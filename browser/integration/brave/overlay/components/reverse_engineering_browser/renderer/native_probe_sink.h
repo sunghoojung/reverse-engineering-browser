@@ -10,14 +10,17 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <span>
 #include <string_view>
+#include "brave/components/reverse_engineering_browser/common/native_wasm_guest.h"
 
 #include "base/component_export.h"
 #include "brave/components/reverse_engineering_browser/common/native_artifact_header.h"
 #include "brave/components/reverse_engineering_browser/common/native_probe_event.h"
 #include "brave/components/reverse_engineering_browser/common/native_vm_dispatch_emit.h"
 #include "brave/components/reverse_engineering_browser/common/native_vm_finding.h"
+#include "brave/components/reverse_engineering_browser/common/native_wasm_dispatch.h"
 
 namespace reb {
 
@@ -66,6 +69,12 @@ struct OwnedRegisterSamplePolicy final {
   std::uint64_t investigation_id = 0;
   std::uint64_t interpreter_artifact_id = 0;
   std::uint64_t bytecode_artifact_id = 0;
+};
+
+enum class NativeWasmGuestModuleDecision : std::uint8_t {
+  kNotDispatcher,
+  kAdmit,
+  kRejectModule,
 };
 
 class COMPONENT_EXPORT(REB_NATIVE_PROBE_SINK) NativeProbeSink final {
@@ -157,6 +166,45 @@ class COMPONENT_EXPORT(REB_NATIVE_PROBE_SINK) NativeProbeSink final {
     CaptureGeneratedArtifact(kind, capture_origin, 0, execution_context_id, frame_id, source_url,
                              content);
   }
+  void ConfigureNativeWasmGuest(std::shared_ptr<const NativeWasmGuestAdapter> adapter,
+                                NativeGuestCaptureEmitter capture,
+                                NativeGuestHostEmitter host) noexcept;
+  void SetNativeWasmGuestRuntime(NativeWasmGuestContextProvider context,
+                                 NativeWasmGuestReset reset) noexcept;
+  // Records the browser's verdict for the module bytes sent with the guest
+  // dispatch whose sequence number is module_token. Lock-free; may be called
+  // from the transport sequence while Wasm runs on another thread.
+  void NoteNativeGuestModuleStatus(std::uint64_t module_token, bool accepted) noexcept;
+  [[nodiscard]] bool IsNativeWasmGuestEnabled() const noexcept;
+  [[nodiscard]] bool IsNativeWasmGuestDispatchSite(std::uint32_t function_index,
+                                                   std::uint32_t module_byte_offset) const noexcept;
+  void InvalidateNativeWasmGuest(const NativeWasmGuestStateView& view) noexcept;
+  // kNotDispatcher defers to a later function entry (or a later enabled
+  // interval). kRejectModule is final for these exact module bytes under the
+  // immutable adapter, so the engine may stop asking (and hashing) for them.
+  [[nodiscard]] NativeWasmGuestModuleDecision AdmitNativeWasmGuestModule(
+      std::span<const std::uint8_t> module,
+      std::uint32_t function_index) const noexcept;
+  void RecordNativeWasmGuest(std::uint64_t execution_context_id,
+                             std::uint64_t frame_id,
+                             std::string_view source_url,
+                             std::span<const std::uint8_t> module_bytes,
+                             const NativeWasmGuestStateView& view,
+                             std::uint64_t document_token_high,
+                             std::uint64_t document_token_low) noexcept;
+  // Native-only runtime callback; no page JS registration and no inferred guest PC.
+  void SetNativeWasmDispatchEmitter(NativeWasmDispatchEmitter emitter) noexcept;
+  [[nodiscard]] bool IsNativeWasmDispatchEnabled() const noexcept;
+  void RecordNativeWasmDispatch(std::uint64_t execution_context_id,
+                                std::uint64_t frame_id,
+                                std::string_view source_url,
+                                std::span<const std::uint8_t> module_bytes,
+                                std::uint32_t function_index,
+                                std::uint32_t module_byte_offset,
+                                std::uint32_t selector,
+                                std::uint32_t table_count,
+                                std::uint64_t document_token_high,
+                                std::uint64_t document_token_low) noexcept;
   void RecordApiCall(NativeProbeCategory category, std::string_view operation) noexcept;
   void RecordPropertyRead(NativeProbeCategory category, std::string_view operation) noexcept;
   // Call-site state is an opaque, monotonically ordered configuration claim,
@@ -250,6 +298,13 @@ class COMPONENT_EXPORT(REB_NATIVE_PROBE_SINK) NativeProbeSink final {
                           std::uint32_t thread_id,
                           std::uint64_t interpreter_artifact_id) noexcept;
 
+  enum class NativeWasmOmission : std::size_t { kInput, kTransport, kBudget };
+  bool NoteNativeWasmDispatchOmission(const VmAdmission& admission,
+                                      NativeWasmOmission reason) noexcept;
+  std::atomic<NativeWasmDispatchEmitter> native_wasm_emitter_{nullptr};
+  std::array<std::atomic<std::uint64_t>, kNativeWasmDispatchSampleBudget> native_wasm_slots_{};
+  std::array<std::atomic<std::uint64_t>, 3> native_wasm_gap_generations_{};
+  std::atomic<std::uint64_t> native_wasm_capped_generation_{0};
   std::atomic<NativeRendererProbeEmitter> emitter_{nullptr};
   std::atomic<NativeProbeFrameIdProvider> frame_id_provider_{nullptr};
   std::atomic<NativeGeneratedArtifactEmitter> artifact_emitter_{nullptr};
@@ -300,6 +355,31 @@ class COMPONENT_EXPORT(REB_NATIVE_PROBE_SINK) NativeProbeSink final {
   std::atomic<std::uint64_t> wasm_br_table_interpreter_id_{0};
   std::atomic<std::uint64_t> wasm_br_table_bytecode_id_{0};
   std::atomic<std::uint64_t> page_guest_invocation_{1};
+  const NativeWasmGuestAdapter* native_guest_retained_adapter_ = nullptr;
+  std::atomic<const NativeWasmGuestAdapter*> native_guest_adapter_{nullptr};
+  std::atomic<NativeGuestCaptureEmitter> native_guest_capture_{nullptr};
+  std::atomic<NativeGuestHostEmitter> native_guest_host_{nullptr};
+  std::atomic<NativeWasmGuestContextProvider> native_guest_context_{nullptr};
+  std::atomic<NativeWasmGuestReset> native_guest_reset_{nullptr};
+  std::array<std::atomic<std::uint64_t>, kNativeGuestSampleLimit> native_guest_slots_{};
+  std::atomic<std::uint64_t> native_guest_capped_generation_{0};
+  std::array<std::atomic<std::uint64_t>, 10> native_guest_gap_generations_{};
+  // Parent-binding host routes claimed per configuration (see
+  // kNativeGuestHostParentLimit). Same generation-tag scheme as samples.
+  std::array<std::atomic<std::uint64_t>, kNativeGuestHostParentLimit> native_guest_host_slots_{};
+  std::atomic<std::uint64_t> native_guest_host_capped_generation_{0};
+  // Recent module verdicts, (token << 1) | accepted. Tokens are process-unique
+  // renderer sequence numbers, so a stale verdict can never match a new send.
+  std::array<std::atomic<std::uint64_t>, 64> native_guest_module_status_{};
+  std::atomic<std::uint32_t> native_guest_module_status_next_{0};
+  enum class GuestModuleVerdict : std::uint8_t { kPending, kAccepted, kRejected };
+  [[nodiscard]] GuestModuleVerdict NativeGuestModuleVerdict(std::uint64_t token) const noexcept;
+  [[nodiscard]] bool ClaimNativeGuestHostRoute(std::uint64_t generation) noexcept;
+  void NoteNativeGuestOmission(std::uint64_t generation,
+                               std::uint64_t frame,
+                               std::size_t kind,
+                               std::string_view reason) noexcept;
+  bool TryRecordNativeGuestHost(NativeProbeEvent& event, std::uint64_t generation) noexcept;
 
   struct PageGuestIds final {
     std::uint64_t finding_id = 0;

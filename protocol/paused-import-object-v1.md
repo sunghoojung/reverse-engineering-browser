@@ -1,9 +1,11 @@
 # Paused import-object map v1
 
-`POST /api/debugger/actions`, action `inspect_paused_import_object`, returns an
+> **Retired.** The paused import-object map ran through `POST /api/debugger/actions`. CDP and the `/api/debugger` routes were removed; every `/api/debugger` route now returns 410 `debugger_unavailable`, and no operation or schema in [openapi.json](openapi.json) implements this contract. This page is kept as a historical record for reading earlier captures and notes.
+
+`POST /api/debugger/actions`, action `inspect_paused_import_object`, returned an
 ephemeral `import_object` report with host-side module/name labels even when
-`guest_position` is null. Its closed request/response contracts are in
-[OpenAPI](openapi.json), `DebuggerAction` and `DebuggerImportObjectResult`.
+`guest_position` was null. Its `DebuggerAction` and `DebuggerImportObjectResult`
+schemas were removed from [OpenAPI](openapi.json) with the action.
 The debugger sidebar **Captured document** pane and the VM workbench
 **Captured document VM Lab** call this action for a selected local, closure, or
 block binding. The report
@@ -43,7 +45,7 @@ limits still apply to CDP replies; this is not a claim that the renderer itself
 enumerates a large object incrementally. No object handles or function source
 text are returned. There is no automatic persistence/export.
 
-## API workflow
+## Historical API workflow
 
 1. Pause the owned page in the glue function where its import object is a local
    or closure binding. Read `get_debugger` after scope enrichment settles.

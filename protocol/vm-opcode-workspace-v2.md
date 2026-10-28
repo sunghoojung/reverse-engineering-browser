@@ -40,6 +40,24 @@ Unmatched opcodes stay in samples and residual unknowns. No accepted samples
 and no dispatch-budget loss produces `sampler-unavailable`, preserving static
 handler candidates.
 
+Native Wasm workspaces keep three separate streams. `sample_count` covers only
+the `samples` records above. `native_wasm_observation_count` counts physical
+`br_table` executions and `native_guest_sample_count` counts adapter-interpreted
+guest samples, with matching per-handler `native_wasm_sample_count` and
+`native_guest_sample_count`. V8 emits both a physical observation and a guest
+sample for one execution at an adapter dispatch site, so the two native counts
+overlap and are never added together or into `sample_count`. A consumer that
+needs a lower bound on distinct executions at one handler uses the largest of
+the three counts. Producers before 2.7.0 summed all three into `sample_count`;
+consumers read those documents with that older arithmetic.
+
+Each `native_wasm_observations` and `native_guest_samples` row carries
+`monotonic_time_ns`, the accepted native event's monotonic time as a canonical
+unsigned decimal string, like the other 64-bit identifiers. A consumer can show
+when a retained row happened after its event has left the bounded event window.
+The field is optional: producers before 2.8.0 omit it, and their documents stay
+valid.
+
 A `vm` `gap` whose artifact id is the interpreter and whose payload is a
 decimal count is a dispatch-budget loss. The workspace adds
 `dispatch-sample-budget` with that summed count and keeps coverage incomplete.

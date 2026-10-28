@@ -2,6 +2,7 @@
 #define REB_EVENT_HPP_
 
 #include <array>
+#include <bit>
 #include <cstddef>
 #include <cstdint>
 #include <span>
@@ -10,6 +11,8 @@
 #include <type_traits>
 
 namespace reb {
+// Raw event envelope ABI is supported only on little-endian targets.
+static_assert(std::endian::native == std::endian::little);
 
 inline constexpr std::uint16_t kEventProtocolVersion = 3;
 inline constexpr std::size_t kInlinePayloadSize = 128;
@@ -49,6 +52,9 @@ enum class EventType : std::uint16_t {
   kArtifactCaptured = 14,
   kArtifactCaptureFailed = 15,
   kVmDispatchSample = 16,
+  kWasmDispatchObservation = 17,
+  kWasmGuestDispatch = 18,
+  kWasmGuestInvocation = 19,
 };
 
 enum class EventFlag : std::uint16_t {

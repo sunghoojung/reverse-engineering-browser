@@ -2,21 +2,17 @@ import assert from 'node:assert/strict';
 import {readFile,mkdtemp,writeFile,stat,symlink,rm,realpath} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
-import {createServer} from 'node:http';
 import {spawn} from 'node:child_process';
-import {runInNewContext} from 'node:vm';
-import {markerPlan,validatePlan,digest,runMarkerPlan,backendCall,readMarkerFile,saveMarkerFile} from './marker-fuzz.mjs';
+import {markerPlan,validatePlan,digest,readMarkerFile,saveMarkerFile} from './marker-fuzz.mjs';
 // A text patch can land in a similar brace context while remaining valid JSON.
 // Verify semantic schema ownership and every local reference on the exact base.
 const spec=JSON.parse(await readFile(new URL('../protocol/openapi.json',import.meta.url),'utf8'));
+// The CDP Repeater runner and its debugger actions were removed. Plans stay
+// offline; the HTTP contract must not advertise a runner for them.
 const schemas=spec.components.schemas;
-for(const name of ['MarkerFuzzCaseGuard','MarkerFuzzExpectedExecution']){
-  assert.equal(schemas[name]?.type,'object',`${name} must live in components.schemas`);
-  assert(schemas[name].required.includes('instance_id'));
-}
-const actions=schemas.DebuggerAction.oneOf;
-assert.equal(actions.find(v=>v.properties.action.const==='run_repeater_request').properties.marker_fuzz.$ref,'#/components/schemas/MarkerFuzzCaseGuard');
-assert.equal(actions.find(v=>v.properties.action.const==='cancel_repeater_request').properties.expected_execution.$ref,'#/components/schemas/MarkerFuzzExpectedExecution');
+for(const name of ['MarkerFuzzCaseGuard','MarkerFuzzExpectedExecution','DebuggerAction'])
+  assert.equal(schemas[name],undefined,`${name} must not return to the HTTP contract`);
+assert(!JSON.stringify(spec).includes('run_repeater_request'),'No Repeater action is advertised');
 function references(value){
   if(!value || typeof value!=='object')return;
   if(typeof value.$ref==='string' && value.$ref.startsWith('#/')){
@@ -49,92 +45,40 @@ const escaped=clone(body);escaped.payloads=Array(16).fill('\u0000'.repeat(2048))
 const overlap=clone(body);overlap.marker.literal='ABA';overlap.request.body='ABABA';assert.throws(()=>markerPlan(overlap));
 const wide=clone(body);wide.payloads=Array(16).fill('a'.repeat(2048));wide.request.body='a'.repeat(7000)+'REB_MARKER';assert.throws(()=>markerPlan(wide));
 
-function fixtureState(){return {network:{instance_id:'backend-one'},state:'running',target:{id:'fixture-target'},request_interception:{target_id:'fixture-target',experiment_id:1,state:'ready',rule:{mode:'continue'}},repeater:{session_id:1,active_execution:null,history:[]}};}
-function receipt(action,id){return {id,state:'complete',marker_fuzz:clone(action.marker_fuzz),resolved_request:{url:action.url,method:action.method,body:action.body},response:{protocol_version:1,body:'fixture',cancelled:false,timed_out:false,ok:true,status:200,duration_ms:4,body_sha256:digest('fixture'),body_truncated:false,headers_truncated:false}};}
-async function mockRun(mode){
-  const s=fixtureState(),calls=[],times=[],control=new AbortController();let id=0;
-  const p=markerPlan(original);
-  const report=await runMarkerPlan(p,{arm:p.plan_sha256,baseUrl:'http://127.0.0.1:8001',signal:control.signal,call:async(_base,action)=>{
-    calls.push(action??'snapshot');
-    if(!action){if(mode==='stale' && id)s.request_interception.experiment_id=2;if(mode==='restart' && id)s.network.instance_id='backend-two';return clone(s);}
-    if(action.action==='cancel_repeater_request'){assert.equal(action.expected_execution.execution_id,id);assert.equal(action.expected_execution.plan_sha256,p.plan_sha256);return {ok:true,repeater:s.repeater};}
-    times.push(Date.now());id++;
-    if(mode==='unknown')throw new Error('Lost acknowledgment');
-    if(mode==='cancel'){s.repeater.active_execution={execution_id:id,marker_fuzz:action.marker_fuzz};control.abort();return {ok:true,repeater:clone(s.repeater)};}
-    const entry=receipt(action,id);if(mode==='error')entry.response={...entry.response,ok:false};
-    if(mode==='malformed')entry.marker_fuzz.plan_sha256='b'.repeat(64);
-    if(mode==='injected')entry.response.duration_ms={private:'should not appear'};
-    if(mode==='expanded'){entry.response.body='\ufffd'.repeat(2731);entry.response.body_sha256=digest(entry.response.body);}
-    s.repeater.history.push(entry);return {ok:true,repeater:clone(s.repeater)};
-  }});
-  return {report,calls,times};
-}
-let run=await mockRun('complete');assert.equal(run.report.state,'complete');assert.equal(run.report.attempted_cases,3);assert(run.times[1]-run.times[0]>=245);assert(run.times[2]-run.times[1]>=245);
-for(const [mode,state] of [['unknown','unknown'],['error','error'],['stale','scope_changed'],['restart','scope_changed'],['malformed','unknown'],['injected','unknown'],['expanded','unknown'],['cancel','cancelled']]){
-  run=await mockRun(mode);assert.equal(run.report.state,state,mode);assert.equal(run.report.attempted_cases,1,mode);
-  assert.equal(run.calls.filter(v=>v?.action==='run_repeater_request').length,1,mode);
-  assert.equal(run.calls.filter(v=>v?.action==='cancel_repeater_request').length,mode==='cancel'?1:0,mode);
-  assert(!JSON.stringify(run.report).includes('should not appear'));
-}
-const expired=clone(original);expired.limits.deadline_ms=1000;expired.payloads=['one','two'];const expiredPlan=markerPlan(expired);let sends=0;
-run=await runMarkerPlan(expiredPlan,{arm:expiredPlan.plan_sha256,baseUrl:'http://127.0.0.1:8001',call:async(_base,action)=>{
-  if(!action){await new Promise(r=>setTimeout(r,1050));return fixtureState();}sends++;throw new Error();
-}});assert.equal(run.state,'deadline');assert.equal(sends,0);
-
-// Exercise the production fetch function against an authored local service.
-const asset=await readFile(new URL('../apps/origin-trace-backend/assets/request-interception-function.js',import.meta.url),'utf8');
-let targetHits=0,redirectHits=0,ambient=false;
-const server=createServer((req,res)=>{if(req.url==='/redirect'){res.writeHead(302,{location:'/after'});res.end();return;}if(req.url==='/after')redirectHits++;targetHits++;ambient ||= !!req.headers.cookie || !!req.headers.authorization;res.writeHead(200,{'content-type':'text/plain'});res.end(req.url==='/double-bom'?Buffer.concat([Buffer.from([239,187,191,239,187,191]),Buffer.alloc(8186,255)]):req.url==='/invalid-utf8'?Buffer.alloc(8192,255):req.url==='/partial-utf8'?Buffer.concat([Buffer.alloc(8190,120),Buffer.from([0xe2,0x82])]):'x'.repeat(20000));});
-await new Promise(r=>server.listen(0,'127.0.0.1',r));const base=`http://127.0.0.1:${server.address().port}`;
-try {
-  const execute=runInNewContext('('+asset+')',{AbortController,Map,fetch,TextEncoder,TextDecoder,performance,setTimeout,clearTimeout,Date});
-  const configuration={url:base+'/echo',method:'GET',headers:{},body:'',timeoutMs:1000,headerLimit:64,headerValueLimit:2048,headerTotalLimit:2048,responseByteLimit:8192,responseTextByteLimit:8192,redirect:'error',expiresAtMs:Date.now()+5000};
-  let value=await execute(configuration);assert.equal(value.ok,true);assert.equal(Buffer.byteLength(value.body),8192);assert.equal(value.bodyTruncated,true);assert.equal(ambient,false);
-  value=await execute({...configuration,url:base+'/redirect'});assert.equal(value.ok,false);assert.equal(redirectHits,0);
-  value=await execute({...configuration,expiresAtMs:Date.now()-1});assert.equal(value.ok,false);assert.equal(targetHits,1);
-  value=await execute({...configuration,url:base+'/redirect',redirect:undefined});assert.equal(value.ok,true);assert.equal(redirectHits,1,'Ordinary Repeater keeps its existing redirect behavior');
-  value=await execute({...configuration,url:base+'/invalid-utf8'});assert.equal(value.ok,true);assert.equal(Buffer.byteLength(value.body),8190);assert.equal(value.body,'\ufffd'.repeat(2730));assert.equal(value.bodyTruncated,true);
-  value=await execute({...configuration,url:base+'/partial-utf8'});assert.equal(value.ok,true);assert.equal(value.body,'x'.repeat(8190));assert.equal(value.bodyTruncated,true);
-  value=await execute({...configuration,url:base+'/invalid-utf8',responseTextByteLimit:undefined});assert.equal(Buffer.byteLength(value.body),24576);assert.equal(value.bodyTruncated,false,'Ordinary Repeater decoding remains unchanged');
-  const ordinary=await execute({...configuration,url:base+'/double-bom',responseTextByteLimit:undefined});value=await execute({...configuration,url:base+'/double-bom'});assert.equal(value.body.codePointAt(0),0xfeff);assert(ordinary.body.startsWith(value.body));assert.equal(Buffer.byteLength(value.body),8190);assert.equal(value.bodyTruncated,true);
-
-
-} finally {await new Promise(r=>server.close(r));}
-
-// Malformed API bytes never become evidence or silently change meaning.
-let malformedMode='duplicate',redirectFollowed=0;
-const malformedApi=createServer((req,res)=>{
-  if(req.url==='/followed')redirectFollowed++;
-  res.setHeader('content-type',malformedMode==='mime'?'text/plain':'application/json');
-  if(malformedMode==='encoding')res.setHeader('content-encoding','gzip');
-  if(malformedMode==='redirect'){res.writeHead(302,{location:'/followed'});res.end();return;}
-  if(malformedMode==='duplicate'){res.end('{"ok":true,"ok":false}');return;}
-  if(malformedMode==='utf8'){res.end(Buffer.from([123,34,120,34,58,34,255,34,125]));return;}
-  res.end('{}');
-});
-await new Promise(r=>malformedApi.listen(0,'127.0.0.1',r));
-try{
-  const origin=`http://127.0.0.1:${malformedApi.address().port}`;
-  for(const mode of ['duplicate','utf8','mime','encoding','redirect']){malformedMode=mode;await assert.rejects(()=>backendCall(origin));}
-  assert.equal(redirectFollowed,0);
-}finally{await new Promise(r=>malformedApi.close(r));}
-
-// Real CLI files and a local API fixture prove prepare -> arm -> execute -> report.
+// Real CLI files prove private offline preparation and unconditional execution refusal.
 const directory=await realpath(await mkdtemp(join(tmpdir(),'reb-marker-fuzz-test-')));
 async function cli(name,args,env=process.env){return new Promise(resolve=>{const child=spawn(process.execPath,[new URL(name,import.meta.url).pathname,...args],{env,stdio:['ignore','pipe','pipe']});let out='',err='';child.stdout.on('data',v=>out+=v);child.stderr.on('data',v=>err+=v);child.on('close',code=>resolve({code,out,err}));});}
-let api;
 try{
   const authored=join(directory,'input.json'),prepared=join(directory,'plan.json'),reportPath=join(directory,'report.json');
   await writeFile(authored,JSON.stringify(original));let result=await cli('prepare-marker-fuzz.mjs',['--input',authored,'--output',prepared]);assert.equal(result.code,0,result.err);
   assert.equal((await stat(prepared)).mode&0o777,0o600);const saved=await readMarkerFile(prepared);assert.equal(saved.plan_sha256,plan.plan_sha256);
   await assert.rejects(()=>saveMarkerFile(prepared,plan));await symlink(authored,join(directory,'symlink.json'));await assert.rejects(()=>readMarkerFile(join(directory,'symlink.json')));
   await writeFile(join(directory,'duplicate.json'),'{"x":1,"x":2}');await assert.rejects(()=>readMarkerFile(join(directory,'duplicate.json')));
-  const state=fixtureState();let count=0;
-  api=createServer((req,res)=>{let raw='';req.on('data',v=>raw+=v);req.on('end',()=>{res.setHeader('content-type','application/json');if(req.method==='GET'){res.end(JSON.stringify(state));return;}const action=JSON.parse(raw);count++;state.repeater.history.push(receipt(action,count));res.end(JSON.stringify({ok:true,repeater:state.repeater}));});});
-  await new Promise(r=>api.listen(0,'127.0.0.1',r));const origin=`http://127.0.0.1:${api.address().port}`;
-  result=await cli('run-marker-fuzz.mjs',['--plan',prepared,'--arm',plan.plan_sha256,'--base-url',origin,'--report',reportPath],{...process.env,NODE_USE_ENV_PROXY:'1',HTTP_PROXY:'http://127.0.0.1:1',http_proxy:'http://127.0.0.1:1',NO_PROXY:'',no_proxy:''});assert.equal(result.code,0,result.err);assert.equal(JSON.parse(result.out).state,'complete');assert.equal(count,3);assert.equal((await stat(reportPath)).mode&0o777,0o600);
-  result=await cli('run-marker-fuzz.mjs',['--plan',prepared,'--arm',plan.plan_sha256,'--base-url',origin,'--report',reportPath]);assert.equal(result.code,1);assert.equal(count,3);
-  result=await cli('run-marker-fuzz.mjs',['--plan',prepared,'--arm','0'.repeat(64),'--base-url',origin]);assert.equal(result.code,1);assert.equal(count,3);
-  await assert.rejects(()=>backendCall('https://example.invalid'));
-}finally{if(api)await new Promise(r=>api.close(r));await rm(directory,{recursive:true,force:true});}
-console.log('PASS marker fuzz: exact literal/query/UTF-8 plans, limits, stale/unknown/cancel stop, spacing/deadline, actual local fetch redirect/body cap, private prepare/armed CLI/report fixtures');
+  // Preload tripwires run inside the CLI process, not the parent test launcher.
+  // Any network, browser subprocess, or plan read attempt changes its exit status.
+  const guard=join(directory,'no-effects.cjs');
+  await writeFile(guard,`
+const deny=()=>{process.exit(97);};
+for(const [module,names] of [
+  ['node:http',['request','get']],['node:https',['request','get']],
+  ['node:net',['connect','createConnection']],['node:tls',['connect']],
+  ['node:child_process',['spawn','spawnSync','exec','execSync','execFile','execFileSync','fork']],
+  ['node:fs/promises',['open','readFile','writeFile']]
+]){const api=require(module);for(const name of names)api[name]=deny;}
+require('node:net').Socket.prototype.connect=deny;
+globalThis.fetch=deny;
+require('node:module').syncBuiltinESMExports();
+`);
+  const env={...process.env,NODE_OPTIONS:'',NODE_USE_ENV_PROXY:'1',HTTP_PROXY:'http://127.0.0.1:1'};
+  for(const args of [[],['--help'],['--plan',prepared,'--arm',plan.plan_sha256,'--base-url','http://127.0.0.1:8765','--report',reportPath],
+    ['--plan',join(directory,'missing.json'),'--arm','0'.repeat(64),'--base-url','http://127.0.0.1:8765']]){
+    const result=await new Promise((resolve,reject)=>{
+      const child=spawn(process.execPath,['--require',guard,new URL('run-marker-fuzz.mjs',import.meta.url).pathname,...args],{env,stdio:['ignore','pipe','pipe']});
+      let out='',err='';child.stdout.on('data',v=>out+=v);child.stderr.on('data',v=>err+=v);child.on('error',reject);child.on('close',code=>resolve({code,out,err}));
+    });
+    assert.equal(result.code,1,result.err);assert.equal(result.out,'');
+    assert.match(result.err,/Marker execution is unavailable/);assert.match(result.err,/no fallback/);
+  }
+  await assert.rejects(()=>stat(reportPath),{code:'ENOENT'});
+}finally{await rm(directory,{recursive:true,force:true});}
+console.log('PASS marker fuzz: offline literal/query/UTF-8 plans, limits, integrity, private/no-overwrite files, and immediate no-network/no-spawn execution refusal');

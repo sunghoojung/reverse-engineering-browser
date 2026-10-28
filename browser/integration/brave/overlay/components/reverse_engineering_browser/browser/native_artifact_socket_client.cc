@@ -4,6 +4,7 @@
 // You can obtain one at https://mozilla.org/MPL/2.0/.
 
 #include "brave/components/reverse_engineering_browser/browser/native_artifact_socket_client.h"
+#include "brave/components/reverse_engineering_browser/common/native_artifact_queue_limits.h"
 
 #include "build/build_config.h"
 
@@ -34,8 +35,6 @@ namespace {
 
 constexpr char kArtifactSocketSwitch[] = "reb-artifact-socket";
 constexpr char kBrokerTokenFileSwitch[] = "reb-broker-token-file";
-constexpr std::size_t kMaxQueuedArtifacts = 16;
-constexpr std::size_t kMaxQueuedBytes = 32U * 1024U * 1024U;
 constexpr int kTransferTimeoutSeconds = 30;
 
 bool SendAll(const int descriptor, base::span<const std::uint8_t> bytes) {
@@ -169,8 +168,8 @@ bool NativeArtifactSocketClient::Enqueue(
   }
   const std::size_t transfer_size = TransferSize(*transfer);
   base::AutoLock lock(lock_);
-  if (!connected_.load(std::memory_order_relaxed) || queue_.size() >= kMaxQueuedArtifacts ||
-      transfer_size > kMaxQueuedBytes - std::min(queued_bytes_, kMaxQueuedBytes)) {
+  if (!connected_.load(std::memory_order_relaxed) ||
+      !CanQueueNativeArtifact(queue_.size(), queued_bytes_, transfer_size)) {
     return false;
   }
   queued_bytes_ += transfer_size;

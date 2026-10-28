@@ -1,4 +1,6 @@
 #include "reb/event.hpp"
+#include "reb/wasm_dispatch.hpp"
+#include "reb/wasm_guest.hpp"
 
 #include <algorithm>
 #include <array>
@@ -59,6 +61,9 @@ bool IsKnownType(const EventType type) noexcept {
     case EventType::kArtifactCaptured:
     case EventType::kArtifactCaptureFailed:
     case EventType::kVmDispatchSample:
+    case EventType::kWasmDispatchObservation:
+    case EventType::kWasmGuestDispatch:
+    case EventType::kWasmGuestInvocation:
       return true;
     case EventType::kUnknown:
       return false;
@@ -123,6 +128,13 @@ std::span<const std::byte> InlinePayload(const EventRecord& event) noexcept {
 }
 
 bool IsValidEvent(const EventRecord& event) noexcept {
+  if (event.header.type == EventType::kWasmGuestDispatch && !IsValidWasmGuestDispatch(event))
+    return false;
+  if (event.header.type == EventType::kWasmGuestInvocation && !IsValidWasmGuestInvocation(event))
+    return false;
+  if (event.header.type == EventType::kWasmDispatchObservation &&
+      !IsValidWasmDispatchObservation(event))
+    return false;
   return event.header.protocol_version == kEventProtocolVersion &&
          event.header.header_size == sizeof(EventHeader) &&
          event.header.payload_size <= event.inline_payload.size() && event.header.reserved1 == 0 &&
@@ -277,6 +289,12 @@ std::string_view EventTypeName(const EventType type) noexcept {
       return "artifact_capture_failed";
     case EventType::kVmDispatchSample:
       return "vm_dispatch_sample";
+    case EventType::kWasmDispatchObservation:
+      return "wasm_dispatch_observation";
+    case EventType::kWasmGuestDispatch:
+      return "wasm_guest_dispatch";
+    case EventType::kWasmGuestInvocation:
+      return "wasm_guest_invocation";
     case EventType::kUnknown:
       return "unknown";
   }

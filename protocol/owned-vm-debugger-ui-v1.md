@@ -128,13 +128,9 @@ inert until the user leaves it, then hides.
 `node tools/check-owned-vm-debugger-ui.mjs` runs deterministic strict-codec,
 controller and lightweight DOM checks. These are not rendered acceptance.
 
-`node tools/check-owned-vm-debugger-ui.mjs --browser` additionally runs authored
-HTTP-response UI checks with normal sandboxed Chromium, using the actual
-component and app CSS at 1440×900, 1024×768 and 390×844. Its page explicitly labels
-the responses as authored and never claims native execution. Set
-`REB_UI_CHROMIUM` for a supported browser and `REB_OWNED_VM_UI_OUTPUT` for the
-receipt/screenshot directory; default output is a temporary-directory folder.
-Do not bypass a browser sandbox or socket denial to run it.
+The former `--browser` Chromium mode was removed with CDP browser automation;
+`node tools/check-owned-vm-debugger-ui.mjs` covers controllers and DOM only and is
+not rendered QA. `make rendered-ui-check` is the packaged-app rendered gate.
 
 The exported `checkOwnedVmDebuggerInteractions({evaluate, viewport, click, key,
 screenshot, root, toolbarRoot})` requires an isolated actual backend and helper.
@@ -145,28 +141,6 @@ ancestor containing relocated controls. This flow is authored for the rendered
 real-helper gate, not a fake-response replacement for it. Native packaging and
 macOS interaction remain separate required acceptance checks.
 
-A durable real-backend command is:
-
-```sh
-node tools/check-owned-vm-native-browser.mjs \
-  --backend apps/origin-trace-backend/target/debug/origin-trace-backend \
-  --helper build/reb-native-vm-fixture \
-  --browser /path/to/chromium \
-  --output /path/to/validation
-```
-
-All four paths are required. This runner creates fresh temporary evidence stores,
-starts the actual Rust backend on an ephemeral loopback port with the specified
-native helper, loads the integrated UI in a normal sandboxed Chromium, and opens
-VM tab → Live owned fixture through rendered controls. It then
-runs the real-helper keyboard/state/provider-switch flow. It never starts a
-mock-response server or substitutes a JavaScript VM.
-
-Each invocation creates a unique `run-*` subdirectory under the requested output
-directory with a private validation receipt and any screenshots. Missing
-binaries, browser startup restrictions, runtime exceptions, failed assertions,
-or cleanup failures produce failed receipts. Teardown sends an explicit
-exact-scoped Close if a session remains, then requests graceful backend SIGTERM
-and verifies process exit. Forced backend termination is a failure and cannot
-claim confirmed helper disposal. Browser cleanup is restricted to its owned
-process group. Temporary profiles/stores are retained if cleanup is unverified.
+The durable real-backend runner `tools/check-owned-vm-native-browser.mjs`
+drove Chromium through CDP and was removed with CDP browser automation. The
+exported interaction flow above has no current rendered driver.

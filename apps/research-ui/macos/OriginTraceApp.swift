@@ -142,7 +142,7 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
           try Data(contentsOf: indexURL.deletingLastPathComponent().appendingPathComponent("app.css")),
           "text/css; charset=utf-8", 200, [:]
         )
-      case "/pane_layout.js", "/app.js", "/app_state.js", "/evidence_models.js", "/evidence_package.js", "/float32_inspector.js", "/evidence_comparison.js", "/source_syntax.js", "/source_facts.js", "/investigation_navigation.js", "/investigation_notebook.js", "/traffic_view.js", "/api_catalog.js", "/captured_client.js", "/captured_export_formats.js", "/passive_security.js", "/vm_semantics.js", "/vm_static.js", "/vm_static_view.js", "/vm_analysis_packs.js", "/vm_opcode_ledger.js", "/vm_opcode_ledger_view.js", "/vm_contextual.js", "/vm_contextual_evidence.js", "/vm_contextual_view.js", "/vm_debugger.js", "/vm_program_workspace.js", "/traffic_comparison.js", "/request_value_test.js", "/field_provenance.js", "/native_console_completion.js", "/native_console.js", "/element_screenshot.js", "/local_override_manager.js", "/captured_vm_lab.js":
+      case "/pane_layout.js", "/app.js", "/app_state.js", "/evidence_models.js", "/evidence_package.js", "/float32_inspector.js", "/evidence_comparison.js", "/source_syntax.js", "/source_facts.js", "/investigation_navigation.js", "/investigation_notebook.js", "/traffic_view.js", "/captured_client.js", "/captured_export_formats.js", "/vm_semantics.js", "/vm_static.js", "/vm_static_view.js", "/vm_analysis_packs.js", "/vm_opcode_ledger.js", "/vm_opcode_ledger_view.js", "/vm_contextual.js", "/vm_contextual_evidence.js", "/vm_contextual_view.js", "/vm_debugger.js", "/vm_program_workspace.js", "/native_console_completion.js", "/native_console.js":
         response = (
           try Data(contentsOf: indexURL.deletingLastPathComponent().appendingPathComponent(requestURL.lastPathComponent)),
           "text/javascript; charset=utf-8", 200, [:]
@@ -191,16 +191,6 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
         }
         handleDecoderAction(urlSchemeTask.request, to: urlSchemeTask)
         return
-      case "/api/debugger":
-        let debuggerResponse = try debuggerUnavailableResponse(
-          ifNoneMatch: urlSchemeTask.request.value(forHTTPHeaderField: "If-None-Match")
-        )
-        response = (
-          debuggerResponse.0,
-          "application/json; charset=utf-8",
-          debuggerResponse.1,
-          debuggerResponse.2
-        )
       case "/api/api-collection":
         guard urlSchemeTask.request.httpMethod == nil || urlSchemeTask.request.httpMethod == "GET" else {
           throw LocalHTTPError(status: 405, message: "API Collection only supports GET on this route")
@@ -1678,254 +1668,6 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
     }
   }
 
-  private func debuggerUnavailableResponse(
-    ifNoneMatch: String?
-  ) throws -> (Data, Int, [String: String]) {
-    let etag = "\"debugger-unavailable-v5\""
-    if ifNoneMatch == etag {
-      return (Data(), 304, ["ETag": etag])
-    }
-    let body = try JSONSerialization.data(
-      withJSONObject: [
-        "protocol_version": 1,
-        "state": "unavailable",
-        "generation": 0,
-        "error": NSNull(),
-        "target": NSNull(),
-        "targets": [],
-        "live_tab_count": NSNull(),
-        "scripts": [],
-        "paused": NSNull(),
-        "breakpoints": [],
-        "watches": [],
-        "console": [],
-        "heap_diff_baseline": NSNull(),
-        "network": [
-          "capture_enabled": false, "target_id": NSNull(), "requests": [], "dropped": 0,
-          "limits": ["requests": 1_000, "body_bytes": 128 * 1_024, "headers": 128, "header_bytes": 64 * 1_024],
-        ],
-        "memory_origin_trace": [
-          "protocol_version": 1,
-          "trace_id": 0,
-          "state": "idle",
-          "target_id": NSNull(),
-          "query": "",
-          "scope": "all",
-          "case_sensitive": false,
-          "before_steps": 0,
-          "after_steps": 0,
-          "step_limit": 32,
-          "step_count": 0,
-          "first_match_step": NSNull(),
-          "started_at_ms": 0,
-          "elapsed_ms": 0,
-          "partial": false,
-          "limit_reason": NSNull(),
-          "message": "Enter a value and arm a trace.",
-          "steps": [],
-        ],
-        "action_scope": [
-          "protocol_version": 1,
-          "state": "idle",
-          "mode": "global",
-          "target_id": NSNull(),
-          "revision": 0,
-          "targets": [],
-          "matched_target_count": 0,
-          "connected_target_count": 0,
-          "target_overflow": 0,
-          "message": "Create an isolated Experiment context to choose mutable-rule scope.",
-          "rule_families": ["request_interception", "automation_recipes"],
-          "target_only_families": ["object_experiment", "runtime_hooks", "repeater"],
-          "limits": ["targets": 8, "pending_triggers": 16],
-        ],
-        "request_interception": [
-          "protocol_version": 1,
-          "experiment_id": 0,
-          "state": "idle",
-          "isolated": false,
-          "target_id": NSNull(),
-          "created_at_ms": 0,
-          "disposed_at_ms": 0,
-          "rule": [
-            "mode": "continue",
-            "url_pattern": "*",
-            "method_filter": "",
-            "rewrite_url": "",
-            "rewrite_method": "",
-            "rewrite_header_count": 0,
-            "rewrite_body_bytes": 0,
-            "response_code": 200,
-            "response_header_count": 0,
-            "response_body_bytes": 0,
-          ],
-          "last_request": NSNull(),
-          "result": NSNull(),
-          "audit": [],
-          "audit_evictions": 0,
-          "pending_requests": 0,
-          "message": "Create an isolated experiment to intercept a request.",
-          "limits": [
-            "audit_entries": 128,
-            "pending_requests": 16,
-            "headers": 64,
-            "body_bytes": 64 * 1_024,
-            "response_bytes": 64 * 1_024,
-          ],
-        ],
-        "object_experiment": [
-          "protocol_version": 1,
-          "session_id": 0,
-          "state": "idle",
-          "isolated": false,
-          "target_id": NSNull(),
-          "url": "",
-          "navigation_id": 0,
-          "search_id": 0,
-          "search": NSNull(),
-          "results": [],
-          "last_mutation": NSNull(),
-          "audit": [],
-          "audit_evictions": 0,
-          "mutation_attempts": 0,
-          "message": "Create an isolated Experiment context to use Object Lab.",
-          "limits": [
-            "search_results": 50,
-            "search_candidates": 25_000,
-            "search_timeout_ms": 750,
-            "preview_properties": 16,
-            "mutation_attempts": 256,
-            "audit_entries": 128,
-            "property_bytes": 256,
-            "value_bytes": 16 * 1_024,
-            "value_depth": 8,
-            "value_entries": 256,
-            "value_string_bytes": 4 * 1_024,
-          ],
-        ],
-        "runtime_hooks": [
-          "protocol_version": 1,
-          "session_id": 0,
-          "state": "idle",
-          "isolated": false,
-          "target_id": NSNull(),
-          "workers": [],
-          "worker_overflow": 0,
-          "definitions": [],
-          "active_points": 0,
-          "total_hits": 0,
-          "hits": [],
-          "hit_evictions": 0,
-          "requests": [],
-          "request_evictions": 0,
-          "field_test": [
-            "protocol_version": 2,
-            "enabled": false,
-            "url": "",
-            "method": "POST",
-            "kind": "json",
-            "pointer": "",
-            "observations": [],
-            "observation_evictions": 0,
-            "comparison": NSNull(),
-            "limits": ["body_bytes": 128 * 1_024, "pointer_bytes": 256,
-                       "preview_bytes": 256, "observations": 16],
-          ],
-          "last_failure": NSNull(),
-          "message": "Select a live JavaScript source on the attached page, or create a disposable Experiment context. Add a hook, then confirm before arming.",
-          "limits": [
-            "definitions": 8,
-            "workers": 8,
-            "active_points": 64,
-            "return_points_per_definition": 32,
-            "total_hits": 512,
-            "retained_hits": 128,
-            "retained_requests": 128,
-            "bindings_per_hit": 32,
-            "binding_preview_bytes": 512,
-            "condition_bytes": 1_024,
-            "function_expression_bytes": 1_024,
-            "logic_bytes": 8 * 1_024,
-            "return_bytes": 8 * 1_024,
-            "evaluation_timeout_ms": 100,
-          ],
-        ],
-        "automation_recipes": [
-          "protocol_version": 1,
-          "session_id": 0,
-          "state": "idle",
-          "isolated": false,
-          "target_id": NSNull(),
-          "recipes": [],
-          "source_bytes": 0,
-          "auto_armed": false,
-          "active_run": NSNull(),
-          "total_runs": 0,
-          "automatic_runs": 0,
-          "runs": [],
-          "run_evictions": 0,
-          "dropped_triggers": 0,
-          "variable_count": 0,
-          "variable_bytes": 0,
-          "last_failure": NSNull(),
-          "message": "Create recipes now, then open an isolated Experiment context to run them.",
-          "limits": [
-            "recipes": 16,
-            "automatic_recipes": 8,
-            "recipe_source_bytes": 16 * 1_024,
-            "total_source_bytes": 64 * 1_024,
-            "variables": 32,
-            "variable_value_bytes": 4 * 1_024,
-            "variable_bytes": 16 * 1_024,
-            "total_runs": 256,
-            "automatic_runs": 64,
-            "retained_runs": 64,
-            "logs_per_run": 32,
-            "log_bytes": 1_024,
-            "result_bytes": 16 * 1_024,
-            "execution_timeout_ms": 2_000,
-          ],
-        ],
-        "repeater": [
-          "protocol_version": 1,
-          "session_id": 0,
-          "state": "idle",
-          "variables": [],
-          "history": [],
-          "history_bytes": 0,
-          "history_evictions": 0,
-          "active_execution": NSNull(),
-          "comparison": NSNull(),
-          "message": "Create an isolated request-lab context to use Repeater.",
-          "limits": [
-            "history_entries": 24,
-            "history_bytes": 512 * 1_024,
-            "variables": 32,
-            "variable_bytes": 32 * 1_024,
-            "request_bytes": 64 * 1_024,
-            "response_bytes": 64 * 1_024,
-            "timeout_ms": 30_000,
-          ],
-        ],
-        "settings": [
-          "breakpoints_active": true,
-          "pause_on_exceptions": "none",
-          "xhr_breakpoints": [],
-          "event_breakpoints": [],
-        ],
-        "limits": [
-          "scripts": 5_000,
-          "call_frames": 64,
-          "scope_properties": 2_000,
-          "console_entries": 500,
-          "source_bytes": 2 * 1_024 * 1_024,
-        ],
-      ],
-      options: []
-    )
-    return (body, 200, ["ETag": etag])
-  }
-
   private func eventsResponse(for requestURL: URL) throws -> Data {
     let requestedLimit = URLComponents(url: requestURL, resolvingAgainstBaseURL: false)?
       .queryItems?
@@ -2874,7 +2616,7 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
     let modeLabel = NSTextField(labelWithString: "Capture mode")
     modeLabel.font = NSFont.systemFont(ofSize: NSFont.smallSystemFontSize, weight: .semibold)
     let privacyLabel = NSTextField(wrappingLabelWithString:
-      "Traffic metadata has hosts only, without headers or bodies. Content mode keeps bounded raw CDP values, including credentials, in memory. Artifacts keep raw source URLs in local storage. Only an explicitly exported redacted copy is altered."
+      "Traffic metadata has hosts only, without headers or bodies. Content mode retains only content supported by native browser capture. Artifacts keep raw source URLs in local storage. Only an explicitly exported redacted copy is altered."
     )
     privacyLabel.textColor = .secondaryLabelColor
     privacyLabel.maximumNumberOfLines = 0
@@ -2948,7 +2690,7 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
       compatibility.alertStyle = .warning
       compatibility.messageText = "This browser pairing has not been verified"
       compatibility.informativeText =
-        "Origin Trace 0.3.2 is a companion-only release. Brave supplied with 0.3.0 or 0.3.1 lacks newer native runtime-buffer and VM capture features. CDP Traffic may work, but native capture completeness is not established. Continue only if you accept these limits."
+        "Origin Trace 0.3.2 is a companion-only release. Brave supplied with 0.3.0 or 0.3.1 lacks newer native runtime-buffer and VM capture features. Native capture completeness is not established. Continue only if you accept these limits."
       let offlineButton = compatibility.addButton(withTitle: "Continue Offline")
       compatibility.addButton(withTitle: "Start Unverified Session")
       // Keep Return explicitly bound to the safe choice on every macOS alert style.
@@ -3560,15 +3302,13 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
         [...document.querySelectorAll('.request-row')]
           .find(row => row.textContent.includes('live'))?.click();
         document.querySelector('#trace-origin')?.click();
-        showScreen('experiments');
-        setExperimentMode('repeater');
-        window.__rebSmokeRepeater = {
-          visible: !document.querySelector('#screen-experiments')?.hidden,
-          title: document.querySelector('#experiment-title')?.textContent,
-          requestTabs: document.querySelectorAll('[data-repeater-editor-tab]').length,
-          splitColumns: getComputedStyle(document.querySelector('.repeater-split')).gridTemplateColumns,
-          workspaceHeight: document.querySelector('#repeater-workspace')?.getBoundingClientRect().height,
-          splitHeight: document.querySelector('.repeater-split')?.getBoundingClientRect().height
+        showScreen('vm');
+        window.__rebSmokeNativeWorkspace = {
+          visible: document.querySelector('#screen-vm')?.hidden === false,
+          nativeConsolePresent: Boolean(document.querySelector('#native-console-panel')),
+          exportPresent: Boolean(document.querySelector('#captured-export-dialog')),
+          retiredDebuggerAbsent: !document.querySelector('#screen-experiments') &&
+            typeof setExperimentMode === 'undefined' && typeof runDebuggerAction === 'undefined'
         };
         return true;
         })().catch(error => { window.__rebSmokeExerciseError = String(error); return false; });
@@ -3596,18 +3336,9 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
               artifacts: document.querySelectorAll('.source-tree-row[data-artifact-id]').length,
               sourceLines: document.querySelectorAll('.source-line').length,
               broker: document.querySelector('#broker-status')?.textContent,
-              debuggerState: document.querySelector('#debug-state strong')?.textContent,
-              debuggerContractValid: isDebuggerResponse(state.debuggerSession),
-              objectExperimentAvailable: state.debuggerSession?.object_experiment?.protocol_version === 1,
-              runtimeHooksAvailable: state.debuggerSession?.runtime_hooks?.protocol_version === 1,
-              automationRecipesAvailable: state.debuggerSession?.automation_recipes?.protocol_version === 1,
-              repeaterAvailable: state.debuggerSession?.repeater?.protocol_version === 1,
-              repeaterVisible: window.__rebSmokeRepeater?.visible === true,
-              repeaterTitle: window.__rebSmokeRepeater?.title ?? null,
-              repeaterRequestTabs: window.__rebSmokeRepeater?.requestTabs ?? 0,
-              repeaterSplitColumns: window.__rebSmokeRepeater?.splitColumns ?? null,
-              repeaterWorkspaceHeight: window.__rebSmokeRepeater?.workspaceHeight ?? 0,
-              repeaterSplitHeight: window.__rebSmokeRepeater?.splitHeight ?? 0,
+              retiredLiveControlsAbsent: !Object.hasOwn(state, 'debuggerSession') &&
+                !document.querySelector('#websocket-inspector, #runtime-hook-traffic, #request-memory-pivot'),
+              nativeWorkspace: window.__rebSmokeNativeWorkspace,
               apiCollectionContractValid: isApiCollection(state.apiCollection),
               apiCollectionGeneration: state.apiCollection?.generation,
               apiCollectionStoreVisible: document.querySelector('#collection-generation')?.textContent,

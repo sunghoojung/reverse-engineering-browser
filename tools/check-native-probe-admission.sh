@@ -24,13 +24,20 @@ for header in "${headers[@]}"; do
   mkdir -p "$build/stubs/$(dirname "$header")"
   printf '#include "chromium_stubs.h"\n' >"$build/stubs/$header"
 done
+# JSON is a Chromium boundary; this suite tests explicit typed native policies.
+cat >"$build/stubs/brave/components/reverse_engineering_browser/common/native_wasm_guest_adapter.h" <<'STUB'
+#include <memory>
+#include "brave/components/reverse_engineering_browser/common/native_wasm_guest.h"
+namespace reb { inline std::shared_ptr<const NativeWasmGuestAdapter> ParseNativeWasmGuestAdapter(std::string_view) { return {}; } }
+STUB
 flags=(-std=c++20 -O2 -g -pthread -Wall -Wextra -Wpedantic -Wconversion -Wsign-conversion -Wshadow -Werror)
 if [[ -n "${REB_PROBE_TEST_SANITIZERS:-}" ]]; then
   flags+=(-O1 "-fsanitize=${REB_PROBE_TEST_SANITIZERS}" -fno-omit-frame-pointer)
 fi
 sources="$root/browser/integration/brave/overlay/components/reverse_engineering_browser"
 readonly sources
-"${CXX:-c++}" "${flags[@]}" -I"$fixture" -I"$build/stubs" -I"$build/include" -I"$root/include" \
+"${CXX:-c++}" "${flags[@]}" -I"$fixture" -I"$build/stubs" -I"$root/tools/native-test-support" \
+  -I"$build/include" -I"$root/include" \
   "$fixture/main.cc" "$sources/renderer/native_probe_sink.cc" \
   "$sources/renderer/native_probe_transport.cc" "$sources/common/native_probe_queue.cc" \
   "$root/src/analysis/owned_vm_guest_sampler.cpp" \

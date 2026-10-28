@@ -1,0 +1,298 @@
+diff --git a/test/cctest/wasm/test-run-wasm.cc b/test/cctest/wasm/test-run-wasm.cc
+index 7156fa9..57279d0 100644
+--- a/test/cctest/wasm/test-run-wasm.cc
++++ b/test/cctest/wasm/test-run-wasm.cc
+@@ -3,6 +3,7 @@
+ // found in the LICENSE file.
+ 
+ #include <stdint.h>
++#include <stdio.h>
+ #include <stdlib.h>
+ #include <string.h>
+ 
+@@ -13,6 +14,7 @@
+ #include "src/utils/utils.h"
+ #include "src/wasm/code-space-access.h"
+ #include "src/wasm/compilation-environment-inl.h"
++#include "src/wasm/decoder.h"
+ #include "src/wasm/wasm-opcodes-inl.h"
+ #include "src/wasm/wasm-tracing.h"
+ #include "test/cctest/cctest.h"
+@@ -4923,6 +4925,277 @@ WASM_EXEC_TEST(I64RemUOnDifferentRegisters) {
+       });
+ }
+ 
++// Real public interpreter acceptance: no JavaScript guest-state sampling.
++namespace {
++struct PublicQuickJSObservation {
++  uint64_t instance;
++  uint64_t invocation;
++  uint32_t pc;
++  uint32_t base;
++  uint32_t length;
++  uint32_t selector;
++};
++std::vector<uint8_t> public_quickjs_bytes;
++std::vector<PublicQuickJSObservation> public_quickjs_latest;
++std::vector<PublicQuickJSObservation> public_quickjs_hosts;
++size_t public_quickjs_dispatches = 0;
++
++std::vector<uint8_t> ReadPublicQuickJSFile(const char* variable) {
++  const char* path = getenv(variable);
++  CHECK_NOT_NULL(path);
++  FILE* file = fopen(path, "rb");
++  CHECK_NOT_NULL(file);
++  CHECK_EQ(0, fseek(file, 0, SEEK_END));
++  const long length = ftell(file);
++  CHECK_GT(length, 0);
++  CHECK_LE(length, 16 * 1024 * 1024);
++  CHECK_EQ(0, fseek(file, 0, SEEK_SET));
++  std::vector<uint8_t> bytes(static_cast<size_t>(length));
++  CHECK_EQ(bytes.size(), fread(bytes.data(), 1, bytes.size(), file));
++  CHECK_EQ(0, fclose(file));
++  return bytes;
++}
++
++bool EnablePublicQuickJS() { return true; }
++bool SelectPublicQuickJSSite(uint32_t function, uint32_t offset) {
++  return function == 414 && offset == 0x20677;
++}
++v8::WasmGuestModuleAdmission AdmitPublicQuickJS(v8::Local<v8::Context>,
++                                                const uint8_t* bytes,
++                                                size_t size,
++                                                uint32_t function) {
++  if (function != 414) return v8::WasmGuestModuleAdmission::kNotDispatcher;
++  return size == public_quickjs_bytes.size() &&
++                 memcmp(bytes, public_quickjs_bytes.data(), size) == 0
++             ? v8::WasmGuestModuleAdmission::kAdmit
++             : v8::WasmGuestModuleAdmission::kRejectModule;
++}
++
++uint32_t PublicQuickJSLocal(const v8::WasmGuestStateView& view,
++                            uint32_t index) {
++  uint64_t bits = 0;
++  uint8_t width = 0;
++  CHECK(view.read_numeric_local(view.accessor_context, index, &bits, &width));
++  CHECK_EQ(32, width);
++  CHECK_LE(bits, UINT32_MAX);
++  return static_cast<uint32_t>(bits);
++}
++uint32_t PublicQuickJSWord(const v8::WasmGuestStateView& view,
++                           uint64_t address) {
++  uint8_t bytes[4]{};
++  CHECK_LE(address, uint64_t{UINT32_MAX} - 3);
++  CHECK(view.copy_memory(view.accessor_context, 0, address, 4, bytes));
++  return uint32_t{bytes[0]} | (uint32_t{bytes[1]} << 8) |
++         (uint32_t{bytes[2]} << 16) | (uint32_t{bytes[3]} << 24);
++}
++void ObservePublicQuickJS(v8::Local<v8::Context>, const uint8_t* bytes,
++                          size_t size, const v8::WasmGuestStateView& view) {
++  if (!SelectPublicQuickJSSite(view.function_index, view.module_byte_offset))
++    return;
++  CHECK_EQ(public_quickjs_bytes.size(), size);
++  CHECK_EQ(0, memcmp(bytes, public_quickjs_bytes.data(), size));
++  // Retain only a native observation of this invocation's latest configured
++  // dispatch. Other handler-internal br_tables are not guest instruction
++  // boundaries.
++  for (auto it = public_quickjs_latest.begin();
++       it != public_quickjs_latest.end(); ++it) {
++    if (it->instance == view.instance_id &&
++        it->invocation == view.invocation_id) {
++      public_quickjs_latest.erase(it);
++      break;
++    }
++  }
++  CHECK_NE(uint64_t{0}, view.instance_id);
++  CHECK_NE(uint64_t{0}, view.invocation_id);
++  CHECK_EQ(244u, view.table_count);
++  CHECK_LT(view.module_byte_offset, size);
++  CHECK_EQ(0x0e, bytes[view.module_byte_offset]);
++  // Original opcode-fetch local, NOT postincrement local322 or guessed PC.
++  const uint32_t address = PublicQuickJSLocal(view, 320);
++  const uint32_t frame = PublicQuickJSLocal(view, 10);
++  const uint32_t bytecode = PublicQuickJSWord(view, uint64_t{frame} + 1708);
++  const uint32_t base = PublicQuickJSWord(view, uint64_t{bytecode} + 20);
++  const uint32_t length = PublicQuickJSWord(view, uint64_t{bytecode} + 24);
++  CHECK_GT(length, 0u);
++  CHECK_LE(uint64_t{base} + length, uint64_t{UINT32_MAX} + 1);
++  CHECK_GE(address, base);
++  CHECK_LT(address - base, length);
++  uint8_t opcode = 0;
++  CHECK(view.copy_memory(view.accessor_context, 0, address, 1, &opcode));
++  CHECK_EQ(view.selector, uint32_t{opcode});
++  CHECK_LT(public_quickjs_latest.size(), size_t{4096});
++  public_quickjs_latest.push_back({view.instance_id, view.invocation_id,
++                                   address - base, base, length,
++                                   view.selector});
++  ++public_quickjs_dispatches;
++}
++
++// Wasm permits padded unsigned LEB encodings. Use the engine's checked decoder.
++bool DecodePublicQuickJSU32(const uint8_t* bytes, size_t size, size_t offset,
++                            uint32_t* result) {
++  if (offset >= size) return false;
++  const size_t remaining = size - offset;
++  const size_t length = remaining < 5 ? remaining : 5;
++  Decoder decoder(bytes + offset, bytes + offset + length);
++  const uint32_t value = decoder.consume_u32v("public QuickJS import index");
++  if (!decoder.ok()) return false;
++  *result = value;
++  return true;
++}
++
++void CheckPublicQuickJSCallIndexDecoder() {
++  constexpr uint8_t zero[] = {0};
++  constexpr uint8_t padded_zero[] = {0x80, 0x80, 0x80, 0x80, 0};
++  constexpr uint8_t maximum[] = {0xff, 0xff, 0xff, 0xff, 0x0f};
++  constexpr uint8_t truncated[] = {0x80};
++  constexpr uint8_t overflow[] = {0x80, 0x80, 0x80, 0x80, 0x10};
++  constexpr uint8_t too_long[] = {0x80, 0x80, 0x80, 0x80, 0x80, 0};
++  uint32_t index = 17;
++  CHECK(DecodePublicQuickJSU32(zero, sizeof(zero), 0, &index));
++  CHECK_EQ(0u, index);
++  CHECK(DecodePublicQuickJSU32(padded_zero, sizeof(padded_zero), 0, &index));
++  CHECK_EQ(0u, index);
++  CHECK(DecodePublicQuickJSU32(maximum, sizeof(maximum), 0, &index));
++  CHECK_EQ(UINT32_MAX, index);
++  index = 17;
++  CHECK(!DecodePublicQuickJSU32(truncated, sizeof(truncated), 0, &index));
++  CHECK(!DecodePublicQuickJSU32(overflow, sizeof(overflow), 0, &index));
++  CHECK(!DecodePublicQuickJSU32(too_long, sizeof(too_long), 0, &index));
++  CHECK(!DecodePublicQuickJSU32(zero, sizeof(zero), sizeof(zero), &index));
++  CHECK(!DecodePublicQuickJSU32(zero, sizeof(zero), SIZE_MAX, &index));
++  CHECK_EQ(17u, index);  // Malformed input must not publish a partial value.
++}
++void PublicQuickJSHost(const v8::FunctionCallbackInfo<v8::Value>& args) {
++  static constexpr int expected[] = {100, 201, 102, 203, 100, 201, 102, 203};
++  CHECK_EQ(1, args.Length());
++  CHECK(args[0]->IsInt32());
++  CHECK_LT(public_quickjs_hosts.size(), std::size(expected));
++  CHECK_EQ(expected[public_quickjs_hosts.size()],
++           args[0].As<v8::Int32>()->Value());
++  v8::WasmGuestContext context{};
++  CHECK(args.GetIsolate()->GetCurrentWasmGuestContext(414, &context));
++  CHECK_EQ(414u, context.function_index);
++  // This is the live dispatcher CALL site, not the earlier br_table offset.
++  CHECK_LT(context.module_byte_offset, public_quickjs_bytes.size());
++  const uint8_t call_opcode = public_quickjs_bytes[context.module_byte_offset];
++  CHECK(call_opcode == 0x10 || call_opcode == 0x11);
++  // The API records the actual caller helper, not callee import index zero.
++  CHECK_NE(414u, context.import_function_index);
++  CHECK_EQ(0x6816u, context.import_module_byte_offset);
++  CHECK_LT(size_t{context.import_module_byte_offset} + 1,
++           public_quickjs_bytes.size());
++  CHECK_EQ(0x10, public_quickjs_bytes[context.import_module_byte_offset]);
++  uint32_t callee_index = UINT32_MAX;
++  CHECK(DecodePublicQuickJSU32(
++      public_quickjs_bytes.data(), public_quickjs_bytes.size(),
++      size_t{context.import_module_byte_offset} + 1, &callee_index));
++  CHECK_EQ(0u, callee_index);
++  const PublicQuickJSObservation* match = nullptr;
++  for (const auto& observation : public_quickjs_latest) {
++    if (observation.instance == context.instance_id &&
++        observation.invocation == context.invocation_id) {
++      CHECK_NULL(match);
++      match = &observation;
++    }
++  }
++  CHECK_NOT_NULL(match);
++  public_quickjs_hosts.push_back(*match);
++}
++}  // namespace
++
++TEST(RebNativePublicQuickJSGuestState) {
++  CheckPublicQuickJSCallIndexDecoder();
++  // The fixture is built by tools/check-native-v8-runtime.py. Stock cctest
++  // runs without it skip visibly; that driver requires the JSON witness
++  // printed below, so a skip can never be reported as acceptance there.
++  if (!getenv("REB_PUBLIC_QUICKJS_WASM") ||
++      !getenv("REB_PUBLIC_QUICKJS_BUNDLE")) {
++    printf("SKIPPED RebNativePublicQuickJSGuestState: fixture unset\n");
++    return;
++  }
++  FlagScope<bool> sampling(&v8_flags.reb_wasm_br_table_dispatch, true);
++  FlagScope<bool> guest_frames(&v8_flags.reb_wasm_guest_capture, true);
++  FlagScope<bool> liftoff_only(&v8_flags.liftoff_only, true);
++  FlagScope<bool> cache(&v8_flags.wasm_native_module_cache, false);
++  CcTest::InitializeVM();
++  auto* isolate = CcTest::isolate();
++  v8::HandleScope handles(isolate);
++  auto context = v8::Context::New(isolate);
++  v8::Context::Scope context_scope(context);
++  public_quickjs_bytes = ReadPublicQuickJSFile("REB_PUBLIC_QUICKJS_WASM");
++  const auto bundle = ReadPublicQuickJSFile("REB_PUBLIC_QUICKJS_BUNDLE");
++  // Test-only filter regression, separate from the real execution below.
++  // An unrelated handler br_table must preserve the configured guest boundary.
++  public_quickjs_latest = {{1, 2, 7, 0, 8, 9}};
++  v8::WasmGuestStateView unrelated{};
++  unrelated.instance_id = 1;
++  unrelated.invocation_id = 2;
++  unrelated.function_index = 414;
++  unrelated.module_byte_offset = 0x20676;
++  ObservePublicQuickJS(context, public_quickjs_bytes.data(),
++                       public_quickjs_bytes.size(), unrelated);
++  CHECK_EQ(size_t{1}, public_quickjs_latest.size());
++  CHECK_EQ(7u, public_quickjs_latest[0].pc);
++  public_quickjs_latest.clear();
++  public_quickjs_hosts.clear();
++  public_quickjs_dispatches = 0;
++  auto buffer = v8::ArrayBuffer::New(isolate, public_quickjs_bytes.size());
++  memcpy(buffer->GetBackingStore()->Data(), public_quickjs_bytes.data(),
++         public_quickjs_bytes.size());
++  CHECK(context->Global()
++            ->Set(context, v8_str("rebPublicQuickJSWasm"), buffer)
++            .FromJust());
++  auto host = v8::Function::New(context, PublicQuickJSHost).ToLocalChecked();
++  CHECK(context->Global()
++            ->Set(context, v8_str("rebNativeHostProbe"), host)
++            .FromJust());
++  isolate->SetWasmGuestDispatchCallback(
++      ObservePublicQuickJS, EnablePublicQuickJS, nullptr, AdmitPublicQuickJS,
++      SelectPublicQuickJSSite);
++  auto source = v8::String::NewFromUtf8(
++                    isolate, reinterpret_cast<const char*>(bundle.data()),
++                    v8::NewStringType::kNormal, static_cast<int>(bundle.size()))
++                    .ToLocalChecked();
++  CHECK(!v8::Script::Compile(context, source)
++             .ToLocalChecked()
++             ->Run(context)
++             .IsEmpty());
++  // Loader instantiates synchronously. Only ordinary Promise jobs remain;
++  // no timer/network/platform background task or JavaScript sampling loop.
++  for (int checkpoint = 0; checkpoint < 16; ++checkpoint) {
++    isolate->PerformMicrotaskCheckpoint();
++    if (CompileRun("rebPublicQuickJSDone")->IsTrue()) break;
++  }
++  auto error = CompileRun("rebPublicQuickJSError");
++  CHECK(error->IsString());
++  if (error.As<v8::String>()->Length() != 0) {
++    v8::String::Utf8Value message(isolate, error);
++    fprintf(stderr, "Public QuickJS loader: %s\n", *message);
++    FATAL("Public QuickJS loader failed");
++  }
++  CHECK(CompileRun("rebPublicQuickJSDone")->IsTrue());
++  CHECK_EQ(size_t{8}, public_quickjs_hosts.size());
++  CHECK_GE(public_quickjs_dispatches, public_quickjs_hosts.size());
++  // Loop iterations and the second call reach the same actual guest sites.
++  for (size_t i = 0; i < public_quickjs_hosts.size(); ++i) {
++    const auto& observation = public_quickjs_hosts[i];
++    CHECK_EQ(public_quickjs_hosts[0].instance, observation.instance);
++    CHECK_EQ(public_quickjs_hosts[i % 2].pc, observation.pc);
++    CHECK_EQ(public_quickjs_hosts[i % 2].selector, observation.selector);
++    CHECK_LT(observation.pc, observation.length);
++  }
++  v8::WasmGuestContext absent{};
++  CHECK(!isolate->GetCurrentWasmGuestContext(414, &absent));
++  isolate->SetWasmGuestDispatchCallback(nullptr, nullptr);
++  printf(
++      "{\"target\":\"public-quickjs-0.32.0\",\"native_hook_validated\":true,"
++      "\"host_calls\":8,\"dispatches\":%zu,\"brave_validated\":false}\n",
++      public_quickjs_dispatches);
++  public_quickjs_latest.clear();
++  public_quickjs_hosts.clear();
++  public_quickjs_bytes.clear();
++}
++
+ #undef B1
+ #undef B2
+ #undef RET

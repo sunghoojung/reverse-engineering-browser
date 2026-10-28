@@ -7,12 +7,12 @@ import {spawn} from 'node:child_process';
 import {tmpdir} from 'node:os';
 import {join, resolve, dirname} from 'node:path';
 import {runInNewContext} from 'node:vm';
-import {network} from './traffic-capture-qa.mjs';
+import {network,savedRequests} from './saved-traffic-fixture.mjs';
 
 const root = resolve(new URL('..',import.meta.url).pathname);
-const code = await Promise.all(['evidence_models.js','traffic_view.js','api_catalog.js','captured_client.js'].map(name=>readFile(join(root,'apps/research-ui',name),'utf8')));
+const code = await Promise.all(['traffic_view.js','captured_client.js'].map(name=>readFile(join(root,'apps/research-ui',name),'utf8')));
 const globals = {TextEncoder,TextDecoder,Uint8Array,URL,atob,btoa,AbortController,setTimeout,clearTimeout};
-const api = runInNewContext(code.join('\n')+'\n;({requestsFromDebuggerNetwork,capturedClientCapture,capturedClientRun,capturedClientProject,capturedClientZip,capturedClientIssues,capturedClientSend})',globals);
+const api = runInNewContext(code.join('\n')+'\n;({capturedRequestIdentity,capturedClientCapture,capturedClientRun,capturedClientProject,capturedClientZip,capturedClientIssues,capturedClientSend})',globals);
 const copy = value => JSON.parse(JSON.stringify(value));
 const inputBody = '\ufeff雪\r\n{"duplicate":1,"duplicate":2,"inert":"${process.exit()} ` </script>"}';
 function fixture(url = 'https://example.test/a%2Fb?x=1&%78=2&empty=&q=a+b&q=a%20b') {
@@ -22,8 +22,23 @@ function fixture(url = 'https://example.test/a%2Fb?x=1&%78=2&empty=&q=a+b&q=a%20
   record.request.body.text=inputBody;record.response.body.base64='';record.response.body.text='response-secret';
   return value;
 }
-const requests = value => api.requestsFromDebuggerNetwork(value);
+const requests = value => savedRequests(value);
 const capture = value => api.capturedClientCapture(requests(value)[0]);
+// Saved-capture identity is five exact values; rounded timestamps and visible IDs never substitute.
+{
+  const value = fixture(); value.requests[0].started_monotonic_ms = 100.0000001;
+  const [request] = requests(value), before = JSON.stringify(value);
+  assert.deepEqual(copy(api.capturedRequestIdentity(request)),{instance:value.instance_id,epoch:value.capture_epoch,
+    request:value.requests[0].id,target:value.requests[0].target_id,started:100.0000001});
+  assert.equal(Math.round(100.0000001*1e6), Math.round(100.0000002*1e6), 'Fixture proves rounded timestamp collision');
+  assert.notDeepEqual(copy(api.capturedRequestIdentity({...request,captureRecord:{...request.captureRecord,started_monotonic_ms:100.0000002}})),
+    copy(api.capturedRequestIdentity(request)));
+  for (const owner of [[null,1],['same',Number.MAX_SAFE_INTEGER+1],['same',-1],['same'],'same']) assert.equal(api.capturedRequestIdentity({...request,captureOwner:owner}),null);
+  for (const changed of [{tabId:'wrong'},{id:'wrong'},{captureRecord:undefined}]) assert.equal(api.capturedRequestIdentity({...request,...changed}),null);
+  assert.equal(api.capturedRequestIdentity({id:'native',origin:'live',events:[]}),null,'Native Traffic rows carry no saved-capture identity');
+  assert.equal(api.capturedRequestIdentity(null),null);
+  assert.equal(JSON.stringify(value),before,'Identity resolution must not alter retained raw fields');
+}
 const base = fixture(), original = JSON.stringify(base), source = capture(base);
 assert.deepEqual(copy(source.input),{method:'POST',url:base.requests[0].url,headers:base.requests[0].request.headers,body:inputBody,timeout_ms:15000});
 assert.equal(source.problems.length,0);assert.equal(source.templateProblems.length,0);
@@ -117,51 +132,9 @@ await checkGeneratedProject();
 await checkConfiguredProject();
 if(process.argv.includes('--go')) await checkGeneratedGoProject();
 if(process.argv.includes('--mimic')) await checkGeneratedMimicProject();
-await checkController();
-await checkRepeaterIntegration();
+// The retired repeater controller is not part of native-only export.
+// check-captured-export-ui.mjs exercises the shipped dialog and native save bridge.
 
-async function checkRepeaterIntegration() {
-  const app=await readFile(join(root,'apps/research-ui/app.js'),'utf8');
-  const section=(start,end)=>{const begin=app.indexOf(start),finish=app.indexOf(end,begin+start.length);assert(begin>=0&&finish>begin);return app.slice(begin,finish);};
-  const state={requests:requests(fixture()),selectedRequestId:'synthetic-json',repeaterDraftDirty:true,repeaterDraftRevision:1,
-    repeaterCaptureSource:{source,context:'ctx',importRevision:1}};
-  const elements=Object.fromEntries(['Url','Method','Headers','Body','Timeout'].map(name=>['repeaterRequest'+name,{value:''}]));
-  Object.assign(elements.repeaterRequestUrl,{value:source.input.url});Object.assign(elements.repeaterRequestMethod,{value:'POST'});
-  Object.assign(elements.repeaterRequestHeaders,{value:JSON.stringify(Object.fromEntries(source.input.headers))});
-  Object.assign(elements.repeaterRequestBody,{value:inputBody});Object.assign(elements.repeaterRequestTimeout,{value:'15000'});
-  let textarea='';Object.defineProperty(elements.repeaterRequestBody,'value',{get:()=>textarea,set:value=>{textarea=value.replace(/\r\n?/g,'\n');}});
-  elements.repeaterRequestBody.value=inputBody;state.repeaterBodyRepresentation={text:inputBody,display:elements.repeaterRequestBody.value};
-  let execution=0;const payloads=[];
-  const production=runInNewContext(section('      function prefillRepeaterRequest(', '      function setRepeaterEditorTab(')+
-    section('      async function runRepeaterRequest()', '      async function compareRepeaterResponses()')+
-    '\n;({prefillRepeaterRequest,loadRepeaterHistoryEntry,runRepeaterRequest})',{
-    state,elements,URL,refreshRepeaterStructuredEditors(){},renderRepeaterVariableStatus(){},renderRepeater(){},renderExperiment(){},
-    repeaterSubmissionKey:()=> 'submission',experimentContextKey:()=> 'ctx',repeaterState:()=>({history:execution?[{id:execution}]:[]}),
-    currentExperimentReceipt:value=>value,applyRepeaterVariables:async()=>({}),parseExperimentHeaders:text=>Object.entries(JSON.parse(text)).map(([name,value])=>({name,value})),
-    repeaterHeaderObject:headers=>Object.fromEntries(headers.map(({name,value})=>[name,value])),
-    runExperimentAction:async payload=>{payloads.push(payload);return {repeater:{active_execution:{execution_id:++execution},history:[]}};}
-  });
-  await production.runRepeaterRequest();assert.equal(payloads.length,1);assert.equal(payloads[0].body,inputBody);
-  assert.equal(state.repeaterDraftDirty,false);production.prefillRepeaterRequest();
-  assert.equal(elements.repeaterRequestBody.value,inputBody.replace(/\r\n?/g,'\n'),'Textarea display uses normalized line endings');
-  assert.equal(state.repeaterBodyRepresentation.text,inputBody,'Retained request preserves original CRLF');
-  assert.equal(state.repeaterCaptureRuns.source,source);assert.equal(state.repeaterCaptureRuns.links[0].id,1);
-  state.repeaterDraftRevision++;state.repeaterDraftDirty=true;await production.runRepeaterRequest();
-  assert.equal(state.repeaterCaptureRuns.links.length,2);assert.match(state.repeaterCaptureRuns.links[1].relation,/edited after/);
-  production.loadRepeaterHistoryEntry({...run,id:1});
-  assert.equal(state.repeaterCaptureSource,null,'Selecting another draft retires its active import');
-  production.prefillRepeaterRequest();assert.equal(elements.repeaterRequestBody.value,inputBody.replace(/\r\n?/g,'\n'),'History display is not overwritten by ordinary Traffic prefill');
-  assert.equal(state.repeaterBodyRepresentation.text,inputBody);
-  assert.equal(state.repeaterCaptureRuns.links.length,2,'Inspecting history retains established capture provenance');
-  const getRunCapture=runInNewContext('('+section('        getRunCapture: (run,context) => {','        openRepeater:').trim().replace(/^getRunCapture: /,'').replace(/,$/, '')+')',{state});
-  assert.equal(getRunCapture({id:1},'ctx').evidence,source.evidence);
-  assert.equal(getRunCapture({id:2},'ctx').evidence,source.evidence);
-  assert.equal(getRunCapture({id:3},'ctx'),null);assert.equal(getRunCapture({id:1},'replacement'),null);
-  assert.match(section('      function clearExperimentLifetime()', '      function '),/state\.repeaterCaptureRuns = null/);
-  state.repeaterBodyRepresentation=null;await production.runRepeaterRequest();
-  assert.equal(payloads.at(-1).body,inputBody.replace(/\r\n?/g,'\n'),'Explicit body edit uses editor text rather than secretly restoring CRLF');
-  console.log('PASS production Repeater Send/prefill/history integration: full draft preserved after Send, bounded per-run provenance retained and context mismatches refused');
-}
 
 async function command(command,args,cwd,options={}) {
   return new Promise((done,reject)=>{
@@ -218,32 +191,72 @@ async function checkGeneratedProject() {
       await writeFile(join(folder,'config.json'),JSON.stringify({allowedOrigin:origin,request:{...override,url:origin+path,timeout_ms:path==='/slow'?100:5000}}));
       result=await execute('--send');
       if(expected==='large'||expected==='exact'){assert.equal(result.code,0,result.stderr);const response=JSON.parse(result.stdout);assert.equal(response.body.length,65536);assert.equal(response.body_truncated,expected==='large');}
-      else assert.notEqual(result.code,0,'Timeout is surfaced with no retry');
+      else {
+        assert.notEqual(result.code,0,'Timeout is surfaced with no retry');
+        assert.match(result.stderr,/^timeout:/m,'A transport failure must not masquerade as the deadline case');
+      }
     }
-    assert.equal(seen.length,5);
+    // The overall deadline can expire before connect or after server receipt.
+    // Count every successful send/refusal exactly; a timed-out send may arrive
+    // zero or one time, but never retries. Recheck after closing/draining below.
+    const receivedWithoutTimeout=()=>seen.filter(request=>request.url!=='/slow').length;
+    assert(seen.filter(request=>request.url==='/slow').length<=1,'Timed-out send never retries');
+    assert.equal(receivedWithoutTimeout(),4);
     await writeFile(join(folder,'config.json'),JSON.stringify({allowedOrigin:'https://wrong.test',request:override}));
-    result=await execute('--send');assert.notEqual(result.code,0);assert.equal(seen.length,5);
+    result=await execute('--send');assert.notEqual(result.code,0);assert.equal(receivedWithoutTimeout(),4);
     await writeFile(join(folder,'config.json'),JSON.stringify({allowedOrigin:origin,request:{...override,headers:[['Authorization','synthetic-only']]}}));
-    result=await execute('--send');assert.notEqual(result.code,0);assert.equal(seen.length,5,'Credential/transport refusal happens before fetch');
+    result=await execute('--send');assert.notEqual(result.code,0);assert.equal(receivedWithoutTimeout(),4,'Credential/transport refusal happens before fetch');
     for(const type of invalidContentTypes) {
       await writeFile(join(folder,'config.json'),JSON.stringify({allowedOrigin:origin,request:{...copy(local.input),headers:[['Content-Type',type]]}}));
-      result=await execute('--send');assert.notEqual(result.code,0,type);assert.match(result.stderr,/invalid_input/);assert.equal(seen.length,5,'Malformed/ambiguous charset is refused before send');
+      result=await execute('--send');assert.notEqual(result.code,0,type);assert.match(result.stderr,/invalid_input/);assert.equal(receivedWithoutTimeout(),4,'Malformed/ambiguous charset is refused before send');
     }
     for(const type of validContentTypes) {
       await writeFile(join(folder,'config.json'),JSON.stringify({allowedOrigin:origin,request:{...copy(local.input),headers:[['Content-Type',type]]}}));
-      result=await execute();assert.equal(result.code,0,result.stderr);assert.equal(JSON.parse(result.stdout).ready,true,type);assert.equal(seen.length,5);
+      result=await execute();assert.equal(result.code,0,result.stderr);assert.equal(JSON.parse(result.stdout).ready,true,type);assert.equal(receivedWithoutTimeout(),4);
     }
     const redactedProject=api.capturedClientProject(local,'redacted_copy');
     for(const item of redactedProject.files)await writeFile(join(directory,item.path),item.text);
     await writeFile(join(folder,'config.json'),JSON.stringify({allowedOrigin:origin}));
     result=await execute();assert.equal(result.code,0);assert.equal(JSON.parse(result.stdout).ready,false);
-    result=await execute('--send');assert.notEqual(result.code,0);assert.equal(seen.length,5,'Redacted inputs require a complete reviewed replacement');
+    result=await execute('--send');assert.notEqual(result.code,0);assert.equal(receivedWithoutTimeout(),4,'Redacted inputs require a complete reviewed replacement');
     await writeFile(join(folder,'config.json'),JSON.stringify({allowedOrigin:origin,request:{...override,url:origin+'/configured'}}));
-    result=await execute('--send');assert.equal(result.code,0,result.stderr);assert.equal(seen.length,6);
+    result=await execute('--send');assert.equal(result.code,0,result.stderr);assert.equal(receivedWithoutTimeout(),5);
+    // Exercise the pre-connect deadline deterministically. This authored preload
+    // defers only this fixture request until its real AbortSignal fires, then
+    // calls Node's real transport with the already-aborted signal. Product
+    // timeout code and its deadline are unchanged; no connection may escape.
+    await writeFile(join(folder,'deferred-connect.mjs'), `
+import http from 'node:http';
+import {EventEmitter} from 'node:events';
+import {syncBuiltinESMExports} from 'node:module';
+const original=http.request;
+http.request=function(url,options,callback){
+  if(new URL(url).pathname!=='/deadline-before-connect') return original.call(this,url,options,callback);
+  const pending=new EventEmitter();
+  pending.end=body=>{
+    options.signal.addEventListener('abort',()=>{
+      const request=original.call(http,url,options,callback);
+      request.on('error',error=>pending.emit('error',error));request.end(body);
+    },{once:true});
+  };
+  return pending;
+};
+syncBuiltinESMExports();
+`);
+    await writeFile(join(folder,'config.json'),JSON.stringify({allowedOrigin:origin,request:{...override,url:origin+'/deadline-before-connect',timeout_ms:100}}));
+    result=await command(process.execPath,['--import','./deferred-connect.mjs','examples/request-001.mjs','--send'],folder);
+    assert.notEqual(result.code,0);assert.match(result.stderr,/^timeout:/m);
+    assert.equal(receivedWithoutTimeout(),5,'Already-aborted transport must not send');
     const output=join(root,'build/client-project-qa');await mkdir(output,{recursive:true});
     await writeFile(join(output,'authored-example.zip'),raw.bytes);
     await writeFile(join(output,'validation.json'),JSON.stringify({status:'passed',fixture:'authored loopback only',requests:seen.length,checks:['ZIP CRC and extraction','generated syntax','default dry run','exact method/query/header/text body','origin gate','manual redirect','timeout without retry','bounded response','credential refusal','redacted explicit configuration']},null,2)+'\n');
-  } finally {server.closeAllConnections();await new Promise(done=>server.close(done));await rm(directory,{recursive:true,force:true});}
+  } finally {
+    server.closeAllConnections();await new Promise(done=>server.close(done));
+    await rm(directory,{recursive:true,force:true});
+    assert(seen.filter(request=>request.url==='/slow').length<=1,'Drained timeout traffic never retries');
+    assert.equal(seen.filter(request=>request.url==='/deadline-before-connect').length,0,'Pre-connect timeout remains unsent after drain');
+  }
+  assert.equal(seen.filter(request=>request.url!=='/slow').length,5,'Drained successful/refused requests retain the exact total');
   console.log('PASS generated project extracted by Python, Node syntax, no network until explicit Send, exact supported request values, redirect/origin/credential guards, timeout and response bound');
 }
 
@@ -314,65 +327,6 @@ async function checkGeneratedGoProject() {
   console.log('PASS generated Go build/test/vet and actual net/http loopback fidelity, explicit send/origin/configuration gates, unsupported matrix, redirects, timeout and response bounds');
 }
 
-async function checkController() {
-  class Node {
-    constructor(tag='div'){this.tagName=tag;this.children=[];this.events={};this.dataset={};this.text='';this.open=false;this.disabled=false;this.checked=false;}
-    set textContent(value){this.text=String(value);this.children=[];}get textContent(){return this.text+this.children.map(child=>child.textContent).join('');}
-    append(...children){this.children.push(...children);}replaceChildren(...children){this.children=children;this.text='';}
-    addEventListener(type,handler){this.events[type]=handler;}click(){if(!this.disabled)return this.events.click?.({currentTarget:this});}
-    focus(){}remove(){}showModal(){this.open=true;}close(){this.open=false;this.events.close?.();}
-  }
-  const selectors=['#captured-client-review','[data-client-review-content]','[data-client-review-status]','[data-client-apply]','[data-client-replace]','[data-client-replace-label]','[data-client-close]'];
-  const nodes=new Map(selectors.map(selector=>[selector,new Node()]));
-  const drafts=new Node(),exports=['raw','redacted_copy'].map(mode=>{const node=new Node();node.dataset.clientCapture=mode;return node;});
-  const runExports=['raw','redacted_copy'].map(mode=>{const node=new Node();node.dataset.clientRunExport=mode;return node;});
-  let native=false,bridgeMode='saved',bridgeCalls=0;
-  const bridge={postMessage:async payload=>{bridgeCalls++;assert.equal(payload.format,'reb-client-project-save-v1');assert.equal(payload.mode,'raw');assert.equal(Buffer.from(payload.base64,'base64').readUInt32LE(0),0x04034b50);if(bridgeMode==='failed')throw new Error('authored save denial');return {status:bridgeMode};}};
-  const document={querySelector:selector=>selector==='[data-client-capture="draft"]'?drafts:selector.startsWith('[data-client-provider=')?{value:'standard'}:nodes.get(selector),
-    querySelectorAll:selector=>selector==='[data-client-capture]'?[drafts,...exports]:selector==='[data-client-run-export]'?runExports:selector==='[data-client-capture="raw"], [data-client-capture="redacted_copy"]'?exports:[],
-    createElement:tag=>new Node(tag),body:new Node(),documentElement:{classList:{contains:()=>native}},events:{},addEventListener(type,handler){this.events[type]=handler;}};
-  const dialog=nodes.get('#captured-client-review');dialog.querySelector=selector=>nodes.get(selector);
-  const install=runInNewContext(code.join('\n')+'\ninstallCapturedClientWorkflow',{...globals,document,Blob,webkit:{messageHandlers:{rebClientProjectExport:bridge}},URL:class extends URL {static createObjectURL(){downloads++;return 'blob:authored';}static revokeObjectURL(){}},setTimeout:()=>0});
-  let current=requests(fixture()),selected=current[0],context='ctx',edit=0,dirty=false,prepared=0,written=0,opened=0,downloads=0,release=null,notice='',createNew=false;
-  const options={getRequest:()=>selected,getRequests:()=>current,getRun:()=>null,contextKey:()=>context,editRevision:()=>edit,hasDraft:()=>dirty,
-    prepareContext:async()=>{prepared++;if(release==='hold')await new Promise(done=>{release=done;});return {key:'ctx',created:createNew};},
-    writeDraft:source=>{written++;assert.equal(source.input.body,inputBody);},openRepeater:()=>opened++,notice:message=>{notice=message;}};
-  const workflow=install(options);
-  const apply=nodes.get('[data-client-apply]'),replace=nodes.get('[data-client-replace]'),close=nodes.get('[data-client-close]'),status=nodes.get('[data-client-review-status]');
-  assert.equal(prepared+written+downloads,0);workflow.sync();assert.equal(prepared+written+downloads,0);
-  drafts.click();assert.equal(dialog.open,true);assert.equal(apply.disabled,false);assert.equal(prepared+written+downloads,0);
-  assert(nodes.get('[data-client-review-content]').textContent.includes(inputBody));
-  close.click();assert.equal(written,0);
-  dirty=true;drafts.click();assert.equal(apply.disabled,true);replace.checked=true;replace.events.change();assert.equal(apply.disabled,false);
-  await apply.click();assert.equal(prepared,1);assert.equal(written,1);assert.equal(opened,1);assert.equal(dialog.open,false);
-  dirty=false;drafts.click();selected.captureRecord.request.body.text='changed';workflow.sync();assert.equal(apply.disabled,true);assert.match(status.textContent,/changed or expired/);close.click();
-  current=requests(fixture());selected=current[0];drafts.click();current=[];await apply.click();assert.equal(written,1);close.click();
-  current=[selected,{...selected}];drafts.click();assert.equal(dialog.open,false);assert.match(notice,/ambiguous/);
-  current=[selected];
-  for(const interruption of ['close','edit','context','expiry']) {
-    context='ctx';current=[selected];release='hold';drafts.click();const pending=apply.click();assert.equal(apply.disabled,true);
-    const before=written;
-    if(interruption==='close')close.click();else if(interruption==='edit')edit++;else if(interruption==='context')context='replacement';else current=[];
-    release();await pending;assert.equal(written,before,interruption+' rejects late draft write');close.click();
-  }
-  context='ctx';current=[selected];release=null;drafts.click();
-  for(const key of [{key:'F8'},{key:'ArrowLeft',altKey:true},{key:'p',ctrlKey:true},{key:'j',metaKey:true}]) {
-    let stopped=false,prevented=false;document.events.keydown({...key,preventDefault:()=>prevented=true,stopImmediatePropagation:()=>stopped=true});assert(stopped&&prevented);
-  }
-  close.click();assert.equal(downloads,0,'Review never starts an export');
-  assert.equal(written,1);assert.equal(opened,1);
-  createNew=true;
-  for(const transition of ['cleared-by-create','new-selection','new-edit']) {
-    current=[selected];workflow.sync();release='hold';drafts.click();const pending=apply.click(),before=written;
-    if(transition==='new-selection') {current=requests(fixture());current[0].captureOwner=['new-owner',3];selected=current[0];}
-    else {current=[];selected=null;if(transition==='new-edit')edit++;}
-    release();await pending;
-    assert.equal(written,before+(transition==='cleared-by-create'?1:0),transition+' only confirmed source reset can import');
-    close.click();current=requests(fixture());selected=current[0];
-  }
-  createNew=false;release=null;
-  console.log('PASS capture review controller: explicit-only creation/export, dirty guard, changed/expired/ambiguous sources, canceled or edited late creation, context ownership and modal shortcut isolation');
-}
 
 async function checkConfiguredProject() {
   const seen=[];
@@ -395,7 +349,9 @@ async function checkConfiguredProject() {
     seen.push({url:request.url,headers:request.headers});
     if(request.url==='/slow'){setTimeout(()=>response.end('late'),250);return;}
     if(request.url==='/short'){response.writeHead(200,{'Content-Type':'application/json','Content-Length':'100'});response.end('{"part":');return;}
-    if(request.url==='/partial-timeout'){response.writeHead(200,{'Content-Type':'application/json'});response.write('{"part":');setTimeout(()=>response.end('1}'),250);return;}
+    // Hold the partial body open until the client aborts, so its timeout wins
+    // regardless of scheduler load.
+    if(request.url==='/partial-timeout'){response.writeHead(200,{'Content-Type':'application/json'});response.write('{"part":');response.on('close',()=>response.destroy());return;}
     if(request.url==='/invalid-utf8'){response.writeHead(200,{'Content-Type':'application/json'});response.end(Buffer.from([123,34,120,34,58,34,255,34,125]));return;}
     const [status,type,body]=responses[request.url]??responses['/stock'];
     response.writeHead(status,{'Content-Type':type,...(status===302?{Location:'/unexpected','Set-Cookie':'authored=1'}:{})});response.end(body);
@@ -429,7 +385,8 @@ async function checkConfiguredProject() {
       [field('/__proto__','object'),'/stock','response_field_missing'],[{...valid,timeoutMs:100},'/slow','timeout'],
     ])await refuses(config,path,code);
     for(const path of ['/short','/partial-timeout']){
-      await assert.rejects(()=>send({...valid,timeoutMs:100},path),error=>{
+      // A premature close is independent of the deadline; give it a long one.
+      await assert.rejects(()=>send({...valid,timeoutMs:path==='/short'?10000:100},path),error=>{
         assert.equal(error.code,path==='/short'?'response_read':'timeout');assert.equal(error.result.network_requests,1);
         assert.equal(error.result.url,origin+path);assert.equal(error.result.status,200);assert.equal(error.result.body,'{"part":');assert.equal(error.result.body_truncated,true);return true;
       });

@@ -1,6 +1,6 @@
 #!/usr/bin/env node
-// Authored static bytecode and DOM-controller checks. Rendered assertions are
-// exported for the integrated browser gate; neither establishes macOS pixels.
+// Authored static bytecode and offline DOM-controller checks only.
+// No rendered browser driver is retained or claimed.
 import assert from 'node:assert/strict';
 import {createHash, webcrypto} from 'node:crypto';
 import {readFile} from 'node:fs/promises';
@@ -157,72 +157,5 @@ function authoredLiveView() {
     last_command: null, diagnostics: {stderr_bytes: '0', stderr_truncated: false}, disposal_failed: false
   }};
 }
-export async function checkVmStaticInteractions({evaluate, viewport, click, key, screenshot}) {
-  const root = '#vm-static-workspace';
-  const visibleClick = async selector => { await evaluate(`document.querySelector(${JSON.stringify(selector)}).scrollIntoView({block:'nearest'})`); await click(selector); };
-  const settle = () => evaluate(`new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))`);
-  // The workspace observes its content width. A 760 px viewport with a vertical
-  // scrollbar is already narrow, so viewport thresholds cannot select its pane.
-  const isNarrow = () => evaluate(`document.querySelector('${root}').dataset.layout==='narrow'`);
-  const showAddresses = async () => { if (await isNarrow()) await visibleClick(root + ' [data-vm-static-panel="listing"]'); };
-  const waitAnalysis = () => evaluate(`(async()=>{const end=performance.now()+5000;while(!vmExecutionWorkspace.staticAnalysis.getReport()){if(performance.now()>end)throw Error('Static analysis did not complete');await new Promise(resolve=>setTimeout(resolve,10));}})()`);
-  const importFile = async (kind, value) => evaluate(`(async()=>{const input=vmExecutionWorkspace.staticAnalysis.fileInputs[${JSON.stringify(kind)}],transfer=new DataTransfer();transfer.items.add(new File([${JSON.stringify(JSON.stringify(value))}],${JSON.stringify(kind + '-owned.json')},{type:'application/json'}));input.files=transfer.files;input.dispatchEvent(new Event('change',{bubbles:true}));const end=performance.now()+5000;while(input.value){if(performance.now()>end)throw Error('Static import did not settle');await new Promise(resolve=>setTimeout(resolve,10));}})()`);
-  const geometry = selector => evaluate(`(()=>{const e=document.querySelector(${JSON.stringify(selector)}),r=e.getBoundingClientRect(),hit=document.elementFromPoint(r.left+r.width/2,r.top+r.height/2);return{width:r.width,height:r.height,visible:r.left>=0&&r.right<=innerWidth&&r.top>=0&&r.bottom<=innerHeight,pointer:hit===e||e.contains(hit),focus:getComputedStyle(e).outlineStyle!=='none'}})()`);
-  await viewport(1440, 900); await evaluate("showScreen('vm');"); await visibleClick('#vm-show-static'); await settle();
-  assert.equal(await evaluate(`document.querySelector('${root}').hidden`), false);
-  const oldTraceSelection = await evaluate(`vmExecutionWorkspace.execution.selector.value`);
-  await importFile('image', fixture.image); assert.equal(await evaluate('vmExecutionWorkspace.staticAnalysis.analyze.disabled'), true);
-  await importFile('definition', fixture.definition); assert.equal(await evaluate('vmExecutionWorkspace.staticAnalysis.getReport()'), null);
-  await visibleClick(root + ' [data-vm-static-action="analyze"]'); await waitAnalysis();
-  assert.equal(await evaluate(`document.querySelectorAll('${root} .vm-static-row').length`), 16);
-  const completeRows = await evaluate(`(()=>{const body=document.querySelector('${root} .vm-static-rows'),b=body.getBoundingClientRect();return[...body.children].filter(e=>{const r=e.getBoundingClientRect();return r.top>=Math.max(0,b.top)&&r.bottom<=Math.min(innerHeight,b.bottom)}).length})()`);
-  assert(completeRows >= 12, 'Desktop static listing retains at least12 complete rows');
-  await visibleClick(root + ' [data-vm-static-offset="40"]'); await visibleClick('#vm-static-tab-cfg');
-  assert.match(await evaluate(`document.querySelector('${root} .vm-static-detail').textContent`), /branch taken/);
-  await visibleClick('#vm-static-tab-pseudocode'); assert.equal(await evaluate(`document.querySelector('${root} [data-vm-static-pseudocode="40"]').getAttribute('aria-pressed')`), 'true');
-  await visibleClick('#vm-static-tab-instruction'); assert.match(await evaluate(`document.querySelector('${root} .vm-static-detail').textContent`), /target: 47/);
-  await visibleClick('#vm-static-tab-inputs'); assert.match(await evaluate(`document.querySelector('${root} .vm-static-detail').textContent`), /Exact image JSON SHA-256/);
-  await importFile('definition', {bad: '<img src=x onerror=alert(1)>'}); assert.equal(await evaluate('vmExecutionWorkspace.staticAnalysis.getSelected()'), 40); assert.equal(await evaluate(`document.querySelectorAll('${root} img').length`), 0);
-  await visibleClick('#vm-show-findings'); await visibleClick('#vm-show-execution'); assert.equal(await evaluate('vmExecutionWorkspace.execution.selector.value'), oldTraceSelection); await visibleClick('#vm-show-static'); assert.equal(await evaluate('vmExecutionWorkspace.staticAnalysis.getSelected()'), 40);
-  for (const [width, height] of [[1440,900],[1024,768],[760,700],[600,800],[360,740],[720,450]]) {
-    await viewport(width, height); await settle();
-    await showAddresses();
-    await visibleClick(root + ' [data-vm-static-offset="40"]'); await key('ArrowDown', 'ArrowDown', {windowsVirtualKeyCode: 40}); assert.equal(await evaluate('vmExecutionWorkspace.staticAnalysis.getSelected()'), 44);
-    const row = await geometry(root + ' [data-vm-static-offset="44"]'); assert(row.visible && row.pointer && row.focus, `Focused static row reachable at ${width}×${height}`);
-    assert.equal(await evaluate('document.documentElement.scrollWidth<=innerWidth'), true);
-    await key('Enter', 'Enter', {windowsVirtualKeyCode: 13, text: '\r', unmodifiedText: '\r'}); assert((await geometry('#vm-static-tab-inputs')).visible);
-    await screenshot(`vm-static-${width}x${height}.png`);
-    if (await isNarrow()) { await key('Escape', 'Escape', {windowsVirtualKeyCode: 27}); assert.equal(await evaluate(`document.querySelector('${root}').dataset.panel`), 'listing'); }
-  }
-  // Keep Details selected before narrowing only the root. Real pane controls
-  // must reveal the hidden listing even though the viewport is still desktop.
-  await viewport(1440,900); await settle(); await visibleClick('#vm-static-tab-inputs');
-  await evaluate(`document.querySelector('${root}').style.width='700px'`); await settle(); assert.equal(await isNarrow(), true);
-  assert.equal(await evaluate(`getComputedStyle(document.querySelector('${root} .vm-static-listing')).display`), 'none');
-  await showAddresses(); await visibleClick(root + ' [data-vm-static-offset="40"]');
-  await key('ArrowDown','ArrowDown',{windowsVirtualKeyCode:40}); assert.equal(await evaluate('vmExecutionWorkspace.staticAnalysis.getSelected()'),44);
-  const rootWidthRow=await geometry(root + ' [data-vm-static-offset="44"]'); assert(rootWidthRow.visible&&rootWidthRow.pointer&&rootWidthRow.focus,'Narrow-root address remains pointer and keyboard reachable in a desktop viewport');
-  await key('Enter','Enter',{windowsVirtualKeyCode:13,text:'\r',unmodifiedText:'\r'}); assert.equal(await evaluate(`document.querySelector('${root}').dataset.panel`),'details');
-  await key('Escape','Escape',{windowsVirtualKeyCode:27}); assert.equal(await evaluate(`document.querySelector('${root}').dataset.panel`),'listing');
-  await screenshot('vm-static-root700-viewport1440.png');
-  await evaluate(`document.querySelector('${root}').style.width=''`); await settle();
-  // Synthetic response on the normal read path; all POSTs are forbidden here.
-  await evaluate(`window.vmStaticSavedFetch=window.fetch;window.vmStaticPosts=0;window.vmStaticAuthored=${JSON.stringify(authoredLiveView())};window.fetch=(input,init={})=>{if(String(input)==='/api/vm-debugger'||String(input)==='/api/vm-debugger/actions'){if(init.method==='POST'){window.vmStaticPosts++;throw Error('Static fixture forbids native commands');}return Promise.resolve(new Response(JSON.stringify(window.vmStaticAuthored),{status:200,headers:{'Content-Type':'application/json'}}));}return window.vmStaticSavedFetch(input,init);};`);
-  try {
-    await evaluate(`(async()=>{const end=performance.now()+5000;while(vmExecutionWorkspace.owned.controller.model().view?.session?.run_id!=='static-ui-authored'){await vmExecutionWorkspace.owned.controller.refresh();if(performance.now()>end)throw Error('Authored live view not accepted');await new Promise(resolve=>setTimeout(resolve,20));}})()`);
-    for (const [width,height] of [[1440,900],[360,740],[720,450]]) {
-      await viewport(width,height); await settle(); assert.equal(await evaluate(`document.querySelector('#vm-owned-controls').hidden`), false);
-      await evaluate(`vmExecutionWorkspace.owned.buttons.stop.focus();vmExecutionWorkspace.owned.buttons.stop.scrollIntoView({block:'nearest'})`);
-      const stop = await geometry('#vm-owned-controls [data-owned-vm-action="stop"]'); assert(stop.visible && stop.pointer && stop.focus, 'Active live Stop stays reachable in static mode');
-      await screenshot(`vm-static-with-owned-controls-${width}x${height}.png`);
-      await showAddresses();
-      await visibleClick(root+' [data-vm-static-offset="44"]'); assert((await geometry(root+' [data-vm-static-offset="44"]')).pointer);
-    }
-    assert.equal(await evaluate('window.vmStaticPosts'),0,'Static mode never issues native commands');
-  } finally {
-    await evaluate(`(async()=>{try{window.vmStaticAuthored.session=null;const end=performance.now()+5000;while(vmExecutionWorkspace.owned.controller.model().view?.session){await vmExecutionWorkspace.owned.controller.refresh();if(performance.now()>end)throw Error('Authored live cleanup did not settle');await new Promise(resolve=>setTimeout(resolve,20));}}finally{window.fetch=window.vmStaticSavedFetch;delete window.vmStaticSavedFetch;delete window.vmStaticAuthored;}})()`);
-  }
-  await viewport(1440,900); await visibleClick(root+' .vm-static-toolbar > button:last-of-type'); assert.equal(await evaluate('vmExecutionWorkspace.staticAnalysis.getReport()'), null);
-  return {status:'passed',source:'authored static JSON and authored live read response; no native fixture execution',checks:['independent imports and exact SHA provenance','16-row owned sample and12 visible desktop rows','declared CFG/pseudocode/instruction selection','invalid import retains report','existing mode round trip','1440/1024/760/600/360 and720×450 layouts','actual root-width responsive pane navigation','visible keyboard focus and narrow Escape','coexisting live Stop controls','no native commands'],actual_browser_zoom:'requires separate macOS zoom gate'};
-}
+
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) await checkVmStaticController();

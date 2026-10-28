@@ -42,17 +42,11 @@ Timeouts remain explicit and preserve only a still-matching prior report. Missin
 changed and ambiguous records leave the current workspace intact with a visible
 explanation. A return does not reload a missing capture from a target website.
 
-Debugger Requests can currently inherit native events through host, method and
-time correlation in `requestsFromDebuggerNetwork` (`evidence_models.js`). That
-is not an exact captured identity. A separate exact join exists only when one
-native `request_initiated` event carries the renderer id in the DevTools
-request id (`<process token>.<renderer id>`, or a single canonical decimal),
-and the method and host match. `requestTraceRoot` uses that join and still
-excludes heuristic rows from native trace, signal, and VM queries. The UI can
-select the correlated native Traffic row without treating it as the query.
-Their own debugger identity remains usable for returning to the retained
-Request. The existing Request signal correlation and other analysis labels
-remain their original contracts.
+Traffic rows come only from native network events. A row's exact identity is
+its unique retained `request_started` (or `request_initiated`) event and request
+ID; host, method and time never substitute for it. Rows without one stay in
+Traffic and are excluded from trace, signal and VM queries. The CDP Request rows
+and their DevTools request-id join were removed with CDP.
 
 ## Working path and provenance
 

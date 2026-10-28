@@ -11,6 +11,7 @@
 #include <span>
 #include <string_view>
 #include <vector>
+#include "brave/components/reverse_engineering_browser/common/native_wasm_dispatch.h"
 
 #include "base/memory/shared_memory_mapping.h"
 #include "base/memory/unsafe_shared_memory_region.h"
@@ -42,8 +43,13 @@ class NativeProbeTransport final : public mojom::NativeProbeClient {
                  std::uint64_t category_mask,
                  std::uint64_t expires_at_monotonic_ns,
                  bool capture_canvas_images,
-                 base::UnsafeSharedMemoryRegion queue_region) override;
+                 base::UnsafeSharedMemoryRegion queue_region,
+                 std::uint64_t wasm_capture_epoch = 0,
+                 const std::string& guest_adapter_json = {}) override;
   void Disable() override;
+  void NativeGuestModuleStatus(std::uint64_t wasm_capture_epoch,
+                               std::uint64_t module_token,
+                               bool accepted) override;
 
   [[nodiscard]] static NativeProbeEmitStatus EmitStatus(const NativeProbeEvent& event,
                                                         std::uint64_t config_generation) noexcept;
@@ -56,6 +62,10 @@ class NativeProbeTransport final : public mojom::NativeProbeClient {
 
   [[nodiscard]] NativeProbeEmitStatus EmitEvent(const NativeProbeEvent& event,
                                                 std::uint64_t config_generation) noexcept;
+  static bool EmitNativeGuest(const NativeGuestCapture& capture, std::uint64_t generation) noexcept;
+  static bool EmitNativeGuestHost(const NativeProbeEvent& event, std::uint64_t generation) noexcept;
+  static bool EmitWasmDispatch(const NativeWasmDispatchObservation& observation,
+                               std::uint64_t generation) noexcept;
   static void EmitArtifact(NativeArtifactKind kind,
                            NativeArtifactCaptureOrigin capture_origin,
                            std::uint64_t creator_event_id,
@@ -82,6 +92,7 @@ class NativeProbeTransport final : public mojom::NativeProbeClient {
   // non-blocking copy.
   std::vector<base::WritableSharedMemoryMapping> queue_mappings_;
   std::atomic<NativeProbeQueue*> queue_{nullptr};
+  std::atomic<std::uint64_t> wasm_capture_epoch_{0};
 };
 
 }  // namespace reb

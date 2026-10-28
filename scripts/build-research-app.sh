@@ -63,7 +63,7 @@ if application.is_dir():
 PY
 mkdir -p "${research_ui_resources}"
 # One explicit packaged copy serves both the native scheme and live HTTP UI.
-for asset in index.html app.css app_state.js evidence_models.js evidence_package.js float32_inspector.js evidence_comparison.js source_syntax.js source_facts.js investigation_navigation.js investigation_notebook.js traffic_view.js api_catalog.js captured_client.js captured_export_formats.js passive_security.js vm_semantics.js vm_static.js vm_static_view.js vm_analysis_packs.js vm_opcode_ledger.js vm_opcode_ledger_view.js vm_contextual.js vm_contextual_evidence.js vm_contextual_view.js vm_debugger.js vm_program_workspace.js traffic_comparison.js request_value_test.js field_provenance.js pane_layout.js native_console_completion.js native_console.js element_screenshot.js local_override_manager.js captured_vm_lab.js app.js analyst_runner_core.js analyst_runner_node.js; do
+for asset in index.html app.css app_state.js evidence_models.js evidence_package.js float32_inspector.js evidence_comparison.js source_syntax.js source_facts.js traffic_view.js captured_client.js captured_export_formats.js vm_debugger.js vm_static.js vm_static_view.js vm_contextual.js vm_contextual_evidence.js vm_contextual_view.js vm_analysis_packs.js vm_opcode_ledger.js vm_opcode_ledger_view.js vm_semantics.js pane_layout.js native_console_completion.js native_console.js investigation_navigation.js investigation_notebook.js app.js vm_program_workspace.js analyst_runner_core.js analyst_runner_node.js; do
   cp "${repo_root}/apps/research-ui/${asset}" "${research_ui_resources}/${asset}"
 done
 cargo build --locked --release --manifest-path "${repo_root}/apps/origin-trace-backend/Cargo.toml"
@@ -79,7 +79,8 @@ cp "${decoder_binary}" "${macos_path}/OriginTraceDecoder"
 chmod 755 "${macos_path}/OriginTraceDecoder"
 cp "${repo_root}/build/reb-event-broker" "${macos_path}/OriginTraceEventBroker"
 cp "${repo_root}/build/reb-artifact-receiver" "${macos_path}/OriginTraceArtifactReceiver"
-cp "${repo_root}/build/reb-debugger-transport" "${macos_path}/OriginTraceDebuggerTransport"
+# Never retain a retired transport in an incrementally rebuilt app bundle.
+rm -f "${macos_path}/OriginTraceDebuggerTransport"
 cp "${repo_root}/build/reb-native-vm-fixture" "${macos_path}/OriginTraceOwnedVmFixture"
 chmod 755 "${macos_path}/OriginTraceOwnedVmFixture"
 cp "${repo_root}/build/reb-console" "${macos_path}/OriginTraceNativeConsole"
@@ -88,7 +89,6 @@ cp "${repo_root}/build/reb-heap-snapshot" "${macos_path}/OriginTraceHeapSnapshot
 chmod 755 \
   "${macos_path}/OriginTraceEventBroker" \
   "${macos_path}/OriginTraceArtifactReceiver" \
-  "${macos_path}/OriginTraceDebuggerTransport" \
   "${macos_path}/OriginTraceHeapSnapshot"
 cp "${deobfuscation_binary}" "${macos_path}/OriginTraceDeobfuscator"
 chmod 755 "${macos_path}/OriginTraceDeobfuscator"

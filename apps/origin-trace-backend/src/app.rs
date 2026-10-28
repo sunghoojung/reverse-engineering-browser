@@ -3,7 +3,6 @@ use crate::{
     analyst::Analyst,
     artifact_lookup::ArtifactLookupCache,
     config::Options,
-    debugger::{Debugger, NetworkRequestSelection},
     decoder::Decoder,
     deobfuscation::Deobfuscator,
     error::{Code, Error, Phase, Reason, Result},
@@ -33,7 +32,7 @@ use std::{
 };
 use tokio::sync::{Mutex, OwnedMutexGuard, OwnedSemaphorePermit, Semaphore, TryAcquireError};
 
-const UI_ASSETS: [&str; 37] = [
+const UI_ASSETS: [&str; 29] = [
     "index.html",
     "app.css",
     "app_state.js",
@@ -46,10 +45,8 @@ const UI_ASSETS: [&str; 37] = [
     "investigation_navigation.js",
     "investigation_notebook.js",
     "traffic_view.js",
-    "api_catalog.js",
     "captured_client.js",
     "captured_export_formats.js",
-    "passive_security.js",
     "vm_semantics.js",
     "vm_static.js",
     "vm_static_view.js",
@@ -61,16 +58,10 @@ const UI_ASSETS: [&str; 37] = [
     "vm_contextual_view.js",
     "vm_debugger.js",
     "vm_program_workspace.js",
-    "traffic_comparison.js",
-    "request_value_test.js",
-    "field_provenance.js",
     "app.js",
-    "captured_vm_lab.js",
     "pane_layout.js",
     "native_console.js",
     "native_console_completion.js",
-    "element_screenshot.js",
-    "local_override_manager.js",
 ];
 #[derive(Clone, Copy)]
 enum PackageOperation {
@@ -94,7 +85,8 @@ pub struct App {
     decoder: Decoder,
     analyst: Analyst,
     deobfuscator: Deobfuscator,
-    pub debugger: Arc<Debugger>,
+    /// Process-lifetime identity for `/api/health` and `X-REB-Expected-Instance`.
+    instance_id: String,
     native_console: NativeConsole,
     owned_vm_debugger: OwnedVmDebugger,
     vm_experiments: crate::vm_experiment::Experiments,
@@ -126,14 +118,12 @@ fn cached_artifact_lookup(
 impl App {
     pub async fn stop(&self) {
         self.analyst.stop();
-        self.debugger.stop().await;
         self.native_console.stop().await;
         if self.owned_vm_debugger.stop().await.is_err() {
             eprintln!("Owned VM helper shutdown could not be confirmed");
         }
     }
     pub async fn new(options: Options, port: u16) -> Arc<Self> {
-        let debugger = Debugger::new(&options);
         let native_console = NativeConsole::new(&options);
         let app = Arc::new(Self {
             port,
@@ -151,7 +141,14 @@ impl App {
                 "OriginTraceDeobfuscator",
                 "apps/deobfuscator-worker/target/debug/reb-deobfuscator-worker",
             )),
-            debugger,
+            instance_id: format!(
+                "{}:{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_nanos()
+            ),
             native_console,
             owned_vm_debugger: OwnedVmDebugger::new(options.worker(
                 &options.owned_vm_fixture,
@@ -176,7 +173,6 @@ impl App {
             artifact_lookup: Arc::new(Mutex::new(ArtifactLookupCache::default())),
         });
         app.native_console.arm_live_bridge().await;
-        app.debugger.start().await;
         app
     }
     pub fn router(self: &Arc<Self>) -> Router {
@@ -308,16 +304,6 @@ impl App {
         socket_connected(self.options.artifact_socket.as_deref()).await
     }
     async fn get(&self, path: &str, raw_query: &str, headers: &HeaderMap) -> Result<Response> {
-        if path == "/api/network/request" {
-            // Bound and strictly decode this identity before the legacy query
-            // parser can allocate or replace malformed UTF-8.
-            let selection = NetworkRequestSelection::parse(raw_query)?;
-            let debugger = self.debugger.clone();
-            let bytes = self
-                .blocking(move || debugger.network_request(&selection))
-                .await?;
-            return Ok(([("content-type", "application/json")], bytes).into_response());
-        }
         if path == "/api/vm-debugger/trace" {
             return self
                 .owned_vm_debugger
@@ -329,13 +315,13 @@ impl App {
         let mut etag = None;
         let value = match path {
             "/api/health" => {
-                json!({"status":"ok","instance_id":self.debugger.instance_id(),"store":self.options.store,"store_exists":self.options.store.exists(),"trace_store":self.options.trace_store,"trace_store_exists":self.options.trace_store.exists(),"signal_store":self.options.signal_store,"signal_store_exists":self.options.signal_store.exists(),"artifact_store":self.options.artifacts,"artifact_store_exists":self.options.artifacts.exists(),"artifact_receiver_configured":self.options.artifact_socket.is_some(),"artifact_receiver_connected":self.receiver_connected().await,"api_collection_store":self.collection.path,"api_collection_store_exists":self.collection.path.exists(),"local_analyst_store":self.workspace.path,"local_analyst_store_exists":self.workspace.path.exists(),"local_analyst_runner_available":self.analyst.state()["available"],"decoder_available":self.decoder.state()["available"],"broker_connected":self.broker_connected().await,"capture_mode":self.options.capture_mode(),"debugger_state":self.debugger.snapshot()["state"]})
+                json!({"status":"ok","instance_id":self.instance_id,"store":self.options.store,"store_exists":self.options.store.exists(),"trace_store":self.options.trace_store,"trace_store_exists":self.options.trace_store.exists(),"signal_store":self.options.signal_store,"signal_store_exists":self.options.signal_store.exists(),"artifact_store":self.options.artifacts,"artifact_store_exists":self.options.artifacts.exists(),"artifact_receiver_configured":self.options.artifact_socket.is_some(),"artifact_receiver_connected":self.receiver_connected().await,"api_collection_store":self.collection.path,"api_collection_store_exists":self.collection.path.exists(),"local_analyst_store":self.workspace.path,"local_analyst_store_exists":self.workspace.path.exists(),"local_analyst_runner_available":self.analyst.state()["available"],"decoder_available":self.decoder.state()["available"],"broker_connected":self.broker_connected().await,"capture_mode":self.options.capture_mode(),"debugger_state":"unavailable"})
             }
             "/api/session/context" => {
                 if !q.0.is_empty() {
                     return Err(Error::bad("Session context takes no query parameters"));
                 }
-                let snapshot = self.debugger.session_context();
+                let snapshot = session_context::retired_debugger(&self.instance_id);
                 let root = self.options.artifacts.clone();
                 let mut value = session_context::with_artifacts(
                     snapshot,
@@ -353,13 +339,13 @@ impl App {
                     self.port
                 ));
                 value["capture_mode"] = json!(self.options.capture_mode());
+                let broker_connected =
+                    self.options.socket.is_some() && self.broker_connected().await;
                 value["live_admission"] = json!(session_context::live_admission(
                     self.options.capture_mode(),
-                    value["debugger_state"].as_str().unwrap_or("unavailable"),
-                    self.options.devtools_active_port.is_some(),
+                    broker_connected,
                 ));
-                value["broker_connected"] =
-                    json!(self.options.socket.is_some() && self.broker_connected().await);
+                value["broker_connected"] = json!(broker_connected);
                 value["allow_effects"] = Value::Null;
                 value["effects_admission"] = json!("caller_specific_unknown");
                 value["limits"] = json!({"items_per_inventory":session_context::ITEMS,"url_policy":"origin_or_wasm_label","title_policy":"omitted","artifact_linkage":"not_inferred"});
@@ -367,13 +353,6 @@ impl App {
                 value
             }
             "/api/analysis/catalog" => analysis_catalog::catalog()?,
-            "/api/network/catalog" => {
-                if !q.0.is_empty() {
-                    return Err(Error::bad("Network catalog takes no query parameters"));
-                }
-                let debugger = self.debugger.clone();
-                self.blocking(move || debugger.api_catalog()).await?
-            }
             "/api/decoder" => self.decoder.state(),
             "/api/native-console" => self.native_console.state().await,
             "/api/analysis/vm/experiments" => self.vm_experiments.list()?,
@@ -407,29 +386,6 @@ impl App {
                 value
             }
             "/api/local-analyst/runner" => self.analyst.state(),
-            "/api/debugger" => {
-                let wait = q.number("wait_ms", Some("0"), 32, false)?;
-                if wait > 25000 {
-                    return Err(Error::bad(
-                        "Debugger wait must be between 0 and 25000 milliseconds",
-                    ));
-                }
-                let notified = self.debugger.changed.notified();
-                tokio::pin!(notified);
-                notified.as_mut().enable();
-                let value = self.debugger.snapshot();
-                let current = format!("\"debugger-{}\"", value["generation"]);
-                if wait > 0
-                    && headers.get("if-none-match").and_then(|v| v.to_str().ok())
-                        == Some(current.as_str())
-                {
-                    let _ = tokio::time::timeout(Duration::from_millis(wait), notified).await;
-                }
-                let value = self.debugger.snapshot();
-                etag = Some(format!("\"debugger-{}\"", value["generation"]));
-                value
-            }
-            "/api/debugger/source" => self.debugger.source(q.required("script_id")?).await?,
             "/api/source-facts" => {
                 // Never infer identity from a URL, live script, or selected UI row.
                 if q.0
@@ -453,11 +409,7 @@ impl App {
                 result
             }
             "/api/deobfuscation" => {
-                let script = q.one("script_id")?;
-                let artifact = q.one("artifact_id")?;
-                if script.is_some() == artifact.is_some() {
-                    return Err(Error::bad("Specify exactly one script ID or artifact ID"));
-                }
+                let artifact = q.required("artifact_id")?;
                 let mode = q.one("mode")?.unwrap_or("analysis");
                 if !["analysis", "derived"].contains(&mode) {
                     return Err(Error::bad("Deobfuscation mode is invalid"));
@@ -466,35 +418,25 @@ impl App {
                 if !["0", "1"].contains(&assumption) {
                     return Err(Error::bad("Intrinsic assumption must be 0 or 1"));
                 }
-                let (source, truncated) = if let Some(id) = script {
-                    let script = self.debugger.source(id).await?;
-                    (
-                        script["source"].as_str().unwrap().to_owned(),
-                        script["truncated"] == true,
-                    )
-                } else {
-                    let artifact = self.find_artifact(artifact.unwrap()).await?;
-                    if artifact["kind"] != "javascript" {
-                        return Err(Error::bad("Artifact is not JavaScript"));
-                    }
-                    let root = self.options.artifacts.clone();
-                    let bytes = self
-                        .blocking(move || evidence::content(&root, &artifact, 4 * 1024 * 1024))
-                        .await?;
-                    (
-                        String::from_utf8(bytes)
-                            .map_err(|_| Error::bad("Artifact is not valid UTF-8 JavaScript"))?,
-                        false,
-                    )
-                };
+                let record = self.find_artifact(artifact).await?;
+                if record["kind"] != "javascript" {
+                    return Err(Error::bad("Artifact is not JavaScript"));
+                }
+                let root = self.options.artifacts.clone();
+                let bytes = self
+                    .blocking(move || evidence::content(&root, &record, 4 * 1024 * 1024))
+                    .await?;
+                let source = String::from_utf8(bytes)
+                    .map_err(|_| Error::bad("Artifact is not valid UTF-8 JavaScript"))?;
                 let mut result = self
                     .deobfuscator
                     .analyze(&source, assumption == "1", mode == "derived")
                     .await?;
-                result["script_id"] = json!(script);
+                // Version 1 keeps the field; live scripts left with CDP.
+                result["script_id"] = Value::Null;
                 result["artifact_id"] = json!(artifact);
                 result["mode"] = json!(mode);
-                result["source_truncated"] = json!(truncated);
+                result["source_truncated"] = json!(false);
                 result
             }
             "/api/events" => {
@@ -843,7 +785,6 @@ impl App {
                 }
                 _ => Err(Error::bad("Analyst workspace action is invalid")),
             },
-            "/api/debugger/actions" => self.debugger.action(value).await,
             "/api/native-console/actions" => self.native_console.action(value).await,
             "/api/capture/actions" => {
                 validation::schema("CaptureAction", value, 400)?;
@@ -950,6 +891,13 @@ async fn handle(State(app): State<Arc<App>>, request: Request<Body>) -> Response
         {
             return Err(Error::new(403, "Local request origin rejected"));
         }
+        if path == "/api/debugger" || path.starts_with("/api/debugger/") {
+            return Err(Error::new(
+                410,
+                "CDP functionality was removed; this operation has no native replacement.",
+            )
+            .with_code(Code::DebuggerUnavailable));
+        }
         // A preflight can race a backend restart at the same port. Bind each
         // cooperating client's request to this process before any dispatch.
         // This is a conflict precondition, not authentication or authorization.
@@ -957,7 +905,7 @@ async fn handle(State(app): State<Arc<App>>, request: Request<Body>) -> Response
             let expected = parts.headers.get_all("x-reb-expected-instance");
             if expected.iter().count() != 1
                 || expected.iter().next().and_then(|value| value.to_str().ok())
-                    != app.debugger.instance_id().as_str()
+                    != Some(app.instance_id.as_str())
             {
                 return Err(Error::new(409, "Backend instance changed. Reconnect and reselect the intended session. No operation was dispatched.")
                     .with_code(Code::StateConflict));

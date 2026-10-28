@@ -13,8 +13,16 @@ interface NativeProbeClient {
             uint64 category_mask,
             uint64 expires_at_monotonic_ns,
             bool capture_canvas_images,
-            mojo_base.mojom.UnsafeSharedMemoryRegion queue_region);
+            mojo_base.mojom.UnsafeSharedMemoryRegion queue_region,
+            uint64 wasm_capture_epoch,
+            string guest_adapter_json);
   Disable();
+  // Browser verdict on the module bytes carried by the guest capture whose
+  // dispatch sequence number is module_token. The renderer keeps sending an
+  // empty module only after acceptance, and resends after a rejection.
+  NativeGuestModuleStatus(uint64 wasm_capture_epoch,
+                          uint64 module_token,
+                          bool accepted);
 };
 
 // Process-wide renderer connection. Event records travel through the shared
@@ -22,6 +30,34 @@ interface NativeProbeClient {
 interface NativeProbeHost {
   BindClient(pending_remote<NativeProbeClient> client);
   EventsAvailable();
+  CaptureWasmDispatch(uint64 capture_epoch,
+                      uint64 session_id,
+                      uint64 sequence_number,
+                      uint64 monotonic_time_ns,
+                      uint32 process_id,
+                      uint32 thread_id,
+                      uint64 frame_id,
+                      uint64 execution_context_id,
+                      uint64 document_token_high,
+                      uint64 document_token_low,
+                      uint32 function_index,
+                      uint32 module_byte_offset,
+                      uint32 selector,
+                      uint32 table_count,
+                      uint32 sample_index,
+                      string source_url,
+                      mojo_base.mojom.BigBuffer content);
+  CaptureNativeGuest(uint64 capture_epoch,
+                     array<uint8> invocation_record,
+                     array<uint8> dispatch_record,
+                     uint64 execution_context_id,
+                     uint64 document_token_high,
+                     uint64 document_token_low,
+                     string source_url,
+                     string adapter_json,
+                     mojo_base.mojom.BigBuffer module,
+                     mojo_base.mojom.BigBuffer bytecode);
+  CaptureNativeGuestHost(uint64 capture_epoch, array<uint8> event_record);
   CaptureGeneratedArtifact(uint16 kind,
                            uint16 capture_origin,
                            uint64 creator_event_id,

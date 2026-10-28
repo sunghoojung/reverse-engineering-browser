@@ -14,11 +14,11 @@ function sourceFactsIdentity(source) {
 function sourceFactsUnavailable(source, protocol) {
   if (!['http:', 'https:'].includes(protocol)) {
     return protocol === 'reb:'
-      ? 'Unavailable in stored-evidence native mode. Open a live workspace or the browser development UI to inspect JavaScript facts.'
+      ? 'Unavailable in stored-evidence native mode. Open the evidence through the local HTTP workspace or the browser development UI to inspect JavaScript facts.'
       : 'Open the local browser development UI to inspect JavaScript facts.';
   }
   if (source?.source_type !== 'artifact' || source.kind !== 'javascript') {
-    return 'Select one captured JavaScript artifact. Live scripts and derived text cannot be analyzed here.';
+    return 'Select one captured JavaScript artifact. Derived text cannot be analyzed here.';
   }
   const canonical = value => typeof value === 'string' && /^(0|[1-9][0-9]{0,19})$/.test(value) && BigInt(value) <= 18446744073709551615n;
   if (!canonical(source.session_id) || !canonical(source.artifact_id) ||

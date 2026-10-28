@@ -1,0 +1,25 @@
+diff --git a/content/public/browser/render_frame_host.h b/content/public/browser/render_frame_host.h
+--- a/content/public/browser/render_frame_host.h
++++ b/content/public/browser/render_frame_host.h
+@@ -226,6 +226,9 @@
+   // Returns the frame token for this frame.
+   virtual const blink::LocalFrameToken& GetFrameToken() const = 0;
+ 
++  // Identity for admitted native observations. Call only on an active frame.
++  virtual const blink::DocumentToken& GetDocumentToken() const = 0;
++
+   // Returns a tracing track to use as a grouping parent. Do not emit directly
+   // events to this track.
+   virtual const perfetto::NamedTrack& GetTracingTrack() const = 0;
+diff --git a/content/browser/renderer_host/render_frame_host_impl.h b/content/browser/renderer_host/render_frame_host_impl.h
+--- a/content/browser/renderer_host/render_frame_host_impl.h
++++ b/content/browser/renderer_host/render_frame_host_impl.h
+@@ -644,7 +644,7 @@
+   //   acknowledge the commit, since the DocumentToken will change as soon as
+   //   the navigation actually commits.
+   // - the RenderFrameHost is speculative
+-  const blink::DocumentToken& GetDocumentToken() const;
++  const blink::DocumentToken& GetDocumentToken() const override;
+ 
+   // Retrieving the document token is disallowed during times when the result
+   // might be misleading / confusing (kPendingCommit or kSpeculative).

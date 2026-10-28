@@ -9,7 +9,7 @@ const trafficStart = traffic.indexOf('function trafficRequestFailed(');
 const trafficEnd = traffic.indexOf('function renderTrafficRows(', trafficStart);
 assert(trafficStart >= 0 && trafficEnd > trafficStart);
 const failedNoticeHelpers = traffic.slice(trafficStart, trafficEnd);
-const start = app.indexOf('      function networkContentCaptureEnabled()');
+const start = app.indexOf('      function renderNetworkNotice()');
 const end = app.indexOf('      function textElement(', start);
 assert(start >= 0 && end > start, 'Traffic notice helpers must stay extractable');
 const state = {
@@ -21,12 +21,11 @@ const state = {
   sequenceGaps: 280n,
   queueDrops: 280n,
   eventCountScope: 'store',
-  requests: [],
-  debuggerSession: {state: 'running', network: {capture_enabled: false}}
+  requests: []
 };
 let notice;
 const api = runInNewContext(
-  `${failedNoticeHelpers}\n${models}\n${app.slice(start, end)};({isBrokerResponse,acceptEventWindow,captureWideTotal,countSequenceGaps,countReportedQueueDrops,requestsFromEvents,trafficRowsForLiveCapture,shownSequenceGaps,shownQueueDrops,eventGapLabel,fingerprintCoverageNotice,renderNetworkNotice})`,
+  `${failedNoticeHelpers}\n${models}\n${app.slice(start, end)};({isBrokerResponse,acceptEventWindow,captureWideTotal,countSequenceGaps,countReportedQueueDrops,requestsFromEvents,shownSequenceGaps,shownQueueDrops,eventGapLabel,fingerprintCoverageNotice,renderNetworkNotice})`,
   {
     state,
     TextEncoder,
@@ -188,7 +187,8 @@ assert.equal(state.nativeRequests.length, 1, 'production refresh uses independen
 assert.equal(state.nativeRequests[0].operation, 'request_completed');
 assert.equal(state.nativeRequests[0].rank, 5);
 assert.equal(state.events[0].category, 'canvas');
-const liveRows = api.trafficRowsForLiveCapture([], state.nativeRequests);
+// rebuildTrafficRequests() shows exactly the native rows; there is no second producer.
+const liveRows = state.nativeRequests;
 assert.equal(liveRows.length, 1, 'A canvas-only general window still leaves the retained network request in Traffic');
 assert.equal(liveRows[0].operation, 'request_completed');
 assert.equal(liveRows[0].events.some(event => event.category === 'network'), true);
@@ -225,3 +225,10 @@ for (const invalid of ['2\n', '2\r', '2 ', ' 2', '+2', '02', '-2', '184467440737
 assert.equal(api.countSequenceGaps([request(1, 'request_started'), {...gap, sequence_number: '4', session_id: '9'}, request(5, 'request_completed')]), 2n,
   'visible fallback and backend both count a present gap marker in sequence high-water accounting');
 console.log('PASS strict unsigned summaries/drop payloads and gap-marker high-water parity');
+
+for (const sequences of [[3, 1, 2], [1, 4, 2, 3], [3, 1, 2, 2]]) {
+  assert.equal(api.countSequenceGaps(sequences.map(n => request(n, 'request_started'))), 0n,
+    'late ACK identities close holes and duplicates do not create loss');
+}
+assert.equal(api.countSequenceGaps([1, 5, 3].map(n => request(n, 'request_started'))), 2n);
+console.log('PASS delayed-ACK and duplicate-aware sequence gaps');

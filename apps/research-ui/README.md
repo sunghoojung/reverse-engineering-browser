@@ -2,13 +2,44 @@
 
 Origin Trace reads local event, trace, signal, and artifact stores. The macOS
 application is the normal product path. The [Rust backend](../origin-trace-backend/)
-serves browser development and live debugger sessions, with the same HTTP
+serves browser development and native evidence sessions, with the same HTTP
 contracts and tools. The native Brave broker, artifact receiver, probes, and
 wire formats remain C++. See the [backend boundary](../../docs/architecture/origin-trace-backend-boundary.md).
 
 Project-wide authorization, capture, and privacy policy is in
 [SAFETY.md](../../SAFETY.md); this guide describes the product's current controls
 and limits.
+
+## Native-only capture
+
+Origin Trace reads native evidence only. The packaged app opens stored evidence
+or a native live session started by `make live`, and every view is built from
+broker events, retained artifacts and analyzer documents:
+
+- **Traffic** lists native network events with exact session, process and
+  sequence identities, linked origin traces and local exports.
+- **Sources** shows retained artifacts, static facts, decoding and formatting;
+  it never fetches or executes source.
+- **VM** shows analyzer findings, the opcode workspace, native Wasm dispatch and
+  guest observations, the owned native fixture, static bytecode, packs and the
+  opcode ledger.
+- **Console** drives the native console against a disposable profile or an
+  explicitly selected native document.
+- **Collection**, **Analyst** and the notebook keep local authoring data that
+  never sends requests.
+
+The application does not launch, attach to or emulate a Chrome DevTools
+Protocol debugger. Historical `cdp-attached` provenance labels and recorded
+event schemas remain readable for old captures; they do not enable an
+attachment or any live control.
+
+The Findings **Native observations** tab displays native Wasm module offsets,
+function indexes and unsigned selectors/default arms. These are physical Wasm
+dispatch observations, not recovered guest-interpreter PCs or guest opcodes.
+Guest rows interpreted through an explicit adapter appear beneath them with
+their evidence identities. Host causality remains unproven.
+`make native-only-check` (part of `make check`) enforces the native-only
+contract and `make rendered-ui-check` verifies the rendered packaged app.
 
 ## VM desktop workspace
 
@@ -27,65 +58,22 @@ rows. No-match filters keep the selected evidence available and disable stepping
 These docks expose existing evidence, not a native-code decompiler or editable
 Ghidra project. The deterministic fixture remains explicitly opt-in.
 
-## Local file override manager
-
-In **Experiments → Interceptor**, create an isolated context and apply **Target**
-scope to its primary page. **Local file override** chooses a single browser File,
-validates at most 64 KiB of exact UTF-8, and shows inert preview text and SHA-256.
-Set the exact canonical URL (including query), GET/HEAD, content type and 1–300
-second lifetime. Review the bytes and settings, then **Prepare snapshot** and
-**Arm prepared override** separately. Preparation sends nothing; Arm sends only
-to the existing local debugger and never requests the target URL. Later matching
-requests may execute replacement JavaScript in that disposable target.
-
-Edits invalidate preparation. The snapshot is frozen; later on-disk edits never
-change armed bytes. The panel shows exact target, experiment, URL, digest and
-absolute expiry. Arm replaces the single existing rule slot. **Disarm exact
-override** uses the original identity guard, including after expiry or an unknown
-receipt, and cannot remove a different rule. A failed receipt is explicitly
-unknown and is never retried automatically. Public rule summaries omit URL
-queries, so a matching summary alone never confirms an unknown arm operation.
-
-The browser grants bytes, not a trusted OS path or symlink metadata. The CLI's
-strict regular-file and symlink checks are a separate workflow. This UI neither
-watches files nor saves them; clear drops preview bytes but retains the attempted
-identity for guarded disarm. Reloading loses that identity and never rearms;
-original expiry still applies. Arm transfers the selected bytes to the local
-backend and serves them only to matching disposable-target requests; it performs
-no third-party/provider upload. Native macOS file-picker behavior requires native
-validation. See [Scoped local overrides v1](../../protocol/local-overrides-v1.md).
-
-Native proxy destruction and redirect handoff are displayed as **incomplete**
-observations, with the final network outcome explicitly unavailable. They are
-not evidence that the underlying request failed or successfully completed. See
-the [native startup contract](../../protocol/native-network-startup-v1.md).
-
 ## Traffic identity and resource filters
 
-Traffic classifies a CDP response as **Wasm** when its recorded MIME type is
-`application/wasm` (case-insensitive, ignoring surrounding whitespace and MIME
-parameters), including responses loaded by Fetch or XHR. A `.wasm` URL alone
-never establishes that type. Other responses retain their CDP resource category.
-
-Each retained CDP row must have a unique public ID. A snapshot with duplicate
-public IDs is rejected and the last valid evidence stays visible. Raw protocol
-request IDs may repeat across targets or redirect hops when the public row IDs
-remain distinct.
-
-Changing the selected debugger target preserves a selected HTTP row and comparison
-baseline only when its immutable capture owner, exact row identity, and backend
-instance remain uniquely retained. Closing another target does not discard that
-history. Missing ownership, reused or ambiguous rows, a cleared window, backend
-restart, generation regression, or same-target reconnection expires the selection.
-This is a local viewer continuity check: old catalog links and pending details
-keep their original epoch guards; WebSocket and action ownership are unchanged.
+Traffic rows come only from native network lifecycle events. A row's exact
+identity is the session, process and sequence of its unique retained
+`request_started` (or `request_initiated`) event plus its non-zero request ID;
+URLs, hosts and timing never substitute for it. Rows whose events carry no
+request ID stay visible but cannot open traces, signal profiles or Related VM
+candidates. Native network metadata retains the method, URL or host and
+lifecycle status only; the inspector states that headers and bodies were not
+captured instead of showing empty panes.
 
 Traffic selection updates only the mounted rows and selection summary when the
 retained snapshot, filters, ordering and page are unchanged. Keyboard navigation
-does not repeat content search or sorting and does not rebuild rows or reset
-ledger scrolling. A changed snapshot, filter, page or explicit refresh still
-recomputes the whole bounded retained window; partial-content coverage remains
-visible. `node tools/check-traffic-selection-work.mjs` checks production
+does not repeat search or sorting and does not rebuild rows or reset ledger
+scrolling. A changed snapshot, filter, page or explicit refresh still recomputes
+the whole bounded retained window. `node tools/check-traffic-selection-work.mjs` checks production
 controller work and selection invariants. Add `--baseline-ref=<commit>` for a
 reproducible authored 5,000-record/500-row before-and-after Node benchmark. Those
 timings are not rendered browser or native-app latency; the Requests browser
@@ -118,8 +106,8 @@ trace; unsafe numeric identities and ambiguous rows are rejected. **Open retaine
 that step's session and artifact identity. A Facts **Original bytes** link
 verifies complete retained UTF-8 bytes and SHA-256; **Decode range** copies those
 exact bytes, up to 64 KiB, into Decoder. **Open original evidence** retains the
-source identity and half-open byte range. Request inspector and Field trace
-handoffs distinguish selected string bytes from unavailable raw HTTP offsets.
+source identity and half-open byte range. Evidence field handoffs distinguish
+selected string bytes from unavailable raw HTTP offsets.
 Evidence source links use the selected native record’s exact retained artifact
 identity. Back restores both observation-list and record-inspector scroll, the
 visible trigger and current scope/search without selecting package exports.
@@ -132,134 +120,38 @@ is a copied template, never captured evidence; no request is sent.
 
 Console URL links open a bounded, explicitly unverified source search. The
 separate disposable browser is not assigned a captured-artifact identity, and
-Console line offsets are never applied to search candidates. Debugger/native
-host-and-time correlations likewise cannot become exact captured trace links,
-request-specific signal profiles, or request-filtered VM candidates. CDP content
-and raw native events remain available independently.
+Console line offsets are never applied to search candidates. Host-and-time
+matches likewise cannot become exact captured trace links, request-specific
+signal profiles, or request-filtered VM candidates.
 See [Investigation navigation v1](../../docs/product/investigation-navigation-v1.md)
 for the identity boundary, retained limits and integration points.
 
 ## Local passive security report
 
-In Traffic, select a retained CDP request, open **Export capture**, then choose
-**Local passive security report**. It analyzes the already-retained selection
-without fetching, sending target requests or changing evidence. The dialog
-shows versioned header observations and secret-looking category/location/counts,
-plus source hashes and explicit partial/unknown coverage. It never shows matched
-values, validates credentials or declares the site secure. Closing or changing
-the selected evidence discards its report. A private offline CLI accepts one
-saved exact-request API response; see [Passive security report v1](../../docs/product/passive-security-report-v1.md)
-for the schema, rules, bounds and commands. Active probes remain separate work.
+The passive security report is an offline command for one saved exact-request
+API response (`tools/report-passive-security.mjs`, library
+`tools/passive-security.cjs`). Live native Traffic retains no headers or bodies,
+so Origin Trace has no in-app report. See
+[Passive security report v1](../../docs/product/passive-security-report-v1.md)
+for the schema, rules, bounds and commands.
 
-## Observed API catalog
+## Captured request exports
 
-Choose **API catalog** in the Traffic footer to read a bounded structural
-snapshot. **Refresh snapshot** is explicit; opening the app, polling Traffic,
-and reopening a loaded catalog do not fetch it again. Expand an endpoint to see
-its observations, query/header names, independent request/response JSON shapes,
-and explicit unknown reasons. Typed paths distinguish property names (including
-`"*"`, empty names and slashes) from array elements. Coverage keeps unexamined
-older records, skipped records, capture evictions and name/header omissions
-separate. This is not a service specification or a required-field inference.
-Paths and names can still be private; no catalog export or target request occurs.
+Live native Traffic retains no request or response bodies, so Traffic has no
+capture actions. **Export…** in the Traffic toolbar converts a local
+introspection JSON file (`__schema` or `data.__schema`, up to 1 MiB) to GraphQL
+SDL; duplicate keys, invalid UTF-8, partial/error schemas and unsafe SDL
+literals are refused. Export never queries an introspection endpoint or sends a
+request. SDL is a raw schema export: descriptions and identifiers can be
+sensitive.
 
-Use **Find observed structure** to narrow that snapshot by a case-insensitive
-literal substring: method, origin/path, HTTP status, lifecycle, query/header
-name, JSON property path/type, media type, or unavailable-shape reason. Captured
-values and source identifiers are not searched. **Response** limits matches to
-observed JSON, unavailable shapes, or HTTP errors (400–599). Match counts never
-replace the original coverage counts; no match means no match in this bounded
-snapshot. Clear filters restores the snapshot and returns focus to search.
-
-Expand a group with two matching observations and choose **Reference
-observation** and **Comparison observation**, then **Compare observed
-structure**. Request and response JSON are compared independently, including
-root type, typed property/array paths, type sets and within-body occurrence
-counts. A path seen only in one body is not evidence of an optional field or a
-changed API contract. Missing, truncated, malformed and unsupported bodies keep
-their exact unknown reasons; none become empty schemas. Equal structures do not
-prove equal values or equivalent behavior. Each numbered observation retains
-its exact captured-source link below the comparison.
-
-Comparison is local, read-only and deliberate. Selecting a different source
-clears the previous report, and the same source cannot be compared with itself.
-Filtering keeps expanded endpoint groups open but resets comparison choices to
-the matching observations, so hidden rows cannot supply a comparison. A failed
-refresh preserves the current filters and results. A successful refresh replaces
-the snapshot and clears its old comparisons. Close/reopen retains the current
-snapshot without another read. Source links continue to validate current Traffic
-independently of the retained structural report.
-
-**Open captured request** verifies the original backend instance, capture epoch,
-request ID, target ID and unrounded monotonic start against retained Traffic.
-Missing, changed or ambiguous sources stay visibly unavailable; URLs and native
-correlations never substitute for that identity. The action opens the existing
-Headers inspector, where Field trace and Save to Collection remain explicit
-workflows. Capture values are unchanged. A later source replacement clears its
-selection rather than silently displaying a reused request ID. Failed or
-malformed catalog refreshes preserve the previous readable snapshot; Close or
-Escape cancels a pending read. See [API observation catalog v1](../../protocol/api-observation-catalog-v1.md).
-
-Focused checks use `node tools/check-api-observation-catalog-ui.mjs`. Add
-`--browser` with `REB_UI_CHROMIUM` pointing to a sandbox-capable Chromium to test
-the authored loopback fixture at 1440×900, 760×560 and 360×740; screenshots and a
-receipt are written under `build/api-catalog-ui/`. `--serve` exposes the same
-read-only authored fixture for manual browser-development inspection. These
-checks do not substitute for native macOS QA.
-
-## Captured request client projects
-
-From an exact Traffic capture, **Export capture → Review captured request in
-Repeater** previews retained method, URL/query, headers and text body before
-copying an isolated draft. Existing drafts require replacement confirmation;
-unsupported inputs remain explicit. Creating the draft never sends the request.
-Repeater's separate **Send** action and **Export project** menu connect the
-reviewed draft to a retained run and its known source provenance.
-
-Raw and explicitly redacted projects use a fixed folder layout with README,
-client source, one service/operation, request data, dry-run example,
-configuration placeholders and evidence/provenance. macOS uses a native Save
-dialog; browser development downloads the ZIP. Dependency-free standard Go and
-JavaScript clients share the same
-request/evidence/configuration folders, explicit timeout/redirect/cookie policy
-and opt-in status/media-type/JSON-pointer response checks. Go is the first entry
-point; both default to no network and require a reviewed origin plus `--send`.
-An experimental, separately enabled Go build-tag adapter pins Mimic v1.0.2 for
-one Chrome 133.0.0.0/Linux HTTP/HTTP2/TLS profile; it does not claim browser
-equivalence or implement automatic browser fallback.
-A separate offline repository command, `tools/export-captured-client.mjs`,
-reuses this generator for a reviewed saved exact-request API response.
-See [Client project v1](../../docs/product/client-project-v1.md) for limits,
-unsupported cases, layout, privacy and validation.
-
-The **Client language** selector in both Traffic and retained Repeater-run export
-menus also offers **Python · requests** and **Python · httpx**. Each uses the same
-offline generator as `--python-client`, with fixed source, pinned direct provider,
-shared explicit copy policy and a dry run. Python's timeout is per operation,
-not a whole-request deadline. Native project exports use the existing local Save
-dialog and fixed-path ZIP validation, including the Python-only layout.
-
-Traffic **Export capture** also offers explicit **redacted HAR**, **raw HAR** and
-**captured GraphQL SDL** actions. HAR refuses missing, malformed or ambiguous
-source timing rather than inventing phases. SDL requires a complete retained
-HTTP 200 introspection response. **Export saved introspection JSON as SDL**
-accepts a local `__schema` or `data.__schema` JSON file up to 1 MiB; duplicate keys,
-invalid UTF-8, partial/error schemas and unsafe SDL literals are refused.
-Browser development downloads these text files. In the native shell the actions
-are labeled **Copy** and explicitly place text on the local clipboard; save it
-locally yourself. No clipboard write happens on opening or refreshing the menu.
-SDL is a raw schema export: descriptions and identifiers can be sensitive.
-Captured SDL includes the exact retained identity; the CLI additionally hashes
-the original saved input. Export never queries an introspection endpoint, sends
-a captured request, installs packages, evaluates capture values or changes the
-retained evidence. Status and unsupported/error reasons remain in the menu.
-
-`node tools/check-captured-export-ui.mjs` exercises the real action handlers with
-an in-memory DOM, including native bridge/clipboard routing, both providers and
-copy modes, invalid timing, partial schemas and canceled file reads. The rendered
-API-catalog lane exercises the menu with real keyboard/pointer actions and local
-downloads at three viewport sizes. Native Save-panel testing remains a macOS gate.
-
+Saved `reb-network-request-v1` documents remain usable through offline
+commands: `tools/export-captured-client.mjs` (client projects, see
+[Client project v1](../../docs/product/client-project-v1.md)),
+`tools/export-captured-har.mjs` and `tools/export-graphql-sdl.mjs`. They read
+local files only and never send captured requests.
+`node tools/check-captured-export-ui.mjs` exercises the dialog handlers with an
+in-memory DOM; native Save-panel testing remains a macOS gate.
 
 ## Saved investigation notebook
 
@@ -366,21 +258,16 @@ Paths, queries, headers and bodies are excluded. Source links search retained ca
 They do not automatically open a source or claim an exact artifact relationship.
 
 Closing the dock preserves the session; Disconnect removes its browser/profile.
-The Sources Logs drawer remains the debugger log viewer. Console values and
-history remain ephemeral. See [Native Console v2](../../protocol/native-console-v2.md)
+Console values and history remain ephemeral. See [Native Console v2](../../protocol/native-console-v2.md)
 for exact operation, bounds, contracts and required post-build verification.
 The synthetic wire fixture supplies scripted responses and never executes JS.
 
-### Private cookie import
+### Private cookie import (removed)
 
-For an explicitly selected Chrome/Firefox cookie export, use the separate
-[user-operated import tool](../../protocol/cookie-import-v1.md):
-`node tools/import-browser-cookies.mjs --browser /absolute/path/to/chromium`.
-It applies and privately verifies a strict supported subset in a fresh,
-short-lived off-record browser context. A second local confirmation is required
-before browsing; clear/expiry closes the context and owned browser. This is a
-terminal handoff, not a menu/API action or a cookie-enabled Traffic experiment.
-Real credentials must remain with the user. The tool is not an origin firewall.
+The former [cookie import tool](../../protocol/cookie-import-v1.md) is retired.
+It refuses before reading private input or launching a browser. There is no
+CDP transport, fallback, UI/API import action, or native replacement for cookie
+import. Offline export validation tests remain; they do not install cookies.
 
 ## Run
 
@@ -390,13 +277,12 @@ make app
 
 This packages `build/Origin Trace.app` and opens a complete live capture
 session without a setup dialog. This research launch enables every implemented
-native capture category, the live debugger, bounded request and response content,
-and Canvas image artifacts. Retained credentials are unmasked; evidence stays
+native capture category and Canvas image artifacts. Retained credentials are unmasked; evidence stays
 local. Use this profile only for authorized targets. The default isolated research
 profile uses Chromium's mock Keychain so launch does not stop on a macOS password
 prompt; do not save credentials in that profile. An explicit checkbox opts into
 macOS Keychain encryption when credential storage is required. The app does not
-mark the session live until the browser debugger endpoint is ready, and the
+mark the session live until the launcher publishes its loopback handshake, and the
 failure dialog can retry the same privacy mode without restarting Origin Trace.
 Startup allows up to 60 seconds for the bounded broker, receiver, backend and
 browser readiness stages; individual helper failures are reported sooner.
@@ -407,7 +293,7 @@ Keychain controls. `REB_AUTOMATIC_CAPTURE_MODE=metadata` selects metadata-only
 automatic launch, and `REB_CAPTURE_CANVAS_IMAGES=0` disables image retention.
 
 The app creates a private evidence directory and isolated browser
-profile, starts its bundled broker, artifact receiver, debugger transport,
+profile, starts its bundled broker, artifact receiver,
 analysis helpers, and loopback UI, then launches Brave Browser Development with
 all native capture categories enabled. Closing Origin Trace stops the session
 processes. Evidence remains under `~/Library/Application Support/Origin
@@ -416,8 +302,8 @@ Trace/sessions/live/`.
 Origin Trace looks beside its app bundle, in the reused browser output recorded
 at packaging time, in the local `browser/worktree/`
 build output, and among registered applications for Brave Browser Development.
-A `REB_BRAVE_BINARY` override takes precedence. The app bundles its Rust live
-debugger and VM analyzer, so Python is not required. A startup problem is shown explicitly
+A `REB_BRAVE_BINARY` override takes precedence. The app bundles its Rust backend
+and VM analyzer, so Python is not required. A startup problem is shown explicitly
 and leaves the stored-evidence interface available offline.
 Pass an explicit evidence-store or demo argument, or set
 `REB_DISABLE_AUTOMATIC_LIVE_SESSION=1`, when opening the native stored-evidence
@@ -432,8 +318,7 @@ connection and offers retry instead of silently leaving a failed session running
 The coordinator signals all owned helpers together, allows a shared five-second
 shutdown grace, then stops remaining children. An active analyzer worker has a
 shorter two-second grace so its supervising shell can reap it before exiting.
-Runtime experiments and Console commands still require explicit actions in their
-disposable contexts. Worker/proxy foundations do not yet have runtime adapters.
+Console commands still require explicit actions in their disposable contexts. Worker/proxy foundations do not yet have runtime adapters.
 
 For an explicit development session with deterministic sample evidence:
 
@@ -454,110 +339,22 @@ Open `http://127.0.0.1:7319`. For a live capture with the pinned custom Brave
 build, use `make live`. Follow the [browser setup](../../browser/README.md)
 before starting a live session.
 
-Native probes retain host-level network metadata. The automatic native launch
-also enables CDP Traffic content inspection for its live session. The optional
-**New Live Session…** controls can reduce it to metadata. Command-line development
-sessions enable CDP content inspection with:
-
-```sh
-REB_CDP_NETWORK_CAPTURE=1 make live
-```
-
-This enables full URLs, request and response headers, available POST data, and
-response-body retrieval for the attached tab. Authorization, cookie,
-proxy-authorization, set-cookie and custom header values are retained unchanged.
-URLs keep their captured userinfo, query and fragment; no navigation is performed. Request and
-response bodies are retained only in memory by the local UI bridge, limited to
-128 KiB per side, and discarded when the live session ends. The Origin Trace
-title bar visibly changes to `Live content` while this mode is active.
-Headers show explicit truncation when count, name/value or aggregate byte limits
-omit data. Document URL, request URL and method truncation are also labeled.
-Only primary CDP event headers are currently collected; extra-info headers and
-original HTTP wire order/casing/duplicate lines are not guaranteed. CDP body
-strings/base64 are not a promise of original wire bytes. Native network metadata
-still retains hosts only; enabled native artifacts retain unmasked source URLs
-in their separate local store, including in metadata-only Traffic sessions.
-
-**Export capture** exports one selected retained CDP record. **Save raw capture**
-(browser development UI) and **Copy raw capture** preserve its retained values;
-**Save redacted copy** and **Copy redacted copy** explicitly transform a separate
-copy. Bodies and all header values are omitted from that copy; URL userinfo,
-queries and fragments are stripped. Paths, header names and other metadata may
-still contain secrets. Review before sharing. Native downloads are disabled;
-clipboard copy depends on the native web view and is not a verified file-save
-fallback. Clipboard contents may sync through the user's operating system.
-
-These `reb-traffic-capture-v1` copies are distinct from the unchanged
-`reb-metadata-only-v1` evidence-package contract. The Traffic window is ephemeral,
-not a durable full HTTP archive: at most 1,000 entries are retained, oldest entries
-are evicted, and reconnect/target change/process exit can discard it. No export
-uploads data. See [Traffic capture copies v1](../../protocol/traffic-capture-copy-v1.md).
-For exact synthetic raw/redacted export checks in native WebKit or the browser,
-see [Traffic capture runtime QA](../../docs/development/traffic-capture-runtime-qa.md).
-
-The content-capture label remains visible during connection failures. If the
-native broker disconnects while CDP capture continues, the shell shows
-`Network only`; Traffic reports both the broker failure and ongoing bounded
-network capture. Broker gaps, queue drops, and network-window evictions remain
-visible across either refresh path. A debugger failure retains recorded requests
-and explicitly reports that network capture is unavailable.
+Native probes retain host-level network metadata only. Enabled native artifacts
+retain unmasked source URLs in their separate local store. CDP content capture
+was removed; historical `reb-traffic-capture-v1` copies are not re-read by the
+viewer. Broker gaps, queue drops, and network-window evictions remain visible.
 Failed refreshes request a complete validated response on retry, so an unchanged
 ETag cannot leave the connection warning stuck after recovery.
-Rejected debugger actions, including a full Watch list, retain their own error
-without marking active network capture or the live tab count disconnected.
 Short windows keep at least one request row visible when status warnings wrap.
 
 A healthy live Traffic view leaves the status line hidden. The line appears for
-broker and debugger failures, malformed evidence, sequence gaps, queue drops,
-scanned-tail and window caps, evictions, overflow, failed or unattached targets,
-an incomplete catalog, stale discovery, document navigations that committed
-before attachment, a selected page outside HTTP capture, and failed requests.
-Credential handling for retained values stays on the session label.
-
-Passive browser target discovery supports page, worker and out-of-process iframe
-targets without requesting startup holds. An http(s) page that stays open can be
-queued from the debugger target list Sources already uses when its `targetCreated`
-event was missed, without another Traffic click, once the catalog is stable.
-Browser-root auto-attach is disabled to avoid its popup-throttling side effect;
-captured owners retain recursive child attachment. Worker attachment can affect
-worker lifecycle and timeout behavior. It improves early discovery but cannot
-guarantee the first request: traffic preceding attachment and `Network.enable`
-remains unavailable. If browser target discovery is unavailable, capture uses
-page-target polling and leaves worker and out-of-process iframe targets
-unattached. Overflow and unattached targets remain explicit in either mode;
-native-only requests stay in Traffic as separate rows, and WebSockets retain
-their selected-debugger-target scope.
-
-Supplementary HTTP target-list discovery validates the browser connection and
-catalog epoch from before the list read, then admits under the catalog lock.
-It retains at most 4,096 retired target IDs per connection. At that limit, list-only
-recovery fails closed and coverage is visibly partial until capture reconnects;
-normal browser Target events continue. No first-navigation or short-lived-page
-capture guarantee is added.
-
-`make traffic-capture-check` includes a live Chromium → native transport →
-backend → actual Traffic UI regression using authored loopback origins. A separate
-viewer browser prevents self-capture. It checks automatic new-tab and subsequent
-navigation arrivals, concurrent requests, view and target-scope continuity, popup
-traffic, and retained closed-tab history without manual refresh. Screenshots are
-written under `build/traffic-live-ui/` and retained by CI. Blank-target readiness
-is deliberate; this continuity test does not establish lossless startup capture
-or replace native macOS acceptance.
-
-The backend command-line option `--capture-target-limit` sets the HTTP owner cap
-(default 32, allowed range 1–128). This is a backend launch option, not an in-app
-setting. Raising it permits more capture owners; the existing 1,000-request window
-and 128 KiB per-side body limits still apply.
-
+broker failures, malformed evidence, sequence gaps, queue drops, scanned-tail and
+window caps, evictions and failed requests.
 
 The live launcher disables Brave background networking, component updates, and
 sync for its isolated research profile. Browser diagnostics are retained in the
 session's private `brave.log`, separate from coordinator failures. The native
 app pre-creates the matching macOS cache sandbox path before launch.
-
-Redirect hops retain their own status, response headers, and elapsed time when
-CDP starts the next request. Their response bodies are explicitly unavailable;
-the destination's body is never substituted for an earlier hop.
 
 All eight fingerprint metadata families are enabled by the standard live
 launcher. To retain the exact data URL returned by Canvas readback for one
@@ -573,20 +370,13 @@ limited to 2 MiB per image, and is joined to its exact `toDataURL` event. The UI
 continues to show operation names when image capture is off or an image exceeds
 the limit.
 
-For a live capture without a DevTools connection:
+To make the browser ignore page `debugger;` statements during a live capture:
 
 ```sh
 REB_NATIVE_QUIET_MODE=1 make live
 ```
 
-Quiet mode keeps native evidence capture and Captured Sources available.
-Live Page sources, breakpoints, stepping, watches, and console controls remain
-disconnected. It does not guarantee that the custom browser is undetectable.
-
-If the attached renderer crashes, Sources shows `Crashed`, clears stale paused
-frames, and retains captured evidence. Reload the browser tab to resume the
-debugger connection. A connected browser socket alone does not imply that its
-renderer is still running.
+Quiet mode keeps native evidence capture and Captured Sources available. It does not guarantee that the custom browser is undetectable.
 
 ## Packaged UI resources
 
@@ -627,15 +417,15 @@ The macOS CI job runs this check before uploading the app preview.
 
 The failed-start smoke uses a deliberately missing browser and follows the offline
 branch without showing a modal dialog. It does not automate the Retry/Continue
-Offline buttons. Headless Chrome tests live debugger startup and packaged routing,
-not custom Brave probe capture. These checks do not replace interactive native
+Offline buttons. Headless Chrome stands in for the browser to test live session
+startup and packaged routing, not custom Brave probe capture. These checks do not replace interactive native
 keyboard, resize and visual QA. On other platforms, `--contract-only` checks
 source wiring only and does not claim native runtime coverage.
 
 ## Workspace layout
 
-Traffic, Collection, Sources, and Fingerprinting are available in the sidebar.
-Expand **Advanced** for Backtraces, Memory, Experiments, Analyst, and Tools.
+Traffic, Collection, Sources, VM, Console and Fingerprinting are available in
+the toolbar. Expand **Advanced** for Backtraces, Analyst, and Tools.
 Navigation into an advanced tool reveals its group automatically on desktop. On
 narrow windows navigation moves above the workspace and closes after selection.
 
@@ -645,12 +435,15 @@ has no newer events.
 
 Traffic uses a compact network ledger with visible resource-type filters and
 sortable Name, Status, Type, Method, and Time columns. **Capture order** restores
-the evidence order. The selected request opens Headers, Payload, Preview,
-Response, Initiator, and Timing beside the ledger above 1100 px, or below it in
-narrow windows. Both panes stay within the available workspace height; the
-request ledger and inspector body scroll independently. Captured-tab and domain
-filters share a compact row at narrow widths. REB's Signals and Evidence tools remain separate tabs. Missing
-headers, bodies, initiators, and timing phases stay explicitly unavailable.
+the evidence order. The selected request opens General, Initiator, Timing,
+Signals and Evidence beside the ledger above 1100 px, or below it in narrow
+windows. Both panes stay within the available workspace height; the request
+ledger and inspector body scroll independently. Captured-tab and domain filters
+share a compact row at narrow widths. Native capture records the method, URL or
+host, status and lifecycle timing of each request. Request and response headers
+and bodies are not captured, so Traffic has no header, body, preview, comparison
+or content-search views; General states that coverage. Missing initiators and
+timing phases stay explicitly unavailable.
 Request signal profiles are owned by the exact selected session, request and root
 event. Late responses cannot replace a newer selection or refresh. Malformed or
 failed refreshes preserve only the last validated profile for that same identity
@@ -659,40 +452,9 @@ No cache, recording, throttling, or invented waterfall controls are implied.
 The layout follows familiar [network inspection conventions](https://developer.chrome.com/docs/devtools/network/reference)
 while keeping Origin Trace's own controls and Rosé Pine Moon palette.
 
-Traffic’s **Compare** tab pins one exact retained request as a baseline. Select
-another request to compare method, URL, status, request/response headers, and
-request/response bodies without replaying either request. **Clear baseline**
-releases the reference. Concise baseline and selected-request summaries stay
-visible; their disclosure expands the full exact capture identifiers. Demo/sample
-rows cannot be pinned. Native references use
-session/process/event/request IDs; CDP references use target/protocol-request/start
-identity and are never promoted to native provenance. Loss of the exact retained
-record, duplicate identities, an observed target change or debugger generation
-restart expires the baseline permanently until explicitly selected again.
-
-JSON changes use escaped JSON Pointers, preserve number lexemes (including
-integers above 2^53), ignore object-key order, and compare arrays by index. The
-view separately labels exact retained UTF-8 byte equality and structural equality.
-Duplicate keys (including equivalent escaped names), malformed JSON/UTF-8,
-binary MIME types, incomplete capture and unavailable content remain explicitly
-unsupported or inconclusive. Header names are case-insensitive and duplicate
-values retain their order; redacted values never prove equality. Header capture
-completeness cannot be established by the current capture contract.
-
-Comparison is a local interpretation of current retained snapshots, not a frozen
-capture or an assertion about original wire bytes or causation. It retains no body
-copy in navigation, storage, or the baseline reference. Work is capped at 128 KiB
-per body, 4,096 JSON nodes and 24 levels. Each section shows at most 64 changed
-rows, with a shared 64 Ki-character report budget, bounded value previews, and
-explicit omitted counts. Existing bodies are never rewritten. Unchanged refreshes
-preserve the result DOM, focus and scroll; changed results preserve section disclosures
-and summary focus. At most four 128 KiB byte snapshots detect in-place changes;
-leaving the tab releases the result DOM and these snapshots.
-
 The ledger mounts at most 500 fixed-height rows. Previous/Next page through the
 retained window without changing the evidence: the Rust native-event API returns separate newest general and network lifecycle
-windows of up to 5,000 events each from at most the newest 64 MiB; the existing
-CDP window retains up to 1,000 requests. Canvas/WebGL activity does not consume
+windows of up to 5,000 events each from at most the newest 64 MiB. Canvas/WebGL activity does not consume
 network slots within that byte budget. Traffic uses the network window, including
 redirect, failed, and response-completed outcomes. Notices distinguish a capped
 window from the bounded tail and label summary counts by their actual scan scope.
@@ -712,22 +474,14 @@ labeled. An actually evicted selection reports that it left the retained window
 instead of silently selecting another request.
 
 Arrow keys select adjacent request rows; inspector tabs use Left/Right and
-Home/End. Escape dismisses Find or viewer options first, or closes the inspector and
-returns focus to the ledger. The close button has the same behavior. A dismissed
-inspector stays closed across refreshes; selecting a request reopens it. Full
-URLs remain available in Headers and Copy URL, and host-only metadata never
-implies a captured path or query.
+Home/End. Escape closes the inspector and returns focus to the ledger. The close
+button has the same behavior. A dismissed inspector stays closed across
+refreshes; selecting a request reopens it. Full URLs remain available in General
+and Copy URL, and host-only metadata never implies a captured path or query.
 
-Choose **Include headers and bodies** beside Traffic search to find a literal,
-case-insensitive value in retained request or response text. Each result names
-its first matching location; selecting a content match opens Headers, Payload, or Response
-with Find filled in. URL, method, and status remain searchable.
-Tab, domain, and resource filters scope the search before content is inspected.
-Search never enables capture or fetches missing bodies. Binary and uncaptured
-bodies are excluded, and retained prefixes and missing headers limit coverage.
-Large captures use an explicit 8-million UTF-16-unit search budget, newest
-requests first. A partial-search notice reports inspected and omitted coverage
-and suggests narrowing filters. See the [content search design](../../docs/product/traffic-content-search-v1.md).
+Traffic search is a literal, case-insensitive match over the URL or host,
+method and status that native rows carry. Tab, domain, and resource filters
+scope it. Search never enables capture or fetches anything.
 
 Collection uses a saved-request library, template editor, and submitted-response
 pane. Headers, Body, and Variables are keyboard-accessible request sections;
@@ -741,12 +495,6 @@ The dark theme uses [Rosé Pine Moon](https://rosepinetheme.com/palette/), with
 slightly brighter secondary labels for legibility. Appearance switches to the
 existing light theme.
 
-Field trace can send its original request string through explicit Decoder steps
-and search attached sources for the selected result. Original evidence remains
-visible beside a derived search value and transformation history; matches are
-labeled decoded candidates. The handoff rejects binary or oversized results,
-edited inputs, and changed field selections.
-
 Fingerprinting starts with an Overview of active surfaces and captured Canvas
 output. **Show inactive surfaces** reveals the rest of the supported families.
 Surface chips open filtered Activity. Each Canvas card keeps replay comparison,
@@ -757,50 +505,13 @@ result statistics are likewise available in expanders beside their controls.
 
 Advanced workspaces keep the primary task visible and secondary information in
 expandable sections. Backtraces groups correlation identifiers separately from
-relationship facts. Memory places its four modes above the search and results.
-Each Memory mode keeps criteria, explicit action, and inspection separate. The
-result receipt records the submitted target, time, and criteria; diff receipts
-also retain the submitted baseline's native target/time/size metadata. Baselines
-are target-scoped; the native contract does not provide document identity. Draft
-scope changes do not rewrite an existing result. Captures can briefly pause the
-target, and origin tracing explicitly controls debugger stepping until stopped.
-Completed debugger polls are reconciled when actions settle, including after a
-lost acknowledgement; a matching terminal trace poll can retire an unread
-acknowledgement immediately. Memory HTTP waits have explicit headers-and-body
-deadlines: 30 seconds for live search, 90 for baseline capture, 120 for snapshot
-search, 150 for diff, and 15 for trace controls or baseline reset. These include
-margin beyond the existing native command/worker timeouts and do not limit or
-cancel an already-running native trace. Target/context/epoch expiry also retires
-the wait. Only that HTTP read is aborted; completion stays unconfirmed, no
-action is automatically retried, and a retired request cannot release a newer
-action's pending latch. Other debugger callers keep their existing request behavior;
-an older reply cannot overwrite a newer terminal trace or baseline.
-Trace-ID ordering is scoped to the observed native restart epoch.
-Acknowledgements require a valid generation before reporting reset or clear.
-No action is automatically retried. Lost, malformed, or stale replies report an
-unconfirmed outcome: discarding a reply does not stop native work. Target or
-observed execution-context changes expire previews without relabeling them as
-current. Only the current bounded result is retained, with no heap-file history.
-
-Memory result rows keep their identity during unchanged refreshes, preserving
-keyboard selection, focus, detail scroll, and incoming-reference disclosures.
-Snapshot paths and incoming references remain separate; heap diffs show retained
-owners even when no signature groups changed. Partial results qualify absence
-and dominator claims. Origin traces expose the recorded location as text, but do
-not open a live source using only a possibly reused script ID or URL: the trace
-contract lacks the execution-context/source-hash identity needed for that link.
-Request-field pivots only fill criteria and do not run captures; a pending action
-keeps its criteria and receipt when the workspace is reopened.
-
-The `--memory-ui-browser` mode of `tools/check-origin-trace-debugger.mjs` uses
-the existing installed-Chromium driver and synthetic native API fixtures. It
-covers four workflows, race/error/partial states, keyboard/refresh behavior,
-inert text, and wide/narrow geometry. It is separate from native macOS validation.
-
-Experiments separates setup, request, and response, with activity logs collapsed.
-Analyst prioritizes the editor and evidence permissions; folder settings, storage,
-variables, execution limits, and history can be expanded as needed. Tools keeps
-input and output visible with transformation history available on demand.
+relationship facts. Origin traces expose the recorded location as text; they do
+not open a source using only a possibly reused script ID or URL, because the
+trace contract lacks the execution-context/source-hash identity needed for that
+link. Analyst prioritizes the editor and evidence permissions; folder settings,
+storage, variables, execution limits, and history can be expanded as needed.
+Tools keeps input and output visible with transformation history available on
+demand.
 
 Analyst keeps unsaved file and folder changes with their selected owners. Clicking
 the same file, refreshing, or visiting another workspace preserves the draft.
@@ -832,13 +543,6 @@ Closing can interrupt a pending save and cannot undo a save
 already committed. Save and verify the result before closing. Neither warning
 protects against crashes or a forced process exit.
 
-The existing `--investigation-ui-browser` gate includes synthetic Analyst library
-interactions at 1440×900, 760×560 and 360×740: dirty selection, folder/file edits,
-keyboard focus, workspace returns, real reload cancellation, lost/malformed save
-acknowledgements, locked recovery, concurrent edits and narrow recovery controls.
-Production-controller regressions run in `make javascript-check`. These fixtures
-are separate from real storage durability and native macOS lifecycle acceptance.
-
 Native acceptance requires `make app-build`, strict code-signature verification,
 and `node tools/check-origin-trace-native-close.mjs` on macOS. The existing macOS
 CI job runs a relocated packaged app with synthetic workspaces through actual
@@ -860,22 +564,18 @@ dispatch-mode diagnostics and prompt PNGs are retained in `build/native-close-qa
 and uploaded by CI. The `--contract-only` mode checks wiring, sheet/sudden-exit
 policy and trace assertions; it is not evidence of native lifecycle behavior.
 
-
 ## Code ownership
 
 | Location | Responsibility |
 | --- | --- |
 | `index.html`, `app.css` | Document structure and visual layout |
 | `app_state.js`, `evidence_models.js`, `app.js` | Initial state and DOM bindings, evidence validation and projection, interaction and rendering |
-| `field_provenance.js`, `../origin-trace-backend/src/provenance.rs` | Selected request strings, bounded source candidates, replay evidence, source identity checks, and explicit value-flow gaps |
-| `request_value_test.js` | Ephemeral request-value capture controls, observation selection, and comparison rendering |
 | `pane_layout.js` | Shared pointer and keyboard pane resizing, responsive constraints, and local size preferences |
-| `traffic_view.js`, `traffic_comparison.js` | Bounded request/response views, exact retained comparison ownership, lossless structural JSON comparison, explicit missing-data states, and labeled sample exchanges |
-| `api_catalog.js` | Catalog contract validation, exact capture identities shared with navigation/client exports, snapshot-local structural filtering and observed-shape comparison |
-| `source_syntax.js` | Source names, display formatting, and bounded tokenization without DOM or application state |
+| `traffic_view.js` | Native request ledger rows, ordering, paging and URL/method/status search, the General coverage view, and the saved-capture export document |
+| `captured_client.js`, `captured_export_formats.js` | Saved-capture identity, local export dialog, and the client-project/HAR/SDL generators shared with offline commands |
+| `source_syntax.js` | Source names, display formatting, the inert hex view for Wasm and guest bytecode artifacts, and bounded tokenization without DOM or application state |
 | `native_console.js`, `native_console_completion.js` | Disposable browser console controls and local built-in API completion |
 | `../origin-trace-backend/src/app.rs`, `evidence.rs` | Loopback HTTP routing and bounded evidence reads |
-| `../origin-trace-backend/src/debugger/` | CDP sessions, transport ownership, request validation, hooks, experiments, and automation |
 | `../origin-trace-backend/src/workspace.rs`, `analyst.rs`, `workspace_lease.rs` | Workspace contracts, explicit analyst execution, private durable replacement |
 | `../origin-trace-backend/src/decoder.rs`, `origin_trace.rs`, `vm.rs` | Native decoder adapter, trace projection, and VM analysis |
 | `macos/` | Native shell, evidence readers, and helper processes |
@@ -887,24 +587,12 @@ validation and projections; `source_syntax.js` owns source display algorithms.
 Live refresh and DOM updates belong in `app.js`.
 The native scheme handler and packaging script explicitly list shipped assets.
 
-Traffic correlates native requests within method/host buckets, preserving native
-order for equal-time matches. These heuristic associations never establish an
-exact native/CDP request join: Traffic retains both independently observed rows,
-including native host-only evidence from another tab or an ambiguous repeated
-request. A native row is not hidden merely because a CDP row has a similar host,
-method and time. Decoded binary bodies are reused only while their
-request remains in the current network window and its encoded bytes are unchanged;
-headers and capture states always come from the latest validated snapshot. Live
-source text is retained only for the current validated script catalog and matching
-target/hash identity. A failed refresh preserves the last valid cache, and a
-detached pending load is cancelled and cannot restore obsolete source text.
-Source fetches have a 15-second deadline, including body reads; a timed-out load
-can be retried by selecting the source again.
-
-Debugger support modules must not import the session coordinator or the HTTP
-server. Pure request validation does not require a browser connection. The
-coordinator owns session locks, authorization, cancellation, and feature
-lifecycle transitions.
+Traffic shows every native request row independently; host, method and time
+never merge or hide rows. Sources reads retained artifact bytes only. A failed
+refresh preserves the last valid catalog, and a detached pending load is
+cancelled and cannot restore obsolete source text. Artifact loads have a
+10-second deadline, including body reads; a timed-out load can be retried
+explicitly.
 
 ## Validate
 
@@ -922,79 +610,54 @@ See the [Origin Trace reference](../../docs/product/origin-trace-reference.md)
 for workspace behavior, limits, command-line options, and evidence guarantees.
 Versioned wire and storage contracts belong in [`protocol/`](../../protocol/).
 
-### Rendered Requests regression check
-
-The existing debugger checker includes offline DOM/state regressions in
-`make javascript-check`. Those checks do not claim browser interaction or pixels.
-For a real browser pass, use an installed Chrome/Chromium with its normal sandbox:
+### Rendered UI acceptance
 
 ```sh
-REB_UI_CHROMIUM="$(command -v google-chrome || command -v chromium)" \
-  node tools/check-origin-trace-debugger.mjs --traffic-ui-browser
+make rendered-ui-check
 ```
 
-The `requests-ui` CI job runs this mode on the existing Ubuntu runner. It serves
-only synthetic fixtures on loopback, exercises pointer and keyboard workflows,
-checks 500-row paging, synchronized selected-summary lifecycle changes, selection/focus/scroll retention,
-content invalidation, empty/malformed/offline states, dismissal, narrow layouts,
-and reduced motion. Narrow checks require two visible ledger rows, visible
-inspector tabs, at least 80 px of preview height, independent wheel scrolling,
-and hit-tested pointer targets without scrolling an offscreen workspace into view.
-Genuine rendered PNGs and a success-only `validation.json`
-are written under `build/requests-ui-qa` and uploaded as a short-lived CI artifact.
-Readiness uses Chrome's `DevToolsActivePort` file with a 30-second deadline,
-not a stderr banner. The socket handshake has a separate 10-second deadline.
-`browser-startup.json` is written even when startup or interaction fails; it
-contains bounded process output, the readiness stage, browser version when
-available, exit status and cleanup results. The checker terminates only its own
-isolated browser process group, including launcher helpers, with bounded
-SIGTERM/SIGKILL waits. No successful validation manifest is written until both
-interaction and cleanup complete. Startup process/socket fixtures also run in
-`make javascript-check`; they do not claim rendered browser coverage.
-A browser startup or sandbox error is a failed/unavailable check, never a pass;
-do not disable the sandbox to run it. Native macOS interaction remains a separate
-product-path requirement.
+This runs the packaged app, not a browser. `tools/check-origin-trace-rendered-ui.mjs`
+copies `build/Origin Trace.app` to a temporary directory, verifies its signature,
+and starts the bundled `OriginTraceBackend` on loopback with a bounded synthetic
+session: the `make e2e` demo stores, 72 native network rows, a 400-line retained
+source, a synthetic guest bytecode buffer, and Wasm dispatch and guest events
+emitted by the real C++ encoders (`build/reb-native-wasm-dispatch-golden` and
+`build/reb-native-wasm-guest-golden`). Captured strings and bytecode include
+markup that would execute if it were inserted as HTML.
 
-### Rendered Sources facts regression check
+The hosted XCTest bundle in
+[`tools/origin-trace-rendered-ui`](../../tools/origin-trace-rendered-ui/) is
+injected into that app (`TEST_HOST`) through an `.xctestrun` description. It
+drives the production window and WKWebView with native AppKit pointer and key
+events, and reads layout only through `probes.js`. At the default 1180×790
+window and the enforced 760×560 minimum it checks:
 
-The same `requests-ui` CI owner also runs a separate Sources facts mode:
+- Traffic: retained rows, list scrolling to the last row, request selection and
+  the detail pane;
+- Sources: a retained artifact rendered as literal text and scrolled to its end;
+- Investigation navigation: Back appears after a screen change, Alt+Left returns
+  to the selected request, and Forward reopens Sources;
+- VM: the opcode workspace for the guest artifact shows the native guest row
+  with its wide instance identity, and the physical artifact never claims a
+  guest PC;
+- native-only coverage: Traffic offers only General, Initiator, Timing, Signals
+  and Evidence with no content search or Compare; Export offers only local-file
+  SDL and says why; golden and hostile guest bytecode render as an inert hex
+  view with an unclipped kind icon;
+- keyboard order and visible focus for 30 stops (Option+Tab when Full Keyboard
+  Access is off, as in Safari), and Shift+Tab reversal;
+- no removed CDP control or markup anywhere in the shipped screens.
 
-```sh
-REB_UI_CHROMIUM="$(command -v google-chrome || command -v chromium)" \
-  node tools/check-origin-trace-debugger.mjs --source-facts-ui-browser
-```
-
-This uses the existing browser lifecycle and strict hit-tested pointer/keyboard
-checks with synthetic immutable source artifacts. It covers exact selection,
-100-row paging, keyboard categories and disclosure, original UTF-8/BOM byte
-navigation, profile-relative coverage, unknown frontiers, unavailable and error
-states, retained reports, cancellation and retry, source changes, Hooks dismissal,
-Close/Escape focus, and narrow-sidebar navigation. Analyzed source is never
-executed. Sources runs even if Requests fails, unless the job is cancelled.
-
-Separate screenshots, bounded startup/failure diagnostics, and a success-only
-`validation.json` are written under `build/source-facts-ui-qa` and uploaded as
-`source-facts-ui-<run id>`. Inspect these screenshots as well as the interaction
-receipt before accepting rendered behavior. A startup error cannot produce a
-passing receipt. These browser fixtures do not replace real Rust/Oxc HTTP/CLI
-integration, native live WKWebView testing, or macOS package validation. Stored
-`reb://` evidence still reports Sources facts as unsupported.
-
-Collection has a separate mode on the same sandbox-preserving browser QA driver:
-
-```sh
-REB_UI_CHROMIUM="$(command -v google-chrome || command -v chromium)" \
-  node tools/check-origin-trace-debugger.mjs --collection-ui-browser
-```
-
-It uses a synthetic loopback collection store and scripted disposable transport,
-never a real target request. CI checks pointer/keyboard authoring, dirty draft
-ownership, invalid/failed/conflicting saves, explicit Save & Run, late-result
-identity, inert response text, independent response scroll, load retry, and
-760/360 px layouts. Genuine screenshots and success-only validation are retained
-under `build/collection-ui-qa`. The normal JavaScript gate separately exercises
-actual controller functions for deterministic failure and stale-result races;
-those DOM fixtures do not establish rendered acceptance.
+Layout checks reject horizontal page overflow, controls cut off by a
+non-scrolling ancestor, controls covered at their hit-test point, overlapping
+controls and text clipped without an ellipsis or line clamp. No captured value
+may execute or become an element. Screenshots are written to
+`build/rendered-ui-qa/screenshots`; inspect them as well as the result. The
+check needs macOS and full Xcode (XCTest); it uses `DEVELOPER_DIR` or the
+selected Xcode without changing the global selection. Run one case with
+`node tools/check-origin-trace-rendered-ui.mjs --only test4VmNativeGuestRows`.
+The window becomes active while the check runs. It does not exercise a live
+browser capture.
 
 ### Interface styling
 
@@ -1086,23 +749,6 @@ chunk rules](https://www.w3.org/TR/png-3/). The native capture still does not re
 drawing arguments or a canvas object identifier, so local replay remains
 unavailable and the earlier-call relationship stays renderer-scoped.
 
-Rendered Canvas regression coverage runs with
-`REB_UI_CHROMIUM=/path/to/chrome node tools/check-origin-trace-debugger.mjs --canvas-ui-browser`
-and in the installed-Chrome `canvas-ui` CI job. It serves authored artifact
-metadata and bytes through the real application routes, decodes a 16 × 16 PNG,
-and exercises refusal/error labels, explicit retry, gallery retirement and
-reopening, pending-body cancellation, keyboard controls and narrow/wide layouts.
-Screenshots, browser diagnostics and fixture receipts are written under
-`build/canvas-ui-qa/`. A fail-closed observer at the native image source setter
-records assignments and fails the test before any rejected giant-header fixture
-can enter decoding; accepted tiny images use Chrome's real decoder. No product
-admission or ownership function is replaced. A separate fresh document uses
-an authored `img-src 'none'` response policy to trigger real image load errors
-and verify the existing error label and cleanup. This is policy/load-error
-coverage, not evidence that Chrome rejects corrupt compressed PNG streams.
-These receipts do not establish native capture, macOS behavior, decoder-memory
-reclamation or process RSS bounds.
-
 The fingerprint workspace scopes Rendering and Activity to a captured browser
 tab, all tabs, or explicitly unattributed events. The selected tab is a stable
 top-level frame-tree identifier; renderer events without a live frame context
@@ -1115,11 +761,7 @@ local broker without closing the browser. Clear events is available after
 capture stops, requires confirmation, and truncates only this session's event,
 trace, and request-profile stores. Canvas artifact files and other saved files
 remain on disk. Detailed identifiers stay behind a disclosure. The
-captured-tab buttons are historical evidence, not an open-tab count. In a live
-debugger session, the browser target list supplies a separately labeled current
-page-tab count, refreshed as targets open and close. Quiet mode and a lost
-debugger connection show that count as unavailable rather than guessing from
-captured events. The footer separates missing per-process sequence IDs from
+captured-tab buttons are historical evidence, not an open-tab count. The footer separates missing per-process sequence IDs from
 reported queue drops, since a gap report can describe the same missing IDs.
 The custom browser observes generated Web IDL callbacks for a selected native
 allowlist across all eight families, in addition to the lower-level Canvas,
@@ -1135,11 +777,7 @@ correlation and exposes zero-count families instead of hiding coverage. The
 view never claims that an observed value was transmitted or that a particular
 fingerprinting vendor produced the activity.
 
-Sources navigation exposes Page and Captured collections. Page removes scripts
-when their execution context is destroyed or cleared, including removed frames
-and full navigations. URL breakpoint definitions and captured evidence remain;
-only resolved locations in retired scripts are discarded. Unimplemented
-Workspace and Overrides tabs are omitted until they provide a usable workflow.
+Sources navigation lists retained Captured artifacts.
 File rows reserve their remaining width for the filename, with full URLs in
 tooltips and source metadata in Details. Folder rows retain their item counts.
 The navigator initially expands branches to keep retained files directly visible.
@@ -1151,8 +789,8 @@ meaning. Focus and the open document are separate: collapsing a selected file's
 ancestor leaves its editor, Find result and original-byte location unchanged and
 never reads source bytes or runs analysis. Ordinary catalog refresh keeps keyed
 rows, tree focus and scroll, returning a removed focused row to its closest
-surviving ancestor. Page and Captured retain independent session-only branch
-state; origins and full path segments have distinct identities.
+surviving ancestor. Branch state is session-only; origins and full path
+segments have distinct identities.
 
 The navigator inspects at most 5,000 catalog records, retains 10,000 metadata
 nodes and renders at most 1,000 expanded rows. Collapsed descendants have no DOM
@@ -1164,63 +802,6 @@ segments remain distinct, explicitly labeled folders. Collapse branches
 or use **Open file** to reach later catalog choices. Deep indentation is bounded
 for narrow sidebars; full source URLs remain available in tooltips. These limits
 do not evict open source text, change captured evidence, or relink documents.
-Clicking original source records the UTF-16 column across syntax spans, so the
-Hooks panel can target a function inside a minified line. Inline script offsets
-are included; readable representations cannot change the runtime cursor.
-In a connected session, **Hooks** opens the shared Runtime Hooks workspace
-beside the Sources editor, with its ephemeral hit trail below the code. The
-panel can manage the same disposable Experiment context used by Experiments,
-or explicitly bind a live JavaScript source on the attached captured document.
-The header identifies which document is selected. Captured hooks do not require
-creating or navigating a disposable page.
-On the attached captured page, before an isolated context exists, the same
-panel lists that page's JavaScript and **Pause at this line** sets a debugger
-breakpoint on the selected script. The page stays paused when the line runs.
-That control is separate from an armed hook, which still resumes itself.
-Targeting guidance stays in the **Targeting help** disclosure, while armed
-status uses a compact hit count.
-Selecting a hit returns to the original live source location when that script
-is still attached. Captured or pretty-printed sources cannot prefill a runtime
-location, and an unavailable script is reported rather than guessed.
-Runtime Hooks resolves a selected cursor against the original live JavaScript with
-the bundled Rust parser. It chooses the innermost function, including anonymous
-callbacks and arrows, and shows its start and V8 entry-search position before
-arming. A cursor outside a function is rejected rather than creating a hook at
-an unrelated statement. In an isolated Experiment context, Sources also lists
-dedicated-worker scripts with a Worker label. The Hooks panel can select one of
-those scripts; ordinary page-debugger gutters remain disabled for worker
-sources. Runtime Hooks can arm page and worker definitions together, with
-commands and hit records identified by target. Live-function-object mode takes
-a side-effect-free expression such as `self.onmessage` in the selected target
-and captures entry only; it does not discover closure-held functions
-automatically. Worker attachment runs off the page-target watcher; a failed
-attachment drops its scripts and retries with bounded backoff. The breakpoint
-active setting is shared with attached workers. While armed, page and worker requests
-appear as bounded, redacted metadata. Links to nearby hits are labeled
-temporal/inferred, not causal proof.
-Selecting one of these requests opens a separate ephemeral trail in
-Traffic, with links back to retained hits. It is not merged into the captured
-request ledger or presented as a proven initiator chain.
-The optional [Request Value Test](../../docs/product/request-value-test-v2.md)
-starts from **Test a request value** in Session or an isolated request's Traffic
-trail. Its controls stay with the disposable-page setup, separate from the hit
-trail. Select a method, query-free URL, and one JSON, form, query, header, or
-raw-text value, confirm capture, then reproduce the request. No hook is needed
-for observation. The active capture summary is separate from editable drafts;
-changing a draft requires fresh confirmation, and restarting capture erases the
-previous observations. Field names and JSON Pointers are used exactly as entered.
-The comparison defaults to distinct available observations from the same target,
-keeps a selected pair across refreshes, and remains usable while hooks are armed.
-For an intervention, first collect a return-hook baseline, then disarm and replace
-that hook with a synchronous return override before repeating the same input.
-A matched comparison is intervention-associated, never complete value provenance.
-The value preview is erased with the disposable context.
-[Request Field Provenance v1](../../docs/product/request-field-provenance-v1.md)
-connects Traffic's JSON tree and Query selection to that workflow through
-**Trace value**. It shows observed request call sites, bounded original-source
-text candidates, and equal-string replay hook candidates. **Test value** prefills
-the exact selector; **Field trace** returns from the test. Source links require
-retained target, script, and source hash identity.
 Find searches the selected document's owned retained text, independently of
 which lines are mounted. It uses a case-insensitive single-line literal of at
 most 512 UTF-16 code units. Multiline pastes are refused before the browser can
@@ -1249,30 +830,22 @@ Derived/Pretty mappings are projected only for mounted lines.
 Investigation history retains logical line/column windows with the exact source
 and representation owner, then restores pane scroll. A changed derived-analysis
 version or intrinsic assumption cannot restore a stale representation window.
-Ordinary debugger refresh leaves Find and the current window in place; explicit
-frame, Hook and original-source pivots choose their own retained location.
+Ordinary evidence refresh leaves Find and the current window in place; explicit
+original-source pivots choose their own retained location.
 
-
-The Sources sidebar starts closed without an attached debugger. Details opens
-source metadata and connection status; attached sessions show debugger controls
-by default. The toggle remains available at narrow window sizes.
+The Sources sidebar starts closed. Details opens source metadata, JavaScript
+facts and static cleanup; the toggle remains available at narrow window sizes.
+Wasm modules and native guest bytecode buffers open as an inert hex view of
+their retained bytes (offset, hex and printable columns, labeled **WebAssembly
+hex** or **Guest bytecode hex**); bytecode is never decoded as text. Guest
+adapter recipes are JSON text.
 
 VM analysis is a secondary Traffic view, reached through Related VM candidates
-for a selected native request with a complete root identity. A CDP row joined
-by DevTools request id can use the same pivot when the joined native events
-contain one exact request start; the renderer id is not that start. Other CDP
-and incomplete native rows stay in Traffic with an unlinked notice; they never
+for a selected native request with a complete root identity. Incomplete native
+rows stay in Traffic with an unlinked notice; they never
 silently open session-wide analysis. The request-scoped view uses only acknowledged response
 creator chains and has a Back to traffic control. Use workspace navigation
 explicitly to inspect unfiltered session analysis.
-
-**Captured document**, in the debugger sidebar, and **Captured document VM Lab**,
-on the VM workbench, map a paused local, closure, or block binding with `inspect_paused_import_object`
-and can list or read live Wasm memory for the navigated Object Lab page or the
-confirmed attached page. Import rows keep `invocation` unproven and
-`guest_position` null. Heap snapshots stay in Memory Explorer; reordered V8
-sections remain readable. This lab does not invent a guest program counter or
-claim a live sampler. Caller dispatch reports remain a separate offline input.
 
 When the selected finding has a validated opcode workspace, VM Lab adds the
 handler mapping, runtime typed-array bytecode preview, characterized coverage,
@@ -1286,93 +859,10 @@ prove a guest PC.
 Workspace failures retain the last valid workspace and never remove detection
 findings.
 
-The VM header distinguishes an attached CDP debugger from an active native
-stealth capture. Native stealth copy states that Inspector domains are off and
-that breakpoints, watches, and console controls remain unavailable. Captured
-hex, labels, notes, omissions, and unknowns are inserted as DOM text.
-
-Experiments puts its mode switcher and current connection state in one compact
-toolbar above three stable setup, editor, and result panes. Each pane scrolls
-independently on wide windows; narrow windows stack the results below the forms.
-Scope, session metadata, resource limits, request restrictions, response
-comparison, and advanced object search use native disclosures. Switching tools
-preserves form drafts and disclosure state. Scope is shown only for Interceptor
-and Automation, which support it.
-
-An action is acknowledged only after its `ok: true`, generation and required
-result groups validate for the submitted disposable lifetime. A transport success
-alone is insufficient. Missing, rejected, stale or malformed receipts leave the
-draft available and never trigger an automatic retry or a chained Repeater send.
-A newer validated poll is never replaced by an older receipt; changed newer
-groups also prevent that receipt from acknowledging the current draft; an already-running
-poll cannot undo an accepted receipt. Automation recipe/run aliases must match
-the validated records. Additive response fields are bounded to 64 levels, 65,536
-values and 4 Mi characters before retention or iterative comparison.
-
-Refreshes within the same lifetime preserve drafts and consent. A changed
-creation time, disposable target/session identity or observed generation reset
-erases disposable form values, confirmations, selections and hidden result DOM.
-Late replies cannot restore them, including an identity that leaves and returns.
-Expired in-flight reads release their UI busy controls even if transport stalls;
-this does not cancel native work or resend an action.
-Ownership is checked again after each awaited receipt, including the gap before
-its caller resumes. Repeater keeps the original complete request draft and
-selection/edit revision through Apply and Send; changed drafts require a fresh
-explicit Send. Collection keeps the original saved recipe and inherited variables,
-and rejects a changed lifetime, edited recipe or newer draft before sending.
-Changing the Collection selection alone never substitutes the newly selected
-recipe. Disposable run ownership is erased on lifetime replacement while saved
-Collection definitions and drafts remain intact.
-Saved automation definitions remain in authoritative backend state. Disposed
-Interceptor results may be inspected until creating another context; that new
-lifetime starts with an empty result, audit and rule even if creation fails.
-The browser-free production-function regressions run in the existing debugger
-checker under `make javascript-check`; they do not establish rendered/native QA.
-
-
-Repeater keeps method, URL, and Send in one command row above a persistent
-request-response split. Compare responses includes a Rust-generated body line diff
-with source line numbers, nearby context, newline markers, and explicit limits.
-Polling preserves the diff's focus and scroll position. Session actions appear only after a browser target is
-connected. Request tabs share the pane header, while idle badges and footers stay
-hidden until they contain useful state. Headers and query parameters use compact
-key-value rows with per-row enable and remove controls; query rows preserve
-duplicate names and update the request URL.
-
-Traffic's Headers tab groups General, Response Headers, and Request Headers.
-Payload keeps Query, Body, and Raw request views; Preview shows a safe JSON tree,
-formatted retained text, or the existing isolated HTML preview. Response offers
-Raw and Formatted text. Find, Wrap, Copy, field selection, Decode, and Trace value
-continue to operate on bounded retained content. Equal-length body edits and
-header-only refreshes invalidate the selected viewer without replacing its
-controls or losing its scroll position. Captured values always remain inert.
-Live traffic remains grouped by captured browser tab with an All tabs scope and
-a domain selector. Protocol v3 carries the stable top-level tab identifier;
-older evidence remains Unattributed. Evidence retains the original payload and
-trace actions; Initiator and Timing display only recorded observations.
-
-The viewer distinguishes uncaptured, redacted, loading, failed, explicitly
-empty, and truncated bodies. Its local preview is bounded to 128 KiB, 1,000 JSON
-nodes, 24 levels, and 2,000 displayed text lines; limits are visible and raw/copy
-operate on the retained preview. Sample exchanges are labeled in both panes.
-Default native network metadata supplies no request/response header or body
-bytes, so the viewer reports them as not captured. Explicit CDP network capture
-projects the attached tab's full request lifecycle into Traffic and correlates
-it with matching native events when their host, method, and monotonic timing
-agree. CDP body retrieval can still report unavailable content for streaming,
-evicted, cached, or protocol-internal responses rather than inventing bytes.
-
-Captured `text/html` responses use the inspector's **Preview** tab.
-Preview reconstructs a bounded, presentation-only HTML tree inside an opaque
-sandboxed frame. It blocks scripts, navigation, submission, network resources,
-and external stylesheets; supported inline presentation styles survive.
-Short windows scroll the request ledger and inspector instead of collapsing
-the preview beneath its controls.
-Omitted images appear as text placeholders. Capture truncation and the
-1,000-node / 24-level rendering limits remain visible. Preview never fetches
-the original URL, changes captured bytes, or enables content capture. Body and
-Raw body continue to show inert source text. See
-[HTML Response Preview v1](../../docs/product/html-response-preview-v1.md).
+Traffic remains grouped by captured browser tab with an All tabs scope and a
+domain selector. Protocol v3 carries the stable top-level tab identifier; older
+evidence remains Unattributed. Evidence retains the original payload and trace
+actions; General, Initiator and Timing display only recorded observations.
 
 ## Deobfuscation engines
 
@@ -1408,14 +898,14 @@ input guards.
 over captured artifacts. It needs no Python runtime. Building the app
 requires a current stable Rust toolchain (`rustup toolchain install stable`).
 The Rust backend preserves classification, formatting, and literal-table
-analysis for captured artifacts and live scripts. The Deobfuscation details
+analysis for captured artifacts. The Deobfuscation details
 name the engine. Dynamic decoding remains unimplemented and is reported as an omission. Static table substitution is
 restricted to non-escaping local tables with proven own-index reads.
 
 Failed analysis remains visible until **Retry analysis** is selected. A failed
 retry retains the last successful result. Source selection does not switch the
 Sources editor away from original evidence. The UI retains at most eight analysis
-documents and distinguishes source hashes and debugger targets in its cache.
+documents and distinguishes source hashes and artifact identities in its cache.
 The report retains the last successful summary and snippets during a retry or
 failure. **Cancel analysis** retires the current request; a worker may still
 finish, but its late response cannot replace the report. Cancellation and errors
@@ -1427,9 +917,7 @@ limited to 2,048 UTF-16 units each. Snippets scroll independently; truncation is
 visible and never splits a surrogate pair. In the HTTP live workspace or browser
 development UI, **Reveal original range** verifies captured original bytes
 through the existing Facts path. Stored-evidence native mode displays an explicit
-unavailable reason for that navigation. Live scripts require
-their currently owned complete source text and target identity. Neither path
-executes source. Pretty printing remains a separate display layer.
+unavailable reason for that navigation. Neither path executes source. Pretty printing remains a separate display layer.
 
 Transformation families, heuristic classification signals, recovered table
 summaries, and assumptions/limits have explicit counts and four-row paging.
@@ -1455,8 +943,7 @@ worker makes AST operations unavailable with an explicit error. Deob stays insid
 In **Sources**, select a captured JavaScript artifact and choose **Facts**.
 The existing Rust/Oxc worker returns bounded lexical scopes, declarations,
 callables, regions and operations for that exact session, artifact and SHA-256.
-This is an explicit, inert analysis action. Live debugger scripts and derived
-text are not accepted. The Details pane shows complete-within-profile, partial,
+This is an explicit, inert analysis action. Derived text is not accepted. The Details pane shows complete-within-profile, partial,
 unavailable and truncated states, diagnostics and unknown-effect frontiers.
 Each category displays 100 rows per page; fact details are capped at 4,096
 characters. In **Bindings**, search declaration names and choose **Find lexical
@@ -1517,8 +1004,8 @@ itself an HTTP server.
 
 ## Pane sizes
 
-Drag the shared borders in Traffic, Repeater, Sources navigator,
-Memory criteria/results/details, and Tools Decoder to resize adjacent panes.
+Drag the shared borders in Traffic, Sources navigator, and Tools Decoder to
+resize adjacent panes.
 The divider shows an accent on hover or keyboard focus. Tab to a divider and use
 the arrow keys along its axis; Shift changes the step from 10 to 50 pixels.
 Home or double-click restores that split's default. Escape cancels an active
@@ -1526,9 +1013,8 @@ drag. Traffic saves wide column and narrow row splits separately. Sizes persist 
 proportions in the local `origin-trace.layout.v1` preference, independently of evidence and backend state.
 
 Minimum pane sizes keep controls and empty states usable. The Sources toolbar
-wraps within the editor; its narrow debugger overlay starts below those controls. Saved widths are suspended when the
-responsive layout stacks panes, shows a single exchange side, or lacks enough
-space. Returning to a wide window restores them. Handles follow scrolling and
+wraps within the editor; its narrow details overlay starts below those controls. Saved widths are suspended when the
+responsive layout stacks panes or lacks enough space. Returning to a wide window restores them. Handles follow scrolling and
 are clipped to the active workspace. `pane_layout.js` owns the shared layout controller;
 no captured evidence is modified by resizing.
 
@@ -1548,10 +1034,8 @@ or **Evidence** from Backtraces. The initial view leads with the selected reques
 a bounded recorded-observation list and an independently scrolling record inspector.
 It separates native request records, explicit same-process parent links, matching
 nonzero session/process/navigation/frame context and unlinked retained records.
-For debugger requests, the method/host/time association with native records remains
-visibly correlated, including when the native records have exact parent links.
-The compact request summary keeps the method/host/time basis, absent exact producer
-request key, missing-parent count and unknown coverage visible beside the reading panes.
+The compact request summary keeps the missing-parent count and unknown coverage
+visible beside the reading panes.
 A context match never establishes causation, value flow or request ownership.
 
 The inspector exposes the operation, original bounded inline payload, recorded
@@ -1597,7 +1081,7 @@ mode retires pending package ownership, just as leaving Evidence does.
 Choose individual native event identities
 (session, process and sequence) or artifact identities (session and artifact).
 The selected-request view uses only that request's attached native records;
-CDP request IDs and synthetic gap rows are not export identities. The other
+synthetic gap rows are not export identities. The other
 views expose the current retained windows, at most 5,000 events or 500 artifacts,
 with 50 candidates per page. They are not an exhaustive store inventory. The
 pager stays above the viewport-bounded list. **Limits & privacy** holds the
@@ -1655,24 +1139,6 @@ packaging acceptance. Interactive QA must additionally inspect keyboard use,
 50-row paging, independent panel scrolling and controls at desktop and narrow
 widths, plus Cancel/Escape, Back/reopen, file replacement and late responses.
 
-For rendered Evidence QA with an installed browser, run:
-
-```sh
-REB_UI_CHROMIUM="$(command -v google-chrome || command -v chromium)" \
-  node tools/check-origin-trace-debugger.mjs --evidence-ui-browser
-```
-
-The existing browser CI job runs Requests, Sources and Evidence separately and
-uploads `build/evidence-ui-qa/`. Evidence includes genuine pointer/keyboard
-selection, real file input, explicit download byte comparison, failures,
-interruption, scrolling and narrow layouts. Download QA waits for the matching
-Chrome frame, filename and download GUID to report completion before checking
-exact bytes and the single output file. Cancellation, missing completion or
-corrupt completed bytes fail; filename existence alone is not completion.
-Its synthetic service tests the UI; the real native-writer/guarded-export/validator
-integration is a separate check.
-A validation receipt is written only after interactions and cleanup succeed.
-
 All native HTTP entry paths, including an explicit loopback `--ui-url` without a
 query, normalize to one `native=1` marker. Unrelated encoded/repeated query
 parameters are preserved. Stored native loads also carry the marker; ordinary
@@ -1685,16 +1151,10 @@ rendered WebKit behavior.
 
 Opening a file reads its preview only. **Deob** explicitly starts inert static
 analysis; entering Sources from another workspace never starts it. Analyzer
-responses must match the submitted artifact or live script, its session or
-actual page/worker target, SHA-256, source byte size, intrinsic assumptions and
-original-source map. SHA-256 is recomputed over the returned original text.
-Live CDP hashes remain opaque owner/version tokens. The analyzer's original
-UTF-8 text must equal the exact complete live text held by that submitted
-preview owner, and its UTF-8 SHA-256 is recomputed separately. Missing, loading
-or truncated live previews cannot authenticate analysis. Replacing the preview
-owner retires pending results; a cached derived result is shown only while its
-original text still equals the current complete owned live text. No V8 hash
-normalization or pinned-engine implementation is inferred.
+responses must match the submitted artifact, its session, SHA-256, source byte
+size, intrinsic assumptions and original-source map. SHA-256 is recomputed over
+the returned original text. Missing, loading or truncated previews cannot
+authenticate analysis. Replacing the preview owner retires pending results.
 Changed or closed owners cannot accept a late response, and analyzer text never
 replaces the original preview. A failed explicit retry preserves only the last
 successful analysis for the same identity. URLs are display/search hints, not
@@ -1703,17 +1163,16 @@ proof of ownership.
 Artifact catalog refreshes preserve an exact pending preview owner. Changing
 its session, hash or descriptor retires that read. Preview failures and deadlines
 show **Retry source**; they do not silently retry during refresh. Preview bodies
-reuse the Facts bounded streaming reader: 2 MiB raw artifact bytes, 13 MiB for
-escaped live-source JSON, and 33 MiB for an analyzer envelope, with at most
-65,536 chunks. Artifact and analyzer deadlines are ten seconds, including body
-reads and SHA-256 work; the live-source deadline is fifteen seconds. Cancellation
+reuse the Facts bounded streaming reader: 2 MiB raw artifact bytes and 33 MiB
+for an analyzer envelope, with at most 65,536 chunks. Artifact and analyzer
+deadlines are ten seconds, including body reads and SHA-256 work. Cancellation
 retires ownership without waiting for a stalled producer's cleanup. Full artifact
 previews verify SHA-256 when WebCrypto is available; partial or lossy text is
 visibly a preview. Exact byte navigation still belongs to the existing Facts
 verified-original reader.
 
 The editor retains at most eight preview owners and 16 MiB of UTF-16 preview
-text across captured and live files. The selected owner is pinned; older preview
+text across captured files. The selected owner is pinned; older preview
 bytes can be evicted while their tab and immutable catalog metadata remain.
 **Retry source** or reopening the file loads it again. Closing a file cancels its
 preview/Deob reads and releases its preview, Deob and formatting cache entries.
@@ -1734,15 +1193,7 @@ bytes is introduced.
 
 Unchanged source/representation refreshes keep the editor DOM, scroll, Find
 occurrence and focus, including enabled original-source map links in pretty or
-derived views. Runtime decoration refresh never relabels those links as
-breakpoints. Runtime cursors and Hook setup are scoped to the exact
-script target, hash, context and original representation. Sources and Field trace
-use the same identity-checked cursor receiver and honor refused source selection.
-Hook-hit jumps require
-that exact identity; a legacy URL-only hit remains unavailable. Delayed focus
-cannot move to a newer selected source. Open-file tabs support
-Left/Right, Home/End and Delete to close, with focus returning to the next tab.
-The existing Rosé Pine Moon tokens and editor-first layout are unchanged.
+derived views.
 
 Cross-workspace callers can pass the investigation-navigation v1 tuple to
 `selectArtifact(id, line, {identity})`: `{type:'captured-artifact', session,
@@ -1751,37 +1202,6 @@ receiving boundary. Selection returns false before any read when that identity
 is stale or the artifact ID is globally ambiguous. When shared investigation
 navigation is present, callers should continue using its `openInvestigation`
 adapter and bounded Back/Forward trail.
-
-The existing `--source-facts-ui-browser` driver additionally covers pending body
-plus catalog refresh, passive entry, wrong analyzer identity/preview bytes,
-explicit retries, stable Find/scroll, keyboard file tabs and close cleanup at
-1440×900, 760×560 and 360×740. Production-function and DOM fixtures run in
-`make lint`; they do not replace real browser screenshots or native acceptance.
-
-The dedicated `--sources-history-ui-browser` mode adds real Back after the
-production eight-preview cache evicts captured and live documents. Native
-pointer, wheel and keyboard input save nonzero editor/navigator offsets and
-focus, hold reopen HTTP delivery, and await the actual loader's terminal receipt
-before checking restoration. Repeated eviction, Forward, newer input, failed
-reopen and explicit Retry are covered at 1440×900 and 760×560. Four other explicit
-WASM inspections evict an authored valid module's report through the production
-four-report cache. Back and a changed catalog must show the released state
-without another analysis; native Enter on Retry, held/error returns and the valid
-report are checked separately. The `sources-history-ui` CI job uploads screenshots,
-request/operation receipts and validation under `build/sources-history-ui-qa`.
-These small synthetic HTTP fixtures do not run a module or analyzed JavaScript,
-and this browser gate does not replace native macOS acceptance.
-
-The same job also runs `--sources-tree-ui-browser` with authored catalogs at
-1440×900, 760×560 and 360×740. Native pointer, wheel, Tab, arrow, Home/End,
-Enter and Space input cover collapse, selected-but-hidden files, independent
-Page/Captured paths, file activation, and actual source reveal. Catalog HTTP
-refreshes exercise additions, removal, reordering, retained focus/scroll anchors
-and typing in Find. Empty, Canvas-only, hostile-label and deep-path states remain
-explicit. Chrome accessibility snapshots verify branch ownership and collapse;
-screenshots and input/request receipts are in `build/sources-tree-ui-qa`. The
-inert model gate separately covers catalog/node/row bounds and unchanged-row
-reuse; it does not claim browser frame-time or memory measurements.
 
 ### Compare supplied packages
 
@@ -1811,18 +1231,6 @@ explicit unsupported explanation and mounts no comparison file inputs. This
 restriction does not apply to the whole native app. macOS runtime and packaged
 asset acceptance remain separate checks.
 
-`--evidence-comparison-ui-browser` in the shared debugger test now exercises the
-actual product host and scripts, rather than the earlier isolated component
-fixture. It covers real file inputs, backend-produced equal/changed synthetic
-results, error retention, pending ownership, late File reads, Close/Escape,
-Return/navigation, page disposal/remount, retained package export/validation,
-wide/narrow layouts and the live native HTTP marker. CI uploads
-`build/comparison-ui-qa/`. The mock service is UI evidence, not a replacement for
-the real API/CLI integrity/admission tests. Shared Source navigation uses the
-scoped receiving adapter and bounded Back trail. The strict Evidence browser
-mode also requires Source → Back restoration of filters, focus and scroll
-without automatic derived analysis. See [the comparison contract and bounds](../../protocol/evidence-comparison-v1.md).
-
 ## Float32 comparison
 
 Open Tools → Float32 comparison to inspect exact hexadecimal binary32 words,
@@ -1836,50 +1244,6 @@ This uses the local Rust backend, including live native sessions. Stored-evidenc
 native mode displays its limitation. No sample capture, audio graph collection,
 platform identity, normalization, spoofing or target execution is added. See
 [the versioned contract](../../protocol/float32-comparison-v1.md).
-
-The existing driver owns the real browser lifecycle:
-`node tools/check-origin-trace-debugger.mjs --float32-ui-browser` with
-`REB_UI_CHROMIUM` set and the current backend built. Its domain fixture forwards
-requests to the actual backend; only held delivery and a labeled 503 are synthetic.
-`--float32-fixture-only` checks the real loopback boundary without rendered claims.
-
-### Retained-source Find and window regression checks
-
-The existing `--source-facts-ui-browser` check includes complete 20,001-line and
-1.7 MiB minified fixtures, actual pointer/keyboard Find cycling across window
-boundaries, late-column excerpts, local line/column controls, logical-window
-Back/Forward, original-byte Facts links, single-line paste refusal, and coverage
-labels at 1440×900, 760×560 and 360×740. These authored fixtures never execute
-source text. Screenshots and the Sources validation receipt include the bounded
-window results. The JavaScript gate also exercises sparse indices, Unicode case
-folding, BOM/CRLF/astral offsets, empty lines, source ownership, notice exclusion,
-repeated inline-script frame locations and unavailable preview locations. Model
-costs are printed for 8 Mi-unit newline-heavy and minified inputs; these are
-measured helper costs, not browser frame-time or process-memory guarantees.
-
-### Original candidate → disposable observation
-
-Field trace's **Test this candidate** carries one bounded original live-JavaScript
-literal into a compact question strip in existing Runtime Hooks. Explicit create,
-open, page/worker choice, binding, capture and arming remain separate controls.
-Binding requires a unique complete UTF-8 digest match and strict synchronous-body
-worker admission, never a copied script ID or URL match. Original evidence remains
-separate and returnable; no field values are saved to the notebook. See the
-[identity, consent, bounds and research contract](../../docs/product/candidate-experiment-v1.md).
-While Sources Runtime Hooks is open, visible Link context reserves a bounded, keyboard-
-focusable scroll area. Asynchronous expiry warnings remain readable without
-moving disposable action controls when the notice expands or wraps.
-
-Runtime Hooks mutation controls, including Open, Remove and Disarm, stay disabled
-until acknowledged changes reconcile with a current debugger snapshot. The
-visible status explains the wait; URL drafts are preserved and no navigation is
-retried automatically.
-
-Bind waits for pending debugger actions and for a fresh debugger snapshot to
-reconcile acknowledged changes. Its status explains the wait; reconciliation
-never automatically retries a binding or restores capture/arming consent.
-
-Traffic includes a bounded read-only [WebSocket message inspector](../../protocol/websocket-capture-v1.md) for enabled CDP content captures. Text/base64 messages, exact connection lifetimes and drop counters stay separate from HTTP rows.
 
 The existing VM findings view now includes an explicit local [execution semantics workflow](../../protocol/vm-semantics-v1.md): bounded trace import, state changes, opcode candidates and hypothesis counterexamples. It preserves existing detection findings and does not claim native guest-opcode capture.
 
@@ -2073,26 +1437,6 @@ import them through the existing trace input, and inspect call/return, multiply,
 memory, stack and a taken branch. It is an owned fixed-program fixture, not the
 upstream runtime or unknown-code decompilation.
 
-### Element screenshot markup
-
-Experiments → **Element screenshot** reads the explicitly selected primary
-isolated page opened in Objects. Inspect selects its exact bounded document;
-confirmation and **Grab local screenshot** capture raw local viewport pixels
-and numbered layout bounds. Pointer and keyboard selection changes only the
-local overlay. Form/editable/private-marked content, child frames, shadow trees,
-unsupported zoom and observed drift refuse capture. Raw text/images can still
-be sensitive, and before/after checks are not atomic or an occlusion guarantee.
-See [Element screenshot v1](../../protocol/element-screenshot-v1.md) for the
-closed API, geometry limits, privacy boundary and required real-browser checks.
-
-`make element-screenshot-ui-check` runs the real product capture workflow with
-native pointer/keyboard input at desktop, 600 px and 360 px widths, including
-actual PNG decode/geometry and clear/leave cancellation. Set
-`ORIGIN_TRACE_TEST_BROWSER` to an installed Chromium-compatible browser when
-needed. Outputs are authored-fixture UI QA images and metadata receipts under
-`build/element-screenshot-ui-qa` (or `REB_UI_SCREENSHOTS`). This runnable check
-still requires execution; it does not replace packaged macOS acceptance.
-
 ### Per-build contextual VM analysis
 
 **VM → Contextual build** is an independent offline workspace for supplied
@@ -2208,10 +1552,8 @@ offers every retained snapshot; the compact handler listing keeps its four-sampl
 preview. A workspace with `sampler-unavailable` says static-only: host links keep
 `dispatch-samples-unavailable` and `guest_position` null, and that is the missing
 sampler rather than an empty workspace. Session sources lists same-session stored
-artifacts and, for the live evidence window only, CDP JavaScript scripts.
-`chrome://` rows are browser-UI noise. Live scripts are not artifact records
-and are not guest positions. Shared session or target is correlation, not loader
-provenance.
+artifacts only. `chrome://` rows are browser-UI noise. Shared session is
+correlation, not loader provenance, and never a guest position.
 Operand width zero means unknown, matching the producer contract. Source locations
 show exact retained byte ranges without guessing a source line number.
 
@@ -2232,20 +1574,10 @@ source digests remain explicit. The example never supplies capture provenance.
 
 ### Full-page VM navigation check
 
-`node tools/check-vm-full-shell-ui.mjs --fixture-only` validates the authored
-HTTP response contracts without a browser. With `REB_UI_CHROMIUM` pointing to
-installed Chrome/Chromium, omit the flag to load the actual `index.html` and all
-shipped scripts. The loopback fixture admits one authored retained finding
-through the ordinary analysis API. It checks the primary VM entry, every VM
-mode and finding panel, linked keyboard handler selection, and above-fold
-listing visibility at 1440 and 1280 pixels. Real local File imports populate Packs and
-Ledger; one exact bounded comparison request receives an explicitly authored
-presentation response. Raw editors stay collapsed for result captures. Empty
-modes and populated results are captured at 1440, 1280, 900 and 390 pixels.
-Full-page and scrolled-dock screenshots are saved under
-`build/vm-workspace-ui-qa/full-shell`; CI includes them in the VM artifact.
-This verifies product-shell composition with synthetic responses, not native
-capture, guest execution, every feature's semantics or a live backend.
+`node tools/check-vm-full-shell-ui.mjs` loads the shipped page contracts with
+authored loopback responses and validates its literal parser and HTTP
+contracts without a browser. Rendered VM composition is covered by
+`make rendered-ui-check`.
 
 The desktop Findings layout keeps the program navigator, handler listing, and
 selected-handler inspector together above a bottom analysis dock. Handler click
@@ -2272,7 +1604,6 @@ evidence status, asserted meaning and supplied test outcome; definition hashes
 remain available under **Definition identity**. These presentation changes do
 not alter schema checks, research assertions, cancellation or export boundaries.
 
-
 ### Exact request VM candidates
 
 Related VM candidates on a native Traffic row sends the complete request root
@@ -2282,10 +1613,7 @@ IDs remain labeled correlated context, never exact linkage. Empty or conflicting
 chains produce no request findings; a new selection cannot retain findings from
 an older request, and late responses cannot replace a newer selection.
 
-A CDP row reaches that same exact root only through a DevTools request-id join
-whose retained events include one valid native start. The renderer request id
-is not substituted for the browser start id. Other CDP and incomplete-root rows
-remain in Traffic with an explicit unlinked notice.
+Incomplete-root rows remain in Traffic with an explicit unlinked notice.
 Use the VM workspace navigation for session-wide analysis. Existing captures
 without the new browser artifact-parent event remain unlinked. Generated/runtime
 allocating-source artifacts do not gain network ancestry from equal URLs or bytes.

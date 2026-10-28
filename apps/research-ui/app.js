@@ -1,75 +1,15 @@
-      const passiveSecurityPanel = installPassiveSecurityReport({getRequest: () => apiCatalogResolveSource(state.selectedCaptureIdentity,state.requests).record});
-
-      const localOverrideManager = RebLocalOverrideManager.install({
-        root: document.querySelector('#local-override-manager'),
-        getSession: () => state.debuggerSession,
-        contextKey: () => experimentContextKey(),
-        busy: () => Boolean(state.experimentPending || state.debuggerActionPending || state.experimentNeedsRefresh ||
-          (requestInterception()?.pending_requests ?? 0) > 0 ||
-          ['arming', 'armed', 'handling', 'stopping'].includes(runtimeHooksState()?.state) ||
-          automationRecipesState()?.auto_armed || ['arming', 'running', 'stopping'].includes(automationRecipesState()?.state)),
-        run: async request => currentExperimentReceipt(await runExperimentAction(request))
-      });
-
-      const elementScreenshotPanel = RebElementScreenshot.install({getState: () => state.debuggerSession});
-      const trafficCaptureExport = installTrafficCaptureExport(
-        document.querySelector('#traffic-capture-export'),
-        () => state.requests.find(request => request.id === state.selectedRequestId)
-      );
-      const apiCatalogPanel = installApiObservationCatalog({
-        getRequests: () => state.requests,
-        openRequest: request => {
-          const identity = investigationRequestIdentity(request);
-          if (!identity || !openInvestigation({kind: 'request', identity, inspectorTab: 'headers',
-            relation: 'Catalog source matched the exact backend instance, capture epoch, request, target and original monotonic start. Shapes describe observations only.'})) return false;
-          return true;
-        }
-      });
-
-      const capturedClientWorkflow = installCapturedClientWorkflow({
-        getRequest: () => state.requests.find(request => request.id === state.selectedRequestId),
-        getRequests: () => state.requests,
-        getRun: () => selectedRepeaterEntry(),
-        contextKey: () => experimentContextKey(),
-        editRevision: () => state.repeaterDraftRevision ?? 0,
-        hasDraft: () => Boolean(elements.repeaterRequestUrl.value || elements.repeaterRequestBody.value || elements.repeaterRequestHeaders.value || state.repeaterDraftDirty || state.repeaterVariablesDirty),
-        prepareContext: async () => {
-          if (state.experimentPending || state.debuggerActionPending || repeaterState()?.active_execution) throw new TypeError('Wait for the current disposable action to finish.');
-          const created = !requestInterception()?.isolated;
-          if (created) {
-            const receipt = currentExperimentReceipt(await runExperimentAction({action:'create_request_interception_experiment'}));
-            if (!receipt) throw new TypeError(state.experimentError || 'The isolated blank page could not be confirmed.');
-          }
-          const context = requestInterception();
-          if (!context?.isolated || context.target_id !== state.debuggerSession?.target?.id || !['ready','error'].includes(context.state) ||
-              !['running','paused'].includes(state.debuggerSession?.state)) throw new TypeError('The exact disposable page is not ready.');
-          return {key:experimentContextKey(),created};
-        },
-        writeDraft: (source,context) => {
-          elements.repeaterRequestUrl.value = source.input.url;
-          elements.repeaterRequestMethod.value = source.input.method;
-          elements.repeaterRequestHeaders.value = JSON.stringify(Object.fromEntries(source.input.headers),null,2);
-          elements.repeaterRequestBody.value = source.input.body;
-          state.repeaterBodyRepresentation = {text:source.input.body,display:elements.repeaterRequestBody.value};
-          elements.repeaterRequestTimeout.value = String(source.input.timeout_ms);
-          state.repeaterSelectedHistoryId = null; state.repeaterExpectedHistoryId = null;
-          state.repeaterPrefillKey = null; state.repeaterHeadersSource = null; state.repeaterQuerySource = null;
-          markRepeaterDraftChanged(); refreshRepeaterStructuredEditors(true);
-          state.repeaterCaptureSource = {source,context,importRevision:state.repeaterDraftRevision};
-        },
-        getRunCapture: (run,context) => {
-          const retained = state.repeaterCaptureRuns;
-          const link = retained?.context === context ? retained.links.find(item => item.id === run?.id) : null;
-          return link ? {identity:retained.source.identity,evidence:retained.source.evidence,relation:link.relation} : null;
-        },
-        openRepeater: () => { state.experimentMode = 'repeater'; showScreen('experiments'); elements.repeaterRequestUrl.focus({preventScroll:true}); },
-        notice: message => { investigationNotice(message); setExperimentNotice('ready',message); }
-      });
-
+// Browser instrumentation is native-only. This viewer never attaches a debugger.
+const sourceFactsPanel = createSourceFactsPanel({
+  getSource: selectedSource, onNavigate: revealSourceFactRange,
+  openSidebar() { state.sourceSidebarOpen = true; renderSourceSidebar(); }
+});
+const capturedExportPanel = installCapturedExportDialog({
+  getRun: () => null, contextKey: () => null, getRunCapture: () => null,
+  notice: message => investigationNotice(message)
+});
       const evidencePackagePanel = createEvidencePackagePanel({getContext: () => ({
         requestId: evidenceRequestKey(state.requests.find(request => request.id === state.selectedRequestId)),
         requestEvents: state.requests.find(request => request.id === state.selectedRequestId)?.events ?? [],
-        requestCorrelated: evidenceDebuggerRequest(state.requests.find(request => request.id === state.selectedRequestId)),
         events: state.events, artifacts: state.artifacts, eventsLimited: state.eventsLimited
       })});
 
@@ -93,22 +33,11 @@
       // Ordinary refresh/navigation keeps file drafts in the owned component.
       // A departing document disposes it; BFCache suspension only retires work.
       window.addEventListener('pagehide', event => {
-        if (typeof retireCandidateExperimentPending === 'function') retireCandidateExperimentPending();
         evidenceWorkspace.setVisible(false);
         if (!event.persisted) evidenceWorkspace.disposeComparison();
       });
       window.addEventListener('pageshow', () => {
         evidenceWorkspace.setVisible(!document.querySelector('#screen-evidence').hidden);
-      });
-
-      const sourceFactsPanel = createSourceFactsPanel({
-        getSource: selectedSource,
-        onNavigate: revealSourceFactRange,
-        openSidebar() {
-          if (state.sourceHooksOpen) closeSourceHooks(false);
-          state.sourceSidebarOpen = true;
-          renderSourceSidebar();
-        }
       });
 
       function acceptVmOpcodeWorkspace(document, requestId, etag = null, embedded = false) {
@@ -259,24 +188,11 @@
         elements.networkNotice.hidden = false;
       }
 
-      function networkContentCaptureEnabled() {
-        return state.sessionMode === 'live' && state.debuggerSession?.network?.capture_enabled === true;
-      }
-
-      function networkContentCaptureActive() {
-        const coverage = state.debuggerSession?.network?.capture_status;
-        return networkContentCaptureEnabled() && !state.debuggerRefreshFailed &&
-          (coverage ? coverage.attached_targets > 0 && ['ready', 'partial'].includes(coverage.state)
-            : ['running', 'paused'].includes(state.debuggerSession?.state));
-      }
-
       // Both refresh paths project the same status so neither can erase the other's gaps.
       // Summaries describe the scanned store/tail, independently of either rendered window.
       // A healthy capture leaves this line hidden. Window, target-mode, and
       // Network.enable explanations stay in the README; only gaps and failures show here.
       function renderNetworkNotice() {
-        const contentCapture = networkContentCaptureEnabled();
-        const active = networkContentCaptureActive();
         const gapCount = shownSequenceGaps();
         const reportedDrops = shownQueueDrops();
         const messages = [];
@@ -305,58 +221,7 @@
           if (kind === 'empty') kind = 'gap';
           messages.push(`The queue reports ${state.queueDropsSaturated ? 'at least ' : ''}${reportedDrops} dropped ${reportedDrops === 1n ? 'event' : 'events'}${gapCount > 0n ? '; counts may overlap sequence gaps' : `; no sequence jump is visible in ${eventCountScopeLabel()}`}.`);
         }
-        if (contentCapture) {
-          if (active) {
-            if (kind === 'empty') kind = 'active';
-          } else {
-            if (kind !== 'malformed') kind = 'disconnected';
-            messages.push(state.debuggerRefreshFailed ? 'The live debugger is disconnected.'
-              : state.debuggerSession?.state === 'crashed' ? 'The captured browser target crashed.'
-                : 'Network capture is waiting for an attached browser target.');
-            messages.push(state.requests.length ? 'The last recorded requests remain visible.' : 'No captured network requests are available.');
-          }
-          const coverage = state.debuggerSession.network.capture_status;
-          if (coverage) {
-            if (kind === 'active' && (coverage.state !== 'ready' || coverage.gaps > 0 || (coverage.document_navigation_gaps ?? 0) > 0 || coverage.catalog_incomplete)) kind = 'gap';
-            const targetKind = coverage.scope === 'http-browser-targets' ? 'browser targets' : 'page targets';
-            if (coverage.catalog_incomplete) messages.push('Target catalog is incomplete; counts cover only known targets while recovery is pending.');
-            if (coverage.discovery_stale) messages.push('Target discovery is unavailable; counts are last known and new tabs may not attach.');
-            if (coverage.target_overflow > 0) messages.push(`${coverage.target_overflow} ${targetKind} exceed the capture limit and are not attached.`);
-            if (coverage.failed_targets > 0) messages.push(`${coverage.failed_targets} target attachments failed; retry is pending.`);
-            if (coverage.gaps > 0) messages.push(`${coverage.gaps} HTTP capture owner losses or retirements recorded; coverage may be incomplete.`);
-            const documentGaps = coverage.document_navigation_gaps ?? 0;
-            if (documentGaps > 0) {
-              messages.push(`${documentGaps} document ${documentGaps === 1 ? 'navigation was' : 'navigations were'} already committed when Network capture attached. ${documentGaps === 1 ? 'That document request is' : 'Those document requests are'} absent from the CDP list; later requests on the tab are still recorded. An unmatched native row may still show the host.`);
-            }
-            const unattached = coverage.unattached_targets ?? [];
-            if (unattached.length) {
-              const labels = unattached.slice(0, 3).map(target => `${target.title || 'Untitled target'} [${target.id.length > 48 ? target.id.slice(0, 48) + '…' : target.id}]`);
-              const remaining = unattached.length - labels.length + (coverage.unattached_targets_omitted ?? 0);
-              messages.push(`Not attached: ${labels.join('; ')}${remaining ? `; ${remaining} more targets not listed here` : ''}.`);
-            }
-            const selectedTarget = state.debuggerSession.target?.id;
-            if (selectedTarget && Array.isArray(coverage.attached_target_ids) && !coverage.attached_target_ids.includes(selectedTarget)) {
-              if (kind === 'active') kind = 'gap';
-              messages.push('The selected debugger page is not attached for HTTP capture; its new requests are not being recorded here.');
-            }
-          }
-          const dropped = state.debuggerSession.network.dropped;
-          if (dropped) {
-            if (kind === 'active') kind = 'gap';
-            messages.push(`${dropped} older requests evicted from the 1,000-request window.`);
-          }
-          const queueDrops = state.debuggerSession.network.capture_status?.event_queue_drops ?? 0;
-          if (queueDrops > 0) {
-            if (kind === 'active') kind = 'gap';
-            messages.push(`${queueDrops} debugger events were dropped because the capture event queue was full. The browser connection stayed open, so the page under test kept its capture owner.`);
-          }
-        } else if (kind === 'malformed' || kind === 'disconnected') {
-          messages.push(state.events.length ? 'The last valid evidence remains visible.' : 'No live broker evidence is available.');
-        } else if (!messages.length) {
-          if (state.sessionMode === 'live' && !state.events.length) messages.push('No live requests yet. Start a capture in the attached browser.');
-          else if (state.sessionMode === 'demo') messages.push('Developer evidence loaded. It does not represent a live capture.');
-          else if (state.sessionMode === 'idle') messages.push('No evidence is bundled. Start a live capture to populate the workspace.');
-        }
+
         const failedNotice = trafficFailedRequestNotice(state.requests);
         if (failedNotice) messages.push(failedNotice);
         if (messages.length) setNetworkNotice(kind, messages.join(' '));
@@ -496,17 +361,7 @@
       }
 
       function requestSignalRoot(request) {
-        // A DevTools request-id join is the renderer request_initiated id.
-        // Host/method/time correlation cannot identify an exact native request.
-        if (request?.nativeLink?.kind === 'devtools-request-id') {
-          const requestId = request.nativeLink.requestId;
-          const matches = event => integerText(event, 'request_id') === requestId;
-          const candidates = request.events ?? [];
-          return candidates.find(event => event.type === 'request_started' && matches(event)) ??
-            candidates.find(event => event.type === 'request_initiated' && matches(event)) ?? null;
-        }
-        if (!request || request.origin === 'sample' || request.protocolRequestId ||
-            String(request.operation).startsWith('cdp_')) return null;
+        if (!request || request.origin === 'sample') return null;
         const candidates = request.events ?? [];
         return candidates.find(event => event.type === 'request_started' && integerText(event, 'request_id') !== '0') ??
           candidates.find(event => event.type === 'request_initiated' && integerText(event, 'request_id') !== '0') ??
@@ -989,39 +844,6 @@
 
       function renderSignalRequestProfile() {
         const selectedRequest = state.requests.find(request => request.id === state.selectedRequestId);
-        // Same DevTools-id rule as requestSignalRoot. Kept local so this renderer
-        // can be exercised without pulling in the profile fetch.
-        const devtoolsLink = selectedRequest?.nativeLink?.kind === 'devtools-request-id' &&
-          (selectedRequest.events ?? []).some(event =>
-            (event.type === 'request_started' || event.type === 'request_initiated') &&
-            integerText(event, 'request_id') === selectedRequest.nativeLink.requestId);
-        if ((selectedRequest?.protocolRequestId || String(selectedRequest?.operation).startsWith('cdp_')) &&
-            !devtoolsLink) {
-          const events = fingerprintEventsFromEvents(state.events ?? []);
-          const tabs = new Set(events.map(signalTabKey));
-          const summary = document.createElement('article');
-          summary.className = 'signal-request-card';
-          summary.append(
-            textElement('h3', '', 'No exact native request link'),
-            textElement('p', '', 'This debugger row has no native request id, so Origin Trace will not build a request signal profile from host, method, or timing. Those matches can belong to another request.'),
-            textElement('p', '', `${events.length} fingerprint ${events.length === 1 ? 'event' : 'events'}${tabs.size ? ` on ${tabs.size} tab ${tabs.size === 1 ? 'scope' : 'scopes'}` : ''}.`)
-          );
-          const open = textElement('button', 'secondary-button', 'Open Fingerprinting');
-          open.type = 'button';
-          open.addEventListener('click', () => {
-            state.signalTabId = 'all';
-            showScreen('signals', open);
-          });
-          summary.append(open);
-          if (selectedRequest.nativeCandidateId) {
-            const showNative = textElement('button', 'secondary-button', 'Show correlated native row');
-            showNative.type = 'button';
-            showNative.addEventListener('click', () => selectRequest(selectedRequest.nativeCandidateId));
-            summary.append(showNative);
-          }
-          elements.signalRequestProfile.replaceChildren(summary);
-          return;
-        }
         if (state.signalProfileStatus === 'loading') {
           elements.signalRequestProfile.replaceChildren(textElement('div', 'signal-render-empty', 'Building the selected request profile...'));
           return;
@@ -1222,18 +1044,7 @@
         }
       }
 
-      function renderLiveBrowserTabCount() {
-        const count = state.debuggerSession?.live_tab_count;
-        const available = state.sessionMode === 'live' && !state.debuggerRefreshFailed &&
-          Number.isInteger(count) && count >= 0;
-        elements.signalLiveTabs.textContent = available
-          ? `${count} open ${count === 1 ? 'tab' : 'tabs'}`
-          : state.sessionMode === 'live' ? 'Live tab count unavailable' : 'No live browser';
-        elements.signalLiveTabs.dataset.live = String(available);
-        elements.signalLiveTabs.title = available
-          ? 'Current browser page tabs. Captured tab buttons retain historical evidence.'
-          : 'The live browser tab list is unavailable; captured tab buttons show historical evidence.';
-      }
+      function renderLiveBrowserTabCount() { elements.signalLiveTabs.textContent = 'Captured tabs'; elements.signalLiveTabs.dataset.live = 'false'; elements.signalLiveTabs.title = 'Tab identifiers come from retained native evidence, not a live browser inventory.'; }
 
       function renderFingerprintActivity() {
         const allSignalEvents = fingerprintEventsFromEvents(state.events);
@@ -1402,40 +1213,10 @@
         renderFingerprintDetail(orderedEvents.find(event => signalEventKey(event) === state.selectedSignalEventKey) ?? null);
       }
 
-      function rebuildTrafficRequests(previousSession = null) {
-        // Hidden Traffic must not keep the previous snapshot's bodies alive.
+      function rebuildTrafficRequests() {
+        // Hidden Traffic must not keep the previous request snapshot alive.
         state.trafficRenderedView = null;
-        const previousSelection = state.selectedCaptureIdentity
-          ? apiCatalogResolveSource(state.selectedCaptureIdentity, state.requests).record : null;
-        const cdpRequests = requestsFromDebuggerNetwork(
-          state.debuggerSession?.network, state.nativeRequests, state.debuggerNetworkBodyCache
-        );
-        if (state.sessionMode === 'live') {
-          state.requests = state.debuggerSession?.network?.capture_enabled
-            ? trafficRowsForLiveCapture(cdpRequests, state.nativeRequests) : state.nativeRequests;
-        } else {
-          state.requests = state.nativeRequests;
-        }
-        const oldOwner = trafficHttpSnapshotOwner(previousSession, state.sessionMode);
-        const newOwner = trafficHttpSnapshotOwner(state.debuggerSession, state.sessionMode);
-        const snapshotReset = previousSession && previousSelection && !trafficHttpSnapshotContinues(oldOwner, newOwner);
-        const retainedSelection = previousSelection && trafficRetainedFocusRequest(previousSelection, state.requests, oldOwner, newOwner);
-        if (retainedSelection) {
-          state.selectedCaptureIdentity = apiCatalogRequestIdentity(retainedSelection);
-          // Old-epoch asynchronous details must not relabel the renewed selection.
-          state.originTraceController?.abort();
-          state.originTraceGeneration += 1;
-          state.signalProfileGeneration += 1;
-        }
-        syncTrafficComparison();
-        const selected = apiCatalogResolveSource(state.selectedCaptureIdentity, state.requests).record;
-        const previousRetention = trafficRetainedHttpIdentity(previousSelection);
-        if (state.selectedCaptureIdentity && (snapshotReset || !selected || previousRetention && trafficRetainedHttpIdentity(selected) !== previousRetention)) {
-          resetRequestSelection();
-          state.trafficSelectionNotice = 'The selected captured request expired or its exact source changed. Choose another request.';
-          investigationNotice(state.trafficSelectionNotice, 'stale');
-        }
-        apiCatalogPanel.sync();
+        state.requests = state.nativeRequests;
       }
 
       function renderShellStatus() {
@@ -1447,20 +1228,15 @@
           (!state.artifactReceiverConnected || state.artifactReceiverError);
         const offline = brokerOffline;
         const connecting = live && state.broker === 'connecting';
-        const contentCapture = networkContentCaptureEnabled();
-        const networkActive = networkContentCaptureActive();
-        const modeLabel = live ? (contentCapture ? 'Live content' : offline ? 'Live offline'
+        const modeLabel = live ? (offline ? 'Live offline'
           : artifactOffline ? 'Live degraded' : 'Live session')
           : idle ? 'Ready' : preview ? 'Preview' : 'Demo evidence';
-        const captureLabel = networkActive && (offline || connecting) ? 'Network only'
-          : connecting ? 'Connecting' : offline ? 'Offline' : artifactOffline ? 'Artifacts offline'
+        const captureLabel = connecting ? 'Connecting' : offline ? 'Offline' : artifactOffline ? 'Artifacts offline'
           : live ? 'Capturing' : idle ? 'No session' : preview ? 'Preview' : 'Demo';
         elements.sessionMode.textContent = modeLabel;
         elements.sessionMode.dataset.kind = state.sessionMode;
         elements.sessionMode.title = live
-          ? contentCapture
-            ? 'CDP request and response content capture is enabled for this session. Retained values, including credentials, are shown unchanged. Capture is bounded and local.'
-            : 'Only live broker evidence is shown; sample rows are hidden.'
+          ? 'Only native broker evidence is shown; sample rows are hidden.'
           : idle
             ? 'No evidence is bundled. Start a live capture to populate the workspace.'
             : preview
@@ -1477,17 +1253,12 @@
             : live ? 'broker connected' : idle ? 'no capture session'
               : preview ? 'standalone preview' : 'demo evidence loaded';
         elements.sampleStatus.textContent = live
-          ? networkActive && (offline || connecting) ? 'network capture only'
-            : offline
+          ? offline
             ? state.requests.length ? 'last requests retained' : state.events.length ? 'last live evidence retained' : 'no live evidence'
             : artifactOffline ? 'artifact capture offline'
             : 'sample rows hidden'
           : idle || preview ? 'no bundled evidence' : 'developer evidence';
-        if (networkActive && (offline || connecting)) {
-          elements.updated.textContent = 'network capture active';
-        } else if (contentCapture && offline && state.requests.length) {
-          elements.updated.textContent = 'last recorded requests retained';
-        } else if (!state.lastUpdatedLabel) {
+        if (!state.lastUpdatedLabel) {
           elements.updated.textContent = connecting ? 'waiting for evidence'
             : offline ? state.events.length ? 'last valid evidence retained' : 'no live evidence'
               : artifactOffline ? 'artifact capture unavailable'
@@ -1504,7 +1275,6 @@
         state.originTraceController?.abort();
         state.trafficSelectionNotice = state.selectedRequestId === null ? '' : 'The selected request left the retained capture window. Choose another request.';
         state.selectedRequestId = null;
-        state.selectedCaptureIdentity = null;
         state.selectedField = null;
         state.originTrace = null;
         state.selectedTraceRow = null;
@@ -1520,7 +1290,6 @@
         state.signalProfileEtag = null;
         state.signalProfileGeneration += 1;
         evidencePackagePanel.sync();
-        passiveSecurityPanel.sync();
       }
 
       function renderRequestCount(visibleCount, loadedCount) {
@@ -2120,17 +1889,14 @@
         const section = document.createElement('section'); section.className = 'vm-workspace-card';
         section.setAttribute('aria-label', 'Session sources');
         section.append(textElement('h4', '', 'Session sources'));
-        section.append(textElement('p', '', 'Stored artifacts from this evidence session, plus live CDP scripts only when that session is in the current live evidence window. Shared session or target is correlation, not loader provenance and not a guest position.'));
+        section.append(textElement('p', '', 'Stored artifacts from this native evidence session. Shared session or target is correlation, not loader provenance and not a guest position.'));
         const finding = (state.vmFindings ?? []).find(item => item.findingId === state.selectedVmFindingId);
         const interpreter = vmSourceArtifactForFinding(state.artifacts ?? [], finding, state.vmAnalysisSelection);
         const sessionId = interpreter?.session_id;
-        const joined = vmLiveCatalogMatchesSession(state.events, sessionId, state.sessionMode);
         const join = vmSessionSourceJoin({
           artifacts: state.artifacts,
-          scripts: state.debuggerSession?.scripts,
           interpreterArtifactId: workspace.interpreter_artifact_id,
-          sessionId,
-          liveSessionJoined: joined
+          sessionId
         });
         if (!join.scoped) {
           section.append(textElement('p', 'vm-workspace-empty', 'Interpreter artifact is not in the retained catalog, so same-session JavaScript cannot be listed. /api/artifacts is unchanged.'));
@@ -2158,26 +1924,36 @@
             return item;
           });
         }
-        section.append(textElement('h4', '', 'Live CDP scripts'));
-        if (!join.liveJoined) {
-          section.append(textElement('p', 'vm-workspace-empty', 'Live CDP scripts are not joined. They appear only when this interpreter session_id is in the current live evidence window and a debugger is attached. A catalog from another target is not treated as this module\'s loader.'));
-        } else if (join.live.length === 0) {
-          section.append(textElement('p', 'vm-workspace-empty', 'The attached debugger has no JavaScript scripts in its catalog. WebAssembly debugger scripts are omitted; module bytes stay on the stored Wasm artifact.'));
-        } else {
-          if (join.liveOmitted > 0) {
-            section.append(textElement('p', 'vm-workspace-empty', `Showing 32 of ${join.live.length + join.liveOmitted} live JavaScript scripts, preferring challenge-like URLs and generated scripts over browser UI. Omitted scripts remain in Sources.`));
-          }
-          appendVmPagedRows(section, join.live, 'live scripts', entry => {
-            const item = document.createElement('div'); item.className = 'vm-effect-row';
-            item.append(textElement('p', 'vm-effect-detail', `${entry.role} · live script ${entry.script_id} · CDP catalog · ${entry.url || '(anonymous)'}`));
-            item.append(textElement('p', 'vm-effect-detail', entry.relation));
-            const open = textElement('button', 'secondary-button', 'Open live script'); open.type = 'button';
-            open.addEventListener('click', () => { showScreen('sources', open); selectScript(entry.script_id); });
-            item.append(open);
-            return item;
-          });
-        }
         return section;
+      }
+
+      function renderNativeWasmObservations(workspace) {
+        const panel = document.createElement('section');
+        panel.append(textElement('h4', '', 'Native Wasm dispatch observations'),
+          textElement('p', 'vm-workspace-notice', 'Physical module offsets and selectors are not guest-interpreter PCs or recovered guest opcodes. No host causality is inferred from physical-only rows.'));
+        const nativeRow = (row, position) => {
+          const item = document.createElement('details'); item.className = 'vm-effect-row';
+          const summary = document.createElement('summary');
+          summary.append(textElement('span', 'vm-native-row-identity', vmNativeRowIdentityText(row, state.events)), document.createElement('br'),
+            textElement('span', 'vm-native-row-position', position));
+          item.append(summary, textElement('pre', 'vm-effect-detail vm-evidence-audit', JSON.stringify(row, null, 2)));
+          return item;
+        };
+        const rows = Array.isArray(workspace.native_wasm_observations) ? workspace.native_wasm_observations : [];
+        appendVmPagedRows(panel, rows, 'native Wasm observations', row => nativeRow(row, vmNativeWasmPositionText(row)));
+        if (!rows.length) panel.append(textElement('p', 'vm-selection-empty', 'No native Wasm dispatch observations retained.'));
+        const physicalCount = vmNativeAcceptedCount(workspace.native_wasm_observation_count, rows.length);
+        if (physicalCount > rows.length) panel.append(textElement('p', 'vm-workspace-notice',
+          `${physicalCount - rows.length} accepted observations are outside the retained window.`));
+        const guestRows = Array.isArray(workspace.native_guest_samples) ? workspace.native_guest_samples : [];
+        panel.append(textElement('h4', '', 'Native guest state (adapter interpreted)'),
+          textElement('p', 'vm-workspace-notice', 'Actual typed local values and memory bytes are retained. Explicit adapters interpret those values; verified-dataflow labels require a reviewed exact module binding. Guest positions on host links require verified guest semantics plus an exact synchronous retained parent.'));
+        appendVmPagedRows(panel, guestRows, 'native guest samples', row => nativeRow(row, vmNativeGuestPositionText(row)));
+        if (!guestRows.length) panel.append(textElement('p','vm-selection-empty','No native guest samples retained.'));
+        const guestCount = vmNativeAcceptedCount(workspace.native_guest_sample_count, guestRows.length);
+        if (guestCount > guestRows.length) panel.append(textElement('p', 'vm-workspace-notice',
+          `${guestCount - guestRows.length} accepted guest samples are outside the retained window.`));
+        return panel;
       }
 
       function renderVmOpcodeWorkspace(selected) {
@@ -2224,7 +2000,8 @@
           observations.append(textElement('h4', '', 'Retained positions'));
           appendVmPagedRows(observations, row.retainedSamples, 'retained samples', sample => {
             const item = document.createElement('details'); item.className = 'vm-effect-row';
-            item.append(textElement('summary', '', `${sample.provenance ? 'Caller-reported ' : ''}PC ${sample.instruction_pointer} (${sample.instruction_pointer_units}) · handler ${sample.handler_index} · bytecode ${sample.bytecode_artifact_id}`), textElement('pre', 'vm-effect-detail vm-evidence-audit', JSON.stringify(sample, null, 2)));
+            const position = vmNativeIsGuestRow(sample) ? vmNativeGuestPositionText(sample) : sample.module_byte_offset !== undefined ? vmNativeWasmPositionText(sample) : `${sample.provenance ? 'Caller-reported ' : ''}PC ${sample.instruction_pointer} (${sample.instruction_pointer_units}) · handler ${sample.handler_index} · bytecode ${sample.bytecode_artifact_id}`;
+            item.append(textElement('summary', '', sample.module_byte_offset !== undefined ? `${vmNativeRowIdentityText(sample, state.events)} · ${position}` : position), textElement('pre', 'vm-effect-detail vm-evidence-audit', JSON.stringify(sample, null, 2)));
             return item;
           });
           if (!row.retainedSamples.length) observations.append(textElement('p', 'vm-selection-empty', 'No retained PC or guest-byte position.'));
@@ -2242,7 +2019,7 @@
         const panels = document.createElement('div'); panels.className = 'vm-workbench-panels';
         const definitions = [
           ['effects', 'Effects', renderVmEffects],
-          ...(workspace.runtime === 'webassembly' ? [['dispatch', 'Dispatch sites', renderVmDispatchInventory], ['tables', 'Handler tables', renderVmHandlerTables]] : []),
+          ...(workspace.runtime === 'webassembly' ? [['dispatch', 'Dispatch sites', renderVmDispatchInventory], ['tables', 'Handler tables', renderVmHandlerTables], ['native-wasm', 'Native observations', renderNativeWasmObservations]] : []),
           ['bytecode', 'Bytes', renderVmBytecode],
           ['reachability', 'Reachability', renderVmReachability],
           ['coverage', 'Coverage', renderVmWorkspaceCoverage],
@@ -2471,16 +2248,7 @@
 
       let renderedVmFindings = null;
       let renderedVmWorkspace = null;
-      function vmSessionSourceRefreshKey() {
-        const finding = (state.vmFindings ?? []).find(item => item.findingId === state.selectedVmFindingId);
-        const artifact = vmSourceArtifactForFinding(state.artifacts ?? [], finding, state.vmAnalysisSelection);
-        const sessionId = artifact?.session_id ?? '';
-        const stored = (state.artifacts ?? []).filter(item => String(item.session_id) === String(sessionId)).map(item => item.artifact_id);
-        const joined = vmLiveCatalogMatchesSession(state.events, sessionId, state.sessionMode);
-        const scripts = joined ? (state.debuggerSession?.scripts ?? []).filter(script => script?.language !== 'WebAssembly').slice(0, 32)
-          .map(script => `${script.script_id}\u0000${script.url ?? ''}`) : [];
-        return [sessionId, joined, stored.join(','), scripts.join('\n')];
-      }
+      function vmSessionSourceRefreshKey() { const finding=(state.vmFindings??[]).find(item=>item.findingId===state.selectedVmFindingId); const artifact=vmSourceArtifactForFinding(state.artifacts??[],finding,state.vmAnalysisSelection); const sessionId=artifact?.session_id??''; return [sessionId,(state.artifacts??[]).filter(item=>String(item.session_id)===String(sessionId)).map(item=>item.artifact_id).join(',')]; }
       function renderVmLab() {
         const focusedFindingId = document.activeElement?.classList.contains('vm-row')
           ? document.activeElement.dataset.findingId
@@ -2605,16 +2373,15 @@
 
       function renderRequestScopes() {
         const groups = requestTabGroups();
-        const targetScope = state.debuggerSession?.network?.capture_status?.scope === 'http-browser-targets';
         const availableTabs = new Set(groups.map(group => group.id));
         if (state.requestTabId !== 'all' && !availableTabs.has(state.requestTabId)) state.requestTabId = 'all';
         const oldScopes = new Map([...elements.requestTabScopes.children].map(button => [button.dataset.scopeId, button]));
         const focusedScope = elements.requestTabScopes.contains(document.activeElement) ? document.activeElement : null;
-        const buttons = [{id: 'all', label: targetScope ? 'All targets' : 'All tabs', count: state.requests.length}, ...groups.map((group, index) => {
+        const buttons = [{id: 'all', label: 'All tabs', count: state.requests.length}, ...groups.map((group, index) => {
           const domains = [...new Set(group.requests.map(requestDomain))];
           const title = group.requests.map(request => String(request.tabTitle ?? '').trim()).find(Boolean);
           const domain = domains.find(value => value && value !== 'unknown');
-          const fallback = `${targetScope ? 'Target' : 'Tab'} ${index + 1}`;
+          const fallback = `Tab ${index + 1}`;
           const label = group.id === 'unattributed' ? 'Unattributed'
             : title ? (title.length > 42 ? `${title.slice(0, 41)}…` : title)
             : domain || fallback;
@@ -2639,9 +2406,9 @@
           button.tabIndex = state.requestTabId === scope.id ? 0 : -1;
           if (button.children[0].textContent !== scope.label) button.children[0].textContent = scope.label;
           if (button.children[1].textContent !== String(scope.count)) button.children[1].textContent = String(scope.count);
-          button.title = scope.id === 'all' ? targetScope ? 'Show requests from every captured browser target' : 'Show requests from every captured browser tab'
-            : scope.id === 'unattributed' ? targetScope ? 'Events without a browser target identifier' : 'Events without a browser tab identifier'
-              : `${scope.label} · ${scope.domains.join(', ')} · ${targetScope ? 'target' : 'tab'} id ${scope.id}`;
+          button.title = scope.id === 'all' ? 'Show requests from every captured browser tab'
+            : scope.id === 'unattributed' ? 'Events without a browser tab identifier'
+              : `${scope.label} · ${scope.domains.join(', ')} · tab id ${scope.id}`;
           if (created) button.addEventListener('click', () => {
             state.requestTabId = scope.id;
             state.requestDomain = 'all';
@@ -2687,7 +2454,7 @@
 
       function trafficRequestFilterKey() {
         return JSON.stringify([state.requestTabId, state.requestDomain, state.requestType,
-          elements.requestFilter.value.trim().toLowerCase(), elements.requestSearchScope.value === 'content',
+          elements.requestFilter.value.trim().toLowerCase(),
           state.trafficSort, state.trafficSortDirection]);
       }
 
@@ -2711,36 +2478,30 @@
           return;
         }
         state.trafficRenderedView = null;
-        renderWebSocketInspector(document.querySelector('#websocket-inspector'),state.debuggerSession?.network,Boolean(state.debuggerError));
         renderRequestScopes();
         const needle = elements.requestFilter.value.trim().toLowerCase();
-        const includeContent = elements.requestSearchScope.value === 'content';
         const scoped = state.requests.filter(request =>
           (state.requestTabId === 'all' ||
             (request.tabId && request.tabId !== '0' ? request.tabId : 'unattributed') === state.requestTabId) &&
           (state.requestDomain === 'all' || requestDomain(request) === state.requestDomain) &&
           (state.requestType === 'all' || request.type === state.requestType)
         );
-        const search = trafficSearchRequests(scoped, needle, includeContent);
+        const search = trafficSearchRequests(scoped, needle);
         state.trafficSearchMatches = search.matches;
         const visible = trafficSortedRequests(scoped.filter(request => search.matches.has(request.id)), state.trafficSort, state.trafficSortDirection);
         const filterKey = trafficRequestFilterKey();
         const filterChanged = filterKey !== state.trafficFilterKey;
         if (filterChanged) { state.trafficNewIds.clear(); state.trafficWindowStart = 0; state.trafficWindowAnchor = null; }
         state.trafficFilterKey = filterKey;
-        elements.requestSearchStatus.hidden = !includeContent;
-        elements.requestSearchStatus.dataset.kind = search.omitted ? 'partial' : '';
-        const searchMessage = !needle ? 'Search retained headers and text bodies. Content capture is unchanged.'
-          : `${visible.length} matching ${visible.length === 1 ? 'request' : 'requests'} · ` +
-            (search.omitted ? `Partial content search: ${search.inspected} of ${scoped.length} requests inspected, newest first. Narrow tab, domain, or type to search the rest. ` : '') +
-            'Retained text only; truncated prefixes and uncaptured or binary bodies limit coverage.';
-        if (elements.requestSearchStatus.textContent !== searchMessage) elements.requestSearchStatus.textContent = searchMessage;
         const selectedIsVisible = visible.some(request => request.id === state.selectedRequestId);
         const selectionCleared = state.selectedRequestId !== null && !state.requests.some(request => request.id === state.selectedRequestId);
         if (selectionCleared) resetRequestSelection();
-        const knownIds = state.trafficKnownIds;
-        const newIds = new Set(knownIds ? visible.filter(request => !knownIds.has(request.id)).map(request => request.id) : []);
+        // Only a live capture can deliver new requests. Stored, demo and idle
+        // evidence is a fixed set loaded at once, so none of it is "new".
+        const knownIds = state.trafficKnownIds, live = state.sessionMode === 'live';
+        const newIds = new Set(live && knownIds ? visible.filter(request => !knownIds.has(request.id)).map(request => request.id) : []);
         state.trafficKnownIds = new Set(state.requests.map(request => request.id));
+        if (!live) state.trafficNewIds.clear();
         if (!filterChanged) newIds.forEach(id => state.trafficNewIds.add(id));
         for (const id of state.trafficNewIds) if (!state.trafficKnownIds.has(id)) state.trafficNewIds.delete(id);
         const window = trafficWindow(visible, state.trafficWindowStart, state.trafficWindowAnchor);
@@ -2765,8 +2526,7 @@
           empty.textContent = state.requests.length === 0
             ? state.sessionMode === 'live' ? 'No live requests yet. Start a capture in the attached browser.'
               : state.sessionMode === 'demo' ? 'No developer evidence is available.' : 'No capture session is running.'
-            : search.omitted ? 'No matches in inspected content. Narrow the filters to search the omitted requests.'
-              : 'No requests match the current filters. Clear the filter or choose another type.';
+            : 'No requests match the current filters. Clear the filter or choose another type.';
           const hadFocus = elements.requestRows.contains(document.activeElement);
           elements.requestRows.replaceChildren(empty);
           elements.requestRows.tabIndex = 0;
@@ -2784,7 +2544,6 @@
         }
         renderTrafficRows(elements.requestRows, window.rows, {
           selectedId: state.selectedRequestId, newIds,
-          matches: includeContent && needle ? search.matches : null,
           onSelect: id => { selectRequest(id); focusRequestRow(id); }, onKey: moveRequestSelection
         });
         state.trafficPendingCount = state.trafficNewIds.size;
@@ -2832,13 +2591,9 @@
         }
         investigationBeforeSelection();
         state.originTraceController?.abort();
-        const match = elements.requestSearchScope.value === 'content' ? state.trafficSearchMatches?.get(id) : null;
-        if (match?.side) state.inspectorTab = match.mode === 'headers' ? 'headers' : match.side === 'Request' ? 'payload' : 'response';
         const request = state.requests.find(candidate => candidate.id === id);
         if (!request) return;
-        if (state.selectedRequestId !== id) state.repeaterDraftRevision = (state.repeaterDraftRevision ?? 0) + 1;
         state.selectedRequestId = id;
-        state.selectedCaptureIdentity = request.captureRecord ? apiCatalogRequestIdentity(request) : null;
         state.trafficDetailOpen = true;
         state.trafficSelectionNotice = null;
         state.originTrace = null;
@@ -2896,14 +2651,7 @@
       }
 
       function requestTraceRoot(request) {
-        if (request?.nativeLink?.kind === 'devtools-request-id') {
-          const requestId = request.nativeLink.requestId;
-          const matches = event => integerText(event, 'request_id') === requestId;
-          const candidates = request.events ?? [];
-          return candidates.find(event => event.type === 'request_started' && matches(event)) ??
-            candidates.find(event => event.type === 'request_initiated' && matches(event)) ?? null;
-        }
-        if (request?.origin !== 'live' || request.protocolRequestId || String(request.operation).startsWith('cdp_')) return null;
+        if (request?.origin !== 'live') return null;
         const candidates = request.events ?? [];
         return candidates.find(event => event.type === 'request_started' && integerText(event, 'request_id') !== '0') ??
           candidates.find(event => event.type === 'request_initiated' && integerText(event, 'request_id') !== '0') ??
@@ -3023,33 +2771,19 @@
         if (!request?.traceable) {
           const empty = document.createElement('div');
           empty.className = 'field-empty';
-          const linkedRoot = requestTraceRoot(request);
           empty.textContent = request?.origin === 'live'
-            ? request.protocolRequestId
-              ? linkedRoot
-                ? 'Structured fields were not captured. This debugger row joins one native request by its DevTools request id. Related VM candidates uses that request only when its events contain one exact native start.'
-                : 'This debugger request has no exact native-event link. Host, method and timing matches are correlation only. Related VM candidates requires an exact native start; use VM navigation separately for session-wide findings. Fingerprinting lists the session surfaces.'
-              : 'Structured fields were not captured. Request-level origin evidence is still available.'
+            ? 'Structured fields were not captured. Request-level origin evidence is still available.'
             : request?.origin === 'demo'
               ? 'Demo request fields are not traceable. Select a live request for broker-backed origin evidence.'
               : request
                 ? 'This sample request has no trace target in the proof of concept.'
                 : 'Select a request to inspect its fields.';
-          if (request?.nativeCandidateId) {
-            const showNative = document.createElement('button');
-            showNative.type = 'button';
-            showNative.className = 'secondary-button';
-            showNative.textContent = 'Show correlated native row';
-            showNative.addEventListener('click', () => selectRequest(request.nativeCandidateId));
-            empty.append(document.createElement('br'), showNative);
-          }
           elements.fieldTree.replaceChildren(empty);
           const root = requestTraceRoot(request);
           elements.traceTarget.textContent = root
             ? `${request.method} ${request.path} · request ${integerText(root, 'request_id')}`
             : 'No broker-backed trace target selected';
           elements.traceButton.disabled = !root;
-          elements.requestMemoryPivot.disabled = true;
           elements.requestDecoderPivot.disabled = true;
           return;
         }
@@ -3072,7 +2806,6 @@
           ? `request-${state.selectedRequestId} · ${selected.label} · ${selected.path}`
           : 'Select a traceable field';
         elements.traceButton.disabled = !selected;
-        elements.requestMemoryPivot.disabled = !selected;
         elements.requestDecoderPivot.disabled = !selected;
       }
 
@@ -3097,6 +2830,8 @@
 
       function renderInspector() {
         evidencePackagePanel.sync();
+        // History and notebook entries can name inspector tabs that no longer exist.
+        if (![...document.querySelectorAll('.inspector-tab')].some(tab => tab.dataset.inspectorTab === state.inspectorTab)) state.inspectorTab = 'general';
         document.querySelector('#request-package-entry').hidden = state.inspectorTab !== 'evidence';
         document.querySelectorAll('.inspector-tab').forEach(tab => {
           const selected = tab.dataset.inspectorTab === state.inspectorTab;
@@ -3104,35 +2839,23 @@
           tab.tabIndex = selected ? 0 : -1;
         });
         const exchangeInspector = document.querySelector('#exchange-inspector');
-        const showingExchange = ['headers', 'payload', 'preview', 'response'].includes(state.inspectorTab) || state.selectedRequestId === null;
+        const showingGeneral = state.inspectorTab === 'general' || state.selectedRequestId === null;
         const request = state.requests.find(candidate => candidate.id === state.selectedRequestId);
         updateSelectionSummary(request);
-        trafficCaptureExport.sync();
-        passiveSecurityPanel.sync();
-        capturedClientWorkflow.sync();
+
         document.querySelector('.traffic-grid').dataset.detailOpen = String(state.trafficDetailOpen);
         document.querySelector('.detail-pane').hidden = !state.trafficDetailOpen;
-        const showingComparison = state.inspectorTab === 'compare';
-        const comparisonPanel = document.querySelector('#traffic-comparison');
-        comparisonPanel.hidden = !showingComparison;
-        renderTrafficComparison(comparisonPanel, request, showingComparison);
-        exchangeInspector.hidden = !showingExchange || showingComparison;
+        exchangeInspector.hidden = !showingGeneral;
         exchangeInspector.setAttribute('aria-labelledby', `inspector-tab-${state.inspectorTab}`);
         const evidenceToggle = document.querySelector('#request-evidence-toggle');
-        evidenceToggle.textContent = state.inspectorTab === 'evidence' ? 'Headers' : 'Evidence';
+        evidenceToggle.textContent = state.inspectorTab === 'evidence' ? 'General' : 'Evidence';
         evidenceToggle.setAttribute('aria-expanded', String(state.inspectorTab === 'evidence'));
         evidenceToggle.disabled = !request;
         elements.requestCollectionPivot.disabled = !request;
-        elements.requestInspector.hidden = showingExchange || showingComparison;
-        document.querySelector('.detail-pane').classList.toggle('showing-exchange', showingExchange || showingComparison);
-        if (showingComparison) return;
-        if (showingExchange) {
-          renderTrafficDetails(exchangeInspector, request, state.inspectorTab, (value, selection) => {
-            const identity = investigationRequestIdentity(request);
-            investigationDecode(value, {route: identity ? {kind: 'request', identity, inspectorTab: state.inspectorTab} : null,
-              description: `${selection.side} · ${selection.path} · selected inspector value. UTF-8 string bytes are retained; raw HTTP byte offsets are unavailable.${identity ? '' : ' Exact request identity is unavailable.'}`});
-          }, openFieldProvenance, elements.requestSearchScope.value === 'content' && state.trafficSearchMatches?.get(request?.id)?.side
-            ? {...state.trafficSearchMatches.get(request.id), query: elements.requestFilter.value.trim()} : null, state.trafficSelectionNotice);
+        elements.requestInspector.hidden = showingGeneral;
+        document.querySelector('.detail-pane').classList.toggle('showing-exchange', showingGeneral);
+        if (showingGeneral) {
+          renderTrafficDetails(exchangeInspector, request, state.trafficSelectionNotice);
           return;
         }
         elements.requestInspector.setAttribute('aria-labelledby', `inspector-tab-${state.inspectorTab}`);
@@ -3158,34 +2881,6 @@
           elements.prompt.textContent = 'Fingerprint activity before this request';
           elements.fieldTabs.hidden = true;
           elements.traceDock.hidden = !requestTraceRoot(request);
-          if ((request?.protocolRequestId || String(request?.operation).startsWith('cdp_')) && !requestTraceRoot(request)) {
-            const events = fingerprintEventsFromEvents(state.events ?? []);
-            const tabs = new Set(events.map(signalTabKey));
-            elements.prompt.textContent = 'Session fingerprint activity, not a request profile';
-            renderInspectorDetails([
-              {key: 'link', value: 'This debugger row has no native request id. Host, method, and timing matches are not a request profile.', type: 'unavailable'},
-              {key: 'session fingerprint events', value: String(events.length), type: 'count'},
-              {key: 'tab scopes', value: String(tabs.size), type: 'count'}
-            ]);
-            const open = document.createElement('button');
-            open.type = 'button';
-            open.className = 'secondary-button';
-            open.textContent = 'Open Fingerprinting';
-            open.addEventListener('click', () => {
-              state.signalTabId = 'all';
-              showScreen('signals', open);
-            });
-            elements.fieldTree.append(open);
-            if (request?.nativeCandidateId) {
-              const showNative = document.createElement('button');
-              showNative.type = 'button';
-              showNative.className = 'secondary-button';
-              showNative.textContent = 'Show correlated native row';
-              showNative.addEventListener('click', () => selectRequest(request.nativeCandidateId));
-              elements.fieldTree.append(showNative);
-            }
-            return;
-          }
           if (state.signalProfileStatus === 'loading') {
             renderInspectorMessage('Building a bounded profile from retained browser-signal evidence.');
             return;
@@ -3220,15 +2915,6 @@
           elements.prompt.textContent = 'Initiator';
           elements.fieldTabs.hidden = true;
           elements.traceDock.hidden = true;
-          if (isFieldCallSites(request?.initiator) && request.initiator.sites.length) {
-            const rows = request.initiator.sites.flatMap((site, index) => [
-              {key: `call site ${index + 1}`, value: `${site.function || '(anonymous)'} · ${site.source || '(URL unavailable)'}:${site.line + 1}:${site.column + 1}`, type: 'observed'},
-              {key: 'source identity', value: `target ${site.target_id} · script ${site.script_id}${site.source_hash ? ' · hash ' + site.source_hash : ''}`, type: 'id'}
-            ]);
-            for (const gap of request.initiator.gaps) rows.push({key: 'capture gap', value: gap.replaceAll('_', ' '), type: 'unavailable'});
-            renderInspectorDetails(rows);
-            return;
-          }
           const lifecycleEvents = request?.events ?? [];
           const correlated = lifecycleEvents.find(event => event.protocol_version >= 2 && event.initiator_process_id > 0);
           const initiated = lifecycleEvents.find(event => event.type === 'request_initiated');
@@ -3236,9 +2922,6 @@
           if (correlated || initiated || contextEvent) {
             const source = correlated ?? initiated ?? contextEvent;
             const details = [{ key: 'correlation', value: request.id, type: 'id' }];
-            if (request.protocolRequestId || String(request.operation).startsWith('cdp_')) {
-              details.unshift({key: 'link confidence', value: 'Unverified host, method and timing match. These native identifiers may belong to another request or tab.', type: 'Correlated'});
-            }
             if (contextEvent) {
               details.push({ key: 'browser context', value: browserContextToken(contextEvent), type: 'token' });
             }
@@ -3274,7 +2957,7 @@
               { key: 'last event', value: request.lastTimestamp, type: 'ns' },
               { key: 'duration', value: trafficTimeLabel(request.time), type: 'time' },
               { key: 'lifecycle', value: request.operation, type: 'state' },
-              { key: request.protocolRequestId || String(request.operation).startsWith('cdp_') ? 'unverified native candidate events' : 'events', value: request.events.length, type: 'count' },
+              { key: 'events', value: request.events.length, type: 'count' },
               { key: 'phase breakdown', value: 'DNS, connection, TLS, waiting and download phases were not captured.', type: 'unavailable' }
             ]);
           } else if (request) {
@@ -3288,18 +2971,10 @@
           return;
         }
 
-
       }
 
       function renderEvidence() {
         evidencePackagePanel.sync();
-        document.querySelectorAll('.nav-button[data-screen="experiments"]')
-          .forEach(button => {
-            button.disabled = false;
-            button.title = state.selectedField
-              ? 'Open disposable experiments for the selected request field.'
-              : 'Experiments use the attached debugger target; selecting a request field is optional.';
-          });
         evidenceWorkspace.sync();
         const currentTrace = state.originTraceKey === originTraceSelection()?.key ? state.originTrace : null;
         elements.evidenceLinkCount.textContent = String(currentTrace?.steps?.length ?? 0);
@@ -3492,7 +3167,7 @@
         elements.traceLoad.disabled = !selection || state.originTraceStatus === 'loading';
         elements.traceLoad.textContent = state.originTrace ? 'Refresh trace' : 'Load trace';
         elements.backtraceSubtitle.textContent = selection
-          ? `${request.method} ${request.path}${request.nativeLink?.kind === 'devtools-request-id' ? ' · DevTools request id join' : ''}`
+          ? `${request.method} ${request.path}`
           : 'Request events and their recorded predecessors';
         const trace = selection && state.originTraceKey === selection.key ? state.originTrace : null;
         const hasSteps = Boolean(trace?.steps.length);
@@ -3554,2470 +3229,6 @@
         }
       }
 
-      function requestInterception() {
-        return state.debuggerSession?.request_interception ?? null;
-      }
-
-      function actionScopeState() {
-        return state.debuggerSession?.action_scope ?? null;
-      }
-
-      function repeaterState() {
-        return state.debuggerSession?.repeater ?? null;
-      }
-
-      function objectExperimentState() {
-        return state.debuggerSession?.object_experiment ?? null;
-      }
-
-      function runtimeHooksState() {
-        return state.debuggerSession?.runtime_hooks ?? null;
-      }
-
-      function automationRecipesState() {
-        return state.debuggerSession?.automation_recipes ?? null;
-      }
-
-      function setExperimentMode(mode, focus = false) {
-        if (!['interceptor', 'repeater', 'object', 'hooks', 'automation', 'screenshot'].includes(mode)) return;
-        if (state.sourceHooksOpen) closeSourceHooks(false);
-        state.experimentMode = mode;
-        elements.interceptionWorkspace.hidden = mode !== 'interceptor';
-        elements.repeaterWorkspace.hidden = mode !== 'repeater';
-        elements.objectWorkspace.hidden = mode !== 'object';
-        elements.hooksWorkspace.hidden = mode !== 'hooks';
-        elements.automationWorkspace.hidden = mode !== 'automation';
-        elements.experimentModeButtons.forEach(button => {
-          const selected = button.dataset.experimentMode === mode;
-          button.setAttribute('aria-selected', String(selected));
-          button.tabIndex = selected ? 0 : -1;
-          if (selected && focus) button.focus();
-        });
-        renderExperiment();
-      }
-
-      function setExperimentNotice(kind, message) {
-        elements.experimentNotice.dataset.kind = kind;
-        elements.experimentNotice.textContent = message;
-      }
-
-      function renderActionScope() {
-        const scope = actionScopeState();
-        const experiment = requestInterception();
-        const sharedMode = ['interceptor', 'automation'].includes(state.experimentMode);
-        elements.actionScopePanel.hidden = !sharedMode;
-        const busy = state.experimentPending || state.debuggerActionPending ||
-          (experiment?.pending_requests ?? 0) > 0 || experiment?.state === 'running' ||
-          automationRecipesState()?.auto_armed ||
-          ['arming', 'running', 'stopping'].includes(automationRecipesState()?.state);
-        const contextExists = Boolean(experiment?.isolated);
-        if (scope && state.actionScopeDraftRevision !== scope.revision) {
-          state.actionScopeDraftMode = scope.mode;
-          state.actionScopeDraftRevision = scope.revision;
-        }
-        const draftMode = state.actionScopeDraftMode ?? scope?.mode ?? 'global';
-        const targets = scope?.targets ?? [];
-        const previousTarget = elements.actionScopeTarget.value;
-        const selectedTarget = targets.some(target => target.id === previousTarget)
-          ? previousTarget
-          : scope?.target_id && targets.some(target => target.id === scope.target_id)
-            ? scope.target_id : targets[0]?.id ?? '';
-        const options = targets.map(target => {
-          const option = document.createElement('option'); option.value = target.id;
-          option.textContent = `${target.title || 'Untitled page'} · ${target.url || 'about:blank'}`;
-          return option;
-        });
-        if (!options.length) {
-          const option = document.createElement('option'); option.value = ''; option.textContent = 'No disposable pages';
-          options.push(option);
-        }
-        elements.actionScopeTarget.replaceChildren(...options);
-        elements.actionScopeTarget.value = selectedTarget;
-        elements.actionScopeGlobal.setAttribute('aria-pressed', String(draftMode === 'global'));
-        elements.actionScopeTargeted.setAttribute('aria-pressed', String(draftMode === 'target'));
-        elements.actionScopeGlobal.disabled = !sharedMode || !contextExists || busy;
-        elements.actionScopeTargeted.disabled = !sharedMode || !contextExists || busy || targets.length === 0;
-        elements.actionScopeTarget.disabled = !sharedMode || !contextExists || busy || draftMode !== 'target' || targets.length === 0;
-        const unchanged = scope && draftMode === scope.mode &&
-          (draftMode === 'global' || selectedTarget === scope.target_id);
-        elements.actionScopeApply.disabled = !sharedMode || !contextExists || busy || !scope || unchanged ||
-          (draftMode === 'target' && !selectedTarget);
-        elements.actionScopeNewUrl.disabled = !contextExists || busy || targets.length >= (scope?.limits.targets ?? 8);
-        elements.actionScopeAdd.disabled = elements.actionScopeNewUrl.disabled;
-        if (!sharedMode) {
-          elements.actionScopeBadge.dataset.kind = contextExists ? '' : 'offline';
-          elements.actionScopeBadge.textContent = 'Target only';
-          const labels = {repeater: 'Repeater', object: 'Object Lab', hooks: 'Runtime Hooks', screenshot: 'Element screenshot'};
-          elements.actionScopeMessage.textContent = `${labels[state.experimentMode]} stays on the primary disposable page. Shared scope applies to Interceptor and Automation.`;
-        } else {
-          elements.actionScopeBadge.dataset.kind = ['error', 'partial'].includes(scope?.state) ? 'error'
-            : scope?.state === 'ready' ? '' : 'offline';
-          elements.actionScopeBadge.textContent = scope?.state === 'ready'
-            ? scope.mode === 'target' ? 'One page' : 'All pages'
-            : scope?.state === 'error' ? 'Error' : 'Not set';
-          elements.actionScopeMessage.textContent = scope?.message ?? 'Create an isolated context to choose action scope.';
-        }
-        elements.actionScopeTargets.replaceChildren(...(targets.length ? targets.map(target => {
-          const row = document.createElement('div'); row.className = 'action-scope-target';
-          row.dataset.matched = String(target.matched);
-          const title = textElement('strong', '', target.title || 'Untitled page');
-          const meta = textElement('small', '', `${target.connected ? 'connected' : 'disconnected'} · ${target.url || 'about:blank'}`);
-          row.append(title, meta);
-          if (target.id !== experiment?.target_id) {
-            const close = document.createElement('button'); close.type = 'button'; close.textContent = '×';
-            close.title = `Close ${target.title || 'disposable page'}`;
-            close.setAttribute('aria-label', close.title);
-            close.disabled = busy;
-            close.addEventListener('click', () => runExperimentAction({action: 'close_experiment_page', target_id: target.id}));
-            row.append(close);
-          }
-          return row;
-        }) : [textElement('span', 'experiment-empty', 'No disposable pages.') ]));
-      }
-
-      function parseExperimentHeaders(value, label) {
-        const source = value.trim();
-        if (!source) return {};
-        let headers;
-        try { headers = JSON.parse(source); }
-        catch { throw new TypeError(`${label} must be a JSON object.`); }
-        if (!isPlainObject(headers) || Object.values(headers).some(item => typeof item !== 'string')) {
-          throw new TypeError(`${label} must map header names to text values.`);
-        }
-        return headers;
-      }
-
-      function setExperimentRuleVisibility() {
-        const mode = elements.experimentRuleMode.value;
-        elements.experimentRewriteOptions.hidden = mode !== 'rewrite';
-        elements.experimentFulfillOptions.hidden = mode !== 'fulfill';
-      }
-
-      function prefillExperimentRequest() {
-        const request = state.requests.find(candidate => candidate.id === state.selectedRequestId);
-        if (!request) return;
-        const key = `${request.id}:${request.method}:${request.path}`;
-        if (state.experimentPrefillKey === key) return;
-        state.experimentPrefillKey = key;
-        let requestUrl = request.path;
-        if (!/^https?:\/\//i.test(requestUrl)) {
-          requestUrl = `https://checkout.acme.test${requestUrl.startsWith('/') ? '' : '/'}${requestUrl}`;
-        }
-        try {
-          const parsed = new URL(requestUrl);
-          parsed.search = '';
-          parsed.hash = '';
-          elements.experimentRequestUrl.value = parsed.toString();
-          elements.experimentUrlPattern.value = `${parsed.origin}${parsed.pathname}*`;
-        } catch {
-          elements.experimentRequestUrl.value = '';
-          elements.experimentUrlPattern.value = '*';
-        }
-        elements.experimentRequestMethod.value = /^[A-Z][A-Z0-9!#$%&'*+.^_`|~-]{0,31}$/.test(request.method)
-          ? request.method : 'GET';
-        elements.experimentRequestBody.value = '';
-      }
-
-      function experimentFact(label, value) {
-        const fact = document.createElement('div');
-        const name = document.createElement('span'); name.textContent = label;
-        const detail = document.createElement('strong'); detail.textContent = value;
-        fact.append(name, detail);
-        return fact;
-      }
-
-      function renderExperimentResult(experiment) {
-        const result = experiment?.result;
-        if (!result) {
-          elements.experimentResult.className = 'experiment-empty';
-          elements.experimentResult.textContent = experiment?.state === 'disposed'
-            ? 'No response was retained before the disposable context was deleted.'
-            : 'Create a context, arm a rule, then run a request.';
-          elements.experimentResultMeta.textContent = experiment?.last_request
-            ? `${experiment.last_request.method} ${experiment.last_request.url}`
-            : 'No experiment request has run.';
-          elements.experimentResultBadge.dataset.kind = 'offline';
-          elements.experimentResultBadge.textContent = 'No result';
-          return;
-        }
-        elements.experimentResult.className = '';
-        const summary = document.createElement('div'); summary.className = 'experiment-result-summary';
-        summary.append(
-          experimentFact('Status', result.ok ? `${result.status} ${result.status_text}`.trim() : 'Request error'),
-          experimentFact('Response URL', result.url || 'Not available'),
-          experimentFact('Body', `${utf8ByteLength(result.body)} bytes${result.body_truncated ? ' · truncated' : ''}`)
-        );
-        const body = document.createElement('pre'); body.className = 'experiment-result-body';
-        body.textContent = result.ok ? result.body || '(empty response body)' : result.error;
-        elements.experimentResult.replaceChildren(summary, body);
-        elements.experimentResultMeta.textContent = experiment.last_request
-          ? `${experiment.last_request.method} ${experiment.last_request.url} · ${result.headers.length} response headers${result.headers_truncated ? ' · truncated' : ''}`
-          : `${result.headers.length} response headers${result.headers_truncated ? ' · truncated' : ''}`;
-        elements.experimentResultBadge.dataset.kind = result.ok ? '' : 'error';
-        elements.experimentResultBadge.textContent = result.ok ? 'Complete' : 'Error';
-      }
-
-      function renderExperimentAudit(experiment) {
-        const audit = experiment?.audit ?? [];
-        const countLabel = `${audit.length} ${audit.length === 1 ? 'entry' : 'entries'}`;
-        elements.experimentAuditCount.textContent = experiment?.audit_evictions
-          ? `${countLabel} · ${experiment.audit_evictions} evicted`
-          : countLabel;
-        elements.experimentAuditCount.dataset.kind = audit.length ? '' : 'offline';
-        if (!audit.length) {
-          elements.experimentAudit.replaceChildren(textElement('div', 'experiment-empty', 'No intercepted requests yet.'));
-          return;
-        }
-        elements.experimentAudit.replaceChildren(...[...audit].reverse().map(entry => {
-          const row = document.createElement('div'); row.className = 'experiment-audit-row';
-          const title = textElement('div', 'experiment-audit-title', `${entry.method || 'REQUEST'} ${entry.url || '(invalid URL)'}`);
-          const outcome = textElement('div', 'experiment-audit-outcome', entry.outcome.replaceAll('_', ' '));
-          const occurred = new Date(entry.occurred_at_ms).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
-          const target = entry.target_id ? ` · page ${entry.target_id.slice(0, 12)}` : '';
-          const meta = textElement('div', 'experiment-audit-meta', `${occurred} · ${entry.resource_type} · ${entry.rule_mode} · ${entry.request_id}${target} · ${entry.detail}`);
-          row.append(title, outcome, meta);
-          return row;
-        }));
-      }
-
-      function parseRepeaterVariables(value) {
-        const source = value.trim();
-        if (!source) return {};
-        let variables;
-        try { variables = JSON.parse(source); }
-        catch { throw new TypeError('Session variables must be a JSON object.'); }
-        if (!isPlainObject(variables) || Object.values(variables).some(item => typeof item !== 'string')) {
-          throw new TypeError('Session variables must map names to text values.');
-        }
-        return variables;
-      }
-
-      function repeaterHeaderObject(headers) {
-        return Object.fromEntries(headers.map(header => [header.name, header.value]));
-      }
-
-      function parseRepeaterHeaderRows(value) {
-        if (!value.trim()) return [];
-        try {
-          const headers = JSON.parse(value);
-          if (!headers || typeof headers !== 'object' || Array.isArray(headers)) return [];
-          return Object.entries(headers)
-            .filter(([, headerValue]) => typeof headerValue === 'string')
-            .map(([key, headerValue]) => ({key, value: headerValue, enabled: true}));
-        } catch { return []; }
-      }
-
-      function serializeRepeaterHeaderRows(rows) {
-        const headers = Object.fromEntries(rows
-          .filter(row => row.enabled && row.key.trim())
-          .map(row => [row.key.trim(), row.value]));
-        return Object.keys(headers).length ? JSON.stringify(headers, null, 2) : '';
-      }
-
-      function decodeRepeaterQueryComponent(value) {
-        try { return decodeURIComponent(value.replaceAll('+', ' ')); }
-        catch { return value; }
-      }
-
-      function encodeRepeaterQueryComponent(value) {
-        return encodeURIComponent(value).replaceAll('%7B', '{').replaceAll('%7D', '}');
-      }
-
-      function repeaterUrlParts(value) {
-        const hashIndex = value.indexOf('#');
-        const fragment = hashIndex < 0 ? '' : value.slice(hashIndex);
-        const withoutFragment = hashIndex < 0 ? value : value.slice(0, hashIndex);
-        const queryIndex = withoutFragment.indexOf('?');
-        return {
-          base: queryIndex < 0 ? withoutFragment : withoutFragment.slice(0, queryIndex),
-          query: queryIndex < 0 ? '' : withoutFragment.slice(queryIndex + 1),
-          fragment
-        };
-      }
-
-      function parseRepeaterQueryRows(value) {
-        const {query} = repeaterUrlParts(value);
-        if (!query) return [];
-        return query.split('&').filter(Boolean).map(parameter => {
-          const separator = parameter.indexOf('=');
-          return {
-            key: decodeRepeaterQueryComponent(separator < 0 ? parameter : parameter.slice(0, separator)),
-            value: decodeRepeaterQueryComponent(separator < 0 ? '' : parameter.slice(separator + 1)),
-            enabled: true
-          };
-        });
-      }
-
-      function repeaterUrlWithQuery(value, rows) {
-        const {base, fragment} = repeaterUrlParts(value);
-        const query = rows.filter(row => row.enabled && row.key.trim()).map(row =>
-          `${encodeRepeaterQueryComponent(row.key.trim())}=${encodeRepeaterQueryComponent(row.value)}`
-        ).join('&');
-        return `${base}${query ? `?${query}` : ''}${fragment}`;
-      }
-
-      function repeaterEditorRowValues(container) {
-        return [...container.querySelectorAll('.repeater-kv-row:not([data-new-row="true"])')].map(row => ({
-          key: row.querySelector('[data-repeater-kv-key]').value,
-          value: row.querySelector('[data-repeater-kv-value]').value,
-          enabled: row.querySelector('[data-repeater-kv-enabled]').checked
-        }));
-      }
-
-      function markRepeaterDraftChanged() {
-        state.repeaterDraftRevision = (state.repeaterDraftRevision ?? 0) + 1;
-        state.repeaterDraftDirty = true;
-        state.experimentError = null;
-        renderRepeaterVariableStatus();
-      }
-
-      function syncRepeaterStructuredEditor(kind) {
-        const container = kind === 'headers' ? elements.repeaterHeaderRows : elements.repeaterQueryRows;
-        const rows = repeaterEditorRowValues(container);
-        if (kind === 'headers') {
-          elements.repeaterRequestHeaders.value = serializeRepeaterHeaderRows(rows);
-          state.repeaterHeadersSource = elements.repeaterRequestHeaders.value;
-        } else {
-          elements.repeaterRequestUrl.value = repeaterUrlWithQuery(elements.repeaterRequestUrl.value, rows);
-          state.repeaterQuerySource = elements.repeaterRequestUrl.value;
-        }
-        markRepeaterDraftChanged();
-      }
-
-      function createRepeaterEditorRow(kind, entry = {key: '', value: '', enabled: true}, newRow = false) {
-        const row = document.createElement('div');
-        row.className = 'repeater-kv-row';
-        row.dataset.newRow = String(newRow);
-        row.dataset.enabled = String(entry.enabled);
-        row.setAttribute('role', 'row');
-        const toggle = document.createElement('label'); toggle.className = 'repeater-kv-toggle';
-        const checkbox = document.createElement('input'); checkbox.type = 'checkbox'; checkbox.checked = entry.enabled;
-        checkbox.name = `${kind}-enabled`; checkbox.dataset.repeaterKvEnabled = '';
-        const key = document.createElement('input'); key.type = 'text'; key.className = 'repeater-kv-input';
-        key.value = entry.key; key.placeholder = newRow ? 'New key' : '';
-        key.name = `${kind}-key`; key.autocomplete = 'off'; key.spellcheck = false;
-        key.maxLength = kind === 'headers' ? 256 : 2048; key.dataset.repeaterKvKey = '';
-        key.setAttribute('aria-label', `${kind === 'headers' ? 'Header' : 'Query parameter'} name`);
-        const keyCell = document.createElement('span'); keyCell.className = 'repeater-kv-cell';
-        keyCell.setAttribute('role', 'cell'); keyCell.append(key);
-        const value = document.createElement('input'); value.type = 'text'; value.className = 'repeater-kv-input';
-        value.value = entry.value; value.placeholder = newRow ? 'New value' : '';
-        value.name = `${kind}-value`; value.autocomplete = 'off'; value.spellcheck = false;
-        value.maxLength = kind === 'headers' ? 16384 : 8192; value.dataset.repeaterKvValue = '';
-        value.setAttribute('aria-label', `${kind === 'headers' ? 'Header' : 'Query parameter'} value`);
-        const valueCell = document.createElement('span'); valueCell.className = 'repeater-kv-cell';
-        valueCell.setAttribute('role', 'cell'); valueCell.append(value);
-        const remove = document.createElement('button'); remove.type = 'button'; remove.className = 'repeater-kv-remove';
-        remove.textContent = '×'; remove.setAttribute('aria-label', `Remove ${kind === 'headers' ? 'header' : 'query parameter'}`);
-        const removeCell = document.createElement('span'); removeCell.className = 'repeater-kv-remove-cell';
-        removeCell.setAttribute('role', 'cell'); removeCell.append(remove);
-        toggle.setAttribute('role', 'cell'); toggle.append(checkbox); row.append(toggle, keyCell, valueCell, removeCell);
-
-        const updateToggleLabel = () => checkbox.setAttribute('aria-label',
-          `${checkbox.checked ? 'Disable' : 'Enable'} ${key.value || (kind === 'headers' ? 'header' : 'query parameter')}`);
-        const promote = () => {
-          if (row.dataset.newRow !== 'true' || (!key.value && !value.value)) return;
-          row.dataset.newRow = 'false';
-          checkbox.disabled = state.repeaterStructuredEditorsDisabled;
-          remove.disabled = state.repeaterStructuredEditorsDisabled;
-          row.parentElement.append(createRepeaterEditorRow(kind, undefined, true));
-        };
-        [key, value].forEach(input => input.addEventListener('input', () => {
-          promote(); updateToggleLabel(); syncRepeaterStructuredEditor(kind);
-        }));
-        checkbox.addEventListener('change', () => {
-          row.dataset.enabled = String(checkbox.checked); updateToggleLabel(); syncRepeaterStructuredEditor(kind);
-        });
-        remove.addEventListener('click', () => { row.remove(); syncRepeaterStructuredEditor(kind); });
-        updateToggleLabel();
-        [checkbox, key, value, remove].forEach(control => { control.disabled = state.repeaterStructuredEditorsDisabled; });
-        return row;
-      }
-
-      function renderRepeaterStructuredEditor(kind, rows) {
-        const container = kind === 'headers' ? elements.repeaterHeaderRows : elements.repeaterQueryRows;
-        container.replaceChildren(...rows.map(row => createRepeaterEditorRow(kind, row)),
-          createRepeaterEditorRow(kind, undefined, true));
-      }
-
-      function refreshRepeaterStructuredEditors(force = false) {
-        if (force || state.repeaterHeadersSource !== elements.repeaterRequestHeaders.value) {
-          state.repeaterHeadersSource = elements.repeaterRequestHeaders.value;
-          renderRepeaterStructuredEditor('headers', parseRepeaterHeaderRows(elements.repeaterRequestHeaders.value));
-        }
-        if (force || state.repeaterQuerySource !== elements.repeaterRequestUrl.value) {
-          state.repeaterQuerySource = elements.repeaterRequestUrl.value;
-          renderRepeaterStructuredEditor('query', parseRepeaterQueryRows(elements.repeaterRequestUrl.value));
-        }
-      }
-
-      function setRepeaterStructuredEditorsDisabled(disabled) {
-        state.repeaterStructuredEditorsDisabled = disabled;
-        [elements.repeaterHeaderRows, elements.repeaterQueryRows].forEach(container => {
-          container.querySelectorAll('input, button').forEach(control => { control.disabled = disabled; });
-        });
-      }
-
-      function prefillRepeaterVariables(repeater) {
-        const variables = Object.fromEntries((repeater?.variables ?? []).map(item => [item.name, item.value]));
-        const key = JSON.stringify(variables);
-        if (state.repeaterVariablesKey === key || state.repeaterVariablesDirty) return;
-        state.repeaterVariablesKey = key;
-        elements.repeaterVariables.value = Object.keys(variables).length
-          ? JSON.stringify(variables, null, 2) : '';
-      }
-
-      function prefillRepeaterRequest(force = false) {
-        const request = state.requests.find(candidate => candidate.id === state.selectedRequestId);
-        if (!request || !force && (state.repeaterDraftDirty || state.repeaterCaptureSource)) return;
-        const key = `${request.id}:${request.method}:${request.path}`;
-        if (!force && state.repeaterPrefillKey === key) return;
-        state.repeaterCaptureSource = null;
-        state.repeaterPrefillKey = key;
-        let requestUrl = request.path;
-        if (!/^https?:\/\//i.test(requestUrl)) {
-          requestUrl = `https://checkout.acme.test${requestUrl.startsWith('/') ? '' : '/'}${requestUrl}`;
-        }
-        try {
-          const parsed = new URL(requestUrl);
-          parsed.hash = '';
-          elements.repeaterRequestUrl.value = parsed.toString();
-        } catch { elements.repeaterRequestUrl.value = ''; }
-        elements.repeaterRequestMethod.value = /^[A-Z][A-Z0-9!#$%&'*+.^_`|~-]{0,31}$/.test(request.method)
-          ? request.method : 'GET';
-        elements.repeaterRequestTimeout.value = '15000';
-        elements.repeaterRequestHeaders.value = '';
-        elements.repeaterRequestBody.value = '';
-        state.repeaterBodyRepresentation = null;
-        state.repeaterDraftDirty = false;
-        refreshRepeaterStructuredEditors(true);
-        renderRepeaterVariableStatus();
-      }
-
-      function loadRepeaterHistoryEntry(entry, focus = false) {
-        if (!entry) return;
-        state.repeaterCaptureSource = null;
-        const selectedCapture = state.requests.find(request => request.id === state.selectedRequestId);
-        state.repeaterPrefillKey = selectedCapture ? `${selectedCapture.id}:${selectedCapture.method}:${selectedCapture.path}` : null;
-        state.repeaterDraftRevision = (state.repeaterDraftRevision ?? 0) + 1;
-        state.repeaterSelectedHistoryId = entry.id;
-        state.repeaterExpectedHistoryId = null;
-        elements.repeaterRequestUrl.value = entry.request.url;
-        elements.repeaterRequestMethod.value = entry.request.method;
-        elements.repeaterRequestTimeout.value = String(entry.request.timeout_ms);
-        elements.repeaterRequestHeaders.value = entry.request.headers.length
-          ? JSON.stringify(repeaterHeaderObject(entry.request.headers), null, 2) : '';
-        elements.repeaterRequestBody.value = entry.request.body;
-        state.repeaterBodyRepresentation = {text:entry.request.body,display:elements.repeaterRequestBody.value};
-        state.repeaterDraftDirty = false;
-        refreshRepeaterStructuredEditors(true);
-        renderRepeaterVariableStatus();
-        renderRepeater();
-        if (focus) {
-          [...elements.repeaterHistory.querySelectorAll('.repeater-history-row')]
-            .find(row => Number(row.dataset.historyId) === entry.id)?.focus({preventScroll: true});
-        }
-      }
-
-      function setRepeaterEditorTab(tab, focus = false) {
-        if (!['headers', 'query', 'body', 'settings'].includes(tab)) return;
-        refreshRepeaterStructuredEditors();
-        state.repeaterEditorTab = tab;
-        elements.repeaterEditorTabs.forEach(button => {
-          const selected = button.dataset.repeaterEditorTab === tab;
-          button.setAttribute('aria-selected', String(selected));
-          button.tabIndex = selected ? 0 : -1;
-          if (selected && focus) button.focus();
-        });
-        elements.repeaterEditorPanels.forEach(panel => {
-          panel.hidden = panel.dataset.repeaterEditorPanel !== tab;
-        });
-      }
-
-      function setRepeaterResponseTab(tab, focus = false) {
-        if (!['body', 'headers'].includes(tab)) return;
-        state.repeaterResponseTab = tab;
-        const buttons = [...elements.repeaterResponse.querySelectorAll('[data-repeater-response-tab]')];
-        buttons.forEach(button => {
-          const selected = button.dataset.repeaterResponseTab === tab;
-          button.setAttribute('aria-selected', String(selected));
-          button.tabIndex = selected ? 0 : -1;
-          if (selected && focus) button.focus();
-        });
-        elements.repeaterResponse.querySelectorAll('[data-repeater-response-panel]').forEach(panel => {
-          panel.hidden = panel.dataset.repeaterResponsePanel !== tab;
-        });
-      }
-
-      function renderRepeaterVariableStatus() {
-        let variables = {};
-        let invalidVariables = false;
-        try { variables = parseRepeaterVariables(elements.repeaterVariables.value); }
-        catch { invalidVariables = true; }
-        const source = [
-          elements.repeaterRequestUrl.value,
-          elements.repeaterRequestMethod.value,
-          elements.repeaterRequestHeaders.value,
-          elements.repeaterRequestBody.value
-        ].join('\n');
-        const names = new Set();
-        for (const match of source.matchAll(/\{\{(=)?([^{}]+)\}\}/g)) {
-          if (!match[1]) names.add(match[2]);
-        }
-        const chips = [];
-        if (invalidVariables) {
-          const chip = textElement('span', 'repeater-variable-chip', 'Invalid variable JSON');
-          chip.dataset.kind = 'missing'; chips.push(chip);
-        }
-        [...names].sort().forEach(name => {
-          const resolved = Object.hasOwn(variables, name);
-          const chip = textElement('span', 'repeater-variable-chip', `${resolved ? 'Resolved' : 'Missing'} · {{${name}}}`);
-          if (!resolved) chip.dataset.kind = 'missing';
-          chips.push(chip);
-        });
-        elements.repeaterVariableStatus.hidden = chips.length === 0;
-        elements.repeaterVariableStatus.replaceChildren(...chips);
-      }
-
-      function selectedRepeaterEntry(repeater = repeaterState()) {
-        return repeater?.history.find(entry => entry.id === state.repeaterSelectedHistoryId) ?? null;
-      }
-
-      function renderRepeaterHistory(repeater) {
-        const history = repeater?.history ?? [];
-        if (state.repeaterExpectedHistoryId !== null && history.some(entry => entry.id === state.repeaterExpectedHistoryId)) {
-          state.repeaterSelectedHistoryId = state.repeaterExpectedHistoryId;
-          state.repeaterExpectedHistoryId = null;
-        }
-        if (!history.some(entry => entry.id === state.repeaterSelectedHistoryId)) {
-          state.repeaterSelectedHistoryId = history.at(-1)?.id ?? null;
-        }
-        elements.repeaterHistoryBadge.textContent = `${history.length} ${history.length === 1 ? 'run' : 'runs'}${repeater?.history_evictions ? ` · ${repeater.history_evictions} evicted` : ''}`;
-        elements.repeaterHistoryBadge.dataset.kind = history.length ? '' : 'offline';
-        elements.repeaterHistoryBytes.textContent = `${Math.ceil((repeater?.history_bytes ?? 0) / 1024)} / 512 KiB`;
-        elements.repeaterHistoryUsage.textContent = `${history.length} / ${repeater?.limits?.history_entries ?? 24}`;
-        if (!history.length) {
-          elements.repeaterHistory.replaceChildren(emptyListboxOption('experiment-empty', 'No Repeater requests yet.'));
-          elements.repeaterHistoryPrev.disabled = true;
-          elements.repeaterHistoryNext.disabled = true;
-          return;
-        }
-        const selectedIndex = history.findIndex(entry => entry.id === state.repeaterSelectedHistoryId);
-        elements.repeaterHistoryPrev.disabled = selectedIndex <= 0;
-        elements.repeaterHistoryNext.disabled = selectedIndex < 0 || selectedIndex >= history.length - 1;
-        elements.repeaterHistory.replaceChildren(...[...history].reverse().map(entry => {
-          const row = document.createElement('button'); row.type = 'button'; row.className = 'repeater-history-row';
-          row.dataset.historyId = String(entry.id); row.setAttribute('role', 'option');
-          row.setAttribute('aria-selected', String(entry.id === state.repeaterSelectedHistoryId));
-          row.tabIndex = entry.id === state.repeaterSelectedHistoryId ? 0 : -1;
-          const title = textElement('span', 'repeater-history-title', `${entry.resolved_request.method} ${entry.resolved_request.url}`);
-          const status = textElement('span', 'repeater-history-state', entry.response.ok ? String(entry.response.status) : entry.state.replaceAll('_', ' '));
-          if (!entry.response.ok) status.dataset.kind = 'error';
-          const occurred = new Date(entry.completed_at_ms).toLocaleTimeString([], {hour: '2-digit', minute: '2-digit', second: '2-digit'});
-          const meta = textElement('span', 'repeater-history-meta', `run ${entry.id} · ${entry.response.duration_ms} ms · ${occurred}`);
-          row.append(title, status, meta);
-          row.addEventListener('click', () => loadRepeaterHistoryEntry(entry, true));
-          row.addEventListener('keydown', event => {
-            if (!['ArrowUp', 'ArrowDown', 'Home', 'End'].includes(event.key)) return;
-            event.preventDefault();
-            const rows = [...elements.repeaterHistory.querySelectorAll('.repeater-history-row')];
-            const index = rows.indexOf(row);
-            const next = event.key === 'Home' ? 0 : event.key === 'End' ? rows.length - 1
-              : Math.max(0, Math.min(rows.length - 1, index + (event.key === 'ArrowDown' ? 1 : -1)));
-            rows[next].click();
-          });
-          return row;
-        }));
-      }
-
-      function renderRepeaterResponse(repeater) {
-        const entry = selectedRepeaterEntry(repeater);
-        elements.repeaterCopyResolved.disabled = !entry || ['running', 'cancelling'].includes(repeater?.state) || state.experimentPending;
-        elements.repeaterCopyResolved.hidden = !entry;
-        elements.repeaterResponseBadge.hidden = !entry;
-        if (!entry) {
-          elements.repeaterResponse.className = 'repeater-response experiment-empty';
-          elements.repeaterResponse.textContent = 'Send a request or choose one from history.';
-          elements.repeaterResponseMeta.textContent = 'Select a completed run to inspect its bounded response.';
-          elements.repeaterResponseBadge.dataset.kind = 'offline';
-          elements.repeaterResponseBadge.textContent = 'No response';
-          return;
-        }
-        const response = entry.response;
-        elements.repeaterResponse.className = 'repeater-response';
-        const summary = document.createElement('div'); summary.className = 'experiment-result-summary';
-        summary.append(
-          experimentFact('Status', response.ok ? `${response.status} ${response.status_text}`.trim() : entry.state.replaceAll('_', ' ')),
-          experimentFact('Duration', `${response.duration_ms} ms`),
-          experimentFact('Body', `${utf8ByteLength(response.body)} bytes${response.body_truncated ? ' · truncated' : ''}`)
-        );
-        const headers = document.createElement('div');
-        headers.id = 'repeater-response-headers-panel';
-        headers.className = 'repeater-response-headers repeater-response-panel';
-        headers.dataset.repeaterResponsePanel = 'headers';
-        headers.setAttribute('role', 'tabpanel');
-        if (response.headers.length) {
-          headers.append(...response.headers.map(header => {
-            const row = document.createElement('div'); row.className = 'repeater-response-header';
-            row.append(textElement('span', '', header.name), textElement('span', '', header.value));
-            return row;
-          }));
-        } else headers.append(textElement('div', 'experiment-empty', 'No response headers.'));
-        const bodyPanel = document.createElement('div');
-        bodyPanel.id = 'repeater-response-body-panel';
-        bodyPanel.className = 'repeater-response-panel';
-        bodyPanel.dataset.repeaterResponsePanel = 'body';
-        bodyPanel.setAttribute('role', 'tabpanel');
-        const body = document.createElement('pre'); body.className = 'experiment-result-body';
-        body.textContent = response.ok ? response.body || '(empty response body)' : response.error;
-        bodyPanel.append(body);
-        const tabs = document.createElement('div');
-        tabs.className = 'repeater-response-tabs';
-        tabs.setAttribute('role', 'tablist');
-        tabs.setAttribute('aria-label', 'Response inspector');
-        [['body', 'Body'], ['headers', `Headers (${response.headers.length})`]].forEach(([tab, label]) => {
-          const button = textElement('button', 'repeater-response-tab', label);
-          button.type = 'button';
-          button.dataset.repeaterResponseTab = tab;
-          button.setAttribute('role', 'tab');
-          button.setAttribute('aria-controls', `repeater-response-${tab}-panel`);
-          button.addEventListener('click', () => setRepeaterResponseTab(tab));
-          button.addEventListener('keydown', event => {
-            if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
-            event.preventDefault();
-            const responseTabs = [...tabs.querySelectorAll('[data-repeater-response-tab]')];
-            const current = responseTabs.indexOf(button);
-            const next = event.key === 'Home' ? 0 : event.key === 'End' ? responseTabs.length - 1
-              : (current + (event.key === 'ArrowRight' ? 1 : -1) + responseTabs.length) % responseTabs.length;
-            responseTabs[next].click();
-            responseTabs[next].focus();
-          });
-          tabs.append(button);
-        });
-        const view = document.createElement('div'); view.className = 'repeater-response-view';
-        view.append(bodyPanel, headers);
-        elements.repeaterResponse.replaceChildren(summary, tabs, view);
-        setRepeaterResponseTab(state.repeaterResponseTab);
-        elements.repeaterResponseMeta.textContent = `run ${entry.id} · ${entry.resolved_request.method} ${entry.resolved_request.url} · ${response.headers.length} headers${response.headers_truncated ? ' · truncated' : ''}`;
-        elements.repeaterResponseBadge.dataset.kind = response.ok ? '' : 'error';
-        elements.repeaterResponseBadge.textContent = response.ok ? 'Complete' : entry.state.replaceAll('_', ' ');
-      }
-
-      function renderRepeaterBodyDiff(comparison) {
-        const panel = elements.repeaterBodyDiff;
-        const diff = comparison?.body_diff;
-        panel.hidden = !diff;
-        const key = JSON.stringify([comparison?.baseline_id, comparison?.current_id, diff]);
-        // Polling must preserve keyboard focus and the researcher's scroll position.
-        if (panel.dataset.renderKey === key) return;
-        panel.dataset.renderKey = key;
-        panel.replaceChildren();
-        if (!diff) return;
-        const heading = document.createElement('h3'); heading.textContent = 'Body line changes';
-        const summary = document.createElement('p');
-        summary.textContent = `+${diff.added} added · −${diff.removed} removed${diff.partial ? ' · Partial' : ''}`;
-        const coverage = document.createElement('p'); coverage.className = 'repeater-diff-coverage';
-        const reasons = {
-          capture_truncated: 'A captured response was truncated.',
-          line_limit: 'Only the first 1,000 lines of each response were aligned.',
-          output_limit: 'The excerpt is limited to 200 rows and 32 KiB of text.',
-          line_text_limit: 'Long lines are clipped to 4 KiB.'
-        };
-        coverage.textContent = diff.limits_reached.map(limit => reasons[limit]).join(' ') ||
-          'Baseline and current line numbers. Two nearby rows of context; unmarked endings are LF.';
-        panel.append(heading, summary, coverage);
-        if (!diff.lines.length) {
-          const empty = document.createElement('p');
-          empty.textContent = comparison.body_changed ? 'No changed lines in the inspected prefixes.' : 'Captured response bodies are identical.';
-          panel.append(empty); return;
-        }
-        const rows = document.createElement('ol'); rows.className = 'repeater-diff-lines';
-        rows.tabIndex = 0; rows.setAttribute('aria-label', 'Body diff. Baseline line, current line, change, and text');
-        let baseline = 0, current = 0;
-        for (const line of diff.lines) {
-          if ((line.baseline_line !== null && line.baseline_line > baseline + 1) ||
-              (line.current_line !== null && line.current_line > current + 1)) {
-            const gap = document.createElement('li'); gap.className = 'repeater-diff-gap';
-            gap.textContent = '⋯ unchanged context omitted'; rows.append(gap);
-          }
-          const row = document.createElement('li'); row.dataset.kind = line.kind;
-          const oldNumber = document.createElement('span'); oldNumber.textContent = line.baseline_line ?? '';
-          const newNumber = document.createElement('span'); newNumber.textContent = line.current_line ?? '';
-          const marker = document.createElement('span');
-          marker.textContent = line.kind === 'added' ? '+' : line.kind === 'removed' ? '−' : ' ';
-          marker.setAttribute('aria-label', line.kind);
-          const text = document.createElement('code'); text.textContent = line.text;
-          const notes = [line.ending === 'crlf' ? 'CRLF' : line.ending === 'none' ? 'no final newline' : '',
-            line.text_truncated ? 'text clipped' : ''].filter(Boolean);
-          if (notes.length) {
-            const note = document.createElement('em'); note.textContent = ` [${notes.join(' · ')}]`; text.append(note);
-          }
-          row.append(oldNumber, newNumber, marker, text); rows.append(row);
-          baseline = line.baseline_line ?? baseline; current = line.current_line ?? current;
-        }
-        panel.append(rows);
-      }
-
-      function renderRepeaterComparison(repeater) {
-        const successful = (repeater?.history ?? []).filter(entry => entry.response.ok);
-        const retained = new Set(successful.map(entry => entry.id));
-        const comparison = repeater?.comparison ?? null;
-        renderRepeaterBodyDiff(comparison);
-        const comparisonKey = comparison ? `${comparison.baseline_id}:${comparison.current_id}` : null;
-        if (comparison && comparisonKey !== state.repeaterComparisonKey) {
-          state.repeaterCompareBaselineId = comparison.baseline_id;
-          state.repeaterCompareCurrentId = comparison.current_id;
-        }
-        state.repeaterComparisonKey = comparisonKey;
-        if (!retained.has(state.repeaterCompareBaselineId)) state.repeaterCompareBaselineId = successful.at(-2)?.id ?? null;
-        if (!retained.has(state.repeaterCompareCurrentId)) state.repeaterCompareCurrentId = successful.at(-1)?.id ?? null;
-        const options = successful.map(entry => {
-          const option = document.createElement('option'); option.value = String(entry.id);
-          option.textContent = `Run ${entry.id} · ${entry.response.status} · ${entry.response.duration_ms} ms`;
-          return option;
-        });
-        const optionKey = options.map(option => `${option.value}:${option.textContent}`).join('|');
-        if (elements.repeaterCompareBaseline.dataset.optionKey !== optionKey) {
-          elements.repeaterCompareBaseline.dataset.optionKey = optionKey;
-          elements.repeaterCompareBaseline.replaceChildren(...options.map(option => option.cloneNode(true)));
-          elements.repeaterCompareCurrent.replaceChildren(...options);
-        }
-        elements.repeaterCompareBaseline.value = state.repeaterCompareBaselineId === null ? '' : String(state.repeaterCompareBaselineId);
-        elements.repeaterCompareCurrent.value = state.repeaterCompareCurrentId === null ? '' : String(state.repeaterCompareCurrentId);
-        elements.repeaterCompare.disabled = successful.length < 2 ||
-          state.repeaterCompareBaselineId === state.repeaterCompareCurrentId ||
-          ['running', 'cancelling'].includes(repeater?.state) || state.experimentPending;
-        if (!comparison) {
-          elements.repeaterComparison.className = 'experiment-empty';
-          elements.repeaterComparison.textContent = 'Complete two requests to compare their responses.';
-          elements.repeaterComparisonBadge.dataset.kind = 'offline';
-          elements.repeaterComparisonBadge.textContent = 'No comparison';
-          return;
-        }
-        elements.repeaterComparison.className = 'repeater-comparison';
-        const signed = value => `${value > 0 ? '+' : ''}${value}`;
-        const headerDetail = [
-          comparison.headers_added.length ? `added ${comparison.headers_added.join(', ')}` : '',
-          comparison.headers_removed.length ? `removed ${comparison.headers_removed.join(', ')}` : '',
-          comparison.headers_changed.length ? `changed ${comparison.headers_changed.join(', ')}` : ''
-        ].filter(Boolean).join(' · ') || 'No response-header changes';
-        elements.repeaterComparison.replaceChildren(
-          experimentFact('Status', comparison.status_changed
-            ? `${comparison.baseline_status} → ${comparison.current_status}` : `${comparison.current_status} unchanged`),
-          experimentFact('Latency', `${signed(comparison.duration_delta_ms)} ms`),
-          experimentFact('Body', comparison.body_changed ? 'Digest changed' : 'Exact digest match'),
-          experimentFact('Body size', `${signed(comparison.body_bytes_delta)} bytes`),
-          experimentFact('Header names', headerDetail),
-          experimentFact('Coverage', comparison.partial
-            ? comparison.body_diff?.partial ? 'Partial; inspect limits below' : 'Partial due to response truncation'
-            : 'Complete within limits')
-        );
-        elements.repeaterComparison.lastElementChild.classList.add('repeater-comparison-detail');
-        elements.repeaterComparisonBadge.dataset.kind = comparison.partial ? 'error' : '';
-        elements.repeaterComparisonBadge.textContent = `Run ${comparison.baseline_id} vs ${comparison.current_id}`;
-      }
-
-      function renderRepeater() {
-        prefillRepeaterRequest();
-        refreshRepeaterStructuredEditors();
-        const experiment = requestInterception();
-        const repeater = repeaterState();
-        const attached = ['running', 'paused'].includes(state.debuggerSession?.state);
-        const active = ['running', 'cancelling'].includes(repeater?.state);
-        const hookBusy = ['arming', 'armed', 'handling', 'stopping'].includes(runtimeHooksState()?.state);
-        const automationBusy = automationRecipesState()?.auto_armed ||
-          ['arming', 'running', 'stopping'].includes(automationRecipesState()?.state);
-        const working = state.experimentPending || ['creating', 'disposing'].includes(experiment?.state) || hookBusy || automationBusy;
-        const contextReady = attached && experiment?.isolated &&
-          experiment.target_id === state.debuggerSession?.target?.id && ['ready', 'error'].includes(experiment.state) &&
-          ['ready', 'error'].includes(repeater?.state);
-        const canDispose = experiment?.isolated && ['ready', 'error'].includes(experiment.state) &&
-          experiment.pending_requests === 0 && !active && !hookBusy && !automationBusy;
-        const request = state.requests.find(candidate => candidate.id === state.selectedRequestId);
-        elements.experimentTitle.textContent = 'Repeater';
-        elements.experimentSubtitle.textContent = request
-          ? `request-${request.id} · editable credential-free replay · isolated session`
-          : 'Editable credential-free replay · isolated session';
-        if (state.experimentError) setExperimentNotice('error', state.experimentError);
-        else if (!repeater || !experiment) setExperimentNotice('error', 'The debugger session is unavailable or malformed.');
-        else if (active || working) setExperimentNotice('working', repeater.message);
-        else if (repeater.state === 'error') setExperimentNotice('error', repeater.message);
-        else if (contextReady || repeater.state === 'disposed') setExperimentNotice('ready', repeater.message);
-        else if (!attached) setExperimentNotice('idle', 'Connect a browser target to send requests.');
-        else setExperimentNotice('idle', repeater.message);
-
-        elements.repeaterContextBadge.dataset.kind = repeater?.state === 'error' ? 'error' : experiment?.isolated ? '' : 'offline';
-        elements.repeaterContextBadge.textContent = experiment?.state === 'creating' ? 'Creating'
-          : experiment?.state === 'disposing' ? 'Disposing'
-            : experiment?.isolated ? 'Isolated'
-              : repeater?.state === 'disposed' ? 'Disposed' : 'Not created';
-        elements.repeaterContextMessage.textContent = repeater?.state === 'error' ? repeater.message
-          : contextReady ? 'Disposable page attached. Repeater has no baseline cookies or storage.'
-            : repeater?.message ?? 'No disposable request-lab context exists.';
-        elements.repeaterSessionBar.hidden = !attached && !experiment?.isolated;
-        elements.repeaterStorageState.textContent = experiment?.isolated ? 'Ephemeral and isolated'
-          : repeater?.state === 'disposed' ? 'Deleted and erased' : 'Not allocated';
-        elements.repeaterCreate.disabled = !attached || Boolean(experiment?.isolated) || working || state.debuggerActionPending;
-        elements.repeaterDispose.disabled = !canDispose || working || state.debuggerActionPending;
-        elements.repeaterCreate.hidden = Boolean(experiment?.isolated);
-        elements.repeaterDispose.hidden = !experiment?.isolated;
-        elements.repeaterClearHistory.disabled = !repeater?.history.length || active || working || state.debuggerActionPending;
-
-        prefillRepeaterVariables(repeater);
-        const variableCount = repeater?.variables.length ?? 0;
-        elements.repeaterVariableBadge.textContent = `${variableCount} ${variableCount === 1 ? 'variable' : 'variables'}`;
-        elements.repeaterVariableBadge.dataset.kind = contextReady ? '' : 'offline';
-        elements.repeaterApplyVariables.disabled = !contextReady || active || working || state.debuggerActionPending;
-        elements.repeaterVariables.disabled = !contextReady || active || working;
-        const requestDisabled = !contextReady || active || working;
-        [elements.repeaterRequestUrl, elements.repeaterRequestMethod, elements.repeaterRequestTimeout,
-          elements.repeaterRequestHeaders, elements.repeaterRequestBody]
-          .forEach(field => { field.disabled = requestDisabled; });
-        setRepeaterStructuredEditorsDisabled(requestDisabled);
-        elements.repeaterSend.disabled = !contextReady || active || working || state.debuggerActionPending;
-        elements.repeaterCancel.disabled = !active || repeater?.state === 'cancelling';
-        elements.repeaterSend.hidden = active;
-        elements.repeaterCancel.hidden = !active;
-        elements.repeaterRequestBadge.dataset.kind = active ? '' : contextReady ? '' : 'offline';
-        elements.repeaterRequestBadge.textContent = repeater?.state === 'cancelling' ? 'Cancelling'
-          : repeater?.state === 'running' ? 'Running' : 'Draft';
-        elements.repeaterRequestBadge.hidden = !active;
-        elements.repeaterActiveRequest.textContent = repeater?.active_execution
-          ? `run ${repeater.active_execution.execution_id} · ${repeater.active_execution.resolved_method} ${repeater.active_execution.resolved_url}`
-          : 'No active request';
-        elements.repeaterActiveRequest.hidden = !repeater?.active_execution;
-        setRepeaterEditorTab(state.repeaterEditorTab);
-        renderRepeaterVariableStatus();
-        elements.repeaterRequestFooter.hidden = elements.repeaterVariableStatus.hidden && elements.repeaterActiveRequest.hidden;
-        renderRepeaterHistory(repeater);
-        renderRepeaterResponse(repeater);
-        renderRepeaterComparison(repeater);
-        capturedClientWorkflow.sync();
-      }
-
-      function selectedObjectExperimentResult(experiment = objectExperimentState()) {
-        return experiment?.results.find(result => result.id === state.objectSelectedResultId) ?? null;
-      }
-
-      function selectObjectExperimentResult(resultId, focus = false) {
-        const experiment = objectExperimentState();
-        if (!experiment?.results.some(result => result.id === resultId)) return;
-        state.objectSelectedResultId = resultId;
-        state.objectSelectionSearchId = experiment.search_id;
-        elements.objectConfirm.checked = false;
-        renderObjectExperiment();
-        if (focus) elements.objectResults.querySelector(`[data-object-result-id="${CSS.escape(resultId)}"]`)?.focus();
-      }
-
-      function renderObjectResults(experiment) {
-        if (state.objectSelectionSearchId !== (experiment?.search_id ?? 0) ||
-            !experiment?.results.some(result => result.id === state.objectSelectedResultId)) {
-          state.objectSelectionSearchId = experiment?.search_id ?? 0;
-          state.objectSelectedResultId = experiment?.results[0]?.id ?? null;
-          elements.objectConfirm.checked = false;
-        }
-        const results = experiment?.results ?? [];
-        elements.objectResultCount.textContent = `${results.length} ${results.length === 1 ? 'match' : 'matches'}`;
-        elements.objectResultCount.dataset.kind = results.length > 0 ? '' : 'offline';
-        if (results.length === 0) {
-          elements.objectResults.replaceChildren(emptyListboxOption('experiment-empty',
-            experiment?.search ? 'No objects matched within the visible limits.' : 'No retained object references.'));
-        } else {
-          elements.objectResults.replaceChildren(...results.map(result => {
-            const row = document.createElement('button'); row.type = 'button'; row.className = 'object-result-row';
-            row.dataset.objectResultId = result.id;
-            row.setAttribute('role', 'option');
-            row.setAttribute('aria-selected', String(result.id === state.objectSelectedResultId));
-            const title = textElement('span', 'object-result-title', `${result.class_name} · object ${result.id}`);
-            const count = textElement('span', 'object-result-count', `${result.property_count} props`);
-            const preview = textElement('span', 'object-result-preview', result.preview.length > 0
-              ? result.preview.slice(0, 3).map(property => `${property.name}: ${property.value}`).join(' · ')
-              : 'No retained own-property preview');
-            row.append(title, count, preview);
-            row.addEventListener('click', () => selectObjectExperimentResult(result.id));
-            return row;
-          }));
-        }
-        const search = experiment?.search;
-        if (!search) elements.objectSearchMeta.textContent = 'Open a page and run one bounded search.';
-        else {
-          const limits = [];
-          if (search.timed_out) limits.push('time limit reached');
-          if (search.result_limit_reached) limits.push('result limit reached');
-          if (search.scan_limit_reached) limits.push('candidate limit reached');
-          if (search.property_limit_reached) limits.push('property limit reached');
-          elements.objectSearchMeta.textContent = `${results.length} shown from ${search.analyzed.toLocaleString()} inspected objects in ${search.duration_ms} ms${limits.length ? ` · ${limits.join(' · ')}` : ''}`;
-        }
-      }
-
-      function renderObjectSelection(experiment) {
-        const selected = selectedObjectExperimentResult(experiment);
-        elements.objectSelectionMeta.textContent = selected
-          ? `${selected.class_name} · retained result ${selected.id} · search ${experiment.search_id}`
-          : 'Select one retained object result.';
-        elements.objectMutationBadge.dataset.kind = selected ? '' : 'offline';
-        elements.objectMutationBadge.textContent = selected ? `Object ${selected.id}` : 'Locked';
-        if (!selected) {
-          elements.objectPreview.replaceChildren(textElement('div', 'experiment-empty', 'No object selected.'));
-          return;
-        }
-        const rows = selected.preview.map(property => {
-          const row = document.createElement('div'); row.className = 'object-property-row';
-          row.append(textElement('span', '', property.name), textElement('span', '', property.type),
-            textElement('span', '', property.value));
-          return row;
-        });
-        if (rows.length === 0) rows.push(textElement('div', 'experiment-empty', 'No own properties in the bounded preview.'));
-        elements.objectPreview.replaceChildren(...rows);
-      }
-
-      function renderObjectMutation(experiment) {
-        const mutation = experiment?.last_mutation;
-        if (!mutation) {
-          elements.objectMutationResult.dataset.kind = '';
-          elements.objectMutationResult.textContent = 'No mutation attempted.';
-          return;
-        }
-        elements.objectMutationResult.dataset.kind = mutation.ok ? 'ready' : 'error';
-        const before = mutation.before.preview ?? mutation.before.type;
-        const after = mutation.after.preview ?? mutation.after.type;
-        elements.objectMutationResult.textContent = mutation.ok
-          ? `Audit ${mutation.audit_id} · ${mutation.operation} ${mutation.property} · ${before} → ${after} · ${mutation.value_bytes} value bytes`
-          : `Audit ${mutation.audit_id} · ${mutation.outcome} · ${mutation.error}`;
-      }
-
-      function renderObjectAudit(experiment) {
-        const audit = experiment?.audit ?? [];
-        elements.objectAuditCount.textContent = `${audit.length} ${audit.length === 1 ? 'entry' : 'entries'}`;
-        elements.objectAuditCount.dataset.kind = audit.length > 0 ? '' : 'offline';
-        if (audit.length === 0) {
-          elements.objectAudit.replaceChildren(textElement('div', 'experiment-empty', 'No object mutations attempted.'));
-          return;
-        }
-        elements.objectAudit.replaceChildren(...audit.slice().reverse().map(entry => {
-          const row = document.createElement('div'); row.className = 'experiment-audit-row';
-          const title = textElement('span', 'experiment-audit-title',
-            `${entry.operation.toUpperCase()} ${entry.target_class}.${entry.property}`);
-          const outcome = textElement('span', 'experiment-audit-outcome', entry.outcome.replaceAll('_', ' '));
-          if (!entry.success) outcome.style.color = 'var(--red)';
-          const digest = entry.value_digest ? `${entry.value_digest.slice(0, 12)}…` : 'none';
-          const meta = textElement('span', 'experiment-audit-meta',
-            `audit ${entry.id} · nav ${entry.navigation_id} · search ${entry.search_id} · object ${entry.result_id} · ${entry.before_type} → ${entry.after_type} · ${entry.value_bytes} bytes · sha256 ${digest} · ${entry.url}`);
-          row.append(title, outcome, meta);
-          return row;
-        }));
-      }
-
-      function renderObjectExperiment() {
-        const experiment = requestInterception();
-        const objectExperiment = objectExperimentState();
-        const repeater = repeaterState();
-        const attached = ['running', 'paused'].includes(state.debuggerSession?.state);
-        const objectBusy = ['navigating', 'searching', 'mutating'].includes(objectExperiment?.state);
-        const hookBusy = ['arming', 'armed', 'handling', 'stopping'].includes(runtimeHooksState()?.state);
-        const automationBusy = automationRecipesState()?.auto_armed ||
-          ['arming', 'running', 'stopping'].includes(automationRecipesState()?.state);
-        const contextBusy = state.experimentPending || ['creating', 'running', 'disposing'].includes(experiment?.state) ||
-          ['running', 'cancelling'].includes(repeater?.state) || objectBusy || hookBusy || automationBusy;
-        const contextReady = attached && experiment?.isolated && objectExperiment?.isolated &&
-          experiment.target_id === state.debuggerSession?.target?.id &&
-          objectExperiment.target_id === state.debuggerSession?.target?.id &&
-          !['attaching', 'disposing', 'disposed'].includes(objectExperiment.state);
-        const pageReady = contextReady && objectExperiment.navigation_id > 0 && objectExperiment.url;
-        if (state.objectSelectionSearchId !== (objectExperiment?.search_id ?? 0) ||
-            !objectExperiment?.results.some(result => result.id === state.objectSelectedResultId)) {
-          state.objectSelectionSearchId = objectExperiment?.search_id ?? 0;
-          state.objectSelectedResultId = objectExperiment?.results[0]?.id ?? null;
-          elements.objectConfirm.checked = false;
-        }
-        const selected = selectedObjectExperimentResult(objectExperiment);
-        const canDispose = experiment?.isolated && experiment.pending_requests === 0 &&
-          !['running', 'cancelling'].includes(repeater?.state) && !objectBusy && !hookBusy && !automationBusy;
-        elements.experimentTitle.textContent = 'Objects';
-        elements.experimentSubtitle.textContent = 'Find an object, inspect its properties, and test a change on a disposable page.';
-
-        if (state.experimentError) setExperimentNotice('error', state.experimentError);
-        else if (!experiment || !objectExperiment) setExperimentNotice('error', 'The debugger session is unavailable or malformed.');
-        else if (contextBusy) setExperimentNotice('working', objectExperiment.message);
-        else if (objectExperiment.state === 'error' || objectExperiment.last_mutation?.ok === false) setExperimentNotice('error', objectExperiment.message);
-        else if (pageReady || objectExperiment.state === 'disposed') setExperimentNotice('ready', objectExperiment.message);
-        else if (!attached) setExperimentNotice('idle', 'Connect a browser target to inspect live objects.');
-        else setExperimentNotice('idle', objectExperiment.message);
-
-        elements.objectContextBadge.dataset.kind = objectExperiment?.state === 'error' ? 'error' : objectExperiment?.isolated ? '' : 'offline';
-        elements.objectContextBadge.textContent = experiment?.state === 'creating' ? 'Creating'
-          : experiment?.state === 'disposing' ? 'Disposing'
-            : objectExperiment?.isolated ? 'Isolated'
-              : objectExperiment?.state === 'disposed' ? 'Disposed' : 'Not created';
-        elements.objectContextMessage.textContent = objectExperiment?.message ?? 'No disposable Experiment context exists.';
-        elements.objectStorageState.textContent = objectExperiment?.isolated ? 'Ephemeral and isolated'
-          : objectExperiment?.state === 'disposed' ? 'Deleted and erased' : 'Not allocated';
-        elements.objectPageState.textContent = objectExperiment?.url || 'Not opened';
-        elements.objectPageBadge.dataset.kind = pageReady ? '' : objectExperiment?.state === 'error' ? 'error' : 'offline';
-        elements.objectPageBadge.textContent = objectExperiment?.state === 'navigating' ? 'Opening'
-          : pageReady ? 'Loaded' : 'No page';
-        const search = objectExperiment?.search;
-        const partial = search && (search.timed_out || search.result_limit_reached || search.scan_limit_reached || search.property_limit_reached);
-        elements.objectSearchBadge.dataset.kind = partial ? 'error' : search ? '' : 'offline';
-        elements.objectSearchBadge.textContent = objectExperiment?.state === 'searching' ? 'Searching'
-          : search ? partial ? 'Partial' : 'Complete' : 'No search';
-
-        elements.objectCreate.disabled = !attached || Boolean(experiment?.isolated) || contextBusy || state.debuggerActionPending;
-        elements.objectDispose.disabled = !canDispose || contextBusy || state.debuggerActionPending;
-        elements.objectNavigationForm.querySelectorAll('input').forEach(field => { field.disabled = !contextReady || contextBusy; });
-        elements.objectNavigate.disabled = !contextReady || contextBusy || state.debuggerActionPending;
-        elements.objectSearchForm.querySelectorAll('input, textarea').forEach(field => { field.disabled = !pageReady || contextBusy; });
-        elements.objectSearch.disabled = !pageReady || contextBusy || state.debuggerActionPending;
-        elements.objectValueField.hidden = elements.objectOperation.value === 'delete';
-        elements.objectMutationForm.querySelectorAll('input, select, textarea').forEach(field => {
-          field.disabled = !selected || contextBusy;
-        });
-        elements.objectMutationValue.disabled = !selected || contextBusy || elements.objectOperation.value === 'delete';
-        elements.objectMutate.disabled = !selected || contextBusy || !elements.objectConfirm.checked ||
-          !elements.objectMutationProperty.value || state.debuggerActionPending ||
-          (objectExperiment?.mutation_attempts ?? 0) >= (objectExperiment?.limits?.mutation_attempts ?? 256);
-        renderObjectResults(objectExperiment);
-        renderObjectSelection(objectExperiment);
-        renderObjectMutation(objectExperiment);
-        renderObjectAudit(objectExperiment);
-      }
-
-      function renderRuntimeHookDefinitions(hooks, active) {
-        const definitions = hooks?.definitions ?? [];
-        elements.hooksDefinitionCount.textContent = `${definitions.length} / ${hooks?.limits?.definitions ?? 8}`;
-        elements.hooksDefinitionCount.dataset.kind = definitions.length ? '' : 'offline';
-        elements.hooksDefinitionBadge.textContent = definitions.length
-          ? `${definitions.length} ${definitions.length === 1 ? 'hook' : 'hooks'}` : 'Empty';
-        elements.hooksDefinitionBadge.dataset.kind = definitions.length ? '' : 'offline';
-        if (!definitions.length) {
-          elements.hooksDefinitions.replaceChildren(textElement('div', 'experiment-empty', 'No hooks yet.'));
-          return;
-        }
-        elements.hooksDefinitions.replaceChildren(...definitions.map(definition => {
-          const row = document.createElement('div'); row.className = 'hook-definition-row';
-          const title = textElement('span', 'hook-definition-title', definition.label);
-          const phases = [definition.entry_enabled ? 'entry' : '', definition.return_enabled ? 'return' : ''].filter(Boolean).join(' + ');
-          const phase = textElement('span', 'hook-definition-phase', phases);
-          const resolved = definition.resolved
-            ? ` · ${definition.resolved.entry_points} entry / ${definition.resolved.return_points} return points`
-            : '';
-          const behavior = [definition.condition ? 'condition' : '', definition.entry_logic || definition.return_logic ? 'logic' : '',
-            definition.return_mode !== 'none' ? `${definition.return_mode} override` : ''].filter(Boolean).join(' · ') || 'observe only';
-          const functionKind = definition.function_kind.replaceAll('_', ' ');
-          const location = definition.entry_mode === 'function'
-            ? `live function ${definition.function_expression}`
-            : `${functionKind} at ${definition.function_start.line + 1}:${definition.function_start.column + 1} · V8 entry search ${definition.target_line + 1}:${definition.target_column + 1}`;
-          const meta = textElement('span', 'hook-definition-meta',
-            `${definition.target_type} ${definition.target_id.slice(0, 12)} · ${sourceName({url: definition.url, source_type: 'script', script_id: definition.script_id})}:${definition.line + 1}:${definition.column + 1} · ${location}${resolved} · ${behavior}${definition.url_truncated ? ' · source URL truncated' : ''}`);
-          meta.title = definition.url;
-          const remove = document.createElement('button'); remove.type = 'button'; remove.className = 'hook-remove';
-          remove.textContent = 'Remove'; remove.disabled = active || state.experimentPending || state.debuggerActionPending || state.experimentNeedsRefresh;
-          remove.setAttribute('aria-label', `Remove ${definition.label}`);
-          remove.addEventListener('click', () => runExperimentAction({action: 'remove_runtime_hook', hook_id: definition.id}));
-          row.append(title, remove, phase, meta);
-          return row;
-        }));
-      }
-
-      function renderRuntimeHookHits(hooks, emptyMessage = 'Arm a hook, then exercise the isolated page.') {
-        const hits = hooks?.hits ?? [];
-        const requests = hooks?.requests ?? [];
-        const total = hooks?.total_hits ?? 0;
-        elements.hooksHitCount.textContent = `${total} / ${hooks?.limits?.total_hits ?? 512}`;
-        elements.hooksHitCount.dataset.kind = hooks?.last_failure ? 'error' : hits.length ? '' : 'offline';
-        const hitDetails = [];
-        if (hooks?.hit_evictions || hits.length !== total) hitDetails.push(`${hits.length} retained`);
-        if (hooks?.hit_evictions) hitDetails.push(`${hooks.hit_evictions} evicted`);
-        if (requests.length) hitDetails.push(`${requests.length} ${requests.length === 1 ? 'request' : 'requests'}`);
-        elements.hooksHitMeta.textContent = hitDetails.join(' · ');
-        elements.hooksHitMeta.hidden = !hitDetails.length;
-        const key = JSON.stringify([hits, requests, total, hooks?.hit_evictions, hooks?.last_failure]);
-        if (key === state.runtimeHookHitsKey) return;
-        state.runtimeHookHitsKey = key;
-        if (!hits.length && !requests.length) {
-          elements.hooksHits.replaceChildren(textElement('div', 'experiment-empty', emptyMessage));
-          return;
-        }
-        const events = [
-          ...hits.map(hit => ({kind: 'hit', occurred_at_ms: hit.occurred_at_ms, id: hit.id, value: hit})),
-          ...requests.map(request => ({kind: 'request', occurred_at_ms: request.occurred_at_ms, id: request.id, value: request}))
-        ].sort((left, right) => left.occurred_at_ms - right.occurred_at_ms ||
-          (left.kind === right.kind ? left.id - right.id : left.kind === 'hit' ? -1 : 1));
-        const rows = events.map(event => {
-          if (event.kind === 'request') {
-            const request = event.value;
-            const row = document.createElement('button'); row.type = 'button'; row.className = 'hook-hit-row hook-hit-link';
-            row.setAttribute('aria-label', `Show ${request.method} ${request.target_type || 'worker'} request in Traffic`);
-            row.addEventListener('click', () => revealRuntimeHookRequest(request));
-            row.append(
-              textElement('span', 'hook-hit-title', `${request.method} ${request.url}`),
-              textElement('span', 'hook-hit-operation', request.status === null ? 'pending' : String(request.status)),
-              textElement('span', 'hook-hit-meta', `${new Date(request.occurred_at_ms).toLocaleTimeString()} · observed ${request.target_type || 'worker'} request ${request.target_id.slice(0, 12)} · ${request.resource_type || 'resource'}`),
-              textElement('span', 'hook-hit-bindings', request.related_hit_ids.length
-                ? `Related hits ${request.related_hit_ids.join(', ')} · ${request.relation}; not proof of a causal call chain`
-                : 'No hook hit linked to this request')
-            );
-            return row;
-          }
-          const hit = event.value;
-          const row = document.createElement('button'); row.type = 'button'; row.className = 'hook-hit-row hook-hit-link';
-          row.setAttribute('aria-label', `Show ${hit.label} ${hit.category} hit in Sources`);
-          row.addEventListener('click', () => revealRuntimeHookHit(hit));
-          const title = textElement('span', 'hook-hit-title', `${hit.label} · ${hit.function}`);
-          const operation = textElement('span', 'hook-hit-operation', hit.operation.replaceAll('_', ' '));
-          const source = sourceName({url: hit.source, source_type: 'script', script_id: ''});
-          const meta = textElement('span', 'hook-hit-meta',
-            `${new Date(hit.occurred_at_ms).toLocaleTimeString()} · ${hit.target_type} ${hit.target_id.slice(0, 12)} · ${hit.category} · ${source}:${hit.line + 1}:${hit.column + 1} · session ${hit.session_id} / hook ${hit.hook_id} / hit ${hit.id}${hit.source_truncated ? ' · source URL truncated' : ''}`);
-          meta.title = hit.source;
-          const values = hit.bindings.map(binding => `${binding.name}=${debuggerValueText(binding.value)}`);
-          const returnText = hit.category === 'return'
-            ? `return ${debuggerValueText(hit.original_return)}${hit.replacement_return ? ` → ${debuggerValueText(hit.replacement_return)}` : ''}` : '';
-          const bindingText = [...values, returnText].filter(Boolean).join(' · ') || 'No local data properties captured';
-          const bindings = textElement('span', 'hook-hit-bindings', `${bindingText}${hit.bindings_truncated ? ' · binding limit reached' : ''}`);
-          row.append(title, operation, meta, bindings);
-          if (hit.error) row.append(textElement('span', 'hook-hit-error', hit.error));
-          return row;
-        });
-        elements.hooksHits.replaceChildren(...rows);
-      }
-
-      function revealRuntimeHookRequest(request) {
-        if (investigationScreen() === 'traffic') investigationNavigation?.record();
-        state.selectedRuntimeHookRequest = {sessionId: runtimeHooksState()?.session_id, id: request.id};
-        state.runtimeHookTrafficKey = null;
-        showScreen('traffic');
-        renderRuntimeHookTraffic();
-        requestAnimationFrame(() => elements.runtimeHookTraffic.focus({preventScroll: true}));
-      }
-
-      function renderRuntimeHookTraffic() {
-        const selected = state.selectedRuntimeHookRequest;
-        elements.runtimeHookTraffic.hidden = !selected;
-        if (!selected) return;
-        const hooks = runtimeHooksState();
-        const request = hooks?.session_id === selected.sessionId
-          ? hooks.requests.find(candidate => candidate.id === selected.id) : null;
-        const related = request?.related_hit_ids.map(id => hooks.hits.find(hit => hit.id === id)).filter(Boolean) ?? [];
-        const key = JSON.stringify([selected, request, related]);
-        if (key === state.runtimeHookTrafficKey) return;
-        state.runtimeHookTrafficKey = key;
-        const close = document.createElement('button'); close.type = 'button'; close.className = 'source-tool';
-        close.textContent = 'Close'; close.setAttribute('aria-label', 'Close request trail');
-        close.addEventListener('click', () => {
-          state.selectedRuntimeHookRequest = null;
-          state.runtimeHookTrafficKey = null;
-          elements.runtimeHookTraffic.hidden = true;
-          elements.requestFilter.focus({preventScroll: true});
-        });
-        if (!request) {
-          elements.runtimeHookTraffic.replaceChildren(
-            textElement('span', 'runtime-hook-traffic-status', 'This ephemeral request is no longer available.'), close);
-          return;
-        }
-        const title = textElement('strong', 'runtime-hook-traffic-title', `${request.method} ${request.url}`);
-        const status = textElement('span', 'runtime-hook-traffic-status',
-          `${request.status ?? 'Pending'} · ${request.resource_type || 'resource'} · isolated ${request.target_type || 'worker'} ${request.target_id.slice(0, 12)}`);
-        const relation = textElement('span', 'runtime-hook-traffic-relation',
-          related.length ? `${request.relation}; not proof of a causal call chain`
-            : 'No retained hook hit is linked to this request.');
-        const heading = textElement('span', 'runtime-hook-traffic-heading', 'Isolated request trail · ephemeral, separate from captured requests');
-        const links = related.map(hit => {
-          const button = document.createElement('button'); button.type = 'button'; button.className = 'source-tool';
-          button.textContent = `Hit ${hit.id} · ${hit.category} in Sources`;
-          button.addEventListener('click', () => revealRuntimeHookHit(hit));
-          return button;
-        });
-        const testField = document.createElement('button'); testField.type = 'button'; testField.className = 'source-tool';
-        testField.textContent = ['arming', 'armed', 'handling', 'stopping'].includes(hooks?.state)
-          ? 'Disarm to test a value' : 'Test a request value';
-        testField.addEventListener('click', async () => {
-          if (['arming', 'armed', 'handling', 'stopping'].includes(runtimeHooksState()?.state)) {
-            const response = currentExperimentReceipt(await runExperimentAction({action: 'disarm_runtime_hooks',
-          ...(!requestInterception()?.isolated ? {expected_session_id: runtimeHooksState()?.session_id} : {})}));
-            if (!response) return;
-          }
-          elements.hooksFieldUrl.value = request.url;
-          elements.hooksFieldMethod.value = request.method;
-          elements.hooksFieldConfirm.checked = false;
-          showScreen('sources');
-          if (!state.sourceHooksOpen) openSourceHooks(false, false);
-          renderRuntimeHooks();
-          focusRuntimeFieldTest();
-        });
-        elements.runtimeHookTraffic.replaceChildren(heading, title, status, relation, ...links, testField, close);
-      }
-
-      function revealRuntimeHookHit(hit) {
-        const sources = liveSources().filter(candidate => candidate.target_id === hit.target_id &&
-          hit.script_id && hit.source_hash && candidate.script_id === hit.script_id && candidate.hash === hit.source_hash);
-        const source = sources.length === 1 ? sources[0] : null;
-        if (!source) {
-          state.experimentError = 'This hit has no unambiguous attached target, script and hash identity. A URL match cannot establish its original source location.';
-          showScreen('sources');
-          if (!state.sourceHooksOpen) openSourceHooks(false, false);
-          else renderRuntimeHooks();
-          return;
-        }
-        showScreen('sources');
-        if (!state.sourceHooksOpen) openSourceHooks(false, false);
-        if (selectScript(source.script_id, hit.line, hit.column) === false) return;
-        if (!setSourceCursor(source, hit.line, hit.column)) return;
-        elements.sourcePosition.textContent = `Line ${hit.line + 1}, Column ${hit.column + 1}`;
-        const identity = sourceIdentity(source);
-        requestAnimationFrame(() => {
-          if (sourceIdentity(selectedSource()) === identity && !document.querySelector('#screen-sources').hidden) elements.sourceCodeWrap.focus({preventScroll: true});
-        });
-      }
-
-      function renderRuntimeHooks() {
-        if (typeof renderCandidateExperiment === 'function') renderCandidateExperiment();
-        const experiment = requestInterception();
-        const objectExperiment = objectExperimentState();
-        const hooks = runtimeHooksState();
-        const attached = ['running', 'paused'].includes(state.debuggerSession?.state);
-        const activeStates = ['arming', 'armed', 'handling', 'stopping'];
-        const active = activeStates.includes(hooks?.state) || (hooks?.active_points ?? 0) > 0;
-        const objectBusy = ['navigating', 'searching', 'mutating'].includes(objectExperiment?.state);
-        const requestBusy = ['running', 'cancelling'].includes(repeaterState()?.state);
-        const automationBusy = automationRecipesState()?.auto_armed ||
-          ['arming', 'running', 'stopping'].includes(automationRecipesState()?.state);
-        const contextWorking = state.experimentPending || state.experimentNeedsRefresh || ['creating', 'disposing'].includes(experiment?.state) ||
-          objectBusy || requestBusy || automationBusy;
-        const contextReady = attached && experiment?.isolated && hooks?.isolated &&
-          experiment.target_id === state.debuggerSession?.target?.id && hooks.target_id === state.debuggerSession?.target?.id &&
-          ['ready', 'error'].includes(experiment.state) && !['attaching', 'disposing', 'disposed'].includes(hooks.state);
-        const pageReady = contextReady && objectExperiment?.navigation_id > 0 && objectExperiment.url;
-        const disposableReady = contextReady;
-        const capturedTarget = state.debuggerSession?.target;
-        const hookableScripts = (state.debuggerSession?.scripts ?? []).filter(script => {
-          if (script.language !== 'JavaScript') return false;
-          const url = script.url ?? '';
-          return !url.startsWith('file:') && !url.startsWith('evaluate;') && !url.startsWith('pptr:') && !url.startsWith('reb-automation-');
-        });
-        const capturedScripts = hookableScripts.filter(script => script.target_type !== 'worker' &&
-          (script.target_id ?? capturedTarget?.id) === capturedTarget?.id);
-        const capturedDocument = attached && !experiment?.isolated && Boolean(capturedTarget?.id) && capturedScripts.length > 0 &&
-          (!hooks?.isolated || (hooks.target_id === capturedTarget.id &&
-            capturedHookOwnerKey(hooks.captured_owner) === capturedHookOwnerKey(capturedHookDocument()))) &&
-          !['attaching', 'disposing'].includes(hooks?.state ?? '');
-        const disposableEditable = disposableReady && !active && !contextWorking;
-        const capturedEditable = capturedDocument && !active && !contextWorking;
-        const editable = disposableEditable || capturedEditable;
-        const workerScripts = hookableScripts.filter(script => script.target_type === 'worker').slice(-128);
-        const scripts = [
-          ...workerScripts,
-          ...hookableScripts.filter(script => script.target_type !== 'worker').slice(-(256 - workerScripts.length))
-        ];
-        const listedScripts = capturedDocument && !disposableReady ? capturedScripts.slice(-256) : scripts;
-        elements.hooksWorkspace.dataset.sourceReady = String(Boolean((pageReady || capturedDocument) && listedScripts.length));
-        const selectedScript = elements.hooksScript.value;
-        const selectedSource = capturedHookSource(listedScripts.find(script => script.script_id === selectedScript));
-        const sourceChanged = state.hooksSelectedSource && JSON.stringify(state.hooksSelectedSource) !== JSON.stringify(selectedSource);
-        const options = listedScripts.map(script => {
-          const option = document.createElement('option'); option.value = script.script_id;
-          option.textContent = `${script.target_type === 'worker' ? `Worker ${script.target_id.slice(0, 12)}` : 'Page'} · ${sourceName({...script, source_type: 'script'})} · lines ${script.start_line + 1}-${script.end_line + 1}`;
-          return option;
-        });
-        if (!options.length) {
-          const option = document.createElement('option'); option.value = ''; option.textContent = 'No live JavaScript sources';
-          options.push(option);
-        }
-        if (!disposableReady && options[0]?.value) {
-          const choice = document.createElement('option'); choice.value = ''; choice.textContent = 'Choose a captured source';
-          options.unshift(choice);
-        }
-        elements.hooksScript.replaceChildren(...options);
-        if (!sourceChanged && listedScripts.some(script => script.script_id === selectedScript)) elements.hooksScript.value = selectedScript;
-        state.hooksSelectedSource = capturedHookSource(listedScripts.find(script => script.script_id === elements.hooksScript.value));
-        const consent = hookConfirmationKey();
-        if (state.hooksConfirmationOwner !== consent) elements.hooksConfirm.checked = false;
-
-        elements.experimentTitle.textContent = 'Runtime Hooks';
-        elements.experimentSubtitle.textContent = capturedDocument
-          ? 'Observe function calls or test return values on the captured document. Arming stays explicit.'
-          : 'Observe function calls or test return values on a disposable page or its worker.';
-        if (state.experimentError) setExperimentNotice('error', state.experimentError);
-        else if (state.experimentNeedsRefresh) setExperimentNotice('working', 'Waiting for a current debugger snapshot. Runtime Hooks controls are paused until reconciliation.');
-        else if (!experiment || !hooks || !objectExperiment) setExperimentNotice('error', 'The debugger session is unavailable or malformed.');
-        else if (contextWorking || ['arming', 'handling', 'stopping'].includes(hooks.state)) setExperimentNotice('working', hooks.message);
-        else if (hooks.last_failure) setExperimentNotice('error', hooks.last_failure);
-        else if (hooks.state === 'armed' || contextReady || (capturedDocument && hooks.isolated) || hooks.state === 'disposed') setExperimentNotice('ready', hooks.message);
-        else if (!attached) setExperimentNotice('idle', 'Connect a browser target to configure hooks.');
-        else setExperimentNotice('idle', hooks.message);
-
-        const documentName = String(capturedTarget?.title || capturedTarget?.url || 'Captured document').slice(0, 80);
-        elements.hooksContextBadge.dataset.kind = hooks?.state === 'error' ? 'error' : (hooks?.isolated || capturedDocument) ? '' : 'offline';
-        elements.hooksContextBadge.textContent = experiment?.state === 'creating' ? 'Creating'
-          : experiment?.state === 'disposing' ? 'Disposing'
-            : capturedDocument ? documentName
-            : hooks?.captured_owner ? 'Captured document unavailable'
-            : hooks?.isolated ? 'Disposable context'
-            : hooks?.state === 'disposed' ? 'Disposed' : 'Not created';
-        const workerCount = hooks?.workers?.length ?? 0;
-        const workerOverflow = hooks?.worker_overflow ?? 0;
-        elements.hooksContextMessage.textContent = workerCount || workerOverflow
-          ? `${workerCount} ${workerCount === 1 ? 'worker' : 'workers'} discovered${workerOverflow ? ` · ${workerOverflow} beyond the attachment limit` : ''}`
-          : '';
-        elements.hooksContextMessage.hidden = !(workerCount || workerOverflow);
-        elements.hooksStorageState.textContent = capturedDocument && hooks?.isolated
-          ? 'Hook records only; page storage persists'
-          : hooks?.captured_owner ? 'Captured hooks retained for cleanup'
-          : hooks?.isolated ? 'Disposable context storage'
-          : hooks?.state === 'disposed' ? 'Deleted and erased' : 'Not allocated';
-        elements.hooksPointUsage.textContent = `${hooks?.active_points ?? 0} / ${hooks?.limits?.active_points ?? 64}`;
-        elements.hooksPageBadge.dataset.kind = capturedDocument ? '' : pageReady ? '' : objectExperiment?.state === 'error' ? 'error' : 'offline';
-        elements.hooksPageBadge.textContent = objectExperiment?.state === 'navigating' ? 'Opening'
-          : capturedDocument ? 'Captured' : pageReady ? 'Loaded' : 'No page';
-        const stateLabels = {arming: 'Arming', armed: 'Armed', handling: 'Handling', stopping: 'Stopping',
-          disarmed: 'Disarmed', ready: 'Disarmed', error: 'Error'};
-        elements.hooksStateBadge.textContent = stateLabels[hooks?.state] ?? 'Disarmed';
-        elements.hooksStateBadge.dataset.kind = hooks?.last_failure ? 'error' : hooks?.state === 'armed' ? '' : 'offline';
-
-        const disposableDispose = experiment?.isolated && experiment.pending_requests === 0 && !contextWorking;
-        const capturedDispose = !experiment?.isolated && Boolean(hooks?.captured_owner) && hooks.session_id > 0 &&
-          !state.experimentPending && !['attaching', 'disposing'].includes(hooks.state);
-        elements.hooksCreate.disabled = !attached || Boolean(experiment?.isolated) || Boolean(hooks?.captured_owner) || contextWorking || state.debuggerActionPending;
-        elements.hooksDispose.disabled = !(disposableDispose || capturedDispose) || state.debuggerActionPending;
-        elements.hooksClear.disabled = !(hooks?.hits.length || hooks?.requests.length) || active || contextWorking || state.debuggerActionPending;
-        elements.hooksPageUrl.disabled = !disposableEditable;
-        elements.hooksNavigate.disabled = !disposableEditable || state.debuggerActionPending;
-        elements.hooksDefinitionForm.querySelectorAll('input, select, textarea').forEach(field => { field.disabled = !editable; });
-        if (!disposableReady) elements.hooksEntryMode.value = 'source';
-        elements.hooksEntryMode.disabled = !disposableEditable;
-        const functionMode = elements.hooksEntryMode.value === 'function';
-        elements.hooksSourceLocationFields.hidden = functionMode;
-        elements.hooksFunctionExpressionField.hidden = !functionMode;
-        elements.hooksReturnEnabled.disabled = !editable || functionMode;
-        elements.hooksReturnLogic.disabled = !editable || functionMode;
-        elements.hooksReturnMode.disabled = !editable || functionMode;
-        elements.hooksReturnValueField.hidden = functionMode || elements.hooksReturnMode.value === 'none';
-        elements.hooksReturnValueField.firstChild.textContent = elements.hooksReturnMode.value === 'json'
-          ? 'Replacement JSON' : 'Replacement frame expression';
-        elements.hooksAdd.disabled = !editable || !elements.hooksScript.value || !listedScripts.length || !elements.hooksLabel.value.trim() ||
-          (!elements.hooksEntryEnabled.checked && !elements.hooksReturnEnabled.checked) ||
-          (functionMode && !elements.hooksFunctionExpression.value.trim()) || state.debuggerActionPending;
-        const traceActive = typeof memoryOriginTraceActive === 'function' && memoryOriginTraceActive();
-        elements.hooksPauseLine.disabled = !capturedPauseRequest() || state.debuggerActionPending || traceActive;
-        elements.hooksPauseLine.title = elements.hooksPauseLine.disabled
-          ? 'Choose a current page script and a line inside it. Worker scripts are not paused from here.'
-          : 'Pause the attached page at this exact script. The pause stays until you resume.';
-        elements.hooksConfirm.disabled = !editable || !hooks?.definitions.length || contextWorking;
-        elements.hooksArm.disabled = !editable || !hooks?.definitions.length || !elements.hooksConfirm.checked || state.debuggerActionPending;
-        elements.hooksDisarm.disabled = !(active || hooks?.active_points > 0) || state.debuggerActionPending;
-        renderRuntimeHookDefinitions(hooks, active);
-        renderRuntimeHookHits(hooks, capturedDocument ? 'Arm a hook, then exercise the captured document.' : undefined);
-        renderRuntimeFieldTest(hooks, disposableEditable, contextReady && !contextWorking &&
-          !['arming', 'handling', 'stopping'].includes(hooks?.state));
-        elements.sourceHooksNotice.dataset.kind = elements.experimentNotice.dataset.kind;
-        elements.sourceHooksNotice.textContent = hooks?.state === 'armed' && !state.experimentNeedsRefresh && !state.experimentError && !hooks.last_failure
-          ? `Armed · ${hooks.total_hits} ${hooks.total_hits === 1 ? 'hit' : 'hits'}`
-          : elements.experimentNotice.textContent;
-        elements.sourceHooksNotice.hidden = !state.sourceHooksOpen ||
-          (contextReady && !active && !contextWorking && !state.experimentError && !hooks?.last_failure);
-      }
-
-      function capturedPauseRequest() {
-        const session = state.debuggerSession;
-        if (!['running', 'paused'].includes(session?.state)) return null;
-        const script = (session.scripts ?? []).find(candidate => candidate.script_id === elements.hooksScript.value);
-        if (!script || script.language !== 'JavaScript' || script.target_type === 'worker') return null;
-        if ((script.target_id ?? session.target?.id) !== session.target?.id) return null;
-        const line = Number(elements.hooksLine.value);
-        const column = Number(elements.hooksColumn.value);
-        if (!Number.isSafeInteger(line) || line < 1 || !Number.isSafeInteger(column) || column < 1) return null;
-        const runtimeLine = line - 1;
-        const runtimeColumn = column - 1;
-        if (Number.isInteger(script.start_line) && runtimeLine < script.start_line) return null;
-        if (Number.isInteger(script.end_line) && runtimeLine > script.end_line) return null;
-        return {action: 'set_breakpoint', url: '', script_id: script.script_id, line: runtimeLine, column: runtimeColumn, kind: 'line', condition: ''};
-      }
-
-      function parseAutomationVariables() {
-        const source = elements.automationVariables.value.trim();
-        if (!source) return {};
-        let variables;
-        try { variables = JSON.parse(source); }
-        catch { throw new TypeError('Automation variables must be valid JSON.'); }
-        if (!isPlainObject(variables) || Object.values(variables).some(value => typeof value !== 'string')) {
-          throw new TypeError('Automation variables must map names to text values.');
-        }
-        if (Object.keys(variables).length > 32 || Object.entries(variables).some(([name, value]) =>
-          !/^[A-Za-z_][A-Za-z0-9_.-]*$/.test(name) || utf8ByteLength(name) > 128 || utf8ByteLength(value) > 4 * 1024)) {
-          throw new TypeError('Automation variables exceed the visible name, count, or 4 KiB value limits.');
-        }
-        const total = Object.entries(variables).reduce((bytes, [name, value]) =>
-          bytes + utf8ByteLength(name) + utf8ByteLength(value), 0);
-        if (total > 16 * 1024) throw new TypeError('Automation variables exceed the 16 KiB session limit.');
-        return variables;
-      }
-
-      function resetAutomationEditor() {
-        state.automationEditingRecipeId = null;
-        elements.automationLabel.value = '';
-        elements.automationTrigger.value = 'manual';
-        elements.automationEnabled.checked = true;
-        elements.automationSource.value = '';
-      }
-
-      function editAutomationRecipe(recipeId) {
-        const recipe = automationRecipesState()?.recipes.find(candidate => candidate.id === recipeId);
-        if (!recipe) return;
-        state.automationEditingRecipeId = recipe.id;
-        elements.automationLabel.value = recipe.label;
-        elements.automationTrigger.value = recipe.trigger;
-        elements.automationEnabled.checked = recipe.enabled;
-        elements.automationSource.value = recipe.source;
-        renderAutomationRecipes();
-        elements.automationLabel.focus();
-      }
-
-      function renderAutomationRecipeLibrary(automation, libraryEditable, canRun) {
-        const recipes = automation?.recipes ?? [];
-        elements.automationRecipeCount.textContent = `${recipes.length} / ${automation?.limits?.recipes ?? 16}`;
-        elements.automationRecipeCount.dataset.kind = recipes.length ? '' : 'offline';
-        elements.automationSourceUsage.textContent = `${Math.ceil((automation?.source_bytes ?? 0) / 1024)} / 64 KiB`;
-        elements.automationSourceUsage.dataset.kind = recipes.length ? '' : 'offline';
-        if (!recipes.length) {
-          elements.automationRecipes.replaceChildren(textElement('div', 'experiment-empty', 'No page-context recipes configured.'));
-          return;
-        }
-        elements.automationRecipes.replaceChildren(...recipes.map(recipe => {
-          const row = document.createElement('div'); row.className = 'automation-recipe-row';
-          const title = textElement('span', 'automation-recipe-title', recipe.label);
-          const trigger = textElement('span', 'automation-trigger', recipe.enabled ? recipe.trigger : 'disabled');
-          const meta = textElement('span', 'automation-recipe-meta',
-            `recipe ${recipe.id} · ${recipe.source_bytes.toLocaleString()} source bytes · ${recipe.trigger === 'manual' ? 'manual execution' : 'automatic and manual execution'}`);
-          const actions = document.createElement('div'); actions.className = 'automation-recipe-actions';
-          const run = document.createElement('button'); run.type = 'button'; run.textContent = 'Run now';
-          run.disabled = !canRun || !elements.automationConfirm.checked;
-          run.setAttribute('aria-label', `Run ${recipe.label} now`);
-          run.addEventListener('click', () => runAutomationRecipe(recipe.id));
-          const edit = document.createElement('button'); edit.type = 'button'; edit.textContent = 'Edit';
-          edit.disabled = !libraryEditable;
-          edit.addEventListener('click', () => editAutomationRecipe(recipe.id));
-          const remove = document.createElement('button'); remove.type = 'button'; remove.textContent = 'Remove';
-          remove.disabled = !libraryEditable;
-          remove.addEventListener('click', async () => {
-            const response = currentExperimentReceipt(await runExperimentAction({action: 'remove_automation_recipe', recipe_id: recipe.id}));
-            if (response && state.automationEditingRecipeId === recipe.id) resetAutomationEditor();
-          });
-          actions.append(run, edit, remove);
-          row.append(title, trigger, meta, actions);
-          return row;
-        }));
-      }
-
-      function selectAutomationRun(runId, focus = false) {
-        if (!automationRecipesState()?.runs.some(run => run.id === runId)) return;
-        state.automationSelectedRunId = runId;
-        renderAutomationRecipes();
-        if (focus) elements.automationRuns.querySelector(`[data-automation-run-id="${runId}"]`)?.focus();
-      }
-
-      function renderAutomationTimeline(automation) {
-        const runs = automation?.runs ?? [];
-        if (!runs.some(run => run.id === state.automationSelectedRunId)) {
-          state.automationSelectedRunId = runs.at(-1)?.id ?? null;
-        }
-        elements.automationRunCount.textContent = `${runs.length} / ${automation?.limits?.retained_runs ?? 64}`;
-        elements.automationRunCount.dataset.kind = automation?.last_failure ? 'error' : runs.length ? '' : 'offline';
-        elements.automationRunMeta.textContent = runs.length
-          ? `${automation.total_runs} total · ${automation.automatic_runs} automatic · ${automation.run_evictions} evicted · ${automation.dropped_triggers} trigger batches dropped`
-          : 'Time, source, trigger, outcome, and correlation IDs for every retained run.';
-        if (!runs.length) {
-          elements.automationRuns.replaceChildren(emptyListboxOption('experiment-empty', 'Run a recipe to see its bounded result and logs.'));
-        } else {
-          elements.automationRuns.replaceChildren(...[...runs].reverse().map(run => {
-            const row = document.createElement('button'); row.type = 'button'; row.className = 'automation-run-row';
-            row.dataset.automationRunId = String(run.id);
-            row.setAttribute('role', 'option');
-            row.setAttribute('aria-selected', String(run.id === state.automationSelectedRunId));
-            const title = textElement('span', 'automation-run-title', run.label);
-            const outcome = textElement('span', 'automation-outcome', run.operation.replaceAll('_', ' '));
-            if (['failed', 'timed_out'].includes(run.operation)) outcome.style.color = 'var(--red)';
-            const source = sourceName({url: run.source, source_type: 'script', script_id: ''});
-            const meta = textElement('span', 'automation-run-meta',
-              `${new Date(run.occurred_at_ms).toLocaleTimeString()} · ${source} · ${run.category} · ${run.duration_ms} ms · session ${run.session_id} / recipe ${run.recipe_id} / run ${run.id}`);
-            row.append(title, outcome, meta);
-            row.addEventListener('click', () => selectAutomationRun(run.id));
-            return row;
-          }));
-        }
-        const selected = runs.find(run => run.id === state.automationSelectedRunId) ?? null;
-        elements.automationResultBadge.dataset.kind = selected
-          ? ['failed', 'timed_out'].includes(selected.operation) ? 'error' : '' : 'offline';
-        elements.automationResultBadge.textContent = selected ? selected.operation.replaceAll('_', ' ') : 'No result';
-        elements.automationResultMeta.textContent = selected
-          ? `${selected.result_type} · ${selected.duration_ms} ms · ${selected.logs.length} logs${selected.logs_truncated ? ' · log limit reached' : ''}`
-          : 'Select a completed run.';
-        if (!selected) {
-          elements.automationResult.replaceChildren(textElement('div', 'experiment-empty', 'No run selected.'));
-          return;
-        }
-        const output = document.createElement('pre');
-        output.textContent = selected.error || selected.result_text || '[undefined]';
-        const logs = document.createElement('div'); logs.className = 'automation-log-list';
-        if (!selected.logs.length) logs.append(textElement('div', 'experiment-empty', 'No console output captured.'));
-        else selected.logs.forEach(log => {
-          const row = textElement('div', 'automation-log-row', `${log.level.toUpperCase()}  ${log.text}`);
-          row.dataset.level = log.level;
-          logs.append(row);
-        });
-        elements.automationResult.replaceChildren(output, logs);
-      }
-
-      function renderAutomationRecipes() {
-        const experiment = requestInterception();
-        const objectExperiment = objectExperimentState();
-        const automation = automationRecipesState();
-        const attached = ['running', 'paused'].includes(state.debuggerSession?.state);
-        const autoBusy = ['arming', 'running', 'stopping'].includes(automation?.state) || automation?.active_run !== null;
-        const otherBusy = ['navigating', 'searching', 'mutating'].includes(objectExperiment?.state) ||
-          ['arming', 'armed', 'handling', 'stopping'].includes(runtimeHooksState()?.state) ||
-          ['running', 'cancelling'].includes(repeaterState()?.state) || experiment?.state === 'running';
-        const working = state.experimentPending || ['creating', 'disposing'].includes(experiment?.state) || autoBusy || otherBusy;
-        const contextReady = attached && experiment?.isolated && automation?.isolated &&
-          experiment.target_id === state.debuggerSession?.target?.id && automation.target_id === state.debuggerSession?.target?.id &&
-          ['ready', 'error'].includes(experiment.state) && !['attaching', 'disposing', 'disposed'].includes(automation.state);
-        const pageReady = contextReady && objectExperiment?.navigation_id > 0 && objectExperiment.url;
-        const libraryEditable = !state.experimentPending && !automation?.auto_armed && !autoBusy && !otherBusy;
-        const canRun = contextReady && !working && !automation?.auto_armed;
-        const canDispose = experiment?.isolated && experiment.pending_requests === 0 && !autoBusy && !otherBusy;
-        const automaticRecipes = automation?.recipes.filter(recipe => recipe.enabled && recipe.trigger !== 'manual').length ?? 0;
-
-        elements.experimentTitle.textContent = 'Automation';
-        elements.experimentSubtitle.textContent = 'Run a page script once or on a chosen trigger. Review each run and its logs.';
-        if (state.experimentError) setExperimentNotice('error', state.experimentError);
-        else if (!experiment || !automation || !objectExperiment) setExperimentNotice('error', 'The debugger session is unavailable or malformed.');
-        else if (working) setExperimentNotice('working', automation.message);
-        else if (automation.last_failure) setExperimentNotice('error', automation.last_failure);
-        else if (automation.auto_armed || contextReady || automation.state === 'disposed') setExperimentNotice('ready', automation.message);
-        else if (!attached) setExperimentNotice('idle', 'Connect a browser target to run automations.');
-        else setExperimentNotice('idle', automation.message);
-
-        elements.automationContextBadge.dataset.kind = automation?.state === 'error' ? 'error' : automation?.isolated ? '' : 'offline';
-        elements.automationContextBadge.textContent = experiment?.state === 'creating' ? 'Creating'
-          : experiment?.state === 'disposing' ? 'Disposing' : automation?.isolated ? 'Isolated'
-            : automation?.state === 'disposed' ? 'Disposed' : 'Not created';
-        elements.automationContextMessage.textContent = automation?.message ?? 'Recipe definitions stay local; execution requires a disposable context.';
-        elements.automationStorageState.textContent = automation?.isolated ? 'Ephemeral execution'
-          : automation?.state === 'disposed' ? 'Runs erased · recipes retained' : 'Definitions in memory';
-        elements.automationRunUsage.textContent = `${automation?.total_runs ?? 0} / ${automation?.limits?.total_runs ?? 256}`;
-        elements.automationPageBadge.dataset.kind = pageReady ? '' : objectExperiment?.state === 'error' ? 'error' : 'offline';
-        elements.automationPageBadge.textContent = objectExperiment?.state === 'navigating' ? 'Opening' : pageReady ? 'Loaded' : 'No page';
-        const stateLabels = {arming: 'Arming', armed: 'Armed', running: 'Running', stopping: 'Stopping', ready: 'Disarmed', error: 'Error'};
-        elements.automationStateBadge.textContent = stateLabels[automation?.state] ?? 'Disarmed';
-        elements.automationStateBadge.dataset.kind = automation?.last_failure ? 'error' : automation?.auto_armed ? '' : 'offline';
-
-        elements.automationCreate.disabled = !attached || Boolean(experiment?.isolated) || working || state.debuggerActionPending;
-        elements.automationDispose.disabled = !canDispose || state.debuggerActionPending;
-        elements.automationClear.disabled = !automation?.runs.length || automation.auto_armed || autoBusy || state.debuggerActionPending;
-        elements.automationPageUrl.disabled = !contextReady || autoBusy || otherBusy;
-        elements.automationNavigate.disabled = !contextReady || autoBusy || otherBusy || state.debuggerActionPending;
-        elements.automationVariables.disabled = !contextReady || automation?.auto_armed || autoBusy || otherBusy;
-        elements.automationConfirm.disabled = !contextReady || autoBusy || otherBusy;
-        elements.automationArm.disabled = !contextReady || autoBusy || otherBusy || automation?.auto_armed ||
-          automaticRecipes === 0 || !elements.automationConfirm.checked || state.debuggerActionPending;
-        elements.automationDisarm.disabled = !(automation?.auto_armed || automation?.active_run) || state.debuggerActionPending;
-        elements.automationCancel.disabled = !automation?.active_run;
-        elements.automationRecipeForm.querySelectorAll('input, select, textarea').forEach(field => { field.disabled = !libraryEditable; });
-        elements.automationSave.disabled = !libraryEditable || !elements.automationLabel.value.trim() ||
-          !elements.automationSource.value.trim() || state.debuggerActionPending;
-        elements.automationSave.textContent = state.automationEditingRecipeId === null ? 'Add recipe' : 'Save recipe';
-        elements.automationCancelEdit.hidden = state.automationEditingRecipeId === null;
-        elements.automationCancelEdit.disabled = !libraryEditable;
-        renderAutomationRecipeLibrary(automation, libraryEditable, canRun);
-        renderAutomationTimeline(automation);
-      }
-
-      function renderExperiment() {
-        localOverrideManager.render();
-        if (typeof elementScreenshotPanel !== 'undefined') elementScreenshotPanel.setVisible(state.experimentMode === 'screenshot' && document.querySelector('#screen-experiments')?.hidden === false);
-        elements.experimentModeButtons.forEach(button => {
-          const selected = button.dataset.experimentMode === state.experimentMode;
-          button.setAttribute('aria-selected', String(selected));
-          button.tabIndex = selected ? 0 : -1;
-        });
-        elements.interceptionWorkspace.hidden = state.experimentMode !== 'interceptor';
-        elements.repeaterWorkspace.hidden = state.experimentMode !== 'repeater';
-        elements.objectWorkspace.hidden = state.experimentMode !== 'object';
-        elements.hooksWorkspace.hidden = !state.sourceHooksOpen && state.experimentMode !== 'hooks';
-        elements.automationWorkspace.hidden = state.experimentMode !== 'automation';
-        renderActionScope();
-        if (state.experimentMode === 'screenshot') {
-          elements.experimentTitle.textContent = 'Element screenshot';
-          elements.experimentSubtitle.textContent = 'Exact disposable document · bounded local pixels and layout';
-          return;
-        }
-        if (state.experimentMode === 'repeater') {
-          renderRepeater();
-          return;
-        }
-        if (state.experimentMode === 'object') {
-          renderObjectExperiment();
-          return;
-        }
-        if (state.experimentMode === 'hooks') {
-          renderRuntimeHooks();
-          return;
-        }
-        if (state.experimentMode === 'automation') {
-          renderAutomationRecipes();
-          return;
-        }
-        elements.experimentTitle.textContent = 'Interceptor';
-        prefillExperimentRequest();
-        setExperimentRuleVisibility();
-        const experiment = requestInterception();
-        const request = state.requests.find(candidate => candidate.id === state.selectedRequestId);
-        const attached = ['running', 'paused'].includes(state.debuggerSession?.state);
-        const hookBusy = ['arming', 'armed', 'handling', 'stopping'].includes(runtimeHooksState()?.state);
-        const automationBusy = automationRecipesState()?.auto_armed || ['arming', 'running', 'stopping'].includes(automationRecipesState()?.state);
-        const working = state.experimentPending || ['creating', 'running', 'disposing'].includes(experiment?.state) || hookBusy || automationBusy;
-        const hasPendingRequests = (experiment?.pending_requests ?? 0) > 0;
-        const contextReady = attached && experiment?.isolated &&
-          experiment.target_id === state.debuggerSession?.target?.id && ['ready', 'error'].includes(experiment.state);
-        const canDispose = experiment?.isolated && ['ready', 'error'].includes(experiment.state) && experiment.pending_requests === 0 && !automationBusy;
-        const disposeBlocked = state.experimentPending || ['creating', 'running', 'disposing'].includes(experiment?.state) || automationBusy;
-        elements.experimentSubtitle.textContent = request && state.selectedField
-          ? `request-${request.id} · ${state.selectedField.label} ${state.selectedField.path} · isolated replay only`
-          : attached
-            ? 'Debugger target running · request field optional · disposable context only'
-            : 'Disposable context requires an attached debugger target';
-
-        if (state.experimentError) setExperimentNotice('error', state.experimentError);
-        else if (!experiment) setExperimentNotice('error', 'The debugger session is unavailable or malformed.');
-        else if (working) setExperimentNotice('working', experiment.message);
-        else if (experiment.state === 'error' || experiment.result?.ok === false) setExperimentNotice('error', experiment.message);
-        else if (contextReady) setExperimentNotice('ready', experiment.message);
-        else if (experiment.state === 'disposed') setExperimentNotice('ready', experiment.message);
-        else if (!attached) setExperimentNotice('idle', 'Connect a browser target to intercept requests.');
-        else if (!request || !state.selectedField) {
-          setExperimentNotice('idle', 'Debugger target is running. Experiments are available without a selected request field; create a disposable context to begin.');
-        }
-        else setExperimentNotice('idle', experiment.message);
-
-        const contextKind = experiment?.state === 'error' ? 'error' : experiment?.isolated ? '' : 'offline';
-        elements.experimentContextBadge.dataset.kind = contextKind;
-        elements.experimentContextBadge.textContent = experiment?.state === 'creating' ? 'Creating'
-          : experiment?.state === 'disposing' ? 'Disposing'
-            : experiment?.isolated ? 'Isolated'
-              : experiment?.state === 'disposed' ? 'Disposed' : 'Not created';
-        elements.experimentContextMessage.textContent = experiment?.state === 'error'
-          ? experiment.message
-          : experiment?.isolated
-            ? contextReady ? 'Disposable page attached. Its cookies and storage are isolated from the baseline target.'
-              : 'Disposable context exists. Waiting for its page debugger to attach.'
-            : experiment?.message ?? 'No isolated browser context exists.';
-        elements.experimentStorageState.textContent = experiment?.isolated ? 'Ephemeral and isolated'
-          : experiment?.state === 'disposed' ? 'Deleted' : 'Not allocated';
-        elements.experimentPendingCount.textContent = `${experiment?.pending_requests ?? 0} / ${experiment?.limits?.pending_requests ?? 16}`;
-
-        elements.experimentCreate.disabled = !attached || Boolean(experiment?.isolated) || working || state.debuggerActionPending;
-        elements.experimentDispose.disabled = !canDispose || disposeBlocked || state.debuggerActionPending;
-        elements.experimentClear.disabled = !experiment || !['disposed', 'error'].includes(experiment.state) || experiment.isolated || working || state.debuggerActionPending;
-        elements.experimentArmRule.disabled = !contextReady || hasPendingRequests || working || state.debuggerActionPending;
-        elements.experimentRun.disabled = !contextReady || hasPendingRequests || working || state.debuggerActionPending;
-        const fields = elements.experimentRuleForm.querySelectorAll('input, select, textarea');
-        fields.forEach(field => { field.disabled = !contextReady || working; });
-        elements.experimentRequestForm.querySelectorAll('input, textarea').forEach(field => { field.disabled = !contextReady || working; });
-
-        const modeLabels = { continue: 'Continue', block: 'Block', drop: 'Drop', rewrite: 'Rewrite', fulfill: 'Fulfill' };
-        elements.experimentRuleBadge.dataset.kind = contextReady ? '' : 'offline';
-        elements.experimentRuleBadge.textContent = experiment && experiment.experiment_id > 0
-          ? modeLabels[experiment.rule.mode] : 'Unarmed';
-        renderExperimentResult(experiment);
-        renderExperimentAudit(experiment);
-      }
-
-      function experimentLifetimeKey(session) {
-        const experiment = session?.request_interception;
-        return JSON.stringify([experiment?.experiment_id ?? 0, experiment?.created_at_ms ?? 0,
-          experiment?.isolated ?? false, experiment?.target_id ?? null,
-          ...['repeater', 'object_experiment', 'runtime_hooks', 'automation_recipes'].flatMap(group =>
-            [session?.[group]?.session_id ?? 0, session?.[group]?.target_id ?? null])]);
-      }
-
-      function capturedHookDocument(session = state.debuggerSession) {
-        return {instance_id: session?.network?.instance_id, connection_epoch: session?.network?.capture_epoch,
-          document_epoch: session?.target_document_epoch, target_id: session?.target?.id};
-      }
-
-      function capturedHookOwnerKey(owner) {
-        return JSON.stringify([owner?.instance_id, owner?.connection_epoch, owner?.document_epoch, owner?.target_id]);
-      }
-
-      function capturedHookSource(script, session = state.debuggerSession) {
-        return script ? {owner: capturedHookDocument(session), script_id: script.script_id,
-          source_hash: script.hash, execution_context_id: script.execution_context_id} : null;
-      }
-
-      function hookConfirmationKey() {
-        const session = state.debuggerSession;
-        return JSON.stringify([capturedHookDocument(session), session?.runtime_hooks?.session_id,
-          session?.runtime_hooks?.definitions, session?.scripts?.map(script =>
-            [script.script_id, script.hash, script.execution_context_id])]);
-      }
-
-      function expectedCapturedHookTransition(owner, current) {
-        if (owner.initialIsolated || current?.request_interception?.isolated ||
-            experimentLifetimeKey({...current, runtime_hooks: owner.initialHooks}) !== owner.initialLifetime) return false;
-        const hooks = current.runtime_hooks, request = owner.request;
-        if (request.action === 'add_runtime_hook' && request.captured_source &&
-            request.expected_session_id === owner.initialHooks?.session_id &&
-            hooks?.isolated && hooks.session_id > (owner.initialHooks?.session_id ?? 0) &&
-            capturedHookOwnerKey(hooks.captured_owner) === capturedHookOwnerKey(request.captured_source.owner) &&
-            capturedHookOwnerKey(capturedHookDocument(current)) === capturedHookOwnerKey(request.captured_source.owner) &&
-            hooks.target_id === request.captured_source.owner.target_id) {
-          owner.capturedSession ??= hooks.session_id;
-          return owner.capturedSession === hooks.session_id;
-        }
-        if (request.action !== 'disarm_runtime_hooks' || request.expected_session_id !== owner.initialHooks?.session_id ||
-            hooks?.session_id !== request.expected_session_id) return false;
-        if (hooks.isolated && owner.initialHooks?.captured_owner &&
-            hooks.target_id === owner.initialHooks.target_id &&
-            capturedHookOwnerKey(hooks.captured_owner) === capturedHookOwnerKey(owner.initialHooks.captured_owner)) return true;
-        return request.erase === true && hooks.state === 'disposed' && !hooks.isolated && hooks.target_id === null &&
-          hooks.captured_owner == null && hooks.definitions.length === 0 && hooks.active_points === 0;
-      }
-
-      function experimentContextKey() {
-        return JSON.stringify([state.experimentContextEpoch ?? 0, experimentLifetimeKey(state.debuggerSession),
-          state.debuggerSession?.target?.id ?? null]);
-      }
-
-      function currentExperimentReceipt(response) {
-        const owner = response && state.experimentReceiptOwners?.get(response);
-        if (!owner || owner.context !== experimentContextKey()) return null;
-        const generation = Math.max(state.debuggerSession?.generation ?? 0, state.experimentReceipt?.generation ?? 0);
-        if (response.generation < generation && owner.groups.some(group =>
-            !experimentRecordMatches(state.debuggerSession[group === 'experiment' ? 'request_interception' : group], response[group]))) return null;
-        return response;
-      }
-
-      function experimentEditorKey(names, selection = null) {
-        return JSON.stringify([selection, ...names.map(name => [elements[name]?.value, elements[name]?.checked])]);
-      }
-
-      function repeaterSubmissionKey() {
-        return JSON.stringify([experimentContextKey(), state.repeaterDraftRevision ?? 0, state.selectedRequestId,
-          ...['repeaterRequestUrl', 'repeaterRequestMethod', 'repeaterRequestTimeout', 'repeaterRequestHeaders',
-            'repeaterRequestBody', 'repeaterVariables'].map(name => elements[name].value)]);
-      }
-
-      function experimentActionGroups(action) {
-        const families = [
-          [['experiment', 'action_scope', 'object_experiment', 'runtime_hooks', 'automation_recipes', 'repeater'],
-            ['create_request_interception_experiment', 'dispose_request_interception_experiment']],
-          [['action_scope'], ['set_action_scope', 'close_experiment_page', 'create_experiment_page']],
-          [['experiment'], ['configure_request_interception', 'run_request_interception', 'clear_request_interception_result']],
-          [['object_experiment'], ['navigate_object_experiment', 'search_object_experiment', 'mutate_object_experiment']],
-          [['runtime_hooks'], ['bind_runtime_candidate', 'add_runtime_hook', 'remove_runtime_hook', 'arm_runtime_hooks', 'disarm_runtime_hooks',
-            'clear_runtime_hook_hits', 'configure_runtime_field_test', 'compare_runtime_field_test']],
-          [['automation_recipes'], ['add_automation_recipe', 'update_automation_recipe', 'remove_automation_recipe',
-            'arm_automation_recipes', 'disarm_automation_recipes', 'cancel_automation_recipe', 'clear_automation_runs', 'run_automation_recipe']],
-          [['repeater'], ['configure_repeater_variables', 'run_repeater_request', 'cancel_repeater_request',
-            'compare_repeater_history', 'clear_repeater_history']]
-        ];
-        return families.find(([, actions]) => actions.includes(action))?.[0] ?? null;
-      }
-
-      function experimentReceiptBounded(value) {
-        // Validators allow additive fields. Bound those fields as well before
-        // retaining or comparing a receipt; never recurse over untrusted JSON.
-        const pending = [[value, 0]];
-        let nodes = 0, characters = 0;
-        while (pending.length) {
-          const [item, depth] = pending.pop();
-          if (++nodes > 65536 || depth > 64) return false;
-          if (typeof item === 'string') characters += item.length;
-          if (characters > 4 * 1024 * 1024) return false;
-          if (item && typeof item === 'object') {
-            const keys = Object.keys(item);
-            if (nodes + pending.length + keys.length > 65536) return false;
-            for (const key of keys) {
-              characters += key.length;
-              if (characters > 4 * 1024 * 1024) return false;
-              pending.push([item[key], depth + 1]);
-            }
-          }
-        }
-        return true;
-      }
-
-      function experimentRecordMatches(record, candidate) {
-        if (!experimentReceiptBounded(record) || !experimentReceiptBounded(candidate)) return false;
-        const pending = [[record, candidate]];
-        while (pending.length) {
-          const [left, right] = pending.pop();
-          if (left === null || typeof left !== 'object') {
-            if (left !== right) return false;
-          } else {
-            if (right === null || typeof right !== 'object' || Array.isArray(left) !== Array.isArray(right) ||
-                (Array.isArray(left) && left.length !== right.length)) return false;
-            // Additional alias fields are harmless; every authoritative field
-            // must still be present and equal to the validated group record.
-            for (const key of Object.keys(left)) {
-              if (!Object.hasOwn(right, key)) return false;
-              pending.push([left[key], right[key]]);
-            }
-          }
-        }
-        return true;
-      }
-
-      function isExperimentReceipt(response, request, submittedGeneration) {
-        const groups = experimentActionGroups(request.action);
-        if (!groups || !isPlainObject(response) || response.ok !== true ||
-            !isSafeIntegerInRange(response.generation, submittedGeneration, Number.MAX_SAFE_INTEGER) ||
-            !experimentReceiptBounded(response)) return false;
-        const validators = {experiment: isRequestInterception, action_scope: isActionScope,
-          object_experiment: isObjectExperiment, runtime_hooks: isRuntimeHooks,
-          automation_recipes: isAutomationRecipes, repeater: isRepeater};
-        if (groups.some(group => !validators[group](response[group]))) return false;
-        if (['create_request_interception_experiment', 'dispose_request_interception_experiment'].includes(request.action)) {
-          const experiment = response.experiment;
-          const isolated = request.action === 'create_request_interception_experiment';
-          if (experiment.isolated !== isolated || (isolated ? experiment.state !== 'ready' : experiment.state !== 'disposed') ||
-              ['repeater', 'object_experiment', 'runtime_hooks', 'automation_recipes'].some(group =>
-                response[group].session_id !== experiment.experiment_id || (group !== 'repeater' &&
-                  (response[group].isolated !== isolated || response[group].target_id !== experiment.target_id)))) return false;
-        }
-        if (request.action === 'create_experiment_page' &&
-            (!isBoundedText(response.target_id, 4096) || !response.target_id ||
-             !response.action_scope.targets.some(target => target.id === response.target_id))) return false;
-        if (['add_automation_recipe', 'update_automation_recipe'].includes(request.action)) {
-          const recipe = response.automation_recipes.recipes.find(item => item.id === response.recipe?.id);
-          if (!recipe || !experimentRecordMatches(recipe, response.recipe) ||
-              (request.action === 'update_automation_recipe' && recipe.id !== request.recipe_id)) return false;
-        }
-        if (request.action === 'run_automation_recipe') {
-          if (!Array.isArray(response.runs) || response.runs.length > 8 ||
-              response.runs.some((run, index) => !run || run.recipe_id !== request.recipe_id ||
-                response.runs.findIndex(other => other?.id === run.id) !== index ||
-                !response.automation_recipes.runs.some(record => experimentRecordMatches(record, run))) ||
-              !(response.runs.length ? experimentRecordMatches(response.runs.at(-1), response.run) : response.run === null)) return false;
-        }
-        return true;
-      }
-
-      function clearExperimentLifetime() {
-        state.repeaterCaptureSource = null;
-        state.repeaterCaptureRuns = null;
-        state.repeaterBodyRepresentation = null;
-        for (const name of ['objectConfirm', 'hooksConfirm', 'hooksFieldConfirm', 'automationConfirm']) {
-          if (elements[name]) elements[name].checked = false;
-        }
-        for (const name of ['actionScopeNewUrl', 'actionScopeTarget', 'repeaterRequestUrl', 'repeaterRequestHeaders',
-          'repeaterRequestBody', 'repeaterVariables', 'experimentRequestUrl', 'experimentRequestHeaders',
-          'experimentRequestBody', 'experimentMethodFilter', 'experimentRewriteUrl', 'experimentRewriteMethod',
-          'experimentRewriteHeaders', 'experimentRewriteBody', 'experimentResponseHeaders', 'experimentResponseBody',
-          'objectPageUrl', 'objectPropertyQuery', 'objectValueQuery', 'objectClassQuery', 'objectShapeQuery',
-          'objectMutationProperty', 'objectMutationValue', 'hooksPageUrl', 'hooksLabel', 'hooksScript',
-          'hooksCondition', 'hooksEntryLogic', 'hooksReturnLogic', 'hooksReturnValue', 'hooksFunctionExpression',
-          'hooksFieldUrl', 'hooksFieldPointer', 'automationPageUrl', 'automationVariables', 'automationLabel', 'automationSource']) {
-          if (elements[name]) elements[name].value = '';
-        }
-        const defaults = {repeaterRequestMethod: 'GET', repeaterRequestTimeout: '15000', experimentRequestMethod: 'GET',
-          experimentUrlPattern: '*', experimentRuleMode: 'continue', experimentResponseCode: '200', objectOperation: 'set',
-          objectSimilarityThreshold: '0.75', hooksEntryMode: 'source', hooksLine: '1', hooksColumn: '1',
-          hooksReturnMode: 'none', hooksFieldMethod: 'POST', hooksFieldKind: 'json', automationTrigger: 'manual'};
-        for (const [name, value] of Object.entries(defaults)) if (elements[name]) elements[name].value = value;
-        for (const [name, checked] of Object.entries({objectRegex: false, objectCaseSensitive: false, objectShapeValues: false,
-          hooksEntryEnabled: true, hooksReturnEnabled: false, automationEnabled: true})) {
-          if (elements[name]) elements[name].checked = checked;
-        }
-        // Hidden workspaces also own disposable previews and text. Erase them
-        // immediately; polling only renders the currently visible workspace.
-        for (const name of ['repeaterHeaderRows', 'repeaterQueryRows', 'repeaterHistory', 'repeaterResponse', 'repeaterResponseMeta',
-          'repeaterComparison', 'repeaterBodyDiff', 'repeaterCompareBaseline', 'repeaterCompareCurrent', 'repeaterVariableStatus',
-          'repeaterActiveRequest', 'experimentResult', 'experimentResultMeta', 'experimentAudit', 'experimentArmedRule',
-          'objectResults', 'objectPreview', 'objectMutationResult', 'objectAudit', 'objectSearchMeta', 'objectSelectionMeta',
-          'hooksDefinitions', 'hooksHits', 'hooksHitMeta', 'hooksFieldObservations', 'hooksFieldBaseline', 'hooksFieldVariant',
-          'hooksFieldResult', 'hooksFieldStatus', 'sourceHooksNotice', 'runtimeHookTraffic', 'automationRuns', 'automationRunMeta',
-          'automationResult', 'automationResultMeta', 'actionScopeTargets']) {
-          const node = elements[name];
-          if (!node) continue;
-          node.textContent = ''; node.title = '';
-          if (node.dataset) { delete node.dataset.renderKey; delete node.dataset.optionKey; }
-        }
-        if (elements.runtimeHookTraffic) elements.runtimeHookTraffic.hidden = true;
-        // Collection definitions/drafts are durable, but these claims identify
-        // executions in the disposable lifetime and may not survive reused IDs.
-        state.collectionRunOwners?.clear();
-        Object.assign(state, {collectionSubmittedOwners: [], collectionPendingRunSelection: null,
-          collectionPendingSubmission: null, collectionRunPending: false, collectionSelectedHistoryId: null});
-        Object.assign(state, {experimentError: null, repeaterDraftDirty: false, repeaterVariablesDirty: false, repeaterVariablesKey: null,
-          repeaterSelectedHistoryId: null, repeaterExpectedHistoryId: null, experimentPrefillKey: null, repeaterPrefillKey: null,
-          repeaterHeadersSource: null, repeaterQuerySource: null, repeaterCompareBaselineId: null, repeaterCompareCurrentId: null,
-          repeaterComparisonKey: null, objectSelectedResultId: null, objectSelectionSearchId: 0, automationEditingRecipeId: null,
-          automationSelectedRunId: null, actionScopeDraftMode: null, actionScopeDraftRevision: -1,
-          selectedRuntimeHookRequest: null, runtimeHookTrafficKey: null, runtimeHookHitsKey: null, runtimeFieldTestKey: null});
-      }
-
-      function syncExperimentSession(previous, current, receiptAtPollStart = null, acknowledgement = false) {
-        const receipt = state.experimentReceipt;
-        state.experimentNeedsRefresh = false;
-        if (!acknowledgement && receipt && current.generation < receipt.generation && receiptAtPollStart !== receipt) {
-          // This GET was already in flight when the action was acknowledged.
-          // Keep its unrelated state, but do not roll back the applied groups.
-          state.experimentNeedsRefresh = true;
-          current = {...current};
-          for (const group of receipt.groups) current[group] = previous[group];
-          return current;
-        }
-        const restarted = current.generation < previous?.generation || (!acknowledgement && receipt && current.generation < receipt.generation);
-        const changed = experimentLifetimeKey(previous) !== experimentLifetimeKey(current);
-        const targetChanged = (previous?.target?.id ?? null) !== (current.target?.id ?? null);
-        if (restarted || changed || targetChanged) {
-          state.experimentContextEpoch = (state.experimentContextEpoch ?? 0) + 1;
-          state.repeaterSubmissionOwner = null;
-          const before = previous?.request_interception, after = current.request_interception;
-          let expired = false;
-          for (const owner of state.experimentActionOwners ?? []) {
-            let expected = !restarted && expectedCapturedHookTransition(owner, current);
-            if (!restarted && owner.action === 'create_request_interception_experiment' && !owner.initialIsolated) {
-              const creation = JSON.stringify([after.experiment_id, after.created_at_ms]);
-              if (after.experiment_id > 0 && after.created_at_ms > 0 && ['creating', 'ready', 'error'].includes(after.state)) {
-                owner.creation ??= creation;
-                expected = owner.creation === creation;
-              }
-            }
-            if (!restarted && owner.action === 'dispose_request_interception_experiment') {
-              expected = before?.experiment_id === after.experiment_id && before?.created_at_ms === after.created_at_ms &&
-                (!owner.disposed || !after.isolated);
-              owner.disposed ||= !after.isolated;
-            }
-            if (!expected) {
-              expired = true;
-              owner.expired = true;
-              owner.transport?.retire?.('The disposable session ended. Native completion is unknown; no cancellation or retry was requested.');
-              if (state.debuggerActionOwner === owner.transport) {
-                state.debuggerActionOwner = null;
-                state.debuggerActionPending = false;
-              }
-              if (state.experimentPrimaryOwner === owner) {
-                state.experimentPrimaryOwner = null;
-                state.experimentPending = false;
-              }
-            }
-          }
-          if ((restarted || changed) && previous?.request_interception?.experiment_id > 0) clearExperimentLifetime();
-          if (expired) state.experimentError = 'The disposable session changed. Its pending action acknowledgement is unavailable; native completion is unknown. No cancellation or retry was sent.';
-        }
-        state.experimentReceipt = null;
-        return current;
-      }
-
-      async function runExperimentAction(request) {
-        const parallelControl = ['cancel_repeater_request', 'cancel_automation_recipe'].includes(request.action);
-        if (state.experimentPending && !parallelControl) return null;
-        const session = state.debuggerSession;
-        if (!session || !experimentActionGroups(request.action)) return null;
-        const owner = {request, initialHooks: session.runtime_hooks, initialLifetime: experimentLifetimeKey(session),
-          action: request.action, initialIsolated: session.request_interception.isolated, expired: false,
-          initialCreation: JSON.stringify([session.request_interception.experiment_id, session.request_interception.created_at_ms])};
-        if (state.experimentNeedsRefresh && request.action !== 'disarm_runtime_hooks') {
-          state.experimentError = 'Waiting for a current debugger snapshot before another experiment action. No request was sent.';
-          renderExperiment();
-          return null;
-        }
-        state.experimentActionOwners ??= new Set();
-        state.experimentActionOwners.add(owner);
-        const generation = Math.max(session.generation, state.experimentReceipt?.generation ?? 0);
-        if (!parallelControl) {
-          state.experimentPending = true;
-          state.experimentPrimaryOwner = owner;
-        }
-        state.experimentError = null;
-        renderExperiment();
-        let result = null;
-        try {
-          const response = await debuggerAction(request, null, owner);
-          if (owner.expired) throw new Error('The disposable session changed while awaiting this action. Its acknowledgement is unavailable.');
-          if (!response) throw new Error(state.debuggerError || 'The experiment action acknowledgement is unavailable.');
-          if (response.ok === false) throw new Error(isBoundedText(response.error, 512) && response.error || 'The experiment action was rejected.');
-          if (!isExperimentReceipt(response, request, generation)) throw new Error('The experiment action returned an invalid acknowledgement.');
-          const current = state.debuggerSession;
-          const next = {...current};
-          const groups = experimentActionGroups(request.action).map(group => group === 'experiment' ? 'request_interception' : group);
-          for (const group of experimentActionGroups(request.action)) next[group === 'experiment' ? 'request_interception' : group] = response[group];
-          const lifecycle = ['create_request_interception_experiment', 'dispose_request_interception_experiment'].includes(request.action) ||
-            expectedCapturedHookTransition(owner, next);
-          const receiptCreation = JSON.stringify([response.experiment?.experiment_id, response.experiment?.created_at_ms]);
-          if ((request.action === 'create_request_interception_experiment' && owner.creation && owner.creation !== receiptCreation) ||
-              (request.action === 'dispose_request_interception_experiment' && owner.initialCreation !== receiptCreation) ||
-              (!lifecycle && experimentLifetimeKey(next) !== experimentLifetimeKey(current))) {
-            throw new Error('The experiment acknowledgement belongs to another disposable session.');
-          }
-          const latestGeneration = Math.max(current.generation, state.experimentReceipt?.generation ?? 0);
-          if (response.generation < latestGeneration && experimentActionGroups(request.action).some(group =>
-              !experimentRecordMatches(current[group === 'experiment' ? 'request_interception' : group], response[group]))) {
-            throw new Error('Newer experiment state arrived before this acknowledgement. The current result and draft are retained.');
-          }
-          if (response.generation >= latestGeneration) {
-            const retainedGroups = state.experimentReceipt?.groups ?? [];
-            state.debuggerSession = syncExperimentSession(current, next, null, true);
-            state.experimentReceipt = {generation: response.generation, groups: [...new Set([...retainedGroups, ...groups])]};
-          }
-          result = response;
-        } catch (error) {
-          if (!owner.expired) state.experimentError = `${error.message} No automatic retry was sent.`;
-        } finally {
-          state.experimentActionOwners.delete(owner);
-          if (state.experimentPrimaryOwner === owner) {
-            state.experimentPrimaryOwner = null;
-            state.experimentPending = false;
-          }
-          if (!owner.expired) renderExperiment();
-        }
-        if (result && !owner.expired) {
-          state.experimentReceiptOwners ??= new WeakMap();
-          state.experimentReceiptOwners.set(result, {context: experimentContextKey(), groups: experimentActionGroups(request.action)});
-        }
-        return owner.expired ? null : result;
-      }
-
-      async function configureExperimentRule() {
-        try {
-          const mode = elements.experimentRuleMode.value;
-          const request = {
-            action: 'configure_request_interception',
-            url_pattern: elements.experimentUrlPattern.value.trim(),
-            method_filter: elements.experimentMethodFilter.value.trim(),
-            mode
-          };
-          if (mode === 'rewrite') Object.assign(request, {
-            rewrite_url: elements.experimentRewriteUrl.value.trim(),
-            rewrite_method: elements.experimentRewriteMethod.value.trim(),
-            rewrite_headers: parseExperimentHeaders(elements.experimentRewriteHeaders.value, 'Rewrite headers'),
-            rewrite_body: elements.experimentRewriteBody.value
-          });
-          if (mode === 'fulfill') Object.assign(request, {
-            response_code: Number(elements.experimentResponseCode.value),
-            response_headers: parseExperimentHeaders(elements.experimentResponseHeaders.value, 'Response headers'),
-            response_body: elements.experimentResponseBody.value
-          });
-          await runExperimentAction(request);
-        } catch (error) {
-          state.experimentError = error.message;
-          renderExperiment();
-        }
-      }
-
-      async function runExperimentRequest() {
-        try {
-          const method = elements.experimentRequestMethod.value.trim().toUpperCase();
-          const body = elements.experimentRequestBody.value;
-          if (['GET', 'HEAD'].includes(method) && body) throw new TypeError(`${method} requests cannot include a body.`);
-          await runExperimentAction({
-            action: 'run_request_interception',
-            url: elements.experimentRequestUrl.value.trim(),
-            method,
-            headers: parseExperimentHeaders(elements.experimentRequestHeaders.value, 'Request headers'),
-            body
-          });
-        } catch (error) {
-          state.experimentError = error.message;
-          renderExperiment();
-        }
-      }
-
-      async function navigateObjectExperiment() {
-        const url = elements.objectPageUrl.value.trim();
-        if (!url) {
-          state.experimentError = 'Enter one HTTP or HTTPS URL for the disposable page.';
-          renderExperiment();
-          elements.objectPageUrl.focus();
-          return;
-        }
-        const response = currentExperimentReceipt(await runExperimentAction({action: 'navigate_object_experiment', url}));
-        if (response) {
-          state.objectSelectedResultId = null;
-          state.objectSelectionSearchId = 0;
-          elements.objectConfirm.checked = false;
-          elements.objectMutationValue.value = '';
-        }
-      }
-
-      async function searchObjectExperiment() {
-        const threshold = Number(elements.objectSimilarityThreshold.value);
-        if (!Number.isFinite(threshold) || threshold < 0 || threshold > 1) {
-          state.experimentError = 'Similarity must be between 0 and 1.';
-          renderExperiment();
-          elements.objectSimilarityThreshold.focus();
-          return;
-        }
-        const request = {
-          action: 'search_object_experiment',
-          property_query: elements.objectPropertyQuery.value,
-          value_query: elements.objectValueQuery.value,
-          class_query: elements.objectClassQuery.value,
-          shape: elements.objectShapeQuery.value,
-          similarity_threshold: threshold,
-          regex: elements.objectRegex.checked,
-          case_sensitive: elements.objectCaseSensitive.checked,
-          include_shape_values: elements.objectShapeValues.checked
-        };
-        if (![request.property_query, request.value_query, request.class_query, request.shape].some(value => value.trim())) {
-          state.experimentError = 'Enter at least one bounded live-object search criterion.';
-          renderExperiment();
-          elements.objectPropertyQuery.focus();
-          return;
-        }
-        const response = currentExperimentReceipt(await runExperimentAction(request));
-        if (response?.object_experiment) {
-          state.objectSelectionSearchId = response.object_experiment.search_id;
-          state.objectSelectedResultId = response.object_experiment.results[0]?.id ?? null;
-          elements.objectConfirm.checked = false;
-          elements.objectMutationValue.value = '';
-          renderObjectExperiment();
-        }
-      }
-
-      async function mutateObjectExperiment() {
-        const experiment = objectExperimentState();
-        const selected = selectedObjectExperimentResult(experiment);
-        if (!selected || !experiment) return;
-        const operation = elements.objectOperation.value;
-        const property = elements.objectMutationProperty.value;
-        if (!property) {
-          state.experimentError = 'Enter one explicit own-property name.';
-          renderExperiment();
-          elements.objectMutationProperty.focus();
-          return;
-        }
-        if (!elements.objectConfirm.checked) {
-          state.experimentError = 'Confirm the disposable-page mutation before applying it.';
-          renderExperiment();
-          elements.objectConfirm.focus();
-          return;
-        }
-        const request = {
-          action: 'mutate_object_experiment',
-          search_id: experiment.search_id,
-          result_id: selected.id,
-          operation,
-          property,
-          confirmed: true
-        };
-        if (operation === 'set') {
-          try { request.value = JSON.parse(elements.objectMutationValue.value); }
-          catch {
-            state.experimentError = 'Set value must be valid JSON.';
-            renderExperiment();
-            elements.objectMutationValue.focus();
-            return;
-          }
-        }
-        const response = currentExperimentReceipt(await runExperimentAction(request));
-        if (response) {
-          elements.objectConfirm.checked = false;
-          elements.objectMutationValue.value = '';
-          renderObjectExperiment();
-        }
-      }
-
-      async function navigateRuntimeHooks() {
-        const url = elements.hooksPageUrl.value.trim();
-        if (!url) {
-          state.experimentError = 'Enter one HTTP or HTTPS URL for the disposable page.';
-          renderExperiment();
-          elements.hooksPageUrl.focus();
-          return;
-        }
-        const response = currentExperimentReceipt(await runExperimentAction({action: 'navigate_object_experiment', url}));
-        if (response) {
-          elements.hooksConfirm.checked = false;
-          renderRuntimeHooks();
-        }
-      }
-
-      async function navigateAutomationRecipes() {
-        const url = elements.automationPageUrl.value.trim();
-        if (!url) {
-          state.experimentError = 'Enter one HTTP or HTTPS URL for the disposable page.';
-          renderExperiment();
-          elements.automationPageUrl.focus();
-          return;
-        }
-        await runExperimentAction({action: 'navigate_object_experiment', url});
-      }
-
-      async function saveAutomationRecipe() {
-        const draft = () => experimentEditorKey(['automationLabel', 'automationTrigger', 'automationEnabled', 'automationSource'], state.automationEditingRecipeId);
-        const submittedDraft = draft();
-        const request = {
-          action: state.automationEditingRecipeId === null ? 'add_automation_recipe' : 'update_automation_recipe',
-          label: elements.automationLabel.value.trim(),
-          trigger: elements.automationTrigger.value,
-          enabled: elements.automationEnabled.checked,
-          source: elements.automationSource.value
-        };
-        if (state.automationEditingRecipeId !== null) request.recipe_id = state.automationEditingRecipeId;
-        if (!request.label || !request.source.trim()) {
-          state.experimentError = 'Enter a recipe label and page-context JavaScript.';
-          renderExperiment();
-          (!request.label ? elements.automationLabel : elements.automationSource).focus();
-          return;
-        }
-        const response = currentExperimentReceipt(await runExperimentAction(request));
-        if (response && draft() === submittedDraft) resetAutomationEditor();
-      }
-
-      async function runAutomationRecipe(recipeId) {
-        if (!elements.automationConfirm.checked) {
-          state.experimentError = 'Confirm disposable-page code execution before running a recipe.';
-          renderExperiment();
-          elements.automationConfirm.focus();
-          return;
-        }
-        try {
-          const response = currentExperimentReceipt(await runExperimentAction({
-            action: 'run_automation_recipe', recipe_id: recipeId, confirmed: true,
-            variables: parseAutomationVariables()
-          }));
-          if (response?.run) state.automationSelectedRunId = response.run.id;
-          if (response) elements.automationConfirm.checked = false;
-        } catch (error) {
-          state.experimentError = error.message;
-          renderExperiment();
-        }
-      }
-
-      async function addRuntimeHook() {
-        const draft = () => experimentEditorKey(['hooksLabel', 'hooksScript', 'hooksLine', 'hooksColumn', 'hooksEntryMode',
-          'hooksFunctionExpression', 'hooksEntryEnabled', 'hooksReturnEnabled', 'hooksCondition', 'hooksEntryLogic',
-          'hooksReturnLogic', 'hooksReturnMode', 'hooksReturnValue'], state.selectedScriptId);
-        const submittedDraft = draft();
-        try {
-          const line = Number(elements.hooksLine.value);
-          const column = Number(elements.hooksColumn.value);
-          if (!Number.isSafeInteger(line) || line < 1 || !Number.isSafeInteger(column) || column < 1) {
-            throw new TypeError('Hook line and column must be positive integers.');
-          }
-          const returnMode = elements.hooksReturnMode.value;
-          const request = {
-            action: 'add_runtime_hook',
-            label: elements.hooksLabel.value.trim(),
-            script_id: elements.hooksScript.value,
-            entry_mode: elements.hooksEntryMode.value,
-            function_expression: elements.hooksFunctionExpression.value.trim(),
-            line: line - 1,
-            column: column - 1,
-            entry_enabled: elements.hooksEntryEnabled.checked,
-            return_enabled: elements.hooksReturnEnabled.checked,
-            condition: elements.hooksCondition.value,
-            entry_logic: elements.hooksEntryLogic.value,
-            return_logic: elements.hooksReturnLogic.value,
-            return_mode: returnMode
-          };
-          if (!request.label) throw new TypeError('Enter a short hook label.');
-          if (!requestInterception()?.isolated) {
-            const selected = capturedHookSource((state.debuggerSession?.scripts ?? []).find(script => script.script_id === request.script_id));
-            if (!selected || !state.hooksSelectedSource || JSON.stringify(selected) !== JSON.stringify(state.hooksSelectedSource)) {
-              throw new TypeError('The selected source changed. Select it again explicitly.');
-            }
-            request.captured_source = state.hooksSelectedSource;
-            request.expected_session_id = runtimeHooksState()?.session_id ?? 0;
-          }
-          if (!request.script_id) throw new TypeError('Choose one live JavaScript source.');
-          if (!request.entry_enabled && !request.return_enabled) throw new TypeError('Enable entry, synchronous return, or both.');
-          if (request.entry_mode === 'function' && (!request.function_expression || !request.entry_enabled || request.return_enabled)) {
-            throw new TypeError('Live function targeting needs an expression and entry-only capture.');
-          }
-          if (returnMode === 'json') {
-            try { request.return_value = JSON.parse(elements.hooksReturnValue.value); }
-            catch { throw new TypeError('Return replacement must be valid JSON.'); }
-          }
-          if (returnMode === 'expression') {
-            request.return_expression = elements.hooksReturnValue.value.trim();
-            if (!request.return_expression) throw new TypeError('Enter one return-frame expression.');
-          }
-          const response = currentExperimentReceipt(await runExperimentAction(request));
-          if (response && draft() === submittedDraft) {
-            elements.hooksConfirm.checked = false;
-            elements.hooksLabel.value = '';
-            elements.hooksFunctionExpression.value = '';
-            elements.hooksCondition.value = '';
-            elements.hooksEntryLogic.value = '';
-            elements.hooksReturnLogic.value = '';
-            elements.hooksReturnMode.value = 'none';
-            elements.hooksReturnValue.value = '';
-            renderRuntimeHooks();
-          }
-        } catch (error) {
-          state.experimentError = error.message;
-          renderExperiment();
-        }
-      }
-
-      function prefillHookFromSource(source) {
-        const hooks = runtimeHooksState();
-        const targetId = state.debuggerSession?.target?.id;
-        const interception = state.debuggerSession?.request_interception;
-        const isolatedExperiment = interception ? Boolean(interception.isolated) : Boolean(hooks?.isolated);
-        const disposable = isolatedExperiment && Boolean(hooks?.isolated) && hooks?.target_id === targetId;
-        const capturedPage = !isolatedExperiment
-          && ['running', 'paused'].includes(state.debuggerSession?.state)
-          && source?.target_type !== 'worker'
-          && (source?.target_id ?? targetId) === targetId;
-        if (source?.source_type !== 'script' || state.sourceDeobfuscated || state.sourceFormatted || !targetId || (!disposable && !capturedPage)) return false;
-        const cursor = sourceCursorFor(source);
-        const line = cursor?.line ?? source.start_line;
-        elements.hooksScript.value = source.script_id;
-        elements.hooksEntryMode.value = 'source';
-        elements.hooksLine.value = String(line + 1);
-        elements.hooksColumn.value = String((cursor?.column ?? sourceRuntimeColumn(source, 0)) + 1);
-        if (!elements.hooksLabel.value) elements.hooksLabel.value = `${sourceName(source)}:${line + 1}`;
-        return true;
-      }
-
-      function openSourceHooks(prefill = true, focus = true) {
-        state.sourceHooksOpen = true;
-        state.experimentMode = 'hooks';
-        document.querySelector('#screen-sources').dataset.hooksOpen = 'true';
-        document.querySelector('#screen-sources').append(elements.hooksWorkspace);
-        elements.sourceHooksHits.append(elements.hooksHitsColumn);
-        elements.hooksWorkspace.hidden = false;
-        elements.sourceHooksHits.hidden = false;
-        elements.sourceHooksNotice.hidden = false;
-        elements.sourceHookPivot.setAttribute('aria-expanded', 'true');
-        renderSourceSidebar();
-        renderRuntimeHooks();
-        if (prefill) {
-          prefillHookFromSource(selectedSource());
-          renderRuntimeHooks();
-        }
-        if (focus) requestAnimationFrame(() => {
-          const field = [elements.hooksLabel, elements.hooksCreate, elements.hooksDisarm, elements.sourceHooksClose]
-            .find(candidate => !candidate.disabled);
-          field?.focus({preventScroll: true});
-        });
-      }
-
-      function closeSourceHooks(restoreFocus = true) {
-        if (typeof retireCandidateExperimentPending === 'function') retireCandidateExperimentPending();
-        state.sourceHooksOpen = false;
-        document.querySelector('#screen-sources').dataset.hooksOpen = 'false';
-        elements.hooksHome.after(elements.hooksWorkspace);
-        elements.hooksHitsHome.after(elements.hooksHitsColumn);
-        elements.sourceHooksHits.hidden = true;
-        elements.sourceHooksNotice.hidden = true;
-        elements.sourceHookPivot.setAttribute('aria-expanded', 'false');
-        elements.hooksWorkspace.hidden = state.experimentMode !== 'hooks' || document.querySelector('#screen-experiments').hidden;
-        renderSourceSidebar();
-        if (restoreFocus) elements.sourceHookPivot.focus({preventScroll: true});
-      }
-
-      function pivotSourceToRuntimeHooks() {
-        if (state.sourceHooksOpen) {
-          closeSourceHooks();
-          return;
-        }
-        if (!['running', 'paused'].includes(state.debuggerSession?.state)) return;
-        openSourceHooks(Boolean(selectedSource()));
-      }
-
-      async function applyRepeaterVariables() {
-        try {
-          const draft = elements.repeaterVariables.value;
-          const variables = parseRepeaterVariables(draft);
-          const response = currentExperimentReceipt(await runExperimentAction({action: 'configure_repeater_variables', variables}));
-          if (!response || elements.repeaterVariables.value !== draft) return null;
-          state.repeaterVariablesDirty = false;
-          state.repeaterVariablesKey = JSON.stringify(variables);
-          renderRepeaterVariableStatus();
-          return response;
-        } catch (error) {
-          state.experimentError = error.message;
-          renderExperiment();
-          return null;
-        }
-      }
-
-      async function runRepeaterRequest() {
-        if (state.repeaterSubmissionOwner) return;
-        const owner = {key: repeaterSubmissionKey()};
-        state.repeaterSubmissionOwner = owner;
-        const current = () => state.repeaterSubmissionOwner === owner && owner.key === repeaterSubmissionKey();
-        try {
-          const previousHistoryId = repeaterState()?.history.at(-1)?.id ?? 0;
-          const method = elements.repeaterRequestMethod.value.trim();
-          // Textarea.value normalizes CR/CRLF. Retain the reviewed representation
-          // until an explicit body edit (or a different editor value) replaces it.
-          const retainedBody = state.repeaterBodyRepresentation;
-          const body = retainedBody?.display === elements.repeaterRequestBody.value
-            ? retainedBody.text : elements.repeaterRequestBody.value;
-          const resolvedMethod = method.toUpperCase();
-          if (['GET', 'HEAD'].includes(resolvedMethod) && body && !method.includes('{{')) {
-            throw new TypeError(`${resolvedMethod} requests cannot include a body.`);
-          }
-          const timeout = Number(elements.repeaterRequestTimeout.value);
-          if (!Number.isInteger(timeout) || timeout < 100 || timeout > 30000) {
-            throw new TypeError('Repeater timeout must be between 100 and 30000 ms.');
-          }
-          const payload = {action: 'run_repeater_request', url: elements.repeaterRequestUrl.value.trim(), method,
-            headers: parseExperimentHeaders(elements.repeaterRequestHeaders.value, 'Request headers'), body, timeout_ms: timeout};
-          const applied = currentExperimentReceipt(await applyRepeaterVariables());
-          if (!applied || !current() || state.repeaterVariablesDirty) return;
-          const response = currentExperimentReceipt(await runExperimentAction(payload));
-          if (!response || !current()) return;
-          const executionId = response.repeater.active_execution?.execution_id ?? response.repeater.history.at(-1)?.id;
-          if (Number.isSafeInteger(executionId) && executionId > previousHistoryId) {
-            const source = state.repeaterCaptureSource;
-            if (source?.context === experimentContextKey()) {
-              const relation = source.importRevision === state.repeaterDraftRevision
-                ? 'Run submitted from the reviewed captured draft. HTTP client normalization still applies; compare retained evidence with resolved inputs.'
-                : 'Draft edited after capture import. Original capture is provenance only, not a claim of equivalent execution.';
-              const retained = state.repeaterCaptureRuns;
-              const links = retained?.context === source.context && retained.source === source.source ? retained.links : [];
-              state.repeaterCaptureRuns = {source:source.source,context:source.context,links:[...links.filter(link => link.id !== executionId),{id:executionId,relation}].slice(-24)};
-            }
-            state.repeaterExpectedHistoryId = executionId;
-            renderExperiment();
-          }
-          state.repeaterDraftDirty = false;
-        } catch (error) {
-          if (current()) {
-            state.experimentError = error.message;
-            renderExperiment();
-          }
-        } finally {
-          if (state.repeaterSubmissionOwner === owner) state.repeaterSubmissionOwner = null;
-        }
-      }
-
-      async function compareRepeaterResponses() {
-        const baselineId = Number(elements.repeaterCompareBaseline.value);
-        const currentId = Number(elements.repeaterCompareCurrent.value);
-        if (!Number.isSafeInteger(baselineId) || !Number.isSafeInteger(currentId) || baselineId === currentId) return;
-        state.repeaterCompareBaselineId = baselineId;
-        state.repeaterCompareCurrentId = currentId;
-        await runExperimentAction({
-          action: 'compare_repeater_history', baseline_id: baselineId, current_id: currentId
-        });
-      }
-
-      async function copyResolvedRepeaterRequest() {
-        const entry = selectedRepeaterEntry();
-        if (!entry) return;
-        const request = {
-          url: entry.resolved_request.url,
-          method: entry.resolved_request.method,
-          headers: repeaterHeaderObject(entry.resolved_request.headers),
-          body: entry.resolved_request.body,
-          timeout_ms: entry.resolved_request.timeout_ms
-        };
-        try {
-          await navigator.clipboard.writeText(JSON.stringify(request, null, 2));
-          setExperimentNotice('ready', `Resolved request from run ${entry.id} copied to the clipboard.`);
-        } catch {
-          state.experimentError = 'The resolved request could not be copied to the clipboard.';
-          renderExperiment();
-        }
-      }
-
       function collectionFolder(folderId) {
         return state.apiCollection.folders.find(folder => folder.id === folderId) ?? null;
       }
@@ -6055,16 +3266,7 @@
         return values.reduce((maximum, value) => Math.max(maximum, value.id), 0) + 1;
       }
 
-      function collectionNextRequestId() {
-        // Do not recycle a deleted recipe ID while its ephemeral runs still exist.
-        const repeater = repeaterState();
-        return Math.max(collectionNextId(state.apiCollection.requests),
-          (state.collectionPendingSubmission?.requestId ?? 0) + 1,
-          ...(state.collectionSubmittedOwners ?? []).filter(owner => owner.targetId === requestInterception()?.target_id &&
-            owner.experimentId === requestInterception()?.experiment_id).map(owner => owner.requestId + 1),
-          ...[...(repeater?.history ?? []), repeater?.active_execution].map(entry =>
-            Number.isSafeInteger(entry?.collection_request_id) ? entry.collection_request_id + 1 : 1));
-      }
+      function collectionNextRequestId() { return collectionNextId(state.apiCollection.requests); }
 
       function collectionVariablesFromText(value, label) {
         const source = value.trim();
@@ -6092,7 +3294,13 @@
       }
 
       function collectionHeadersFromText(value) {
-        const headers = parseExperimentHeaders(value, 'Request headers');
+        let headers;
+        try { headers = value.trim() ? JSON.parse(value) : {}; }
+        catch { throw new TypeError('Request headers must be a JSON object.'); }
+        if (!isPlainObject(headers) || Object.values(headers).some(item => typeof item !== 'string')) {
+          throw new TypeError('Request headers must map names to text values.');
+        }
+
         const forbidden = new Set(['authorization', 'connection', 'content-length', 'cookie', 'host',
           'proxy-authorization', 'set-cookie', 'transfer-encoding']);
         const entries = Object.entries(headers);
@@ -6347,9 +3555,7 @@
           if (selected && focus) button.focus({preventScroll: true});
         });
         if (response) {
-          elements.collectionResponse.setAttribute('aria-labelledby', `collection-response-tab-${tab}`);
-          elements.collectionResponse.dataset.renderKey = '';
-          renderCollectionExecution();
+
         }
       }
 
@@ -6482,8 +3688,7 @@
           elements.collectionRequestUrl.value = request.url;
           elements.collectionRequestMethod.value = request.method;
           elements.collectionRequestTimeout.value = String(request.timeout_ms);
-          elements.collectionRequestHeaders.value = request.headers.length
-            ? JSON.stringify(repeaterHeaderObject(request.headers), null, 2) : '';
+
           elements.collectionRequestBody.value = request.body;
           elements.collectionRequestVariables.value = collectionVariablesText(request.variables);
         }
@@ -6500,183 +3705,6 @@
         renderCollectionVariableStatus();
       }
 
-      function collectionRunKey(executionId) {
-        return JSON.stringify([requestInterception()?.target_id, requestInterception()?.experiment_id, executionId]);
-      }
-
-      function rememberCollectionRunOwner(key, owner) {
-        const owners = state.collectionRunOwners ??= new Map();
-        owners.set(key, {requestId: owner.requestId, createdAt: owner.createdAt});
-        while (owners.size > 25) owners.delete(owners.keys().next().value);
-        return owners.get(key);
-      }
-
-      function collectionObservedRunOwner(entry, active = false) {
-        const executionId = active ? entry?.execution_id : entry?.id;
-        if (!entry || !Number.isSafeInteger(executionId)) return null;
-        const key = collectionRunKey(executionId);
-        const known = state.collectionRunOwners?.get(key);
-        if (known) return known;
-        // Polling can observe a run before its POST acknowledgement, or after
-        // that acknowledgement is lost. Dispatch ownership must already exist.
-        const candidates = (state.collectionSubmittedOwners ?? []).filter(owner =>
-          owner.targetId === requestInterception()?.target_id && owner.experimentId === requestInterception()?.experiment_id &&
-          owner.requestId === entry.collection_request_id && owner.executionId === undefined && executionId > owner.afterExecutionId);
-        if (!candidates.length) return null;
-        const owner = candidates[0];
-        if (candidates.some(candidate => candidate.createdAt !== owner.createdAt)) return {ambiguous: true};
-        owner.executionId = executionId;
-        return rememberCollectionRunOwner(key, owner);
-      }
-
-      function collectionRunBelongsToRequest(entry, active = false) {
-        const owner = collectionObservedRunOwner(entry, active);
-        const request = collectionRequest();
-        if (!request || !entry || entry.collection_request_id !== request.id || !Number.isSafeInteger(entry.started_at_ms) || entry.started_at_ms < request.created_at_ms) return false;
-        return !owner || !owner.ambiguous && owner.requestId === request.id && owner.createdAt === request.created_at_ms;
-      }
-
-      function collectionHistoryEntries() {
-        return (repeaterState()?.history ?? []).filter(entry => collectionRunBelongsToRequest(entry));
-      }
-
-      function collectionPendingRunForSelection() {
-        const pending = state.collectionPendingRunSelection;
-        if (!pending) return null;
-        const request = collectionRequest();
-        if (pending.selection !== state.collectionSelectionVersion || pending.historySelection !== state.collectionHistorySelectionVersion ||
-            pending.requestId !== request?.id || pending.createdAt !== request?.created_at_ms ||
-            pending.key !== collectionRunKey(pending.executionId) || !requestInterception()?.isolated) {
-          state.collectionPendingRunSelection = null;
-          return null;
-        }
-        return pending;
-      }
-
-      function renderCollectionResponse(entry) {
-        const repeater = repeaterState();
-        const running = ['running', 'cancelling'].includes(repeater?.state) &&
-          collectionRunBelongsToRequest(repeater?.active_execution, true);
-        const pending = collectionPendingRunForSelection();
-        const pendingLabel = running ? ' · another run in progress' : pending ? ` · waiting for run ${pending.executionId}` : '';
-        const key = JSON.stringify([requestInterception()?.experiment_id, state.collectionSelectedRequestId,
-          entry?.id, state.collectionResponseTab, entry ? 'complete' : pending?.executionId ?? (running ? repeater.state : 'idle')]);
-        if (entry) elements.collectionResponseMeta.textContent = `Run ${entry.id} · ${entry.resolved_request.method} ${entry.resolved_request.url}${pendingLabel}`;
-        if (elements.collectionResponse.dataset.renderKey === key) return;
-        elements.collectionResponse.dataset.renderKey = key;
-        if (!entry) {
-          elements.collectionResponse.className = 'repeater-response experiment-empty';
-          elements.collectionResponse.textContent = pending ? `Waiting for acknowledged run ${pending.executionId} to appear in history…` : running ? 'Waiting for this request’s response…'
-            : collectionRequest() ? 'Run this saved request to inspect its bounded response.' : 'Select a saved request to inspect its runs.';
-          elements.collectionResponseMeta.textContent = pending ? `Run ${pending.executionId} acknowledged; response pending.` : running ? 'An explicit run is in progress.' : 'No completed run for this request.';
-          elements.collectionResponseBadge.dataset.kind = 'offline';
-          elements.collectionResponseBadge.textContent = pending ? running && repeater.state === 'cancelling' ? 'Cancelling' : 'Awaiting response' : running ? repeater.state === 'cancelling' ? 'Cancelling' : 'Running' : 'No response';
-          return;
-        }
-        const response = entry.response;
-        const summary = document.createElement('div'); summary.className = 'experiment-result-summary';
-        summary.append(experimentFact('Status', response.ok ? `${response.status} ${response.status_text}`.trim() : entry.state.replaceAll('_', ' ')),
-          experimentFact('Duration', `${response.duration_ms} ms`),
-          experimentFact('Body', `${utf8ByteLength(response.body)} bytes${response.body_truncated ? ' · truncated' : ''}`));
-        let content;
-        if (state.collectionResponseTab === 'headers') {
-          content = document.createElement('div'); content.className = 'repeater-response-headers';
-          if (response.headers.length) content.append(...response.headers.map(header => {
-            const row = document.createElement('div'); row.className = 'repeater-response-header';
-            row.append(textElement('span', '', header.name), textElement('span', '', header.value)); return row;
-          }));
-          else content.append(textElement('div', 'experiment-empty', 'No response headers were retained.'));
-          if (response.headers_truncated) content.append(textElement('p', 'collection-help', 'Response headers were truncated; only the retained subset is shown.'));
-        } else {
-          content = document.createElement('pre'); content.className = 'experiment-result-body';
-          content.textContent = response.ok ? response.body || '(empty response body)' : response.error;
-        }
-        elements.collectionResponse.className = 'repeater-response';
-        elements.collectionResponse.replaceChildren(summary, content);
-        elements.collectionResponse.scrollTop = 0;
-        elements.collectionResponseMeta.textContent = `Run ${entry.id} · ${entry.resolved_request.method} ${entry.resolved_request.url}${pendingLabel}`;
-        elements.collectionResponseBadge.dataset.kind = response.ok ? '' : 'error';
-        elements.collectionResponseBadge.textContent = response.ok ? 'Complete' : entry.state.replaceAll('_', ' ');
-      }
-
-      function renderCollectionExecution() {
-        const experiment = requestInterception();
-        const repeater = repeaterState();
-        const history = collectionHistoryEntries();
-        const pendingSelection = collectionPendingRunForSelection();
-        if (pendingSelection && history.some(entry => entry.id === pendingSelection.executionId)) {
-          state.collectionSelectedHistoryId = pendingSelection.executionId;
-          state.collectionPendingRunSelection = null;
-        }
-        const attached = ['running', 'paused'].includes(state.debuggerSession?.state);
-        const active = ['running', 'cancelling'].includes(repeater?.state);
-        const contextReady = attached && experiment?.isolated && experiment.target_id === state.debuggerSession?.target?.id &&
-          ['ready', 'error'].includes(experiment.state) && ['ready', 'error'].includes(repeater?.state);
-        elements.collectionContextBadge.dataset.kind = repeater?.state === 'error' ? 'error' : contextReady ? '' : 'offline';
-        elements.collectionContextBadge.textContent = active ? repeater.state === 'cancelling' ? 'Cancelling' : 'Running'
-          : contextReady ? 'Isolated' : experiment?.state === 'creating' ? 'Creating' : 'Not created';
-        elements.collectionContextMessage.textContent = active
-          ? `Request #${repeater.active_execution?.collection_request_id ?? 'external'} is ${repeater.state}. Cancellation does not undo an already sent request.`
-          : contextReady ? 'Disposable page attached. Baseline cookies and storage are excluded.'
-            : attached ? repeater?.message ?? 'Create the shared isolated Request Lab context.'
-              : 'Attach an authorized browser target before creating a context.';
-        elements.collectionCreateContext.disabled = !attached || Boolean(experiment?.isolated) ||
-          state.experimentPending || state.debuggerActionPending;
-        elements.collectionRun.disabled = !collectionRequest() || !contextReady || active || state.experimentPending ||
-          state.apiCollectionSaving || state.apiCollectionNeedsReload || state.collectionRunPending || Boolean(collectionPendingRunForSelection()) || state.debuggerActionPending || state.collectionFolderDirty;
-        elements.collectionRun.textContent = state.collectionRunPending ? 'Submitting…' : state.collectionDraftDirty ? 'Save & Run' : 'Run saved request';
-        elements.collectionRunHelp.textContent = collectionPendingRunForSelection() ? 'The acknowledged run is awaiting its response. Selecting another run only changes the displayed result.'
-          : state.collectionFolderDirty ? 'Save or discard folder variables before running.'
-          : !attached ? 'A browser target and isolated context are required to run.'
-            : !contextReady ? active ? 'Wait for the active run, or cancel it in Isolated context.' : 'Create an isolated context to run this request.'
-              : state.collectionDraftDirty ? 'Save & Run saves these edits locally, then sends that saved request once.'
-                : 'Run sends the saved method, URL, headers and body once. Selecting a request never sends it.';
-        elements.collectionCancel.disabled = !active || state.debuggerActionPending || repeater?.state === 'cancelling';
-        if (!history.some(entry => entry.id === state.collectionSelectedHistoryId)) {
-          state.collectionSelectedHistoryId = history.at(-1)?.id ?? null;
-        }
-        elements.collectionHistoryBadge.textContent = `${history.length} ${history.length === 1 ? 'run' : 'runs'}`;
-        elements.collectionHistoryBadge.dataset.kind = history.length ? '' : 'offline';
-        const historyKey = JSON.stringify([experiment?.experiment_id, state.collectionSelectedRequestId,
-          state.collectionSelectedHistoryId, history.map(entry => entry.id)]);
-        if (elements.collectionHistory.dataset.renderKey !== historyKey) {
-          const focusedId = elements.collectionHistory.contains(document.activeElement) ? document.activeElement?.dataset.runId : null;
-          const scrollTop = elements.collectionHistory.scrollTop;
-          elements.collectionHistory.dataset.renderKey = historyKey;
-          if (!history.length) elements.collectionHistory.replaceChildren(
-            emptyListboxOption('experiment-empty', collectionRequest() ? 'No executions for this request.' : 'Select a saved request.')
-          );
-          else elements.collectionHistory.replaceChildren(...[...history].reverse().map(entry => {
-            const row = document.createElement('button'); row.type = 'button'; row.className = 'collection-history-row';
-            row.dataset.runId = String(entry.id);
-            row.setAttribute('role', 'option'); row.setAttribute('aria-selected', String(entry.id === state.collectionSelectedHistoryId));
-            row.tabIndex = entry.id === state.collectionSelectedHistoryId ? 0 : -1;
-            row.append(textElement('span', '', `${entry.resolved_request.method} ${entry.resolved_request.url}`),
-              textElement('strong', '', entry.response.ok ? String(entry.response.status) : entry.state.replaceAll('_', ' ')),
-              textElement('small', '', `Run ${entry.id} · ${entry.response.duration_ms} ms · ${new Date(entry.completed_at_ms).toLocaleTimeString()}`));
-            row.addEventListener('click', () => {
-              state.collectionHistorySelectionVersion += 1;
-              state.collectionPendingRunSelection = null;
-              state.collectionSelectedHistoryId = entry.id; renderCollectionExecution();
-              elements.collectionHistory.querySelector(`[data-run-id="${entry.id}"]`)?.focus({preventScroll: true});
-            });
-            row.addEventListener('keydown', event => {
-              if (!['ArrowUp', 'ArrowDown', 'Home', 'End'].includes(event.key)) return;
-              event.preventDefault();
-              const rows = [...elements.collectionHistory.querySelectorAll('.collection-history-row')];
-              const index = rows.indexOf(row);
-              const next = event.key === 'Home' ? 0 : event.key === 'End' ? rows.length - 1
-                : Math.max(0, Math.min(rows.length - 1, index + (event.key === 'ArrowDown' ? 1 : -1)));
-              rows[next].click();
-            });
-            return row;
-          }));
-          elements.collectionHistory.scrollTop = scrollTop;
-          if (focusedId) elements.collectionHistory.querySelector(`[data-run-id="${focusedId}"]`)?.focus({preventScroll: true});
-        }
-        renderCollectionResponse(history.find(entry => entry.id === state.collectionSelectedHistoryId) ?? null);
-      }
-
       function renderApiCollection() {
         if (!elements.collectionTree) return;
         const firstUse = state.apiCollection.requests.length === 0 && state.apiCollection.folders.length === 1;
@@ -6687,7 +3715,7 @@
             ? `${state.apiCollection.requests.length} saved ${state.apiCollection.requests.length === 1 ? 'request' : 'requests'} loaded from the permission-restricted local store.`
             : 'Start by creating a saved request or importing one from Traffic.';
         }
-        elements.collectionGeneration.textContent = `Generation ${state.apiCollection.generation}`;
+
         elements.collectionCount.textContent = `${state.apiCollection.requests.length} / 128`;
         elements.collectionNewFolder.disabled = !state.apiCollectionLoaded || state.apiCollectionNeedsReload || state.apiCollectionSaving || state.apiCollection.folders.length >= 32 ||
           collectionFolderDepth(state.collectionSelectedFolderId) >= 4;
@@ -6699,7 +3727,7 @@
         renderCollectionTree();
         renderCollectionFolderForm();
         renderCollectionRequestForm();
-        renderCollectionExecution();
+
       }
 
       async function createCollectionFolder() {
@@ -6833,95 +3861,6 @@
           state.apiCollection.requests, `Folder “${folder.name}” deleted.`)) {
           state.collectionSelectedFolderId = folder.parent_id ?? 1; state.collectionDeleteFolderId = null;
           state.collectionFolderDraftId = null; state.collectionFolderDirty = false; renderApiCollection();
-        }
-      }
-
-      async function runCollectionRequest() {
-        const request = collectionRequest();
-        if (!request || state.collectionRunPending || collectionPendingRunForSelection() || state.apiCollectionSaving || state.apiCollectionNeedsReload || state.experimentPending || state.debuggerActionPending) return;
-        if (state.collectionFolderDirty) {
-          setCollectionNotice('conflict', 'Save or discard folder variables before running a request.'); return;
-        }
-        const selection = state.collectionSelectionVersion;
-        const historySelection = state.collectionHistorySelectionVersion;
-        const targetId = state.debuggerSession?.target?.id;
-        const experimentId = requestInterception()?.experiment_id;
-        const context = experimentContextKey();
-        const ready = () => context === experimentContextKey() && ['running', 'paused'].includes(state.debuggerSession?.state) && targetId === state.debuggerSession?.target?.id &&
-          experimentId === requestInterception()?.experiment_id && requestInterception()?.target_id === targetId && requestInterception()?.isolated &&
-          ['ready', 'error'].includes(requestInterception()?.state) && ['ready', 'error'].includes(repeaterState()?.state);
-        if (!ready()) { setCollectionNotice('error', 'Create an isolated context before running.'); return; }
-        state.collectionRunPending = true;
-        const pendingOwner = {requestId: request.id, createdAt: request.created_at_ms, targetId, experimentId};
-        state.collectionPendingSubmission = pendingOwner;
-        renderCollectionExecution();
-        let savedEdits = false;
-        try {
-          const expected = state.collectionDraftDirty ? collectionRequestDraft() : request;
-          const draftRevision = state.collectionDraftRevision ?? 0;
-          if (state.collectionDraftDirty) {
-            // The button explicitly says Save & Run. Selection and plain saves never send.
-            if (!(await saveCollectionRequest())) return;
-            savedEdits = true;
-          }
-          const saved = collectionRequest(request.id);
-          if (!ready()) throw new Error('The isolated context changed before the request could run.');
-          if (!saved || Object.keys(expected).some(key => !['created_at_ms', 'updated_at_ms'].includes(key) &&
-              JSON.stringify(expected[key]) !== JSON.stringify(saved[key])) || (state.collectionDraftRevision ?? 0) !== draftRevision) {
-            throw new Error('The submitted request draft changed before sending. No request was sent.');
-          }
-          const savedKey = JSON.stringify([saved, collectionFolderLineage(saved.folder_id)]);
-          const variables = {};
-          collectionFolderLineage(saved.folder_id).forEach(folder => folder.variables.forEach(variable => {
-            variables[variable.name] = variable.value;
-          }));
-          saved.variables.forEach(variable => { variables[variable.name] = variable.value; });
-          const payload = {action: 'run_repeater_request', url: saved.url, method: saved.method,
-            headers: repeaterHeaderObject(saved.headers), body: saved.body, timeout_ms: saved.timeout_ms,
-            collection_request_id: saved.id};
-          if (!ready()) throw new Error('The isolated context changed before the request could run.');
-          const configured = currentExperimentReceipt(await runExperimentAction({action: 'configure_repeater_variables', variables}));
-          if (!configured) {
-            throw new Error(state.experimentError || 'Request variables could not be configured.');
-          }
-          if (!ready()) throw new Error('The isolated context changed before the request could run.');
-          if (state.apiCollectionNeedsReload || collectionRequest(saved.id)?.created_at_ms !== saved.created_at_ms) {
-            throw new Error('The saved request was removed or replaced before sending. No request was sent.');
-          }
-          if (savedKey !== JSON.stringify([collectionRequest(saved.id), collectionFolderLineage(saved.folder_id)]) ||
-              ((state.collectionDraftRevision ?? 0) !== draftRevision) ||
-              (state.collectionSelectedRequestId === saved.id && state.collectionDraftDirty)) {
-            throw new Error('The submitted request or its variables changed before sending. No request was sent.');
-          }
-          const previousId = repeaterState()?.history.at(-1)?.id ?? 0;
-          const submittedOwners = state.collectionSubmittedOwners ??= [];
-          const submission = {...state.collectionPendingSubmission, afterExecutionId: previousId};
-          submittedOwners.push(submission);
-          if (submittedOwners.length > 25) submittedOwners.shift();
-          const response = currentExperimentReceipt(await runExperimentAction(payload));
-          if (!response) throw new Error(state.experimentError || 'The run could not be confirmed. It was not automatically retried.');
-          const acknowledgement = response.repeater?.active_execution?.collection_request_id === saved.id
-            ? response.repeater.active_execution : response.repeater?.history.findLast(entry => entry.collection_request_id === saved.id && entry.id > previousId);
-          const executionId = acknowledgement?.execution_id ?? acknowledgement?.id;
-          if (!Number.isSafeInteger(executionId) || executionId <= previousId) {
-            throw new Error('The run acknowledgement did not identify this request. Its outcome is unknown and it was not retried.');
-          }
-          const key = JSON.stringify([targetId, experimentId, executionId]);
-          submission.executionId = executionId;
-          rememberCollectionRunOwner(key, {requestId: saved.id, createdAt: saved.created_at_ms});
-          if (selection === state.collectionSelectionVersion && historySelection === state.collectionHistorySelectionVersion &&
-              state.collectionSelectedRequestId === saved.id && collectionRequest()?.created_at_ms === saved.created_at_ms) {
-            state.collectionPendingRunSelection = {key, executionId, requestId: saved.id, createdAt: saved.created_at_ms, selection, historySelection};
-          }
-          setCollectionNotice('ready', `${savedEdits ? 'Edits saved. ' : ''}Run submitted for “${saved.name}”. Responses remain tied to that submitted request.`);
-        } catch (error) {
-          if (state.collectionPendingSubmission === pendingOwner) setCollectionNotice('error', `${savedEdits ? 'Edits saved. ' : ''}${error.message}`);
-        } finally {
-          if (state.collectionPendingSubmission === pendingOwner) {
-            state.collectionPendingSubmission = null;
-            state.collectionRunPending = false;
-            renderApiCollection();
-          }
         }
       }
 
@@ -7991,7 +4930,6 @@
       }
 
       function renderDecoder() {
-        renderDecoderFieldOrigin();
         toolsElements.engineBadge.textContent = state.decoderEngine.available ? (state.decoderEngine.busy ? 'Engine busy' : 'Native engine ready') : 'Engine unavailable';
         toolsElements.engineBadge.dataset.kind = state.decoderEngine.available ? '' : 'offline';
         let parsedInput = null;
@@ -8140,7 +5078,6 @@
 
       function resetDecoderChain(message = 'Decoder chain cleared. Input was preserved.') {
         investigationDecoderOrigin = null;
-        clearDecoderFieldOrigin();
         state.decoderInputSnapshot = null;
         state.decoderSteps = [];
         state.decoderSelectedStepId = null;
@@ -8441,27 +5378,14 @@
         }
       }
 
-      function liveScriptIdentity(script) {
-        return JSON.stringify([script.target_id ?? state.debuggerSession?.target?.id ?? '', script.script_id, script.hash,
-          script.execution_context_id ?? null, script.start_line ?? 0, script.start_column ?? 0, script.length ?? null]);
-      }
-
-
       // Source ownership never comes from a URL. Captured documents reuse the
-      // Facts identity; live documents include the actual page/worker target.
+      // Facts identity of their immutable stored artifact.
       function sourceIdentity(source) {
-        if (!source) return null;
-        if (source.source_type === 'script' || (source.artifact_id === undefined && source.script_id !== undefined)) {
-          return JSON.stringify(['script', source.script_id, liveScriptIdentity(source),
-            source.execution_context_id ?? null, source.start_line ?? 0, source.start_column ?? 0]);
-        }
-        return sourceFactsIdentity({...source, source_type: 'artifact'});
+        return source ? sourceFactsIdentity({...source, source_type: 'artifact'}) : null;
       }
 
       function sourceIsCurrent(source) {
-        const candidates = source.source_type === 'script' || (source.artifact_id === undefined && source.script_id !== undefined)
-          ? (state.debuggerSession?.scripts ?? []).filter(value => value.script_id === source.script_id && !state.staleScriptIds?.has(value.script_id))
-          : state.artifacts.filter(value => value.artifact_id === source.artifact_id);
+        const candidates = state.artifacts.filter(value => value.artifact_id === source.artifact_id);
         return candidates.length === 1 && sourceIdentity(candidates[0]) === sourceIdentity(source);
       }
 
@@ -8469,27 +5393,6 @@
         // Navigator/tab/Quick Open handlers must not keep an evicted document
         // alive through a hidden DOM closure. Keep descriptors, never payloads.
         return Object.fromEntries(Object.entries(source).filter(([key]) => !['content', 'deobfuscation', 'controller'].includes(key)));
-      }
-
-      function setSourceCursor(source, line, column) {
-        if (source?.source_type !== 'script' || !sourceIsCurrent(source) ||
-            sourceIdentity(selectedSource()) !== sourceIdentity(source) ||
-            state.sourceDeobfuscated || state.sourceFormatted || state.sourceWasm ||
-            !Number.isSafeInteger(line) || line < 0 || !Number.isSafeInteger(column) || column < 0) return false;
-        const editor = state.sourceEditorView;
-        if (editor?.identity === sourceIdentity(source) && !editor.view.derived && !editor.view.formatted) {
-          const local = line - (source.start_line ?? 0), bounds = sourceDocumentLine(editor.index, local);
-          const localColumn = column - sourceRuntimeColumn(source, local);
-          if (!bounds || localColumn < 0 || localColumn > bounds.length) return false;
-        }
-        state.sourceCursor = {identity: sourceIdentity(source), representation: 'original', scriptId: source.script_id, line, column};
-        return true;
-      }
-
-      function sourceCursorFor(source) {
-        return !state.sourceDeobfuscated && !state.sourceFormatted && !state.sourceWasm &&
-          state.sourceCursor?.identity === sourceIdentity(source) && state.sourceCursor?.representation === 'original'
-          ? state.sourceCursor : null;
       }
 
       function retireSourceAnalysis(except = null) {
@@ -8507,15 +5410,8 @@
 
       function releaseSourcePreview(source) {
         const identity = sourceIdentity(source);
-        const preview = source.source_type === 'script'
-          ? state.liveScriptContent.get(source.script_id)
-          : state.artifacts.find(value => sourceIdentity(value) === identity);
-        if (source.source_type === 'script') {
-          if (preview?.identity === liveScriptIdentity(source)) {
-            preview.controller?.abort();
-            state.liveScriptContent.delete(source.script_id);
-          }
-        } else if (preview) {
+        const preview = state.artifacts.find(value => sourceIdentity(value) === identity);
+        if (preview) {
           preview.controller?.abort();
           for (const field of ['content', 'sourceTextLength', 'contentTruncated', 'loading', 'loadError', 'controller', 'previewUsed', 'contentVerified', 'contentLossy']) delete preview[field];
         }
@@ -8527,15 +5423,12 @@
           }
         }
         if (state.sourceEditorView?.identity === identity) state.sourceEditorView = null;
-        if (state.sourceCursor?.identity === identity) state.sourceCursor = null;
       }
 
       function boundSourcePreviews(protectedSource = null) {
         const protectedIdentity = sourceIdentity(selectedSource() ?? protectedSource);
-        const entries = [
-          ...(state.artifacts ?? []).filter(source => source.kind !== 'canvas_data_url').map(source => ({source, preview: source})),
-          ...(state.debuggerSession?.scripts ?? []).map(source => ({source: {...source, source_type: 'script'}, preview: state.liveScriptContent.get(source.script_id)}))
-        ].filter(({preview}) => preview && (preview.loading || preview.content !== undefined));
+        const entries = (state.artifacts ?? []).filter(source => source.kind !== 'canvas_data_url').map(source => ({source, preview: source}))
+          .filter(({preview}) => preview && (preview.loading || preview.content !== undefined));
         entries.sort((a, b) => (a.preview.previewUsed ?? 0) - (b.preview.previewUsed ?? 0));
         let characters = entries.reduce((sum, {preview}) => sum + (preview.content?.length ?? 0), 0);
         let documents = entries.length;
@@ -8566,44 +5459,6 @@
         }
       }
 
-      function pruneLiveScriptContent() {
-        const identities = new Map((state.debuggerSession?.scripts ?? [])
-          .map(script => [script.script_id, liveScriptIdentity(script)]));
-        for (const [scriptId, cached] of state.liveScriptContent) {
-          if (identities.get(scriptId) !== cached.identity || state.staleScriptIds.has(scriptId)) {
-            cached.controller?.abort();
-            state.liveScriptContent.delete(scriptId);
-          }
-        }
-      }
-
-      function liveSources() {
-        const staleScriptIds = state.staleScriptIds ?? new Set();
-        // Hide helper display entries without dropping them from the backend's
-        // complete catalog used to prove candidate byte identity and uniqueness.
-        return (state.debuggerSession?.scripts ?? []).filter(script => !staleScriptIds.has(script.script_id) && !script.url?.startsWith('reb-automation-')).map(script => {
-          const entry = state.liveScriptContent.get(script.script_id);
-          const cached = entry?.identity === liveScriptIdentity(script) ? entry : {};
-          const analysis = state.deobfuscationCache?.get(deobfuscationKey({...script, source_type: 'script', target_id: script.target_id ?? state.debuggerSession?.target?.id, sha256: script.hash}));
-          return {
-            ...script,
-            ...cached,
-            source_type: 'script',
-            key: `script:${script.script_id}`,
-            target_id: script.target_id ?? state.debuggerSession?.target?.id ?? '',
-            target_title: script.target_type === 'worker'
-              ? (runtimeHooksState()?.workers ?? []).find(worker => worker.id === script.target_id)?.title ?? 'Worker'
-              : state.debuggerSession?.target?.title ?? '',
-            kind: script.language === 'WebAssembly' ? 'wasm' : 'javascript',
-            mime_type: script.language === 'WebAssembly' ? 'application/wasm' : 'text/javascript',
-            byte_size: script.length,
-            sha256: script.hash,
-            sensitive: false,
-            deobfuscation: analysis && sourceOwnedLiveText({...script, source_type: 'script'}) === analysis.original_source ? analysis : null
-          };
-        });
-      }
-
       function capturedSources() {
         return state.artifacts
           .filter(artifact => artifact.kind !== 'canvas_data_url')
@@ -8618,19 +5473,19 @@
       }
 
       function sourceDisplayName(source) {
-        const identity = source.source_type === 'script'
-          ? `script ${source.script_id}` : `artifact ${source.artifact_id}`;
-        if (source.source_type === 'script' && !source.url) return `anonymous · ${identity}`;
-        return `${sourceName(source)} · ${identity}`;
+        return `${sourceName(source)} · artifact ${source.artifact_id}`;
+      }
+
+      // Every artifact kind the evidence contract admits, labeled by what its
+      // bytes are. Only javascript artifacts are JavaScript.
+      function sourceKindLabel(kind) {
+        return {javascript: ['JS', 'JavaScript'], wasm: ['W', 'WebAssembly'], source_map: ['{}', 'source map'],
+          response_body: ['R', 'response body'], wasm_guest_adapter: ['AD', 'guest adapter JSON'],
+          bytecode_buffer: ['BC', 'guest bytecode']}[kind] ?? null;
       }
 
       function sourceDisplayMeta(source) {
-        if (source.source_type === 'script') {
-          const language = source.language === 'WebAssembly' ? 'WASM' : 'JS';
-          const context = source.execution_context_id > 0 ? `ctx ${source.execution_context_id}` : 'ctx unknown';
-          return `${language} · ${source.target_type === 'worker' ? 'worker' : 'page'} · live · ${context}`;
-        }
-        return `${source.origin === 'sample' ? 'sample' : source.origin === 'demo' ? 'demo' : 'evidence'} · ${source.kind}`;
+        return `${source.origin === 'sample' ? 'sample' : source.origin === 'demo' ? 'demo' : 'evidence'} · ${sourceKindLabel(source.kind)?.[1] ?? source.kind}`;
       }
 
       function sourcePathParts(source) {
@@ -8638,35 +5493,11 @@
       }
 
       function sourceIcon(source) {
-        if (source.kind === 'wasm') return 'W';
-        if (source.kind === 'source_map') return '{}';
-        if (source.kind === 'response_body') return 'R';
-        return 'JS';
-      }
-
-      function markLiveSourceStale(scriptId, reason = 'The live source detached before its bytes could be loaded.') {
-        if (!scriptId) return;
-        state.staleScriptIds ??= new Set();
-        state.staleScriptIds.add(scriptId);
-        state.liveScriptContent.get(scriptId)?.controller?.abort();
-        state.liveScriptContent.delete(scriptId);
-        state.openScriptIds = state.openScriptIds.filter(id => id !== scriptId);
-        if (state.selectedScriptId === scriptId) {
-          state.selectedScriptId = null;
-          state.pendingSourceLine = null;
-          state.sourceDeobfuscated = false;
-          state.sourceFormatted = false;
-          state.selectedArtifactId = state.openArtifactIds.at(-1) ?? null;
-          state.sourceCollection = 'captured';
-        }
-        state.sourceNoticeKind = 'error';
-        state.sourceNotice = `${reason} The stale live source was removed from Page and open tabs.`;
+        return sourceKindLabel(source.kind)?.[0] ?? '?';
       }
 
       function selectedSource() {
-        const matches = state.selectedScriptId !== null
-          ? liveSources().filter(source => source.script_id === state.selectedScriptId)
-          : capturedSources().filter(source => source.artifact_id === state.selectedArtifactId);
+        const matches = capturedSources().filter(source => source.artifact_id === state.selectedArtifactId);
         return matches.length === 1 ? matches[0] : null;
       }
 
@@ -8675,8 +5506,7 @@
       const SOURCE_TREE_LIMITS = Object.freeze({catalog: 5000, nodes: 10000, visible: 1000, depth: 16, url: 4096, identity: 8192});
 
       function sourceTreeModel(collection) {
-        const page = collection === 'page';
-        const catalog = page ? state.debuggerSession?.scripts ?? [] : state.artifacts;
+        const catalog = state.artifacts;
         const nodes = new Map();
         const rootKey = JSON.stringify([collection, 'root']);
         const root = {key: rootKey, kind: 'root', label: 'top', depth: 0, parent: null, children: [], count: 0};
@@ -8692,14 +5522,10 @@
         };
         for (let index = 0; index < Math.min(catalog.length, SOURCE_TREE_LIMITS.catalog); index++) {
           const raw = catalog[index];
-          if (page ? state.staleScriptIds?.has(raw.script_id) : raw.kind === 'canvas_data_url') continue;
+          if (raw.kind === 'canvas_data_url') continue;
           // Refuse an overlong path before URL parsing or identity serialization.
           if (typeof raw.url !== 'string' || raw.url.length > SOURCE_TREE_LIMITS.url) {limits.omitted++; continue;}
-          const source = {...sourceReference(raw), source_type: page ? 'script' : 'artifact'};
-          if (page) {
-            source.target_id ??= state.debuggerSession?.target?.id ?? '';
-            source.kind = source.language === 'WebAssembly' ? 'wasm' : 'javascript';
-          }
+          const source = {...sourceReference(raw), source_type: 'artifact'};
           const identity = sourceIdentity(source);
           if (!identity || identity.length > SOURCE_TREE_LIMITS.identity) {limits.omitted++; continue;}
           const key = JSON.stringify([collection, 'source', identity]);
@@ -8839,10 +5665,8 @@
           if (!current) return;
           sourceTreeScope(nav, nav.model.collection).focus = node.key;
           if (current.children) toggleSourceTree(node.key);
-          else if (sourceIsCurrent(current.source)) {
-            if (current.source.source_type === 'script') selectScript(current.source.script_id);
-            else selectArtifact(current.source.artifact_id);
-          } else {
+          else if (sourceIsCurrent(current.source)) selectArtifact(current.source.artifact_id);
+          else {
             state.sourceNoticeKind = 'warning';
             state.sourceNotice = 'This exact source changed or is no longer available. Refresh the catalog before opening it.';
             renderSourceHealth();
@@ -8867,8 +5691,7 @@
         if (previousScope) {previousScope.scrollTop = tree.scrollTop; previousScope.scrollLeft = tree.scrollLeft;}
         if (refresh || !previous || previous.collection !== state.sourceCollection) nav.model = sourceTreeModel(state.sourceCollection);
         const model = nav.model, scope = sourceTreeScope(nav, model.collection);
-        // Deleted branches cannot grow an unbounded preference history. Page
-        // and Captured retain independent, session-only navigation state.
+        // Deleted branches cannot grow an unbounded preference history.
         for (const key of scope.collapsed) if (!model.nodes.get(key)?.children) scope.collapsed.delete(key);
         const {visible, limited} = sourceTreeVisible(model, scope.collapsed);
         const keys = new Set(visible.map(node => node.key));
@@ -8879,9 +5702,7 @@
           }
           return null;
         };
-        const selectedCandidates = [...model.nodes.values()].filter(node => node.source && (node.source.source_type === 'script'
-          ? node.source.script_id === state.selectedScriptId
-          : state.selectedScriptId === null && node.source.artifact_id === state.selectedArtifactId));
+        const selectedCandidates = [...model.nodes.values()].filter(node => node.source && node.source.artifact_id === state.selectedArtifactId);
         // Selection must agree with the authoritative raw catalog, including
         // records omitted by path/node limits. Never scan beyond the catalog cap
         // merely to decorate a row: an incomplete catalog cannot prove uniqueness.
@@ -8903,9 +5724,10 @@
           row.setAttribute('aria-label', label);
           icon.className = node.source ? `source-file-icon ${node.source.kind}` : 'tree-glyph';
           icon.textContent = node.source ? sourceIcon(node.source) : scope.collapsed.has(node.key) ? '›' : '⌄';
+          icon.title = node.source ? sourceKindLabel(node.source.kind)?.[1] ?? node.source.kind : '';
           detail.textContent = node.children ? String(node.count) : sourceDisplayMeta(node.source);
           if (node.source) {
-            row.dataset[node.source.source_type === 'script' ? 'scriptId' : 'artifactId'] = node.source.source_type === 'script' ? node.source.script_id : node.source.artifact_id;
+            row.dataset.artifactId = node.source.artifact_id;
             row.setAttribute('aria-selected', String(node === selected));
           } else {
             row.setAttribute('aria-expanded', String(!scope.collapsed.has(node.key)));
@@ -8923,11 +5745,7 @@
         if (limited) notices.push(`Showing the first ${SOURCE_TREE_LIMITS.visible.toLocaleString()} expanded rows. Collapse branches to see later rows, or use Open file.`);
         if (!visible.length || notices.length) {
           nav.notice ??= document.createElement('div'); nav.notice.className = 'source-tree-empty'; nav.notice.setAttribute('role', 'status');
-          nav.notice.textContent = notices.join(' ') || (state.sourceCollection === 'page'
-            ? state.debuggerSession?.state === 'waiting' || state.debuggerSession?.state === 'connecting'
-              ? 'Waiting for an authorized browser target. Open a page in the live Brave session.'
-              : 'No live scripts available. Detached execution contexts are excluded from Page.'
-            : 'No source artifacts captured. Canvas images are shown in Fingerprinting.');
+          nav.notice.textContent = notices.join(' ') || 'No source artifacts captured. Canvas images are shown in Fingerprinting.';
           // Keep limit disclosures above the rows, including when the navigator
           // itself is empty after filtering or rejecting over-limit paths.
           containers.get(tree).unshift(nav.notice);
@@ -8973,8 +5791,8 @@
           for (const source of sources) result.set(source[field], result.has(source[field]) ? null : sourceReference(source));
           return result;
         };
-        const live = index(liveSources(), 'script_id'), captured = index(capturedSources(), 'artifact_id');
-        const sources = [...state.openScriptIds.map(id => live.get(id)), ...state.openArtifactIds.map(id => captured.get(id))].filter(Boolean);
+        const captured = index(capturedSources(), 'artifact_id');
+        const sources = state.openArtifactIds.map(id => captured.get(id)).filter(Boolean);
         if (sources.length === 0) {
           const placeholder = document.createElement('span');
           placeholder.className = 'source-tab-placeholder';
@@ -8991,14 +5809,13 @@
           tab.setAttribute('aria-keyshortcuts', 'Delete');
           tab.dataset.sourceIdentity = sourceIdentity(source);
           tab.title = source.url || sourceDisplayName(source);
-          const selected = source.source_type === 'script'
-            ? source.script_id === state.selectedScriptId
-            : source.artifact_id === state.selectedArtifactId && state.selectedScriptId === null;
+          const selected = source.artifact_id === state.selectedArtifactId;
           tab.setAttribute('aria-selected', String(selected));
           tab.tabIndex = selected ? 0 : -1;
           const icon = document.createElement('span');
           icon.className = `source-file-icon ${source.kind}`;
           icon.textContent = sourceIcon(source);
+          icon.title = sourceKindLabel(source.kind)?.[1] ?? source.kind;
           const name = document.createElement('span');
           name.textContent = sourceDisplayName(source);
           name.title = source.url || sourceDisplayName(source);
@@ -9006,15 +5823,14 @@
           close.className = 'source-tab-close';
           close.textContent = '×';
           close.setAttribute('aria-hidden', 'true');
-          const kind = document.createElement('span'); kind.className = 'source-tab-kind'; kind.textContent = source.source_type === 'script' ? 'live' : 'captured';
+          const kind = document.createElement('span'); kind.className = 'source-tab-kind'; kind.textContent = 'captured';
           tab.append(icon, name, kind, close);
           tab.addEventListener('click', event => {
             if (event.target === close) {
               closeSource(source);
               return;
             }
-            if (source.source_type === 'script') selectScript(source.script_id);
-            else selectArtifact(source.artifact_id);
+            selectArtifact(source.artifact_id);
           });
           tab.addEventListener('keydown', event => {
             const keys = ['ArrowLeft', 'ArrowRight', 'Home', 'End', 'Delete'];
@@ -9027,9 +5843,7 @@
             }
             const next = event.key === 'Home' ? 0 : event.key === 'End' ? sources.length - 1
               : (index + (event.key === 'ArrowRight' ? 1 : -1) + sources.length) % sources.length;
-            const target = sources[next];
-            if (target.source_type === 'script') selectScript(target.script_id);
-            else selectArtifact(target.artifact_id);
+            selectArtifact(sources[next].artifact_id);
             elements.sourceEditorTabs.querySelector('[aria-selected="true"]')?.focus({preventScroll: true});
           });
           return tab;
@@ -9052,22 +5866,14 @@
         }
         const list = document.createElement('dl');
         list.className = 'artifact-facts';
-        const facts = source.source_type === 'script'
-          ? [
-              ['Runtime', 'live target'], ['Target', source.target_title || source.target_id || 'attached browser'],
-              ['Script', source.script_id],
-              ['Context', source.execution_context_id], ['Language', source.language],
-              ['Module', source.is_module ? 'yes' : 'no'], ['Source map', source.source_map_url_omitted ? 'unavailable (URL exceeds 64 KiB)' : source.source_map_url || 'none'],
-              ['Hash', source.hash || 'unreported'], ['Length', formatByteSize(source.length)]
-            ]
-          : [
-              ['Artifact', source.artifact_id], ['Kind', source.kind], ['Session', source.session_id],
-              ['Navigation', source.navigation_id], ['Frame', source.frame_id], ['Creator', source.creator_event_id],
-              ['Context', source.execution_context_id ?? 'unreported'],
-              ['Origin', source.capture_origin?.replaceAll('_', ' ') ?? 'legacy capture'],
-              ['Parent', source.parent_artifact_id], ['MIME', source.mime_type], ['SHA-256', source.sha256],
-              ['Sensitive', source.sensitive ? 'approved' : 'no']
-            ];
+        const facts = [
+          ['Artifact', source.artifact_id], ['Kind', source.kind], ['Session', source.session_id],
+          ['Navigation', source.navigation_id], ['Frame', source.frame_id], ['Creator', source.creator_event_id],
+          ['Context', source.execution_context_id ?? 'unreported'],
+          ['Origin', source.capture_origin?.replaceAll('_', ' ') ?? 'legacy capture'],
+          ['Parent', source.parent_artifact_id], ['MIME', source.mime_type], ['SHA-256', source.sha256],
+          ['Sensitive', source.sensitive ? 'approved' : 'no']
+        ];
         const wasm = source.kind === 'wasm' ? state.wasmCache.get(wasmKey(source)) : null;
         if (wasm) facts.push(['Inspection', wasm.notice], ['Coverage', wasm.status === 'partial' ? wasm.omissions.join(' ') : 'All sections and function bodies decoded.'], ['Limits', '2 MiB input, 8,192 rows, 128 sections, 2 seconds.']);
         facts.forEach(([label, value]) => {
@@ -9130,8 +5936,7 @@
         if (!query) {
           state.sourceSearchIndex = 0;
           elements.sourceCode.querySelectorAll('.source-line[data-line]').forEach(row => row.classList.toggle('search-match', false));
-          const cursor = sourceCursorFor(source);
-          elements.sourcePosition.textContent = `Line ${(cursor?.line ?? sourceRuntimeLine(source, editor.window.line)) + 1}, Column ${(cursor?.column ?? editor.window.column) + 1}`;
+          elements.sourcePosition.textContent = `Line ${editor.window.line + 1}, Column ${editor.window.column + 1}`;
           status(`${coverage}. Find is a case-insensitive, single-line literal; no source is fetched.`);
           return;
         }
@@ -9161,10 +5966,8 @@
         }
         highlightRows();
         const row = elements.sourceCode.querySelector(`[data-local-line="${match.line}"]`);
-        const transformed = state.sourceDeobfuscated || state.sourceFormatted;
-        const line = sourceRuntimeLine(source, match.line);
-        const column = match.column + (transformed ? 0 : sourceRuntimeColumn(source, match.line));
-        if (reveal && source.source_type === 'script' && !transformed) {setSourceCursor(source, line, column); updateSourceDecorations();}
+        const line = match.line;
+        const column = match.column;
         elements.sourcePosition.textContent = `${state.sourceSearchIndex + 1} of ${matches.length}${truncated ? '+' : ''} matches · ${editor.view.wasmRows ? 'Inspection row' : 'Line'} ${line + 1}, Column ${column + 1}`;
         status(`${coverage}.${truncated ? ' First 1,000 matches; refine Find for later matches.' : ''}${editor.index.complete ? '' : ' Search stopped at the 8 Mi UTF-16-unit bound.'}`);
         if (!row) return;
@@ -9216,54 +6019,10 @@
             !Number.isSafeInteger(column) || column < 0 || column > (sourceDocumentLine(editor.index, line)?.length ?? 0)) return false;
         renderSourceContent(source, editor.view, {line, column, search: false});
         applySourceSearch(false, 0, {reveal: false});
-        elements.sourcePosition.textContent = `Line ${sourceRuntimeLine(source, line) + 1}, Column ${column + 1} · Retained display location`;
+        elements.sourcePosition.textContent = `Line ${line + 1}, Column ${column + 1} · Retained display location`;
         const row = elements.sourceCode.querySelector(`[data-local-line="${line}"]`);
         revealSourceColumn(row, column, true);
         return true;
-      }
-
-      function sourceRuntimeLine(source, sourceLine) {
-        return source?.source_type === 'script' ? (source.start_line ?? 0) + sourceLine : sourceLine;
-      }
-
-      function sourceRuntimeColumn(source, sourceLine) {
-        return source?.source_type === 'script' && sourceLine === 0 ? source.start_column ?? 0 : 0;
-      }
-
-      function sourceClickColumn(line, event) {
-        const text = line.querySelector('.source-text');
-        if (!text) return 0;
-        // DOM Range offsets and CDP columns both count UTF-16 code units.
-        // Measure across syntax spans, excluding the line-number gutter.
-        const caret = document.caretPositionFromPoint?.(event.clientX, event.clientY);
-        const range = caret ? null : document.caretRangeFromPoint?.(event.clientX, event.clientY);
-        const node = caret?.offsetNode ?? range?.startContainer;
-        const offset = caret?.offset ?? range?.startOffset;
-        if (!node || !text.contains(node)) return 0;
-        const prefix = document.createRange();
-        prefix.selectNodeContents(text);
-        prefix.setEnd(node, offset);
-        return prefix.toString().length;
-      }
-
-      function breakpointLinesForSource(source) {
-        const byLine = new Map();
-        if (source?.source_type !== 'script') return byLine;
-        (state.debuggerSession?.breakpoints ?? []).forEach(breakpoint => {
-          const resolved = breakpoint.locations?.filter(location => location.script_id === source.script_id) ?? [];
-          if (resolved.length > 0) {
-            resolved.forEach(location => { if (!byLine.has(location.line)) byLine.set(location.line, breakpoint); });
-            return;
-          }
-          if ((source.url && breakpoint.url === source.url) || breakpoint.script_id === source.script_id) {
-            if (!byLine.has(breakpoint.line)) byLine.set(breakpoint.line, breakpoint);
-          }
-        });
-        return byLine;
-      }
-
-      function breakpointAt(source, line) {
-        return breakpointLinesForSource(source).get(line) ?? null;
       }
 
       function sourceFormattedView(source, value, variant) {
@@ -9316,8 +6075,7 @@
       function retrySourcePreview(source) {
         const identity = sourceIdentity(source);
         if (sourceIdentity(selectedSource()) !== identity || !sourceIsCurrent(source)) return;
-        if (source.source_type === 'script') loadScriptContent(source);
-        else loadArtifactContent(state.artifacts.find(value => sourceIdentity(value) === identity), {retry: true});
+        if (source.source_type === 'artifact') loadArtifactContent(state.artifacts.find(value => sourceIdentity(value) === identity), {retry: true});
       }
 
       function renderSourceContent(source, view = null, target = {}) {
@@ -9360,7 +6118,7 @@
           elements.sourceLanguage.textContent = 'Detecting syntax';
           elements.sourceCode.hidden = true;
           elements.sourceCodeEmpty.hidden = false;
-          elements.sourceCodeEmpty.textContent = source.source_type === 'script' ? 'Loading live script source…' : 'Loading immutable artifact bytes…';
+          elements.sourceCodeEmpty.textContent = 'Loading immutable artifact bytes…';
           return;
         }
         if ((source.loadError || source.content === undefined) && sourceFactsPanel.original(source) === undefined) {
@@ -9385,27 +6143,18 @@
         const sameDocument = previous?.representation === representation && previous.content === content && previous.mapping === mapping && previous.formatting === formatting;
         const index = sameDocument ? previous.index : sourceDocumentIndex(content);
         const savedWindow = state.sourceWindow?.identity === identity && state.sourceWindow.representation === representation ? state.sourceWindow : null;
-        const pendingLine = !state.sourceDeobfuscated && !state.sourceFormatted && state.pendingSourceLine?.identity === identity
-          ? state.pendingSourceLine.line - (source.source_type === 'script' ? source.start_line ?? 0 : 0) : null;
-        const pendingKey = pendingLine === null ? null : `${identity}:${state.pendingSourceLine.line}:${state.pendingSourceLine.column ?? 0}:${state.pendingSourceLine.revision ?? 0}`;
-        const requestedLine = target.line ?? (pendingKey && pendingKey !== previous?.pendingKey ? pendingLine : savedWindow?.line ?? 0);
-        const pendingColumn = pendingKey && pendingKey !== previous?.pendingKey ? Math.max(0, (state.pendingSourceLine.column ?? 0) - sourceRuntimeColumn(source, pendingLine)) : null;
-        const requestedColumn = target.column ?? pendingColumn ?? savedWindow?.column ?? 0;
+        const requestedLine = target.line ?? savedWindow?.line ?? 0;
+        const requestedColumn = target.column ?? savedWindow?.column ?? 0;
         const clampedLine = Math.max(0, Math.min(index.lineCount - 1, Number.isSafeInteger(requestedLine) ? requestedLine : 0));
         const window = sameDocument && previous.window.line === clampedLine && previous.window.column === requestedColumn
           ? previous.window : sourceDocumentWindow(index, clampedLine, requestedColumn);
         state.sourceWindow = {identity, representation, line: window.line, column: window.column};
-        const requestedUnavailable = requestedLine !== window.line || requestedColumn !== window.column;
-        const newPending = Boolean(pendingKey && pendingKey !== previous?.pendingKey && target.line === undefined);
         const sameWindow = sameDocument && previous.window.line === window.line && previous.window.column === window.column;
         if (sameWindow) {
           const coverageChanged = previous.view.searchCoverage !== view.searchCoverage || previous.view.searchIncomplete !== view.searchIncomplete;
-          previous.pendingKey = pendingKey;
           previous.view = view;
-          updateSourceDecorations(); renderSourceWindowControls(previous);
+          renderSourceWindowControls(previous);
           if (coverageChanged && target.search !== false) applySourceSearch(false, 0, {reveal: false});
-          if (newPending) revealSourceColumn(elements.sourceCode.querySelector('.source-line.current'), window.column);
-          if (newPending && requestedUnavailable) elements.sourcePosition.textContent = 'Requested live location lies outside retained text; the available preview remains visible.';
           return;
         }
         elements.sourceCodeEmpty.replaceChildren();
@@ -9417,51 +6166,31 @@
         const mappedLines = mappingContext?.(window.rows);
         if (!sameDocument) state.sourceSearchIndex = 0;
         state.sourceEditorView = {identity, representation, content, mapping, formatting, index, window, view, mappingContext,
-          pendingKey, search: sameDocument ? previous.search : null};
+          search: sameDocument ? previous.search : null};
         const lineMap = view.lineMap;
-        const breakpointsByLine = breakpointLinesForSource(source);
         // Later/column-clipped windows cannot assume the lexical state of an omitted prefix.
         const plainWindow = window.start > 0 || window.rows.some(row => row.columnStart > 0 || row.columnEnd < row.fullLength);
         const tokenizer = createSourceTokenizer(view.wasmRows || plainWindow ? {kind: 'plain', mime_type: 'text/plain'} : source);
-        const cursor = sourceCursorFor(source);
+
         const nodes = window.rows.map((excerpt, rowIndex) => {
           const {text: line, line: index} = excerpt;
-          const runtimeLine = sourceRuntimeLine(source, index);
           const mapped = lineMap ? lineMap[index] ?? null : mappedLines?.[rowIndex] ?? null;
           const mappedLine = mapped?.originalLine ?? null;
           const row = document.createElement('span');
           row.className = 'source-line';
-          row.dataset.line = String(runtimeLine + 1);
+          row.dataset.line = String(index + 1);
           row.dataset.localLine = String(index);
           row.dataset.columnStart = String(excerpt.columnStart);
-          const breakpoint = breakpointsByLine.get(runtimeLine) ?? null;
-          if (breakpoint) row.classList.add('breakpoint');
-          if (source.source_type === 'script' && !state.sourceDeobfuscated && !state.sourceFormatted && state.pendingSourceLine?.identity === identity && state.pendingSourceLine.line === runtimeLine) {
-            row.classList.add('current');
-          }
-          if (source.source_type === 'script' && cursor?.line === runtimeLine) {
-            row.classList.add('cursor');
-          }
           const gutter = document.createElement('button');
           gutter.type = 'button';
           gutter.className = 'source-gutter';
-          gutter.textContent = String((mappedLine ?? runtimeLine) + 1);
-          const transformed = state.sourceDeobfuscated || state.sourceFormatted;
-          gutter.disabled = mappedLine === null && (source.source_type !== 'script' || source.target_type === 'worker' || transformed || !['running', 'paused'].includes(state.debuggerSession?.state) || memoryOriginTraceActive());
-          gutter.title = mappedLine === null
-            ? transformed ? 'Show original source to edit breakpoints'
-              : source.source_type !== 'script' ? 'Captured evidence is not the live page. Select its Page script to pause that exact script.'
-              : source.target_type === 'worker' ? 'Worker scripts are not paused from the page gutter.'
-              : 'Pause this attached page script. The breakpoint stays until it is removed.'
-            : `Show original source at line ${mappedLine + 1}`;
-          gutter.setAttribute('aria-label', mappedLine === null
-            ? `${breakpoint ? 'Remove' : 'Add'} breakpoint on line ${runtimeLine + 1}`
-            : `Show original source at line ${mappedLine + 1}`);
+          gutter.textContent = String((mappedLine ?? index) + 1);
+          gutter.disabled = mappedLine === null;
+          gutter.title = mappedLine === null ? 'Retained source line' : `Show original source at line ${mappedLine + 1}`;
+          gutter.setAttribute('aria-label', gutter.title);
           gutter.addEventListener('click', event => {
             event.stopPropagation();
-            if (view.wasmRows) return;
-            if (mappedLine !== null) { revealOriginalLine(source, mappedLine, mapped?.originalColumn ?? 0); return; }
-            toggleLineBreakpoint(source, runtimeLine, sourceRuntimeColumn(source, index), breakpointAt(source, runtimeLine));
+            if (!view.wasmRows && mappedLine !== null) revealOriginalLine(source, mappedLine, mapped?.originalColumn ?? 0);
           });
           if (view.wasmRows) {
             const offset = view.wasmRows[index]?.byte_offset;
@@ -9505,30 +6234,6 @@
           elements.sourceCodeWrap.scrollLeft = 0;
           if (target.search !== false) applySourceSearch(false, 0, {reveal: false});
         }
-        if (newPending) revealSourceColumn(elements.sourceCode.querySelector('.source-line.current'), window.column);
-        if (newPending && requestedUnavailable) elements.sourcePosition.textContent = 'Requested live location lies outside retained text; the available preview remains visible.';
-      }
-
-      function updateSourceDecorations() {
-        const source = selectedSource();
-        if (source?.source_type !== 'script' || elements.sourceCode.hidden || state.sourceDeobfuscated || state.sourceFormatted || state.sourceWasm) return;
-        const breakpointsByLine = breakpointLinesForSource(source);
-        const identity = sourceIdentity(source);
-        const enabled = source.target_type !== 'worker' && !state.sourceDeobfuscated && !state.sourceFormatted && ['running', 'paused'].includes(state.debuggerSession?.state) && !memoryOriginTraceActive();
-        elements.sourceCode.querySelectorAll('.source-line[data-line]').forEach(row => {
-          const runtimeLine = Number(row.dataset.line) - 1;
-          const breakpoint = breakpointsByLine.get(runtimeLine) ?? null;
-          const current = !state.sourceDeobfuscated && !state.sourceFormatted && state.pendingSourceLine?.identity === identity && state.pendingSourceLine.line === runtimeLine;
-          row.classList.toggle('breakpoint', Boolean(breakpoint));
-          row.classList.toggle('current', current);
-          row.classList.toggle('cursor', sourceCursorFor(source)?.line === runtimeLine);
-          const gutter = row.querySelector('.source-gutter');
-          if (!gutter) return;
-          gutter.disabled = !enabled;
-          gutter.setAttribute('aria-label', `${breakpoint ? 'Remove' : 'Add'} breakpoint on line ${runtimeLine + 1}`);
-        });
-        // Explicit pause/reveal changes choose their window while rendering.
-        // Ordinary debugger refresh must not pull a Find result back to a frame.
       }
 
       function renderSources() {
@@ -9549,7 +6254,7 @@
         elements.sourceLocation.textContent = source?.url || (source ? sourceDisplayName(source) : 'Select a source');
         elements.sourceLocation.title = source?.url || (source ? sourceDisplayName(source) : '');
         elements.sourceSize.textContent = source ? formatByteSize(source.byte_size) : '0 bytes';
-        elements.sourceHash.textContent = source?.sha256 ? `${source.source_type === 'script' ? 'hash' : 'sha256'} ${source.sha256}` : '';
+        elements.sourceHash.textContent = source?.sha256 ? `sha256 ${source.sha256}` : '';
         syncSourceDisplayControls(source, view);
         renderSourceContent(source, view);
         if (!investigationPassiveSource && state.sourceDeobfuscated && source?.kind === 'javascript' && !document.querySelector('#screen-sources').hidden) loadDeobfuscation(source);
@@ -9573,8 +6278,7 @@
         elements.sourceDeob.setAttribute('aria-label', state.sourceDeobfuscated ? 'Show original evidence' : 'Run local static cleanup');
         elements.sourceDeob.title = state.sourceDeobfuscated ? 'Show original evidence' : 'Run local static cleanup';
         elements.sourceDeob.textContent = state.sourceDeobfuscated ? 'Original' : 'Static cleanup';
-        elements.sourceHookPivot.disabled = !['running', 'paused'].includes(state.debuggerSession?.state);
-        elements.sourceHookPivot.setAttribute('aria-expanded', String(state.sourceHooksOpen));
+
       }
 
       function sourceViewLabel(source, view = null) {
@@ -9586,8 +6290,7 @@
           return report ? `${report.status === 'partial' ? 'Partial' : 'Static'} inspection · original byte offsets` : request?.status === 'error' ? 'Inspection failed · original bytes preserved' : request?.status === 'loading' ? 'Inspection pending' : 'Inspection preview released';
         }
         view ??= source?.content !== undefined ? sourceDisplayView(source) : null;
-        const original = source?.source_type === 'script' ? 'Live runtime source'
-          : sourceFactsPanel.original(source) !== undefined ? 'Verified original evidence'
+        const original = sourceFactsPanel.original(source) !== undefined ? 'Verified original evidence'
           : `Original evidence preview${source?.contentLossy ? ' · lossy UTF-8 display' : ''}${source?.contentTruncated ? ' · truncated' : ''}`;
         if (view?.formatError) return `${original} · ${view.formatError}`;
         if (state.sourceDeobfuscated && sourceDerivedView(source)) {
@@ -9610,28 +6313,24 @@
         if (sourceIdentity(selectedSource()) !== sourceIdentity(source)) return;
         state.sourceDeobfuscated = false;
         state.sourceFormatted = false;
-        if (source.source_type === 'script') {
-          setSourceCursor(source, sourceRuntimeLine(source, line), (column ?? 0) + sourceRuntimeColumn(source, line));
-        }
         const view = sourceDisplayView(source);
         renderSourceContent(source, view, {line, column: column ?? 0, search: false});
         syncSourceDisplayControls(source, view);
         renderDeobfuscationReport(source);
         applySourceSearch(false, 0, {reveal: false});
-        const runtimeLine = sourceRuntimeLine(source, line);
-        const row = [...elements.sourceCode.querySelectorAll('.source-line')].find(candidate => Number(candidate.dataset.line) === runtimeLine + 1);
+        const row = [...elements.sourceCode.querySelectorAll('.source-line')].find(candidate => Number(candidate.dataset.line) === line + 1);
         if (row) {
           revealSourceColumn(row, column ?? 0, true);
-          elements.sourcePosition.textContent = `Original line ${runtimeLine + 1}, Column ${(column ?? 0) + sourceRuntimeColumn(source, line) + 1}`;
+          elements.sourcePosition.textContent = `Original line ${line + 1}, Column ${(column ?? 0) + 1}`;
         } else {
-          elements.sourcePosition.textContent = `Original line ${runtimeLine + 1} is outside the displayed preview. Facts can read verified original-byte ranges.`;
+          elements.sourcePosition.textContent = `Original line ${line + 1} is outside the displayed preview. Facts can read verified original-byte ranges.`;
         }
       }
 
       function revealSourceFactRange(source, range, position) {
         if (sourceFactsIdentity(selectedSource()) !== sourceFactsIdentity(source)) return;
         // This uses separately hash-verified, strict UTF-8 original bytes, never
-        // a lossy preview, derived text, or a live debugger script.
+        // a lossy preview or derived text.
         if (getComputedStyle(elements.sourceSidebar).position === 'absolute') {
           state.sourceSidebarOpen = false;
           renderSourceSidebar();
@@ -9657,25 +6356,15 @@
         return `${sourceIdentity(source)}|intrinsics:${Boolean(state.deobfuscationAssumeIntrinsics)}`;
       }
 
-      function sourceOwnedLiveText(source) {
-        if (source?.source_type !== 'script' || !sourceIsCurrent(source)) return null;
-        const entry = state.liveScriptContent.get(source.script_id);
-        return entry?.identity === liveScriptIdentity(source) && !entry.loading && !entry.loadError &&
-          entry.contentTruncated === false && typeof entry.content === 'string' && entry.sourceTextLength === entry.content.length
-          ? entry.content : null;
-      }
-
-      async function validateSourceAnalysis(payload, source, assumeIntrinsics, liveOriginal = null) {
+      async function validateSourceAnalysis(payload, source, assumeIntrinsics) {
         const original = payload?.original_source;
         const representation = payload?.representation;
         const expectedAssumptions = assumeIntrinsics ? ['standard-intrinsics'] : [];
         if (payload?.schema !== 'deobfuscation-analysis-v1' || !['rust-oxc', 'python-lexical'].includes(payload.engine) || payload.mode !== 'derived' || payload.source_truncated !== false ||
-            payload.artifact_id !== (source.source_type === 'artifact' ? source.artifact_id : null) ||
-            payload.script_id !== (source.source_type === 'script' ? source.script_id : null) ||
+            source.source_type !== 'artifact' || payload.artifact_id !== source.artifact_id || payload.script_id !== null ||
             typeof original !== 'string' || original.length > 4 * 1024 * 1024 ||
             !/^[0-9a-f]{64}$/.test(payload.analysis?.source?.sha256) ||
-            (source.source_type === 'artifact' && (!/^[0-9a-f]{64}$/.test(source.sha256) || payload.analysis.source.sha256 !== source.sha256)) ||
-            (source.source_type === 'script' && (liveOriginal === null || original !== liveOriginal)) ||
+            !/^[0-9a-f]{64}$/.test(source.sha256) || payload.analysis.source.sha256 !== source.sha256 ||
             JSON.stringify(payload.analysis?.assumptions) !== JSON.stringify(expectedAssumptions) ||
             typeof representation?.text !== 'string' || representation.text.length > 4 * 1024 * 1024 + 512 * 1024 ||
             !Array.isArray(representation.segments) || representation.segments.length > 250000 ||
@@ -9753,14 +6442,10 @@
       }
 
       async function loadDeobfuscation(source, {retry = false} = {}) {
-        const sourceId = source?.source_type === 'artifact' ? source.artifact_id : source?.script_id;
-        const sourceParam = source?.source_type === 'artifact' ? 'artifact_id' : 'script_id';
+        const sourceId = source?.source_type === 'artifact' ? source.artifact_id : null;
         if (!sourceId || !sourceIsCurrent(source)) return;
         const key = deobfuscationKey(source);
         const identity = sourceIdentity(source);
-        const liveOwner = source.source_type === 'script' ? state.liveScriptContent.get(source.script_id) : null;
-        const liveOriginal = source.source_type === 'script' ? sourceOwnedLiveText(source) : null;
-        if (source.source_type === 'script' && state.deobfuscationCache.get(key)?.original_source !== liveOriginal) state.deobfuscationCache.delete(key);
         const assumeIntrinsics = Boolean(state.deobfuscationAssumeIntrinsics);
         const previous = state.deobfuscationRequests.get(key);
         if (previous?.status === 'loading' || (!retry && (['error', 'cancelled'].includes(previous?.status) || state.deobfuscationCache.has(key)))) return;
@@ -9771,8 +6456,7 @@
         renderSources();
         while (state.deobfuscationRequests.size > 128) state.deobfuscationRequests.delete(state.deobfuscationRequests.keys().next().value);
         const current = () => state.deobfuscationRequests.get(key) === request && request.status === 'loading' &&
-          !controller.signal.aborted && sourceIsCurrent(source) && deobfuscationKey(source) === key &&
-          (source.source_type !== 'script' || state.liveScriptContent.get(source.script_id) === liveOwner);
+          !controller.signal.aborted && sourceIsCurrent(source) && deobfuscationKey(source) === key;
         const timeout = setTimeout(() => {
           if (state.deobfuscationRequests.get(key) !== request || request.status !== 'loading') return;
           request.status = 'error'; request.error = 'Analysis timed out. Retry explicitly; original bytes are preserved.';
@@ -9780,14 +6464,13 @@
           if (sourceIdentity(selectedSource()) === identity) renderSources();
         }, 10000);
         try {
-          if (source.source_type === 'script' && liveOriginal === null) throw new Error('Load the complete owned live source before analyzing it; truncated previews cannot establish exact text.');
-          const response = await fetch(`/api/deobfuscation?${sourceParam}=${encodeURIComponent(sourceId)}&mode=derived&assume_intrinsics=${assumeIntrinsics ? 1 : 0}`, {cache: 'no-store', signal: controller.signal});
+          const response = await fetch(`/api/deobfuscation?artifact_id=${encodeURIComponent(sourceId)}&mode=derived&assume_intrinsics=${assumeIntrinsics ? 1 : 0}`, {cache: 'no-store', signal: controller.signal});
           const bytes = await sourceFactsReadBytes(response, 33 * 1024 * 1024, controller.signal);
           if (!current()) return;
           if (bytes.length > 32 * 1024 * 1024) throw new Error('The analyzer response exceeds the retained-document budget.');
           const payload = JSON.parse(new TextDecoder('utf-8', {fatal: true}).decode(bytes));
           if (!response.ok) throw new Error(payload.error || `Deobfuscation analysis returned ${response.status}`);
-          const inspection = await validateSourceAnalysis(payload, source, assumeIntrinsics, liveOriginal);
+          const inspection = await validateSourceAnalysis(payload, source, assumeIntrinsics);
           if (!current()) return;
           state.sourceAnalysisVersion = (state.sourceAnalysisVersion ?? 0) + 1;
           payload.sourceWindowVersion = state.sourceAnalysisVersion;
@@ -9908,17 +6591,6 @@
         const change = owner?.payload.sourceInspection?.changes[view.change];
         if (!change || !owner.payload.sourceInspection.byteRanges || view.revealing) return;
         const wire = owner.payload.representation.segments[change.index];
-        if (owner.source.source_type === 'script') {
-          if (sourceOwnedLiveText(owner.source) !== owner.payload.original_source) return;
-          const position = sourceDocumentPosition(sourceDocumentIndex(owner.payload.original_source), change.original_start);
-          if (getComputedStyle(elements.sourceSidebar).position === 'absolute') {
-            state.sourceSidebarOpen = false;
-            renderSourceSidebar();
-          }
-          revealOriginalLine(owner.source, position.line, position.column);
-          elements.sourcePosition.textContent = `Original live-source UTF-8 bytes [${wire.original_start}, ${wire.original_end}) · Line ${sourceRuntimeLine(owner.source, position.line) + 1}, Column ${position.column + sourceRuntimeColumn(owner.source, position.line) + 1}`;
-          return;
-        }
         const unavailable = sourceFactsUnavailable(owner.source, location.protocol);
         if (unavailable) {view.notice = unavailable; renderDeobfuscationReport(owner.source); return;}
         if (['loading', 'loading-source'].includes(sourceFactsPanel.model.status)) {
@@ -10028,7 +6700,7 @@
           const changes = inspection.changes;
           nodes.push(textElement('strong', 'deobfuscation-title', `Static cleanup · ${changes.length ? `${changes.length} changed spans` : 'No safe rewrites found'}`));
           nodes.push(deobfuscationRow('Bytes', `${formatByteSize(inspection.originalBytes)} → ${formatByteSize(inspection.derivedBytes)}`));
-          nodes.push(deobfuscationRow('Source', `${target.source_type === 'script' ? 'Live script' : 'Captured artifact'} ${target.script_id ?? target.artifact_id}`));
+          nodes.push(deobfuscationRow('Source', `Captured artifact ${target.artifact_id}`));
           nodes.push(deobfuscationRow('Original SHA-256', analysis.source.sha256));
           nodes.push(deobfuscationRow('Cleaned SHA-256', inspection.derivedSha256));
           nodes.push(textElement('p', 'deobfuscation-note', 'Original bytes are unchanged. Cleanup runs locally without executing the input or uploading it to a third-party service. SHA-256 identifies each complete UTF-8 text, not its preview. Static reconstruction does not prove equivalent runtime behavior. Pretty printing is a separate display layer.'));
@@ -10167,14 +6839,14 @@
             if (hash !== artifact.sha256) throw new Error('The artifact bytes do not match the selected SHA-256.');
             artifact.contentVerified = true;
           }
-          if (artifact.kind !== 'wasm') {
+          if (!sourceHexArtifact(artifact)) {
             try {new TextDecoder('utf-8', {fatal: true}).decode(buffer); artifact.contentLossy = false;}
             catch {artifact.contentLossy = true;}
           }
           // Hex is only a view. Format every byte whose rows fit in the editor
           // index (about 1.6 MiB). The immutable blob is untouched.
-          const hexBytes = artifact.kind === 'wasm' ? Math.min(buffer.length, wasmHexByteLimit()) : buffer.length;
-          const content = artifact.kind === 'wasm'
+          const hexBytes = sourceHexArtifact(artifact) ? Math.min(buffer.length, wasmHexByteLimit()) : buffer.length;
+          const content = sourceHexArtifact(artifact)
             ? formatWasmHex(buffer.subarray(0, hexBytes))
             : new TextDecoder('utf-8', {fatal: false, ignoreBOM: true}).decode(buffer);
           if (canvasOwner && (artifact.contentLossy || !canvasDataUrlPattern.test(content))) {
@@ -10187,9 +6859,9 @@
           }
           artifact.sourceTextLength = content.length;
           artifact.content = content;
-          artifact.wasmHexBytes = artifact.kind === 'wasm' ? hexBytes : undefined;
-          artifact.contentTruncated = artifact.byte_size > buffer.length || (artifact.kind === 'wasm' && buffer.length > hexBytes);
-          if (artifact.contentTruncated) artifact.content += artifact.kind === 'wasm'
+          artifact.wasmHexBytes = sourceHexArtifact(artifact) ? hexBytes : undefined;
+          artifact.contentTruncated = artifact.byte_size > buffer.length || (sourceHexArtifact(artifact) && buffer.length > hexBytes);
+          if (artifact.contentTruncated) artifact.content += sourceHexArtifact(artifact)
             ? `\n\n[Hex preview limited to the first ${hexBytes} bytes; original bytes are unchanged]`
             : '\n\n[Viewer preview limited to the first 2 MiB; original bytes are unchanged]';
           if (!canvasOwner) boundSourcePreviews();
@@ -10266,10 +6938,7 @@
         retireSourceAnalysis(identity);
         investigationBeforeSelection();
         sourceFactsPanel.cancel();
-        state.sourceCollection = 'captured';
-        state.selectedScriptId = null;
         state.selectedArtifactId = artifactId;
-        state.pendingSourceLine = null;
         state.sourceDeobfuscated = false;
         state.sourceFormatted = false;
         state.sourceWasm = false;
@@ -10284,140 +6953,26 @@
         return true;
       }
 
-      function selectScript(scriptId, line = null, column = null) {
-        const candidates = liveSources().filter(candidate => candidate.script_id === scriptId);
-        if (candidates.length !== 1) {
-          state.sourceNoticeKind = 'warning';
-          state.sourceNotice = 'This live script ID is missing or ambiguous. Refresh the Page catalog before opening it.';
-          renderSourceHealth();
-          return false;
-        }
-        const source = candidates[0];
-        investigationPassiveSource = false;
-        state.sourceNotice = null;
-        retireSourceAnalysis(sourceIdentity(source));
-        investigationBeforeSelection();
-        sourceFactsPanel.cancel();
-        state.sourceCollection = 'page';
-        state.selectedScriptId = scriptId;
-        state.selectedArtifactId = null;
-        state.sourceRevealRevision = (state.sourceRevealRevision ?? 0) + 1;
-        state.pendingSourceLine = line === null ? null : { identity: sourceIdentity(source), scriptId, line, column, revision: state.sourceRevealRevision };
-        state.sourceDeobfuscated = false;
-        state.sourceFormatted = false;
-        state.sourceWasm = false;
-        if (!state.openScriptIds.includes(scriptId)) state.openScriptIds.push(scriptId);
-        renderSources();
-        if (state.sourceHooksOpen && line === null && prefillHookFromSource(source)) renderRuntimeHooks();
-        loadScriptContent(source);
-      }
-
       function closeSource(source) {
         if (!sourceIsCurrent(source)) return;
         releaseSourcePreview(source);
-        if (source.source_type === 'script') {
-          const closedIndex = state.openScriptIds.indexOf(source.script_id);
-          state.openScriptIds = state.openScriptIds.filter(id => id !== source.script_id);
-          if (state.selectedScriptId === source.script_id) {
-            state.selectedScriptId = state.openScriptIds[Math.max(0, closedIndex - 1)] ?? null;
-            if (state.selectedScriptId === null) {
-              state.selectedArtifactId = state.openArtifactIds.at(-1) ?? null;
-              state.sourceCollection = 'captured';
-            }
-          }
-        } else {
-          const closedIndex = state.openArtifactIds.indexOf(source.artifact_id);
-          state.openArtifactIds = state.openArtifactIds.filter(id => id !== source.artifact_id);
-          if (state.selectedArtifactId === source.artifact_id && state.selectedScriptId === null) {
-            state.selectedArtifactId = state.openArtifactIds[Math.max(0, closedIndex - 1)] ?? null;
-          }
+        const closedIndex = state.openArtifactIds.indexOf(source.artifact_id);
+        state.openArtifactIds = state.openArtifactIds.filter(id => id !== source.artifact_id);
+        if (state.selectedArtifactId === source.artifact_id) {
+          state.selectedArtifactId = state.openArtifactIds[Math.max(0, closedIndex - 1)] ?? null;
         }
-        state.pendingSourceLine = null;
         state.sourceDeobfuscated = false;
         state.sourceFormatted = false;
         state.sourceWasm = false;
         renderSources();
         const selected = selectedSource();
-        if (selected?.source_type === 'script') loadScriptContent(selected);
-        else if (selected) loadArtifactContent(state.artifacts.find(value => sourceIdentity(value) === sourceIdentity(selected)));
-      }
 
-      async function loadScriptContent(source) {
-        const identity = liveScriptIdentity(source);
-        const attached = () => sourceIsCurrent({...source, source_type: 'script'});
-        if (!attached()) return;
-        const existing = state.liveScriptContent.get(source.script_id);
-        if (existing?.identity === identity && (existing.content !== undefined || existing.loading)) return;
-        existing?.controller?.abort();
-        const controller = new AbortController();
-        const previewUsed = state.sourcePreviewSequence = (state.sourcePreviewSequence ?? 0) + 1;
-        const pending = { identity, loading: true, loadError: null, controller, previewUsed };
-        state.liveScriptContent.set(source.script_id, pending);
-        boundSourcePreviews(source);
-        // Longer than the backend's CDP deadline, but bound stalled HTTP/body reads too.
-        const timeout = setTimeout(() => {
-          if (state.liveScriptContent.get(source.script_id) !== pending) return;
-          state.liveScriptContent.set(source.script_id, {identity, loading: false,
-            loadError: 'Live source is unavailable: Loading timed out after 15 seconds. Retry source explicitly.'});
-          controller.abort();
-          if (sourceIdentity(selectedSource()) === sourceIdentity(source)) renderSources();
-        }, 15000);
-        const stillCurrent = () => state.liveScriptContent.get(source.script_id) === pending && attached();
-        try {
-          renderSources();
-          const response = await fetch(`/api/debugger/source?script_id=${encodeURIComponent(source.script_id)}`, {
-            cache: 'no-store', signal: controller.signal
-          });
-          const bytes = await sourceFactsReadBytes(response, 13 * 1024 * 1024, controller.signal);
-          const body = JSON.parse(new TextDecoder('utf-8', {fatal: true}).decode(bytes));
-          if (!stillCurrent()) return;
-          const responseError = body?.error || `Debugger returned ${response.status}`;
-          if (!response.ok) {
-            if (/^No script for id:/i.test(responseError)) {
-              markLiveSourceStale(source.script_id, responseError);
-              renderSources();
-              return;
-            }
-            throw new Error(responseError);
-          }
-          if (!isPlainObject(body) || body.protocol_version !== 1 || body.script_id !== source.script_id ||
-              typeof body.source !== 'string' || body.source.length > 2097152 || typeof body.truncated !== 'boolean') throw new TypeError('Malformed debugger source response');
-          const sourceBytes = new TextEncoder().encode(body.source);
-          if (sourceBytes.length > 2097152) throw new TypeError('The live source exceeded its byte limit');
-          // CDP's hash is an opaque owner/version token, not a UTF-8 digest.
-          // Deob validates against this exact complete text and its own SHA-256.
-          const content = source.kind === 'wasm'
-            ? body.source
-            : body.source + (body.truncated ? '\n\n[Live source preview limited to the first 2 MB]' : '');
-          state.liveScriptContent.set(source.script_id, { identity, loading: false, loadError: null, content, previewUsed,
-            sourceTextLength: body.source.length, contentTruncated: body.truncated });
-          boundSourcePreviews();
-        } catch (error) {
-          if (!stillCurrent()) return;
-          const message = controller.signal.aborted || error.name === 'AbortError'
-            ? 'Loading timed out after 15 seconds. Select the source to retry.' : error.message;
-          state.liveScriptContent.set(source.script_id, { identity, loading: false, loadError: `Live source is unavailable: ${String(message).slice(0, 1024)}` });
-          state.sourceNoticeKind = 'warning';
-          state.sourceNotice = `Live source ${sourceDisplayName(source)} could not be loaded. The last debugger catalog remains visible.`;
-        } finally {
-          clearTimeout(timeout);
-          // A detached or superseded response must not leave a loading entry behind.
-          if (state.liveScriptContent.get(source.script_id) === pending) state.liveScriptContent.delete(source.script_id);
-        }
-        renderSources();
-      }
-
-      async function toggleLineBreakpoint(source, line, column, breakpoint) {
-        if (state.debuggerActionPending) return;
-        if (breakpoint) await debuggerAction({ action: 'remove_breakpoint', breakpoint_id: breakpoint.id });
-        else if (source.source_type === 'script' && source.target_type !== 'worker') {
-          await debuggerAction({ action: 'set_breakpoint', url: '', script_id: source.script_id, line, column, kind: 'line', condition: '' });
-        } else await debuggerAction({ action: 'set_breakpoint', url: source.url || '', script_id: source.script_id || '', line, column, condition: '' });
+        if (selected?.source_type === 'artifact') loadArtifactContent(state.artifacts.find(value => sourceIdentity(value) === sourceIdentity(selected)));
       }
 
       function renderQuickOpen() {
         const needle = elements.quickOpenInput.value.trim().toLowerCase();
-        const matches = [...liveSources(), ...capturedSources()].map(sourceReference).filter(source =>
+        const matches = capturedSources().map(sourceReference).filter(source =>
           !needle || `${sourceDisplayName(source)} ${source.url}`.toLowerCase().includes(needle)
         );
         const rows = matches.map(source => {
@@ -10425,12 +6980,11 @@
           row.type = 'button';
           row.className = 'quick-open-row';
           const name = document.createElement('span'); name.textContent = sourceDisplayName(source);
-          const path = document.createElement('small'); path.textContent = `${source.source_type === 'script' ? 'Live' : 'Captured'} · ${source.url || '(anonymous)'}`;
+          const path = document.createElement('small'); path.textContent = `Captured · ${source.url || '(anonymous)'}`;
           row.append(name, path);
           row.addEventListener('click', () => {
             elements.quickOpen.hidden = true;
-            if (source.source_type === 'script') selectScript(source.script_id);
-            else selectArtifact(source.artifact_id);
+            selectArtifact(source.artifact_id);
           });
           return row;
         });
@@ -10444,1610 +6998,7 @@
         requestAnimationFrame(() => elements.quickOpenInput.focus());
       }
 
-      function memoryAttached() {
-        return ['running', 'paused'].includes(state.debuggerSession?.state);
-      }
-
-      // One in-flight action and one bounded result. UI ownership is not native cancellation.
-      function memoryOwnerCurrent(owner) {
-        return Boolean(owner && !owner.expired && memoryAttached() && owner.targetId === state.debuggerSession?.target?.id &&
-          owner.scopeVersion === (state.memoryScopeVersion ?? 0));
-      }
-
-      function memoryBaselineKey(baseline) {
-        return baseline ? JSON.stringify([baseline.target_id, baseline.captured_at_ms, baseline.file_bytes]) : '';
-      }
-
-      function syncMemorySession(previous, current) {
-        state.memoryPollSequence = (state.memoryPollSequence ?? 0) + 1;
-        if (current.generation < previous?.generation) state.memoryNativeEpoch = (state.memoryNativeEpoch ?? 0) + 1;
-        const contexts = new Set((current?.scripts ?? []).filter(script => !script.target_type)
-          .map(script => script.execution_context_id));
-        const scriptIdentities = new Map((current?.scripts ?? []).filter(script => !script.target_type).map(script => [script.script_id, script.hash]));
-        const expired = current?.generation < previous?.generation ||
-          (previous?.scripts ?? []).some(script => !script.target_type && scriptIdentities.has(script.script_id) && scriptIdentities.get(script.script_id) !== script.hash) ||
-          (previous?.target?.id ?? null) !== (current?.target?.id ?? null) ||
-          (['running', 'paused'].includes(previous?.state) && !['running', 'paused'].includes(current?.state)) ||
-          (previous?.scripts ?? []).some(script => !script.target_type && !contexts.has(script.execution_context_id));
-        if (expired) state.memoryScopeVersion = (state.memoryScopeVersion ?? 0) + 1;
-        // Native baseline metadata is target-scoped, not a document identity.
-        if (current?.generation < previous?.generation || (previous?.target?.id ?? null) !== (current?.target?.id ?? null) ||
-            current.generation >= (state.memoryBaselineGeneration ?? 0)) {
-          state.memoryDiffBaseline = current?.heap_diff_baseline?.target_id === current?.target?.id
-            ? current.heap_diff_baseline : null;
-          state.memoryBaselineGeneration = current.generation;
-        }
-        if (expired && state.memoryMode === 'origin' && !state.memoryOperation) {
-          state.memorySearchPending = false;
-          state.memorySearchStatus = 'unavailable';
-          state.memorySearchMessage = 'Trace context expired. The retained sample is historical; native completion is unconfirmed until refreshed for its target.';
-        }
-        retireObsoleteMemoryRequest(current);
-      }
-
-      function memoryActionDeadline(action) {
-        // Native live search has 3+5+3 second commands and two 3 second releases.
-        // Heap capture is 3+60 seconds; search/diff workers add 20/60 seconds.
-        // These bound waiting for HTTP headers AND body, not native execution.
-        const deadlines = {search_live_objects: 30000, search_heap_snapshot: 120000,
-          capture_heap_diff_baseline: 90000, compare_heap_diff: 150000,
-          clear_heap_diff_baseline: 15000, start_memory_origin_trace: 15000,
-          stop_memory_origin_trace: 15000, clear_memory_origin_trace: 15000};
-        return Object.hasOwn(deadlines, action) ? deadlines[action] : 0;
-      }
-
-      function retireObsoleteMemoryRequest(current) {
-        const transport = state.debuggerActionOwner;
-        const operation = transport?.memoryOwner;
-        if (!operation || !transport.retire) return;
-        if (!memoryOwnerCurrent(operation) || operation.mode !== state.memoryMode ||
-            (operation.action === 'compare_heap_diff' && memoryBaselineKey(operation.baseline) !== memoryBaselineKey(state.memoryDiffBaseline))) {
-          transport.retire('Memory request ownership expired. Its native completion is unknown; no cancellation or retry was requested.');
-          return;
-        }
-        const trace = current.memory_origin_trace;
-        if (current.generation <= operation.submittedGeneration || !isMemoryOriginTrace(trace) ||
-            new Set(trace.steps.map(step => step.id)).size !== trace.steps.length) return;
-        const terminal = ['found', 'not_found', 'aborted', 'error'].includes(trace.state) && trace.target_id === operation.targetId;
-        const previousIdentity = trace.trace_id === operation.traceId && trace.started_at_ms === operation.traceStartedAt;
-        const request = transport.request;
-        const startedTrace = operation.action === 'start_memory_origin_trace' && terminal && !previousIdentity &&
-          trace.query === request.query && trace.scope === request.scope && trace.before_steps === request.before_steps && trace.after_steps === request.after_steps;
-        const stoppedTrace = operation.action === 'stop_memory_origin_trace' && terminal && previousIdentity;
-        const clearedTrace = operation.action === 'clear_memory_origin_trace' && trace.state === 'idle';
-        if (startedTrace || stoppedTrace || clearedTrace) {
-          transport.retire('A newer native trace lifecycle was observed. The action acknowledgement remains unavailable; ending this wait does not cancel or retry native work.');
-        }
-      }
-
-      function beginMemoryOperation(action, criteria = '') {
-        if (!memoryAttached() || state.memorySearchPending || state.debuggerActionPending) return null;
-        const operation = {
-          id: (state.memoryOperationSequence ?? 0) + 1, action, mode: state.memoryMode,
-          targetId: state.debuggerSession.target.id,
-          scopeVersion: state.memoryScopeVersion ?? 0, nativeEpoch: state.memoryNativeEpoch ?? 0,
-          pollSequence: state.memoryPollSequence ?? 0,
-          submittedAt: Date.now(), submittedGeneration: state.debuggerSession.generation, criteria,
-          traceId: state.debuggerSession.memory_origin_trace?.trace_id ?? 0,
-          traceStartedAt: state.debuggerSession.memory_origin_trace?.started_at_ms ?? 0,
-          baseline: state.memoryDiffBaseline ? { ...state.memoryDiffBaseline } : null
-        };
-        state.memoryOperationSequence = operation.id;
-        state.memoryOperation = operation;
-        state.memoryLastOperation = operation;
-        state.memorySearchPending = true;
-        return operation;
-      }
-
-      function finishMemoryOperation(operation, body) {
-        if (state.memoryOperation !== operation) return false;
-        state.memoryOperation = null;
-        state.memorySearchPending = false;
-        if (!memoryOwnerCurrent(operation) || operation.mode !== state.memoryMode ||
-            (body && Number.isSafeInteger(body.generation) && body.generation < operation.submittedGeneration) ||
-            (operation.action === 'compare_heap_diff' &&
-              memoryBaselineKey(operation.baseline) !== memoryBaselineKey(state.memoryDiffBaseline))) {
-          if (operation.mode === 'origin' && (state.memoryPollSequence ?? 0) > operation.pollSequence) {
-            // The old operation may belong to a prior epoch. Display the current
-            // validated poll without comparing its generation to that old reply.
-            applyMemoryOriginTrace(state.debuggerSession?.memory_origin_trace);
-          }
-          state.memorySearchStatus = 'unavailable';
-          state.memorySearchMessage = `The ${operation.action.replaceAll('_', ' ')} reply submitted to ${operation.targetId} at ${new Date(operation.submittedAt).toLocaleTimeString()} was discarded because target, context, mode, or baseline changed. Native completion is not cancelled or confirmed by discarding this reply.`;
-          renderMemory();
-          return false;
-        }
-        return true;
-      }
-
-      function isMemoryAcknowledgement(body, trace = false) {
-        return isPlainObject(body) && Object.keys(body).length === (trace ? 3 : 2) && body.ok === true &&
-          (!trace || Object.hasOwn(body, 'trace')) &&
-          isSafeIntegerInRange(body.generation, 0, Number.MAX_SAFE_INTEGER);
-      }
-
-      function memoryTracePollAfter(operation, generation = null) {
-        // Keep one authoritative session snapshot, not another trace payload queue.
-        // A completed poll can arrive while POST is pending; its ETag may make all
-        // following GETs 304, so reconcile it before accepting the action reply.
-        if (!memoryOwnerCurrent(operation) || operation.nativeEpoch !== (state.memoryNativeEpoch ?? 0) ||
-            (state.memoryPollSequence ?? 0) <= operation.pollSequence) return null;
-        const session = state.debuggerSession;
-        const trace = session?.memory_origin_trace;
-        if ((generation !== null && session.generation < generation) || !isMemoryOriginTrace(trace) ||
-            (trace.state !== 'idle' && trace.target_id !== operation.targetId) ||
-            new Set(trace.steps.map(step => step.id)).size !== trace.steps.length) return null;
-        return trace;
-      }
-
-      function reconcileMemoryOrigin(operation, body = null) {
-        const valid = isMemoryAcknowledgement(body, true);
-        const trace = memoryTracePollAfter(operation, valid ? body.generation : null) ?? (valid ? body.trace : null);
-        return trace ? applyMemoryOriginTrace(trace) : false;
-      }
-
-      function keepNewerMemoryBaseline(operation, body) {
-        if (body.generation >= (state.memoryBaselineGeneration ?? 0)) return false;
-        // The operation did complete, but its acknowledgement is not the current
-        // baseline. Do not lower the generation or delete a later client's data.
-        operation.acknowledgedGeneration = body.generation;
-        state.memorySearchStatus = 'ready';
-        state.memorySearchMessage = `${operation.action === 'clear_heap_diff_baseline' ? 'Reset' : 'Capture'} acknowledged for target ${operation.targetId} at generation ${body.generation}. Newer native baseline information at generation ${state.memoryBaselineGeneration} is retained.`;
-        renderMemory();
-        return true;
-      }
-
-      function memoryOperationFailed(message) {
-        state.memorySearchStatus = 'unavailable';
-        const attempt = state.memoryLastOperation;
-        const submitted = attempt ? `Submitted to ${attempt.targetId} at ${new Date(attempt.submittedAt).toLocaleTimeString()}. ` : '';
-        state.memorySearchMessage = `${submitted}${message} Completion is unconfirmed; no automatic retry. Any retained preview is from the last successful action. Refresh debugger state before choosing another action.`;
-      }
-
-      function commitMemoryOwner(operation) {
-        state.memoryResultOwner = operation;
-        state.memoryTargetId = operation.targetId;
-      }
-
-      function memoryResultSignature() {
-        // Live/snapshot/diff arrays are immutable until an explicit action. Origin
-        // refresh can replace at most 25 rows, so only that small window is hashed.
-        const rows = state.memoryMode === 'origin' ? JSON.stringify(state.memoryResults) : state.memoryResults;
-        return { rows, mode: state.memoryMode, selected: state.selectedMemoryResultId,
-          meta: state.memorySearchMeta, stale: !memoryOwnerCurrent(state.memoryResultOwner) };
-      }
-
-      function selectMemoryResult(id, focus = false) {
-        const result = state.memoryResults.find(candidate => candidate.id === id);
-        if (!result) return;
-        state.selectedMemoryResultId = id;
-        renderMemory();
-        if (focus) {
-          [...elements.memoryResults.querySelectorAll('.memory-result-row')]
-            .find(row => row.dataset.resultId === id)?.focus({ preventScroll: true });
-        }
-      }
-
-      function moveMemorySelection(event) {
-        if (!['ArrowUp', 'ArrowDown', 'Home', 'End'].includes(event.key)) return;
-        const rows = [...elements.memoryResults.querySelectorAll('.memory-result-row')];
-        const current = rows.indexOf(event.currentTarget);
-        if (current < 0 || rows.length === 0) return;
-        event.preventDefault();
-        const next = event.key === 'Home'
-          ? 0
-          : event.key === 'End'
-            ? rows.length - 1
-            : Math.max(0, Math.min(rows.length - 1, current + (event.key === 'ArrowDown' ? 1 : -1)));
-        selectMemoryResult(rows[next].dataset.resultId, true);
-      }
-
-      function formatSignedByteSize(value) {
-        if (value === 0) return '0 bytes';
-        return `${value > 0 ? '+' : '-'}${formatByteSize(Math.abs(value))}`;
-      }
-
-      function formatSignedCount(value) {
-        return `${value > 0 ? '+' : ''}${value.toLocaleString()}`;
-      }
-
-      function memoryFactRow(name, type, value) {
-        const row = document.createElement('div'); row.className = 'memory-property';
-        row.append(
-          textElement('span', 'memory-property-name', name),
-          textElement('span', 'memory-property-type', type),
-          textElement('span', 'memory-property-value', value)
-        );
-        return row;
-      }
-
-      function renderHeapDiffDetail(result) {
-        const diff = state.memorySearchMeta;
-        if (!diff) {
-          elements.memoryDetail.replaceChildren(textElement('div', 'memory-empty',
-            state.memoryDiffBaseline
-              ? 'Run the page activity you want to measure, then capture the current heap.'
-              : 'Capture a baseline before the page activity you want to measure.'));
-          return;
-        }
-        const cards = [];
-        const summaryCard = document.createElement('article'); summaryCard.className = 'memory-detail-card';
-        const summaryHead = document.createElement('header'); summaryHead.className = 'memory-detail-head';
-        const summaryTitle = document.createElement('div');
-        summaryTitle.append(
-          textElement('h2', '', result ? result.name || `(${result.type})` : 'Heap comparison'),
-          textElement('p', '', result
-            ? `${result.type} · ${formatSignedByteSize(result.self_size_delta)} self memory`
-            : `${formatSignedByteSize(diff.self_size_delta)} total self memory · ${diff.duration_ms} ms native analysis`)
-        );
-        summaryHead.append(summaryTitle, textElement('span', 'memory-readonly', Object.entries(diff).some(([key, value]) => (key.endsWith('_reached') || key === 'retained_size_saturated') && value) ? 'Bounded partial diff' : 'Indexed heap diff'));
-        const facts = document.createElement('div'); facts.className = 'memory-properties';
-        if (result) {
-          facts.append(
-            memoryFactRow('object count', 'baseline → current', `${result.baseline_count.toLocaleString()} → ${result.current_count.toLocaleString()} (${formatSignedCount(result.count_delta)})`),
-            memoryFactRow('self memory', 'baseline → current', `${formatByteSize(result.baseline_self_size)} → ${formatByteSize(result.current_self_size)} (${formatSignedByteSize(result.self_size_delta)})`),
-            memoryFactRow('signature', result.type, result.name || '(anonymous)')
-          );
-        } else {
-          facts.append(
-            memoryFactRow('heap nodes', 'baseline → current', `${diff.baseline_nodes.toLocaleString()} → ${diff.current_nodes.toLocaleString()}`),
-            memoryFactRow('reachable nodes', 'baseline → current', `${diff.baseline_reachable_nodes.toLocaleString()} → ${diff.current_reachable_nodes.toLocaleString()}`),
-            memoryFactRow('self memory', 'baseline → current', `${formatByteSize(diff.baseline_self_size)} → ${formatByteSize(diff.current_self_size)} (${formatSignedByteSize(diff.self_size_delta)})`)
-          );
-        }
-        summaryCard.append(summaryHead, facts);
-        cards.push(summaryCard);
-
-        const ownersCard = document.createElement('article'); ownersCard.className = 'memory-detail-card';
-        const ownersHead = document.createElement('header'); ownersHead.className = 'memory-detail-head';
-        const ownersTitle = document.createElement('div');
-        ownersTitle.append(
-          textElement('h2', '', 'Top retained-memory changes'),
-          textElement('p', '', 'Dominators over indexed reachable non-weak V8 heap edges; reported limits qualify this comparison')
-        );
-        ownersHead.append(ownersTitle, textElement('span', 'memory-readonly', 'Native C++'));
-        const owners = document.createElement('div'); owners.className = 'memory-properties';
-        if (diff.dominators.length === 0) {
-          owners.append(textElement('div', 'memory-empty', 'No individual retained-size changes were detected.'));
-        } else {
-          diff.dominators.forEach(change => {
-            owners.append(memoryFactRow(
-              change.name || `(${change.type})`,
-              `${change.type} · node ${change.id}`,
-              `${formatSignedByteSize(change.retained_size_delta)} · ${formatByteSize(change.baseline_retained_size)} → ${formatByteSize(change.current_retained_size)}`
-            ));
-          });
-        }
-        ownersCard.append(ownersHead, owners);
-        cards.push(ownersCard);
-        elements.memoryDetail.replaceChildren(...cards);
-      }
-
-      function renderMemoryOriginDetail(result) {
-        const trace = state.memorySearchMeta;
-        if (!result) {
-          const message = trace && ['armed', 'capturing', 'stepping', 'stopping'].includes(trace.state)
-            ? trace.message
-            : 'Arm a trace, then click the page action that creates the value.';
-          elements.memoryDetail.replaceChildren(textElement('div', 'memory-empty', message));
-          return;
-        }
-        const card = document.createElement('article'); card.className = 'memory-detail-card';
-        const head = document.createElement('header'); head.className = 'memory-detail-head';
-        const title = document.createElement('div');
-        title.append(
-          textElement('h2', '', result.location.function_name || '(anonymous)'),
-          textElement('p', '', `${result.location.url || '(recorded anonymous script)'}:${result.location.line + 1}:${result.location.column + 1}`)
-        );
-        head.append(title, textElement('span', 'memory-readonly', result.is_first_match ? 'First appearance' : result.matched ? 'Observed' : result.coverage_partial ? 'Not found · partial' : 'Not found in sample'));
-        head.append(textElement('span', 'memory-source-unavailable',
-          'Source link unavailable: this trace records a script ID and location, without execution-context or source-hash identity.'));
-        const facts = document.createElement('div'); facts.className = 'memory-properties';
-        facts.append(
-          memoryFactRow('trace step', result.is_first_match ? 'origin' : 'context', `${result.step} of ${trace?.step_count ?? result.step}`),
-          memoryFactRow('heap match', result.matched ? 'found' : 'absent', result.match ? `${result.match.type} · node ${result.match.id}` : result.coverage_partial ? 'No match in the inspected subset; absence is unproven' : 'No matching node in this sampled snapshot'),
-          memoryFactRow('native probe', result.coverage_partial ? 'partial' : 'bounded', `${result.analyzed_nodes.toLocaleString()} of ${result.total_nodes.toLocaleString()} nodes · ${result.duration_ms} ms`),
-          memoryFactRow('heap capture', 'temporary', `${formatByteSize(result.capture_bytes)} · deleted after probe`),
-          memoryFactRow('source filter', result.location.framework_filtered ? 'applied' : 'direct', result.location.url || '(anonymous script)')
-        );
-        card.append(head, facts);
-        const context = document.createElement('article'); context.className = 'memory-detail-card';
-        const contextHead = document.createElement('header'); contextHead.className = 'memory-detail-head';
-        const contextTitle = document.createElement('div');
-        contextTitle.append(
-          textElement('h2', '', result.match ? result.match.name || `(${result.match.type})` : 'Temporal context'),
-          textElement('p', '', result.match
-            ? `${result.match.type} · ${result.match.self_size.toLocaleString()} self bytes`
-            : 'No value was found in the inspected nodes at this function boundary')
-        );
-        contextHead.append(contextTitle, textElement('span', 'memory-readonly', result.matched ? 'Native match' : 'Before window'));
-        const explanation = textElement('div', 'memory-empty', result.is_first_match
-          ? 'This is the first sampled function boundary whose bounded V8 heap contains the requested value.'
-          : result.matched
-            ? 'The value remains present after its first sampled appearance.'
-            : 'This retained step provides execution context immediately before the first sampled appearance.');
-        context.append(contextHead, explanation);
-        elements.memoryDetail.replaceChildren(card, context);
-      }
-
-      function renderMemoryDetail() {
-        const result = state.memoryResults.find(candidate => candidate.id === state.selectedMemoryResultId);
-        if (state.memoryMode === 'diff') {
-          renderHeapDiffDetail(result);
-          return;
-        }
-        if (state.memoryMode === 'origin') {
-          renderMemoryOriginDetail(result);
-          return;
-        }
-        if (!result) {
-          const empty = textElement('div', 'memory-empty', memoryAttached()
-            ? 'Enter at least one criterion, then start a bounded search.'
-            : 'Run make live to attach an authorized browser target.');
-          elements.memoryDetail.replaceChildren(empty);
-          return;
-        }
-        const card = document.createElement('article'); card.className = 'memory-detail-card';
-        const head = document.createElement('header'); head.className = 'memory-detail-head';
-        const title = document.createElement('div');
-        if (state.memoryMode === 'snapshot') {
-          title.append(
-            textElement('h2', '', result.name || `(${result.type})`),
-            textElement('p', '', `${result.type} · node ${result.id} · ${result.self_size.toLocaleString()} self bytes · ${result.reachable ? 'root-reachable' : 'unreachable'}`)
-          );
-          head.append(title, textElement('span', 'memory-readonly', result.reachable ? 'Root reachable' : 'Unreachable'));
-          const facts = document.createElement('div'); facts.className = 'memory-properties';
-          [
-            ['node id', 'uint64', result.id],
-            ['type', 'V8 node', result.type],
-            ['self size', 'bytes', result.self_size.toLocaleString()],
-            ['incoming refs', result.incoming_reference_limit_reached ? 'capped' : 'full', result.incoming_reference_count.toLocaleString()]
-          ].forEach(([name, type, value]) => {
-            const row = document.createElement('div'); row.className = 'memory-property';
-            row.append(
-              textElement('span', 'memory-property-name', name),
-              textElement('span', 'memory-property-type', type),
-              textElement('span', 'memory-property-value', value)
-            );
-            facts.append(row);
-          });
-          const path = document.createElement('div'); path.className = 'memory-retaining-path';
-          path.append(textElement('div', 'memory-results-head', !result.reachable
-            ? 'No strong retaining path from a V8 root'
-            : result.retaining_path_complete ? 'Shortest retaining path from a V8 root' : 'Partial retaining path'));
-          if (result.retaining_path.length === 0) {
-            path.append(textElement('div', 'memory-empty', result.reachable
-              ? 'No retaining path was available inside the bounded native index.'
-              : 'This node is not reachable from the V8 root through indexed non-weak edges. Inspect its incoming references below.'));
-          } else {
-            result.retaining_path.forEach(step => {
-              const row = document.createElement('div'); row.className = 'memory-path-step';
-              row.append(
-                textElement('span', 'memory-path-edge', `${step.edge_type} · ${step.edge}`),
-                textElement('span', 'memory-path-type', step.type),
-                textElement('span', 'memory-path-name', step.name || '(anonymous)')
-              );
-              path.append(row);
-            });
-          }
-          card.append(head, facts, path);
-          const referencesCard = document.createElement('details'); referencesCard.className = 'memory-detail-card memory-detail-disclosure'; referencesCard.open = true;
-          const summary = textElement('summary', '', '3 · Incoming references'); referencesCard.append(summary);
-          const referencesHead = document.createElement('header'); referencesHead.className = 'memory-detail-head';
-          const referencesTitle = document.createElement('div');
-          referencesTitle.append(
-            textElement('h2', '', 'Referring nodes'),
-            textElement('p', '', result.incoming_reference_limit_reached
-              ? `Showing ${result.incoming_references.length} prioritized references of ${result.incoming_reference_count.toLocaleString()}`
-              : `${result.incoming_reference_count.toLocaleString()} indexed references`)
-          );
-          referencesHead.append(referencesTitle, textElement('span', 'memory-readonly', 'Internal first'));
-          const references = document.createElement('div'); references.className = 'memory-reference-list';
-          if (result.incoming_references.length === 0) {
-            references.append(textElement('div', 'memory-empty', 'No incoming references were present in the bounded snapshot index.'));
-          } else {
-            result.incoming_references.forEach(reference => {
-              const row = document.createElement('div'); row.className = 'memory-reference-row';
-              const kind = textElement('span', 'memory-reference-kind', reference.edge_type);
-              kind.dataset.kind = reference.edge_type;
-              const source = document.createElement('span'); source.className = 'memory-reference-source';
-              source.append(
-                textElement('span', '', `${reference.source_type} · ${reference.source_name || '(anonymous)'}`),
-                textElement('small', '', `source node ${reference.source_id}`)
-              );
-              row.append(kind, textElement('span', 'memory-reference-edge', reference.edge), source);
-              references.append(row);
-            });
-          }
-          referencesCard.append(referencesHead, references);
-          elements.memoryDetail.replaceChildren(card, referencesCard);
-          return;
-        }
-        const similarity = result.similarity === null ? 'shape filter not used' : `${Math.round(result.similarity * 100)}% structural similarity`;
-        title.append(
-          textElement('h2', '', result.class_name || 'Object'),
-          textElement('p', '', `${result.property_count} own properties · ${similarity}`)
-        );
-        head.append(title, textElement('span', 'memory-readonly', memoryOwnerCurrent(state.memoryResultOwner) ? 'Ephemeral preview' : 'Expired preview'));
-        const properties = document.createElement('div'); properties.className = 'memory-properties';
-        if (result.preview.length === 0) {
-          properties.append(textElement('div', 'memory-empty', 'The matched object has no previewable own properties.'));
-        } else {
-          result.preview.forEach(property => {
-            const row = document.createElement('div'); row.className = 'memory-property';
-            row.append(
-              textElement('span', 'memory-property-name', property.name),
-              textElement('span', 'memory-property-type', property.type),
-              textElement('span', 'memory-property-value', property.value)
-            );
-            properties.append(row);
-          });
-          if (result.properties_truncated) {
-            const row = document.createElement('div'); row.className = 'memory-property';
-            row.append(
-              textElement('span', 'memory-property-name', 'preview'),
-              textElement('span', 'memory-property-type', 'bounded'),
-              textElement('span', 'memory-property-value', `Showing ${result.preview.length} of ${result.property_count} properties`)
-            );
-            properties.append(row);
-          }
-        }
-        card.append(head, properties);
-        elements.memoryDetail.replaceChildren(card);
-      }
-
-      function renderMemory() {
-        const attached = memoryAttached();
-        const targetId = state.debuggerSession?.target?.id ?? null;
-        const stale = state.memoryResultOwner && !memoryOwnerCurrent(state.memoryResultOwner);
-        if (!attached && !state.memorySearchPending && !state.memoryResultOwner && state.memorySearchStatus === 'idle') state.memorySearchStatus = 'offline';
-        if (attached && state.memorySearchStatus === 'offline') state.memorySearchStatus = 'idle';
-        elements.memoryTarget.textContent = attached ? `Selected target · ${targetId}` : 'Target unavailable';
-        elements.memoryTarget.title = targetId ?? 'No selected target';
-        const owner = state.memoryResultOwner;
-        const pending = state.memoryOperation;
-        elements.memorySubmission.textContent = pending
-          ? `Submitted to ${pending.targetId} · ${new Date(pending.submittedAt).toLocaleTimeString()} · ${pending.action.replaceAll('_', ' ')}. Waiting does not stop native work.`
-          : owner
-            ? `${stale ? 'Expired context · historical preview' : 'Last successful result'} · target ${owner.targetId} · ${new Date(owner.submittedAt).toLocaleTimeString()} · ${owner.action.replaceAll('_', ' ')}${owner.baseline && owner.action === 'compare_heap_diff' ? ` · submitted baseline ${owner.baseline.target_id} at ${new Date(owner.baseline.captured_at_ms).toLocaleTimeString()}` : ''}`
-            : state.memoryLastOperation
-              ? `Last submitted action · target ${state.memoryLastOperation.targetId} · ${new Date(state.memoryLastOperation.submittedAt).toLocaleTimeString()} · no accepted result`
-              : 'No submitted result. Editing criteria does not run a search.';
-        elements.memorySubmission.dataset.stale = String(Boolean(stale));
-        const attempt = state.memoryLastOperation;
-        elements.memorySubmittedCriteria.textContent = pending
-          ? `Pending attempt · target ${pending.targetId}\n${pending.criteria}`
-          : owner
-            ? `Retained result · target ${owner.targetId}\n${owner.criteria}${attempt && attempt !== owner ? `\n\nLatest attempt · target ${attempt.targetId} · ${new Date(attempt.submittedAt).toLocaleTimeString()}\n${attempt.criteria}` : ''}`
-            : attempt ? `Latest attempt · target ${attempt.targetId}\n${attempt.criteria}` : 'No submitted criteria';
-        const instructions = {live: 'Find an object by property, value, class, or shape. Inspect inert own-property previews.', snapshot: 'Capture once to find heap nodes, then follow retaining paths and incoming references.', diff: 'Capture a baseline, perform the page activity, then compare the current heap.', origin: 'Arm a bounded trace, trigger a page click, then inspect the first sampled appearance.'};
-        elements.memoryWorkflow.textContent = instructions[state.memoryMode];
-        const snapshotMode = state.memoryMode === 'snapshot';
-        const diffMode = state.memoryMode === 'diff';
-        const originMode = state.memoryMode === 'origin';
-        const liveMode = state.memoryMode === 'live';
-        const originTrace = state.debuggerSession?.memory_origin_trace ?? null;
-        const originActive = originTrace?.target_id === targetId && ['armed', 'capturing', 'stepping', 'stopping'].includes(originTrace.state);
-        elements.memorySearchForm.dataset.mode = state.memoryMode;
-        elements.memoryModeButtons.forEach(button => {
-          button.setAttribute('aria-pressed', String(button.dataset.memoryMode === state.memoryMode));
-          button.disabled = state.memorySearchPending || state.debuggerActionPending;
-        });
-        elements.memorySearchForm.querySelectorAll('.memory-live-only').forEach(element => {
-          element.hidden = !liveMode;
-        });
-        elements.memorySearchForm.querySelectorAll('.memory-search-only').forEach(element => {
-          element.hidden = diffMode;
-        });
-        elements.memorySearchForm.querySelectorAll('.memory-reference-only').forEach(element => {
-          element.hidden = !(snapshotMode || originMode);
-        });
-        elements.memorySearchForm.querySelectorAll('.memory-snapshot-only').forEach(element => {
-          element.hidden = !snapshotMode;
-        });
-        elements.memorySearchForm.querySelectorAll('.memory-diff-only').forEach(element => {
-          element.hidden = !diffMode;
-        });
-        elements.memorySearchForm.querySelectorAll('.memory-origin-only').forEach(element => {
-          element.hidden = !originMode;
-        });
-        elements.memoryValueCaption.textContent = originMode ? 'Value or node name to trace' : snapshotMode ? 'Snapshot value or node name' : 'Value';
-        elements.memoryValueQuery.placeholder = snapshotMode || originMode ? 'value from a request, closure, or unreachable object' : 'exact text or pattern';
-        elements.memorySearchHelp.textContent = diffMode
-          ? 'The baseline stays in local temporary storage until reset, target change, or shutdown. Current captures are deleted after native comparison.'
-          : originMode
-            ? 'The trace arms on the next page click, samples bounded heap snapshots at function-return boundaries, keeps only the requested context window, and deletes every temporary snapshot immediately.'
-          : snapshotMode
-            ? 'Capturing briefly pauses the target. Native C++ classifies root reachability and prioritizes hidden, internal, and weak incoming references. The temporary file is deleted immediately.'
-            : 'Accessors are reported without invoking getters. Results are ephemeral and are never added to the evidence store.';
-        const controls = elements.memorySearchForm.querySelectorAll('input, textarea, select');
-        controls.forEach(control => { control.disabled = !attached || state.memorySearchPending || state.debuggerActionPending; });
-        elements.memorySearchButton.disabled = !attached || state.memorySearchPending || state.debuggerActionPending;
-        elements.memorySearchButton.setAttribute('aria-busy', String(state.memorySearchPending));
-        elements.memorySearchButton.textContent = state.memorySearchPending
-          ? originMode ? originTrace?.state === 'armed' ? 'Armed for page click...' : 'Tracing function boundaries...' : snapshotMode ? 'Capturing and indexing...' : 'Searching...'
-          : originMode ? 'Arm origin trace' : snapshotMode ? 'Capture and search snapshot' : 'Search live objects';
-        elements.memoryOriginStop.disabled = !originActive || state.debuggerActionPending;
-        elements.memoryOriginReset.disabled = Boolean(originActive) || !originTrace || originTrace.state === 'idle' || state.debuggerActionPending;
-        const baseline = state.memoryDiffBaseline;
-        elements.memoryBaselineTitle.textContent = baseline ? 'Baseline ready' : 'Not captured';
-        elements.memoryBaselineMeta.textContent = baseline
-          ? `Target ${baseline.target_id} · ${formatByteSize(baseline.file_bytes)} · captured ${new Date(baseline.captured_at_ms).toLocaleString()}. Native target-scoped baseline; document identity is not supplied.`
-          : 'Capture the target before the activity you want to measure.';
-        elements.memoryCaptureBaseline.disabled = !attached || state.memorySearchPending || state.debuggerActionPending;
-        elements.memoryClearBaseline.disabled = !attached || !baseline || baseline.target_id !== targetId || state.memorySearchPending || state.debuggerActionPending;
-        elements.memoryCompareSnapshot.disabled = !attached || !baseline || baseline.target_id !== targetId || state.memorySearchPending || state.debuggerActionPending;
-        elements.memoryCaptureBaseline.textContent = state.memoryOperation?.action === 'capture_heap_diff_baseline'
-          ? 'Capturing baseline...' : baseline ? 'Replace baseline' : 'Capture baseline';
-        elements.memoryCompareSnapshot.textContent = state.memoryOperation?.action === 'compare_heap_diff'
-          ? 'Capturing and comparing...' : 'Capture current and compare';
-
-        const messages = diffMode ? {
-          offline: 'Run a live session to attach an authorized browser target.',
-          idle: state.memorySearchMessage || (baseline
-            ? 'Baseline ready. Run the activity you want to measure, then compare.'
-            : 'Capture a baseline before the page activity you want to measure.'),
-          searching: state.memorySearchMessage || 'Capturing a bounded heap snapshot for native comparison.',
-          empty: state.memorySearchMessage || 'The compared heaps have no reported memory changes.',
-          ready: state.memorySearchMessage || 'Native retained-memory comparison completed.',
-          partial: state.memorySearchMessage || 'Heap comparison completed with explicit bounded coverage.',
-          error: state.memorySearchMessage || 'Native heap comparison failed.'
-        } : originMode ? {
-          offline: 'Run a live session to attach an authorized browser target.',
-          idle: state.memorySearchMessage || 'Enter a value, arm the trace, then click the page action that creates it.',
-          searching: state.memorySearchMessage || originTrace?.message || 'Sampling bounded heap snapshots at debugger function boundaries.',
-          empty: state.memorySearchMessage || originTrace?.message || 'The value did not appear in the bounded temporal trace.',
-          ready: state.memorySearchMessage || originTrace?.message || 'The first sampled appearance is highlighted with its source function.',
-          partial: state.memorySearchMessage || originTrace?.message || 'The origin was found with explicit partial context or snapshot coverage.',
-          error: state.memorySearchMessage || originTrace?.message || 'Memory Origin Trace failed.'
-        } : snapshotMode ? {
-          offline: 'Run a live session to attach an authorized browser target.',
-          idle: state.memorySearchMessage || 'Enter a value to capture and search the full V8 heap, including unreachable nodes.',
-          searching: 'Capturing the target heap, then building a bounded native C++ reachability and reference index.',
-          empty: state.memorySearchMessage || 'No snapshot nodes matched the current value.',
-          ready: state.memorySearchMessage || 'Native heap snapshot search completed.',
-          partial: state.memorySearchMessage || 'Native heap snapshot search returned explicit partial coverage.',
-          error: state.memorySearchMessage || 'Native heap snapshot search failed.'
-        } : {
-          offline: 'Run a live session to attach an authorized browser target.',
-          idle: state.memorySearchMessage || 'Enter a property, primitive value, class, or JSON shape to search live objects.',
-          searching: 'Scanning the attached page with explicit time, candidate, and result limits.',
-          empty: state.memorySearchMessage || 'No live objects matched the current criteria.',
-          ready: state.memorySearchMessage || 'Live object search completed.',
-          partial: state.memorySearchMessage || 'Live object search returned partial bounded results.',
-          error: state.memorySearchMessage || 'Live object search failed.'
-        };
-        elements.memoryNotice.dataset.kind = state.memorySearchStatus;
-        elements.memoryNotice.textContent = state.memorySearchStatus === 'unavailable' ? state.memorySearchMessage : messages[state.memorySearchStatus] ?? messages.idle;
-        elements.memoryResultLabel.textContent = diffMode ? '2 · Changed groups' : originMode ? '2 · Sampled steps' : '2 · Matches';
-        elements.memoryResultCount.textContent = String(state.memoryResults.length);
-        elements.memoryResults.setAttribute('aria-label', diffMode ? 'Heap growth groups' : originMode ? 'Memory origin trace steps' : snapshotMode ? 'Heap snapshot matches' : 'Live object matches');
-
-        const memoryResultsPane = elements.memoryDetail.parentElement;
-        const signature = memoryResultSignature();
-        const previous = state.memoryRenderSignature;
-        const sameRows = previous?.rows === signature.rows && previous?.mode === signature.mode;
-        const sameDetail = sameRows && previous?.selected === signature.selected && previous?.stale === signature.stale &&
-          (state.memoryResults.length > 0 || previous?.status === state.memorySearchStatus) &&
-          (originMode || previous?.meta === signature.meta);
-        if (sameDetail) return;
-        const focusedId = elements.memoryResults.contains(document.activeElement) ? document.activeElement?.dataset.resultId : null;
-        const resultsTop = elements.memoryResults.parentElement.scrollTop;
-        const detailTop = elements.memoryDetail.scrollTop;
-        state.memoryRenderSignature = {...signature, status: state.memorySearchStatus};
-        if (state.memoryResults.length === 0) {
-          const empty = textElement('div', 'memory-empty', state.memorySearchStatus === 'partial'
-            ? 'No matches in the inspected subset. Coverage limits prevent a claim of complete absence.'
-            : state.memorySearchStatus === 'empty'
-            ? originMode
-              ? 'The bounded trace contains no retained steps for this result.'
-              : snapshotMode
-              ? 'No heap nodes matched this value and reference scope. Adjust the value or scope.'
-              : diffMode ? 'The compared heaps have no reported memory changes.'
-                : 'No objects matched. Broaden one criterion or lower the similarity threshold.'
-            : ['error', 'unavailable'].includes(state.memorySearchStatus)
-              ? 'Results unavailable. No accepted results were returned; this is not an empty search.'
-                : diffMode ? state.memorySearchMeta ? 'No changed signature groups. Retained-owner changes are shown in the comparison detail.' : 'Capture a baseline, use the page, then compare a second snapshot to see what grew.' : originMode ? 'Enter the value to trace, arm the trace, then perform the page action that creates it.' : snapshotMode ? 'Enter a value, then capture a snapshot to find matching objects and references.' : 'Enter a property name or value, then run a bounded live-object search.');
-          elements.memoryResults.removeAttribute('role');
-          elements.memoryResults.replaceChildren(empty);
-          memoryResultsPane?.setAttribute('data-empty', 'true');
-          elements.memoryDetail.hidden = !(diffMode && state.memorySearchMeta);
-          if (diffMode && state.memorySearchMeta) { memoryResultsPane?.setAttribute('data-empty', 'false'); renderHeapDiffDetail(null); }
-          else elements.memoryDetail.replaceChildren();
-          return;
-        }
-        memoryResultsPane?.setAttribute('data-empty', 'false');
-        elements.memoryDetail.hidden = false;
-        elements.memoryResults.setAttribute('role', 'listbox');
-        if (!state.memoryResults.some(result => result.id === state.selectedMemoryResultId)) {
-          state.selectedMemoryResultId = state.memoryResults[0].id;
-        }
-        if (!sameRows) elements.memoryResults.replaceChildren(...state.memoryResults.map(result => {
-          const row = document.createElement('button');
-          row.type = 'button'; row.className = 'memory-result-row'; row.dataset.resultId = result.id;
-          row.setAttribute('role', 'option');
-          row.setAttribute('aria-selected', String(result.id === state.selectedMemoryResultId));
-          row.tabIndex = result.id === state.selectedMemoryResultId ? 0 : -1;
-          if (originMode) row.dataset.firstMatch = String(result.is_first_match);
-          const score = diffMode
-            ? formatSignedByteSize(result.self_size_delta)
-            : originMode
-            ? result.is_first_match ? 'origin' : result.matched ? 'present' : 'absent'
-            : snapshotMode
-            ? result.reachable ? 'root' : 'unreachable'
-            : result.similarity === null ? 'match' : `${Math.round(result.similarity * 100)}%`;
-          const title = diffMode ? result.name || `(${result.type})` : originMode ? result.location.function_name || '(anonymous)' : snapshotMode ? result.name || `(${result.type})` : result.class_name || 'Object';
-          const metadata = diffMode
-            ? `${result.type} · ${result.baseline_count.toLocaleString()} → ${result.current_count.toLocaleString()} objects (${formatSignedCount(result.count_delta)})`
-            : originMode
-            ? `step ${result.step} · ${`${result.location.url || '(recorded anonymous script)'}:${result.location.line + 1}:${result.location.column + 1}`} · ${result.analyzed_nodes.toLocaleString()} nodes in ${result.duration_ms} ms`
-            : snapshotMode
-            ? `${result.type} · ${result.self_size.toLocaleString()} self bytes · ${result.incoming_reference_count.toLocaleString()} incoming references`
-            : `${result.property_count} properties · ${result.preview.slice(0, 5).map(property => property.name).join(', ') || 'no own properties'}`;
-          row.append(
-            textElement('span', 'memory-result-class', title),
-            textElement('span', 'memory-result-score', score),
-            textElement('span', 'memory-result-meta', metadata)
-          );
-          row.addEventListener('click', () => selectMemoryResult(result.id));
-          row.addEventListener('keydown', moveMemorySelection);
-          return row;
-        }));
-        for (const row of elements.memoryResults.querySelectorAll('.memory-result-row')) {
-          const selected = row.dataset.resultId === state.selectedMemoryResultId;
-          row.setAttribute('aria-selected', String(selected)); row.tabIndex = selected ? 0 : -1;
-        }
-        const disclosure = elements.memoryDetail.querySelector('.memory-detail-disclosure');
-        const disclosureOpen = previous?.selected === signature.selected ? disclosure?.open : undefined;
-        const disclosureFocused = disclosure?.querySelector('summary') === document.activeElement;
-        renderMemoryDetail();
-        const nextDisclosure = elements.memoryDetail.querySelector('.memory-detail-disclosure');
-        if (nextDisclosure && disclosureOpen !== undefined) nextDisclosure.open = disclosureOpen;
-        if (disclosureFocused) nextDisclosure?.querySelector('summary')?.focus({preventScroll: true});
-        elements.memoryResults.parentElement.scrollTop = resultsTop;
-        if (previous?.selected === signature.selected) elements.memoryDetail.scrollTop = detailTop;
-        if (focusedId) [...elements.memoryResults.querySelectorAll('.memory-result-row')]
-          .find(row => row.dataset.resultId === focusedId)?.focus({ preventScroll: true });
-      }
-
-      function applyMemoryOriginTrace(trace) {
-        if (!isMemoryOriginTrace(trace) || new Set(trace.steps.map(step => step.id)).size !== trace.steps.length) return false;
-        const targetId = state.debuggerSession?.target?.id ?? null;
-        if (trace.state !== 'idle' && trace.target_id !== targetId) return false;
-        if (state.memoryOperation) return false;
-        const sameEpoch = state.memoryResultOwner?.nativeEpoch === (state.memoryNativeEpoch ?? 0) &&
-          state.memoryResultOwner?.targetId === targetId;
-        const previousTrace = state.memoryMode === 'origin' && sameEpoch ? state.memorySearchMeta : null;
-        if (previousTrace?.trace_id > trace.trace_id && trace.state !== 'idle') return false;
-        if (previousTrace?.trace_id === trace.trace_id && (previousTrace.step_count > trace.step_count ||
-            (!['armed', 'capturing', 'stepping', 'stopping'].includes(previousTrace.state) && ['armed', 'capturing', 'stepping', 'stopping'].includes(trace.state)))) return false;
-        if (sameEpoch && state.memorySearchMeta?.trace_id === trace.trace_id && !memoryOwnerCurrent(state.memoryResultOwner)) return false;
-        const active = ['armed', 'capturing', 'stepping', 'stopping'].includes(trace.state);
-        if (active && state.memoryMode !== 'origin') state.memoryMode = 'origin';
-        if (state.memoryMode !== 'origin') return true;
-        if (trace.state === 'idle' && state.memoryResultOwner) {
-          state.memoryResultOwner.expired = true;
-          state.memorySearchPending = false;
-          state.memorySearchStatus = 'unavailable';
-          state.memorySearchMessage = 'The native trace is no longer available. Retained samples are historical; no active trace or complete absence is implied.';
-          return true;
-        }
-        const previousFirstMatch = state.memorySearchMeta?.first_match_step ?? null;
-        if (trace.trace_id > 0 && (!sameEpoch || state.memorySearchMeta?.trace_id !== trace.trace_id)) {
-          state.memoryResultOwner = {targetId: trace.target_id, scopeVersion: state.memoryScopeVersion ?? 0, nativeEpoch: state.memoryNativeEpoch ?? 0,
-            submittedAt: trace.started_at_ms, action: 'start_memory_origin_trace', mode: 'origin',
-            criteria: `${trace.query} · ${trace.scope} · trace ${trace.trace_id}`, baseline: null};
-          state.memoryLastOperation = state.memoryResultOwner;
-        }
-        state.memorySearchMeta = trace;
-        state.memoryResults = trace.steps;
-        state.memoryTargetId = trace.target_id;
-        state.memorySearchPending = active;
-        const firstMatch = trace.steps.find(step => step.is_first_match);
-        if (firstMatch && previousFirstMatch !== trace.first_match_step) {
-          state.selectedMemoryResultId = firstMatch.id;
-        } else if (!trace.steps.some(step => step.id === state.selectedMemoryResultId)) {
-          state.selectedMemoryResultId = firstMatch?.id ?? trace.steps.at(-1)?.id ?? null;
-        }
-        const coverage = trace.limit_reason ? ` · ${trace.limit_reason.replaceAll('_', ' ')}` : '';
-        state.memorySearchMessage = trace.state === 'idle'
-          ? null
-          : `${trace.message} · ${trace.step_count}/${trace.step_limit} sampled steps${coverage}`;
-        if (active) state.memorySearchStatus = 'searching';
-        else if (trace.state === 'found') state.memorySearchStatus = trace.partial ? 'partial' : 'ready';
-        else if (trace.state === 'not_found') state.memorySearchStatus = trace.partial ? 'partial' : 'empty';
-        else if (trace.state === 'error') state.memorySearchStatus = 'error';
-        else if (trace.state === 'aborted') state.memorySearchStatus = trace.steps.length > 0 ? 'partial' : 'idle';
-        else state.memorySearchStatus = memoryAttached() ? 'idle' : 'offline';
-        return true;
-      }
-
-      async function runMemoryOriginTrace() {
-        if (!memoryAttached() || state.memorySearchPending) return;
-        const query = elements.memoryValueQuery.value.trim();
-        if (!query) {
-          state.memorySearchStatus = 'error';
-          state.memorySearchMessage = 'Enter one value or node name to trace.';
-          renderMemory();
-          elements.memoryValueQuery.focus();
-          return;
-        }
-        const beforeSteps = Number(elements.memoryOriginBefore.value);
-        const afterSteps = Number(elements.memoryOriginAfter.value);
-        if (!Number.isInteger(beforeSteps) || beforeSteps < 0 || beforeSteps > 8 ||
-            !Number.isInteger(afterSteps) || afterSteps < 0 || afterSteps > 16) {
-          state.memorySearchStatus = 'error';
-          state.memorySearchMessage = 'Choose 0 to 8 steps before and 0 to 16 steps after the first match.';
-          renderMemory();
-          return;
-        }
-        const operation = beginMemoryOperation('start_memory_origin_trace', `${query} · ${elements.memoryReferenceScope.value} · ${beforeSteps} before / ${afterSteps} after`);
-        if (!operation) return;
-        state.memorySearchStatus = 'searching';
-        state.memorySearchMessage = 'Arming a bounded click-driven temporal trace.';
-        renderMemory();
-        const body = await debuggerAction({
-          action: 'start_memory_origin_trace', query,
-          scope: elements.memoryReferenceScope.value,
-          case_sensitive: false,
-          before_steps: beforeSteps,
-          after_steps: afterSteps
-        }, operation);
-        if (!finishMemoryOperation(operation, body)) return;
-        if (!isMemoryAcknowledgement(body, true) || !isMemoryOriginTrace(body.trace) || body.trace.target_id !== operation.targetId ||
-            body.trace.query !== query || body.trace.scope !== elements.memoryReferenceScope.value ||
-            body.trace.before_steps !== beforeSteps || body.trace.after_steps !== afterSteps) {
-          reconcileMemoryOrigin(operation);
-          state.memoryLastOperation = operation;
-          memoryOperationFailed(state.debuggerError || 'The debugger returned malformed Memory Origin Trace state.');
-          renderMemory();
-          return;
-        }
-        if (!reconcileMemoryOrigin(operation, body)) memoryOperationFailed('The returned trace could not be adopted with its recorded identity.');
-        renderMemory();
-      }
-
-      async function stopMemoryOriginTrace() {
-        const trace = state.debuggerSession?.memory_origin_trace;
-        if (!memoryOriginTraceActive() || trace?.target_id !== state.debuggerSession?.target?.id || state.debuggerActionPending) return;
-        const owner = {targetId: trace.target_id, scopeVersion: state.memoryScopeVersion ?? 0, nativeEpoch: state.memoryNativeEpoch ?? 0,
-          pollSequence: state.memoryPollSequence ?? 0, submittedGeneration: state.debuggerSession.generation,
-          action: 'stop_memory_origin_trace', mode: 'origin', submittedAt: Date.now(), criteria: `Stop trace ${trace.trace_id}`, baseline: null,
-          traceId: trace.trace_id, traceStartedAt: trace.started_at_ms};
-        state.memoryLastOperation = owner;
-        const body = await debuggerAction({ action: 'stop_memory_origin_trace' }, owner);
-        if (!memoryOwnerCurrent(owner) || state.debuggerSession?.memory_origin_trace?.trace_id !== trace.trace_id) return;
-        if (!isMemoryAcknowledgement(body, true) || body.generation < owner.submittedGeneration || !isMemoryOriginTrace(body.trace) || body.trace.trace_id !== trace.trace_id || body.trace.target_id !== owner.targetId) {
-          reconcileMemoryOrigin(owner);
-          memoryOperationFailed(state.debuggerError || 'The native stop outcome is unknown.');
-        } else reconcileMemoryOrigin(owner, body);
-        renderMemory();
-      }
-
-      async function clearMemoryOriginTrace() {
-        if (state.memorySearchPending) return;
-        const operation = beginMemoryOperation('clear_memory_origin_trace', 'Clear trace result');
-        if (!operation) return;
-        renderMemory();
-        const body = await debuggerAction({ action: 'clear_memory_origin_trace' }, operation);
-        if (!finishMemoryOperation(operation, body)) return;
-        if (!isMemoryAcknowledgement(body)) {
-          reconcileMemoryOrigin(operation);
-          state.memoryLastOperation = operation;
-          memoryOperationFailed(state.debuggerError || 'The native clear outcome is unknown.');
-          renderMemory(); return;
-        }
-        const newerTrace = memoryTracePollAfter(operation, body.generation);
-        if (newerTrace && newerTrace.state !== 'idle') {
-          applyMemoryOriginTrace(newerTrace);
-          state.memorySearchMessage = 'Clear acknowledged. A newer validated native trace is retained.';
-          renderMemory(); return;
-        }
-        state.memoryResults = [];
-        state.selectedMemoryResultId = null;
-        state.memorySearchMeta = null;
-        state.memoryResultOwner = null;
-        state.memoryTargetId = null;
-        state.memorySearchStatus = memoryAttached() ? 'idle' : 'offline';
-        state.memorySearchMessage = 'Temporal trace result cleared.';
-        renderMemory();
-      }
-
-      async function runLiveObjectSearch() {
-        if (!memoryAttached() || state.memorySearchPending) return;
-        if (state.memoryMode === 'diff') {
-          await runHeapSnapshotDiff();
-          return;
-        }
-        if (state.memoryMode === 'snapshot') {
-          await runHeapSnapshotSearch();
-          return;
-        }
-        if (state.memoryMode === 'origin') {
-          await runMemoryOriginTrace();
-          return;
-        }
-        const request = {
-          action: 'search_live_objects',
-          property_query: elements.memoryPropertyQuery.value.trim(),
-          value_query: elements.memoryValueQuery.value.trim(),
-          class_query: elements.memoryClassQuery.value.trim(),
-          shape: elements.memoryShapeQuery.value.trim(),
-          similarity_threshold: Number(elements.memorySimilarityThreshold.value),
-          regex: elements.memoryRegex.checked,
-          case_sensitive: elements.memoryCaseSensitive.checked,
-          include_shape_values: elements.memoryShapeValues.checked
-        };
-        if (!request.property_query && !request.value_query && !request.class_query && !request.shape) {
-          state.memorySearchStatus = 'error';
-          state.memorySearchMessage = 'Enter at least one property, value, class, or structural shape criterion.';
-          renderMemory();
-          elements.memoryPropertyQuery.focus();
-          return;
-        }
-        const operation = beginMemoryOperation('search_live_objects', JSON.stringify(request));
-        if (!operation) return;
-        state.memorySearchStatus = 'searching';
-        state.memorySearchMessage = null;
-        renderMemory();
-        const body = await debuggerAction(request, operation);
-        if (!finishMemoryOperation(operation, body)) return;
-        if (!isLiveObjectSearchResponse(body) || new Set(body.search.results.map(result => result.id)).size !== body.search.results.length) {
-          memoryOperationFailed(state.debuggerError || 'The debugger returned malformed live object results.');
-          renderMemory();
-          return;
-        }
-        const search = body.search;
-        state.memoryResults = search.results;
-        state.selectedMemoryResultId = search.results[0]?.id ?? null;
-        state.memorySearchMeta = search;
-        commitMemoryOwner(operation);
-        const limits = [];
-        if (search.timed_out) limits.push('time limit reached');
-        if (search.result_limit_reached) limits.push(`${search.result_limit} result limit reached`);
-        if (search.scan_limit_reached) limits.push('candidate limit reached');
-        if (search.property_limit_reached) limits.push('property limit reached');
-        const summary = `${search.results.length} ${search.results.length === 1 ? 'match' : 'matches'} from ${search.analyzed} inspected objects in ${search.duration_ms} ms`;
-        state.memorySearchMessage = limits.length > 0 ? `${summary} · ${limits.join(' · ')}` : summary;
-        state.memorySearchStatus = limits.length > 0 ? 'partial' : search.results.length > 0 ? 'ready' : 'empty';
-        renderMemory();
-      }
-
-      async function runHeapSnapshotSearch() {
-        if (!memoryAttached() || state.memorySearchPending || state.debuggerActionPending) return;
-        const query = elements.memoryValueQuery.value.trim();
-        if (!query) {
-          state.memorySearchStatus = 'error';
-          state.memorySearchMessage = 'Enter one snapshot value or node name.';
-          renderMemory();
-          elements.memoryValueQuery.focus();
-          return;
-        }
-        const operation = beginMemoryOperation('search_heap_snapshot', `${query} · ${elements.memoryReferenceScope.value}`);
-        if (!operation) return;
-        state.memorySearchStatus = 'searching';
-        state.memorySearchMessage = null;
-        renderMemory();
-        const body = await debuggerAction({
-          action: 'search_heap_snapshot', query, case_sensitive: false,
-          scope: elements.memoryReferenceScope.value
-        }, operation);
-        if (!finishMemoryOperation(operation, body)) return;
-        if (!isHeapSnapshotSearchResponse(body) || new Set(body.snapshot.results.map(result => result.id)).size !== body.snapshot.results.length || body.snapshot.scope !== elements.memoryReferenceScope.value) {
-          memoryOperationFailed(state.debuggerError || 'The native snapshot index returned malformed results.');
-          renderMemory();
-          return;
-        }
-        const snapshot = body.snapshot;
-        state.memoryResults = snapshot.results;
-        state.selectedMemoryResultId = snapshot.results[0]?.id ?? null;
-        state.memorySearchMeta = snapshot;
-        commitMemoryOwner(operation);
-        const limits = [];
-        if (snapshot.result_limit_reached) limits.push(`${snapshot.result_limit} result limit reached`);
-        if (snapshot.node_limit_reached) limits.push('node limit reached');
-        if (snapshot.edge_limit_reached) limits.push('edge limit reached');
-        if (snapshot.string_limit_reached) limits.push('string budget reached');
-        if (snapshot.retaining_paths_partial) limits.push('some retaining paths are partial');
-        if (snapshot.results.some(result => result.incoming_reference_limit_reached)) {
-          limits.push(`${snapshot.reference_limit} incoming reference display limit reached`);
-        }
-        const scopeLabel = snapshot.scope === 'unreachable' ? 'unreachable' : snapshot.scope === 'reachable' ? 'root-reachable' : 'total';
-        const summary = `${snapshot.results.length} shown of ${snapshot.matched_nodes.toLocaleString()} ${scopeLabel} ${snapshot.matched_nodes === 1 ? 'match' : 'matches'} across ${snapshot.analyzed_nodes.toLocaleString()} nodes in ${snapshot.duration_ms} ms`;
-        state.memorySearchMessage = limits.length > 0 ? `${summary} · ${limits.join(' · ')}` : summary;
-        state.memorySearchStatus = limits.length > 0 ? 'partial' : snapshot.results.length > 0 ? 'ready' : 'empty';
-        renderMemory();
-      }
-
-      async function captureHeapDiffBaseline() {
-        if (!memoryAttached() || state.memorySearchPending) return;
-        const operation = beginMemoryOperation('capture_heap_diff_baseline', 'Capture baseline');
-        if (!operation) return;
-        state.memorySearchStatus = 'searching';
-        state.memorySearchMessage = 'Capturing the comparison baseline. The target may pause briefly.';
-        renderMemory();
-        const body = await debuggerAction({ action: 'capture_heap_diff_baseline' }, operation);
-        if (!finishMemoryOperation(operation, body)) return;
-        if (!isHeapDiffBaselineResponse(body) || body.baseline.target_id !== operation.targetId) {
-          memoryOperationFailed(state.debuggerError || 'The debugger returned malformed baseline metadata.');
-          renderMemory();
-          return;
-        }
-        if (keepNewerMemoryBaseline(operation, body)) return;
-        state.memoryBaselineGeneration = body.generation;
-        state.memoryDiffBaseline = body.baseline;
-        state.memoryResults = [];
-        state.selectedMemoryResultId = null;
-        state.memorySearchMeta = null;
-        commitMemoryOwner(operation);
-        state.memorySearchStatus = 'ready';
-        state.memorySearchMessage = `${formatByteSize(body.baseline.file_bytes)} baseline captured. Run the activity you want to measure, then compare.`;
-        renderMemory();
-      }
-
-      async function clearHeapDiffBaseline() {
-        if (state.memorySearchPending || !state.memoryDiffBaseline) return;
-        const operation = beginMemoryOperation('clear_heap_diff_baseline', 'Reset baseline');
-        if (!operation) return;
-        renderMemory();
-        const body = await debuggerAction({ action: 'clear_heap_diff_baseline' }, operation);
-        if (!finishMemoryOperation(operation, body)) return;
-        if (!isMemoryAcknowledgement(body)) {
-          memoryOperationFailed(state.debuggerError || 'The heap comparison baseline could not be reset.');
-          renderMemory();
-          return;
-        }
-        if (keepNewerMemoryBaseline(operation, body)) return;
-        state.memoryBaselineGeneration = body.generation;
-        state.memoryResultOwner = null;
-        state.memoryDiffBaseline = null;
-        state.memoryResults = [];
-        state.selectedMemoryResultId = null;
-        state.memorySearchMeta = null;
-        state.memorySearchStatus = memoryAttached() ? 'idle' : 'offline';
-        state.memorySearchMessage = 'Baseline reset and its local temporary file was deleted.';
-        renderMemory();
-      }
-
-      async function runHeapSnapshotDiff() {
-        if (!memoryAttached() || state.memorySearchPending) return;
-        if (!state.memoryDiffBaseline || state.memoryDiffBaseline.target_id !== state.debuggerSession?.target?.id) {
-          state.memorySearchStatus = 'error';
-          state.memorySearchMessage = 'Capture a baseline before comparing the heap.';
-          renderMemory();
-          elements.memoryCaptureBaseline.focus();
-          return;
-        }
-        const operation = beginMemoryOperation('compare_heap_diff', 'Capture current and compare');
-        if (!operation) return;
-        state.memorySearchStatus = 'searching';
-        state.memorySearchMessage = 'Capturing the current heap, then computing dominators and retained-size changes within the native index.';
-        renderMemory();
-        const body = await debuggerAction({ action: 'compare_heap_diff' }, operation);
-        if (!finishMemoryOperation(operation, body)) return;
-        if (!isHeapSnapshotDiffResponse(body)) {
-          memoryOperationFailed(state.debuggerError || 'The native heap comparison returned malformed results.');
-          renderMemory();
-          return;
-        }
-        const diff = body.diff;
-        state.memoryResults = diff.groups.map((group, index) => ({ ...group, id: `heap-diff-${index}` }));
-        state.selectedMemoryResultId = state.memoryResults[0]?.id ?? null;
-        state.memorySearchMeta = diff;
-        commitMemoryOwner(operation);
-        const limits = [];
-        if (diff.group_result_limit_reached) limits.push(`${diff.result_limit} group limit reached`);
-        if (diff.dominator_result_limit_reached) limits.push(`${diff.result_limit} dominator limit reached`);
-        if (diff.aggregation_limit_reached) limits.push('signature budget reached');
-        if (diff.baseline_node_limit_reached || diff.current_node_limit_reached) limits.push('node limit reached');
-        if (diff.baseline_edge_limit_reached || diff.current_edge_limit_reached) limits.push('edge limit reached');
-        if (diff.baseline_string_limit_reached || diff.current_string_limit_reached) limits.push('string budget reached');
-        if (diff.retained_size_saturated) limits.push('size counter saturated');
-        const summary = `${diff.groups.length} changed ${diff.groups.length === 1 ? 'group' : 'groups'}, ${diff.dominators.length} retained owners, ${formatSignedByteSize(diff.self_size_delta)} total self memory in ${diff.duration_ms} ms`;
-        state.memorySearchMessage = limits.length > 0 ? `${summary} · ${limits.join(' · ')}` : summary;
-        state.memorySearchStatus = limits.length > 0
-          ? 'partial'
-          : diff.groups.length > 0 || diff.dominators.length > 0 ? 'ready' : 'empty';
-        renderMemory();
-      }
-
-      function setMemoryMode(mode) {
-        if (!['live', 'snapshot', 'diff', 'origin'].includes(mode) || state.memorySearchPending || state.debuggerActionPending || mode === state.memoryMode) return;
-        state.memoryMode = mode;
-        state.memoryTargetId = null;
-        state.memoryLastOperation = null;
-        state.memoryResultOwner = null;
-        state.memoryResults = [];
-        state.selectedMemoryResultId = null;
-        state.memorySearchMeta = null;
-        state.memorySearchMessage = null;
-        state.memorySearchStatus = memoryAttached() ? 'idle' : 'offline';
-        if (mode === 'origin') applyMemoryOriginTrace(state.debuggerSession?.memory_origin_trace);
-        renderMemory();
-      }
-
-      function debuggerValueText(value) {
-        if (!value) return 'unavailable';
-        if (value.unserializable_value) return value.unserializable_value;
-        const suffix = value.value_truncated ? '…' : '';
-        if (value.type === 'string') return `${JSON.stringify(value.value ?? '')}${suffix}`;
-        if (value.value !== null && value.value !== undefined) return `${String(value.value)}${suffix}`;
-        return value.description || value.class_name || value.subtype || value.type;
-      }
-
-      function debuggerScriptName(scriptId, fallbackUrl = '') {
-        const script = state.debuggerSession?.scripts.find(candidate => candidate.script_id === scriptId);
-        if (script) return sourceName({ ...script, source_type: 'script' });
-        if (fallbackUrl) return sourceName({ url: fallbackUrl, source_type: 'script', script_id: scriptId });
-        return `(script ${scriptId})`;
-      }
-
-      function debuggerLocationText(location, fallbackUrl = '') {
-        return `${debuggerScriptName(location.script_id, fallbackUrl)}:${location.line + 1}:${location.column + 1}`;
-      }
-
-      function selectedCallFrame() {
-        const frames = state.debuggerSession?.paused?.call_frames ?? [];
-        return frames.find(frame => frame.id === state.selectedCallFrameId) ?? frames[0] ?? null;
-      }
-
-      function memoryOriginTraceActive() {
-        return ['armed', 'capturing', 'stepping', 'stopping'].includes(
-          state.debuggerSession?.memory_origin_trace?.state
-        );
-      }
-
-      function renderSourceSidebar() {
-        const attached = ['running', 'paused'].includes(state.debuggerSession?.state);
-        const open = state.sourceSidebarOpen ?? (attached || state.debuggerSession?.state === 'crashed');
-        elements.sourceSidebar.dataset.attached = String(attached);
-        elements.sourceSidebar.hidden = !open;
-        document.querySelector('#screen-sources').dataset.sidebarOpen = String(open);
-        elements.sourceSidebarToggle.setAttribute('aria-expanded', String(open));
-        elements.sourceSidebarToggle.textContent = attached ? 'Debugger' : 'Details';
-        elements.sourceSidebarToggle.title = attached ? 'Toggle debugger sidebar' : 'Source details and debugger connection status';
-      }
-
-      function renderDebuggerState() {
-        renderSourceSidebar();
-        const session = state.debuggerSession;
-        const originTraceActive = memoryOriginTraceActive();
-        const stateLabels = {
-          unavailable: 'Offline', waiting: 'Waiting', connecting: 'Attaching', running: 'Running', paused: 'Paused', crashed: 'Crashed'
-        };
-        const line = document.createElement('div'); line.className = 'debug-state-line';
-        const label = document.createElement('strong'); label.textContent = stateLabels[session?.state] ?? 'Offline';
-        const target = document.createElement('span'); target.className = 'debug-target';
-        target.textContent = session?.target?.title || (session?.state === 'unavailable'
-          ? 'Run make live to attach the browser debugger'
-          : 'Waiting for an authorized browser target');
-        line.append(label, target);
-        const nodes = [line];
-        if ((session?.targets.length ?? 0) > 1) {
-          const select = document.createElement('select'); select.id = 'debugger-target-select'; select.name = 'debugger_target';
-          select.className = 'debug-select'; select.setAttribute('aria-label', 'Debugger target');
-          session.targets.filter(candidate => ['page', 'webview'].includes(candidate.type)).forEach(candidate => {
-            const option = document.createElement('option'); option.value = candidate.id; option.textContent = candidate.title || candidate.url || candidate.id;
-            option.selected = candidate.id === session.target?.id; select.append(option);
-          });
-          select.disabled = originTraceActive;
-          select.addEventListener('change', () => debuggerAction({ action: 'select_target', target_id: select.value }));
-          nodes.push(select);
-        }
-        if (state.debuggerError || session?.error) {
-          const error = document.createElement('div'); error.className = 'debug-state-error'; error.textContent = state.debuggerError || session.error; nodes.push(error);
-        }
-        elements.debugState.replaceChildren(...nodes);
-      }
-
-      function renderCallStack() {
-        const originTraceActive = memoryOriginTraceActive();
-        const paused = state.debuggerSession?.paused;
-        if (!paused || paused.call_frames.length === 0) {
-          elements.callStack.textContent = state.debuggerSession?.state === 'paused' ? 'No JavaScript frames were reported.' : 'Not paused';
-          return;
-        }
-        const nodes = [];
-        const appendFrame = (frame, async = false) => {
-          const row = document.createElement('button'); row.type = 'button'; row.className = 'call-frame';
-          row.setAttribute('aria-selected', String(!async && frame.id === state.selectedCallFrameId));
-          const name = document.createElement('span'); name.className = 'call-frame-name'; name.textContent = frame.function_name || '(anonymous)';
-          const location = document.createElement('span'); location.className = 'call-frame-location'; location.textContent = debuggerLocationText(frame.location, frame.url);
-          row.append(name, location);
-          row.addEventListener('click', () => {
-            if (async) {
-              revealDebuggerLocation(frame.location);
-              return;
-            }
-            selectCallFrame(frame);
-          });
-          nodes.push(row);
-        };
-        paused.call_frames.forEach(frame => appendFrame(frame));
-        paused.async_stack.forEach(stack => {
-          const label = document.createElement('div'); label.className = 'async-stack-label'; label.textContent = stack.description || 'Async'; nodes.push(label);
-          (stack.call_frames ?? []).forEach(frame => appendFrame(frame, true));
-        });
-        const tools = document.createElement('div'); tools.className = 'debug-form';
-        const restart = document.createElement('button'); restart.type = 'button'; restart.textContent = 'Restart frame';
-        restart.disabled = originTraceActive;
-        restart.addEventListener('click', () => {
-          const frame = selectedCallFrame();
-          if (frame) debuggerAction({ action: 'restart_frame', call_frame_id: frame.id });
-        });
-        const copy = document.createElement('button'); copy.type = 'button'; copy.textContent = 'Copy stack';
-        copy.addEventListener('click', () => copyStackTrace(paused));
-        tools.append(restart, copy); nodes.push(tools);
-        elements.callStack.replaceChildren(...nodes);
-      }
-
-      async function copyStackTrace(paused) {
-        const lines = paused.call_frames.map(frame => `${frame.function_name} (${debuggerLocationText(frame.location, frame.url)})`);
-        paused.async_stack.forEach(stack => {
-          lines.push(`--- ${stack.description || 'Async'} ---`);
-          (stack.call_frames ?? []).forEach(frame => lines.push(`${frame.function_name} (${debuggerLocationText(frame.location, frame.url)})`));
-        });
-        try { await navigator.clipboard.writeText(lines.join('\n')); }
-        catch { state.debuggerError = 'The call stack could not be copied to the clipboard.'; renderDebuggerState(); }
-      }
-
-      function selectCallFrame(frame) {
-        state.selectedCallFrameId = frame.id;
-        revealDebuggerLocation(frame.location);
-        if (!memoryOriginTraceActive()) {
-          debuggerAction({ action: 'evaluate_watches', call_frame_id: frame.id });
-        }
-        renderDebugger();
-      }
-
-      function revealDebuggerLocation(location) {
-        const source = liveSources().find(candidate => candidate.script_id === location.script_id);
-        if (!source) return false;
-        selectScript(source.script_id, location.line, location.column);
-        return true;
-      }
-
-      function renderScope() {
-        const frame = selectedCallFrame();
-        if (!frame) {
-          elements.scopeList.textContent = 'Not paused';
-          return;
-        }
-        const nodes = [];
-        frame.scopes.forEach((scope, index) => {
-          const group = document.createElement('details'); group.className = 'scope-group'; group.open = index < 2;
-          const summary = document.createElement('summary'); summary.textContent = scope.name || `${scope.type[0].toUpperCase()}${scope.type.slice(1)}`;
-          const properties = scope.properties.map(property => {
-            const row = document.createElement('div'); row.className = 'scope-property';
-            const name = document.createElement('span'); name.className = 'scope-property-name'; name.textContent = property.name;
-            const value = document.createElement('span'); value.className = 'scope-property-value'; value.textContent = debuggerValueText(property.value ?? property.get);
-            row.append(name, value);
-            if (['local', 'closure', 'block'].includes(scope.type) && property.name) {
-              const map = document.createElement('button');
-              map.type = 'button';
-              map.className = 'scope-map';
-              map.textContent = 'Map imports';
-              map.setAttribute('aria-label', `Map ${property.name} as a paused import object`);
-              map.disabled = memoryOriginTraceActive();
-              map.addEventListener('click', () => mapPausedImport(frame, scope, index, property.name));
-              row.append(map);
-            }
-            return row;
-          });
-          if (properties.length === 0) properties.push(textElement('div', 'debug-pane-empty', 'No retained properties'));
-          group.append(summary, ...properties); nodes.push(group);
-        });
-        if (frame.this) {
-          const row = document.createElement('div'); row.className = 'scope-property';
-          const name = document.createElement('span'); name.className = 'scope-property-name'; name.textContent = 'this';
-          const value = document.createElement('span'); value.className = 'scope-property-value'; value.textContent = debuggerValueText(frame.this);
-          row.append(name, value); nodes.unshift(row);
-        }
-        const coverage = state.debuggerSession.paused.scope_coverage;
-        const note = document.createElement('div'); note.className = 'debug-row-meta';
-        note.textContent = `${coverage.status} · ${coverage.properties}/${coverage.limit} bounded properties`;
-        nodes.push(note);
-        elements.scopeList.replaceChildren(...nodes);
-      }
-
-      function renderWatches() {
-        const originTraceActive = memoryOriginTraceActive();
-        const watches = state.debuggerSession?.watches ?? [];
-        const nodes = watches.map(watch => {
-          const row = document.createElement('div'); row.className = 'debug-row';
-          const main = document.createElement('div'); main.className = 'debug-row-main';
-          const expression = document.createElement('div'); expression.textContent = watch.expression;
-          const value = document.createElement('div'); value.className = watch.error ? 'debug-state-error' : 'debug-row-value';
-          value.textContent = watch.error || debuggerValueText(watch.result);
-          main.append(expression, value);
-          const remove = document.createElement('button'); remove.type = 'button'; remove.className = 'debug-row-action'; remove.textContent = '×'; remove.setAttribute('aria-label', `Remove watch ${watch.expression}`);
-          remove.disabled = originTraceActive;
-          remove.addEventListener('click', () => debuggerAction({ action: 'remove_watch', watch_id: watch.id }));
-          row.append(main, remove); return row;
-        });
-        if (nodes.length === 0) nodes.push(textElement('div', 'debug-pane-empty', 'No watch expressions'));
-        elements.watchList.replaceChildren(...nodes);
-      }
-
-      function renderBreakpoints() {
-        const originTraceActive = memoryOriginTraceActive();
-        const breakpoints = state.debuggerSession?.breakpoints ?? [];
-        const nodes = breakpoints.map(breakpoint => {
-          const row = document.createElement('div'); row.className = 'debug-row';
-          const reveal = document.createElement('button'); reveal.type = 'button'; reveal.className = 'call-frame';
-          const name = document.createElement('span'); name.className = 'call-frame-name';
-          name.textContent = breakpoint.kind === 'logpoint'
-            ? `Logpoint: ${breakpoint.expression}`
-            : breakpoint.kind === 'conditional' ? `Conditional: ${breakpoint.expression}` : 'Line breakpoint';
-          const location = document.createElement('span'); location.className = 'call-frame-location';
-          const resolved = breakpoint.locations?.[0] ?? { script_id: '', line: breakpoint.line, column: breakpoint.column };
-          const script = liveSources().find(candidate => candidate.url === breakpoint.url || candidate.script_id === resolved.script_id || candidate.script_id === breakpoint.script_id);
-          location.textContent = `${script ? sourceName(script) : sourceName({ url: breakpoint.url, source_type: 'script', script_id: breakpoint.script_id })}:${resolved.line + 1}${breakpoint.locations_truncated ? ' · more locations' : ''}`;
-          reveal.append(name, location);
-          reveal.addEventListener('click', () => {
-            const script = liveSources().find(candidate => candidate.url === breakpoint.url || candidate.script_id === resolved.script_id);
-            if (script) selectScript(script.script_id, resolved.line, resolved.column);
-          });
-          const actions = document.createElement('div'); actions.className = 'debug-row-actions';
-          const edit = document.createElement('button'); edit.type = 'button'; edit.className = 'debug-row-action'; edit.textContent = '✎'; edit.setAttribute('aria-label', `Edit breakpoint on line ${breakpoint.line + 1}`);
-          edit.disabled = originTraceActive;
-          edit.addEventListener('click', () => { state.editingBreakpointId = state.editingBreakpointId === breakpoint.id ? null : breakpoint.id; renderBreakpoints(); });
-          const remove = document.createElement('button'); remove.type = 'button'; remove.className = 'debug-row-action'; remove.textContent = '×'; remove.setAttribute('aria-label', `Remove breakpoint on line ${breakpoint.line + 1}`);
-          remove.disabled = originTraceActive;
-          remove.addEventListener('click', () => debuggerAction({ action: 'remove_breakpoint', breakpoint_id: breakpoint.id }));
-          actions.append(edit, remove);
-          row.append(reveal, actions);
-          if (state.editingBreakpointId === breakpoint.id) {
-            const editor = document.createElement('form'); editor.className = 'debug-row-editor';
-            const kind = document.createElement('select'); kind.setAttribute('aria-label', 'Breakpoint type');
-            [['line', 'Line'], ['conditional', 'Conditional'], ['logpoint', 'Logpoint']].forEach(([value, label]) => {
-              const option = document.createElement('option'); option.value = value; option.textContent = label; option.selected = value === breakpoint.kind; kind.append(option);
-            });
-            const expression = document.createElement('input'); expression.type = 'text'; expression.value = breakpoint.expression ?? ''; expression.placeholder = 'Expression'; expression.setAttribute('aria-label', 'Breakpoint expression');
-            const save = document.createElement('button'); save.type = 'submit'; save.className = 'debug-row-action'; save.textContent = 'Save';
-            kind.disabled = originTraceActive;
-            expression.disabled = originTraceActive;
-            save.disabled = originTraceActive;
-            const updateVisibility = () => { expression.hidden = kind.value === 'line'; };
-            kind.addEventListener('change', updateVisibility); updateVisibility();
-            editor.addEventListener('submit', event => {
-              event.preventDefault();
-              if (kind.value !== 'line' && !expression.value.trim()) return;
-              state.editingBreakpointId = null;
-              debuggerAction({ action: 'update_breakpoint', breakpoint_id: breakpoint.id, kind: kind.value, expression: expression.value.trim() });
-            });
-            editor.append(kind, expression, save); row.append(editor);
-          }
-          return row;
-        });
-        if (nodes.length === 0) nodes.push(textElement('div', 'debug-pane-empty', 'No breakpoints'));
-        elements.breakpointList.replaceChildren(...nodes);
-      }
-
-      function renderSpecialBreakpoints() {
-        const settings = state.debuggerSession?.settings;
-        const originTraceActive = memoryOriginTraceActive();
-        const attached = ['running', 'paused'].includes(state.debuggerSession?.state);
-        elements.pauseOnExceptions.value = settings?.pause_on_exceptions ?? 'none';
-        const xhrRows = (settings?.xhr_breakpoints ?? []).map(pattern => {
-          const row = document.createElement('div'); row.className = 'debug-row';
-          const value = document.createElement('span'); value.className = 'debug-row-value'; value.textContent = pattern || 'Any XHR or fetch';
-          const remove = document.createElement('button'); remove.type = 'button'; remove.className = 'debug-row-action'; remove.textContent = '×';
-          remove.disabled = originTraceActive;
-          remove.addEventListener('click', () => debuggerAction({ action: 'remove_xhr_breakpoint', pattern }));
-          row.append(value, remove); return row;
-        });
-        if (xhrRows.length === 0) xhrRows.push(textElement('div', 'debug-pane-empty', 'No XHR/fetch breakpoints'));
-        elements.xhrBreakpointList.replaceChildren(...xhrRows);
-        const events = [
-          ['listener:click', 'Mouse · click'], ['listener:keydown', 'Keyboard · keydown'],
-          ['listener:submit', 'Control · submit'], ['listener:DOMContentLoaded', 'Load · DOMContentLoaded'],
-          ['instrumentation:setTimeout.callback', 'Timer · setTimeout']
-        ];
-        const eventRows = events.map(([eventName, label]) => {
-          const row = document.createElement('label'); row.className = 'debug-checkbox';
-          const input = document.createElement('input'); input.type = 'checkbox'; input.name = 'event_breakpoint';
-          input.id = `event-breakpoint-${eventName.replace(/[^a-zA-Z0-9_-]/g, '-')}`;
-          input.checked = settings?.event_breakpoints.includes(eventName) ?? false;
-          input.disabled = !attached || originTraceActive;
-          input.addEventListener('change', () => debuggerAction({ action: input.checked ? 'set_event_breakpoint' : 'remove_event_breakpoint', event_name: eventName }));
-          const text = document.createElement('span'); text.textContent = label; row.append(input, text); return row;
-        });
-        elements.eventBreakpointList.replaceChildren(...eventRows);
-      }
-
-      function consoleEntryNode(entry) {
-        const row = document.createElement('div'); row.className = `console-entry ${entry.type}`; row.dataset.consoleId = entry.id;
-        const type = document.createElement('span'); type.textContent = entry.type;
-        const message = document.createElement('span'); message.textContent = (entry.arguments ?? []).map(debuggerValueText).join(' ') || '(no value)';
-        const source = document.createElement('span'); source.className = 'console-entry-source';
-        const frame = entry.stack?.[0]; source.textContent = frame ? `${sourceName({ url: frame.url, source_type: 'script', script_id: '' })}:${frame.line + 1}` : '';
-        row.append(type, message, source);
-        return row;
-      }
-
-      function renderConsole() {
-        const entries = state.debuggerSession?.console ?? [];
-        elements.consoleCount.textContent = `${entries.length} ${entries.length === 1 ? 'message' : 'messages'}`;
-        const signature = entries.length === 0 ? 'empty' : `${entries.length}:${entries[0].id}:${entries.at(-1).id}`;
-        if (state.renderedConsoleSignature === signature) return;
-        state.renderedConsoleSignature = signature;
-        if (entries.length === 0) {
-          elements.consoleEntries.replaceChildren(textElement('div', 'debug-pane-empty', 'No console messages from the attached target.'));
-          return;
-        }
-        const existing = new Map(
-          [...elements.consoleEntries.querySelectorAll('.console-entry[data-console-id]')]
-            .map(row => [row.dataset.consoleId, row])
-        );
-        elements.consoleEntries.replaceChildren(...entries.map(entry => existing.get(entry.id) ?? consoleEntryNode(entry)));
-      }
-
-      function renderDebuggerPart(name, signature, render) {
-        if (state.debuggerRenderKeys[name] === signature) return;
-        state.debuggerRenderKeys[name] = signature;
-        render();
-      }
-
-      function renderDebugger() {
-        renderVmSessionStatus();
-        if (typeof elementScreenshotPanel !== 'undefined') elementScreenshotPanel.refresh();
-        const session = state.debuggerSession;
-        const paused = session?.state === 'paused';
-        const running = session?.state === 'running';
-        const attached = paused || running;
-        elements.sourceHookPivot.disabled = !attached;
-        const originTraceActive = memoryOriginTraceActive();
-        elements.debugResume.disabled = !paused || state.debuggerActionPending || originTraceActive;
-        elements.debugPause.disabled = !running || state.debuggerActionPending || originTraceActive;
-        [elements.debugStepOver, elements.debugStepInto, elements.debugStepOut].forEach(button => { button.disabled = !paused || state.debuggerActionPending || originTraceActive; });
-        elements.debugBreakpointsActive.disabled = !attached || state.debuggerActionPending || originTraceActive;
-        elements.debugBreakpointsActive.setAttribute('aria-pressed', String(session?.settings.breakpoints_active ?? true));
-        elements.debugBreakpointsActive.title = session?.settings.breakpoints_active ? 'Deactivate breakpoints' : 'Activate breakpoints';
-        elements.watchExpression.disabled = !attached || originTraceActive;
-        elements.watchForm.querySelector('button').disabled = !attached || originTraceActive;
-        elements.pauseOnExceptions.disabled = !attached || originTraceActive;
-        elements.xhrBreakpointPattern.disabled = !attached || originTraceActive;
-        elements.xhrBreakpointForm.querySelector('button').disabled = !attached || originTraceActive;
-        elements.consoleClear.disabled = !attached || originTraceActive;
-        const pausedSignature = JSON.stringify(session?.paused ?? null);
-        const selectedPauseSignature = `${state.selectedCallFrameId ?? ''}:${pausedSignature}`;
-        renderDebuggerPart('state', JSON.stringify([session?.state, session?.error, session?.target, session?.targets, state.debuggerError, originTraceActive]), renderDebuggerState);
-        renderDebuggerPart('callStack', `${originTraceActive}:${selectedPauseSignature}`, renderCallStack);
-        renderDebuggerPart('scope', selectedPauseSignature, renderScope);
-        if (typeof CapturedVmLab !== 'undefined') CapturedVmLab.refresh();
-        renderDebuggerPart('watches', JSON.stringify([session?.watches ?? [], originTraceActive]), renderWatches);
-        renderDebuggerPart('breakpoints', JSON.stringify([session?.breakpoints ?? [], originTraceActive]), renderBreakpoints);
-        renderDebuggerPart('specialBreakpoints', JSON.stringify([session?.settings ?? null, attached, originTraceActive]), renderSpecialBreakpoints);
-        renderConsole();
-      }
-
-      async function mapPausedImport(frame, scope, scopeIndex, bindingName) {
-        if (typeof CapturedVmLab === 'undefined') return;
-        const built = CapturedVmLab.importRequest(state.debuggerSession, {
-          scopeType: scope.type, callFrameId: frame.id, scopeIndex, bindingName
-        });
-        if (!built.ok) {
-          CapturedVmLab.showImport(null, built.message);
-          return;
-        }
-        const result = await debuggerAction(built.request);
-        if (result?.import_object) {
-          CapturedVmLab.showImport(result.import_object, 'Import map is descriptor labels only. invocation is unproven and guest_position is null.');
-          document.querySelector('#debugger-vm-lab')?.setAttribute('open', '');
-          document.querySelector('#vm-captured-lab')?.setAttribute('open', '');
-        } else CapturedVmLab.showImport(null, state.debuggerError || 'Import map was not accepted.');
-      }
-
-      async function debuggerAction(request, memoryOwner = null, experimentOwner = null) {
-        const parallelControl = ['cancel_repeater_request', 'cancel_automation_recipe'].includes(request.action);
-        if ((state.debuggerActionPending && !parallelControl) || (memoryOriginTraceActive() && request.action !== 'stop_memory_origin_trace')) return null;
-        const localOverrideAction = experimentOwner && request.action === 'configure_request_interception' &&
-          (request.local_override || request.expected_local_override);
-        const deadline = memoryOwner ? memoryActionDeadline(request.action) : localOverrideAction ? 10000 : 0;
-        if (memoryOwner && (!deadline || memoryOwner.action !== request.action)) return null;
-        const owner = {memoryOwner, experimentOwner, request, retire: null};
-        if (experimentOwner) experimentOwner.transport = owner;
-        if (!parallelControl) {
-          state.debuggerActionOwner = owner;
-          state.debuggerActionPending = true;
-        }
-        const current = () => (parallelControl || state.debuggerActionOwner === owner) && !experimentOwner?.expired;
-        state.debuggerError = null;
-        renderDebugger();
-        let result = null, timer = null, controller = null, retired = false;
-        try {
-          let retirement;
-          if (memoryOwner || experimentOwner) {
-            controller = new AbortController();
-            retirement = new Promise((_, reject) => {
-              owner.retire = message => {
-                if (retired) return;
-                retired = true;
-                // Reject the UI wait even if a fetch/body implementation ignores
-                // abort. Abort only releases this HTTP read, never native work.
-                reject(new Error(message));
-                controller.abort();
-              };
-              if (deadline) timer = setTimeout(() => owner.retire?.(`${localOverrideAction ? 'Local override' : 'Memory action'} acknowledgement exceeded ${deadline / 1000} seconds. Native completion is unknown; no cancellation or retry was requested.`), deadline);
-            });
-          }
-          const transport = (async () => {
-            const response = await fetch('/api/debugger/actions', {
-              method: 'POST', cache: 'no-store', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(request),
-              ...(controller ? {signal: controller.signal} : {})
-            });
-            if ((memoryOwner || experimentOwner) && (retired || !current())) return null;
-            const body = await response.json();
-            if ((memoryOwner || experimentOwner) && (retired || !current())) return null;
-            if (!response.ok) throw new Error(body.error || `Debugger returned ${response.status}`);
-            return body;
-          })();
-          const body = await (retirement ? Promise.race([transport, retirement]) : transport);
-          if (current() && !retired) result = body;
-        } catch (error) {
-          if (current()) state.debuggerError = error.message;
-        } finally {
-          if (timer !== null) clearTimeout(timer);
-          owner.retire = null;
-          if (current()) {
-            if (!parallelControl) {
-              state.debuggerActionOwner = null;
-              state.debuggerActionPending = false;
-            }
-            renderDebugger();
-            // Refresh current controls even when the Memory caller exits on an
-            // expired owner. Generic callers and replaced tokens do not redraw.
-            if (memoryOwner) renderMemory();
-            if (!state.debuggerRefreshing) scheduleDebuggerRefresh(0);
-          }
-        }
-        return result;
-      }
-
-      function debuggerScriptCatalogSignature(session) {
-        const scripts = session?.scripts ?? [];
-        if (scripts.length === 0) return `${session?.target?.id ?? ''}:empty`;
-        const first = scripts[0];
-        const last = scripts.at(-1);
-        return `${session?.target?.id ?? ''}:${scripts.length}:${first.script_id}:${first.hash}:${last.script_id}:${last.hash}`;
-      }
-
-      function scheduleDebuggerRefresh(delay = 0) {
-        if (location.protocol === 'file:') return;
-        if (state.debuggerRefreshTimer !== null) clearTimeout(state.debuggerRefreshTimer);
-        state.debuggerRefreshTimer = setTimeout(() => {
-          state.debuggerRefreshTimer = null;
-          refreshDebugger();
-        }, delay);
-      }
-
-      async function refreshDebugger(force = false) {
-        if (state.debuggerRefreshing || location.protocol === 'file:') return;
-        state.debuggerRefreshing = true;
-        const experimentReceiptAtStart = state.experimentReceipt;
-        try {
-          const headers = !force && state.debuggerEtag ? { 'If-None-Match': state.debuggerEtag } : {};
-          const wait = !force && state.debuggerEtag && state.debuggerSession?.state !== 'unavailable' ? 25000 : 0;
-          const response = await fetch(`/api/debugger?wait_ms=${wait}`, { cache: 'no-store', headers });
-          if (response.status === 304) return;
-          if (!response.ok) throw new Error(`Debugger returned ${response.status}`);
-          let body = await response.json();
-          if (!isDebuggerResponse(body)) throw new TypeError('Malformed debugger response');
-          const previousSession = state.debuggerSession;
-          const previousSelectedScript = previousSession?.scripts.find(script => script.script_id === state.selectedScriptId);
-          const previousSelectedIdentity = previousSelectedScript ? liveScriptIdentity(previousSelectedScript) : null;
-          const previousState = state.debuggerSession?.state;
-          const previousFrame = state.debuggerSession?.paused?.call_frames?.[0]?.id;
-          const previousCatalog = debuggerScriptCatalogSignature(previousSession);
-          const previousBreakpoints = JSON.stringify(previousSession?.breakpoints ?? []);
-          const previousOpenScripts = state.openScriptIds.join('\u0000');
-          const previousPendingLine = state.pendingSourceLine ? `${state.pendingSourceLine.scriptId}:${state.pendingSourceLine.line}` : '';
-          body = syncExperimentSession(previousSession, body, experimentReceiptAtStart);
-          state.debuggerSession = body;
-          rebuildTrafficRequests(previousSession);
-          syncMemorySession(previousSession, body);
-          applyMemoryOriginTrace(body.memory_origin_trace);
-          state.debuggerEtag = state.experimentNeedsRefresh ? null : response.headers.get('ETag');
-          state.debuggerError = null;
-          state.debuggerRefreshFailed = false;
-          renderLiveBrowserTabCount();
-          state.staleScriptIds ??= new Set();
-          if ((previousSession?.target?.id ?? '') !== (body.target?.id ?? '')) {
-            state.staleScriptIds.clear();
-          } else {
-            const currentScripts = new Map(body.scripts.map(script => [script.script_id, script]));
-            const previousScripts = new Map((previousSession?.scripts ?? []).map(script => [script.script_id, script]));
-            state.staleScriptIds.forEach(scriptId => {
-              const current = currentScripts.get(scriptId);
-              const previous = previousScripts.get(scriptId);
-              if (!current || (previous && current.hash !== previous.hash)) state.staleScriptIds.delete(scriptId);
-            });
-          }
-          pruneLiveScriptContent();
-          state.openScriptIds = state.openScriptIds.filter(id =>
-            body.scripts.some(script => script.script_id === id) && !state.staleScriptIds.has(id));
-          if (state.editingBreakpointId !== null && !body.breakpoints.some(breakpoint => breakpoint.id === state.editingBreakpointId)) {
-            state.editingBreakpointId = null;
-          }
-          if (state.selectedScriptId !== null &&
-              (!body.scripts.some(script => script.script_id === state.selectedScriptId) ||
-               state.staleScriptIds.has(state.selectedScriptId))) {
-            state.sourceNoticeKind = 'warning';
-            state.sourceNotice = 'The selected live source is no longer attached to the current debugger target. The current Page catalog is shown after refresh.';
-            state.selectedScriptId = null;
-            state.pendingSourceLine = null;
-            state.selectedArtifactId = state.openArtifactIds.at(-1) ?? null;
-            state.sourceCollection = 'captured';
-          }
-          const firstFrame = body.paused?.call_frames?.[0] ?? null;
-          let sourceRendered = false;
-          if (firstFrame && (previousState !== 'paused' || previousFrame !== firstFrame.id)) {
-            state.selectedCallFrameId = firstFrame.id;
-            sourceRendered = revealDebuggerLocation(firstFrame.location);
-          } else if (!firstFrame) {
-            state.selectedCallFrameId = null;
-            state.pendingSourceLine = null;
-          }
-          renderDebugger();
-          const selectedTrafficRequest = state.requests.find(request => request.id === state.selectedRequestId) ?? null;
-          if (!selectedTrafficRequest && state.selectedRequestId !== null) resetRequestSelection();
-          renderShellStatus();
-          renderNetworkNotice();
-          if (!document.querySelector('#screen-traffic').hidden) {
-            renderRequests();
-            updateSelectionSummary(selectedTrafficRequest);
-            renderInspector();
-          }
-          renderMemory();
-          if (!document.querySelector('#screen-experiments').hidden) renderExperiment();
-          if (state.sourceHooksOpen) renderRuntimeHooks();
-          if (state.selectedRuntimeHookRequest) renderRuntimeHookTraffic();
-          renderFieldProvenance();
-          if (!document.querySelector('#screen-api-collection').hidden) renderApiCollection();
-          const sourcesVisible = !document.querySelector('#screen-sources').hidden;
-          if (sourcesVisible && !sourceRendered) {
-            const currentSelectedScript = body.scripts.find(script => script.script_id === state.selectedScriptId);
-            const selectedIdentityChanged = previousSelectedIdentity !== null && currentSelectedScript &&
-              previousSelectedIdentity !== liveScriptIdentity(currentSelectedScript);
-            const catalogChanged = previousCatalog !== debuggerScriptCatalogSignature(body);
-            const openScriptsChanged = previousOpenScripts !== state.openScriptIds.join('\u0000');
-            const pendingLine = state.pendingSourceLine ? `${state.pendingSourceLine.scriptId}:${state.pendingSourceLine.line}` : '';
-            if (selectedIdentityChanged) {
-              renderSources();
-              loadScriptContent(selectedSource());
-            } else if (openScriptsChanged || (state.selectedScriptId === null && previousSession?.scripts?.length > 0 && body.scripts.length === 0)) {
-              renderSources();
-            } else {
-              if (catalogChanged && state.sourceCollection === 'page') renderSourceTree();
-              if (catalogChanged && state.openScriptIds.length > 0) renderSourceTabs();
-              if (previousBreakpoints !== JSON.stringify(body.breakpoints) || previousPendingLine !== pendingLine || previousState !== body.state) {
-                updateSourceDecorations();
-              }
-            }
-          }
-        } catch (error) {
-          state.debuggerError = error instanceof TypeError ? 'The debugger returned malformed state. The last valid pause is retained.' : error.message;
-          // Rejected actions and clipboard errors do not describe capture health.
-          state.debuggerRefreshFailed = true;
-          // A 304 cannot clear a failed refresh; recovery needs a validated body.
-          state.debuggerEtag = null;
-          renderShellStatus();
-          renderNetworkNotice();
-          renderLiveBrowserTabCount();
-          renderDebugger();
-          renderMemory();
-          if (!document.querySelector('#screen-experiments').hidden) renderExperiment();
-          if (state.sourceHooksOpen) renderRuntimeHooks();
-          if (state.selectedRuntimeHookRequest) renderRuntimeHookTraffic();
-          renderFieldProvenance();
-          if (!document.querySelector('#screen-api-collection').hidden) renderApiCollection();
-        } finally {
-          state.debuggerRefreshing = false;
-          const quiet = document.hidden || state.debuggerSession?.state === 'unavailable' || state.debuggerError;
-          scheduleDebuggerRefresh(quiet ? 1000 : 50);
-        }
-      }
+      function renderSourceSidebar() { const open = Boolean(state.sourceSidebarOpen); elements.sourceSidebar.hidden = !open; document.querySelector('#screen-sources').dataset.sidebarOpen = String(open); elements.sourceSidebarToggle.setAttribute('aria-expanded', String(open)); }
 
       async function refreshArtifacts() {
         if (state.artifactRefreshing || location.protocol === 'file:') return;
@@ -12131,6 +7082,7 @@
 
       function showScreen(name, trigger = null) {
         const screenName = name === 'backtraces' ? 'backtrace' : name;
+        if (!document.getElementById(`screen-${screenName}`)) return;
         investigationBeforeScreen(screenName);
         if (screenName !== 'signals') retireCanvasPreviews();
         if (screenName !== 'backtrace' && state.originTraceStatus === 'loading') {
@@ -12138,12 +7090,11 @@
           state.originTraceGeneration += 1;
           state.originTraceStatus = state.originTrace ? 'ready' : 'idle';
         }
-        if (typeof elementScreenshotPanel !== 'undefined') elementScreenshotPanel.setVisible(screenName === 'experiments' && state.experimentMode === 'screenshot');
+
         evidenceWorkspace.setVisible(screenName === 'evidence');
         if (screenName !== 'sources') sourceFactsPanel.cancel();
         if (screenName !== 'tools') float32Panel.cancel();
-        if (typeof retireCandidateExperimentPending === 'function') retireCandidateExperimentPending();
-        if (screenName !== 'sources' && state.sourceHooksOpen) closeSourceHooks(false);
+
         document.querySelectorAll('.screen').forEach(screen => { screen.hidden = screen.id !== `screen-${screenName}`; });
         if (typeof vmExecutionWorkspace !== 'undefined') vmExecutionWorkspace?.setVisible(screenName === 'vm');
         document.querySelectorAll('.nav-button').forEach(button => {
@@ -12158,15 +7109,15 @@
         navigation.open = false;
         if (screenName === 'signals') renderFingerprintActivity();
         if (screenName === 'traffic') {
-          // Hidden debugger refreshes update the model without painting Traffic.
+          // Hidden evidence refreshes update the model without painting Traffic.
           // A quiet backend may return 304 indefinitely after we return here.
           renderRequests();
           updateSelectionSummary(state.requests.find(request => request.id === state.selectedRequestId) ?? null);
           renderInspector();
-          renderRuntimeHookTraffic();
+
         }
         if (screenName === 'backtrace') renderBacktrace();
-        if (screenName === 'experiments') renderExperiment();
+
         if (screenName === 'api-collection') {
           renderApiCollection();
           refreshApiCollection();
@@ -12180,13 +7131,13 @@
           refreshDecoderEngine();
         }
         if (screenName === 'sources') {
-          renderDebugger();
+
           renderSources();
           const source = selectedSource();
-          if (source?.source_type === 'script') loadScriptContent(source);
-          else if (source) loadArtifactContent(state.artifacts.find(candidate => candidate.artifact_id === source.artifact_id));
+
+          if (source?.source_type === 'artifact') loadArtifactContent(state.artifacts.find(candidate => candidate.artifact_id === source.artifact_id));
         }
-        if (screenName === 'memory') renderMemory();
+
         if (screenName === 'vm') {
           if (trigger === elements.requestVmCandidates && typeof vmExecutionWorkspace !== 'undefined') vmExecutionWorkspace?.showWorkspace('findings');
           if (trigger?.id === 'nav-vm' && state.vmAnalysisRequestId !== null) refreshVmAnalysis(null);
@@ -12314,7 +7265,6 @@
         state.artifactReceiverConfigured = false;
         state.artifactReceiverConnected = false;
         state.artifactReceiverError = null;
-        state.staleScriptIds?.clear();
         state.sourceNotice = null;
         state.selectedRequestId = null;
         state.selectedField = null;
@@ -12324,7 +7274,7 @@
         setNetworkNotice('empty', 'No evidence is bundled. Start a live capture to populate the workspace.');
         renderRequests();
         renderEvidence();
-        renderDebugger();
+
         renderSources();
         renderVmLab();
         state.apiCollectionStatus = 'empty';
@@ -12476,7 +7426,7 @@
         if (state.inspectorTab === 'signals') refreshRequestSignalProfile();
       }));
       document.querySelector('#request-evidence-toggle').addEventListener('click', () => {
-        state.inspectorTab = state.inspectorTab === 'evidence' ? 'headers' : 'evidence';
+        state.inspectorTab = state.inspectorTab === 'evidence' ? 'general' : 'evidence';
         renderInspector();
       });
       enableTabKeyboardNavigation('.inspector-tab');
@@ -12495,7 +7445,6 @@
         elements.backtraceSteps.querySelector('.trace-row')?.focus();
       });
       elements.requestFilter.addEventListener('input', renderRequests);
-      elements.requestSearchScope.addEventListener('change', renderRequests);
       function closeRequestDetails() {
         state.trafficDetailOpen = false;
         renderInspector();
@@ -12557,60 +7506,16 @@
         const request = state.requests.find(candidate => candidate.id === state.selectedRequestId);
         openInvestigation({kind: 'trace', identity: investigationRequestIdentity(request), relation: 'Captured request → recorded trace. Shared-identifier relationships and missing predecessors remain explicit.'});
       });
-      elements.requestRepeaterPivot.addEventListener('click', () => {
-        state.experimentMode = 'repeater';
-        state.repeaterDraftDirty = false;
-        state.repeaterPrefillKey = null;
-        prefillRepeaterRequest(true);
-        showScreen('experiments', elements.requestRepeaterPivot);
-        requestAnimationFrame(() => elements.repeaterRequestUrl.focus({preventScroll: true}));
-      });
+
       elements.requestCollectionPivot.addEventListener('click', copyInvestigationRequestToCollection);
       elements.requestDecoderPivot.addEventListener('click', useSelectedFieldInDecoder);
-      elements.requestMemoryPivot.addEventListener('click', () => {
-        if (state.memorySearchPending || state.debuggerActionPending) {
-          showScreen('memory', elements.requestMemoryPivot);
-          return;
-        }
-        const selected = state.selectedField;
-        if (!selected) return;
-        let value = String(selected.value ?? '').trim();
-        if (selected.type === 'str' && value.startsWith('"') && value.endsWith('"')) {
-          value = value.slice(1, -1);
-        }
-        value = value.replace(/(?:…|\.{3})+$/u, '').slice(0, 512);
-        if (!value) return;
-        state.memoryResultOwner = null;
-        state.memoryLastOperation = null;
-        state.memoryMode = 'live';
-        state.memoryResults = [];
-        state.selectedMemoryResultId = null;
-        state.memorySearchMeta = null;
-        state.memoryTargetId = null;
-        state.memorySearchStatus = memoryAttached() ? 'idle' : 'offline';
-        state.memorySearchMessage = `Pivoted from request-${state.selectedRequestId} · ${selected.label} · ${selected.path}`;
-        elements.memoryPropertyQuery.value = '';
-        elements.memoryValueQuery.value = value;
-        elements.memoryClassQuery.value = '';
-        elements.memoryShapeQuery.value = '';
-        elements.memoryRegex.checked = false;
-        elements.memoryCaseSensitive.checked = false;
-        elements.memoryShapeValues.checked = false;
-        showScreen('memory', elements.requestMemoryPivot);
-        requestAnimationFrame(() => elements.memoryValueQuery.focus({ preventScroll: true }));
-      });
+
       elements.requestVmCandidates.addEventListener('click', async () => {
-        const request = state.requests.find(candidate => candidate.id === state.selectedRequestId);
         const selection = vmRequestSelection(state.requests, state.selectedRequestId);
         if (!selection) {
-          investigationNotice(request?.nativeLink?.kind === 'devtools-request-id'
-            ? 'This debugger row joins a native request by its DevTools request id, but that join is not a unique retained native request start. Related VM candidates needs the exact captured-response-body chain. Choose the native row, or use VM navigation separately for session-wide findings.'
-            : 'Unlinked: this Traffic row has no unique retained native request start with exact session, process and sequence identifiers. Debugger correlations and legacy rows cannot establish a captured-response-body link. Choose a native row, or use VM navigation separately for session-wide findings.',
+          investigationNotice('Unlinked: this Traffic row has no unique retained native request start with exact session, process and sequence identifiers. Legacy rows cannot establish a captured-response-body link. Choose another native row, or use VM navigation separately for session-wide findings.',
             'unavailable');
           return;
-        }
-        if (request?.nativeLink?.kind === 'devtools-request-id') {
-          investigationNotice('This debugger row joins a native request by its DevTools request id. Related VM candidates uses that joined native start.', 'ready');
         }
         const refresh = refreshVmAnalysis(selection);
         showScreen('vm', elements.requestVmCandidates);
@@ -12651,17 +7556,9 @@
       });
       document.querySelectorAll('[data-source-collection]').forEach(button => button.addEventListener('click', () => {
         state.sourceCollection = button.dataset.sourceCollection;
-        if (state.sourceCollection === 'page') {
-          const script = liveSources().find(source => source.script_id === state.selectedScriptId) ?? liveSources()[0];
-          if (script) selectScript(script.script_id);
-          else renderSources();
-        } else {
-          state.selectedScriptId = null;
-          state.pendingSourceLine = null;
-          const artifact = state.artifacts.find(candidate => candidate.artifact_id === state.selectedArtifactId) ?? state.artifacts[0];
-          if (artifact) selectArtifact(artifact.artifact_id);
-          else renderSources();
-        }
+        const artifact = state.artifacts.find(candidate => candidate.artifact_id === state.selectedArtifactId) ?? state.artifacts[0];
+        if (artifact) selectArtifact(artifact.artifact_id);
+        else renderSources();
       }));
       elements.deobfuscationIntrinsics.addEventListener('change', () => {
         retireSourceAnalysis();
@@ -12699,387 +7596,14 @@
         }
         if (event.key === 'Enter') elements.quickOpenResults.querySelector('button')?.click();
       });
-      elements.sourceCode.addEventListener('click', event => {
-        const line = event.target.closest('.source-line');
-        if (!line?.dataset.line) return;
-        const source = selectedSource();
-        const runtimeLine = Number(line.dataset.line) - 1;
-        const localLine = runtimeLine - (source?.source_type === 'script' ? source.start_line : 0);
-        const transformed = state.sourceDeobfuscated || state.sourceFormatted;
-        const column = Number(line.dataset.columnStart ?? 0) + sourceClickColumn(line, event) + (transformed ? 0 : sourceRuntimeColumn(source, localLine));
-        if (source?.source_type === 'script' && !transformed) {
-          setSourceCursor(source, runtimeLine, column);
-          elements.sourceCode.querySelectorAll('.source-line').forEach(row => row.classList.toggle('cursor', row === line));
-          if (state.sourceHooksOpen && prefillHookFromSource(source)) renderRuntimeHooks();
-        }
-        elements.sourcePosition.textContent = `Line ${line.dataset.line}, Column ${column + 1}`;
-      });
-      elements.sourceHookPivot.addEventListener('click', pivotSourceToRuntimeHooks);
-      elements.sourceHooksClose.addEventListener('click', () => closeSourceHooks());
-      elements.sourceHooksExperiments.addEventListener('click', () => showScreen('experiments'));
-      const setConsoleOpen = open => {
-        state.consoleOpen = open;
-        elements.consoleDrawer.hidden = !open;
-        elements.sourcesEditor.classList.toggle('console-open', open);
-        elements.consoleToggle.setAttribute('aria-pressed', String(open));
-      };
-      if (typeof CapturedVmLab !== 'undefined') {
-        const labApi = {
-          session: () => state.debuggerSession,
-          busy: () => state.debuggerActionPending || memoryOriginTraceActive(),
-          run: request => debuggerAction(request)
-        };
-        CapturedVmLab.mount(document.querySelector('#debugger-vm-lab-body'), labApi);
-        CapturedVmLab.mount(document.querySelector('#vm-captured-lab-body'), labApi);
-      }
+
+
       elements.sourceSidebarToggle.addEventListener('click', () => {
         state.sourceSidebarOpen = elements.sourceSidebar.hidden;
         renderSourceSidebar();
       });
-      elements.consoleToggle.addEventListener('click', () => setConsoleOpen(!state.consoleOpen));
-      elements.consoleClear.addEventListener('click', () => debuggerAction({ action: 'clear_console' }));
-      elements.debugResume.addEventListener('click', () => debuggerAction({ action: 'resume' }));
-      elements.debugPause.addEventListener('click', () => debuggerAction({ action: 'pause' }));
-      elements.debugStepOver.addEventListener('click', () => debuggerAction({ action: 'step_over' }));
-      elements.debugStepInto.addEventListener('click', () => debuggerAction({ action: 'step_into' }));
-      elements.debugStepOut.addEventListener('click', () => debuggerAction({ action: 'step_out' }));
-      elements.debugBreakpointsActive.addEventListener('click', () => debuggerAction({
-        action: 'set_breakpoints_active', active: !(state.debuggerSession?.settings.breakpoints_active ?? true)
-      }));
-      elements.watchForm.addEventListener('submit', event => {
-        event.preventDefault();
-        const expression = elements.watchExpression.value.trim();
-        if (!expression) return;
-        elements.watchExpression.value = '';
-        debuggerAction({ action: 'add_watch', expression });
-      });
-      elements.pauseOnExceptions.addEventListener('change', () => debuggerAction({
-        action: 'set_pause_on_exceptions', mode: elements.pauseOnExceptions.value
-      }));
-      elements.xhrBreakpointForm.addEventListener('submit', event => {
-        event.preventDefault();
-        const pattern = elements.xhrBreakpointPattern.value.trim();
-        elements.xhrBreakpointPattern.value = '';
-        debuggerAction({ action: 'set_xhr_breakpoint', pattern });
-      });
-      elements.actionScopeGlobal.addEventListener('click', () => {
-        state.actionScopeDraftMode = 'global';
-        renderExperiment();
-      });
-      elements.actionScopeTargeted.addEventListener('click', () => {
-        state.actionScopeDraftMode = 'target';
-        renderExperiment();
-      });
-      elements.actionScopeTarget.addEventListener('change', renderExperiment);
-      elements.actionScopeApply.addEventListener('click', () => {
-        const mode = state.actionScopeDraftMode ?? actionScopeState()?.mode ?? 'global';
-        const request = {action: 'set_action_scope', mode};
-        if (mode === 'target') request.target_id = elements.actionScopeTarget.value;
-        runExperimentAction(request);
-      });
-      elements.actionScopeAddForm.addEventListener('submit', async event => {
-        event.preventDefault();
-        const value = elements.actionScopeNewUrl.value.trim();
-        let url = 'about:blank';
-        if (value) {
-          try {
-            const parsed = new URL(value);
-            if (!['http:', 'https:'].includes(parsed.protocol) || parsed.username || parsed.password || parsed.hash) throw new Error();
-            url = value;
-          } catch {
-            state.experimentError = 'Disposable page URL must be credential-free HTTP or HTTPS with no fragment.';
-            renderExperiment();
-            return;
-          }
-        }
-        const response = currentExperimentReceipt(await runExperimentAction({action: 'create_experiment_page', url}));
-        if (response) elements.actionScopeNewUrl.value = '';
-      });
-      elements.experimentCreate.addEventListener('click', () => runExperimentAction({
-        action: 'create_request_interception_experiment'
-      }));
-      elements.experimentDispose.addEventListener('click', () => runExperimentAction({
-        action: 'dispose_request_interception_experiment'
-      }));
-      elements.experimentClear.addEventListener('click', async () => {
-        const response = currentExperimentReceipt(await runExperimentAction({ action: 'clear_request_interception_result' }));
-        if (response) {
-          state.experimentPrefillKey = null;
-          prefillExperimentRequest();
-        }
-      });
-      elements.experimentRuleMode.addEventListener('change', () => {
-        state.experimentError = null;
-        setExperimentRuleVisibility();
-      });
-      elements.experimentRuleForm.addEventListener('submit', event => {
-        event.preventDefault();
-        configureExperimentRule();
-      });
-      elements.experimentRequestForm.addEventListener('submit', event => {
-        event.preventDefault();
-        runExperimentRequest();
-      });
-      elements.experimentModeButtons.forEach(button => button.addEventListener('click', () => {
-        setExperimentMode(button.dataset.experimentMode);
-      }));
-      enableTabKeyboardNavigation('.experiment-mode-tab');
-      elements.repeaterEditorTabs.forEach(button => button.addEventListener('click', () => {
-        setRepeaterEditorTab(button.dataset.repeaterEditorTab);
-      }));
-      enableTabKeyboardNavigation('.repeater-editor-tab');
-      elements.objectCreate.addEventListener('click', () => runExperimentAction({
-        action: 'create_request_interception_experiment'
-      }));
-      elements.objectDispose.addEventListener('click', async () => {
-        const response = currentExperimentReceipt(await runExperimentAction({action: 'dispose_request_interception_experiment'}));
-        if (response) {
-          state.objectSelectedResultId = null;
-          state.objectSelectionSearchId = 0;
-          elements.objectConfirm.checked = false;
-          elements.objectMutationValue.value = '';
-          elements.objectMutationProperty.value = '';
-        }
-      });
-      elements.objectNavigationForm.addEventListener('submit', event => {
-        event.preventDefault();
-        navigateObjectExperiment();
-      });
-      elements.objectSearchForm.addEventListener('submit', event => {
-        event.preventDefault();
-        searchObjectExperiment();
-      });
-      elements.objectMutationForm.addEventListener('submit', event => {
-        event.preventDefault();
-        mutateObjectExperiment();
-      });
-      elements.objectOperation.addEventListener('change', () => {
-        elements.objectConfirm.checked = false;
-        renderObjectExperiment();
-      });
-      elements.objectConfirm.addEventListener('change', renderObjectExperiment);
-      elements.objectMutationProperty.addEventListener('input', () => {
-        state.experimentError = null;
-        renderObjectExperiment();
-      });
-      elements.objectMutationValue.addEventListener('input', () => { state.experimentError = null; });
-      elements.objectResults.addEventListener('keydown', event => {
-        if (!['ArrowUp', 'ArrowDown', 'Home', 'End'].includes(event.key)) return;
-        const results = objectExperimentState()?.results ?? [];
-        if (results.length === 0) return;
-        event.preventDefault();
-        const current = Math.max(0, results.findIndex(result => result.id === state.objectSelectedResultId));
-        const index = event.key === 'Home' ? 0 : event.key === 'End' ? results.length - 1
-          : event.key === 'ArrowUp' ? Math.max(0, current - 1) : Math.min(results.length - 1, current + 1);
-        selectObjectExperimentResult(results[index].id, true);
-      });
-      elements.hooksCreate.addEventListener('click', () => runExperimentAction({
-        action: 'create_request_interception_experiment'
-      }));
-      elements.hooksDispose.addEventListener('click', async () => {
-        const hooks = runtimeHooksState();
-        const experiment = requestInterception();
-        const captured = Boolean(hooks?.captured_owner) && !experiment?.isolated;
-        const response = currentExperimentReceipt(await runExperimentAction(
-          captured ? {action: 'disarm_runtime_hooks', erase: true, expected_session_id: hooks.session_id} : {action: 'dispose_request_interception_experiment'}
-        ));
-        if (response) {
-          elements.hooksConfirm.checked = false;
-          elements.hooksDefinitionForm.reset();
-          elements.hooksEntryEnabled.checked = true;
-          elements.hooksReturnEnabled.checked = true;
-          elements.hooksReturnMode.value = 'none';
-          renderRuntimeHooks();
-        }
-      });
-      elements.hooksClear.addEventListener('click', () => runExperimentAction({action: 'clear_runtime_hook_hits'}));
-      elements.hooksNavigationForm.addEventListener('submit', event => {
-        event.preventDefault();
-        navigateRuntimeHooks();
-      });
-      elements.hooksDefinitionForm.addEventListener('submit', event => {
-        event.preventDefault();
-        addRuntimeHook();
-      });
-      elements.hooksPauseLine.addEventListener('click', async () => {
-        const request = capturedPauseRequest();
-        if (!request) return;
-        state.experimentError = null;
-        const response = await debuggerAction(request);
-        if (response?.ok) setExperimentNotice('ready', 'Breakpoint set on the attached page script. The page stays paused when that line runs.');
-      });
-      elements.hooksScript.addEventListener('change', () => {
-        state.hooksSelectedSource = null;
-        elements.hooksConfirm.checked = false;
-        const script = (state.debuggerSession?.scripts ?? []).find(candidate => candidate.script_id === elements.hooksScript.value);
-        if (script) {
-          elements.hooksLine.value = String(script.start_line + 1);
-          elements.hooksColumn.value = String(script.start_column + 1);
-        }
-        renderRuntimeHooks();
-      });
-      elements.hooksReturnMode.addEventListener('change', () => {
-        state.experimentError = null;
-        renderRuntimeHooks();
-      });
-      elements.hooksEntryMode.addEventListener('change', () => {
-        if (elements.hooksEntryMode.value === 'function') {
-          elements.hooksEntryEnabled.checked = true;
-          elements.hooksReturnEnabled.checked = false;
-          elements.hooksReturnMode.value = 'none';
-          elements.hooksReturnLogic.value = '';
-          elements.hooksReturnValue.value = '';
-        }
-        state.experimentError = null;
-        renderRuntimeHooks();
-      });
-      elements.hooksDefinitionForm.addEventListener('input', () => {
-        state.experimentError = null;
-        renderRuntimeHooks();
-      });
-      elements.hooksConfirm.addEventListener('change', () => {
-        state.hooksConfirmationOwner = elements.hooksConfirm.checked ? hookConfirmationKey() : null;
-        renderRuntimeHooks();
-      });
-      elements.hooksArm.addEventListener('click', async () => {
-        const response = currentExperimentReceipt(await runExperimentAction({action: 'arm_runtime_hooks',
-          confirmed: elements.hooksConfirm.checked && state.hooksConfirmationOwner === hookConfirmationKey(),
-          ...(!requestInterception()?.isolated ? {expected_session_id: runtimeHooksState()?.session_id,
-            captured_owner: capturedHookDocument(), expected_definition_ids: runtimeHooksState()?.definitions.map(hook => hook.id)} : {})}));
-        if (response) elements.hooksConfirm.checked = false;
-      });
-      elements.hooksDisarm.addEventListener('click', async () => {
-        const response = currentExperimentReceipt(await runExperimentAction({action: 'disarm_runtime_hooks'}));
-        if (response) elements.hooksConfirm.checked = false;
-      });
-      bindRuntimeFieldTest();
-      elements.automationCreate.addEventListener('click', () => runExperimentAction({
-        action: 'create_request_interception_experiment'
-      }));
-      elements.automationDispose.addEventListener('click', async () => {
-        const response = currentExperimentReceipt(await runExperimentAction({action: 'dispose_request_interception_experiment'}));
-        if (response) {
-          state.automationSelectedRunId = null;
-          elements.automationConfirm.checked = false;
-          elements.automationVariables.value = '';
-          resetAutomationEditor();
-        }
-      });
-      elements.automationClear.addEventListener('click', async () => {
-        const response = currentExperimentReceipt(await runExperimentAction({action: 'clear_automation_runs'}));
-        if (response) state.automationSelectedRunId = null;
-      });
-      elements.automationNavigationForm.addEventListener('submit', event => {
-        event.preventDefault();
-        navigateAutomationRecipes();
-      });
-      elements.automationRecipeForm.addEventListener('submit', event => {
-        event.preventDefault();
-        saveAutomationRecipe();
-      });
-      elements.automationRecipeForm.addEventListener('input', () => {
-        state.experimentError = null;
-        renderAutomationRecipes();
-      });
-      elements.automationCancelEdit.addEventListener('click', () => {
-        resetAutomationEditor();
-        renderAutomationRecipes();
-      });
-      elements.automationConfirm.addEventListener('change', renderAutomationRecipes);
-      elements.automationArm.addEventListener('click', async () => {
-        try {
-          const response = currentExperimentReceipt(await runExperimentAction({
-            action: 'arm_automation_recipes', confirmed: elements.automationConfirm.checked,
-            variables: parseAutomationVariables()
-          }));
-          if (response) elements.automationConfirm.checked = false;
-        } catch (error) {
-          state.experimentError = error.message;
-          renderExperiment();
-        }
-      });
-      elements.automationDisarm.addEventListener('click', async () => {
-        const response = currentExperimentReceipt(await runExperimentAction({action: 'disarm_automation_recipes'}));
-        if (response) elements.automationConfirm.checked = false;
-      });
-      elements.automationCancel.addEventListener('click', () => runExperimentAction({
-        action: 'cancel_automation_recipe'
-      }));
-      elements.automationRuns.addEventListener('keydown', event => {
-        if (!['ArrowUp', 'ArrowDown', 'Home', 'End'].includes(event.key)) return;
-        const runs = automationRecipesState()?.runs ?? [];
-        if (!runs.length) return;
-        event.preventDefault();
-        const current = Math.max(0, runs.findIndex(run => run.id === state.automationSelectedRunId));
-        const index = event.key === 'Home' ? 0 : event.key === 'End' ? runs.length - 1
-          : event.key === 'ArrowUp' ? Math.max(0, current - 1) : Math.min(runs.length - 1, current + 1);
-        selectAutomationRun(runs[index].id, true);
-      });
-      elements.repeaterCreate.addEventListener('click', () => runExperimentAction({
-        action: 'create_request_interception_experiment'
-      }));
-      elements.repeaterDispose.addEventListener('click', async () => {
-        const response = currentExperimentReceipt(await runExperimentAction({action: 'dispose_request_interception_experiment'}));
-        if (response) {
-          state.repeaterSelectedHistoryId = null;
-          state.repeaterExpectedHistoryId = null;
-          state.repeaterVariablesKey = null;
-          state.repeaterVariablesDirty = false;
-          state.repeaterComparisonKey = null;
-        }
-      });
-      elements.repeaterClearHistory.addEventListener('click', async () => {
-        const response = currentExperimentReceipt(await runExperimentAction({action: 'clear_repeater_history'}));
-        if (response) {
-          state.repeaterSelectedHistoryId = null;
-          state.repeaterExpectedHistoryId = null;
-          state.repeaterComparisonKey = null;
-        }
-      });
-      elements.repeaterVariableForm.addEventListener('submit', event => {
-        event.preventDefault();
-        applyRepeaterVariables();
-      });
-      elements.repeaterVariables.addEventListener('input', () => {
-        state.repeaterDraftRevision = (state.repeaterDraftRevision ?? 0) + 1;
-        state.repeaterVariablesDirty = true;
-        state.experimentError = null;
-        renderRepeaterVariableStatus();
-      });
-      [elements.repeaterRequestUrl, elements.repeaterRequestMethod, elements.repeaterRequestTimeout,
-        elements.repeaterRequestHeaders, elements.repeaterRequestBody].forEach(field => field.addEventListener('input', () => {
-        if (field === elements.repeaterRequestUrl) state.repeaterQuerySource = null;
-        if (field === elements.repeaterRequestBody) state.repeaterBodyRepresentation = null;
-        markRepeaterDraftChanged();
-      }));
-      elements.repeaterRequestUrl.addEventListener('change', () => {
-        if (state.repeaterEditorTab === 'query') refreshRepeaterStructuredEditors();
-      });
-      elements.repeaterRequestForm.addEventListener('submit', event => {
-        event.preventDefault();
-        runRepeaterRequest();
-      });
-      elements.repeaterCancel.addEventListener('click', () => runExperimentAction({action: 'cancel_repeater_request'}));
-      elements.repeaterCopyResolved.addEventListener('click', copyResolvedRepeaterRequest);
-      elements.repeaterCompareBaseline.addEventListener('change', () => {
-        state.repeaterCompareBaselineId = Number(elements.repeaterCompareBaseline.value);
-        renderRepeaterComparison(repeaterState());
-      });
-      elements.repeaterCompareCurrent.addEventListener('change', () => {
-        state.repeaterCompareCurrentId = Number(elements.repeaterCompareCurrent.value);
-        renderRepeaterComparison(repeaterState());
-      });
-      elements.repeaterCompare.addEventListener('click', compareRepeaterResponses);
-      elements.repeaterHistoryPrev.addEventListener('click', () => {
-        const history = repeaterState()?.history ?? [];
-        const index = history.findIndex(entry => entry.id === state.repeaterSelectedHistoryId);
-        if (index > 0) loadRepeaterHistoryEntry(history[index - 1]);
-      });
-      elements.repeaterHistoryNext.addEventListener('click', () => {
-        const history = repeaterState()?.history ?? [];
-        const index = history.findIndex(entry => entry.id === state.repeaterSelectedHistoryId);
-        if (index >= 0 && index < history.length - 1) loadRepeaterHistoryEntry(history[index + 1]);
-      });
+
+
       elements.collectionRetry.addEventListener('click', () => refreshApiCollection(true));
       elements.collectionDiscardRequest.addEventListener('click', () => {
         if (state.apiCollectionSaving) return;
@@ -13130,43 +7654,15 @@
       elements.collectionFolderForm.addEventListener('submit', event => {
         event.preventDefault(); saveCollectionFolder();
       });
-      elements.collectionFolderForm.querySelectorAll('input, textarea, select').forEach(field => field.addEventListener('input', () => {
-        state.collectionFolderDirty = true;
-        state.collectionDeleteFolderId = null;
-        elements.collectionFolderDraftStatus.textContent = '· Unsaved';
-        elements.collectionDiscardFolder.disabled = false;
-        renderCollectionExecution();
-      }));
+
       elements.collectionDeleteFolder.addEventListener('click', deleteCollectionFolder);
       elements.collectionRequestForm.addEventListener('submit', event => {
         event.preventDefault(); saveCollectionRequest();
       });
-      elements.collectionRequestForm.querySelectorAll('input, textarea, select').forEach(field => field.addEventListener('input', () => {
-        state.collectionDraftRevision = (state.collectionDraftRevision ?? 0) + 1;
-        state.collectionDraftDirty = true;
-        state.collectionDeleteRequestId = null;
-        elements.collectionDraftStatus.textContent = 'Unsaved edits · Save or discard before switching.';
-        elements.collectionDiscardRequest.disabled = false;
-        renderCollectionVariableStatus();
-        renderCollectionExecution();
-      }));
+
       elements.collectionDuplicateRequest.addEventListener('click', duplicateCollectionRequest);
       elements.collectionDeleteRequest.addEventListener('click', deleteCollectionRequest);
-      elements.collectionCreateContext.addEventListener('click', async () => {
-        if (state.experimentPending || elements.collectionCreateContext.disabled) return;
-        elements.collectionCreateContext.disabled = true;
-        const result = currentExperimentReceipt(await runExperimentAction({action: 'create_request_interception_experiment'}));
-        if (!result) setCollectionNotice('error', state.experimentError || 'Isolated context could not be created.');
-        renderApiCollection();
-      });
-      elements.collectionRun.addEventListener('click', runCollectionRequest);
-      elements.collectionCancel.addEventListener('click', async () => {
-        if (elements.collectionCancel.disabled) return;
-        elements.collectionCancel.disabled = true;
-        const result = currentExperimentReceipt(await runExperimentAction({action: 'cancel_repeater_request'}));
-        if (!result) setCollectionNotice('error', state.experimentError || 'Cancellation could not be confirmed.');
-        renderApiCollection();
-      });
+
       analystElements.newFolder.addEventListener('click', createAnalystFolder);
       analystElements.newScript.addEventListener('click', () => createAnalystFile('analyst-script'));
       analystElements.newNote.addEventListener('click', () => createAnalystFile('scratchpad'));
@@ -13241,7 +7737,6 @@
       toolsElements.inputEncoding.addEventListener('change', scheduleDecoderInputRender);
       toolsElements.operation.addEventListener('change', renderTools);
       toolsElements.useField.addEventListener('click', useSelectedFieldInDecoder);
-      toolsElements.findSources.addEventListener('click', searchDecodedFieldSources);
       toolsElements.removeAfter.addEventListener('click', () => {
         const index = state.decoderSteps.findIndex(step => step.id === state.decoderSelectedStepId);
         if (index < 0) return;
@@ -13296,29 +7791,7 @@
         toolsElements.jwtCreateSecret.value = '';
         renderTools();
       });
-      elements.memorySearchForm.addEventListener('submit', event => {
-        event.preventDefault();
-        runLiveObjectSearch();
-      });
-      elements.memoryValueQuery.addEventListener('keydown', event => {
-        if (event.key !== 'Enter' || !['snapshot', 'origin'].includes(state.memoryMode)) return;
-        event.preventDefault();
-        if (state.memoryMode === 'origin') runMemoryOriginTrace();
-        else runHeapSnapshotSearch();
-      });
-      elements.memoryModeButtons.forEach(button => button.addEventListener('click', () => {
-        setMemoryMode(button.dataset.memoryMode);
-      }));
-      elements.memoryReferenceScope.addEventListener('change', () => {
-        if (!['snapshot', 'origin'].includes(state.memoryMode) || state.memorySearchPending) return;
-        state.memorySearchMessage = 'Reference scope changed. It applies only to the next explicit action; the submitted result keeps its original scope.';
-        renderMemory();
-      });
-      elements.memoryOriginStop.addEventListener('click', stopMemoryOriginTrace);
-      elements.memoryOriginReset.addEventListener('click', clearMemoryOriginTrace);
-      elements.memoryCaptureBaseline.addEventListener('click', captureHeapDiffBaseline);
-      elements.memoryClearBaseline.addEventListener('click', clearHeapDiffBaseline);
-      elements.memoryCompareSnapshot.addEventListener('click', runHeapSnapshotDiff);
+
       const consoleTraffic = new Map();
       document.querySelector('#console-traffic-back').addEventListener('click', () => {
         delete document.querySelector('#screen-traffic').dataset.consoleTraffic;
@@ -13366,38 +7839,7 @@
       document.addEventListener('reb-console-location', event => {
         if (!investigationSourceSearch(event.detail ?? {})) event.detail.unavailable = true;
       });
-      document.addEventListener('keydown', event => {
-        if (event.defaultPrevented || event.target.closest?.('#native-console-panel')) return;
-        const sourcesVisible = !document.querySelector('#screen-sources').hidden;
-        if (sourcesVisible && event.key === 'Escape' && elements.quickOpen.hidden) {
-          event.preventDefault();
-          setConsoleOpen(!state.consoleOpen);
-          return;
-        }
-        if (sourcesVisible && ['F8', 'F10', 'F11'].includes(event.key)) {
-          const debugState = state.debuggerSession?.state;
-          if (['armed', 'capturing', 'stepping', 'stopping'].includes(state.debuggerSession?.memory_origin_trace?.state)) return;
-          if (!['running', 'paused'].includes(debugState)) return;
-          if (event.key !== 'F8' && debugState !== 'paused') return;
-          event.preventDefault();
-          if (event.key === 'F8') debuggerAction({ action: debugState === 'paused' ? 'resume' : 'pause' });
-          if (event.key === 'F10') debuggerAction({ action: 'step_over' });
-          if (event.key === 'F11') debuggerAction({ action: event.shiftKey ? 'step_out' : 'step_into' });
-          return;
-        }
-        const commandKey = navigator.platform.includes('Mac') ? event.metaKey : event.ctrlKey;
-        if (!commandKey || event.altKey) return;
-        if (event.key.toLowerCase() === 'p') {
-          event.preventDefault();
-          showScreen('sources');
-          openQuickOpen();
-        }
-        if (event.key.toLowerCase() === 'f' && !document.querySelector('#screen-sources').hidden) {
-          event.preventDefault();
-          elements.sourceSearch.focus();
-          elements.sourceSearch.select();
-        }
-      });
+
       document.querySelector('#theme-toggle').addEventListener('click', () => {
         const next = document.documentElement.dataset.theme === 'light' ? 'dark' : 'light';
         document.documentElement.dataset.theme = next;
@@ -13407,33 +7849,10 @@
       try { savedTheme = localStorage.getItem('reb-theme'); } catch { /* Keep the system theme. */ }
       if (savedTheme === 'light' || savedTheme === 'dark') document.documentElement.dataset.theme = savedTheme;
 
-      document.addEventListener('visibilitychange', () => {
-        if (document.hidden || location.protocol === 'file:') return;
-        state.debuggerRenderKeys = {};
-        state.renderedConsoleSignature = null;
-        renderDebugger();
-        if (!document.querySelector('#screen-experiments').hidden) renderExperiment();
-        if (!document.querySelector('#screen-api-collection').hidden) {
-          renderApiCollection();
-          refreshApiCollection();
-        }
-        if (!document.querySelector('#screen-analyst').hidden) {
-          renderLocalAnalyst();
-          refreshLocalAnalyst();
-        }
-        if (!document.querySelector('#screen-tools').hidden) {
-          renderTools();
-          refreshDecoderEngine(true);
-        }
-        if (!document.querySelector('#screen-sources').hidden) renderSources();
-        scheduleDebuggerRefresh(0);
-      });
-
       renderRequests();
       renderInspector();
       renderEvidence();
-      renderDebugger();
-      renderMemory();
+
       renderSources();
       renderVmLab();
       renderApiCollection();
@@ -13446,7 +7865,7 @@
         refreshApiCollection();
         refreshLocalAnalyst();
         refreshDecoderEngine();
-        scheduleDebuggerRefresh();
+
         setInterval(refresh, 2000);
       }
 

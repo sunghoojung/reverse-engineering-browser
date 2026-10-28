@@ -149,7 +149,7 @@
           const origin = String(source?.capture_origin || 'module').replaceAll('_', ' ');
           return `wasm ${origin}`;
         }
-        if (!source?.url) return source?.source_type === 'script' ? `(anonymous ${source.script_id})` : `artifact-${source?.artifact_id}`;
+        if (!source?.url) return `artifact-${source?.artifact_id}`;
         return file || source.url;
       }
 
@@ -165,6 +165,12 @@
         if (bytes < 1024) return `${bytes} bytes`;
         if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
         return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+      }
+
+      // Binary artifacts render as an inert hex view of their retained bytes,
+      // never as decoded text. Guest bytecode has no text representation.
+      function sourceHexArtifact(source) {
+        return source?.kind === 'wasm' || source?.kind === 'bytecode_buffer';
       }
 
       function formatWasmHex(buffer) {
@@ -643,6 +649,7 @@
         if (!source) return 'text';
         const mime = String(source.mime_type ?? '').toLowerCase().split(';', 1)[0];
         const name = sourceName(source).toLowerCase();
+        if (source.kind === 'bytecode_buffer') return 'bytes';
         if (source.kind === 'wasm' || mime === 'application/wasm') return 'wasm';
         if (source.kind === 'javascript' || /(?:java|ecma)script/.test(mime) || /\.[cm]?jsx?$/.test(name)) return 'javascript';
         if (source.kind === 'source_map' || /json/.test(mime) || /\.(?:json|map)$/.test(name)) return 'json';
@@ -652,7 +659,7 @@
       }
 
       function sourceSyntaxLabel(language) {
-        return {javascript: 'JavaScript', json: 'JSON', css: 'CSS', markup: 'HTML', wasm: 'WebAssembly hex', text: 'Plain text'}[language];
+        return {javascript: 'JavaScript', json: 'JSON', css: 'CSS', markup: 'HTML', wasm: 'WebAssembly hex', bytes: 'Guest bytecode hex', text: 'Plain text'}[language];
       }
 
       function createSourceTokenizer(source) {
@@ -941,7 +948,7 @@
         if (tokenizer.language === 'javascript' || tokenizer.language === 'json') return tokenizeCodeSourceLine(line, tokenizer);
         if (tokenizer.language === 'css') return tokenizeCssSourceLine(line, tokenizer);
         if (tokenizer.language === 'markup') return tokenizeMarkupSourceLine(line, tokenizer);
-        if (tokenizer.language === 'wasm') return tokenizeWasmSourceLine(line, tokenizer);
+        if (tokenizer.language === 'wasm' || tokenizer.language === 'bytes') return tokenizeWasmSourceLine(line, tokenizer);
         return [{type: 'plain', text: line}];
       }
 

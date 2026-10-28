@@ -25,9 +25,9 @@ For a saved exact-request response, use Node.js 22+:
 node tools/report-passive-security.mjs --input selected-request.json --output security-report.json
 ```
 
-Obtain `selected-request.json` through the existing `get_network_request`
-API/`reb-api` workflow using its five exact selectors. The input is one
-`reb-network-request-v1` response, including `source`, `debugger_generation` and
+`selected-request.json` is a previously saved response of the retired
+`get_network_request` operation; nothing produces new ones since CDP Traffic was
+removed. The input is one `reb-network-request-v1` response, including `source`, `debugger_generation` and
 `request`. An ordinary `reb-traffic-capture-v1` raw export lacks the complete
 owner identity and is not accepted. Neither retrieval nor recapture is performed
 by the report command. A partial capture is accepted as partial evidence; it is
@@ -162,9 +162,6 @@ counts, malformed/partial/opaque inputs, the real CLI publication path, and
 late-result/close/reselection/focus handling. It is included in
 `make javascript-check`.
 
-`node tools/check-api-observation-catalog-ui.mjs --browser` exercises the new
-Traffic action in the real browser-development shell alongside the existing
-catalog workflow. Authored fixtures verify pointer/keyboard use, Escape/reopen,
-modal shortcuts, 1440/760/360-pixel layouts, inert output, zero report fetches and
-same-identity revision invalidation. Native macOS app acceptance is separate;
-a browser test or authored test case is not evidence that native acceptance ran.
+The in-app Traffic report was removed with CDP Traffic, which was its only
+source of retained headers and bodies. The offline library is
+`tools/passive-security.cjs`.

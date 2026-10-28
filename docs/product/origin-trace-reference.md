@@ -1,5 +1,11 @@
 # Origin Trace reference
 
+> Native-only migration: the legacy CDP debugger, browser automation, request
+> replay/interception, and related experiment controls described in older sections
+> below are retired. They are not current capabilities or fallback instructions.
+> See the [current UI guide](../../apps/research-ui/README.md) and
+> [native observation contract](../../protocol/native-wasm-dispatch-v1.md).
+
 The research UI is the human-facing investigation workspace.
 Project-wide authorization, capture, and privacy policy is defined in
 [`SAFETY.md`](../../SAFETY.md). This reference describes implemented UI
@@ -323,16 +329,10 @@ do not hide expiration or not-before claim warnings. HMAC secrets are sent over
 standard input to the one-shot helper and cleared from password fields after
 each action. See [Decoder Tools v1](./decoder-tools-v1.md).
 
-The Traffic workspace can pivot a selected request value into Memory. The pivot
-only prefills an ephemeral query. It does not persist the selected value or
-begin a heap capture without a separate user action.
-
-The live debugger is ephemeral. Brave uses a private profile inside the
-session directory and chooses a random loopback debugging port. The research
-server validates the browser endpoint, exposes only allowlisted actions,
-rejects cross-site requests, caps scripts, frames, properties, messages,
-expressions, and source bytes, and never writes runtime scope or console values
-to the evidence store. Closing the session stops the bridge.
+Origin Trace has no live debugger. Brave uses a private profile inside the
+session directory; the research server rejects cross-site requests and reads
+only native evidence, artifacts and analyzer documents. Closing the session
+stops its helpers.
 
 Debugger state delivery is generation-tagged and change-driven. A conditional
 request can wait for up to 25 seconds, and an unchanged request reads only the

@@ -50,6 +50,12 @@ fn position(host: &Value, artifact: &Value, samples: &[Value]) -> Option<Value> 
         (sample["invocation_id"].is_string()
             && sample["invocation_event"].is_object()
             && sample.get("provenance").is_none()
+            && sample
+                .get("interpretation")
+                .is_none_or(|v| v == "verified-dataflow")
+            && sample
+                .get("host_import_call_offsets")
+                .is_none_or(|v| v.as_array().is_some_and(|a| !a.is_empty()))
             && sample["instruction_pointer_units"] != "unknown"
             && event["session_id"] == host["session_id"]
             && event["process_id"] == host["process_id"]
@@ -87,16 +93,35 @@ pub(crate) fn store(
         };
         let samples = workspace["samples"]
             .as_array()
-            .expect("validated workspace samples");
+            .expect("validated workspace samples")
+            .iter()
+            .chain(
+                workspace["native_guest_samples"]
+                    .as_array()
+                    .into_iter()
+                    .flatten(),
+            )
+            .cloned()
+            .collect::<Vec<_>>();
         let mut links = Vec::new();
         let mut omissions = Vec::new();
         let native_samples_available = samples
             .iter()
-            .any(|sample| sample.get("provenance").is_none());
+            .any(|sample| sample.get("provenance").is_none())
+            || workspace["native_wasm_observation_count"]
+                .as_u64()
+                .unwrap_or(0)
+                > 0;
         if !native_samples_available {
             omissions.push("dispatch-samples-unavailable");
         }
-        if workspace["sample_count"].as_u64().unwrap_or(0) > samples.len() as u64 {
+        let truncated = |rows: &str, count: &str| {
+            workspace[count].as_u64().unwrap_or(0)
+                > workspace[rows].as_array().map_or(0, Vec::len) as u64
+        };
+        if truncated("samples", "sample_count")
+            || truncated("native_guest_samples", "native_guest_sample_count")
+        {
             omissions.push("dispatch-sample-retention-limit");
         }
         for event in events.iter().filter(|event| {
@@ -109,7 +134,7 @@ pub(crate) fn store(
                 omissions.push("host-link-limit");
                 break;
             }
-            let guest = position(event, artifact, samples);
+            let guest = position(event, artifact, &samples);
             let (state, reason) = if guest.is_some() {
                 ("observed", "direct-dispatch-parent")
             } else if !native_samples_available {
@@ -170,6 +195,19 @@ mod tests {
         assert_eq!(document["document_digest"], vm::digest(&unsigned).unwrap());
         assert!(!document.to_string().contains("PRIVATE HOST PAYLOAD"));
         document
+    }
+    #[test]
+    fn native_physical_dispatch_never_proves_guest_position() {
+        let (mut workspace, artifact, host) = inputs();
+        workspace["workspaces"][0]["samples"] = json!([]);
+        workspace["workspaces"][0]["sample_count"] = json!(0);
+        workspace["workspaces"][0]["native_wasm_observation_count"] = json!(1);
+        let document = analyze(&workspace, &[artifact], &[host]);
+        let result = &document["workspaces"][0];
+        assert_eq!(result["links"][0]["state"], "correlated");
+        assert_eq!(result["links"][0]["reason"], "guest-position-unproven");
+        assert!(result["links"][0]["guest_position"].is_null());
+        assert_eq!(result["omissions"], json!([]));
     }
     #[test]
     fn exact_retained_dispatch_parent_proves_position_without_payload() {
@@ -291,5 +329,36 @@ mod tests {
                 .unwrap()
                 .contains(&json!("host-link-limit"))
         }));
+    }
+    #[test]
+    fn native_guest_host_positions_require_verified_semantics() {
+        let (mut workspace, artifact, host) = inputs();
+        let mut sample = workspace["workspaces"][0]["samples"][0].clone();
+        sample["host_import_call_offsets"] = json!([41]);
+        sample["interpretation"] = json!("explicit-adapter");
+        workspace["workspaces"][0]["samples"] = json!([]);
+        workspace["workspaces"][0]["native_guest_samples"] = json!([sample.clone()]);
+        let doc = analyze(
+            &workspace,
+            std::slice::from_ref(&artifact),
+            std::slice::from_ref(&host),
+        );
+        assert!(doc["workspaces"][0]["links"][0]["guest_position"].is_null());
+        // This is a host-projection contract test, not evidence of module verification.
+        sample["interpretation"] = json!("verified-dataflow");
+        workspace["workspaces"][0]["native_guest_samples"] = json!([sample]);
+        let doc = analyze(
+            &workspace,
+            std::slice::from_ref(&artifact),
+            std::slice::from_ref(&host),
+        );
+        assert_eq!(
+            doc["workspaces"][0]["links"][0]["guest_position"]["instruction_pointer"],
+            2
+        );
+        workspace["workspaces"][0]["native_guest_samples"][0]["host_import_call_offsets"] =
+            json!([]);
+        let doc = analyze(&workspace, &[artifact], &[host]);
+        assert!(doc["workspaces"][0]["links"][0]["guest_position"].is_null());
     }
 }

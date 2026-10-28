@@ -1,0 +1,420 @@
+diff --git a/include/v8-callbacks.h b/include/v8-callbacks.h
+index c141e5d..fedf1ce 100644
+--- a/include/v8-callbacks.h
++++ b/include/v8-callbacks.h
+@@ -318,6 +318,18 @@ using ExtensionCallback = bool (*)(const FunctionCallbackInfo<Value>&);
+ using AllowWasmCodeGenerationCallback = bool (*)(Local<Context> context,
+                                                  Local<String> source);
+ 
++// Synchronous observation immediately before a compiled br_table dispatch.
++// Module offsets are Wasm instruction addresses, not guest-interpreter PCs.
++// Bytes are borrowed only during this call. Do not execute JS, allocate V8
++// heap objects, retain raw pointers, block, or perform I/O in the callback.
++using WasmBrTableDispatchCallback = void (*)(
++    Local<Context> context, const uint8_t* module_bytes, size_t module_size,
++    uint32_t function_index, uint32_t module_byte_offset, uint32_t selector,
++    uint32_t table_count);
++// Cheap admission before handles or a frame walk. Must not allocate or call
++// into V8. Null means enabled; embedders should reject inactive/capped captures.
++using WasmBrTableDispatchEnabledCallback = bool (*)();
++
+ enum class WasmModuleBytesOrigin {
+   kCompile,
+   kModule,
+diff --git a/include/v8-isolate.h b/include/v8-isolate.h
+index 3a42bcc..09606fb 100644
+--- a/include/v8-isolate.h
++++ b/include/v8-isolate.h
+@@ -1758,6 +1758,12 @@ class V8_EXPORT Isolate {
+ 
+   void SetWasmModuleBytesCallback(WasmModuleBytesCallback callback);
+ 
++  // Requires --reb-wasm-br-table-dispatch before compilation (off by default).
++  // A null callback disables delivery. The predicate gates expensive setup.
++  void SetWasmBrTableDispatchCallback(
++      WasmBrTableDispatchCallback callback,
++      WasmBrTableDispatchEnabledCallback enabled_callback = nullptr);
++
+   void SetWasmStreamingCallback(WasmStreamingCallback callback);
+ 
+   void SetRuntimeBufferCallback(RuntimeBufferCallback callback);
+diff --git a/src/api/api.cc b/src/api/api.cc
+index 3698c6e..c128c92 100644
+--- a/src/api/api.cc
++++ b/src/api/api.cc
+@@ -11004,6 +11004,14 @@ CALLBACK_SETTER(AllowWasmCodeGenerationCallback,
+ CALLBACK_SETTER(WasmModuleCallback, ExtensionCallback, wasm_module_callback)
+ CALLBACK_SETTER(WasmInstanceCallback, ExtensionCallback, wasm_instance_callback)
+ 
++void Isolate::SetWasmBrTableDispatchCallback(
++    WasmBrTableDispatchCallback callback,
++    WasmBrTableDispatchEnabledCallback enabled_callback) {
++  i::Isolate* i_isolate = reinterpret_cast<i::Isolate*>(this);
++  i_isolate->set_wasm_br_table_dispatch_enabled_callback(enabled_callback);
++  i_isolate->set_wasm_br_table_dispatch_callback(callback);
++}
++
+ CALLBACK_SETTER(WasmModuleBytesCallback, WasmModuleBytesCallback,
+                 wasm_module_bytes_callback)
+ 
+diff --git a/src/builtins/builtins-definitions.h b/src/builtins/builtins-definitions.h
+index e1180fc..3604a72 100644
+--- a/src/builtins/builtins-definitions.h
++++ b/src/builtins/builtins-definitions.h
+@@ -1406,6 +1406,7 @@ constexpr int kGearboxGenericBuiltinIdOffset = -2;
+   IF_WASM(ASM, WasmDebugBreak, WasmDummy)                                      \
+   IF_WASM(ASM, WasmOnStackReplace, WasmDummy)                                  \
+   IF_WASM(ASM, WasmHandleStackOverflow, WasmHandleStackOverflow)               \
++  IF_WASM(TFC, WasmRebTraceBrTable, WasmTraceMemory)             \
+   IF_WASM(TFC, WasmFloat32ToNumber, WasmFloat32ToNumber)                       \
+   IF_WASM(TFC, WasmFloat64ToNumber, WasmFloat64ToTagged)                       \
+   IF_WASM(TFC, WasmFloat64ToString, WasmFloat64ToTagged)                       \
+diff --git a/src/builtins/builtins-wasm-gen.cc b/src/builtins/builtins-wasm-gen.cc
+index 058b902..93922b6 100644
+--- a/src/builtins/builtins-wasm-gen.cc
++++ b/src/builtins/builtins-wasm-gen.cc
+@@ -134,6 +134,12 @@ TNode<Float64T> WasmBuiltinsAssembler::StringToFloat64(TNode<String> input) {
+ #endif
+ }
+ 
++TF_BUILTIN(WasmRebTraceBrTable, WasmBuiltinsAssembler) {
++  // Reuse the native tracing stack-pointer descriptor; no JavaScript runs.
++  auto info = Parameter<Smi>(Descriptor::kInfo);
++  TailCallRuntime(Runtime::kWasmRebTraceBrTable, NoContextConstant(), info);
++}
++
+ TF_BUILTIN(WasmFloat32ToNumber, WasmBuiltinsAssembler) {
+   auto val = UncheckedParameter<Float32T>(Descriptor::kValue);
+   Return(ChangeFloat32ToTagged(val));
+diff --git a/src/execution/isolate.h b/src/execution/isolate.h
+index cedbe4e..a695fec 100644
+--- a/src/execution/isolate.h
++++ b/src/execution/isolate.h
+@@ -503,6 +503,9 @@ using DebugObjectCache = std::vector<Handle<HeapObject>>;
+   V(AllowWasmCodeGenerationCallback, allow_wasm_code_gen_callback, nullptr) \
+   V(ExtensionCallback, wasm_module_callback, &NoExtension)                  \
+   V(ExtensionCallback, wasm_instance_callback, &NoExtension)                \
++  V(WasmBrTableDispatchEnabledCallback,                                    \
++    wasm_br_table_dispatch_enabled_callback, nullptr)                      \
++  V(WasmBrTableDispatchCallback, wasm_br_table_dispatch_callback, nullptr) \
+   V(WasmModuleBytesCallback, wasm_module_bytes_callback, nullptr)           \
+   V(SharedArrayBufferConstructorEnabledCallback,                            \
+     sharedarraybuffer_constructor_enabled_callback, nullptr)                \
+diff --git a/src/flags/flag-definitions.h b/src/flags/flag-definitions.h
+index 7f1aebf..3b73178 100644
+--- a/src/flags/flag-definitions.h
++++ b/src/flags/flag-definitions.h
+@@ -2047,6 +2047,10 @@ DEFINE_BOOL(liftoff, true,
+             "enable Liftoff, the baseline compiler for WebAssembly")
+ DEFINE_BOOL(liftoff_only, false,
+             "disallow TurboFan compilation for WebAssembly (for testing)")
++DEFINE_BOOL(reb_wasm_br_table_dispatch, false,
++            "emit native REB br_table observations (baseline-only research mode)")
++DEFINE_IMPLICATION(reb_wasm_br_table_dispatch, liftoff_only)
++DEFINE_NEG_IMPLICATION(reb_wasm_br_table_dispatch, wasm_native_module_cache)
+ DEFINE_IMPLICATION(liftoff_only, liftoff)
+ DEFINE_NEG_IMPLICATION(liftoff_only, wasm_tier_up)
+ DEFINE_NEG_IMPLICATION(liftoff_only, wasm_dynamic_tiering)
+diff --git a/src/runtime/runtime-wasm.cc b/src/runtime/runtime-wasm.cc
+index 79d6917..c3b231c 100644
+--- a/src/runtime/runtime-wasm.cc
++++ b/src/runtime/runtime-wasm.cc
+@@ -4,6 +4,7 @@
+ 
+ #include <optional>
+ 
++#include "src/api/api-inl.h"
+ #include "src/builtins/builtins-inl.h"
+ #include "src/builtins/data-view-ops.h"
+ #include "src/common/assert-scope.h"
+@@ -40,6 +41,7 @@
+ #include "src/wasm/wasm-stack-wrapper-cache.h"
+ #include "src/wasm/wasm-subtyping.h"
+ #include "src/wasm/wasm-value.h"
++#include "src/wasm/wasm-tracing.h"
+ 
+ #if V8_ENABLE_WEBASSEMBLY && V8_ENABLE_DRUMBRAKE
+ #include "src/wasm/interpreter/wasm-interpreter.h"
+@@ -147,6 +149,50 @@ RUNTIME_FUNCTION(Runtime_WasmJSToWasmObject) {
+   return ret;
+ }
+ 
++RUNTIME_FUNCTION(Runtime_WasmRebTraceBrTable) {
++  // Inactive/capped sessions return before handles, code references or a frame
++  // walk, even when the browser was compiled in the instrumented research mode.
++  auto callback = isolate->wasm_br_table_dispatch_callback();
++  if (callback == nullptr) return ReadOnlyRoots(isolate).undefined_value();
++  auto enabled = isolate->wasm_br_table_dispatch_enabled_callback();
++  if (enabled != nullptr && !enabled()) {
++    return ReadOnlyRoots(isolate).undefined_value();
++  }
++  CHECK(v8_flags.reb_wasm_br_table_dispatch);
++  CHECK_EQ(1, args.length());
++  CHECK(IsSmi(args[0]));
++  DisallowGarbageCollection no_gc;
++  auto* info = reinterpret_cast<const wasm::RebBrTableTracingInfo*>(
++      Cast<Smi>(args[0]).ptr());
++  wasm::WasmCodeRefScope code_scope;
++  FrameFinder<WasmFrame> frame_finder(isolate);
++  WasmFrame* frame = frame_finder.frame();
++  if (frame->wasm_code()->tier() != wasm::ExecutionTier::kLiftoff) {
++    return ReadOnlyRoots(isolate).undefined_value();
++  }
++  const int function_index = frame->GetInnermostFunctionIndex();
++  const auto instance = frame->trusted_instance_data();
++  const auto* module = instance->module();
++  if (!instance->has_native_context() || function_index < 0 ||
++      static_cast<size_t>(function_index) >= module->functions.size()) {
++    return ReadOnlyRoots(isolate).undefined_value();
++  }
++  const auto& function = module->functions[function_index];
++  const auto bytes = frame->native_module()->wire_bytes();
++  if (info->function_byte_offset >= function.code.length()) {
++    return ReadOnlyRoots(isolate).undefined_value();
++  }
++  const uint32_t offset = function.code.offset() + info->function_byte_offset;
++  if (offset >= bytes.size() || bytes[offset] != wasm::kExprBrTable) {
++    return ReadOnlyRoots(isolate).undefined_value();
++  }
++  HandleScope scope(isolate);
++  callback(Utils::ToLocal(direct_handle(instance->native_context(), isolate)),
++           bytes.data(), bytes.size(), static_cast<uint32_t>(function_index),
++           offset, info->selector, info->table_count);
++  return ReadOnlyRoots(isolate).undefined_value();
++}
++
+ RUNTIME_FUNCTION(Runtime_WasmMemoryGrow) {
+   HandleScope scope(isolate);
+   DCHECK_EQ(3, args.length());
+diff --git a/src/runtime/runtime.h b/src/runtime/runtime.h
+index c3195fb..855f151 100644
+--- a/src/runtime/runtime.h
++++ b/src/runtime/runtime.h
+@@ -714,6 +714,7 @@ constexpr bool CanTriggerGC(T... properties) {
+ 
+ #define FOR_EACH_INTRINSIC_WASM(F, I)                            \
+   FOR_EACH_INTRINSIC_WASM_DRUMBRAKE(F, I)                        \
++  F(WasmRebTraceBrTable, 1, 1)                                  \
+   F(ThrowWasmJSPISuspendError, 0, 1)                             \
+   F(ThrowWasmFXSuspendError, 0, 1)                               \
+   F(ThrowWasmError, 1, 1)                                        \
+diff --git a/src/wasm/baseline/liftoff-compiler.cc b/src/wasm/baseline/liftoff-compiler.cc
+index 85e9a85..2197c8c 100644
+--- a/src/wasm/baseline/liftoff-compiler.cc
++++ b/src/wasm/baseline/liftoff-compiler.cc
+@@ -3866,8 +3866,40 @@ class LiftoffCompiler {
+                     frozen);
+   }
+ 
++  void TraceRebBrTable(FullDecoder* decoder, uint32_t table_count) {
++    // Keep the original selector on the operand stack. BrTable reloads it
++    // after the call, preserving all i32 bits and the ordinary branch behavior.
++    __ SpillAllRegisters();
++    LiftoffRegList pinned;
++    LiftoffRegister selector = pinned.set(__ PeekToRegister(0, pinned));
++    LiftoffRegister info = pinned.set(__ GetUnusedRegister(kGpReg, pinned));
++    __ AllocateStackSlot(info.gp(), sizeof(RebBrTableTracingInfo));
++    __ Store(info.gp(), no_reg, offsetof(RebBrTableTracingInfo, selector),
++             selector, StoreType::kI32Store, pinned);
++    __ SpillAllRegisters();
++    LiftoffRegister data = pinned.set(__ GetUnusedRegister(kGpReg, pinned));
++    __ LoadConstant(data, WasmValue(static_cast<uint32_t>(decoder->position())));
++    __ Store(info.gp(), no_reg,
++             offsetof(RebBrTableTracingInfo, function_byte_offset), data,
++             StoreType::kI32Store, pinned);
++    __ LoadConstant(data, WasmValue(table_count));
++    __ Store(info.gp(), no_reg, offsetof(RebBrTableTracingInfo, table_count),
++             data, StoreType::kI32Store, pinned);
++    WasmTraceMemoryDescriptor descriptor;
++    Register param_reg = descriptor.GetRegisterParameter(0);
++    if (info.gp() != param_reg) __ Move(param_reg, info.gp(), kIntPtrKind);
++    source_position_table_builder_.AddPosition(
++        __ pc_offset(), SourcePosition(decoder->position()), false);
++    __ CallBuiltin(Builtin::kWasmRebTraceBrTable);
++    DefineSafepoint();
++    __ DeallocateStackSlot(sizeof(RebBrTableTracingInfo));
++  }
++
+   void BrTable(FullDecoder* decoder, const BranchTableImmediate& imm,
+                const Value& key) {
++    if (V8_UNLIKELY(v8_flags.reb_wasm_br_table_dispatch)) {
++      TraceRebBrTable(decoder, imm.table_count);
++    }
+     LiftoffRegList pinned;
+     LiftoffRegister value = pinned.set(__ PopToRegister());
+ 
+diff --git a/src/wasm/wasm-builtin-list.h b/src/wasm/wasm-builtin-list.h
+index ddab741..2057b87 100644
+--- a/src/wasm/wasm-builtin-list.h
++++ b/src/wasm/wasm-builtin-list.h
+@@ -60,6 +60,7 @@ namespace v8::internal::wasm {
+   V(WasmHandleStackOverflow)                                                   \
+   V(WasmTraceEnter)                                                            \
+   V(WasmTraceExit)                                                             \
++  V(WasmRebTraceBrTable)                                                       \
+   V(WasmTraceMemory)                                                           \
+   V(WasmTraceGlobal)                                                           \
+   V(BigIntToI32Pair)                                                           \
+diff --git a/src/wasm/wasm-serialization.cc b/src/wasm/wasm-serialization.cc
+index ac9c1a6..c198ac5 100644
+--- a/src/wasm/wasm-serialization.cc
++++ b/src/wasm/wasm-serialization.cc
+@@ -1202,6 +1202,9 @@ MaybeDirectHandle<WasmModuleObject> DeserializeNativeModule(
+     base::OwnedVector<const uint8_t>& wire_bytes_vec,
+     const CompileTimeImports& compile_imports,
+     base::Vector<const char> source_url) {
++  // Serialized code is TurboFan-only and lacks the baseline dispatch hooks.
++  // Recompile instead of silently accepting a module without instrumentation.
++  if (v8_flags.reb_wasm_br_table_dispatch) return {};
+   if (!IsWasmCodegenAllowed(isolate, isolate->native_context())) return {};
+   if (!HeaderMatches(data, enabled_features, compile_imports)) return {};
+ 
+diff --git a/src/wasm/wasm-tracing.h b/src/wasm/wasm-tracing.h
+index 220507b..7106d5a 100644
+--- a/src/wasm/wasm-tracing.h
++++ b/src/wasm/wasm-tracing.h
+@@ -29,6 +29,18 @@ struct MemoryTracingInfo {
+                 "MachineRepresentation uses uint8_t");
+ };
+ 
++// Created on the native stack by Liftoff, following MemoryTracingInfo's ABI.
++// Liftoff reserves exactly sizeof() bytes before calling the runtime, so the
++// size must keep the native stack pointer word-aligned on every target.
++// This is not a serialized wire record.
++struct alignas(uintptr_t) RebBrTableTracingInfo {
++  uint32_t function_byte_offset;
++  uint32_t selector;
++  uint32_t table_count;
++};
++static_assert(alignof(RebBrTableTracingInfo) >= alignof(uintptr_t));
++static_assert(sizeof(RebBrTableTracingInfo) % sizeof(uintptr_t) == 0);
++
+ struct GlobalTracingInfo {
+   uint32_t global_index;
+   uint8_t is_store;  // 0 or 1
+diff --git a/test/cctest/wasm/test-run-wasm.cc b/test/cctest/wasm/test-run-wasm.cc
+index 17b4883..7f4c541 100644
+--- a/test/cctest/wasm/test-run-wasm.cc
++++ b/test/cctest/wasm/test-run-wasm.cc
+@@ -1240,6 +1240,121 @@ WASM_EXEC_TEST(Regression_660262) {
+   r.Call();
+ }
+ 
++namespace {
++struct RebDispatchObservation {
++  uint32_t count = 0;
++  uint32_t selector = 0;
++  uint32_t offset = 0;
++};
++thread_local RebDispatchObservation reb_dispatch_observation;
++thread_local bool reb_dispatch_enabled = false;
++thread_local uint32_t reb_dispatch_admission_calls = 0;
++
++bool AdmitRebBrTable() {
++  ++reb_dispatch_admission_calls;
++  return reb_dispatch_enabled;
++}
++
++void ObserveRebBrTable(v8::Local<v8::Context> context, const uint8_t* bytes,
++                       size_t size, uint32_t function_index,
++                       uint32_t module_byte_offset, uint32_t selector,
++                       uint32_t table_count) {
++  CHECK(!context.IsEmpty());
++  CHECK_EQ(0, function_index);
++  CHECK_LT(module_byte_offset, size);
++  CHECK_EQ(kExprBrTable, bytes[module_byte_offset]);
++  CHECK_EQ(1, table_count);
++  ++reb_dispatch_observation.count;
++  reb_dispatch_observation.selector = selector;
++  reb_dispatch_observation.offset = module_byte_offset;
++}
++}  // namespace
++
++TEST(RebNativeBrTableRuntimeDispatch) {
++  FlagScope<bool> sampling(&v8_flags.reb_wasm_br_table_dispatch, true);
++  WasmRunner<int32_t, int32_t> r(TestExecutionTier::kLiftoff);
++  // Distinct branch results detect a damaged selector, not merely a callback.
++  r.Build({B1(B2(B1(WASM_BR_TABLE(WASM_LOCAL_GET(0), 1, BR_TARGET(0),
++                                  BR_TARGET(1))), RET_I8(76))),
++           WASM_I32V_2(77)});
++  auto* api_isolate = reinterpret_cast<v8::Isolate*>(r.isolate());
++  reb_dispatch_observation = {};
++  CHECK_EQ(76, r.Call(0));
++  CHECK_EQ(0, reb_dispatch_observation.count);
++  api_isolate->SetWasmBrTableDispatchCallback(&ObserveRebBrTable);
++  CHECK_EQ(76, r.Call(0));
++  CHECK_EQ(1, reb_dispatch_observation.count);
++  CHECK_EQ(0, reb_dispatch_observation.selector);
++  const uint32_t offset = reb_dispatch_observation.offset;
++  CHECK_EQ(77, r.Call(-1));
++  CHECK_EQ(2, reb_dispatch_observation.count);
++  CHECK_EQ(UINT32_MAX, reb_dispatch_observation.selector);
++  CHECK_EQ(offset, reb_dispatch_observation.offset);
++  api_isolate->SetWasmBrTableDispatchCallback(nullptr);
++  CHECK_EQ(77, r.Call(9));
++  CHECK_EQ(2, reb_dispatch_observation.count);
++}
++
++TEST(RebNativeBrTableAdmissionPredicate) {
++  FlagScope<bool> sampling(&v8_flags.reb_wasm_br_table_dispatch, true);
++  WasmRunner<int32_t, int32_t> r(TestExecutionTier::kLiftoff);
++  r.Build({B1(WASM_BR_TABLE(WASM_LOCAL_GET(0), 1, BR_TARGET(0),
++                            BR_TARGET(0))), WASM_I32V_2(93)});
++  auto* api_isolate = reinterpret_cast<v8::Isolate*>(r.isolate());
++  reb_dispatch_observation = {};
++  reb_dispatch_enabled = false;
++  reb_dispatch_admission_calls = 0;
++  api_isolate->SetWasmBrTableDispatchCallback(&ObserveRebBrTable,
++                                             &AdmitRebBrTable);
++  CHECK_EQ(93, r.Call(7));
++  CHECK_EQ(1, reb_dispatch_admission_calls);
++  CHECK_EQ(0, reb_dispatch_observation.count);
++  reb_dispatch_enabled = true;
++  CHECK_EQ(93, r.Call(-1));
++  CHECK_EQ(2, reb_dispatch_admission_calls);
++  CHECK_EQ(1, reb_dispatch_observation.count);
++  CHECK_EQ(UINT32_MAX, reb_dispatch_observation.selector);
++  reb_dispatch_enabled = false;
++  CHECK_EQ(93, r.Call(0));
++  CHECK_EQ(3, reb_dispatch_admission_calls);
++  CHECK_EQ(1, reb_dispatch_observation.count);
++  api_isolate->SetWasmBrTableDispatchCallback(nullptr, &AdmitRebBrTable);
++  CHECK_EQ(93, r.Call(1));
++  CHECK_EQ(3, reb_dispatch_admission_calls);
++  api_isolate->SetWasmBrTableDispatchCallback(nullptr);
++}
++
++TEST(RebNativeBrTablePreservesLiveValues) {
++  FlagScope<bool> sampling(&v8_flags.reb_wasm_br_table_dispatch, true);
++  WasmRunner<int64_t, int32_t, int64_t> r(TestExecutionTier::kLiftoff);
++  // Keep an i64 below the block and reuse its local after dispatch. Both must
++  // survive the runtime call intact, including on the default branch.
++  r.Build({WASM_LOCAL_GET(1),
++           B1(WASM_BR_TABLE(WASM_LOCAL_GET(0), 1, BR_TARGET(0), BR_TARGET(0))),
++           WASM_LOCAL_GET(1), kExprI64Add});
++  auto* api_isolate = reinterpret_cast<v8::Isolate*>(r.isolate());
++  reb_dispatch_observation = {};
++  api_isolate->SetWasmBrTableDispatchCallback(&ObserveRebBrTable);
++  constexpr int64_t value = 0x123456789abcdef;
++  CHECK_EQ(value * 2, r.Call(-1, value));
++  api_isolate->SetWasmBrTableDispatchCallback(nullptr);
++  CHECK_EQ(1, reb_dispatch_observation.count);
++  CHECK_EQ(UINT32_MAX, reb_dispatch_observation.selector);
++}
++
++TEST(RebNativeBrTableDisabledCompilation) {
++  FlagScope<bool> sampling(&v8_flags.reb_wasm_br_table_dispatch, false);
++  WasmRunner<int32_t, int32_t> r(TestExecutionTier::kLiftoff);
++  r.Build({B1(WASM_BR_TABLE(WASM_LOCAL_GET(0), 1, BR_TARGET(0),
++                            BR_TARGET(0))), WASM_I32V_2(93)});
++  auto* api_isolate = reinterpret_cast<v8::Isolate*>(r.isolate());
++  reb_dispatch_observation = {};
++  api_isolate->SetWasmBrTableDispatchCallback(&ObserveRebBrTable);
++  CHECK_EQ(93, r.Call(7));
++  api_isolate->SetWasmBrTableDispatchCallback(nullptr);
++  CHECK_EQ(0, reb_dispatch_observation.count);
++}
++
+ WASM_EXEC_TEST(BrTable0a) {
+   WasmRunner<int32_t, int32_t> r(execution_tier);
+   r.Build({B1(B1(WASM_BR_TABLE(WASM_LOCAL_GET(0), 0, BR_TARGET(0)))),

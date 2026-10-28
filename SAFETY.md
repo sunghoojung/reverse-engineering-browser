@@ -29,19 +29,19 @@ it.
 ## Default capture
 
 - Opening the packaged Origin Trace app starts a visibly labeled local research
-  session with all implemented native capture categories, bounded CDP request
-  and response content, and Canvas image artifacts enabled. Launch this profile
-  only for authorized targets and data. The session expires after one hour.
-  **New Live Session…** offers metadata-only capture;
-  `REB_AUTOMATIC_CAPTURE_MODE=metadata` selects that mode for automatic launch.
-- Standalone probes remain inactive without an enabled session. Metadata-only
-  Traffic sessions retain native host-level observations without CDP headers or
-  bodies. This is a collection boundary, not a promise that artifact metadata
-  is secret-free: enabled artifact capture retains raw source URLs locally.
-- Retained CDP Traffic header values, URLs and bodies, and retained artifact and
-  provenance source URLs, are shown/stored without automatic credential masking.
-  Authorization, cookies, custom tokens, URL userinfo/query/fragments and personal
-  data may be present. Only collect data covered by the session authorization.
+  session with implemented native capture categories. CDP collection and injected
+  JavaScript hooks have been removed. Launch only for authorized targets/data.
+  The session expires after one hour. Native Wasm dispatch instrumentation is
+  an additional explicit opt-in requiring a rebuilt browser. Native guest-program
+  capture is a further opt-in on top of it: it needs a researcher-supplied
+  adapter recipe file and records typed local values and bounded bytecode
+  snapshots that the recipe names. Recipes are evidence inputs, not proof of
+  guest semantics. Guest capture is native only; no debugger protocol is used.
+- Standalone probes remain inactive without an enabled session. Enabled artifact
+  capture retains raw source URLs locally; metadata is not necessarily secret-free.
+- Historical captures can include sensitive URLs, headers, bodies and source.
+  Removal of CDP does not sanitize previously saved evidence. Only collect and
+  disclose data covered by authorization.
 - Operational bounds remain enforced. Missing data, truncated prefixes and
   evictions must be visible; raw display never means complete wire capture.
 - Redaction is an explicit export-copy operation. It never rewrites retained
@@ -68,29 +68,14 @@ it.
 - Probes remain disabled by default and observational. A visibly enabled
   experiment and an explicit researcher action are required for browser
   mutation.
-- Run mutable tools such as interception, automation, runtime hooks, replay, and
-  object changes in a disposable experiment context by default. Only the explicit
-  captured-document Runtime Hooks mode may operate on a specifically selected
-  captured document after the researcher confirms mutation for that document and
-  requested hook action. Navigation or replacement invalidates that confirmation.
-  A named isolated world is not a sandbox for paused-frame hook logic. Pin the
-  exact target, document lifetime, and selected source; reject replacement or
-  stale ownership rather than retargeting. This exception does not authorize other
-  mutable tools, unrelated baseline tabs, production credentials, or automatic
-  execution of extracted code.
-- Live Wasm inspection is a second, narrower exception. `list_live_wasm_objects`
-  and `read_live_wasm_memory` may run helper JavaScript in the exact attached
-  page only after the researcher sends `confirmed: true` and `captured_owner`
-  for that document (`instance_id`, connection epoch, document epoch, and
-  target id). Navigation, replacement, a worker, or any other target invalidates
-  the confirmation. The disposable Object Lab path remains available and does
-  not use `captured_owner`. Reads copy 1–4096 bytes; at most 32 handles per kind
-  are kept for 60 seconds. Prototype queries do not prove artifact identity.
-  This exception does not authorize challenge solving, automatic
-  instrumentation, guest program-counter invention, or inspection of a page
-  that was not the attached document.
-- Other experiments do not read or modify baseline tabs, production cookies,
-  storage, or credentials. Never execute extracted code automatically.
+- Origin Trace has no Chrome DevTools Protocol path. The browser debugger,
+  runtime hooks, live objects, element screenshots and live Wasm inspection used
+  it and were removed with it; their retired contracts remain only as history.
+  Wasm evidence comes from native capture and stored artifacts. The owned VM
+  debugger controls only the project's own native fixture helper.
+- Run mutable tools in a disposable experiment context by default. Experiments
+  do not read or modify baseline tabs, production cookies, storage, or
+  credentials. Never execute extracted code automatically.
 
 - The native Console defaults to a separate disposable browser profile. Explicit
   Live capture mode additionally requires a specifically selected native document
@@ -106,14 +91,6 @@ it.
   exported, or added to evidence. Clear output before sharing the interface.
   Commands require an explicit document selection and are never automatically
   retried. See [Native Console v2](protocol/native-console-v2.md) for these limits.
-
-- Element screenshot markup requires an explicit selected disposable document and
-  raw-local-capture confirmation. Observed form/editable/private-marked content,
-  child frames and shadow trees refuse capture. Other text/images and transient
-  changes may still be sensitive; before/after checks are not redaction or an
-  atomic privacy guarantee. PNGs stay in ephemeral local panel memory and are
-  never automatically exported, logged, persisted or sent to providers. See
-  [Element screenshot v1](protocol/element-screenshot-v1.md).
 
 ## Local operation and evidence
 
@@ -139,7 +116,6 @@ of the data-handling policy:
 | --- | --- |
 | Sensitive artifact rejection without an enabled session | `src/evidence/artifact.cpp` |
 | Loopback-only research API trust check | [`config.rs`](apps/origin-trace-backend/src/config.rs) and [`app.rs`](apps/origin-trace-backend/src/app.rs) |
-| Credential-free experiment request validation | [`requests.rs`](apps/origin-trace-backend/src/debugger/requests.rs) |
 | Artifact receiver `--allow-sensitive` gate | `services/artifact-receiver/main.cpp` |
 | Capture category mask and session expiration | `protocol/README.md`, native probes |
 | Origin allowlisting | Not implemented; the native event envelope lacks trustworthy origin identity |

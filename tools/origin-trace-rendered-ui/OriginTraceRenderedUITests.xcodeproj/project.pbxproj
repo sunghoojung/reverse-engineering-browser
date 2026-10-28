@@ -1,0 +1,62 @@
+// !$*UTF8*$!
+{
+  archiveVersion = 1;
+  classes = {};
+  objectVersion = 56;
+  objects = {
+    B00000000000000000000001 = {isa = PBXBuildFile; fileRef = B00000000000000000000002; };
+    B00000000000000000000002 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OriginTraceRenderedUITests.swift; sourceTree = "<group>"; };
+    B00000000000000000000003 = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = OriginTraceRenderedUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+    B00000000000000000000004 = {isa = PBXGroup; children = (B00000000000000000000002, B00000000000000000000005); sourceTree = "<group>"; };
+    B00000000000000000000005 = {isa = PBXGroup; children = (B00000000000000000000003); name = Products; sourceTree = "<group>"; };
+    B00000000000000000000006 = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (B00000000000000000000001); runOnlyForDeploymentPostprocessing = 0; };
+    B00000000000000000000007 = {isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
+    B00000000000000000000008 = {isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
+    B00000000000000000000009 = {
+      isa = PBXNativeTarget;
+      buildConfigurationList = B0000000000000000000000D;
+      buildPhases = (B00000000000000000000006, B00000000000000000000007, B00000000000000000000008);
+      buildRules = ();
+      dependencies = ();
+      name = OriginTraceRenderedUITests;
+      productName = OriginTraceRenderedUITests;
+      productReference = B00000000000000000000003;
+      productType = "com.apple.product-type.bundle.unit-test";
+    };
+    B0000000000000000000000A = {
+      isa = PBXProject;
+      attributes = {LastUpgradeCheck = 1600; TargetAttributes = {B00000000000000000000009 = {CreatedOnToolsVersion = 16.0; }; }; };
+      buildConfigurationList = B0000000000000000000000C;
+      compatibilityVersion = "Xcode 14.0";
+      developmentRegion = en;
+      hasScannedForEncodings = 0;
+      knownRegions = (en, Base);
+      mainGroup = B00000000000000000000004;
+      productRefGroup = B00000000000000000000005;
+      projectDirPath = "";
+      projectRoot = "";
+      targets = (B00000000000000000000009);
+    };
+    B0000000000000000000000B = {
+      isa = XCBuildConfiguration;
+      buildSettings = {CLANG_ENABLE_MODULES = YES; SDKROOT = macosx; MACOSX_DEPLOYMENT_TARGET = 13.0; SWIFT_VERSION = 5.0; };
+      name = Debug;
+    };
+    B0000000000000000000000C = {isa = XCConfigurationList; buildConfigurations = (B0000000000000000000000B); defaultConfigurationIsVisible = 0; defaultConfigurationName = Debug; };
+    B0000000000000000000000D = {isa = XCConfigurationList; buildConfigurations = (B0000000000000000000000E); defaultConfigurationIsVisible = 0; defaultConfigurationName = Debug; };
+    B0000000000000000000000E = {
+      isa = XCBuildConfiguration;
+      buildSettings = {
+        CODE_SIGN_IDENTITY = "-";
+        GENERATE_INFOPLIST_FILE = YES;
+        LD_RUNPATH_SEARCH_PATHS = ("$(inherited)", "@executable_path/../Frameworks", "@loader_path/../Frameworks");
+        PRODUCT_BUNDLE_IDENTIFIER = com.reverseengineeringbrowser.origintracerendereduitests;
+        PRODUCT_NAME = "$(TARGET_NAME)";
+        SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+        TEST_HOST = "$(REB_ORIGIN_TRACE_TEST_HOST)";
+      };
+      name = Debug;
+    };
+  };
+  rootObject = B0000000000000000000000A;
+}

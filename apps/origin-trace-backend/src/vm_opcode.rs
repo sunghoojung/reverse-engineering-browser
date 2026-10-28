@@ -11,10 +11,16 @@ use std::{
     sync::LazyLock,
 };
 
+#[path = "vm_opcode_native_guest.rs"]
+mod native_guest;
+#[path = "vm_opcode_native_module.rs"]
+mod native_module;
+#[path = "vm_opcode_native_wasm.rs"]
+mod native_wasm;
 #[path = "vm_opcode_wasm.rs"]
 mod wasm;
 
-const PRODUCER_VERSION: &str = "2.5.0";
+const PRODUCER_VERSION: &str = "2.8.0";
 const MAX_SAMPLES: usize = 4096;
 const MAX_HANDLERS: usize = 1024;
 const MAX_SNAPSHOTS: usize = 16;
@@ -87,6 +93,9 @@ pub(crate) fn is_snapshot_candidate(value: &Value) -> bool {
 }
 
 pub(crate) fn validate_snapshot_artifact(value: &Value) -> Result<()> {
+    if value["capture_origin"] == "native_wasm_guest" {
+        return evidence::validate_artifact(&mut value.clone());
+    }
     let identifiers = [
         "artifact_id",
         "session_id",
@@ -780,7 +789,8 @@ fn snapshots(root: &Path, interpreter: &Value, artifacts: &[Value]) -> (Vec<Valu
     let linked = artifacts
         .iter()
         .filter(|artifact| {
-            artifact["parent_artifact_id"] != "0"
+            artifact["kind"] != "wasm_guest_adapter"
+                && artifact["parent_artifact_id"] != "0"
                 && artifact["parent_artifact_id"] == interpreter["artifact_id"]
                 && artifact["session_id"] == interpreter["session_id"]
                 && artifact["navigation_id"] == interpreter["navigation_id"]
@@ -798,7 +808,7 @@ fn snapshots(root: &Path, interpreter: &Value, artifacts: &[Value]) -> (Vec<Valu
             |artifact| match evidence::verified_range(root, artifact, 0, SNAPSHOT_PREVIEW_BYTES) {
                 Ok(bytes) => json!({
                     "artifact_id": artifact["artifact_id"],
-                    "origin": "runtime-typed-array",
+                    "origin": if artifact["capture_origin"] == "native_wasm_guest" { "native-wasm-guest" } else { "runtime-typed-array" },
                     "sha256": artifact["sha256"],
                     "byte_count": artifact["byte_size"],
                     "preview_hex": hex::encode(&bytes),
@@ -813,7 +823,7 @@ fn snapshots(root: &Path, interpreter: &Value, artifacts: &[Value]) -> (Vec<Valu
                             .collect::<String>();
                     json!({
                         "artifact_id": artifact["artifact_id"],
-                        "origin": "runtime-typed-array",
+                        "origin": if artifact["capture_origin"] == "native_wasm_guest" { "native-wasm-guest" } else { "runtime-typed-array" },
                         "sha256": artifact["sha256"],
                         "byte_count": artifact["byte_size"],
                         "preview_hex": null,
@@ -1091,6 +1101,19 @@ pub(crate) fn workspace(
             }
         }
     }
+    // One lazily decoded index serves both native streams for this artifact.
+    let mut module = (artifact["kind"] == "wasm")
+        .then(|| native_module::Module::parse(bytes))
+        .flatten();
+    let observations = native_wasm::collect(artifact, module.as_mut(), events);
+    let guest_samples = native_guest::collect(
+        root,
+        artifact,
+        bytes,
+        module.as_mut(),
+        snapshot_artifacts,
+        events,
+    );
     let budget_dropped = budget_losses
         .iter()
         .filter(|loss| {
@@ -1104,9 +1127,21 @@ pub(crate) fn workspace(
         omissions.push(json!({"reason":"caller-samples-unverified", "detail":
             "Caller-supplied dispatch reports were retained, not independently observed by a native sampler. They cannot confirm handlers, PC units, invocation identity or host-call causality."}));
     }
-    if native_samples.is_empty() && budget_dropped == 0 {
+    let undecodable = observations.undecodable + guest_samples.undecodable;
+    if undecodable > 0 {
+        omissions.push(json!({"reason":"native-wasm-module-undecodable","detail":format!(
+            "The captured module's sections did not decode, so {} native Wasm observations and {} native guest samples could not be checked against an exact site.",
+            observations.undecodable, guest_samples.undecodable
+        )}));
+    }
+    if native_samples.is_empty()
+        && observations.count == 0
+        && guest_samples.count == 0
+        && budget_dropped == 0
+        && undecodable == 0
+    {
         omissions.push(json!({"reason":"sampler-unavailable", "detail":
-            "No runtime dispatch samples were retained. Automatic guest-interpreter sampling is not implemented. A caller-fed writer still needs a runtime producer. Static dispatch, Canvas calls and snapshots do not prove a guest PC."}));
+            "No native dispatch samples were retained. Rebuild with native guest capture, enable an exact matching adapter, and inspect capture omissions. Static dispatch, Canvas calls and snapshots alone do not prove a guest PC."}));
     }
     if sample_count > retained_samples.len() as u64 {
         omissions.push(json!({"reason":"sample-limit", "detail":"Only the first 4096 accepted sample records are retained; counts include all accepted samples."}));
@@ -1137,6 +1172,23 @@ pub(crate) fn workspace(
                 handler["state"] = json!("observed");
             }
         }
+    }
+    observations.attach(&mut handlers);
+    guest_samples.attach(&mut handlers);
+    if guest_samples.invalid > 0 {
+        omissions.push(json!({"reason":"native-guest-sample-invalid","detail":format!("Rejected {} malformed or mismatched native guest samples.",guest_samples.invalid)}));
+    }
+    if guest_samples.count > guest_samples.rows.len() as u64 {
+        omissions.push(json!({"reason":"native-guest-sample-limit","detail":"Only the first 4096 native guest samples are retained."}));
+    }
+    if observations.invalid > 0 {
+        omissions.push(json!({"reason":"native-wasm-observation-invalid","detail":format!("Rejected {} malformed, mismatched or out-of-scope native Wasm observations.", observations.invalid)}));
+    }
+    if observations.count > observations.rows.len() as u64 {
+        omissions.push(json!({"reason":"native-wasm-observation-limit","detail":"Only the first 4096 native Wasm observations are retained; counts include all accepted observations."}));
+    }
+    if observations.count > 0 {
+        unknowns.push("Native br_table observations prove physical Wasm site and selector execution, not a guest PC, guest opcode ISA, invocation or host-call causality.".into());
     }
     if opcode_sites
         .iter()
@@ -1262,6 +1314,8 @@ pub(crate) fn workspace(
         "source_artifact_sha256": artifact["sha256"],
         "runtime": result["runtime"],
         "capture_mode": "unknown",
+        // Physical and guest callbacks fire for the same br_table execution at
+        // an adapter site, so each native stream keeps its own count below.
         "sample_count": sample_count,
         "samples": retained_samples,
         "finding_id": result["finding_id"],
@@ -1272,6 +1326,12 @@ pub(crate) fn workspace(
         "unknowns": unknowns,
         "traversal": traversal,
     });
+    if runtime == "webassembly" {
+        workspace["native_guest_samples"] = json!(guest_samples.rows);
+        workspace["native_guest_sample_count"] = json!(guest_samples.count);
+        workspace["native_wasm_observations"] = json!(observations.rows);
+        workspace["native_wasm_observation_count"] = json!(observations.count);
+    }
     if runtime == "webassembly"
         && let Some(inventory) = result["frontend"].get("dispatch_inventory")
     {
@@ -1352,6 +1412,26 @@ pub(crate) fn store(root: &Path, analysis: &Value, mut workspaces: Vec<Value>) -
     Ok(document)
 }
 
+// The C++ golden tests build a real evidence store from native encoder output.
+// When the named variable is set, copy that exact store (manifest, events and
+// content-addressed blobs) for consumers such as the rendered UI acceptance, so
+// they never mirror the fixture by hand.
+#[cfg(test)]
+fn export_golden_evidence(root: &std::path::Path, variable: &str) {
+    let Ok(out) = std::env::var(variable) else {
+        return;
+    };
+    let out = std::path::Path::new(&out);
+    std::fs::create_dir_all(out.join("blobs")).unwrap();
+    for name in ["manifest.jsonl", "events.jsonl"] {
+        std::fs::copy(root.join(name), out.join(name)).unwrap();
+    }
+    for entry in std::fs::read_dir(root.join("blobs")).unwrap() {
+        let path = entry.unwrap().path();
+        std::fs::copy(&path, out.join("blobs").join(path.file_name().unwrap())).unwrap();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1388,6 +1468,55 @@ mod tests {
             "type":"vm_dispatch_sample",
             "payload":hex::encode(payload),
         })
+    }
+
+    #[test]
+    fn native_wasm_observations_bind_only_exact_sites_and_default() {
+        let bytes = wasm_fixture("two_br_tables");
+        for selector in [0, 2, u32::MAX] {
+            let event = native_wasm::tests::event(selector);
+            let (_, _, document) = analyze_artifact(&bytes, "wasm", &[event.clone(), event]);
+            assert_schema(&document);
+            let workspace = &document["workspaces"][0];
+            assert_eq!(workspace["sample_count"], 0);
+            assert_eq!(workspace["native_wasm_observation_count"], 1);
+            assert_eq!(workspace["samples"], json!([]));
+            let observed = workspace["handlers"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|h| h["state"] == "observed")
+                .collect::<Vec<_>>();
+            assert_eq!(observed.len(), 1);
+            assert_eq!(observed[0]["source"]["byte_offset"], 47);
+            assert_eq!(observed[0]["native_wasm_sample_count"], 1);
+            assert_ne!(workspace["evidence_class"], "guest-opcode-isa");
+        }
+        let mut conflict = native_wasm::tests::event(1);
+        conflict["flags"] = json!(1);
+        let (_, _, document) =
+            analyze_artifact(&bytes, "wasm", &[native_wasm::tests::event(0), conflict]);
+        assert_eq!(
+            document["workspaces"][0]["native_wasm_observation_count"],
+            0
+        );
+    }
+    #[test]
+    fn native_wasm_observation_requires_digest_verified_artifact() {
+        let bytes = wasm_fixture("br_table");
+        let (root, _, document) = analyze_artifact(&bytes, "wasm", &[native_wasm::tests::event(0)]);
+        let hash = document["workspaces"][0]["source_artifact_sha256"]
+            .as_str()
+            .unwrap();
+        let mut corrupted = bytes;
+        corrupted[47] = 0x01;
+        fs::write(root.path().join(format!("blobs/{hash}.bin")), corrupted).unwrap();
+        crate::vm::store(root.path(), &root.path().join("events.jsonl")).unwrap();
+        let rebuilt: Value = serde_json::from_slice(
+            &fs::read(root.path().join("analysis/vm-opcode-workspace-v2.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(rebuilt["workspaces"], json!([]));
     }
 
     fn budget_gap(sequence: u64, dropped: u64) -> Value {
@@ -2871,7 +3000,7 @@ mod tests {
         let snapshot = &artifacts[1];
         validate_snapshot_artifact(snapshot).unwrap();
         assert_eq!(
-            snapshots(&fixture_root, interpreter, &[snapshot.clone()])
+            snapshots(&fixture_root, interpreter, std::slice::from_ref(snapshot))
                 .0
                 .len(),
             1
@@ -2982,10 +3111,10 @@ mod tests {
             omission["detail"]
                 .as_str()
                 .unwrap()
-                .starts_with("No runtime dispatch samples were retained. Automatic guest-interpreter sampling is not implemented.")
+                .starts_with("No native dispatch samples were retained. Rebuild with native guest capture, enable an exact matching adapter,")
         );
         let detail = omission["detail"].as_str().unwrap();
-        assert!(detail.contains("A caller-fed writer still needs a runtime producer."));
+        assert!(detail.contains("inspect capture omissions"));
         assert!(!detail.contains("no guest dispatch emitter"));
         assert!(detail.len() <= 240);
         assert_schema(&document);

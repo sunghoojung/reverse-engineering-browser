@@ -58,9 +58,22 @@ function capturedClientIssues(request) {
   return [...new Set(problems)];
 }
 
+/* Exact identity of a saved Traffic capture wrapper ({captureRecord, captureOwner}).
+ * Never derive identity from a displayed URL, rounded timestamps or a reusable
+ * protocol request ID. Live native Traffic rows carry no captureRecord. */
+function capturedRequestIdentity(request) {
+  const record = request?.captureRecord, owner = request?.captureOwner;
+  const bounded = (value, max) => typeof value === 'string' && value.length > 0 && new TextEncoder().encode(value).length <= max;
+  if (!record || !Array.isArray(owner) || owner.length !== 2 || request.id !== record.id || request.tabId !== record.target_id ||
+      !bounded(owner[0], 128) || !Number.isSafeInteger(owner[1]) || owner[1] < 0 ||
+      !bounded(record.id, 8192) || !bounded(record.target_id, 4096) ||
+      typeof record.started_monotonic_ms !== 'number' || !Number.isFinite(record.started_monotonic_ms) || record.started_monotonic_ms < 0) return null;
+  return {instance: owner[0], epoch: owner[1], request: record.id, target: record.target_id, started: record.started_monotonic_ms};
+}
+
 function capturedClientCapture(request) {
-  const identity = apiCatalogRequestIdentity(request);
-  if (!identity) throw new TypeError('Select an exact retained CDP capture.');
+  const identity = capturedRequestIdentity(request);
+  if (!identity) throw new TypeError('A saved capture with an exact identity is required.');
   return capturedClientSource(identity, capturedClientTrafficDocument(request, 'raw'));
 }
 
@@ -1025,82 +1038,6 @@ function capturedClientProject(source, mode) {
   return {files,provenance,bytes:capturedClientZip(files)};
 }
 
-function installCapturedClientWorkflow(options) {
-  const dialog = document.querySelector('#captured-client-review');
-  if (!dialog) return {sync() {}};
-  const content = dialog.querySelector('[data-client-review-content]'), status = dialog.querySelector('[data-client-review-status]');
-  const apply = dialog.querySelector('[data-client-apply]'), replace = dialog.querySelector('[data-client-replace]');
-  const replaceLabel = dialog.querySelector('[data-client-replace-label]');
-  const report = message => options.notice(message);
-  let reviewed = null, revision = 0, busy = false, opener = null, exporter = null;
-  const captureRequest = () => {
-    const selected = options.getRequest();
-    const identity = selected && apiCatalogRequestIdentity(selected);
-    if (!identity || !apiCatalogResolveSource(identity,options.getRequests()).record) throw new TypeError('The exact selected capture is unavailable or ambiguous.');
-    return selected;
-  };
-  const currentCapture = () => capturedClientCapture(captureRequest());
-  const stillCurrent = () => {
-    try { const current = currentCapture(); return JSON.stringify([current.identity,current.evidence]) === JSON.stringify([reviewed.identity,reviewed.evidence]); } catch { return false; }
-  };
-  const note = (message, parent = content, tag = 'p') => { const node = document.createElement(tag); node.textContent = message; parent.append(node); return node; };
-  const close = () => { revision++; busy = false; reviewed = null; if (dialog.open) dialog.close(); opener?.focus({preventScroll:true}); };
-  dialog.querySelector('[data-client-close]').addEventListener('click',close);
-  dialog.addEventListener('cancel',event => { event.preventDefault(); close(); });
-  dialog.addEventListener('close',() => { revision++; reviewed = null; busy = false; });
-  document.addEventListener('keydown',event => {
-    if (!dialog.open) return;
-    if (event.key === 'F8' || event.altKey && ['ArrowLeft','ArrowRight'].includes(event.key) ||
-        (event.ctrlKey || event.metaKey) && ['p','j'].includes(event.key.toLowerCase())) { event.preventDefault(); event.stopImmediatePropagation(); }
-  },true);
-  const sync = () => {
-    let capture = false; try { capture = Boolean(options.getRequest()?.captureRecord); } catch { /* No retained selection. */ }
-    document.querySelectorAll('[data-client-capture]').forEach(button => { button.disabled = !capture || busy; });
-    exporter?.sync();
-    if (!dialog.open || !reviewed) return;
-    const matches = busy || stillCurrent();
-    apply.disabled = busy || !matches || reviewed.problems.length > 0 || reviewed.templateProblems.length > 0 || options.hasDraft() && !replace.checked;
-    if (!busy && !matches) status.textContent = 'The capture changed or expired. Close and review the current record again. Nothing was sent.';
-  };
-  replace.addEventListener('change',sync);
-  document.querySelector('[data-client-capture="draft"]').addEventListener('click',event => {
-    try {
-      reviewed = currentCapture(); revision++; opener = event.currentTarget; busy = false; content.replaceChildren(); replace.checked = false;
-      replaceLabel.hidden = !options.hasDraft();
-      note(`${reviewed.input.method} ${reviewed.input.url}`,content,'pre');
-      note('Review the retained request values below. This is a CDP representation, not original wire bytes. Header casing/order, cookies, redirects and browser-controlled fields limit replay fidelity.');
-      const problems = [...reviewed.problems,...reviewed.templateProblems];
-      if (problems.length) { note('Cannot create a faithful supported Repeater draft. Original values remain available through raw capture or raw project export.'); const list = document.createElement('ul'); content.append(list); problems.forEach(problem=>note(problem,list,'li')); }
-      for (const [label,value] of [['Request headers',JSON.stringify(reviewed.input.headers,null,2)],['Request body',reviewed.input.body ?? '(unavailable; see original evidence)']]) {
-        const details = document.createElement('details'); note(label,details,'summary'); note(value,details,'pre'); content.append(details);
-      }
-      status.textContent = 'Confirmation copies this reviewed snapshot and, if needed, creates an isolated blank page. Creating that page can clear live Traffic; the confirmed source snapshot is retained with the draft. It never sends the target request. Use Repeater Send separately.';
-      dialog.showModal(); sync(); dialog.querySelector('[data-client-close]').focus();
-    } catch (error) { report(error.message); }
-  });
-  apply.addEventListener('click',async () => {
-    if (apply.disabled || !reviewed || !stillCurrent()) { sync(); return; }
-    const source = reviewed, owner = ++revision, editRevision = options.editRevision(); busy = true; sync();
-    status.textContent = 'Preparing the isolated draft. No target request is being sent.';
-    try {
-      const prepared = await options.prepareContext();
-      if (!prepared?.key || owner !== revision || !dialog.open) return;
-      const context = prepared.key;
-      // A confirmed new disposable page may clear Traffic. Existing contexts may
-      // not import a capture that expired or changed during the async boundary.
-      const expectedReset = prepared.created && !options.getRequest() && !apiCatalogResolveSource(source.identity,options.getRequests()).record;
-      if (!stillCurrent() && !expectedReset) throw new TypeError('The reviewed capture changed or expired. Close and review the current record again.');
-      if (options.contextKey() !== context || options.editRevision() !== editRevision) throw new TypeError('The disposable context or draft changed. Review again; no draft was overwritten.');
-      options.writeDraft(source,context);
-      close(); options.openRepeater();
-      report('Reviewed capture copied to an editable Repeater draft. No request was sent. Original evidence is retained separately for project export.');
-    } catch (error) { if (owner === revision && dialog.open) status.textContent = `${error.message} Context creation may already have completed; no target request was sent.`; }
-    finally { if (owner === revision) busy = false; sync(); }
-  });
-  exporter = installCapturedExportDialog({...options,getCaptureRequest:captureRequest});
-  sync(); return {sync,close() { close(); exporter.close(); }};
-}
-
 // A single deliberate local export. The dialog never sends a target request.
 function installCapturedExportDialog(options) {
   const dialog = document.querySelector('#captured-export-dialog');
@@ -1117,8 +1054,8 @@ function installCapturedExportDialog(options) {
       const run = options.getRun(), context = options.contextKey();
       return capturedClientRun(run,context,options.getRunCapture(run,context));
     }
-    const request = options.getCaptureRequest();
-    return {request,identity:apiCatalogRequestIdentity(request),evidence:capturedClientTrafficDocument(request,'raw')};
+    const request = options.getCaptureRequest?.() ?? null;
+    return {request,identity:capturedRequestIdentity(request),evidence:capturedClientTrafficDocument(request,'raw')};
   };
   const fingerprint = value => JSON.stringify(kind === 'run' ? value : [value.identity,value.evidence]);
   const current = () => { try { return snapshot !== null && fingerprint(source()) === snapshot; } catch { return false; } };
@@ -1131,11 +1068,16 @@ function installCapturedExportDialog(options) {
     }
     if (!dialog.open) return;
     const project = fields.format.value === 'client', sdl = fields.format.value === 'sdl';
-    for (const option of fields.format.options) option.disabled = kind === 'run' ? option.value !== 'client' : snapshot === null && option.value !== 'sdl';
-    fields.source.querySelector('[value="capture"]').disabled = snapshot === null;
+    // Unavailable modes are removed from the choice, not offered disabled.
+    for (const option of fields.format.options) option.hidden = option.disabled = kind === 'run' ? option.value !== 'client' : snapshot === null && option.value !== 'sdl';
+    const fromCapture = fields.source.querySelector('[value="capture"]');
+    fromCapture.hidden = fromCapture.disabled = snapshot === null;
+    // Without a saved capture only local-file SDL works: show no choice at all.
+    const fileOnly = kind === 'capture' && snapshot === null;
+    query('format-field').hidden = fileOnly;
     query('provider-field').hidden = !project;
     query('policy-field').hidden = sdl;
-    query('source-field').hidden = !sdl;
+    query('source-field').hidden = !sdl || fileOnly;
     query('file-field').hidden = !fileMode();
     const save = fields.destination.querySelector('[value="save"]'), copy = fields.destination.querySelector('[value="copy"]');
     save.disabled = native && !project; copy.disabled = project;
@@ -1175,8 +1117,12 @@ function installCapturedExportDialog(options) {
       fields.format.value = kind === 'run' ? 'client' : snapshot === null ? 'sdl' : 'json'; fields.provider.value = 'standard';
       fields.source.value = snapshot === null ? 'file' : 'capture'; fields.policy.value = 'redacted_copy'; fields.destination.value = native && kind === 'capture' ? 'copy' : 'save';
       fields.file.value = ''; status('');
-      document.querySelector('#captured-export-title').textContent = kind === 'run' ? 'Export retained run' : 'Export capture';
-      document.querySelector('#captured-export-context').textContent = kind === 'run' ? 'One retained Repeater run' : snapshot === null ? 'No selected capture · choose local introspection JSON' : 'One selected Traffic request';
+      document.querySelector('#captured-export-title').textContent = kind === 'run' ? 'Export retained run' : snapshot === null ? 'Export GraphQL schema' : 'Export capture';
+      // Native Traffic rows carry no captureRecord: their headers and bodies are
+      // not captured, so only conversion of a local introspection file can work.
+      document.querySelector('#captured-export-context').textContent = kind === 'run' ? 'One retained Repeater run'
+        : snapshot === null ? 'Native Traffic rows retain no request or response headers or bodies, so capture JSON, client project and HAR exports are unavailable here. Convert a local GraphQL introspection JSON file to SDL.'
+          : 'One selected Traffic request';
       // Return focus to the exact toolbar action when dismissed.
       dialog.showModal(); sync(); fields.format.focus({preventScroll:true});
     } catch (error) { options.notice(error.message); }

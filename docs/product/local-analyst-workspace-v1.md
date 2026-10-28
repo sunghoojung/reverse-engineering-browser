@@ -7,10 +7,9 @@ files, write async JavaScript, run a saved analyst script against an immutable
 snapshot of captured evidence, and inspect bounded logs and results.
 
 The runner intentionally does not provide ambient Node.js, Puppeteer, network,
-filesystem, process, module-loader, or arbitrary DevTools access. REB exposes
-browser mutation and live debugger control through Object Lab, Runtime Hooks,
-Automation Recipes, Repeater, and the debugger UI, where target scope and
-consent remain visible. MCP remains deferred.
+filesystem, process, module-loader, or arbitrary DevTools access. Explicit
+browser mutation is available only through the native Console's disposable or
+explicitly authorized document, where target scope and consent remain visible.
 
 ## Persistent local library
 

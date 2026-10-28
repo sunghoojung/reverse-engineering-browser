@@ -17,9 +17,9 @@ sensitive wire and storage contracts.
 The Rust crate under `apps/origin-trace-backend/` replaces the former Python
 services. `app.rs` owns loopback HTTP routing and application composition;
 `evidence.rs`, `origin_trace.rs`, and `workspace.rs` own stored evidence,
-projections, and durable workspaces. `debugger/` owns CDP session state, page
-and worker connections, bounded events, experiment ownership, hooks, and
-cancellation. Adapters invoke the Rust deobfuscator and existing native workers.
+projections, and durable workspaces. The former CDP `debugger/` module was
+removed; `/api/debugger` routes only return 410. Adapters invoke the Rust
+deobfuscator and existing native workers.
 
 The macOS app bundles `OriginTraceBackend` and `OriginTraceVMAnalyzer` and the
 live-session launcher invokes them directly. `make ui` uses the same backend.

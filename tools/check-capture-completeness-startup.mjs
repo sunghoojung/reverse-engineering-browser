@@ -1,5 +1,4 @@
 import assert from 'node:assert/strict';
-import {readFile} from 'node:fs/promises';
 import {createStartupTimeline, startCaptureObservers} from './capture-completeness-startup.mjs';
 import {completenessVerdict} from './capture-completeness-reference.mjs';
 const deferred = () => {
@@ -105,22 +104,4 @@ let tick = 0;
 const bounded = createStartupTimeline(() => tick);
 tick = 120001;
 assert.throws(() => bounded.mark('referenceStartMs'), /startup-timeline-invalid/);
-// Guard the actual runner wiring: all reference initialization and REB launch
-// live inside the shared barrier, after Chrome launch, before prearmed navigate.
-const runner = await readFile(
-  new URL('./check-capture-completeness-browser.mjs', import.meta.url),
-  'utf8',
-);
-const barrier = runner.indexOf('await startCaptureObservers(');
-assert(runner.indexOf('browserProcess = start(browser') < barrier);
-for (const operation of [
-  'const lines = await until',
-  'new WebSocket(',
-  'await ref.start()',
-  'start(binary,',
-])
-  assert(runner.indexOf(operation) > barrier);
-assert(runner.indexOf("if (mode === 'prearmed')") > runner.indexOf('start(binary,'));
-console.log(
-  'PASS concurrent observer startup: delayed peers, readiness barrier, failures, bounded timing, and runner wiring (synthetic only)',
-);
+console.log('PASS offline observer startup model: readiness, failures, and bounded timing; live CDP runner removed');

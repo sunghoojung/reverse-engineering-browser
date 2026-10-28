@@ -31,8 +31,8 @@ offset in the original source. The worker returns the innermost enclosing
 function's `kind`, `start`, `end`, and `body_start` byte offsets in
 `function_location`, without executing or rewriting the script. In this query
 mode, `derived_source` is empty and `function_location` is null when the cursor
-is outside a function. The live debugger converts CDP UTF-16 columns before
-querying and uses the body start to find V8's first breakable entry point.
+is outside a function. The retired CDP debugger was its only caller; no current
+Origin Trace view issues this query, and it remains part of the worker contract.
 
 The worker is a separate process bundled as `OriginTraceDeobfuscator` in the
 native macOS app. `DeobfuscationService.swift` invokes it with a five-second

@@ -135,7 +135,7 @@
         return {status: 'ambiguous', message: 'The artifact ID is reused. Sources cannot safely distinguish these records.'};
       if (scoped[0].sha256 !== ref.sha256 || scoped[0].byte_size !== ref.bytes)
         return {status: 'changed', message: 'This source descriptor changed. The saved hash and size do not match.'};
-      if (!['javascript', 'wasm', 'source_map', 'response_body'].includes(scoped[0].kind) || ref.range && scoped[0].kind !== 'javascript')
+      if (!['javascript', 'wasm', 'source_map', 'response_body', 'wasm_guest_adapter', 'bytecode_buffer'].includes(scoped[0].kind) || ref.range && scoped[0].kind !== 'javascript')
         return {status: 'unavailable', message: 'This captured source has no supported original view.'};
       return {status: 'ready', message: 'Exact retained descriptor. Original bytes are verified by Sources when required.'};
     }
@@ -398,7 +398,7 @@
       if (add.disabled) return; change(); const owner = revision, interaction = interactionRevision; verifying = true; localNotice = 'Checking the exact selected evidence…'; render();
       try {
         const selection = getSelection();
-        if (!selection) throw new Error('Select a captured source or a native observation first. Live scripts and correlated debugger requests cannot be pinned.');
+        if (!selection) throw new Error('Select a captured source or a native observation first. Only retained evidence can be pinned.');
         const ref = selection.kind === 'artifact' ? artifactReference(selection.artifact, selection.range) : await eventReference(selection.event, getContext);
         const status = await resolve(ref, getContext);
         if (revision !== owner) return;

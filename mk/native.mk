@@ -8,7 +8,6 @@ ARTIFACT_PRODUCER_BINARY := $(BUILD_DIR)/reb-artifact-producer
 ARTIFACT_RECEIVER_BINARY := $(BUILD_DIR)/reb-artifact-receiver
 HEAP_SNAPSHOT_BINARY := $(BUILD_DIR)/reb-heap-snapshot
 DECODER_BINARY := $(BUILD_DIR)/reb-decoder
-DEBUGGER_TRANSPORT_BINARY := $(BUILD_DIR)/reb-debugger-transport
 NATIVE_VM_FIXTURE_BINARY := $(BUILD_DIR)/reb-native-vm-fixture
 OWNED_VM_FIXTURE_TEST := $(BUILD_DIR)/check-owned-vm-fixture
 NATIVE_CONSOLE_BINARY := $(BUILD_DIR)/reb-console
@@ -27,8 +26,9 @@ EVENT_BROKER_TEST_BINARY := $(BUILD_DIR)/tests/event-broker-test
 VM_DISPATCH_TEST_BINARY := $(BUILD_DIR)/tests/vm-dispatch-test
 OWNED_REGISTER_SAMPLER_TEST := $(BUILD_DIR)/tests/owned-register-sampler-test
 PAGE_GUEST_SAMPLER_TEST := $(BUILD_DIR)/tests/page-guest-sampler-test
+NATIVE_GUEST_TEST := $(BUILD_DIR)/tests/native-wasm-guest-test
 ARTIFACT_TEST_BINARY := $(BUILD_DIR)/tests/artifact-test
-NATIVE_TEST_BINARIES := $(ARTIFACT_TEST_BINARY) $(EVENT_TEST_BINARY) $(EVENT_BROKER_TEST_BINARY) $(VM_DISPATCH_TEST_BINARY) $(OWNED_REGISTER_SAMPLER_TEST) $(PAGE_GUEST_SAMPLER_TEST)
+NATIVE_TEST_BINARIES := $(ARTIFACT_TEST_BINARY) $(EVENT_TEST_BINARY) $(EVENT_BROKER_TEST_BINARY) $(VM_DISPATCH_TEST_BINARY) $(OWNED_REGISTER_SAMPLER_TEST) $(PAGE_GUEST_SAMPLER_TEST) $(NATIVE_GUEST_TEST)
 ORIGIN_TRACE_BACKEND := apps/origin-trace-backend/target/debug/origin-trace-backend
 VM_ANALYZER := apps/origin-trace-backend/target/debug/origin-trace-vm
 
@@ -41,7 +41,6 @@ APP_BINARIES := \
 	$(ARTIFACT_RECEIVER_BINARY) \
 	$(HEAP_SNAPSHOT_BINARY) \
 	$(DECODER_BINARY) \
-	$(DEBUGGER_TRANSPORT_BINARY) \
 	$(NATIVE_CONSOLE_BINARY)
 $(NATIVE_VM_FIXTURE_BINARY): $(BUILD_DIR)/apps/reb-native-vm-fixture/main.o $(BUILD_DIR)/apps/reb-native-vm-fixture/dispatch_events.o \
 	$(BUILD_DIR)/src/analysis/native_vm_recorder.o $(BUILD_DIR)/src/analysis/owned_vm_fixture.o \
@@ -86,8 +85,6 @@ $(HEAP_SNAPSHOT_BINARY): $(BUILD_DIR)/apps/reb-heap-snapshot/main.o \
 	$(BUILD_DIR)/src/analysis/heap_snapshot.o
 $(DECODER_BINARY): $(BUILD_DIR)/apps/reb-decoder/main.o \
 	$(BUILD_DIR)/src/analysis/decoder.o
-$(DEBUGGER_TRANSPORT_BINARY): $(BUILD_DIR)/apps/reb-debugger-transport/main.o \
-	$(BUILD_DIR)/src/transport/debugger_transport.o
 $(NATIVE_CONSOLE_BINARY): $(BUILD_DIR)/apps/native-console/main.o $(NATIVE_CONSOLE_IO_OBJECT)
 $(BUILD_DIR)/apps/native-console/main.o: CPPFLAGS += -Ibrowser/integration/brave/overlay
 $(DECODER_BINARY): LDLIBS += $(ZLIB_LIBS)
@@ -135,3 +132,24 @@ $(BUILD_DIR)/check-magic-decoder-limits: $(BUILD_DIR)/tools/check-magic-decoder-
 	@mkdir -p $(@D)
 	$(CXX) $(filter %.o,$^) $(LDFLAGS) $(LDLIBS) $(ZLIB_LIBS) -o $@
 -include $(BUILD_DIR)/tools/check-magic-decoder-limits.d
+
+# Test-only ABI producer. No authored JSON substitute for cross-language checks.
+NATIVE_WASM_DISPATCH_GOLDEN := $(BUILD_DIR)/reb-native-wasm-dispatch-golden
+.PHONY: native-wasm-dispatch-golden
+native-wasm-dispatch-golden: $(NATIVE_WASM_DISPATCH_GOLDEN)
+$(BUILD_DIR)/tools/native-wasm-dispatch-golden.o: mk/config.mk mk/native.mk
+$(NATIVE_WASM_DISPATCH_GOLDEN): $(BUILD_DIR)/tools/native-wasm-dispatch-golden.o $(BUILD_DIR)/src/capture/event.o mk/native.mk
+	$(CXX) $(filter %.o,$^) $(LDFLAGS) $(LDLIBS) -o $@
+-include $(BUILD_DIR)/tools/native-wasm-dispatch-golden.d
+
+# Native guest ABI producer; shares the actual renderer encoder.
+NATIVE_WASM_GUEST_GOLDEN := $(BUILD_DIR)/reb-native-wasm-guest-golden
+.PHONY: native-wasm-guest-golden
+native-wasm-guest-golden: $(NATIVE_WASM_GUEST_GOLDEN)
+$(BUILD_DIR)/tools/native-wasm-guest-golden.o: mk/config.mk mk/native.mk
+$(NATIVE_WASM_GUEST_GOLDEN): $(BUILD_DIR)/tools/native-wasm-guest-golden.o $(BUILD_DIR)/src/capture/event.o mk/native.mk
+	$(CXX) $(filter %.o,$^) $(LDFLAGS) $(LDLIBS) -o $@
+-include $(BUILD_DIR)/tools/native-wasm-guest-golden.d
+
+$(BUILD_DIR)/tests/native_wasm_guest_test.o: CPPFLAGS += -Ibrowser/integration/brave/overlay -Itools/native-test-support
+$(NATIVE_GUEST_TEST): $(BUILD_DIR)/tests/native_wasm_guest_test.o

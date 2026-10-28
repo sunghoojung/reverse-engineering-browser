@@ -52,7 +52,13 @@ It is included in `make check` and `make sanitize`; it does not establish real
 browser routing or isolation. See the versioned native proxy-container contract.
 
 `origin-trace-backend` builds the Rust HTTP service, VM analyzer, and API CLI.
-`ui` starts that service after deterministic evidence generation. `backend-e2e`
-uses a disposable Chromium-compatible profile and synthetic localhost fixtures;
-set `ORIGIN_TRACE_TEST_BROWSER` for a nonstandard browser executable. App builds
+`ui` starts that service after deterministic evidence generation. App builds
 bundle Rust executables and static UI assets, with no Python runtime dependency.
+
+`make check` also runs `native-only-check` (the shipped UI in a LinkeDOM model,
+removed-control absence and launch-script refusal of retired CDP options; it
+installs the pinned `tools/ui-startup-deps` lockfile on first use) and runs each
+ignored Rust integration test by exact name, failing unless exactly one test
+passed. `make quickjs-binding-check` checks the pinned public QuickJS module.
+`make rendered-ui-check` is the macOS rendered acceptance of the packaged app;
+it needs full Xcode for XCTest.

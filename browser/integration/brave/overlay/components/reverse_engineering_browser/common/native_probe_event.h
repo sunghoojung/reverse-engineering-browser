@@ -7,11 +7,14 @@
 #define BRAVE_COMPONENTS_REVERSE_ENGINEERING_BROWSER_COMMON_NATIVE_PROBE_EVENT_H_
 
 #include <array>
+#include <bit>
 #include <cstddef>
 #include <cstdint>
 #include <type_traits>
 
 namespace reb {
+// Raw event envelope ABI is supported only on little-endian targets.
+static_assert(std::endian::native == std::endian::little);
 
 inline constexpr std::uint16_t kNativeProbeProtocolVersion = 3;
 inline constexpr std::size_t kNativeProbeInlinePayloadSize = 128;
@@ -67,6 +70,9 @@ enum class NativeProbeType : std::uint16_t {
   kArtifactCaptured = 14,
   kArtifactCaptureFailed = 15,
   kVmDispatchSample = 16,
+  kWasmDispatchObservation = 17,
+  kWasmGuestDispatch = 18,
+  kWasmGuestInvocation = 19,
 };
 
 enum class NativeProbeFlag : std::uint16_t {

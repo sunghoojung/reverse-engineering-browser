@@ -1,0 +1,18 @@
+<!doctype html><meta charset="utf-8"><title>Public QuickJS native capture target</title>
+<script type="importmap">{"imports":{"quickjs-emscripten-core":"./node_modules/quickjs-emscripten-core/dist/index.mjs","@jitl/quickjs-ffi-types":"./node_modules/@jitl/quickjs-ffi-types/dist/index.mjs","@jitl/quickjs-wasmfile-debug-sync":"./node_modules/@jitl/quickjs-wasmfile-debug-sync/dist/index.mjs","@jitl/quickjs-wasmfile-debug-sync/emscripten-module":"./node_modules/@jitl/quickjs-wasmfile-debug-sync/dist/emscripten-module.browser.mjs"}}</script>
+<pre id="result">Running official QuickJS; enable native capture separately.</pre>
+<script type="module">
+// Normal target execution: no JavaScript sampling or fabricated event reports.
+import {newQuickJSWASMModuleFromVariant} from 'quickjs-emscripten-core';
+import variant from '@jitl/quickjs-wasmfile-debug-sync';
+const QuickJS=await newQuickJSWASMModuleFromVariant(variant),vm=QuickJS.newContext(),calls=[];
+const canvas=document.createElement('canvas'),context=canvas.getContext('2d');
+if(!context)throw new Error('Canvas2D unavailable');
+const host=vm.newFunction('hostProbe',value=>{const n=vm.getNumber(value);calls.push(n);context.measureText(String(n));});
+vm.setProp(vm.global,'hostProbe',host);host.dispose();
+const result=vm.evalCode("function visit(n){for(let i=0;i<n;i++){if((i&1)===0)hostProbe(100+i);else hostProbe(200+i);}} visit(4);visit(4);'complete';",'reb-public-quickjs-acceptance.js');
+let value;if(result.error){value={error:vm.dump(result.error)};result.error.dispose();}else{value=vm.dump(result.value);result.value.dispose();}vm.dispose();
+const success=value==='complete'&&JSON.stringify(calls)===JSON.stringify([100,201,102,203,100,201,102,203]);
+document.querySelector('#result').textContent=JSON.stringify({success,value,calls,nativeCaptureValidated:false},null,2);
+if(!success)throw new Error('QuickJS target mismatch');
+</script>

@@ -561,8 +561,12 @@
             "request_completed",
             "request_failed",
             "vm_finding",
+            "vm_dispatch_sample",
+            "wasm_dispatch_observation",
             "artifact_captured",
-            "artifact_capture_failed"
+            "artifact_capture_failed",
+            "wasm_guest_dispatch",
+            "wasm_guest_invocation"
           ]
         },
         "status_code": {
@@ -760,7 +764,8 @@
             "webassembly_compile",
             "webassembly_module",
             "webassembly_instantiate",
-            "canvas_to_data_url"
+            "canvas_to_data_url",
+            "native_wasm_guest"
           ]
         },
         "kind": {
@@ -770,7 +775,9 @@
             "wasm",
             "source_map",
             "response_body",
-            "canvas_data_url"
+            "canvas_data_url",
+            "bytecode_buffer",
+            "wasm_guest_adapter"
           ]
         },
         "byte_size": {

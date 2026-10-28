@@ -89,35 +89,27 @@ mod tests {
                 assert!(valid_details(spec, &details));
             }
         }
-        for variant in spec["components"]["schemas"]["DebuggerAction"]["oneOf"]
-            .as_array()
-            .unwrap()
-        {
-            assert!(
-                variant["x-reb-requires-live-target"].is_boolean(),
-                "Every action must declare live target admission"
-            );
-        }
-        assert!(crate::validation::requires_live_target("pause"));
-        assert!(!crate::validation::requires_live_target("clear_console"));
-        assert!(crate::validation::requires_live_target("unknown"));
     }
     #[test]
     fn guidance_never_echoes_rejected_values() {
-        let schema = &crate::validation::SPEC["components"]["schemas"]["DebuggerAction"];
+        let schema = &crate::validation::SPEC["components"]["schemas"]["DecoderAction"];
         let guidance = action_guidance(
             schema,
             &json!({"action":"secret_canary", "credential":"secret_canary"}),
         )
         .unwrap();
-        assert!(guidance.allowed_actions.contains(&"pause".to_owned()));
+        assert!(guidance.allowed_actions.contains(&"jwt_inspect".to_owned()));
         assert!(
             !serde_json::to_string(&guidance)
                 .unwrap()
                 .contains("secret_canary")
         );
-        let guidance = action_guidance(schema, &json!({"action":"add_watch"})).unwrap();
-        assert_eq!(guidance.missing_fields, ["expression"]);
+        let guidance = action_guidance(
+            schema,
+            &json!({"action":"jwt_verify","protocol_version":1,"token":"x"}),
+        )
+        .unwrap();
+        assert_eq!(guidance.missing_fields, ["secret"]);
         assert!(!valid_details(
             &crate::validation::SPEC,
             &json!({"allowed_actions":["secret_canary"]})

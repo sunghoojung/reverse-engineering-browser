@@ -7,11 +7,11 @@ research UI. Authorization, capture, and privacy rules are defined in
 [WASM Inspection v1](wasm-inspection-v1.md) defines bounded static module
 inspection and its original-byte coordinates.
 
-[Live Wasm inspection v1](live-wasm-inspection-v1.md) defines confirmed
-Object Lab and attached-page memory inspection. It does not invent a guest PC.
+[Live Wasm inspection v1](live-wasm-inspection-v1.md) (retired with CDP) defined
+confirmed Object Lab and attached-page memory inspection.
 
-[Paused import-object map v1](paused-import-object-v1.md) defines the
-getProperties-only host import map. Invocation stays unproven.
+[Paused import-object map v1](paused-import-object-v1.md) (retired with CDP)
+defined the getProperties-only host import map.
 
 [JavaScript Source Facts v1](javascript-source-facts-v1.md) defines exact-artifact
 lexical binding/effect analysis, original-byte ranges and explicit unknown coverage.
@@ -39,10 +39,14 @@ local recorder and deterministic fixture export. Browser capture and VM-view
 ingestion are not implemented by that contract.
 
 [Literal marker fuzz workflow v1](marker-fuzz-v1.md) defines offline reviewed
-plans and explicitly armed, bounded disposable Repeater execution.
+plans only. Browser/Repeater execution is removed and its CLI fails closed.
 
 [VM analysis packs v1](vm-analysis-pack-v1.md) defines inert relevance overlays
 and conservative offline comparison of exact workspace v2 documents.
+
+[Native Wasm guest observations v1](native-wasm-guest-v1.md) defines native
+adapter-bound PC/memory observations, exact synchronous host parents, and explicit
+verification limits.
 
 ## Two representations
 
@@ -256,22 +260,11 @@ unguarded stores remain available through existing read-only APIs.
 
 ## Request field provenance
 
-The optional `FieldProvenance` v1 extension on ephemeral field-test observations
-in [`openapi.json`](openapi.json) preserves bounded synchronous request call
-sites, same-target equal-string hook candidates, source hashes, and named gaps.
-Call sites are observed execution context; equality is correlated, never a
-producer-to-request value-flow proof. The production HTTP route remains the
-existing debugger state/actions interface. See the
-[feature design](../docs/product/request-field-provenance-v1.md) for bounds and
-compatibility with field-test v2 responses that lack the extension.
-The bounded projection runs directly inside the Rust debugger.
-
-General network records may carry optional `initiator` sites with the same
-bounded location model. Runtime hook hits carry optional `script_id` and
-`source_hash` identity snapshots. Their primitive previews may carry a nullable
-`string_sha256`, computed over complete UTF-8 strings up to 4 KiB only while
-selected-value capture is enabled. These extensible nested fields do not change
-the existing capture or action envelope versions.
+Retired with CDP. The `FieldProvenance` extension on Runtime Hooks field-test
+observations lived in the removed debugger actions, and its schema left
+[`openapi.json`](openapi.json) with them. The
+[feature design](../docs/product/request-field-provenance-v1.md) remains a
+historical record.
 
 [Float32 Comparison v1](float32-comparison-v1.md) defines explicit bounded binary32
 inputs, exact bits, finite metrics and completeness policies.
@@ -283,15 +276,15 @@ pages and the local HTTP/CLI contract.
 
 - [Investigation notebook v1](investigation-notebook-v1.md): bounded local research notes and exact retained evidence pins in the existing Analyst library.
 
-[WebSocket capture v1](websocket-capture-v1.md) specifies bounded CDP message identities, raw payload encoding, loss counters and Traffic inspection.
+[WebSocket capture v1](websocket-capture-v1.md) (retired with CDP) specified bounded CDP message identities, raw payload encoding, loss counters and Traffic inspection.
 
 - [VM execution semantics v1](vm-semantics-v1.md): bounded supplied traces, exact step provenance, declarative hypotheses and differential validation; capture-backend-neutral, no automatic code execution.
 
 ## Scoped local response overrides
 
-[Local overrides v1](local-overrides-v1.md) defines the optional exact URL,
-method, target, experiment, digest and expiry guard on existing fulfillment,
-with explicit offline preparation and local CLI arming/disarming.
+[Local overrides v1](local-overrides-v1.md) documents the historical exact URL,
+method, target, experiment, digest and expiry format. Offline preparation remains;
+live fulfillment and CLI arming/disarming were removed with CDP.
 
 Runtime allocating-script provenance adds artifact capture origin 8,
 `runtime_allocating_script`, valid only for JavaScript with a nonzero execution
@@ -308,3 +301,16 @@ and separate bounded effect/coverage/traversal declarations. Historical v1
 workspaces are rejected rather than silently upconverted.
 
 - [Owned opcode experiments v1](owned-opcode-experiments-v1.md): explicit, input-specific native confirmation and counterexamples.
+
+## Native-only capture
+
+Executable CDP APIs/transport have been removed. Legacy schemas may describe
+historical saved records, not supported runtime operations. Retired contracts
+kept as historical records: [API observation catalog v1](api-observation-catalog-v1.md),
+[Element screenshot v1](element-screenshot-v1.md),
+[Live Wasm inspection v1](live-wasm-inspection-v1.md),
+[Paused import-object map v1](paused-import-object-v1.md) and
+[WebSocket capture v1](websocket-capture-v1.md).
+[Native Wasm dispatch observations](native-wasm-dispatch-v1.md) use a separate
+typed128-byte payload and exact artifact/site validation; they are not legacy
+guest-PC samples.

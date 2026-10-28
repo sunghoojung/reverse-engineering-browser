@@ -7,12 +7,15 @@
 #define BRAVE_COMPONENTS_REVERSE_ENGINEERING_BROWSER_BROWSER_NATIVE_PROBE_HOST_H_
 
 #include <cstdint>
+#include <memory>
 #include <string>
+#include <vector>
 
 #include "base/memory/raw_ptr.h"
 #include "base/memory/raw_ref.h"
 #include "base/memory/shared_memory_mapping.h"
 #include "base/memory/unsafe_shared_memory_region.h"
+#include "base/memory/weak_ptr.h"
 #include "brave/components/reverse_engineering_browser/common/native_probe_transport.mojom.h"
 #include "mojo/public/cpp/base/big_buffer.h"
 #include "mojo/public/cpp/bindings/remote.h"
@@ -32,6 +35,35 @@ class NativeProbeHost final : public mojom::NativeProbeHost {
   // mojom::NativeProbeHost:
   void BindClient(mojo::PendingRemote<mojom::NativeProbeClient> client) override;
   void EventsAvailable() override;
+  void CaptureWasmDispatch(std::uint64_t capture_epoch,
+                           std::uint64_t session_id,
+                           std::uint64_t sequence_number,
+                           std::uint64_t monotonic_time_ns,
+                           std::uint32_t process_id,
+                           std::uint32_t thread_id,
+                           std::uint64_t frame_id,
+                           std::uint64_t execution_context_id,
+                           std::uint64_t document_token_high,
+                           std::uint64_t document_token_low,
+                           std::uint32_t function_index,
+                           std::uint32_t module_byte_offset,
+                           std::uint32_t selector,
+                           std::uint32_t table_count,
+                           std::uint32_t sample_index,
+                           const std::string& source_url,
+                           mojo_base::BigBuffer content) override;
+  void CaptureNativeGuest(std::uint64_t capture_epoch,
+                          const std::vector<std::uint8_t>& invocation_record,
+                          const std::vector<std::uint8_t>& dispatch_record,
+                          std::uint64_t execution_context_id,
+                          std::uint64_t document_token_high,
+                          std::uint64_t document_token_low,
+                          const std::string& source_url,
+                          const std::string& adapter_json,
+                          mojo_base::BigBuffer module,
+                          mojo_base::BigBuffer bytecode) override;
+  void CaptureNativeGuestHost(std::uint64_t capture_epoch,
+                              const std::vector<std::uint8_t>& event_record) override;
   void CaptureGeneratedArtifact(std::uint16_t kind,
                                 std::uint16_t capture_origin,
                                 std::uint64_t creator_event_id,
@@ -52,6 +84,11 @@ class NativeProbeHost final : public mojom::NativeProbeHost {
 
  private:
   void Drain();
+  // Reports the browser verdict for module bytes sent with the guest dispatch
+  // whose sequence number is module_token, if that configuration is current.
+  void SendNativeGuestModuleStatus(std::uint64_t capture_epoch,
+                                   std::uint64_t module_token,
+                                   bool accepted);
 
   const raw_ref<NativeProbeSession> session_;
   const int renderer_process_id_;
@@ -60,6 +97,13 @@ class NativeProbeHost final : public mojom::NativeProbeHost {
   base::WritableSharedMemoryMapping queue_mapping_;
   raw_ptr<NativeProbeQueue> queue_ = nullptr;
   std::uint64_t reported_dropped_events_ = 0;
+  std::uint64_t wasm_capture_epoch_ = 0;
+  std::uint32_t wasm_capture_count_ = 0;
+  std::uint32_t guest_capture_count_ = 0;
+  bool wasm_document_gap_emitted_ = false, guest_budget_gap_emitted_ = false,
+       guest_host_malformed_gap_emitted_ = false;
+  std::shared_ptr<const std::uint64_t> wasm_epoch_lifetime_;
+  base::WeakPtrFactory<NativeProbeHost> weak_factory_{this};
 };
 
 }  // namespace reb

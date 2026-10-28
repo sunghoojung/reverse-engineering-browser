@@ -30,8 +30,7 @@
             <summary>Advanced</summary>
             <div class="advanced-items">
           <button class="nav-button" data-screen="backtrace"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M5 3v9a3 3 0 0 0 3 3h9m-4-4 4 4-4 4"/></svg><span>Backtraces</span></button>
-          <button id="nav-memory" class="nav-button" data-screen="memory"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M5 5h10v10H5zM8 2v3m4-3v3M8 15v3m4-3v3M2 8h3m-3 4h3m10-4h3m-3 4h3"/></svg><span>Memory</span></button>
-          <button class="nav-button" data-screen="experiments"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M7 2h6m-5 0v6l-5 9h14l-5-9V2M6 12h8"/></svg><span>Experiments</span></button>
+
           <button class="nav-button" data-screen="analyst"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="m4 5 4 5-4 5m7 0h5"/></svg><span>Analyst</span></button>
           <button class="nav-button" data-screen="tools"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M4 3v6m-2-3h4m7 5v6m-2-3h4M13 3v4M4 13v4"/></svg><span>Tools</span></button>
             </div>
@@ -55,16 +54,10 @@
               <p id="console-traffic-notice" role="status"></p>
               <div id="console-traffic-events" class="console-traffic-events" role="log" aria-label="Experiment resource events"></div>
             </section>
-            <section id="runtime-hook-traffic" class="runtime-hook-traffic" aria-label="Isolated worker request trail" tabindex="-1" hidden></section>
-            <details id="websocket-inspector" class="websocket-inspector" aria-label="Captured WebSocket messages" hidden></details>
             <div class="traffic-grid" data-detail-open="false">
               <div class="request-pane">
                 <div class="network-tools">
                   <label class="filter-box"><input id="request-filter" type="search" maxlength="512" placeholder="Search requests…" aria-label="Filter requests" /></label>
-                  <select id="request-search-scope" class="request-search-scope" aria-label="Search request content">
-                    <option value="url">URL / method / status</option>
-                    <option value="content">Include headers and bodies</option>
-                  </select>
                   <div class="request-filters" id="request-filters">
                   <div class="type-filters" aria-label="Resource type filters">
                     <button class="type-filter" type="button" data-filter="all" aria-pressed="true">All</button>
@@ -82,7 +75,6 @@
                   </div>
                 </div>
 
-                <div id="request-search-status" class="request-search-status" role="status" aria-live="polite" hidden></div>
                 <div id="network-notice" class="network-notice" data-kind="loading" role="status" aria-live="polite">Connecting to the local evidence broker…</div>
 
                 <div class="request-scope" aria-label="Captured request scope">
@@ -97,7 +89,7 @@
                 <div class="request-table">
                   <div class="request-head" role="group" aria-label="Sort requests"><button type="button" data-request-sort="name" aria-pressed="false">Name<span aria-hidden="true"></span></button><button type="button" data-request-sort="status" aria-pressed="false">Status<span aria-hidden="true"></span></button><button type="button" data-request-sort="type" aria-pressed="false">Type<span aria-hidden="true"></span></button><button type="button" data-request-sort="method" aria-pressed="false">Method<span aria-hidden="true"></span></button><button type="button" data-request-sort="time" aria-pressed="false">Time<span aria-hidden="true"></span></button></div>
                   <div id="request-rows" class="request-rows" role="listbox" aria-label="Captured requests" tabindex="0"></div>
-                  <div class="request-window"><span id="request-window-status">0 requests</span><button id="request-window-prev" type="button" aria-label="Previous 500 requests">Previous</button><button id="request-window-next" type="button" aria-label="Next 500 requests">Next</button><button id="request-latest" type="button" hidden>New requests</button><button id="request-order" type="button" title="Restore capture order">Capture order</button><button id="open-api-catalog" type="button" aria-haspopup="dialog">API catalog</button><button id="open-captured-export" type="button" data-export-open="capture" aria-haspopup="dialog">Export…</button></div>
+                  <div class="request-window"><span id="request-window-status">0 requests</span><button id="request-window-prev" type="button" aria-label="Previous 500 requests">Previous</button><button id="request-window-next" type="button" aria-label="Next 500 requests">Next</button><button id="request-latest" type="button" hidden>New requests</button><button id="request-order" type="button" title="Restore capture order">Capture order</button><button id="open-captured-export" type="button" data-export-open="capture" aria-haspopup="dialog">Export…</button></div>
                 </div>
               </div>
 
@@ -109,30 +101,17 @@
                   <span id="selected-url" class="selection-url">https://checkout.acme.test/cart</span>
                   <button id="request-copy-url" class="secondary-button" type="button" title="Copy selected request URL">Copy URL</button>
                   <button id="request-evidence-toggle" class="secondary-button" type="button" aria-expanded="false">Evidence</button>
-                  <details id="traffic-capture-export" class="exchange-options">
-                    <summary aria-label="Selected capture actions">Capture actions</summary>
-                    <div class="exchange-options-menu">
-                      <button class="exchange-button" type="button" data-client-capture="draft">Review in Repeater</button>
-                      <button id="passive-security-open" class="exchange-button" type="button" aria-haspopup="dialog">Passive security report</button>
-                      <p data-traffic-export-status role="status" aria-live="polite" hidden></p>
-                    </div>
-                  </details>
                   <button id="request-collection-pivot" class="secondary-button" type="button">Save to Collection</button>
                 </div>
                 <div class="inspector-tabs" role="tablist" aria-label="Request inspector">
-                  <button id="inspector-tab-headers" class="inspector-tab" type="button" role="tab" data-inspector-tab="headers" aria-controls="exchange-inspector" aria-selected="true">Headers</button>
-                  <button id="inspector-tab-payload" class="inspector-tab" type="button" role="tab" data-inspector-tab="payload" aria-controls="exchange-inspector" aria-selected="false" tabindex="-1">Payload</button>
-                  <button id="inspector-tab-preview" class="inspector-tab" type="button" role="tab" data-inspector-tab="preview" aria-controls="exchange-inspector" aria-selected="false" tabindex="-1">Preview</button>
-                  <button id="inspector-tab-response" class="inspector-tab" type="button" role="tab" data-inspector-tab="response" aria-controls="exchange-inspector" aria-selected="false" tabindex="-1">Response</button>
-                  <button id="inspector-tab-compare" class="inspector-tab" type="button" role="tab" data-inspector-tab="compare" aria-controls="traffic-comparison" aria-selected="false" tabindex="-1">Compare</button>
+                  <button id="inspector-tab-general" class="inspector-tab" type="button" role="tab" data-inspector-tab="general" aria-controls="exchange-inspector" aria-selected="true">General</button>
                   <button id="inspector-tab-initiator" class="inspector-tab" type="button" role="tab" data-inspector-tab="initiator" aria-controls="request-inspector" aria-selected="false" tabindex="-1">Initiator</button>
                   <button id="inspector-tab-timing" class="inspector-tab" type="button" role="tab" data-inspector-tab="timing" aria-controls="request-inspector" aria-selected="false" tabindex="-1">Timing</button>
                   <button id="inspector-tab-signals" class="inspector-tab" type="button" role="tab" data-inspector-tab="signals" aria-controls="request-inspector" aria-selected="false" tabindex="-1">Signals</button>
                   <button id="inspector-tab-evidence" class="inspector-tab" type="button" role="tab" data-inspector-tab="evidence" aria-controls="request-inspector" aria-selected="false" tabindex="-1">Evidence</button>
                 </div>
-                <section id="traffic-comparison" class="traffic-comparison" role="tabpanel" aria-labelledby="inspector-tab-compare" hidden></section>
-                <div id="exchange-inspector" class="exchange-inspector" role="tabpanel" aria-labelledby="inspector-tab-headers"></div>
-                <div hidden id="request-inspector" class="request-inspector" role="tabpanel" aria-labelledby="inspector-tab-payload" tabindex="0">
+                <div id="exchange-inspector" class="exchange-inspector" role="tabpanel" aria-labelledby="inspector-tab-general"></div>
+                <div hidden id="request-inspector" class="request-inspector" role="tabpanel" aria-labelledby="inspector-tab-initiator" tabindex="0">
                   <h1 id="request-prompt">Choose a request value and trace where it came from.</h1>
                   <div id="request-package-entry" class="package-entry" hidden><button class="secondary-button" type="button" data-screen="evidence">Inspect observations &amp; artifacts</button><span>Recorded links, context correlations and missing evidence.</span></div>
                   <div id="field-tabs" class="field-tabs" role="tablist" aria-label="Request values">
@@ -144,9 +123,8 @@
                   <div id="field-tree" class="field-tree" role="tabpanel" aria-labelledby="field-tab-body" tabindex="0"></div>
                   <div id="trace-dock" class="trace-dock">
                     <div><div class="trace-label">Selected request field</div><div id="trace-target" class="trace-target">request-81 · Body · $.device.fingerprint</div></div>
-                    <button id="request-repeater-pivot" class="secondary-button" type="button">Send to Repeater</button>
+
                     <button id="request-decoder-pivot" class="secondary-button" type="button">Decode value</button>
-                    <button id="request-memory-pivot" class="secondary-button" type="button">Find in Memory</button>
                     <button id="request-vm-candidates" class="secondary-button" type="button">Related VM candidates</button>
                     <button id="trace-origin" class="trace-button" type="button">⌘ Trace origin</button>
                   </div>
@@ -231,26 +209,10 @@
             </section>
           </section>
 
-          <section id="screen-field-provenance" class="screen" aria-label="Request field provenance" hidden>
-            <header class="screen-head"><div><h1>Field trace</h1><p id="field-provenance-target"></p></div><button id="field-provenance-back" class="secondary-button" type="button">Traffic</button></header>
-            <div class="field-provenance-body">
-              <pre id="field-provenance-value" class="field-provenance-value" tabindex="0" aria-label="Selected value preview"></pre>
-              <section id="field-provenance-derived" class="field-provenance-derived" aria-label="Derived source search" hidden>
-                <h2>Decoded search value</h2>
-                <pre id="field-provenance-derived-value" tabindex="0"></pre>
-                <p>Researcher-applied transformations. Source matches are candidates; page value flow remains unobserved. Test value uses the original request field.</p>
-                <details><summary>Transformation history</summary><pre id="field-provenance-derived-steps"></pre></details>
-              </section>
-              <div class="field-provenance-actions"><button id="field-provenance-search" class="secondary-button" type="button">Find sources</button><button id="field-provenance-decode" class="secondary-button" type="button">Decode value</button><button id="field-provenance-original" class="secondary-button" type="button" hidden>Use original value</button><button id="field-provenance-test" class="trace-button" type="button">Test value</button></div>
-              <section aria-label="Source candidates"><div class="field-provenance-section-head"><h2>Sources</h2><span id="field-provenance-notice" role="status"></span></div><div id="field-provenance-candidates"></div></section>
-              <section aria-label="Replay evidence"><h2>Replay</h2><div id="field-provenance-replay"></div></section>
-              <details class="field-provenance-coverage"><summary>Coverage</summary><ul id="field-provenance-gaps"></ul></details>
-            </div>
-          </section>
           <section id="screen-sources" class="screen" data-sidebar-open="false" aria-label="Sources" hidden>
             <aside class="sources-navigator" aria-label="Sources navigator">
               <div class="source-side-tabs" role="tablist" aria-label="Source collections">
-                <button id="source-tab-page" class="source-side-tab" type="button" role="tab" data-source-collection="page" aria-selected="false" aria-controls="source-tree" tabindex="-1">Page</button>
+
                 <button id="source-tab-captured" class="source-side-tab" type="button" role="tab" data-source-collection="captured" aria-selected="true" aria-controls="source-tree">Captured</button>
               </div>
               <div id="source-health" class="source-health" data-kind="warning" role="status" aria-live="polite" hidden></div>
@@ -268,9 +230,9 @@
                 <button id="investigation-decode-range" class="source-tool" type="button" title="First select an Original bytes link in Facts; this copies at most 64 KiB without running a transformation" disabled>Decode range</button>
                 <button id="source-facts-toggle" class="source-tool" type="button" aria-controls="source-facts-details" aria-expanded="false" disabled>Facts</button>
                 <button id="source-deob" class="source-tool" type="button" aria-label="Run local static cleanup" title="Run local static cleanup" disabled>Static cleanup</button>
-                <button id="source-hook-pivot" class="source-tool" type="button" aria-controls="hooks-workspace" aria-expanded="false" title="Open Runtime Hooks beside source" disabled>Hooks</button>
+
                 <button id="source-sidebar-toggle" class="source-tool" type="button" aria-controls="source-sidebar" aria-expanded="false">Details</button>
-                <button id="console-toggle" class="source-tool" type="button" aria-label="Toggle debugger logs" title="Toggle debugger logs (Escape)">Logs</button>
+
                 <form id="source-window" class="source-window" aria-label="Source display window" hidden>
                   <span id="source-window-label"></span>
                   <button id="source-window-previous" class="source-tool" type="button" aria-label="Previous source lines">Previous</button>
@@ -292,117 +254,22 @@
                 <span id="source-language">Plain text</span>
                 <span id="source-hash" class="source-hash"></span>
               </div>
-              <section id="console-drawer" class="console-drawer" aria-label="Debugger logs" hidden>
-                <div class="console-head"><strong>Logs</strong><span id="console-count">0 messages</span><button id="console-clear" type="button">Clear</button></div>
-                <div id="console-entries" class="console-entries" role="log" aria-live="polite"></div>
-              </section>
+
               <div id="quick-open" class="quick-open" role="dialog" aria-label="Open a source file" hidden>
                 <input id="quick-open-input" type="search" placeholder="Open file" aria-label="File name" />
                 <div id="quick-open-results" class="quick-open-results"></div>
               </div>
             </section>
 
-            <section id="source-hooks-hits" class="source-hooks-hits" aria-label="Runtime Hook hits" hidden></section>
+            <aside id="source-sidebar" class="sources-debugger" aria-label="Source details" hidden>
 
-            <aside id="source-sidebar" class="sources-debugger" aria-label="Debugger sidebar" hidden>
-              <div class="debug-controls" aria-label="Debugger controls">
-                <button id="debug-resume" class="debug-control" type="button" aria-label="Resume script execution" title="Resume script execution (F8)" disabled>▶</button>
-                <button id="debug-pause" class="debug-control" type="button" aria-label="Pause script execution" title="Pause script execution" disabled>Ⅱ</button>
-                <button id="debug-step-over" class="debug-control" type="button" aria-label="Step over" title="Step over (F10)" disabled>↷</button>
-                <button id="debug-step-into" class="debug-control" type="button" aria-label="Step into" title="Step into (F11)" disabled>↓</button>
-                <button id="debug-step-out" class="debug-control" type="button" aria-label="Step out" title="Step out (Shift+F11)" disabled>↑</button>
-                <button id="debug-breakpoints-active" class="debug-control" type="button" aria-label="Deactivate breakpoints" title="Deactivate breakpoints" disabled>◇</button>
-              </div>
-              <div id="debug-state" class="debug-state"><div class="debug-state-line"><strong>Offline</strong><span class="debug-target">Run a live session to attach</span></div></div>
               <div class="debug-panes">
                 <details id="artifact-details" class="debug-pane" open><summary>Source details</summary><div id="artifact-facts" class="debug-pane-body">Select a source to inspect capture or runtime metadata.</div></details>
                 <details id="source-facts-details" class="debug-pane"><summary>JavaScript facts</summary><div id="source-facts-report" class="debug-pane-body source-facts-report" aria-live="polite"></div></details>
                 <details id="deobfuscation-details" class="debug-pane" open><summary>Static cleanup</summary><label class="deobfuscation-assumption"><input id="deobfuscation-intrinsics" type="checkbox"> Assume standard JavaScript intrinsics</label><div id="deobfuscation-report" class="debug-pane-body" role="region" aria-label="Deobfuscation analysis" tabindex="-1">Select a JavaScript source to analyze.</div></details>
-                <details class="debug-pane" open><summary>Watch</summary><div class="debug-pane-body"><form id="watch-form" class="debug-form"><input id="watch-expression" type="text" placeholder="Add expression" aria-label="Watch expression" autocomplete="off" /><button type="submit" aria-label="Add watch expression">+</button></form><div id="watch-list"></div></div></details>
-                <details class="debug-pane" open><summary>Breakpoints</summary><div id="breakpoint-list" class="debug-pane-body">No breakpoints</div></details>
-                <details class="debug-pane" open><summary>Scope</summary><div id="scope-list" class="debug-pane-body">Not paused</div></details>
-                <details id="debugger-vm-lab" class="debug-pane"><summary>Captured document</summary><div id="debugger-vm-lab-body" class="debug-pane-body"></div></details>
-                <details class="debug-pane" open><summary>Call Stack</summary><div id="call-stack" class="debug-pane-body">Not paused</div></details>
-                <details class="debug-pane"><summary>Pause on exceptions</summary><div class="debug-pane-body"><select id="pause-on-exceptions" class="debug-select" aria-label="Pause on exceptions"><option value="none">Don't pause</option><option value="uncaught">Uncaught exceptions</option><option value="all">Caught and uncaught</option></select></div></details>
-                <details class="debug-pane"><summary>XHR/fetch Breakpoints</summary><div class="debug-pane-body"><form id="xhr-breakpoint-form" class="debug-form"><input id="xhr-breakpoint-pattern" type="text" placeholder="URL contains" aria-label="XHR or fetch URL pattern" autocomplete="off" /><button type="submit" aria-label="Add XHR breakpoint">+</button></form><div id="xhr-breakpoint-list"></div></div></details>
-                <details class="debug-pane"><summary>Event Listener Breakpoints</summary><div id="event-breakpoint-list" class="debug-pane-body"></div></details>
+
               </div>
             </aside>
-          </section>
-
-          <section id="screen-memory" class="screen" aria-label="Memory investigation" hidden>
-            <header class="screen-head">
-              <div><h1>Memory Explorer</h1><div class="screen-subtitle">Find objects, inspect what retains them, and compare memory over time.</div></div>
-              <div class="screen-head-actions"><span id="memory-target" class="memory-target">Target unavailable</span><span class="memory-readonly">Ephemeral · local</span></div>
-            </header>
-            <div id="memory-notice" class="memory-notice" data-kind="offline" role="status" aria-live="polite">Run a live session to attach an authorized browser target.</div>
-                  <div class="memory-mode-switch" role="group" aria-label="Memory search mode">
-                    <button class="memory-mode-button" type="button" data-memory-mode="live" aria-pressed="true">Live objects</button>
-                    <button class="memory-mode-button" type="button" data-memory-mode="snapshot" aria-pressed="false">Heap snapshot</button>
-                    <button class="memory-mode-button" type="button" data-memory-mode="diff" aria-pressed="false">Heap diff</button>
-                    <button class="memory-mode-button" type="button" data-memory-mode="origin" aria-pressed="false">Origin trace</button>
-                  </div>
-            <div class="memory-grid">
-              <aside class="memory-search-pane" aria-label="Memory search criteria">
-                <form id="memory-search-form" class="memory-form" data-mode="live">
-                  <div class="memory-stage"><span>1</span><div><strong>Choose criteria</strong><small id="memory-workflow">Find an object, then inspect its inert preview.</small></div></div>
-
-                  <label class="memory-live-only">Property name<input id="memory-property-query" type="text" placeholder="token, config, fingerprint" maxlength="512" autocomplete="off" /></label>
-                  <label class="memory-search-only memory-value-field"><span id="memory-value-caption">Value</span><input id="memory-value-query" type="text" placeholder="exact text or pattern" maxlength="512" autocomplete="off" /></label>
-                  <label class="memory-reference-only" hidden>Reference scope<select id="memory-reference-scope"><option value="all">All matching nodes</option><option value="reachable">Root-reachable only</option><option value="unreachable">Unreachable only</option></select></label>
-                  <details class="memory-live-only memory-advanced">
-                    <summary>Additional filters</summary>
-                    <div class="memory-advanced-fields">
-                      <label class="memory-live-only">Class name<input id="memory-class-query" type="text" placeholder="Object, Array, CartState" maxlength="512" autocomplete="off" /></label>
-                      <label class="memory-live-only memory-shape-field">Structural shape<textarea id="memory-shape-query" placeholder='{"device":{"fingerprint":""}}' maxlength="4096" spellcheck="false"></textarea></label>
-                      <label class="memory-live-only">Similarity threshold<input id="memory-similarity-threshold" type="number" min="0" max="1" step="0.05" value="0.75" /></label>
-                      <div class="memory-options memory-live-only">
-                        <label class="memory-check"><input id="memory-regex" type="checkbox" /> Regular expression</label>
-                        <label class="memory-check"><input id="memory-case-sensitive" type="checkbox" /> Case sensitive</label>
-                        <label class="memory-check"><input id="memory-shape-values" type="checkbox" /> Match shape values</label>
-                      </div>
-                    </div>
-                  </details>
-                  <button id="memory-search-button" class="trace-button memory-search-button memory-search-only" type="submit" disabled>Search live objects</button>
-                  <div class="memory-origin-only" hidden>
-                    <div class="memory-origin-window">
-                      <label>Steps before<input id="memory-origin-before" type="number" min="0" max="8" step="1" value="3" /></label>
-                      <label>Steps after<input id="memory-origin-after" type="number" min="0" max="16" step="1" value="8" /></label>
-                    </div>
-                    <div class="memory-origin-actions">
-                      <button id="memory-origin-stop" class="secondary-button" type="button" disabled>Stop trace</button>
-                      <button id="memory-origin-reset" class="secondary-button" type="button" disabled>Clear result</button>
-                    </div>
-                  </div>
-                  <div id="memory-diff-controls" class="memory-diff-controls memory-diff-only" hidden>
-                    <div class="memory-baseline-card">
-                      <span>Comparison baseline</span>
-                      <strong id="memory-baseline-title">Not captured</strong>
-                      <small id="memory-baseline-meta">Capture the target before the activity you want to measure.</small>
-                    </div>
-                    <div class="memory-diff-actions">
-                      <button id="memory-capture-baseline" class="secondary-button" type="button">Capture baseline</button>
-                      <button id="memory-clear-baseline" class="secondary-button" type="button" disabled>Reset</button>
-                      <button id="memory-compare-snapshot" class="trace-button memory-diff-primary" type="button" disabled>Capture current and compare</button>
-                    </div>
-                  </div>
-                  <details class="workspace-disclosure"><summary>Search behavior</summary><p id="memory-search-help" class="memory-search-help">Accessors are reported without invoking getters. Results are ephemeral and are never added to the evidence store.</p></details>
-                </form>
-              </aside>
-              <div class="memory-output">
-                <div class="memory-receipt">
-                  <div id="memory-submission" class="memory-submission">No submitted result.</div>
-                  <details class="memory-submitted"><summary>Submitted criteria</summary><pre id="memory-submitted-criteria">No submitted criteria</pre></details>
-                </div>
-                <div id="memory-results-pane" class="memory-results-pane">
-                <div class="memory-results-list">
-                  <div class="memory-results-head"><span id="memory-result-label">Matches</span><span id="memory-result-count">0</span></div>
-                  <div id="memory-results" role="listbox" aria-label="Live object matches"></div>
-                </div>
-                <div id="memory-detail" class="memory-detail" tabindex="0"><div class="memory-empty">Attach a live page, enter at least one criterion, then start a bounded search.</div></div>
-                </div>
-              </div>
-            </div>
           </section>
 
           <section id="screen-vm" class="screen" aria-label="Virtual machine investigation" hidden>
@@ -430,7 +297,7 @@
               <div id="vm-detail" class="vm-detail" tabindex="0"></div>
             </div>
             <details class="vm-program-example"><summary>Explore a deterministic owned VM example <span>Fixture replay · no capture or execution</span></summary><div id="vm-program-workspace" class="vm-program-workspace"></div></details>
-            <details id="vm-captured-lab" class="vm-program-example"><summary>Captured document VM Lab <span>Paused import map and live Wasm memory. No guest PC.</span></summary><div id="vm-captured-lab-body" class="vm-program-workspace"></div></details>
+
             </div>
             <section id="vm-owned-debugger" aria-label="Live owned native fixture" hidden></section>
             <section id="vm-contextual-workspace" class="vm-contextual-workspace" aria-label="Per-build contextual VM analysis" hidden></section>
@@ -524,559 +391,9 @@
             </div>
           </section>
 
-          <section id="screen-experiments" class="screen" aria-label="Experiments" hidden>
-            <header class="screen-head">
-              <div><h1 id="experiment-title">Interceptor</h1><div id="experiment-subtitle" class="screen-subtitle">Disposable context · no baseline cookies, storage, or credentials</div></div>
-            </header>
-            <div class="experiment-mode-tabs" role="tablist" aria-label="Experiment mode">
-              <button class="experiment-mode-tab" type="button" role="tab" data-experiment-mode="interceptor" aria-selected="true">Interceptor</button>
-              <button class="experiment-mode-tab" type="button" role="tab" data-experiment-mode="repeater" aria-selected="false" tabindex="-1">Repeater</button>
-              <button class="experiment-mode-tab" type="button" role="tab" data-experiment-mode="object" aria-selected="false" tabindex="-1">Objects</button>
-              <button class="experiment-mode-tab" type="button" role="tab" data-experiment-mode="hooks" aria-selected="false" tabindex="-1">Hooks</button>
-              <button class="experiment-mode-tab" type="button" role="tab" data-experiment-mode="screenshot" aria-selected="false" tabindex="-1">Element screenshot</button>
-              <button class="experiment-mode-tab" type="button" role="tab" data-experiment-mode="automation" aria-selected="false" tabindex="-1">Automation</button>
-            </div>
-            <div id="experiment-notice" class="experiment-notice" data-kind="idle" role="status" aria-live="polite">Create an isolated experiment to configure request interception.</div>
-            <details id="action-scope-panel" class="experiment-scope" aria-label="Mutable action scope">
-              <summary>Scope <span id="action-scope-badge" class="action-scope-badge" data-kind="offline">Not set</span></summary>
-              <div class="action-scope-panel">
-                <div class="action-scope-summary">
-                  <h2>Action scope</h2>
-                  <p id="action-scope-message">Create an isolated context to choose all pages or one exact page.</p>
-                </div>
-                <div class="action-scope-controls">
-                  <div class="action-scope-toggle" role="group" aria-label="Action scope mode">
-                    <button id="action-scope-global" type="button" aria-pressed="true">All pages</button>
-                    <button id="action-scope-targeted" type="button" aria-pressed="false">One page</button>
-                  </div>
-                  <select id="action-scope-target" aria-label="Target disposable page" disabled><option value="">No disposable pages</option></select>
-                  <button id="action-scope-apply" class="secondary-button" type="button" disabled>Apply scope</button>
-                </div>
-                <div class="action-scope-pages">
-                  <form id="action-scope-add-form" class="action-scope-add">
-                    <input id="action-scope-new-url" type="url" maxlength="8192" placeholder="https://app.example.test/page" autocomplete="off" aria-label="New disposable page URL" />
-                    <button id="action-scope-add" class="secondary-button" type="submit" disabled>Add page</button>
-                  </form>
-                  <div id="action-scope-targets" class="action-scope-targets" aria-label="Disposable pages"><span class="experiment-empty">No disposable pages.</span></div>
-                </div>
-              </div>
-            </details>
-            <div id="interception-workspace" class="experiment-workspace">
-              <div class="experiment-column">
-                <article class="experiment-card">
-                  <header>
-                    <div><h2>Session</h2><p id="experiment-context-message">No isolated browser context exists.</p></div>
-                    <span id="experiment-context-badge" class="experiment-card-badge" data-kind="offline">Not created</span>
-                  </header>
-                  <div class="experiment-body">
-                    <div class="experiment-actions">
-                      <button id="experiment-create" class="trace-button experiment-primary" type="button">Create isolated context</button>
-                      <button id="experiment-dispose" class="secondary-button" type="button" disabled>Dispose context</button>
-                      <button id="experiment-clear" class="secondary-button" type="button" disabled>Clear result</button>
-                    </div>
-                  </div>
-                  <details class="experiment-session-details"><summary>Session details</summary>
-                  <div class="experiment-context-facts">
-                    <div class="experiment-context-fact"><span>Storage</span><strong id="experiment-storage-state">Not allocated</strong></div>
-                    <div class="experiment-context-fact"><span>Pending</span><strong id="experiment-pending-count">0 / 16</strong></div>
-                  </div>
-                  </details>
-                </article>
-                <article class="experiment-card" id="local-override-manager">
-                  <header><div><h2>Local file override</h2><p>One reviewed response snapshot, one exact disposable target.</p></div></header>
-                  <div class="experiment-body experiment-form">
-                    <p class="experiment-privacy">Choose a UTF-8 file up to 64 KiB. Preview stays local and inert. Arm replaces the single interception rule; later matching requests may execute replacement JavaScript. Only use code and targets you are authorized to test.</p>
-                    <label>Replacement file<input data-override-file type="file" /></label>
-                    <p data-override-facts class="experiment-privacy" style="overflow-wrap:anywhere"></p>
-                    <label>Exact snapshot preview<textarea data-override-preview readonly spellcheck="false" rows="8" aria-label="Inert replacement file preview"></textarea></label>
-                    <label>Exact request URL (including query)<input data-override-url type="url" maxlength="2048" autocomplete="off" placeholder="http://127.0.0.1:17777/fixture.js" /></label>
-                    <div class="experiment-form-row">
-                      <label>Method<select data-override-method><option>GET</option><option>HEAD</option></select></label>
-                      <label>Lifetime from preparation (seconds)<input data-override-ttl type="number" value="60" min="1" max="300" step="1" /></label>
-                    </div>
-                    <label>Response content type<select data-override-type><option value="text/plain; charset=utf-8">UTF-8 plain text</option><option value="text/javascript; charset=utf-8">UTF-8 JavaScript</option><option value="application/json; charset=utf-8">UTF-8 JSON</option><option value="text/css; charset=utf-8">UTF-8 CSS</option></select></label>
-                    <label><input data-override-review type="checkbox" /> I reviewed these exact bytes, digest, URL and settings for this authorized disposable target.</label>
-                    <div class="experiment-actions">
-                      <button data-override-prepare class="secondary-button" type="button" disabled>Prepare snapshot</button>
-                      <button data-override-arm class="trace-button" type="button" disabled>Arm prepared override</button>
-                      <button data-override-disarm class="secondary-button" type="button" disabled>Disarm exact override</button>
-                      <button data-override-clear class="secondary-button" type="button">Clear preview</button>
-                    </div>
-                    <p data-override-status class="experiment-privacy" role="status" style="white-space:pre-wrap;overflow-wrap:anywhere"></p>
-                    <p class="experiment-privacy">No file paths are inferred. The browser supplies selected bytes, not filesystem metadata. No watcher, automatic request, persistence or third-party upload. Closing this panel does not disarm. Keep it open for guarded Disarm, or use the CLI with its original prepared action. Expiry blocks new fulfillment admission, not in-flight completion.</p>
-                  </div>
-                </article>
-                <article class="experiment-card">
-                  <header><div><h2>Interception rule</h2><p>Choose which requests to match and what to change.</p></div><span id="experiment-rule-badge" class="experiment-card-badge" data-kind="offline">Unarmed</span></header>
-                  <div class="experiment-body">
-                    <form id="experiment-rule-form" class="experiment-form">
-                      <label>URL pattern<input id="experiment-url-pattern" type="text" value="*" maxlength="2048" autocomplete="off" /></label>
-                      <div class="experiment-form-row">
-                        <label>Action<select id="experiment-rule-mode"><option value="continue">Continue unchanged</option><option value="block">Block by client</option><option value="drop">Drop / abort</option><option value="rewrite">Rewrite request</option><option value="fulfill">Synthetic response</option></select></label>
-                        <label>Method filter<input id="experiment-method-filter" type="text" maxlength="32" placeholder="Any" autocomplete="off" /></label>
-                      </div>
-                      <div id="experiment-rewrite-options" class="experiment-rule-options" hidden>
-                        <label>Rewrite URL<input id="experiment-rewrite-url" type="url" maxlength="8192" placeholder="Leave unchanged" autocomplete="off" /></label>
-                        <label>Rewrite method<input id="experiment-rewrite-method" type="text" maxlength="32" placeholder="Leave unchanged" autocomplete="off" /></label>
-                        <label>Rewrite headers (JSON)<textarea id="experiment-rewrite-headers" maxlength="20000" spellcheck="false" placeholder='{"x-experiment":"1"}'></textarea></label>
-                        <label>Rewrite body<textarea id="experiment-rewrite-body" maxlength="65536" spellcheck="false" placeholder="Leave unchanged"></textarea></label>
-                      </div>
-                      <div id="experiment-fulfill-options" class="experiment-rule-options" hidden>
-                        <label>Status code<input id="experiment-response-code" type="number" min="100" max="599" step="1" value="200" /></label>
-                        <label>Response headers (JSON)<textarea id="experiment-response-headers" maxlength="20000" spellcheck="false" placeholder='{"content-type":"application/json"}'></textarea></label>
-                        <label>Response body<textarea id="experiment-response-body" maxlength="65536" spellcheck="false" placeholder='{"ok":true}'></textarea></label>
-                      </div>
-                      <button id="experiment-arm-rule" class="secondary-button" type="submit" disabled>Arm interception rule</button>
-                    </form>
-                  </div>
-                </article>
-              </div>
-              <div class="experiment-column">
-                <article class="experiment-card">
-                  <header><div><h2>Request</h2><p>Send one explicit request through the isolated rule.</p></div></header>
-                  <div class="experiment-body">
-                    <form id="experiment-request-form" class="experiment-form">
-                      <label>Request URL<input id="experiment-request-url" type="url" maxlength="8192" placeholder="https://api.example.test/path" autocomplete="off" /></label>
-                      <label>Method<input id="experiment-request-method" type="text" value="GET" maxlength="32" autocomplete="off" /></label>
-                      <label>Headers (JSON)<textarea id="experiment-request-headers" maxlength="20000" spellcheck="false" placeholder='{"accept":"application/json"}'></textarea></label>
-                      <label>Body<textarea id="experiment-request-body" maxlength="65536" spellcheck="false" placeholder="Optional for non-GET requests"></textarea></label>
-                      <button id="experiment-run" class="trace-button" type="submit" disabled>Run isolated request</button>
-                      <details class="experiment-help"><summary>Restrictions</summary><p class="experiment-privacy">Credentials are always omitted. Authorization, Cookie, Set-Cookie, Host, Content-Length, connection, and transfer-encoding headers are rejected before DevTools receives the command.</p></details>
-                    </form>
-                  </div>
-                </article>
-              </div>
-              <div class="experiment-column">
-                <article class="experiment-card">
-                  <header><div><h2>Response</h2><p id="experiment-result-meta">No experiment request has run.</p></div><span id="experiment-result-badge" class="experiment-card-badge" data-kind="offline">No result</span></header>
-                  <div id="experiment-result" class="experiment-empty">Create a context, arm a rule, then run a request.</div>
-                </article>
-                <details class="experiment-card"><summary class="workspace-disclosure-title">Activity log</summary>
-                  <header><div><h2>Activity</h2><p>Metadata only. Query strings, headers, and bodies are not retained.</p></div><span id="experiment-audit-count" class="experiment-card-badge" data-kind="offline">0 entries</span></header>
-                  <div id="experiment-audit" class="experiment-audit"><div class="experiment-empty">No intercepted requests yet.</div></div>
-                </details>
-                <details class="experiment-card experiment-disclosure">
-                  <summary>Limits</summary>
-                  <div class="experiment-context-facts">
-                    <div class="experiment-context-fact"><span>Audit</span><strong>128 entries</strong></div>
-                    <div class="experiment-context-fact"><span>Bodies</span><strong>64 KiB</strong></div>
-                  </div>
-                  <div class="experiment-context-facts">
-                    <div class="experiment-context-fact"><span>Headers</span><strong>64 / 16 KiB</strong></div>
-                    <div class="experiment-context-fact"><span>Concurrent</span><strong>16 requests</strong></div>
-                  </div>
-                </details>
-              </div>
-            </div>
-            <div id="repeater-workspace" class="repeater-workspace" role="region" aria-label="Repeater workspace" hidden>
-              <div class="repeater-command-bar">
-                <form id="repeater-request-form" class="repeater-compose-bar">
-                  <label class="repeater-method-field"><span>Method</span><input id="repeater-request-method" type="text" value="GET" maxlength="256" autocomplete="off" aria-label="Request method" /></label>
-                  <label class="repeater-url-field"><span>URL</span><input id="repeater-request-url" type="text" maxlength="8192" placeholder="https://{{host}}/path/{{id}}" autocomplete="off" aria-label="Request URL" /></label>
-                  <button id="repeater-cancel" class="secondary-button" type="button" disabled>Cancel</button>
-                  <button id="repeater-send" class="trace-button repeater-send" type="submit" disabled>Send</button>
-                </form>
-                <div class="repeater-session-bar">
-                  <span id="repeater-context-badge" class="repeater-session-state" data-kind="offline">Not created</span>
-                  <span id="repeater-context-message" class="repeater-session-message">No disposable request-lab context exists.</span>
-                  <button id="repeater-create" class="secondary-button" type="button">Start session</button>
-                  <button id="repeater-dispose" class="secondary-button" type="button" disabled>End session</button>
-                  <button id="repeater-copy-resolved" class="secondary-button" type="button" disabled>Copy resolved</button>
-                  <button class="exchange-button" id="repeater-client-export" type="button" data-export-open="run" aria-haspopup="dialog" disabled>Export…</button>
-                </div>
-              </div>
-
-              <div class="repeater-split">
-                <section class="repeater-pane repeater-request-pane" aria-labelledby="repeater-request-heading">
-                  <header class="repeater-pane-head">
-                    <div><h2 id="repeater-request-heading">Request</h2><p>Credential-free values sent from the isolated page.</p></div>
-                    <div class="repeater-editor-tabs" role="tablist" aria-label="Request editor">
-                      <button class="repeater-editor-tab" type="button" role="tab" aria-selected="true" aria-controls="repeater-headers-panel" data-repeater-editor-tab="headers">Headers</button>
-                      <button class="repeater-editor-tab" type="button" role="tab" aria-selected="false" aria-controls="repeater-query-panel" data-repeater-editor-tab="query" tabindex="-1">Query</button>
-                      <button class="repeater-editor-tab" type="button" role="tab" aria-selected="false" aria-controls="repeater-body-panel" data-repeater-editor-tab="body" tabindex="-1">Body</button>
-                      <button class="repeater-editor-tab" type="button" role="tab" aria-selected="false" aria-controls="repeater-settings-panel" data-repeater-editor-tab="settings" tabindex="-1">Settings</button>
-                    </div>
-                    <span id="repeater-request-badge" class="experiment-card-badge" data-kind="offline" hidden>Draft</span>
-                  </header>
-                  <div id="repeater-headers-panel" class="repeater-editor-panel repeater-kv-editor" role="tabpanel" data-repeater-editor-panel="headers">
-                    <div class="repeater-kv-table" role="table" aria-label="Request headers">
-                      <div class="repeater-kv-head" role="row"><span aria-hidden="true"></span><span role="columnheader">Key</span><span role="columnheader">Value</span><span aria-hidden="true"></span></div>
-                      <div id="repeater-header-rows" class="repeater-kv-rows" role="rowgroup"></div>
-                    </div>
-                    <textarea id="repeater-request-headers" form="repeater-request-form" maxlength="20000" spellcheck="false" aria-label="Serialized request headers" hidden></textarea>
-                  </div>
-                  <div id="repeater-query-panel" class="repeater-editor-panel repeater-kv-editor" role="tabpanel" data-repeater-editor-panel="query" hidden>
-                    <div class="repeater-kv-table" role="table" aria-label="Query parameters">
-                      <div class="repeater-kv-head" role="row"><span aria-hidden="true"></span><span role="columnheader">Key</span><span role="columnheader">Value</span><span aria-hidden="true"></span></div>
-                      <div id="repeater-query-rows" class="repeater-kv-rows" role="rowgroup"></div>
-                    </div>
-                  </div>
-                  <div id="repeater-body-panel" class="repeater-editor-panel" role="tabpanel" data-repeater-editor-panel="body" hidden>
-                    <label class="repeater-editor-label" for="repeater-request-body">Request body</label>
-                    <p id="repeater-body-representation-note">Imported body line endings are preserved until you edit this field. Editing uses the text editor’s line endings.</p>
-                    <textarea aria-describedby="repeater-body-representation-note" id="repeater-request-body" form="repeater-request-form" maxlength="65536" spellcheck="false" aria-label="Request body" placeholder='{"id":"{{id}}"}'></textarea>
-                  </div>
-                  <div id="repeater-settings-panel" class="repeater-editor-panel repeater-settings-panel" role="tabpanel" data-repeater-editor-panel="settings" hidden>
-                    <label>Timeout (ms)<input id="repeater-request-timeout" form="repeater-request-form" type="number" value="15000" min="100" max="30000" step="100" /></label>
-                    <form id="repeater-variable-form" class="experiment-form">
-                      <div class="repeater-settings-heading"><div><strong>Session variables</strong><span>Use {{name}} in the request or {{=name}} for a literal token.</span></div><span id="repeater-variable-badge" class="experiment-card-badge" data-kind="offline">0 variables</span></div>
-                      <label>Variables (JSON)<textarea id="repeater-variables" maxlength="40000" spellcheck="false" placeholder='{"host":"api.example.test","id":"42"}'></textarea></label>
-                      <button id="repeater-apply-variables" class="secondary-button" type="submit" disabled>Apply variables</button>
-                    </form>
-                    <details class="experiment-help"><summary>Request restrictions</summary><p class="experiment-privacy">Credentials are omitted and browser storage is isolated. Sensitive and transport-owned headers are rejected. History is ephemeral and never enters the evidence store.</p></details>
-                  </div>
-                  <footer class="repeater-request-footer">
-                    <div id="repeater-variable-status" class="repeater-variable-status" role="status" aria-live="polite"><span class="repeater-variable-chip">No variables used</span></div>
-                    <span id="repeater-active-request" class="repeater-active-request">No active request</span>
-                  </footer>
-                </section>
-
-                <section class="repeater-pane repeater-response-pane" aria-labelledby="repeater-response-heading">
-                  <header class="repeater-pane-head">
-                    <div><h2 id="repeater-response-heading">Response</h2><p id="repeater-response-meta">Select a completed run to inspect its bounded response.</p></div>
-                    <span id="repeater-response-badge" class="experiment-card-badge" data-kind="offline">No response</span>
-                  </header>
-                  <div id="repeater-response" class="repeater-response experiment-empty">Send a request or choose one from history.</div>
-                  <details class="repeater-comparison-drawer">
-                    <summary><span>Compare responses</span><span id="repeater-comparison-badge" class="experiment-card-badge" data-kind="offline">No comparison</span></summary>
-                    <div class="repeater-compare-controls experiment-form">
-                      <label>Baseline<select id="repeater-compare-baseline"></select></label>
-                      <label>Current<select id="repeater-compare-current"></select></label>
-                      <button id="repeater-compare" class="secondary-button" type="button" disabled>Compare</button>
-                    </div>
-                    <div id="repeater-comparison" class="experiment-empty">Complete two requests to compare their responses.</div>
-                    <section id="repeater-body-diff" class="repeater-body-diff" aria-label="Response body line changes" hidden></section>
-                  </details>
-                </section>
-              </div>
-
-              <details class="repeater-history-drawer">
-                <summary><span>History</span><span id="repeater-history-badge" class="experiment-card-badge" data-kind="offline">0 runs</span><span id="repeater-history-bytes">0 / 512 KiB</span></summary>
-                <div class="repeater-history-toolbar">
-                  <div><span>Session storage</span><strong id="repeater-storage-state">Not allocated</strong></div>
-                  <div><span>Retained</span><strong id="repeater-history-usage">0 / 24</strong></div>
-                  <button id="repeater-history-prev" class="repeater-icon-button" type="button" aria-label="Previous Repeater request" title="Previous request" disabled>←</button>
-                  <button id="repeater-history-next" class="repeater-icon-button" type="button" aria-label="Next Repeater request" title="Next request" disabled>→</button>
-                  <button id="repeater-clear-history" class="secondary-button" type="button" disabled>Clear</button>
-                </div>
-                <div id="repeater-history" class="repeater-history" role="listbox" aria-label="Repeater request history"><div class="experiment-empty" role="option" aria-disabled="true" aria-selected="false">No Repeater requests yet.</div></div>
-              </details>
-            </div>
-            <div id="element-screenshot-workspace" class="element-screenshot-workspace" hidden>
-              <article class="experiment-card">
-                <header><div><h2>Element screenshot</h2><p>Open an authorized page in Objects, then inspect and capture its exact document.</p></div></header>
-                <div class="experiment-body">
-                  <p class="experiment-privacy">Explicit raw local capture. Form controls, editable/private-marked content, frames and shadow trees are refused. Other text and images may still be sensitive.</p>
-                  <div class="experiment-actions"><button type="button" class="secondary-button" data-element-inspect>Inspect selected document</button><button type="button" class="trace-button" data-element-capture disabled>Grab local screenshot</button><button type="button" class="secondary-button" data-element-clear disabled>Cancel / clear</button></div>
-                  <label class="object-confirm"><input type="checkbox" data-element-confirm disabled /> I authorize raw pixels from this inspected disposable document to remain in this local panel.</label>
-                  <p data-element-notice role="status" aria-live="polite">No capture has been made.</p>
-                  <p data-element-metadata>No document selected.</p>
-                  <details><summary>Geometry, privacy and timing limits</summary><ul data-element-limits></ul><p>Labels may overlap. Select from the list with pointer, Tab, arrow keys, Home or End. Selection changes only the local markup.</p></details>
-                </div>
-              </article>
-              <div class="element-screenshot-layout"><div class="element-screenshot-stage" data-element-stage aria-label="Local screenshot with numbered layout bounds"></div><div class="element-screenshot-list" data-element-list aria-label="Captured element selection"></div></div>
-            </div>
-            <div id="object-workspace" class="experiment-workspace" hidden>
-              <div class="experiment-column">
-                <article class="experiment-card">
-                  <header>
-                    <div><h2>Session</h2><p id="object-context-message">No disposable Experiment context exists.</p></div>
-                    <span id="object-context-badge" class="experiment-card-badge" data-kind="offline">Not created</span>
-                  </header>
-                  <div class="experiment-body">
-                    <div class="experiment-actions">
-                      <button id="object-create" class="trace-button experiment-primary" type="button">Create isolated context</button>
-                      <button id="object-dispose" class="secondary-button" type="button" disabled>Dispose and erase</button>
-                    </div>
-                  </div>
-                  <details class="experiment-session-details"><summary>Session details</summary>
-                  <div class="experiment-context-facts">
-                    <div class="experiment-context-fact"><span>Storage</span><strong id="object-storage-state">Not allocated</strong></div>
-                    <div class="experiment-context-fact"><span>Page</span><strong id="object-page-state">Not opened</strong></div>
-                  </div>
-                  </details>
-                </article>
-                <article class="experiment-card">
-                  <header><div><h2>Disposable page</h2><p>Open one explicit URL with no baseline cookies or storage.</p></div><span id="object-page-badge" class="experiment-card-badge" data-kind="offline">No page</span></header>
-                  <div class="experiment-body">
-                    <form id="object-navigation-form" class="experiment-form">
-                      <label>Page URL<input id="object-page-url" type="url" maxlength="8192" placeholder="https://app.example.test/lab" autocomplete="off" /></label>
-                      <button id="object-navigate" class="secondary-button" type="submit" disabled>Open isolated page</button>
-                      <details class="experiment-help"><summary>Restrictions</summary><p class="experiment-privacy">HTTP and HTTPS only. URL credentials and fragments are rejected. Query text is never retained in the audit.</p></details>
-                    </form>
-                  </div>
-                </article>
-                <article class="experiment-card">
-                  <header><div><h2>Find objects</h2><p>Own properties are inspected without invoking getters.</p></div><span id="object-search-badge" class="experiment-card-badge" data-kind="offline">No search</span></header>
-                  <div class="experiment-body">
-                    <form id="object-search-form" class="experiment-form">
-                      <label>Property name<input id="object-property-query" type="text" maxlength="512" placeholder="ready, config, featureFlag" autocomplete="off" /></label>
-                      <label>Primitive value<input id="object-value-query" type="text" maxlength="512" placeholder="Optional exact text or pattern" autocomplete="off" /></label>
-                      <details class="experiment-advanced"><summary>Advanced search</summary><div class="experiment-form">
-                      <label>Class name<input id="object-class-query" type="text" maxlength="512" placeholder="Object, Array, CheckoutState" autocomplete="off" /></label>
-                      <label>Structural shape<textarea id="object-shape-query" maxlength="4096" spellcheck="false" placeholder='{"ready":false}'></textarea></label>
-                      <div class="experiment-form-row">
-                        <label>Similarity<input id="object-similarity-threshold" type="number" min="0" max="1" step="0.05" value="0.75" /></label>
-                        <div class="object-search-options"><label class="memory-check"><input id="object-regex" type="checkbox" /> Regular expression</label><label class="memory-check"><input id="object-case-sensitive" type="checkbox" /> Case sensitive</label><label class="memory-check"><input id="object-shape-values" type="checkbox" /> Match shape values</label></div>
-                      </div>
-                      </div></details>
-                      <button id="object-search" class="trace-button" type="submit" disabled>Search isolated page</button>
-                    </form>
-                  </div>
-                </article>
-              </div>
-              <div class="experiment-column">
-                <article class="experiment-card object-results-card">
-                  <header><div><h2>Matches</h2><p id="object-search-meta">Open a page and run one bounded search.</p></div><span id="object-result-count" class="experiment-card-badge" data-kind="offline">0 matches</span></header>
-                  <div id="object-results" class="object-result-list" role="listbox" aria-label="Object Lab live matches"><div class="experiment-empty" role="option" aria-disabled="true" aria-selected="false">No retained object references.</div></div>
-                </article>
-              </div>
-              <div class="experiment-column">
-                <article class="experiment-card">
-                  <header><div><h2>Edit selected object</h2><p id="object-selection-meta">Select one retained object result.</p></div><span id="object-mutation-badge" class="experiment-card-badge" data-kind="offline">Locked</span></header>
-                  <div class="experiment-body">
-                    <div id="object-preview" class="object-property-preview"><div class="experiment-empty">No object selected.</div></div>
-                    <form id="object-mutation-form" class="experiment-form">
-                      <div class="experiment-form-row">
-                        <label>Operation<select id="object-operation"><option value="set">Set JSON value</option><option value="delete">Delete own property</option></select></label>
-                        <label>Own property<input id="object-mutation-property" type="text" maxlength="256" autocomplete="off" placeholder="ready" /></label>
-                      </div>
-                      <label id="object-value-field">JSON value<textarea id="object-mutation-value" maxlength="16384" spellcheck="false" placeholder='{"enabled":true}'></textarea></label>
-                      <label class="object-confirm"><input id="object-confirm" type="checkbox" /> I confirm this will mutate only the disposable Experiment page.</label>
-                      <button id="object-mutate" class="trace-button" type="submit" disabled>Apply confirmed patch</button>
-                      <details class="experiment-help"><summary>Restrictions</summary><p class="experiment-privacy">No arbitrary code, function calls, prototype changes, getters, or setters. The baseline page and evidence store are never modified.</p></details>
-                    </form>
-                  </div>
-                  <div id="object-mutation-result" class="object-mutation-summary">No mutation attempted.</div>
-                </article>
-                <details class="experiment-card"><summary class="workspace-disclosure-title">Activity log</summary>
-                  <header><div><h2>Activity</h2><p>Metadata and value digest only. Set values and page content are not retained.</p></div><span id="object-audit-count" class="experiment-card-badge" data-kind="offline">0 entries</span></header>
-                  <div id="object-audit" class="experiment-audit"><div class="experiment-empty">No object mutations attempted.</div></div>
-                </details>
-                <details class="experiment-card experiment-disclosure">
-                  <summary>Limits</summary>
-                  <div class="experiment-context-facts">
-                    <div class="experiment-context-fact"><span>Search</span><strong>25,000 objects / 750 ms</strong></div>
-                    <div class="experiment-context-fact"><span>Matches</span><strong>50 / 16 properties</strong></div>
-                  </div>
-                  <div class="experiment-context-facts">
-                    <div class="experiment-context-fact"><span>Mutations</span><strong>256 attempts / 128 audit</strong></div>
-                    <div class="experiment-context-fact"><span>JSON value</span><strong>16 KiB / depth 8</strong></div>
-                  </div>
-                </details>
-              </div>
-            </div>
-            <div id="hooks-home" hidden></div>
-            <div id="hooks-workspace" class="experiment-workspace" aria-label="Runtime Hooks" hidden>
-              <div class="source-hooks-head"><strong>Runtime Hooks · page execution</strong><button id="source-hooks-experiments" class="source-tool" type="button">Experiments</button><button id="source-hooks-close" class="source-tool" type="button" aria-label="Close Runtime Hooks panel">Close</button></div>
-              <div id="source-hooks-notice" class="experiment-notice" data-kind="idle" role="status" aria-live="polite" hidden></div>
-              <section id="candidate-experiment-strip" class="candidate-experiment-strip" aria-label="Candidate experiment question" hidden>
-                <strong id="candidate-experiment-question"></strong>
-                <p id="candidate-experiment-status" role="status" aria-live="polite"></p>
-                <label>Disposable target<select id="candidate-experiment-target"><option value="">Choose page or worker</option></select></label>
-                <div class="experiment-actions">
-                  <button id="candidate-experiment-bind" class="secondary-button" type="button" disabled>Bind observation hook</button>
-                  <button id="candidate-experiment-cancel" class="secondary-button" type="button" hidden>Stop waiting</button>
-                  <button id="candidate-experiment-return" class="secondary-button" type="button">Return to original field</button>
-                  <button id="candidate-experiment-close" class="source-tool" type="button">Clear question</button>
-                </div>
-              </section>
-              <div class="experiment-column hooks-setup-column">
-                <article class="experiment-card">
-                  <header>
-                    <div><h2>Session</h2><p id="hooks-context-message" hidden></p></div>
-                    <span id="hooks-context-badge" class="experiment-card-badge" data-kind="offline">Not created</span>
-                  </header>
-                  <div class="experiment-body">
-                    <div class="experiment-actions">
-                      <button id="hooks-create" class="trace-button experiment-primary" type="button">Create isolated context</button>
-                      <button id="hooks-dispose" class="secondary-button" type="button" disabled>Dispose and erase</button>
-                      <button id="hooks-field-jump" class="secondary-button" type="button">Test a request value</button>
-                      <button id="hooks-clear" class="secondary-button" type="button" disabled>Clear hit records</button>
-                    </div>
-                  </div>
-                  <details class="experiment-session-details"><summary>Session details</summary>
-                  <div class="experiment-context-facts">
-                    <div class="experiment-context-fact"><span>Storage</span><strong id="hooks-storage-state">Not allocated</strong></div>
-                    <div class="experiment-context-fact"><span>Active points</span><strong id="hooks-point-usage">0 / 64</strong></div>
-                  </div>
-                  </details>
-                </article>
-                <article class="experiment-card">
-                  <header><div><h2>Disposable page</h2><p>Credential-free URL only.</p></div><span id="hooks-page-badge" class="experiment-card-badge" data-kind="offline">No page</span></header>
-                  <div class="experiment-body">
-                    <form id="hooks-navigation-form" class="experiment-form">
-                      <label>Page URL<input id="hooks-page-url" type="url" maxlength="8192" placeholder="https://app.example.test/lab" autocomplete="off" /></label>
-                      <button id="hooks-navigate" class="secondary-button" type="submit" disabled>Open isolated page</button>
-                      <details class="experiment-help"><summary>Restrictions</summary><p class="experiment-privacy">Navigation invalidates script identifiers and safely clears all hook definitions.</p></details>
-                    </form>
-                  </div>
-                </article>
-                <article id="hooks-field-card" class="experiment-card" tabindex="-1" aria-label="Request value test">
-                  <header><div><h2>Value test</h2></div><span id="hooks-field-badge" class="experiment-card-badge" data-kind="offline">Off</span></header>
-                  <div class="experiment-body experiment-form">
-                    <p id="hooks-field-status" class="experiment-privacy" role="status">Choose a field to capture.</p>
-                    <form id="hooks-field-form" class="experiment-form">
-                      <label>Request URL<input id="hooks-field-url" type="url" maxlength="8192" placeholder="https://example.test/api/submit" title="Exact path; omit query and fragment" autocomplete="off" /></label>
-                      <div class="experiment-form-row"><label>Method<input id="hooks-field-method" type="text" maxlength="32" value="POST" autocomplete="off" /></label><label>Value type<select id="hooks-field-kind"><option value="json">JSON field</option><option value="form">Form field</option><option value="query">Query parameter</option><option value="header">Request header</option><option value="body">Raw text body</option></select></label></div>
-                      <label id="hooks-field-pointer-label">JSON pointer or field name<input id="hooks-field-pointer" type="text" maxlength="256" placeholder="/payload" autocomplete="off" /></label>
-                      <label class="hook-confirm"><input id="hooks-field-confirm" type="checkbox" /> Capture value in isolated context</label>
-                      <div class="hook-control-actions"><button id="hooks-field-configure" class="trace-button" type="submit" disabled>Capture</button><button id="hooks-field-erase" class="secondary-button" type="button" disabled>Stop and erase</button></div>
-                    </form>
-                    <details class="experiment-help"><summary>Capture details</summary><p class="experiment-privacy">Captures only the selected value. Query context is compared privately. Raw body mode captures body content.</p></details>
-                    <div id="hooks-field-observations" class="hook-hit-list" role="log" aria-live="polite"><div class="experiment-empty">No observations.</div></div>
-                    <details class="experiment-help"><summary>Comparison details</summary><p class="experiment-privacy">Observe a baseline, then repeat the same input with a return override. A change alone is inconclusive.</p></details>
-                    <div class="experiment-form-row"><label>Baseline<select id="hooks-field-baseline"></select></label><label>Variant<select id="hooks-field-variant"></select></label></div>
-                    <button id="hooks-field-compare" class="secondary-button" type="button" disabled>Compare</button>
-                    <button id="hooks-field-provenance" class="secondary-button" type="button" disabled>Field trace</button>
-                    <div id="hooks-field-result" role="status" aria-live="polite"></div>
-                  </div>
-                </article>
-              </div>
-              <div class="experiment-column hooks-definition-column">
-                <article class="experiment-card">
-                  <header><div><h2>Add hook</h2></div><span id="hooks-definition-count" class="experiment-card-badge" data-kind="offline">0 / 8</span></header>
-                  <div class="experiment-body">
-                    <form id="hooks-definition-form" class="experiment-form">
-                      <label>Label<input id="hooks-label" type="text" maxlength="128" placeholder="checkout guard" autocomplete="off" /></label>
-                      <label>Source<select id="hooks-script"></select></label>
-                      <label>Target<select id="hooks-entry-mode"><option value="source">Source cursor</option><option value="function">Live function object</option></select></label>
-                      <details class="experiment-help"><summary>Targeting help</summary><p class="experiment-privacy">Source cursor targets the innermost function and supports entry and return. Live function object accepts a side-effect-free expression and supports entry only.</p></details>
-                      <div id="hooks-source-location-fields" class="experiment-form-row"><label>Line<input id="hooks-line" type="number" min="1" max="2147483647" step="1" value="1" /></label><label>Column<input id="hooks-column" type="number" min="1" max="2147483647" step="1" value="1" /></label></div>
-                      <label id="hooks-function-expression-field" hidden>Side-effect-free function expression<input id="hooks-function-expression" type="text" maxlength="1024" placeholder="self.onmessage" autocomplete="off" /></label>
-                      <div class="hook-phase-options"><label><input id="hooks-entry-enabled" type="checkbox" checked /> Entry</label><label><input id="hooks-return-enabled" type="checkbox" checked /> Synchronous return</label></div>
-                      <details class="experiment-help"><summary>Conditions and custom logic · optional</summary>
-                      <label>Side-effect-free condition<input id="hooks-condition" type="text" maxlength="1024" placeholder="cart.total &gt; 100" autocomplete="off" /></label>
-                      <label>Entry logic<textarea id="hooks-entry-logic" maxlength="8192" spellcheck="false" placeholder="cart.reviewed = true;"></textarea></label>
-                      <label>Return logic<textarea id="hooks-return-logic" maxlength="8192" spellcheck="false" placeholder="window.__labHits = (window.__labHits || 0) + 1;"></textarea></label>
-                      </details>
-                      <label>Return replacement<select id="hooks-return-mode"><option value="none">Keep original</option><option value="json">Typed JSON value</option><option value="expression">Frame expression</option></select></label>
-                      <label id="hooks-return-value-field" hidden>Replacement JSON or expression<textarea id="hooks-return-value" maxlength="8192" spellcheck="false" placeholder='{"allowed":true}'></textarea></label>
-                      <div class="hook-control-actions">
-                        <button id="hooks-add" class="secondary-button" type="submit" disabled>Add hook</button>
-                        <button id="hooks-pause-line" class="secondary-button" type="button" disabled>Pause at this line</button>
-                      </div>
-                      <p class="experiment-privacy">Pause at this line sets a debugger breakpoint on the exact attached page script and leaves that page paused. It is not a hook and does not resume on its own.</p>
-                    </form>
-                  </div>
-                </article>
-                <article class="experiment-card">
-                  <header><div><h2>Configured</h2><p>Edit while disarmed. Cleared on navigation.</p></div><span id="hooks-definition-badge" class="experiment-card-badge" data-kind="offline">Empty</span></header>
-                  <div id="hooks-definitions" class="hook-definition-list"><div class="experiment-empty">No hooks yet.</div></div>
-                </article>
-                <article class="experiment-card">
-                  <header><div><h2>Hook controls · optional</h2></div><span id="hooks-state-badge" class="experiment-card-badge" data-kind="offline">Disarmed</span></header>
-                  <div class="experiment-body experiment-form">
-                    <label class="hook-confirm"><input id="hooks-confirm" type="checkbox" /> I confirm these hooks may mutate the selected page, its cookies and storage. Page-frame code is not sandboxed.</label>
-                    <div class="hook-control-actions">
-                      <button id="hooks-arm" class="trace-button" type="button" disabled>Arm all hooks</button>
-                      <button id="hooks-disarm" class="secondary-button" type="button" disabled>Disarm</button>
-                    </div>
-                    <details class="experiment-help"><summary>Restrictions</summary><p class="experiment-privacy">A hook pause is handled internally and always resumes. Promise return replacement is rejected.</p></details>
-                  </div>
-                </article>
-              </div>
-              <div id="hooks-hits-home" hidden></div>
-              <div id="hooks-hits-column" class="experiment-column">
-                <article class="experiment-card hook-hits-card">
-                  <header><div><h2>Hits</h2><p id="hooks-hit-meta" hidden></p></div><span id="hooks-hit-count" class="experiment-card-badge" data-kind="offline">0 / 512</span></header>
-                  <div id="hooks-hits" class="hook-hit-list" role="log" aria-live="polite"><div class="experiment-empty">Arm a hook, then exercise the isolated page.</div></div>
-                </article>
-                <details class="experiment-card experiment-disclosure">
-                  <summary>Limits</summary>
-                  <div class="experiment-context-facts"><div class="experiment-context-fact"><span>Definitions</span><strong>8 / 64 points</strong></div><div class="experiment-context-fact"><span>Returns</span><strong>32 per function</strong></div></div>
-                  <div class="experiment-context-facts"><div class="experiment-context-fact"><span>Hits</span><strong>512 / 128 retained</strong></div><div class="experiment-context-fact"><span>Handler</span><strong>100 ms / 32 bindings</strong></div></div>
-                </details>
-              </div>
-            </div>
-            <div id="automation-workspace" class="experiment-workspace" hidden>
-              <div class="experiment-column">
-                <article class="experiment-card">
-                  <header>
-                    <div><h2>Session</h2><p id="automation-context-message">Recipe definitions stay local; execution requires a disposable context.</p></div>
-                    <span id="automation-context-badge" class="experiment-card-badge" data-kind="offline">Not created</span>
-                  </header>
-                  <div class="experiment-body">
-                    <div class="experiment-actions">
-                      <button id="automation-create" class="trace-button experiment-primary" type="button">Create isolated context</button>
-                      <button id="automation-dispose" class="secondary-button" type="button" disabled>Dispose and erase runs</button>
-                      <button id="automation-clear" class="secondary-button" type="button" disabled>Clear run history</button>
-                    </div>
-                  </div>
-                  <details class="experiment-session-details"><summary>Session details</summary>
-                  <div class="experiment-context-facts">
-                    <div class="experiment-context-fact"><span>Storage</span><strong id="automation-storage-state">Definitions in memory</strong></div>
-                    <div class="experiment-context-fact"><span>Runs</span><strong id="automation-run-usage">0 / 256</strong></div>
-                  </div>
-                  </details>
-                </article>
-                <article class="experiment-card">
-                  <header><div><h2>Disposable page</h2><p>Open one explicit credential-free page for manual and automatic recipes.</p></div><span id="automation-page-badge" class="experiment-card-badge" data-kind="offline">No page</span></header>
-                  <div class="experiment-body">
-                    <form id="automation-navigation-form" class="experiment-form">
-                      <label>Page URL<input id="automation-page-url" type="url" maxlength="8192" placeholder="https://app.example.test/lab" autocomplete="off" /></label>
-                      <button id="automation-navigate" class="secondary-button" type="submit" disabled>Open isolated page</button>
-                    </form>
-                  </div>
-                </article>
-                <article class="experiment-card">
-                  <header><div><h2>Automatic execution</h2><p>Created, before-load, and after-load recipes run sequentially with a bounded 16-trigger queue.</p></div><span id="automation-state-badge" class="experiment-card-badge" data-kind="offline">Disarmed</span></header>
-                  <div class="experiment-body experiment-form">
-                    <label>Variables (JSON object)<textarea id="automation-variables" maxlength="16384" spellcheck="false" placeholder='{"seed":"verified"}'></textarea></label>
-                    <label class="hook-confirm"><input id="automation-confirm" type="checkbox" /> I confirm these recipes may execute and mutate only the disposable page</label>
-                    <div class="hook-control-actions">
-                      <button id="automation-arm" class="trace-button" type="button" disabled>Arm automatic recipes</button>
-                      <button id="automation-disarm" class="secondary-button" type="button" disabled>Disarm</button>
-                      <button id="automation-cancel" class="secondary-button" type="button" disabled>Cancel active run</button>
-                    </div>
-                    <details class="experiment-help"><summary>Restrictions</summary><p class="experiment-privacy">Variable values are never returned in public session state. A new explicit snapshot is required for each arm or manual run.</p></details>
-                  </div>
-                </article>
-              </div>
-              <div class="experiment-column">
-                <article class="experiment-card">
-                  <header><div><h2>Recipe editor</h2><p>WireBrowser-compatible page helpers: WB.Browser.Utils and Utils.</p></div><span id="automation-recipe-count" class="experiment-card-badge" data-kind="offline">0 / 16</span></header>
-                  <div class="experiment-body">
-                    <form id="automation-recipe-form" class="experiment-form">
-                      <label>Label<input id="automation-label" type="text" maxlength="128" placeholder="mark checkout state" autocomplete="off" /></label>
-                      <div class="experiment-form-row">
-                        <label>Trigger<select id="automation-trigger"><option value="manual">Manual only</option><option value="created">Context created / armed</option><option value="before-load">Before page load</option><option value="after-load">After page load</option></select></label>
-                        <div class="object-search-options"><label class="memory-check"><input id="automation-enabled" type="checkbox" checked /> Enabled</label></div>
-                      </div>
-                      <label>Async page-context JavaScript<textarea id="automation-source" class="automation-code" maxlength="16384" spellcheck="false" placeholder='console.info("seed", Utils.getVar("seed"));&#10;return document.title;'></textarea></label>
-                      <div class="automation-editor-actions">
-                        <button id="automation-save" class="trace-button" type="submit" disabled>Add recipe</button>
-                        <button id="automation-cancel-edit" class="secondary-button" type="button" hidden>Cancel edit</button>
-                      </div>
-                    </form>
-                  </div>
-                </article>
-                <article class="experiment-card">
-                  <header><div><h2>Recipe library</h2><p>Definitions survive disposable-context recreation until Origin Trace exits.</p></div><span id="automation-source-usage" class="experiment-card-badge" data-kind="offline">0 / 64 KiB</span></header>
-                  <div id="automation-recipes" class="automation-recipe-list"><div class="experiment-empty">No page-context recipes configured.</div></div>
-                </article>
-              </div>
-              <div class="experiment-column">
-                <article class="experiment-card">
-                  <header><div><h2>Run timeline</h2><p id="automation-run-meta">Time, source, trigger, outcome, and correlation IDs for every retained run.</p></div><span id="automation-run-count" class="experiment-card-badge" data-kind="offline">0 / 64</span></header>
-                  <div id="automation-runs" class="automation-run-list" role="listbox" aria-label="Automation recipe runs"><div class="experiment-empty" role="option" aria-disabled="true" aria-selected="false">Run a recipe to see its bounded result and logs.</div></div>
-                </article>
-                <article class="experiment-card">
-                  <header><div><h2>Selected result</h2><p id="automation-result-meta">Select a completed run.</p></div><span id="automation-result-badge" class="experiment-card-badge" data-kind="offline">No result</span></header>
-                  <div id="automation-result" class="automation-result"><div class="experiment-empty">No run selected.</div></div>
-                </article>
-                <details class="experiment-card experiment-disclosure">
-                  <summary>Limits</summary>
-                  <div class="experiment-context-facts"><div class="experiment-context-fact"><span>Recipes</span><strong>16 / 64 KiB total</strong></div><div class="experiment-context-fact"><span>Automatic</span><strong>8 recipes / 64 runs</strong></div></div>
-                  <div class="experiment-context-facts"><div class="experiment-context-fact"><span>Runtime</span><strong>2 seconds each</strong></div><div class="experiment-context-fact"><span>Output</span><strong>16 KiB / 32 logs</strong></div></div>
-                </details>
-              </div>
-            </div>
-          </section>
-
           <section id="screen-api-collection" class="screen" aria-label="API Collection" hidden>
             <header class="screen-head">
-              <div><h1>Collection</h1><div class="screen-subtitle">Author saved requests. Test them in an isolated context.</div></div>
+              <div><h1>Collection</h1><div class="screen-subtitle">Author and organize saved request definitions locally. Browser replay has been removed.</div></div>
               <div class="screen-head-actions"><span class="memory-readonly">Local only</span></div>
             </header>
             <div class="collection-statusbar"><div id="collection-notice" class="collection-notice" data-kind="loading" role="status" aria-live="polite">Loading your local collection…</div><button id="collection-retry" class="secondary-button" type="button" hidden>Retry load</button></div>
@@ -1112,8 +429,8 @@
                 </div>
                 <form id="collection-request-form" class="collection-form" hidden>
                   <div class="collection-command-row"><label>Method<input id="collection-request-method" type="text" maxlength="256" value="GET" autocomplete="off" /></label><label>Request URL<input id="collection-request-url" type="text" maxlength="8192" placeholder="https://{{host}}/path/{{id}}" autocomplete="off" /></label></div>
-                  <div class="collection-author-actions"><button id="collection-save-request" class="secondary-button" type="submit">Save request</button><button id="collection-run" class="trace-button" type="button" disabled>Run saved request</button><button id="collection-discard-request" class="secondary-button" type="button" disabled>Discard edits</button></div>
-                  <p id="collection-run-help" class="collection-help">Save your request before running it.</p>
+                  <div class="collection-author-actions"><button id="collection-save-request" class="secondary-button" type="submit">Save request</button><button id="collection-discard-request" class="secondary-button" type="button" disabled>Discard edits</button></div>
+
                   <details class="collection-properties" open><summary>Request settings</summary>
                     <div class="collection-form-row"><label>Name<input id="collection-request-name" type="text" maxlength="128" autocomplete="off" /></label><label>Folder<select id="collection-request-folder"></select></label></div>
                     <label>Timeout (ms)<input id="collection-request-timeout" type="number" min="100" max="30000" step="100" value="15000" /></label>
@@ -1131,31 +448,6 @@
                 </form>
               </section>
 
-              <aside class="collection-pane collection-run-pane" aria-label="Collection execution">
-                <details class="collection-run-card collection-context" open>
-                  <summary class="workspace-disclosure-title">Isolated context <span id="collection-context-badge" class="experiment-card-badge" data-kind="offline">Not created</span></summary>
-                  <p id="collection-context-message" class="collection-help">No disposable request-lab context exists.</p>
-                  <div class="collection-author-actions"><button id="collection-create-context" class="secondary-button" type="button">Create isolated context</button><button id="collection-cancel" class="secondary-button" type="button" disabled>Cancel active run</button></div>
-                </details>
-                <article class="collection-run-card collection-response-card">
-                  <header><div><h2>Response</h2><p id="collection-response-meta">No completed run selected.</p></div><span id="collection-response-badge" class="experiment-card-badge" data-kind="offline">No response</span></header>
-                  <div class="collection-tabs" role="tablist" aria-label="Response content">
-                    <button id="collection-response-tab-body" type="button" role="tab" data-collection-response-tab="body" aria-selected="true" aria-controls="collection-response">Body</button>
-                    <button id="collection-response-tab-headers" type="button" role="tab" data-collection-response-tab="headers" aria-selected="false" aria-controls="collection-response" tabindex="-1">Headers</button>
-                  </div>
-                  <div id="collection-response" class="repeater-response experiment-empty" role="tabpanel" aria-labelledby="collection-response-tab-body" tabindex="0">Run a saved request to inspect its bounded response.</div>
-                </article>
-                <details class="collection-run-card collection-history-card">
-                  <summary class="workspace-disclosure-title">Run history <span id="collection-history-badge" class="experiment-card-badge" data-kind="offline">0 runs</span></summary>
-                  <p class="collection-help">This request’s retained runs. Erased with the isolated context.</p>
-                  <div id="collection-history" class="collection-run-history" role="listbox" aria-label="Selected request execution history"><div class="experiment-empty" role="option" aria-disabled="true" aria-selected="false">No executions for this request.</div></div>
-                </details>
-                <details class="collection-run-card collection-limits">
-                  <summary class="workspace-disclosure-title">Storage and limits</summary>
-                  <p id="collection-generation" class="collection-storage-note">Generation 0</p>
-                  <p class="collection-storage-note">Saved locally in a permission-restricted 2 MiB document. Up to 32 folders, 128 requests and 32 variables per scope. Runs stay in bounded, ephemeral Repeater memory and never enter captured evidence. Imported requests include only a method and query-free URL.</p>
-                </details>
-              </aside>
             </div>
           </section>
 
@@ -1302,11 +594,6 @@
                         <pre id="decoder-output" tabindex="0" data-empty-label="No bytes to display. Enter input to begin.">No bytes selected.</pre>
                         <div class="decoder-actions"><button id="decoder-copy-output" class="secondary-button" type="button" disabled>Copy visible output</button></div>
                         <section id="investigation-decoder-origin" class="decoder-field-origin" aria-label="Decoded value evidence origin" hidden><p></p><button class="secondary-button" type="button">Open original evidence</button></section>
-                        <section id="decoder-field-origin" class="decoder-field-origin" aria-label="Request field source search" hidden>
-                          <p id="decoder-field-origin-label"></p>
-                          <button id="decoder-find-sources" class="secondary-button" type="button" disabled>Find sources for result</button>
-                          <p id="decoder-field-origin-notice" role="status"></p>
-                        </section>
                       </div>
                       <details class="tool-detail-disclosure"><summary>Result details</summary>
                       <div class="decoder-facts"><div class="decoder-fact"><span>Selected bytes</span><strong id="decoder-selected-bytes">0 B</strong></div><div class="decoder-fact"><span>Retained</span><strong id="decoder-retained-bytes">0 B / 4 MiB</strong></div><div class="decoder-fact"><span>Engine time</span><strong id="decoder-duration">Not run</strong></div><div class="decoder-fact"><span>Execution</span><strong>Explicit only</strong></div></div>
@@ -1315,7 +602,6 @@
                   </aside>
                 </div>
               </div>
-
 
               <div id="tools-panel-float32" class="tools-panel" role="tabpanel" aria-labelledby="tools-tab-float32" hidden>
                 <div class="float32-workspace">
@@ -1420,32 +706,12 @@
         </section>
       </div>
 
-      <dialog id="passive-security" class="api-catalog" aria-labelledby="passive-security-title" aria-describedby="passive-security-scope">
-        <header class="api-catalog-header"><h2 id="passive-security-title">Local passive security report</h2><button id="passive-security-close" class="secondary-button" type="button" autofocus>Close</button></header>
-        <p id="passive-security-scope">One selected retained capture. Header observations and secret-looking counts only. No target requests, credential checks or automatic changes.</p>
-        <p id="passive-security-status" role="status" aria-live="polite"></p>
-        <div id="passive-security-content" class="api-catalog-content" tabindex="0" aria-label="Passive security observations"></div>
-      </dialog>
-      <dialog id="api-catalog" class="api-catalog" aria-labelledby="api-catalog-title" aria-describedby="api-catalog-scope">
-        <header class="api-catalog-header"><h2 id="api-catalog-title">Observed API catalog</h2><button id="api-catalog-refresh" class="secondary-button" type="button">Refresh snapshot</button><button id="api-catalog-close" class="secondary-button" type="button" autofocus>Close</button></header>
-        <p id="api-catalog-scope">Structural observations from the newest retained Traffic records. Not an API specification. Paths and names may contain private data. Raw Traffic is unchanged.</p>
-        <p id="api-catalog-status" role="status" aria-live="polite">Open or refresh deliberately to read a snapshot. No automatic refresh.</p>
-        <div class="api-catalog-filters">
-          <label>Find observed structure<input id="api-catalog-search" type="search" disabled maxlength="256" autocomplete="off" placeholder="Path, method, status or field name" aria-describedby="api-catalog-filter-scope"></label>
-          <label>Response<select id="api-catalog-response" disabled><option value="all">Any response</option><option value="json">Observed JSON</option><option value="unavailable">Unavailable shape</option><option value="error">HTTP errors (400–599)</option></select></label>
-          <button id="api-catalog-clear" class="secondary-button" type="button" disabled>Clear filters</button>
-        </div>
-        <p id="api-catalog-filter-scope">Local substring search of endpoint and structural names only; no captured values or target requests.</p>
-        <p id="api-catalog-filter-status" role="status" aria-live="polite"></p>
-        <div id="api-catalog-content" class="api-catalog-content" tabindex="0" aria-label="Endpoint observations"></div>
-      </dialog>
-
       <dialog id="captured-export-dialog" class="captured-export-dialog" aria-labelledby="captured-export-title" aria-describedby="captured-export-context">
         <header class="captured-export-header"><div><p class="captured-export-eyebrow">LOCAL EXPORT</p><h2 id="captured-export-title">Export capture</h2></div><button class="secondary-button" type="button" data-export-close aria-label="Close export">×</button></header>
         <div class="captured-export-body">
           <p id="captured-export-context" class="captured-export-context"></p>
           <div class="captured-export-fields">
-            <label>Format<select data-export-format><option value="json">Capture JSON</option><option value="client">Client project · ZIP</option><option value="har">HAR · network archive</option><option value="sdl">GraphQL schema · SDL</option></select></label>
+            <label data-export-format-field>Format<select data-export-format><option value="json">Capture JSON</option><option value="client">Client project · ZIP</option><option value="har">HAR · network archive</option><option value="sdl">GraphQL schema · SDL</option></select></label>
             <label data-export-provider-field hidden>Client runtime<select data-export-provider><option value="standard">Go + JavaScript</option><option value="requests">Python · requests</option><option value="httpx">Python · httpx</option></select></label>
             <label data-export-source-field hidden>Schema source<select data-export-source><option value="capture">Selected response</option><option value="file">Local introspection JSON</option></select></label>
             <label data-export-file-field hidden>Introspection file<input type="file" accept=".json,application/json" data-export-file><span>Up to 1 MiB · complete __schema or data.__schema</span></label>
@@ -1456,14 +722,6 @@
           <p class="captured-export-status" data-export-status role="status" aria-live="polite" hidden></p>
         </div>
         <footer class="captured-export-footer"><span>On this device only</span><button class="secondary-button" type="button" data-export-cancel>Cancel</button><button class="secondary-button captured-export-primary" type="button" data-export-submit>Export</button></footer>
-      </dialog>
-
-      <dialog id="captured-client-review" class="api-catalog" aria-labelledby="captured-client-title">
-        <header class="api-catalog-header"><h2 id="captured-client-title">Review captured request</h2><button class="secondary-button" type="button" data-client-close autofocus>Cancel</button></header>
-        <div class="api-catalog-content captured-client-content" data-client-review-content tabindex="0" aria-label="Captured request and replay limitations"></div>
-        <p data-client-review-status role="status" aria-live="polite"></p>
-        <label data-client-replace-label><input type="checkbox" data-client-replace /> Replace the existing Repeater draft with this reviewed capture</label>
-        <button class="secondary-button" type="button" data-client-apply disabled>Create isolated draft</button>
       </dialog>
 
       <footer class="statusbar">
@@ -1483,12 +741,9 @@
     <script src="evidence_comparison.js"></script>
     <script src="source_syntax.js"></script>
     <script src="source_facts.js"></script>
-    <script src="traffic_comparison.js"></script>
     <script src="traffic_view.js"></script>
-    <script src="api_catalog.js"></script>
     <script src="captured_client.js"></script>
     <script src="captured_export_formats.js"></script>
-    <script src="passive_security.js"></script>
     <script src="vm_debugger.js"></script>
     <script src="vm_static.js"></script>
     <script src="vm_static_view.js"></script>
@@ -1499,16 +754,12 @@
     <script src="vm_opcode_ledger.js"></script>
     <script src="vm_opcode_ledger_view.js"></script>
     <script src="vm_semantics.js"></script>
-    <script src="request_value_test.js"></script>
-    <script src="field_provenance.js"></script>
     <script src="pane_layout.js"></script>
     <script src="native_console_completion.js"></script>
     <script src="native_console.js"></script>
     <script src="investigation_navigation.js"></script>
     <script src="investigation_notebook.js"></script>
-    <script src="element_screenshot.js"></script>
-    <script src="local_override_manager.js"></script>
-    <script src="captured_vm_lab.js"></script>
+
     <script src="app.js"></script>
     <script src="vm_program_workspace.js"></script>
   </body>

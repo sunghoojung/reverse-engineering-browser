@@ -28,11 +28,11 @@ endpoint file, so it will not silently target an installed app session:
 ```sh
 apps/origin-trace-backend/target/debug/reb-api list
 apps/origin-trace-backend/target/debug/reb-api spec > origin-trace-openapi.json
-apps/origin-trace-backend/target/debug/reb-api describe debugger_action
-apps/origin-trace-backend/target/debug/reb-api describe debugger_action --action add_automation_recipe
+apps/origin-trace-backend/target/debug/reb-api describe capture_action
+apps/origin-trace-backend/target/debug/reb-api describe vm_debugger_action --action step
 apps/origin-trace-backend/target/debug/reb-api call get_events \
   --endpoint-file /tmp/reb-api-endpoint --param limit=50 --show-headers
-printf '%s' '{"action":"pause"}' | apps/origin-trace-backend/target/debug/reb-api call debugger_action \
+printf '%s' '{"action":"stop"}' | apps/origin-trace-backend/target/debug/reb-api call capture_action \
   --endpoint-file /tmp/reb-api-endpoint --body-file -
 apps/origin-trace-backend/target/debug/reb-api call get_artifact_content \
   --endpoint-file /tmp/reb-api-endpoint --param artifact_id=1 \
@@ -84,8 +84,10 @@ This closes replacement at the same port between health and action. It is not
 an authentication token, permission grant, or a document-generation selector;
 existing action-specific target/document ownership checks remain required. A
 legacy backend without a health identity cannot use `--require-live`.
-Live mode requires `capture_mode=live` and a running
-or paused debugger before advertising tools and before valid tool dispatch.
+Live mode requires `capture_mode=live` and `broker_connected=true` (the native
+capture broker is connected) before advertising tools and before valid tool
+dispatch. The retired `debugger_state` field is always `unavailable` and is not
+consulted.
 Diagnostics name the loopback endpoint and allowlisted states, never the health
 body's evidence paths. Explicit stored-evidence connections can omit the live
 requirement. See [connection and restart behavior](../docs/development/local-coding-agents.md#select-the-endpoint).
@@ -159,21 +161,19 @@ any direct or state-dependent effect is something other than `analysis`.
 REB_API=$(cat /tmp/reb-api-endpoint)
 curl --fail-with-body "$REB_API/api/health"
 curl --fail-with-body "$REB_API/api/events?limit=50"
-curl --fail-with-body "$REB_API/api/debugger"
-curl --fail-with-body --json '{"action":"pause"}' "$REB_API/api/debugger/actions"
+curl --fail-with-body --json '{"action":"stop"}' "$REB_API/api/capture/actions"
 ```
 
-The last call needs a connected debugger and changes its execution state.
-A server without configured live services still exposes stored-evidence
-operations and returns explicit unavailable state or 409 for live controls.
+The last call stops capture. A server without configured live services still
+exposes stored-evidence operations and returns explicit unavailable state or 409
+for live controls. Every retired `/api/debugger` route returns 410
+`debugger_unavailable`.
 `curl --json` sends the required Content-Length; streaming/chunked request bodies
 are unsupported. Action bodies must be JSON objects within the per-operation
 `x-max-body-bytes` limit. The server does not enforce Content-Type, but clients
 should send `application/json`.
 
 Conditional GET operations list `If-None-Match` and a bodyless 304 response.
-Debugger long polling accepts `wait_ms=0..25000`; it waits only when the supplied
-ETag matches the current generation. Set client timeouts above the chosen wait.
 Artifact content uses `offset` and `limit` query arguments and always returns
 200 on success, including partial chunks. Advance using actual byte count and
 `X-Artifact-Total-Bytes`; `X-Artifact-Truncated` is the string `true` when bytes
@@ -222,14 +222,13 @@ skill nor the guard authorizes sharing or configures the user's agent account.
 
 ## Observed website API catalog
 
-`GET /api/network/catalog` (`reb-api call get_api_observation_catalog`) derives
-exact-path endpoint groups, parameter/header names and value-free JSON shapes
-from the newest 64 retained Traffic requests. Each observation retains its
-scoped source identity; missing, truncated, malformed and over-budget data stay
-explicit. Capture-off returns an empty catalog without enabling capture. Raw
-local Traffic is unchanged. This is a structural observation view, not an API
-specification or authenticated SDK. See the [v1 contract and local client
-example](api-observation-catalog-v1.md).
+Retired. `GET /api/network/catalog` (`get_api_observation_catalog`) derived
+endpoint shapes from retained CDP Traffic bodies. It was removed with CDP:
+native network records carry the method and host, plus bounded path and header
+prefixes in sensitive mode, and no bodies to infer shapes from. The route
+returns 404 and the operation is absent from the contract. The
+[historical v1 contract](api-observation-catalog-v1.md) describes the removed
+response.
 
 ## Exact request trace selection
 
@@ -260,13 +259,14 @@ in the ETag. The v1 response shape, stored evidence and capture policy are uncha
 a connected agent. It returns bounded current session discovery without fetching
 source or bytecode. It includes `live_admission`, the same process-lifetime
 `instance_id` as `/api/health` (also sent as `X-REB-Expected-Instance`), endpoint,
-capture/debugger state, target ID, debugger generation, and separate Wasm script
-and retained-artifact inventories (16 entries each; a 256 KiB artifact manifest
-tail). `consistency` explicitly identifies independent debugger and manifest
-snapshots. Generation and `debugger_etag` apply only to the debugger snapshot,
-not the manifest; use this route's own ETag for conditional reads. No
-target/session join is inferred from URL or timing. `instance_id` is null when
-the snapshot value is not the health identity format; it is never shortened.
+capture mode, and a retained Wasm artifact inventory (16 entries from a 256 KiB
+manifest tail). Use this route's own ETag for conditional reads. No
+target/session join is inferred from URL or timing.
+
+CDP was removed. Version 1 keeps its debugger fields with fixed retirement
+values so existing clients still parse it: `debugger_state` is `unavailable`,
+`target` is null, `wasm_scripts` is empty, `generation`, `capture_epoch` and
+`target_document_epoch` are 0, and `debugger_etag` is `"debugger-0"`.
 
 Titles are omitted, HTTP(S) URL labels contain only origins, and conventional
 Wasm hex labels are retained. Source, headers, bodies, socket URLs and diagnostics
@@ -289,18 +289,15 @@ replace the [advisory effects and common guards](#execution-metadata).
 
 Invalid action bodies return schema-derived `allowed_actions` and, where
 unambiguous, `missing_fields` inside details. Submitted values are not echoed.
-Each debugger action declares `x-reb-requires-live-target`: live-target actions
-refuse before dispatch with `idle_backend` or `debugger_unavailable`; local
-editing, cleanup and cancellation keep their existing admission paths. This
-annotation supplements rather than replaces effects, ownership, and confirmation
-metadata. `idle_backend` is an idle process with no DevTools port.
-`debugger_unavailable` is a required live target that is not running or paused,
-including a configured port that has not attached and a crashed renderer.
+`idle_backend` is an idle process. `native_capture_unavailable` means a live
+backend whose native capture broker is not connected.
 `live_admission` on session context uses the same distinction and adds
-`not_live_capture` for demo and other non-live modes. A disconnected capture
+`not_live_capture` for demo and other non-live modes. The retired debugger
+actions and their `x-reb-requires-live-target` annotations were removed with
+them. A disconnected capture
 broker cannot report a newly requested stop as successful
 (`dependency_unavailable`). `--require-live` MCP connections refuse other tools
-with `idle_backend`, `debugger_unavailable`, or `state_conflict` before
+with `idle_backend`, `native_capture_unavailable`, or `state_conflict` before
 dispatch. `get_session_context` remains readable on that connection until the
 endpoint file or instance identity changes, which retires the connection
 instead of retargeting the call.
@@ -348,133 +345,18 @@ explains evidence levels and compatibility.
 
 ## HTTP Traffic capture coverage
 
-`GET /api/debugger` retains one shared bounded HTTP ledger across debugger target
-selection. A single browser CDP connection uses flattened, owner-qualified
-sessions for supported page, dedicated/shared/service worker and out-of-process
-iframe targets. Browser Target events trigger bounded explicit root attachment;
-recursive attachment on captured owners discovers nested contexts. This avoids
-one-per-second admission while leaving earliest requests best-effort. An http(s)
-page that `/json/list` already shows, but whose `targetCreated` event was missed,
-can be queued on the next stable refresh through that same explicit attach. Known catalog
-entries are not reattached on that pass. A target this browser connection
-already reported as destroyed is not queued from that list. No startup pause, reload,
-navigation or Runtime evaluation is requested. Passive attachment can still
-change worker lifecycle/timeouts, and requests before attachment or
-`Network.enable`, including short-lived popups, remain unavailable.
-
-Supplementary HTTP target-list discovery validates the browser connection and
-catalog epoch from before the list read, then admits under the catalog lock.
-It retains at most 4,096 retired target IDs per connection. At that limit, list-only
-recovery fails closed and coverage is visibly partial until capture reconnects;
-normal browser Target events continue. No first-navigation or short-lived-page
-capture guarantee is added.
-
-`network.capture_status` reports `scope: http-browser-targets`,
-`transport_mode: browser-sessions`, and `startup_mode: passive`. Standalone
-`--capture-target-limit` defaults to 32 and accepts 1–128; the limit counts both
-initializing and ready capture sessions across all supported target types.
-Existing owners retain their slots. Waiting admission takes the oldest page
-before any non-page, then the oldest remaining non-page. A page can replace a
-waiting non-page that is not an owner when the 512-target catalog is full.
-Selection does not evict an attached owner.
-A bounded 512-target catalog feeds `eligible_targets`; `attached_targets`,
-`target_limit`, `target_overflow`, `failed_targets`, cumulative `gaps`, bounded
-`last_error` and `message` describe current coverage. Optional
-`event_queue_drops` counts debugger events discarded because the capture event
-queue or byte budget was full. The browser socket stays open, and this counter
-is separate from owner-loss `gaps`. While it is nonzero, `state` stays
-`partial`. `state` is `disabled`,
-`waiting`, `ready` or `partial`. Ready means known eligible targets initialized
-capture, never first-navigation completeness. Failed target initialization
-retries after five seconds. `attached_target_ids` identifies ready owners;
-`unattached_targets` includes up to 16 missing target IDs/current titles and
-`unattached_targets_omitted` counts the remainder. Worker IDs are not page IDs
-and must not be assigned the selected page's identity.
-Optional cumulative `cleanup_already_gone` and `cleanup_failures` counters report
-confirmed-ended cleanup jobs and unsuccessful cleanup jobs, respectively. They
-are cleanup diagnostics, not counts of missing requests. Only jobs belonging to
-the then-current browser connection may increment them; late replies from a
-replaced connection cannot alter the new connection's status. Counters retain
-history across ordinary connection replacement and are absent until observed.
-Cleanup proof accepts an exact session/parent detach, exact target destruction,
-or disappearance of an ancestor reached through the current connection's
-recorded capture-owner sessions. A target ID in a detach event is not enough to
-prove a session ended. Timeouts and transport failures remain failures even if
-a lifecycle event was observed; only a protocol rejection can use ended-session
-proof after the event barrier.
-
-When browser Target setup fails, compatibility fallback reports
-`scope: http-page-targets`, `transport_mode: page-fallback`: the previous eight
-independent page connections and one-second discovery remain, without independent
-worker/OOPIF coverage. Browser setup is retried after 30 seconds. Transport
-changes retain completed history and explicitly retire unfinished owners.
-`discovery_stale` marks failed discovery; healthy owners may continue while new
-target coverage cannot be confirmed. Browser discovery is independent of the
-selected debugger's HTTP page enumeration.
-
-Each new HTTP row receives an opaque, instance-unique public `id` and a string
-`capture_owner` token. Raw `protocol_request_id` values are only meaningful within
-that owner. Redirect hops and replacement connections never reuse public IDs,
-even after eviction. Asynchronous bodies are fetched from the original owner;
-closure marks unfinished evidence unavailable and rejects late owner events.
-The global 1000-row limit and eight concurrent body retrieval jobs remain.
-Browser sessions share one 64 MiB event queue and a requested 128 MiB aggregate
-Network buffer budget divided by the configured session limit (not a total
-process-memory guarantee). The page fallback retains its former 512 MiB aggregate
-transport/128 MiB browser-buffer bounds. The focused debugger is additional.
-Row titles are attachment-time metadata and may precede a later navigation.
-
-The existing `network.capture_epoch` still advances on debugger focus/reconnect
-for selection and screenshot compatibility. HTTP rows survive those changes;
-clients must obtain the current snapshot epoch when selecting a retained row.
-The epoch is not interchangeable with `capture_owner`.
+Retired. The shared HTTP ledger described here lived in `GET /api/debugger`
+and its CDP connection, both removed. Native network evidence arrives as broker
+events in [`get_events`](#native-event-window-and-summary-scope) and the
+[native Traffic to VM selection](#exact-native-traffic-to-vm-selection) below.
 
 ## Exact retained Traffic request
 
-`GET /api/network/request` (`get_network_request`) returns one unchanged retained
-CDP Traffic record. Supply all five original identity fields:
-
-- `instance_id`: nonempty, at most 128 UTF-8 bytes
-- `capture_epoch`: canonical unsigned decimal, at most 9007199254740991
-- `request_id`: the public Traffic ID, nonempty, at most 8192 UTF-8 bytes
-- `target_id`: nonempty, at most 4096 UTF-8 bytes
-- `started_monotonic_ms`: the original finite, nonnegative binary64 value as a
-  JSON number spelling, at most 64 bytes, without whitespace or rounding
-
-The encoded query is capped at 40960 bytes. Unknown, duplicate, missing and
-empty fields, malformed percent escapes, invalid UTF-8, and invalid numbers
-return 400 `invalid_request`. Form query decoding applies: encode a literal `+`
-as `%2B`; the CLI encodes `--param` values for you. Exponent notation is allowed
-for the timestamp. It is not a canonical uint64 or a rounded display time.
-
-The owner instance and epoch are checked first. A mismatch returns 409
-`state_conflict` with `details.selection_reason=stale_capture`. Otherwise, two
-or more retained rows with the same public request ID return 409
-`state_conflict` with `selection_reason=ambiguous_request`, even when only one
-matches target and start. An absent exact ID/target/start match returns 404
-`target_unavailable` with `selection_reason=request_not_retained`. These fixed
-errors contain no alternative IDs, selected content or unrelated diagnostics.
-Never substitute a URL, protocol request ID, nearby time, target or session.
-
-The closed success envelope is `format: reb-network-request-v1`, `source`
-(the five identity fields), `debugger_generation`, and `request` (the complete
-raw retained row). The nested row remains source-owned and partially modeled in
-OpenAPI so its existing fields are preserved. The adapter takes one state lock,
-checks ownership and uniqueness across the retained window, measures JSON
-escaping, and copies only the selected row. The complete serialized envelope is
-capped at 8 MiB. Oversized results fail wholly with 413 `resource_limit`; no
-truncated replacement or partial response is returned.
-
-This is an inert read eligible for `--read-only`. It does not obtain a full
-debugger snapshot, fetch a body or source, reconnect, enable capture, launch a
-helper, replay, or write state. Capture-off or disconnected sessions can still
-return an exact retained record. An empty/evicted window stays unavailable.
-Concurrent later capture can change the row after this coherent snapshot.
-Original raw URLs, headers, text/base64 bodies, truncation flags and missing,
-loading or error states are retained. The result may contain credentials or
-personal data; get specific sharing authorization before putting it in agent
-context, and never upload raw captures automatically. No native stored-evidence
-`reb://` handler is added. See the [local agent workflow](../docs/development/local-coding-agents.md#2-correlate-without-substituting-identities).
+Retired. `GET /api/network/request` (`get_network_request`) returned one
+retained CDP Traffic record as `reb-network-request-v1`. Nothing produces those
+records any more, so the route returns 404 and the operation is absent from
+the contract. Offline client export tools still accept previously saved
+`reb-network-request-v1` files.
 
 ## Authentication and locality
 
@@ -491,7 +373,7 @@ The client rejects redirects, so a response cannot send a request to a
 different host or local service.
 
 The native broker's socket token belongs to a **different transport**. The
-macOS `WKURLSchemeHandler`, C++/Unix sockets, CDP WebSockets, worker stdin/stdout
+macOS `WKURLSchemeHandler`, C++/Unix sockets, worker stdin/stdout
 protocols and static UI assets are not OpenAPI HTTP endpoints. Native custom
 scheme behavior is not guaranteed to match the Rust backend in every detail.
 
@@ -518,16 +400,6 @@ The action routes are multiplexed, not invented REST resources:
   its current conditional-GET validator.
 - Analyst execution requires the current saved JavaScript script and explicit
   confirmation; sensitive selected artifact data needs additional confirmation.
-- Debugger enumerates all 60 current actions with source-backed request fields,
-  types, requiredness, defaults and bounded values, including automation,
-  repeater, interception, object search and mutation. Six variants retain
-  `x-schema-completeness: partial` for complex constraints: interception rule
-  normalization, recursive mutation-value budgets, JSON-inside-string shape
-  parsing in the two object searches, and legacy condition/expression fallback
-  in breakpoint creation/update. These are modeling limits, not unknown endpoints.
-  `x-unmodeled-constraints` identifies each residual check. All 60 actions map
-  to one of 17 closed response envelopes; nested experiment, search-row and
-  CDP-dependent state records remain partially typed with source pointers.
 
 Known behavior worth preserving in clients:
 
@@ -541,10 +413,6 @@ Known behavior worth preserving in clients:
 - Unknown API paths return JSON 404; unsupported methods return JSON 405.
   Every application response includes `Cache-Control: no-store` and
   `X-Content-Type-Options: nosniff`. HEAD is not an equivalent of API GET.
-- Current debugger dispatch rejects every action except disarm while Runtime
-  Hooks is active, **including request-value comparison**. This conflicts with
-  the UI enabling Compare while armed. CLI clients must disarm first until the
-  dispatcher is corrected; this change documents rather than alters behavior.
 - GET VM analysis may write its local analysis cache. No rate-limit, pagination
   cursor, idempotency key, cancellation API for every operation, or remote auth
   exists. A connection failure or process crash has no guaranteed JSON body.
@@ -562,13 +430,13 @@ retry mutations after a timeout or dropped connection.
 
 ## Execution metadata
 
-All HTTP operations and all 75 top-level request action variants, including the 60
-debugger actions, carry version 1 `x-reb-execution` metadata. It is a source-owned,
+All HTTP operations and all 23 top-level request action variants carry version 1
+`x-reb-execution` metadata. It is a source-owned,
 static advisory catalog. It does not grant permission, verify target ownership,
 report current availability, replace server validation, or prove that an action
 has no additional effects. In particular, no confirmation field means only that
-the current handler has no such field. Native evaluation and Repeater still
-require appropriate researcher authorization under [SAFETY.md](../SAFETY.md).
+the current handler has no such field. Native evaluation still requires
+appropriate researcher authorization under [SAFETY.md](../SAFETY.md).
 
 One root `x-reb-execution-policy` owns the common `version: 1`, `advisory: true`,
 `automatic_retry: never`, and `idempotence: unproven` rules. The CLI copies this
@@ -638,8 +506,7 @@ The effect vocabulary is deliberately separate from HTTP method and success:
 - `sensitive-capture`: explicitly changes selected-value capture that may
   process sensitive request content; the label is not a complete privacy review
 
-Effects include work explicitly enabled by an action, such as automatic recipes
-or saved watches evaluated on later pauses. Independently running capture and
+Effects include later work explicitly enabled by an action. Independently running capture and
 unrelated background refresh are not attributed to an evidence GET. Browser
 internals, target code, partial failures, and raced state can introduce effects
 that static metadata cannot establish. Check the uncertainty and condition text.
@@ -648,17 +515,9 @@ Important distinctions captured by the catalog:
 
 - VM GET can write its analysis cache. Native-console GET can retire an expired
   or poisoned session, stop processes, and delete its temporary profile.
-- Heap searches/comparisons capture fresh temporary files and run a helper.
-  Live-object search and watch evaluation execute JavaScript. Adding a watch
-  enables its automatic evaluation on a later pause.
-- Configuring interception immediately arms browser rules. Automation
-  cancel/disarm can reload a page, causing more code and requests to run.
 - Capture clear truncates stored records after capture stops, while leaving
   artifact files. Workspace replacements and clear-history actions discard
   data even when they do not touch the live target.
-- Debugger action narrowing preserves the common dispatcher guards. Runtime
-  Hooks currently blocks every action except disarm while active, including
-  field comparison. A cancellation lock exemption does not bypass other owners.
 
 `describe --action` fails explicitly if the chosen action lacks supported
 metadata. It retains the operation extension and adds the selected entry under
@@ -677,53 +536,6 @@ do not establish live browser or native-app coverage. Run
 the contract. Validate the document with an OpenAPI 3.1-capable tool.
 When changing the server, update the spec in the same change. Never update a
 schema to claim an endpoint or authorization mechanism that is not implemented.
-
-### Debugger action response envelopes
-
-Every successful debugger response has `ok: true` and `generation`. The following
-additional fields depend on the requested action; responses are not full snapshots.
-Nested state models remain extensible where noted. `x-action-results` in the spec
-is the machine-readable action-to-schema map.
-
-- `pause`, `resume`, `step_over`, `step_into`, `step_out`, `restart_frame`, `remove_breakpoint`, `set_breakpoints_active`, `set_pause_on_exceptions`, `add_watch`, `remove_watch`, `evaluate_watches`, `set_xhr_breakpoint`, `remove_xhr_breakpoint`, `set_event_breakpoint`, `remove_event_breakpoint`, `select_target`, `clear_memory_origin_trace`, `clear_heap_diff_baseline`, `clear_console`: no additional fields.
-
-- `set_breakpoint`, `update_breakpoint`: `breakpoint`.
-
-- `search_live_objects`: `search`.
-
-- `search_heap_snapshot`: `snapshot`.
-
-- `start_memory_origin_trace`, `stop_memory_origin_trace`: `trace`.
-
-- `set_action_scope`, `close_experiment_page`: `action_scope`.
-
-- `create_request_interception_experiment`, `dispose_request_interception_experiment`: `action_scope`, `automation_recipes`, `experiment`, `object_experiment`, `repeater`, `runtime_hooks`.
-
-- `create_experiment_page`: `action_scope`, `target_id`.
-
-- `navigate_object_experiment`, `search_object_experiment`, `mutate_object_experiment`: `object_experiment`.
-
-- `add_runtime_hook`, `remove_runtime_hook`, `arm_runtime_hooks`, `disarm_runtime_hooks`, `clear_runtime_hook_hits`, `configure_runtime_field_test`, `compare_runtime_field_test`: `runtime_hooks`.
-
-- `add_automation_recipe`, `update_automation_recipe`: `automation_recipes`, `recipe`.
-
-- `remove_automation_recipe`, `arm_automation_recipes`, `disarm_automation_recipes`, `cancel_automation_recipe`, `clear_automation_runs`: `automation_recipes`.
-
-- `run_automation_recipe`: `automation_recipes`, `run`, `runs`.
-
-- `configure_request_interception`, `run_request_interception`, `clear_request_interception_result`: `experiment`.
-
-- `configure_repeater_variables`, `run_repeater_request`, `cancel_repeater_request`, `compare_repeater_history`, `clear_repeater_history`: `repeater`.
-
-- `capture_heap_diff_baseline`: `baseline`.
-
-- `compare_heap_diff`: `diff`.
-
-- `list_live_wasm_objects`: `wasm`, including `owner_scope`, `captured_owner`, and `linkage_reason`.
-
-- `read_live_wasm_memory`: `memory`.
-
-- `inspect_paused_import_object`: `import_object`. `invocation` is `unproven` and `guest_position` is null.
 
 ## Inert evidence package validation
 
@@ -754,82 +566,6 @@ request shape, safe persistence, exact limits, lease compatibility and stable
 error reasons. Backend event clear now also requires matching exclusive guards
 for all existing configured outputs; legacy unguarded clear returns 503.
 
-Passive browser-session HTTP capture uses browser target discovery and bounded
-explicit root attachments, with recursive attachment on captured page/worker
-sessions. It does not enable browser-root auto-attachment: Chromium's browser-root
-popup throttling can affect `window.open` even when `waitForDebuggerOnStart` is
-false. Admission runs immediately on discovery events with at most four attach
-commands in flight; the target capacity still includes pending attachments. The
-periodic refresh retries known targets; incomplete catalogs are reconciled as
-described below. First full URLs remain best-effort, and this change does not
-establish lossless early navigation capture. Traffic keeps an unmatched native
-row as host-only metadata when the debugger never recorded that request.
-
-`document_navigation_gaps` counts main-frame `http`/`https` navigations that
-were already committed when `Network.enable` finished. Passive capture then
-reads `Target.getTargetInfo` and compares that URL with Document requests
-already seen for the target. CDP does not replay the missed document request,
-and the Page domain stays unused. The counter stays separate from owner-loss
-`gaps`, is charged once per target and committed URL, and moves capture state
-from `ready` to `partial`. A later Document event for the same URL is not
-another miss. A snapshot that includes a loader id matches on that loader
-instead. `about:blank` and non-HTTP targets are not charged. A redirect hop
-that shares a loader with a later captured Document request is not separately
-visible. If `Target.getTargetInfo` fails, the gap stays zero. Unmatched native
-rows remain in Traffic as host-only metadata.
-
-`catalog_incomplete` is true when the 512-target catalog omitted discovered
-candidates. Counts then cover known targets only, and coverage cannot report
-ready. Bounded reconciliation scans at most 4096 target descriptions per reply,
-retries at most every five seconds while incomplete, and becomes eligible on the
-next refresh after a catalog slot frees. Omitted stable targets can recover
-without another creation event. Rejected-session cleanup runs independently with
-a deduplicated FIFO of at most512 queued/in-flight session identities and four
-concurrent commands; queue overload closes that capture connection with an explicit
-gap rather than blocking healthy Network event dispatch indefinitely.
-
-Optional `capture_status.browser_setup_failure` is null or a fixed `{stage, reason}`
-object describing the last failed browser capture setup attempt. It survives page
-fallback status updates and clears on successful browser setup. It does not prove
-that browser-wide capture is unsupported. Stages separate endpoint validation,
-native transport opening, discovery enablement, target enumeration, and malformed
-successful enumeration output. Reasons come only from structured error codes and
-causes, never from browser-supplied error text. Missing endpoint publication is
-still a waiting condition; all existing retry timing remains unchanged.
-
-### HTTP status provenance
-
-Current Traffic rows include top-level `status_source` and `wire_status`; both
-properties remain optional in the contract for older producers. `status_source`
-is `unavailable`, `response-received`, `redirect-response`, or
-`response-received-extra-info`. Fresh rows initialize it to `unavailable` with
-`status: null` and `wire_status: null`.
-
-`Network.responseReceived` and the explicit `redirectResponse` evidence are
-authoritative for the effective `status`. A uniquely attributable
-`Network.responseReceivedExtraInfo.statusCode` can supply a missing effective
-status and records `wire_status` independently. Wire status must be an integer
-100–599. ExtraInfo alone with wire status 304 never supplies an effective status:
-a cached `responseReceived` status 200 with wire status 304 retains effective 200.
-
-Attribution requires exactly one unredirected request and one valid ExtraInfo
-observation for the same capture owner and raw protocol request ID, with complete
-retained history. ExtraInfo may precede the request. Duplicate or malformed
-observations (including duplicate response events), raw-ID reuse, any explicit
-redirectResponse field (including null), or lost history invalidate ExtraInfo
-attribution: `wire_status` becomes null and any ExtraInfo-derived effective status
-returns to null/`unavailable`. Genuine response or redirect status remains intact.
-No attribution crosses a capture owner or connection generation. These fields do
-not imply a response body, complete request capture, or replayable traffic.
-
-Optional `capture_status.status_extra_info_overflow` becomes true when the private
-2048-entry `(capture owner, protocol request ID)` history saturates. This sticky
-flag makes the attribution limit visible: all ExtraInfo-derived status and wire
-status are retracted, and later ExtraInfo attribution remains disabled. HTTP rows,
-`responseReceived`, and redirect response status continue normally. Identity
-history is not evicted and later reused as a false proof of uniqueness.
-
-
 ## Native event window and summary scope
 
 `GET /api/events?limit=5000` returns `count`/`events` for the newest general
@@ -850,8 +586,12 @@ parsed as a new record. `scope: "store"` means the scan starts at byte zero;
 
 `sequence_gaps` and `queue_drops` are canonical unsigned decimal strings over
 validated records in this declared scope. They are not session totals.
-Sequence gaps count forward jumps of per-session/process high-water marks;
-late arrivals can overlap those observed jumps and do not reduce the total.
+Sequence gaps count absent IDs between the minimum and maximum observed sequence
+within each session/process in the stated scope. Late ACK-delayed arrivals close
+holes; duplicates do not create gaps. Unknown prefixes and tails are not counted.
+The native broker retains bounded missing intervals independently of its event
+ring; `sequence_tracking_evictions` reports lost tracking coverage when that
+budget is exhausted, rather than freezing speculative losses.
 A canonical positive unsigned decimal gap-marker payload contributes its value
 to queue drops, otherwise the marker weighs one. Drop totals may overlap gaps.
 The respective `_saturated` flags distinguish clamping at u64 maximum.
@@ -894,10 +634,7 @@ snapshots, missing ACK/creator records, and historical captures without the new
 parent link are excluded from exact selection. `related_request_ids` remains
 legacy correlated context for unfiltered analysis and is never an exact filter.
 
-A DevTools request-id join identifies one native `request_initiated` event. That
-renderer id is not the browser `request_started` id used above. Related VM on
-the joined CDP row uses the joined native events only when they also contain
-one valid `request_started` root. Unjoined CDP rows, host/method/time
-correlations, and incomplete roots stay in Traffic with an explanation. Use the
-VM workspace navigation explicitly for unfiltered session analysis. A rebuilt,
-matched Brave is required to produce the new capture-parent link.
+Host/method/time correlations and incomplete roots stay in Traffic with an
+explanation. Use the VM workspace navigation explicitly for unfiltered session
+analysis. A rebuilt, matched Brave is required to produce the new capture-parent
+link.

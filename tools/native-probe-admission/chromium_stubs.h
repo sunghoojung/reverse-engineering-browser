@@ -106,14 +106,29 @@ struct NativeProbeClient {
                          std::uint64_t,
                          std::uint64_t,
                          bool,
-                         base::UnsafeSharedMemoryRegion) = 0;
+                         base::UnsafeSharedMemoryRegion,
+                         std::uint64_t,
+                         const std::string&) = 0;
   virtual void Disable() = 0;
+  virtual void NativeGuestModuleStatus(std::uint64_t, std::uint64_t, bool) = 0;
 };
 struct NativeProbeHost {
   inline static std::atomic<unsigned> notifications{0};
   inline static std::atomic<unsigned> artifacts{0};
   void BindClient(int) {}
   void EventsAvailable() { ++notifications; }
+  template <class... Args>
+  void CaptureWasmDispatch(Args&&...) {
+    ++artifacts;
+  }
+  template <class... Args>
+  void CaptureNativeGuest(Args&&...) {
+    ++artifacts;
+  }
+  template <class... Args>
+  void CaptureNativeGuestHost(Args&&...) {
+    ++artifacts;
+  }
   template <class... Args>
   void CaptureGeneratedArtifact(Args&&...) {
     ++artifacts;

@@ -351,7 +351,7 @@ function createEvidencePackagePanel({getContext, protocol = location.protocol}) 
     }
     const newSignature = JSON.stringify([scope.value, [...next.values()].map(row => [row.id, row.label])]);
     if (signature !== newSignature) { signature = newSignature; rows = [...next.values()]; renderCandidates(); }
-    host.querySelector('[data-package-context]').textContent = `${rows.length} selectable keys in this view. ${context.requestCorrelated && scope.value === 'request' ? 'Native association with the debugger request is correlated, not exact. ' : ''}${context.eventsLimited && scope.value !== 'artifacts' ? 'Latest 5,000-event window; older records may be absent.' : 'Retained window may be incomplete.'}`;
+    host.querySelector('[data-package-context]').textContent = `${rows.length} selectable keys in this view. ${context.eventsLimited && scope.value !== 'artifacts' ? 'Latest 5,000-event window; older records may be absent.' : 'Retained window may be incomplete.'}`;
   };
   scope.addEventListener('change', () => { page = 0; signature = null; sync(); });
   host.querySelector('[data-package-previous]').addEventListener('click', () => { page -= 1; renderCandidates(); });
@@ -406,12 +406,8 @@ function evidenceEventKey(event) {
   const key = evidencePackageKey('event', event);
   return key ? `${key.session_id}:${key.process_id}:${key.sequence_number}` : null;
 }
-function evidenceDebuggerRequest(request) {
-  return Boolean(request?.protocolRequestId || String(request?.operation).startsWith('cdp_'));
-}
 function evidenceRequestKey(request) {
   if (!request) return null;
-  if (evidenceDebuggerRequest(request)) return JSON.stringify(['debugger', request.id, request.tabId, request.protocolRequestId, String(request.firstTimestamp)]);
   const events = request.events ?? [];
   const root = events.find(event => event.type === 'request_started') ?? events.find(event => event.type === 'request_initiated') ?? events[0];
   return JSON.stringify(['native', request.id, evidenceEventKey(root), root?.request_id ?? null]);
@@ -508,13 +504,11 @@ function evidenceObservationModel(context) {
     records.set(key, Object.fromEntries(['protocol_version', 'session_id', 'sequence_number', 'monotonic_time_ns', 'navigation_id', 'frame_id', 'artifact_id', 'parent_event_id', 'request_id', 'process_id', 'thread_id', 'browser_context_id_high', 'browser_context_id_low', 'tab_id', 'status_code', 'error_code', 'category', 'type', 'payload', 'payload_truncated'].filter(field => Object.hasOwn(event, field)).map(field => [field, event[field]])));
   }
   const request = context.request;
-  const correlatedRequest = evidenceDebuggerRequest(request);
   const requestKeys = new Set((['live', 'demo'].includes(request?.origin) ? request.events ?? [] : []).slice(-5000).filter(event => event.category === 'network' && networkLifecycleTypes.has(event.type)).map(evidenceEventKey).filter(Boolean));
   const retainedRequest = new Set([...requestKeys].filter(key => records.has(key) && !duplicates.has(key)));
   const parents = new Set(), missing = new Set();
   let parentLimit = false, parentCycle = false;
-  // Only inspect ancestors of attached native request records. The selected
-  // debugger request association remains correlated for every such ancestor.
+  // Only inspect ancestors of attached native request records.
   for (const start of retainedRequest) {
     let key = start; const seen = new Set([key]);
     for (let depth = 0; depth < 32; depth += 1) {
@@ -539,7 +533,7 @@ function evidenceObservationModel(context) {
   });
   const related = rows.filter(row => row.group !== 'unlinked');
   return {request: request ? {id: request.id, origin: request.origin, method: request.method, path: String(request.path ?? '').slice(0, 2048), hostOnly: request.hostOnly} : null,
-    requestKey: evidenceRequestKey(request), correlatedRequest, rows, related, omitted, queueMarkers, sources,
+    requestKey: evidenceRequestKey(request), rows, related, omitted, queueMarkers, sources,
     missingParents: missing.size, unavailableRequest: requestKeys.size - retainedRequest.size,
     duplicates: duplicates.size, parentLimit, parentCycle, limited: Boolean(context.eventsLimited || (context.events?.length ?? 0) > 5000),
     sequence: evidenceSequenceObservations([...records.values()]),
@@ -599,12 +593,12 @@ function createEvidenceWorkspace({getContext, packagePanel, onTrace, onRequest, 
     for (const tab of paneTabs) {const active = tab.dataset.evidencePane === value; tab.setAttribute('aria-selected', String(active)); tab.tabIndex = active ? 0 : -1;}
     if (focus) (value === 'detail' ? inspector : list.querySelector('[aria-current="true"]') ?? list).focus({preventScroll: true});
   };
-  const relation = row => row.duplicate ? 'Ambiguous identity' : row.group === 'request' ? model.correlatedRequest ? 'Associated native record · request correlation only' : 'Native request record'
-    : row.group === 'parent' ? model.correlatedRequest ? 'Recorded parent · request association correlated' : 'Recorded parent relationship'
+  const relation = row => row.duplicate ? 'Ambiguous identity' : row.group === 'request' ? 'Native request record'
+    : row.group === 'parent' ? 'Recorded parent relationship'
       : row.group === 'context' ? 'Same context · correlation only' : 'No recorded request relationship';
   function renderDetail() {
     const row = model.rows.find(candidate => candidate.key === selectedKey);
-    const signature = JSON.stringify([row, model.requestKey, model.correlatedRequest, canOpenSource()]);
+    const signature = JSON.stringify([row, model.requestKey, canOpenSource()]);
     if (signature === detailSignature) return;
     detailSignature = signature;
     const sameRecord = inspector.dataset.evidenceKey === row?.key;
@@ -637,7 +631,7 @@ function createEvidenceWorkspace({getContext, packagePanel, onTrace, onRequest, 
         if (!onSource(current.artifact.identity)) message('The exact source could not be opened. No other artifact or URL was substituted.');
       }, 'source');
       sourceButton.id = 'evidence-open-source';
-      const supported = ['javascript', 'wasm', 'source_map', 'response_body'].includes(artifact.kind);
+      const supported = ['javascript', 'wasm', 'source_map', 'response_body', 'wasm_guest_adapter', 'bytecode_buffer'].includes(artifact.kind);
       sourceButton.disabled = row.artifact.status !== 'ready' || row.duplicate || !supported || !canOpenSource();
       card.append(sourceButton); source.append(card);
       if (artifact.urlTruncated) source.append(node('p', 'Artifact URL display is limited to 2,048 characters. Navigation uses exact identity, never this text.', 'evidence-detail-hint'));
@@ -647,9 +641,8 @@ function createEvidenceWorkspace({getContext, packagePanel, onTrace, onRequest, 
     source.append(node('p', row.artifact.message, 'evidence-detail-hint'));
     const connection = node('section', '', 'evidence-detail-section'); connection.append(node('h3', 'Relationship to this request'));
     connection.append(node('p', row.group === 'parent' ? 'A retained record names this event as a parent. That records a link between native observations; it does not establish how a value was computed.'
-      : row.group === 'request' ? model.correlatedRequest ? 'These native records were associated by method, host and time. There is no producer-provided key proving that they belong to the selected debugger request.' : 'This event is part of the selected native request’s recorded lifecycle.'
+      : row.group === 'request' ? 'This event is part of the selected native request’s recorded lifecycle.'
         : row.group === 'context' ? 'Session, renderer process, navigation and frame match. No parent or request link was recorded for this observation.' : 'No link to the selected request is established in this retained window.', 'evidence-detail-hint'));
-    if (model.correlatedRequest && row.group === 'parent') connection.append(node('p', 'The selected debugger request is only correlated with the native records. Its association does not become exact through a native parent link.', 'evidence-detail-hint'));
     const actions = node('div', '', 'evidence-record-actions');
     if (model.request) actions.append(button('View request', onRequest, 'request'));
     const parentKey = event.parent_event_id !== '0' ? `${event.session_id}:${event.process_id}:${event.parent_event_id}` : null;
@@ -683,7 +676,7 @@ function createEvidenceWorkspace({getContext, packagePanel, onTrace, onRequest, 
   function renderList() {
     page = Math.min(page, Math.max(0, Math.ceil(filtered.length / evidenceObservationPage) - 1));
     const start = page * evidenceObservationPage, rows = filtered.slice(start, start + evidenceObservationPage);
-    const signature = JSON.stringify([rows, selectedKey, page, model.correlatedRequest]);
+    const signature = JSON.stringify([rows, selectedKey, page]);
     if (signature !== listSignature) {
       listSignature = signature;
       const focused = list.contains(document.activeElement) ? document.activeElement.dataset.evidenceKey : null;
@@ -691,9 +684,8 @@ function createEvidenceWorkspace({getContext, packagePanel, onTrace, onRequest, 
       for (const [group, name, description] of evidenceRelationshipGroups) {
         const members = rows.filter(row => row.group === group); if (!members.length) continue;
         const section = node('section', '', 'evidence-observation-group');
-        const title = group === 'request' && model.correlatedRequest ? 'Associated native records' : group === 'parent' && model.correlatedRequest ? 'Parents of associated records' : name;
-        const heading = node('h3', `${title} · ${filtered.filter(row => row.group === group).length}`);
-        section.append(heading, node('p', group === 'request' && model.correlatedRequest ? 'Debugger request association is correlated, not exact' : description, 'evidence-group-note'));
+        const heading = node('h3', `${name} · ${filtered.filter(row => row.group === group).length}`);
+        section.append(heading, node('p', description, 'evidence-group-note'));
         for (const row of members) {
           const element = node('button', '', 'evidence-observation'); element.type = 'button'; element.dataset.evidenceKey = row.key; element.dataset.relationship = row.group;
           element.setAttribute('aria-current', String(row.key === selectedKey));
@@ -735,15 +727,15 @@ function createEvidenceWorkspace({getContext, packagePanel, onTrace, onRequest, 
     }
     if (selectedKey && !model.rows.some(row => row.key === selectedKey)) {selectedKey = null; message('The selected observation left the retained window. No neighboring record was substituted.');}
     if (!selectedKey && !detailSignature) selectedKey = model.related[0]?.key ?? model.rows[0]?.key ?? null;
-    find('evidence-context-kind').textContent = model.request ? model.correlatedRequest ? 'Debugger request · correlated native context' : model.related.length ? model.request.origin === 'demo' ? 'Demo native request' : 'Selected native request' : 'Selected request · native identity unavailable' : 'Retained evidence window';
+    find('evidence-context-kind').textContent = model.request ? model.related.length ? model.request.origin === 'demo' ? 'Demo native request' : 'Selected native request' : 'Selected request · native identity unavailable' : 'Retained evidence window';
     find('evidence-context-title').textContent = model.request ? `${model.request.method} ${model.request.path}` : 'Explore recorded observations';
     find('evidence-context-title').title = find('evidence-context-title').textContent;
-    find('evidence-context-note').textContent = model.request ? model.correlatedRequest ? 'Matched by method, host and time. No exact producer request key.' : `${model.request.hostOnly ? 'Host-only metadata · ' : ''}${model.related.length} related observations · ${model.linkedArtifacts} exact artifact references` : 'Choose a request in Traffic to separate recorded links from context-only correlations.';
+    find('evidence-context-note').textContent = model.request ? `${model.request.hostOnly ? 'Host-only metadata · ' : ''}${model.related.length} related observations · ${model.linkedArtifacts} exact artifact references` : 'Choose a request in Traffic to separate recorded links from context-only correlations.';
     find('evidence-count').textContent = `${model.rows.length} retained observations`;
     find('evidence-coverage-summary').textContent = `${model.missingParents} missing parent${model.missingParents === 1 ? '' : 's'} · coverage unknown`;
     find('evidence-gap-details').textContent = `${model.limited ? 'Latest 5,000-record window; earlier records may be evicted. ' : 'Retained window only; complete capture is not established. '}${model.queueMarkers} native queue-drop markers; ${model.sequence.holes} absent sequence IDs between retained stream endpoints (not proof of capture loss); ${model.sequence.arrivalDiscontinuities} forward-jump observations in arrival order; ${model.sequence.outOfOrderArrivals} later arrivals below a prior high-water ID; ${model.missingParents} missing or ambiguous parent references; ${model.unavailableRequest} attached request records outside this window; ${model.duplicates} duplicate identities; ${model.omitted} unsupported or unaddressable records omitted.${model.parentLimit ? ' Parent lookup stopped at its 32-link bound.' : ''}${model.parentCycle ? ' A repeated parent identity stopped lookup.' : ''} Queue markers, sequence holes and missing references can overlap and are not added into a loss total.`;
-    find('evidence-trace').disabled = model.request?.origin !== 'live' || model.correlatedRequest || !model.related.length;
-    find('evidence-trace').title = model.correlatedRequest ? 'A correlated debugger request has no exact native trace root.' : 'Inspect the selected request’s recorded predecessor chain.';
+    find('evidence-trace').disabled = model.request?.origin !== 'live' || !model.related.length;
+    find('evidence-trace').title = 'Inspect the selected request’s recorded predecessor chain.';
     refreshNotice = context.error ? `Evidence refresh ${context.error === 'malformed' ? 'returned malformed records' : 'is unavailable'}. Retained observations remain visible.` : '';
     renderNotice();
     rebuild(); renderList(); renderDetail();

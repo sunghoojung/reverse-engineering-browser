@@ -61,7 +61,6 @@ impl Server {
                 std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o700)).unwrap();
                 for option in [
                     "--decoder",
-                    "--debugger-transport",
                     "--native-console",
                     "--owned-vm-fixture",
                     "--brave-binary",
@@ -555,7 +554,7 @@ async fn assert_contract_response(
     bytes
 }
 #[test]
-fn openapi_references_and_debugger_action_result_maps_are_consistent() {
+fn openapi_references_and_native_only_operations_are_consistent() {
     use std::collections::BTreeSet;
     fn references(spec: &Value, value: &Value) {
         match value {
@@ -593,116 +592,16 @@ fn openapi_references_and_debugger_action_result_maps_are_consistent() {
             assert!(ids.insert(id), "Duplicate operation ID: {id}");
         }
     }
-    assert_eq!(ids.len(), 40, "Review route coverage when the API changes");
+    assert_eq!(ids.len(), 35, "Review route coverage when the API changes");
     assert!(ids.contains("vm_pack_apply") && ids.contains("vm_pack_compare"));
-    let schemas = &spec["components"]["schemas"];
-    let actions = schemas["DebuggerAction"]["oneOf"].as_array().unwrap();
-    let results = &schemas["DebuggerResult"];
-    let mappings = results["x-action-results"].as_object().unwrap();
-    let mut names = BTreeSet::new();
-    for action in actions {
-        let name = action["properties"]["action"]["const"].as_str().unwrap();
-        assert!(names.insert(name), "Duplicate action: {name}");
-        let reference = action["x-result-schema"].as_str().unwrap();
-        assert!(
-            spec.pointer(&reference[1..]).is_some(),
-            "Unresolved action result: {name}"
-        );
-        assert_eq!(
-            mappings[name]["$ref"], reference,
-            "Mismatched result: {name}"
-        );
-        assert!(
-            results["oneOf"]
-                .as_array()
-                .unwrap()
-                .contains(&mappings[name])
-        );
-    }
-    assert_eq!(
-        names.len(),
-        65,
-        "Review debugger action coverage when the dispatcher changes"
+    assert!(!ids.contains("debugger_action"));
+    assert!(
+        !spec["paths"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .any(|path| path.starts_with("/api/debugger"))
     );
-    assert_eq!(names, mappings.keys().map(String::as_str).collect());
-    let binding = actions
-        .iter()
-        .find(|action| action["properties"]["action"]["const"] == "bind_runtime_candidate")
-        .unwrap();
-    assert_eq!(
-        binding["x-result-schema"],
-        "#/components/schemas/DebuggerRuntimeHooksResult"
-    );
-    assert_eq!(
-        binding["x-reb-execution"]["effects"],
-        json!(["analysis", "local-state-write"])
-    );
-    assert_eq!(
-        binding["x-reb-execution"]["confirmations"],
-        json!([]),
-        "Binding adds an observation definition; capture and arming remain separate confirmed actions"
-    );
-    assert_eq!(binding["additionalProperties"], false);
-    for field in [
-        "digest_version",
-        "source_sha256",
-        "source_bytes",
-        "start_byte",
-        "end_byte",
-        "target_id",
-        "session_id",
-        "created_at_ms",
-        "navigation_id",
-    ] {
-        assert!(
-            binding["required"]
-                .as_array()
-                .unwrap()
-                .contains(&json!(field)),
-            "Candidate identity field {field} is required"
-        );
-    }
-    for forbidden in [
-        "script_id",
-        "url",
-        "source",
-        "return_value",
-        "selected_value",
-    ] {
-        assert!(
-            binding["properties"].get(forbidden).is_none(),
-            "Candidate handoff must not carry original IDs, source text, values or overrides"
-        );
-    }
-    let existing = actions
-        .iter()
-        .find(|action| action["properties"]["action"]["const"] == "add_runtime_hook")
-        .unwrap();
-    assert_eq!(
-        existing["required"],
-        json!(["action", "label", "script_id", "line"]),
-        "Existing hook callers keep their original envelope"
-    );
-
-    let empty: Value = serde_json::from_str(include_str!("../assets/debugger-empty.json")).unwrap();
-    // These two actions return state, unlike the generic acknowledgement.
-    // The clear action is also exercised through live HTTP below; stopping an
-    // active memory trace still needs the separate browser end-to-end gate.
-    for (action, field, state) in [
-        (
-            "clear_request_interception_result",
-            "experiment",
-            "request_interception",
-        ),
-        ("stop_memory_origin_trace", "trace", "memory_origin_trace"),
-    ] {
-        assert_schema(
-            &spec,
-            &mappings[action],
-            &json!({"ok":true,field:empty[state],"generation":0}),
-            action,
-        );
-    }
     // Source-backed fixtures for the disk-read deadlines in evidence.rs. The
     // HTTP suite does not deliberately stall artifact I/O for thirty seconds.
     let deadline_schema = &spec["paths"]["/api/artifacts/{artifact_id}/content"]["get"]["responses"]
@@ -776,7 +675,7 @@ fn execution_metadata_covers_operations_actions_and_dispatch_without_safe_defaul
             operation_count += 1;
         }
     }
-    assert_eq!(operation_count, 40);
+    assert_eq!(operation_count, 35);
     let schemas = &spec["components"]["schemas"];
     let mut action_count = 0;
     for name in [
@@ -784,7 +683,6 @@ fn execution_metadata_covers_operations_actions_and_dispatch_without_safe_defaul
         "DecoderAction",
         "CollectionAction",
         "AnalystAction",
-        "DebuggerAction",
         "NativeConsoleAction",
         "OwnedVmDebuggerAction",
     ] {
@@ -827,10 +725,8 @@ fn execution_metadata_covers_operations_actions_and_dispatch_without_safe_defaul
             action_count += 1;
         }
     }
-    // Includes explicit element document inspection, confirmed screenshot capture,
-    // live-capture native console connect, live Wasm inspection, and paused
-    // import-object mapping.
-    assert_eq!(action_count, 88);
+    // Only retained native and offline actions are advertised after CDP removal.
+    assert_eq!(action_count, 23);
     // Source checks intentionally follow the dispatch syntax. If it changes,
     // audit the new handler before updating this narrow test helper.
     fn arms<'a>(source: &'a str, start: &str, end: &str, indent: usize) -> BTreeSet<&'a str> {
@@ -865,13 +761,6 @@ fn execution_metadata_covers_operations_actions_and_dispatch_without_safe_defaul
     };
     for (name, source, start, end, indent) in [
         (
-            "DebuggerAction",
-            include_str!("../src/debugger/mod.rs"),
-            "        match action {",
-            "    async fn breakpoint",
-            12,
-        ),
-        (
             "DecoderAction",
             include_str!("../src/decoder.rs"),
             "        match action {",
@@ -882,7 +771,7 @@ fn execution_metadata_covers_operations_actions_and_dispatch_without_safe_defaul
             "AnalystAction",
             include_str!("../src/app.rs"),
             "\"/api/local-analyst/actions\" => match",
-            "\"/api/debugger/actions\"",
+            "\"/api/capture/actions\"",
             16,
         ),
     ] {
@@ -892,7 +781,6 @@ fn execution_metadata_covers_operations_actions_and_dispatch_without_safe_defaul
             "Dispatch coverage: {name}"
         );
     }
-    assert_eq!(action_names("DebuggerAction").len(), 65);
     for (name, source, pattern) in [
         (
             "NativeConsoleAction",
@@ -975,37 +863,12 @@ fn execution_metadata_keeps_destructive_conditional_and_unproven_effects_visible
     for kind in ["process-stop", "filesystem-write", "data-discard"] {
         assert!(effect(native_state, kind));
     }
-    for name in ["cancel_automation_recipe", "disarm_automation_recipes"] {
-        assert!(effect(&action("DebuggerAction", name), "network-access"));
-    }
-    for kind in ["analysis", "process-launch", "process-stop"] {
-        assert!(effect(
-            &action("DebuggerAction", "configure_runtime_field_test"),
-            kind
-        ));
-    }
-    for name in [
-        "search_heap_snapshot",
-        "capture_heap_diff_baseline",
-        "compare_heap_diff",
-        "clear_heap_diff_baseline",
-    ] {
-        assert!(effect(&action("DebuggerAction", name), "filesystem-write"));
-    }
-    for name in [
-        "add_watch",
-        "evaluate_watches",
-        "search_live_objects",
-        "run_repeater_request",
-    ] {
-        assert!(effect(&action("DebuggerAction", name), "code-execution"));
-    }
-    for entry in [
-        action("DebuggerAction", "run_repeater_request"),
-        action("NativeConsoleAction", "evaluate"),
-    ] {
-        assert!(entry["confirmations"].as_array().unwrap().is_empty());
-    }
+    assert!(
+        action("NativeConsoleAction", "evaluate")["confirmations"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
     assert!(
         !action("NativeConsoleAction", "runtime")["uncertainties"]
             .as_array()
@@ -1028,11 +891,6 @@ fn execution_metadata_keeps_destructive_conditional_and_unproven_effects_visible
     assert!(predicate.is_valid(&json!({"algorithm":"none"})));
     assert!(!predicate.is_valid(&json!({"algorithm":"HS256"})));
     assert!(!predicate.is_valid(&json!({})));
-    let confirmation =
-        action("DebuggerAction", "configure_runtime_field_test")["confirmations"][0].clone();
-    let predicate = jsonschema::validator_for(&confirmation["when"]).unwrap();
-    assert!(predicate.is_valid(&json!({"enabled":true})));
-    assert!(!predicate.is_valid(&json!({"enabled":false})));
     let run = action("AnalystAction", "run_local_analyst_script");
     let sensitive = run["confirmations"]
         .as_array()
@@ -1061,7 +919,6 @@ async fn openapi_responses_match_live_local_http_and_conditional_reads() {
         "/api/api-collection",
         "/api/local-analyst",
         "/api/local-analyst/runner",
-        "/api/debugger",
         "/api/native-console",
         "/api/events",
         "/api/artifacts",
@@ -1093,13 +950,6 @@ async fn openapi_responses_match_live_local_http_and_conditional_reads() {
         ),
         ("/api/analysis/vm?request_id=oops", "/api/analysis/vm", 400),
         ("/api/analysis/vm?request_id=01", "/api/analysis/vm", 400),
-        ("/api/debugger?wait_ms=25001", "/api/debugger", 400),
-        ("/api/debugger/source", "/api/debugger/source", 400),
-        (
-            "/api/debugger/source?script_id=missing",
-            "/api/debugger/source",
-            409,
-        ),
         ("/api/deobfuscation", "/api/deobfuscation", 400),
         ("/api/source-facts", "/api/source-facts", 400),
         ("/api/origin-trace", "/api/origin-trace", 400),
@@ -1153,27 +1003,6 @@ async fn openapi_responses_match_live_local_http_and_conditional_reads() {
         );
         assert_contract_response(response, "post", &route, 200).await;
         assert_contract_response(server.action(&route, request).await, "post", &route, 409).await;
-    }
-    for request in [
-        json!({"action":"add_watch","expression":"1"}),
-        json!({"action":"clear_request_interception_result"}),
-    ] {
-        let action = request["action"].as_str().unwrap().to_owned();
-        let bytes = assert_contract_response(
-            server.action("/api/debugger/actions", request).await,
-            "post",
-            "/api/debugger/actions",
-            200,
-        )
-        .await;
-        let spec = specification();
-        let mapping = &spec["components"]["schemas"]["DebuggerResult"]["x-action-results"][&action];
-        assert_schema(
-            &spec,
-            mapping,
-            &serde_json::from_slice::<Value>(&bytes).unwrap(),
-            &action,
-        );
     }
 }
 #[tokio::test]
@@ -1291,7 +1120,7 @@ async fn incomplete_request_body_keeps_coarse_reason_and_legacy_text() {
     let server = Server::start().await;
     let address = server.url.strip_prefix("http://").unwrap();
     let mut stream = tokio::net::TcpStream::connect(address).await.unwrap();
-    stream.write_all(format!("POST /api/debugger/actions HTTP/1.1\r\nHost: {address}\r\nContent-Length: 100\r\nConnection: close\r\n\r\n{{").as_bytes()).await.unwrap();
+    stream.write_all(format!("POST /api/capture/actions HTTP/1.1\r\nHost: {address}\r\nContent-Length: 100\r\nConnection: close\r\n\r\n{{").as_bytes()).await.unwrap();
     stream.shutdown().await.unwrap();
     let mut raw = Vec::new();
     tokio::time::timeout(Duration::from_secs(10), stream.read_to_end(&mut raw))
@@ -1642,14 +1471,14 @@ async fn locality_static_allowlist_and_malformed_actions() {
             .action("/api/debugger/actions", json!({"action":"unknown"}))
             .await
             .status(),
-        400
+        410
     );
     assert_eq!(
         server
             .action("/api/debugger/actions", json!({"action":"pause"}))
             .await
             .status(),
-        409
+        410
     );
     assert_eq!(
         server
@@ -3093,13 +2922,6 @@ async fn error_reasons_preserve_http_text_targets_limits_and_cli_contracts() {
     .await;
     for (route, body, status, code, text) in [
         (
-            "/api/debugger/actions",
-            json!({"action":"select_target","target_id":"synthetic_private_target"}),
-            409,
-            "target_unavailable",
-            "Debugger target is unavailable",
-        ),
-        (
             "/api/decoder/actions",
             json!({"action":"jwt_inspect","protocol_version":1,"token":"synthetic_private_token"}),
             503,
@@ -3130,110 +2952,14 @@ async fn error_reasons_preserve_http_text_targets_limits_and_cli_contracts() {
         assert!(!result.to_string().contains("synthetic_private"));
         assert!(result.get("retryable").is_none());
     }
-    let state: Value = server.get("/api/debugger").await.json().await.unwrap();
-    assert!(state["target"].is_null());
-    for _ in 0..100 {
-        assert_eq!(
-            server
-                .action(
-                    "/api/debugger/actions",
-                    json!({"action":"add_watch","expression":"synthetic_private_expression"})
-                )
-                .await
-                .status(),
-            200
-        );
-    }
-    let response = server
-        .action(
-            "/api/debugger/actions",
-            json!({"action":"add_watch","expression":"synthetic_private_expression"}),
-        )
-        .await;
-    assert_eq!(response.status(), 409);
-    let result: Value = response.json().await.unwrap();
-    assert_eq!(result["error"], "Watch expression limit reached");
-    assert_eq!(result["code"], "resource_limit");
-    assert_eq!(result["details"], json!({}));
-
-    let body = server.root.path().join("request.json");
-    std::fs::write(
-        &body,
-        br#"{"action":"select_target","target_id":"synthetic_private_target"}"#,
-    )
-    .unwrap();
-    let output = Command::new(env!("CARGO_BIN_EXE_reb-api"))
-        .args([
-            "call",
-            "debugger_action",
-            "--base-url",
-            &server.url,
-            "--body-file",
-        ])
-        .arg(&body)
-        .output()
-        .unwrap();
-    assert_eq!(output.status.code(), Some(1));
-    assert!(output.stdout.is_empty());
-    let stderr = String::from_utf8(output.stderr).unwrap();
-    let value: Value =
-        serde_json::from_str(stderr.trim().strip_prefix("HTTP 409: ").unwrap()).unwrap();
-    assert_eq!(value["error"], "Debugger target is unavailable");
-    assert_eq!(value["code"], "target_unavailable");
-    let output = Command::new(env!("CARGO_BIN_EXE_reb-api"))
-        .args([
-            "call",
-            "debugger_action",
-            "--base-url",
-            &server.url,
-            "--json-errors",
-            "--body-file",
-        ])
-        .arg(&body)
-        .output()
-        .unwrap();
-    assert_eq!(output.status.code(), Some(1));
-    assert!(output.stdout.is_empty());
-    let value: Value = serde_json::from_slice(&output.stderr).unwrap();
-    assert_eq!(
-        value,
-        json!({"http_status":409,"code":"target_unavailable","details":{},"error":"Debugger target is unavailable","error_truncated":false})
-    );
-
-    let output = Command::new(env!("CARGO_BIN_EXE_reb-api"))
-        .args(["describe", "debugger_action", "--action", "select_target"])
-        .output()
-        .unwrap();
-    assert!(output.status.success());
-    let description: Value = serde_json::from_slice(&output.stdout).unwrap();
-    let spec = specification();
-    assert_eq!(
-        description["x-reb-execution-policy"],
-        spec["x-reb-execution-policy"]
-    );
-    assert_eq!(
-        description["x-reb-execution"],
-        spec["paths"]["/api/debugger/actions"]["post"]["x-reb-execution"]
-    );
-    let selected = spec["components"]["schemas"]["DebuggerAction"]["oneOf"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|variant| variant["properties"]["action"]["const"] == "select_target")
-        .unwrap();
-    assert_eq!(
-        description["x-reb-selected-action-execution"],
-        selected["x-reb-execution"]
-    );
-    assert_eq!(
-        description["components"]["schemas"]["RebExecutionMetadata"],
-        spec["components"]["schemas"]["RebExecutionMetadata"]
-    );
-    for component in ["Error", "ErrorCode", "ErrorDetails", "SafeInteger"] {
-        assert_eq!(
-            description["components"]["schemas"][component],
-            specification()["components"]["schemas"][component]
-        );
+    // Removed operations are not CLI-discoverable and never reach transport.
+    for operation in ["debugger_action", "get_debugger", "get_debugger_source"] {
+        let output = Command::new(env!("CARGO_BIN_EXE_reb-api"))
+            .args(["describe", operation])
+            .output()
+            .unwrap();
+        assert!(!output.status.success());
+        assert!(String::from_utf8_lossy(&output.stderr).contains("Unknown operation"));
     }
     let spec = specification();
     let validator = jsonschema::validator_for(
@@ -6400,86 +6126,6 @@ async fn workspace_native_lock_interoperability() {
     }
 }
 
-#[tokio::test]
-async fn api_observation_catalog_is_read_only_local_and_cli_discoverable() {
-    let server = Server::start_with_helper_canaries(true).await;
-    server.file("events.jsonl", b"not consulted by Traffic catalog\n");
-    let bytes = assert_contract_response(
-        server.get("/api/network/catalog").await,
-        "get",
-        "/api/network/catalog",
-        200,
-    )
-    .await;
-    let catalog: Value = serde_json::from_slice(&bytes).unwrap();
-    assert_eq!(catalog["format"], "reb-api-observation-catalog-v1");
-    assert_eq!(catalog["coverage"]["capture_enabled"], false);
-    assert_eq!(catalog["coverage"]["window_records"], 0);
-    assert_eq!(catalog["endpoints"], json!([]));
-    assert_eq!(
-        std::fs::read(server.root.path().join("events.jsonl")).unwrap(),
-        b"not consulted by Traffic catalog\n"
-    );
-    assert!(
-        !server
-            .root
-            .path()
-            .join("unexpected-helper.sh.invoked")
-            .exists()
-    );
-    assert!(!server.root.path().join("collection.json").exists());
-    assert_contract_response(
-        server.get("/api/network/catalog?limit=1000").await,
-        "get",
-        "/api/network/catalog",
-        400,
-    )
-    .await;
-    let forbidden = server
-        .client
-        .get(format!("{}/api/network/catalog", server.url))
-        .header("Origin", "https://external.test")
-        .send()
-        .await
-        .unwrap();
-    assert_contract_response(forbidden, "get", "/api/network/catalog", 403).await;
-    let cli = |args: &[&str]| {
-        let result = Command::new(env!("CARGO_BIN_EXE_reb-api"))
-            .args(args)
-            .output()
-            .unwrap();
-        assert!(
-            result.status.success(),
-            "{}",
-            String::from_utf8_lossy(&result.stderr)
-        );
-        result.stdout
-    };
-    assert!(
-        String::from_utf8(cli(&["list"]))
-            .unwrap()
-            .contains("get_api_observation_catalog")
-    );
-    let description: Value =
-        serde_json::from_slice(&cli(&["describe", "get_api_observation_catalog"])).unwrap();
-    assert!(description["components"]["schemas"]["ApiObservedJsonShape"].is_object());
-    assert_schema(
-        &description,
-        &description["components"]["schemas"]["ApiObservationCatalog"],
-        &catalog,
-        "Offline API catalog schema",
-    );
-    let live: Value = serde_json::from_slice(&cli(&[
-        "call",
-        "get_api_observation_catalog",
-        "--read-only",
-        "--base-url",
-        &server.url,
-    ]))
-    .unwrap();
-    assert_eq!(live, catalog);
-}
-
 #[test]
 fn cli_json_discovery_is_offline_and_preserves_legacy_list() {
     let cli = |args: &[&str]| {
@@ -6514,11 +6160,8 @@ fn cli_json_discovery_is_offline_and_preserves_legacy_list() {
         assert!(row["read_only_eligible"].is_boolean());
     }
     for (id, eligible) in [
-        ("get_api_observation_catalog", true),
-        ("get_network_request", true),
         ("get_origin_trace", true),
         ("compare_evidence_packages", true),
-        ("debugger_action", false),
         ("get_vm_analysis", false),
         ("get_native_console", false),
     ] {
@@ -6565,7 +6208,10 @@ fn cli_read_only_rejects_mutation_unknowns_and_effectful_gets_before_dispatch() 
         assert_eq!(output.status.code(), Some(2), "{operation}: {output:?}");
         assert!(output.stdout.is_empty());
         let error = String::from_utf8(output.stderr).unwrap();
-        if operation == "unknown_operation" {
+        if matches!(
+            operation,
+            "unknown_operation" | "debugger_action" | "get_debugger_source"
+        ) {
             assert!(error.contains("Unknown operation"), "{error}");
         } else {
             assert!(error.contains("--read-only rejects operation"), "{error}");
@@ -6692,185 +6338,6 @@ async fn cli_read_only_malformed_response_is_not_replayed_and_default_calls_stil
             "The CLI must never retry requests or follow redirects"
         );
     }
-}
-
-#[tokio::test]
-async fn exact_network_request_has_closed_selection_safe_errors_and_offline_discovery() {
-    let server = Server::start_with_helper_canaries(true).await;
-    server.file(
-        "events.jsonl",
-        b"synthetic unrelated store must not be read or changed\n",
-    );
-    let before: Value = server.get("/api/debugger").await.json().await.unwrap();
-    let network = &before["network"];
-    let params = [
-        (
-            "instance_id",
-            network["instance_id"].as_str().unwrap().to_owned(),
-        ),
-        ("capture_epoch", network["capture_epoch"].to_string()),
-        ("request_id", "synthetic-selected-request".to_owned()),
-        ("target_id", "synthetic-selected-target".to_owned()),
-        ("started_monotonic_ms", "100.0000001".to_owned()),
-    ];
-    let path = |params: &[(String, String)]| {
-        format!(
-            "/api/network/request?{}",
-            url::form_urlencoded::Serializer::new(String::new())
-                .extend_pairs(params.iter().map(|(key, value)| (key, value)))
-                .finish()
-        )
-    };
-    let params: Vec<(String, String)> = params
-        .into_iter()
-        .map(|(key, value)| (key.into(), value))
-        .collect();
-    let bytes = assert_contract_response(
-        server.get(&path(&params)).await,
-        "get",
-        "/api/network/request",
-        404,
-    )
-    .await;
-    let error: Value = serde_json::from_slice(&bytes).unwrap();
-    assert_eq!(error["code"], "target_unavailable");
-    assert_eq!(
-        error["details"],
-        json!({"selection_reason":"request_not_retained"})
-    );
-    assert!(!String::from_utf8_lossy(&bytes).contains("synthetic"));
-    for index in 0..params.len() {
-        let mut missing = params.clone();
-        missing.remove(index);
-        assert_contract_response(
-            server.get(&path(&missing)).await,
-            "get",
-            "/api/network/request",
-            400,
-        )
-        .await;
-        let mut duplicate = params.clone();
-        duplicate.push(params[index].clone());
-        assert_contract_response(
-            server.get(&path(&duplicate)).await,
-            "get",
-            "/api/network/request",
-            400,
-        )
-        .await;
-    }
-    let mut extra = params.clone();
-    extra.push(("fallback".into(), "synthetic-private-diagnostic".into()));
-    assert_contract_response(
-        server.get(&path(&extra)).await,
-        "get",
-        "/api/network/request",
-        400,
-    )
-    .await;
-    for (field, invalid) in [
-        ("instance_id", ""),
-        ("request_id", ""),
-        ("capture_epoch", "01"),
-        ("capture_epoch", "9007199254740992"),
-        ("started_monotonic_ms", "NaN"),
-        ("started_monotonic_ms", "-1"),
-        ("started_monotonic_ms", " 1"),
-    ] {
-        let mut changed = params.clone();
-        changed.iter_mut().find(|(key, _)| key == field).unwrap().1 = invalid.into();
-        assert_contract_response(
-            server.get(&path(&changed)).await,
-            "get",
-            "/api/network/request",
-            400,
-        )
-        .await;
-    }
-    for invalid in ["%", "%GG", "%FF", "%C3%28"] {
-        let malformed = path(&params).replace("synthetic-selected-request", invalid);
-        assert_contract_response(
-            server.get(&malformed).await,
-            "get",
-            "/api/network/request",
-            400,
-        )
-        .await;
-    }
-    for field in ["instance_id", "capture_epoch"] {
-        let mut stale = params.clone();
-        stale.iter_mut().find(|(key, _)| key == field).unwrap().1 = if field == "capture_epoch" {
-            "1"
-        } else {
-            "synthetic-stale-owner"
-        }
-        .into();
-        let bytes = assert_contract_response(
-            server.get(&path(&stale)).await,
-            "get",
-            "/api/network/request",
-            409,
-        )
-        .await;
-        let error: Value = serde_json::from_slice(&bytes).unwrap();
-        assert_eq!(error["code"], "state_conflict");
-        assert_eq!(
-            error["details"],
-            json!({"selection_reason":"stale_capture"})
-        );
-        assert!(!String::from_utf8_lossy(&bytes).contains("synthetic"));
-    }
-    let forbidden = server
-        .client
-        .get(format!("{}{}", server.url, path(&params)))
-        .header("Origin", "https://external.test")
-        .send()
-        .await
-        .unwrap();
-    assert_contract_response(forbidden, "get", "/api/network/request", 403).await;
-    let offline = Command::new(env!("CARGO_BIN_EXE_reb-api"))
-        .args(["describe", "get_network_request"])
-        .output()
-        .unwrap();
-    assert!(offline.status.success());
-    let description: Value = serde_json::from_slice(&offline.stdout).unwrap();
-    assert!(description["components"]["schemas"]["NetworkRequestResponse"].is_object());
-    let mut cli = Command::new(env!("CARGO_BIN_EXE_reb-api"));
-    cli.args([
-        "call",
-        "get_network_request",
-        "--read-only",
-        "--json-errors",
-        "--base-url",
-        &server.url,
-    ]);
-    for (key, value) in &params {
-        cli.arg("--param").arg(format!("{key}={value}"));
-    }
-    let result = cli.output().unwrap();
-    assert_eq!(result.status.code(), Some(1));
-    assert!(result.stdout.is_empty());
-    let error: Value = serde_json::from_slice(&result.stderr).unwrap();
-    assert_eq!(error["http_status"], 404);
-    assert_eq!(
-        error["details"],
-        json!({"selection_reason":"request_not_retained"})
-    );
-    assert!(!String::from_utf8_lossy(&result.stderr).contains("synthetic"));
-    let after: Value = server.get("/api/debugger").await.json().await.unwrap();
-    assert_eq!(before, after);
-    assert_eq!(
-        std::fs::read(server.root.path().join("events.jsonl")).unwrap(),
-        b"synthetic unrelated store must not be read or changed\n"
-    );
-    assert!(
-        !server
-            .root
-            .path()
-            .join("unexpected-helper.sh.invoked")
-            .exists()
-    );
-    assert!(!server.root.path().join("collection.json").exists());
 }
 
 #[tokio::test]
@@ -7371,47 +6838,73 @@ fn response_event_for_vm_test(root: &Value) -> Value {
     response
 }
 
+// The CDP Traffic ledger behind these reads is gone, and native network
+// records keep no bodies to rebuild it. They are not routes or operations.
 #[tokio::test]
-async fn live_wasm_requires_disposable_owner_and_explicit_bounded_reads() {
-    let server = Server::start().await;
-    // An idle backend refuses before page classification. Attached-page
-    // confirmation and captured_owner checks live in the debugger unit tests.
-    for request in [
-        json!({"action":"list_live_wasm_objects","target_id":"baseline"}),
-        json!({"action":"read_live_wasm_memory","target_id":"baseline","listing_id":1,"object_id":"memory:0","offset":0,"length":4,"confirmed":true}),
-        json!({"action":"list_live_wasm_objects","target_id":"baseline","captured_owner":{"instance_id":"instance","connection_epoch":0,"document_epoch":0,"target_id":"baseline"}}),
-        json!({"action":"list_live_wasm_objects","target_id":"other","confirmed":true,"captured_owner":{"instance_id":"instance","connection_epoch":0,"document_epoch":0,"target_id":"baseline"}}),
+async fn retired_network_catalog_and_request_routes_are_absent() {
+    let server = Server::start_with_helper_canaries(true).await;
+    let spec: Value = serde_json::from_str(include_str!("../../../protocol/openapi.json")).unwrap();
+    for (path, id) in [
+        ("/api/network/catalog", "get_api_observation_catalog"),
+        ("/api/network/request", "get_network_request"),
     ] {
-        let response = server.action("/api/debugger/actions", request).await;
-        assert_eq!(response.status(), 409);
-        let body: Value = response.json().await.unwrap();
-        assert_eq!(body["code"], "idle_backend");
-        assert!(
-            body["error"]
-                .as_str()
-                .unwrap()
-                .contains("authorized live endpoint"),
-            "{}",
-            body["error"]
-        );
+        assert!(spec["paths"].get(path).is_none(), "{path}");
+        assert!(!spec.to_string().contains(id), "{id}");
+        assert_eq!(server.get(path).await.status(), 404, "{path}");
     }
-    for (key, value) in [
-        ("confirmed", json!(false)),
-        ("length", json!(4097)),
-        ("length", json!(0)),
-        ("offset", json!(-1)),
-        ("target_id", json!("")),
+    let output = Command::new(env!("CARGO_BIN_EXE_reb-api"))
+        .args(["list", "--json"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let listing = String::from_utf8(output.stdout).unwrap();
+    assert!(!listing.contains("get_api_observation_catalog"));
+    assert!(!listing.contains("get_network_request"));
+    let deobfuscation = &spec["paths"]["/api/deobfuscation"]["get"];
+    assert!(
+        deobfuscation["parameters"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|parameter| parameter["name"] != "script_id")
+    );
+    let response = server.get("/api/deobfuscation?script_id=1").await;
+    assert_eq!(response.status(), 400, "live script input is gone");
+}
+
+#[tokio::test]
+async fn retired_cdp_routes_are_gone_for_every_method_and_subpath() {
+    let server = Server::start_with_helper_canaries(true).await;
+    for path in [
+        "/api/debugger",
+        "/api/debugger/actions",
+        "/api/debugger/source?script_id=1",
+        "/api/debugger/unknown",
     ] {
-        let mut request = json!({"action":"read_live_wasm_memory","target_id":"baseline","listing_id":1,"object_id":"memory:0","offset":0,"length":4,"confirmed":true});
-        request[key] = value;
-        assert_eq!(
-            server
-                .action("/api/debugger/actions", request)
+        for method in [
+            reqwest::Method::GET,
+            reqwest::Method::POST,
+            reqwest::Method::PUT,
+        ] {
+            let response = server
+                .client
+                .request(method, format!("{}{path}", server.url))
+                .body("{\"action\":\"pause\"}")
+                .send()
                 .await
-                .status(),
-            400
-        );
+                .unwrap();
+            assert_eq!(response.status(), 410);
+            let value: Value = response.json().await.unwrap();
+            assert_eq!(value["code"], "debugger_unavailable");
+        }
     }
+    assert!(
+        !server
+            .root
+            .path()
+            .join("unexpected-helper.sh.invoked")
+            .exists()
+    );
 }
 
 #[tokio::test]
@@ -7455,10 +6948,7 @@ async fn compact_session_context_and_action_errors_are_bounded_and_explicit() {
         400,
     )
     .await;
-    for (path, valid) in [
-        ("/api/debugger/actions", "pause"),
-        ("/api/capture/actions", "stop"),
-    ] {
+    for (path, valid) in [("/api/capture/actions", "stop")] {
         for body in [json!({}), json!({"action":"secret_canary"})] {
             let bytes =
                 assert_contract_response(server.action(path, body).await, "post", path, 400).await;
@@ -7485,36 +6975,12 @@ async fn compact_session_context_and_action_errors_are_bounded_and_explicit() {
         );
     }
     let missing: Value = server
-        .action("/api/debugger/actions", json!({"action":"add_watch"}))
-        .await
-        .json()
-        .await
-        .unwrap();
-    assert_eq!(missing["details"]["missing_fields"], json!(["expression"]));
-    let missing: Value = server
         .action("/api/capture/actions", json!({"action":"clear"}))
         .await
         .json()
         .await
         .unwrap();
     assert_eq!(missing["details"]["missing_fields"], json!(["confirm"]));
-    // Offline cleanup remains available and is not mislabeled live work.
-    assert!(
-        server
-            .action("/api/debugger/actions", json!({"action":"clear_console"}))
-            .await
-            .status()
-            .is_success()
-    );
-    let response = server
-        .client
-        .get(format!("{}/api/session/context", server.url))
-        .header("If-None-Match", &etag)
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(response.status(), 200);
-    assert_ne!(response.headers()["etag"], etag);
     assert!(
         !server
             .root
@@ -7524,31 +6990,21 @@ async fn compact_session_context_and_action_errors_are_bounded_and_explicit() {
     );
 }
 
-#[tokio::test]
-async fn configured_but_unattached_debugger_refuses_live_actions_explicitly() {
-    let root = tempfile::tempdir().unwrap();
-    let server = Server::start_with_args(&[
-        "--devtools-active-port".into(),
-        root.path().join("missing").display().to_string(),
-    ])
-    .await;
-    let response = server
-        .action("/api/debugger/actions", json!({"action":"pause"}))
-        .await;
-    let bytes = assert_contract_response(response, "post", "/api/debugger/actions", 409).await;
-    assert_eq!(
-        serde_json::from_slice::<Value>(&bytes).unwrap()["code"],
-        "debugger_unavailable"
-    );
-    let context: Value = server
-        .get("/api/session/context")
-        .await
-        .json()
-        .await
-        .unwrap();
-    assert_eq!(context["capture_mode"], "idle");
-    assert_eq!(context["debugger_state"], "waiting");
-    assert_eq!(context["live_admission"], "debugger_unavailable");
+#[test]
+fn retired_cdp_cli_options_are_rejected() {
+    for flag in [
+        "--devtools-active-port",
+        "--debugger-transport",
+        "--capture-network-content",
+        "--capture-target-limit",
+    ] {
+        let output = std::process::Command::new(env!("CARGO_BIN_EXE_origin-trace-backend"))
+            .arg(flag)
+            .arg("unused")
+            .output()
+            .unwrap();
+        assert!(!output.status.success(), "{flag}");
+    }
 }
 
 #[tokio::test]
@@ -7578,5 +7034,5 @@ async fn disconnected_capture_stop_is_not_reported_as_success() {
         .unwrap();
     assert_eq!(context["broker_connected"], false);
     assert_eq!(context["capture_mode"], "live");
-    assert_eq!(context["live_admission"], "debugger_unavailable");
+    assert_eq!(context["live_admission"], "native_capture_unavailable");
 }

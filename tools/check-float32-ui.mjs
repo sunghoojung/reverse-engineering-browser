@@ -1,9 +1,9 @@
 import {assertFloat32Smoke} from './check-origin-trace-package.mjs';
-// Feature checks extend the existing Origin Trace driver; no alternate browser runner.
+// Retained Float32 controller, native bridge and inert DOM/geometry model checks.
 import assert from 'node:assert/strict';
-import {spawn} from 'node:child_process';
+
 import {runInNewContext} from 'node:vm';
-import {readFile,mkdir} from 'node:fs/promises';
+import {readFile} from 'node:fs/promises';
 import {join,resolve} from 'node:path';
 const delay=ms=>new Promise(resolve=>setTimeout(resolve,ms));
 export async function checkFloat32Model(root) {
@@ -43,48 +43,11 @@ export async function checkFloat32Model(root) {
   console.log('PASS Float32 exact identity, closed report shapes, finite/nonfinite display, stale/latest/cancel/deadline and bounded transport models (not rendered QA)');
 }
 
-export async function float32BrowserFixture(root,directory) {
-  const store=join(directory,'float32-store');await mkdir(store);
-  const backend=join(resolve(process.env.CARGO_TARGET_DIR||join(root,'apps/origin-trace-backend/target')),'debug/origin-trace-backend');
-  const endpoint=join(store,'endpoint'),args=['--port','0','--endpoint-file',endpoint];
-  for(const [flag,file] of [['store','events'],['trace-store','trace'],['signal-store','signals'],['artifacts','artifacts'],['api-collection','collection'],['local-analyst','analyst']])args.push('--'+flag,join(store,file));
-  const fixture={mode:'normal',requests:[],reports:[],pending:[],diagnostics:{backend,args,output:''}};
-  const child=spawn(backend,args,{cwd:root,stdio:['ignore','pipe','pipe']});let closed=false,startError;
-  const exited=new Promise(resolve=>child.once('close',(code,signal)=>{closed=true;fixture.diagnostics.exit={code,signal};resolve();}));child.on('error',error=>{startError=error;});
-  for(const stream of [child.stdout,child.stderr])stream.on('data',chunk=>{fixture.diagnostics.output=(fixture.diagnostics.output+chunk.toString()).slice(-16384);});
-  fixture.release=()=>{for(const send of fixture.pending.splice(0))send();};
-  fixture.stop=async()=>{const cleanup=fixture.diagnostics.cleanup={exited:closed};fixture.release();try{if(!closed){child.kill('SIGTERM');await Promise.race([exited,delay(2000)]);}if(!closed){child.kill('SIGKILL');await Promise.race([exited,delay(2000)]);}assert(closed,'Owned Float32 backend did not stop');}finally{cleanup.exited=closed;}};
-  // Publish ownership before readiness: outer cleanup retains live-process storage.
-  fixture.ready=async()=>{
-    let url;const start=Date.now();
-    while(Date.now()-start<10000){if(startError)throw startError;assert(!closed,'Float32 backend exited before readiness');try{url=(await readFile(endpoint,'utf8')).trim();}catch(error){if(error.code!=='ENOENT')throw error;}if(url)break;await delay(25);}
-    assert(url&&/^http:\/\/127\.0\.0\.1:\d+$/.test(url),'Float32 backend endpoint unavailable');
-    fixture.url=url;
-    fixture.handle=async(request,response)=>{
-      if(new URL(request.url,'http://127.0.0.1').pathname!=='/api/float32/compare')return false;
-      try{
-        const chunks=[];let count=0;for await(const chunk of request){count+=chunk.length;assert(count<=2097152,'Float32 fixture input exceeded bound');chunks.push(Buffer.from(chunk));}
-        const body=Buffer.concat(chunks),payload=JSON.parse(body),mode=fixture.mode;fixture.requests.push(payload);
-        const result=await fetch(url+'/api/float32/compare',{method:'POST',headers:{'Content-Type':'application/json'},body,signal:AbortSignal.timeout(15000)});
-        const bytes=new Uint8Array(await result.arrayBuffer());assert(bytes.length<=524288,'Float32 fixture output exceeded bound');
-        if(result.ok)fixture.reports.push(JSON.parse(new TextDecoder().decode(bytes)));
-        const send=()=>{if(response.destroyed)return;if(mode==='failure'){response.writeHead(503,{'Content-Type':'application/json'});response.end('{"error":"Synthetic transport failure"}');}else{response.writeHead(result.status,{'Content-Type':'application/json'});response.end(bytes);}};
-        if(mode==='pending')fixture.pending.push(send);else send();
-      }catch(error){fixture.diagnostics.request_error=String(error.message).slice(0,2048);if(!response.destroyed){response.writeHead(500,{'Content-Type':'application/json'});response.end('{"error":"Float32 QA fixture failed"}');}}return true;
-    };
-  };
-  return fixture;
-}
-export async function checkFloat32Fixture(fixture,root) {
-  const {request,result}=JSON.parse(await readFile(join(root,'tools/fixtures/float32-v1.json'),'utf8'));
-  const response=await fetch(fixture.url+'/api/float32/compare',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(request),signal:AbortSignal.timeout(5000)});
-  assert.equal(response.status,200);assert.deepEqual(JSON.parse(JSON.stringify(await response.json())),JSON.parse(JSON.stringify(result)));
-  await checkFloat32NativeBridge(root,fixture.url);
-  console.log('PASS Float32 original fixture through the actual loopback backend (not rendered QA)');
-}
 // Keep Float32 on the shared driver's hit-tested, settled native wheel path.
 // Pane centers can belong to the nested sample list or a textarea instead.
-export function createFloat32Revealer({evaluate,wheel,record=()=>{}}) {
+function createFloat32ModelRevealer({context,wheel,record=()=>{}}) {
+  // Geometry only: expressions run in an inert local VM, never a browser driver.
+  const evaluate=async expression=>JSON.parse(JSON.stringify(runInNewContext(expression,context)));
   return async selector=>{
     for(let n=0;n<18;n++) {
       const movement=await evaluate(`(()=>{
@@ -144,21 +107,21 @@ async function checkFloat32RevealModel() {
   const pane={id:'tools-panel-float32',parentElement:null,scrollHeight:1200,clientHeight:686,
     get scrollTop(){return state.scrollTop;},getBoundingClientRect:()=>({top:190,bottom:876}),querySelectorAll:()=>[samples]};
   const control={parentElement:pane,getBoundingClientRect:()=>({top:state.controlTop-(state.scrollTop-100),bottom:state.controlTop+state.controlHeight-(state.scrollTop-100)})};
-  const evaluate=async expression=>JSON.parse(JSON.stringify(runInNewContext(expression,{document:{querySelector:selector=>selector==='#tools-panel-float32'?pane:control},getComputedStyle:()=>({overflowY:'auto'}),innerHeight:900,innerWidth:1440})));
+  const context={document:{querySelector:selector=>selector==='#tools-panel-float32'?pane:control},getComputedStyle:()=>({overflowY:'auto'}),innerHeight:900,innerWidth:1440};
   const wheel=async(owner,deltaY,mode)=>{
     assert.equal(owner,'#tools-panel-float32');assert.equal(mode,'scrollbar');assert(Number.isInteger(deltaY));state.wheels++;
     state.scrollTop=Math.min(514,Math.max(0,state.scrollTop+deltaY));
     return {point:{nested:[],mode}};
   };
-  const receipts=[],reveal=createFloat32Revealer({evaluate,wheel,record:value=>receipts.push(value)});
+  const receipts=[],reveal=createFloat32ModelRevealer({context,wheel,record:value=>receipts.push(value)});
   await reveal('#float32-run');assert.equal(state.wheels,1);assert.equal(receipts[0].deltaY,1);assert.equal(state.sampleTop,17);
   await reveal('#float32-run');assert.equal(state.wheels,1,'Visible control should not scroll');
   state.controlTop=100;await reveal('[data-float32-input="input"]');assert(state.scrollTop<100,'Input above the pane must use upward wheel movement');
   state.scrollTop=514;state.controlTop=1500;await assert.rejects(reveal('#float32-run'),/owning pane did not move/,'An unreachable margin must still fail at the scroll limit');
   state.scrollTop=100;state.controlTop=900;
-  await assert.rejects(createFloat32Revealer({evaluate,wheel:async()=>({point:{nested:[]}})})('#float32-run'),/owning pane did not move/);
-  await assert.rejects(createFloat32Revealer({evaluate,wheel:async()=>{state.sampleTop++;state.scrollTop++;return {point:{nested:[]}};}})('#float32-run'),/nested sample list/);
-  await assert.rejects(createFloat32Revealer({evaluate,wheel:async()=>({point:{nested:[{id:'wrong-owner'}]}})})('#float32-run'),/landed in a nested/);
+  await assert.rejects(createFloat32ModelRevealer({context,wheel:async()=>({point:{nested:[]}})})('#float32-run'),/owning pane did not move/);
+  await assert.rejects(createFloat32ModelRevealer({context,wheel:async()=>{state.sampleTop++;state.scrollTop++;return {point:{nested:[]}};}})('#float32-run'),/nested sample list/);
+  await assert.rejects(createFloat32ModelRevealer({context,wheel:async()=>({point:{nested:[{id:'wrong-owner'}]}})})('#float32-run'),/landed in a nested/);
   console.log('PASS Float32 reveal owning-pane progress, independent nested-list offsets, fractional edges, upward motion and blocked-wheel controls (geometry model; not rendered QA)');
 }
 
@@ -178,10 +141,10 @@ async function checkFloat32ResponsiveOwnerModel(root) {
       '#tools-panel-float32':panel,'#screen-tools > .tools-shell':state.foreign?{}:shell,
       '#screen-tools > .tools-shell > .tools-tabs':tabs,'#screen-tools':{get scrollTop(){return state.screen;}}
     }[selector]??control)};
-    const evaluate=async expression=>JSON.parse(JSON.stringify(runInNewContext(expression,{document,innerWidth:state.width,innerHeight:800,
-      getComputedStyle:node=>node===tabs?{position:state.sticky?'sticky':'static'}:{overflowY:'auto',display:state.display}})));
+    const context={document,get innerWidth(){return state.width;},innerHeight:800,
+      getComputedStyle:node=>node===tabs?{position:state.sticky?'sticky':'static'}:{overflowY:'auto',display:state.display}};
     const wheel=async(owner,delta,mode)=>{assert.equal(owner,'#screen-tools > .tools-shell');assert.equal(mode,'scrollbar');state.outer=Math.min(1616,Math.max(0,state.outer+delta));return {point:{nested:[],mode}};};
-    const receipts=[],reveal=createFloat32Revealer({evaluate,wheel,record:value=>receipts.push(value)});
+    const receipts=[],reveal=createFloat32ModelRevealer({context,wheel,record:value=>receipts.push(value)});
     await reveal('#float32-run');assert.equal(receipts[0].before.clip.top,236);assert.equal(state.sample,17);assert.equal(state.textarea,9);
     state.target=220;await reveal('[data-float32-input="input"]');assert(state.outer<100,'Sticky tabs must remain above the full revealed control');
     state.outer=1616;state.target=2400;await assert.rejects(reveal('#float32-run'),/owning pane did not move/,'Narrow saturation must not waive the margin');
@@ -193,77 +156,12 @@ async function checkFloat32ResponsiveOwnerModel(root) {
     await assert.rejects(reveal('#float32-run'),/sticky tab boundary/);state.sticky=true;
     for(const key of ['sample','textarea','page','screen','panel']) {
       state.outer=100;state.target=900;
-      await assert.rejects(createFloat32Revealer({evaluate,wheel:async(...args)=>{const receipt=await wheel(...args);state[key]++;return receipt;}})('#float32-run'),/scrolled/);
+      await assert.rejects(createFloat32ModelRevealer({context,wheel:async(...args)=>{const receipt=await wheel(...args);state[key]++;return receipt;}})('#float32-run'),/scrolled/);
     }
   }
   console.log('PASS Float32 exact responsive shell, sticky-tab clipping, narrow up/down movement and foreign/wide/nested/page ownership rejection (geometry model; not rendered QA)');
 }
 
-export async function checkFloat32Interactions({evaluate,viewport,click,key,command,wheel,screenshot,fixture}) {
-  const until=async(check,message)=>{const start=Date.now();while(!await(typeof check==='function'?check():evaluate(check))){assert(Date.now()-start<8000,message);await delay(25);}};
-  const press=async(value,modifiers=0)=>{const codes={Enter:13,Home:36,End:35,ArrowDown:40,ArrowUp:38,ArrowRight:39,Tab:9,a:65};await key(value,value==='a'?'KeyA':value,{windowsVirtualKeyCode:codes[value],modifiers,...(value==='Enter'?{text:'\r',unmodifiedText:'\r'}:{})});};
-  const scrollChecks=[];
-  const reveal=createFloat32Revealer({evaluate,wheel,record:receipt=>scrollChecks.push(receipt)});
-  const use=async selector=>{await reveal(selector);await click(selector);};
-  const type=async(selector,text)=>{await use(selector);await press('a',process.platform==='darwin'?4:2);await command('Input.insertText',{text});await until(`document.querySelector(${JSON.stringify(selector)}).value===${JSON.stringify(text)}`,'Typed input did not stick');};
-  const snapshot=()=>evaluate('float32Panel.controller.snapshot()');
-  const compare=async()=>{const previous=fixture.requests.length;await use('#float32-run');await until(async()=>fixture.requests.length===previous+1&&!(await snapshot()).pending,'New Float32 operation did not finish');const s=await snapshot();assert.equal(s.status,'ready');assert.equal(s.stale,false);assert.deepEqual(JSON.parse(JSON.stringify(s.report)),JSON.parse(JSON.stringify(fixture.reports.at(-1))),'Visible result must match this actual backend operation; signed-zero identity is carried in raw bits and sign_bit');return s;};
-  if (!await evaluate("document.querySelector('#advanced-navigation').open")) await use('#advanced-navigation > summary');
-  await use('[data-screen="tools"]');await use('#tools-tab-float32');
-  assert.equal(fixture.requests.length,0,'Opening inspector must not run analysis');
-  await use('#float32-example');assert.equal(fixture.requests.length,0,'Loading synthetic input must not run analysis');
-  const first=await compare();assert.equal(first.report.comparison.maximum_ulp_distance,1);assert.equal(first.report.input_summary.nan,1);assert.equal(first.report.input_summary.negative_zero,1);assert.equal(first.report.comparison.all_numeric_equal,false);
-  await use('.float32-identity summary');assert.match(await evaluate("document.querySelector('#float32-result').textContent"),/SHA-256/);await screenshot('float32-wide-bits');
-  await evaluate("window.float32RetainedDetails=document.querySelector('.float32-identity');window.float32RetainedRows=document.querySelector('.float32-rows');float32Panel.refresh()");
-  assert(await evaluate("document.querySelector('.float32-identity')===float32RetainedDetails && float32RetainedDetails.open && document.querySelector('.float32-rows')===float32RetainedRows"),'Routine refresh replaced immutable report nodes/disclosures');
-  const originalWords=await evaluate(`document.querySelector('[data-float32-input="input"]').value`);
-  // Establish that the sample list has a distinct native wheel owner, then
-  // revisit the input and Run controls through their parent pane.
-  await reveal('.float32-rows');
-  const nestedBefore=await evaluate("({outer:document.querySelector('#tools-panel-float32').scrollTop,inner:document.querySelector('.float32-rows').scrollTop,limit:document.querySelector('.float32-rows').scrollHeight-document.querySelector('.float32-rows').clientHeight})");
-  assert(nestedBefore.limit>nestedBefore.inner,'Sample-list fixture must have remaining native scroll range');
-  await wheel('.float32-rows',Math.min(32,nestedBefore.limit-nestedBefore.inner));
-  const nestedAfter=await evaluate("({outer:document.querySelector('#tools-panel-float32').scrollTop,inner:document.querySelector('.float32-rows').scrollTop,limit:document.querySelector('.float32-rows').scrollHeight-document.querySelector('.float32-rows').clientHeight})");
-  assert.equal(nestedAfter.outer,nestedBefore.outer,'Sample-list wheel moved the outer Float32 pane');
-  assert(nestedAfter.inner>nestedBefore.inner,'Sample-list wheel did not move its own pane');
-  await type('[data-float32-input="input"]','not-hex');await use('#float32-run');await until("float32Panel.controller.snapshot().status==='error'",'Preflight failure did not enter controller state');
-  const preflightMessage=(await snapshot()).message;assert.match(preflightMessage,/eight lowercase/);await use('#tools-tab-jwt');await use('#tools-tab-float32');assert.equal(await evaluate("document.querySelector('#float32-status').textContent"),preflightMessage,'Refresh erased the local preflight error');
-  await type('[data-float32-input="input"]',originalWords);await compare();
-  await type('#float32-ulps','1');assert.equal((await snapshot()).stale,true);const tolerant=await compare();assert.equal(tolerant.report.comparison.within_tolerance_pairs,3);assert.equal(tolerant.report.comparison.all_within_tolerance,null);
-  fixture.mode='failure';await use('#float32-run');await until("float32Panel.controller.snapshot().status==='error'",'HTTP failure not visible');assert.equal((await snapshot()).report.input.sha256,tolerant.report.input.sha256);assert.equal((await snapshot()).stale,true);
-  fixture.mode='pending';await use('#float32-run');await until(()=>fixture.pending.length===1,'Pending response not held');await use('#float32-cancel');assert.equal((await snapshot()).pending,false);fixture.release();await delay(100);assert.equal((await snapshot()).status,'cancelled');
-  fixture.mode='pending';await use('#float32-run');await until(()=>fixture.pending.length===1,'Second pending response not held');await type('#float32-ulps','0');assert.equal((await snapshot()).pending,false);fixture.mode='normal';const newest=await compare();fixture.release();await delay(100);assert.equal((await snapshot()).revision,newest.revision);assert.deepEqual((await snapshot()).report,newest.report);
-  fixture.mode='pending';await use('#float32-run');await until(()=>fixture.pending.length===1,'Navigation response not held');
-  await use('#tools-tab-jwt');assert.equal((await snapshot()).pending,false);fixture.release();await delay(100);assert.equal((await snapshot()).status,'cancelled');
-  await use('#tools-tab-float32');fixture.mode='normal';await compare();
-  // Supply enough original raw words for real paged backend results.
-  await type('[data-float32-input="input"]',Array(130).fill('3f800000').join(' '));await type('[data-float32-frames="input"]','130');
-  await use('[data-float32-frames="reference"]');await press('a',process.platform==='darwin'?4:2);await key('Backspace','Backspace',{windowsVirtualKeyCode:8});
-  assert.equal(await evaluate(`document.querySelector('[data-float32-frames="reference"]').value`),'');
-  await use('#float32-reference-enabled');assert(await evaluate("document.querySelector('#float32-reference-fields').disabled"),'Inactive reference fields must not prevent native form submission');await compare();
-  await use('#float32-next');await until("float32Panel.controller.snapshot().status==='ready' && float32Panel.controller.snapshot().report.detail.start===64",'Next sample window failed');assert.equal((await snapshot()).report.detail.rows[0].byte_offset,256);
-  await use('#float32-previous');await until("float32Panel.controller.snapshot().status==='ready' && float32Panel.controller.snapshot().report.detail.start===0",'Previous window failed');
-  // Keyboard tab selection uses the shared tablist behavior.
-  await use('#tools-tab-jwt');await press('ArrowRight');await until("state.toolsTab==='float32'",'Keyboard Float32 tab selection failed');
-  const narrowOwners=[];
-  for(const [width,height] of [[600,800],[360,740]]) {
-    await viewport(width,height);const firstCheck=scrollChecks.length;
-    await compare();
-    // Return above the run controls using a real wheel and strict hit-tested
-    // input click, then descend again without moving its nested textarea.
-    await use('[data-float32-input="input"]');await compare();
-    await reveal('.float32-receipt');
-    assert(await evaluate('document.documentElement.scrollWidth<=innerWidth'),'Float32 causes horizontal page overflow');
-    const checks=scrollChecks.slice(firstCheck);
-    assert(checks.some(check=>check.before.owner==='#screen-tools > .tools-shell'&&check.before.viewport.width===width),'Narrow Float32 must exercise its exact responsive shell owner');
-    narrowOwners.push({width,height,checks});
-    await screenshot(`float32-${width}-report`);await use('#float32-next');
-    await until("float32Panel.controller.snapshot().report.detail.start===64 && !float32Panel.controller.snapshot().pending",'Narrow paging failed');
-  }
-  await use('#float32-clear');assert.equal((await snapshot()).report,null);await screenshot('float32-cleared');
-  assert(scrollChecks.some(check=>check.selector==='#float32-run'&&check.before.samples.length===1&&check.after.scrollTop>check.before.scrollTop),'Float32 Run reveal must exercise the outer pane with a retained nested sample list');
-  return {status:'passed',path:'browser development UI with actual Rust backend',source:'original synthetic buffers; only held responses/503 are synthetic',viewports:[[1440,900],[600,800],[360,740]],scrollChecks,narrowOwners,nestedWheel:{before:nestedBefore,after:nestedAfter},checks:['explicit input and reference','actual backend result identity','exceptional values and signed zero','visible tolerances','stale/retry retention','cancel and late responses','newer result wins','sample pagination','keyboard tabs','narrow scrolling and pointer controls','clear']};
-}
 
 async function checkFloat32HostLifecycle(root, fixture) {
   // Narrow DOM adapter, executing the real mounted panel and host refresh path.
@@ -309,7 +207,7 @@ async function checkFloat32HostLifecycle(root, fixture) {
   const app=await readFile(join(root,'apps/research-ui/app.js'),'utf8');
   const section=(start,end)=>{const first=app.indexOf(start),last=app.indexOf(end,first);assert(first>=0&&last>first);return app.slice(first,last);};
   const api=runInNewContext((await readFile(join(root,'apps/research-ui/source_facts.js'),'utf8'))+'\n'+(await readFile(join(root,'apps/research-ui/evidence_package.js'),'utf8'))+'\n'+(await readFile(join(root,'apps/research-ui/float32_inspector.js'),'utf8'))+'\n'+
-    section('      function liveScriptIdentity(','      function liveSources(')+section('      const float32Panel =','      function renderTools()')+section('      async function refreshArtifacts()','      function showScreen(')+';({panel:float32Panel,refreshArtifacts,syncFloat32Panel})',env);
+    section('      function sourceIdentity(','      function capturedSources(')+section('      const float32Panel =','      function renderTools()')+section('      async function refreshArtifacts()','      function showScreen(')+';({panel:float32Panel,refreshArtifacts,syncFloat32Panel})',env);
   const panel=api.panel,snapshot=panel.controller.snapshot,select=field('input','artifact');
   let refreshCalls=0;const refresh=panel.refresh;panel.refresh=()=>{refreshCalls++;refresh();};
   const update=async(artifacts,status=200,valid=true)=>{catalog=artifacts;catalogStatus=status;catalogValid=valid;await api.refreshArtifacts();};

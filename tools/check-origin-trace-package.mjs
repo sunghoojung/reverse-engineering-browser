@@ -107,7 +107,8 @@ export async function runPackagedSmoke(app, directory, name, flags = [], environ
   assert.deepEqual(result.nativeClientProject,{available:true,invalidPayloadRefused:true,subframeRefused:true});
   assert.equal(result.stylesLoaded, true);
   assert.equal(result.smokeExerciseError, null, output);
-  assert.equal(result.debuggerContractValid, true);
+  assert.equal(result.retiredLiveControlsAbsent, true);
+  assert.deepEqual(result.nativeWorkspace, {visible:true,nativeConsolePresent:true,exportPresent:true,retiredDebuggerAbsent:true});
   assert.equal(result.apiCollectionContractValid, true);
   assert.equal(result.localAnalystContractValid, true);
   assert.equal(result.localAnalystRunnerAvailable, true);
@@ -250,8 +251,8 @@ async function main() {
     assert.match(fallback.output, /SMOKE_LIVE_FAILURE Brave Browser Development is not executable/);
     assert.equal(new URL(fallback.result.location).protocol, 'reb:');
     assert.equal(fallback.result.captureMode, 'idle');
-    // Installed Chrome/Brave supplies only a disposable loopback debugger. It does
-    // not stand in for native Brave capture instrumentation.
+    // Installed Chrome/Brave supplies only a disposable browser process. The
+    // launcher opens no DevTools endpoint; this is not native probe acceptance.
     const launcher = spawn(process.execPath, [join(root, 'tools/check-origin-trace-launcher.mjs'), root, app], {
       cwd: temporary, env: {...process.env, REB_CHECK_PACKAGED_APP_UI: '1'}, stdio: 'inherit',
     });

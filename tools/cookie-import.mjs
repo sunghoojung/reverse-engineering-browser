@@ -45,8 +45,7 @@ function normalize(row,format,destination,now) {
       row.name.startsWith('__Http-') && (!row.secure || !row.httpOnly) || row.name.startsWith('__Host-Http-') && (!row.secure || !row.httpOnly || !row.hostOnly || row.path !== '/')) fail('prefix');
   if (row.session ? Object.hasOwn(row,'expirationDate') : typeof row.expirationDate !== 'number' || !Number.isFinite(row.expirationDate) ||
       row.expirationDate <= now+5 || row.expirationDate > now+400*86400) fail('expiry');
-  // Chromium promotes Secure when CookieParam.url is HTTPS, even with secure:false.
-  // Domain-only input preserves the reviewed flag; no leading dot means host-only.
+  // Preserve the exact reviewed scope and flags in the offline normalization.
   const param={name:row.name,value:row.value,domain:(row.hostOnly?'':'.')+destination.host,path:row.path,secure:row.secure,httpOnly:row.httpOnly};
   if (sameSites[row.sameSite]) param.sameSite=sameSites[row.sameSite];
   if (!row.session) param.expires=row.expirationDate;
@@ -56,52 +55,23 @@ function normalize(row,format,destination,now) {
 // The only ordinary serialization/inspection surface is the name/value-free review.
 // JS strings cannot be securely zeroed. Dropping references is not secure erasure.
 export class CookieImportPlan {
-  #cookies;
   #review;
   constructor(rows,format,destination,now) {
     const seen=new Set();
     if(rows.some(row=>row?.storeId!==rows[0]?.storeId))fail('mixed-stores');
-    this.#cookies=rows.map(row=>normalize(row,format,destination,now));
-    for(const {param} of this.#cookies) {
+    const cookies=rows.map(row=>normalize(row,format,destination,now));
+    for(const {param} of cookies) {
       const key=JSON.stringify([param.domain??destination.host,param.path,param.name]);
       if(seen.has(key)) fail('duplicate-cookie'); seen.add(key);
     }
     this.#review=Object.freeze({format:'reb-private-cookie-import-v1',source_format:format,destination, count:rows.length,
-      cookies:Object.freeze(this.#cookies.map(({param,session,hostOnly,sameSite},index)=>Object.freeze({row:index+1,domain:destination.host,
+      cookies:Object.freeze(cookies.map(({param,session,hostOnly,sameSite},index)=>Object.freeze({row:index+1,domain:destination.host,
         scope:hostOnly?'exact host':'host and subdomains',path:param.path,secure:param.secure,http_only:param.httpOnly,
         same_site:sameSite,expiry:session?'session':param.expires}))) });
   }
   review() { return this.#review; }
   toJSON() { return this.review(); }
   [inspect.custom]() { return this.review(); }
-  discard() { this.#cookies=null; }
-  async applyAndVerify(command,context,now=Date.now()/1000) {
-    if(!this.#cookies || typeof context !== 'string' || !context || context.length>256) fail('retired-plan');
-    const rows=this.#cookies; this.#cookies=null; // Single-use, including uncertain replies.
-    if(rows.some(({param})=>param.expires !== undefined && param.expires <= now+5)) fail('expiry');
-    try {
-      const before=await command('Storage.getCookies',{browserContextId:context});
-      if(!Array.isArray(before?.cookies) || before.cookies.length !== 0) fail('context-not-empty');
-      await command('Storage.setCookies',{browserContextId:context,cookies:rows.map(row=>row.param)});
-      const read=await command('Storage.getCookies',{browserContextId:context});
-      if(!Array.isArray(read?.cookies) || read.cookies.length !== rows.length) fail('verification');
-      const seen=new Set();
-      for(const {param,hostOnly,session} of rows) {
-        const domain=hostOnly?this.#review.destination.host:'.'+this.#review.destination.host;
-        const matches=read.cookies.filter(c=>c.name===param.name&&c.domain===domain&&c.path===param.path);
-        if(matches.length!==1) fail('verification');
-        const cookie=matches[0];
-        if(seen.has(cookie) || cookie.value!==param.value || cookie.secure!==param.secure || cookie.httpOnly!==param.httpOnly || cookie.session!==session ||
-          cookie.sameSite!==param.sameSite || cookie.partitionKey!=null || cookie.partitionKeyOpaque===true ||
-          (!session&&(!Number.isFinite(cookie.expires)||Math.abs(cookie.expires-param.expires)>0.000002))) fail('verification');
-        seen.add(cookie);
-      }
-      return Object.freeze({state:'verified',count:rows.length});
-    } catch(error) {
-      if(error instanceof CookieImportError) throw error;
-      fail('browser-command');
-    } finally { rows.length=0; }
-  }
 }
 
 export function parseCookieImport(bytes,format,origin,seconds,now=Date.now()/1000) {

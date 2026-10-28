@@ -193,7 +193,7 @@ final class StoredEventWindowCache {
     var sequenceGapsSaturated = false
     var queueDrops: UInt64 = 0
     var queueDropsSaturated = false
-    var marks: [UInt64: [UInt64: UInt64]] = [:]
+    var marks: [UInt64: [UInt64: Set<UInt64>]] = [:]
     var retained = Array(repeating: false, count: records.count)
     var events: [[String: Any]] = []
     var networkEvents: [[String: Any]] = []
@@ -202,16 +202,7 @@ final class StoredEventWindowCache {
     var networkSkip = networkCount >= capped ? networkCount - capped : 0
     for index in records.indices {
       var record = records[index]
-      var processMarks = marks[record.session] ?? [:]
-      if let previous = processMarks[record.process] {
-        if record.sequence > previous {
-          add(&sequenceGaps, &sequenceGapsSaturated, record.sequence - previous - 1)
-          processMarks[record.process] = record.sequence
-        }
-      } else {
-        processMarks[record.process] = record.sequence
-      }
-      marks[record.session] = processMarks
+      marks[record.session, default: [:]][record.process, default: []].insert(record.sequence)
       add(&queueDrops, &queueDropsSaturated, record.drops)
       let keepGeneral = index >= generalStart
       let keepNetwork: Bool
@@ -234,6 +225,14 @@ final class StoredEventWindowCache {
         if keepGeneral { events.append(record.event!) }
         if keepNetwork { networkEvents.append(record.event!) }
         retained[index] = true
+      }
+    }
+    // ACK-delayed identities close holes; duplicates cannot create gaps.
+    for processes in marks.values {
+      for seen in processes.values {
+        if let low = seen.min(), let high = seen.max() {
+          add(&sequenceGaps, &sequenceGapsSaturated, high - low - UInt64(seen.count - 1))
+        }
       }
     }
     let coverage: [String: Any] = [

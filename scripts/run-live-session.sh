@@ -18,7 +18,6 @@ repository_root="$(cd "${script_dir}/.." && pwd)"
 readonly repository_root
 readonly broker_binary="${REB_BROKER_BINARY:-${repository_root}/build/reb-event-broker}"
 readonly artifact_receiver_binary="${REB_ARTIFACT_RECEIVER_BINARY:-${repository_root}/build/reb-artifact-receiver}"
-readonly debugger_transport_binary="${REB_DEBUGGER_TRANSPORT_BINARY:-${repository_root}/build/reb-debugger-transport}"
 readonly heap_snapshot_binary="${REB_HEAP_SNAPSHOT_BINARY:-${repository_root}/build/reb-heap-snapshot}"
 readonly decoder_binary="${REB_DECODER_BINARY:-${repository_root}/build/reb-decoder}"
 readonly research_ui_server="${REB_ORIGIN_TRACE_BACKEND:-${repository_root}/apps/origin-trace-backend/target/debug/origin-trace-backend}"
@@ -43,7 +42,8 @@ readonly category_mask="${REB_CAPTURE_CATEGORY_MASK:-4095}"
 readonly duration_seconds="${REB_CAPTURE_DURATION_SECONDS:-3600}"
 readonly open_command="${REB_OPEN_COMMAND:-open}"
 readonly native_quiet_mode="${REB_NATIVE_QUIET_MODE:-0}"
-readonly cdp_network_capture="${REB_CDP_NETWORK_CAPTURE:-0}"
+readonly native_wasm_dispatch="${REB_NATIVE_WASM_DISPATCH:-0}"
+readonly native_guest_adapter="${REB_NATIVE_WASM_GUEST_ADAPTER:-}"
 readonly capture_canvas_images="${REB_CAPTURE_CANVAS_IMAGES:-0}"
 readonly use_system_keychain="${REB_USE_SYSTEM_KEYCHAIN:-1}"
 readonly localhost_only="${REB_LOCALHOST_ONLY:-0}"
@@ -57,8 +57,27 @@ readonly active_endpoint_file="${REB_ACTIVE_ENDPOINT_FILE:-${HOME:?HOME is requi
 if [[ "${native_quiet_mode}" != 0 && "${native_quiet_mode}" != 1 ]]; then
   fail_live_session 2 "REB_NATIVE_QUIET_MODE must be 0 or 1."
 fi
-if [[ "${cdp_network_capture}" != 0 && "${cdp_network_capture}" != 1 ]]; then
-  fail_live_session 2 "REB_CDP_NETWORK_CAPTURE must be 0 or 1."
+if [[ "${native_wasm_dispatch}" != 0 && "${native_wasm_dispatch}" != 1 ]]; then
+  fail_live_session 2 "REB_NATIVE_WASM_DISPATCH must be 0 or 1."
+fi
+if [[ "${native_wasm_dispatch}" == 1 ]] &&
+   (( (category_mask & 512) == 0 || (category_mask & 1024) == 0 )); then
+  fail_live_session 2 "REB_NATIVE_WASM_DISPATCH requires VM and Artifact capture categories."
+fi
+if [[ -n "${native_guest_adapter}" ]]; then
+  if [[ "${native_wasm_dispatch}" != 1 ]]; then
+    fail_live_session 2 "REB_NATIVE_WASM_GUEST_ADAPTER requires REB_NATIVE_WASM_DISPATCH=1."
+  fi
+  if [[ "${native_guest_adapter}" != /* || ! -f "${native_guest_adapter}" || ! -r "${native_guest_adapter}" ]]; then
+    fail_live_session 2 "REB_NATIVE_WASM_GUEST_ADAPTER must name a readable absolute regular file."
+  fi
+  adapter_bytes="$(wc -c < "${native_guest_adapter}")"
+  if (( adapter_bytes == 0 || adapter_bytes > 8192 )); then
+    fail_live_session 2 "REB_NATIVE_WASM_GUEST_ADAPTER must contain between 1 and 8192 bytes."
+  fi
+fi
+if [[ "${REB_CDP_NETWORK_CAPTURE:-0}" != 0 || -n "${REB_DEBUGGER_TRANSPORT_BINARY:-}" ]]; then
+  fail_live_session 2 "CDP capture and debugger transport were removed; use native Brave capture."
 fi
 if [[ "${capture_canvas_images}" != 0 && "${capture_canvas_images}" != 1 ]]; then
   fail_live_session 2 "REB_CAPTURE_CANVAS_IMAGES must be 0 or 1."
@@ -82,9 +101,6 @@ if [[ "${capture_canvas_images}" == 1 ]] &&
    (( (category_mask & 1) == 0 || (category_mask & 1024) == 0 )); then
   fail_live_session 2 "REB_CAPTURE_CANVAS_IMAGES requires Canvas and Artifact category bits (mask 1025)."
 fi
-if [[ "${native_quiet_mode}" == 1 && "${cdp_network_capture}" == 1 ]]; then
-  fail_live_session 2 "REB_CDP_NETWORK_CAPTURE requires the live debugger."
-fi
 
 mkdir -p "${session_directory}" "${artifact_store_path}" "${profile_path}" "${native_console_directory}"
 chmod 700 "${session_directory}" "${artifact_store_path}" "${profile_path}" "${native_console_directory}"
@@ -101,7 +117,6 @@ readonly artifact_receiver_log="${session_directory}/artifact-receiver.log"
 readonly ui_log="${session_directory}/research-ui.log"
 readonly brave_log="${session_directory}/brave.log"
 readonly ui_endpoint_path="${session_directory}/research-ui.endpoint"
-readonly devtools_active_port="${profile_path}/DevToolsActivePort"
 touch "${brave_log}"
 chmod 600 "${brave_log}"
 
@@ -127,9 +142,6 @@ if [[ ! -x "${broker_binary}" ]]; then
 fi
 if [[ ! -x "${artifact_receiver_binary}" ]]; then
   fail_live_session 1 "Artifact receiver is missing. Run: make artifact-receiver"
-fi
-if [[ "${native_quiet_mode}" == 0 && ! -x "${debugger_transport_binary}" ]]; then
-  fail_live_session 1 "Debugger transport is missing. Run: make debugger-transport"
 fi
 if [[ ! -x "${heap_snapshot_binary}" ]]; then
   fail_live_session 1 "Heap snapshot helper is missing. Run: make heap-snapshot"
@@ -321,15 +333,7 @@ ui_arguments=(
   --capture-session-id "${session_id}"
   --broker-pid "${broker_pid}"
 )
-if [[ "${native_quiet_mode}" == 0 ]]; then
-  ui_arguments+=(
-    --devtools-active-port "${devtools_active_port}"
-    --debugger-transport "${debugger_transport_binary}"
-  )
-  if [[ "${cdp_network_capture}" == 1 ]]; then
-    ui_arguments+=(--capture-network-content)
-  fi
-fi
+
 ui_arguments+=(--native-console-live-directory "${native_console_directory}")
 "${research_ui_server}" \
   "${ui_arguments[@]}" \
@@ -387,10 +391,23 @@ brave_arguments=(
   --reb-category-mask="${category_mask}" \
   --reb-duration-seconds="${duration_seconds}"
 )
+native_js_flags=()
 if [[ "${native_quiet_mode}" == 1 ]]; then
-  brave_arguments+=(--js-flags=--reb-ignore-debugger-statements)
-else
-  brave_arguments+=(--remote-debugging-port=0)
+  native_js_flags+=(--reb-ignore-debugger-statements)
+fi
+if [[ "${native_wasm_dispatch}" == 1 ]]; then
+  native_js_flags+=(--reb-wasm-br-table-dispatch)
+fi
+# Per-function-entry frame hooks cost a runtime call on every Wasm call, so
+# they are compiled in only when a guest adapter actually needs them.
+if [[ -n "${native_guest_adapter}" ]]; then
+  native_js_flags+=(--reb-wasm-guest-capture)
+fi
+if [[ ${#native_js_flags[@]} -gt 0 ]]; then
+  brave_arguments+=("--js-flags=${native_js_flags[*]}")
+fi
+if [[ -n "${native_guest_adapter}" ]]; then
+  brave_arguments+=("--reb-wasm-guest-adapter=${native_guest_adapter}")
 fi
 if [[ "${capture_canvas_images}" == 1 ]]; then
   brave_arguments+=(--reb-capture-canvas-images)
@@ -422,32 +439,14 @@ fi
 "${brave_binary}" "${brave_arguments[@]}" >"${brave_log}" 2>&1 &
 brave_pid=$!
 
-if [[ "${native_quiet_mode}" == 0 ]]; then
-  for _ in {1..600}; do
-    if [[ -s "${devtools_active_port}" ]]; then
-      break
-    fi
-    if ! kill -0 "${brave_pid}" 2>/dev/null; then
-      fail_live_session 1 "Brave stopped before its debugger endpoint became ready. See: ${brave_log}"
-    fi
-    sleep 0.05
-  done
-  if [[ ! -s "${devtools_active_port}" ]]; then
-    fail_live_session 1 "Brave did not become ready within 30 seconds. Complete any macOS Brave Safe Storage prompt, then retry. See: ${brave_log}"
-  fi
-else
-  sleep 0.25
-  if ! kill -0 "${brave_pid}" 2>/dev/null; then
-    fail_live_session 1 "Brave stopped during quiet-mode startup. See: ${brave_log}"
-  fi
+sleep 0.25
+if ! kill -0 "${brave_pid}" 2>/dev/null; then
+  fail_live_session 1 "Brave stopped during native startup. See: ${brave_log}"
 fi
 
-# Persist the launch fact after startup succeeds. Never infer this from a later
-# debugger disconnection, and do not equate an omitted endpoint with invisibility.
-vm_capture_mode="cdp-attached"
-if [[ "${native_quiet_mode}" == 1 ]]; then
-  vm_capture_mode="native-stealth"
-fi
+# This launch never opens a DevTools transport. Preserve the existing native
+# provenance value; it is not a promise that instrumentation is undetectable.
+vm_capture_mode="native-stealth"
 provenance_temporary="${artifact_store_path}/capture-provenance-v1.json.tmp.$$"
 printf '{"contract_version":1,"sessions":[{"session_id":"%s","capture_mode":"%s"}]}\n' \
   "${session_id}" "${vm_capture_mode}" >"${provenance_temporary}"
@@ -479,16 +478,7 @@ if [[ "${capture_canvas_images}" == 1 ]]; then
 else
   echo "Canvas image capture: disabled; set REB_CAPTURE_CANVAS_IMAGES=1 to enable it for one session"
 fi
-if [[ "${native_quiet_mode}" == 1 ]]; then
-  echo "Live debugger: disabled (native quiet mode)"
-else
-  echo "Live debugger: ${ui_endpoint}"
-  if [[ "${cdp_network_capture}" == 1 ]]; then
-    echo "CDP network content: enabled for this session; sensitive headers are redacted and bodies are limited to 128 KiB"
-  else
-    echo "CDP network content: disabled for this session"
-  fi
-fi
+echo "Capture transport: native only"
 echo "Close Brave to stop this capture session."
 
 if [[ "${embedded_session}" == 1 ]]; then

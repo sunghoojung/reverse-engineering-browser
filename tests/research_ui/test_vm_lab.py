@@ -446,10 +446,10 @@ process.stdout.write(JSON.stringify({{
         if bash is None:
             self.skipTest("Bash is not installed")
         script = (UI_DIRECTORY.parents[1] / "scripts" / "run-live-session.sh").read_text(encoding="utf-8")
-        start = script.index("# Persist the launch fact after startup succeeds.")
+        start = script.index("# This launch never opens a DevTools transport.")
         end = script.index('if [[ "${embedded_session}" == 1 ]]; then', start)
         with tempfile.TemporaryDirectory() as temporary:
-            for quiet, mode in [("1", "native-stealth"), ("0", "cdp-attached")]:
+            for quiet, mode in [("1", "native-stealth"), ("0", "native-stealth")]:
                 subprocess.run([bash, "-c", script[start:end]], check=True, env={
                     **os.environ, "artifact_store_path": temporary,
                     "session_id": "18446744073709551615", "native_quiet_mode": quiet,
@@ -629,61 +629,39 @@ const wasm = {artifact_id:'4294967296', session_id:'9', kind:'wasm', url:'wasm:/
 const noise = {artifact_id:'1', session_id:'9', kind:'javascript', url:'chrome://newtab/strings.js', capture_origin:'network_response'};
 const other = {artifact_id:'2', session_id:'8', kind:'javascript', url:'https://newassets.hcaptcha.com/hsw.js', capture_origin:'network_response'};
 const page = {artifact_id:'3', session_id:'9', kind:'javascript', url:'https://newassets.hcaptcha.com/captcha/v1/hsw.js', capture_origin:'network_response'};
-const scripts = [
-  {script_id:'1', url:'chrome://newtab/strings.js', language:'JavaScript'},
-  {script_id:'25', url:'wasm://wasm/003c0d96', language:'WebAssembly'},
-  {script_id:'30', url:'https://accounts.hcaptcha.com/demo', language:'JavaScript'},
-  {script_id:'31', url:'', language:'JavaScript'},
-  {script_id:'32', url:'https://newassets.hcaptcha.com/captcha/v1/hsw.js', language:'JavaScript'}
-];
-const gap = vmSessionSourceJoin({artifacts:[wasm, noise, other], scripts, interpreterArtifactId:wasm.artifact_id, sessionId:'9', liveSessionJoined:true});
-const joined = vmSessionSourceJoin({artifacts:[wasm, noise, page], scripts, interpreterArtifactId:wasm.artifact_id, sessionId:'9', liveSessionJoined:true});
-const foreign = vmSessionSourceJoin({artifacts:[wasm, page], scripts, interpreterArtifactId:wasm.artifact_id, sessionId:'9', liveSessionJoined:false});
-const live = vmLiveCatalogMatchesSession([{session_id:'9'}], '9', 'live');
-const stale = vmLiveCatalogMatchesSession([{session_id:'9'}], '9', 'demo');
-const otherSession = vmLiveCatalogMatchesSession([{session_id:'4'}], '9', 'live');
+const gap = vmSessionSourceJoin({artifacts:[wasm, noise, other], interpreterArtifactId:wasm.artifact_id, sessionId:'9'});
+const joined = vmSessionSourceJoin({artifacts:[wasm, noise, page], interpreterArtifactId:wasm.artifact_id, sessionId:'9'});
+const unscoped = vmSessionSourceJoin({artifacts:[wasm, page], interpreterArtifactId:wasm.artifact_id});
 process.stdout.write(JSON.stringify({
   gap: gap.omission,
   gapText: gap.gapText,
   gapRoles: gap.stored.map(row => row.role),
   gapIgnoredOtherSession: gap.stored.some(row => row.artifact_id === '2'),
-  liveIds: gap.live.map(row => row.script_id),
-  liveRoles: gap.live.map(row => row.role),
   joinedCount: joined.pageJavaScriptCount,
   joinedOmission: joined.omission,
-  foreignLive: foreign.live.length,
-  foreignJoined: foreign.liveJoined,
-  relation: gap.live[0].relation,
-  hasSource: gap.live.some(row => Object.hasOwn(row, 'source')),
-  live, stale, otherSession,
-  capped: (() => {
-    const many = Array.from({length:33}, (_, index) => ({script_id:String(index + 1), url:`https://example.test/${index}.js`, language:'JavaScript'}));
-    const result = vmSessionSourceJoin({artifacts:[wasm], scripts:many, interpreterArtifactId:wasm.artifact_id, sessionId:'9', liveSessionJoined:true});
-    return {shown:result.live.length, omitted:result.liveOmitted};
-  })()
+  joinedRecords: [...new Set(joined.stored.map(row => row.record))],
+  relation: joined.stored.find(row => row.role === 'page-javascript').relation,
+  keys: Object.keys(joined).sort(),
+  unscoped: unscoped.scoped,
+  unscopedStored: unscoped.stored.length,
+  liveHelpers: [typeof vmLiveCatalogMatchesSession, typeof vmLiveScriptRank].filter(type => type !== 'undefined')
 }));
 """
         )
         self.assertEqual(result["gap"], "no-page-javascript-artifact")
         self.assertIn("/api/artifacts", result["gapText"])
-        self.assertIn("not written into the artifact store", result["gapText"])
+        self.assertNotIn("Debugger", result["gapText"])
         self.assertEqual(result["gapRoles"], ["interpreter", "browser-noise"])
         self.assertFalse(result["gapIgnoredOtherSession"])
-        self.assertEqual(result["liveIds"], ["30", "32", "31", "1"])
-        self.assertEqual(result["liveRoles"], ["page-javascript", "page-javascript", "generated-javascript", "browser-noise"])
         self.assertEqual(result["joinedCount"], 1)
         self.assertIsNone(result["joinedOmission"])
-        self.assertEqual(result["foreignLive"], 0)
-        self.assertFalse(result["foreignJoined"])
+        # Native evidence is artifact-only; no live script catalog joins in.
+        self.assertEqual(result["joinedRecords"], ["artifact"])
+        self.assertEqual(result["keys"], ["gapText", "omission", "pageJavaScriptCount", "scoped", "stored"])
         self.assertIn("correlation", result["relation"])
-        self.assertIn("guest_position stays null", result["relation"])
-        self.assertNotIn("provenance", result["relation"].replace("not loader provenance", ""))
-        self.assertFalse(result["hasSource"])
-        self.assertTrue(result["live"])
-        self.assertFalse(result["stale"])
-        self.assertFalse(result["otherSession"])
-        self.assertEqual(result["capped"], {"shown": 32, "omitted": 1})
-
+        self.assertFalse(result["unscoped"])
+        self.assertEqual(result["unscopedStored"], 0)
+        self.assertEqual(result["liveHelpers"], [])
 
 if __name__ == "__main__":
     unittest.main()

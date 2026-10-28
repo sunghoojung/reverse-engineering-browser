@@ -41,7 +41,6 @@ const environment = {
 for (const [key, name] of Object.entries({
   REB_BROKER_BINARY: "OriginTraceEventBroker",
   REB_ARTIFACT_RECEIVER_BINARY: "OriginTraceArtifactReceiver",
-  REB_DEBUGGER_TRANSPORT_BINARY: "OriginTraceDebuggerTransport",
   REB_HEAP_SNAPSHOT_BINARY: "OriginTraceHeapSnapshot",
   REB_DECODER_BINARY: "OriginTraceDecoder",
   REB_ORIGIN_TRACE_BACKEND: "OriginTraceBackend",
@@ -77,26 +76,31 @@ try {
     await wait(50);
   }
   assert(endpoint, "Launcher did not publish its endpoint: " + diagnostics);
-  const health = await (
-    await fetch(new URL("/api/health", endpoint), {
-      signal: AbortSignal.timeout(3000),
-    })
-  ).json();
-  assert.equal(health.capture_mode, "live");
-  let state;
+  let health;
   for (let i = 0; i < 200; i++) {
-    state = await (
-      await fetch(new URL("/api/debugger", endpoint), {
-        signal: AbortSignal.timeout(3000),
-      })
-    ).json();
-    if (state.state === "running") break;
+    const response = await fetch(new URL("/api/health", endpoint), {
+      signal: AbortSignal.timeout(3000),
+    });
+    assert.equal(response.status, 200);
+    health = await response.json();
+    if (health.broker_connected && health.artifact_receiver_connected) break;
+    assert.equal(child.exitCode, null, diagnostics);
     await wait(50);
   }
-  assert.equal(state.state, "running");
-  console.log(
-    "PASS packaged launcher starts a disposable live browser session",
-  );
+  assert.equal(health.status, "ok");
+  assert.equal(health.capture_mode, "live");
+  assert.equal(health.broker_connected, true);
+  assert.equal(health.artifact_receiver_connected, true);
+  assert.equal(health.debugger_state, "unavailable");
+  const ownedBrowserPid = Number((await readFile(browserPid, "utf8")).trim());
+  assert(Number.isSafeInteger(ownedBrowserPid) && ownedBrowserPid > 0);
+  process.kill(ownedBrowserPid, 0);
+  const retired = await fetch(new URL("/api/debugger", endpoint), {
+    signal: AbortSignal.timeout(3000),
+  });
+  assert.equal(retired.status, 410);
+  assert.equal((await retired.json()).code, "debugger_unavailable");
+  console.log("PASS packaged native-only launcher: owned browser alive, broker/receiver connected, retired debugger unavailable (not native probe acceptance)");
   if (process.env.REB_CHECK_PACKAGED_APP_UI === "1") {
     // Prove the running backend reads the relocated subtree, even while the
     // compiler's development source directory still exists. Restore before

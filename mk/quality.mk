@@ -12,13 +12,81 @@ magic-decoder-check: $(MAGIC_DECODER_EXECUTABLE) $(BUILD_DIR)/check-magic-decode
 native-tests: $(NATIVE_TEST_BINARIES)
 	@set -e; for test_binary in $(NATIVE_TEST_BINARIES); do "$$test_binary"; done
 
-check: all heap-snapshot-check native-artifact-capture-check native-request-identity-check wire-decoder-check magic-decoder-check native-vm-recorder-check owned-vm-helper-check native-probe-compile native-probe-admission-check native-network-capture-check native-proxy-policy-check native-build-test native-tests workspace-check deob-benchmark vm-lab-check
+# Run exactly one named ignored Rust test. --exact and the executed-count check
+# make a renamed or filtered-out test fail instead of passing with 0 tests.
+# $(1): cargo target selector, $(2): exact test path, $(3): environment.
+define ignored-rust-test
+	output=$$(env $(3) cargo test --locked --manifest-path apps/origin-trace-backend/Cargo.toml $(1) -- --ignored --exact $(2) 2>&1); \
+		status=$$?; printf '%s\n' "$$output"; test $$status -eq 0 && \
+		printf '%s\n' "$$output" | grep -q '^test result: ok\. 1 passed; 0 failed;' || \
+		{ echo "Expected exactly one passing ignored test: $(2)" >&2; exit 1; }
+endef
+
+check: native-wasm-golden-check all heap-snapshot-check native-artifact-capture-check native-request-identity-check wire-decoder-check magic-decoder-check native-vm-recorder-check owned-vm-helper-check native-probe-compile native-probe-admission-check native-network-capture-check native-proxy-policy-check native-build-test native-tests workspace-check deob-benchmark vm-lab-check native-only-check
 	cargo test --locked --manifest-path apps/origin-trace-backend/Cargo.toml
 	cargo test --locked --manifest-path apps/deobfuscator-worker/Cargo.toml
-	REB_OWNED_VM_TEST_HELPER="$(abspath $(NATIVE_VM_FIXTURE_BINARY))" \
-		cargo test --locked --manifest-path apps/origin-trace-backend/Cargo.toml owned_vm_real_helper -- --ignored
-	REB_SOURCE_FACTS_TEST_WORKER="$(abspath $(or $(CARGO_TARGET_DIR),apps/deobfuscator-worker/target))/debug/reb-deobfuscator-worker" \
-		cargo test --locked --manifest-path apps/origin-trace-backend/Cargo.toml source_facts_real_worker_http_and_cli -- --ignored
+	$(call ignored-rust-test,--lib,owned_vm_debugger::tests::owned_vm_real_helper_control_and_independent_goldens,\
+		REB_OWNED_VM_TEST_HELPER="$(abspath $(NATIVE_VM_FIXTURE_BINARY))")
+	$(call ignored-rust-test,--test owned_vm_http,owned_vm_real_helper_http_cli_lifecycle,\
+		REB_OWNED_VM_TEST_HELPER="$(abspath $(NATIVE_VM_FIXTURE_BINARY))")
+	$(call ignored-rust-test,--test http,source_facts_real_worker_http_and_cli,\
+		REB_SOURCE_FACTS_TEST_WORKER="$(abspath $(or $(CARGO_TARGET_DIR),apps/deobfuscator-worker/target))/debug/reb-deobfuscator-worker")
+
+# The actual C++ native Wasm encoders feed the Rust workspace builder, the
+# shipped viewer and the Python validator. The Rust tests also export the exact
+# evidence stores they built; make rendered-ui-check renders those stores
+# instead of a hand-mirrored copy.
+NATIVE_GOLDEN_DIR := $(abspath $(BUILD_DIR)/native-golden)
+.PHONY: native-wasm-golden-check
+native-wasm-golden-check: $(NATIVE_WASM_GUEST_GOLDEN) $(NATIVE_WASM_DISPATCH_GOLDEN)
+	rm -rf "$(NATIVE_GOLDEN_DIR)"
+	mkdir -p "$(NATIVE_GOLDEN_DIR)"
+	$(call ignored-rust-test,--lib,vm_opcode::native_wasm::tests::native_wasm_cpp_golden,\
+		REB_NATIVE_WASM_GOLDEN="$(abspath $(NATIVE_WASM_DISPATCH_GOLDEN))" \
+		REB_NATIVE_WASM_WORKSPACE_OUTPUT="$(NATIVE_GOLDEN_DIR)/native-wasm-workspace.json" \
+		REB_NATIVE_WASM_EVIDENCE_OUTPUT="$(NATIVE_GOLDEN_DIR)/wasm-evidence")
+	REB_NATIVE_WASM_WORKSPACE_INPUT="$(NATIVE_GOLDEN_DIR)/native-wasm-workspace.json" \
+		REB_NATIVE_WASM_GOLDEN="$(abspath $(NATIVE_WASM_DISPATCH_GOLDEN))" \
+		node tools/check-vm-opcode-workspace-ui.mjs
+	$(call ignored-rust-test,--lib,vm_opcode::native_guest::tests::native_guest_cpp_golden,\
+		REB_NATIVE_GUEST_GOLDEN="$(abspath $(NATIVE_WASM_GUEST_GOLDEN))" \
+		REB_NATIVE_GUEST_WORKSPACE_OUTPUT="$(NATIVE_GOLDEN_DIR)/native-guest-workspace.json" \
+		REB_NATIVE_GUEST_EVIDENCE_OUTPUT="$(NATIVE_GOLDEN_DIR)/guest-evidence")
+	REB_NATIVE_GUEST_GOLDEN="$(abspath $(NATIVE_WASM_GUEST_GOLDEN))" \
+		REB_NATIVE_GUEST_WORKSPACE_INPUT="$(NATIVE_GOLDEN_DIR)/native-guest-workspace.json" \
+		node tools/check-native-guest-wire.mjs
+
+# The public QuickJS module is a pinned development dependency installed with
+# npm ci --prefix tools/quickjs-native-fixture; it is not native capture.
+QUICKJS_WASM := $(abspath tools/quickjs-native-fixture/node_modules/@jitl/quickjs-wasmfile-debug-sync/dist/emscripten-module.wasm)
+.PHONY: quickjs-binding-check
+quickjs-binding-check: $(NATIVE_WASM_GUEST_GOLDEN)
+	@test -f "$(QUICKJS_WASM)" || { echo "Missing $(QUICKJS_WASM); run npm ci --prefix tools/quickjs-native-fixture --ignore-scripts" >&2; exit 1; }
+	node tools/quickjs-native-fixture/verify.mjs
+	node tools/quickjs-native-fixture/exercise-quickjs.mjs
+	$(call ignored-rust-test,--lib,native_guest_binding::tests::pinned_public_module_and_corruption,\
+		REB_QUICKJS_WASM="$(QUICKJS_WASM)")
+	rm -f "$(abspath $(BUILD_DIR)/native-quickjs-workspace.json)"
+	$(call ignored-rust-test,--lib,vm_opcode::native_guest::tests::native_guest_quickjs_cpp_golden,\
+		REB_QUICKJS_WASM="$(QUICKJS_WASM)" \
+		REB_NATIVE_GUEST_GOLDEN="$(abspath $(NATIVE_WASM_GUEST_GOLDEN))" \
+		REB_NATIVE_GUEST_WORKSPACE_OUTPUT="$(abspath $(BUILD_DIR)/native-quickjs-workspace.json)")
+	REB_NATIVE_GUEST_WORKSPACE_INPUT="$(abspath $(BUILD_DIR)/native-quickjs-workspace.json)" \
+		REB_NATIVE_GUEST_GOLDEN="$(abspath $(NATIVE_WASM_GUEST_GOLDEN))" \
+		node tools/check-native-guest-wire.mjs
+
+# CDP removal contract: shipped UI startup in a DOM model, no removed controls,
+# and launch scripts that reject retired CDP options. The DOM model uses the
+# pinned development-only LinkeDOM lockfile.
+UI_STARTUP_DEPS := tools/ui-startup-deps/node_modules/linkedom/package.json
+$(UI_STARTUP_DEPS): tools/ui-startup-deps/package-lock.json
+	npm ci --prefix tools/ui-startup-deps --ignore-scripts --no-audit --no-fund
+	touch $@
+
+native-only-check: $(UI_STARTUP_DEPS)
+	node tools/check-native-only-ui.mjs
+	node tools/check-native-only-startup.cjs
+	node tools/check-native-only-launch.mjs
 
 owned-vm-helper-check: $(NATIVE_VM_FIXTURE_BINARY) $(OWNED_VM_FIXTURE_TEST)
 	$(OWNED_VM_FIXTURE_TEST)
@@ -113,25 +181,18 @@ clean:
 	rm -rf $(BUILD_DIR)
 
 javascript-check: capture-completeness-check
-	node tools/check-live-wasm.mjs
-	node tools/check-runtime-import-object.mjs
-	node tools/check-captured-vm-lab.mjs
 	@command -v node >/dev/null 2>&1 || { echo "Node.js is not installed" >&2; exit 1; }
 	@set -e; for source in apps/research-ui/*.js apps/runtime-hook-demo/*.mjs tools/*.mjs tools/*.cjs; do node --check "$$source"; done
 	node tools/check-vm-request-linkage-ui.mjs
 	node tools/check-traffic-capture.mjs
 	node tools/check-traffic-selection-work.mjs
 	node tools/check-event-window.mjs
-	node tools/check-traffic-retained-focus.mjs
 	node tools/check-traffic-capture-qa.mjs
-	node tools/check-public-demo-passive-smoke.mjs
-	node tools/check-websocket-inspection.mjs
 	node tools/check-captured-client-project.mjs
 	node tools/check-captured-client-export.mjs
 	node tools/check-captured-har.mjs
 	node tools/check-captured-export-ui.mjs
 	node tools/check-local-overrides.mjs
-	node tools/check-local-override-manager.mjs
 	node tools/check-graphql-sdl.mjs
 	node tools/check-passive-security.mjs
 	node tools/check-marker-fuzz.mjs
@@ -145,7 +206,7 @@ javascript-check: capture-completeness-check
 	node tools/check-vm-opcode-ledger-ui.mjs
 	node tools/check-vm-workspace-contract.mjs
 	node tools/check-vm-opcode-workspace-ui.mjs
-	node tools/check-vm-full-shell-ui.mjs --fixture-only
+	node tools/check-vm-full-shell-ui.mjs
 	node tools/check-owned-opcode-experiments.mjs
 	node tools/owned-opcode-experiment-ui-cases.mjs --validate-fixtures
 	node tools/check-vm-static.mjs
@@ -158,14 +219,12 @@ javascript-check: capture-completeness-check
 	node tools/check-vm-observed-path.mjs
 	node tools/check-vm-compare-cli.mjs
 	node tools/check-python-client-project.mjs
-	node tools/check-element-screenshot.mjs
-	node tools/check-api-observation-catalog-ui.mjs
 	node tools/check-origin-trace-debugger.mjs --field-provenance-only
 	node tools/check-origin-trace-launcher.mjs --cleanup-only
 	node tools/check-origin-trace-package.mjs --contract-only
 	node tools/check-origin-trace-native-close.mjs --contract-only
 
-.PHONY: capture-completeness-check capture-completeness-browser-check
+.PHONY: capture-completeness-check native-only-check
 capture-completeness-check:
 	node tools/check-capture-completeness-response-evidence.mjs
 	node tools/check-capture-completeness-startup.mjs
@@ -175,10 +234,6 @@ capture-completeness-check:
 	node tools/check-capture-completeness-netlog.mjs
 	node tools/check-capture-completeness-integration.mjs
 	node tools/check-capture-completeness-report.mjs
-
-# Exact browser version must be explicitly selected with REB_REFERENCE_BROWSER_VERSION.
-capture-completeness-browser-check: capture-completeness-check origin-trace-backend debugger-transport
-	node tools/check-capture-completeness-browser.mjs .
 
 .PHONY: native-artifact-capture-check
 

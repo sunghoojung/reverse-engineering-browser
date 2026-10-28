@@ -58,27 +58,27 @@ and fixture testing. `make ui` serves the browser development interface alone.
 Explicit store or demo arguments retain the native stored-evidence reader path
 without starting another session.
 
-Live debugging is enabled for a normal session. A loopback DevTools WebSocket
-connects Brave to `reb-debugger-transport`, a bounded C++ helper. Versioned
-private process pipes connect that helper to the Rust debugger-state and
-policy adapter. The UI uses allowlisted local routes for debugger, source,
-memory, and experiment operations. Runtime values and debugger state stay
-ephemeral rather than entering the native evidence store.
+Live capture uses native Brave/V8 probes, bounded native transport, and the Rust
+evidence reader. REB no longer launches a DevTools endpoint or a CDP transport.
+Legacy debugger routes return a removal error and are absent from CLI/MCP
+discovery. Native console and owned VM fixture controls are separate capabilities,
+not fallbacks for the removed debugger. Physical Wasm observations use the
+[typed native contract](../../protocol/native-wasm-dispatch-v1.md).
 
-Memory inspection uses bounded C++ heap analysis; Decoder Lab uses a separate
-native transform helper. API Collection and Local Analyst Workspace persist
-user-authored templates and scripts separately from captured evidence. Analyst
-scripts run explicitly in a restricted helper with selected evidence inputs.
+Decoder Lab uses a separate native transform helper. API Collection and Local
+Analyst Workspace persist user-authored templates and scripts separately from
+captured evidence. Analyst scripts run explicitly in a restricted helper with
+selected evidence inputs.
 
-Request interception, Repeater, Object Lab, Runtime Hook Studio, and automation
-recipes share a disposable experiment BrowserContext. Mutating operations are
-explicit and do not inherit the baseline target's cookies or storage. This
-experiment path is distinct from observational native capture.
+The CDP experiment tools (request interception, Repeater, Object Lab, Runtime
+Hook Studio, automation recipes and Memory) were removed with the debugger.
+Explicit page mutation is limited to the native Console, which defaults to a
+disposable profile and is distinct from observational native capture.
 
-`REB_NATIVE_QUIET_MODE=1 make live` omits the DevTools endpoint and debugger
-transport. Native capture and Captured Sources remain available; live debugger
-and CDP-dependent tools are unavailable. This mode also explicitly enables the
-patched V8 behavior that ignores page-authored `debugger;` statements.
+`REB_NATIVE_QUIET_MODE=1 make live` additionally enables the patched V8
+behavior that ignores page-authored `debugger;` statements. Native capture and
+Captured Sources are unchanged; Origin Trace has no debugger transport in any
+mode.
 
 See the [Origin Trace operating guide](../../apps/research-ui/README.md) and
 [live-session launcher](../../scripts/run-live-session.sh) for mode-specific

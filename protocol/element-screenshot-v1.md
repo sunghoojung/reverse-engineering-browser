@@ -1,5 +1,7 @@
 # Element screenshot markup v1
 
+> **Retired.** Element screenshots used the backend CDP transport through `POST /api/debugger/actions`. CDP and the `/api/debugger` routes were removed; every `/api/debugger` route now returns 410 `debugger_unavailable`, and no operation or schema in [openapi.json](openapi.json) implements this contract. This page is kept as a historical record for reading earlier captures and notes.
+
 This is explicit, local-only capture of the selected **primary disposable
 Experiment page**. The researcher opens an authorized HTTP(S) page in Objects,
 opens Experiments → Element screenshot, clicks **Inspect selected document**,
@@ -7,7 +9,7 @@ reviews the limits and confirms raw local capture, then clicks **Grab local
 screenshot**. Numbered local overlays and a keyboard-selectable list identify
 layout bounds. Selecting a number never interacts with the target page.
 
-This workflow uses the backend's existing native CDP transport. It does not use
+This workflow used the backend's CDP transport. It does not use
 page JavaScript, DOM injection, the native Console, Canvas artifact capture, an
 AI/vision provider, or test-harness screenshots. It does not establish ownership
 or permission to capture a target. [SAFETY.md](../SAFETY.md) still applies.
@@ -109,38 +111,4 @@ The overlay is not a segmentation mask or visual verification result.
 
 ## Verification
 
-- `node tools/check-element-screenshot.mjs`: strict contracts, double clicks,
-  confirmation, ownership, exact image/document binding, cancel/navigation,
-  disposal/disconnect/restart retirement and deterministic deadlines. Synthetic
-  responses exercise the production controller, not browser capture.
-- Rust `debugger::element_screenshot::tests`: clipping, opaque IDs, privacy and
-  frame/shadow refusal, malformed/bounded input, zoom and pixel scale, and
-  baseline-owner refusal.
-- `make backend-e2e`: the actual product actions against authored loopback pages
-  in `tools/check-element-screenshot-capture.mjs`, including PNG dimensions/hash,
-  known CSS geometry, scroll, privacy/frame/shadow limits and stale navigation.
-  It requires a working Rust backend, native transport and Chromium-compatible
-  browser. Fixture code presence is not a receipt that the journey ran.
-- `make element-screenshot-ui-check`: actual product UI plus backend on the
-  authored local fixture. The driver creates and disposes the owned context via
-  visible controls, inspects, confirms and captures; verifies genuine response
-  PNG hash/dimensions against real decoded image and overlay rectangles; checks
-  pointer/list synchronization, Tab/Enter/Space/arrows/Home/End, unclipped hit
-  testing at 1440×900, 600×800 and 360×740. Genuine capture responses are held
-  at the UI network response stage to test clear/leave cancellation. A real
-  disposable viewport event wakes normal polling and verifies that off-screen
-  polling cannot reopen the screenshot workspace. No response body, PNG,
-  debugger state or target script is substituted. UI DOM reads use the UI's
-  own CDP session; the disposable page is never evaluated.
-  `ORIGIN_TRACE_TEST_BROWSER` (or `REB_UI_CHROMIUM`) selects an already-installed
-  Chromium-compatible browser; the default is the normal macOS Brave path.
-  `REB_UI_SCREENSHOTS` selects the local QA output folder. These authored-fixture
-  UI QA screenshots are separate from the actual product capture evidence.
-  For an already built backend, the equivalent harness entry is
-  `node tools/check-origin-trace-debugger.mjs --element-screenshot-ui-browser`.
-- Native packaged pointer/keyboard/narrow-window acceptance remains required
-  under [the UI guide](../apps/research-ui/README.md); pure controller checks do
-  not establish visual layout or a native browser screenshot result.
-
-No image/export/provider or automatic capture API is added. Sharing raw pixels
-is outside this feature and remains subject to explicit review and authorization.
+The checks that covered this workflow were removed with the implementation.

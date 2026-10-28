@@ -8,6 +8,7 @@
 
 #include <atomic>
 #include <cstdint>
+#include <string>
 #include <vector>
 
 #include "base/memory/raw_ptr.h"
@@ -38,6 +39,9 @@ class NativeProbeSession final {
                                   NativeProbeEmitter downstream) noexcept;
   void StopSession() noexcept;
 
+  [[nodiscard]] const std::string& guest_adapter_json() const noexcept {
+    return guest_adapter_json_;
+  }
   [[nodiscard]] bool IsActive() const noexcept;
   [[nodiscard]] std::uint64_t session_id() const noexcept;
   [[nodiscard]] std::uint64_t category_mask() const noexcept;
@@ -57,6 +61,7 @@ class NativeProbeSession final {
 
   static void EmitBrowserEvent(const NativeProbeEvent& event) noexcept;
 
+  std::string guest_adapter_json_, guest_startup_adapter_json_;
   std::vector<raw_ptr<NativeProbeHost>> hosts_;
   std::atomic<NativeProbeEmitter> downstream_{nullptr};
   std::atomic<std::uint64_t> session_id_{0};

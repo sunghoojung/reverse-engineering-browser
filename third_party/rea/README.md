@@ -4,13 +4,13 @@ Reviewed source: [morluto/rea](https://github.com/morluto/rea), commit
 [`bb540826d65316c164d2de8ba4ef10f81a8ad073`](https://github.com/morluto/rea/tree/bb540826d65316c164d2de8ba4ef10f81a8ad073),
 reviewed 2026-10-13.
 
-`apps/origin-trace-backend/src/debugger/api_catalog.rs` adapts the typed structural
+`apps/origin-trace-backend/src/debugger/api_catalog.rs` adapted the typed structural
 path, value-type union, and repeated-array observation accumulation in REA's
 [`src/domain/jsonShape.ts`](https://github.com/morluto/rea/blob/bb540826d65316c164d2de8ba4ef10f81a8ad073/src/domain/jsonShape.ts).
-REA-authored material is MIT, Copyright (c) 2026 morluto. The complete upstream
-notice is preserved in [LICENSE](LICENSE). The Rust implementation uses a bounded
-streaming parser rather than REA's full JSON-value tree, and rejects duplicate
-keys or exhausted budgets instead of returning a potentially misleading shape.
+That file and the observed API catalog it served were removed with CDP, so no
+REA-derived code remains in this repository. REA-authored material is MIT,
+Copyright (c) 2026 morluto; the upstream notice stays in [LICENSE](LICENSE) for
+the historical record.
 
 REA's
 [`CdpCaptureEventBodyShapes.ts`](https://github.com/morluto/rea/blob/bb540826d65316c164d2de8ba4ef10f81a8ad073/src/browser/CdpCaptureEventBodyShapes.ts)

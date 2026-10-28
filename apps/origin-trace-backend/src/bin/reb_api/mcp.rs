@@ -1083,7 +1083,7 @@ pub async fn serve(
                         "error": refusal.message,
                         "details": {
                             "capture_mode": refusal.capture_mode,
-                            "debugger_state": refusal.debugger_state
+                            "broker_connected": refusal.broker_connected
                         }
                     });
                     write_message(&rpc_result(&id, payload))?;
@@ -1177,11 +1177,14 @@ mod tests {
                 assert_eq!(tool["annotations"]["destructiveHint"], false);
             }
         }
-        let debugger = all
+        assert!(!all.iter().any(|tool| tool["name"] == "debugger_action"
+            || tool["name"] == "get_debugger"
+            || tool["name"] == "get_debugger_source"));
+        let capture = all
             .iter()
-            .find(|tool| tool["name"] == "debugger_action")
+            .find(|tool| tool["name"] == "capture_action")
             .unwrap();
-        assert_eq!(debugger["annotations"]["destructiveHint"], true);
+        assert_eq!(capture["annotations"]["destructiveHint"], true);
         let analysis = all
             .iter()
             .find(|tool| tool["name"] == "get_vm_analysis")

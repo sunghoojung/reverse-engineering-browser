@@ -1244,9 +1244,118 @@ void PageGuestSamplerAdmission() {
       << "PASS page javascript and wasm opt-in, program counters, budget gap and queue drops\n";
 }
 
+// Actual callback-input admission only; this does not execute V8.
+std::size_t native_wasm_frame_lookups = 0;
+std::uint64_t NativeWasmFrameLookup() noexcept {
+  ++native_wasm_frame_lookups;
+  return 8;
+}
+std::size_t native_wasm_retained = 0;
+bool native_wasm_accept = true;
+bool CaptureNativeWasm(const reb::NativeWasmDispatchObservation& observation,
+                       std::uint64_t generation) noexcept {
+  assert(generation != 0);
+  assert(observation.header.type == reb::NativeProbeType::kWasmDispatchObservation);
+  assert(observation.header.artifact_id == 0 && observation.header.parent_event_id == 0);
+  assert(observation.execution_context_id == 7 && observation.header.frame_id == 8);
+  assert(observation.document_token_high == 9 && observation.document_token_low == 10);
+  assert(observation.module_byte_offset == 8 && observation.selector == UINT32_MAX);
+  assert(observation.table_count == 2 && observation.sample_index == native_wasm_retained);
+  if (!native_wasm_accept)
+    return false;
+  ++native_wasm_retained;
+  return true;
+}
+void NativeWasmRuntimeAdmission() {
+  NativeProbeQueue queue;
+  constexpr std::array<std::uint8_t, 12> module{0, 97, 115, 109, 1, 0, 0, 0, 0x0e, 2, 0, 0};
+  reb::NativeWasmDispatchObservation input;
+  input.header.frame_id = 8;
+  input.execution_context_id = 7;
+  input.document_token_high = 9;
+  input.source_url = "https://owned.test/module.wasm";
+  input.module_bytes = module;
+  input.module_byte_offset = 8;
+  input.table_count = 2;
+  assert(reb::IsValidNativeWasmDispatchInput(input));
+  input.table_count = 3;
+  assert(!reb::IsValidNativeWasmDispatchInput(input));
+  input.table_count = 2;
+  input.module_byte_offset = UINT32_MAX;
+  assert(!reb::IsValidNativeWasmDispatchInput(input));
+  input.module_byte_offset = 8;
+  input.source_url = "";
+  assert(!reb::IsValidNativeWasmDispatchInput(input));
+  input.source_url = "https://owned.test/module.wasm";
+  std::vector<std::uint8_t> oversized(reb::kNativeArtifactMaxContentBytes + 1);
+  input.module_bytes = oversized;
+  assert(!reb::IsValidNativeWasmDispatchInput(input));
+  input.module_bytes = std::span(module).first(9);
+  assert(!reb::IsValidNativeWasmDispatchInput(input));
+  const auto record = [&] {
+    sink.RecordNativeWasmDispatch(7, 8, "https://owned.test/module.wasm", module, 0, 8, UINT32_MAX,
+                                  2, 9, 10);
+  };
+  transport.Disable();
+  sink.SetNativeWasmDispatchEmitter(&CaptureNativeWasm);
+  const auto before = allocations.load();
+  assert(!sink.IsNativeWasmDispatchEnabled());
+  record();
+  assert(allocations.load() == before && native_wasm_retained == 0);
+  Configure(queue, 42, kForever, reb::NativeProbeCategoryMask(reb::NativeProbeCategory::kVm));
+  assert(!sink.IsNativeWasmDispatchEnabled());
+  Configure(queue, 42, 0);
+  assert(!sink.IsNativeWasmDispatchEnabled());
+  Configure(queue);
+  sink.SetNativeWasmDispatchEmitter(&CaptureNativeWasm);
+  assert(sink.IsNativeWasmDispatchEnabled());
+  sink.RecordNativeWasmDispatch(7, 8, "https://owned.test/module.wasm", module, 0, 8, 0, 2, 0, 0);
+  assert(One(queue).header.type == reb::NativeProbeType::kGap);
+  assert(native_wasm_retained == 0);
+  native_wasm_accept = false;
+  record();
+  assert(One(queue).header.type == reb::NativeProbeType::kGap);
+  native_wasm_accept = true;
+  for (unsigned i = 0; i < 16; ++i)
+    record();
+  const auto initial_drain = Drain(queue);
+  assert(native_wasm_retained == 16 && initial_drain == 0);
+  Fill(queue);
+  record();  // A full ring must NOT permanently suppress the cap omission.
+  assert(sink.IsNativeWasmDispatchEnabled());
+  assert(Drain(queue) == reb::kNativeProbeQueueCapacity);
+  record();
+  const auto gap = One(queue);
+  assert(std::string_view(reinterpret_cast<const char*>(gap.inline_payload.data()),
+                          gap.header.payload_size) == "native_wasm_dispatch_budget_incomplete");
+  assert(!sink.IsNativeWasmDispatchEnabled());
+  record();
+  assert(native_wasm_retained == 16 && Drain(queue) == 0);
+  Configure(queue);
+  sink.SetNativeWasmDispatchEmitter(&CaptureNativeWasm);  // Same session, fresh policy generation.
+  native_wasm_retained = 0;
+  assert(sink.IsNativeWasmDispatchEnabled());
+  record();
+  assert(native_wasm_retained == 1);
+  sink.SetEmitters(&AcceptRuntimeEvent, &CaptureRuntimeMetadata, 42,
+                   reb::kAllNativeProbeCategoryMask, kForever, false, &NativeWasmFrameLookup);
+  assert(sink.IsNativeWasmDispatchEnabled());
+  assert(native_wasm_frame_lookups == 0);  // Enabled callback must not re-enter V8.
+  sink.SetNativeWasmDispatchEmitter(nullptr);
+  assert(!sink.IsNativeWasmDispatchEnabled());
+  transport.Disable();
+  std::cout << "PASS native Wasm runtime-input admission; scoped bounds, unsigned selector, "
+               "transport retry and full-ring cap retry\n";
+}
+
+#include "guest_sampler_tests.h"
+
 int main() {
   reb::mojom::NativeProbeHost host;
   transport.Connect(mojo::PendingRemote<reb::mojom::NativeProbeHost>(&host));
+  NativeGuestAdmission();
+  NativeGuestModuleVerdictsAndHostBudget();
+  NativeWasmRuntimeAdmission();
   DispatchSampleAdmission();
   DispatchEmitFailureReleasesBudget();
   OwnedRegisterSamplerAdmission();

@@ -1,5 +1,7 @@
 # Request Field Provenance v1
 
+> **Retired.** Field trace started from a selected value in a CDP-retained request body. Native Traffic rows carry no bodies, so Origin Trace removed Field trace and its Decoder handoff; Sources **Decode range** still copies verified original bytes into Decoder. This page is kept as a historical record.
+
 A researcher can select one complete string in Traffic's request JSON tree or
 Query view and choose **Trace value**. The field view connects original request
 content, request call sites, bounded source search, and the existing disposable

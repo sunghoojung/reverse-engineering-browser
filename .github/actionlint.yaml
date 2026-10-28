@@ -1,0 +1,6 @@
+# actionlint 1.7.7 predates this GitHub-hosted image (GA 2026-09-17).
+# Extend its known labels without disabling runner-label validation.
+# https://github.blog/changelog/2026-09-17-ubuntu-26-generally-available-and-latest-migration/
+self-hosted-runner:
+  labels:
+    - ubuntu-26.04

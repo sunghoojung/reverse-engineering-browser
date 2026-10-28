@@ -1,12 +1,12 @@
 #!/usr/bin/env node
 // Real dialog/controller routes with authored evidence and an in-memory DOM.
-// Rendered coverage lives in the API-catalog browser lane, not this model.
+// Offline controller coverage only; CDP browser lanes have been removed.
 import assert from 'node:assert/strict';
 import {readFile} from 'node:fs/promises';
 import {runInNewContext} from 'node:vm';
-import {network} from './traffic-capture-qa.mjs';
+import {network,savedRequests} from './saved-traffic-fixture.mjs';
 import formats from '../apps/research-ui/captured_export_formats.js';
-const code=(await Promise.all(['evidence_models.js','traffic_view.js','api_catalog.js','captured_client.js','captured_export_formats.js'].map(name=>readFile(new URL('../apps/research-ui/'+name,import.meta.url),'utf8')))).join('\n');
+const code=(await Promise.all(['traffic_view.js','captured_client.js','captured_export_formats.js'].map(name=>readFile(new URL('../apps/research-ui/'+name,import.meta.url),'utf8')))).join('\n');
 const schema={data:{__schema:{queryType:{name:'Query'},mutationType:null,subscriptionType:null,types:[{kind:'SCALAR',name:'String',description:null},{kind:'OBJECT',name:'Query',description:'synthetic schema',interfaces:[],fields:[{name:'hello',description:null,args:[],type:{kind:'SCALAR',name:'String',ofType:null},isDeprecated:false,deprecationReason:null}]}],directives:[]}}};
 class Node {
   constructor(dataset={}){this.dataset=dataset;this.events={};this.children=[];this.disabled=false;this.files=[];this.options=[];this.textContent='';this.open=false;this.focused=false;}
@@ -18,19 +18,19 @@ class Node {
   querySelector(selector){return this.options.find(option=>selector==='[value="'+option.value+'"]');}
 }
 function harness(native=false){
-  const fields=Object.fromEntries(['format','provider','source','file','policy','destination','submit','close','cancel','note','status','provider-field','policy-field','source-field','file-field'].map(name=>[name,new Node()]));fields.file.isFile=true;
+  const fields=Object.fromEntries(['format','provider','source','file','policy','destination','submit','close','cancel','note','status','format-field','provider-field','policy-field','source-field','file-field'].map(name=>[name,new Node()]));fields.file.isFile=true;
   fields.source.options=['capture','file'].map(value=>({value}));fields.format.options=['json','client','har','sdl'].map(value=>({value}));fields.destination.options=['save','copy'].map(value=>({value}));
   const dialog=new Node(),title=new Node(),context=new Node(),triggers={capture:new Node({exportOpen:'capture'}),run:new Node({exportOpen:'run'})};
   dialog.querySelector=selector=>fields[selector.slice(13,-1)];
   const downloads=[],clips=[],bridges=[],notices=[],filenames=[];let bridgeResult={status:'saved'},clipboardError=false,bridgeWait=null;
   const document={querySelector:key=>({'#captured-export-dialog':dialog,'#captured-export-title':title,'#captured-export-context':context})[key],querySelectorAll:key=>key==='[data-export-open]'?Object.values(triggers):[],createElement:()=>{const link=new Node();link.click=()=>filenames.push(link.download);return link;},body:new Node(),documentElement:{classList:{contains:()=>native}},events:{},addEventListener(name,handler){this.events[name]=handler;}};
   const globals={TextEncoder,TextDecoder,Uint8Array,URL:class extends URL{static createObjectURL(blob){downloads.push(blob);return 'blob:authored';}static revokeObjectURL(){}},Blob,atob,btoa,setTimeout:()=>0,document,navigator:{clipboard:{writeText:async text=>{if(clipboardError)throw Error('authored clipboard denial');clips.push(text);}}},webkit:{messageHandlers:{rebClientProjectExport:{postMessage:async payload=>{bridges.push(payload);if(bridgeWait)await bridgeWait;return bridgeResult;}}}}};
-  const api=runInNewContext(code+'\n;({installCapturedExportDialog,requestsFromDebuggerNetwork,capturedClientCapture,capturedClientRun})',globals);
+  const api=runInNewContext(code+'\n;({installCapturedExportDialog,capturedClientCapture,capturedClientRun})',globals);
   const fixture=network(),row=fixture.requests[0];row.protocol='h2';row.started_monotonic_ms=1000;
   row.request.headers=[['X-Private','synthetic-secret']];row.response.headers=[['Content-Type','application/json']];row.response.body.base64='';row.response.body.text=JSON.stringify(schema);
   const a=value=>({state:'available',value}),u=()=>({state:'unavailable'});
   row.timing_evidence={format:'reb-network-timing-v1',request_monotonic_seconds:a(1),request_wall_seconds:a(1700000000),response_monotonic_seconds:a(1.06),completion_monotonic_seconds:a(1.1),response_observed:true,completion_observed:true,response_source:'responseReceived',completion_source:'loadingFinished',duplicate_response:false,duplicate_completion:false,response_after_completion:false,resource_timing:{state:'available',fields:{requestTime:a(1.005),proxyStart:u(),proxyEnd:u(),workerStart:u(),dnsStart:a(1),dnsEnd:a(3),connectStart:a(4),connectEnd:a(10),sslStart:a(5),sslEnd:a(9),sendStart:a(12),sendEnd:a(13),receiveHeadersStart:a(40),receiveHeadersEnd:a(45)}}};
-  let selected=api.requestsFromDebuggerNetwork(fixture)[0];const captured=api.capturedClientCapture(selected);
+  let selected=savedRequests(fixture)[0];const captured=api.capturedClientCapture(selected);
   const run={id:7,started_at_ms:123,request:{...captured.input,headers:captured.input.headers.map(([name,value])=>({name,value}))},response:{status:200,headers:[],body:'synthetic-secret'}};run.resolved_request=run.request;
   const options={getCaptureRequest:()=>{if(!selected)throw Error('Expired capture');return selected;},getRun:()=>run,getRunCapture:()=>null,contextKey:()=> 'ctx',notice:message=>notices.push(message)};
   const workflow=api.installCapturedExportDialog(options);
@@ -110,7 +110,20 @@ for(const native of [false,true]){
   h.open();h.set('format','json');h.set('destination','copy');h.setClipboardError(true);await f.submit.click();assert.match(f.status.textContent,/authored clipboard denial/);h.setClipboardError(false);
   previous=count();h.expire();assert(f.submit.disabled&&!h.triggers.capture.disabled);h.set('format','sdl');h.set('source','file');await selectFile(JSON.stringify(schema));await f.submit.click();assert.equal(count(),++previous);h.open();assert.equal(f.format.value,'sdl');assert.equal(f.source.value,'file');assert(f.submit.disabled,'Closing clears prepared schema');assert(f.format.options.filter(o=>o.value!=='sdl').every(o=>o.disabled));await selectFile(JSON.stringify(schema));await f.submit.click();assert.equal(count(),++previous);assert.equal(h.notices.length,0,'Export status stays in the dialog, not unrelated navigation');
 }
+// Native Traffic rows carry no captureRecord. Without one the dialog offers only
+// local-file SDL: no hidden-but-disabled format choice and an explicit reason.
+{
+  const h=harness(false),f=h.fields;h.expire();h.open();
+  assert.equal(f.format.value,'sdl');assert.equal(f.source.value,'file');
+  assert(f['format-field'].hidden&&f['source-field'].hidden,'A single possible mode is not presented as a choice');
+  assert(f.format.options.filter(option=>option.value!=='sdl').every(option=>option.hidden&&option.disabled),'Capture-only formats are not offered');
+  assert(f.source.options.find(option=>option.value==='capture').hidden,'Selected response is not offered');
+  const context=h.document.querySelector('#captured-export-context').textContent;
+  assert.match(context,/capture JSON, client project and HAR exports are unavailable/);assert.doesNotMatch(context,/CDP|debugger/i);
+  assert.equal(h.document.querySelector('#captured-export-title').textContent,'Export GraphQL schema');
+}
 const html=await readFile(new URL('../apps/research-ui/index.html',import.meta.url),'utf8');
-for(const token of ['data-export-open="capture"','data-export-open="run"','data-export-format','data-export-policy','data-export-file','captured_export_formats.js'])assert(html.includes(token));
+for(const token of ['data-export-open="capture"','data-export-format','data-export-policy','data-export-file','captured_export_formats.js'])assert(html.includes(token));
+assert(!html.includes('data-export-open="run"'), 'The retired live repeater has no export action in the shipped UI');
 assert.match(html,/<button id="open-captured-export" type="button" data-export-open="capture"/,'Traffic export uses the compact toolbar button, not inspector exchange-button height');
 console.log('PASS compact export dialog: redacted default, explicit modes and destinations, runtime/capture/run parity, local file preparation without automatic output, exact-source invalidation, strict timing/schema/size bounds, cancel and focus return, native handoff and clipboard failure');

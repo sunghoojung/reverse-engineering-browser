@@ -50,7 +50,7 @@ initial traffic capture.
 
 The dormant dedicated-worker source foundation adds bounded native compile
 observations for classic scripts and JavaScript modules. It has no production
-activation or transport yet, and the working CDP worker extractor is unchanged.
+activation or transport yet, and worker extraction has no CDP fallback.
 Shared/service workers remain unsupported. See the
 [status, privacy gates, identity contract, and release checklist](../../../protocol/native-worker-source-v1.md).
 
@@ -369,3 +369,18 @@ backups and real index entries; do not hand-edit the generated checkout. The
 runtime buffer callback obtains its isolate from Blink's execution context,
 which is supported at the pinned V8 revision; a missing context emits the
 existing omission reason.
+
+## Native Wasm dispatch (opt-in)
+
+Rebuilt browsers can record physical `br_table` operands with
+`REB_NATIVE_WASM_DISPATCH=1` through the native launcher, or manually with
+`--js-flags=--reb-wasm-br-table-dispatch`. This is Liftoff-only instrumentation,
+not arbitrary interpreter guest-PC recovery. See
+[wire contract and verification limits](../../../protocol/native-wasm-dispatch-v1.md).
+
+Guest-state capture additionally needs `REB_NATIVE_WASM_GUEST_ADAPTER`, which
+makes the launcher add `--reb-wasm-guest-capture`. That flag compiles a call on
+every Wasm function entry (frame identity) and numeric-local descriptors for
+each `br_table`; without it, physical dispatch observation alone pays neither
+cost. See [native guest observations](../../../protocol/native-wasm-guest-v1.md).
+All CDP capture/transport functionality has been removed from the companion.

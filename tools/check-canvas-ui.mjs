@@ -1,12 +1,10 @@
 import assert from 'node:assert/strict';
-import {readFile} from 'node:fs/promises';
-import {join} from 'node:path';
 import {deflateSync, inflateSync} from 'node:zlib';
 import {runInNewContext} from 'node:vm';
 
 // Authored HTTP evidence only. The production catalog, byte/hash reader,
-// ownership, PNG admission, renderer and browser decoder remain in use.
-export async function canvasBrowserFixture(root, {artifact, png, pngUrl, chunk}) {
+// ownership and PNG admission are checked offline; no browser driver is exported.
+export async function canvasEvidenceFixture({artifact, png, pngUrl, chunk}) {
   const pixels=Buffer.concat(Array.from({length:16},()=>Buffer.from([0,...Array.from({length:16},()=>[255,0,0,255]).flat()])));
   const valid=pngUrl(png({width:16,height:16,idat:[chunk('IDAT',deflateSync(pixels))]}));
   // Chrome CI loaded both authored malformed scanlines without error events.
@@ -24,7 +22,6 @@ export async function canvasBrowserFixture(root, {artifact, png, pngUrl, chunk})
     session_id:1,sequence_number:Number(source.creator_event_id),monotonic_time_ns:Number(source.creator_event_id),
     navigation_id:1,frame_id:1,artifact_id:Number(source.artifact_id),parent_event_id:0,process_id:1,thread_id:1,
     payload_encoding:'hex',payload:Buffer.from('canvas.toDataURL').toString('hex'),payload_size:16}));
-  const debuggerState=JSON.parse(await readFile(join(root,'apps/origin-trace-backend/assets/debugger-empty.json'),'utf8'));
   const fixture={documents,artifacts,events,requests:[],pending:[],readError:true,hold:false,catalogError:false,revision:1,active:true,phase:'normal'};
   fixture.documentHeaders=raw=>{
     const url=new URL(raw,'http://127.0.0.1');
@@ -36,7 +33,6 @@ export async function canvasBrowserFixture(root, {artifact, png, pngUrl, chunk})
     const json=(status,value,headers={})=>{response.writeHead(status,{'Content-Type':'application/json','Cache-Control':'no-store',...headers});response.end(JSON.stringify(value));};
     if(!path.startsWith('/api/'))return false;
     if(request.method&&request.method!=='GET'){fixture.requests.push({path,method:request.method,status:405});json(405,{error:'Canvas QA never mutates a native capture'});return true;}
-    if(path==='/api/debugger'){json(200,debuggerState);return true;}
     if(path==='/api/events'||path==='/api/artifacts'){
       const etag=`"canvas-${path}-${fixture.revision}"`;
       if(path==='/api/artifacts'&&fixture.catalogError){json(503,{error:'Authored catalog failure'});return true;}
@@ -91,7 +87,6 @@ export async function checkCanvasFixture(fixture, models, inspect) {
     const reply=await response(`/api/${path}`);assert.equal(reply.status,200);assert(validator(JSON.parse(reply.body)));
     assert.equal((await response(`/api/${path}`,{headers:{'if-none-match':reply.headers.ETag}})).status,304);
   }
-  assert(models.isDebuggerResponse(JSON.parse((await response('/api/debugger')).body)));
   assert.deepEqual({...inspect(fixture.documents.get('5'))},{width:16,height:16,pixels:256});
   assert.match(inspect(fixture.documents.get('4')).reason,/4096-pixel/);
   assert.match(inspect(fixture.documents.get('3')).reason,/only static PNG/);
@@ -123,153 +118,7 @@ export async function checkCanvasFixture(fixture, models, inspect) {
   for(const id of ['5','2'])new FixtureImage().src=fixture.documents.get(id);
   assert.equal(nativeAssignments.length,2,'Only tiny decoder fixtures pass through unchanged');
   fixture.catalogError=true;assert.equal((await response('/api/artifacts')).status,503);fixture.catalogError=false;
-  assert.equal((await response('/api/debugger/actions',{method:'POST'})).status,405);
+  assert.equal((await response('/api/artifacts',{method:'POST'})).status,405);
   fixture.active=false;fixture.revision++;assert.equal(JSON.parse((await response('/api/artifacts')).body).count,0);
   console.log('PASS authored Canvas browser fixture routes, validators, hashes, bounded pixels, refusal inputs and isolated image-policy header, held body, retry and read-only boundary (not rendered QA)');
-}
-
-export async function checkCanvasInteractions({evaluate,viewport,click,key,wheel,screenshot,fixture,record,navigatePolicy}) {
-  const until=async(expression,message=expression)=>{
-    const end=Date.now()+7000;
-    while(Date.now()<end){if(await evaluate(expression))return;await new Promise(resolve=>setTimeout(resolve,25));}
-    assert.fail(`Canvas UI did not settle: ${message}`);
-  };
-  // Native summary activation needs the Enter character, not only rawKeyDown.
-  const press=async(value)=>key(value,value,{windowsVirtualKeyCode:{Enter:13,Tab:9,ArrowRight:39,ArrowLeft:37}[value],...(value==='Enter'?{text:'\r',unmodifiedText:'\r'}:{})});
-  const card=id=>`#signal-render-list .signal-render-card:nth-child(${6-Number(id)})`;
-  const text=id=>evaluate(`document.querySelector(${JSON.stringify(card(id))})?.textContent`);
-  const settle=()=>until("!state.refreshing&&!state.artifactRefreshing&&!state.canvasPreviewReads?.size");
-  const refresh=async()=>{await settle();await evaluate('refresh()');await settle();};
-  const clean=async(label)=>{
-    const value=await evaluate(`({owners:state.canvasPreviewOwners?.size??0,reads:state.canvasPreviewReads?.size??0,
-      retained:state.artifacts.filter(a=>a.kind==='canvas_data_url'&&a.content!==undefined).length,
-      images:document.querySelectorAll('#signal-render-list img[src]').length,
-      detached:(window.canvasRetiredImages??[]).filter(image=>image.hasAttribute('src')).length,
-      descriptors:state.artifacts.length,blocked:canvasBrowserReceipt.blocked})`);
-    assert.deepEqual({...value,descriptors:0},{owners:0,reads:0,retained:0,images:0,detached:0,descriptors:0,blocked:[]},label);
-    record({label,...value});
-  };
-  const retireSnapshot=()=>evaluate("window.canvasRetiredImages=[...document.querySelectorAll('#signal-render-list img')]");
-  const decoded=()=>until("document.querySelector('#signal-render-list img')?.naturalWidth===16&&[...document.querySelectorAll('#signal-render-list img')].every(image=>image.complete&&image.naturalWidth===16)");
-  const open=async()=>{await click('.nav-button[data-screen="signals"]');await settle();await decoded();};
-  const reveal=async(selector)=>{
-    // Only the owned gallery scrolls. Never force a screen/ancestor offset.
-    for(let attempt=0;attempt<12;attempt++){
-      const delta=await evaluate(`(()=>{const r=document.querySelector(${JSON.stringify(selector)}).getBoundingClientRect(),p=document.querySelector('#signal-panel-rendering').getBoundingClientRect();
-        return r.top<p.top+6?r.top-p.top-6:r.bottom>p.bottom-6?r.bottom-p.bottom+6:0;})()`);
-      if(Math.abs(delta)<1)return;
-      await wheel('#signal-panel-rendering',Math.max(-500,Math.min(500,delta)),true);
-    }
-    assert.fail(`Canvas gallery could not reveal ${selector}`);
-  };
-  const geometry=async(label,selector)=>{
-    const value=await evaluate(`(()=>{const node=document.querySelector(${JSON.stringify(selector)}),r=node.getBoundingClientRect(),p=document.querySelector('#signal-panel-rendering'),b=p.getBoundingClientRect();
-      const hit=document.elementFromPoint(r.x+r.width/2,r.y+r.height/2),style=getComputedStyle(node);
-      return {viewport:[innerWidth,innerHeight],left:r.left,right:r.right,top:r.top,bottom:r.bottom,width:r.width,height:r.height,
-        hit:!!node.contains(hit),panel:{top:b.top,bottom:b.bottom,client:p.clientWidth,scroll:p.scrollWidth,scrollTop:p.scrollTop},
-        pageOverflow:document.documentElement.scrollWidth>innerWidth,screenScroll:document.querySelector('#screen-signals').scrollTop,
-        focus:document.activeElement===node,focusVisible:node.matches(':focus-visible'),outline:style.outlineStyle,outlineWidth:style.outlineWidth};})()`);
-    assert(value.width>0&&value.height>0&&value.left>=0&&value.right<=value.viewport[0]+1,label);
-    assert(value.top>=0&&value.bottom<=value.viewport[1]+1&&value.hit,label);
-    assert.equal(value.pageOverflow,false,label);assert(value.panel.scroll<=value.panel.client+1,label);assert.equal(value.screenScroll,0,label);
-    record({label,...value});return value;
-  };
-  await until('state.artifacts.length===5&&!state.refreshing&&!state.artifactRefreshing');
-  assert.equal(fixture.requests.length,0,'Hidden Canvas descriptors must not load content');await clean('initial hidden gallery');
-  await screenshot('canvas-hidden');
-  await open();
-  assert.match(await text('4'),/4096-pixel/);assert.match(await text('3'),/only static PNG/);
-  assert.match(await text('1'),/503/);
-  assert.equal(fixture.requests.length,5);assert(fixture.requests.every(request=>request.limit==='2097152'));
-  const accepted=await evaluate(`(()=>{const image=document.querySelector(${JSON.stringify(card('5')+' img')}),canvas=document.createElement('canvas');
-    canvas.width=canvas.height=1;const context=canvas.getContext('2d');context.drawImage(image,0,0);return {complete:image.complete,width:image.naturalWidth,height:image.naturalHeight,pixel:[...context.getImageData(0,0,1,1).data]};})()`);
-  assert.deepEqual({complete:accepted.complete,width:accepted.width,height:accepted.height},{complete:true,width:16,height:16});
-  // Brave's getImageData fingerprint protection flips RGB low bits. Keep the
-  // upper seven bits and alpha exact; original image/text bytes are checked below.
-  assert.deepEqual(accepted.pixel.map((value,index)=>index<3?value>>1:value),[127,0,0,255]);
-  record({label:'decoded image readback with Brave RGB low-bit protection',...accepted});
-  assert(await evaluate(`state.artifacts.filter(a=>['2','3','4','5'].includes(a.artifact_id)).every(a=>a.contentVerified&&a.content===new Map(${JSON.stringify([...fixture.documents])}).get(a.artifact_id))`),'Exact captured text stays unchanged');
-  assert.deepEqual(await evaluate('canvasBrowserReceipt.blocked'),[]);
-  assert(await evaluate("canvasBrowserReceipt.assignments.every(item=>item.safe&&item.id==='valid')"),'Only valid tiny PNGs may reach src');
-  for(let repeat=0;repeat<3;repeat++)await refresh();
-  assert.equal(fixture.requests.length,5,'Refresh cannot retry failed or refused previews');
-  await reveal(card('4')+' .signal-canvas-frame');await geometry('oversize refusal',card('4')+' .signal-canvas-frame');await screenshot('canvas-oversize-refused');
-  await reveal(card('3')+' .signal-canvas-frame');await screenshot('canvas-unsupported');
-  fixture.readError=false;
-  await reveal(card('1')+' button');await click(card('1')+' button');await settle();
-  await until(`document.querySelector(${JSON.stringify(card('1')+' img')})?.naturalWidth===16`);
-  assert.equal(fixture.requests.filter(request=>request.id==='1').length,2,'Retry is explicit and exact');await screenshot('canvas-retry-decoded');
-  for(const [width,height] of [[1440,900],[600,800],[360,740]]){
-    await viewport(width,height);
-    await reveal(card('5')+' .signal-canvas-frame');await geometry(`decoded preview ${width}`,card('5')+' .signal-canvas-frame');await screenshot(`canvas-${width}-decoded`);
-    const disclosure=card('5')+' details:first-of-type > summary';
-    const disclosureOpen=`document.querySelector(${JSON.stringify(card('5')+' details')})?.open`;
-    await reveal(disclosure);await click(disclosure);
-    await until(`${disclosureOpen}===true`,`pointer opens disclosure at ${width}`);
-    await press('Enter');
-    await until(`${disclosureOpen}===false`,`Enter closes disclosure at ${width}`);
-    await press('Enter');
-    await until(`${disclosureOpen}===true`,`Enter reopens disclosure at ${width}`);
-    assert(await evaluate(`document.querySelector(${JSON.stringify(card('5')+' details')}).open`));
-    await press('Tab');await key('Tab','Tab',{windowsVirtualKeyCode:9,modifiers:8});
-    const focused=await geometry(`keyboard disclosure ${width}`,disclosure);
-    assert(focused.focus&&focused.focusVisible&&focused.outline!=='none'&&parseFloat(focused.outlineWidth)>0);
-    await screenshot(`canvas-${width}-keyboard`);await press('Enter');
-    await until(`${disclosureOpen}===false`,`Enter closes focused disclosure at ${width}`);
-    assert.equal(await evaluate(`document.querySelector(${JSON.stringify(card('5')+' details')}).open`),false);
-    await click('#signal-view-rendering');await retireSnapshot();await press('ArrowRight');await settle();
-    assert.equal(await evaluate('state.signalView'),'activity');assert.equal(await evaluate('document.activeElement.id'),'signal-view-activity');
-    await clean(`Activity releases ${width}`);await screenshot(`canvas-${width}-activity`);
-    await press('ArrowLeft');await settle();await decoded();
-    assert.equal(await evaluate('document.activeElement.id'),'signal-view-rendering');
-  }
-  await viewport(1440,900);await retireSnapshot();await click('.nav-button[data-screen="traffic"]');await settle();await clean('navigation closes gallery');
-  const closedReads=fixture.requests.length;await refresh();assert.equal(fixture.requests.length,closedReads,'Hidden refresh stays metadata-only');
-  fixture.hold=true;await click('.nav-button[data-screen="signals"]');await until('state.canvasPreviewReads?.size===2');
-  for(let attempt=0;attempt<200&&fixture.pending.length<2;attempt++)await new Promise(resolve=>setTimeout(resolve,25));
-  assert.equal(fixture.pending.length,2);await screenshot('canvas-pending');await retireSnapshot();
-  await click('.nav-button[data-screen="traffic"]');await settle();await clean('close aborts pending bodies');
-  fixture.release();fixture.hold=false;await new Promise(resolve=>setTimeout(resolve,50));await clean('late bodies cannot repopulate');
-  await open();await screenshot('canvas-reopened');
-  await retireSnapshot();fixture.catalogError=true;await refresh();await clean('catalog failure releases gallery');
-  assert.match(await text('5'),/catalog is unavailable/);await screenshot('canvas-catalog-error');
-  fixture.catalogError=false;await refresh();await decoded();
-  await retireSnapshot();fixture.active=false;fixture.revision++;await refresh();await clean('empty live catalog');
-  // Empty live catalogs retire the gallery nodes; the persistent summary owns
-  // the visible empty-state label after that cleanup.
-  await until("state.artifacts.length===0&&document.querySelector('#signal-render-summary')?.textContent==='No canvas readbacks'",'empty live catalog summary');
-  assert.equal(await evaluate("document.querySelectorAll('#signal-render-list .signal-render-card').length"),0);
-  assert.match(await evaluate("document.querySelector('#signal-render-summary').textContent"),/^No canvas readbacks$/);
-  await geometry('empty live catalog summary','#signal-render-summary');await screenshot('canvas-empty');
-  await click('.nav-button[data-screen="traffic"]');await settle();await clean('normal phase closes before policy navigation');
-  const sink=await evaluate('canvasBrowserReceipt');assert.deepEqual(sink.blocked,[]);assert.deepEqual(sink.errors,[]);record({label:'normal native image sink receipts',...sink});
-  // A fresh document gets a real response CSP, not a replaced Image/error API.
-  // Its valid admitted PNGs must raise trusted native error events and exercise
-  // production's existing error label/retirement. This is load-policy coverage,
-  // not a claim that Chrome rejects any particular corrupt compressed payload.
-  fixture.active=true;fixture.revision++;fixture.phase='image-policy';
-  const policyStart=fixture.requests.length;
-  await navigatePolicy();
-  await until("location.search.includes('canvas_policy=blocked')&&typeof state!=='undefined'&&state.artifacts.length===5&&!state.refreshing&&!state.artifactRefreshing");
-  assert.equal(fixture.requests.length,policyStart,'Fresh policy page also discovers hidden metadata without image reads');
-  await viewport(1440,900);await click('.nav-button[data-screen="signals"]');await settle();
-  await until("canvasBrowserReceipt.errors.some(item=>item.id==='valid'&&item.trusted)&&canvasBrowserReceipt.violations.some(item=>item.directive==='img-src'&&item.disposition==='enforce')&&document.querySelectorAll('#signal-render-list img[src]').length===0&&[...state.canvasPreviewOwners.values()].filter(owner=>['5','2','1'].includes(owner.artifact.artifact_id)).every(owner=>owner.imageError?.includes('browser could not decode'))");
-  for(const id of ['5','2','1'])assert.match(await text(id),/browser could not decode this PNG/);
-  assert.match(await text('4'),/4096-pixel/);assert.match(await text('3'),/only static PNG/);
-  assert(await evaluate(`state.artifacts.every(a=>a.contentVerified&&a.content===new Map(${JSON.stringify([...fixture.documents])}).get(a.artifact_id))`),'Policy failure cannot alter verified captured text');
-  assert.equal(fixture.requests.length-policyStart,5);
-  for(let repeat=0;repeat<3;repeat++)await refresh();
-  assert.equal(fixture.requests.length-policyStart,5,'Native image errors cannot trigger automatic content refetch');
-  for(const [width,height] of [[1440,900],[360,740]]){
-    await viewport(width,height);await reveal(card('5')+' .signal-canvas-frame');
-    await geometry(`native policy load-error ${width}`,card('5')+' .signal-canvas-frame');await screenshot(`canvas-${width}-native-policy-error`);
-  }
-  const policy=await evaluate('canvasBrowserReceipt');assert.deepEqual(policy.blocked,[]);assert.deepEqual(policy.loads,[]);
-  assert(policy.errors.length>=3&&policy.errors.every(error=>error.id==='valid'&&error.trusted),'Each admitted valid image must fail through a trusted native event');
-  record({label:'isolated CSP native load-error receipts',policy:"img-src 'none'",...policy});
-  await viewport(1440,900);await retireSnapshot();await click('.nav-button[data-screen="traffic"]');await settle();await clean('policy error gallery close releases ownership');
-  assert(fixture.requests.every(request=>request.method==='GET'),'The UI must never mutate capture state');
-  return {status:'passed',path:'installed Chrome, production Canvas UI with authored HTTP evidence',viewports:[[1440,900],[600,800],[360,740]],
-    checks:['hidden metadata-only discovery','real 16x16 PNG decode and pixel readback','oversized/unsupported refused before native src','isolated CSP native image load-error events and existing error label','explicit read-error retry','stable refresh without refetch','keyboard disclosure and Activity/Overview tabs','wide/narrow gallery geometry','close and reopen','abort pending bodies and refuse late completion','catalog failure/recovery and empty cleanup'],
-    limits:['Only authored tiny PNGs enter Chrome decoding. The giant-header sink tripwire must never fire.','No production admission or ownership functions are mocked. HTTP responses are synthetic; this is not native capture or backend acceptance.','Source removal and declared-pixel accounting do not measure decoder allocation, native caches, JavaScript heap or process RSS; no immediate native-memory reclamation claim.','The image-error phase uses CSP img-src none on a fresh document with valid PNGs; it does not establish corrupt-stream decoder rejection.','Not macOS native-shell acceptance.']};
 }

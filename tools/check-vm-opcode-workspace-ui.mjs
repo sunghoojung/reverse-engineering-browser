@@ -1,16 +1,16 @@
 #!/usr/bin/env node
 // Authored fixtures and shipped rendering functions only. No captured WASM is executed.
 import assert from 'node:assert/strict';
-import {createServer} from 'node:http';
-import {startSandboxedChromium} from './sandboxed-chromium-startup.mjs';
-import {mkdtemp, readFile, writeFile, rm, mkdir} from 'node:fs/promises';
+import {execFileSync, spawnSync} from 'node:child_process';
+import {readFile} from 'node:fs/promises';
 import {join} from 'node:path';
-import {tmpdir} from 'node:os';
 import {fileURLToPath} from 'node:url';
 import {runInNewContext} from 'node:vm';
 
 const root = fileURLToPath(new URL('..', import.meta.url));
-const output = process.env.REB_VM_WORKSPACE_UI_OUTPUT || join(root, 'build/vm-workspace-ui-qa');
+// Inputs come only from REB_NATIVE_WASM_* variables. Rendered acceptance is
+// `make rendered-ui-check`; a stale or misspelled flag must fail, not be ignored.
+if (process.argv.length > 2) throw new Error(`Unexpected arguments: ${process.argv.slice(2).join(' ')}`);
 const app = await readFile(join(root, 'apps/research-ui/app.js'), 'utf8');
 const model = await readFile(join(root, 'apps/research-ui/evidence_models.js'), 'utf8');
 const fixture = JSON.parse(await readFile(join(root, 'tests/research_ui/fixtures/vm-opcode-workspace-v2.json'), 'utf8'));
@@ -56,7 +56,7 @@ class TestElement {
 }
 const testDocument = {createElement: tag => new TestElement(tag), createTextNode: text => { const node = new TestElement('#text'); node.textContent = text; return node; }, querySelector: () => null};
 const renderApiState = {vmOpcodeWorkspace: hostWorkspace, vmHostLinks: hostLinks, vmHostLinksStatus: 'ready'};
-const renderApi = runInNewContext(`${model}\n${helper}\n${renders}\n({renderVmEffects,renderVmReachability,renderVmBytecode,renderVmHostLinks,renderVmSessionSources,renderVmWorkspaceCoverage,appendVmPagedRows,renderVmHandlers,renderVmDispatchInventory,renderVmHandlerTables,vmOpcodeRows})`, {document: testDocument, state: renderApiState, TextEncoder, Event});
+const renderApi = runInNewContext(`${model}\n${helper}\n${renders}\n({renderVmEffects,renderVmReachability,renderVmBytecode,renderVmHostLinks,renderVmSessionSources,renderVmWorkspaceCoverage,appendVmPagedRows,renderVmHandlers,renderVmDispatchInventory,renderVmHandlerTables,renderNativeWasmObservations,vmOpcodeRows})`, {document: testDocument, state: renderApiState, TextEncoder, Event});
 const descendants = element => [element, ...element.children.flatMap(descendants)];
 const findButton = (root, label) => descendants(root).find(node => node.tagName === 'button' && node.textContent === label);
 const many = structuredClone(hostSource);
@@ -405,233 +405,104 @@ findButton(coveragePanel,'Next byte attributions').click();findButton(coveragePa
 assert(coveragePanel.textContent.includes('bytes [64, 65)'));assert(findButton(coveragePanel,'Next byte attributions').disabled);
 console.log('PASS complete bounded Findings paging: 257 effects/instructions, 65 host links/samples, multi-snapshot selection, empty inputs and keyboard focus');
 
-if (process.argv.includes('--browser')) {
-  fixture.workspaces[0].captured_module_preview = modulePreview;
-  fixture.workspaces[0].dispatch_inventory = inventory;
-  fixture.workspaces[0].handler_tables = tables;
-  const selected = {findingId: 'analysis:c5e529342af22aafd3d7ddbc', sourceArtifactId: '302'};
-  const setup = `const fixture=${JSON.stringify(fixture)};const selected=${JSON.stringify(selected)};
-const hostWorkspace=${JSON.stringify(hostWorkspace)},hostLinks=${JSON.stringify(hostLinks)};
-const state={vmOpcodeWorkspace:fixture,lastValidVmOpcodeWorkspace:fixture,vmOpcodeWorkspaceStatus:'ready',selectedVmHandlerKey:null,vmFindings:[selected],selectedVmFindingId:selected.findingId,
-vmAnalysisDocument:{document_digest:fixture.analysis_digest,capture_mode:'unknown'}};
-const elements={vmSessionStatus:document.querySelector('#status')};
-function render(){document.querySelector('#workspace').replaceChildren(renderVmOpcodeWorkspace(selected));renderVmSessionStatus();}
-render();`;
-  const html = `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<link rel="stylesheet" href="/app.css"><style>html,body{overflow:auto;height:auto;min-height:100%}body{margin:0}main{padding:16px;max-width:1100px;margin:auto;min-width:0}</style>
-</head><body><main><p>Authored static WASM workspace. No module execution or browser capture.</p><div id="status" class="vm-session-status"></div><div id="workspace"></div></main>
-<script>${model}\n${helper}\n${renders}\n${setup}</script></body></html>`;
-  const css = await readFile(join(root, 'apps/research-ui/app.css'));
-  const server = createServer((request, response) => {
-    if (request.url === '/') { response.setHeader('content-type', 'text/html'); response.end(html); }
-    else if (request.url === '/app.css') { response.setHeader('content-type', 'text/css'); response.end(css); }
-    else response.writeHead(404).end();
-  });
-  const profile = await mkdtemp(join(tmpdir(), 'reb-vm-workspace-'));
-  let browser, socket, closed = false, diagnostics = '', sequence = 0;
-  const pending = new Map(), errors = [], pause = ms => new Promise(resolve => setTimeout(resolve, ms));
-  const until = async (test, label, timeoutMs = 10000) => {
-    const end = Date.now() + timeoutMs;
-    while (Date.now() < end) { if (await test()) return; await pause(40); }
-    throw Error(`Timed out: ${label}`);
-  };
-  const send = (method, params = {}) => new Promise((resolve, reject) => {
-    const id = ++sequence, timer = setTimeout(() => { pending.delete(id); reject(Error(`CDP timeout: ${method}`)); }, 10000);
-    pending.set(id, {resolve, reject, timer}); socket.send(JSON.stringify({id, method, params}));
-  });
-  const evaluate = async expression => {
-    const result = await send('Runtime.evaluate', {expression, returnByValue: true, awaitPromise: true});
-    if (result.exceptionDetails) throw Error(JSON.stringify(result.exceptionDetails));
-    return result.result.value;
-  };
-  await mkdir(output, {recursive: true});
-  try {
-    await new Promise((ready, reject) => { server.once('error', reject); server.listen(0, '127.0.0.1', ready); });
-    const chromium = startSandboxedChromium(process.env.REB_UI_CHROMIUM || '/usr/bin/chromium', profile, text => { diagnostics = text; });
-    browser = chromium.browser;
-    browser.once('close', () => { closed = true; });
-    const port = await chromium.ready();
-    const pages = await (await fetch(`http://127.0.0.1:${port}/json/list`)).json();
-    socket = new WebSocket(pages.find(page => page.type === 'page').webSocketDebuggerUrl);
-    await new Promise((ready, reject) => { socket.addEventListener('open', ready, {once: true}); socket.addEventListener('error', reject, {once: true}); });
-    socket.addEventListener('message', event => {
-      const message = JSON.parse(event.data), request = pending.get(message.id);
-      if (message.method === 'Runtime.exceptionThrown') errors.push(message.params);
-      if (!request) return;
-      pending.delete(message.id); clearTimeout(request.timer);
-      if (message.error) request.reject(Error(message.error.message)); else request.resolve(message.result);
-    });
-    await send('Runtime.enable'); await send('Page.enable');
-    await send('Page.navigate', {url: `http://127.0.0.1:${server.address().port}/`});
-    // These three authored arms use distinct source spans, so each stays its own row.
-    await until(() => evaluate("document.querySelectorAll('.vm-handler-row').length === 3"), 'WASM handler rows');
-    const text = await evaluate('document.body.textContent');
-    assert(text.includes('WebAssembly')); assert(text.includes('3 dispatch-arm candidates')); assert(text.includes('unknown'));
-    assert(text.includes('stack or registers unproven'));
-    assert(text.includes('not a proven guest opcode ISA'));
-    assert.equal(await evaluate("document.querySelectorAll('#workspace img').length"), 0);
-    for (const width of [1440, 390]) {
-      await send('Emulation.setDeviceMetricsOverride', {width, height: 900, deviceScaleFactor: 1, mobile: false});
-      const point = await evaluate("(async()=>{const e=document.querySelector('.vm-handler-row');e.scrollIntoView({block:'center'});await new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r)));const b=e.getBoundingClientRect();return{x:b.x+b.width/2,y:b.y+b.height/2};})()");
-      for (const type of ['mousePressed', 'mouseReleased']) await send('Input.dispatchMouseEvent', {type, ...point, button: 'left', clickCount: 1});
-      for (const type of ['rawKeyDown', 'keyUp']) await send('Input.dispatchKeyEvent', {type, key: 'ArrowDown', code: 'ArrowDown', windowsVirtualKeyCode: 40});
-      assert.equal(await evaluate("document.activeElement === document.querySelectorAll('.vm-handler-row')[1]"), true);
-      assert.equal(await evaluate("document.activeElement.getAttribute('aria-selected')"), 'true');
-      assert.equal(await evaluate("document.querySelector('.vm-selection-inspector h3').textContent"), 'call_indirect target');
-      assert((await evaluate("document.querySelector('.vm-selection-inspector').textContent")).includes('50 + 3 bytes'));
-      assert.equal(await evaluate("document.querySelectorAll('.vm-selection-inspector img').length"), 0);
-      assert.equal(await evaluate('document.documentElement.scrollWidth <= innerWidth'), true);
-      for (const panel of ['dispatch', 'tables', 'bytecode', 'reachability', 'coverage', 'unknowns', 'experiment', 'host-links', 'sources', 'effects']) {
-        await evaluate(`document.querySelector('[data-vm-panel="${panel}"]').click()`);
-        assert.equal(await evaluate(`document.querySelector('[data-vm-panel-content="${panel}"]').hidden`), false);
-        assert.equal(await evaluate("document.querySelectorAll('.vm-workbench-panels > :not([hidden])').length"), 1);
-      }
-      await evaluate("document.querySelector('[data-vm-panel=dispatch]').click()");
-      assert((await evaluate("document.querySelector('[data-vm-panel-content=dispatch]').textContent")).includes('200 arms + default'));
-      assert((await evaluate("document.querySelector('[data-vm-panel-content=dispatch]').textContent")).includes('CFF / relooper candidate'));
-      assert((await evaluate("document.querySelector('[data-vm-panel-content=dispatch]').textContent")).includes('indirect funcref candidate'));
-      assert((await evaluate("document.querySelector('[data-vm-panel-content=dispatch]').textContent")).includes('not a proven guest opcode ISA'));
-      assert((await evaluate("document.querySelector('[data-vm-panel-content=dispatch]').textContent")).includes('CFF helper'));
-      assert((await evaluate("document.querySelector('[data-vm-panel-content=dispatch]').textContent")).includes('Handler table candidate'));
-      assert((await evaluate("document.querySelector('[data-vm-panel-content=dispatch]').textContent")).includes('Call-indirect table'));
-      assert(!(await evaluate("document.querySelector('[data-vm-panel-content=dispatch]').textContent")).includes('Guest opcode ISA'));
-      const tableText = await evaluate("document.querySelector('[data-vm-panel-content=tables]').textContent");
-      assert(tableText.includes('11 arms, 3 unique targets'));
-      assert(tableText.includes('listed 32 of 100'));
-      assert(tableText.includes('do not prove a guest PC'));
-      assert(!tableText.includes('guest-opcode-isa'));
-      await evaluate("document.querySelector('[data-vm-panel=tables]').focus()");
-      await send('Input.dispatchKeyEvent', {type: 'keyDown', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13, text: '\r'});
-      await send('Input.dispatchKeyEvent', {type: 'keyUp', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13});
-      assert.equal(await evaluate("document.querySelector('[data-vm-panel-content=tables]').hidden"), false);
-      assert.equal(await evaluate("document.activeElement?.dataset?.vmPanel"), 'tables');
-      await evaluate("document.querySelector('[data-vm-panel=dispatch]').click()");
-      await evaluate("(()=>{const search=document.querySelector('.vm-listing-toolbar input'); search.value='call_indirect'; search.dispatchEvent(new Event('input')); document.querySelector('[data-vm-panel-content=dispatch] details').open=true; document.querySelector('[data-vm-panel-content=dispatch] details button').focus()})()");
-      assert.equal(await evaluate("document.activeElement === document.querySelector('[data-vm-panel-content=dispatch] details button')"), true);
-      assert((await evaluate("document.querySelector('[data-vm-panel-content=dispatch] summary').textContent")).includes('handler-table candidate'));
-      assert((await evaluate("[...document.querySelectorAll('[data-vm-panel-content=dispatch] summary')][1].textContent")).includes('CFF / relooper candidate'));
-      // The button owns Enter. Send the keydown the page actually receives;
-      // do not click the control from the test.
-      await send('Input.dispatchKeyEvent', {type: 'keyDown', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13, text: '\r'});
-      await send('Input.dispatchKeyEvent', {type: 'keyUp', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13});
-      assert.equal(await evaluate("document.querySelector('.vm-listing-toolbar input').value"), '');
-      assert.equal(await evaluate("state.selectedVmHandlerKey"), '0::45');
-      await evaluate("document.querySelectorAll('.vm-handler-row')[1].click();render()");
-      assert.equal(await evaluate("state.selectedVmHandlerKey"), 'null::50');
-      assert.equal(await evaluate('document.documentElement.scrollWidth <= innerWidth'), true);
-      const inventoryShot = await send('Page.captureScreenshot', {format: 'png', captureBeyondViewport: true});
-      await writeFile(join(output, `dispatch-inventory-${width}.png`), Buffer.from(inventoryShot.data, 'base64'));
-      await evaluate("document.querySelector('[data-vm-panel=bytecode]').click();document.querySelector('.vm-snapshot-selector').focus()");
-      for (const type of ['rawKeyDown', 'keyUp']) await send('Input.dispatchKeyEvent', {type, key: 'End', code: 'End', windowsVirtualKeyCode: 35});
-      assert.equal(await evaluate("document.querySelector('.vm-snapshot-selector').value"), '1');
-      const moduleText = await evaluate("document.querySelector('[data-vm-panel-content=bytecode]').textContent");
-      assert(moduleText.includes('module byte offset45')); assert(moduleText.includes('0e 01'));
-      assert(moduleText.includes('This is not a runtime memory snapshot.'));
-      assert.equal(await evaluate('fixture.workspaces[0].snapshots.length'), 1);
-      assert.equal(await evaluate('document.documentElement.scrollWidth <= innerWidth'), true);
-      await evaluate('scrollTo(0,0)');
-      const {data} = await send('Page.captureScreenshot', {format: 'png', captureBeyondViewport: true});
-      await writeFile(join(output, `wasm-${width}.png`), Buffer.from(data, 'base64'));
-      for (const [mode, label] of [['native-stealth', 'Native stealth'], ['cdp-attached', 'CDP attached'], ['unknown', 'Recorded evidence']]) {
-        await evaluate(`fixture.workspaces[0].capture_mode=${JSON.stringify(mode)};state.debuggerSession={state:'running',target:{}};renderVmSessionStatus()`);
-        assert.equal(await evaluate("document.querySelector('.vm-session-chip').textContent"), label);
-        assert.equal(await evaluate('document.documentElement.scrollWidth <= innerWidth'), true);
-        const capture = await send('Page.captureScreenshot', {format: 'png', captureBeyondViewport: true});
-        await writeFile(join(output, `capture-${mode}-${width}.png`), Buffer.from(capture.data, 'base64'));
-      }
-      await evaluate("fixture.workspaces[0].capture_mode='native-stealth';state.vmAnalysisDocument.document_digest='stale';renderVmSessionStatus()");
-      assert.equal(await evaluate("document.querySelector('.vm-session-chip').textContent"), 'Recorded evidence');
-      await evaluate("delete state.vmAnalysisDocument.capture_mode;state.broker='connected';state.sessionMode='live';renderVmSessionStatus()");
-      assert.equal(await evaluate("document.querySelector('.vm-session-chip').textContent"), 'Recorded evidence');
-      await evaluate("state.vmAnalysisDocument={document_digest:fixture.analysis_digest,capture_mode:'unknown'};renderVmSessionStatus()");
-
-    }
-    await evaluate("fixture.workspaces[0].coverage.omissions.push({reason:'sampler-unavailable',detail:'No runtime dispatch samples were retained.'});state.vmOpcodeWorkspace=fixture;state.vmWorkspacePanel='host-links';render()");
-    assert((await evaluate('document.body.textContent')).includes('Static only. sampler-unavailable'));
-    assert((await evaluate('document.body.textContent')).includes('--emit-dispatch-events-v1'));
-    await evaluate("state.vmOpcodeWorkspace=hostWorkspace;state.vmHostLinks=hostLinks;state.vmHostLinksStatus='ready';state.vmWorkspacePanel='host-links';render()");
-    assert.equal(await evaluate("document.querySelector('[data-vm-panel-content=\"host-links\"]').hidden"), false);
-    assert((await evaluate('document.body.textContent')).includes('event 1:1:50'));
-    assert((await evaluate('document.body.textContent')).includes('exact request-value provenance'));
-    for (const width of [1440, 390]) {
-      await send('Emulation.setDeviceMetricsOverride', {width, height: 900, deviceScaleFactor: 1, mobile: false});
-      assert.equal(await evaluate('document.documentElement.scrollWidth <= innerWidth'), true);
-      const {data} = await send('Page.captureScreenshot', {format: 'png', captureBeyondViewport: true});
-      await writeFile(join(output, `host-links-${width}.png`), Buffer.from(data, 'base64'));
-    }
-    await evaluate(`hostLinks.workspaces[0].omissions=['dispatch-samples-unavailable']; hostLinks.workspaces[0].links=[{host_event:hostLinks.workspaces[0].links[0].host_event, category:'network', type:'request_initiated', state:'unknown', reason:'dispatch-samples-unavailable', guest_position:null}]; state.vmHostLinks=hostLinks; state.artifacts=[{artifact_id:'302', session_id:'1', kind:'wasm', url:'wasm://wasm/003c0d96', capture_origin:'webassembly_compile', sha256:hostWorkspace.workspaces[0].source_artifact_sha256, byte_size:8},{artifact_id:'1', session_id:'1', kind:'javascript', url:'chrome://newtab/strings.js', capture_origin:'network_response', sha256:'${'b'.repeat(64)}', byte_size:12}]; state.events=[{session_id:'1'}]; state.sessionMode='live'; state.debuggerSession={scripts:[{script_id:'32', url:'https://newassets.hcaptcha.com/captcha/v1/hsw.js', language:'JavaScript'},{script_id:'25', url:'wasm://module', language:'WebAssembly'}]}; state.vmFindings=[{findingId:selected.findingId, sourceArtifactId:'302'}]; state.selectedVmFindingId=selected.findingId; state.vmAnalysisSelection=null; state.vmWorkspacePanel='host-links'; render();`);
-    const staticText = await evaluate("document.querySelector('[data-vm-panel-content=\"host-links\"]').textContent");
-    assert(staticText.includes('Static only'));
-    assert(staticText.includes('dispatch-samples-unavailable'));
-    assert(staticText.includes('guest_position null'));
-    assert(staticText.includes('correlation'));
-    assert(!staticText.includes('guest_position PC'));
-    await evaluate("document.querySelector('[data-vm-panel=\"sources\"]').focus(); document.querySelector('[data-vm-panel=\"sources\"]').click()");
-    const sourceText = await evaluate("document.querySelector('[data-vm-panel-content=\"sources\"]').textContent");
-    assert(sourceText.includes('chrome://newtab/strings.js'));
-    assert(sourceText.includes('hsw.js'));
-    assert(sourceText.includes('No page or challenge JavaScript artifact'));
-    assert(sourceText.includes('guest_position stays null'));
-    assert(!sourceText.includes('wasm://module'));
-    for (const width of [1440, 390]) {
-      await send('Emulation.setDeviceMetricsOverride', {width, height: 900, deviceScaleFactor: 1, mobile: false});
-      await evaluate("document.querySelector('[data-vm-panel=\"host-links\"]').click()");
-      assert.equal(await evaluate('document.documentElement.scrollWidth <= innerWidth'), true);
-      const hostShot = await send('Page.captureScreenshot', {format: 'png', captureBeyondViewport: true});
-      await writeFile(join(output, `static-host-links-${width}.png`), Buffer.from(hostShot.data, 'base64'));
-      await evaluate("document.querySelector('[data-vm-panel=\"sources\"]').click()");
-      const open = await evaluate("(()=>{const button=[...document.querySelectorAll('[data-vm-panel-content=\"sources\"] button')].find(item=>item.textContent==='Open stored artifact'); button.scrollIntoView({block:'center'}); button.focus(); const b=button.getBoundingClientRect(); return {x:b.x, y:b.y, w:b.width, h:b.height, focused:document.activeElement===button};})()");
-      assert.equal(open.focused, true);
-      assert.equal(open.w > 0 && open.h > 0 && open.x >= 0 && open.y >= 0, true);
-      assert.equal(await evaluate('document.documentElement.scrollWidth <= innerWidth'), true);
-      const sourceShot = await send('Page.captureScreenshot', {format: 'png', captureBeyondViewport: true});
-      await writeFile(join(output, `session-sources-${width}.png`), Buffer.from(sourceShot.data, 'base64'));
-    }
-    await evaluate("hostLinks.workspace_document_digest='stale';render()");
-    assert((await evaluate('document.body.textContent')).includes('Guest position unknown'));
-    await evaluate("state.vmOpcodeWorkspace=fixture;state.vmHostLinks=null;render()");
-    await evaluate("retainVmOpcodeWorkspaceOnFailure(state,'malformed','synthetic malformed fixture');render()");
-    assert((await evaluate('document.body.textContent')).includes('last valid workspace is retained'));
-    await evaluate("state.vmOpcodeWorkspace={...fixture,workspaces:[]};state.vmOpcodeWorkspaceStatus='ready';render()");
-    assert.equal(await evaluate("document.querySelectorAll('.vm-handler-row').length"), 0);
-    assert((await evaluate('document.body.textContent')).includes('Workspace unavailable for this finding'));
-    await evaluate(`state.vmOpcodeWorkspace=${JSON.stringify(callerDocument)};state.lastValidVmOpcodeWorkspace=state.vmOpcodeWorkspace;state.vmOpcodeWorkspaceStatus='ready';state.vmHostLinks=null;state.selectedVmHandlerKey=null;render()`);
-    assert((await evaluate('document.body.textContent')).includes('not native runtime observations'));
-    for (const width of [1440, 390]) {
-      await send('Emulation.setDeviceMetricsOverride', {width, height: 900, deviceScaleFactor: 1, mobile: false});
-      await evaluate("(()=>{const key=vmOpcodeRows(state.vmOpcodeWorkspace.workspaces[0]).find(row=>row.retainedSamples.length).key;[...document.querySelectorAll('.vm-handler-row')].find(row=>row.dataset.handlerKey===key).click();})()");
-      const callerText = await evaluate("document.querySelector('.vm-selection-inspector').textContent");
-      assert(callerText.includes('Caller-reported PC'));
-      assert(!callerText.includes('Observed at a sampled program counter'));
-      await evaluate("document.querySelector('.vm-selection-inspector details summary').click()");
-      assert((await evaluate("document.querySelector('.vm-selection-inspector details').textContent")).includes('caller-supplied'));
-      assert.equal(await evaluate('document.documentElement.scrollWidth <= innerWidth'), true);
-      const callerShot = await send('Page.captureScreenshot', {format: 'png', captureBeyondViewport: true});
-      await writeFile(join(output, `caller-reports-${width}.png`), Buffer.from(callerShot.data, 'base64'));
-    }
-    await evaluate("retainVmOpcodeWorkspaceOnFailure(state,'malformed','unknown caller provenance');render()");
-    assert((await evaluate('document.body.textContent')).includes('last valid workspace is retained'));
-    assert((await evaluate('document.body.textContent')).includes('not native runtime observations'));
-    assert.deepEqual(errors, []);
-    await writeFile(join(output, 'validation.json'), JSON.stringify({status: 'passed', viewports: [1440, 390],
-      scope: 'Shipped workspace rendering with authored fixtures; no native capture, WASM execution or full-app polling acceptance'}, null, 2));
-    console.log(`PASS rendered WASM rows and persisted capture modes, keyboard selection, inert text, narrow layout, retained error and empty states: ${output}`);
-  } catch (error) {
-    await writeFile(join(output, 'validation.json'), JSON.stringify({status: 'failed', error: String(error.stack || error), diagnostics, errors}, null, 2));
-    throw error;
-  } finally {
-    for (const request of pending.values()) clearTimeout(request.timer);
-    socket?.close();
-    if (browser?.pid) {
-      for (const signal of ['SIGTERM', 'SIGKILL']) {
-        try { if (process.platform !== 'win32') process.kill(-browser.pid, signal); else if (!closed) browser.kill(signal); }
-        catch (error) { if (error.code !== 'ESRCH') throw error; }
-        const end = Date.now() + 2000; while (!closed && Date.now() < end) await pause(25);
-        if (closed) break;
-      }
-    }
-    server.closeAllConnections(); await new Promise(resolve => server.close(resolve));
-    if (!browser?.pid || closed) await rm(profile, {recursive: true, force: true, maxRetries: 5, retryDelay: 100});
-    else throw Error(`Browser did not close; retained its owned profile at ${profile}`);
-  }
+// Native physical observations use independent exact-site counters, not guest PCs.
+const nativeDocument = structuredClone(inventoryDocument), nativeWorkspace = nativeDocument.workspaces[0];
+const nativeRow = {event:{session_id:'1',process_id:1,sequence_number:'1'},function_index:0,module_byte_offset:45,
+  selector:0,table_count:200,sample_index:0,selected_arm:0,is_default:false};
+nativeWorkspace.native_wasm_observations = [nativeRow];nativeWorkspace.native_wasm_observation_count = 1;
+nativeWorkspace.sample_count = nativeDocument.summary.sample_count = 1;
+nativeWorkspace.handlers[0].sample_count = nativeWorkspace.handlers[0].native_wasm_sample_count = 1;
+nativeWorkspace.handlers[0].state = 'observed';
+assert(validateModule(nativeDocument), 'exact native site can confirm one repeated selector');
+assert.equal(nativeWorkspace.handlers[2].sample_count,0);
+assert(runInNewContext(`${model}\nvmOpcodeSamplePositions(value)[0]`,{value:[nativeRow],TextEncoder}).includes('guest PC unknown'));
+for (const mutate of [
+  doc=>{doc.workspaces[0].native_wasm_observations[0].module_byte_offset=70;},
+  doc=>{doc.workspaces[0].native_wasm_observations[0].function_index=1;},
+  doc=>{doc.workspaces[0].native_wasm_observations[0].table_count=199;},
+  doc=>{doc.workspaces[0].native_wasm_observations[0].selector=-1;},
+  doc=>{doc.workspaces[0].native_wasm_observations[0].selected_arm=1;},
+  doc=>{doc.workspaces[0].native_wasm_observations[0].sample_index=16;},
+  doc=>{doc.workspaces[0].native_wasm_observations[0].guest_pc=1;},
+  doc=>{doc.workspaces[0].handlers[2].sample_count=doc.workspaces[0].handlers[2].native_wasm_sample_count=1;doc.workspaces[0].handlers[2].state='observed';},
+  doc=>{delete doc.workspaces[0].native_wasm_observation_count;}
+]) {const invalid=structuredClone(nativeDocument);mutate(invalid);assert(!validateModule(invalid),'malformed or wrong-site native observations rejected');}
+const defaultDocument=structuredClone(nativeDocument), dw=defaultDocument.workspaces[0];
+Object.assign(dw.native_wasm_observations[0],{selector:0xffffffff,selected_arm:200,is_default:true});
+Object.assign(dw.handlers[0],{opcode:null,label:'br_table default'});
+assert(validateModule(defaultDocument),'unsigned max selects default without inventing an opcode');
+// Producer 2.7.0 keeps physical and guest counts out of sample_count. One
+// br_table execution at an adapter site emits both records.
+const separateDocument=structuredClone(nativeDocument), sw=separateDocument.workspaces[0];
+separateDocument.producer.version='2.7.0';
+sw.sample_count=separateDocument.summary.sample_count=0;sw.handlers[0].sample_count=0;
+assert(validateModule(separateDocument),'separate native counts accepted from producer 2.7.0');
+const summedNew=structuredClone(nativeDocument);summedNew.producer.version='2.7.0';
+assert(!validateModule(summedNew),'producer 2.7.0 cannot sum native observations into sample_count');
+const bothDocument=structuredClone(defaultDocument), bw=bothDocument.workspaces[0];
+bothDocument.producer.version='2.7.0';
+bw.sample_count=bothDocument.summary.sample_count=0;
+bw.native_guest_samples=[];bw.native_guest_sample_count=0;
+Object.assign(bw.handlers[0],{sample_count:0,native_wasm_sample_count:1});
+assert(validateModule(bothDocument),'native-only default arm is observed with zero dispatch reports');
+bw.handlers[0].sample_count=1;
+assert(!validateModule(bothDocument),'native-only default arm cannot report dispatch samples');
+bw.handlers[0].sample_count=0;
+const executions=runInNewContext(`${model}\nvmOpcodeHandlerRow(workspace, workspace.handlers[0]).samples`,
+  {workspace:{...bw,handlers:[{...bw.handlers[0],native_guest_sample_count:1}]},TextEncoder});
+assert.equal(executions,1,'one execution with physical and guest records displays once');
+const nativePanel=renderApi.renderNativeWasmObservations({...nativeWorkspace,
+  native_wasm_observation_count:66,native_wasm_observations:Array.from({length:65},(_,i)=>({...nativeRow,selector:i,selected_arm:i}))});
+assert(nativePanel.textContent.includes('not guest-interpreter PCs'));
+assert(nativePanel.textContent.includes('1 accepted observations are outside the retained window'));
+const nativePageRows=()=>descendants(nativePanel).find(row=>row.dataset.vmPagedRows==='native Wasm observations');
+assert.equal(nativePageRows().children.length,32);
+const nativeNext=findButton(nativePanel,'Next native Wasm observations');nativeNext.click();nativeNext.click();
+assert.equal(nativePageRows().children.length,1);assert(nativePageRows().textContent.includes('selector 64'));assert(nativeNext.disabled);
+assert(renderApi.renderNativeWasmObservations({...nativeWorkspace,native_wasm_observations:[],native_wasm_observation_count:0}).textContent.includes('No native Wasm dispatch observations retained'));
+// Every native row exposes time, source, category/operation and its exact correlation identity.
+assert(nativePanel.textContent.includes('time outside retained event window · session 1 · process 1 · seq 1 · native probe · vm/wasm_dispatch_observation'));
+renderApiState.events=[{session_id:'1',process_id:1,sequence_number:'1',monotonic_time_ns:'4242',category:'vm',type:'wasm_dispatch_observation'}];
+assert(renderApi.renderNativeWasmObservations({...nativeWorkspace,native_wasm_observations:[nativeRow],native_wasm_observation_count:1}).textContent
+  .includes('time 4242 ns · session 1 · process 1 · seq 1 · native probe · vm/wasm_dispatch_observation'));
+delete renderApiState.events;
+const guestRow={event:{session_id:'101',process_id:3,sequence_number:'105'},invocation_event:{session_id:'101',process_id:3,sequence_number:'104'},
+  instance_id:'18446744073709551615',instruction_pointer:1,instruction_pointer_units:'byte-offset',opcode:66,interpretation:'explicit-adapter',module_byte_offset:58};
+const guestPanel=renderApi.renderNativeWasmObservations({native_wasm_observations:[],native_wasm_observation_count:0,native_guest_samples:[guestRow],native_guest_sample_count:3});
+assert(guestPanel.textContent.includes('session 101 · process 3 · seq 105 · native probe · vm/wasm_guest_dispatch'));
+assert(guestPanel.textContent.includes('PC 1 bytes · opcode 66 · instance 18446744073709551615 · explicit-adapter'));
+assert(guestPanel.textContent.includes('2 accepted guest samples are outside the retained window.'));
+// Older or partially migrated documents: missing, malformed or summed counts never invent or hide rows.
+for (const legacy of [{native_guest_samples:[guestRow]},{native_guest_samples:[guestRow],native_guest_sample_count:'7'},
+  {native_guest_samples:[guestRow],native_guest_sample_count:0},{native_guest_samples:'bad'},{}]) {
+  const text=renderApi.renderNativeWasmObservations(legacy).textContent;
+  assert(!text.includes('outside the retained window'),JSON.stringify(legacy));
+  assert(!text.includes('NaN'),JSON.stringify(legacy));
 }
+console.log('PASS native physical and guest rows expose time/source/operation/correlation identity and separate retained-window notices');
+if (process.env.REB_NATIVE_WASM_WORKSPACE_INPUT) {
+  const actual=JSON.parse(await readFile(process.env.REB_NATIVE_WASM_WORKSPACE_INPUT,'utf8'));
+  assert(validateModule(actual),'actual C++ → Rust workspace accepted by shipped viewer');
+  assert(actual.workspaces.some(row=>row.native_wasm_observation_count>0));
+  const physical=actual.workspaces.flatMap(row=>row.native_wasm_observations??[]);
+  assert(physical.length>0 && physical.every(row=>/^(0|[1-9][0-9]{0,19})$/.test(row.monotonic_time_ns)),'physical rows carry canonical decimal event times');
+  const identity=runInNewContext(`${model}\nvmNativeRowIdentityText(row, [])`,{row:physical[0],TextEncoder});
+  assert.match(identity,new RegExp(`^time ${physical[0].monotonic_time_ns} ns · `),'row time renders without a retained event');
+  const legacy=structuredClone(actual);for(const row of legacy.workspaces.flatMap(row=>row.native_wasm_observations??[]))delete row.monotonic_time_ns;
+  assert(validateModule(legacy),'documents without the optional time stay valid');
+  const badTime=structuredClone(actual);badTime.workspaces.find(row=>row.native_wasm_observations?.length).native_wasm_observations[0].monotonic_time_ns=1;
+  assert(!validateModule(badTime),'a numeric time is not a canonical decimal string');
+  console.log('PASS actual C++ → Rust → viewer workspace with wide identities');
+}
+if (process.env.REB_NATIVE_WASM_GOLDEN) {
+  for (const mode of ['default','arm','wide-identities','envelope-version','reserved','version','size','truncated','big-endian','sample-index','offset','function','count','flags','parent','identity']) {
+    const event=JSON.parse(execFileSync(process.env.REB_NATIVE_WASM_GOLDEN,['--case',mode],{encoding:'utf8'}));
+    const valid=runInNewContext(`${model}\nisBrokerEvent(event)`,{event,TextEncoder});
+    assert.equal(valid,['default','arm','wide-identities','offset','function','count'].includes(mode),`actual native event ${mode}`);
+    const python = spawnSync('python3',['-c',"import runpy,json,sys; runpy.run_path('tools/validate-evidence-store.py')['validate_event'](json.load(sys.stdin),1)"],
+      {cwd:root,input:JSON.stringify(event),encoding:'utf8'});
+    assert.equal(python.status === 0,valid,`Python/native event ${mode}: ${python.stderr}`);
+  }
+  console.log('PASS actual C++ → viewer typed payload, unsigned fields, envelope and reserved-byte cases');
+}
+console.log('PASS native exact-site/default/counter schema regressions');

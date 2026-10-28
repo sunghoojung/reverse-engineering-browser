@@ -6,7 +6,7 @@ use std::{
 };
 
 #[derive(Debug, Parser, Clone)]
-#[command(about = "Origin Trace local evidence and live-debugger backend")]
+#[command(about = "Origin Trace local evidence and native capture backend")]
 pub struct Options {
     #[arg(long, default_value = "127.0.0.1")]
     pub host: String,
@@ -27,8 +27,6 @@ pub struct Options {
     #[arg(long)]
     pub decoder: Option<PathBuf>,
     #[arg(long)]
-    pub debugger_transport: Option<PathBuf>,
-    #[arg(long)]
     pub native_console: Option<PathBuf>,
     #[arg(long)]
     pub owned_vm_fixture: Option<PathBuf>,
@@ -48,20 +46,13 @@ pub struct Options {
     pub broker_pid: Option<i32>,
     #[arg(long)]
     pub artifact_socket: Option<PathBuf>,
-    /// Live capture session whose artifact manifest receives debugger Wasm modules.
+    /// Live native capture session for artifact provenance.
     #[arg(long)]
     pub capture_session_id: Option<u64>,
-    #[arg(long)]
-    pub devtools_active_port: Option<PathBuf>,
     /// Private directory where a live capture publishes the native-console binding.
     /// When set, the console attaches to that capture browser instead of launching one.
     #[arg(long)]
     pub native_console_live_directory: Option<PathBuf>,
-    #[arg(long)]
-    pub capture_network_content: bool,
-    /// Maximum multiplexed HTTP capture sessions; shares a fixed browser buffer budget.
-    #[arg(long, default_value_t = 32, value_parser = clap::value_parser!(u16).range(1..=128))]
-    pub capture_target_limit: u16,
     #[arg(long)]
     pub demo_evidence: bool,
     #[arg(long)]
@@ -100,7 +91,6 @@ impl Options {
         }
         for path in [
             &mut self.decoder,
-            &mut self.debugger_transport,
             &mut self.native_console,
             &mut self.owned_vm_fixture,
             &mut self.brave_binary,
@@ -110,7 +100,6 @@ impl Options {
             &mut self.ui_directory,
             &mut self.socket,
             &mut self.artifact_socket,
-            &mut self.devtools_active_port,
             &mut self.native_console_live_directory,
             &mut self.endpoint_file,
             &mut self.active_endpoint_file,

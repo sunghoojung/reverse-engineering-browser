@@ -952,6 +952,31 @@ fn analyze(artifact: &Value, bytes: &[u8], events: &[Value]) -> Value {
     analyze_with_roles(artifact, bytes, events).0
 }
 
+/// Workspace extraction spends the same artifact budget. Its exhaustion
+/// must remain visible even when extraction cannot return a workspace.
+pub(crate) fn finish_classification(
+    result: &mut Value,
+    workspace: Option<&mut Value>,
+    meter: &dispatch_shape::Meter,
+) {
+    if !meter.exhausted() {
+        return;
+    }
+    let classification = &mut result["frontend"]["dispatch_classification"];
+    if let Some(omissions) = classification["omissions"].as_array_mut()
+        && !omissions
+            .iter()
+            .any(|o| o["reason"] == "classification-work-limit")
+    {
+        omissions.push(json!({"reason":"classification-work-limit","detail":"The shared artifact work or memory budget prevented completion of 1 downstream claim-gate or table-layout pass. Unsupported claims were withheld."}));
+    }
+    if let Some(workspace) = workspace {
+        workspace["dispatch_classification"] = classification.clone();
+        workspace["coverage"]["omissions"].as_array_mut().expect("workspace omissions").push(json!({"reason":"classification-work-limit","detail":"The shared artifact work or memory budget prevented completion of the claim gate or table layout."}));
+        workspace["coverage"]["complete"] = json!(false);
+    }
+}
+
 /// The analysis result and the roles of every classified dispatch site, which
 /// the opcode-claim gate reads without classifying the artifact again.
 fn analyze_with_roles(
@@ -1412,8 +1437,8 @@ pub(crate) fn store_documents(root: &Path, event_store: &Path) -> Result<Documen
                 .unwrap()
                 .extend(omissions.clone());
         }
-        if let Some((bytes, roles)) = bytes
-            && let Some(mut workspace) = crate::vm_opcode::workspace(
+        if let Some((bytes, roles)) = bytes {
+            let mut workspace = crate::vm_opcode::workspace(
                 root,
                 artifact,
                 &bytes,
@@ -1424,11 +1449,15 @@ pub(crate) fn store_documents(root: &Path, event_store: &Path) -> Result<Documen
                 &snapshot_artifacts,
                 &events,
                 &dispatch_budget_losses,
-            )
-        {
-            workspace["capture_mode"] = json!(capture_provenance.mode(&artifact["session_id"]));
-            retain_handlerless_javascript_as_candidate(&mut result, &workspace);
-            opcode_workspaces.push(workspace);
+            );
+            if let Some(roles) = &roles {
+                finish_classification(&mut result, workspace.as_mut(), &roles.meter);
+            }
+            if let Some(mut workspace) = workspace {
+                workspace["capture_mode"] = json!(capture_provenance.mode(&artifact["session_id"]));
+                retain_handlerless_javascript_as_candidate(&mut result, &workspace);
+                opcode_workspaces.push(workspace);
+            }
         }
         results.push(result);
     }

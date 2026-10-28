@@ -205,9 +205,10 @@ impl SiteTable {
         json!({
             "table_index": self.table_index,
             "type_index": self.type_index,
-            "populated_slot_count": matching.map(|(_, populated)| populated),
-            "matching_slot_count": matching.map(|(slots, _)| slots.len()),
-            "matching_slots": matching.map(|(slots, _)| {
+            "populated_slot_count": matching.map(|matching| matching.1),
+            "matching_slot_count": matching.map(|matching| matching.0.len()),
+            "matching_slots": matching.map(|matching| {
+                let slots = &matching.0;
                 slots.iter().take(MAX_LISTED_SLOTS).copied().collect::<Vec<_>>()
             }),
         })
@@ -1955,11 +1956,7 @@ impl Meter {
 /// selector first, and classified in that order, so trivial noise elsewhere
 /// cannot exhaust the meter before a real interpreter is reached.
 pub(crate) fn wasm(bytes: &[u8], meter: &Meter) -> Option<Classified> {
-    let tables = crate::vm::wasm_tables::Tables::parse(bytes);
-    if let Some(tables) = &tables {
-        meter.charge(tables.work);
-        meter.retain(tables.retained_bytes());
-    }
+    let tables = crate::vm::wasm_tables::Tables::parse_under(bytes, meter);
     let tables = tables.as_ref();
     let mut validator = Some(Validator::new_with_features(WasmFeatures::all()));
     let mut imported = 0u32;
@@ -2070,9 +2067,6 @@ pub(crate) fn wasm(bytes: &[u8], meter: &Meter) -> Option<Classified> {
         }
     }
     meter.release(retained);
-    if let Some(tables) = tables {
-        meter.release(tables.retained_bytes());
-    }
     if sites.is_empty() && !meter.exhausted() && exports.len() >= 2 {
         sites.push(Site {
             kind: Kind::ExportPerRole,

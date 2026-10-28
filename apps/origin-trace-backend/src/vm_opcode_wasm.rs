@@ -7,7 +7,10 @@
 //! in-loop `call_indirect`. Unrelated jump tables stay out. Nothing here
 //! instantiates the module or invents a guest program counter.
 use super::MAX_HANDLERS;
-use crate::vm::wasm_tables::{Placement, Tables};
+use crate::vm::{
+    dispatch_shape::{Memory, Meter},
+    wasm_tables::{Placement, Tables},
+};
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use wasmparser::{BinaryReader, Operator, OperatorsReader, Parser, Payload, TypeRef};
@@ -69,7 +72,16 @@ struct FunctionDispatch {
     sites_truncated: bool,
 }
 
+#[cfg(test)]
 pub(super) fn handlers(bytes: &[u8], result: &Value) -> Option<ExtractedHandlers> {
+    handlers_under(bytes, result, &crate::vm::dispatch_shape::Meter::new())
+}
+
+pub(super) fn handlers_under(
+    bytes: &[u8],
+    result: &Value,
+    meter: &crate::vm::dispatch_shape::Meter,
+) -> Option<ExtractedHandlers> {
     let coordinate = result["observations"]
         .as_array()?
         .iter()
@@ -80,14 +92,8 @@ pub(super) fn handlers(bytes: &[u8], result: &Value) -> Option<ExtractedHandlers
     let body_offset = coordinate["function_body_offset"].as_u64()? as usize;
     let body_size = coordinate["function_body_size"].as_u64()? as usize;
     let mut functions = Vec::new();
-    let tables = Tables::parse(bytes)?;
-    // Call-graph edges only need which functions a table can hold, placed or
-    // relative. Slot numbers come from the evaluated layout, never from order.
-    let elements = tables
-        .active_tables()
-        .into_iter()
-        .map(|table| (table, tables.active_functions(table)))
-        .collect::<BTreeMap<_, _>>();
+    let tables = Tables::parse_under(bytes, meter)?;
+    let elements = tables.active_functions();
     let mut imported = 0u32;
     let mut defined = 0u32;
     let mut call_edges = 0usize;
@@ -213,7 +219,7 @@ pub(super) fn handlers(bytes: &[u8], result: &Value) -> Option<ExtractedHandlers
     functions[selected_pos]
         .sites
         .sort_by_key(|site| site.offset != selected_site);
-    attach_table_edges(&mut functions, &elements, &mut calls_truncated);
+    attach_table_edges(&mut functions, elements, &mut calls_truncated, meter);
     let (included, neighborhood_limited) = neighborhood(&functions, selected);
     let mut handlers = Vec::new();
     let mut omissions = Vec::new();
@@ -363,6 +369,7 @@ pub(super) fn handlers(bytes: &[u8], result: &Value) -> Option<ExtractedHandlers
             .get("frontend")
             .and_then(|frontend| frontend.get("dispatch_inventory")),
         &tables,
+        meter,
     );
     Some(ExtractedHandlers {
         handlers,
@@ -379,7 +386,12 @@ pub(super) fn handlers(bytes: &[u8], result: &Value) -> Option<ExtractedHandlers
 /// Top-ranked dispatch sites keep every explicit arm as a target cluster.
 /// The flat handler list is still capped; `selector_count` is the exact arm
 /// membership and `selectors` is only a prefix when a cluster is long.
-fn build_handler_tables(bytes: &[u8], inventory: Option<&Value>, layout: &Tables) -> Vec<Value> {
+fn build_handler_tables(
+    bytes: &[u8],
+    inventory: Option<&Value>,
+    layout: &Tables,
+    meter: &Meter,
+) -> Vec<Value> {
     let mut tables = Vec::new();
     if let Some(candidates) = inventory
         .and_then(|value| value.get("candidates"))
@@ -398,11 +410,13 @@ fn build_handler_tables(bytes: &[u8], inventory: Option<&Value>, layout: &Tables
             }
         }
     }
-    for table_index in layout.active_tables().into_iter().take(MAX_ELEMENT_TABLES) {
+    for table_index in layout.active_tables().take(MAX_ELEMENT_TABLES) {
         if layout.oversized.contains(&table_index) {
             continue;
         }
-        tables.push(element_handler_table(table_index, layout));
+        if let Some(table) = element_handler_table(table_index, layout, meter) {
+            tables.push(table);
+        }
     }
     tables
 }
@@ -508,7 +522,18 @@ fn call_indirect_handler_table(site: &Value, bytes: &[u8]) -> Value {
 /// whose offset reads an imported global stays `relative` with no slots, and
 /// one that ends past the declared table minimum is `out-of-range`. Clusters
 /// list only slots whose function is statically known.
-fn element_handler_table(table_index: u32, layout: &Tables) -> Value {
+fn element_handler_table(table_index: u32, layout: &Tables, meter: &Meter) -> Option<Value> {
+    let memory = Memory::new(meter);
+    let slots = layout.slots.get(&table_index).map_or(0, Vec::len);
+    let unique = layout
+        .active_functions()
+        .get(&table_index)
+        .map_or(0, Vec::len);
+    if !meter.charge(slots as u64 * 32 + layout.segments_for(table_index).len() as u64)
+        || !memory.keep(slots as u64 * 24 + unique as u64 * 256)
+    {
+        return None;
+    }
     let pairs = layout
         .slots
         .get(&table_index)
@@ -517,16 +542,12 @@ fn element_handler_table(table_index: u32, layout: &Tables) -> Value {
         .filter_map(|(slot, entry)| entry.function().map(|function| (*slot, function)))
         .collect::<Vec<_>>();
     let (clusters, unique, omitted) = clusters_from_pairs(&pairs);
-    let table_segments = layout
-        .segments
-        .iter()
-        .filter(|segment| segment.table == Some(table_index))
-        .count();
+    let table_segments = layout.segments_for(table_index).len();
     let segments = layout
-        .segments
+        .segments_for(table_index)
         .iter()
-        .filter(|segment| segment.table == Some(table_index))
         .take(MAX_LISTED_SEGMENTS)
+        .map(|index| &layout.segments[*index])
         .map(|segment| {
             json!({
                 "segment_index": segment.index,
@@ -541,11 +562,11 @@ fn element_handler_table(table_index: u32, layout: &Tables) -> Value {
                     Placement::Relative(global) => Some(global),
                     _ => None,
                 },
-                "entry_count": segment.entries.len(),
+                "entry_count": segment.entry_count,
             })
         })
         .collect::<Vec<_>>();
-    json!({
+    Some(json!({
         "kind": "element",
         "evidence_class": "call-indirect-table",
         "function_index": null,
@@ -560,14 +581,20 @@ fn element_handler_table(table_index: u32, layout: &Tables) -> Value {
         "omitted_cluster_count": omitted,
         "segments": segments,
         "omitted_segment_count": table_segments.saturating_sub(MAX_LISTED_SEGMENTS),
-    })
+    }))
 }
 
 fn attach_table_edges(
     functions: &mut [FunctionDispatch],
     elements: &BTreeMap<u32, Vec<u32>>,
     calls_truncated: &mut bool,
+    meter: &Meter,
 ) {
+    let memory = Memory::new(meter);
+    if !meter.charge(functions.len() as u64) || !memory.keep(functions.len() as u64 * 64) {
+        *calls_truncated = true;
+        return;
+    }
     // Element targets can name every function. Index once rather than
     // searching all functions for each target (quadratic on unique entries).
     let has_dispatch = functions
@@ -576,9 +603,22 @@ fn attach_table_edges(
         .collect::<std::collections::HashMap<_, _>>();
     let mut preferred: BTreeMap<u32, Vec<u32>> = BTreeMap::new();
     for (table, targets) in elements {
+        if !memory.keep(
+            128 + targets
+                .len()
+                .min(MAX_TABLE_DISPATCH_TARGETS + MAX_TABLE_OTHER_TARGETS) as u64
+                * 8,
+        ) {
+            *calls_truncated = true;
+            return;
+        }
         let mut dispatch = Vec::new();
         let mut other = Vec::new();
         for target in targets {
+            if !meter.charge((dispatch.len() + other.len()) as u64 + 1) {
+                *calls_truncated = true;
+                return;
+            }
             let Some(dispatches) = has_dispatch.get(target) else {
                 continue;
             };

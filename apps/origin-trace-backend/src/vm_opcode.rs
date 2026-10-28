@@ -1298,7 +1298,9 @@ pub(crate) fn workspace(
                 (handlers, model, unknowns, omissions, None, Vec::new())
             }
             "webassembly" => {
-                let extracted = wasm::handlers(bytes, result)?;
+                let fallback = vm::dispatch_shape::Meter::new();
+                let meter = roles.map_or(&fallback, |roles| &roles.meter);
+                let extracted = wasm::handlers_under(bytes, result, meter)?;
                 (
                     extracted.handlers,
                     "unknown".into(),

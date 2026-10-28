@@ -180,6 +180,18 @@ def fake_browser(arguments):
     return 0
 
 
+def kill_browser_group(process):
+    try:
+        os.killpg(process.pid, 9)
+    except ProcessLookupError:
+        pass
+    except PermissionError:
+        # macOS returns EPERM for a group containing only an unreaped zombie.
+        # Reap that child, but preserve permission failures for a live peer.
+        if process.poll() is None:
+            raise
+
+
 @contextlib.contextmanager
 def bridge(binary, browser=None, binary_mode=True):
     with tempfile.TemporaryDirectory(prefix="reb-console-check.", dir="/tmp") as directory:
@@ -210,10 +222,7 @@ def bridge(binary, browser=None, binary_mode=True):
             for process in [console, child]:
                 if process:
                     if process is child:
-                        try:
-                            os.killpg(process.pid, 9)
-                        except ProcessLookupError:
-                            pass
+                        kill_browser_group(process)
                     process.kill()
                     process.wait(timeout=5)
             if console.stdin:
@@ -251,6 +260,12 @@ class Fixture(http.server.BaseHTTPRequestHandler):
 
 
 def check(binary, browser):
+    # Keep an exited group leader unreaped, exactly as a peer can be when
+    # the console closes its socket before bridge() tears the fixture down.
+    with subprocess.Popen([sys.executable, "-c", "pass"], start_new_session=True) as exited:
+        os.waitid(os.P_PID, exited.pid, os.WEXITED | os.WNOWAIT)
+        kill_browser_group(exited)
+        assert exited.wait(timeout=5) == 0, "Exited browser fixture was not reaped"
     for flag in ["--version", "-v", "-V"]:
         assert subprocess.check_output([binary, flag]) == b"2\n"
     invalid = subprocess.run([binary, "--unexpected"], capture_output=True)

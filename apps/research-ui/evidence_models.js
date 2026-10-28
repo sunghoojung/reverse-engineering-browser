@@ -1319,6 +1319,15 @@
       // Samples prove a guest ISA only with real PC units and one handler.
       // Owned effects prove it only when the model is stack or register and a
       // known effect exists. Static arms and identifier spelling do not.
+      // Producer 2.9.0 and later: a Wasm arm proves a guest opcode only at a
+      // site the structural classification calls an interpreter candidate.
+      function vmInterpreterArm(workspace, handler) {
+        const classification = workspace.runtime === 'webassembly' ? workspace.dispatch_classification : undefined;
+        if (classification === undefined) return true;
+        return classification.sites.some(site => site.location.byte_offset === handler.source.byte_offset &&
+          site.role === 'interpreter-candidate');
+      }
+
       function vmGuestOpcodeIsaProven(workspace) {
         const uses = new Map();
         for (const handler of workspace.handlers) {
@@ -1328,7 +1337,7 @@
           ['instruction-index', 'byte-offset'].includes(sample.instruction_pointer_units) &&
           uses.get(sample.opcode) === 1 &&
           workspace.handlers.some(handler => handler.opcode === sample.opcode && handler.state === 'observed' &&
-            handler.sample_count > 0))) return true;
+            handler.sample_count > 0 && vmInterpreterArm(workspace, handler)))) return true;
         return ['stack', 'register'].includes(workspace.model) &&
           workspace.handlers.some(handler => vmUniqueWorkspaceEffect(handler));
       }
@@ -1387,10 +1396,27 @@
         return true;
       }
 
+      // Element rows from producer 2.9.0 and later list each active segment
+      // with its evaluated placement; older documents omit the field.
+      function isVmElementSegments(segments) {
+        return Array.isArray(segments) && segments.length <= 64 && segments.every(segment =>
+          vmWorkspaceExact(segment, ['segment_index', 'placement', 'offset', 'global_index', 'entry_count']) &&
+          isSafeIntegerInRange(segment.segment_index, 0, 4294967295) &&
+          ['placed', 'relative', 'unresolved'].includes(segment.placement) &&
+          (segment.placement === 'placed' ? isSafeIntegerInRange(segment.offset, 0, 4294967295) : segment.offset === null) &&
+          (segment.placement === 'relative' ? isSafeIntegerInRange(segment.global_index, 0, 4294967295) : segment.global_index === null) &&
+          isSafeIntegerInRange(segment.entry_count, 0, 4294967295));
+      }
+
       function isVmHandlerTable(table) {
-        if (!vmWorkspaceExact(table, ['kind', 'evidence_class', 'function_index', 'byte_offset', 'byte_size',
+        const keys = ['kind', 'evidence_class', 'function_index', 'byte_offset', 'byte_size',
           'table_index', 'arm_count', 'entry_count', 'unique_target_count', 'default_target', 'clusters',
-          'omitted_cluster_count']) || !['br_table', 'call_indirect', 'element'].includes(table.kind) ||
+          'omitted_cluster_count'];
+        if (isPlainObject(table) && table.segments !== undefined) {
+          if (table.kind !== 'element' || !isVmElementSegments(table.segments)) return false;
+          keys.push('segments');
+        }
+        if (!vmWorkspaceExact(table, keys) || !['br_table', 'call_indirect', 'element'].includes(table.kind) ||
           !isSafeIntegerInRange(table.omitted_cluster_count, 0, 4294967295) ||
           !Array.isArray(table.clusters) || table.clusters.length > 1024 ||
           !table.clusters.every(isVmHandlerCluster)) return false;
@@ -1427,6 +1453,71 @@
           table.default_target === null &&
           table.clusters.length + table.omitted_cluster_count === table.unique_target_count &&
           (table.omitted_cluster_count === 0 ? counted === table.entry_count : counted <= table.entry_count);
+      }
+
+      const vmDispatchKinds = ['switch_on_value', 'handler_table', 'compare_chain', 'export_per_role', 'threaded'];
+      const vmSelectorSources = ['cursor_index', 'cursor_pointer', 'frame_slot', 'call_argument', 'handler_address', 'constant', 'unknown'];
+      const vmDispatchInstructions = ['br_table', 'call_indirect', 'return_call_indirect', 'i32.eq ladder', 'export', 'switch', 'indexed call', 'if ladder', 'self call'];
+
+      // The role is derived from the three axes; a document cannot assert it.
+      function vmDispatchRole(site) {
+        const selects = ['switch_on_value', 'handler_table', 'compare_chain'].includes(site.dispatch_kind);
+        if (selects && site.repeats === 'loop' && ['cursor_index', 'cursor_pointer', 'frame_slot'].includes(site.selector_source)) return 'interpreter-candidate';
+        if (selects && site.repeats === 'once' && site.selector_source === 'call_argument') return 'multiplexer';
+        return 'other';
+      }
+
+      function isVmDispatchClassificationSite(site, artifactId, runtime) {
+        if (!vmWorkspaceExact(site, ['artifact_id', 'dispatch_kind', 'selector_source', 'repeats', 'role', 'confidence',
+          'instruction', 'location', 'selector', 'arm_count', 'loop', 'buffer_kind', 'table']) ||
+          site.artifact_id !== artifactId || !vmDispatchKinds.includes(site.dispatch_kind) ||
+          !vmSelectorSources.includes(site.selector_source) || !['loop', 'once', 'unknown'].includes(site.repeats) ||
+          site.role !== vmDispatchRole(site) || site.confidence !== 'structural' ||
+          !vmDispatchInstructions.includes(site.instruction) ||
+          !(site.arm_count === null || isSafeIntegerInRange(site.arm_count, 0, 4294967295)) ||
+          ![null, 'string', 'typed-array', 'array', 'unknown'].includes(site.buffer_kind)) return false;
+        const location = site.location;
+        const javascript = runtime === 'javascript';
+        if (!vmWorkspaceExact(location, ['function_index', 'function_body_offset', 'byte_offset', 'byte_size', 'line', 'column']) ||
+          !isSafeIntegerInRange(location.byte_offset, 0, Number.MAX_SAFE_INTEGER) ||
+          !isSafeIntegerInRange(location.byte_size, 1, Number.MAX_SAFE_INTEGER) ||
+          !(location.function_body_offset === null || isSafeIntegerInRange(location.function_body_offset, 0, Number.MAX_SAFE_INTEGER)) ||
+          (javascript ? location.function_index !== null || !isSafeIntegerInRange(location.line, 1, Number.MAX_SAFE_INTEGER) ||
+            !isSafeIntegerInRange(location.column, 1, Number.MAX_SAFE_INTEGER)
+            : !(location.function_index === null || isSafeIntegerInRange(location.function_index, 0, 4294967295)) ||
+              location.line !== null || location.column !== null)) return false;
+        if (!vmWorkspaceExact(site.selector, ['expression', 'byte_offset']) ||
+          typeof site.selector.expression !== 'string' || site.selector.expression.length === 0 ||
+          !isBoundedText(site.selector.expression, 160) ||
+          !(site.selector.byte_offset === null || isSafeIntegerInRange(site.selector.byte_offset, 0, Number.MAX_SAFE_INTEGER))) return false;
+        if (site.loop !== null && (!vmWorkspaceExact(site.loop, ['byte_offset', 'byte_size']) ||
+          !isSafeIntegerInRange(site.loop.byte_offset, 0, Number.MAX_SAFE_INTEGER) ||
+          !isSafeIntegerInRange(site.loop.byte_size, 1, Number.MAX_SAFE_INTEGER))) return false;
+        if (site.table === null) return true;
+        const table = site.table;
+        const count = value => value === null || isSafeIntegerInRange(value, 0, Number.MAX_SAFE_INTEGER);
+        return vmWorkspaceExact(table, ['table_index', 'type_index', 'populated_slot_count', 'matching_slot_count', 'matching_slots']) &&
+          isSafeIntegerInRange(table.table_index, 0, 4294967295) && isSafeIntegerInRange(table.type_index, 0, 4294967295) &&
+          count(table.populated_slot_count) && count(table.matching_slot_count) &&
+          (table.matching_slots === null || (Array.isArray(table.matching_slots) && table.matching_slots.length <= 32 &&
+            table.matching_slots.every(slot => isSafeIntegerInRange(slot, 0, 4294967295)) &&
+            new Set(table.matching_slots).size === table.matching_slots.length));
+      }
+
+      function isVmDispatchClassification(classification, workspace) {
+        if (!vmWorkspaceExact(classification, ['classification_version', 'site_count', 'omitted_site_count', 'role_counts', 'kind_counts', 'sites']) ||
+          classification.classification_version !== 1 ||
+          !isSafeIntegerInRange(classification.site_count, 0, 4294967295) ||
+          !Array.isArray(classification.sites) || classification.sites.length > 256 ||
+          classification.omitted_site_count !== classification.site_count - classification.sites.length ||
+          !vmWorkspaceExact(classification.role_counts, ['interpreter-candidate', 'multiplexer', 'other']) ||
+          !vmWorkspaceExact(classification.kind_counts, vmDispatchKinds)) return false;
+        const sum = counts => Object.values(counts).reduce((total, value) =>
+          isSafeIntegerInRange(value, 0, 4294967295) && total !== null ? total + value : null, 0);
+        if (sum(classification.role_counts) !== classification.site_count ||
+          sum(classification.kind_counts) !== classification.site_count) return false;
+        return classification.sites.every(site =>
+          isVmDispatchClassificationSite(site, workspace.interpreter_artifact_id, workspace.runtime));
       }
 
       function isVmDispatchInventory(inventory) {
@@ -1530,7 +1621,7 @@
         if (!isPlainObject(workspace) || !hasOnlyKeys(workspace, new Set([
           'interpreter_artifact_id', 'bytecode_artifact_id', 'finding_id', 'model', 'handlers', 'snapshots', 'coverage',
           'unknowns', 'runtime', 'source_artifact_sha256', 'capture_mode', 'samples', 'sample_count', 'traversal', 'captured_module_preview', 'dispatch_inventory',
-          'evidence_class', 'machine_state', 'handler_tables', 'native_wasm_observations', 'native_wasm_observation_count', 'native_guest_samples', 'native_guest_sample_count'
+          'dispatch_classification', 'evidence_class', 'machine_state', 'handler_tables', 'native_wasm_observations', 'native_wasm_observation_count', 'native_guest_samples', 'native_guest_sample_count'
         ])) || !isCanonicalInteger(workspace.interpreter_artifact_id, 0n, uint64Max) ||
           (workspace.bytecode_artifact_id !== undefined && !isCanonicalInteger(workspace.bytecode_artifact_id, 0n, uint64Max)) ||
           typeof workspace.finding_id !== 'string' || !/^[0-9a-f]{24}$/.test(workspace.finding_id) ||
@@ -1543,6 +1634,8 @@
             !isVmDispatchInventory(workspace.dispatch_inventory))) ||
           (workspace.handler_tables !== undefined && (workspace.runtime !== 'webassembly' ||
             !isVmHandlerTables(workspace.handler_tables))) ||
+          (workspace.dispatch_classification !== undefined &&
+            !isVmDispatchClassification(workspace.dispatch_classification, workspace)) ||
           !vmMachineStateMatches(workspace) ||
           (workspace.evidence_class ?? null) !== vmWorkspaceEvidenceClass(workspace) ||
           (workspace.captured_module_preview !== undefined && !isVmCapturedModulePreview(workspace.captured_module_preview, workspace)) ||

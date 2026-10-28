@@ -856,6 +856,12 @@ samples, the Coverage diagnostic leads with the observed absence of retained
 samples and the missing automatic guest-interpreter sampler. A caller-fed writer
 is not that sampler; static dispatch, Canvas calls and snapshots still do not
 prove a guest PC.
+The **Dispatch sites** panel shows each site's structural
+[dispatch classification](../../protocol/vm-dispatch-classification-v1.md) as
+`kind / selector source / repeats` text on dispatch-inventory and handler-table
+rows, and lists every classified site, including JavaScript workspaces. A
+one-shot router reads `router, no guest opcodes claimed`. Element handler
+tables list each segment's evaluated slot placement.
 Workspace failures retain the last valid workspace and never remove detection
 findings.
 

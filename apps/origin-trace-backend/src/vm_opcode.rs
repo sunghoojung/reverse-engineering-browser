@@ -20,7 +20,7 @@ mod native_wasm;
 #[path = "vm_opcode_wasm.rs"]
 mod wasm;
 
-const PRODUCER_VERSION: &str = "2.8.0";
+const PRODUCER_VERSION: &str = "2.9.0";
 const MAX_SAMPLES: usize = 4096;
 const MAX_HANDLERS: usize = 1024;
 const MAX_SNAPSHOTS: usize = 16;
@@ -421,10 +421,23 @@ fn object_handlers(
     }
 }
 
+/// Why a dispatch site that is not a cursor-loop interpreter yields no
+/// opcode handlers. Its arms or constants are not guest opcodes.
+fn not_interpreter_unknown(role: vm::dispatch_shape::Role) -> String {
+    if role == vm::dispatch_shape::Role::Multiplexer {
+        "A one-shot router dispatches on a call argument. Its case values route one call and are not claimed as guest opcodes.".into()
+    } else {
+        "A dispatch site is not a cursor-advancing loop. Its case values are not claimed as guest opcodes.".into()
+    }
+}
+
+/// Opcode handlers come only from sites the structural classification calls
+/// interpreter candidates: a cursor-like selector re-derived in a loop.
 fn static_handlers(
     source: &str,
     start: usize,
     end: usize,
+    classification: Option<&Value>,
 ) -> (Vec<Value>, String, Vec<String>, Vec<Value>) {
     let region = vm::mask(&source[start..end]);
     let outer = without_nested_functions(&region);
@@ -434,13 +447,18 @@ fn static_handlers(
     let mut handler_limit_hit = false;
     let mut blocked_tables = BTreeSet::new();
     for captures in INDEXED_DISPATCH.captures_iter(&outer) {
-        if !direct_selector(
-            &captures[2],
-            &outer[..captures.get(0).expect("dispatch match").start()],
-            0,
-        ) {
+        let at = captures.get(0).expect("dispatch match").start();
+        let role = vm::dispatch_shape::role_at(classification, (start + at) as u64);
+        if role != vm::dispatch_shape::Role::Multiplexer
+            && !direct_selector(&captures[2], &outer[..at], 0)
+        {
             blocked_tables.insert(captures[1].to_owned());
             unknowns.push("A computed, position-dependent, or saved-state handler selector has no proven fixed opcode mapping.".into());
+            continue;
+        }
+        if role != vm::dispatch_shape::Role::InterpreterCandidate {
+            blocked_tables.insert(captures[1].to_owned());
+            unknowns.push(not_interpreter_unknown(role));
         }
     }
     let mut previous_switch_end = 0;
@@ -462,12 +480,20 @@ fn static_handlers(
             continue;
         };
         previous_switch_end = closing_brace + 1;
-        if !direct_selector(
-            &region[opening_paren + 1..closing_paren],
-            &outer[..switch_match.start()],
-            0,
-        ) {
+        let role =
+            vm::dispatch_shape::role_at(classification, (start + switch_match.start()) as u64);
+        if role != vm::dispatch_shape::Role::Multiplexer
+            && !direct_selector(
+                &region[opening_paren + 1..closing_paren],
+                &outer[..switch_match.start()],
+                0,
+            )
+        {
             unknowns.push("A computed, position-dependent, or saved-state switch selector has no proven fixed opcode mapping.".into());
+            continue;
+        }
+        if role != vm::dispatch_shape::Role::InterpreterCandidate {
+            unknowns.push(not_interpreter_unknown(role));
             continue;
         }
         let body = &region[opening_brace + 1..closing_brace];
@@ -879,7 +905,24 @@ fn captured_module_preview(artifact: &Value, bytes: &[u8], handlers: &[Value]) -
 /// A retained sample proves a guest ISA only when its PC units are real and
 /// the opcode hits exactly one static handler. Owned exact-hash effects are
 /// the other proof. Static arms, unknown PC units, and repeated selectors do not.
-fn guest_opcode_isa_proven(samples: &[Value], handlers: &[Value], owned: Option<&Value>) -> bool {
+fn guest_opcode_isa_proven(
+    samples: &[Value],
+    handlers: &[Value],
+    owned: Option<&Value>,
+    module_classification: Option<&Value>,
+) -> bool {
+    // A Wasm arm proves a guest opcode only at an interpreter-candidate site.
+    // Router and ordinary branch arms stay selectors whatever a sample says.
+    let interpreter_arm = |handler: &Value| {
+        module_classification.is_none_or(|classification| {
+            handler["source"]["byte_offset"]
+                .as_u64()
+                .is_some_and(|offset| {
+                    vm::dispatch_shape::role_at(Some(classification), offset)
+                        == vm::dispatch_shape::Role::InterpreterCandidate
+                })
+        })
+    };
     let mut sites = BTreeMap::<u32, usize>::new();
     for handler in handlers {
         if let Some(opcode) = handler["opcode"].as_u64() {
@@ -899,6 +942,7 @@ fn guest_opcode_isa_proven(samples: &[Value], handlers: &[Value], owned: Option<
                 handler["opcode"].as_u64() == Some(u64::from(opcode))
                     && handler["state"] == "observed"
                     && handler["sample_count"].as_u64().unwrap_or(0) > 0
+                    && interpreter_arm(handler)
             })
     });
     if sample_proves {
@@ -980,8 +1024,9 @@ fn workspace_evidence_class(
     handlers: &[Value],
     owned: Option<&Value>,
     inventory: Option<&Value>,
+    module_classification: Option<&Value>,
 ) -> Option<&'static str> {
-    if guest_opcode_isa_proven(samples, handlers, owned) {
+    if guest_opcode_isa_proven(samples, handlers, owned, module_classification) {
         return Some("guest-opcode-isa");
     }
     if let Some(candidates) = inventory
@@ -1043,7 +1088,12 @@ pub(crate) fn workspace(
                 {
                     return None;
                 }
-                let (handlers, model, unknowns, omissions) = static_handlers(source, region.0, end);
+                let (handlers, model, unknowns, omissions) = static_handlers(
+                    source,
+                    region.0,
+                    end,
+                    result["frontend"].get("dispatch_classification"),
+                );
                 (handlers, model, unknowns, omissions, None, Vec::new())
             }
             "webassembly" => {
@@ -1209,6 +1259,31 @@ pub(crate) fn workspace(
             ));
         }
     }
+    // Counted before coverage, which is complete only without unknowns.
+    let classification = result["frontend"].get("dispatch_classification");
+    if runtime == "webassembly"
+        && let Some(sites) = classification.and_then(|value| value["sites"].as_array())
+    {
+        let routed = handlers
+            .iter()
+            .filter_map(|handler| handler["source"]["byte_offset"].as_u64())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .filter(|offset| {
+                sites.iter().any(|site| {
+                    site["location"]["byte_offset"].as_u64() == Some(*offset)
+                        && site["role"] != "interpreter-candidate"
+                })
+            })
+            .count();
+        if routed > 0 {
+            unknowns.push(format!(
+                "{} {} not a cursor-loop interpreter. Those arms are Wasm branch selectors, not guest opcodes.",
+                count_label(routed as u32, "retained dispatch site"),
+                if routed == 1 { "is" } else { "are" }
+            ));
+        }
+    }
     let (snapshots, snapshot_omissions) = snapshots(root, artifact, snapshot_artifacts);
     omissions.extend(snapshot_omissions);
     // Source instruction bytes are display evidence, not a zero-based guest image.
@@ -1299,6 +1374,7 @@ pub(crate) fn workspace(
         result
             .get("frontend")
             .and_then(|frontend| frontend.get("dispatch_inventory")),
+        classification.filter(|_| runtime == "webassembly"),
     );
     let machine = machine_state(&handlers);
     let attributions = crate::vm_reachability::attributions(&traversal, &handlers);
@@ -1336,6 +1412,9 @@ pub(crate) fn workspace(
         && let Some(inventory) = result["frontend"].get("dispatch_inventory")
     {
         workspace["dispatch_inventory"] = inventory.clone();
+    }
+    if let Some(classification) = classification {
+        workspace["dispatch_classification"] = classification.clone();
     }
     if let Some(class) = evidence_class {
         workspace["evidence_class"] = json!(class);
@@ -1437,6 +1516,17 @@ mod tests {
     use super::*;
     use sha2::{Digest, Sha256};
     use std::{fs, path::PathBuf};
+
+    /// Static handler extraction with the same JavaScript classification
+    /// that `analyze` records for the whole source.
+    fn classified_handlers(
+        source: &str,
+        start: usize,
+        end: usize,
+    ) -> (Vec<Value>, String, Vec<String>, Vec<Value>) {
+        let classification = vm::javascript_classification(source);
+        static_handlers(source, start, end, Some(&classification))
+    }
 
     fn fixture(name: &str) -> String {
         fs::read_to_string(
@@ -2597,6 +2687,55 @@ mod tests {
         assert_schema(&document);
     }
 
+    /// Element slots are real table indexes: a segment at offset 1 starts at
+    /// slot 1, a second segment at offset 5 starts at slot 5, and the empty
+    /// slots in between are not renumbered.
+    #[test]
+    fn wasm_element_tables_keep_real_slot_indexes_across_offset_segments() {
+        let bytes = include_bytes!(
+            "../../../tools/fixtures/dispatch-shapes/handler-table-interpreter.wasm"
+        );
+        let (_, _, document) = analyze_artifact(bytes, "wasm", &[]);
+        let workspace = &document["workspaces"][0];
+        let element = workspace["handler_tables"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|table| table["kind"] == "element")
+            .unwrap();
+        assert_eq!(element["table_index"], 0);
+        assert_eq!(element["entry_count"], 5);
+        let slots = element["clusters"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|cluster| {
+                (
+                    cluster["target"].as_u64().unwrap(),
+                    cluster["selectors"].clone(),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            slots,
+            [
+                (0, json!([1])),
+                (1, json!([2])),
+                (2, json!([3])),
+                (3, json!([5])),
+                (4, json!([6])),
+            ]
+        );
+        assert_eq!(
+            element["segments"],
+            json!([
+                {"segment_index":0,"placement":"placed","offset":1,"global_index":null,"entry_count":3},
+                {"segment_index":1,"placement":"placed","offset":5,"global_index":null,"entry_count":2},
+            ])
+        );
+        assert_schema(&document);
+    }
+
     #[test]
     fn wasm_call_indirect_table_functions_contribute_br_tables() {
         let selected = [
@@ -3155,7 +3294,7 @@ if (!validate(document)) throw new Error('Backend workspace rejected by shipped 
     #[test]
     fn computed_handler_names_stay_unknown() {
         let source = "while(pc<program.length){handlers[key]=function(){};handlers[7]=function(){};handlers[program[pc++]]();}";
-        let (handlers, _, unknowns, _) = static_handlers(source, 0, source.len());
+        let (handlers, _, unknowns, _) = classified_handlers(source, 0, source.len());
         assert_eq!(handlers.len(), 1);
         assert_eq!(handlers[0]["opcode"], 7);
         assert!(unknowns.iter().any(|unknown| unknown.contains("computed")));
@@ -3356,7 +3495,7 @@ if (!validate(document)) throw new Error('Backend workspace rejected by shipped 
     #[test]
     fn numeric_object_map_entries_are_handler_candidates() {
         let source = "const table={1:function(){},0x2:()=>{}};while(pc<program.length){stack.push(table[program[pc++]]());}";
-        let (handlers, model, _, _) = static_handlers(source, 0, source.len());
+        let (handlers, model, _, _) = classified_handlers(source, 0, source.len());
         assert_eq!(model, "stack");
         assert_eq!(
             handlers
@@ -3375,7 +3514,7 @@ if (!validate(document)) throw new Error('Backend workspace rejected by shipped 
     fn handler_ranges_include_nested_helpers_and_exclude_neighbor_cases() {
         let source = "/*é*/ function setup(){handlers[7]=function(){function helper(){return 5;}stack.push(program[pc++]);};} while(pc<program.length){handlers[program[pc++]]();}";
         let start = source.find("function setup").unwrap();
-        let (handlers, _, _, _) = static_handlers(source, start, source.len());
+        let (handlers, _, _, _) = classified_handlers(source, start, source.len());
         assert_eq!(handlers.len(), 1);
         let handler = &handlers[0];
         let offset = handler["source"]["byte_offset"].as_u64().unwrap() as usize;
@@ -3386,8 +3525,8 @@ if (!validate(document)) throw new Error('Backend workspace rejected by shipped 
         );
         assert_eq!(handler["operand_width"], 1);
 
-        let source = "switch(program[pc++]){case 1: switch(state){case 99: break;} break; case 2: return; default: throw 0;}";
-        let (handlers, _, _, _) = static_handlers(source, 0, source.len());
+        let source = "while(pc<program.length){switch(program[pc++]){case 1: switch(state){case 99: break;} break; case 2: return; default: throw 0;}}";
+        let (handlers, _, _, _) = classified_handlers(source, 0, source.len());
         assert_eq!(
             handlers
                 .iter()
@@ -3421,7 +3560,7 @@ if (!validate(document)) throw new Error('Backend workspace rejected by shipped 
             ("function helper(){return bytes[ip++];} return helper();", 0),
         ] {
             let source = format!("handlers[1]=function(){{{body}}};");
-            let (handlers, _, _, _) = static_handlers(&source, 0, source.len());
+            let (handlers, _, _, _) = classified_handlers(&source, 0, source.len());
             assert_eq!(handlers[0]["operand_width"], expected, "{body}");
             assert!(
                 handlers[0]["notes"]
@@ -3450,7 +3589,7 @@ if (!validate(document)) throw new Error('Backend workspace rejected by shipped 
             ] {
                 let source =
                     format!("handlers[7]=function(){{}}; const selector={expression}; {dispatch}");
-                let (handlers, _, unknowns, _) = static_handlers(&source, 0, source.len());
+                let (handlers, _, unknowns, _) = classified_handlers(&source, 0, source.len());
                 if dispatch.starts_with("switch") {
                     // An unrelated literal table assignment remains independent.
                     assert_eq!(handlers.len(), 1);
@@ -3466,15 +3605,39 @@ if (!validate(document)) throw new Error('Backend workspace rejected by shipped 
             }
         }
         let source = "let opcode=program[pc++]; opcode ^= saved; switch(opcode){case 9:break;}";
-        assert!(static_handlers(source, 0, source.len()).0.is_empty());
-        let source = "const opcode=program[pc++];const alias=opcode;switch(alias){case 9:break;}";
-        assert_eq!(static_handlers(source, 0, source.len()).0[0]["opcode"], 9);
+        assert!(classified_handlers(source, 0, source.len()).0.is_empty());
+        let source = "while(pc<program.length){const opcode=program[pc++];const alias=opcode;switch(alias){case 9:break;}}";
+        assert_eq!(
+            classified_handlers(source, 0, source.len()).0[0]["opcode"],
+            9
+        );
+    }
+
+    /// Case values become opcode handlers only at a cursor-loop interpreter
+    /// candidate. A one-shot fetch and a router on an argument claim none.
+    #[test]
+    fn loopless_and_router_dispatch_claim_no_opcode_handlers() {
+        let source = "switch(program[pc++]){case 1: stack.push(1); break; case 2: return;}";
+        let (handlers, _, unknowns, _) = classified_handlers(source, 0, source.len());
+        assert!(handlers.is_empty());
+        assert!(
+            unknowns
+                .iter()
+                .any(|s| s.contains("not a cursor-advancing loop"))
+        );
+        let source = "function route(k,x){switch(k){case 1: return a(x); case 2: return b(x); case 3: return c(x);}}";
+        let start = source.find('{').unwrap() + 1;
+        let (handlers, _, unknowns, _) = classified_handlers(source, start, source.len() - 1);
+        assert!(handlers.is_empty());
+        assert!(unknowns.iter().any(|s| s.contains("one-shot router")));
+        let source = "while(pc<program.length){switch(program[pc++]){case 1: stack.push(1); break; case 2: return;}}";
+        assert_eq!(classified_handlers(source, 0, source.len()).0.len(), 2);
     }
 
     #[test]
     fn computed_objects_and_expression_arrows_do_not_borrow_other_bodies() {
-        let source = "const handlers={[key]:()=>{},7(){return program[pc++];},a8:()=>{},9:()=>{const nested={99:()=>{}};}};handlers[program[pc++]]();";
-        let (handlers, _, unknowns, _) = static_handlers(source, 0, source.len());
+        let source = "const handlers={[key]:()=>{},7(){return program[pc++];},a8:()=>{},9:()=>{const nested={99:()=>{}};}};while(pc<program.length){handlers[program[pc++]]();}";
+        let (handlers, _, unknowns, _) = classified_handlers(source, 0, source.len());
         assert_eq!(
             handlers
                 .iter()
@@ -3484,7 +3647,7 @@ if (!validate(document)) throw new Error('Backend workspace rejected by shipped 
         );
         assert!(unknowns.iter().any(|s| s.contains("computed")));
         let source = "handlers[1]=x=>x,handlers[2]=()=>{};";
-        let (handlers, _, _, _) = static_handlers(source, 0, source.len());
+        let (handlers, _, _, _) = classified_handlers(source, 0, source.len());
         assert_eq!(handlers.len(), 1);
         assert_eq!(handlers[0]["opcode"], 2);
     }
@@ -3494,7 +3657,7 @@ if (!validate(document)) throw new Error('Backend workspace rejected by shipped 
         let source = (0..1025)
             .map(|i| format!("handlers[{i}]=function(){{}};"))
             .collect::<String>();
-        let (handlers, _, _, omissions) = static_handlers(&source, 0, source.len());
+        let (handlers, _, _, omissions) = classified_handlers(&source, 0, source.len());
         assert_eq!(handlers.len(), MAX_HANDLERS);
         assert_eq!(handlers.last().unwrap()["opcode"], 1023);
         assert_eq!(
@@ -3513,12 +3676,12 @@ if (!validate(document)) throw new Error('Backend workspace rejected by shipped 
             "const alias=opcode;const opcode=program[pc++];switch(alias){case 9:break;}",
         ] {
             assert!(
-                static_handlers(source, 0, source.len()).0.is_empty(),
+                classified_handlers(source, 0, source.len()).0.is_empty(),
                 "{source}"
             );
         }
-        let source = "switch(program[pc++]){case 1: case 2: stack.push(program[pc++]);break;default:return;}";
-        let (handlers, _, _, _) = static_handlers(source, 0, source.len());
+        let source = "while(pc<program.length){switch(program[pc++]){case 1: case 2: stack.push(program[pc++]);break;default:return;}}";
+        let (handlers, _, _, _) = classified_handlers(source, 0, source.len());
         assert_eq!(handlers.len(), 2);
         for handler in handlers {
             let offset = handler["source"]["byte_offset"].as_u64().unwrap() as usize;

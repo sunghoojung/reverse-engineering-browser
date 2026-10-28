@@ -1409,6 +1409,60 @@ const capturedExportPanel = installCapturedExportDialog({
         }
       }
 
+      // Structural dispatch classification, inserted as text only. A router
+      // never supplies guest opcodes, whatever its arm count.
+      function vmDispatchShapeSite(workspace, byteOffset) {
+        return workspace.dispatch_classification?.sites.find(site => site.location.byte_offset === byteOffset) ?? null;
+      }
+
+      function vmCountText(count, singular, plural = `${singular}s`) {
+        return `${count} ${count === 1 ? singular : plural}`;
+      }
+
+      // Older documents carry no classification; their rows stay unchanged.
+      function vmDispatchShapeSuffix(workspace, byteOffset) {
+        return workspace.dispatch_classification ? ` · ${vmDispatchShapeText(vmDispatchShapeSite(workspace, byteOffset))}` : '';
+      }
+
+      function vmDispatchShapeText(site) {
+        if (!site) return 'structure not classified';
+        const axes = `${site.dispatch_kind} / ${site.selector_source} / ${site.repeats}`;
+        if (site.role === 'multiplexer') return `${axes} · router, no guest opcodes claimed`;
+        if (site.role === 'interpreter-candidate') return `${axes} · cursor-loop interpreter candidate`;
+        return `${axes} · not an interpreter loop`;
+      }
+
+      function renderVmDispatchStructure(workspace) {
+        const section = document.createElement('section'); section.className = 'vm-workspace-card';
+        section.append(textElement('h4', '', 'Dispatch structure'));
+        const classification = workspace.dispatch_classification;
+        if (!classification) {
+          section.append(textElement('p', '', 'No structural dispatch classification is retained in this document.'));
+          return section;
+        }
+        const roles = classification.role_counts;
+        section.append(textElement('p', '', `${vmCountText(classification.site_count, 'classified site')}: ${vmCountText(roles['interpreter-candidate'], 'cursor-loop interpreter candidate')}, ${vmCountText(roles.multiplexer, 'router')}, ${roles.other} other. ${classification.sites.length} listed; ${classification.omitted_site_count} omitted from this bounded list.`));
+        section.append(textElement('p', '', 'Structural classification only: kind / selector source / repeats. A router dispatches once on a call argument; its arms and constants are routing labels and no guest opcodes are claimed. Only a cursor-loop interpreter candidate supplies opcode handlers.'));
+        appendVmPagedRows(section, classification.sites, 'dispatch sites', site => {
+          const row = document.createElement('details'); row.className = 'vm-effect-row';
+          const where = site.location.line !== null
+            ? `line ${site.location.line}:${site.location.column}`
+            : `${site.location.function_index === null ? 'module' : `f${site.location.function_index}`} · byte ${site.location.byte_offset}`;
+          row.append(textElement('summary', '', `${site.instruction} · ${where} · ${vmDispatchShapeText(site)}`));
+          const loop = site.loop ? `loop bytes [${site.loop.byte_offset}, ${site.loop.byte_offset + site.loop.byte_size})` : 'no enclosing loop';
+          const arms = site.arm_count === null ? 'arm count unknown' : `${site.arm_count} ${site.dispatch_kind === 'compare_chain' ? 'comparisons' : 'arms'}`;
+          const buffer = site.buffer_kind === null ? '' : ` · buffer ${site.buffer_kind}`;
+          row.append(textElement('p', 'vm-effect-detail', `Selector ${site.selector.expression} · ${arms} · ${loop}${buffer}`));
+          if (site.table) {
+            const slots = site.table.matching_slots === null ? 'table layout unknown'
+              : `${site.table.matching_slot_count} of ${site.table.populated_slot_count} placed slots match type ${site.table.type_index}: ${site.table.matching_slots.join(', ') || 'none'}`;
+            row.append(textElement('p', 'vm-effect-detail', `Table ${site.table.table_index} · ${slots}`));
+          }
+          return row;
+        });
+        return section;
+      }
+
       function renderVmHandlerTables(workspace) {
         const section = document.createElement('section'); section.className = 'vm-workspace-card';
         section.append(textElement('h4', '', 'Handler tables'));
@@ -1425,7 +1479,8 @@ const capturedExportPanel = installCapturedExportDialog({
             : table.kind === 'element'
               ? `${table.entry_count} slots, ${table.unique_target_count} unique functions`
               : 'dynamic target';
-          row.append(textElement('summary', '', `${table.kind} · ${table.evidence_class} · ${count}`));
+          const shape = table.byte_offset === null ? '' : vmDispatchShapeSuffix(workspace, table.byte_offset);
+          row.append(textElement('summary', '', `${table.kind} · ${table.evidence_class} · ${count}${shape}`));
           const clusters = table.clusters.map(cluster => {
             const noun = table.kind === 'element' ? 'function' : 'label depth';
             const more = cluster.selectors.length < cluster.selector_count ? ` · listed ${cluster.selectors.length} of ${cluster.selector_count}` : '';
@@ -1433,9 +1488,23 @@ const capturedExportPanel = installCapturedExportDialog({
           });
           if (table.omitted_cluster_count) clusters.push(`${table.omitted_cluster_count} additional target clusters omitted`);
           row.append(textElement('p', 'vm-effect-detail', clusters.join('; ') || 'No static targets.'));
+          if (Array.isArray(table.segments) && table.segments.length) {
+            row.append(textElement('p', 'vm-effect-detail', table.segments.map(segment => segment.placement === 'placed'
+              ? `segment ${segment.segment_index} at slot ${segment.offset} · ${segment.entry_count} entries`
+              : segment.placement === 'relative'
+                ? `segment ${segment.segment_index} relative to imported global ${segment.global_index} · ${segment.entry_count} entries, slots unknown`
+                : `segment ${segment.segment_index} offset unresolved · ${segment.entry_count} entries, slots unknown`).join('; ')));
+          }
           return row;
         });
         return section;
+      }
+
+      function renderVmDispatchSites(workspace) {
+        const panel = document.createElement('div');
+        panel.append(renderVmDispatchInventory(workspace));
+        if (workspace.dispatch_classification) panel.append(renderVmDispatchStructure(workspace));
+        return panel;
       }
 
       function renderVmDispatchInventory(workspace) {
@@ -1446,7 +1515,7 @@ const capturedExportPanel = installCapturedExportDialog({
           section.append(textElement('p', '', 'No module-wide dispatch inventory is retained in this document.'));
           return section;
         }
-        section.append(textElement('p', '', `${inventory.site_count} module sites: ${inventory.br_table_count} br_table, ${inventory.call_indirect_count} call_indirect. ${inventory.candidates.length} ranked sites retained; ${inventory.omitted_site_count} omitted from this bounded list.`));
+        section.append(textElement('p', '', `${vmCountText(inventory.site_count, 'module site')}: ${inventory.br_table_count} br_table, ${inventory.call_indirect_count} call_indirect. ${vmCountText(inventory.candidates.length, 'ranked site')} retained; ${inventory.omitted_site_count} omitted from this bounded list.`));
         section.append(textElement('p', '', 'Candidate dispatchers are ranked by loop shape, then by br_table arm count or call_indirect element fanout. Arm counts exclude the default. Unique branch targets cluster repeated Wasm labels. A small br_table is a CFF/relooper candidate, a large br_table is a handler-table candidate, and call_indirect is an indirect funcref candidate. None of these is a proven guest opcode ISA. This inventory does not invent registers, a stack, or a guest PC.'));
         const retainedRows = vmOpcodeRows(workspace);
         const classificationLabel = classification => classification === 'cff-helper-candidate' ? 'CFF / relooper candidate'
@@ -1466,7 +1535,7 @@ const capturedExportPanel = installCapturedExportDialog({
               : 'Static CFF or relooper arms. No guest opcode, guest PC, register, or stack is inferred.';
           // Rank and the heuristic label stay in the collapsed summary. Opening
           // every row is not usable once the bounded list reaches 256 sites.
-          row.append(textElement('summary', '', `#${rank} · ${selected ? 'Default · ' : ''}f${site.function_index} · ${site.kind} · ${count} · byte ${site.byte_offset} · ${classification}`));
+          row.append(textElement('summary', '', `#${rank} · ${selected ? 'Default · ' : ''}f${site.function_index} · ${site.kind} · ${count} · byte ${site.byte_offset} · ${classification}${vmDispatchShapeSuffix(workspace, site.byte_offset)}`));
           if (selected) row.open = true;
           row.append(textElement('p', 'vm-effect-detail', `${classification} · ${vmDispatchEvidenceText(site)} · body ${site.function_body_size} bytes · loop depth ${site.loop_depth} · IP-like read/write pattern ${site.ip_like ? 'present' : 'absent'}. ${honesty}`));
           const retained = retainedRows.find(candidate => candidate.source === `${site.byte_offset} + ${site.byte_size} bytes`);
@@ -2020,7 +2089,8 @@ const capturedExportPanel = installCapturedExportDialog({
         const panels = document.createElement('div'); panels.className = 'vm-workbench-panels';
         const definitions = [
           ['effects', 'Effects', renderVmEffects],
-          ...(workspace.runtime === 'webassembly' ? [['dispatch', 'Dispatch sites', renderVmDispatchInventory], ['tables', 'Handler tables', renderVmHandlerTables], ['native-wasm', 'Native observations', renderNativeWasmObservations]] : []),
+          ...(workspace.runtime === 'webassembly' ? [['dispatch', 'Dispatch sites', renderVmDispatchSites], ['tables', 'Handler tables', renderVmHandlerTables], ['native-wasm', 'Native observations', renderNativeWasmObservations]]
+            : workspace.dispatch_classification ? [['dispatch', 'Dispatch sites', renderVmDispatchStructure]] : []),
           ['bytecode', 'Bytes', renderVmBytecode],
           ['reachability', 'Reachability', renderVmReachability],
           ['coverage', 'Coverage', renderVmWorkspaceCoverage],

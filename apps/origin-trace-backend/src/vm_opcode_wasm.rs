@@ -7,11 +7,10 @@
 //! in-loop `call_indirect`. Unrelated jump tables stay out. Nothing here
 //! instantiates the module or invents a guest program counter.
 use super::MAX_HANDLERS;
+use crate::vm::wasm_tables::{Placement, Tables};
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
-use wasmparser::{
-    BinaryReader, ElementItems, ElementKind, Operator, OperatorsReader, Parser, Payload, TypeRef,
-};
+use wasmparser::{BinaryReader, Operator, OperatorsReader, Parser, Payload, TypeRef};
 
 const MAX_RELATED_FUNCTIONS: usize = 32;
 const MAX_SITES_PER_FUNCTION: usize = MAX_HANDLERS;
@@ -25,6 +24,7 @@ const MAX_HANDLER_TABLES: usize = 8;
 const MAX_ELEMENT_TABLES: usize = 4;
 const MAX_CLUSTERS: usize = 1024;
 const MAX_LISTED_SELECTORS: usize = 32;
+const MAX_LISTED_SEGMENTS: usize = 64;
 
 pub(super) struct ModuleDispatch {
     pub sites: u32,
@@ -80,7 +80,14 @@ pub(super) fn handlers(bytes: &[u8], result: &Value) -> Option<ExtractedHandlers
     let body_offset = coordinate["function_body_offset"].as_u64()? as usize;
     let body_size = coordinate["function_body_size"].as_u64()? as usize;
     let mut functions = Vec::new();
-    let mut elements: BTreeMap<u32, Vec<u32>> = BTreeMap::new();
+    let tables = Tables::parse(bytes)?;
+    // Call-graph edges only need which functions a table can hold, placed or
+    // relative. Slot numbers come from the evaluated layout, never from order.
+    let elements = tables
+        .active_tables()
+        .into_iter()
+        .map(|table| (table, tables.active_functions(table)))
+        .collect::<BTreeMap<_, _>>();
     let mut imported = 0u32;
     let mut defined = 0u32;
     let mut call_edges = 0usize;
@@ -98,44 +105,6 @@ pub(super) fn handlers(bytes: &[u8], result: &Value) -> Option<ExtractedHandlers
                     };
                     if matches!(import.ty, TypeRef::Func(_)) {
                         imported += 1;
-                    }
-                }
-            }
-            Payload::ElementSection(reader) => {
-                for element in reader {
-                    let Ok(element) = element else {
-                        return None;
-                    };
-                    let ElementKind::Active { table_index, .. } = element.kind else {
-                        continue;
-                    };
-                    // MVP active segments omit the table index and mean table 0.
-                    let targets = elements.entry(table_index.unwrap_or(0)).or_default();
-                    match element.items {
-                        ElementItems::Functions(functions) => {
-                            for function in functions {
-                                let Ok(function) = function else {
-                                    return None;
-                                };
-                                targets.push(function);
-                            }
-                        }
-                        ElementItems::Expressions(_, expressions) => {
-                            for expression in expressions {
-                                let Ok(expression) = expression else {
-                                    return None;
-                                };
-                                let mut reader = expression.get_operators_reader();
-                                while !reader.eof() {
-                                    let Ok(op) = reader.read() else {
-                                        return None;
-                                    };
-                                    if let Operator::RefFunc { function_index } = op {
-                                        targets.push(function_index);
-                                    }
-                                }
-                            }
-                        }
                     }
                 }
             }
@@ -383,7 +352,7 @@ pub(super) fn handlers(bytes: &[u8], result: &Value) -> Option<ExtractedHandlers
         result
             .get("frontend")
             .and_then(|frontend| frontend.get("dispatch_inventory")),
-        &elements,
+        &tables,
     );
     Some(ExtractedHandlers {
         handlers,
@@ -400,11 +369,7 @@ pub(super) fn handlers(bytes: &[u8], result: &Value) -> Option<ExtractedHandlers
 /// Top-ranked dispatch sites keep every explicit arm as a target cluster.
 /// The flat handler list is still capped; `selector_count` is the exact arm
 /// membership and `selectors` is only a prefix when a cluster is long.
-fn build_handler_tables(
-    bytes: &[u8],
-    inventory: Option<&Value>,
-    elements: &BTreeMap<u32, Vec<u32>>,
-) -> Vec<Value> {
+fn build_handler_tables(bytes: &[u8], inventory: Option<&Value>, layout: &Tables) -> Vec<Value> {
     let mut tables = Vec::new();
     if let Some(candidates) = inventory
         .and_then(|value| value.get("candidates"))
@@ -423,11 +388,11 @@ fn build_handler_tables(
             }
         }
     }
-    for (table_index, funcs) in elements.iter().take(MAX_ELEMENT_TABLES) {
-        if funcs.len() > 1_000_000 {
+    for table_index in layout.active_tables().into_iter().take(MAX_ELEMENT_TABLES) {
+        if layout.oversized.contains(&table_index) {
             continue;
         }
-        tables.push(element_handler_table(*table_index, funcs));
+        tables.push(element_handler_table(table_index, layout));
     }
     tables
 }
@@ -528,13 +493,39 @@ fn call_indirect_handler_table(site: &Value, bytes: &[u8]) -> Value {
     })
 }
 
-fn element_handler_table(table_index: u32, funcs: &[u32]) -> Value {
-    let pairs = funcs
-        .iter()
-        .enumerate()
-        .filter_map(|(slot, function)| u32::try_from(slot).ok().map(|slot| (slot, *function)))
+/// Clusters key on real table slots: each active segment is placed at its
+/// evaluated offset and later segments overwrite earlier slots. A segment
+/// whose offset reads an imported global stays `relative` with no slots.
+fn element_handler_table(table_index: u32, layout: &Tables) -> Value {
+    let pairs = layout
+        .slots
+        .get(&table_index)
+        .into_iter()
+        .flatten()
+        .filter_map(|(slot, function)| function.map(|function| (*slot, function)))
         .collect::<Vec<_>>();
     let (clusters, unique, omitted) = clusters_from_pairs(&pairs);
+    let segments = layout
+        .segments
+        .iter()
+        .filter(|segment| segment.table == Some(table_index))
+        .take(MAX_LISTED_SEGMENTS)
+        .map(|segment| {
+            json!({
+                "segment_index": segment.index,
+                "placement": segment.placement.label(),
+                "offset": match segment.placement {
+                    Placement::Placed(offset) => Some(offset),
+                    _ => None,
+                },
+                "global_index": match segment.placement {
+                    Placement::Relative(global) => Some(global),
+                    _ => None,
+                },
+                "entry_count": segment.entries.len(),
+            })
+        })
+        .collect::<Vec<_>>();
     json!({
         "kind": "element",
         "evidence_class": "call-indirect-table",
@@ -543,11 +534,12 @@ fn element_handler_table(table_index: u32, funcs: &[u32]) -> Value {
         "byte_size": null,
         "table_index": table_index,
         "arm_count": null,
-        "entry_count": funcs.len(),
+        "entry_count": pairs.len(),
         "unique_target_count": unique,
         "default_target": null,
         "clusters": clusters,
         "omitted_cluster_count": omitted,
+        "segments": segments,
     })
 }
 

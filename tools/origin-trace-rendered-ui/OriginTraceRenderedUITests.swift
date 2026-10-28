@@ -621,6 +621,21 @@ final class OriginTraceRenderedUITests: XCTestCase {
       try await assertLayout(ui, "#screen-vm", "\(size.name) vm native physical")
       try await assertVmDock(ui, size.name)
       try await ui.screenshot("vm-native-physical-\(size.name)")
+
+      // The structural classification renders as inert text on the dispatch
+      // rows; this golden module's constant selector is not an interpreter.
+      try await ui.click("[data-vm-panel='dispatch']")
+      let dispatch = "[data-vm-panel-content='dispatch']"
+      try await ui.waitUntil("!document.querySelector(\"\(dispatch)\")?.hidden", "dispatch sites panel did not open")
+      let structure = try await ui.value("document.querySelector(\"\(dispatch)\").innerText") as? String ?? ""
+      XCTAssertTrue(structure.contains("Dispatch structure"), "\(size.name): classification section renders: \(structure)")
+      XCTAssertTrue(structure.contains("switch_on_value / constant / unknown · not an interpreter loop"),
+        "\(size.name): classification axes render on the dispatch rows: \(structure)")
+      XCTAssertFalse(structure.contains("· cursor-loop interpreter candidate"), "\(size.name): no interpreter claim: \(structure)")
+      try await assertInert(ui, "\(size.name) vm dispatch")
+      _ = try await ui.value("document.querySelector(\"\(dispatch)\").lastElementChild.scrollIntoView({block: 'end'}), true")
+      try await assertLayout(ui, "#screen-vm", "\(size.name) vm dispatch structure")
+      try await ui.screenshot("vm-dispatch-structure-\(size.name)")
     }
   }
 

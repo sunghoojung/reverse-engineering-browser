@@ -246,11 +246,41 @@ spaces. A null register index does not invent a register file. Spelling in a
 page script does not fill `machine_state`.
 
 `handler_tables` keeps the top 8 ranked dispatch sites and up to 4 element
-segments. Each `br_table` records an exact `arm_count` and clusters selectors
+tables. Each `br_table` records an exact `arm_count` and clusters selectors
 that share a label depth. `selector_count` is exact. `selectors` lists at most
 32 indexes, so a prefix is not a shorter table. The flat handler list is still
 capped at 1024 and still emits the ranked site first. Element clusters group
 duplicate funcref slots. They are `call-indirect-table`, not opcodes.
+
+Element selectors are real table slots. Producer 2.9.0 places each active
+segment at its evaluated offset (`i32.const`, a defined immutable constant
+global, or extended-const arithmetic over them), in segment order, so a later
+segment overwrites an earlier slot and a segment at offset 1 starts at slot 1.
+Earlier producers numbered slots from 0 across the merged segment list, which
+shifted every slot of an offset segment. `segments` lists each active segment
+with `placement` `placed`, `relative` (the offset reads an imported global, so
+its slots are unknown and are not clustered) or `unresolved`. Passive and
+declared segments fill no table and are not listed. `entry_count` counts
+populated placed slots.
+
+## Dispatch classification
+
+Producer 2.9.0 copies the analysis result's
+[`dispatch_classification`](vm-dispatch-classification-v1.md) onto each
+workspace. Only `interpreter-candidate` sites, a cursor-like selector re-derived
+in a loop, can carry guest-opcode claims:
+
+- JavaScript integer cases and numeric handler tables become `handlers` only at
+  an interpreter candidate. A router adds the residual unknown that its case
+  values route one call and are not guest opcodes. Other sites add that they
+  are not a cursor-advancing loop.
+- Wasm arms keep their physical selector indexes. A retained sample proves
+  `guest-opcode-isa` through an arm only when the arm's site is an interpreter
+  candidate. A residual unknown counts retained sites that are not.
+- Older documents without the field keep their original rules.
+
+The viewer recomputes each site's role from its three fields, so a document
+cannot assert an interpreter role its structure does not support.
 
 A workspace with no recovered arms omits `evidence_class`. That absence is not
 a guest ISA and not an empty workspace; `handler-unavailable` still names the gap.

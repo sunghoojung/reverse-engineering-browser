@@ -11,11 +11,15 @@ use std::{
     path::Path,
     sync::LazyLock,
 };
-use wasmparser::{ElementItems, ElementKind, Operator, Parser, Payload, TypeRef};
+use wasmparser::{Operator, Parser, Payload, TypeRef};
 #[path = "vm_capture_mode.rs"]
 pub(crate) mod capture_mode;
+#[path = "vm_dispatch_shape.rs"]
+pub(crate) mod dispatch_shape;
 #[path = "vm_wasm_dispatch.rs"]
 mod wasm_dispatch;
+#[path = "vm_wasm_tables.rs"]
+pub(crate) mod wasm_tables;
 
 const PROFILE: &str = "anti-bot-vm-detection-v1";
 static CONFIG: LazyLock<Value> = LazyLock::new(|| {
@@ -81,7 +85,7 @@ static ANTI: LazyLock<Vec<(&str, u64, Regex)>> = LazyLock::new(|| {
 ].into_iter().map(|(id,weight,p)|(id,weight,Regex::new(p).expect("Anti-bot rule"))).collect()
 });
 pub(crate) fn current_producer() -> Value {
-    json!({"id":"origin-trace-vm-detector","version":"1.5.0"})
+    json!({"id":"origin-trace-vm-detector","version":"1.6.0"})
 }
 
 // The catalog and generated documents share this exact profile projection.
@@ -189,7 +193,8 @@ pub(crate) fn mask(source: &str) -> String {
     }
     String::from_utf8(bytes).expect("UTF-8 literal masking")
 }
-fn js(source: &str) -> Result<(Vec<Value>, Vec<Value>)> {
+type JavaScriptStructure = (Vec<Value>, Vec<Value>, Vec<dispatch_shape::Site>);
+fn js(source: &str) -> Result<JavaScriptStructure> {
     static SIGNATURE: LazyLock<Regex> = LazyLock::new(|| {
         Regex::new(
             r"(?:\bfunction\b[^{}]{0,1024}|\([^(){}]{0,1024}\)\s*=>|[A-Za-z_$][\w$]*\s*=>)\s*\{",
@@ -202,7 +207,8 @@ fn js(source: &str) -> Result<(Vec<Value>, Vec<Value>)> {
             .unwrap()
     });
     let masked = mask(source);
-    let mut openings = BTreeSet::new();
+    // Opening brace to its signature start, for parameter names.
+    let mut openings = BTreeMap::new();
     let mut omissions = Vec::new();
     for m in SIGNATURE.find_iter(&masked) {
         if openings.len() >= 4096 {
@@ -210,18 +216,23 @@ fn js(source: &str) -> Result<(Vec<Value>, Vec<Value>)> {
                 .push(json!({"reason":"javascript-function-region-limit","observed_records":4096}));
             break;
         }
-        openings.insert(m.end() - 1);
+        openings.insert(m.end() - 1, m.start());
     }
     let mut stack = Vec::new();
     let mut regions = vec![(0, source.len())];
+    let mut parameters = BTreeMap::<usize, Vec<String>>::new();
     for (i, c) in masked.bytes().enumerate() {
         if c == b'{' {
             stack.push(i);
         } else if c == b'}'
             && let Some(start) = stack.pop()
-            && openings.remove(&start)
+            && let Some(signature) = openings.remove(&start)
         {
             regions.push((start + 1, i));
+            parameters.insert(
+                start + 1,
+                dispatch_shape::javascript::parameters(&masked[signature..=start]),
+            );
         }
     }
     if !openings.is_empty() {
@@ -253,6 +264,8 @@ fn js(source: &str) -> Result<(Vec<Value>, Vec<Value>)> {
     let mut work = 0;
     let mut best = Vec::new();
     let mut best_rank = (0, 0, usize::MAX);
+    let lines = dispatch_shape::javascript::Lines::new(source);
+    let mut sites = Vec::new();
     for (start, end) in order {
         if work + end - start > 64 * 1024 * 1024 {
             omissions.push(json!({"reason":"javascript-region-work-limit","observed_bytes":work,"total_bytes":work+end-start}));
@@ -266,6 +279,14 @@ fn js(source: &str) -> Result<(Vec<Value>, Vec<Value>)> {
             bytes[a - start..b - start].fill(b' ');
         }
         let region = String::from_utf8(bytes).expect("masked nested source");
+        dispatch_shape::javascript::classify_region(
+            source,
+            &lines,
+            &region,
+            start,
+            parameters.get(&start).map_or(&[], Vec::as_slice),
+            &mut sites,
+        );
         let mut observations = Vec::new();
         if let (Some(a), Some(b)) = (LOOP.find(&region), DISPATCH.find(&region)) {
             observations.push(observation(
@@ -315,7 +336,14 @@ fn js(source: &str) -> Result<(Vec<Value>, Vec<Value>)> {
             best_rank = (score, families, start);
         }
     }
-    Ok((best, omissions))
+    Ok((best, omissions, sites))
+}
+/// The structural dispatch classification of one JavaScript source, as
+/// `analyze` records it.
+#[cfg(test)]
+pub(crate) fn javascript_classification(source: &str) -> Value {
+    let (_, _, sites) = js(source).expect("JavaScript structure");
+    dispatch_shape::document(&json!("1"), sites)
 }
 struct Instruction {
     opcode: u8,
@@ -329,7 +357,7 @@ struct Instruction {
     unique_targets: Option<u32>,
     table_index: Option<u32>,
 }
-fn wasm(bytes: &[u8]) -> Result<(Vec<Value>, Value)> {
+fn wasm(bytes: &[u8]) -> Result<(Vec<Value>, Value, Vec<dispatch_shape::Site>)> {
     let bad = |e: wasmparser::BinaryReaderError| Error::bad(e.to_string());
     let mut sections = 0;
     let mut code_sections = 0;
@@ -343,9 +371,15 @@ fn wasm(bytes: &[u8]) -> Result<(Vec<Value>, Value)> {
     let mut best_rank = (0, 0);
     let mut best_dispatch = None;
     let mut inventory = wasm_dispatch::Inventory::default();
-    // Active element-segment funcref initializers, keyed by table index. A missing
-    // key means the fanout is unknown. Passive and declarative segments are omitted.
-    let mut element_fanout: BTreeMap<u32, u32> = BTreeMap::new();
+    // Active element-segment funcref fanout keyed by table index: populated
+    // slots after placing each segment at its evaluated offset, plus entries of
+    // segments whose offset is only known at instantiation. A missing key means
+    // the fanout is unknown. Passive and declarative segments fill no table.
+    let tables = wasm_tables::Tables::parse(bytes);
+    let element_fanout = tables
+        .as_ref()
+        .map(wasm_tables::Tables::fanout)
+        .unwrap_or_default();
     let mut seen = BTreeSet::new();
     for payload in Parser::new(0).parse_all(bytes) {
         let payload = payload.map_err(bad)?;
@@ -388,37 +422,7 @@ fn wasm(bytes: &[u8]) -> Result<(Vec<Value>, Value)> {
             Payload::ElementSection(reader) => {
                 table_ranges.push(reader.range());
                 for element in reader {
-                    let element = element.map_err(bad)?;
-                    let ElementKind::Active { table_index, .. } = element.kind else {
-                        continue;
-                    };
-                    // MVP active segments omit the table index and mean table 0.
-                    let slot = element_fanout.entry(table_index.unwrap_or(0)).or_insert(0);
-                    match element.items {
-                        ElementItems::Functions(functions) => {
-                            for function in functions {
-                                let _ = function.map_err(bad)?;
-                                *slot = slot.saturating_add(1);
-                            }
-                        }
-                        ElementItems::Expressions(_, expressions) => {
-                            for expression in expressions {
-                                let mut operators = expression.map_err(bad)?.get_operators_reader();
-                                let mut funcref = false;
-                                while !operators.eof() {
-                                    if matches!(
-                                        operators.read().map_err(bad)?,
-                                        Operator::RefFunc { .. }
-                                    ) {
-                                        funcref = true;
-                                    }
-                                }
-                                if funcref {
-                                    *slot = slot.saturating_add(1);
-                                }
-                            }
-                        }
-                    }
+                    let _ = element.map_err(bad)?;
                 }
             }
             Payload::DataSection(reader) => data_ranges.push(reader.range()),
@@ -619,9 +623,13 @@ fn wasm(bytes: &[u8]) -> Result<(Vec<Value>, Value)> {
             "A data section can supply candidate guest bytes.",
         ));
     }
+    // Classification is interpretation over the same decoded bytes; it never
+    // feeds the structural score above.
+    let sites = dispatch_shape::wasm(bytes, tables.as_ref()).unwrap_or_default();
     Ok((
         best,
         json!({"section_count":sections,"code_section_count":code_sections,"data_section_count":data_ranges.len(),"decoded_function_count":functions,"imported_function_count":imported,"decoded_instruction_count":instructions_count,"dispatch_inventory":inventory.value(best_dispatch.map(|(_, offset)| offset))}),
+        sites,
     ))
 }
 pub fn canonical(value: &Value) -> Result<Vec<u8>> {
@@ -762,14 +770,19 @@ fn analyze(artifact: &Value, bytes: &[u8], events: &[Value]) -> Value {
     } else {
         ""
     };
-    let (observations, frontend, mut omissions) = if runtime == "javascript" {
+    let (observations, mut frontend, mut omissions, sites) = if runtime == "javascript" {
         match js(source) {
-            Ok((obs, omissions)) => (obs, json!({"replacement_character_count":0}), omissions),
+            Ok((obs, omissions, sites)) => (
+                obs,
+                json!({"replacement_character_count":0}),
+                omissions,
+                sites,
+            ),
             Err(e) => return failure(artifact, "malformed-artifact", &e.message),
         }
     } else {
         match wasm(bytes) {
-            Ok((obs, frontend)) => {
+            Ok((obs, frontend, sites)) => {
                 let omitted = frontend["dispatch_inventory"]["omitted_site_count"]
                     .as_u64()
                     .unwrap_or(0);
@@ -778,11 +791,12 @@ fn analyze(artifact: &Value, bytes: &[u8], events: &[Value]) -> Value {
                 } else {
                     Vec::new()
                 };
-                (obs, frontend, omissions)
+                (obs, frontend, omissions, sites)
             }
             Err(e) => return failure(artifact, "malformed-artifact", &e.message),
         }
     };
+    frontend["dispatch_classification"] = dispatch_shape::document(&artifact["artifact_id"], sites);
     let rules = observations
         .iter()
         .map(|o| o["rule_id"].as_str().unwrap().to_owned())
@@ -1253,7 +1267,7 @@ mod profile_tests {
     #[test]
     fn handler_recovery_requirement_has_distinct_profile_and_accepts_older_profiles() {
         let current = current_profile();
-        assert_eq!(current_producer()["version"], "1.5.0");
+        assert_eq!(current_producer()["version"], "1.6.0");
         assert_eq!(current["javascript_likely_vm_requires_handlers"], true);
         let mut historical = current.clone();
         historical
@@ -1276,5 +1290,308 @@ mod profile_tests {
             .unwrap()
             .remove("javascript_scoring_version");
         validator.validate(&historical).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod dispatch_shape_tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    fn fixtures() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tools/fixtures/dispatch-shapes")
+    }
+
+    fn sources() -> Vec<PathBuf> {
+        let mut sources = std::fs::read_dir(fixtures())
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| path.extension().is_some_and(|ext| ext == "wat"))
+            .collect::<Vec<_>>();
+        sources.sort();
+        assert!(sources.len() >= 5, "dispatch shape WAT sources are missing");
+        sources
+    }
+
+    fn classify(name: &str) -> Value {
+        let bytes = std::fs::read(fixtures().join(name)).unwrap();
+        let kind = if name.ends_with(".js") {
+            "javascript"
+        } else {
+            "wasm"
+        };
+        let artifact = json!({
+            "artifact_id": "7", "sha256": hex::encode(Sha256::digest(&bytes)), "kind": kind,
+            "session_id": "1", "navigation_id": "1", "frame_id": "1", "url": name,
+        });
+        analyze(&artifact, &bytes, &[])
+    }
+
+    /// The checked-in binaries are exactly what the pinned assembler builds
+    /// from the checked-in sources. Run `make dispatch-shape-fixtures` after
+    /// editing a `.wat`.
+    #[test]
+    fn dispatch_shape_wasm_fixtures_match_their_wat_sources() {
+        for source in sources() {
+            let built = wat::parse_file(&source).unwrap();
+            wasmparser::Validator::new().validate_all(&built).unwrap();
+            let binary = source.with_extension("wasm");
+            let checked_in = std::fs::read(&binary).unwrap_or_else(|_| {
+                panic!(
+                    "{} is missing; run make dispatch-shape-fixtures",
+                    binary.display()
+                )
+            });
+            assert!(
+                built == checked_in,
+                "{} drifted from its source; run make dispatch-shape-fixtures",
+                binary.display()
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "writes fixtures; run through make dispatch-shape-fixtures"]
+    fn write_dispatch_shape_fixtures() {
+        for source in sources() {
+            let built = wat::parse_file(&source).unwrap();
+            std::fs::write(source.with_extension("wasm"), built).unwrap();
+        }
+    }
+
+    #[test]
+    fn dispatch_shape_fixtures_classify_as_expected() {
+        let expected: Value = serde_json::from_str(
+            &std::fs::read_to_string(fixtures().join("expected.json")).unwrap(),
+        )
+        .unwrap();
+        let schema: Value = serde_json::from_str(include_str!(
+            "../../../protocol/vm-dispatch-classification-v1.schema.json"
+        ))
+        .unwrap();
+        let validator = jsonschema::validator_for(&schema).unwrap();
+        let analysis_schema: Value =
+            serde_json::from_str(include_str!("../../../protocol/vm-analysis-v1.schema.json"))
+                .unwrap();
+        let result_validator = jsonschema::validator_for(
+            &json!({"$ref":"#/$defs/result","$defs":analysis_schema["$defs"]}),
+        )
+        .unwrap();
+        for fixture in expected["fixtures"].as_array().unwrap() {
+            let name = fixture["artifact"].as_str().unwrap();
+            let result = classify(name);
+            result_validator.validate(&result).unwrap();
+            let classification = &result["frontend"]["dispatch_classification"];
+            validator.validate(classification).unwrap();
+            let sites = classification["sites"].as_array().unwrap();
+            let wanted = fixture["sites"].as_array().unwrap();
+            assert_eq!(
+                sites.len(),
+                wanted.len(),
+                "{name}: {}",
+                serde_json::to_string_pretty(sites).unwrap()
+            );
+            for (site, want) in sites.iter().zip(wanted) {
+                for (key, value) in want.as_object().unwrap() {
+                    let actual = match key.as_str() {
+                        "function_index" | "line" => &site["location"][key],
+                        _ => &site[key],
+                    };
+                    assert_eq!(actual, value, "{name} {key}: {site}");
+                }
+                assert_eq!(site["confidence"], "structural");
+                assert_eq!(site["artifact_id"], "7");
+                assert!(site["selector"]["expression"].as_str().unwrap().len() > 1);
+            }
+            assert_eq!(classification["site_count"], wanted.len());
+            // Classification never raises the structural tier.
+            let observations = result["observations"].as_array().unwrap();
+            let rules = observations
+                .iter()
+                .map(|o| o["rule_id"].as_str().unwrap().to_owned())
+                .collect::<Vec<_>>();
+            assert_eq!(
+                result["finding_id"],
+                finding(result["artifact_sha256"].as_str().unwrap(), &rules)
+            );
+        }
+    }
+
+    /// Every embedded copy of the classification contract matches the
+    /// standalone versioned schema after reference rewriting.
+    #[test]
+    fn dispatch_classification_contract_copies_match_the_standalone_schema() {
+        let standalone: Value = serde_json::from_str(include_str!(
+            "../../../protocol/vm-dispatch-classification-v1.schema.json"
+        ))
+        .unwrap();
+        let copy = |prefix: &str| {
+            let mut body = standalone.clone();
+            for key in ["$schema", "$id", "title", "$defs"] {
+                body.as_object_mut().unwrap().remove(key);
+            }
+            let text = serde_json::to_string(&body).unwrap().replace(
+                "\"#/$defs/site\"",
+                &format!("\"{prefix}/dispatchClassificationSite\""),
+            );
+            serde_json::from_str::<Value>(&text).unwrap()
+        };
+        let analysis: Value =
+            serde_json::from_str(include_str!("../../../protocol/vm-analysis-v1.schema.json"))
+                .unwrap();
+        let workspace: Value = serde_json::from_str(include_str!(
+            "../../../protocol/vm-opcode-workspace-v2.schema.json"
+        ))
+        .unwrap();
+        let openapi: Value =
+            serde_json::from_str(include_str!("../../../protocol/openapi.json")).unwrap();
+        for (defs, prefix) in [
+            (&analysis["$defs"], "#/$defs".to_owned()),
+            (&workspace["$defs"], "#/$defs".to_owned()),
+            (
+                &openapi["components"]["schemas"]["VmAnalysis"]["$defs"],
+                "#/components/schemas/VmAnalysis/$defs".to_owned(),
+            ),
+            (
+                &openapi["components"]["schemas"]["VmOpcodeWorkspace"]["$defs"],
+                "#/components/schemas/VmOpcodeWorkspace/$defs".to_owned(),
+            ),
+        ] {
+            assert_eq!(defs["dispatchClassification"], copy(&prefix), "{prefix}");
+            assert_eq!(
+                defs["dispatchClassificationSite"], standalone["$defs"]["site"],
+                "{prefix}"
+            );
+        }
+    }
+
+    /// A loop that reloads a state field and writes constants back is a
+    /// state machine. Only a slot stored back as `slot + n` is an advancing
+    /// program position.
+    #[test]
+    fn field_state_machine_loops_are_not_interpreter_candidates() {
+        let bytes = wat::parse_str(
+            r#"(module
+              (memory 1)
+              (func (export "drive") (param $obj i32) (result i32)
+                (local $state i32)
+                (block $exit
+                  (loop $again
+                    (local.set $state (i32.load offset=4 (local.get $obj)))
+                    (block $two (block $one (block $zero
+                      (br_table $zero $one $two $exit (local.get $state)))
+                      (i32.store offset=4 (local.get $obj) (i32.const 2)) (br $again))
+                      (i32.store offset=4 (local.get $obj) (i32.const 0)) (br $again))
+                    (i32.store offset=4 (local.get $obj) (i32.const 3))
+                    (br $again)))
+                (local.get $state)))"#,
+        )
+        .unwrap();
+        let sites =
+            dispatch_shape::wasm(&bytes, wasm_tables::Tables::parse(&bytes).as_ref()).unwrap();
+        let document = dispatch_shape::document(&json!("9"), sites);
+        let site = &document["sites"][0];
+        assert_eq!(site["selector_source"], "frame_slot");
+        assert_eq!(site["repeats"], "unknown");
+        assert_eq!(site["role"], "other");
+    }
+
+    #[test]
+    fn javascript_saved_positions_must_advance_to_repeat() {
+        let classify = |source: &str| {
+            let document = javascript_classification(source);
+            let site = document["sites"][0].clone();
+            (
+                site["selector_source"].as_str().unwrap().to_owned(),
+                site["repeats"].as_str().unwrap().to_owned(),
+                site["role"].as_str().unwrap().to_owned(),
+            )
+        };
+        let machine = "function drive(m){while(true){switch(m.state){case 0: m.state = 1; break; case 1: m.state = 2; break; case 2: return;}}}";
+        assert_eq!(
+            classify(machine),
+            ("frame_slot".into(), "unknown".into(), "other".into())
+        );
+        let saved = "function run(f, code){while(true){switch(code[f.pc++]){case 0: break; case 1: return; case 2: f.pc = 0;}}}";
+        assert_eq!(
+            classify(saved),
+            (
+                "frame_slot".into(),
+                "loop".into(),
+                "interpreter-candidate".into()
+            )
+        );
+    }
+
+    #[test]
+    fn module_without_dispatch_records_export_per_role() {
+        let bytes = wat::parse_str(
+            r#"(module
+              (func (export "init") (param i32) (result i32) (i32.add (local.get 0) (i32.const 1)))
+              (func (export "step") (param i32) (result i32) (i32.mul (local.get 0) (i32.const 3))))"#,
+        )
+        .unwrap();
+        let sites =
+            dispatch_shape::wasm(&bytes, wasm_tables::Tables::parse(&bytes).as_ref()).unwrap();
+        let document = dispatch_shape::document(&json!("9"), sites);
+        assert_eq!(document["site_count"], 1);
+        let site = &document["sites"][0];
+        assert_eq!(site["dispatch_kind"], "export_per_role");
+        assert_eq!(site["role"], "other");
+        assert_eq!(site["arm_count"], 2);
+    }
+
+    #[test]
+    fn threaded_and_cff_loops_are_not_interpreter_candidates() {
+        let bytes = wat::parse_str(
+            r#"(module
+              (type $step (func (param i32) (result i32)))
+              (table 4 funcref)
+              (func $next (type $step) (local.get 0))
+              (elem (i32.const 0) func $next)
+              (func (export "threaded") (param $h i32) (result i32)
+                (local $handler i32)
+                (local.set $handler (local.get $h))
+                (block $exit
+                  (loop $again
+                    (br_if $exit (i32.eqz (local.get $handler)))
+                    (local.set $handler (call_indirect (type $step) (local.get $handler) (local.get $handler)))
+                    (br $again)))
+                (local.get $handler))
+              (func (export "flattened") (result i32)
+                (local $state i32) (local $acc i32)
+                (local.set $state (i32.const 0))
+                (block $exit
+                  (loop $again
+                    (block $two (block $one (block $zero
+                      (br_table $zero $one $two $exit (local.get $state)))
+                      (local.set $state (i32.const 2)) (br $again))
+                      (local.set $state (i32.const 3)) (br $again))
+                    (local.set $acc (i32.const 7))
+                    (local.set $state (i32.const 1))
+                    (br $again)))
+                (local.get $acc)))"#,
+        )
+        .unwrap();
+        let sites =
+            dispatch_shape::wasm(&bytes, wasm_tables::Tables::parse(&bytes).as_ref()).unwrap();
+        let document = dispatch_shape::document(&json!("9"), sites);
+        let listed = document["sites"].as_array().unwrap();
+        let threaded = listed
+            .iter()
+            .find(|site| site["instruction"] == "call_indirect")
+            .unwrap();
+        assert_eq!(threaded["dispatch_kind"], "threaded");
+        assert_eq!(threaded["selector_source"], "handler_address");
+        assert_eq!(threaded["repeats"], "loop");
+        assert_eq!(threaded["role"], "other");
+        let flattened = listed
+            .iter()
+            .find(|site| site["instruction"] == "br_table")
+            .unwrap();
+        assert_eq!(flattened["selector_source"], "constant");
+        assert_eq!(flattened["repeats"], "loop");
+        assert_eq!(flattened["role"], "other");
+        assert_eq!(document["role_counts"]["interpreter-candidate"], 0);
     }
 }

@@ -7,7 +7,7 @@
 //! intervals, and every binding, write and arithmetic advance by name. Site
 //! classification then only looks names up, under a per-query step budget and
 //! the shared per-artifact budget, so work stays linear in the region size.
-use super::{Budget, Kind, MAX_QUERY_STEPS, MIN_COMPARE_ARMS, Repeats, Site, Source, priority};
+use super::{Kind, MAX_QUERY_STEPS, MIN_COMPARE_ARMS, Meter, Repeats, Site, Source, priority};
 use regex::Regex;
 use std::{
     cell::{Cell, RefCell},
@@ -25,6 +25,10 @@ const MAX_ALTERNATIVES: usize = 16;
 pub(crate) const MAX_REGION_SITES: u64 = 4096;
 /// Characters of a line counted exactly per column checkpoint.
 const COLUMN_CHECKPOINT: usize = 4096;
+/// Bytes one braceless statement body is scanned for its end. A body that
+/// runs on without `;`, a line break or a closing bracket ends here, so a run
+/// of such loops costs linear work.
+const MAX_STATEMENT_SCAN: usize = 4096;
 
 static LOOP_HEADER: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\b(?:while|for)\s*\(|\bdo\b").expect("loop header"));
@@ -123,12 +127,14 @@ impl Lines {
                 .count()
     }
 
-    fn locate(&self, source: &str, offset: usize) -> (usize, usize) {
+    /// Line, column, and the bytes counted to find them.
+    fn locate(&self, source: &str, offset: usize) -> (usize, usize, u64) {
         let line = self.starts.partition_point(|start| *start <= offset);
         let start = self.starts[line - 1];
         let characters = (offset - start)
             - (self.continuation_before(source, offset) - self.continuation_before(source, start));
-        (line, characters + 1)
+        let scanned = (offset % COLUMN_CHECKPOINT + start % COLUMN_CHECKPOINT) as u64 + 1;
+        (line, characters + 1, scanned)
     }
 }
 
@@ -237,19 +243,30 @@ impl Intervals {
 }
 
 /// Bindings, writes and arithmetic advances of every name in one region.
+/// Entries are spans into the region text, never copies, so chained writes
+/// keep a fixed number of bytes per write.
 #[derive(Default)]
 struct Index {
-    /// Plain `=` writes: (name offset, value offset, value text).
-    definitions: HashMap<String, Vec<(usize, usize, String)>>,
-    writes: HashMap<String, Vec<usize>>,
+    /// Plain `=` writes: (name offset, value start, value end).
+    definitions: HashMap<String, Vec<Definition>>,
+    writes: HashMap<String, Vec<u32>>,
     /// `++`, `--`, `+=`, `-=` and `name = name ± ...`.
-    advances: HashMap<String, Vec<usize>>,
+    advances: HashMap<String, Vec<u32>>,
 }
 
-fn any_within(offsets: Option<&Vec<usize>>, (start, end): (usize, usize)) -> bool {
+type Definition = (u32, u32, u32);
+
+/// Bytes one index entry keeps, for retained-memory accounting.
+const DEFINITION_BYTES: u64 = 12;
+const OFFSET_BYTES: u64 = 4;
+const PAIR_BYTES: u64 = 24;
+
+fn any_within(offsets: Option<&Vec<u32>>, (start, end): (usize, usize)) -> bool {
     offsets.is_some_and(|offsets| {
-        let first = offsets.partition_point(|offset| *offset < start);
-        offsets.get(first).is_some_and(|offset| *offset < end)
+        let first = offsets.partition_point(|offset| (*offset as usize) < start);
+        offsets
+            .get(first)
+            .is_some_and(|offset| (*offset as usize) < end)
     })
 }
 
@@ -266,6 +283,9 @@ struct Found {
 }
 
 struct Region<'a> {
+    meter: &'a Meter,
+    /// Bytes this region's index retains, released when it is dropped.
+    retained: Cell<u64>,
     source: &'a str,
     text: &'a str,
     start: usize,
@@ -275,9 +295,6 @@ struct Region<'a> {
     index: Index,
     steps: Cell<u64>,
     step_limit: Cell<u64>,
-    /// Work outside traced steps (bracket pairing, buffer scans), counted
-    /// into the artifact's total so cost tests see every operation.
-    overhead: Cell<u64>,
     deepest: Cell<u8>,
     /// A bound cut the current query short: its result is an honest unknown.
     limited: Cell<bool>,
@@ -325,9 +342,23 @@ impl Trace {
     }
 }
 
+impl Drop for Region<'_> {
+    fn drop(&mut self) {
+        self.meter.release(self.retained.get());
+    }
+}
+
 impl<'a> Region<'a> {
-    fn new(source: &'a str, text: &'a str, start: usize, params: &'a [String]) -> Self {
+    fn new(
+        source: &'a str,
+        text: &'a str,
+        start: usize,
+        params: &'a [String],
+        meter: &'a Meter,
+    ) -> Self {
         let mut region = Self {
+            meter,
+            retained: Cell::new(0),
             source,
             text,
             start,
@@ -337,28 +368,33 @@ impl<'a> Region<'a> {
             index: Index::default(),
             steps: Cell::new(0),
             step_limit: Cell::new(MAX_QUERY_STEPS),
-            overhead: Cell::new(0),
             deepest: Cell::new(0),
             limited: Cell::new(false),
             depth_cut: Cell::new(false),
             identifier_memo: RefCell::new(HashMap::new()),
             buffer_memo: RefCell::new(HashMap::new()),
         };
-        let (pairs, work) = Self::pairs(text);
-        region.pairs = pairs;
-        region.overhead.set(work);
+        meter.charge(text.len() as u64);
+        region.pairs = Self::pairs(text);
+        region.keep(region.pairs.len() as u64 * PAIR_BYTES);
         region.loops = region.loop_intervals();
+        region.keep(region.loops.ranges.len() as u64 * PAIR_BYTES);
         region.index = region.build_index();
         region
+    }
+
+    /// Retain index memory against the meter's byte bound.
+    fn keep(&self, bytes: u64) -> bool {
+        self.retained.set(self.retained.get() + bytes);
+        self.meter.retain(bytes)
     }
 
     /// Every bracket pair in one linear pass, one stack per bracket kind.
     /// Unmatched brackets, such as ones inside regex literals the masker
     /// keeps, pair with nothing and cost nothing extra.
-    fn pairs(text: &str) -> (HashMap<usize, usize>, u64) {
+    fn pairs(text: &str) -> HashMap<usize, usize> {
         let mut pairs = HashMap::new();
         let mut stacks: [Vec<usize>; 3] = [Vec::new(), Vec::new(), Vec::new()];
-        let mut work = 0u64;
         for (index, byte) in text.bytes().enumerate() {
             let (kind, opening) = match byte {
                 b'(' => (0, true),
@@ -369,14 +405,13 @@ impl<'a> Region<'a> {
                 b'}' => (2, false),
                 _ => continue,
             };
-            work += 1;
             if opening {
                 stacks[kind].push(index);
             } else if let Some(start) = stacks[kind].pop() {
                 pairs.insert(start, index);
             }
         }
-        (pairs, work)
+        pairs
     }
 
     fn close(&self, open: usize) -> Option<usize> {
@@ -441,23 +476,34 @@ impl<'a> Region<'a> {
             }
             return Some(body);
         }
+        // An expression statement ends at `;`, a line break (automatic
+        // semicolon insertion), an enclosing closer, or the scan bound.
+        let limit = (at + MAX_STATEMENT_SCAN).min(bytes.len());
         let mut index = at;
-        while index < bytes.len() {
+        while index < limit {
             match bytes[index] {
                 b'(' | b'[' | b'{' => index = self.close(index)?,
-                b';' => return Some(index),
-                b')' | b']' | b'}' => return Some(index.saturating_sub(1)),
+                b';' | b'\n' => break,
+                b')' | b']' | b'}' => {
+                    self.meter.charge((index - at) as u64 + 1);
+                    return Some(index.saturating_sub(1));
+                }
                 _ => (),
             }
             index += 1;
         }
-        Some(bytes.len() - 1)
+        self.meter.charge((index.min(limit) - at) as u64 + 1);
+        Some(index.min(bytes.len() - 1))
     }
 
     fn loop_intervals(&self) -> Intervals {
         let bytes = self.text.as_bytes();
         let mut ranges = Vec::new();
+        self.meter.charge(self.text.len() as u64);
         for header in LOOP_HEADER.find_iter(self.text) {
+            if self.meter.exhausted() {
+                break;
+            }
             if header.start() > 0 && bytes[header.start() - 1] == b'.' {
                 continue;
             }
@@ -484,21 +530,27 @@ impl<'a> Region<'a> {
             match bytes[index] {
                 b'(' | b'[' | b'{' => match self.close(index) {
                     Some(close) if close < limit => index = close,
-                    _ => return limit,
+                    _ => break,
                 },
-                b';' | b',' | b')' | b']' | b'}' => return index,
-                b'\n' if !self.text[from..index].trim().is_empty() => return index,
+                b';' | b',' | b')' | b']' | b'}' => break,
+                b'\n' if !self.text[from..index].trim().is_empty() => break,
                 _ => (),
             }
             index += 1;
         }
-        limit
+        let end = index.min(limit);
+        self.meter.charge((end - from) as u64 + 1);
+        end
     }
 
     fn build_index(&self) -> Index {
         let bytes = self.text.as_bytes();
         let mut index = Index::default();
+        self.meter.charge(2 * self.text.len() as u64);
         for captures in WRITE.captures_iter(self.text) {
+            if self.meter.exhausted() {
+                break;
+            }
             let whole = captures.get(0).expect("write");
             let name_match = captures.get(1).expect("written name");
             if name_match
@@ -513,28 +565,35 @@ impl<'a> Region<'a> {
                 continue;
             }
             let operator = &captures[2];
-            let at = name_match.start();
+            let at = name_match.start() as u32;
+            let mut kept = OFFSET_BYTES;
             if operator == "=" {
                 if matches!(bytes.get(whole.end()), Some(b'=' | b'>')) {
                     continue;
                 }
                 let value_start = self.skip_space(whole.end());
                 let value_end = self.value_end(value_start).max(value_start);
-                let value = self.text[value_start..value_end].trim().to_owned();
+                let value = self.text[value_start..value_end].trim();
                 if value.starts_with(&name)
                     && value[name.len()..].trim_start().starts_with(['+', '-'])
                 {
                     index.advances.entry(name.clone()).or_default().push(at);
+                    kept += OFFSET_BYTES;
                 }
-                index
-                    .definitions
-                    .entry(name.clone())
-                    .or_default()
-                    .push((at, value_start, value));
+                index.definitions.entry(name.clone()).or_default().push((
+                    at,
+                    value_start as u32,
+                    value_end as u32,
+                ));
+                kept += DEFINITION_BYTES;
             } else if ["++", "--", "+=", "-="].contains(&operator) {
                 index.advances.entry(name.clone()).or_default().push(at);
+                kept += OFFSET_BYTES;
             }
             index.writes.entry(name).or_default().push(at);
+            if !self.keep(kept) {
+                break;
+            }
         }
         for captures in PREFIX.captures_iter(self.text) {
             let operator = captures.get(1).expect("prefix operator");
@@ -544,18 +603,34 @@ impl<'a> Region<'a> {
                 continue;
             }
             let name = normalized(&captures[2]);
-            let at = operator.start();
+            let at = operator.start() as u32;
             index.advances.entry(name.clone()).or_default().push(at);
             index.writes.entry(name).or_default().push(at);
+            if !self.keep(2 * OFFSET_BYTES) {
+                break;
+            }
         }
         for offsets in index.writes.values_mut().chain(index.advances.values_mut()) {
+            self.meter.charge(offsets.len() as u64);
             offsets.sort_unstable();
         }
         index
     }
 
-    fn definitions(&self, name: &str) -> &[(usize, usize, String)] {
+    fn definitions(&self, name: &str) -> &[Definition] {
         self.index.definitions.get(name).map_or(&[], Vec::as_slice)
+    }
+
+    /// The text of one binding's value.
+    fn value(&self, definition: &Definition) -> &'a str {
+        self.text[definition.1 as usize..definition.2 as usize].trim()
+    }
+
+    /// Enclosing loops, innermost first, charged by how many it walks.
+    fn enclosing_loops(&self, at: usize) -> Vec<(usize, usize)> {
+        let loops = self.loops.enclosing(at, true);
+        self.meter.charge(loops.len() as u64 + 1);
+        loops
     }
 
     fn written_within(&self, name: &str, range: (usize, usize)) -> bool {
@@ -575,9 +650,10 @@ impl<'a> Region<'a> {
             .is_some_and(|offsets| !offsets.is_empty())
     }
 
+    /// One logical step of the query budget, and one unit of real work.
     fn step(&self) -> bool {
         let used = self.steps.get();
-        if used >= self.step_limit.get() {
+        if used >= self.step_limit.get() || !self.meter.charge(1) {
             self.limited.set(true);
             return false;
         }
@@ -651,13 +727,13 @@ impl<'a> Region<'a> {
                 trace.cursor = Some(cursor);
                 return vec![trace];
             }
-            if let [(at, _, value)] = self.definitions(&cursor)
-                && MEMBER.is_match(self.strip(value))
+            if let [definition] = self.definitions(&cursor)
+                && MEMBER.is_match(self.strip(self.value(definition)))
             {
                 // A local copy of a saved frame position.
                 trace.source = Source::FrameSlot;
-                trace.anchor = Some(*at);
-                trace.cursor = Some(normalized(self.strip(value)));
+                trace.anchor = Some(definition.0 as usize);
+                trace.cursor = Some(normalized(self.strip(self.value(definition))));
                 return vec![trace];
             }
             if self.advanced(&cursor) {
@@ -703,6 +779,8 @@ impl<'a> Region<'a> {
                 return vec![Trace::new(Source::Unknown)];
             }
             if !memo.exhausted {
+                // The meter sees only the lookup this hit performs.
+                self.meter.charge(1 + memo.traces.len() as u64);
                 self.steps.set(used + memo.cost);
                 return memo.traces;
             }
@@ -742,10 +820,13 @@ impl<'a> Region<'a> {
         } else if definitions.is_empty() {
             return vec![Trace::new(Source::Unknown)];
         }
-        for (at, _, value) in definitions {
+        for definition in definitions {
             if !self.step() {
                 break;
             }
+            let at = &(definition.0 as usize);
+            let value = self.value(definition);
+            self.meter.charge(value.len() as u64);
             // An advance (`k + 1`), a normalization (`k | 0`) or another
             // self-derived write adds no new value source.
             if mentions(value, name) {
@@ -767,7 +848,7 @@ impl<'a> Region<'a> {
                 // Constant writes differ only by where they land: one per
                 // enclosing loop explains every repeat decision.
                 let loop_of = |anchor: Option<usize>| {
-                    anchor.and_then(|at| self.loops.enclosing(at, true).first().copied())
+                    anchor.and_then(|at| self.enclosing_loops(at).first().copied())
                 };
                 let duplicate = traces.iter().any(|known: &Trace| {
                     known.source == trace.source
@@ -795,7 +876,7 @@ impl<'a> Region<'a> {
                 trace.source == Source::Constant
                     && trace
                         .anchor
-                        .is_some_and(|at| !self.loops.enclosing(at, true).is_empty())
+                        .is_some_and(|at| !self.enclosing_loops(at).is_empty())
             })
         {
             traces.retain(|trace| trace.source != Source::CallArgument);
@@ -807,7 +888,7 @@ impl<'a> Region<'a> {
     }
 
     fn repeats(&self, trace: &Trace, at: usize) -> (Repeats, Option<(usize, usize)>) {
-        let loops = self.loops.enclosing(at, true);
+        let loops = self.enclosing_loops(at);
         let Some(innermost) = loops.first().copied() else {
             return (Repeats::Once, None);
         };
@@ -893,7 +974,7 @@ impl<'a> Region<'a> {
         };
         // Once per buffer name, over a bounded prefix of its bindings.
         if let Some(kind) = self.buffer_memo.borrow().get(buffer) {
-            self.overhead.set(self.overhead.get() + 1);
+            self.meter.charge(1);
             return Some(kind);
         }
         let kind = self.binding_kind(buffer);
@@ -904,11 +985,12 @@ impl<'a> Region<'a> {
     fn binding_kind(&self, buffer: &str) -> &'static str {
         let definitions = self.definitions(buffer);
         if definitions.len() > MAX_BUFFER_DEFINITIONS {
-            self.overhead.set(self.overhead.get() + 1);
+            self.meter.charge(1);
             return "unknown";
         }
-        for (_, value_start, value) in definitions {
-            self.overhead.set(self.overhead.get() + 1);
+        for definition in definitions {
+            let (value_start, value) = (definition.1 as usize, self.value(definition));
+            self.meter.charge(1 + value.len() as u64);
             if TYPED_ARRAY.is_match(value) {
                 return "typed-array";
             }
@@ -928,10 +1010,11 @@ impl<'a> Region<'a> {
     }
 
     /// Classify one site under a fresh per-query step budget. A query a
-    /// bound cut short is an honest unknown, reported through the flag.
-    fn site(&self, lines: &Lines, found: Found, budget: u64) -> (Site, u64, bool) {
+    /// bound cut short is an honest unknown, reported through the flag;
+    /// None when the artifact meter ran out, so the site is unclassified.
+    fn site(&self, lines: &Lines, found: Found) -> Option<(Site, bool)> {
         self.steps.set(0);
-        self.step_limit.set(budget.min(MAX_QUERY_STEPS));
+        self.step_limit.set(MAX_QUERY_STEPS);
         self.deepest.set(0);
         self.limited.set(false);
         self.depth_cut.set(false);
@@ -953,8 +1036,12 @@ impl<'a> Region<'a> {
             self.choose(traces, found.at)
         };
         let absolute = self.start + found.at;
-        let (line, column) = lines.locate(self.source, absolute);
+        let (line, column, scanned) = lines.locate(self.source, absolute);
+        self.meter.charge(scanned);
         let buffer_kind = self.buffer_kind(&trace, found.string_cases);
+        if self.meter.exhausted() {
+            return None;
+        }
         let site = Site {
             kind: found.kind,
             source: trace.source,
@@ -974,13 +1061,34 @@ impl<'a> Region<'a> {
             buffer_kind,
             table: None,
         };
-        (site, self.steps.get(), limited)
+        Some((site, limited))
+    }
+
+    /// Cheap dispatch strength for ordering: inside a loop, and a selector
+    /// that reads a buffer at an index, directly or through one binding.
+    fn strength(&self, found: &Found) -> u8 {
+        let looped = !self.enclosing_loops(found.at).is_empty();
+        let selector = self.strip(&found.selector);
+        let reads = |text: &str| INDEXED_READ.is_match(text) || ACCESSOR_READ.is_match(text);
+        self.meter.charge(selector.len() as u64 + 1);
+        let fetched = reads(selector)
+            || (IDENTIFIER.is_match(selector)
+                && self.definitions(selector).iter().take(4).any(|definition| {
+                    let value = self.value(definition);
+                    self.meter.charge(value.len() as u64 + 1);
+                    reads(self.strip(value))
+                }));
+        u8::from(looped) * 2 + u8::from(fetched)
     }
 
     fn switches(&self) -> Vec<Found> {
         let bytes = self.text.as_bytes();
         let mut found = Vec::new();
+        self.meter.charge(self.text.len() as u64);
         for switch in SWITCH.find_iter(self.text) {
+            if self.meter.exhausted() {
+                break;
+            }
             let open = switch.end() - 1;
             let Some(close) = self.close(open) else {
                 continue;
@@ -1020,6 +1128,7 @@ impl<'a> Region<'a> {
                 }
                 index += 1;
             }
+            self.meter.charge((body_close - body_open) as u64);
             found.push(Found {
                 kind: Kind::SwitchOnValue,
                 instruction: "switch",
@@ -1035,6 +1144,7 @@ impl<'a> Region<'a> {
     }
 
     fn indexed_calls(&self) -> Vec<Found> {
+        self.meter.charge(self.text.len() as u64);
         INDEXED_CALL
             .captures_iter(self.text)
             .map(|call| {
@@ -1055,6 +1165,7 @@ impl<'a> Region<'a> {
 
     /// Equality ladders: tests inside an `if` header or before a ternary `?`.
     fn ladders(&self) -> Vec<Found> {
+        self.meter.charge(2 * self.text.len() as u64);
         let headers = Intervals::new(
             IF_HEADER
                 .find_iter(self.text)
@@ -1075,7 +1186,9 @@ impl<'a> Region<'a> {
                 }
             };
             let at = name_match.start().min(whole.end());
-            let in_header = !headers.enclosing(at, false).is_empty();
+            let enclosing = headers.enclosing(at, false);
+            self.meter.charge(enclosing.len() as u64 + 1);
+            let in_header = !enclosing.is_empty();
             let ternary = self.text[whole.end()..]
                 .trim_start()
                 .trim_start_matches(')')
@@ -1118,12 +1231,13 @@ impl<'a> Region<'a> {
 
     /// Threaded: a loop where the current handler returns the next handler.
     fn threaded(&self) -> Vec<Found> {
+        self.meter.charge(self.text.len() as u64);
         SELF_CALL
             .captures_iter(self.text)
             .filter(|captures| captures[1] == captures[2])
             .filter_map(|captures| {
                 let name = captures.get(1).expect("handler name");
-                if self.loops.enclosing(name.start(), true).is_empty() {
+                if self.enclosing_loops(name.start()).is_empty() {
                     return None;
                 }
                 Some(Found {
@@ -1161,8 +1275,10 @@ fn balanced_outer(text: &str) -> bool {
 
 /// Classify the dispatch sites of one masked function region. `text` has
 /// comments, literals and nested function bodies blanked with the original
-/// byte length, so region offsets map to `source` offsets. Every site found
-/// is either classified or counted in `budget` as unclassified.
+/// byte length, so region offsets map to `source` offsets. Candidates are
+/// ranked by dispatch strength before the per-region site bound applies, so a
+/// region full of trivial switches still classifies its interpreter first.
+/// Every site found is classified or counted on the meter as unclassified.
 pub(crate) fn classify_region(
     source: &str,
     lines: &Lines,
@@ -1170,30 +1286,30 @@ pub(crate) fn classify_region(
     start: usize,
     params: &[String],
     sites: &mut Vec<Site>,
-    budget: &mut Budget,
+    meter: &Meter,
 ) {
-    let region = Region::new(source, text, start, params);
-    // Pairing work is charged before the region's sites draw on the budget.
-    budget.charge_overhead(region.overhead.replace(0));
+    let region = Region::new(source, text, start, params, meter);
     let mut candidates = region.switches();
     candidates.extend(region.indexed_calls());
     candidates.extend(region.ladders());
     candidates.extend(region.threaded());
-    candidates.sort_by_key(|candidate| candidate.at);
-    let mut classified = 0u64;
-    for candidate in candidates {
-        if classified >= MAX_REGION_SITES {
-            budget.count_unclassified();
+    let mut ranked = candidates
+        .into_iter()
+        .map(|candidate| (region.strength(&candidate), candidate))
+        .collect::<Vec<_>>();
+    ranked.sort_by_key(|(strength, candidate)| (std::cmp::Reverse(*strength), candidate.at));
+    for (position, (_, candidate)) in ranked.into_iter().enumerate() {
+        if position as u64 >= MAX_REGION_SITES || meter.exhausted() {
+            meter.count_unclassified(1);
             continue;
         }
-        if budget.refuse() {
-            continue;
+        match region.site(lines, candidate) {
+            Some((site, limited)) => {
+                meter.count_limited(limited);
+                meter.retain(site.retained_bytes());
+                sites.push(site);
+            }
+            None => meter.count_unclassified(1),
         }
-        let (site, used, limited) = region.site(lines, candidate, budget.remaining());
-        budget.spend(used);
-        budget.count_limited(limited);
-        classified += 1;
-        sites.push(site);
     }
-    budget.charge_overhead(region.overhead.get());
 }

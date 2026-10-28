@@ -14,7 +14,7 @@
 use serde_json::{Value, json};
 use std::{
     cell::{Cell, OnceCell, RefCell},
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, HashMap},
 };
 use wasmparser::{
     ExternalKind, FuncValidator, FuncValidatorAllocations, FunctionBody, Operator, Parser, Payload,
@@ -39,10 +39,9 @@ const MAX_LISTED_SLOTS: usize = 32;
 /// that differ only in where a constant or handler value was written.
 /// Exceeding it makes the site an honest, counted unknown.
 const MAX_ALTERNATIVES: usize = 16;
-/// Trace steps for one selector query, and for a whole artifact. Past the
-/// artifact budget, remaining sites are counted in a visible omission.
+/// Logical trace steps for one selector query. Memo hits replay what a fresh
+/// computation would spend, so a query's result never depends on order.
 const MAX_QUERY_STEPS: u64 = 4096;
-pub(crate) const MAX_ARTIFACT_STEPS: u64 = 20_000_000;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Kind {
@@ -188,10 +187,40 @@ pub(crate) struct Site {
     pub arm_count: Option<u64>,
     pub loop_range: Option<(usize, usize)>,
     pub buffer_kind: Option<&'static str>,
-    pub table: Option<Value>,
+    pub table: Option<SiteTable>,
+}
+
+/// A `call_indirect` site's table facts. The matching slots are one list
+/// shared by every site with the same table and type, so a site costs a
+/// pointer, not a copy; JSON is rendered only for listed sites.
+pub(crate) struct SiteTable {
+    pub table_index: u32,
+    pub type_index: u32,
+    pub matching: crate::vm::wasm_tables::Matching,
+}
+
+impl SiteTable {
+    fn json(&self) -> Value {
+        let matching = self.matching.as_deref();
+        json!({
+            "table_index": self.table_index,
+            "type_index": self.type_index,
+            "populated_slot_count": matching.map(|(_, populated)| populated),
+            "matching_slot_count": matching.map(|(slots, _)| slots.len()),
+            "matching_slots": matching.map(|(slots, _)| {
+                slots.iter().take(MAX_LISTED_SLOTS).copied().collect::<Vec<_>>()
+            }),
+        })
+    }
 }
 
 impl Site {
+    /// Bytes this record keeps until the document is written, charged to
+    /// the artifact meter so a module of millions of sites stays bounded.
+    pub fn retained_bytes(&self) -> u64 {
+        (std::mem::size_of::<Self>() + self.selector_expression.capacity()) as u64
+    }
+
     pub fn role(&self) -> Role {
         role(
             self.kind,
@@ -269,7 +298,7 @@ pub(crate) fn document(artifact_id: &Value, mut sites: Vec<Site>, omissions: Vec
                     "byte_size": end.saturating_sub(start).max(1),
                 })),
                 "buffer_kind": site.buffer_kind,
-                "table": site.table,
+                "table": site.table.as_ref().map(SiteTable::json),
             })
         })
         .collect::<Vec<_>>();
@@ -359,7 +388,6 @@ struct Query {
     trace: Trace,
     repeats: Repeats,
     range: Option<(usize, usize)>,
-    steps: u64,
     limited: bool,
 }
 
@@ -386,7 +414,8 @@ struct Frame {
 /// Symbolic facts of one function body: an operand-stack simulation typed
 /// by validator arity, so an unmodeled operator consumes and produces the
 /// right number of unknown values instead of wiping the stack.
-struct Facts {
+struct Facts<'a> {
+    meter: &'a Meter,
     params: u32,
     nodes: Vec<Node>,
     defs: BTreeMap<u32, Vec<(usize, NodeId)>>,
@@ -408,9 +437,31 @@ struct Facts {
     depth_cut: Cell<bool>,
     /// The function ran out of symbolic nodes during simulation.
     nodes_exhausted: bool,
-    store_keys: OnceCell<Vec<KeyedStore>>,
+    /// Stores grouped by the memory slot they write, built once.
+    stores_by_slot: OnceCell<HashMap<SlotKey, Vec<(usize, NodeId)>>>,
     advanced_memo: RefCell<BTreeMap<u32, bool>>,
     reloaded_memo: RefCell<BTreeMap<u32, Option<SlotKey>>>,
+    /// Whether a local's writes advance a given slot, keyed by (local, slot,
+    /// carrier); each (local, slot) is walked once.
+    slot_advance_memo: RefCell<HashMap<SlotAdvanceKey, bool>>,
+    /// Whether a loop stores an advance of a slot back, keyed by (slot,
+    /// carrier, loop): every site reading that slot shares one walk.
+    loop_store_memo: RefCell<HashMap<LoopStoreKey, bool>>,
+    /// Loops sorted by start with each one's enclosing loop, built once, so
+    /// a containment query walks only the nesting chain.
+    loop_tree: OnceCell<LoopTree>,
+}
+
+/// (followed local, slot, carrier local).
+type SlotAdvanceKey = (u32, SlotKey, Option<u32>);
+/// (slot, carrier local, loop range).
+type LoopStoreKey = (SlotKey, Option<u32>, (usize, usize));
+
+struct LoopTree {
+    /// Loop ranges by start, outer before inner at the same start.
+    sorted: Vec<(usize, usize)>,
+    /// Index of each loop's innermost enclosing loop.
+    parents: Vec<Option<usize>>,
 }
 
 /// A local trace plus what computing it fresh costs: the steps it consumes
@@ -429,8 +480,6 @@ struct Memo {
 
 /// A memory slot as (rendered base, byte offset).
 type SlotKey = (String, u64);
-/// A store keyed by its slot: (offset, slot, stored value).
-type KeyedStore = (usize, SlotKey, NodeId);
 
 /// Sources ranked for a site that no loop re-derives.
 fn priority(source: Source) -> u8 {
@@ -568,7 +617,15 @@ fn ends_flow(op: &Operator<'_>) -> bool {
     )
 }
 
-impl Facts {
+impl<'a> Facts<'a> {
+    /// Estimated bytes this function's symbolic facts keep.
+    fn retained_bytes(&self) -> u64 {
+        (self.nodes.len() * std::mem::size_of::<Node>()
+            + self.defs.values().map(Vec::len).sum::<usize>() * 16
+            + self.stores.len() * 32
+            + (self.loops.len() + self.dispatch.len() + self.compares.len()) * 32) as u64
+    }
+
     fn node(&mut self, node: Node) -> NodeId {
         if self.nodes.len() >= MAX_NODES {
             self.nodes_exhausted = true;
@@ -578,12 +635,15 @@ impl Facts {
         self.nodes.len() - 1
     }
 
+    /// None when the body does not decode or the meter runs out.
     fn simulate(
         body: &FunctionBody<'_>,
         mut validator: Option<FuncValidator<ValidatorResources>>,
         params: u32,
+        meter: &'a Meter,
     ) -> Option<Self> {
         let mut facts = Facts {
+            meter,
             params,
             nodes: vec![Node::Unknown],
             defs: BTreeMap::new(),
@@ -599,9 +659,12 @@ impl Facts {
             limited: Cell::new(false),
             depth_cut: Cell::new(false),
             nodes_exhausted: false,
-            store_keys: OnceCell::new(),
+            stores_by_slot: OnceCell::new(),
             advanced_memo: RefCell::new(BTreeMap::new()),
             reloaded_memo: RefCell::new(BTreeMap::new()),
+            slot_advance_memo: RefCell::new(HashMap::new()),
+            loop_store_memo: RefCell::new(HashMap::new()),
+            loop_tree: OnceCell::new(),
         };
         if let Some(v) = validator.as_mut() {
             let mut locals = body.get_locals_reader().ok()?;
@@ -618,6 +681,9 @@ impl Facts {
         let mut stack: Vec<NodeId> = Vec::new();
         let mut frames: Vec<Frame> = Vec::new();
         while !reader.eof() {
+            if !meter.charge(1) {
+                return None;
+            }
             let start = reader.original_position();
             let op = reader.read().ok()?;
             let end = reader.original_position();
@@ -960,34 +1026,63 @@ impl Facts {
         if let Some(advanced) = self.advanced_memo.borrow().get(&local) {
             return *advanced;
         }
-        let advanced = self
-            .definitions(local)
+        let defs = self.definitions(local);
+        self.meter.charge(defs.len() as u64);
+        let advanced = defs
             .iter()
             .any(|(_, def)| self.advances_itself(*def, local));
         self.advanced_memo.borrow_mut().insert(local, advanced);
         advanced
     }
 
+    /// The loops strictly containing an offset, innermost first. Wasm
+    /// control is structured, so loops nest and the innermost one that
+    /// starts before the offset leads up the chain to every container.
+    fn enclosing_loops(&self, offset: usize) -> Vec<(usize, usize)> {
+        let LoopTree { sorted, parents } = self.loop_tree.get_or_init(|| {
+            self.meter.charge(self.loops.len() as u64 * 2);
+            let mut sorted = self.loops.clone();
+            sorted.sort_by(|left, right| left.0.cmp(&right.0).then(right.1.cmp(&left.1)));
+            let mut parents = Vec::with_capacity(sorted.len());
+            let mut open = Vec::<usize>::new();
+            for (index, (start, _)) in sorted.iter().enumerate() {
+                while open.last().is_some_and(|top| sorted[*top].1 <= *start) {
+                    open.pop();
+                }
+                parents.push(open.last().copied());
+                open.push(index);
+            }
+            LoopTree { sorted, parents }
+        });
+        let mut found = Vec::new();
+        let mut at = sorted
+            .partition_point(|(start, _)| *start < offset)
+            .checked_sub(1);
+        while let Some(index) = at {
+            self.meter.charge(1);
+            let (start, end) = sorted[index];
+            if start < offset && offset < end {
+                found.push((start, end));
+            }
+            at = parents[index];
+        }
+        found
+    }
+
     fn in_any_loop(&self, offset: usize) -> bool {
-        self.loops
-            .iter()
-            .any(|(start, end)| *start < offset && offset < *end)
+        !self.enclosing_loops(offset).is_empty()
     }
 
     /// The innermost loop containing an offset, as a merge key.
     fn innermost_loop(&self, offset: Option<usize>) -> Option<(usize, usize)> {
-        let offset = offset?;
-        self.loops
-            .iter()
-            .filter(|(start, end)| *start < offset && offset < *end)
-            .min_by_key(|(start, end)| end - start)
-            .copied()
+        self.enclosing_loops(offset?).first().copied()
     }
 
-    /// One unit of trace work against the current query's budget.
+    /// One logical trace step against the query's budget, and one unit of
+    /// real work on the artifact meter.
     fn step(&self) -> bool {
         let used = self.steps.get();
-        if used >= self.step_limit.get() {
+        if used >= self.step_limit.get() || !self.meter.charge(1) {
             self.limited.set(true);
             return false;
         }
@@ -1017,16 +1112,20 @@ impl Facts {
         (self.render(base, 0), offset.wrapping_add(addend as u64))
     }
 
-    /// Every store keyed once per function: (offset, slot, stored value).
-    fn store_keys(&self) -> &[KeyedStore] {
-        self.store_keys.get_or_init(|| {
-            self.stores
-                .iter()
-                .map(|(offset, addr, store_offset, value)| {
-                    (*offset, self.slot_key(*addr, *store_offset), *value)
-                })
-                .collect()
-        })
+    /// Stores grouped by the slot they write, built once per function.
+    fn stores_for(&self, slot: &SlotKey) -> &[(usize, NodeId)] {
+        let groups = self.stores_by_slot.get_or_init(|| {
+            self.meter.charge(self.stores.len() as u64);
+            let mut groups = HashMap::<SlotKey, Vec<(usize, NodeId)>>::new();
+            for (offset, addr, store_offset, value) in &self.stores {
+                groups
+                    .entry(self.slot_key(*addr, *store_offset))
+                    .or_default()
+                    .push((*offset, *value));
+            }
+            groups
+        });
+        groups.get(slot).map_or(&[], Vec::as_slice)
     }
 
     /// The fixed memory slot a local is reloaded from: one write loads a
@@ -1037,6 +1136,7 @@ impl Facts {
         if let Some(slot) = self.reloaded_memo.borrow().get(&local) {
             return slot.clone();
         }
+        self.meter.charge(self.definitions(local).len() as u64);
         let slot = self.definitions(local).iter().find_map(|(_, def)| {
             let Node::Load { addr, offset, .. } = self.nodes[self.strip(*def)] else {
                 return None;
@@ -1111,6 +1211,8 @@ impl Facts {
                 return (vec![Trace::new(Source::Unknown)], true);
             }
             if !memo.exhausted {
+                // The meter sees only the lookup this hit performs.
+                self.meter.charge(1 + memo.traces.len() as u64);
                 self.steps.set(used + memo.cost);
                 return (memo.traces, false);
             }
@@ -1353,19 +1455,60 @@ impl Facts {
     }
 
     /// A stored value that adds to or subtracts from the slot's prior value,
-    /// following at most two local writes.
+    /// following at most two local writes. Every write of a followed local
+    /// is examined, with no prefix cut; each (local, slot) walk is memoized
+    /// and charged to the meter.
     fn slot_advance(&self, value: NodeId, slot: &SlotKey, carrier: Option<u32>, depth: u8) -> bool {
         match self.nodes[value] {
             Node::Bin { op, a, b } if op.ends_with(".add") || op.ends_with(".sub") => {
                 self.slot_read(a, slot, carrier) || self.slot_read(b, slot, carrier)
             }
-            Node::Local(local) if depth < 2 => self
-                .definitions(local)
-                .iter()
-                .take(MAX_QUERY_STEPS as usize)
-                .any(|(_, def)| self.slot_advance(*def, slot, carrier, depth + 1)),
+            Node::Local(local) if depth < 2 => {
+                let key = (local, slot.clone(), carrier);
+                if let Some(advances) = self.slot_advance_memo.borrow().get(&key) {
+                    self.meter.charge(1);
+                    return *advances;
+                }
+                // A cycle through this local contributes no advance.
+                self.slot_advance_memo
+                    .borrow_mut()
+                    .insert(key.clone(), false);
+                let defs = self.definitions(local);
+                self.meter.charge(defs.len() as u64);
+                let advances = defs
+                    .iter()
+                    .any(|(_, def)| self.slot_advance(*def, slot, carrier, depth + 1));
+                self.slot_advance_memo.borrow_mut().insert(key, advances);
+                advances
+            }
             _ => false,
         }
+    }
+
+    /// Whether a loop stores an advance of `slot` back, walked once per
+    /// (slot, carrier, loop) however many sites read the slot.
+    fn stores_back(
+        &self,
+        slot: &SlotKey,
+        carrier: Option<u32>,
+        (start, end): (usize, usize),
+    ) -> bool {
+        let key = (slot.clone(), carrier, (start, end));
+        self.meter.charge(1);
+        if let Some(stores) = self.loop_store_memo.borrow().get(&key) {
+            return *stores;
+        }
+        let stores = self.stores_for(slot);
+        let first = stores.partition_point(|(offset, _)| *offset <= start);
+        let stored = stores[first..]
+            .iter()
+            .take_while(|(offset, _)| *offset < end)
+            .any(|(_, value)| {
+                self.meter.charge(1);
+                self.slot_advance(*value, slot, carrier, 0)
+            });
+        self.loop_store_memo.borrow_mut().insert(key, stored);
+        stored
     }
 
     fn slot_read(&self, value: NodeId, slot: &SlotKey, carrier: Option<u32>) -> bool {
@@ -1387,17 +1530,12 @@ impl Facts {
     }
 
     fn repeats(&self, trace: &Trace, site: usize) -> (Repeats, Option<(usize, usize)>) {
-        let mut loops = self
-            .loops
-            .iter()
-            .filter(|(start, end)| *start < site && site < *end)
-            .copied()
-            .collect::<Vec<_>>();
-        loops.sort_by_key(|(start, end)| end - start);
+        let loops = self.enclosing_loops(site);
         let Some(innermost) = loops.first().copied() else {
             return (Repeats::Once, None);
         };
         for (start, end) in loops {
+            self.meter.charge(1);
             let inside = |offset: usize| start < offset && offset < end;
             // The selector must be produced inside the loop body, not once
             // before it, to be re-derived per iteration.
@@ -1416,11 +1554,7 @@ impl Facts {
                 // step is not an advancing position.
                 Source::FrameSlot => trace.slots.iter().any(|(local, slot)| {
                     local.is_none_or(|local| self.written_inside(local, (start, end)))
-                        && self.store_keys().iter().any(|(offset, key, value)| {
-                            inside(*offset)
-                                && key == slot
-                                && self.slot_advance(*value, slot, *local, 0)
-                        })
+                        && self.stores_back(slot, *local, (start, end))
                 }),
                 Source::Constant | Source::HandlerAddress => written,
                 _ => false,
@@ -1471,9 +1605,11 @@ impl Facts {
     /// Classify one selector under a fresh per-query step budget. A query a
     /// bound cut short, or one in a function that ran out of symbolic nodes,
     /// is an honest unknown, reported through the returned flag.
-    fn query(&self, selector: NodeId, site: usize, budget: u64) -> Query {
+    /// None when the artifact meter ran out during the query: the site is
+    /// then unclassified, not unknown.
+    fn query(&self, selector: NodeId, site: usize) -> Option<Query> {
         self.steps.set(0);
-        self.step_limit.set(budget.min(MAX_QUERY_STEPS));
+        self.step_limit.set(MAX_QUERY_STEPS);
         self.deepest.set(0);
         self.limited.set(false);
         self.depth_cut.set(false);
@@ -1486,13 +1622,15 @@ impl Facts {
         } else {
             self.choose(traces, site)
         };
-        Query {
+        if self.meter.exhausted() {
+            return None;
+        }
+        Some(Query {
             trace,
             repeats,
             range,
-            steps: self.steps.get(),
             limited,
-        }
+        })
     }
 
     fn render(&self, id: NodeId, depth: u8) -> String {
@@ -1609,79 +1747,133 @@ pub(crate) struct Classified {
     pub omissions: Vec<Value>,
 }
 
-/// Remaining classifier work for one artifact, traced steps plus indexing
-/// and buffer scans, and the sites left unclassified once it runs out.
-/// Unclassified sites are counted, never dropped silently.
-pub(crate) struct Budget {
+/// The one work meter for all classifier work on an artifact, JavaScript or
+/// Wasm: every loop over bytes, writes, stores, sites or slots charges it with
+/// the work it actually does, and retained index memory is charged against a
+/// separate byte bound. Once either bound is reached, classification stops;
+/// sites found but not classified and regions or functions not examined are
+/// counted into a visible omission, never dropped silently.
+///
+/// The meter is distinct from each query's logical step budget, which
+/// replays memoized cost so results never depend on query order. A memo hit
+/// charges the meter only for the lookup it performs.
+pub(crate) struct Meter {
     limit: u64,
-    spent: u64,
-    unclassified: u64,
-    /// Sites a trace bound turned into an honest unknown.
-    limited: u64,
+    retained_limit: u64,
+    used: Cell<u64>,
+    retained: Cell<u64>,
+    peak: Cell<u64>,
+    exhausted: Cell<bool>,
+    unclassified: Cell<u64>,
+    unexamined: Cell<u64>,
+    limited: Cell<u64>,
 }
 
-impl Budget {
-    pub fn new(limit: u64) -> Self {
+/// Work units per artifact. Each unit is a byte scanned, a write, store, slot
+/// or site visited, or one trace step.
+pub(crate) const MAX_ARTIFACT_WORK: u64 = 1_000_000_000;
+/// Index and symbolic-trace memory retained at once per artifact.
+pub(crate) const MAX_RETAINED_BYTES: u64 = 128 << 20;
+
+impl Meter {
+    pub fn new() -> Self {
+        Self::with_limits(MAX_ARTIFACT_WORK, MAX_RETAINED_BYTES)
+    }
+
+    pub fn with_limits(limit: u64, retained_limit: u64) -> Self {
         Self {
             limit,
-            spent: 0,
-            unclassified: 0,
-            limited: 0,
+            retained_limit,
+            used: Cell::new(0),
+            retained: Cell::new(0),
+            peak: Cell::new(0),
+            exhausted: Cell::new(false),
+            unclassified: Cell::new(0),
+            unexamined: Cell::new(0),
+            limited: Cell::new(0),
         }
     }
 
-    /// Every unit of classifier work spent so far.
+    /// Charge work actually done. False once the bound is reached.
+    pub fn charge(&self, work: u64) -> bool {
+        if self.exhausted.get() {
+            return false;
+        }
+        let used = self.used.get().saturating_add(work);
+        if used > self.limit {
+            self.used.set(self.limit);
+            self.exhausted.set(true);
+            return false;
+        }
+        self.used.set(used);
+        true
+    }
+
+    /// Charge memory a structure keeps until it is released.
+    pub fn retain(&self, bytes: u64) -> bool {
+        let retained = self.retained.get().saturating_add(bytes);
+        self.retained.set(retained);
+        self.peak.set(self.peak.get().max(retained));
+        if retained > self.retained_limit {
+            self.exhausted.set(true);
+            return false;
+        }
+        !self.exhausted.get()
+    }
+
+    pub fn release(&self, bytes: u64) {
+        self.retained.set(self.retained.get().saturating_sub(bytes));
+    }
+
+    pub fn exhausted(&self) -> bool {
+        self.exhausted.get()
+    }
+
+    #[cfg(test)]
     pub fn used(&self) -> u64 {
-        self.spent
+        self.used.get()
     }
 
-    pub fn count_limited(&mut self, limited: bool) {
-        self.limited += u64::from(limited);
+    #[cfg(test)]
+    pub fn peak(&self) -> u64 {
+        self.peak.get()
     }
 
-    /// Work outside traced steps, such as bracket pairing or buffer scans.
-    /// It counts toward the same artifact bound as traced steps.
-    pub fn charge_overhead(&mut self, work: u64) {
-        self.spent = self.spent.saturating_add(work).min(self.limit);
+    /// A dispatch site was found but not classified.
+    pub fn count_unclassified(&self, sites: u64) {
+        self.unclassified.set(self.unclassified.get() + sites);
     }
 
-    /// A site was found but the budget is gone.
-    pub fn refuse(&mut self) -> bool {
-        if self.remaining() == 0 {
-            self.unclassified += 1;
-            true
-        } else {
-            false
-        }
+    /// A function region or Wasm function was not examined.
+    pub fn count_unexamined(&self, units: u64) {
+        self.unexamined.set(self.unexamined.get() + units);
     }
 
-    /// A site was found past a structural bound (such as sites per region).
-    pub fn count_unclassified(&mut self) {
-        self.unclassified += 1;
+    pub fn count_limited(&self, limited: bool) {
+        self.limited.set(self.limited.get() + u64::from(limited));
     }
 
-    pub fn spend(&mut self, steps: u64) {
-        self.spent = self.spent.saturating_add(steps.max(1)).min(self.limit);
-    }
-
-    pub fn remaining(&self) -> u64 {
-        self.limit - self.used()
-    }
-
-    pub fn omissions(&self, scope: &str) -> Vec<Value> {
+    /// `unit` names what was not examined: function regions or functions.
+    pub fn omissions(&self, unit: &str) -> Vec<Value> {
         let mut omissions = Vec::new();
-        if self.unclassified > 0 {
-            omissions.push(json!({
+        let (unclassified, unexamined) = (self.unclassified.get(), self.unexamined.get());
+        if unclassified > 0 || unexamined > 0 || self.exhausted.get() {
+            let mut omission = json!({
                 "reason": "classification-work-limit",
-                "detail": format!("The {scope} classification work bound was reached; these dispatch sites were found but not classified."),
-                "omitted_records": self.unclassified,
-            }));
+                "detail": format!(
+                    "A classification work, memory or site bound was reached: {unclassified} dispatch sites found were not classified and {unexamined} {unit} were not examined."
+                ),
+            });
+            if unclassified > 0 {
+                omission["omitted_records"] = json!(unclassified);
+            }
+            omissions.push(omission);
         }
-        if self.limited > 0 {
+        if self.limited.get() > 0 {
             omissions.push(json!({
                 "reason": "classification-trace-limit",
-                "detail": "A trace depth, step, alternative or symbolic node bound cut these selector traces short; they are reported as unknown.",
-                "omitted_records": self.limited,
+                "detail": "A trace depth, step or alternative bound, or a symbolic node bound, cut these selector traces short; they are reported as unknown.",
+                "omitted_records": self.limited.get(),
             }));
         }
         omissions
@@ -1690,17 +1882,25 @@ impl Budget {
 
 /// Classify every `br_table`, `call_indirect`, `return_call_indirect` and
 /// equality ladder in a module. None only when the module does not decode.
-pub(crate) fn wasm(
-    bytes: &[u8],
-    tables: Option<&crate::vm::wasm_tables::Tables>,
-) -> Option<Classified> {
+///
+/// Every function is simulated first, under the meter. Sites are then ranked
+/// module-wide by dispatch strength, loop-enclosed sites with a load-derived
+/// selector first, and classified in that order, so trivial noise elsewhere
+/// cannot exhaust the meter before a real interpreter is reached.
+pub(crate) fn wasm(bytes: &[u8], meter: &Meter) -> Option<Classified> {
+    let tables = crate::vm::wasm_tables::Tables::parse(bytes);
+    if let Some(tables) = &tables {
+        meter.charge(tables.work);
+        meter.retain(tables.retained_bytes());
+    }
+    let tables = tables.as_ref();
     let mut validator = Some(Validator::new_with_features(WasmFeatures::all()));
     let mut imported = 0u32;
     let mut defined = 0u32;
-    let mut sites = Vec::new();
+    let mut functions = Vec::new();
     let mut exports = BTreeSet::new();
     let mut export_offset = None;
-    let mut budget = Budget::new(MAX_ARTIFACT_STEPS);
+    let mut retained = 0u64;
     for payload in Parser::new(0).parse_all(bytes) {
         let payload = payload.ok()?;
         let function = match validator.as_mut().map(|v| v.payload(&payload)) {
@@ -1732,6 +1932,10 @@ pub(crate) fn wasm(
             Payload::CodeSectionEntry(body) => {
                 let index = imported + defined;
                 defined += 1;
+                if meter.exhausted() {
+                    meter.count_unexamined(1);
+                    continue;
+                }
                 let function =
                     function.map(|f| f.into_validator(FuncValidatorAllocations::default()));
                 let params = match &function {
@@ -1744,15 +1948,65 @@ pub(crate) fn wasm(
                         .map_or(0, |(params, _)| params.len() as u32),
                 };
                 let range = body.range();
-                let Some(facts) = Facts::simulate(&body, function, params) else {
-                    continue;
-                };
-                classify_function(&facts, index, range.start, tables, &mut sites, &mut budget);
+                match Facts::simulate(&body, function, params, meter) {
+                    Some(facts) => {
+                        let bytes = facts.retained_bytes();
+                        retained += bytes;
+                        meter.retain(bytes);
+                        functions.push((index, range.start, facts));
+                    }
+                    None if meter.exhausted() => meter.count_unexamined(1),
+                    None => (),
+                }
             }
             _ => (),
         }
     }
-    if sites.is_empty() && budget.unclassified == 0 && exports.len() >= 2 {
+    let mut candidates = Vec::new();
+    for (position, (_, _, facts)) in functions.iter().enumerate() {
+        for (dispatch, entry) in facts.dispatch.iter().enumerate() {
+            let strength = facts.strength(entry.selector, entry.offset);
+            candidates.push((
+                strength,
+                position,
+                entry.offset,
+                Candidate::Dispatch(dispatch),
+            ));
+        }
+        for (subject, compares) in facts.ladders() {
+            let first = &facts.compares[compares[0]];
+            let strength = facts.strength(first.subject, first.offset);
+            candidates.push((
+                strength,
+                position,
+                first.offset,
+                Candidate::Ladder(subject, compares),
+            ));
+        }
+    }
+    candidates.sort_by_key(|(strength, position, offset, _)| {
+        (std::cmp::Reverse(*strength), *position, *offset)
+    });
+    let mut sites = Vec::new();
+    for (_, position, _, candidate) in candidates {
+        let (index, body_offset, facts) = &functions[position];
+        if meter.exhausted() {
+            meter.count_unclassified(1);
+            continue;
+        }
+        match classify_candidate(facts, *index, *body_offset, tables, candidate, meter) {
+            Some(site) => {
+                meter.retain(site.retained_bytes());
+                sites.push(site);
+            }
+            None => meter.count_unclassified(1),
+        }
+    }
+    meter.release(retained);
+    if let Some(tables) = tables {
+        meter.release(tables.retained_bytes());
+    }
+    if sites.is_empty() && !meter.exhausted() && exports.len() >= 2 {
         sites.push(Site {
             kind: Kind::ExportPerRole,
             source: Source::Unknown,
@@ -1776,137 +2030,162 @@ pub(crate) fn wasm(
     }
     Some(Classified {
         sites,
-        omissions: budget.omissions("module"),
+        omissions: meter.omissions("functions"),
     })
 }
 
-fn classify_function(
+enum Candidate {
+    Dispatch(usize),
+    /// A rendered ladder subject and the indexes of its comparisons.
+    Ladder(String, Vec<usize>),
+}
+
+impl Facts<'_> {
+    /// Cheap dispatch strength for ordering: inside a loop, and a selector
+    /// that is a load or a local some write loads.
+    fn strength(&self, selector: NodeId, offset: usize) -> u8 {
+        let looped = self.in_any_loop(offset);
+        let core = self.strip(selector);
+        let loaded = match self.nodes[core] {
+            Node::Load { .. } => true,
+            Node::Local(local) => self.definitions(local).iter().take(8).any(|(_, def)| {
+                self.meter.charge(1);
+                matches!(self.nodes[self.strip(*def)], Node::Load { .. })
+            }),
+            _ => false,
+        };
+        u8::from(looped) * 2 + u8::from(loaded)
+    }
+
+    /// Equality ladders: comparisons on one subject with enough constants.
+    fn ladders(&self) -> Vec<(String, Vec<usize>)> {
+        let mut ladders = BTreeMap::<String, Vec<usize>>::new();
+        for (position, compare) in self.compares.iter().enumerate() {
+            self.meter.charge(1);
+            let subject = self.strip(compare.subject);
+            if matches!(self.nodes[subject], Node::Unknown | Node::Const(_)) {
+                continue;
+            }
+            ladders
+                .entry(self.render(subject, 0))
+                .or_default()
+                .push(position);
+        }
+        ladders
+            .into_iter()
+            .filter(|(_, compares)| {
+                compares
+                    .iter()
+                    .map(|position| self.compares[*position].constant)
+                    .collect::<BTreeSet<_>>()
+                    .len()
+                    >= MIN_COMPARE_ARMS
+            })
+            .collect()
+    }
+}
+
+fn classify_candidate(
     facts: &Facts,
     index: u32,
     body_offset: usize,
     tables: Option<&crate::vm::wasm_tables::Tables>,
-    sites: &mut Vec<Site>,
-    budget: &mut Budget,
-) {
-    for dispatch in &facts.dispatch {
-        if budget.refuse() {
-            continue;
-        }
-        let Query {
-            trace,
-            repeats,
-            range: loop_range,
-            steps,
-            limited,
-        } = facts.query(dispatch.selector, dispatch.offset, budget.remaining());
-        budget.spend(steps);
-        budget.count_limited(limited);
-        let (kind, instruction, arm_count, table) = match dispatch.op {
-            DispatchOp::BrTable { arms } => {
-                (Kind::SwitchOnValue, "br_table", Some(u64::from(arms)), None)
-            }
-            DispatchOp::CallIndirect {
-                table: table_index,
-                ty,
-                tail,
-            } => {
-                let kind = if tail || trace.source == Source::HandlerAddress {
-                    Kind::Threaded
-                } else {
-                    Kind::HandlerTable
-                };
-                let matching = tables.and_then(|tables| tables.matching_slots(table_index, ty));
-                let table = json!({
-                    "table_index": table_index,
-                    "type_index": ty,
-                    "populated_slot_count": matching.as_ref().map(|(_, populated)| populated),
-                    "matching_slot_count": matching.as_ref().map(|(slots, _)| slots.len()),
-                    "matching_slots": matching.as_ref().map(|(slots, _)| {
-                        slots.iter().take(MAX_LISTED_SLOTS).copied().collect::<Vec<_>>()
-                    }),
-                });
-                (
-                    kind,
-                    if tail {
-                        "return_call_indirect"
+    candidate: Candidate,
+    meter: &Meter,
+) -> Option<Site> {
+    match candidate {
+        Candidate::Dispatch(position) => {
+            let dispatch = &facts.dispatch[position];
+            let Query {
+                trace,
+                repeats,
+                range: loop_range,
+                limited,
+            } = facts.query(dispatch.selector, dispatch.offset)?;
+            meter.count_limited(limited);
+            let (kind, instruction, arm_count, table) = match dispatch.op {
+                DispatchOp::BrTable { arms } => {
+                    (Kind::SwitchOnValue, "br_table", Some(u64::from(arms)), None)
+                }
+                DispatchOp::CallIndirect {
+                    table: table_index,
+                    ty,
+                    tail,
+                } => {
+                    let kind = if tail || trace.source == Source::HandlerAddress {
+                        Kind::Threaded
                     } else {
-                        "call_indirect"
-                    },
-                    matching.map(|(slots, _)| slots.len() as u64),
-                    Some(table),
-                )
-            }
-        };
-        sites.push(Site {
-            kind,
-            source: trace.source,
-            repeats,
-            instruction,
-            function_index: Some(index),
-            function_body_offset: Some(body_offset),
-            byte_offset: dispatch.offset,
-            byte_size: dispatch.size,
-            line: None,
-            column: None,
-            selector_expression: facts.selector_text(dispatch.selector, &trace),
-            selector_offset: trace.anchor,
-            through_lookup: trace.through_lookup,
-            arm_count,
-            loop_range,
-            buffer_kind: None,
-            table,
-        });
-    }
-    let mut ladders = BTreeMap::<String, Vec<&Compare>>::new();
-    for compare in &facts.compares {
-        let subject = facts.strip(compare.subject);
-        if matches!(facts.nodes[subject], Node::Unknown | Node::Const(_)) {
-            continue;
+                        Kind::HandlerTable
+                    };
+                    let matching =
+                        tables.and_then(|tables| tables.matching_slots(table_index, ty, meter));
+                    (
+                        kind,
+                        if tail {
+                            "return_call_indirect"
+                        } else {
+                            "call_indirect"
+                        },
+                        matching.as_ref().map(|matching| matching.0.len() as u64),
+                        Some(SiteTable {
+                            table_index,
+                            type_index: ty,
+                            matching,
+                        }),
+                    )
+                }
+            };
+            Some(Site {
+                kind,
+                source: trace.source,
+                repeats,
+                instruction,
+                function_index: Some(index),
+                function_body_offset: Some(body_offset),
+                byte_offset: dispatch.offset,
+                byte_size: dispatch.size,
+                line: None,
+                column: None,
+                selector_expression: facts.selector_text(dispatch.selector, &trace),
+                selector_offset: trace.anchor,
+                through_lookup: trace.through_lookup,
+                arm_count,
+                loop_range,
+                buffer_kind: None,
+                table,
+            })
         }
-        ladders
-            .entry(facts.render(subject, 0))
-            .or_default()
-            .push(compare);
-    }
-    for (subject, compares) in ladders {
-        let constants = compares
-            .iter()
-            .map(|compare| compare.constant)
-            .collect::<BTreeSet<_>>();
-        if constants.len() < MIN_COMPARE_ARMS {
-            continue;
+        Candidate::Ladder(subject, compares) => {
+            let first = &facts.compares[compares[0]];
+            let Query {
+                trace,
+                repeats,
+                range: loop_range,
+                limited,
+            } = facts.query(first.subject, first.offset)?;
+            meter.count_limited(limited);
+            Some(Site {
+                kind: Kind::CompareChain,
+                source: trace.source,
+                repeats,
+                instruction: "i32.eq ladder",
+                function_index: Some(index),
+                function_body_offset: Some(body_offset),
+                byte_offset: first.offset,
+                byte_size: first.size,
+                line: None,
+                column: None,
+                selector_expression: format!(
+                    "{subject} == constant ({} comparisons)",
+                    compares.len()
+                ),
+                selector_offset: trace.anchor,
+                through_lookup: trace.through_lookup,
+                arm_count: Some(compares.len() as u64),
+                loop_range,
+                buffer_kind: None,
+                table: None,
+            })
         }
-        if budget.refuse() {
-            continue;
-        }
-        let first = compares[0];
-        let Query {
-            trace,
-            repeats,
-            range: loop_range,
-            steps,
-            limited,
-        } = facts.query(first.subject, first.offset, budget.remaining());
-        budget.spend(steps);
-        budget.count_limited(limited);
-        sites.push(Site {
-            kind: Kind::CompareChain,
-            source: trace.source,
-            repeats,
-            instruction: "i32.eq ladder",
-            function_index: Some(index),
-            function_body_offset: Some(body_offset),
-            byte_offset: first.offset,
-            byte_size: first.size,
-            line: None,
-            column: None,
-            selector_expression: format!("{subject} == constant ({} comparisons)", compares.len()),
-            selector_offset: trace.anchor,
-            through_lookup: trace.through_lookup,
-            arm_count: Some(compares.len() as u64),
-            loop_range,
-            buffer_kind: None,
-            table: None,
-        });
     }
 }

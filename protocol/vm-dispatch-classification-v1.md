@@ -10,9 +10,9 @@ definition. A Rust test fails if a copy, including the OpenAPI components,
 drifts from the standalone schema.
 
 This contract lands as one unit with the commits that introduce and then
-correct it (526178a, 7258370 and their follow-up). No document was released
-against an earlier draft, so it keeps version 1; do not treat 526178a alone as
-a released contract.
+correct it (526178a, 7258370, f4092e3 and their follow-up). No document was
+released against an earlier draft, so it keeps version 1; do not treat any of
+those commits alone as a released contract.
 
 ## Why it exists
 
@@ -168,6 +168,11 @@ which keeps them. A `ref.null` item empties its slot; any other non-`ref.func`
 item stores a reference whose function is unknown, so it never matches a type
 and never erases knowledge silently.
 
+`populated_slot_count` is the corrected count of placed slots. It is not a
+ranking input: the detector's Wasm ranking keeps its own element fanout, which
+sums segment entries, so classification never moves a tier or score. A ranking
+change needs its own ranking version.
+
 The object lists at most 256 sites. Interpreter candidates and multiplexers
 are listed before other sites, so the bound never hides them behind ordinary
 branching. `site_count`, `role_counts` and `kind_counts` cover every classified
@@ -176,20 +181,42 @@ site, and `omitted_site_count` names the classified sites that are not listed.
 ## Work bounds
 
 Classification work is bounded so a generated script or module cannot stall
-analysis, and every operation counts: traced steps, bracket pairing and buffer
-scans draw on one per-artifact budget. Each selector query also has its own
-step budget, and each JavaScript function region classifies at most 4096 sites.
-JavaScript regions are classified in pattern-rank order, strongest dispatch
-evidence first, so large noise regions cannot starve a real interpreter.
+analysis. One meter per artifact covers all classifier work, JavaScript and
+Wasm, and every classifier loop charges it for the work it actually does:
+bracket pairing, loop intervals, statement ends, the region index, if-ladder
+scans, Wasm table parsing and type-matching slot scans, symbolic simulation
+per operator, `repeats` and slot-advance walks, buffer scans and every trace
+step. The meter also bounds the bytes the index and symbolic traces retain at
+once (128 MiB). A memo hit charges the lookup and the copy it returns, never
+the work it saved.
 
-- A site found after the artifact budget or the region site bound is spent is
-  not classified and is counted as `classification-work-limit` with
-  `omitted_records`. The opcode-claim gate reports such a site as not
-  classified because of the work limit, never as "not a cursor-advancing loop".
+Each walk that many sites share is done once: the region index stores spans,
+not copies; a braceless loop body's statement end scans at most 4096 bytes and
+stops at a line break; slot-advance walks are memoized per (local, slot,
+carrier) and store-back walks per (slot, carrier, loop); loop containment walks
+only the nesting chain; and a table's matching slots are one shared list. A
+test quadruples every adversarial input of the four reviews and requires total
+work and peak retained bytes to grow at most linearly.
+
+Each selector query also has a logical step budget of 4096 steps, replayed on
+memo hits so a site's result never depends on query order. It is a semantic
+bound, not a work charge.
+
+Work goes to the strongest dispatch evidence first, so noise cannot starve an
+interpreter. JavaScript regions are classified in pattern-rank order, and the
+sites inside a region in strength order (a loop-enclosed, cursor-like fetch
+first) before the 4096-site region bound. Every Wasm function is simulated,
+then sites are classified module-wide in strength order.
+
+- When the meter is exhausted, classification stops. Every site found but not
+  classified is counted as `classification-work-limit` with `omitted_records`,
+  and the detail counts the regions or functions never examined. The
+  opcode-claim gate reports such a site as not classified because of the work
+  limit, never as "not a cursor-advancing loop".
 - A site whose trace hit the depth, per-query step or alternatives bound, or
   whose Wasm function ran out of symbolic nodes, is classified `unknown` and
   counted as `classification-trace-limit`. A bound never yields a confident
-  different source.
+  different source, and no bound cuts a list of writes or stores silently.
 - JavaScript regions beyond the detector's region work bound add
   `classification-region-limit`. A module whose sections do not decode for
   classification adds `classification-unavailable`.
@@ -207,11 +234,20 @@ classification is never an input to handler recovery, tier or score:
   object map) survives only when the region dispatches through that table, as
   `t[selector](...)` or `t[selector].call(...)`, including from a nested
   function of the region, at an interpreter-candidate site. A dispatch through
-  a temporary (`h = t[op]; h()`) ties nothing. Operand-width guesses and
+  a temporary (`h = t[op]; h()`) ties nothing, and a table with no such site
+  is withheld as unclassified.
+- A table ties only to calls that read its own binding. The gate resolves each
+  table name to its declaring function scope (parameters, `var`, `let`,
+  `const` and function declarations; a free name binds outside the region), so
+  a nested function that declares its own `ops` dispatches a different table.
+  A binding it cannot resolve with certainty (block-scoped, destructured or
+  catch bindings, braceless arrow parameters, `with` or `eval`) withholds the
+  table. A property such as `this.ops` matches only property sites. Operand-width guesses and
   owned-effect reachability walks use only surviving handlers, so they never
   start from a router.
-- The gate reads the roles of every classified site, recomputed in full from
-  the artifact bytes, never the bounded listed document.
+- The gate reads the roles of every classified site from the same metered
+  classification run that produced the analysis, never the bounded listed
+  document and never a second classification pass.
 - When the gate removes handlers, the workspace records `handler-withheld`
   with their count instead of `handler-unavailable`, and the tier stays what
   recovery decided. A differential test runs every owned input with and
@@ -237,9 +273,10 @@ classification is never an input to handler recovery, tier or score:
 - On the pinned public QuickJS debug build, 13 of 384 sites are interpreter
   candidates, including the opcode dispatch at function 414; 7 sites are
   trace-limited unknowns, among them byte-cursor format-string parsers.
-- JavaScript bindings are matched by name inside one region. Shadowed names,
-  destructuring and cross-region aliases are not resolved. A handler table
-  used through a temporary or from a nested function supplies no opcodes.
+- Selector bindings inside the classifier are matched by name inside one
+  region. Shadowed names, destructuring and cross-region aliases are not
+  resolved there; only the opcode-claim gate resolves table scopes. A handler
+  table used through a temporary supplies no opcodes.
 - The declared minimum is a lower bound for an imported table, so an imported
   table's out-of-range segment may still fit at instantiation. It is reported,
   not placed.

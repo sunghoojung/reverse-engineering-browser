@@ -17,6 +17,8 @@ mod native_guest;
 mod native_module;
 #[path = "vm_opcode_native_wasm.rs"]
 mod native_wasm;
+#[path = "vm_opcode_scope.rs"]
+mod scope;
 #[path = "vm_opcode_wasm.rs"]
 mod wasm;
 
@@ -606,6 +608,35 @@ static OBJECT_ASSIGNMENT: LazyLock<Regex> =
 static INDEXED_TABLE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^([A-Za-z_$][\w$]*)\s*\[").expect("indexed table"));
 
+/// The role a handler table is dispatched under: the sites whose table name
+/// reads the table's own binding. No such site is no classification. A
+/// binding that cannot be resolved with certainty withholds the table.
+fn table_verdict(
+    binding: scope::Binding,
+    sites: Option<&Vec<(scope::Binding, Option<vm::dispatch_shape::Role>)>>,
+) -> std::result::Result<Option<vm::dispatch_shape::Role>, &'static str> {
+    use vm::dispatch_shape::Role;
+    const AMBIGUOUS: &str = "A handler table name has more than one possible binding, so no dispatch site is tied to it. Its entries are not claimed as guest opcodes.";
+    let sites = sites.map_or(&[][..], Vec::as_slice);
+    if binding == scope::Binding::Ambiguous
+        || sites
+            .iter()
+            .any(|(site, _)| *site == scope::Binding::Ambiguous)
+    {
+        return Err(AMBIGUOUS);
+    }
+    let roles = sites
+        .iter()
+        .filter(|(site, _)| *site == binding)
+        .map(|(_, role)| *role)
+        .collect::<Vec<_>>();
+    Ok(if roles.contains(&Some(Role::InterpreterCandidate)) {
+        Some(Role::InterpreterCandidate)
+    } else {
+        roles.into_iter().find(Option::is_some).flatten()
+    })
+}
+
 /// Handlers `static_handlers` recovered, after the opcode-claim gate.
 struct Gated {
     handlers: Vec<Value>,
@@ -652,21 +683,26 @@ fn gate_handlers(
         switches.push((switch_match.start(), opening_brace, closing_brace));
     }
     // Every site that dispatches through a named table, nested functions
-    // included, as recovery collects table names from the whole region.
-    let mut table_roles = BTreeMap::<String, Vec<Option<Role>>>::new();
+    // included, as recovery collects table names from the whole region. Each
+    // site is keyed by the binding its table name reads, so a table ties
+    // only to the calls through that same declaration.
+    let scopes = scope::Scopes::new(&region);
+    let mut table_sites = BTreeMap::<String, Vec<(scope::Binding, Option<Role>)>>::new();
     for captures in vm::dispatch_shape::javascript::INDEXED_CALL.captures_iter(&region) {
+        let name = captures.get(1).expect("table name");
         let at = start + captures.get(0).expect("indexed call").start();
-        table_roles
-            .entry(captures[1].to_owned())
+        table_sites
+            .entry(name.as_str().to_owned())
             .or_default()
-            .push(roles.get(at));
+            .push((scopes.binding(name.as_str(), name.start()), roles.get(at)));
     }
     let objects = OBJECT_ASSIGNMENT
         .captures_iter(&region)
         .filter_map(|captures| {
             let opening = captures.get(0)?.end() - 1;
             let closing = matching(region.as_bytes(), opening, b'{', b'}')?;
-            Some((opening, closing, captures[1].to_owned()))
+            let name = captures.get(1)?;
+            Some((opening, closing, name.as_str().to_owned(), name.start()))
         })
         .collect::<Vec<_>>();
     let mut kept = Vec::new();
@@ -676,32 +712,33 @@ fn gate_handlers(
         let at = handler["source"]["byte_offset"].as_u64().unwrap_or(0) as usize;
         let relative = at.saturating_sub(start);
         let verdict = if handler.get("handler_index").is_none() {
-            switches
+            Ok(switches
                 .iter()
                 .find(|(_, open, close)| *open < relative && relative < *close)
                 .map(|(keyword, _, _)| roles.get(start + keyword))
-                .unwrap_or(None)
+                .unwrap_or(None))
         } else {
-            let table = INDEXED_TABLE
+            INDEXED_TABLE
                 .captures(&region[relative.min(region.len())..])
-                .map(|captures| captures[1].to_owned())
+                .map(|captures| (captures[1].to_owned(), relative))
                 .or_else(|| {
                     objects
                         .iter()
-                        .filter(|(open, close, _)| *open < relative && relative < *close)
-                        .max_by_key(|(open, _, _)| *open)
-                        .map(|(_, _, name)| name.clone())
-                });
-            table
-                .and_then(|name| table_roles.get(&name))
-                .map(|sites| {
-                    if sites.contains(&Some(Role::InterpreterCandidate)) {
-                        Some(Role::InterpreterCandidate)
-                    } else {
-                        sites.iter().copied().find(Option::is_some).flatten()
-                    }
+                        .filter(|(open, close, _, _)| *open < relative && relative < *close)
+                        .max_by_key(|(open, _, _, _)| *open)
+                        .map(|(_, _, name, at)| (name.clone(), *at))
                 })
-                .unwrap_or(Some(Role::Other))
+                .map_or(Ok(None), |(name, at)| {
+                    table_verdict(scopes.binding(&name, at), table_sites.get(&name))
+                })
+        };
+        let verdict = match verdict {
+            Ok(verdict) => verdict,
+            Err(reason) => {
+                withheld += 1;
+                unknowns.push(reason.into());
+                continue;
+            }
         };
         if verdict == Some(Role::InterpreterCandidate) {
             kept.push(handler);
@@ -1175,15 +1212,23 @@ fn workspace_evidence_class(
         .then_some("handler-table-candidate")
 }
 
+/// One artifact's analysis result and the dispatch roles the same metered
+/// classification computed for it.
+pub(crate) struct Analysis<'a> {
+    pub result: &'a Value,
+    pub roles: Option<&'a vm::dispatch_shape::Roles>,
+}
+
 pub(crate) fn workspace(
     root: &Path,
     artifact: &Value,
     bytes: &[u8],
-    result: &Value,
+    analysis: Analysis<'_>,
     snapshot_artifacts: &[Value],
     events: &[Value],
     budget_losses: &[DispatchBudgetLoss],
 ) -> Option<Value> {
+    let Analysis { result, roles } = analysis;
     // A ranked Wasm table may be worth inspecting without enough independent
     // evidence for likely-vm. Keeping its static workspace never raises that tier.
     let static_wasm_candidate = result["runtime"] == "webassembly"
@@ -1193,11 +1238,10 @@ pub(crate) fn workspace(
         return None;
     }
     let runtime = result["runtime"].as_str()?;
-    // Roles of every classified site, recomputed in full from the artifact
-    // bytes: the gate never reads the bounded listed document.
-    let roles = gate_enabled()
-        .then(|| vm::dispatch_roles(runtime, bytes))
-        .flatten();
+    // Roles of every classified site from the same metered classification
+    // that produced the analysis: the gate never reads the bounded listed
+    // document and never runs a second classification pass.
+    let roles = roles.filter(|_| gate_enabled());
     let (mut handlers, model, mut unknowns, mut omissions, module_dispatch, handler_tables) =
         match runtime {
             "javascript" => {
@@ -1519,7 +1563,7 @@ pub(crate) fn workspace(
         result
             .get("frontend")
             .and_then(|frontend| frontend.get("dispatch_inventory")),
-        roles.as_ref().filter(|_| runtime == "webassembly"),
+        roles.filter(|_| runtime == "webassembly"),
     );
     let machine = machine_state(&handlers);
     let attributions = crate::vm_reachability::attributions(&traversal, &handlers);
@@ -3062,7 +3106,14 @@ mod tests {
             root.path(),
             &interpreter,
             &bytes,
-            &analysis["results"][0],
+            Analysis {
+                result: &analysis["results"][0],
+                roles: vm::dispatch_roles(
+                    analysis["results"][0]["runtime"].as_str().unwrap(),
+                    &bytes,
+                )
+                .as_ref(),
+            },
             &snapshots,
             &[],
             &[],
@@ -3771,64 +3822,6 @@ if (!validate(document)) throw new Error('Backend workspace rejected by shipped 
         .expect("review fixture")
     }
 
-    /// Every owned input the differential invariant covers: repository
-    /// fixtures, dispatch-shape fixtures, review repro copies and generated
-    /// review inputs, as (name, bytes, kind).
-    fn differential_inputs() -> Vec<(String, Vec<u8>, &'static str)> {
-        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
-        let mut inputs = Vec::new();
-        for directory in [
-            "tools/fixtures/dispatch-shapes",
-            "tools/fixtures/dispatch-review",
-            "tools/fixtures/vm-dynamic-debug",
-            "tools/fixtures/vm-dynamic-debug/xor-decoded",
-            "tools/fixtures/vm-workspace-effects",
-            "tools/fixtures/native-vm-dispatch",
-            "tools/fixtures/vm-analysis-packs",
-            "apps/runtime-hook-demo",
-            "apps/runtime-hook-demo/ghostwire-worker",
-        ] {
-            let mut paths = fs::read_dir(root.join(directory))
-                .unwrap()
-                .map(|entry| entry.unwrap().path())
-                .collect::<Vec<_>>();
-            paths.sort();
-            for path in paths {
-                let kind = match path.extension().and_then(|ext| ext.to_str()) {
-                    Some("js" | "mjs") => "javascript",
-                    Some("wasm") => "wasm",
-                    _ => continue,
-                };
-                inputs.push((
-                    path.strip_prefix(&root).unwrap().display().to_string(),
-                    fs::read(&path).unwrap(),
-                    kind,
-                ));
-            }
-        }
-        for name in ["wasm-dispatch.json", "wasm-ranked-dispatch.json"] {
-            let modules: Value = serde_json::from_str(
-                &fs::read_to_string(root.join("tools/fixtures/vm-dynamic-debug").join(name))
-                    .unwrap(),
-            )
-            .unwrap();
-            for (key, value) in modules.as_object().unwrap() {
-                if let Some(hex) = value.as_str()
-                    && let Ok(bytes) = hex::decode(hex)
-                {
-                    inputs.push((format!("{name}#{key}"), bytes, "wasm"));
-                }
-            }
-        }
-        for (name, source) in vm::review_inputs::javascript() {
-            inputs.push((format!("review:{name}"), source.into_bytes(), "javascript"));
-        }
-        for (name, bytes) in vm::review_inputs::wasm() {
-            inputs.push((format!("review:{name}"), bytes, "wasm"));
-        }
-        inputs
-    }
-
     fn tier_and_score(bytes: &[u8], kind: &str, gate: bool) -> (Value, Value) {
         GATE_DISABLED.with(|disabled| disabled.set(!gate));
         let (_, analysis, _) = analyze_artifact(bytes, kind, &[]);
@@ -3842,7 +3835,7 @@ if (!validate(document)) throw new Error('Backend workspace rejected by shipped 
     /// which is the same pipeline with the gate off.
     #[test]
     fn classification_never_changes_tier_or_score_on_any_owned_input() {
-        let inputs = differential_inputs();
+        let inputs = vm::review_inputs::differential_inputs();
         assert!(inputs.len() >= 90, "{} differential inputs", inputs.len());
         let mut differences = Vec::new();
         for (name, bytes, kind) in &inputs {
@@ -3853,6 +3846,158 @@ if (!validate(document)) throw new Error('Backend workspace rejected by shipped 
             }
         }
         assert!(differences.is_empty(), "{}", differences.join("\n"));
+    }
+
+    /// Differential invariant against base itself: on every owned input,
+    /// tier, score, finding ID and dispatch inventory equal the snapshot the
+    /// base (2185b89) CLI wrote. Regenerate it with
+    /// `make dispatch-base-expectations`.
+    #[test]
+    fn analysis_matches_the_base_snapshot_on_every_owned_input() {
+        let expected: Value = serde_json::from_str(include_str!(
+            "../../../tools/fixtures/dispatch-review/base-expectations.json"
+        ))
+        .unwrap();
+        let expected = expected["inputs"].as_object().unwrap();
+        let inputs = vm::review_inputs::differential_inputs();
+        assert_eq!(inputs.len(), expected.len(), "snapshot covers every input");
+        let mut differences = Vec::new();
+        for (name, bytes, kind) in &inputs {
+            let (_, analysis, _) = analyze_artifact(bytes, kind, &[]);
+            let result = &analysis["results"][0];
+            let want = expected
+                .get(name)
+                .unwrap_or_else(|| panic!("{name} missing from the base snapshot"));
+            for key in ["tier", "vm_score", "finding_id"] {
+                if result[key] != want[key] {
+                    differences.push(format!(
+                        "{name} {key}: {} vs base {}",
+                        result[key], want[key]
+                    ));
+                }
+            }
+            if result["frontend"]
+                .get("dispatch_inventory")
+                .cloned()
+                .unwrap_or(Value::Null)
+                != want["dispatch_inventory"]
+            {
+                differences.push(format!("{name} dispatch_inventory"));
+            }
+        }
+        assert!(differences.is_empty(), "{}", differences.join("\n"));
+    }
+
+    fn first_site(classification: &Value, instruction: &str) -> Value {
+        classification["sites"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .rev()
+            .find(|site| site["instruction"] == instruction)
+            .cloned()
+            .unwrap()
+    }
+
+    /// Third review: a frame slot whose advancing write follows thousands of
+    /// constant writes is still found, never cut by a silent prefix.
+    #[test]
+    fn slot_advance_has_no_silent_prefix_cut() {
+        let bytes = vm::review_inputs::slot_writes(4096);
+        let (_, analysis, _) = analyze_artifact(&bytes, "wasm", &[]);
+        let classification = &analysis["results"][0]["frontend"]["dispatch_classification"];
+        let site = first_site(classification, "br_table");
+        let limited = classification["omissions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|omission| omission["reason"] == "classification-trace-limit");
+        assert!(
+            site["role"] == "interpreter-candidate"
+                || (site["selector_source"] == "unknown" && limited),
+            "{site}"
+        );
+    }
+
+    /// Third review: tables bind by declaring scope. A nested `ops` that an
+    /// inner cursor loop dispatches does not tie the outer `ops` handlers.
+    #[test]
+    fn handler_tables_bind_to_their_declaring_scope() {
+        for name in ["j_shadow2.js", "j_shadow2_ctl.js"] {
+            let (_, analysis, document) = analyze(&review_fixture(name), &[]);
+            assert_eq!(analysis["results"][0]["tier"], "likely-vm", "{name}");
+            assert_eq!(handler_opcodes(&document), Vec::<u64>::new(), "{name}");
+        }
+    }
+
+    /// Third review: strong sites are classified before trivial noise, in a
+    /// JavaScript region and across Wasm functions.
+    #[test]
+    fn trivial_noise_never_starves_the_interpreter() {
+        let (_, analysis, document) = analyze(&vm::review_inputs::starve(4200, 5000), &[]);
+        assert_eq!(analysis["results"][0]["tier"], "likely-vm");
+        assert_eq!(handler_opcodes(&document), [0, 1, 2]);
+        let bytes = vm::review_inputs::wasm_starve(4200, 5000);
+        let (_, analysis, _) = analyze_artifact(&bytes, "wasm", &[]);
+        let classification = &analysis["results"][0]["frontend"]["dispatch_classification"];
+        assert_eq!(classification["role_counts"]["interpreter-candidate"], 1);
+    }
+
+    /// Third review: a handler table no indexed call dispatches is withheld
+    /// as unclassified, not as "not a cursor-advancing loop".
+    #[test]
+    fn a_table_without_a_dispatch_site_is_withheld_as_unclassified() {
+        let source = "function run(code,stack){var pc=0;var handlers={1:function(){stack.push(code[pc++])},2:function(){stack.pop()}};while(pc<code.length){var fn=handlers[code[pc++]];fn(stack);}return stack;}";
+        let start = source.find('{').unwrap() + 1;
+        let (handlers, _, unknowns, _) = classified_handlers(source, start, source.len() - 1);
+        assert!(handlers.is_empty());
+        assert!(
+            !unknowns
+                .iter()
+                .any(|s| s.contains("not a cursor-advancing loop")),
+            "{unknowns:?}"
+        );
+        assert!(
+            unknowns
+                .iter()
+                .any(|s| s.contains("no structural classification")),
+            "{unknowns:?}"
+        );
+    }
+
+    /// Third review: an element table too large to expand is counted.
+    #[test]
+    fn oversized_element_tables_are_counted() {
+        let slots = 1_000_001;
+        let text = format!(
+            r#"(module (memory 1)
+              (type $t (func (param i32) (result i32)))
+              (table {slots} funcref)
+              (func $h (type $t) (local.get 0))
+              (elem (i32.const 0) func {})
+              (func (export "run") (param $code i32) (param $len i32) (result i32)
+                (local $pc i32) (local $acc i32)
+                (block $exit (loop $again
+                  (br_if $exit (i32.ge_u (local.get $pc) (local.get $len)))
+                  (local.set $acc (call_indirect (type $t) (local.get $acc)
+                    (i32.load8_u (i32.add (local.get $code) (local.get $pc)))))
+                  (local.set $pc (i32.add (local.get $pc) (i32.const 1)))
+                  (br $again)))
+                (local.get $acc)))"#,
+            "$h ".repeat(slots)
+        );
+        let bytes = wat::parse_str(text).unwrap();
+        let (_, _, document) = analyze_artifact(&bytes, "wasm", &[]);
+        let workspace = &document["workspaces"][0];
+        assert!(
+            workspace["coverage"]["omissions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|omission| omission["reason"] == "element-table-limit"),
+            "{}",
+            workspace["coverage"]["omissions"]
+        );
     }
 
     /// Second review, blockers: tier and score are the unchanged base
@@ -4072,49 +4217,96 @@ if (!validate(document)) throw new Error('Backend workspace rejected by shipped 
             classification["site_count"].as_u64().unwrap() + unclassified,
             8000
         );
-        // Work, not wall time: steps per classified site stay constant as the
-        // region grows, so lookups are indexed rather than rescanned.
-        let work = |count: usize| {
-            let body = (0..count)
-                .map(|i| format!("var v{i}=1;t[v{i}](x);"))
-                .collect::<String>();
-            let (document, steps) =
-                vm::javascript_classification_work(&format!("function run(t,x){{{body}}}"));
-            assert_eq!(document["site_count"], count);
-            steps
-        };
-        let (small, large) = (work(1000), work(2000));
-        assert!(small <= 16 * 1000, "{small} work units for 1000 sites");
-        assert!(large <= 2 * small, "{small} then {large}");
-        // All classifier work, including bracket pairing and buffer scans,
-        // stays linear in the input: a doubled input at most doubles it.
-        let total = |source: String| vm::javascript_classification_work(&source).1;
-        // Definitions and sites grow together: per-site buffer scans would
-        // make this quadratic.
-        let bufkind = |size: usize| {
-            total(format!(
-                "function big(c,x){{var p=0;{}while(p<c.length){{{}}}}}",
-                "c=x;".repeat(size),
-                "switch(c[p++]){case 1:case 2:case 3:p+=1}".repeat(size / 4)
-            ))
-        };
-        let pairs = |count: usize| {
-            total(format!(
-                "function big(s,x){{{}{}}}",
-                "if(/\\(/.test(s))x++;".repeat(count),
-                "if(/\\]/.test(s))x++;".repeat(count)
-            ))
-        };
-        for (name, measure) in [
-            ("pairing", &pairs as &dyn Fn(usize) -> u64),
-            ("buffer_kind", &bufkind),
-        ] {
-            let (small, large) = (measure(2000), measure(4000));
-            assert!(
-                large <= small * 2 + small / 5,
-                "{name}: {small} then {large} work units"
-            );
+    }
+
+    /// Fourth review: exhausting the artifact meter stops classification
+    /// within its limit and records a counted omission. Sites found but not
+    /// classified are omitted records; regions or functions never examined
+    /// are counted in the detail, so classified plus omitted never exceeds a
+    /// full run.
+    #[test]
+    fn meter_exhaustion_stops_and_counts_every_site() {
+        let inputs = [
+            (
+                "javascript",
+                vm::review_inputs::starve(200, 400).into_bytes(),
+            ),
+            ("webassembly", vm::review_inputs::wasm_starve(200, 400)),
+        ];
+        for (runtime, bytes) in inputs {
+            let full = vm::classification_under(runtime, &bytes, &vm::dispatch_shape::Meter::new());
+            let total = full["site_count"].as_u64().unwrap();
+            assert!(total > 100, "{runtime}: {total} sites");
+            let mut exhausted_runs = 0;
+            for limit in [1_000, 10_000, 30_000, 100_000, 300_000] {
+                let meter = vm::dispatch_shape::Meter::with_limits(limit, u64::MAX);
+                let document = vm::classification_under(runtime, &bytes, &meter);
+                assert!(meter.used() <= limit, "{runtime} {limit}: {}", meter.used());
+                let omissions = document["omissions"].as_array().unwrap();
+                let omitted = omissions
+                    .iter()
+                    .filter(|omission| omission["reason"] == "classification-work-limit")
+                    .filter_map(|omission| omission["omitted_records"].as_u64())
+                    .sum::<u64>();
+                let classified = document["site_count"].as_u64().unwrap();
+                if meter.exhausted() {
+                    exhausted_runs += 1;
+                    assert!(
+                        omissions
+                            .iter()
+                            .any(|omission| omission["reason"] == "classification-work-limit"),
+                        "{runtime} {limit}: {omissions:?}"
+                    );
+                    assert!(
+                        classified + omitted <= total,
+                        "{runtime} {limit}: {classified} + {omitted} > {total}"
+                    );
+                }
+            }
+            assert!(exhausted_runs > 0, "{runtime}: no limit was reached");
         }
+    }
+
+    /// Fourth review, root cause: one meter charges every classifier loop,
+    /// JavaScript and Wasm. On every adversarial shape of all four reviews,
+    /// quadrupling the input at most quadruples total work and peak retained
+    /// bytes (with a 10% allowance), and the larger input finishes under the
+    /// meter.
+    #[test]
+    fn classifier_work_and_memory_scale_linearly() {
+        const N: usize = 1024;
+        let measure = |runtime: &str, bytes: &[u8]| {
+            let (_, meter) = match runtime {
+                "javascript" => {
+                    vm::javascript_classification_work(std::str::from_utf8(bytes).unwrap())
+                }
+                _ => vm::wasm_classification_work(bytes),
+            };
+            (meter.used(), meter.peak(), meter.exhausted())
+        };
+        let mut failures = Vec::new();
+        let mut report = Vec::new();
+        for (name, runtime, generate) in vm::review_inputs::scaling_generators() {
+            let (small, large) = (generate(N), generate(4 * N));
+            let (work, peak, _) = measure(runtime, &small);
+            let (work4, peak4, exhausted) = measure(runtime, &large);
+            report.push(format!(
+                "{name}: work {work} -> {work4} ({:.2}x), peak {peak} -> {peak4} bytes",
+                work4 as f64 / work.max(1) as f64
+            ));
+            // A fixed floor absorbs per-artifact constants on tiny inputs.
+            if work4 * 10 > work * 44 + 10 * 4096 {
+                failures.push(format!("{name}: work {work} then {work4}"));
+            }
+            if peak4 * 10 > peak * 44 + 10 * 4096 {
+                failures.push(format!("{name}: peak {peak} then {peak4} bytes"));
+            }
+            if exhausted {
+                failures.push(format!("{name}: the meter was exhausted at 4N"));
+            }
+        }
+        println!("{}", report.join("\n"));
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
     }
 
     /// Case values become opcode handlers only at a cursor-loop interpreter

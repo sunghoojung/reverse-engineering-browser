@@ -347,6 +347,16 @@ pub(super) fn handlers(bytes: &[u8], result: &Value) -> Option<ExtractedHandlers
             "detail": "Direct-call or table-element edges were bounded. Some statically related dispatch functions may be absent.",
         }));
     }
+    if !tables.oversized.is_empty() {
+        omissions.push(json!({
+            "reason": "element-table-limit",
+            "detail": format!(
+                "{} element table(s) place more than {} slots and are not expanded into handler tables or matching slots.",
+                tables.oversized.len(),
+                crate::vm::wasm_tables::MAX_TABLE_SLOTS
+            ),
+        }));
+    }
     let handler_tables = build_handler_tables(
         bytes,
         result

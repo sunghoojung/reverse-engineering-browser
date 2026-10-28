@@ -266,7 +266,9 @@ range, so instantiation traps before applying this one) or `unresolved`. At
 most 64 segments are listed; `omitted_segment_count` counts the rest. Passive
 and declared segments fill no table and are not listed. `entry_count` counts placed slots whose
 function is statically known; a `ref.null` item empties a slot and any other
-non-`ref.func` item leaves the slot's function unknown.
+non-`ref.func` item leaves the slot's function unknown. A table whose placed
+slots exceed 1,000,000 is not expanded into a handler table or matching slots;
+the workspace counts such tables in an `element-table-limit` omission.
 
 ## Dispatch classification
 
@@ -278,12 +280,15 @@ in a loop, can carry guest-opcode claims:
 - JavaScript handler recovery is unchanged and alone decides tier and score.
   The opcode-claim gate is a post-filter on its handlers: a switch case
   survives only at an interpreter-candidate switch, a table entry only when the
-  region (nested functions included) dispatches through that table at an
-  interpreter-candidate site. Each removed claim adds why: a router, a site
-  that is not a cursor-advancing loop, or a site not classified because of the
-  work limit.
-- The gate reads the full classification recomputed from the artifact bytes,
-  not the 256 listed sites.
+  region (nested functions included) dispatches through that table's own
+  binding at an interpreter-candidate site. The gate resolves a table name to
+  its declaring function scope, so a nested function's own `ops` is a
+  different table. Each removed claim adds why: a router, a site that is not a
+  cursor-advancing loop, a table with no structural classification, a table
+  binding that cannot be resolved with certainty, or a site not classified
+  because of the work limit.
+- The gate reads the full classification from the same metered run that
+  produced the analysis, not the 256 listed sites and not a second pass.
 - When the gate removes handlers, the workspace records the `handler-withheld`
   omission with their count instead of `handler-unavailable`, and the analysis
   keeps the tier recovery decided.

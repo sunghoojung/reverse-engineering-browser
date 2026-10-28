@@ -11,7 +11,7 @@ use std::{
     path::Path,
     sync::LazyLock,
 };
-use wasmparser::{Operator, Parser, Payload, TypeRef};
+use wasmparser::{ElementItems, ElementKind, Operator, Parser, Payload, TypeRef};
 #[path = "vm_capture_mode.rs"]
 pub(crate) mod capture_mode;
 #[path = "vm_dispatch_shape.rs"]
@@ -196,8 +196,7 @@ pub(crate) fn mask(source: &str) -> String {
     }
     String::from_utf8(bytes).expect("UTF-8 literal masking")
 }
-type JavaScriptStructure = (Vec<Value>, Vec<Value>, dispatch_shape::Classified);
-fn js(source: &str) -> Result<JavaScriptStructure> {
+fn js(source: &str) -> Result<(Vec<Value>, Vec<Value>)> {
     static SIGNATURE: LazyLock<Regex> = LazyLock::new(|| {
         Regex::new(
             r"(?:\bfunction\b[^{}]{0,1024}|\([^(){}]{0,1024}\)\s*=>|[A-Za-z_$][\w$]*\s*=>)\s*\{",
@@ -210,8 +209,7 @@ fn js(source: &str) -> Result<JavaScriptStructure> {
             .unwrap()
     });
     let masked = mask(source);
-    // Opening brace to its signature start, for parameter names.
-    let mut openings = BTreeMap::new();
+    let mut openings = BTreeSet::new();
     let mut omissions = Vec::new();
     for m in SIGNATURE.find_iter(&masked) {
         if openings.len() >= 4096 {
@@ -219,23 +217,18 @@ fn js(source: &str) -> Result<JavaScriptStructure> {
                 .push(json!({"reason":"javascript-function-region-limit","observed_records":4096}));
             break;
         }
-        openings.insert(m.end() - 1, m.start());
+        openings.insert(m.end() - 1);
     }
     let mut stack = Vec::new();
     let mut regions = vec![(0, source.len())];
-    let mut parameters = BTreeMap::<usize, Vec<String>>::new();
     for (i, c) in masked.bytes().enumerate() {
         if c == b'{' {
             stack.push(i);
         } else if c == b'}'
             && let Some(start) = stack.pop()
-            && let Some(signature) = openings.remove(&start)
+            && openings.remove(&start)
         {
             regions.push((start + 1, i));
-            parameters.insert(
-                start + 1,
-                dispatch_shape::javascript::parameters(&masked[signature..=start]),
-            );
         }
     }
     if !openings.is_empty() {
@@ -267,15 +260,9 @@ fn js(source: &str) -> Result<JavaScriptStructure> {
     let mut work = 0;
     let mut best = Vec::new();
     let mut best_rank = (0, 0, usize::MAX);
-    let lines = dispatch_shape::javascript::Lines::new(source);
-    let mut sites = Vec::new();
-    let mut budget = dispatch_shape::Budget::new(dispatch_shape::MAX_ARTIFACT_STEPS);
-    let mut classification_omissions = Vec::new();
-    let mut scored = Vec::new();
     for (start, end) in order {
         if work + end - start > 64 * 1024 * 1024 {
             omissions.push(json!({"reason":"javascript-region-work-limit","observed_bytes":work,"total_bytes":work+end-start}));
-            classification_omissions.push(json!({"reason":"classification-region-limit","detail":"Function regions past the JavaScript region work bound were not searched for dispatch sites."}));
             break;
         }
         work += end - start;
@@ -327,7 +314,6 @@ fn js(source: &str) -> Result<JavaScriptStructure> {
             o["function_region"] = json!({"byte_offset":start,"byte_size":end-start});
         }
         let (score, families) = rank(&observations);
-        scored.push((start, end, score, families));
         if score > best_rank.0
             || score == best_rank.0
                 && (families > best_rank.1 || families == best_rank.1 && start < best_rank.2)
@@ -336,22 +322,116 @@ fn js(source: &str) -> Result<JavaScriptStructure> {
             best_rank = (score, families, start);
         }
     }
-    // Classification is a separate pass in pattern-rank order: regions with
-    // the strongest dispatch evidence are classified first, so large noise
-    // regions can never starve a real interpreter of the shared budget.
-    scored.sort_by_key(|(start, _, score, families)| {
+    Ok((best, omissions))
+}
+/// Structural dispatch classification of one JavaScript source, run as its
+/// own metered pass after the unchanged scoring pass. It recomputes the same
+/// function regions, then classifies them strongest pattern rank first so
+/// large noise regions cannot starve a real interpreter of the meter.
+fn classify_javascript(source: &str, meter: &dispatch_shape::Meter) -> dispatch_shape::Classified {
+    static SIGNATURE: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(
+            r"(?:\bfunction\b[^{}]{0,1024}|\([^(){}]{0,1024}\)\s*=>|[A-Za-z_$][\w$]*\s*=>)\s*\{",
+        )
+        .unwrap()
+    });
+    static LOOP: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\b(?:while|for)\s*\(").unwrap());
+    static DISPATCH: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r"\bswitch\s*\(|\b[A-Za-z_$][\w$]*\s*\[(?:[^\[\]]+|\[[^\[\]]*\])+\]\s*\(")
+            .unwrap()
+    });
+    let mut omissions = Vec::new();
+    meter.charge(3 * source.len() as u64);
+    let masked = mask(source);
+    let mut openings = BTreeMap::new();
+    for m in SIGNATURE.find_iter(&masked) {
+        if openings.len() >= 4096 {
+            break;
+        }
+        openings.insert(m.end() - 1, m.start());
+    }
+    let mut stack = Vec::new();
+    let mut regions = vec![(0, source.len())];
+    let mut parameters = BTreeMap::<usize, Vec<String>>::new();
+    for (i, c) in masked.bytes().enumerate() {
+        if c == b'{' {
+            stack.push(i);
+        } else if c == b'}'
+            && let Some(start) = stack.pop()
+            && let Some(signature) = openings.remove(&start)
+        {
+            regions.push((start + 1, i));
+            parameters.insert(
+                start + 1,
+                dispatch_shape::javascript::parameters(&masked[signature..=start]),
+            );
+        }
+    }
+    regions.sort_by_key(|(start, end)| (*start, std::cmp::Reverse(*end)));
+    let mut children = BTreeMap::<(usize, usize), Vec<(usize, usize)>>::new();
+    let mut parents = Vec::<(usize, usize)>::new();
+    for region in &regions {
+        while parents.last().is_some_and(|p| region.0 >= p.1) {
+            parents.pop();
+        }
+        if let Some(parent) = parents.last().filter(|p| region.1 <= p.1) {
+            children.entry(*parent).or_default().push(*region);
+        }
+        parents.push(*region);
+    }
+    let region_text = |start: usize, end: usize| {
+        let mut bytes = masked.as_bytes()[start..end].to_vec();
+        for (a, b) in children.get(&(start, end)).into_iter().flatten() {
+            bytes[a - start..b - start].fill(b' ');
+        }
+        String::from_utf8(bytes).expect("masked nested source")
+    };
+    // The same structural rank the scoring pass gives each region, so the
+    // strongest dispatch evidence is classified first.
+    let mut ranked = Vec::new();
+    let mut work = 0usize;
+    for (start, end) in regions {
+        if work + end - start > 64 * 1024 * 1024 {
+            omissions.push(json!({"reason":"classification-region-limit","detail":"Function regions past the JavaScript region work bound were not searched for dispatch sites."}));
+            break;
+        }
+        work += end - start;
+        if !meter.charge((1 + JS_RULES.len() as u64) * (end - start) as u64) {
+            meter.count_unexamined(1);
+            continue;
+        }
+        let region = region_text(start, end);
+        let mut observations = Vec::new();
+        if let (Some(a), Some(b)) = (LOOP.find(&region), DISPATCH.find(&region)) {
+            observations.push(observation("js.dispatch-loop", a.start(), b.end(), ""));
+        }
+        for (id, _, patterns) in JS_RULES.iter() {
+            if patterns.iter().any(|pattern| pattern.is_match(&region)) {
+                observations.push(observation(id, 0, 1, ""));
+            }
+        }
+        ranked.push((rank(&observations), start, end));
+    }
+    ranked.sort_by_key(|((score, families), start, _)| {
         (
             std::cmp::Reverse(*score),
             std::cmp::Reverse(*families),
             *start,
         )
     });
-    for (start, end, _, _) in scored {
-        let mut bytes = masked.as_bytes()[start..end].to_vec();
-        for (a, b) in children.get(&(start, end)).into_iter().flatten() {
-            bytes[a - start..b - start].fill(b' ');
+    let lines = dispatch_shape::javascript::Lines::new(source);
+    let mut sites = Vec::new();
+    for (_, start, end) in ranked {
+        if meter.exhausted() {
+            meter.count_unexamined(1);
+            continue;
         }
-        let region = String::from_utf8(bytes).expect("masked nested source");
+        let region = region_text(start, end);
+        if !meter.retain(region.len() as u64) {
+            meter.release(region.len() as u64);
+            meter.count_unexamined(1);
+            continue;
+        }
         dispatch_shape::javascript::classify_region(
             source,
             &lines,
@@ -359,52 +439,74 @@ fn js(source: &str) -> Result<JavaScriptStructure> {
             start,
             parameters.get(&start).map_or(&[], Vec::as_slice),
             &mut sites,
-            &mut budget,
+            meter,
         );
+        meter.release(region.len() as u64);
     }
-    classification_omissions.extend(budget.omissions("artifact or function region"));
-    #[cfg(test)]
-    CLASSIFICATION_STEPS.with(|steps| steps.set(budget.used()));
-    Ok((
-        best,
-        omissions,
-        dispatch_shape::Classified {
-            sites,
-            omissions: classification_omissions,
-        },
-    ))
-}
-#[cfg(test)]
-thread_local! {
-    /// Trace steps the last JavaScript classification on this thread spent.
-    static CLASSIFICATION_STEPS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    omissions.extend(meter.omissions("function regions"));
+    dispatch_shape::Classified { sites, omissions }
 }
 
-/// Classification of one JavaScript source and the trace steps it spent.
-#[cfg(test)]
-pub(crate) fn javascript_classification_work(source: &str) -> (Value, u64) {
-    let document = javascript_classification(source);
-    (document, CLASSIFICATION_STEPS.with(std::cell::Cell::get))
+/// Classify an artifact's dispatch sites under one fresh meter.
+fn classify_artifact(
+    runtime: &str,
+    bytes: &[u8],
+    meter: &dispatch_shape::Meter,
+) -> Option<dispatch_shape::Classified> {
+    match runtime {
+        "javascript" => Some(classify_javascript(std::str::from_utf8(bytes).ok()?, meter)),
+        "webassembly" => Some(dispatch_shape::wasm(bytes, meter).unwrap_or(
+            dispatch_shape::Classified {
+                sites: Vec::new(),
+                omissions: vec![json!({"reason":"classification-unavailable","detail":"The module sections did not decode for dispatch classification."})],
+            },
+        )),
+        _ => None,
+    }
 }
 
-/// Roles of every classified dispatch site of an artifact, recomputed in
-/// full from its bytes for the opcode-claim gate. The listed document is
-/// bounded; these roles are not.
+/// The classification document of one artifact under a given meter.
+#[cfg(test)]
+pub(crate) fn classification_under(
+    runtime: &str,
+    bytes: &[u8],
+    meter: &dispatch_shape::Meter,
+) -> Value {
+    let classified = classify_artifact(runtime, bytes, meter).expect("classifiable artifact");
+    dispatch_shape::document(&json!("1"), classified.sites, classified.omissions)
+}
+
+/// Classification of one JavaScript source and the meter that bounded it.
+#[cfg(test)]
+pub(crate) fn javascript_classification_work(source: &str) -> (Value, dispatch_shape::Meter) {
+    let meter = dispatch_shape::Meter::new();
+    let document = classification_under("javascript", source.as_bytes(), &meter);
+    (document, meter)
+}
+
+/// Classification of one Wasm module and the meter that bounded it.
+#[cfg(test)]
+pub(crate) fn wasm_classification_work(bytes: &[u8]) -> (Value, dispatch_shape::Meter) {
+    let meter = dispatch_shape::Meter::new();
+    let document = classification_under("webassembly", bytes, &meter);
+    (document, meter)
+}
+
+/// Roles of every classified dispatch site of an artifact, recomputed under
+/// a fresh meter. Production passes the roles the analysis computed instead.
+#[cfg(test)]
 pub(crate) fn dispatch_roles(runtime: &str, bytes: &[u8]) -> Option<dispatch_shape::Roles> {
-    let classified = match runtime {
-        "javascript" => js(std::str::from_utf8(bytes).ok()?).ok()?.2,
-        "webassembly" => dispatch_shape::wasm(bytes, wasm_tables::Tables::parse(bytes).as_ref())?,
-        _ => return None,
-    };
-    Some(dispatch_shape::Roles::new(&classified))
+    let meter = dispatch_shape::Meter::new();
+    Some(dispatch_shape::Roles::new(&classify_artifact(
+        runtime, bytes, &meter,
+    )?))
 }
 
 /// The structural dispatch classification of one JavaScript source, as
 /// `analyze` records it.
 #[cfg(test)]
 pub(crate) fn javascript_classification(source: &str) -> Value {
-    let (_, _, classified) = js(source).expect("JavaScript structure");
-    dispatch_shape::document(&json!("1"), classified.sites, classified.omissions)
+    javascript_classification_work(source).0
 }
 struct Instruction {
     opcode: u8,
@@ -418,7 +520,7 @@ struct Instruction {
     unique_targets: Option<u32>,
     table_index: Option<u32>,
 }
-fn wasm(bytes: &[u8]) -> Result<(Vec<Value>, Value, dispatch_shape::Classified)> {
+fn wasm(bytes: &[u8]) -> Result<(Vec<Value>, Value)> {
     let bad = |e: wasmparser::BinaryReaderError| Error::bad(e.to_string());
     let mut sections = 0;
     let mut code_sections = 0;
@@ -432,15 +534,9 @@ fn wasm(bytes: &[u8]) -> Result<(Vec<Value>, Value, dispatch_shape::Classified)>
     let mut best_rank = (0, 0);
     let mut best_dispatch = None;
     let mut inventory = wasm_dispatch::Inventory::default();
-    // Active element-segment funcref fanout keyed by table index: populated
-    // slots after placing each segment at its evaluated offset, plus entries of
-    // segments whose offset is only known at instantiation. A missing key means
-    // the fanout is unknown. Passive and declarative segments fill no table.
-    let tables = wasm_tables::Tables::parse(bytes);
-    let element_fanout = tables
-        .as_ref()
-        .map(wasm_tables::Tables::fanout)
-        .unwrap_or_default();
+    // Active element-segment funcref initializers, keyed by table index. A missing
+    // key means the fanout is unknown. Passive and declarative segments are omitted.
+    let mut element_fanout: BTreeMap<u32, u32> = BTreeMap::new();
     let mut seen = BTreeSet::new();
     for payload in Parser::new(0).parse_all(bytes) {
         let payload = payload.map_err(bad)?;
@@ -483,7 +579,37 @@ fn wasm(bytes: &[u8]) -> Result<(Vec<Value>, Value, dispatch_shape::Classified)>
             Payload::ElementSection(reader) => {
                 table_ranges.push(reader.range());
                 for element in reader {
-                    let _ = element.map_err(bad)?;
+                    let element = element.map_err(bad)?;
+                    let ElementKind::Active { table_index, .. } = element.kind else {
+                        continue;
+                    };
+                    // MVP active segments omit the table index and mean table 0.
+                    let slot = element_fanout.entry(table_index.unwrap_or(0)).or_insert(0);
+                    match element.items {
+                        ElementItems::Functions(functions) => {
+                            for function in functions {
+                                let _ = function.map_err(bad)?;
+                                *slot = slot.saturating_add(1);
+                            }
+                        }
+                        ElementItems::Expressions(_, expressions) => {
+                            for expression in expressions {
+                                let mut operators = expression.map_err(bad)?.get_operators_reader();
+                                let mut funcref = false;
+                                while !operators.eof() {
+                                    if matches!(
+                                        operators.read().map_err(bad)?,
+                                        Operator::RefFunc { .. }
+                                    ) {
+                                        funcref = true;
+                                    }
+                                }
+                                if funcref {
+                                    *slot = slot.saturating_add(1);
+                                }
+                            }
+                        }
+                    }
                 }
             }
             Payload::DataSection(reader) => data_ranges.push(reader.range()),
@@ -684,16 +810,9 @@ fn wasm(bytes: &[u8]) -> Result<(Vec<Value>, Value, dispatch_shape::Classified)>
             "A data section can supply candidate guest bytes.",
         ));
     }
-    // Classification is interpretation over the same decoded bytes; it never
-    // feeds the structural score above.
-    let sites = dispatch_shape::wasm(bytes, tables.as_ref()).unwrap_or(dispatch_shape::Classified {
-        sites: Vec::new(),
-        omissions: vec![json!({"reason":"classification-unavailable","detail":"The module sections did not decode for dispatch classification."})],
-    });
     Ok((
         best,
         json!({"section_count":sections,"code_section_count":code_sections,"data_section_count":data_ranges.len(),"decoded_function_count":functions,"imported_function_count":imported,"decoded_instruction_count":instructions_count,"dispatch_inventory":inventory.value(best_dispatch.map(|(_, offset)| offset))}),
-        sites,
     ))
 }
 pub fn canonical(value: &Value) -> Result<Vec<u8>> {
@@ -827,7 +946,18 @@ fn graph_entry(
     edges.push(edge);
     true
 }
+#[cfg(test)]
 fn analyze(artifact: &Value, bytes: &[u8], events: &[Value]) -> Value {
+    analyze_with_roles(artifact, bytes, events).0
+}
+
+/// The analysis result and the roles of every classified dispatch site, which
+/// the opcode-claim gate reads without classifying the artifact again.
+fn analyze_with_roles(
+    artifact: &Value,
+    bytes: &[u8],
+    events: &[Value],
+) -> (Value, Option<dispatch_shape::Roles>) {
     let runtime = if artifact["kind"] == "javascript" {
         "javascript"
     } else {
@@ -837,29 +967,27 @@ fn analyze(artifact: &Value, bytes: &[u8], events: &[Value]) -> Value {
         match std::str::from_utf8(bytes) {
             Ok(s) => s,
             Err(_) => {
-                return failure(
-                    artifact,
-                    "malformed-artifact",
-                    "Artifact is not UTF-8 JavaScript",
+                return (
+                    failure(
+                        artifact,
+                        "malformed-artifact",
+                        "Artifact is not UTF-8 JavaScript",
+                    ),
+                    None,
                 );
             }
         }
     } else {
         ""
     };
-    let (observations, mut frontend, mut omissions, sites) = if runtime == "javascript" {
+    let (observations, mut frontend, mut omissions) = if runtime == "javascript" {
         match js(source) {
-            Ok((obs, omissions, sites)) => (
-                obs,
-                json!({"replacement_character_count":0}),
-                omissions,
-                sites,
-            ),
-            Err(e) => return failure(artifact, "malformed-artifact", &e.message),
+            Ok((obs, omissions)) => (obs, json!({"replacement_character_count":0}), omissions),
+            Err(e) => return (failure(artifact, "malformed-artifact", &e.message), None),
         }
     } else {
         match wasm(bytes) {
-            Ok((obs, frontend, sites)) => {
+            Ok((obs, frontend)) => {
                 let omitted = frontend["dispatch_inventory"]["omitted_site_count"]
                     .as_u64()
                     .unwrap_or(0);
@@ -868,13 +996,23 @@ fn analyze(artifact: &Value, bytes: &[u8], events: &[Value]) -> Value {
                 } else {
                     Vec::new()
                 };
-                (obs, frontend, omissions, sites)
+                (obs, frontend, omissions)
             }
-            Err(e) => return failure(artifact, "malformed-artifact", &e.message),
+            Err(e) => return (failure(artifact, "malformed-artifact", &e.message), None),
         }
     };
-    frontend["dispatch_classification"] =
-        dispatch_shape::document(&artifact["artifact_id"], sites.sites, sites.omissions);
+    // Classification is interpretation over the same bytes, metered on its
+    // own and never an input to the observations, score or tier above.
+    let meter = dispatch_shape::Meter::new();
+    let classified = classify_artifact(runtime, bytes, &meter);
+    let roles = classified.as_ref().map(dispatch_shape::Roles::new);
+    if let Some(classified) = classified {
+        frontend["dispatch_classification"] = dispatch_shape::document(
+            &artifact["artifact_id"],
+            classified.sites,
+            classified.omissions,
+        );
+    }
     let rules = observations
         .iter()
         .map(|o| o["rule_id"].as_str().unwrap().to_owned())
@@ -1017,7 +1155,7 @@ fn analyze(artifact: &Value, bytes: &[u8], events: &[Value]) -> Value {
         result["bytecode_snapshot"] =
             crate::vm_bytecode::snapshot(source, artifact["artifact_id"].as_str().unwrap());
     }
-    result
+    (result, roles)
 }
 // Read a bounded prefix, report omissions, and hash exactly the consumed input.
 type JsonlInput = (Vec<(usize, Value)>, Vec<Value>, String);
@@ -1239,8 +1377,8 @@ pub(crate) fn store_documents(root: &Path, event_store: &Path) -> Result<Documen
         }
         let (mut result, bytes) = match evidence::content(root, artifact, 16 * 1024 * 1024) {
             Ok(bytes) => {
-                let result = analyze(artifact, &bytes, &events);
-                (result, Some(bytes))
+                let (result, roles) = analyze_with_roles(artifact, &bytes, &events);
+                (result, Some((bytes, roles)))
             }
             Err(e) => (
                 failure(
@@ -1271,12 +1409,15 @@ pub(crate) fn store_documents(root: &Path, event_store: &Path) -> Result<Documen
                 .unwrap()
                 .extend(omissions.clone());
         }
-        if let Some(bytes) = bytes
+        if let Some((bytes, roles)) = bytes
             && let Some(mut workspace) = crate::vm_opcode::workspace(
                 root,
                 artifact,
                 &bytes,
-                &result,
+                crate::vm_opcode::Analysis {
+                    result: &result,
+                    roles: roles.as_ref(),
+                },
                 &snapshot_artifacts,
                 &events,
                 &dispatch_budget_losses,
@@ -1580,8 +1721,7 @@ mod dispatch_shape_tests {
                 (local.get $state)))"#,
         )
         .unwrap();
-        let sites =
-            dispatch_shape::wasm(&bytes, wasm_tables::Tables::parse(&bytes).as_ref()).unwrap();
+        let sites = dispatch_shape::wasm(&bytes, &dispatch_shape::Meter::new()).unwrap();
         let document = dispatch_shape::document(&json!("9"), sites.sites, sites.omissions);
         let site = &document["sites"][0];
         assert_eq!(site["selector_source"], "frame_slot");
@@ -1631,8 +1771,7 @@ mod dispatch_shape_tests {
         )
         .unwrap();
         assert!(wasmparser::Validator::new().validate_all(&bytes).is_err());
-        let sites =
-            dispatch_shape::wasm(&bytes, wasm_tables::Tables::parse(&bytes).as_ref()).unwrap();
+        let sites = dispatch_shape::wasm(&bytes, &dispatch_shape::Meter::new()).unwrap();
         let document = dispatch_shape::document(&json!("9"), sites.sites, sites.omissions);
         let site = &document["sites"][0];
         assert_eq!(site["selector_source"], "unknown", "{site}");
@@ -1665,8 +1804,7 @@ mod dispatch_shape_tests {
             function("b", "a")
         ))
         .unwrap();
-        let sites =
-            dispatch_shape::wasm(&bytes, wasm_tables::Tables::parse(&bytes).as_ref()).unwrap();
+        let sites = dispatch_shape::wasm(&bytes, &dispatch_shape::Meter::new()).unwrap();
         let document = dispatch_shape::document(&json!("9"), sites.sites, sites.omissions);
         let by_local = |function: u64, expression: &str| {
             document["sites"]
@@ -1711,8 +1849,7 @@ mod dispatch_shape_tests {
     }
 
     fn classify_module(bytes: &[u8]) -> Value {
-        let classified =
-            dispatch_shape::wasm(bytes, wasm_tables::Tables::parse(bytes).as_ref()).unwrap();
+        let classified = dispatch_shape::wasm(bytes, &dispatch_shape::Meter::new()).unwrap();
         dispatch_shape::document(&json!("9"), classified.sites, classified.omissions)
     }
 
@@ -1825,6 +1962,34 @@ mod dispatch_shape_tests {
         assert_eq!(result(0, "local13"), result(1, "local13"));
     }
 
+    /// Writes every differential input for the base CLI to snapshot. Run
+    /// through `make dispatch-base-expectations`; see the dispatch-review
+    /// README.
+    #[test]
+    #[ignore = "writes inputs; run through make dispatch-base-expectations"]
+    fn write_differential_inputs() {
+        let directory = PathBuf::from(
+            std::env::var("REB_DIFFERENTIAL_INPUTS").expect("REB_DIFFERENTIAL_INPUTS"),
+        );
+        std::fs::create_dir_all(&directory).unwrap();
+        let mut index = Vec::new();
+        for (position, (name, bytes, kind)) in
+            review_inputs::differential_inputs().iter().enumerate()
+        {
+            let file = format!(
+                "{position:04}.{}",
+                if *kind == "wasm" { "wasm" } else { "js" }
+            );
+            std::fs::write(directory.join(&file), bytes).unwrap();
+            index.push(json!({"name": name, "file": file, "kind": kind}));
+        }
+        std::fs::write(
+            directory.join("inputs.json"),
+            serde_json::to_string_pretty(&index).unwrap(),
+        )
+        .unwrap();
+    }
+
     #[test]
     fn module_without_dispatch_records_export_per_role() {
         let bytes = wat::parse_str(
@@ -1833,8 +1998,7 @@ mod dispatch_shape_tests {
               (func (export "step") (param i32) (result i32) (i32.mul (local.get 0) (i32.const 3))))"#,
         )
         .unwrap();
-        let sites =
-            dispatch_shape::wasm(&bytes, wasm_tables::Tables::parse(&bytes).as_ref()).unwrap();
+        let sites = dispatch_shape::wasm(&bytes, &dispatch_shape::Meter::new()).unwrap();
         let document = dispatch_shape::document(&json!("9"), sites.sites, sites.omissions);
         assert_eq!(document["site_count"], 1);
         let site = &document["sites"][0];
@@ -1875,8 +2039,7 @@ mod dispatch_shape_tests {
                 (local.get $acc)))"#,
         )
         .unwrap();
-        let sites =
-            dispatch_shape::wasm(&bytes, wasm_tables::Tables::parse(&bytes).as_ref()).unwrap();
+        let sites = dispatch_shape::wasm(&bytes, &dispatch_shape::Meter::new()).unwrap();
         let document = dispatch_shape::document(&json!("9"), sites.sites, sites.omissions);
         let listed = document["sites"].as_array().unwrap();
         let threaded = listed

@@ -14,6 +14,7 @@
 use std::{
     cell::{Cell, RefCell},
     collections::BTreeMap,
+    rc::Rc,
 };
 use wasmparser::{
     CompositeInnerType, ConstExpr, ElementItems, ElementKind, Operator, Parser, Payload, TypeRef,
@@ -81,7 +82,9 @@ pub(crate) struct Segment {
 }
 
 type Signature = (Vec<ValType>, Vec<ValType>);
-type Matching = Option<(Vec<u32>, usize)>;
+/// Matching slots and the count of non-null placed slots, shared by every
+/// call site of one (table, type) so no site copies the slot list.
+pub(crate) type Matching = Option<Rc<(Vec<u32>, usize)>>;
 
 #[derive(Default)]
 pub(crate) struct Tables {
@@ -96,6 +99,9 @@ pub(crate) struct Tables {
     pub signatures: Vec<Option<Signature>>,
     /// Declared minimum size per table index, imports first.
     pub minimums: Vec<u64>,
+    /// Work parsing did: element entries read plus slots placed. The
+    /// classifier charges it to the artifact meter.
+    pub work: u64,
     /// One slot scan per (table, type); a module reuses few call types.
     matching: RefCell<BTreeMap<(u32, u32), Matching>>,
     matching_scans: Cell<usize>,
@@ -166,6 +172,7 @@ impl Tables {
                     for element in reader {
                         let element = element.ok()?;
                         let mut entries = Vec::new();
+                        tables.work += 1;
                         match element.items {
                             ElementItems::Functions(functions) => {
                                 for function in functions {
@@ -263,6 +270,7 @@ impl Tables {
                 continue;
             }
             let slots = tables.slots.entry(table).or_default();
+            tables.work += segment.entries.len() as u64;
             for (position, entry) in segment.entries.iter().enumerate() {
                 // Placement already checked offset + length against the minimum.
                 slots.insert(offset + position as u32, *entry);
@@ -292,36 +300,22 @@ impl Tables {
         functions
     }
 
-    /// Static funcref fanout: non-null placed slots plus non-null entries of
-    /// relative or unresolved segments, which cannot be overlap-checked.
-    pub fn fanout(&self) -> BTreeMap<u32, u32> {
-        let mut fanout = BTreeMap::<u32, u32>::new();
-        for (table, slots) in &self.slots {
-            let populated = slots
-                .values()
-                .filter(|entry| **entry != Entry::Null)
-                .count();
-            fanout.insert(*table, u32::try_from(populated).unwrap_or(u32::MAX));
-        }
-        for segment in &self.segments {
-            let Some(table) = segment.table else {
-                continue;
-            };
-            let unplaced = matches!(
-                segment.placement,
-                Placement::Relative(_) | Placement::Unresolved
-            ) || self.oversized.contains(&table);
-            let entry = fanout.entry(table).or_insert(0);
-            if unplaced {
-                let count = segment
-                    .entries
-                    .iter()
-                    .filter(|entry| **entry != Entry::Null)
-                    .count();
-                *entry = entry.saturating_add(u32::try_from(count).unwrap_or(u32::MAX));
-            }
-        }
-        fanout
+    /// Bytes the slot maps, segment entries and cached matching lists keep.
+    pub fn retained_bytes(&self) -> u64 {
+        let slots = self.slots.values().map(BTreeMap::len).sum::<usize>();
+        let entries = self
+            .segments
+            .iter()
+            .map(|segment| segment.entries.len())
+            .sum::<usize>();
+        let matching = self
+            .matching
+            .borrow()
+            .values()
+            .flatten()
+            .map(|matching| matching.0.len())
+            .sum::<usize>();
+        (slots * 24 + entries * 8 + matching * 4) as u64
     }
 
     /// Tables named by any active segment, in index order.
@@ -337,12 +331,22 @@ impl Tables {
     }
 
     /// Placed slots whose function has exactly the signature of `type_index`,
-    /// and the count of non-null placed slots. Memoized per (table, type).
-    pub fn matching_slots(&self, table: u32, type_index: u32) -> Matching {
+    /// and the count of non-null placed slots. Memoized per (table, type):
+    /// the scan is charged to the meter once, and every site shares it.
+    pub fn matching_slots(
+        &self,
+        table: u32,
+        type_index: u32,
+        meter: &crate::vm::dispatch_shape::Meter,
+    ) -> Matching {
         if let Some(matching) = self.matching.borrow().get(&(table, type_index)) {
+            meter.charge(1);
             return matching.clone();
         }
+        meter.charge(self.slots.get(&table).map_or(1, BTreeMap::len) as u64);
         let matching = self.scan_matching(table, type_index);
+        // Released with the tables: `retained_bytes` counts every cached list.
+        meter.retain(matching.as_ref().map_or(0, |matching| matching.0.len() * 4) as u64);
         self.matching
             .borrow_mut()
             .insert((table, type_index), matching.clone());
@@ -369,7 +373,7 @@ impl Tables {
                 matching.push(*slot);
             }
         }
-        Some((matching, populated))
+        Some(Rc::new((matching, populated)))
     }
 
     #[cfg(test)]
@@ -477,7 +481,6 @@ mod tests {
         .unwrap();
         let tables = Tables::parse(&bytes).unwrap();
         // Slot 0 is null, slot 1 holds an unknown funcref.
-        assert_eq!(tables.fanout()[&0], 1);
         assert_eq!(
             tables.slots[&0]
                 .iter()
@@ -516,8 +519,12 @@ mod tests {
         )
         .unwrap();
         let tables = Tables::parse(&bytes).unwrap();
+        let meter = crate::vm::dispatch_shape::Meter::new();
         for _ in 0..100 {
-            assert_eq!(tables.matching_slots(0, 0), Some((vec![0, 1], 2)));
+            assert_eq!(
+                tables.matching_slots(0, 0, &meter).as_deref(),
+                Some(&(vec![0, 1], 2))
+            );
         }
         assert_eq!(tables.matching_scans(), 1);
     }
@@ -590,8 +597,8 @@ mod tests {
             ]
         );
         // Four populated placed slots plus one relative entry.
-        assert_eq!(tables.fanout()[&0], 5);
-        let (matching, populated) = tables.matching_slots(0, 0).unwrap();
-        assert_eq!((matching, populated), (vec![1, 2, 9], 4));
+        let meter = crate::vm::dispatch_shape::Meter::new();
+        let matching = tables.matching_slots(0, 0, &meter).unwrap();
+        assert_eq!(*matching, (vec![1, 2, 9], 4));
     }
 }

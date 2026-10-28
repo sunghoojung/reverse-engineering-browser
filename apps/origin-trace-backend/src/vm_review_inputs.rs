@@ -558,3 +558,22 @@ pub(crate) fn differential_inputs() -> Vec<(String, Vec<u8>, &'static str)> {
     }
     inputs
 }
+
+/// Minified owned bundle: independent modules with closures, objects, strings
+/// and exports. The real VM sits in the middle, not before the large prefix.
+pub(crate) fn owned_bundle(bytes: usize) -> String {
+    use std::fmt::Write;
+    let vm = include_str!("../../../tools/fixtures/dispatch-retention/owned/handler_pc.js");
+    let mut source = String::from("const ownedModules=[];");
+    let mut inserted = false;
+    let mut i = 0;
+    while source.len() < bytes {
+        if !inserted && source.len() >= bytes / 2 {
+            source.push_str(vm);
+            inserted = true;
+        }
+        write!(source, "ownedModules.push((function m{i}(seed){{const t=[\"owned-{i}\",\"value\",\"total\",\"reset\"],o={{name:t[0],count:seed}};function f(x){{return(x*33+o.count)>>>0}}return{{name:o.name,step:function(x){{o.count=f(x);return o.count}},reset:()=>{{o.count=seed;return t[3]}},map:x=>x.map(v=>f(v))}}}})({i}));").unwrap();
+        i += 1;
+    }
+    source
+}

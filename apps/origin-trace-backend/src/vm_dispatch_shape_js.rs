@@ -17,8 +17,6 @@ use std::{
 const COLUMN_CHECKPOINT: usize = 4096;
 const MAX_SITES: usize = 4096;
 const PARSER_STACK: usize = 32 << 20;
-const PARSER_BYTES_PER_BYTE: u64 = 192;
-const PARSER_FIXED_BYTES: u64 = 256 << 10;
 const MAX_SYNTAX_DEPTH: usize = 8192;
 
 #[cfg(test)]
@@ -36,12 +34,12 @@ pub(crate) struct Proofs {
     // Exact original-byte starts of AST cases and object properties. No source
     // rescan is needed when base recovery asks whether a claim is justified.
     handlers: HashMap<(usize, bool), Verdict>,
-    failure: Option<&'static str>,
+    failure: Option<String>,
     _memory: Memory,
 }
 impl Proofs {
-    pub(crate) fn verdict(&self, offset: usize, table: bool) -> Verdict {
-        self.failure.map_or_else(
+    pub(crate) fn verdict(&self, offset: usize, table: bool) -> Result<Option<Role>, &str> {
+        self.failure.as_deref().map_or_else(
             || {
                 self.handlers
                     .get(&(offset, table))
@@ -1156,8 +1154,8 @@ fn parsed(
     }
     // Oxc's binder expands a var declaration into each intervening block for
     // redeclaration checks. Bound that expansion before semantic allocation.
-    // Functions reset the depth, so deeply nested functions remain admissible.
-    let mut hoists = HoistAdmission::default();
+    // The same linear AST prepass bounds upstream ancestor walks.
+    let mut hoists = SemanticAdmission::default();
     hoists.visit_program(&parse.program);
     if hoists.expansion > source.len() as u64 * 2 {
         return Some(unavailable(
@@ -1166,15 +1164,19 @@ fn parsed(
             "JavaScript block-hoisting admission limit reached.",
         ));
     }
-    // Scope/name hoist entries coexist with the ordinary AST and semantic
-    // vectors. Cover hash-table slack and replacement allocation separately
-    // rather than consuming the arena's per-source-byte allowance twice.
-    let hoist_memory = Memory::new(meter);
-    if !hoist_memory.keep(hoists.expansion * 64) {
+    // Syntax checks walk AST ancestors, resolution walks scope ancestors, and
+    // parameter early resolution can revisit references in enclosing defaults.
+    // AST depth upper-bounds scope depth. The sum is computed in one traversal.
+    // Reserve headroom for valid code below 100 AST levels while rejecting
+    // quadratic deep-scope inputs before calling unmodified upstream semantics.
+    let semantic_work = hoists.ancestor_work.saturating_add(hoists.extra_work);
+    if semantic_work > (source.len() as u64).saturating_mul(128)
+        || !meter.charge(semantic_work + hoists.expansion)
+    {
         return Some(unavailable(
             meter,
             "classification-work-limit",
-            "JavaScript block-hoisting memory admission limit reached.",
+            "JavaScript semantic ancestor-work admission limit reached.",
         ));
     }
     let semantic = SemanticBuilder::new()
@@ -1279,7 +1281,7 @@ fn parsed(
             } else {
                 Repeats::Unknown
             },
-            instruction: candidate.instruction,
+            instruction: candidate.instruction.into(),
             function_index: None,
             function_body_offset: Some(body_start as usize),
             byte_offset: span.start as usize,
@@ -1294,9 +1296,9 @@ fn parsed(
                 .loop_span(candidate.node)
                 .map(|span| (span.start as usize, span.end as usize)),
             buffer_kind: if candidate.strings {
-                Some("string")
+                Some("string".into())
             } else {
-                trace.buffer_kind
+                trace.buffer_kind.map(Into::into)
             },
             table: None,
         };
@@ -1389,13 +1391,66 @@ fn parsed(
 }
 
 #[derive(Default)]
-struct HoistAdmission {
+struct SemanticAdmission<'a> {
+    ast_depth: u64,
+    ancestor_work: u64,
+    extra_work: u64,
+    class_elements: Vec<u64>,
+    private_names: u64,
+    redeclarations: HashMap<(u32, &'a str), u64>,
+    scopes: Vec<u32>,
+    next_scope: u32,
     depth: u64,
     functions: Vec<u64>,
     expansion: u64,
 }
-impl<'a> Visit<'a> for HoistAdmission {
+impl<'a> Visit<'a> for SemanticAdmission<'a> {
+    fn enter_scope(
+        &mut self,
+        _: oxc_syntax::scope::ScopeFlags,
+        _: &std::cell::Cell<Option<ScopeId>>,
+    ) {
+        self.scopes.push(self.next_scope);
+        self.next_scope += 1;
+    }
+    fn leave_scope(&mut self) {
+        self.scopes.pop();
+    }
+
     fn enter_node(&mut self, kind: AstKind<'a>) {
+        self.ast_depth += 1;
+        self.ancestor_work = self.ancestor_work.saturating_add(self.ast_depth * 2);
+        match kind {
+            AstKind::Class(class) => {
+                let names = class
+                    .body
+                    .body
+                    .iter()
+                    .map(|element| u64::from(element.span().size()))
+                    .sum();
+                self.class_elements.push(names);
+                self.private_names += names;
+            }
+            AstKind::PrivateIdentifier(id) => {
+                // Upstream suggests undeclared private names by comparing all
+                // ancestor class elements (including edit-distance work).
+                self.extra_work = self.extra_work.saturating_add(
+                    self.private_names.saturating_mul(id.name.len() as u64 + 1) * 8,
+                );
+            }
+            AstKind::Function(function) if function.is_declaration() => {
+                // Only equal names in one scope can accumulate redeclarations.
+                if let Some(id) = &function.id {
+                    let count = self
+                        .redeclarations
+                        .entry((self.scopes.last().copied().unwrap_or(0), id.name.as_str()))
+                        .or_default();
+                    self.extra_work = self.extra_work.saturating_add(*count);
+                    *count += 1;
+                }
+            }
+            _ => (),
+        }
         match kind {
             AstKind::Function(function) => {
                 if function.is_declaration() {
@@ -1431,6 +1486,10 @@ impl<'a> Visit<'a> for HoistAdmission {
         }
     }
     fn leave_node(&mut self, kind: AstKind<'a>) {
+        self.ast_depth -= 1;
+        if matches!(kind, AstKind::Class(_)) {
+            self.private_names -= self.class_elements.pop().unwrap();
+        }
         match kind {
             AstKind::Function(_) | AstKind::ArrowFunctionExpression(_) => {
                 self.depth = self.functions.pop().unwrap();
@@ -1454,20 +1513,18 @@ fn unavailable(meter: &Meter, reason: &str, detail: &'static str) -> Classified 
         omissions: vec![json!({"reason": reason, "omitted_records": 1, "detail": detail})],
         javascript: Some(Rc::new(Proofs {
             handlers: HashMap::new(),
-            failure: Some(detail),
+            failure: Some(detail.to_owned()),
             _memory: Memory::new(meter),
         })),
     }
 }
 
-pub(crate) fn classify(source: &str, meter: &Meter) -> Classified {
+fn classify_local(source: &str, meter: &Meter) -> Classified {
     #[cfg(test)]
     PARSER_ARENA.set(0);
-    let reservation = Memory::new(meter);
     let mut failure = None;
-    // Oxc owns its arena and semantic vectors. Reserve a conservative input
-    // envelope BEFORE invoking it, including the isolated recursive stack.
-    // Source offsets remain original UTF-8 byte offsets, in script and module.
+    // Worker allocations are limited before they reach the system allocator.
+    // Work admission covers parser passes; stack mappings are not retained heap.
     if !meter.charge(source.len() as u64 * 64) {
         meter.count_unexamined(1);
         failure = Some("JavaScript parser memory or work admission limit reached.");
@@ -1479,7 +1536,17 @@ pub(crate) fn classify(source: &str, meter: &Meter) -> Classified {
     let mut chain = 0usize;
     let mut stack = PARSER_STACK;
     if failure.is_none() {
-        for byte in source.bytes() {
+        let mut word_start = 0;
+        for (index, byte) in source.bytes().enumerate() {
+            if !(byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'$')) {
+                if matches!(
+                    &source.as_bytes()[word_start..index],
+                    b"new" | b"typeof" | b"void" | b"delete" | b"await" | b"yield"
+                ) {
+                    chain += 1;
+                }
+                word_start = index + 1;
+            }
             match byte {
                 b'(' | b'[' | b'{' => depth += 1,
                 b')' | b']' | b'}' => depth = depth.saturating_sub(1),
@@ -1487,7 +1554,7 @@ pub(crate) fn classify(source: &str, meter: &Meter) -> Classified {
             }
             if b";{}".contains(&byte) {
                 chain = 0;
-            } else if b"=+-!~?&|*/%".contains(&byte) {
+            } else if b"=+-!~?&|*/%<>^:.()[]".contains(&byte) {
                 chain += 1;
             }
             if depth > MAX_SYNTAX_DEPTH || chain > MAX_SYNTAX_DEPTH {
@@ -1498,13 +1565,6 @@ pub(crate) fn classify(source: &str, meter: &Meter) -> Classified {
                 stack = PARSER_STACK * 2;
             }
         }
-    }
-    if failure.is_none()
-        && !reservation
-            .keep(source.len() as u64 * PARSER_BYTES_PER_BYTE + PARSER_FIXED_BYTES + stack as u64)
-    {
-        meter.count_unexamined(1);
-        failure = Some("JavaScript parser memory or work admission limit reached.");
     }
     if failure.is_none() {
         let result = stacker::grow(stack, || {
@@ -1526,4 +1586,331 @@ pub(crate) fn classify(source: &str, meter: &Meter) -> Classified {
         "parse-failed"
     };
     unavailable(meter, reason, failure.unwrap_or(PARSE_FAILED))
+}
+
+// The upstream parser and semantic builder use infallible allocations. Keep
+// them unmodified, but isolate their allocations behind a hard, pre-allocation
+// ceiling. Only compact site/proof records return; source never goes to disk.
+const MAX_SOURCE: usize = 8 << 20;
+const MAX_REPLY: usize = 64 << 20;
+
+fn heap_limit(source_bytes: usize) -> u64 {
+    // Small dense artifacts already analyzed by earlier versions need room
+    // for arena chunk growth; this is a limit, never an eager reservation.
+    (64 << 20) + source_bytes.min(MAX_SOURCE) as u64 * 80
+}
+const REPLY_MAGIC: &[u8; 8] = b"REBJS001";
+const WORKER_FAILED: &str = "JavaScript analysis worker unavailable or refused its resource boundary; recovered handlers have no binding proof.";
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct WorkerReply {
+    sites: Vec<Site>,
+    omissions: Vec<serde_json::Value>,
+    handlers: Vec<(usize, bool, Option<Role>, bool)>,
+    failure: Option<String>,
+    work: u64,
+    retained_peak: u64,
+    unclassified: u64,
+    unexamined: u64,
+    limited: u64,
+    exhausted: bool,
+    arena: usize,
+}
+
+/// Internal pipe protocol used by the analyzer's isolated worker mode.
+/// This is not an API, does not execute JavaScript, and writes no source files.
+#[doc(hidden)]
+pub fn worker_main() -> std::io::Result<()> {
+    use std::io::{Read, Write};
+    let mut input = std::io::stdin().lock();
+    let mut header = [0u8; 40];
+    input.read_exact(&mut header)?;
+    let number =
+        |offset: usize| u64::from_le_bytes(header[offset + 8..offset + 16].try_into().unwrap());
+    let (work, retained, heap, length) = (number(0), number(8), number(16), number(24));
+    if &header[..8] != REPLY_MAGIC
+        || length > MAX_SOURCE as u64
+        || work > super::MAX_ARTIFACT_WORK
+        || retained > super::MAX_RETAINED_BYTES
+        || heap > heap_limit(length as usize)
+    {
+        return Err(std::io::Error::other("Invalid JavaScript worker limits"));
+    }
+    crate::js_worker_alloc::start(heap);
+    let mut source = String::new();
+    input.take(length).read_to_string(&mut source)?;
+    if source.len() as u64 != length {
+        return Err(std::io::Error::other("Incomplete JavaScript worker source"));
+    }
+    let meter = Meter::with_limits(work, retained);
+    let result = classify_local(&source, &meter);
+    let proofs = result.javascript.as_ref().unwrap();
+    let reply = WorkerReply {
+        sites: result.sites,
+        omissions: result.omissions,
+        handlers: proofs
+            .handlers
+            .iter()
+            .map(|(&(offset, table), verdict)| {
+                (offset, table, verdict.ok().flatten(), verdict.is_err())
+            })
+            .collect(),
+        failure: proofs.failure.clone(),
+        work: meter.used.get(),
+        retained_peak: meter.peak.get(),
+        unclassified: meter.unclassified.get(),
+        unexamined: meter.unexamined.get(),
+        limited: meter.limited.get(),
+        exhausted: meter.exhausted(),
+        arena: {
+            #[cfg(test)]
+            {
+                parser_arena_bytes()
+            }
+            #[cfg(not(test))]
+            {
+                0
+            }
+        },
+    };
+    // Serialize before the success marker: allocation refusal must not leave a
+    // partial reply that could be mistaken for complete binding proof.
+    let mut bytes = serde_json::to_vec(&reply)?;
+    if bytes.len() > MAX_REPLY - 16 {
+        return Err(std::io::Error::other(
+            "JavaScript proof reply exceeds limit",
+        ));
+    }
+    let peak = crate::js_worker_alloc::peak();
+    let mut output = std::io::stdout().lock();
+    output.write_all(REPLY_MAGIC)?;
+    output.write_all(&peak.to_le_bytes())?;
+    output.write_all(&bytes)?;
+    bytes.clear();
+    output.flush()
+}
+
+fn worker_command() -> std::io::Result<tokio::process::Command> {
+    let current = std::env::current_exe()?;
+    #[cfg(test)]
+    {
+        let mut command = tokio::process::Command::new(current);
+        command
+            .args([
+                "--ignored",
+                "--exact",
+                "vm::dispatch_shape::javascript::worker_process",
+                "--nocapture",
+            ])
+            .env("REB_JS_TEST_WORKER", "1");
+        Ok(command)
+    }
+    #[cfg(not(test))]
+    {
+        let directory = current
+            .parent()
+            .ok_or_else(|| std::io::Error::other("No executable directory"))?;
+        let mut candidates = vec![
+            directory.join("origin-trace-vm"),
+            directory.join("OriginTraceVMAnalyzer"),
+        ];
+        // Cargo integration tests and examples live one directory below bins.
+        if directory
+            .file_name()
+            .is_some_and(|name| name == "deps" || name == "examples")
+        {
+            candidates.push(directory.parent().unwrap().join("origin-trace-vm"));
+        }
+        let path = candidates
+            .into_iter()
+            .find(|path| crate::worker::executable(path))
+            .ok_or_else(|| std::io::Error::other("JavaScript analyzer executable unavailable"))?;
+        let mut command = tokio::process::Command::new(path);
+        command.arg("--classify-javascript-worker");
+        Ok(command)
+    }
+}
+
+pub(crate) fn classify(source: &str, meter: &Meter) -> Classified {
+    classify_with_heap(source, meter, heap_limit(source.len()))
+}
+
+fn classify_with_heap(source: &str, meter: &Meter, heap: u64) -> Classified {
+    #[cfg(test)]
+    PARSER_ARENA.set(0);
+    if source.len() > MAX_SOURCE || meter.exhausted() {
+        meter.count_unexamined(1);
+        return unavailable(
+            meter,
+            "classification-work-limit",
+            "JavaScript source exceeds the 8 MiB analysis ceiling or the artifact budget.",
+        );
+    }
+    // Include IPC copies in the shared work meter; the worker receives only
+    // the remainder, not a second artifact budget. Its peak heap is separate
+    // from the 128 MiB of records retained by the caller.
+    if !meter.charge(source.len() as u64 * 2) {
+        meter.count_unexamined(1);
+        return unavailable(meter, "classification-work-limit", WORKER_FAILED);
+    }
+    let work = meter.remaining_work().min(super::MAX_ARTIFACT_WORK);
+    let retained = meter.remaining_memory().min(super::MAX_RETAINED_BYTES);
+    let output = std::thread::scope(|scope| {
+        std::thread::Builder::new()
+            .spawn_scoped(scope, || {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .ok()?;
+                let mut command = worker_command().ok()?;
+                let mut input = Vec::with_capacity(40 + source.len());
+                input.extend_from_slice(REPLY_MAGIC);
+                for number in [work, retained, heap, source.len() as u64] {
+                    input.extend_from_slice(&number.to_le_bytes());
+                }
+                input.extend_from_slice(source.as_bytes());
+                runtime
+                    .block_on(crate::worker::run(
+                        &mut command,
+                        &input,
+                        MAX_REPLY,
+                        std::time::Duration::from_secs(30),
+                    ))
+                    .ok()
+            })
+            .ok()?
+            .join()
+            .ok()
+            .flatten()
+    });
+    let Some(output) = output else {
+        // With no telemetry, charge the remaining work allowance. A killed or
+        // unavailable worker never leaves uncharged work or permits claims.
+        meter.charge(work);
+        meter.count_unexamined(1);
+        return unavailable(meter, "classification-work-limit", WORKER_FAILED);
+    };
+    if !meter.charge(output.bytes.len() as u64) {
+        meter.count_unexamined(1);
+        return unavailable(meter, "classification-work-limit", WORKER_FAILED);
+    }
+    let marker = output
+        .bytes
+        .windows(8)
+        .position(|bytes| bytes == REPLY_MAGIC || bytes == crate::js_worker_alloc::REFUSED);
+    if let Some(at) = marker {
+        let bytes = &output.bytes[at..];
+        if bytes.len() >= 16 {
+            meter.record_parser_peak(u64::from_le_bytes(bytes[8..16].try_into().unwrap()));
+        }
+        if bytes.starts_with(REPLY_MAGIC)
+            && output.success
+            && bytes.len() >= 16
+            && let Ok(reply) = serde_json::from_slice::<WorkerReply>(&bytes[16..])
+        {
+            meter.charge(reply.work);
+            meter.peak.set(
+                meter
+                    .peak
+                    .get()
+                    .max(meter.retained.get() + reply.retained_peak),
+            );
+            meter.count_unclassified(reply.unclassified);
+            meter.count_unexamined(reply.unexamined);
+            meter.limited.set(meter.limited.get() + reply.limited);
+            #[cfg(test)]
+            PARSER_ARENA.set(reply.arena);
+            let memory = Memory::new(meter);
+            if !memory.keep(reply.handlers.len() as u64 * 96) {
+                meter.count_unexamined(1);
+                return unavailable(meter, "classification-work-limit", WORKER_FAILED);
+            }
+            for site in &reply.sites {
+                if !meter.retain(site.retained_bytes()) {
+                    meter.count_unexamined(1);
+                    return unavailable(meter, "classification-work-limit", WORKER_FAILED);
+                }
+            }
+            meter.exhausted.set(reply.exhausted);
+            return Classified {
+                sites: reply.sites,
+                omissions: reply.omissions,
+                javascript: Some(Rc::new(Proofs {
+                    handlers: reply
+                        .handlers
+                        .into_iter()
+                        .map(|(at, table, role, ambiguous)| {
+                            (
+                                (at, table),
+                                if ambiguous { Err(AMBIGUOUS) } else { Ok(role) },
+                            )
+                        })
+                        .collect(),
+                    failure: reply.failure,
+                    _memory: memory,
+                })),
+            };
+        }
+        if bytes.starts_with(crate::js_worker_alloc::REFUSED) && bytes.len() >= 24 {
+            meter.charge(u64::from_le_bytes(bytes[16..24].try_into().unwrap()));
+            meter.count_unexamined(1);
+            return unavailable(
+                meter,
+                "classification-work-limit",
+                "JavaScript parser/semantic allocation ceiling reached before allocation; binding proof omitted.",
+            );
+        }
+    }
+    meter.charge(work);
+    meter.count_unexamined(1);
+    unavailable(meter, "classification-work-limit", WORKER_FAILED)
+}
+
+// Unit tests use their own executable, so `cargo test --lib` exercises the
+// identical isolation/allocator boundary without a stale or unbuilt helper.
+#[cfg(test)]
+#[test]
+#[ignore]
+fn worker_process() {
+    if std::env::var_os("REB_JS_TEST_WORKER").is_some() {
+        let code = if worker_main().is_ok() { 0 } else { 74 };
+        std::process::exit(code);
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn allocation_refusal_is_counted_and_does_not_poison_the_next_artifact() {
+    let source = "{}".repeat(50_000);
+    let meter = Meter::new();
+    let result = classify_with_heap(&source, &meter, 2 << 20);
+    assert_eq!(result.omissions[0]["reason"], "classification-work-limit");
+    assert!(
+        result.omissions[0]["detail"]
+            .as_str()
+            .unwrap()
+            .contains("allocation ceiling")
+    );
+    assert_eq!(result.omissions[0]["omitted_records"], 1);
+    assert!(meter.parser_peak() <= 2 << 20);
+    assert!(meter.parser_peak() > 0);
+    let source = include_str!("../../../tools/fixtures/dispatch-retention/owned/control.js");
+    let result = classify(source, &Meter::new());
+    assert!(
+        result
+            .sites
+            .iter()
+            .any(|site| site.role() == Role::InterpreterCandidate)
+    );
+}
+
+#[cfg(test)]
+#[test]
+fn oversized_source_is_refused_before_worker_allocation() {
+    let source = " ".repeat(MAX_SOURCE + 1);
+    let meter = Meter::new();
+    let result = classify(&source, &meter);
+    assert_eq!(result.omissions[0]["omitted_records"], 1);
+    assert_eq!(result.omissions[0]["reason"], "classification-work-limit");
+    assert_eq!(meter.parser_peak(), 0);
 }

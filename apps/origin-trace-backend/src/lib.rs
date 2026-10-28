@@ -41,3 +41,13 @@ pub use config::Options;
 pub use endpoint::PublishedEndpoint;
 
 pub use durable::write_private_noclobber;
+
+mod js_worker_alloc;
+#[doc(hidden)]
+pub use js_worker_alloc::JavaScriptWorkerAllocator;
+#[doc(hidden)]
+pub use vm::dispatch_shape::javascript::worker_main as javascript_worker_main;
+
+#[cfg(test)]
+#[global_allocator]
+static JS_TEST_ALLOCATOR: JavaScriptWorkerAllocator = JavaScriptWorkerAllocator;

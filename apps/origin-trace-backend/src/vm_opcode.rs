@@ -4291,7 +4291,7 @@ if (!validate(document)) throw new Error('Backend workspace rejected by shipped 
             .into_iter()
             .filter(|(name, _, _)| *name == "deep_loops")
         {
-            let bytes = generate(4096);
+            let bytes = generate(64);
             let (analysis, workspace, _) = pipeline_work("javascript", &bytes);
             let classification = &analysis["frontend"]["dispatch_classification"];
             let real = std::str::from_utf8(&bytes)
@@ -4392,13 +4392,15 @@ if (!validate(document)) throw new Error('Backend workspace rejected by shipped 
     }
 
     #[test]
-    fn parser_and_interval_growth_reserves_before_allocating() {
+    fn parser_heap_is_separate_and_interval_growth_reserves_before_allocating() {
         let meter = vm::dispatch_shape::Meter::with_limits(1_000_000_000, 1024);
         let source = format!("function f({}) {{}}", "a".repeat(2048));
         let classified = vm::dispatch_shape::javascript::classify(&source, &meter);
         assert!(classified.sites.is_empty());
-        assert!(meter.exhausted());
+        assert!(classified.omissions.is_empty());
+        assert!(!meter.exhausted());
         assert!(meter.peak() <= 1024);
+        assert!(meter.parser_peak() > 1024);
 
         let meter = vm::dispatch_shape::Meter::with_limits(1_000_000_000, 1024);
         let intervals =
@@ -4451,41 +4453,99 @@ if (!validate(document)) throw new Error('Backend workspace rejected by shipped 
             let (result, workspace, meter) = pipeline_work(runtime, &bytes);
             println!(
                 "MEASURE {}",
-                json!({"path":path,"bytes":bytes.len(),"units":meter.used(),"peak":meter.peak(),"parser_arena_bytes":if runtime == "javascript" {vm::dispatch_shape::javascript::parser_arena_bytes()} else {0},"exhausted":meter.exhausted(),"seconds":start.elapsed().as_secs_f64(),"handlers":workspace.as_ref().and_then(|w| w["handlers"].as_array()).map(|a| a.len()),"classification":result["frontend"]["dispatch_classification"]})
+                json!({"path":path,"bytes":bytes.len(),"units":meter.used(),"peak":meter.peak(),"parser_peak_bytes":meter.parser_peak(),"parser_arena_bytes":if runtime == "javascript" {vm::dispatch_shape::javascript::parser_arena_bytes()} else {0},"exhausted":meter.exhausted(),"seconds":start.elapsed().as_secs_f64(),"handlers":workspace.as_ref().and_then(|w| w["handlers"].as_array()).map(|a| a.len()),"classification":result["frontend"]["dispatch_classification"]})
             );
         }
     }
 
-    /// Fourth review, root cause: one meter charges every classifier loop,
-    /// JavaScript and Wasm. On every adversarial shape of all four reviews,
-    /// quadrupling the input at most quadruples total work and peak retained
-    /// bytes (with a 10% allowance), and the larger input finishes under the
-    /// meter.
+    #[test]
+    fn parser_floor_preserves_dense_small_bundle() {
+        let mut source = (0..2)
+            .map(|i| {
+                format!(
+                    "function big{i}(t,x){{var k;while(x){{{}}}}}",
+                    "k=1;t[k](x);".repeat(12_000)
+                )
+            })
+            .collect::<String>();
+        source.push_str(include_str!(
+            "../../../tools/fixtures/dispatch-retention/owned/handler_pc.js"
+        ));
+        let (_, workspace, meter) = pipeline_work("javascript", source.as_bytes());
+        assert_eq!(workspace.unwrap()["handlers"].as_array().unwrap().len(), 3);
+        assert!(!meter.exhausted());
+        assert!(meter.parser_peak() <= 64 * 1024 * 1024 + source.len() as u64 * 80);
+    }
+
+    #[test]
+    fn large_owned_bundle_retains_interpreter_handlers() {
+        let source = vm::review_inputs::owned_bundle(2 << 20);
+        assert!(source.len() >= 2 << 20);
+        let (analysis, workspace, meter) = pipeline_work("javascript", source.as_bytes());
+        assert_eq!(workspace.unwrap()["handlers"].as_array().unwrap().len(), 3);
+        assert_eq!(
+            analysis["frontend"]["dispatch_classification"]["role_counts"]["interpreter-candidate"],
+            1
+        );
+        assert!(!meter.exhausted());
+        assert!(meter.peak() < 128 << 20);
+        assert!(
+            meter.parser_peak() > 0
+                && meter.parser_peak() <= 64 * 1024 * 1024 + source.len() as u64 * 80
+        );
+    }
+
+    /// Upstream semantic ancestor walks are admitted before running them.
+    /// Pathological depth is a counted refusal; all other generated shapes
+    /// retain the linear work/retained-memory scaling assertion.
     #[test]
     fn classifier_work_and_memory_scale_linearly() {
         const N: usize = 1024;
-        let measure = |runtime: &str, bytes: &[u8]| {
-            let (_, _, meter) = pipeline_work(runtime, bytes);
-            (meter.used(), meter.peak(), meter.exhausted())
-        };
         let mut failures = Vec::new();
         let mut report = Vec::new();
         for (name, runtime, generate) in vm::review_inputs::scaling_generators() {
             let (small, large) = (generate(N), generate(4 * N));
-            let (work, peak, _) = measure(runtime, &small);
-            let (work4, peak4, exhausted) = measure(runtime, &large);
+            let (analysis, _, meter) = pipeline_work(runtime, &small);
+            let (analysis4, _, meter4) = pipeline_work(runtime, &large);
+            let (work, peak) = (meter.used(), meter.peak());
+            let (work4, peak4) = (meter4.used(), meter4.peak());
             report.push(format!(
-                "{name}: work {work} -> {work4} ({:.2}x), peak {peak} -> {peak4} bytes",
-                work4 as f64 / work.max(1) as f64
+                "{name}: work {work} -> {work4}, retained {peak} -> {peak4}, parser heap {} -> {}",
+                meter.parser_peak(),
+                meter4.parser_peak()
             ));
-            // A fixed floor absorbs per-artifact constants on tiny inputs.
+            if matches!(
+                name,
+                "deep_functions" | "scopes_times_identifiers" | "deep_loops" | "block_hoists"
+            ) {
+                for result in [&analysis, &analysis4] {
+                    let omissions = result["frontend"]["dispatch_classification"]["omissions"]
+                        .as_array()
+                        .unwrap();
+                    assert!(
+                        omissions
+                            .iter()
+                            .any(|o| o["reason"] == "classification-work-limit"
+                                && o["omitted_records"].as_u64().is_some_and(|n| n > 0)),
+                        "{name}: {result}"
+                    );
+                }
+                continue;
+            }
             if work4 * 10 > work * 44 + 10 * 4096 {
                 failures.push(format!("{name}: work {work} then {work4}"));
             }
             if peak4 * 10 > peak * 44 + 10 * 4096 {
                 failures.push(format!("{name}: peak {peak} then {peak4} bytes"));
             }
-            if exhausted && name != "bracket_memory" {
+            if meter4.parser_peak() * 10 > meter.parser_peak() * 44 + 10 * 4096 {
+                failures.push(format!(
+                    "{name}: parser heap {} then {} bytes",
+                    meter.parser_peak(),
+                    meter4.parser_peak()
+                ));
+            }
+            if meter4.exhausted() && name != "bracket_memory" {
                 failures.push(format!("{name}: the meter was exhausted at 4N"));
             }
         }

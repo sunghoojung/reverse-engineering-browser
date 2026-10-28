@@ -11,6 +11,7 @@
 //! Only `repeats=loop` with a cursor-like selector is an interpreter
 //! candidate. A `once` dispatch on a call argument is a multiplexer: its
 //! arms or constants route one call to one function and are not opcodes.
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
     cell::{Cell, OnceCell, RefCell},
@@ -43,7 +44,7 @@ const MAX_ALTERNATIVES: usize = 16;
 /// computation would spend, so a query's result never depends on order.
 const MAX_QUERY_STEPS: u64 = 4096;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) enum Kind {
     SwitchOnValue,
     HandlerTable,
@@ -75,7 +76,7 @@ impl Kind {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) enum Source {
     CursorIndex,
     CursorPointer,
@@ -106,7 +107,7 @@ impl Source {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) enum Repeats {
     Loop,
     Once,
@@ -123,7 +124,7 @@ impl Repeats {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub(crate) enum Role {
     InterpreterCandidate,
     Multiplexer,
@@ -169,13 +170,14 @@ pub(crate) fn role(
     }
 }
 
+#[derive(Serialize, Deserialize)]
 pub(crate) struct Site {
     /// Structural scheduling strength, never a ranking score.
     pub strength: u8,
     pub kind: Kind,
     pub source: Source,
     pub repeats: Repeats,
-    pub instruction: &'static str,
+    pub instruction: std::borrow::Cow<'static, str>,
     pub function_index: Option<u32>,
     pub function_body_offset: Option<usize>,
     pub byte_offset: usize,
@@ -188,7 +190,8 @@ pub(crate) struct Site {
     pub through_lookup: bool,
     pub arm_count: Option<u64>,
     pub loop_range: Option<(usize, usize)>,
-    pub buffer_kind: Option<&'static str>,
+    pub buffer_kind: Option<std::borrow::Cow<'static, str>>,
+    #[serde(skip)]
     pub table: Option<SiteTable>,
 }
 
@@ -229,7 +232,7 @@ impl Site {
             self.kind,
             self.source,
             self.repeats,
-            self.buffer_kind,
+            self.buffer_kind.as_deref(),
             self.through_lookup,
         )
     }
@@ -1959,6 +1962,7 @@ pub(crate) struct MeterState {
     used: Cell<u64>,
     retained: Cell<u64>,
     peak: Cell<u64>,
+    parser_peak: Cell<u64>,
     exhausted: Cell<bool>,
     unclassified: Cell<u64>,
     unexamined: Cell<u64>,
@@ -2026,11 +2030,29 @@ impl Meter {
             used: Cell::new(0),
             retained: Cell::new(0),
             peak: Cell::new(0),
+            parser_peak: Cell::new(0),
             exhausted: Cell::new(false),
             unclassified: Cell::new(0),
             unexamined: Cell::new(0),
             limited: Cell::new(0),
         }))
+    }
+
+    pub fn remaining_work(&self) -> u64 {
+        self.limit.saturating_sub(self.used.get())
+    }
+
+    pub fn remaining_memory(&self) -> u64 {
+        self.retained_limit.saturating_sub(self.retained.get())
+    }
+
+    #[cfg(test)]
+    pub fn parser_peak(&self) -> u64 {
+        self.parser_peak.get()
+    }
+
+    pub fn record_parser_peak(&self, bytes: u64) {
+        self.parser_peak.set(self.parser_peak.get().max(bytes));
     }
 
     /// Charge work actually done. False once the bound is reached.
@@ -2045,6 +2067,7 @@ impl Meter {
             return false;
         }
         self.used.set(used);
+        crate::js_worker_alloc::record_work(used);
         true
     }
 
@@ -2270,7 +2293,7 @@ pub(crate) fn wasm(bytes: &[u8], meter: &Meter) -> Option<Classified> {
             kind: Kind::ExportPerRole,
             source: Source::Unknown,
             repeats: Repeats::Unknown,
-            instruction: "export",
+            instruction: "export".into(),
             function_index: None,
             function_body_offset: None,
             byte_offset: export_offset.unwrap_or(8),
@@ -2400,7 +2423,7 @@ fn classify_candidate(
                 kind,
                 source: trace.source,
                 repeats,
-                instruction,
+                instruction: instruction.into(),
                 function_index: Some(index),
                 function_body_offset: Some(body_offset),
                 byte_offset: dispatch.offset,
@@ -2430,7 +2453,7 @@ fn classify_candidate(
                 kind: Kind::CompareChain,
                 source: trace.source,
                 repeats,
-                instruction: "i32.eq ladder",
+                instruction: "i32.eq ladder".into(),
                 function_index: Some(index),
                 function_body_offset: Some(body_offset),
                 byte_offset: first.offset,

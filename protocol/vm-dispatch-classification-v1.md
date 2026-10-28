@@ -141,9 +141,9 @@ semicolon insertion and Unicode names do not require text-based guessing.
 
 Each AST node and scope is indexed once, inheriting its function and loop from
 its parent. No function body is copied or rescanned for each enclosing function.
-The pinned semantic dependency retains Oxc's binding rules and uses a single
-scope traversal to resolve JavaScript references against its completed bindings;
-see [the dependency maintenance note](../third_party/oxc_semantic/README.md).
+Unmodified Oxc 0.155.0 resolves references against its completed bindings. A
+linear prepass bounds its ancestor walks before semantic analysis; no vendored
+resolver or alternate binding rules are used.
 
 Outside these structural rules, selectors stay `unknown`. A parse or semantic
 error produces one counted `parse-failed` artifact omission and no site or table
@@ -205,8 +205,9 @@ share matching-slot lists across all indirect sites.
 
 Producer 1.7.0 and workspace producer 2.10.0 share the same meter through
 classification, semantic claim resolution and workspace table extraction. Vector
-capacities, parser/semantic storage, table layouts, matching lists and symbolic
-indexes reserve their retained bytes before growing. Wasm constant-expression
+capacities, table layouts, matching lists and symbolic indexes reserve their
+retained bytes before growing. Temporary JavaScript parser/semantic storage has
+a separate allocation ceiling, with actual peak telemetry on the same meter. Wasm constant-expression
 operand stacks reserve capacity before each growth, including global initializers. Exhaustion in
 the downstream pass is also recorded on the analysis and any returned workspace.
 A scaling test runs this analysis-to-workspace path, including deep nested
@@ -218,21 +219,35 @@ Each selector query also has a logical step budget of 4096 steps, replayed on
 memo hits so a site's result never depends on query order. It is a semantic
 bound, not a work charge.
 
-JavaScript parser admission pre-charges 64 work units and 192 retained bytes
-per source byte, plus 256 KiB for fixed storage and a 32 MiB recursive stack
-(64 MiB above 1024 nested delimiters or operators).
-The arena and semantic data are dropped after producing compact site/proof
-records. Sources whose reservation exceeds the remaining 128 MiB bound are
-omitted before parsing. A conservative raw-punctuation admission guard also
-refuses more than 8192 nested delimiters or operators in a statement; it may
-refuse an unusually large literal or comment but never produces a claim from it.
-An AST preflight also bounds Oxc's block-hoisting expansion to twice the source
-byte count before building semantic data. It counts intervening block scopes
-times binding-pattern bytes and resets at function boundaries. This bounds the
-upstream binder's redeclaration map without penalizing nested functions. Each
-potential hoist entry reserves another 64 bytes for that map and its growth,
-separately from the arena/semantic allowance.
-These are resource refusals, separate from syntax failure, and are counted.
+JavaScript accepts sources up to 8 MiB. Parser admission pre-charges 64 work
+units per byte; pipe transfer adds two units per source byte and one per reply byte. The unmodified Oxc parser
+and semantic builder run inside the existing analyzer executable in an internal
+worker mode. Its allocator checks every allocation, reallocation overlap and
+32 bytes of per-allocation overhead against 64 MiB + 80 times source bytes,
+bounded to 704 MiB. No worst-case arena is reserved. The arena, semantic vectors,
+classifier indexes and serialized reply all count; the measured peak returns to
+the artifact meter. On refusal the allocator writes fixed-size telemetry and
+exits the disposable worker before calling the system allocator. It never
+unwinds inside GlobalAlloc. The caller records an omission and withholds proof.
+Missing, failed or 30-second-deadline workers likewise produce counted omissions.
+Source and compact results travel through bounded anonymous pipes, never disk.
+Only compact site/proof records survive under the separate 128 MiB retained cap.
+A parser reservation cannot consume that cap. Reserved 32 MiB recursive stacks
+(64 MiB for deep syntax) are not charged as retained heap. Peak RSS includes
+resident stack pages, allocator slack, both processes and unchanged recovery;
+the measured 8 MiB target is approximately 1 GiB or less on a local workstation.
+
+A conservative punctuation and unary-keyword guard refuses more than 8192 nested delimiters or
+operators in a statement; it can refuse unusual literals/comments but cannot
+create claims. A linear AST prepass bounds hoisting by intervening block scopes
+times binding-pattern bytes (at most twice source bytes). It also pre-charges
+twice the sum of AST node depths, an upper bound on scope-resolution and syntax
+ancestor walks, plus redeclaration and private-name suggestion work. Semantic
+admission allows at most 128 units per source byte and draws those units from
+the remaining artifact work budget. Normal code with depth well below 100 stays
+admissible; pathological scope chains are counted refusals. Tests require those
+refusals while retaining linear scaling assertions for other generated shapes.
+All resource refusals remain distinct from syntax failures.
 
 JavaScript sites are scheduled artifact-wide in structural strength order:
 first a cursor fetch bounded by that same buffer's length, then other

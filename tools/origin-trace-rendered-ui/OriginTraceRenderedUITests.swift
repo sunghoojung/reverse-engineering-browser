@@ -335,6 +335,32 @@ final class OriginTraceRenderedUITests: XCTestCase {
   }
 
   @MainActor
+  func test11VmOpcodeHeaderSpacing() async throws {
+    let sizes: [(name: String, width: CGFloat, height: CGFloat)] = [
+      ("normal", 1180, 790), ("narrow", 760, 560),
+      ("short", 1180, 560), ("narrow-tall", 760, 790),
+    ]
+    for size in sizes {
+      let ui = try await prepare(size)
+      try await show(ui, "vm")
+      try await ui.waitUntil("document.querySelectorAll('#vm-list .vm-row').length > 0", "VM findings did not load")
+      try await ui.click("#vm-list .vm-row", containing: "artifact 18446744073709551615")
+      _ = try await ui.json("__rebUiProbe.center('.vm-workspace-title') || {}")
+      let spacing = try await ui.json("""
+        (() => { const head = document.querySelector('.vm-workspace-title');
+          const evidence = head.nextElementSibling;
+          return {gap: evidence.getBoundingClientRect().top - head.getBoundingClientRect().bottom,
+            head: __rebUiProbe.box('.vm-workspace-title'), evidence: evidence.outerHTML,
+            marginTop: getComputedStyle(evidence).marginTop, marginBottom: getComputedStyle(evidence).marginBottom}; })()
+        """)
+      print("RENDERED_UI_OPCODE_HEADER \(size.name) \(spacing)")
+      XCTAssertEqual(spacing["gap"] as? Double ?? .infinity, 0, accuracy: 1,
+        "\(size.name): evidence notice follows Opcode workspace without an empty band")
+      try await ui.screenshot("vm-opcode-header-\(size.name)")
+    }
+  }
+
+  @MainActor
   func test1TrafficRequests() async throws {
     let expected = try Expectations.load()
     for size in windowSizes {

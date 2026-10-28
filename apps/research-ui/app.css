@@ -3467,6 +3467,7 @@ body.resizing-panes-y, body.resizing-panes-y * { cursor: row-resize !important; 
    only the handler body and the analysis dock share the remaining space. */
 #screen-vm .vm-workspace { display: flex; flex-direction: column; flex: 1; min-height: 0; gap: 0; margin: 0; }
 #screen-vm .vm-workspace > * { flex: none; }
+#screen-vm .vm-workspace > p.vm-workspace-notice { margin-block: 0; }
 #screen-vm .vm-workspace > .vm-workbench-body { flex: 1 1 150px; }
 #screen-vm .vm-workspace > .vm-workbench-inspector { flex: 1.4 1 200px; }
 #screen-vm .vm-workspace:has(> .vm-workspace-notice) { grid-template-rows: auto auto minmax(150px, 1.4fr) minmax(145px, 1fr); }

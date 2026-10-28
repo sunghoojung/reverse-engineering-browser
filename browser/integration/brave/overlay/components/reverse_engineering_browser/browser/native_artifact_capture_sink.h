@@ -114,7 +114,7 @@ class NativeArtifactCaptureSink final {
     std::uint64_t parent_event_id = 0;
     NativeProbeCategory result_category = NativeProbeCategory::kArtifact;
     // Physical dispatch observations that share this module artifact.
-    std::vector<std::pair<NativeProbeEvent, std::function<bool()>>> wasm_observations;
+    std::vector<std::pair<NativeProbeEvent, std::function<bool()>>> wasm_observations = {};
   };
 
   using GuestEventKey = std::pair<std::uint32_t, std::uint64_t>;

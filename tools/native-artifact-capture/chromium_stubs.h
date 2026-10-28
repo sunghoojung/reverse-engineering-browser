@@ -437,13 +437,23 @@ class WeakDocumentPtr {
 class RenderFrameHost {
  public:
   bool IsActive() const { return active; }
-  TestToken GetFrameToken() const { return {frame}; }
-  TestToken GetDocumentToken() const { return {document}; }
+  // Chromium returns these tokens by reference; so must the adapter.
+  const TestToken& GetFrameToken() const {
+    frame_token_ = {frame};
+    return frame_token_;
+  }
+  const TestToken& GetDocumentToken() const {
+    document_token_ = {document};
+    return document_token_;
+  }
   WeakDocumentPtr GetWeakDocumentPtr() { return WeakDocumentPtr(this); }
   FrameTreeNodeId GetFrameTreeNodeId() const { return {tree_node}; }
   bool active = true;
   base::UnguessableToken frame, document;
   int tree_node = 1;
+
+ private:
+  mutable TestToken frame_token_, document_token_;
 };
 class WebContents {
  public:

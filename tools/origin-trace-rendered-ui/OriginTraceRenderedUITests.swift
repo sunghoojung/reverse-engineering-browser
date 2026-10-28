@@ -136,12 +136,25 @@ final class Harness {
   // Native pointer input: AppKit routes the event through WKWebView hit testing.
   func click(_ selector: String, containing text: String? = nil) async throws {
     let textArgument = text.map { "'\($0.replacingOccurrences(of: "'", with: "\\'"))'" } ?? "null"
-    let point = try await json(
-      "__rebUiProbe.center('\(selector.replacingOccurrences(of: "'", with: "\\'"))', \(textArgument)) || {}")
-    guard let x = point["x"] as? Double, let y = point["y"] as? Double else {
-      throw HarnessError("No visible target for \(selector) \(text ?? "")")
+    let probe = "__rebUiProbe.center('\(selector.replacingOccurrences(of: "'", with: "\\'"))', \(textArgument)) || {}"
+    // center() scrolls the target into view, which can still be moving when
+    // it returns. Click only once two measurements after settling agree, so
+    // the event cannot land on the row that scrolled into the old position.
+    var x = 0.0, y = 0.0, stable = false
+    for _ in 0..<20 {
+      let point = try await json(probe)
+      guard let nextX = point["x"] as? Double, let nextY = point["y"] as? Double else {
+        throw HarnessError("No visible target for \(selector) \(text ?? "")")
+      }
+      try await settle()
+      if nextX == x && nextY == y {
+        stable = true
+        break
+      }
+      x = nextX
+      y = nextY
     }
-    try await settle()
+    guard stable else { throw HarnessError("Target kept moving: \(selector) \(text ?? "")") }
     // CSS pixels map 1:1 to view points; WKWebView reports a flipped view.
     let location = NSPoint(x: x, y: webView.isFlipped ? y : Double(webView.bounds.height) - y)
     let windowPoint = webView.convert(location, to: nil)

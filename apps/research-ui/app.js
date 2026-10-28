@@ -2008,7 +2008,7 @@ const capturedExportPanel = installCapturedExportDialog({
       }
 
       function renderNativeWasmObservations(workspace) {
-        const panel = document.createElement('section');
+        const panel = document.createElement('section'); panel.className = 'vm-workspace-card';
         panel.append(textElement('h4', '', 'Native Wasm dispatch observations'),
           textElement('p', 'vm-workspace-notice', 'Physical module offsets and selectors are not guest-interpreter PCs or recovered guest opcodes. No host causality is inferred from physical-only rows.'));
         const nativeRow = (row, position) => {

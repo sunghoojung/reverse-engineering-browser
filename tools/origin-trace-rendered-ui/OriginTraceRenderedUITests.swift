@@ -215,6 +215,59 @@ final class Harness {
     try await key(48, "\t", modifiers: modifiers)
   }
 
+  // Puts a VM card heading at the top of the finding panels, and the panels at
+  // the top of the findings workspace. Earlier clicks and scrollIntoView calls
+  // otherwise leave both scroll positions arbitrary, so a screenshot could start
+  // mid-card or slice through a control of the card above it.
+  func revealVmHeading(_ panel: String, _ heading: String) async throws {
+    let result = try await json(
+      """
+      (() => {
+        const panel = document.querySelector(\(String(reflecting: panel)));
+        const heading = [...(panel?.querySelectorAll('h4') ?? [])].find(item => item.textContent === \(String(reflecting: heading)));
+        if (!heading) return {missing: true};
+        const panels = heading.closest('.vm-workbench-panels'), workspace = panels.closest('#vm-findings-workspace');
+        // Keep the heading's own top margin, and the card's top border when the
+        // heading opens the card; a borderless card collapses that margin outside it.
+        const card = heading.closest('.vm-workspace-card');
+        const gap = parseFloat(getComputedStyle(heading).marginTop) +
+          (card.firstElementChild === heading ? parseFloat(getComputedStyle(card).borderTopWidth) : 0);
+        workspace.scrollTop += panels.getBoundingClientRect().top - workspace.getBoundingClientRect().top;
+        panels.scrollTop += heading.getBoundingClientRect().top - gap - panels.getBoundingClientRect().top;
+        const shown = heading.getBoundingClientRect(), frame = panels.getBoundingClientRect();
+        return {visible: shown.top >= frame.top && shown.bottom <= frame.bottom};
+      })()
+      """)
+    guard result["missing"] == nil else { throw HarnessError("No VM card heading \(heading) in \(panel)") }
+    XCTAssertEqual(result["visible"] as? Bool, true, "VM card heading \(heading) is not fully visible")
+    try await settle()
+  }
+
+  // Every direct heading, paragraph (notices included) and pager of a VM
+  // workspace card in the panel starts 12px inside the card's content edge,
+  // the inset of .vm-workspace-heading. Returns each offender.
+  func vmCardInsetOffenders(_ panel: String) async throws -> [String] {
+    let result = try await json(
+      """
+      (() => {
+        const root = document.querySelector(\(String(reflecting: panel)));
+        const cards = [...(root.matches('.vm-workspace-card') ? [root] : []), ...root.querySelectorAll('.vm-workspace-card')];
+        const offenders = [];
+        for (const card of cards) {
+          const edge = card.getBoundingClientRect().left + parseFloat(getComputedStyle(card).borderLeftWidth);
+          for (const item of card.querySelectorAll(':scope > h4, :scope > p:not(.vm-effect-detail), :scope > .vm-evidence-pager')) {
+            const box = (item.matches('.vm-evidence-pager') ? item.firstElementChild : item).getBoundingClientRect();
+            const inset = Math.round(box.left - edge);
+            if (box.width > 0 && inset !== 12) offenders.push(`${item.tagName.toLowerCase()} "${item.textContent.slice(0, 40)}" at ${inset}px`);
+          }
+        }
+        return {offenders, cards: cards.length};
+      })()
+      """)
+    guard (result["cards"] as? Int ?? 0) > 0 else { throw HarnessError("No VM workspace card in \(panel)") }
+    return result["offenders"] as? [String] ?? ["probe returned no offenders list"]
+  }
+
   func screenshot(_ name: String) async throws {
     try await settle()
     let configuration = WKSnapshotConfiguration()
@@ -606,6 +659,8 @@ final class OriginTraceRenderedUITests: XCTestCase {
       try await assertInert(ui, "\(size.name) vm")
       try await assertLayout(ui, "#screen-vm", "\(size.name) vm native guest")
       try await assertVmDock(ui, size.name)
+      let guestInset = try await ui.vmCardInsetOffenders(panel)
+      XCTAssertEqual(guestInset, [], "\(size.name) vm native guest: card content shares the 12px inset")
       try await ui.screenshot("vm-native-guest-\(size.name)")
 
       try await setVmAnalysisExpanded(ui, true)
@@ -620,6 +675,8 @@ final class OriginTraceRenderedUITests: XCTestCase {
       try await revealAndAssertFullyVisible(ui, "\(panel) details.vm-effect-row summary", "\(size.name) native row")
       try await assertLayout(ui, "#screen-vm", "\(size.name) vm native physical")
       try await assertVmDock(ui, size.name)
+      let physicalInset = try await ui.vmCardInsetOffenders(panel)
+      XCTAssertEqual(physicalInset, [], "\(size.name) vm native physical: card content shares the 12px inset")
       try await ui.screenshot("vm-native-physical-\(size.name)")
 
       // The structural classification renders as inert text on the dispatch
@@ -633,8 +690,10 @@ final class OriginTraceRenderedUITests: XCTestCase {
         "\(size.name): classification axes render on the dispatch rows: \(structure)")
       XCTAssertFalse(structure.contains("· cursor-loop interpreter candidate"), "\(size.name): no interpreter claim: \(structure)")
       try await assertInert(ui, "\(size.name) vm dispatch")
-      _ = try await ui.value("document.querySelector(\"\(dispatch)\").lastElementChild.scrollIntoView({block: 'end'}), true")
+      try await ui.revealVmHeading(dispatch, "Dispatch structure")
       try await assertLayout(ui, "#screen-vm", "\(size.name) vm dispatch structure")
+      let dispatchInset = try await ui.vmCardInsetOffenders(dispatch)
+      XCTAssertEqual(dispatchInset, [], "\(size.name) vm dispatch structure: card content shares the 12px inset")
       try await ui.screenshot("vm-dispatch-structure-\(size.name)")
     }
   }

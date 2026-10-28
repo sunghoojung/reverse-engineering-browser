@@ -3423,10 +3423,17 @@ body.resizing-panes-y, body.resizing-panes-y * { cursor: row-resize !important; 
 .vm-workbench-panels { max-height: 500px; overflow: auto; overscroll-behavior: contain; }
 .vm-workbench-panels > [hidden] { display: none !important; }
 .vm-workbench-panels > .vm-workspace-card { border: 0; }
-.vm-workbench-panels > .vm-workspace-card > :is(h4,p) { margin: 10px; }
+/* Every VM workspace card shares the 12px horizontal inset of .vm-workspace-heading:
+   its own headings, paragraphs, notices, detail blocks, form and pager, and the
+   contents of its paged rows, all start on that edge. */
+.vm-workspace-card > :is(h4,p):not(.vm-effect-detail) { margin: 10px 12px; }
+.vm-workspace-card > .vm-effect-detail, .vm-workspace-card .vm-effect-row > :is(summary,.vm-effect-detail) { margin: 0; padding: 10px 12px; }
+.vm-workspace-card .vm-effect-row > .secondary-button { margin: 0 12px 10px; max-width: calc(100% - 24px); }
+.vm-workspace-card > .vm-experiment-form { padding: 0 12px 10px; }
+.vm-workspace-card > .vm-evidence-pager, .vm-workspace-card > .vm-reachable-list > .vm-evidence-pager,
+#screen-vm .vm-workspace-card > .vm-evidence-pager, #screen-vm .vm-workspace-card > .vm-reachable-list > .vm-evidence-pager { padding: 6px 12px; }
 /* Empty paragraphs already have the same margins as the panel's other copy. */
-.vm-workbench-panels > .vm-workspace-card > p.vm-workspace-empty { padding-block: 0; }
-.vm-workbench-panels .vm-experiment-form { padding: 0 10px 10px; }
+.vm-workspace-card > p.vm-workspace-empty { padding-block: 0; }
 @media (max-width: 1100px) { .vm-workbench-body { grid-template-columns: minmax(0, 1fr); } .vm-workbench-listing { max-height: 360px; } }
 
 .vm-pack-status { overflow-wrap: anywhere; word-break: break-word; }

@@ -513,10 +513,10 @@ index 220507b1e74ef8585cf380eb09ef3664fc6b07a3..2003d1252a310aeb07af97baaf2284e3
    uint32_t global_index;
    uint8_t is_store;  // 0 or 1
 diff --git a/test/cctest/wasm/test-run-wasm.cc b/test/cctest/wasm/test-run-wasm.cc
-index 17b4883adda27b84a74dea71523d64ad0935a6f8..6eb811aa27afdf89ed5232f5af911c59f95d42d1 100644
+index 17b4883adda27b84a74dea71523d64ad0935a6f8..904a6c4f9682520c8726a761b087c30e656e5588 100644
 --- a/test/cctest/wasm/test-run-wasm.cc
 +++ b/test/cctest/wasm/test-run-wasm.cc
-@@ -1240,6 +1240,387 @@ WASM_EXEC_TEST(Regression_660262) {
+@@ -1240,6 +1240,396 @@ WASM_EXEC_TEST(Regression_660262) {
    r.Call();
  }
  
@@ -561,8 +561,8 @@ index 17b4883adda27b84a74dea71523d64ad0935a6f8..6eb811aa27afdf89ed5232f5af911c59
 +  seen.callee = callee_function_index;
 +}
 +
-+// Compiled calls from the main function's Liftoff code to one builtin.
-+int CountRebStubCalls(WasmRunner<int32_t, int32_t>& r, Builtin builtin) {
++// Builtin calls compiled into the main function's Liftoff code.
++int CountRebStubCalls(WasmRunner<int32_t, int32_t>& r) {
 +  WasmCodeRefScope scope;
 +  WasmCode* code = r.builder().GetFunctionCode(r.function_index());
 +  CHECK_NOT_NULL(code);
@@ -572,12 +572,24 @@ index 17b4883adda27b84a74dea71523d64ad0935a6f8..6eb811aa27afdf89ed5232f5af911c59
 +                        code->constant_pool(),
 +                        RelocInfo::ModeMask(RelocInfo::WASM_STUB_CALL));
 +       !it.done(); it.next()) {
-+    if (code->native_module()->GetBuiltinInJumptableSlot(
-+            it.rinfo()->wasm_stub_call_address()) == builtin) {
-+      ++count;
-+    }
++    ++count;
 +  }
 +  return count;
++}
++
++// One call_indirect through a two-entry table; returns its stub call count.
++int BuildRebIndirectCaller(WasmRunner<int32_t, int32_t>& r) {
++  TestSignatures sigs;
++  WasmFunctionCompiler& add = r.NewFunction(sigs.i_ii());
++  add.Build({WASM_I32_ADD(WASM_LOCAL_GET(0), WASM_LOCAL_GET(1))});
++  add.SetSigIndex(ModuleTypeIndex{1});
++  r.builder().AddSignature(sigs.f_ff());
++  r.builder().AddSignature(sigs.i_ii());
++  uint16_t entries[] = {static_cast<uint16_t>(add.function_index())};
++  r.builder().AddIndirectFunctionTable(entries, arraysize(entries));
++  r.Build({WASM_CALL_INDIRECT(1, WASM_I32V_2(66), WASM_I32V_1(22),
++                              WASM_LOCAL_GET(0))});
++  return CountRebStubCalls(r);
 +}
 +}  // namespace
 +
@@ -599,7 +611,6 @@ index 17b4883adda27b84a74dea71523d64ad0935a6f8..6eb811aa27afdf89ed5232f5af911c59
 +  // Distinct handler results detect a damaged index, not merely a callback.
 +  r.Build({WASM_CALL_INDIRECT(1, WASM_I32V_2(66), WASM_I32V_1(22),
 +                              WASM_LOCAL_GET(0))});
-+  CHECK_EQ(1, CountRebStubCalls(r, Builtin::kWasmRebTraceCallIndirect));
 +  auto* api_isolate = reinterpret_cast<v8::Isolate*>(r.isolate());
 +  const auto& seen = reb_indirect_observation;
 +  reb_indirect_observation = {};
@@ -763,20 +774,15 @@ index 17b4883adda27b84a74dea71523d64ad0935a6f8..6eb811aa27afdf89ed5232f5af911c59
 +}
 +
 +TEST(RebNativeCallIndirectDisabledCompilation) {
++  int hooked = 0;
++  {
++    FlagScope<bool> sampling(&v8_flags.reb_wasm_call_indirect_dispatch, true);
++    WasmRunner<int32_t, int32_t> r(TestExecutionTier::kLiftoff);
++    hooked = BuildRebIndirectCaller(r);
++  }
 +  FlagScope<bool> sampling(&v8_flags.reb_wasm_call_indirect_dispatch, false);
-+  TestSignatures sigs;
 +  WasmRunner<int32_t, int32_t> r(TestExecutionTier::kLiftoff);
-+  WasmFunctionCompiler& add = r.NewFunction(sigs.i_ii());
-+  add.Build({WASM_I32_ADD(WASM_LOCAL_GET(0), WASM_LOCAL_GET(1))});
-+  add.SetSigIndex(ModuleTypeIndex{1});
-+  r.builder().AddSignature(sigs.f_ff());
-+  r.builder().AddSignature(sigs.i_ii());
-+  uint16_t entries[] = {static_cast<uint16_t>(add.function_index())};
-+  r.builder().AddIndirectFunctionTable(entries, arraysize(entries));
-+  r.Build({WASM_CALL_INDIRECT(1, WASM_I32V_2(66), WASM_I32V_1(22),
-+                              WASM_LOCAL_GET(0))});
-+  // Off by default, the compile-time branch emits no hook call at all.
-+  CHECK_EQ(0, CountRebStubCalls(r, Builtin::kWasmRebTraceCallIndirect));
++  const int plain = BuildRebIndirectCaller(r);
 +  auto* api_isolate = reinterpret_cast<v8::Isolate*>(r.isolate());
 +  reb_indirect_observation = {};
 +  api_isolate->SetWasmCallIndirectDispatchCallback(&ObserveRebCallIndirect);
@@ -784,6 +790,9 @@ index 17b4883adda27b84a74dea71523d64ad0935a6f8..6eb811aa27afdf89ed5232f5af911c59
 +  CHECK_TRAP(r.Call(1));
 +  api_isolate->SetWasmCallIndirectDispatchCallback(nullptr);
 +  CHECK_EQ(0, reb_indirect_observation.count);
++  // The only builtin call the flag adds to this function is the hook, so
++  // with the flag off, as by default, no hook call is compiled at all.
++  CHECK_EQ(plain + 1, hooked);
 +}
 +
 +namespace {

@@ -22,7 +22,7 @@ define ignored-rust-test
 		{ echo "Expected exactly one passing ignored test: $(2)" >&2; exit 1; }
 endef
 
-check: native-wasm-golden-check all heap-snapshot-check native-artifact-capture-check native-request-identity-check wire-decoder-check magic-decoder-check native-vm-recorder-check owned-vm-helper-check native-probe-compile native-probe-admission-check native-network-capture-check native-proxy-policy-check native-build-test native-tests workspace-check deob-benchmark vm-lab-check native-only-check
+check: native-wasm-golden-check dispatch-shape-check all heap-snapshot-check native-artifact-capture-check native-request-identity-check wire-decoder-check magic-decoder-check native-vm-recorder-check owned-vm-helper-check native-probe-compile native-probe-admission-check native-network-capture-check native-proxy-policy-check native-build-test native-tests workspace-check deob-benchmark vm-lab-check native-only-check
 	cargo test --locked --manifest-path apps/origin-trace-backend/Cargo.toml
 	cargo test --locked --manifest-path apps/deobfuscator-worker/Cargo.toml
 	$(call ignored-rust-test,--lib,owned_vm_debugger::tests::owned_vm_real_helper_control_and_independent_goldens,\
@@ -31,6 +31,21 @@ check: native-wasm-golden-check all heap-snapshot-check native-artifact-capture-
 		REB_OWNED_VM_TEST_HELPER="$(abspath $(NATIVE_VM_FIXTURE_BINARY))")
 	$(call ignored-rust-test,--test http,source_facts_real_worker_http_and_cli,\
 		REB_SOURCE_FACTS_TEST_WORKER="$(abspath $(or $(CARGO_TARGET_DIR),apps/deobfuscator-worker/target))/debug/reb-deobfuscator-worker")
+
+# Owned dispatch-shape fixtures: each checked-in .wasm must be exactly what the
+# pinned wat development dependency builds from its .wat source, and every
+# fixture site must keep its expected structural classification. The grep makes
+# a renamed or filtered-out module fail instead of passing with 0 tests.
+.PHONY: dispatch-shape-check dispatch-shape-fixtures
+dispatch-shape-check:
+	output=$$(cargo test --locked --manifest-path apps/origin-trace-backend/Cargo.toml --lib vm::dispatch_shape_tests 2>&1); \
+		status=$$?; printf '%s\n' "$$output"; test $$status -eq 0 && \
+		printf '%s\n' "$$output" | grep -Eq '^test result: ok\. [1-9][0-9]* passed; 0 failed;' || \
+		{ echo "Dispatch shape fixture tests did not run and pass" >&2; exit 1; }
+
+# Rebuild the checked-in .wasm fixtures after editing a .wat source.
+dispatch-shape-fixtures:
+	$(call ignored-rust-test,--lib,vm::dispatch_shape_tests::write_dispatch_shape_fixtures,)
 
 # The actual C++ native Wasm encoders feed the Rust workspace builder, the
 # shipped viewer and the Python validator. The Rust tests also export the exact

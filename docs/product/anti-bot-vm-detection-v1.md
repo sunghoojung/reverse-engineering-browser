@@ -399,3 +399,21 @@ static handler table remains a partial candidate. The flag changes the profile
 digest so catalogs do not describe historical results as using this policy.
 Wasm classification is unchanged. Historical v1 profiles without the flag remain
 schema-valid; missing metadata does not imply that handler recovery was required.
+
+### Dispatch structure classification revision
+
+Detector producer `1.6.0` records
+[`vm-dispatch-classification-v1`](../../protocol/vm-dispatch-classification-v1.md)
+for every analyzed artifact. Each JavaScript and Wasm dispatch site gets a
+structural `dispatch_kind`, `selector_source` and `repeats`, and a role derived
+from them. An interpreter is a cursor-like selector re-derived in a loop. A
+dispatch that fires once on a call argument is a multiplexer: its constants
+route one call and are not opcodes. A large `br_table` outside a
+selector-advancing loop, such as a compiled `match`, is not an interpreter.
+Scoring, tiers and the profile digest are unchanged; the record is
+interpretation and never changes a tier. Opcode workspace producer `2.9.0`
+claims guest opcodes only from a switch or handler table tied to an
+interpreter-candidate site; handlers that recovery finds elsewhere are
+reported as `handler-withheld`, and the tier stays as recovery alone decides. The same revision
+places Wasm element segments at their evaluated offsets, so element-table
+slots and `call_indirect` fanout use real table indexes.

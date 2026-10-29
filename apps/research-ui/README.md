@@ -41,6 +41,10 @@ their evidence identities. Host causality remains unproven.
 `make native-only-check` (part of `make check`) enforces the native-only
 contract and `make rendered-ui-check` verifies the rendered packaged app.
 
+A failed VM analysis keeps the last valid evidence and displays the worker reason,
+detail (`timeout`, `crash`, `spawn` or `protocol`), omitted-artifact count and retry
+guidance as text. An unchanged-input retry reruns the worker.
+
 ## VM desktop workspace
 
 The compact Analysis, Navigation, Search and Window menus invoke the existing
@@ -55,6 +59,8 @@ Symbols and the up/down toolbar navigate the same selection. The literal handler
 filter matches retained source offsets, opcodes and labels; selecting a symbol
 clears an excluding filter. Arrow keys, Home and End navigate visible listing
 rows. No-match filters keep the selected evidence available and disable stepping.
+Selecting a retained dispatch site or a Symbol Tree entry opens compact analysis
+and reveals its handler at the evidence pane, without a clipped tree fragment.
 These docks expose existing evidence, not a native-code decompiler or editable
 Ghidra project. The deterministic fixture remains explicitly opt-in.
 
@@ -856,8 +862,16 @@ samples, the Coverage diagnostic leads with the observed absence of retained
 samples and the missing automatic guest-interpreter sampler. A caller-fed writer
 is not that sampler; static dispatch, Canvas calls and snapshots still do not
 prove a guest PC.
-Workspace failures retain the last valid workspace and never remove detection
-findings.
+The **Dispatch sites** panel shows each site's structural
+[dispatch classification](../../protocol/vm-dispatch-classification-v1.md) as
+`kind / selector source / repeats` text on dispatch-inventory and handler-table
+rows, and lists every classified site, including JavaScript workspaces. A
+one-shot router reads `router, no guest opcodes claimed`. Element handler
+tables list each segment's evaluated slot placement.
+Parse failures and binding refusals remain counted, visible text in the
+Dispatch sites panel. Worker execution failures return a retryable API error and
+are never persisted or cached as an analysis. Workspace failures retain the last
+valid workspace and never remove detection findings.
 
 Traffic remains grouped by captured browser tab with an All tabs scope and a
 domain selector. Protocol v3 carries the stable top-level tab identifier; older

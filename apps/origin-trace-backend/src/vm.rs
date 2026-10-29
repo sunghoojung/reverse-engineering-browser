@@ -14,8 +14,15 @@ use std::{
 use wasmparser::{ElementItems, ElementKind, Operator, Parser, Payload, TypeRef};
 #[path = "vm_capture_mode.rs"]
 pub(crate) mod capture_mode;
+#[path = "vm_dispatch_shape.rs"]
+pub(crate) mod dispatch_shape;
+#[cfg(test)]
+#[path = "vm_review_inputs.rs"]
+pub(crate) mod review_inputs;
 #[path = "vm_wasm_dispatch.rs"]
 mod wasm_dispatch;
+#[path = "vm_wasm_tables.rs"]
+pub(crate) mod wasm_tables;
 
 const PROFILE: &str = "anti-bot-vm-detection-v1";
 static CONFIG: LazyLock<Value> = LazyLock::new(|| {
@@ -81,7 +88,7 @@ static ANTI: LazyLock<Vec<(&str, u64, Regex)>> = LazyLock::new(|| {
 ].into_iter().map(|(id,weight,p)|(id,weight,Regex::new(p).expect("Anti-bot rule"))).collect()
 });
 pub(crate) fn current_producer() -> Value {
-    json!({"id":"origin-trace-vm-detector","version":"1.5.0"})
+    json!({"id":"origin-trace-vm-detector","version":"1.8.0"})
 }
 
 // The catalog and generated documents share this exact profile projection.
@@ -316,6 +323,61 @@ fn js(source: &str) -> Result<(Vec<Value>, Vec<Value>)> {
         }
     }
     Ok((best, omissions))
+}
+/// Classify an artifact's dispatch sites under one fresh meter.
+fn classify_artifact(
+    runtime: &str,
+    bytes: &[u8],
+    meter: &dispatch_shape::Meter,
+) -> Option<dispatch_shape::Classified> {
+    match runtime {
+        "javascript" => Some(dispatch_shape::javascript::classify(std::str::from_utf8(bytes).ok()?, meter)),
+        "webassembly" => Some(dispatch_shape::wasm(bytes, meter).unwrap_or(
+            dispatch_shape::Classified {
+                javascript: None,
+                sites: Vec::new(),
+                omissions: vec![json!({"reason":"classification-unavailable","detail":"The module sections did not decode for dispatch classification."})],
+            },
+        )),
+        _ => None,
+    }
+}
+
+/// The classification document of one artifact under a given meter.
+#[cfg(test)]
+pub(crate) fn classification_under(
+    runtime: &str,
+    bytes: &[u8],
+    meter: &dispatch_shape::Meter,
+) -> Value {
+    let classified = classify_artifact(runtime, bytes, meter).expect("classifiable artifact");
+    dispatch_shape::document(&json!("1"), classified.sites, classified.omissions)
+}
+
+/// Classification of one JavaScript source and the meter that bounded it.
+#[cfg(test)]
+pub(crate) fn javascript_classification_work(source: &str) -> (Value, dispatch_shape::Meter) {
+    let meter = dispatch_shape::Meter::new();
+    let document = classification_under("javascript", source.as_bytes(), &meter);
+    (document, meter)
+}
+
+/// Roles of every classified dispatch site of an artifact, recomputed under
+/// a fresh meter. Production passes the roles the analysis computed instead.
+#[cfg(test)]
+pub(crate) fn dispatch_roles(runtime: &str, bytes: &[u8]) -> Option<dispatch_shape::Roles> {
+    let meter = dispatch_shape::Meter::new();
+    Some(dispatch_shape::Roles::new(
+        &classify_artifact(runtime, bytes, &meter)?,
+        &meter,
+    ))
+}
+
+/// The structural dispatch classification of one JavaScript source, as
+/// `analyze` records it.
+#[cfg(test)]
+pub(crate) fn javascript_classification(source: &str) -> Value {
+    javascript_classification_work(source).0
 }
 struct Instruction {
     opcode: u8,
@@ -695,11 +757,24 @@ fn runtime_weights() -> Value {
 }
 // Pattern rank can mark JavaScript likely-vm before static handler recovery.
 // Keep the workspace, but do not leave an empty handler table at that tier.
+// Structural dispatch classification never changes a tier: handlers the
+// classification withheld still count as recovered here.
 fn retain_handlerless_javascript_as_candidate(result: &mut Value, workspace: &Value) {
     let empty_handlers = workspace["handlers"]
         .as_array()
         .is_some_and(|handlers| handlers.is_empty());
-    if result["runtime"] != "javascript" || result["tier"] != "likely-vm" || !empty_handlers {
+    let withheld = workspace["coverage"]["omissions"]
+        .as_array()
+        .is_some_and(|omissions| {
+            omissions
+                .iter()
+                .any(|omission| omission["reason"] == "handler-withheld")
+        });
+    if result["runtime"] != "javascript"
+        || result["tier"] != "likely-vm"
+        || !empty_handlers
+        || withheld
+    {
         return;
     }
     result["tier"] = json!("candidate");
@@ -742,7 +817,52 @@ fn graph_entry(
     edges.push(edge);
     true
 }
+#[cfg(test)]
 fn analyze(artifact: &Value, bytes: &[u8], events: &[Value]) -> Value {
+    analyze_with_roles(artifact, bytes, events).0
+}
+
+/// Workspace extraction spends the same artifact budget. Its exhaustion
+/// must remain visible even when extraction cannot return a workspace.
+pub(crate) fn finish_classification(
+    result: &mut Value,
+    workspace: Option<&mut Value>,
+    meter: &dispatch_shape::Meter,
+) {
+    if !meter.exhausted() {
+        return;
+    }
+    let classification = &mut result["frontend"]["dispatch_classification"];
+    if let Some(omissions) = classification["omissions"].as_array_mut()
+        && !omissions
+            .iter()
+            .any(|o| o["reason"] == "classification-work-limit")
+    {
+        omissions.push(json!({"reason":"classification-work-limit","detail":"The shared artifact work or memory budget prevented completion of 1 downstream claim-gate or table-layout pass. Unsupported claims were withheld."}));
+    }
+    if let Some(workspace) = workspace {
+        workspace["dispatch_classification"] = classification.clone();
+        workspace["coverage"]["omissions"].as_array_mut().expect("workspace omissions").push(json!({"reason":"classification-work-limit","detail":"The shared artifact work or memory budget prevented completion of the claim gate or table layout."}));
+        workspace["coverage"]["complete"] = json!(false);
+    }
+}
+
+/// The analysis result and the roles of every classified dispatch site, which
+/// the opcode-claim gate reads without classifying the artifact again.
+pub(crate) fn analyze_with_roles(
+    artifact: &Value,
+    bytes: &[u8],
+    events: &[Value],
+) -> (Value, Option<dispatch_shape::Roles>) {
+    analyze_with_meter(artifact, bytes, events, &dispatch_shape::Meter::new())
+}
+
+pub(crate) fn analyze_with_meter(
+    artifact: &Value,
+    bytes: &[u8],
+    events: &[Value],
+    meter: &dispatch_shape::Meter,
+) -> (Value, Option<dispatch_shape::Roles>) {
     let runtime = if artifact["kind"] == "javascript" {
         "javascript"
     } else {
@@ -752,20 +872,23 @@ fn analyze(artifact: &Value, bytes: &[u8], events: &[Value]) -> Value {
         match std::str::from_utf8(bytes) {
             Ok(s) => s,
             Err(_) => {
-                return failure(
-                    artifact,
-                    "malformed-artifact",
-                    "Artifact is not UTF-8 JavaScript",
+                return (
+                    failure(
+                        artifact,
+                        "malformed-artifact",
+                        "Artifact is not UTF-8 JavaScript",
+                    ),
+                    None,
                 );
             }
         }
     } else {
         ""
     };
-    let (observations, frontend, mut omissions) = if runtime == "javascript" {
+    let (observations, mut frontend, mut omissions) = if runtime == "javascript" {
         match js(source) {
             Ok((obs, omissions)) => (obs, json!({"replacement_character_count":0}), omissions),
-            Err(e) => return failure(artifact, "malformed-artifact", &e.message),
+            Err(e) => return (failure(artifact, "malformed-artifact", &e.message), None),
         }
     } else {
         match wasm(bytes) {
@@ -780,9 +903,22 @@ fn analyze(artifact: &Value, bytes: &[u8], events: &[Value]) -> Value {
                 };
                 (obs, frontend, omissions)
             }
-            Err(e) => return failure(artifact, "malformed-artifact", &e.message),
+            Err(e) => return (failure(artifact, "malformed-artifact", &e.message), None),
         }
     };
+    // Classification is interpretation over the same bytes, metered on its
+    // own and never an input to the observations, score or tier above.
+    let classified = classify_artifact(runtime, bytes, meter);
+    let roles = classified
+        .as_ref()
+        .map(|classified| dispatch_shape::Roles::new(classified, meter));
+    if let Some(classified) = classified {
+        frontend["dispatch_classification"] = dispatch_shape::document(
+            &artifact["artifact_id"],
+            classified.sites,
+            classified.omissions,
+        );
+    }
     let rules = observations
         .iter()
         .map(|o| o["rule_id"].as_str().unwrap().to_owned())
@@ -925,7 +1061,7 @@ fn analyze(artifact: &Value, bytes: &[u8], events: &[Value]) -> Value {
         result["bytecode_snapshot"] =
             crate::vm_bytecode::snapshot(source, artifact["artifact_id"].as_str().unwrap());
     }
-    result
+    (result, roles)
 }
 // Read a bounded prefix, report omissions, and hash exactly the consumed input.
 type JsonlInput = (Vec<(usize, Value)>, Vec<Value>, String);
@@ -1147,8 +1283,8 @@ pub(crate) fn store_documents(root: &Path, event_store: &Path) -> Result<Documen
         }
         let (mut result, bytes) = match evidence::content(root, artifact, 16 * 1024 * 1024) {
             Ok(bytes) => {
-                let result = analyze(artifact, &bytes, &events);
-                (result, Some(bytes))
+                let (result, roles) = analyze_with_roles(artifact, &bytes, &events);
+                (result, Some((bytes, roles)))
             }
             Err(e) => (
                 failure(
@@ -1179,22 +1315,62 @@ pub(crate) fn store_documents(root: &Path, event_store: &Path) -> Result<Documen
                 .unwrap()
                 .extend(omissions.clone());
         }
-        if let Some(bytes) = bytes
-            && let Some(mut workspace) = crate::vm_opcode::workspace(
+        if let Some((bytes, roles)) = bytes {
+            let mut workspace = crate::vm_opcode::workspace(
                 root,
                 artifact,
                 &bytes,
-                &result,
+                crate::vm_opcode::Analysis {
+                    result: &result,
+                    roles: roles.as_ref(),
+                },
                 &snapshot_artifacts,
                 &events,
                 &dispatch_budget_losses,
-            )
-        {
-            workspace["capture_mode"] = json!(capture_provenance.mode(&artifact["session_id"]));
-            retain_handlerless_javascript_as_candidate(&mut result, &workspace);
-            opcode_workspaces.push(workspace);
+            );
+            if let Some(roles) = &roles {
+                finish_classification(&mut result, workspace.as_mut(), &roles.meter);
+            }
+            if let Some(mut workspace) = workspace {
+                workspace["capture_mode"] = json!(capture_provenance.mode(&artifact["session_id"]));
+                retain_handlerless_javascript_as_candidate(&mut result, &workspace);
+                opcode_workspaces.push(workspace);
+            }
         }
         results.push(result);
+    }
+    // An operational worker failure is retryable, never derived evidence.
+    // Return before writing any document; App only caches successful calls.
+    let mut worker_failures = BTreeMap::<&str, u64>::new();
+    for result in &results {
+        for omission in result["frontend"]["dispatch_classification"]["omissions"]
+            .as_array()
+            .into_iter()
+            .flatten()
+        {
+            if omission["reason"] == "analysis-worker-failed" {
+                *worker_failures
+                    .entry(omission["detail"].as_str().unwrap_or("protocol"))
+                    .or_default() += omission["omitted_records"].as_u64().unwrap_or(1);
+            }
+        }
+    }
+    if !worker_failures.is_empty() {
+        return Err(crate::error::Error::new(
+            503,
+            format!(
+                "analysis-worker-failed: {}. Analysis was not saved; retry the request.",
+                worker_failures
+                    .iter()
+                    .map(|(detail, count)| format!("{detail} ({count} omitted artifacts)"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        )
+        .with_reason(crate::error::Reason::at(
+            crate::error::Code::DependencyUnavailable,
+            crate::error::Phase::Worker,
+        )));
     }
     let mut mixed = Vec::new();
     for wasm in results.iter().filter(|r| {
@@ -1253,7 +1429,7 @@ mod profile_tests {
     #[test]
     fn handler_recovery_requirement_has_distinct_profile_and_accepts_older_profiles() {
         let current = current_profile();
-        assert_eq!(current_producer()["version"], "1.5.0");
+        assert_eq!(current_producer()["version"], "1.8.0");
         assert_eq!(current["javascript_likely_vm_requires_handlers"], true);
         let mut historical = current.clone();
         historical
@@ -1276,5 +1452,530 @@ mod profile_tests {
             .unwrap()
             .remove("javascript_scoring_version");
         validator.validate(&historical).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod dispatch_shape_tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    fn fixtures() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tools/fixtures/dispatch-shapes")
+    }
+
+    fn sources() -> Vec<PathBuf> {
+        let mut sources = std::fs::read_dir(fixtures())
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| path.extension().is_some_and(|ext| ext == "wat"))
+            .collect::<Vec<_>>();
+        sources.sort();
+        assert!(sources.len() >= 5, "dispatch shape WAT sources are missing");
+        sources
+    }
+
+    fn classify(name: &str) -> Value {
+        let bytes = std::fs::read(fixtures().join(name)).unwrap();
+        let kind = if name.ends_with(".js") {
+            "javascript"
+        } else {
+            "wasm"
+        };
+        let artifact = json!({
+            "artifact_id": "7", "sha256": hex::encode(Sha256::digest(&bytes)), "kind": kind,
+            "session_id": "1", "navigation_id": "1", "frame_id": "1", "url": name,
+        });
+        analyze(&artifact, &bytes, &[])
+    }
+
+    /// The checked-in binaries are exactly what the pinned assembler builds
+    /// from the checked-in sources. Run `make dispatch-shape-fixtures` after
+    /// editing a `.wat`.
+    #[test]
+    fn dispatch_shape_wasm_fixtures_match_their_wat_sources() {
+        for source in sources() {
+            let built = wat::parse_file(&source).unwrap();
+            wasmparser::Validator::new().validate_all(&built).unwrap();
+            let binary = source.with_extension("wasm");
+            let checked_in = std::fs::read(&binary).unwrap_or_else(|_| {
+                panic!(
+                    "{} is missing; run make dispatch-shape-fixtures",
+                    binary.display()
+                )
+            });
+            assert!(
+                built == checked_in,
+                "{} drifted from its source; run make dispatch-shape-fixtures",
+                binary.display()
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "writes fixtures; run through make dispatch-shape-fixtures"]
+    fn write_dispatch_shape_fixtures() {
+        for source in sources() {
+            let built = wat::parse_file(&source).unwrap();
+            std::fs::write(source.with_extension("wasm"), built).unwrap();
+        }
+    }
+
+    #[test]
+    fn dispatch_shape_fixtures_classify_as_expected() {
+        let expected: Value = serde_json::from_str(
+            &std::fs::read_to_string(fixtures().join("expected.json")).unwrap(),
+        )
+        .unwrap();
+        let schema: Value = serde_json::from_str(include_str!(
+            "../../../protocol/vm-dispatch-classification-v1.schema.json"
+        ))
+        .unwrap();
+        let validator = jsonschema::validator_for(&schema).unwrap();
+        let analysis_schema: Value =
+            serde_json::from_str(include_str!("../../../protocol/vm-analysis-v1.schema.json"))
+                .unwrap();
+        let result_validator = jsonschema::validator_for(
+            &json!({"$ref":"#/$defs/result","$defs":analysis_schema["$defs"]}),
+        )
+        .unwrap();
+        let mut mismatches = Vec::new();
+        for fixture in expected["fixtures"].as_array().unwrap() {
+            let name = fixture["artifact"].as_str().unwrap();
+            let result = classify(name);
+            result_validator.validate(&result).unwrap();
+            let classification = &result["frontend"]["dispatch_classification"];
+            validator.validate(classification).unwrap();
+            let sites = classification["sites"].as_array().unwrap();
+            let wanted = fixture["sites"].as_array().unwrap();
+            // Every fixture mismatch is reported, not only the first.
+            let mut failed =
+                sites.len() != wanted.len() || classification["site_count"] != wanted.len();
+            for (site, want) in sites.iter().zip(wanted) {
+                for (key, value) in want.as_object().unwrap() {
+                    let actual = match key.as_str() {
+                        "function_index" | "line" => &site["location"][key],
+                        _ => &site[key],
+                    };
+                    failed |= actual != value;
+                }
+                assert_eq!(site["confidence"], "structural");
+                assert_eq!(site["artifact_id"], "7");
+                assert!(!site["selector"]["expression"].as_str().unwrap().is_empty());
+            }
+            if failed {
+                let summary = sites
+                    .iter()
+                    .map(|site| {
+                        format!(
+                            "{} {} {}/{}/{} {}",
+                            site["location"]["function_index"],
+                            site["instruction"],
+                            site["dispatch_kind"],
+                            site["selector_source"],
+                            site["repeats"],
+                            site["role"]
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                mismatches.push(format!("{name}: {summary:?}"));
+            }
+            // Classification never raises the structural tier.
+            let observations = result["observations"].as_array().unwrap();
+            let rules = observations
+                .iter()
+                .map(|o| o["rule_id"].as_str().unwrap().to_owned())
+                .collect::<Vec<_>>();
+            assert_eq!(
+                result["finding_id"],
+                finding(result["artifact_sha256"].as_str().unwrap(), &rules)
+            );
+        }
+        assert!(mismatches.is_empty(), "{}", mismatches.join("\n"));
+    }
+
+    /// Every embedded copy of the classification contract matches the
+    /// standalone versioned schema after reference rewriting.
+    #[test]
+    fn dispatch_classification_contract_copies_match_the_standalone_schema() {
+        let standalone: Value = serde_json::from_str(include_str!(
+            "../../../protocol/vm-dispatch-classification-v1.schema.json"
+        ))
+        .unwrap();
+        assert_eq!(
+            standalone["properties"]["omissions"]["items"]["properties"]["reason"]["enum"],
+            json!(dispatch_shape::OMISSION_REASONS)
+        );
+        let copy = |prefix: &str| {
+            let mut body = standalone.clone();
+            for key in ["$schema", "$id", "title", "$defs"] {
+                body.as_object_mut().unwrap().remove(key);
+            }
+            let text = serde_json::to_string(&body).unwrap().replace(
+                "\"#/$defs/site\"",
+                &format!("\"{prefix}/dispatchClassificationSite\""),
+            );
+            serde_json::from_str::<Value>(&text).unwrap()
+        };
+        let analysis: Value =
+            serde_json::from_str(include_str!("../../../protocol/vm-analysis-v1.schema.json"))
+                .unwrap();
+        let workspace: Value = serde_json::from_str(include_str!(
+            "../../../protocol/vm-opcode-workspace-v2.schema.json"
+        ))
+        .unwrap();
+        let openapi: Value =
+            serde_json::from_str(include_str!("../../../protocol/openapi.json")).unwrap();
+        for (defs, prefix) in [
+            (&analysis["$defs"], "#/$defs".to_owned()),
+            (&workspace["$defs"], "#/$defs".to_owned()),
+            (
+                &openapi["components"]["schemas"]["VmAnalysis"]["$defs"],
+                "#/components/schemas/VmAnalysis/$defs".to_owned(),
+            ),
+            (
+                &openapi["components"]["schemas"]["VmOpcodeWorkspace"]["$defs"],
+                "#/components/schemas/VmOpcodeWorkspace/$defs".to_owned(),
+            ),
+        ] {
+            assert_eq!(defs["dispatchClassification"], copy(&prefix), "{prefix}");
+            assert_eq!(
+                defs["dispatchClassificationSite"], standalone["$defs"]["site"],
+                "{prefix}"
+            );
+        }
+    }
+
+    /// A loop that reloads a state field and writes constants back is a
+    /// state machine. Only a slot stored back as `slot + n` is an advancing
+    /// program position.
+    #[test]
+    fn field_state_machine_loops_are_not_interpreter_candidates() {
+        let bytes = wat::parse_str(
+            r#"(module
+              (memory 1)
+              (func (export "drive") (param $obj i32) (result i32)
+                (local $state i32)
+                (block $exit
+                  (loop $again
+                    (local.set $state (i32.load offset=4 (local.get $obj)))
+                    (block $two (block $one (block $zero
+                      (br_table $zero $one $two $exit (local.get $state)))
+                      (i32.store offset=4 (local.get $obj) (i32.const 2)) (br $again))
+                      (i32.store offset=4 (local.get $obj) (i32.const 0)) (br $again))
+                    (i32.store offset=4 (local.get $obj) (i32.const 3))
+                    (br $again)))
+                (local.get $state)))"#,
+        )
+        .unwrap();
+        let sites = dispatch_shape::wasm(&bytes, &dispatch_shape::Meter::new()).unwrap();
+        let document = dispatch_shape::document(&json!("9"), sites.sites, sites.omissions);
+        let site = &document["sites"][0];
+        assert_eq!(site["selector_source"], "frame_slot");
+        assert_eq!(site["repeats"], "unknown");
+        assert_eq!(site["role"], "other");
+    }
+
+    #[test]
+    fn javascript_saved_positions_must_advance_to_repeat() {
+        let classify = |source: &str| {
+            let document = javascript_classification(source);
+            let site = document["sites"][0].clone();
+            (
+                site["selector_source"].as_str().unwrap().to_owned(),
+                site["repeats"].as_str().unwrap().to_owned(),
+                site["role"].as_str().unwrap().to_owned(),
+            )
+        };
+        let machine = "function drive(m){while(true){switch(m.state){case 0: m.state = 1; break; case 1: m.state = 2; break; case 2: return;}}}";
+        assert_eq!(
+            classify(machine),
+            ("frame_slot".into(), "unknown".into(), "other".into())
+        );
+        let saved = "function run(f, code){while(true){switch(code[f.pc++]){case 0: break; case 1: return; case 2: f.pc = 0;}}}";
+        assert_eq!(
+            classify(saved),
+            (
+                "frame_slot".into(),
+                "loop".into(),
+                "interpreter-candidate".into()
+            )
+        );
+    }
+
+    /// Review regression: without validator arity a call's effect is
+    /// unknown, so its argument never becomes the selector.
+    #[test]
+    fn untyped_call_results_do_not_become_call_arguments() {
+        let bytes = wat::parse_str(
+            r#"(module
+              (func $f (param i32) (result i32) (local.get 0))
+              (func (export "g") (param $x i32) (result i32)
+                (drop (i64.add (i32.const 1) (i32.const 2)))
+                (block $b (block $a
+                  (br_table $a $b (call $f (local.get $x)))))
+                (i32.const 0)))"#,
+        )
+        .unwrap();
+        assert!(wasmparser::Validator::new().validate_all(&bytes).is_err());
+        let sites = dispatch_shape::wasm(&bytes, &dispatch_shape::Meter::new()).unwrap();
+        let document = dispatch_shape::document(&json!("9"), sites.sites, sites.omissions);
+        let site = &document["sites"][0];
+        assert_eq!(site["selector_source"], "unknown", "{site}");
+        assert_eq!(site["role"], "other");
+    }
+
+    /// Review regression: a cyclic local trace must not cache a provisional
+    /// unknown, so a site's classification is independent of query order.
+    #[test]
+    fn cyclic_local_traces_do_not_depend_on_query_order() {
+        let function = |first: &str, second: &str| {
+            format!(
+                r#"(func (param $code i32) (param $len i32)
+                  (local $pc i32) (local $a i32) (local $b i32)
+                  (block $exit
+                    (loop $again
+                      (br_if $exit (i32.ge_u (local.get $pc) (local.get $len)))
+                      (local.set $a (i32.load8_u (i32.add (local.get $code) (local.get $pc))))
+                      (local.set $pc (i32.add (local.get $pc) (i32.const 1)))
+                      (local.set $b (local.get $a))
+                      (block $y (block $x (br_table $x $y (local.get ${first}))))
+                      (block $w (block $v (br_table $v $w (local.get ${second}))))
+                      (local.set $a (local.get $b))
+                      (br $again))))"#
+            )
+        };
+        let bytes = wat::parse_str(format!(
+            "(module (memory 1) {} {})",
+            function("a", "b"),
+            function("b", "a")
+        ))
+        .unwrap();
+        let sites = dispatch_shape::wasm(&bytes, &dispatch_shape::Meter::new()).unwrap();
+        let document = dispatch_shape::document(&json!("9"), sites.sites, sites.omissions);
+        let by_local = |function: u64, expression: &str| {
+            document["sites"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|site| {
+                    site["location"]["function_index"] == function
+                        && site["selector"]["expression"]
+                            .as_str()
+                            .unwrap()
+                            .starts_with(expression)
+                })
+                .map(|site| (site["selector_source"].clone(), site["repeats"].clone()))
+                .unwrap()
+        };
+        assert_eq!(by_local(0, "local4"), by_local(1, "local4"));
+        assert_eq!(by_local(0, "local3"), by_local(1, "local3"));
+        assert_eq!(by_local(0, "local4").0, "cursor_index");
+    }
+
+    /// Review regression: every dispatch_kind the schema allows is counted.
+    #[test]
+    fn kind_counts_cover_every_dispatch_kind() {
+        let schema: Value = serde_json::from_str(include_str!(
+            "../../../protocol/vm-dispatch-classification-v1.schema.json"
+        ))
+        .unwrap();
+        let kinds = schema["$defs"]["site"]["properties"]["dispatch_kind"]["enum"]
+            .as_array()
+            .unwrap()
+            .clone();
+        let counted = schema["properties"]["kind_counts"]["required"]
+            .as_array()
+            .unwrap()
+            .clone();
+        assert_eq!(kinds, counted);
+        let document = dispatch_shape::document(&json!("9"), Vec::new(), Vec::new());
+        for kind in &kinds {
+            assert_eq!(document["kind_counts"][kind.as_str().unwrap()], 0);
+        }
+    }
+
+    fn classify_module(bytes: &[u8]) -> Value {
+        let classified = dispatch_shape::wasm(bytes, &dispatch_shape::Meter::new()).unwrap();
+        dispatch_shape::document(&json!("9"), classified.sites, classified.omissions)
+    }
+
+    /// Review regression: a trace cap never yields a confident different
+    /// source. Constant writes before the loop must not crowd out the loop's
+    /// fetch, and a large function must not run out of symbolic nodes.
+    #[test]
+    fn trace_caps_never_yield_a_confident_wrong_source() {
+        for (name, bytes) in review_inputs::wasm() {
+            let document = classify_module(&bytes);
+            let site = &document["sites"][0];
+            assert_eq!(
+                (
+                    site["selector_source"].as_str().unwrap(),
+                    site["repeats"].as_str().unwrap(),
+                    site["role"].as_str().unwrap()
+                ),
+                ("cursor_index", "loop", "interpreter-candidate"),
+                "{name}: {site}"
+            );
+        }
+    }
+
+    /// Review regression: a selector with more reaching writes than one
+    /// query may trace is an honest unknown with a counted omission.
+    #[test]
+    fn exhausted_trace_budget_is_an_honest_counted_unknown() {
+        let writes = (0..5000)
+            .map(|i| {
+                format!("(local.set $op (i32.load8_u (i32.add (local.get $code) (i32.const {i}))))")
+            })
+            .collect::<String>();
+        let bytes = wat::parse_str(format!(
+            r#"(module (memory 1)
+              (func (param $code i32) (local $op i32)
+                {writes}
+                (block $b (block $a (br_table $a $b (local.get $op))))))"#
+        ))
+        .unwrap();
+        let document = classify_module(&bytes);
+        assert_eq!(document["sites"][0]["selector_source"], "unknown");
+        assert!(
+            document["omissions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(
+                    |omission| omission["reason"] == "classification-trace-limit"
+                        && omission["omitted_records"] == 1
+                ),
+            "{}",
+            document["omissions"]
+        );
+    }
+
+    /// Review regression: a memoized trace must cost the same depth and
+    /// steps as computing it, so a site's result does not depend on whether
+    /// another site traced part of its chain first.
+    #[test]
+    fn trace_results_do_not_depend_on_site_order() {
+        let chain = (1..=10)
+            .map(|i| format!("(local.set $a{i} (local.get $a{}))", i - 1))
+            .collect::<String>();
+        let locals = (0..=10)
+            .map(|i| format!("(local $a{i} i32)"))
+            .collect::<String>();
+        let function = |first: usize, second: usize| {
+            format!(
+                r#"(func (param $code i32) (param $len i32) (local $pc i32) {locals}
+                  (block $exit (loop $again
+                    (br_if $exit (i32.ge_u (local.get $pc) (local.get $len)))
+                    (local.set $a0 (i32.load8_u (i32.add (local.get $code) (local.get $pc))))
+                    (local.set $pc (i32.add (local.get $pc) (i32.const 1)))
+                    {chain}
+                    (block $y (block $x (br_table $x $y (local.get $a{first}))))
+                    (block $w (block $v (br_table $v $w (local.get $a{second}))))
+                    (br $again))))"#
+            )
+        };
+        let bytes = wat::parse_str(format!(
+            "(module (memory 1) {} {})",
+            function(5, 10),
+            function(10, 5)
+        ))
+        .unwrap();
+        let document = classify_module(&bytes);
+        let result = |function: u64, local: &str| {
+            document["sites"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|site| {
+                    site["location"]["function_index"] == function
+                        && site["selector"]["expression"]
+                            .as_str()
+                            .unwrap()
+                            .starts_with(local)
+                })
+                .map(|site| {
+                    (
+                        site["selector_source"].clone(),
+                        site["repeats"].clone(),
+                        site["role"].clone(),
+                    )
+                })
+                .unwrap()
+        };
+        // local8 is $a5 and local13 is $a10, after code, len and pc.
+        assert_eq!(result(0, "local8"), result(1, "local8"));
+        assert_eq!(result(0, "local13"), result(1, "local13"));
+    }
+
+    #[test]
+    fn module_without_dispatch_records_export_per_role() {
+        let bytes = wat::parse_str(
+            r#"(module
+              (func (export "init") (param i32) (result i32) (i32.add (local.get 0) (i32.const 1)))
+              (func (export "step") (param i32) (result i32) (i32.mul (local.get 0) (i32.const 3))))"#,
+        )
+        .unwrap();
+        let sites = dispatch_shape::wasm(&bytes, &dispatch_shape::Meter::new()).unwrap();
+        let document = dispatch_shape::document(&json!("9"), sites.sites, sites.omissions);
+        assert_eq!(document["site_count"], 1);
+        let site = &document["sites"][0];
+        assert_eq!(site["dispatch_kind"], "export_per_role");
+        assert_eq!(site["role"], "other");
+        assert_eq!(site["arm_count"], 2);
+    }
+
+    #[test]
+    fn threaded_and_cff_loops_are_not_interpreter_candidates() {
+        let bytes = wat::parse_str(
+            r#"(module
+              (type $step (func (param i32) (result i32)))
+              (table 4 funcref)
+              (func $next (type $step) (local.get 0))
+              (elem (i32.const 0) func $next)
+              (func (export "threaded") (param $h i32) (result i32)
+                (local $handler i32)
+                (local.set $handler (local.get $h))
+                (block $exit
+                  (loop $again
+                    (br_if $exit (i32.eqz (local.get $handler)))
+                    (local.set $handler (call_indirect (type $step) (local.get $handler) (local.get $handler)))
+                    (br $again)))
+                (local.get $handler))
+              (func (export "flattened") (result i32)
+                (local $state i32) (local $acc i32)
+                (local.set $state (i32.const 0))
+                (block $exit
+                  (loop $again
+                    (block $two (block $one (block $zero
+                      (br_table $zero $one $two $exit (local.get $state)))
+                      (local.set $state (i32.const 2)) (br $again))
+                      (local.set $state (i32.const 3)) (br $again))
+                    (local.set $acc (i32.const 7))
+                    (local.set $state (i32.const 1))
+                    (br $again)))
+                (local.get $acc)))"#,
+        )
+        .unwrap();
+        let sites = dispatch_shape::wasm(&bytes, &dispatch_shape::Meter::new()).unwrap();
+        let document = dispatch_shape::document(&json!("9"), sites.sites, sites.omissions);
+        let listed = document["sites"].as_array().unwrap();
+        let threaded = listed
+            .iter()
+            .find(|site| site["instruction"] == "call_indirect")
+            .unwrap();
+        assert_eq!(threaded["dispatch_kind"], "threaded");
+        assert_eq!(threaded["selector_source"], "handler_address");
+        assert_eq!(threaded["repeats"], "loop");
+        assert_eq!(threaded["role"], "other");
+        let flattened = listed
+            .iter()
+            .find(|site| site["instruction"] == "br_table")
+            .unwrap();
+        assert_eq!(flattened["selector_source"], "constant");
+        assert_eq!(flattened["repeats"], "loop");
+        assert_eq!(flattened["role"], "other");
+        assert_eq!(document["role_counts"]["interpreter-candidate"], 0);
     }
 }

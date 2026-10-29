@@ -5,8 +5,9 @@
 // The UI is served by the packaged backend from a bounded synthetic session
 // that includes events emitted by the real C++ native Wasm encoders.
 import assert from 'node:assert/strict';
+import {createHash} from 'node:crypto';
 import {execFileSync, spawn} from 'node:child_process';
-import {cp, mkdir, mkdtemp, readFile, readdir, rm, writeFile} from 'node:fs/promises';
+import {chmod, cp, mkdir, mkdtemp, readFile, readdir, rm, writeFile} from 'node:fs/promises';
 import {existsSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
@@ -41,7 +42,7 @@ for (const required of [app, join(root, 'build/sessions/demo.jsonl'), ...Object.
 // the selected developer directory or the standard Xcode location without
 // changing the global selection.
 function developerDirectory() {
-  const candidates = [process.env.DEVELOPER_DIR, execFileSync('xcode-select', ['-p'], {encoding: 'utf8'}).trim(),
+  const candidates = [process.env.DEVELOPER_DIR, process.env.DEVELOPER_DIR ? null : execFileSync('xcode-select', ['-p'], {encoding: 'utf8'}).trim(),
     '/Applications/Xcode.app/Contents/Developer'].filter(Boolean);
   const found = candidates.find(path => existsSync(join(path, 'usr/bin/xcodebuild')));
   assert(found, 'Rendered UI acceptance requires full Xcode (XCTest); Command Line Tools alone are insufficient');
@@ -91,6 +92,7 @@ async function waitForFile(path, child, timeout = 30000) {
 
 const temporary = await mkdtemp(join(tmpdir(), 'reb-rendered-ui-'));
 let backend;
+let failingBackend;
 let log = '';
 try {
   await rm(report, {recursive: true, force: true});
@@ -113,6 +115,33 @@ try {
   assert.match(endpoint, /^http:\/\/127\.0\.0\.1:\d+$/, 'The packaged backend must bind loopback only');
   const uiURL = `${endpoint}/?native=1&canvas_images=0`;
 
+  // A separate, real backend has no cached analysis. Removing execution
+  // permission from its copied binary makes self-reexecution fail at spawn.
+  const failureRoot = join(temporary, 'worker-failure');
+  await mkdir(join(failureRoot, 'blobs'), {recursive: true});
+  const source = await readFile(join(root, 'tools/fixtures/dispatch-shapes/handler-array-interpreter.js'));
+  const sha = createHash('sha256').update(source).digest('hex');
+  await writeFile(join(failureRoot, 'blobs', `${sha}.bin`), source);
+  await writeFile(join(failureRoot, 'manifest.jsonl'), JSON.stringify({protocol_version: 1,
+    artifact_id: '1', session_id: '1', navigation_id: '1', frame_id: '1', parent_artifact_id: '0', creator_event_id: '0',
+    execution_context_id: '1', capture_origin: 'dynamic_javascript', kind: 'javascript', url: 'fixture://worker-failure.js',
+    mime_type: 'text/javascript', byte_size: source.length, sha256: sha, sensitive: false, content_path: `blobs/${sha}.bin`}) + '\n');
+  await writeFile(join(failureRoot, 'events.jsonl'), '');
+  const failureBinary = join(temporary, 'FailureBackend');
+  await cp(join(host, 'Contents/MacOS/OriginTraceBackend'), failureBinary);
+  const failureEndpoint = join(failureRoot, 'endpoint');
+  failingBackend = spawn(failureBinary, ['--port', '0', '--endpoint-file', failureEndpoint,
+    '--store', join(failureRoot, 'events.jsonl'), '--artifacts', failureRoot,
+    '--ui-directory', join(host, 'Contents/Resources/research-ui'),
+    '--trace-store', join(failureRoot, 'traces.jsonl'), '--signal-store', join(failureRoot, 'signals.jsonl'),
+    '--api-collection', join(failureRoot, 'collection.json'), '--local-analyst', join(failureRoot, 'analyst.json')],
+  {cwd: temporary, stdio: 'ignore'});
+  const failureURL = await waitForFile(failureEndpoint, failingBackend);
+  await chmod(failureBinary, 0o644);
+  const failure = await fetch(`${failureURL}/api/analysis/vm`);
+  assert.equal(failure.status, 503);
+  assert.match((await failure.json()).error, /analysis-worker-failed: spawn \(1 omitted artifacts\)/);
+
   const derived = join(root, 'build/rendered-ui-derived');
   log += await run('xcodebuild', ['build-for-testing', '-project', join(harness, 'OriginTraceRenderedUITests.xcodeproj'),
     '-scheme', 'OriginTraceRenderedUITests', '-destination', destination, '-derivedDataPath', derived],
@@ -134,6 +163,8 @@ try {
     EnvironmentVariables: {
       ...(maximumHeight === undefined ? {} : {REB_RENDERED_UI_MAX_HEIGHT: maximumHeight}),
       REB_DISABLE_AUTOMATIC_LIVE_SESSION: '1',
+      REB_RENDERED_UI_FAILURE_URL: failureURL,
+      REB_RENDERED_UI_FAILURE_BINARY: failureBinary,
       REB_RENDERED_UI_OUTPUT: join(report, 'screenshots'),
       REB_RENDERED_UI_PROBES: join(harness, 'probes.js'),
       REB_RENDERED_UI_EXPECT: JSON.stringify({hostileUrl: HOSTILE_URL, hostileUrlMarker: HOSTILE_URL_MARKER, hostileSourceUrl: HOSTILE_SOURCE_URL,
@@ -171,6 +202,7 @@ try {
   console.log(`PASS rendered packaged-app UI: ${executed.join(', ')} (${screenshots.length} screenshots in build/rendered-ui-qa/screenshots)`);
 } finally {
   await writeFile(join(report, 'xcodebuild.log'), log).catch(() => {});
+  if (failingBackend && failingBackend.exitCode === null) failingBackend.kill('SIGTERM');
   if (backend && backend.exitCode === null) backend.kill('SIGTERM');
   // Stop any app instance still running from this relocated copy.
   try { execFileSync('pkill', ['-f', join(temporary, 'Origin Trace.app/Contents/MacOS/')]); } catch {}

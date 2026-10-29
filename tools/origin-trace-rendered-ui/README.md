@@ -47,15 +47,19 @@ VM layout assertions check full-width compact evidence, complete footer and
 tab-strip visibility, and an exact boundary between the analysis scroller and
 its tabs. Native observation checks reveal and photograph each section heading
 and retained row separately after exercising the disclosure. They do not require
-both targets to fit in one viewport. Separate 1180x560 and 760x790 cases exercise
-the height and width breakpoints, compact trees,
+both targets to fit in one viewport. Native cards and the Dispatch structure
+card also assert their 12px content inset at all four sizes. Separate 1180x560
+and 760x790 cases exercise the height and width breakpoints, compact trees,
 keyboard focus, and the example disclosure independently. Text bounds also
 verify that handler opcodes keep a readable gap before their operation labels.
 At all four window sizes, every dock tab must leave either a useful analysis
 pane with a complete heading and row or a complete collapsed analysis header,
 with no change in height between tabs. Compact cases also expand the header,
 navigate from the Symbol Tree to a complete handler row, and toggle it with
-Space. A separate geometry check rejects a blank band between the Opcode
+Space. Retained-site buttons must open that same handler pane; both routes reject
+clipped tree fragments above it. Compact Program Trees settle on two complete
+finding rows after selection. Empty paragraphs check their text inset as well
+as their vertical spacing. A separate geometry check rejects a blank band between the Opcode
 workspace header and its evidence notice.
 
 AppKit can clamp requested window sizes to the display. The harness logs the
@@ -84,3 +88,7 @@ Environment passed to the hosted bundle through the `.xctestrun`:
 - `REB_RENDERED_UI_PROBES`: absolute path of `probes.js`
 - `REB_RENDERED_UI_EXPECT`: JSON with the fixture's hostile markers and counts
 - `REB_DISABLE_AUTOMATIC_LIVE_SESSION=1`
+- `REB_RENDERED_UI_FAILURE_URL` and `REB_RENDERED_UI_FAILURE_BINARY`: a separate
+  copied backend with synthetic interpreter evidence. Its executable permission
+  is removed to reproduce a real worker spawn failure, then restored to verify
+  unchanged-input retry. Both window sizes must show the counted failure as text.

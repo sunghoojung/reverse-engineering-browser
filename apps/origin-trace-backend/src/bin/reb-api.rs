@@ -1048,7 +1048,7 @@ fn bounded_http_error(spec: &Value, status: u16, bytes: &[u8]) -> Value {
     result
 }
 #[tokio::main]
-async fn main() {
+async fn run_main() {
     match run().await {
         Ok(code) => std::process::exit(code),
         Err(e) => {
@@ -1706,3 +1706,11 @@ mod tests {
         );
     }
 }
+
+fn main() {
+    origin_trace_backend::javascript_worker_entry();
+    run_main()
+}
+
+#[cfg(test)]
+origin_trace_backend::javascript_worker_test_entry!();

@@ -173,7 +173,11 @@ referenced by the event header's `artifact_id` plus the optional range.
 Detailed deterministic VM analysis uses the version 1 JSON contract in
 `vm-analysis-v1.schema.json`. The stored document is derived, content-addressed
 evidence under `artifacts/analysis/vm-analysis-v1.json`; it never replaces the
-immutable artifact bytes or the fixed-size timeline summary.
+immutable artifact bytes or the fixed-size timeline summary. Each result's
+`frontend.dispatch_classification` follows
+[VM dispatch classification v1](vm-dispatch-classification-v1.md): a structural
+kind, selector source and repeat answer for every dispatch site, which decides
+whether opcode claims may apply at all.
 
 ## VM opcode workspace
 

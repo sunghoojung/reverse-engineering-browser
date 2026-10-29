@@ -20,7 +20,7 @@ mod native_wasm;
 #[path = "vm_opcode_wasm.rs"]
 mod wasm;
 
-const PRODUCER_VERSION: &str = "2.8.0";
+const PRODUCER_VERSION: &str = "2.11.0";
 const MAX_SAMPLES: usize = 4096;
 const MAX_HANDLERS: usize = 1024;
 const MAX_SNAPSHOTS: usize = 16;
@@ -585,6 +585,97 @@ fn static_handlers(
     )
 }
 
+/// Why a dispatch site yields no opcode claims. Its arms or constants are
+/// not guest opcodes.
+fn withheld_reason(
+    roles: &vm::dispatch_shape::Roles,
+    role: Option<vm::dispatch_shape::Role>,
+) -> String {
+    use vm::dispatch_shape::Role;
+    match role {
+        Some(Role::InterpreterCandidate) => String::new(),
+        Some(Role::Multiplexer) => "A one-shot router dispatches on a call argument. Its case values route one call and are not claimed as guest opcodes.".into(),
+        Some(Role::Other) => "A dispatch site is not a cursor-advancing loop. Its case values are not claimed as guest opcodes.".into(),
+        None if roles.limited() => "A dispatch site was not classified: the classification work limit was reached. Its case values are not claimed as guest opcodes.".into(),
+        None => "A dispatch site has no structural classification. Its case values are not claimed as guest opcodes.".into(),
+    }
+}
+
+/// Handlers `static_handlers` recovered, after the opcode-claim gate.
+struct Gated {
+    handlers: Vec<Value>,
+    withheld: usize,
+    unknowns: Vec<String>,
+}
+
+/// The opcode-claim gate: a pure post-filter on recovered handlers. It keeps
+/// a switch case only when that switch is a classified interpreter-candidate
+/// site, and a table entry only when the region dispatches through that
+/// table (`t[op](...)`, `t[op].call(...)`) at an interpreter-candidate site.
+/// It never adds a handler and never feeds recovery, tier or score.
+fn gate_handlers(
+    source: &str,
+    start: usize,
+    end: usize,
+    handlers: Vec<Value>,
+    roles: &vm::dispatch_shape::Roles,
+) -> Gated {
+    use vm::dispatch_shape::Role;
+    let _ = (source, start, end); // Recovery's original byte ranges remain authoritative.
+    let mut kept = Vec::new();
+    let mut unknowns = Vec::new();
+    let mut withheld = 0;
+    for handler in handlers {
+        let offset = handler["source"]["byte_offset"].as_u64().unwrap_or(0) as usize;
+        let verdict = if roles.meter.charge(1) {
+            roles.javascript.as_ref().map_or(Ok(None), |proofs| {
+                proofs.verdict(offset, handler.get("handler_index").is_some())
+            })
+        } else {
+            Ok(None)
+        };
+        match verdict {
+            Ok(Some(Role::InterpreterCandidate)) => kept.push(handler),
+            verdict => {
+                withheld += 1;
+                unknowns.push(match verdict {
+                    Ok(role) => withheld_reason(roles, role),
+                    Err(reason) => reason.to_owned(),
+                });
+            }
+        }
+    }
+    if roles.meter.exhausted() {
+        withheld += kept.len();
+        kept.clear();
+        unknowns.push(withheld_reason(roles, None));
+    }
+    unknowns.sort();
+    unknowns.dedup();
+    Gated {
+        handlers: kept,
+        withheld,
+        unknowns,
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Differential tests run the workspace without the opcode-claim gate.
+    static GATE_DISABLED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+fn gate_enabled() -> bool {
+    #[cfg(test)]
+    {
+        !GATE_DISABLED.with(std::cell::Cell::get)
+    }
+    #[cfg(not(test))]
+    {
+        true
+    }
+}
+
 fn event_identity(event: &Value) -> Option<(String, u32, String)> {
     if !["session_id", "sequence_number"]
         .iter()
@@ -879,7 +970,24 @@ fn captured_module_preview(artifact: &Value, bytes: &[u8], handlers: &[Value]) -
 /// A retained sample proves a guest ISA only when its PC units are real and
 /// the opcode hits exactly one static handler. Owned exact-hash effects are
 /// the other proof. Static arms, unknown PC units, and repeated selectors do not.
-fn guest_opcode_isa_proven(samples: &[Value], handlers: &[Value], owned: Option<&Value>) -> bool {
+fn guest_opcode_isa_proven(
+    samples: &[Value],
+    handlers: &[Value],
+    owned: Option<&Value>,
+    module_roles: Option<&vm::dispatch_shape::Roles>,
+) -> bool {
+    // A Wasm arm proves a guest opcode only at an interpreter-candidate site.
+    // Router and ordinary branch arms stay selectors whatever a sample says.
+    let interpreter_arm = |handler: &Value| {
+        module_roles.is_none_or(|roles| {
+            handler["source"]["byte_offset"]
+                .as_u64()
+                .is_some_and(|offset| {
+                    roles.get(offset as usize)
+                        == Some(vm::dispatch_shape::Role::InterpreterCandidate)
+                })
+        })
+    };
     let mut sites = BTreeMap::<u32, usize>::new();
     for handler in handlers {
         if let Some(opcode) = handler["opcode"].as_u64() {
@@ -899,6 +1007,7 @@ fn guest_opcode_isa_proven(samples: &[Value], handlers: &[Value], owned: Option<
                 handler["opcode"].as_u64() == Some(u64::from(opcode))
                     && handler["state"] == "observed"
                     && handler["sample_count"].as_u64().unwrap_or(0) > 0
+                    && interpreter_arm(handler)
             })
     });
     if sample_proves {
@@ -980,8 +1089,9 @@ fn workspace_evidence_class(
     handlers: &[Value],
     owned: Option<&Value>,
     inventory: Option<&Value>,
+    module_roles: Option<&vm::dispatch_shape::Roles>,
 ) -> Option<&'static str> {
-    if guest_opcode_isa_proven(samples, handlers, owned) {
+    if guest_opcode_isa_proven(samples, handlers, owned, module_roles) {
         return Some("guest-opcode-isa");
     }
     if let Some(candidates) = inventory
@@ -1005,15 +1115,23 @@ fn workspace_evidence_class(
         .then_some("handler-table-candidate")
 }
 
+/// One artifact's analysis result and the dispatch roles the same metered
+/// classification computed for it.
+pub(crate) struct Analysis<'a> {
+    pub result: &'a Value,
+    pub roles: Option<&'a vm::dispatch_shape::Roles>,
+}
+
 pub(crate) fn workspace(
     root: &Path,
     artifact: &Value,
     bytes: &[u8],
-    result: &Value,
+    analysis: Analysis<'_>,
     snapshot_artifacts: &[Value],
     events: &[Value],
     budget_losses: &[DispatchBudgetLoss],
 ) -> Option<Value> {
+    let Analysis { result, roles } = analysis;
     // A ranked Wasm table may be worth inspecting without enough independent
     // evidence for likely-vm. Keeping its static workspace never raises that tier.
     let static_wasm_candidate = result["runtime"] == "webassembly"
@@ -1023,6 +1141,10 @@ pub(crate) fn workspace(
         return None;
     }
     let runtime = result["runtime"].as_str()?;
+    // Roles of every classified site from the same metered classification
+    // that produced the analysis: the gate never reads the bounded listed
+    // document and never runs a second classification pass.
+    let roles = roles.filter(|_| gate_enabled());
     let (mut handlers, model, mut unknowns, mut omissions, module_dispatch, handler_tables) =
         match runtime {
             "javascript" => {
@@ -1043,11 +1165,30 @@ pub(crate) fn workspace(
                 {
                     return None;
                 }
-                let (handlers, model, unknowns, omissions) = static_handlers(source, region.0, end);
+                // Recovery is the unchanged path that also decides the tier.
+                // The gate only removes claims from its output afterwards.
+                let (handlers, model, mut unknowns, mut omissions) =
+                    static_handlers(source, region.0, end);
+                let handlers = match &roles {
+                    Some(roles) => {
+                        let gated = gate_handlers(source, region.0, end, handlers, roles);
+                        unknowns.extend(gated.unknowns);
+                        if gated.withheld > 0 {
+                            omissions.push(json!({"reason":"handler-withheld","detail":format!(
+                                "Static recovery found {} that no switch or table tied to a cursor-loop interpreter-candidate site supports, so they are not claimed as guest opcodes. The tier is unchanged.",
+                                count_label(gated.withheld as u32, "opcode candidate")
+                            )}));
+                        }
+                        gated.handlers
+                    }
+                    None => handlers,
+                };
                 (handlers, model, unknowns, omissions, None, Vec::new())
             }
             "webassembly" => {
-                let extracted = wasm::handlers(bytes, result)?;
+                let fallback = vm::dispatch_shape::Meter::new();
+                let meter = roles.map_or(&fallback, |roles| &roles.meter);
+                let extracted = wasm::handlers_under(bytes, result, meter)?;
                 (
                     extracted.handlers,
                     "unknown".into(),
@@ -1066,7 +1207,12 @@ pub(crate) fn workspace(
     {
         omissions.push(json!({"reason":"dispatch-inventory-limit","detail":"The module-wide count includes every decoded dispatch site; only the top 256 ranked sites are listed."}));
     }
-    if handlers.is_empty() {
+    // Withheld handlers are named separately: recovery did find them.
+    if handlers.is_empty()
+        && !omissions
+            .iter()
+            .any(|omission| omission["reason"] == "handler-withheld")
+    {
         omissions.push(json!({"reason":"handler-unavailable","detail":"No static integer handler candidate was visible in the dispatch region."}));
     }
     let owned = if runtime == "javascript" {
@@ -1209,6 +1355,29 @@ pub(crate) fn workspace(
             ));
         }
     }
+    // Counted before coverage, which is complete only without unknowns.
+    if runtime == "webassembly"
+        && let Some(roles) = &roles
+    {
+        let routed = handlers
+            .iter()
+            .filter_map(|handler| handler["source"]["byte_offset"].as_u64())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .filter(|offset| {
+                roles
+                    .get(*offset as usize)
+                    .is_some_and(|role| role != vm::dispatch_shape::Role::InterpreterCandidate)
+            })
+            .count();
+        if routed > 0 {
+            unknowns.push(format!(
+                "{} {} not a cursor-loop interpreter. Those arms are Wasm branch selectors, not guest opcodes.",
+                count_label(routed as u32, "retained dispatch site"),
+                if routed == 1 { "is" } else { "are" }
+            ));
+        }
+    }
     let (snapshots, snapshot_omissions) = snapshots(root, artifact, snapshot_artifacts);
     omissions.extend(snapshot_omissions);
     // Source instruction bytes are display evidence, not a zero-based guest image.
@@ -1299,6 +1468,7 @@ pub(crate) fn workspace(
         result
             .get("frontend")
             .and_then(|frontend| frontend.get("dispatch_inventory")),
+        roles.filter(|_| runtime == "webassembly"),
     );
     let machine = machine_state(&handlers);
     let attributions = crate::vm_reachability::attributions(&traversal, &handlers);
@@ -1336,6 +1506,9 @@ pub(crate) fn workspace(
         && let Some(inventory) = result["frontend"].get("dispatch_inventory")
     {
         workspace["dispatch_inventory"] = inventory.clone();
+    }
+    if let Some(classification) = result["frontend"].get("dispatch_classification") {
+        workspace["dispatch_classification"] = classification.clone();
     }
     if let Some(class) = evidence_class {
         workspace["evidence_class"] = json!(class);
@@ -1437,6 +1610,22 @@ mod tests {
     use super::*;
     use sha2::{Digest, Sha256};
     use std::{fs, path::PathBuf};
+
+    /// Static handler extraction with the same JavaScript classification
+    /// that `analyze` records for the whole source.
+    fn classified_handlers(
+        source: &str,
+        start: usize,
+        end: usize,
+    ) -> (Vec<Value>, String, Vec<String>, Vec<Value>) {
+        let roles = vm::dispatch_roles("javascript", source.as_bytes()).expect("roles");
+        let (handlers, model, mut unknowns, omissions) = static_handlers(source, start, end);
+        let gated = gate_handlers(source, start, end, handlers, &roles);
+        unknowns.extend(gated.unknowns);
+        unknowns.sort();
+        unknowns.dedup();
+        (gated.handlers, model, unknowns, omissions)
+    }
 
     fn fixture(name: &str) -> String {
         fs::read_to_string(
@@ -2597,6 +2786,55 @@ mod tests {
         assert_schema(&document);
     }
 
+    /// Element slots are real table indexes: a segment at offset 1 starts at
+    /// slot 1, a second segment at offset 5 starts at slot 5, and the empty
+    /// slots in between are not renumbered.
+    #[test]
+    fn wasm_element_tables_keep_real_slot_indexes_across_offset_segments() {
+        let bytes = include_bytes!(
+            "../../../tools/fixtures/dispatch-shapes/handler-table-interpreter.wasm"
+        );
+        let (_, _, document) = analyze_artifact(bytes, "wasm", &[]);
+        let workspace = &document["workspaces"][0];
+        let element = workspace["handler_tables"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|table| table["kind"] == "element")
+            .unwrap();
+        assert_eq!(element["table_index"], 0);
+        assert_eq!(element["entry_count"], 5);
+        let slots = element["clusters"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|cluster| {
+                (
+                    cluster["target"].as_u64().unwrap(),
+                    cluster["selectors"].clone(),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            slots,
+            [
+                (0, json!([1])),
+                (1, json!([2])),
+                (2, json!([3])),
+                (3, json!([5])),
+                (4, json!([6])),
+            ]
+        );
+        assert_eq!(
+            element["segments"],
+            json!([
+                {"segment_index":0,"placement":"placed","offset":1,"global_index":null,"entry_count":3},
+                {"segment_index":1,"placement":"placed","offset":5,"global_index":null,"entry_count":2},
+            ])
+        );
+        assert_schema(&document);
+    }
+
     #[test]
     fn wasm_call_indirect_table_functions_contribute_br_tables() {
         let selected = [
@@ -2773,7 +3011,14 @@ mod tests {
             root.path(),
             &interpreter,
             &bytes,
-            &analysis["results"][0],
+            Analysis {
+                result: &analysis["results"][0],
+                roles: vm::dispatch_roles(
+                    analysis["results"][0]["runtime"].as_str().unwrap(),
+                    &bytes,
+                )
+                .as_ref(),
+            },
             &snapshots,
             &[],
             &[],
@@ -3386,7 +3631,7 @@ if (!validate(document)) throw new Error('Backend workspace rejected by shipped 
         );
         assert_eq!(handler["operand_width"], 1);
 
-        let source = "switch(program[pc++]){case 1: switch(state){case 99: break;} break; case 2: return; default: throw 0;}";
+        let source = "while(pc<program.length){switch(program[pc++]){case 1: switch(state){case 99: break;} break; case 2: return; default: throw 0;}}";
         let (handlers, _, _, _) = static_handlers(source, 0, source.len());
         assert_eq!(
             handlers
@@ -3420,7 +3665,10 @@ if (!validate(document)) throw new Error('Backend workspace rejected by shipped 
             ("let a=bytes[ip++]; ++ip; return a+bytes[ip++];", 0),
             ("function helper(){return bytes[ip++];} return helper();", 0),
         ] {
-            let source = format!("handlers[1]=function(){{{body}}};");
+            // Operand widths are read only for tables an interpreter loop uses.
+            let source = format!(
+                "handlers[1]=function(){{{body}}};while(pc<program.length){{handlers[program[pc++]]();}}"
+            );
             let (handlers, _, _, _) = static_handlers(&source, 0, source.len());
             assert_eq!(handlers[0]["operand_width"], expected, "{body}");
             assert!(
@@ -3450,14 +3698,10 @@ if (!validate(document)) throw new Error('Backend workspace rejected by shipped 
             ] {
                 let source =
                     format!("handlers[7]=function(){{}}; const selector={expression}; {dispatch}");
-                let (handlers, _, unknowns, _) = static_handlers(&source, 0, source.len());
-                if dispatch.starts_with("switch") {
-                    // An unrelated literal table assignment remains independent.
-                    assert_eq!(handlers.len(), 1);
-                    assert!(handlers[0].get("handler_index").is_some());
-                } else {
-                    assert!(handlers.is_empty(), "{source}");
-                }
+                let (handlers, _, unknowns, _) = classified_handlers(&source, 0, source.len());
+                // A literal table that no interpreter-candidate dispatch uses
+                // supplies no opcodes, whatever the switch beside it does.
+                assert!(handlers.is_empty(), "{source}");
                 assert!(
                     unknowns
                         .iter()
@@ -3466,14 +3710,833 @@ if (!validate(document)) throw new Error('Backend workspace rejected by shipped 
             }
         }
         let source = "let opcode=program[pc++]; opcode ^= saved; switch(opcode){case 9:break;}";
-        assert!(static_handlers(source, 0, source.len()).0.is_empty());
-        let source = "const opcode=program[pc++];const alias=opcode;switch(alias){case 9:break;}";
-        assert_eq!(static_handlers(source, 0, source.len()).0[0]["opcode"], 9);
+        assert!(classified_handlers(source, 0, source.len()).0.is_empty());
+        let source = "let pc=0;while(pc<program.length){const opcode=program[pc++];const alias=opcode;switch(alias){case 9:break;}}";
+        assert_eq!(
+            classified_handlers(source, 0, source.len()).0[0]["opcode"],
+            9
+        );
+    }
+
+    fn tier_and_score(bytes: &[u8], kind: &str, gate: bool) -> (Value, Value) {
+        GATE_DISABLED.with(|disabled| disabled.set(!gate));
+        let (_, analysis, _) = analyze_artifact(bytes, kind, &[]);
+        GATE_DISABLED.with(|disabled| disabled.set(false));
+        let result = &analysis["results"][0];
+        (result["tier"].clone(), result["vm_score"].clone())
+    }
+
+    /// Differential invariant: on every owned input, tier and score with the
+    /// opcode-claim gate equal those of the unchanged base recovery path,
+    /// which is the same pipeline with the gate off.
+    #[test]
+    fn classification_never_changes_tier_or_score_on_any_owned_input() {
+        let inputs = vm::review_inputs::differential_inputs();
+        assert!(inputs.len() >= 90, "{} differential inputs", inputs.len());
+        let mut differences = Vec::new();
+        for (name, bytes, kind) in &inputs {
+            let gated = tier_and_score(bytes, kind, true);
+            let base = tier_and_score(bytes, kind, false);
+            if gated != base {
+                differences.push(format!("{name}: gated {gated:?}, base {base:?}"));
+            }
+        }
+        assert!(differences.is_empty(), "{}", differences.join("\n"));
+    }
+
+    fn first_site(classification: &Value, instruction: &str) -> Value {
+        classification["sites"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .rev()
+            .find(|site| site["instruction"] == instruction)
+            .cloned()
+            .unwrap()
+    }
+
+    /// Third review: a frame slot whose advancing write follows thousands of
+    /// constant writes is still found, never cut by a silent prefix.
+    #[test]
+    fn slot_advance_has_no_silent_prefix_cut() {
+        let bytes = vm::review_inputs::slot_writes(4096);
+        let (_, analysis, _) = analyze_artifact(&bytes, "wasm", &[]);
+        let classification = &analysis["results"][0]["frontend"]["dispatch_classification"];
+        let site = first_site(classification, "br_table");
+        let limited = classification["omissions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|omission| omission["reason"] == "classification-trace-limit");
+        assert!(
+            site["role"] == "interpreter-candidate"
+                || (site["selector_source"] == "unknown" && limited),
+            "{site}"
+        );
+    }
+
+    /// Third review: tables bind by declaring scope. A nested `ops` that an
+    /// inner cursor loop dispatches does not tie the outer `ops` handlers.
+    #[test]
+    fn handler_tables_bind_to_their_declaring_scope() {
+        for (name, source) in [
+            ("shadowed", vm::review_inputs::SHADOWED_TABLE_VM),
+            ("control", vm::review_inputs::SHADOW_CONTROL_VM),
+        ] {
+            let (_, analysis, document) = analyze(source, &[]);
+            assert_eq!(analysis["results"][0]["tier"], "likely-vm", "{name}");
+            assert_eq!(handler_opcodes(&document), vec![1, 2, 3], "{name}");
+        }
+    }
+
+    /// Third review: strong sites are classified before trivial noise, in a
+    /// JavaScript region and across Wasm functions.
+    #[test]
+    fn trivial_noise_never_starves_the_interpreter() {
+        let (_, analysis, document) = analyze(&vm::review_inputs::starve(4200, 5000), &[]);
+        assert_eq!(analysis["results"][0]["tier"], "likely-vm");
+        assert_eq!(handler_opcodes(&document), [0, 1, 2]);
+        let bytes = vm::review_inputs::wasm_starve(4200, 5000);
+        let (_, analysis, _) = analyze_artifact(&bytes, "wasm", &[]);
+        let classification = &analysis["results"][0]["frontend"]["dispatch_classification"];
+        assert_eq!(classification["role_counts"]["interpreter-candidate"], 1);
+    }
+
+    /// Third review: a handler table no indexed call dispatches is withheld
+    /// as unclassified, not as "not a cursor-advancing loop".
+    #[test]
+    fn a_table_without_a_dispatch_site_is_withheld_as_unclassified() {
+        let source = "function run(code,stack){var pc=0;var handlers={1:function(){stack.push(code[pc++])},2:function(){stack.pop()}};while(pc<code.length){var fn=handlers[code[pc++]];fn(stack);}return stack;}";
+        let start = source.find('{').unwrap() + 1;
+        let (handlers, _, unknowns, _) = classified_handlers(source, start, source.len() - 1);
+        assert!(handlers.is_empty());
+        assert!(
+            !unknowns
+                .iter()
+                .any(|s| s.contains("not a cursor-advancing loop")),
+            "{unknowns:?}"
+        );
+        assert!(
+            unknowns
+                .iter()
+                .any(|s| s.contains("no structural classification")),
+            "{unknowns:?}"
+        );
+    }
+
+    /// Third review: an element table too large to expand is counted.
+    #[test]
+    fn oversized_element_tables_are_counted() {
+        let slots = 1_000_001;
+        let text = format!(
+            r#"(module (memory 1)
+              (type $t (func (param i32) (result i32)))
+              (table {slots} funcref)
+              (func $h (type $t) (local.get 0))
+              (elem (i32.const 0) func {})
+              (func (export "run") (param $code i32) (param $len i32) (result i32)
+                (local $pc i32) (local $acc i32)
+                (block $exit (loop $again
+                  (br_if $exit (i32.ge_u (local.get $pc) (local.get $len)))
+                  (local.set $acc (call_indirect (type $t) (local.get $acc)
+                    (i32.load8_u (i32.add (local.get $code) (local.get $pc)))))
+                  (local.set $pc (i32.add (local.get $pc) (i32.const 1)))
+                  (br $again)))
+                (local.get $acc)))"#,
+            "$h ".repeat(slots)
+        );
+        let bytes = wat::parse_str(text).unwrap();
+        let (_, _, document) = analyze_artifact(&bytes, "wasm", &[]);
+        let workspace = &document["workspaces"][0];
+        assert!(
+            workspace["coverage"]["omissions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|omission| omission["reason"] == "element-table-limit"),
+            "{}",
+            workspace["coverage"]["omissions"]
+        );
+    }
+
+    /// Second review, blockers: tier and score are the unchanged base
+    /// recovery's. A table dispatched in a nested function keeps base's
+    /// likely-vm, and a loop dispatch beside a router stays a candidate.
+    #[test]
+    fn nested_and_loop_body_dispatch_keep_base_tiers() {
+        let (_, analysis, _) = analyze(vm::review_inputs::NESTED_TABLE_VM, &[]);
+        assert_eq!(analysis["results"][0]["tier"], "likely-vm");
+        assert_eq!(analysis["results"][0]["vm_score"], 65);
+        let (_, analysis, _) = analyze(vm::review_inputs::LOOP_BODY_ROUTER_VM, &[]);
+        assert_eq!(analysis["results"][0]["tier"], "candidate");
+        assert_eq!(analysis["results"][0]["vm_score"], 80);
+    }
+
+    fn handler_opcodes(document: &Value) -> Vec<u64> {
+        document["workspaces"][0]["handlers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|handler| handler["opcode"].as_u64())
+            .collect()
+    }
+
+    /// Second review: the gate reads the full classification, not the 256
+    /// listed sites, and an interpreter region is never starved of budget
+    /// by larger noise regions.
+    #[test]
+    fn listing_and_budget_never_starve_the_interpreter() {
+        for name in ["s2_listing", "s1b_budget"] {
+            let (_, analysis, document) = analyze(&vm::review_inputs::javascript_named(name), &[]);
+            assert_eq!(analysis["results"][0]["tier"], "likely-vm", "{name}");
+            assert_eq!(handler_opcodes(&document), [1, 2, 3], "{name}");
+            assert!(
+                !document["workspaces"][0]["unknowns"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|unknown| unknown
+                        .as_str()
+                        .unwrap()
+                        .contains("not a cursor-advancing loop")),
+                "{name}"
+            );
+        }
+    }
+
+    /// Second review: an element table lists at most 64 segments and counts
+    /// the rest.
+    #[test]
+    fn element_segments_past_the_listing_bound_are_counted() {
+        let elems = (0..70)
+            .map(|i| format!("(elem (i32.const {i}) func $h)"))
+            .collect::<String>();
+        let bytes = wat::parse_str(format!(
+            r#"(module (memory 1)
+              (type $t (func (param i32) (result i32)))
+              (table 80 funcref)
+              (func $h (type $t) (local.get 0))
+              {elems}
+              (func (export "run") (param $code i32) (param $len i32) (result i32)
+                (local $pc i32) (local $acc i32)
+                (block $exit (loop $again
+                  (br_if $exit (i32.ge_u (local.get $pc) (local.get $len)))
+                  (local.set $acc (call_indirect (type $t) (local.get $acc)
+                    (i32.load8_u (i32.add (local.get $code) (local.get $pc)))))
+                  (local.set $pc (i32.add (local.get $pc) (i32.const 1)))
+                  (br $again)))
+                (local.get $acc)))"#
+        ))
+        .unwrap();
+        let (_, _, document) = analyze_artifact(&bytes, "wasm", &[]);
+        let element = document["workspaces"][0]["handler_tables"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|table| table["kind"] == "element")
+            .unwrap()
+            .clone();
+        assert_eq!(element["segments"].as_array().unwrap().len(), 64);
+        assert_eq!(element["omitted_segment_count"], 6);
+    }
+
+    /// Review regression: classification never changes a tier. Where the gate
+    /// withholds recovered handlers, the tier stays and a distinct omission
+    /// names the withholding; demotion still follows genuine recovery only.
+    #[test]
+    fn classification_never_changes_tier_and_names_withheld_handlers() {
+        let statement_do = "function run(code, stack){var pc=0; do switch(code[pc++]){case 1: stack.push(code[pc++]); break; case 2: stack.pop(); break; case 3: return stack;} while(pc<code.length);}";
+        let (_, analysis, document) = analyze(statement_do, &[]);
+        assert_eq!(analysis["results"][0]["tier"], "likely-vm");
+        assert_eq!(
+            document["workspaces"][0]["handlers"]
+                .as_array()
+                .unwrap()
+                .len(),
+            3
+        );
+        // A write to the bound index in the loop is a cursor signal, including
+        // a helper-computed next position. Classification remains structural.
+        let helper_step = "function run(code, stack){var pc=0; while(pc<code.length){switch(code[pc]){case 1: stack.push(code[pc+1]); break; case 2: stack.pop(); break; case 3: return stack;} pc=next(code,pc);}}";
+        let (_, analysis, document) = analyze(helper_step, &[]);
+        let result = &analysis["results"][0];
+        let workspace = &document["workspaces"][0];
+        assert_eq!(result["tier"], "likely-vm", "{}", result["coverage"]);
+        assert_eq!(workspace["handlers"].as_array().unwrap().len(), 3);
+        assert!(
+            !workspace["coverage"]["omissions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|o| o["reason"] == "handler-withheld")
+        );
+        assert_schema(&document);
+    }
+
+    /// Review regression: opcode handlers come only from a table or switch
+    /// tied to a classified interpreter-candidate site. A `.call` dispatch, a
+    /// temporary, a nested function or no dispatch at all yields none.
+    #[test]
+    fn opcode_handlers_require_a_classified_interpreter_table_or_switch() {
+        for source in [
+            "function route(k,code,stack){let pc=0;const handlers={1:function(){stack.push(code[pc++])},2:function(){stack.pop()},3:function(){}};while(pc<code.length){stack.push(code[pc++]);}switch(k){case 9:break;}return handlers[k].call(null,stack);}",
+            "function route(k,x,stack){const handlers={1:function(){stack.push(x)},2:function(){stack.pop()},3:function(){stack.length=0}};for(const v of x){switch(v.kind){case 1:log(v);break;}}return handlers[k].call(null,x);}",
+            "function route(k,x,stack){const handlers={1:function(){stack.push(x)},2:function(){stack.pop()},3:function(){stack.length=0}};for(const v of x){log(v);}return handlers[k](x);}",
+            "function run(code,stack){let pc=0;const handlers={1:function(){stack.push(code[pc++])},2:function(){stack.pop()}};while(pc<code.length){const h=handlers[code[pc++]];h(stack);}}",
+            "function run(code,stack){let pc=0;handlers[1]=function(){stack.push(code[pc++])};handlers[2]=function(){stack.pop()};while(pc<code.length){stack.push(code[pc++]);}}",
+        ] {
+            let start = source.find('{').unwrap() + 1;
+            let end = source.rfind('}').unwrap();
+            let (handlers, _, _, _) = classified_handlers(source, start, end);
+            assert_eq!(handlers, Vec::<Value>::new(), "{source}");
+        }
+        let (_, analysis, document) = analyze(
+            "function route(k,code,stack){let pc=0;const handlers={1:function(){stack.push(code[pc++])},2:function(){stack.pop()},3:function(){}};while(pc<code.length){stack.push(code[pc++]);}switch(k){case 9:break;}return handlers[k].call(null,stack);}",
+            &[],
+        );
+        assert_eq!(
+            analysis["results"][0]["frontend"]["dispatch_classification"]["role_counts"]["interpreter-candidate"],
+            0
+        );
+        if let Some(workspace) = document["workspaces"].as_array().unwrap().first() {
+            assert_eq!(workspace["handlers"], json!([]));
+        }
+        // A nested dispatch resolves the same statically bound table.
+        for (source, expected) in [
+            (
+                "function run(code,stack){let pc=0;const handlers={1:function(){stack.push(code[pc++])},2:function(){stack.pop()}};while(pc<code.length){handlers[code[pc++]](stack);}}",
+                2,
+            ),
+            (
+                "function run(code,stack){let pc=0;const handlers={1:function(){stack.push(code[pc++])},2:function(){stack.pop()}};function inner(){while(pc<code.length){handlers[code[pc++]](stack);}}return inner;}",
+                2,
+            ),
+        ] {
+            let start = source.find('{').unwrap() + 1;
+            let (handlers, _, _, _) = classified_handlers(source, start, source.len() - 1);
+            assert_eq!(handlers.len(), expected, "{source}");
+        }
+    }
+
+    /// Review regression: per-region truncation must rank interpreter
+    /// candidates first and count every classified site.
+    #[test]
+    fn many_ordinary_calls_never_hide_an_interpreter_switch() {
+        let calls = (0..300).map(|i| format!("t[n{i}](x);")).collect::<String>();
+        let source = format!(
+            "function run(code, stack, t, x){{var pc=0; {calls} while(pc<code.length){{switch(code[pc++]){{case 1: stack.push(code[pc++]); break; case 2: stack.pop(); break; case 3: return stack;}}}}}}"
+        );
+        let (_, analysis, document) = analyze(&source, &[]);
+        let classification = &analysis["results"][0]["frontend"]["dispatch_classification"];
+        assert_eq!(classification["site_count"], 301);
+        assert_eq!(classification["omitted_site_count"], 301 - 256);
+        assert_eq!(classification["role_counts"]["interpreter-candidate"], 1);
+        assert!(
+            classification["sites"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|site| site["instruction"] == "switch"
+                    && site["role"] == "interpreter-candidate")
+        );
+        assert_eq!(analysis["results"][0]["tier"], "likely-vm");
+        assert_eq!(
+            document["workspaces"][0]["handlers"]
+                .as_array()
+                .unwrap()
+                .len(),
+            3
+        );
+    }
+
+    /// Review regression: classifier work is bounded per region and per
+    /// artifact, and hitting the bound is a visible omission.
+    #[test]
+    fn javascript_classification_work_is_bounded_and_reported() {
+        let body = (0..8000)
+            .map(|i| format!("var v{i}=1;t[v{i}](x);"))
+            .collect::<String>();
+        let source = format!("function run(t,x){{{body}}}");
+        let classification = vm::javascript_classification(&source);
+        let omissions = classification["omissions"].as_array().expect("omissions");
+        assert!(
+            omissions
+                .iter()
+                .any(|omission| omission["reason"] == "classification-work-limit"),
+            "{omissions:?}"
+        );
+        let unclassified = omissions
+            .iter()
+            .filter_map(|omission| omission["omitted_records"].as_u64())
+            .sum::<u64>();
+        assert_eq!(
+            classification["site_count"].as_u64().unwrap() + unclassified,
+            8000
+        );
+    }
+
+    /// Fourth review: exhausting the artifact meter stops classification
+    /// within its limit and records a counted omission. Sites found but not
+    /// classified are omitted records; regions or functions never examined
+    /// are counted in the detail, so classified plus omitted never exceeds a
+    /// full run.
+    #[test]
+    fn meter_exhaustion_stops_and_counts_every_site() {
+        let inputs = [
+            (
+                "javascript",
+                vm::review_inputs::starve(200, 400).into_bytes(),
+            ),
+            ("webassembly", vm::review_inputs::wasm_starve(200, 400)),
+        ];
+        for (runtime, bytes) in inputs {
+            let full = vm::classification_under(runtime, &bytes, &vm::dispatch_shape::Meter::new());
+            let total = full["site_count"].as_u64().unwrap();
+            assert!(total > 100, "{runtime}: {total} sites");
+            let mut exhausted_runs = 0;
+            for limit in [1_000, 10_000, 30_000, 100_000, 300_000] {
+                let meter = vm::dispatch_shape::Meter::with_limits(limit, u64::MAX);
+                let document = vm::classification_under(runtime, &bytes, &meter);
+                assert!(meter.used() <= limit, "{runtime} {limit}: {}", meter.used());
+                let omissions = document["omissions"].as_array().unwrap();
+                let omitted = omissions
+                    .iter()
+                    .filter(|omission| omission["reason"] == "classification-work-limit")
+                    .filter_map(|omission| omission["omitted_records"].as_u64())
+                    .sum::<u64>();
+                let classified = document["site_count"].as_u64().unwrap();
+                if meter.exhausted() {
+                    exhausted_runs += 1;
+                    assert!(
+                        omissions
+                            .iter()
+                            .any(|omission| omission["reason"] == "classification-work-limit"),
+                        "{runtime} {limit}: {omissions:?}"
+                    );
+                    assert!(
+                        classified + omitted <= total,
+                        "{runtime} {limit}: {classified} + {omitted} > {total}"
+                    );
+                }
+            }
+            assert!(exhausted_runs > 0, "{runtime}: no limit was reached");
+        }
+    }
+
+    #[test]
+    fn proven_table_bindings_keep_their_handlers() {
+        for (name, source) in vm::review_inputs::proven_bindings() {
+            let (_, workspace, meter) = pipeline_work("javascript", source.as_bytes());
+            let workspace = workspace.expect(name);
+            assert_eq!(
+                workspace["handlers"].as_array().unwrap().len(),
+                3,
+                "{name}: {workspace}"
+            );
+            assert!(!meter.exhausted(), "{name}");
+        }
+    }
+
+    #[test]
+    fn shallow_sibling_syntax_never_accumulates_depth() {
+        let interpreter = vm::review_inputs::CONTROL_VM;
+        let catalogue = (0..9000)
+            .map(|i| format!("'locale_{i}':'A localized value {i}',"))
+            .collect::<String>();
+        let objects = (0..10000)
+            .map(|i| format!("k{i}:{{value:{i},label:'text'}},"))
+            .collect::<String>();
+        let cases = (0..10000)
+            .map(|i| format!("case {i}: "))
+            .collect::<String>();
+        for noise in [
+            format!("const catalogue={{{catalogue}}};"),
+            format!("const objects={{{objects}}};"),
+            format!("function lookup(x){{switch(x){{{cases}return 1;}}}}"),
+        ] {
+            let source = format!("{noise}\n{interpreter}");
+            let (analysis, workspace, meter) = pipeline_work("javascript", source.as_bytes());
+            assert!(!meter.exhausted());
+            assert_eq!(
+                analysis["frontend"]["dispatch_classification"]["omissions"],
+                json!([])
+            );
+            assert_eq!(workspace.unwrap()["handlers"].as_array().unwrap().len(), 3);
+        }
+    }
+
+    #[test]
+    fn static_table_writes_use_exact_symbols_and_receivers() {
+        let source = vm::review_inputs::CONTROL_VM;
+        for (changed, expected) in [
+            (source.replace("var ops=", "var ops;ops="), 3),
+            (
+                source
+                    .replace("var ops=", "var ops;(ops=")
+                    .replace(";while", ",0);while"),
+                3,
+            ),
+            (source.replace("var ops=", "var ops=0;ops="), 0),
+            (
+                source
+                    .replace(
+                        "var ops=",
+                        "var first={},second={};second.ops={};first.ops=",
+                    )
+                    .replace("ops[code", "first.ops[code"),
+                3,
+            ),
+            (
+                source
+                    .replace("var ops=", "this.ops=")
+                    .replace("ops[code", "this.ops[code"),
+                3,
+            ),
+            (
+                source
+                    .replace("var ops=", "this.ops=0;this.ops=")
+                    .replace("ops[code", "this.ops[code"),
+                0,
+            ),
+        ] {
+            let (_, workspace, _) = pipeline_work("javascript", changed.as_bytes());
+            assert_eq!(
+                workspace.unwrap()["handlers"].as_array().unwrap().len(),
+                expected,
+                "{changed}"
+            );
+        }
+    }
+
+    #[test]
+    fn parsed_failures_and_hoist_expansion_withhold_with_a_reason() {
+        let valid = vm::review_inputs::BLOCK_LET_VM;
+        for source in [
+            format!("return;{valid}"),
+            format!("{valid}\nlet broken = ;"),
+        ] {
+            let (analysis, workspace, _) = pipeline_work("javascript", source.as_bytes());
+            let classification = &analysis["frontend"]["dispatch_classification"];
+            assert_eq!(classification["site_count"], 0);
+            assert_eq!(classification["omissions"][0]["reason"], "parse-failed");
+            assert!(
+                workspace.unwrap()["handlers"]
+                    .as_array()
+                    .unwrap()
+                    .is_empty()
+            );
+        }
+        let (_, _, generate) = vm::review_inputs::scaling_generators()
+            .into_iter()
+            .find(|(name, _, _)| *name == "block_hoists")
+            .unwrap();
+        let (analysis, _, meter) = pipeline_work("javascript", &generate(1024));
+        let omissions = &analysis["frontend"]["dispatch_classification"]["omissions"];
+        assert_eq!(omissions[0]["reason"], "classification-work-limit");
+        assert!(
+            omissions[0]["detail"]
+                .as_str()
+                .unwrap()
+                .contains("block-hoisting")
+        );
+        assert!(meter.peak() < 128 << 20);
+    }
+
+    #[test]
+    fn bounded_cursor_dispatch_precedes_near_candidate_decoys() {
+        for (name, _, generate) in vm::review_inputs::scaling_generators()
+            .into_iter()
+            .filter(|(name, _, _)| *name == "deep_loops")
+        {
+            let bytes = generate(64);
+            let (analysis, workspace, _) = pipeline_work("javascript", &bytes);
+            let classification = &analysis["frontend"]["dispatch_classification"];
+            let real = std::str::from_utf8(&bytes)
+                .unwrap()
+                .find("switch(code[pc++]")
+                .unwrap();
+            assert!(
+                classification["sites"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|site| site["location"]["byte_offset"] == real),
+                "{name}"
+            );
+            assert!(
+                !workspace.unwrap()["handlers"]
+                    .as_array()
+                    .unwrap()
+                    .is_empty(),
+                "{name}"
+            );
+        }
+    }
+
+    /// Every alignment around the fixed byte windows must accept multibyte
+    /// identifiers and literals through the same classifier and claim gate.
+    #[test]
+    fn unicode_window_boundaries_do_not_panic() {
+        for cap in [200usize, 255, 256, 512, 1024, 4096] {
+            for offset in cap.saturating_sub(8)..=cap + 8 {
+                for value in ["雪", "é", "𐐀"] {
+                    let source = format!(
+                        "var pc=0,ops={{1:function(){{stack.push(code[pc++])}},2:function(){{stack.pop()}},3:function(){{pc=code.length}}}};var a{}{}=1;var q={}{};var s='{}{}';var z=x=>x;while(pc<code.length){{ops[code[pc++]]()}}",
+                        "a".repeat(offset),
+                        value,
+                        "a".repeat(offset),
+                        value,
+                        "a".repeat(offset),
+                        value,
+                    );
+                    let _ = classified_handlers(&source, 0, source.len());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn downstream_budget_exhaustion_withholds_claims_and_is_counted() {
+        let source: &[u8] = &vm::review_inputs::proven_binding("direct").into_bytes();
+        let artifact = json!({"artifact_id":"1","session_id":"1","navigation_id":"1","frame_id":"1","kind":"javascript","sha256":hex::encode(Sha256::digest(source)),"url":"fixture://budget/source"});
+        let (full, roles) = vm::analyze_with_roles(&artifact, source, &[]);
+        let work = roles.unwrap().meter.used();
+        for meter in [
+            vm::dispatch_shape::Meter::with_limits(work + 1, 128 << 20),
+            vm::dispatch_shape::Meter::with_limits(1_000_000_000, 256),
+        ] {
+            let (mut result, roles) = vm::analyze_with_meter(&artifact, source, &[], &meter);
+            let root = tempfile::tempdir().unwrap();
+            let mut workspace = workspace(
+                root.path(),
+                &artifact,
+                source,
+                Analysis {
+                    result: &result,
+                    roles: roles.as_ref(),
+                },
+                &[],
+                &[],
+                &[],
+            )
+            .unwrap();
+            vm::finish_classification(&mut result, Some(&mut workspace), &meter);
+            assert_eq!(workspace["handlers"], json!([]));
+            assert!(
+                workspace["coverage"]["omissions"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|o| o["reason"] == "handler-withheld"
+                        && o["detail"]
+                            .as_str()
+                            .unwrap()
+                            .contains("3 opcode candidates"))
+            );
+            assert!(
+                result["frontend"]["dispatch_classification"]["omissions"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|o| o["reason"] == "classification-work-limit")
+            );
+            for field in ["tier", "vm_score", "finding_id"] {
+                assert_eq!(result[field], full[field]);
+            }
+            assert!(meter.exhausted());
+            assert!(meter.peak() <= 128 << 20);
+        }
+    }
+
+    #[test]
+    fn parser_heap_is_separate_and_interval_growth_reserves_before_allocating() {
+        let meter = vm::dispatch_shape::Meter::with_limits(1_000_000_000, 1024);
+        let source = format!("function f({}) {{}}", "a".repeat(2048));
+        let classified = vm::dispatch_shape::javascript::classify(&source, &meter);
+        assert!(classified.sites.is_empty());
+        assert!(classified.omissions.is_empty());
+        assert!(!meter.exhausted());
+        assert!(meter.peak() <= 1024);
+        assert!(meter.parser_peak() > 1024);
+
+        let meter = vm::dispatch_shape::Meter::with_limits(1_000_000_000, 1024);
+        let intervals =
+            vm::dispatch_shape::Intervals::new((0..10_000).map(|at| (at, 20_000 - at)), &meter);
+        assert!(intervals.ranges.is_empty());
+        assert!(meter.exhausted());
+        assert!(meter.peak() <= 1024);
+    }
+
+    /// The exact analysis-to-workspace path used by origin-trace-vm. The
+    /// returned meter is the same allocation shared by both stages.
+    fn pipeline_work(
+        runtime: &str,
+        bytes: &[u8],
+    ) -> (Value, Option<Value>, vm::dispatch_shape::Meter) {
+        let artifact = json!({"protocol_version":1,"artifact_id":"1","session_id":"1","navigation_id":"1","frame_id":"1","parent_artifact_id":"0","creator_event_id":"0","execution_context_id":"1","capture_origin":if runtime == "javascript" {"dynamic_javascript"} else {"webassembly_compile"},"kind":if runtime == "javascript" {"javascript"} else {"wasm"},"url":"fixture://meter/source","mime_type":if runtime == "javascript" {"text/javascript"} else {"application/wasm"},"sha256":hex::encode(Sha256::digest(bytes)),"byte_size":bytes.len(),"sensitive":false});
+        let (mut result, roles) = vm::analyze_with_roles(&artifact, bytes, &[]);
+        let roles = roles.expect("classification roles");
+        let root = tempfile::tempdir().unwrap();
+        let mut workspace = workspace(
+            root.path(),
+            &artifact,
+            bytes,
+            Analysis {
+                result: &result,
+                roles: Some(&roles),
+            },
+            &[],
+            &[],
+            &[],
+        );
+        vm::finish_classification(&mut result, workspace.as_mut(), &roles.meter);
+        (result, workspace, roles.meter)
+    }
+
+    #[test]
+    #[ignore = "measurement driver; requires REB_CLASSIFIER_MEASURE_INPUTS"]
+    fn measure_classifier_pipeline() {
+        let paths =
+            std::fs::read_to_string(std::env::var("REB_CLASSIFIER_MEASURE_INPUTS").unwrap())
+                .unwrap();
+        for path in paths.lines() {
+            let bytes = std::fs::read(path).unwrap();
+            let runtime = if bytes.starts_with(b"\0asm") {
+                "webassembly"
+            } else {
+                "javascript"
+            };
+            let start = std::time::Instant::now();
+            let (result, workspace, meter) = pipeline_work(runtime, &bytes);
+            println!(
+                "MEASURE {}",
+                json!({"path":path,"bytes":bytes.len(),"units":meter.used(),"peak":meter.peak(),"parser_peak_bytes":meter.parser_peak(),"parser_arena_bytes":if runtime == "javascript" {vm::dispatch_shape::javascript::parser_arena_bytes()} else {0},"exhausted":meter.exhausted(),"seconds":start.elapsed().as_secs_f64(),"handlers":workspace.as_ref().and_then(|w| w["handlers"].as_array()).map(|a| a.len()),"classification":result["frontend"]["dispatch_classification"]})
+            );
+        }
+    }
+
+    #[test]
+    fn parser_floor_preserves_dense_small_bundle() {
+        let mut source = (0..2)
+            .map(|i| {
+                format!(
+                    "function big{i}(t,x){{var k;while(x){{{}}}}}",
+                    "k=1;t[k](x);".repeat(12_000)
+                )
+            })
+            .collect::<String>();
+        source.push_str(vm::review_inputs::HANDLER_PC_VM);
+        let (_, workspace, meter) = pipeline_work("javascript", source.as_bytes());
+        assert_eq!(workspace.unwrap()["handlers"].as_array().unwrap().len(), 3);
+        assert!(!meter.exhausted());
+        assert!(meter.parser_peak() <= 64 * 1024 * 1024 + source.len() as u64 * 80);
+    }
+
+    #[test]
+    fn large_owned_bundle_retains_interpreter_handlers() {
+        let source = vm::review_inputs::owned_bundle(2 << 20);
+        assert!(source.len() >= 2 << 20);
+        let (analysis, workspace, meter) = pipeline_work("javascript", source.as_bytes());
+        assert_eq!(workspace.unwrap()["handlers"].as_array().unwrap().len(), 3);
+        assert_eq!(
+            analysis["frontend"]["dispatch_classification"]["role_counts"]["interpreter-candidate"],
+            1
+        );
+        assert!(!meter.exhausted());
+        assert!(meter.peak() < 128 << 20);
+        assert!(
+            meter.parser_peak() > 0
+                && meter.parser_peak() <= 64 * 1024 * 1024 + source.len() as u64 * 80
+        );
+    }
+
+    /// Upstream semantic ancestor walks are admitted before running them.
+    /// Pathological depth is a counted refusal; all other generated shapes
+    /// retain the linear work/retained-memory scaling assertion.
+    #[test]
+    fn classifier_work_and_memory_scale_linearly() {
+        const N: usize = 1024;
+        let mut failures = Vec::new();
+        let mut report = Vec::new();
+        for (name, runtime, generate) in vm::review_inputs::scaling_generators() {
+            let (small, large) = (generate(N), generate(4 * N));
+            let (analysis, _, meter) = pipeline_work(runtime, &small);
+            let (analysis4, _, meter4) = pipeline_work(runtime, &large);
+            let (work, peak) = (meter.used(), meter.peak());
+            let (work4, peak4) = (meter4.used(), meter4.peak());
+            report.push(format!(
+                "{name}: work {work} -> {work4}, retained {peak} -> {peak4}, parser heap {} -> {}",
+                meter.parser_peak(),
+                meter4.parser_peak()
+            ));
+            if matches!(
+                name,
+                "deep_functions" | "scopes_times_identifiers" | "deep_loops" | "block_hoists"
+            ) {
+                for result in [&analysis, &analysis4] {
+                    let omissions = result["frontend"]["dispatch_classification"]["omissions"]
+                        .as_array()
+                        .unwrap();
+                    assert!(
+                        omissions
+                            .iter()
+                            .any(|o| o["reason"] == "classification-work-limit"
+                                && o["omitted_records"].as_u64().is_some_and(|n| n > 0)),
+                        "{name}: {result}"
+                    );
+                }
+                continue;
+            }
+            if work4 * 10 > work * 44 + 10 * 4096 {
+                failures.push(format!("{name}: work {work} then {work4}"));
+            }
+            if peak4 * 10 > peak * 44 + 10 * 4096 {
+                failures.push(format!("{name}: peak {peak} then {peak4} bytes"));
+            }
+            if meter4.parser_peak() * 10 > meter.parser_peak() * 44 + 10 * 4096 {
+                failures.push(format!(
+                    "{name}: parser heap {} then {} bytes",
+                    meter.parser_peak(),
+                    meter4.parser_peak()
+                ));
+            }
+            if meter4.exhausted() && name != "bracket_memory" {
+                failures.push(format!("{name}: the meter was exhausted at 4N"));
+            }
+        }
+        println!("{}", report.join("\n"));
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
+
+    /// Case values become opcode handlers only at a cursor-loop interpreter
+    /// candidate. A one-shot fetch and a router on an argument claim none.
+    #[test]
+    fn loopless_and_router_dispatch_claim_no_opcode_handlers() {
+        let source = "let pc=0;switch(program[pc++]){case 1: stack.push(1); break; case 2: break;}";
+        let (handlers, _, unknowns, _) = classified_handlers(source, 0, source.len());
+        assert!(handlers.is_empty());
+        assert!(
+            unknowns
+                .iter()
+                .any(|s| s.contains("not a cursor-advancing loop"))
+        );
+        // Recovery itself finds nothing for a switch on an argument; the
+        // classification names it a router.
+        let source = "function route(k,x){switch(k){case 1: return a(x); case 2: return b(x); case 3: return c(x);}}";
+        let start = source.find('{').unwrap() + 1;
+        let (handlers, _, _, _) = classified_handlers(source, start, source.len() - 1);
+        assert!(handlers.is_empty());
+        assert_eq!(
+            vm::javascript_classification(source)["role_counts"]["multiplexer"],
+            1
+        );
+        let source = "let pc=0;while(pc<program.length){switch(program[pc++]){case 1: stack.push(1); break; case 2: break;}}";
+        assert_eq!(classified_handlers(source, 0, source.len()).0.len(), 2);
     }
 
     #[test]
     fn computed_objects_and_expression_arrows_do_not_borrow_other_bodies() {
-        let source = "const handlers={[key]:()=>{},7(){return program[pc++];},a8:()=>{},9:()=>{const nested={99:()=>{}};}};handlers[program[pc++]]();";
+        let source = "const handlers={[key]:()=>{},7(){return program[pc++];},a8:()=>{},9:()=>{const nested={99:()=>{}};}};while(pc<program.length){handlers[program[pc++]]();}";
         let (handlers, _, unknowns, _) = static_handlers(source, 0, source.len());
         assert_eq!(
             handlers
@@ -3483,17 +4546,21 @@ if (!validate(document)) throw new Error('Backend workspace rejected by shipped 
             [7, 9]
         );
         assert!(unknowns.iter().any(|s| s.contains("computed")));
-        let source = "handlers[1]=x=>x,handlers[2]=()=>{};";
+        let source = "handlers[1]=x=>x,handlers[2]=()=>{};while(pc<program.length){handlers[program[pc++]]();}";
         let (handlers, _, _, _) = static_handlers(source, 0, source.len());
         assert_eq!(handlers.len(), 1);
         assert_eq!(handlers[0]["opcode"], 2);
+        // Without a dispatch that uses the table, it supplies no opcodes.
+        let source = "handlers[1]=x=>x,handlers[2]=()=>{};";
+        assert!(classified_handlers(source, 0, source.len()).0.is_empty());
     }
 
     #[test]
     fn handler_cap_preserves_named_omission() {
-        let source = (0..1025)
+        let mut source = (0..1025)
             .map(|i| format!("handlers[{i}]=function(){{}};"))
             .collect::<String>();
+        source.push_str("while(pc<program.length){handlers[program[pc++]]();}");
         let (handlers, _, _, omissions) = static_handlers(&source, 0, source.len());
         assert_eq!(handlers.len(), MAX_HANDLERS);
         assert_eq!(handlers.last().unwrap()["opcode"], 1023);
@@ -3513,12 +4580,12 @@ if (!validate(document)) throw new Error('Backend workspace rejected by shipped 
             "const alias=opcode;const opcode=program[pc++];switch(alias){case 9:break;}",
         ] {
             assert!(
-                static_handlers(source, 0, source.len()).0.is_empty(),
+                classified_handlers(source, 0, source.len()).0.is_empty(),
                 "{source}"
             );
         }
-        let source = "switch(program[pc++]){case 1: case 2: stack.push(program[pc++]);break;default:return;}";
-        let (handlers, _, _, _) = static_handlers(source, 0, source.len());
+        let source = "let pc=0;while(pc<program.length){switch(program[pc++]){case 1: case 2: stack.push(program[pc++]);break;default:break;}}";
+        let (handlers, _, _, _) = classified_handlers(source, 0, source.len());
         assert_eq!(handlers.len(), 2);
         for handler in handlers {
             let offset = handler["source"]["byte_offset"].as_u64().unwrap() as usize;

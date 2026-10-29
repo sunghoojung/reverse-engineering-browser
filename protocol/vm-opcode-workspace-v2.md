@@ -246,11 +246,59 @@ spaces. A null register index does not invent a register file. Spelling in a
 page script does not fill `machine_state`.
 
 `handler_tables` keeps the top 8 ranked dispatch sites and up to 4 element
-segments. Each `br_table` records an exact `arm_count` and clusters selectors
+tables. Each `br_table` records an exact `arm_count` and clusters selectors
 that share a label depth. `selector_count` is exact. `selectors` lists at most
 32 indexes, so a prefix is not a shorter table. The flat handler list is still
 capped at 1024 and still emits the ranked site first. Element clusters group
 duplicate funcref slots. They are `call-indirect-table`, not opcodes.
+
+Element selectors are real table slots. Producer 2.9.0 places each active
+segment at its evaluated offset (`i32.const`, a defined immutable constant
+global, or extended-const arithmetic over them), in segment order, so a later
+segment overwrites an earlier slot and a segment at offset 1 starts at slot 1.
+Earlier producers numbered slots from 0 across the merged segment list, which
+shifted every slot of an offset segment. `segments` lists each active segment
+with `placement` `placed`, `relative` (the offset reads an imported global,
+directly or through a defined global, so its slots are unknown and are not
+clustered), `out-of-range` (the segment ends past the table's declared
+minimum, so it is not placed), `unreached` (an earlier segment is out of
+range, so instantiation traps before applying this one) or `unresolved`. At
+most 64 segments are listed; `omitted_segment_count` counts the rest. Passive
+and declared segments fill no table and are not listed. `entry_count` counts placed slots whose
+function is statically known; a `ref.null` item empties a slot and any other
+non-`ref.func` item leaves the slot's function unknown. A table whose placed
+slots exceed 1,000,000 is not expanded into a handler table or matching slots;
+the workspace counts such tables in an `element-table-limit` omission.
+
+## Dispatch classification
+
+Producer 2.9.0 copies the analysis result's
+[`dispatch_classification`](vm-dispatch-classification-v1.md) onto each
+workspace. Only `interpreter-candidate` sites, a cursor-like selector re-derived
+in a loop, can carry guest-opcode claims:
+
+- JavaScript handler recovery is unchanged and alone decides tier and score.
+  The opcode-claim gate is a post-filter on its handlers: a switch case
+  survives only at an interpreter-candidate switch, a table entry only when the
+  region (nested functions included) dispatches through that table's own
+  binding at an interpreter-candidate site. The gate resolves a table name to
+  its declaring function scope, so a nested function's own `ops` is a
+  different table. Each removed claim adds why: a router, a site that is not a
+  cursor-advancing loop, a table with no structural classification, a table
+  binding that cannot be resolved with certainty, or a site not classified
+  because of the work limit.
+- The gate reads the full classification from the same metered run that
+  produced the analysis, not the 256 listed sites and not a second pass.
+- When the gate removes handlers, the workspace records the `handler-withheld`
+  omission with their count instead of `handler-unavailable`, and the analysis
+  keeps the tier recovery decided.
+- Wasm arms keep their physical selector indexes. A retained sample proves
+  `guest-opcode-isa` through an arm only when the arm's site is an interpreter
+  candidate. A residual unknown counts retained sites that are not.
+- Older documents without the field keep their original rules.
+
+The viewer recomputes each site's role from its three fields, so a document
+cannot assert an interpreter role its structure does not support.
 
 A workspace with no recovered arms omits `evidence_class`. That absence is not
 a guest ISA and not an empty workspace; `handler-unavailable` still names the gap.
@@ -456,3 +504,9 @@ validate PC units or establish invocation/host parentage. They keep
 `caller-samples-unverified`; without native samples the existing native sampler
 and host-link omissions also remain. Mixed reports never promote caller-only
 opcodes. The UI labels their positions and exposes their provenance audit.
+
+Producer 2.11.0 shares the artifact classification budget with table layout and
+the lexical claim gate. The gate indexes complete tokens and lexical extents,
+including arrows, implicit function bindings and loop heads. Ambiguous bindings
+withhold claims; budget exhaustion remains visible even if a workspace cannot
+be completed. See [dispatch classification](vm-dispatch-classification-v1.md).

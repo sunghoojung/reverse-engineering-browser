@@ -2,7 +2,7 @@
 // Synthetic local evidence only. Never load a private capture or contact targets.
 import assert from 'node:assert/strict';
 import {mkdtemp,readFile,writeFile,stat,symlink,mkdir,rm} from 'node:fs/promises';
-import {spawnSync} from 'node:child_process';
+import {checkedSpawnSync as spawnSync} from './checked-spawn-sync.mjs';
 import {createHash,webcrypto} from 'node:crypto';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
@@ -78,7 +78,8 @@ try {
   const input=join(directory,'source.json'),output=join(directory,'report.json');
   const saved={format:'reb-network-request-v1',source:{instance_id:identity.instance,capture_epoch:identity.epoch,request_id:identity.request,target_id:identity.target,started_monotonic_ms:identity.started},debugger_generation:17,request:sensitive};
   const text=JSON.stringify(saved);await writeFile(input,text);
-  const cli=(path=input,destination=output)=>spawnSync(process.execPath,['tools/report-passive-security.mjs','--input',path,'--output',destination],{encoding:'utf8',timeout:10000});
+  // Bound a local child hang while allowing heavily loaded developer machines.
+const cli=(path=input,destination=output)=>spawnSync(process.execPath,['tools/report-passive-security.mjs','--input',path,'--output',destination],{encoding:'utf8'});
   const success=cli();assert.equal(success.status,0,success.stderr);assert(!success.stdout.includes('AUTHORED'));assert.equal(JSON.parse(success.stdout).network_requests,0);
   const document=JSON.parse(await readFile(output,'utf8'));assert.equal(document.source.sha256,createHash('sha256').update(text).digest('hex'));assert.equal(document.source.record_pointer,'/request');
   assert(document.secrets.findings.every(item=>item.location.startsWith('/request/')));assert.equal((await stat(output)).mode&0o777,0o600);

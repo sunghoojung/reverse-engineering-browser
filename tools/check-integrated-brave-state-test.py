@@ -24,6 +24,12 @@ def git(path, *arguments):
 
 class StateGuards(unittest.TestCase):
     def setUp(self):
+        # Git hooks export routing/config variables. Every child, including the
+        # scripts under test, must address the fixture and never the caller's
+        # repository. Restore the caller's environment after each test.
+        environment = {key: value for key, value in os.environ.items()
+                       if not key.startswith("GIT_")}
+        self.enterContext(patch.dict(os.environ, environment, clear=True))
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
@@ -786,6 +792,32 @@ class StateGuards(unittest.TestCase):
         receipt["integration"] = "stale"
         self.receipt.write_text(json.dumps(receipt))
         self.assertNotEqual(self.call().returncode, 0)
+
+
+class GitFixtureIsolation(unittest.TestCase):
+    def test_hook_environment_cannot_modify_a_sentinel_repository(self):
+        clean = {key: value for key, value in os.environ.items()
+                 if not key.startswith("GIT_")}
+        with tempfile.TemporaryDirectory() as directory:
+            sentinel = Path(directory) / "sentinel"
+            subprocess.run(["git", "init", "-q", str(sentinel)], env=clean, check=True)
+            sentinel_git = sentinel / ".git"
+
+            def snapshot():
+                return {str(path.relative_to(sentinel)): path.read_bytes()
+                        for path in sentinel.rglob("*") if path.is_file()}
+
+            before = snapshot()
+            poisoned = dict(clean, GIT_DIR=str(sentinel_git), GIT_WORK_TREE=str(sentinel),
+                            GIT_INDEX_FILE=str(sentinel_git / "sentinel-index"),
+                            GIT_COMMON_DIR=str(sentinel_git), GIT_CONFIG_COUNT="1",
+                            GIT_CONFIG_KEY_0="core.worktree", GIT_CONFIG_VALUE_0=str(sentinel))
+            result = subprocess.run([
+                sys.executable, __file__,
+                "StateGuards.test_patch_advance_reuses_one_file_and_preserves_receipt_and_indexes",
+            ], env=poisoned, capture_output=True, text=True, timeout=120)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertEqual(snapshot(), before, "Git fixture modified its caller's repository")
 
 
 if __name__ == "__main__":

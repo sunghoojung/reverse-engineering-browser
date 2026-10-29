@@ -205,7 +205,8 @@ def main():
         args.receipt.write_text(json.dumps(receipt, indent=2) + "\n")
 
     save_receipt()
-    env = dict(os.environ)
+    # Explicit disposable checkouts must not inherit Git hook routing/config.
+    env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
     for variable, directory in {
         "HOME": ".home", "XDG_CONFIG_HOME": ".config", "XDG_CACHE_HOME": ".cache",
         "VPYTHON_VIRTUALENV_ROOT": ".vpython", "CIPD_CACHE_DIR": ".cipd",

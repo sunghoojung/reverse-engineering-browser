@@ -138,12 +138,12 @@ final class Harness {
   // one, so a fixed sleep can return before navigation and deliver the next
   // click to a page being torn down. Mark the old document and wait for a
   // document without the mark.
-  func reload() async throws {
+  func reload(requireRequests: Bool = true) async throws {
     try await activate()
     _ = try await webView.callAsyncJavaScript("window.__rebOutgoingDocument = true; return true;", contentWorld: .page)
     webView.reload()
     try await waitUntil(
-      "window.__rebOutgoingDocument === undefined && document.readyState === 'complete' && typeof state === 'object' && state.requests.length > 0 && !document.querySelector('#screen-traffic').hidden",
+      "window.__rebOutgoingDocument === undefined && document.readyState === 'complete' && typeof state === 'object' && (\(requireRequests ? "state.requests.length > 0" : "true")) && !document.querySelector('#screen-traffic').hidden",
       timeout: 30, "the packaged UI did not load retained evidence")
     try await settle()
   }
@@ -154,6 +154,10 @@ final class Harness {
   func reveal(_ selector: String, containing text: String? = nil, block: String = "nearest") async throws -> NSPoint {
     let textArgument = text.map { "'\($0.replacingOccurrences(of: "'", with: "\\'"))'" } ?? "null"
     let probe = "__rebUiProbe.center('\(selector.replacingOccurrences(of: "'", with: "\\'"))', \(textArgument), \(String(reflecting: block))) || {}"
+    // A target can render after an asynchronous response: static VM analysis
+    // rows follow runtime evidence rows once a cold analysis worker finishes.
+    // Wait for the target itself rather than failing on the first frame.
+    try await waitUntil("(\(probe)).x !== undefined", "No visible target for \(selector) \(text ?? "")")
     // center() scrolls the target into view, which can still be moving when
     // it returns. Continue only once two measurements after settling agree, so
     // the event cannot land on the row that scrolled into the old position.
@@ -213,6 +217,59 @@ final class Harness {
     var modifiers: NSEvent.ModifierFlags = shift ? [.shift] : []
     if !NSApp.isFullKeyboardAccessEnabled { modifiers.insert(.option) }
     try await key(48, "\t", modifiers: modifiers)
+  }
+
+  // Puts a VM card heading at the top of the finding panels, and the panels at
+  // the top of the findings workspace. Earlier clicks and scrollIntoView calls
+  // otherwise leave both scroll positions arbitrary, so a screenshot could start
+  // mid-card or slice through a control of the card above it.
+  func revealVmHeading(_ panel: String, _ heading: String) async throws {
+    let result = try await json(
+      """
+      (() => {
+        const panel = document.querySelector(\(String(reflecting: panel)));
+        const heading = [...(panel?.querySelectorAll('h4') ?? [])].find(item => item.textContent === \(String(reflecting: heading)));
+        if (!heading) return {missing: true};
+        const panels = heading.closest('.vm-workbench-panels'), workspace = panels.closest('#vm-findings-workspace');
+        // Keep the heading's own top margin, and the card's top border when the
+        // heading opens the card; a borderless card collapses that margin outside it.
+        const card = heading.closest('.vm-workspace-card');
+        const gap = parseFloat(getComputedStyle(heading).marginTop) +
+          (card.firstElementChild === heading ? parseFloat(getComputedStyle(card).borderTopWidth) : 0);
+        workspace.scrollTop += panels.getBoundingClientRect().top - workspace.getBoundingClientRect().top;
+        panels.scrollTop += heading.getBoundingClientRect().top - gap - panels.getBoundingClientRect().top;
+        const shown = heading.getBoundingClientRect(), frame = panels.getBoundingClientRect();
+        return {visible: shown.top >= frame.top && shown.bottom <= frame.bottom};
+      })()
+      """)
+    guard result["missing"] == nil else { throw HarnessError("No VM card heading \(heading) in \(panel)") }
+    XCTAssertEqual(result["visible"] as? Bool, true, "VM card heading \(heading) is not fully visible")
+    try await settle()
+  }
+
+  // Every direct heading, paragraph (notices included) and pager of a VM
+  // workspace card in the panel starts 12px inside the card's content edge,
+  // the inset of .vm-workspace-heading. Returns each offender.
+  func vmCardInsetOffenders(_ panel: String) async throws -> [String] {
+    let result = try await json(
+      """
+      (() => {
+        const root = document.querySelector(\(String(reflecting: panel)));
+        const cards = [...(root.matches('.vm-workspace-card') ? [root] : []), ...root.querySelectorAll('.vm-workspace-card')];
+        const offenders = [];
+        for (const card of cards) {
+          const edge = card.getBoundingClientRect().left + parseFloat(getComputedStyle(card).borderLeftWidth);
+          for (const item of card.querySelectorAll(':scope > h4, :scope > p:not(.vm-effect-detail), :scope > .vm-evidence-pager')) {
+            const box = (item.matches('.vm-evidence-pager') ? item.firstElementChild : item).getBoundingClientRect();
+            const inset = Math.round(box.left - edge);
+            if (box.width > 0 && inset !== 12) offenders.push(`${item.tagName.toLowerCase()} "${item.textContent.slice(0, 40)}" at ${inset}px`);
+          }
+        }
+        return {offenders, cards: cards.length};
+      })()
+      """)
+    guard (result["cards"] as? Int ?? 0) > 0 else { throw HarnessError("No VM workspace card in \(panel)") }
+    return result["offenders"] as? [String] ?? ["probe returned no offenders list"]
   }
 
   func screenshot(_ name: String) async throws {
@@ -331,6 +388,19 @@ final class OriginTraceRenderedUITests: XCTestCase {
   }
 
   @MainActor
+  private func assertCompleteCompactFindings(_ ui: Harness, _ context: String) async throws {
+    guard try await usesCompactVmLayout(ui) else { return }
+    let complete = """
+      (() => { const list = document.querySelector('#vm-list').getBoundingClientRect();
+        const rows = [...document.querySelectorAll('#vm-list .vm-row')].map(row => row.getBoundingClientRect());
+        const visible = rows.filter(row => Math.min(row.bottom, list.bottom) - Math.max(row.top, list.top) > 1);
+        return visible.length === 2 && visible.every(row => row.top >= list.top - 1 && row.bottom <= list.bottom + 1); })()
+      """
+    try await ui.waitUntil(complete, "\(context): compact Program Trees must settle on two complete findings")
+    try await assertFullyVisible(ui, "#vm-list .vm-row[aria-selected='true']", "\(context) selected finding")
+  }
+
+  @MainActor
   private func assertHandlerColumns(_ ui: Harness, _ context: String) async throws {
     let columns = try await ui.json("""
       (() => { const row = document.querySelector('.vm-workbench-listing .vm-handler-row');
@@ -446,6 +516,9 @@ final class OriginTraceRenderedUITests: XCTestCase {
         XCTAssertGreaterThanOrEqual(viewport["visibleHeight"] as? Double ?? 0, 120, "\(size.name): expanded analysis has a useful viewport")
         try await ui.click("#vm-symbol-list .vm-symbol-row")
         try await assertFullyVisible(ui, ".vm-workbench-listing .vm-handler-row", "\(size.name) reachable handler")
+        let tree = try await ui.json("__rebUiProbe.box('.vm-list-pane')")
+        XCTAssertEqual(tree["visibleHeight"] as? Double ?? -1, 0, accuracy: 1,
+          "\(size.name): Symbol Tree navigation leaves no clipped tree fragment above the evidence")
         try await ui.screenshot("vm-analysis-expanded-\(size.name)")
         try await ui.click("#vm-analysis-toggle")
         // WebKit on macOS does not focus buttons on a pointer click. Reach
@@ -467,6 +540,31 @@ final class OriginTraceRenderedUITests: XCTestCase {
   }
 
   @MainActor
+  func test12VmRetainedSiteNavigation() async throws {
+    let sizes: [(name: String, width: CGFloat, height: CGFloat)] = [
+      ("normal", 1180, 790), ("narrow", 760, 560),
+      ("short", 1180, 560), ("narrow-tall", 760, 790),
+    ]
+    for size in sizes {
+      let ui = try await prepare(size)
+      try await show(ui, "vm")
+      try await ui.waitUntil("document.querySelectorAll('#vm-list .vm-row').length > 0", "VM findings did not load")
+      try await setVmAnalysisExpanded(ui, true)
+      try await ui.click("#vm-list .vm-row", containing: "artifact 107")
+      try await setVmAnalysisExpanded(ui, false)
+      try await ui.click("[data-vm-panel='dispatch']")
+      try await ui.click("[data-vm-panel-content='dispatch'] button", containing: "Select retained site")
+      try await assertFullyVisible(ui, ".vm-workbench-listing .vm-handler-row[aria-selected='true']", "\(size.name) retained site navigation")
+      if try await usesCompactVmLayout(ui) {
+        let tree = try await ui.json("__rebUiProbe.box('.vm-list-pane')")
+        XCTAssertEqual(tree["visibleHeight"] as? Double ?? -1, 0, accuracy: 1,
+          "\(size.name): navigation starts at the evidence without a clipped tree fragment")
+      }
+      try await ui.screenshot("vm-retained-site-navigation-\(size.name)")
+    }
+  }
+
+  @MainActor
   func test11VmOpcodeHeaderSpacing() async throws {
     let sizes: [(name: String, width: CGFloat, height: CGFloat)] = [
       ("normal", 1180, 790), ("narrow", 760, 560),
@@ -478,7 +576,15 @@ final class OriginTraceRenderedUITests: XCTestCase {
       try await ui.waitUntil("document.querySelectorAll('#vm-list .vm-row').length > 0", "VM findings did not load")
       try await setVmAnalysisExpanded(ui, true)
       try await ui.click("#vm-list .vm-row", containing: "artifact 18446744073709551615")
-      try await revealAndAssertFullyVisible(ui, ".vm-workspace-title", "\(size.name) opcode header")
+      try await assertCompleteCompactFindings(ui, size.name)
+      try await ui.click("#vm-symbol-list .vm-symbol-row")
+      try await assertFullyVisible(ui, ".vm-workspace-title", "\(size.name) opcode header")
+      try await assertFullyVisible(ui, ".vm-workbench-listing .vm-handler-row[aria-selected='true']", "\(size.name) opcode navigation")
+      if try await usesCompactVmLayout(ui) {
+        let tree = try await ui.json("__rebUiProbe.box('.vm-list-pane')")
+        XCTAssertEqual(tree["visibleHeight"] as? Double ?? -1, 0, accuracy: 1,
+          "\(size.name): opcode navigation leaves no partial tree above the evidence")
+      }
       let spacing = try await ui.json("""
         (() => { const head = document.querySelector('.vm-workspace-title');
           const evidence = head.nextElementSibling;
@@ -576,7 +682,11 @@ final class OriginTraceRenderedUITests: XCTestCase {
 
   @MainActor
   func test4VmNativeGuestRows() async throws {
-    for size in windowSizes {
+    let sizes: [(name: String, width: CGFloat, height: CGFloat)] = [
+      ("normal", 1180, 790), ("narrow", 760, 560),
+      ("short", 1180, 560), ("narrow-tall", 760, 790),
+    ]
+    for size in sizes {
       let ui = try await prepare(size)
       try await show(ui, "vm")
       try await ui.waitUntil("document.querySelectorAll('#vm-list .vm-row').length > 0", "VM findings did not load")
@@ -584,6 +694,7 @@ final class OriginTraceRenderedUITests: XCTestCase {
       try await ui.click("#vm-list .vm-row", containing: "artifact 107")
       try await assertFullyVisible(ui, "#vm-symbol-list .vm-symbol-row", "\(size.name) symbol tree")
       try await assertHandlerColumns(ui, size.name)
+      try await assertCompleteCompactFindings(ui, size.name)
       try await ui.screenshot("vm-navigator-\(size.name)")
       try await setVmAnalysisExpanded(ui, false)
       try await ui.click("[data-vm-panel='native-wasm']")
@@ -606,6 +717,8 @@ final class OriginTraceRenderedUITests: XCTestCase {
       try await assertInert(ui, "\(size.name) vm")
       try await assertLayout(ui, "#screen-vm", "\(size.name) vm native guest")
       try await assertVmDock(ui, size.name)
+      let guestInset = try await ui.vmCardInsetOffenders(panel)
+      XCTAssertEqual(guestInset, [], "\(size.name) vm native guest: card content shares the 12px inset")
       try await ui.screenshot("vm-native-guest-\(size.name)")
 
       try await setVmAnalysisExpanded(ui, true)
@@ -620,7 +733,45 @@ final class OriginTraceRenderedUITests: XCTestCase {
       try await revealAndAssertFullyVisible(ui, "\(panel) details.vm-effect-row summary", "\(size.name) native row")
       try await assertLayout(ui, "#screen-vm", "\(size.name) vm native physical")
       try await assertVmDock(ui, size.name)
+      let physicalInset = try await ui.vmCardInsetOffenders(panel)
+      XCTAssertEqual(physicalInset, [], "\(size.name) vm native physical: card content shares the 12px inset")
       try await ui.screenshot("vm-native-physical-\(size.name)")
+
+      // The structural classification renders as inert text on the dispatch
+      // rows; this golden module's constant selector is not an interpreter.
+      try await ui.click("[data-vm-panel='dispatch']")
+      let dispatch = "[data-vm-panel-content='dispatch']"
+      try await ui.waitUntil("!document.querySelector(\"\(dispatch)\")?.hidden", "dispatch sites panel did not open")
+      let structure = try await ui.value("document.querySelector(\"\(dispatch)\").innerText") as? String ?? ""
+      XCTAssertTrue(structure.contains("Dispatch structure"), "\(size.name): classification section renders: \(structure)")
+      XCTAssertTrue(structure.contains("switch_on_value / constant / unknown · not an interpreter loop"),
+        "\(size.name): classification axes render on the dispatch rows: \(structure)")
+      XCTAssertFalse(structure.contains("· cursor-loop interpreter candidate"), "\(size.name): no interpreter claim: \(structure)")
+      try await assertInert(ui, "\(size.name) vm dispatch")
+      try await ui.revealVmHeading(dispatch, "Dispatch structure")
+      try await assertLayout(ui, "#screen-vm", "\(size.name) vm dispatch structure")
+      let dispatchInset = try await ui.vmCardInsetOffenders(dispatch)
+      XCTAssertEqual(dispatchInset, [], "\(size.name) vm dispatch structure: card content shares the 12px inset")
+      try await ui.screenshot("vm-dispatch-structure-\(size.name)")
+
+      try await setVmAnalysisExpanded(ui, true)
+      try await ui.click("#vm-list .vm-row", containing: "artifact 311")
+      let emptyInspector = try await ui.json("""
+        (() => { const panel = document.querySelector('.vm-selection-inspector');
+          const text = document.createRange(); text.selectNodeContents(panel.querySelector('.vm-selection-empty'));
+          return {inset: text.getBoundingClientRect().left - panel.getBoundingClientRect().left - parseFloat(getComputedStyle(panel).borderLeftWidth)}; })()
+        """)
+      XCTAssertEqual(emptyInspector["inset"] as? Double ?? -1, 10, accuracy: 1,
+        "\(size.name): empty selected-handler text keeps the inspector's content inset")
+      try await setVmAnalysisExpanded(ui, false)
+      try await ui.click("[data-vm-panel='dispatch']")
+      try await ui.waitUntil("document.querySelector(\"\(dispatch)\").innerText.includes('parse-failed')", "parse failure omission did not render")
+      let omitted = try await ui.value("document.querySelector(\"\(dispatch)\").innerText") as? String ?? ""
+      XCTAssertTrue(omitted.contains("1 record omitted."), "\(size.name): parse failure remains counted: \(omitted)")
+      try await assertInert(ui, "\(size.name) vm parse failure")
+      try await ui.revealVmHeading(dispatch, "Dispatch structure")
+      try await assertLayout(ui, "#screen-vm", "\(size.name) vm parse failure")
+      try await ui.screenshot("vm-parse-failed-\(size.name)")
     }
   }
 
@@ -638,13 +789,17 @@ final class OriginTraceRenderedUITests: XCTestCase {
         (() => { const panel = document.querySelector('[data-vm-panel-content="host-links"]');
           const empty = getComputedStyle(panel.querySelector('.vm-workspace-empty'));
           const paragraph = getComputedStyle(panel.querySelector('p'));
+          const text = document.createRange(); text.selectNodeContents(panel.querySelector('.vm-workspace-empty'));
           return {emptyTop: parseFloat(empty.paddingTop), emptyBottom: parseFloat(empty.paddingBottom),
+            textInset: text.getBoundingClientRect().left - panel.getBoundingClientRect().left,
             paragraphTop: parseFloat(paragraph.paddingTop), paragraphBottom: parseFloat(paragraph.paddingBottom)}; })()
         """)
       XCTAssertEqual(spacing["emptyTop"] as? Double, spacing["paragraphTop"] as? Double,
         "\(size.name): empty paragraphs use the panel's paragraph spacing")
       XCTAssertEqual(spacing["emptyBottom"] as? Double, spacing["paragraphBottom"] as? Double,
         "\(size.name): empty paragraphs do not add a second vertical inset")
+      XCTAssertEqual(spacing["textInset"] as? Double ?? -1, 12, accuracy: 1,
+        "\(size.name): empty paragraph text shares the card's 12px content edge")
       try await revealAndAssertFullyVisible(ui, "[data-vm-panel-content='host-links'] details.vm-effect-row summary", "\(size.name) host link")
       try await assertVmDock(ui, size.name)
       try await assertLayout(ui, "#screen-vm", "\(size.name) host links")
@@ -670,6 +825,7 @@ final class OriginTraceRenderedUITests: XCTestCase {
       XCTAssertLessThanOrEqual(tree["height"] as? Double ?? .infinity, 141,
         "\(size.name): trees stay in a compact band above the evidence")
       try await assertHandlerColumns(ui, size.name)
+      try await assertCompleteCompactFindings(ui, size.name)
       try await ui.screenshot("vm-navigator-\(size.name)")
       try await ui.click("#vm-symbol-list .vm-symbol-row")
       try await ui.tab()
@@ -689,6 +845,41 @@ final class OriginTraceRenderedUITests: XCTestCase {
       try await ui.waitUntil("!document.querySelector('.vm-program-example').open", "Space did not close the example")
       try await assertFullyVisible(ui, ".vm-program-example > summary", "\(size.name) collapsed example")
     }
+  }
+
+  @MainActor
+  func test13WorkerFailureDetailsAndRetry() async throws {
+    let environment = ProcessInfo.processInfo.environment
+    let endpoint = try Harness.required(environment, "REB_RENDERED_UI_FAILURE_URL")
+    let binary = try Harness.required(environment, "REB_RENDERED_UI_FAILURE_BINARY")
+    let ui = try Harness()
+    try await ui.waitForInitialLoad()
+    let originalURL = ui.webView.url!
+    try await ui.activate()
+    defer {
+      try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: binary)
+      ui.webView.load(URLRequest(url: originalURL))
+    }
+    for size in windowSizes {
+      try await ui.resize(width: size.width, height: size.height)
+      ui.webView.load(URLRequest(url: URL(string: endpoint)!))
+      try await ui.waitForInitialLoad()
+      try await show(ui, "vm")
+      try await ui.waitUntil("document.querySelector('#vm-notice').textContent.includes('analysis-worker-failed: spawn')", "Worker failure detail did not render")
+      let notice = try await ui.value("document.querySelector('#vm-notice').textContent") as? String ?? ""
+      XCTAssertTrue(notice.contains("1 omitted artifacts"), notice)
+      XCTAssertTrue(notice.contains("retry the request"), notice)
+      try await assertInert(ui, "\(size.name) worker failure")
+      try await assertLayout(ui, "#screen-vm", "\(size.name) worker failure")
+      try await ui.screenshot("vm-worker-failure-\(size.name)")
+    }
+    try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: binary)
+    try await ui.reload(requireRequests: false)
+    try await show(ui, "vm")
+    try await ui.waitUntil("document.querySelectorAll('#vm-list .vm-row').length > 0", "Unchanged-input retry did not recover")
+    let notice = try await ui.value("document.querySelector('#vm-notice').hidden") as? Bool ?? false
+    XCTAssertTrue(notice, "Recovered analysis clears the failure banner")
+    try await ui.screenshot("vm-worker-recovered")
   }
 
   @MainActor

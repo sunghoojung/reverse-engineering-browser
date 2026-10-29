@@ -11,6 +11,7 @@ struct Options {
     output: Option<PathBuf>,
 }
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    origin_trace_backend::javascript_worker_entry();
     let options = Options::parse();
     let document = origin_trace_backend::vm::store(&options.artifacts, &options.events)?;
     if let Some(path) = options.output {
@@ -18,3 +19,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     Ok(())
 }
+
+#[cfg(test)]
+origin_trace_backend::javascript_worker_test_entry!();

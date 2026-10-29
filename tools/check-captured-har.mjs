@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import {mkdtemp,writeFile,readFile,rm,stat,symlink} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
-import {spawnSync} from 'node:child_process';
+import {checkedSpawnSync as spawnSync} from './checked-spawn-sync.mjs';
 import {network} from './saved-traffic-fixture.mjs';
 import {readCapture} from './captured-request-export.mjs';
 import {harProject} from './har-project.mjs';
@@ -18,7 +18,8 @@ row.timing_evidence={format:'reb-network-timing-v1',request_monotonic_seconds:av
 const document={format:'reb-network-request-v1',source:{instance_id:fixture.instance_id,capture_epoch:fixture.capture_epoch,request_id:row.id,target_id:row.target_id,started_monotonic_ms:row.started_monotonic_ms},debugger_generation:42,request:row};
 const directory=await mkdtemp(join(tmpdir(),'reb-har-test-')),input=join(directory,'input.json'),output=join(directory,'output.har');
 const script=new URL('./export-captured-har.mjs',import.meta.url).pathname;
-const run=(...args)=>spawnSync(process.execPath,[script,...args],{encoding:'utf8',timeout:15000});
+// Bound a local child hang while allowing heavily loaded developer machines.
+const run=(...args)=>spawnSync(process.execPath,[script,...args],{encoding:'utf8'});
 const clone=value=>JSON.parse(JSON.stringify(value));
 try {
   await writeFile(input,JSON.stringify(document));

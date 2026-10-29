@@ -41,3 +41,30 @@ pub use config::Options;
 pub use endpoint::PublishedEndpoint;
 
 pub use durable::write_private_noclobber;
+
+mod js_worker_alloc;
+#[doc(hidden)]
+pub use js_worker_alloc::JavaScriptWorkerAllocator;
+#[doc(hidden)]
+pub use vm::dispatch_shape::javascript::worker_entry as javascript_worker_entry;
+
+// libtest owns main, so each harness explicitly includes this ignored entry.
+// The parent still re-executes itself, including integration and binary tests.
+#[doc(hidden)]
+#[macro_export]
+macro_rules! javascript_worker_test_entry {
+    () => {
+        #[test]
+        #[ignore]
+        fn __reb_javascript_worker() {
+            if std::env::var_os("REB_JS_TEST_WORKER").is_some() {
+                $crate::javascript_worker_entry();
+            }
+        }
+    };
+}
+#[cfg(test)]
+javascript_worker_test_entry!();
+
+#[global_allocator]
+static JS_TEST_ALLOCATOR: JavaScriptWorkerAllocator = JavaScriptWorkerAllocator;

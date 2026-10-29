@@ -111,3 +111,5 @@ fn offline_pack_cli_applies_default_rankings_and_refuses_executable_extensions()
     assert!(!apply(&invalid_path, &refused_output).status.success());
     assert!(!refused_output.exists());
 }
+
+origin_trace_backend::javascript_worker_test_entry!();

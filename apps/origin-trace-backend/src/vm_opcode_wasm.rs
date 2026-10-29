@@ -7,11 +7,13 @@
 //! in-loop `call_indirect`. Unrelated jump tables stay out. Nothing here
 //! instantiates the module or invents a guest program counter.
 use super::MAX_HANDLERS;
+use crate::vm::{
+    dispatch_shape::{Memory, Meter},
+    wasm_tables::{Placement, Tables},
+};
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
-use wasmparser::{
-    BinaryReader, ElementItems, ElementKind, Operator, OperatorsReader, Parser, Payload, TypeRef,
-};
+use wasmparser::{BinaryReader, Operator, OperatorsReader, Parser, Payload, TypeRef};
 
 const MAX_RELATED_FUNCTIONS: usize = 32;
 const MAX_SITES_PER_FUNCTION: usize = MAX_HANDLERS;
@@ -25,6 +27,7 @@ const MAX_HANDLER_TABLES: usize = 8;
 const MAX_ELEMENT_TABLES: usize = 4;
 const MAX_CLUSTERS: usize = 1024;
 const MAX_LISTED_SELECTORS: usize = 32;
+const MAX_LISTED_SEGMENTS: usize = 64;
 
 pub(super) struct ModuleDispatch {
     pub sites: u32,
@@ -69,7 +72,16 @@ struct FunctionDispatch {
     sites_truncated: bool,
 }
 
+#[cfg(test)]
 pub(super) fn handlers(bytes: &[u8], result: &Value) -> Option<ExtractedHandlers> {
+    handlers_under(bytes, result, &crate::vm::dispatch_shape::Meter::new())
+}
+
+pub(super) fn handlers_under(
+    bytes: &[u8],
+    result: &Value,
+    meter: &crate::vm::dispatch_shape::Meter,
+) -> Option<ExtractedHandlers> {
     let coordinate = result["observations"]
         .as_array()?
         .iter()
@@ -80,7 +92,8 @@ pub(super) fn handlers(bytes: &[u8], result: &Value) -> Option<ExtractedHandlers
     let body_offset = coordinate["function_body_offset"].as_u64()? as usize;
     let body_size = coordinate["function_body_size"].as_u64()? as usize;
     let mut functions = Vec::new();
-    let mut elements: BTreeMap<u32, Vec<u32>> = BTreeMap::new();
+    let tables = Tables::parse_under(bytes, meter)?;
+    let elements = tables.active_functions();
     let mut imported = 0u32;
     let mut defined = 0u32;
     let mut call_edges = 0usize;
@@ -98,44 +111,6 @@ pub(super) fn handlers(bytes: &[u8], result: &Value) -> Option<ExtractedHandlers
                     };
                     if matches!(import.ty, TypeRef::Func(_)) {
                         imported += 1;
-                    }
-                }
-            }
-            Payload::ElementSection(reader) => {
-                for element in reader {
-                    let Ok(element) = element else {
-                        return None;
-                    };
-                    let ElementKind::Active { table_index, .. } = element.kind else {
-                        continue;
-                    };
-                    // MVP active segments omit the table index and mean table 0.
-                    let targets = elements.entry(table_index.unwrap_or(0)).or_default();
-                    match element.items {
-                        ElementItems::Functions(functions) => {
-                            for function in functions {
-                                let Ok(function) = function else {
-                                    return None;
-                                };
-                                targets.push(function);
-                            }
-                        }
-                        ElementItems::Expressions(_, expressions) => {
-                            for expression in expressions {
-                                let Ok(expression) = expression else {
-                                    return None;
-                                };
-                                let mut reader = expression.get_operators_reader();
-                                while !reader.eof() {
-                                    let Ok(op) = reader.read() else {
-                                        return None;
-                                    };
-                                    if let Operator::RefFunc { function_index } = op {
-                                        targets.push(function_index);
-                                    }
-                                }
-                            }
-                        }
                     }
                 }
             }
@@ -244,7 +219,7 @@ pub(super) fn handlers(bytes: &[u8], result: &Value) -> Option<ExtractedHandlers
     functions[selected_pos]
         .sites
         .sort_by_key(|site| site.offset != selected_site);
-    attach_table_edges(&mut functions, &elements, &mut calls_truncated);
+    attach_table_edges(&mut functions, elements, &mut calls_truncated, meter);
     let (included, neighborhood_limited) = neighborhood(&functions, selected);
     let mut handlers = Vec::new();
     let mut omissions = Vec::new();
@@ -378,12 +353,23 @@ pub(super) fn handlers(bytes: &[u8], result: &Value) -> Option<ExtractedHandlers
             "detail": "Direct-call or table-element edges were bounded. Some statically related dispatch functions may be absent.",
         }));
     }
+    if !tables.oversized.is_empty() {
+        omissions.push(json!({
+            "reason": "element-table-limit",
+            "detail": format!(
+                "{} element table(s) place more than {} slots and are not expanded into handler tables or matching slots.",
+                tables.oversized.len(),
+                crate::vm::wasm_tables::MAX_TABLE_SLOTS
+            ),
+        }));
+    }
     let handler_tables = build_handler_tables(
         bytes,
         result
             .get("frontend")
             .and_then(|frontend| frontend.get("dispatch_inventory")),
-        &elements,
+        &tables,
+        meter,
     );
     Some(ExtractedHandlers {
         handlers,
@@ -403,7 +389,8 @@ pub(super) fn handlers(bytes: &[u8], result: &Value) -> Option<ExtractedHandlers
 fn build_handler_tables(
     bytes: &[u8],
     inventory: Option<&Value>,
-    elements: &BTreeMap<u32, Vec<u32>>,
+    layout: &Tables,
+    meter: &Meter,
 ) -> Vec<Value> {
     let mut tables = Vec::new();
     if let Some(candidates) = inventory
@@ -423,11 +410,13 @@ fn build_handler_tables(
             }
         }
     }
-    for (table_index, funcs) in elements.iter().take(MAX_ELEMENT_TABLES) {
-        if funcs.len() > 1_000_000 {
+    for table_index in layout.active_tables().take(MAX_ELEMENT_TABLES) {
+        if layout.oversized.contains(&table_index) {
             continue;
         }
-        tables.push(element_handler_table(*table_index, funcs));
+        if let Some(table) = element_handler_table(table_index, layout, meter) {
+            tables.push(table);
+        }
     }
     tables
 }
@@ -528,14 +517,56 @@ fn call_indirect_handler_table(site: &Value, bytes: &[u8]) -> Value {
     })
 }
 
-fn element_handler_table(table_index: u32, funcs: &[u32]) -> Value {
-    let pairs = funcs
-        .iter()
-        .enumerate()
-        .filter_map(|(slot, function)| u32::try_from(slot).ok().map(|slot| (slot, *function)))
+/// Clusters key on real table slots: each active segment is placed at its
+/// evaluated offset and later segments overwrite earlier slots. A segment
+/// whose offset reads an imported global stays `relative` with no slots, and
+/// one that ends past the declared table minimum is `out-of-range`. Clusters
+/// list only slots whose function is statically known.
+fn element_handler_table(table_index: u32, layout: &Tables, meter: &Meter) -> Option<Value> {
+    let memory = Memory::new(meter);
+    let slots = layout.slots.get(&table_index).map_or(0, Vec::len);
+    let unique = layout
+        .active_functions()
+        .get(&table_index)
+        .map_or(0, Vec::len);
+    if !meter.charge(slots as u64 * 32 + layout.segments_for(table_index).len() as u64)
+        || !memory.keep(slots as u64 * 24 + unique as u64 * 256)
+    {
+        return None;
+    }
+    let pairs = layout
+        .slots
+        .get(&table_index)
+        .into_iter()
+        .flatten()
+        .filter_map(|(slot, entry)| entry.function().map(|function| (*slot, function)))
         .collect::<Vec<_>>();
     let (clusters, unique, omitted) = clusters_from_pairs(&pairs);
-    json!({
+    let table_segments = layout.segments_for(table_index).len();
+    let segments = layout
+        .segments_for(table_index)
+        .iter()
+        .take(MAX_LISTED_SEGMENTS)
+        .map(|index| &layout.segments[*index])
+        .map(|segment| {
+            json!({
+                "segment_index": segment.index,
+                "placement": segment.placement.label(),
+                "offset": match segment.placement {
+                    Placement::Placed(offset)
+                    | Placement::OutOfRange(offset)
+                    | Placement::Unreached(offset) => Some(offset),
+                    _ => None,
+                },
+                "global_index": match segment.placement {
+                    Placement::Relative(global) => Some(global),
+                    _ => None,
+                },
+                "entry_count": segment.entry_count,
+            })
+        })
+        .collect::<Vec<_>>();
+    Some(json!({
         "kind": "element",
         "evidence_class": "call-indirect-table",
         "function_index": null,
@@ -543,31 +574,58 @@ fn element_handler_table(table_index: u32, funcs: &[u32]) -> Value {
         "byte_size": null,
         "table_index": table_index,
         "arm_count": null,
-        "entry_count": funcs.len(),
+        "entry_count": pairs.len(),
         "unique_target_count": unique,
         "default_target": null,
         "clusters": clusters,
         "omitted_cluster_count": omitted,
-    })
+        "segments": segments,
+        "omitted_segment_count": table_segments.saturating_sub(MAX_LISTED_SEGMENTS),
+    }))
 }
 
 fn attach_table_edges(
     functions: &mut [FunctionDispatch],
     elements: &BTreeMap<u32, Vec<u32>>,
     calls_truncated: &mut bool,
+    meter: &Meter,
 ) {
+    let memory = Memory::new(meter);
+    if !meter.charge(functions.len() as u64) || !memory.keep(functions.len() as u64 * 64) {
+        *calls_truncated = true;
+        return;
+    }
+    // Element targets can name every function. Index once rather than
+    // searching all functions for each target (quadratic on unique entries).
+    let has_dispatch = functions
+        .iter()
+        .map(|function| (function.index, !function.sites.is_empty()))
+        .collect::<std::collections::HashMap<_, _>>();
     let mut preferred: BTreeMap<u32, Vec<u32>> = BTreeMap::new();
     for (table, targets) in elements {
+        if !memory.keep(
+            128 + targets
+                .len()
+                .min(MAX_TABLE_DISPATCH_TARGETS + MAX_TABLE_OTHER_TARGETS) as u64
+                * 8,
+        ) {
+            *calls_truncated = true;
+            return;
+        }
         let mut dispatch = Vec::new();
         let mut other = Vec::new();
         for target in targets {
-            let Some(function) = functions.iter().find(|function| function.index == *target) else {
+            if !meter.charge((dispatch.len() + other.len()) as u64 + 1) {
+                *calls_truncated = true;
+                return;
+            }
+            let Some(dispatches) = has_dispatch.get(target) else {
                 continue;
             };
             if dispatch.contains(target) || other.contains(target) {
                 continue;
             }
-            if function.sites.is_empty() {
+            if !dispatches {
                 if other.len() < MAX_TABLE_OTHER_TARGETS {
                     other.push(*target);
                 } else {

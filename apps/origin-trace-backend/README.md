@@ -52,3 +52,48 @@ fallback. Native artifact/source coverage can be narrower than previous CDP
 capture. Workers, arbitrary interpreter guest PCs and host causality require
 additional native implementation and verification. Saved legacy CDP metadata
 retains its historical provenance; a current native session never relabels it.
+
+## Dispatch classification and opcode claims
+
+Classification and workspace extraction share one per-artifact work and memory
+budget. The parsed semantic gate only removes recovered opcode claims and reports their
+count; it never changes the detector tier, score, finding ID or dispatch
+inventory. See the [classification contract](../../protocol/vm-dispatch-classification-v1.md).
+The scaling test exercises analysis plus workspace extraction, and the ignored
+`vm_opcode::tests::measure_classifier_pipeline` test accepts a newline-separated
+input list through `REB_CLASSIFIER_MEASURE_INPUTS` for local measurements.
+
+JavaScript classification uses unmodified Oxc 0.155.0. The successful parse is
+shared by classification and binding proof. A linear AST prepass admits the
+upstream semantic ancestor walks and block-hoisting expansion before they run.
+Every classification caller re-executes itself through a shared hidden worker
+entry, including the CLI, backend, API executable and Cargo harnesses. Packaged
+names do not change worker selection; no sibling analyzer is discovered.
+The standalone `OriginTraceVMAnalyzer` remains the live-session batch CLI.
+Artifacts up to 8 MiB are analyzed in full within a separate temporary heap
+ceiling of 64 MiB + 80 times source bytes (704 MiB at 8 MiB). The worker allocator
+checks every allocation before calling the system allocator, including arena,
+semantic, indexing and serialization storage. Refusal exits only that worker,
+with fixed-size allocation/work telemetry. The caller keeps the same artifact
+work ledger and the existing 128 MiB retained-record cap. A five-minute deadline
+plus one minute per started MiB is only a hang backstop. Worker timeout, crash,
+spawn and protocol failures are distinct counted `analysis-worker-failed`
+omissions, never saved or cached. The CLI fails and the API returns 503; an
+unchanged-input retry runs again. Workers clear inherited environment variables,
+close extra descriptors and deny network access. Source crosses anonymous pipes only;
+it is never executed or written to a temporary source file.
+
+Reserved 32/64 MiB recursive stacks are separate from heap accounting. Actual
+worker allocation peaks (including 32 bytes of overhead per allocation) are
+reported by the ignored measurement test as `parser_peak_bytes`. Process RSS
+also includes resident stack pages, allocator/runtime overhead and the parent;
+measure both processes together. The 8 MiB target is below roughly 1 GiB peak
+RSS on a local workstation, not a guarantee about unrelated concurrent work.
+Oversize, dense, excessively nested and unavailable-worker inputs have counted
+omissions.
+
+Claims describe the statically bound table. Runtime replacement through `eval`
+or `Function`, Proxy or reflection, global-object writes, sloppy `arguments`
+aliasing, and conditional or never-executed initialization are not modeled.
+Runtime evidence from native guest capture is the authority for what actually
+executes.

@@ -172,7 +172,7 @@ index 7f1aebf78aaf7455216a3ca21bbc6df8af6feb76..84783e90625b04f2e7512721040f033d
  DEFINE_NEG_IMPLICATION(liftoff_only, wasm_tier_up)
  DEFINE_NEG_IMPLICATION(liftoff_only, wasm_dynamic_tiering)
 diff --git a/src/runtime/runtime-wasm.cc b/src/runtime/runtime-wasm.cc
-index 79d69177b9bcc301b40f8bbc45e1250ae3df0bb3..0f78aa9aa6f3b5ba380ad36760316f3464700f1a 100644
+index 79d69177b9bcc301b40f8bbc45e1250ae3df0bb3..75ae9324ddde94bbfea44f66e14f0f30dd73aa3e 100644
 --- a/src/runtime/runtime-wasm.cc
 +++ b/src/runtime/runtime-wasm.cc
 @@ -4,6 +4,7 @@
@@ -191,7 +191,7 @@ index 79d69177b9bcc301b40f8bbc45e1250ae3df0bb3..0f78aa9aa6f3b5ba380ad36760316f34
  
  #if V8_ENABLE_WEBASSEMBLY && V8_ENABLE_DRUMBRAKE
  #include "src/wasm/interpreter/wasm-interpreter.h"
-@@ -147,6 +149,146 @@ RUNTIME_FUNCTION(Runtime_WasmJSToWasmObject) {
+@@ -147,6 +149,145 @@ RUNTIME_FUNCTION(Runtime_WasmJSToWasmObject) {
    return ret;
  }
  
@@ -284,8 +284,7 @@ index 79d69177b9bcc301b40f8bbc45e1250ae3df0bb3..0f78aa9aa6f3b5ba380ad36760316f34
 +  // The call itself still performs its own bounds, null and signature checks.
 +  auto resolution = v8::WasmCallIndirectResolution::kUnresolved;
 +  uint32_t callee_function_index = 0;
-+  if (instance->has_tables() &&
-+      info->table_index < instance->tables()->ulength().value() &&
++  if (info->table_index < instance->tables()->ulength().value() &&
 +      IsWasmTableObject(instance->tables()->get(info->table_index))) {
 +    const auto table =
 +        Cast<WasmTableObject>(instance->tables()->get(info->table_index));

@@ -88,3 +88,7 @@ Environment passed to the hosted bundle through the `.xctestrun`:
 - `REB_RENDERED_UI_PROBES`: absolute path of `probes.js`
 - `REB_RENDERED_UI_EXPECT`: JSON with the fixture's hostile markers and counts
 - `REB_DISABLE_AUTOMATIC_LIVE_SESSION=1`
+- `REB_RENDERED_UI_FAILURE_URL` and `REB_RENDERED_UI_FAILURE_BINARY`: a separate
+  copied backend with synthetic interpreter evidence. Its executable permission
+  is removed to reproduce a real worker spawn failure, then restored to verify
+  unchanged-input retry. Both window sizes must show the counted failure as text.

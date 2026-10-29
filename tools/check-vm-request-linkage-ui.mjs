@@ -326,6 +326,24 @@ async function checkCacheAndRaces(create) {
     await f.refreshVmAnalysis(invalid); assert.deepEqual(checkedState(f), before); assert.equal(f.calls.length, calls);
   }
 
+  for (const detail of ['timeout', 'crash', 'spawn', 'protocol']) {
+    const current = create();
+    await current.refreshVmAnalysis(A);
+    const previous = current.state.vmAnalysisDocument;
+    const message = `analysis-worker-failed: ${detail} (2 omitted artifacts). Analysis was not saved; retry the request. <img src=x onerror=alert(1)>`;
+    current.reply = () => response({code: 'dependency_unavailable', error: message, details: {phase: 'worker'}}, 503);
+    await current.refreshVmAnalysis(A);
+    assert.equal(current.state.vmAnalysisStatus, 'unavailable');
+    assert.equal(current.state.vmAnalysisDocument, previous);
+    assert.equal(current.state.vmAnalysisError, message);
+    assert(current.elements.vmNotice.textContent.includes(message), 'Worker reason, detail, count and retry guidance render as text');
+    assert.equal(current.elements.vmNotice.children.length, 0, 'Captured markup creates no elements');
+    current.reply = () => response(analysisDocument(A));
+    await current.refreshVmAnalysis(A);
+    assert.equal(current.state.vmAnalysisStatus, 'ready', 'An unchanged-input retry recovers');
+    assert.equal(current.state.vmAnalysisError, null);
+  }
+
   for (const outcome of ['http', 'fetch', 'json', 'malformed', 'foreign']) {
     const current = create(); current.reply = () => response(analysisDocument(B, '102', 'b'), 200, 'etag-b');
     await current.refreshVmAnalysis(B);

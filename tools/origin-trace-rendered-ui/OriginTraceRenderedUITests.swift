@@ -138,12 +138,12 @@ final class Harness {
   // one, so a fixed sleep can return before navigation and deliver the next
   // click to a page being torn down. Mark the old document and wait for a
   // document without the mark.
-  func reload() async throws {
+  func reload(requireRequests: Bool = true) async throws {
     try await activate()
     _ = try await webView.callAsyncJavaScript("window.__rebOutgoingDocument = true; return true;", contentWorld: .page)
     webView.reload()
     try await waitUntil(
-      "window.__rebOutgoingDocument === undefined && document.readyState === 'complete' && typeof state === 'object' && state.requests.length > 0 && !document.querySelector('#screen-traffic').hidden",
+      "window.__rebOutgoingDocument === undefined && document.readyState === 'complete' && typeof state === 'object' && (\(requireRequests ? "state.requests.length > 0" : "true")) && !document.querySelector('#screen-traffic').hidden",
       timeout: 30, "the packaged UI did not load retained evidence")
     try await settle()
   }
@@ -841,6 +841,41 @@ final class OriginTraceRenderedUITests: XCTestCase {
       try await ui.waitUntil("!document.querySelector('.vm-program-example').open", "Space did not close the example")
       try await assertFullyVisible(ui, ".vm-program-example > summary", "\(size.name) collapsed example")
     }
+  }
+
+  @MainActor
+  func test13WorkerFailureDetailsAndRetry() async throws {
+    let environment = ProcessInfo.processInfo.environment
+    let endpoint = try Harness.required(environment, "REB_RENDERED_UI_FAILURE_URL")
+    let binary = try Harness.required(environment, "REB_RENDERED_UI_FAILURE_BINARY")
+    let ui = try Harness()
+    try await ui.waitForInitialLoad()
+    let originalURL = ui.webView.url!
+    try await ui.activate()
+    defer {
+      try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: binary)
+      ui.webView.load(URLRequest(url: originalURL))
+    }
+    for size in windowSizes {
+      try await ui.resize(width: size.width, height: size.height)
+      ui.webView.load(URLRequest(url: URL(string: endpoint)!))
+      try await ui.waitForInitialLoad()
+      try await show(ui, "vm")
+      try await ui.waitUntil("document.querySelector('#vm-notice').textContent.includes('analysis-worker-failed: spawn')", "Worker failure detail did not render")
+      let notice = try await ui.value("document.querySelector('#vm-notice').textContent") as? String ?? ""
+      XCTAssertTrue(notice.contains("1 omitted artifacts"), notice)
+      XCTAssertTrue(notice.contains("retry the request"), notice)
+      try await assertInert(ui, "\(size.name) worker failure")
+      try await assertLayout(ui, "#screen-vm", "\(size.name) worker failure")
+      try await ui.screenshot("vm-worker-failure-\(size.name)")
+    }
+    try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: binary)
+    try await ui.reload(requireRequests: false)
+    try await show(ui, "vm")
+    try await ui.waitUntil("document.querySelectorAll('#vm-list .vm-row').length > 0", "Unchanged-input retry did not recover")
+    let notice = try await ui.value("document.querySelector('#vm-notice').hidden") as? Bool ?? false
+    XCTAssertTrue(notice, "Recovered analysis clears the failure banner")
+    try await ui.screenshot("vm-worker-recovered")
   }
 
   @MainActor

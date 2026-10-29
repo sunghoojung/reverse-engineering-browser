@@ -159,7 +159,11 @@ const capturedExportPanel = installCapturedExportDialog({
             state.vmAnalysisStatus = 'ready';
             await refreshVmOpcodeWorkspace(null, key, current);
           } else {
-            if (!response.ok) throw new Error(`Analyzer returned ${response.status}`);
+            if (!response.ok) {
+              const failure = await response.json().catch(() => null);
+              throw new Error(failure?.code === 'dependency_unavailable' && typeof failure.error === 'string'
+                ? failure.error.slice(0, 1024) : `Analyzer returned ${response.status}`);
+            }
             const document = await response.json();
             if (!current()) return;
             if (!isVmAnalysisDocument(document) || !vmAnalysisMatchesSelection(document, selection)) {
@@ -2374,7 +2378,7 @@ const capturedExportPanel = installCapturedExportDialog({
         } else if (state.vmAnalysisStatus === 'malformed') {
           setVmNotice('malformed', `Malformed or mismatched VM analysis was rejected. ${state.vmAnalysisSelection ? 'Only the last valid evidence for this exact request may remain visible.' : 'Valid timeline summaries remain visible.'}`);
         } else if (state.vmAnalysisStatus === 'unavailable') {
-          setVmNotice('disconnected', `The cold analyzer is unavailable. ${state.vmFindings.length ? 'Last valid VM evidence remains visible.' : 'No VM evidence is available.'}`);
+          setVmNotice('disconnected', `The cold analyzer is unavailable. ${state.vmAnalysisError ? `${state.vmAnalysisError} ` : ''}${state.vmFindings.length ? 'Last valid VM evidence remains visible.' : 'No VM evidence is available.'}`);
         } else if (state.broker === 'unavailable') {
           setVmNotice('disconnected', state.vmFindings.length ? 'Broker disconnected. Last valid VM findings remain visible.' : 'Broker disconnected. No VM findings are available.');
         } else if (state.malformedVmFindings > 0) {

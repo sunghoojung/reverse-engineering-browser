@@ -41,6 +41,10 @@ their evidence identities. Host causality remains unproven.
 `make native-only-check` (part of `make check`) enforces the native-only
 contract and `make rendered-ui-check` verifies the rendered packaged app.
 
+A failed VM analysis keeps the last valid evidence and displays the worker reason,
+detail (`timeout`, `crash`, `spawn` or `protocol`), omitted-artifact count and retry
+guidance as text. An unchanged-input retry reruns the worker.
+
 ## VM desktop workspace
 
 The compact Analysis, Navigation, Search and Window menus invoke the existing

@@ -243,7 +243,7 @@ const vmEvidenceSource=await readFile(new URL('../apps/research-ui/evidence_mode
 const vmRefreshSource=vmAppSource.slice(vmAppSource.indexOf('      function acceptVmOpcodeWorkspace('),vmAppSource.indexOf('      function setNetworkNotice('));
 const vmFixtureState={vmFindings:[],lastValidAnalysisFindings:[],eventVmFindings:[],vmAnalysisRequestId:null};
 let vmFixtureRenders=0;
-const vmFixtureApi=runInNewContext(`${vmEvidenceSource}\n${vmRefreshSource}\n;({install:${installVmFindingsFixture.toString()},refreshVmAnalysis})`,{state:vmFixtureState,location:{protocol:'http:'},TextEncoder,crypto:webcrypto,fetch:async()=>({ok:false,status:503}),renderVmLab:()=>{vmFixtureRenders++;}});
+const vmFixtureApi=runInNewContext(`${vmEvidenceSource}\n${vmRefreshSource}\n;({install:${installVmFindingsFixture.toString()},refreshVmAnalysis})`,{state:vmFixtureState,location:{protocol:'http:'},TextEncoder,crypto:webcrypto,fetch:async()=>({ok:false,status:503,json:async()=>null}),renderVmLab:()=>{vmFixtureRenders++;}});
 await vmFixtureApi.install();
 const exactVmFinding='analysis:000000000000000000009876:artifact:9876';
 const admittedVmFinding=vmFixtureState.vmFindings[0];
@@ -299,14 +299,14 @@ const checkVmRetained=()=>{
 };
 const heldVmPoll=vmFindingApi.refreshVmAnalysis();
 vmExecutionSwitch.focus();vmRetained.focus=vmExecutionSwitch;vmExecutionSwitch.events.click();assert.equal(vmFindingShell.hidden,true);
-finishVmPoll({ok:false,status:503});await heldVmPoll;
+finishVmPoll({ok:false,status:503,json:async()=>null});await heldVmPoll;
 vmFindingSwitch.focus();vmRetained.focus=vmFindingSwitch;vmFindingSwitch.events.click();assert.equal(vmFindingShell.hidden,false);
 checkVmRetained();assert.equal(vmFindingElements.vmNotice.dataset.kind,'disconnected');assert.match(vmFindingElements.vmNotice.textContent,/Last valid VM evidence remains visible/);
 vmRetained.list.focus();vmRetained.focus=vmRetained.list;
 for(let index=0;index<20;index++){vmFindingState.vmFindings=copy(vmFindingState.vmFindings);vmFindingApi.renderVmLab();checkVmRetained();}
 vmRetained.focus=vmFindingElements.vmDetail.querySelectorAll('.secondary-button')[0];vmRetained.focus.focus();
 const goodVmDocument={contract_version:1,document_kind:'vm-analysis',document_digest:'a'.repeat(64),profile_digest:'b'.repeat(64),profile:{profile_id:'anti-bot-vm-detection-v1'},input_coverage:{complete:false,omissions:[]},mixed_findings:[],results:vmFindingState.lastValidAnalysisFindings.map(finding=>copy(finding.analysis))};
-for(const reply of [{status:304},{ok:false,status:503},{ok:true,status:200,json:async()=>({bad:true})},{ok:true,status:200,headers:{get:()=>null},json:async()=>copy(goodVmDocument)}]){
+for(const reply of [{status:304},{ok:false,status:503,json:async()=>null},{ok:true,status:200,json:async()=>({bad:true})},{ok:true,status:200,headers:{get:()=>null},json:async()=>copy(goodVmDocument)}]){
  const poll=vmFindingApi.refreshVmAnalysis();finishVmPoll(reply);await poll;checkVmRetained();
  if(reply.status===304)assert.equal(vmFindingElements.vmNotice.hidden,true,'An unchanged success clears the prior failure notice');
  if(reply.status===503)assert.equal(vmFindingElements.vmNotice.dataset.kind,'disconnected');
@@ -334,7 +334,7 @@ const nativeVmFindings=vmFindingApi.vmFindingsFromEvents(vmFindingState.events);
 vmFindingState.eventVmFindings=nativeVmFindings.findings;vmFindingState.lastValidAnalysisFindings=[];vmFindingState.vmFindings=[...nativeVmFindings.findings];vmFindingState.selectedVmFindingId='18446744073709551614';
 vmFindingApi.renderVmLab();assert.match(vmFindingElements.vmDetail.textContent,/3 \/ 5/);assert.match(vmFindingElements.vmDetail.textContent,/9007199254740993/);
 const nativeVmNodes={list:vmFindingElements.vmList.children[0],detail:vmFindingElements.vmDetail.children[0]};nativeVmNodes.list.focus();
-for(const status of [503,304]){const poll=vmFindingApi.refreshVmAnalysis();finishVmPoll({ok:false,status});await poll;assert.equal(vmFindingElements.vmList.children[0],nativeVmNodes.list);assert.equal(vmFindingElements.vmDetail.children[0],nativeVmNodes.detail);assert.equal(vmFindingDocument.activeElement,nativeVmNodes.list);assert.equal(vmFindingState.selectedVmFindingId,'18446744073709551614');}
+for(const status of [503,304]){const poll=vmFindingApi.refreshVmAnalysis();finishVmPoll({ok:false,status,json:async()=>null});await poll;assert.equal(vmFindingElements.vmList.children[0],nativeVmNodes.list);assert.equal(vmFindingElements.vmDetail.children[0],nativeVmNodes.detail);assert.equal(vmFindingDocument.activeElement,nativeVmNodes.list);assert.equal(vmFindingState.selectedVmFindingId,'18446744073709551614');}
 assert.equal(vmFindingElements.vmNotice.hidden,true);
 vmFindingState.eventVmFindings[1].observedCount=4;vmFindingApi.renderVmLab();assert.notEqual(vmFindingElements.vmDetail.children[0],nativeVmNodes.detail);assert.match(vmFindingElements.vmDetail.textContent,/4 \/ 5/);
 console.log('PASS production VM Findings refresh/mode interleaving: stable actual nodes, exact selection, focus and scroll; unchanged/304/failed/malformed/identical-200 refreshes; changed findings, selection, source expiry, empty state and decoded native uint64/coverage findings (DOM model, not rendered QA)');

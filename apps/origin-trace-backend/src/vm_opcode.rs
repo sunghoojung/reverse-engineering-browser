@@ -6,7 +6,7 @@ use crate::{
 use regex::Regex;
 use serde_json::{Value, json};
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, HashMap},
     path::Path,
     sync::LazyLock,
 };
@@ -233,6 +233,18 @@ fn helper_fetch(expression: &str, source: &str) -> bool {
     )
 }
 
+/// Per-region memo for [`direct_selector`]. Every dispatch site in a region
+/// asks about the same names in the same scope and artifact, so each name's
+/// writes and each helper definition are found and judged once, not once per
+/// site. Without it, thousands of sites sharing one selector are quadratic.
+#[derive(Default)]
+struct SelectorFacts {
+    /// (name, depth) to the offset of its first write when every write is a
+    /// direct selector and the name is never mutated.
+    names: HashMap<(String, usize), Option<usize>>,
+    helpers: HashMap<String, bool>,
+}
+
 // These are deliberately syntactic checks, not an evaluator or a data-flow
 // proof. An unrecognized selector cannot establish a fixed opcode mapping.
 // `scope` is the region without nested function bodies, `before` the
@@ -243,21 +255,53 @@ fn direct_selector(
     before: usize,
     source: &str,
     depth: usize,
+    facts: &mut SelectorFacts,
 ) -> bool {
     let expression = expression.trim();
-    if integer(expression).is_some() || byte_read(expression) || helper_fetch(expression, source) {
+    if integer(expression).is_some() || byte_read(expression) {
+        return true;
+    }
+    let helper = match facts.helpers.get(expression) {
+        Some(&known) => known,
+        None => {
+            let known = helper_fetch(expression, source);
+            facts.helpers.insert(expression.to_owned(), known);
+            known
+        }
+    };
+    if helper {
         return true;
     }
     if depth == 8 || !IDENTIFIER.is_match(expression) {
         return false;
     }
+    let key = (expression.to_owned(), depth);
+    let first = match facts.names.get(&key) {
+        Some(&first) => first,
+        None => {
+            let first = first_direct_write(expression, scope, source, depth, facts);
+            facts.names.insert(key, first);
+            first
+        }
+    };
+    // One write must precede the dispatch.
+    first.is_some_and(|first| first < before)
+}
+
+fn first_direct_write(
+    expression: &str,
+    scope: &str,
+    source: &str,
+    depth: usize,
+    facts: &mut SelectorFacts,
+) -> Option<usize> {
     let name = regex::escape(expression);
     let mutation = Regex::new(&format!(
         r"(?:\b{name}\s*(?:\+\+|--|[+\-^|&*/%<>=]+=)|(?:\+\+|--)\s*\b{name}\b)"
     ))
     .expect("selector mutation");
     if mutation.is_match(scope) {
-        return false;
+        return None;
     }
     // Every plain write, declared or assigned, anywhere in the region. A
     // rotated loop fetches before the loop and again at its latch; each write
@@ -271,12 +315,16 @@ fn direct_selector(
         .captures_iter(scope)
         .map(|binding| binding.get(1).expect("selector value"))
         .collect::<Vec<_>>();
-    values.iter().any(|value| value.start() < before)
-        && values.iter().all(|value| {
-            (values.len() == 1 || integer(value.as_str().trim()).is_none())
-                // Alias cycles end at the depth bound, not in a data-flow proof.
-                && direct_selector(value.as_str(), scope, value.start(), source, depth + 1)
-        })
+    let direct = values.iter().all(|value| {
+        (values.len() == 1 || integer(value.as_str().trim()).is_none())
+            // Alias cycles end at the depth bound, not in a data-flow proof.
+            && direct_selector(value.as_str(), scope, value.start(), source, depth + 1, facts)
+    });
+    if direct {
+        values.first().map(|value| value.start())
+    } else {
+        None
+    }
 }
 
 fn operand_width(body: &str) -> (usize, &'static str) {
@@ -659,6 +707,7 @@ fn static_handlers(
     let mut omissions = Vec::new();
     let mut handler_limit_hit = false;
     let mut blocked_tables = BTreeSet::new();
+    let mut facts = SelectorFacts::default();
     for captures in INDEXED_DISPATCH.captures_iter(&outer) {
         if !direct_selector(
             &captures[2],
@@ -666,6 +715,7 @@ fn static_handlers(
             captures.get(0).expect("dispatch match").start(),
             &masked,
             0,
+            &mut facts,
         ) {
             blocked_tables.insert(captures[1].to_owned());
             unknowns.push("A computed, position-dependent, or saved-state handler selector has no proven fixed opcode mapping.".into());
@@ -673,7 +723,7 @@ fn static_handlers(
     }
     for captures in aliased_reads(&outer) {
         let read = captures.get(3).expect("aliased selector");
-        if !direct_selector(read.as_str(), &outer, read.start(), &masked, 0) {
+        if !direct_selector(read.as_str(), &outer, read.start(), &masked, 0, &mut facts) {
             blocked_tables.insert(last_segment(&captures[2]).to_owned());
             unknowns.push("A computed, position-dependent, or saved-state handler selector has no proven fixed opcode mapping.".into());
         }
@@ -703,6 +753,7 @@ fn static_handlers(
             switch_match.start(),
             &masked,
             0,
+            &mut facts,
         ) {
             unknowns.push("A computed, position-dependent, or saved-state switch selector has no proven fixed opcode mapping.".into());
             continue;

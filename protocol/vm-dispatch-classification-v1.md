@@ -422,6 +422,9 @@ executes. Opcode workspace producer 2.12.0 records that evidence as separate
 `observed_claims` at interpreter-candidate sites, including sites whose static
 claims are withheld or absent, and states where they disagree with static
 claims; see [observed claims](vm-opcode-workspace-v2.md#observed-claims-and-nested-guests).
+Producer 2.14.0 adds claims from native `call_indirect` observations, so a
+threaded or handler-table site whose table is filled at run time names the
+callee each observed slot ran.
 Observed claims never feed this classification, the claim gate or a tier.
 
 - A byte-cursor loop over text, such as a format-string or tokenizer loop, is

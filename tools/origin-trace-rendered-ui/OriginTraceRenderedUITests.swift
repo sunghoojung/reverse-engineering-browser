@@ -154,6 +154,10 @@ final class Harness {
   func reveal(_ selector: String, containing text: String? = nil, block: String = "nearest") async throws -> NSPoint {
     let textArgument = text.map { "'\($0.replacingOccurrences(of: "'", with: "\\'"))'" } ?? "null"
     let probe = "__rebUiProbe.center('\(selector.replacingOccurrences(of: "'", with: "\\'"))', \(textArgument), \(String(reflecting: block))) || {}"
+    // A target can render after an asynchronous response: static VM analysis
+    // rows follow runtime evidence rows once a cold analysis worker finishes.
+    // Wait for the target itself rather than failing on the first frame.
+    try await waitUntil("(\(probe)).x !== undefined", "No visible target for \(selector) \(text ?? "")")
     // center() scrolls the target into view, which can still be moving when
     // it returns. Continue only once two measurements after settling agree, so
     // the event cannot land on the row that scrolled into the old position.

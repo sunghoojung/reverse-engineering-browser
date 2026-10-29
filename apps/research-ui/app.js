@@ -2031,6 +2031,14 @@ const capturedExportPanel = installCapturedExportDialog({
         const physicalCount = vmNativeAcceptedCount(workspace.native_wasm_observation_count, rows.length);
         if (physicalCount > rows.length) panel.append(textElement('p', 'vm-workspace-notice',
           `${physicalCount - rows.length} accepted observations are outside the retained window.`));
+        const indirectRows = Array.isArray(workspace.native_wasm_indirect_observations) ? workspace.native_wasm_indirect_observations : [];
+        panel.append(textElement('h4', '', 'Native call_indirect observations'),
+          textElement('p', 'vm-workspace-notice', 'A slot is the dynamic table index of one indirect call and the callee is the table entry it was about to use. Neither is a guest opcode or guest PC.'));
+        appendVmPagedRows(panel, indirectRows, 'native call_indirect observations', row => nativeRow(row, vmNativeWasmIndirectPositionText(row)));
+        if (!indirectRows.length) panel.append(textElement('p', 'vm-selection-empty', 'No native call_indirect observations retained.'));
+        const indirectCount = vmNativeAcceptedCount(workspace.native_wasm_indirect_observation_count, indirectRows.length);
+        if (indirectCount > indirectRows.length) panel.append(textElement('p', 'vm-workspace-notice',
+          `${indirectCount - indirectRows.length} accepted call_indirect observations are outside the retained window.`));
         const guestRows = Array.isArray(workspace.native_guest_samples) ? workspace.native_guest_samples : [];
         panel.append(textElement('h4', '', 'Native guest state (adapter interpreted)'),
           textElement('p', 'vm-workspace-notice', 'Actual typed local values and memory bytes are retained. Explicit adapters interpret those values; verified-dataflow labels require a reviewed exact module binding. Guest positions on host links require verified guest semantics plus an exact synchronous retained parent.'));
@@ -2042,7 +2050,8 @@ const capturedExportPanel = installCapturedExportDialog({
         return panel;
       }
 
-      const vmObservedStreamLabels = {'native-guest': 'Native guest', 'native-wasm': 'Native br_table', 'dispatch-sample': 'Native dispatch sample'};
+      const vmObservedStreamLabels = {'native-guest': 'Native guest', 'native-wasm': 'Native br_table',
+        'native-wasm-indirect': 'Native call_indirect', 'dispatch-sample': 'Native dispatch sample'};
       const vmObservedOmission = reason => /^(?:observed-claim|nested-guest)/.test(reason);
       function vmHasRuntimeClaims(workspace) {
         return workspace.observed_claims !== undefined || workspace.nested_guests !== undefined ||
@@ -2055,11 +2064,19 @@ const capturedExportPanel = installCapturedExportDialog({
       }
       function vmObservedHandlerText(claim) {
         if (claim.handler.kind === 'handler-index') return `handler ${claim.handler.handler_index}`;
+        if (claim.handler.kind === 'table-entry') return `function ${claim.handler.callee_function_index}`;
         return claim.handler.is_default ? `default arm ${claim.handler.arm}` : `arm ${claim.handler.arm}`;
       }
       function vmObservedStaticText(claim) {
         const comparison = claim.static_claim;
         const javascript = claim.stream === 'dispatch-sample';
+        if (claim.stream === 'native-wasm-indirect') {
+          const placed = comparison.handler_index === null ? 'leave this slot empty' : `place function ${comparison.handler_index} in this slot`;
+          if (comparison.state === 'agrees') return `Static claim agrees: the element segments ${placed}.`;
+          if (comparison.state === 'disagrees') return `Static claim disagrees: the element segments ${placed}, but function ${claim.handler.callee_function_index} ran. The table changed at run time. Both are kept.`;
+          if (comparison.state === 'withheld') return `Static claim withheld: table ${claim.handler.table_index} is filled at run time, so its element segments make no claim for slot ${comparison.opcode}.`;
+          return 'No static claim: no element segment fills this slot.';
+        }
         if (comparison.state === 'agrees') return javascript
           ? `Static claim agrees: recovery names handler ${comparison.handler_index ?? comparison.opcode} for opcode ${comparison.opcode}.`
           : `Static claim agrees: this arm is labeled selector ${comparison.opcode}.`;
@@ -2087,7 +2104,7 @@ const capturedExportPanel = installCapturedExportDialog({
           row.dataset.staticClaim = claim.static_claim.state;
           const summary = document.createElement('summary');
           const opcode = claim.opcode === null ? 'guest opcode not observed' : `opcode ${claim.opcode}`;
-          const selector = claim.selector === null ? '' : `selector ${claim.selector} to `;
+          const selector = claim.selector === null ? '' : `${claim.handler.kind === 'table-entry' ? 'slot' : 'selector'} ${claim.selector} to `;
           summary.append(textElement('span', 'vm-native-row-identity', `${vmObservedStreamLabels[claim.stream]} · ${vmObservedSiteText(claim)}`), document.createElement('br'),
             textElement('span', 'vm-native-row-position', `${opcode} · ${selector}${vmObservedHandlerText(claim)} · ${vmCountText(claim.sample_count, 'sample')}`));
           row.append(summary, textElement('p', 'vm-effect-detail vm-observed-static', vmObservedStaticText(claim)),

@@ -502,11 +502,13 @@ mod tests {
     use sha2::{Digest, Sha256};
     use std::{fs, path::Path};
 
+    // Distinct identities, so the exported store can join other rendered-UI stores.
     const SCOPE: [(&str, &str); 3] = [
-        ("session_id", "1"),
-        ("navigation_id", "2"),
-        ("frame_id", "3"),
+        ("session_id", "41"),
+        ("navigation_id", "42"),
+        ("frame_id", "43"),
     ];
+    const MODULE: u64 = 401;
 
     fn artifact(
         root: &Path,
@@ -534,11 +536,14 @@ mod tests {
         row
     }
 
+    /// A complete broker-written event record, as the event API serves it.
     fn event(kind: &str, seq: u64, parent: u64, artifact: u64, payload: &[u8]) -> Value {
         let mut row = json!({"protocol_version":3,"artifact_id":artifact.to_string(),"sequence_number":seq.to_string(),
-            "monotonic_time_ns":seq.to_string(),"process_id":4,"thread_id":5,"category":"vm","type":kind,
-            "parent_event_id":parent.to_string(),"flags":0,"payload_size":payload.len(),"payload_encoding":"hex",
-            "payload_truncated":false,"payload":hex::encode(payload)});
+            "monotonic_time_ns":seq.to_string(),"process_id":41,"thread_id":5,"tab_id":0,"request_id":"0",
+            "browser_context_id_high":"0","browser_context_id_low":"0","encoded_data_length":"0","decoded_body_length":"0",
+            "status_code":0,"error_code":0,"resource_type":0,"initiator_request_id":0,"initiator_process_id":0,
+            "category":"vm","type":kind,"parent_event_id":parent.to_string(),"flags":0,"payload_size":payload.len(),
+            "payload_encoding":"hex","payload_truncated":false,"payload":hex::encode(payload)});
         for (key, value) in SCOPE {
             row[key] = json!(value);
         }
@@ -679,7 +684,7 @@ mod tests {
         }
         assert_eq!(
             claims[1]["events"],
-            json!([{"session_id":"1","process_id":4,"sequence_number":"11"},{"session_id":"1","process_id":4,"sequence_number":"12"}])
+            json!([{"session_id":"41","process_id":41,"sequence_number":"11"},{"session_id":"41","process_id":41,"sequence_number":"12"}])
         );
         // The static row is unchanged and still names its own handler.
         let three = workspace["handlers"]
@@ -773,7 +778,7 @@ mod tests {
         let (outer_site, outer_count) = site(&mut module, 1);
         let (route_site, route_count) = site(&mut module, 2);
         let root = tempfile::tempdir().unwrap();
-        let wasm = artifact(root.path(), 1, "wasm", &bytes, 0, 0);
+        let wasm = artifact(root.path(), MODULE, "wasm", &bytes, 0, 0);
         let mut artifacts = vec![wasm.clone()];
         let mut adapter = |id: u64, function: u64, offset: u64, creator: u64| {
             let recipe = json!({"version":1,"sample_limit":16,"module_sha256":wasm["sha256"],"function_index":function,
@@ -785,15 +790,15 @@ mod tests {
                 id,
                 "wasm_guest_adapter",
                 &crate::vm::canonical(&recipe).unwrap(),
-                1,
+                MODULE,
                 creator,
             );
             let sha = hex::decode(row["sha256"].as_str().unwrap()).unwrap();
             artifacts.push(row);
             sha
         };
-        let outer_sha = adapter(2, 1, outer_site, 1);
-        let inner_sha = adapter(3, 0, inner_site, 4);
+        let outer_sha = adapter(MODULE + 1, 1, outer_site, 1);
+        let inner_sha = adapter(MODULE + 2, 0, inner_site, 4);
         let invocation = |seq, function, invocation, adapter_id, parent, sha: &[u8]| {
             let mut p = vec![0u8; 128];
             p[..4].copy_from_slice(&[1, 0, 128, 0]);
@@ -803,9 +808,9 @@ mod tests {
             put(&mut p, 24, adapter_id, 8);
             p[32..64].copy_from_slice(sha);
             put(&mut p, 64, parent, 8);
-            event("wasm_guest_invocation", seq, 0, 1, &p)
+            event("wasm_guest_invocation", seq, 0, MODULE, &p)
         };
-        let mut events = vec![invocation(1, 1, 8, 2, 0, &outer_sha)];
+        let mut events = vec![invocation(1, 1, 8, MODULE + 1, 0, &outer_sha)];
         let mut dispatch = |seq: u64,
                             parent,
                             function,
@@ -818,10 +823,10 @@ mod tests {
             let selector = if function == 1 { opcode & 3 } else { opcode };
             artifacts.push(artifact(
                 root.path(),
-                100 + seq,
+                MODULE + 100 + seq,
                 "bytecode_buffer",
                 buffer.1,
-                1,
+                MODULE,
                 seq,
             ));
             let mut p = vec![0u8; 128];
@@ -836,7 +841,7 @@ mod tests {
                 (32, invocation, 8),
                 (40, pc, 8),
                 (48, pc + 1, 8),
-                (56, 100 + seq, 8),
+                (56, MODULE + 100 + seq, 8),
                 (64, buffer.0, 8),
                 (72, buffer.1.len() as u64, 4),
                 (76, 2, 4),
@@ -847,7 +852,7 @@ mod tests {
                 put(&mut p, at, value, width);
             }
             p[96..].copy_from_slice(sha);
-            event("wasm_guest_dispatch", seq, parent, 1, &p)
+            event("wasm_guest_dispatch", seq, parent, MODULE, &p)
         };
         let outer_code: &[u8] = &[1, 6, 3, 0];
         let inner_code: &[u8] = &[0, 1, 3];
@@ -855,7 +860,7 @@ mod tests {
         let inner = (inner_site, inner_count);
         events.push(dispatch(2, 1, 1, outer, 8, (0, outer_code), 0, &outer_sha));
         events.push(dispatch(3, 1, 1, outer, 8, (0, outer_code), 1, &outer_sha));
-        events.push(invocation(4, 0, 9, 3, 8, &inner_sha));
+        events.push(invocation(4, 0, 9, MODULE + 2, 8, &inner_sha));
         events.push(dispatch(5, 4, 0, inner, 9, (64, inner_code), 0, &inner_sha));
         events.push(dispatch(6, 4, 0, inner, 9, (64, inner_code), 1, &inner_sha));
         events.push(dispatch(7, 1, 1, outer, 8, (0, outer_code), 2, &outer_sha));
@@ -865,7 +870,7 @@ mod tests {
         put(&mut physical, 4, 2, 4);
         put(&mut physical, 8, route_site, 4);
         put(&mut physical, 16, route_count, 4);
-        events.push(event("wasm_dispatch_observation", 8, 0, 1, &physical));
+        events.push(event("wasm_dispatch_observation", 8, 0, MODULE, &physical));
         Guest {
             root,
             artifacts,
@@ -910,7 +915,7 @@ mod tests {
         assert_eq!(contradiction["site_attribution"], "exact");
         assert_eq!(
             contradiction["events"],
-            json!([{"session_id":"1","process_id":4,"sequence_number":"3"}])
+            json!([{"session_id":"41","process_id":41,"sequence_number":"3"}])
         );
         assert_eq!(contradiction["static_claim"]["opcode"], 2);
         assert_eq!(claims[4]["handler"]["is_default"], true);
@@ -939,6 +944,8 @@ mod tests {
     fn nested_guest_links_inner_interpreter_to_outer_handler() {
         let mut guest = guest();
         let workspace = rerun(&guest);
+        // The rendered UI acceptance shows this exact store.
+        super::super::export_golden_evidence(guest.root.path(), "REB_VM_OBSERVED_EVIDENCE_OUTPUT");
         let nested = workspace["nested_guests"].as_array().unwrap();
         assert_eq!(nested.len(), 1, "{workspace:#}");
         let (outer, inner) = (&nested[0]["outer"], &nested[0]["inner"]);

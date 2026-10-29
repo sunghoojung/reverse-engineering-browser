@@ -33,9 +33,10 @@ for (let index = 0; index < argv.length; index += 1) {
 
 assert.equal(process.platform, 'darwin', 'Rendered UI acceptance runs in the packaged macOS app');
 const app = join(root, 'build/Origin Trace.app');
-const goldenStores = {guestStore: join(root, 'build/native-golden/guest-evidence'), dispatchStore: join(root, 'build/native-golden/wasm-evidence')};
+const goldenStores = {guestStore: join(root, 'build/native-golden/guest-evidence'), dispatchStore: join(root, 'build/native-golden/wasm-evidence'),
+  observedStore: join(root, 'build/vm-observed-evidence')};
 for (const required of [app, join(root, 'build/sessions/demo.jsonl'), ...Object.values(goldenStores).map(store => join(store, 'manifest.jsonl'))]) {
-  assert(existsSync(required), `Missing ${required}; run make app-build e2e native-wasm-golden-check`);
+  assert(existsSync(required), `Missing ${required}; run make app-build e2e native-wasm-golden-check vm-observed-evidence`);
 }
 
 // Full Xcode provides XCTest. Respect an explicit DEVELOPER_DIR, otherwise use

@@ -42,6 +42,7 @@ function jsonLines(text) {
 // actual C++ encoders and validated through the Rust workspace builder: one
 // adapter-interpreted guest sample with its synchronous host child, and one
 // physical br_table observation with the widest identities the wire allows.
+// `make vm-observed-evidence` exports the observed-claims test store the same way.
 async function goldenEvidence(root, store) {
   const artifacts = jsonLines(await readFile(join(store, 'manifest.jsonl'), 'utf8'));
   const events = jsonLines(await readFile(join(store, 'events.jsonl'), 'utf8'));
@@ -77,7 +78,7 @@ function syntheticRequests(template, firstSequence, firstTime) {
   return events;
 }
 
-export async function buildEvidence({root, sessions, guestStore, dispatchStore}) {
+export async function buildEvidence({root, sessions, guestStore, dispatchStore, observedStore}) {
   const artifacts = join(root, 'artifacts');
   await mkdir(join(artifacts, 'blobs'), {recursive: true});
   for (const name of ['origin-trace.jsonl', 'request-signals.jsonl']) await cp(join(sessions, name), join(root, name));
@@ -107,8 +108,12 @@ export async function buildEvidence({root, sessions, guestStore, dispatchStore})
   const physical = await goldenEvidence(artifacts, dispatchStore);
   assert(guest.events.some(event => event.type === 'wasm_guest_dispatch'), 'guest golden store holds a guest sample');
   assert(physical.events.some(event => event.type === 'wasm_dispatch_observation'), 'dispatch golden store holds an observation');
-  const manifest = [...demoArtifacts, source, bytecode, parseFailure, ...guest.artifacts, ...physical.artifacts];
-  const events = [...demoEvents, ...requests, ...guest.events, ...physical.events];
+  // An owned two-level interpreter: observed claims, one contradicting its
+  // static arm label, and an inner interpreter linked to its outer handler.
+  const observed = await goldenEvidence(artifacts, observedStore);
+  assert(observed.events.filter(event => event.type === 'wasm_guest_invocation').length === 2, 'observed store holds outer and inner activations');
+  const manifest = [...demoArtifacts, source, bytecode, parseFailure, ...guest.artifacts, ...physical.artifacts, ...observed.artifacts];
+  const events = [...demoEvents, ...requests, ...guest.events, ...physical.events, ...observed.events];
   await writeFile(join(artifacts, 'manifest.jsonl'), manifest.map(record => JSON.stringify(record) + '\n').join(''));
   await writeFile(join(root, 'events.jsonl'), events.map(event => JSON.stringify(event) + '\n').join(''));
   return {

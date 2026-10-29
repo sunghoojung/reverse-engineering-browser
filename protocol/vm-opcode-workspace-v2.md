@@ -413,7 +413,7 @@ dispatch site, and the child's first guest buffer (memory, base, length)
 differs from the outer dispatch's. A child at the parent's own site is a
 reentrant activation of one dispatcher, such as a guest call, and is not
 nested. The outer handler is the parent's last retained dispatch sample before
-the child's invocation marker. When the child's version-2 marker names the
+the child's invocation marker. When the child's version-2 or 3 marker names the
 parent dispatch exactly, that sample must be the named one and `basis` is
 `exact-parent-dispatch`; a named dispatch that was lost or is contradicted by a
 later retained parent dispatch leaves the child unproven instead of falling

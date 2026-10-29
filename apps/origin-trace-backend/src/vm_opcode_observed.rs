@@ -469,7 +469,7 @@ fn identity(reference: &Value) -> Option<Identity> {
 /// A guest activation that names a parent invocation, runs at another
 /// dispatch site and reads another guest buffer is an inner interpreter driven
 /// by the parent's handler. Same-site children are reentrant activations of
-/// one dispatcher and are not nested guests. A version 2 marker names the
+/// one dispatcher and are not nested guests. A version 2 or 3 marker names the
 /// driving dispatch exactly; version 1 evidence and parents whose dispatch the
 /// renderer could not resolve fall back to sequence order.
 fn nested(inputs: &Inputs<'_>, derived: &mut Derived) {

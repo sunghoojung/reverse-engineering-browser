@@ -1381,8 +1381,16 @@ mod tests {
                 .iter()
                 .find(|a| a["artifact_id"] == id.to_string())
                 .unwrap();
-            serde_json::from_slice(&fs::read(guest.root.path().join(row["content_path"].as_str().unwrap())).unwrap())
-                .unwrap()
+            serde_json::from_slice(
+                &fs::read(
+                    guest
+                        .root
+                        .path()
+                        .join(row["content_path"].as_str().unwrap()),
+                )
+                .unwrap(),
+            )
+            .unwrap()
         };
         let site = |mut r: Value| {
             let map = r.as_object_mut().unwrap();
@@ -1403,7 +1411,9 @@ mod tests {
             1,
         );
         let sha = hex::decode(row["sha256"].as_str().unwrap()).unwrap();
-        guest.artifacts.retain(|a| a["kind"] != "wasm_guest_adapter");
+        guest
+            .artifacts
+            .retain(|a| a["kind"] != "wasm_guest_adapter");
         guest.artifacts.push(row);
         for event in &mut guest.events {
             let mut p = hex::decode(event["payload"].as_str().unwrap()).unwrap();
@@ -1444,7 +1454,10 @@ mod tests {
             (Some(1), Some("8"), Some("3"), Some("exact-parent-dispatch"))
         );
         assert_eq!(
-            (inner["function_index"].as_u64(), inner["sample_count"].as_u64()),
+            (
+                inner["function_index"].as_u64(),
+                inner["sample_count"].as_u64()
+            ),
             (Some(0), Some(2))
         );
         assert!(omission(&workspace, "nested-guest-unproven").is_none());

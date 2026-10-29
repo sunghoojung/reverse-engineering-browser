@@ -930,6 +930,27 @@ mod tests {
                 .unwrap()
                 .contains(&format!("at most {MAX_ADAPTER_BYTES} UTF-8 bytes"))
         );
+        // The version 2 schema states the same site bound and shared budget,
+        // and accepts a recipe this reader admits.
+        assert!(header.contains(&format!("kNativeGuestSiteLimit = {MAX_SITES};")));
+        let v2: Value = serde_json::from_str(include_str!(
+            "../../../protocol/native-wasm-guest-adapter-v2.schema.json"
+        ))
+        .unwrap();
+        assert_eq!(v2["properties"]["sites"]["maxItems"], MAX_SITES);
+        assert_eq!(v2["properties"]["sample_limit"]["maximum"], 256);
+        assert!(
+            v2["$defs"]["site"]["properties"]
+                .get("sample_limit")
+                .is_none()
+        );
+        let validator = jsonschema::validator_for(&v2).unwrap();
+        let hash = Fixture::new().module["sha256"].clone();
+        let mut shared = two_sites(&hash);
+        assert!(validator.is_valid(&shared));
+        let site = shared["sites"][0].clone();
+        shared["sites"] = json!(vec![site; MAX_SITES + 1]);
+        assert!(!validator.is_valid(&shared));
         // An oversized adapter is refused before it is parsed.
         let mut f = Fixture::new();
         let mut encoded = crate::vm::canonical(&recipe(&f.module["sha256"])).unwrap();

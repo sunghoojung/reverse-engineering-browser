@@ -240,6 +240,11 @@ therefore the HTTP ETag), including when unchanged executable evidence produces
 the same score. The v1 contracts accept earlier documents without the field;
 the `profile_id` remains `anti-bot-vm-detection-v1`.
 
+Producer `1.9.0` emits `profile.javascript_scoring_version: 3`. A loop that
+calls a temporary holding an indexed read (`const h = ops[op]; h(s)`) is
+also a dispatch loop, so such an interpreter is no longer scored as if it had
+no dispatch. Version 2 documents remain valid.
+
 The generic JavaScript signal families include:
 
 - a persistent loop with switch, function-array, object-map, or indirect

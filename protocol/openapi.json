@@ -7783,6 +7783,7 @@
                   "export",
                   "switch",
                   "indexed call",
+                  "aliased call",
                   "if ladder",
                   "self call"
                 ]
@@ -8464,8 +8465,11 @@
               },
               "javascript_scoring_version": {
                 "type": "integer",
-                "const": 2,
-                "description": "Version 2 scores same-length comment/literal-masked JavaScript regions. Absent in earlier v1 documents."
+                "enum": [
+                  2,
+                  3
+                ],
+                "description": "Version 2 scores same-length comment/literal-masked JavaScript regions. Version 3 also counts a loop that calls a temporary holding an indexed read as a dispatch loop. Absent in earlier v1 documents."
               },
               "javascript_likely_vm_requires_handlers": {
                 "const": true,
@@ -9438,6 +9442,7 @@
                   "export",
                   "switch",
                   "indexed call",
+                  "aliased call",
                   "if ladder",
                   "self call"
                 ]

@@ -119,7 +119,11 @@ original UTF-8 byte offsets; comments, regex literals, templates, automatic
 semicolon insertion and Unicode names do not require text-based guessing.
 
 - `switch (selector)` is `switch_on_value`; computed member calls, including
-  `.call` and `.apply`, are `handler_table`.
+  `.call` and `.apply`, are `handler_table`. A call through a temporary bound
+  once, in the calling function, to an indexed table read
+  (`const h = t[op]; h(s)` or `h.call(...)`) is also `handler_table`, with
+  instruction `aliased call` and selector `op`. A temporary read outside the
+  loop that calls it is fetched once, so the site does not repeat.
 - Equality tests on one resolved symbol with at least three distinct integer
   constants are `compare_chain`. `h = h(...)` is `threaded`.
 - Indexed reads and byte/string accessors are cursor reads when the bound
@@ -300,9 +304,15 @@ classification is never an input to handler recovery, tier or score:
   object map, or a function element of an array literal) survives only when
   the region dispatches through that table, as
   `t[selector](...)` or `t[selector].call(...)`, including from a nested
-  function of the region, at an interpreter-candidate site. A dispatch through
-  a temporary (`h = t[op]; h()`) ties nothing, and a table with no such site
-  is withheld as unclassified.
+  function of the region or through an `aliased call`, at an
+  interpreter-candidate site. A table with no such site is withheld as
+  unclassified.
+- A dispatched table is followed through aliases bound once (`var t = ops`,
+  `var a = ops, t = a`), by Oxc symbol, for at most 8 links. Each link needs
+  exactly one static write; a second write, a parameter or an ambiguous
+  `with` scope ends the chain at that alias, which binds no table literal.
+  A shadowing declaration is a different symbol and never reaches the outer
+  table.
 - A table ties only to references resolving to its declaration's Oxc symbol,
   with exactly one static write (initializer or assignment). A
   declaration without an initializer followed by its only assignment qualifies.
@@ -358,7 +368,8 @@ executes.
 - On the pinned public QuickJS debug build, 13 of 384 sites are interpreter
   candidates, including the opcode dispatch at function 414; 7 sites are
   trace-limited unknowns, among them byte-cursor format-string parsers.
-- A table used through a temporary supplies no opcode claims.
+- A temporary written more than once, an alias chain longer than 8 links,
+  and a temporary read in another function supply no opcode claims.
 - Structural scheduling is not semantic proof. More than 4096 equally strong
   sites in one artifact can still omit a later interpreter. The omitted site count
   is explicit; neither strength ordering nor withholding changes VM ranking.

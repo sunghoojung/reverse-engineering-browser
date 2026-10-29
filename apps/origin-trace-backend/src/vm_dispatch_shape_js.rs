@@ -160,6 +160,9 @@ struct Definition<'a> {
     value: &'a Expression<'a>,
     at: u32,
     function: Option<NodeId>,
+    /// The `this` owner and scope of the write, for resolving its value.
+    this: Option<NodeId>,
+    scope: ScopeId,
 }
 #[derive(Clone, Copy)]
 struct Write {
@@ -348,6 +351,7 @@ impl<'s, 'a> Facts<'s, 'a> {
         value: &'a Expression<'a>,
         at: u32,
         context: Context,
+        scope: ScopeId,
     ) {
         let literal = match value.get_inner_expression() {
             Expression::NumericLiteral(_)
@@ -367,11 +371,14 @@ impl<'s, 'a> Facts<'s, 'a> {
             value,
             at,
             function: context.function,
+            this: context.this,
+            scope,
         });
     }
     fn index(semantic: &'s Semantic<'a>, meter: &'s Meter) -> Self {
         let nodes = semantic.nodes();
         let scoping = semantic.scoping();
+        let mut aliased = Vec::new();
         let mut facts = Self {
             semantic,
             meter,
@@ -458,7 +465,13 @@ impl<'s, 'a> Facts<'s, 'a> {
                         && let Some(symbol) = binding.symbol_id.get()
                     {
                         *facts.symbol_write_counts.entry(symbol).or_default() += 1;
-                        facts.add_definition(Key::Symbol(symbol), value, d.span.start, context);
+                        facts.add_definition(
+                            Key::Symbol(symbol),
+                            value,
+                            d.span.start,
+                            context,
+                            node.scope_id(),
+                        );
                     }
                 }
                 AstKind::AssignmentExpression(a) => {
@@ -471,7 +484,13 @@ impl<'s, 'a> Facts<'s, 'a> {
                             arithmetic,
                         });
                         if a.operator.as_str() == "=" {
-                            facts.add_definition(key, &a.right, a.span.start, context);
+                            facts.add_definition(
+                                key,
+                                &a.right,
+                                a.span.start,
+                                context,
+                                node.scope_id(),
+                            );
                         }
                     }
                 }
@@ -529,6 +548,10 @@ impl<'s, 'a> Facts<'s, 'a> {
                             arms: None,
                             strings: false,
                         });
+                    } else if let Expression::Identifier(callee) = callee
+                        && let Some(symbol) = facts.symbol(callee)
+                    {
+                        aliased.push((id, symbol));
                     }
                 }
                 AstKind::SwitchStatement(switch) => {
@@ -726,6 +749,55 @@ impl<'s, 'a> Facts<'s, 'a> {
                 }
             }
         }
+        // A call through a temporary bound once to an indexed table read
+        // (`const h = t[op]; h(s)`) dispatches that table like `t[op](s)`.
+        // The read must be in the calling function, so its loop is the call's.
+        for (node, symbol) in aliased {
+            if !meter.charge(1) {
+                break;
+            }
+            let key = Key::Symbol(symbol);
+            let context = facts.context(node);
+            let Some(&[definition]) = facts.definitions.get(&key).map(Vec::as_slice) else {
+                continue;
+            };
+            if facts.symbol_write_counts.get(&symbol) != Some(&1)
+                || facts.parameters.contains(&symbol)
+                || definition.function != context.function
+                || facts.scope_opaque(definition.scope)
+            {
+                continue;
+            }
+            let Expression::ComputedMemberExpression(member) =
+                definition.value.get_inner_expression()
+            else {
+                continue;
+            };
+            let table = facts.key(
+                &member.object,
+                Context {
+                    this: definition.this,
+                    ..context
+                },
+            );
+            facts.candidates.push(Candidate {
+                node,
+                selector: &member.expression,
+                table,
+                kind: Kind::HandlerTable,
+                instruction: "aliased call",
+                arms: None,
+                strings: false,
+            });
+        }
+        let resolved = facts
+            .candidates
+            .iter()
+            .map(|candidate| candidate.table.map(|table| facts.resolve_table(table)))
+            .collect::<Vec<_>>();
+        for (candidate, table) in facts.candidates.iter_mut().zip(resolved) {
+            candidate.table = table;
+        }
         // Each function stored directly in a table is associated once. Writes
         // in these functions can advance that table's selector cursor.
         for node in nodes.iter() {
@@ -797,6 +869,33 @@ impl<'s, 'a> Facts<'s, 'a> {
             }
         }
         facts
+    }
+    /// A table key followed through aliases bound once (`var t = ops`), by
+    /// Oxc symbol, at most 8 links. A link with any other write, a parameter
+    /// or an ambiguous `with` scope ends the chain at that alias.
+    fn resolve_table(&self, mut key: Key<'a>) -> Key<'a> {
+        for _ in 0..8 {
+            let Key::Symbol(symbol) = key else { break };
+            let Some(&[definition]) = self.definitions.get(&key).map(Vec::as_slice) else {
+                break;
+            };
+            if !self.meter.charge(1)
+                || self.symbol_write_counts.get(&symbol) != Some(&1)
+                || self.parameters.contains(&symbol)
+                || self.scope_opaque(definition.scope)
+            {
+                break;
+            }
+            let context = Context {
+                this: definition.this,
+                ..Context::default()
+            };
+            match self.key(definition.value, context) {
+                Some(next) if next != key => key = next,
+                _ => break,
+            }
+        }
+        key
     }
     fn index_key(
         &self,

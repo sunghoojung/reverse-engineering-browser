@@ -212,7 +212,8 @@ It writes, per likely-vm artifact:
 - handler candidates extracted from `switch` cases, function arrays, or
   object maps inside the dispatch region; a function-array element's opcode
   is its position, and arrays come from the region's own body rather than a
-  nested function's;
+  nested function's. A dispatched name is followed through plain aliases
+  (`t = ops`) and called temporaries (`h = ops[op]; h(s)`);
 - operand width guesses from adjacent indexed reads;
 - bytecode hex preview from the linked snapshot (cap 4096 bytes in the
   document, full bytes remain in the artifact store);

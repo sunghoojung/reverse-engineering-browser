@@ -207,6 +207,7 @@
             "export",
             "switch",
             "indexed call",
+            "aliased call",
             "if ladder",
             "self call"
           ]

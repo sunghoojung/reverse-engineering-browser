@@ -59,6 +59,20 @@ static INDEXED_DISPATCH: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"\b([A-Za-z_$][\w$]*)\s*\[((?:[^\[\]]+|\[[^\[\]]*\])+)\]\s*\(")
         .expect("indexed dispatch")
 });
+/// `h = t[selector]` for a callable temporary, and `t = ops` for an alias.
+static ALIASED_READ: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"\b([A-Za-z_$][\w$]*)\s*=\s*((?:[A-Za-z_$][\w$]*\.)*[A-Za-z_$][\w$]*)\s*\[((?:[^\[\]]+|\[[^\[\]]*\])+)\]\s*(?:[;,)\n]|$)")
+        .expect("aliased read")
+});
+static TABLE_ALIAS: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"\b([A-Za-z_$][\w$]*)\s*=\s*((?:[A-Za-z_$][\w$]*\.)*[A-Za-z_$][\w$]*)\s*(?:[;,)\n]|$)",
+    )
+    .expect("table alias")
+});
+static CALLED: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"\b([A-Za-z_$][\w$]*)\s*(?:\(|\.\s*(?:call|apply)\s*\()").expect("called name")
+});
 static NUMERIC_OBJECT_ENTRY: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
         r"(?im)\b(0x[0-9a-f]+|\d+)\s*:\s*(?:function\b|\([^)]*\)\s*=>|[A-Za-z_$][\w$]*\s*=>)",
@@ -364,11 +378,42 @@ fn shallow_braces(region: &str) -> String {
     String::from_utf8(bytes).expect("masked object members")
 }
 
-/// Names a region may dispatch a handler table through.
-fn table_names(region: &str, blocked_tables: &BTreeSet<String>) -> BTreeSet<String> {
+fn last_segment(path: &str) -> &str {
+    path.rsplit('.').next().unwrap_or(path)
+}
+
+/// A binding written as a bare name, not a member such as `x.h = ...`.
+fn bare_write(text: &str, captures: &regex::Captures<'_>) -> bool {
+    let start = captures.get(0).expect("write").start();
+    !text[..start].trim_end().ends_with('.')
+}
+
+/// Tables read into a temporary that the same body calls (`h = t[op]; h()`).
+fn aliased_reads(outer: &str) -> Vec<regex::Captures<'_>> {
+    let called = CALLED
+        .captures_iter(outer)
+        .map(|captures| captures.get(1).expect("called name").as_str())
+        .collect::<BTreeSet<_>>();
+    ALIASED_READ
+        .captures_iter(outer)
+        .filter(|captures| called.contains(&captures[1]) && bare_write(outer, captures))
+        .collect()
+}
+
+/// Names a region may dispatch a handler table through, followed through
+/// plain aliases (`t = ops`) for at most 8 links. An alias whose dispatch is
+/// blocked blocks the table it names.
+fn table_names(
+    region: &str,
+    outer: &str,
+    mut blocked_tables: BTreeSet<String>,
+) -> BTreeSet<String> {
     let mut names = BTreeSet::new();
     for captures in INDEXED_DISPATCH.captures_iter(region) {
         names.insert(captures[1].to_owned());
+    }
+    for captures in aliased_reads(outer) {
+        names.insert(last_segment(&captures[2]).to_owned());
     }
     names.extend([
         "handler".into(),
@@ -376,6 +421,30 @@ fn table_names(region: &str, blocked_tables: &BTreeSet<String>) -> BTreeSet<Stri
         "opcode".into(),
         "opcodes".into(),
     ]);
+    let aliases = TABLE_ALIAS
+        .captures_iter(region)
+        .filter(|captures| bare_write(region, captures))
+        .map(|captures| {
+            (
+                captures[1].to_owned(),
+                last_segment(&captures[2]).to_owned(),
+            )
+        })
+        .collect::<Vec<_>>();
+    for _ in 0..8 {
+        let mut changed = false;
+        for (alias, target) in &aliases {
+            if names.contains(alias) {
+                changed |= names.insert(target.clone());
+            }
+            if blocked_tables.contains(alias) {
+                changed |= blocked_tables.insert(target.clone());
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
     names.retain(|name| !blocked_tables.contains(name));
     names
 }
@@ -551,6 +620,13 @@ fn static_handlers(
             unknowns.push("A computed, position-dependent, or saved-state handler selector has no proven fixed opcode mapping.".into());
         }
     }
+    for captures in aliased_reads(&outer) {
+        let read = captures.get(3).expect("aliased selector");
+        if !direct_selector(read.as_str(), &outer, read.start(), 0) {
+            blocked_tables.insert(last_segment(&captures[2]).to_owned());
+            unknowns.push("A computed, position-dependent, or saved-state handler selector has no proven fixed opcode mapping.".into());
+        }
+    }
     let mut previous_switch_end = 0;
     for switch_match in SWITCH.find_iter(&outer) {
         if switch_match.start() < previous_switch_end {
@@ -656,7 +732,7 @@ fn static_handlers(
             unknowns.push("A computed handler index cannot be assigned a static opcode.".into());
         }
     }
-    let names = table_names(&region, &blocked_tables);
+    let names = table_names(&region, &outer, blocked_tables);
     object_handlers(
         &region,
         start,
@@ -3954,10 +4030,11 @@ if (!validate(document)) throw new Error('Backend workspace rejected by shipped 
     }
 
     /// Third review: a handler table no indexed call dispatches is withheld
-    /// as unclassified, not as "not a cursor-advancing loop".
+    /// as unclassified, not as "not a cursor-advancing loop". A temporary
+    /// written twice is not an alias of the table read.
     #[test]
     fn a_table_without_a_dispatch_site_is_withheld_as_unclassified() {
-        let source = "function run(code,stack){var pc=0;var handlers={1:function(){stack.push(code[pc++])},2:function(){stack.pop()}};while(pc<code.length){var fn=handlers[code[pc++]];fn(stack);}return stack;}";
+        let source = "function run(code,stack){var pc=0;var handlers={1:function(){stack.push(code[pc++])},2:function(){stack.pop()}};while(pc<code.length){var fn=handlers[code[pc++]];fn=fn||handlers[1];fn(stack);}return stack;}";
         let start = source.find('{').unwrap() + 1;
         let (handlers, _, unknowns, _) = classified_handlers(source, start, source.len() - 1);
         assert!(handlers.is_empty());
@@ -4133,7 +4210,7 @@ if (!validate(document)) throw new Error('Backend workspace rejected by shipped 
             "function route(k,code,stack){let pc=0;const handlers={1:function(){stack.push(code[pc++])},2:function(){stack.pop()},3:function(){}};while(pc<code.length){stack.push(code[pc++]);}switch(k){case 9:break;}return handlers[k].call(null,stack);}",
             "function route(k,x,stack){const handlers={1:function(){stack.push(x)},2:function(){stack.pop()},3:function(){stack.length=0}};for(const v of x){switch(v.kind){case 1:log(v);break;}}return handlers[k].call(null,x);}",
             "function route(k,x,stack){const handlers={1:function(){stack.push(x)},2:function(){stack.pop()},3:function(){stack.length=0}};for(const v of x){log(v);}return handlers[k](x);}",
-            "function run(code,stack){let pc=0;const handlers={1:function(){stack.push(code[pc++])},2:function(){stack.pop()}};while(pc<code.length){const h=handlers[code[pc++]];h(stack);}}",
+            "function run(code,stack){let pc=0;const handlers={1:function(){stack.push(code[pc++])},2:function(){stack.pop()}};while(pc<code.length){let h=handlers[code[pc++]];h=h||handlers[1];h(stack);}}",
             "function run(code,stack){let pc=0;handlers[1]=function(){stack.push(code[pc++])};handlers[2]=function(){stack.pop()};while(pc<code.length){stack.push(code[pc++]);}}",
         ] {
             let start = source.find('{').unwrap() + 1;
@@ -4152,8 +4229,13 @@ if (!validate(document)) throw new Error('Backend workspace rejected by shipped 
         if let Some(workspace) = document["workspaces"].as_array().unwrap().first() {
             assert_eq!(workspace["handlers"], json!([]));
         }
-        // A nested dispatch resolves the same statically bound table.
+        // A nested dispatch or a temporary bound once to the indexed read
+        // resolves the same statically bound table.
         for (source, expected) in [
+            (
+                "function run(code,stack){let pc=0;const handlers={1:function(){stack.push(code[pc++])},2:function(){stack.pop()}};while(pc<code.length){const h=handlers[code[pc++]];h(stack);}}",
+                2,
+            ),
             (
                 "function run(code,stack){let pc=0;const handlers={1:function(){stack.push(code[pc++])},2:function(){stack.pop()}};while(pc<code.length){handlers[code[pc++]](stack);}}",
                 2,

@@ -1463,7 +1463,7 @@
 
       const vmDispatchKinds = ['switch_on_value', 'handler_table', 'compare_chain', 'export_per_role', 'threaded', 'unknown'];
       const vmSelectorSources = ['cursor_index', 'cursor_pointer', 'frame_slot', 'call_argument', 'handler_address', 'constant', 'unknown'];
-      const vmDispatchInstructions = ['br_table', 'call_indirect', 'return_call_indirect', 'i32.eq ladder', 'export', 'switch', 'indexed call', 'if ladder', 'self call'];
+      const vmDispatchInstructions = ['br_table', 'call_indirect', 'return_call_indirect', 'i32.eq ladder', 'export', 'switch', 'indexed call', 'aliased call', 'if ladder', 'self call'];
 
       // The role is derived from the three axes; a document cannot assert it.
       function vmDispatchRole(site) {

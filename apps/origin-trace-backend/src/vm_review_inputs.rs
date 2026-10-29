@@ -69,6 +69,36 @@ pub(crate) const STATIC_SHAPES: &[(&str, &str, &[u64])] = &[
         &[],
     ),
     (
+        "alias-of-table",
+        "function run(code){const s={acc:0,h:false};const ops=[function(s){s.acc++;},function(s){s.acc--;},function(s){s.h=true;}];var a=ops,t=a;let pc=0;while(!s.h&&pc<code.length){t[code[pc++]](s);}return s.acc;}",
+        &[0, 1, 2],
+    ),
+    (
+        "alias-temporary-call",
+        "function run(code){const s={acc:0,h:false};const ops={1:function(s){s.acc++;},2:function(s){s.acc--;},3:function(s){s.h=true;}};let pc=0;while(!s.h&&pc<code.length){const h=ops[code[pc++]];h.call(null,s);}return s.acc;}",
+        &[1, 2, 3],
+    ),
+    (
+        "alias-reassigned",
+        "function run(code,other){const s={acc:0,h:false};const ops=[function(s){s.acc++;},function(s){s.acc--;},function(s){s.h=true;}];var t=ops;t=other;let pc=0;while(!s.h&&pc<code.length){t[code[pc++]](s);}return s.acc;}",
+        &[],
+    ),
+    (
+        "alias-shadowed",
+        "function run(code,other){const s={acc:0,h:false};const ops=[function(s){s.acc++;},function(s){s.acc--;},function(s){s.h=true;}];var t=ops;{let t=other;let pc=0;while(!s.h&&pc<code.length){t[code[pc++]](s);}}return s.acc;}",
+        &[],
+    ),
+    (
+        "alias-temporary-hoisted",
+        "function run(code){const s={acc:0,h:false};const ops=[function(s){s.acc++;},function(s){s.acc--;},function(s){s.h=true;}];let pc=0;const h=ops[code[pc++]];while(!s.h&&pc<code.length){h(s);pc++;}return s.acc;}",
+        &[],
+    ),
+    (
+        "alias-temporary-router",
+        "function route(k,s){const ops=[function(s){s.acc++;},function(s){s.acc--;},function(s){s.h=true;}];while(s.busy){s.tick();}const h=ops[k];return h(s);}",
+        &[],
+    ),
+    (
         "rotated-state-machine",
         "function run(code){let pc=0,acc=0;let op=1;while(op){switch(op){case 1:acc+=code[pc++];op=2;break;case 2:acc-=1;op=3;break;case 3:op=0;break;}}return acc;}",
         &[],

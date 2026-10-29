@@ -102,7 +102,7 @@ pub(crate) fn current_profile() -> Value {
             limits.insert(format!("max_{}", name.to_ascii_lowercase()), value.clone());
         }
     }
-    json!({"profile_id":PROFILE,"javascript_scoring_version":2,"javascript_likely_vm_requires_handlers":true,"candidate_threshold":20,"likely_vm_threshold":60,"likely_vm_required_families":3,"rule_weights":CONFIG["RULE_WEIGHTS"],"runtime_evidence_version":2,"runtime_rule_weights":runtime_weights(),"limits":limits})
+    json!({"profile_id":PROFILE,"javascript_scoring_version":3,"javascript_likely_vm_requires_handlers":true,"candidate_threshold":20,"likely_vm_threshold":60,"likely_vm_required_families":3,"rule_weights":CONFIG["RULE_WEIGHTS"],"runtime_evidence_version":2,"runtime_rule_weights":runtime_weights(),"limits":limits})
 }
 
 pub(crate) fn current_rule_definitions() -> Vec<Value> {
@@ -110,7 +110,7 @@ pub(crate) fn current_rule_definitions() -> Vec<Value> {
     for (id, weight) in CONFIG["RULE_WEIGHTS"].as_object().unwrap() {
         let detail = JS_RULES.iter().find(|(rule, _, _)| *rule == id)
             .map(|(_, detail, _)| *detail).unwrap_or_else(|| match id.as_str() {
-                "js.dispatch-loop" => "A loop and switch or indexed call occur in one approximate function region.",
+                "js.dispatch-loop" => "A loop and a switch, indexed call or called alias of an indexed read occur in one approximate function region.",
                 "wasm.dispatch-loop" => "Decoded br_table or call_indirect occurs inside a loop.",
                 "wasm.instruction-pointer" => "A decoded variable is both read and written, with arithmetic in the function.",
                 "wasm.linear-memory" => "A decoded instruction accesses linear memory.",
@@ -208,6 +208,29 @@ fn js(source: &str) -> Result<(Vec<Value>, Vec<Value>)> {
         Regex::new(r"\bswitch\s*\(|\b[A-Za-z_$][\w$]*\s*\[(?:[^\[\]]+|\[[^\[\]]*\])+\]\s*\(")
             .unwrap()
     });
+    // `h = t[selector]` whose temporary the same region calls.
+    static ALIASED_READ: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r"\b([A-Za-z_$][\w$]*)\s*=\s*[A-Za-z_$][\w$.]*\s*\[(?:[^\[\]]+|\[[^\[\]]*\])+\]\s*(?:[;,)\n]|$)")
+            .unwrap()
+    });
+    static CALLED: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r"\b([A-Za-z_$][\w$]*)\s*(?:\(|\.\s*(?:call|apply)\s*\()").unwrap()
+    });
+    let dispatch = |region: &str| {
+        let direct = DISPATCH.find(region).map(|m| (m.start(), m.end()));
+        let called = CALLED
+            .captures_iter(region)
+            .map(|captures| captures.get(1).unwrap().as_str())
+            .collect::<BTreeSet<_>>();
+        let aliased = ALIASED_READ
+            .captures_iter(region)
+            .find(|captures| called.contains(&captures[1]))
+            .map(|captures| {
+                let m = captures.get(0).unwrap();
+                (m.start(), m.end())
+            });
+        direct.into_iter().chain(aliased).min()
+    };
     let masked = mask(source);
     let mut openings = BTreeSet::new();
     let mut omissions = Vec::new();
@@ -274,12 +297,14 @@ fn js(source: &str) -> Result<(Vec<Value>, Vec<Value>)> {
         }
         let region = String::from_utf8(bytes).expect("masked nested source");
         let mut observations = Vec::new();
-        if let (Some(a), Some(b)) = (LOOP.find(&region), DISPATCH.find(&region)) {
+        if let Some(a) = LOOP.find(&region)
+            && let Some(b) = dispatch(&region)
+        {
             observations.push(observation(
                 "js.dispatch-loop",
-                a.start().min(b.start()),
-                a.end().max(b.end()),
-                "A loop and switch or indexed callable dispatch occur in the same function region.",
+                a.start().min(b.0),
+                a.end().max(b.1),
+                "A loop and a switch, an indexed callable, or a called alias of an indexed read occur in the same function region.",
             ));
         }
         for (id, detail, patterns) in JS_RULES.iter() {
@@ -1436,6 +1461,8 @@ mod profile_tests {
             .as_object_mut()
             .unwrap()
             .remove("javascript_likely_vm_requires_handlers");
+        // The pinned digest is the version 2 profile that preceded both.
+        historical["javascript_scoring_version"] = json!(2);
         assert_eq!(
             digest(&historical).unwrap(),
             "61900fb0d5f5e7b8db28d67086c4e2648aca6a604c1fd2ef509941e95c974824"

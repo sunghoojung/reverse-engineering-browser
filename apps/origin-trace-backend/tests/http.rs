@@ -2517,7 +2517,7 @@ async fn vm_lexical_scoring_retains_dispatch_families_and_original_artifacts() {
         .validate(&document)
         .unwrap();
     assert_eq!(document["producer"]["version"], "1.9.0");
-    assert_eq!(document["profile"]["javascript_scoring_version"], 2);
+    assert_eq!(document["profile"]["javascript_scoring_version"], 3);
     assert_eq!(document["profile"]["runtime_evidence_version"], 2);
     let profile = origin_trace_backend::vm::canonical(&document["profile"]).unwrap();
     assert_eq!(
@@ -3500,6 +3500,7 @@ async fn analysis_catalog_resolves_every_generated_rule_and_preserves_profile_id
         .as_object_mut()
         .unwrap()
         .remove("javascript_likely_vm_requires_handlers");
+    historical_profile["javascript_scoring_version"] = json!(2);
     assert_eq!(
         hex::encode(Sha256::digest(
             origin_trace_backend::vm::canonical(&historical_profile).unwrap()

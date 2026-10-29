@@ -16,7 +16,7 @@ those commits alone as a released contract. The static-shape commits that add
 the `aliased call` instruction, `selector.through_helper` and the threaded
 interpreter-candidate rule belong to the same unreleased unit: release tags
 up to v0.3.2 predate the schema. VM detector producer 1.9.0 and workspace
-producer 2.12.0 write them; documents from the earlier drafts lack the field
+producer 2.13.0 write them; documents from the earlier drafts lack the field
 and are not accepted.
 
 ## Why it exists

@@ -595,7 +595,7 @@ including arrows, implicit function bindings and loop heads. Ambiguous bindings
 withhold claims; budget exhaustion remains visible even if a workspace cannot
 be completed. See [dispatch classification](vm-dispatch-classification-v1.md).
 
-Producer 2.12.0 also recovers function-array tables: a function or arrow
+Producer 2.13.0 recovers function-array tables: a function or arrow
 element's opcode is its position in the literal, and the gate requires the
 element's AST position to match. Recovery follows a dispatched name through
 plain aliases (`t = ops`) and called temporaries (`h = ops[op]; h(s)`), a

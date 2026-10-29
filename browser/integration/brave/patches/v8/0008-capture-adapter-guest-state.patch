@@ -1,11 +1,15 @@
 diff --git a/include/v8-callbacks.h b/include/v8-callbacks.h
-index fedf1ce..afb84bf 100644
+index fedf1ce7d0b7be7c76a705427982a38c375ba01c..337c95b0e34e30282c681eaab795e1d3f3d38690 100644
 --- a/include/v8-callbacks.h
 +++ b/include/v8-callbacks.h
-@@ -330,6 +330,37 @@ using WasmBrTableDispatchCallback = void (*)(
+@@ -330,6 +330,45 @@ using WasmBrTableDispatchCallback = void (*)(
  // into V8. Null means enabled; embedders should reject inactive/capped captures.
  using WasmBrTableDispatchEnabledCallback = bool (*)();
  
++// The nearest enclosing guest activation, resolved by one bounded stack walk
++// at an activation's first selected boundary. kUnresolved never names a
++// guessed ancestor; kNone means no enclosing activation is on the stack.
++enum class WasmGuestParent : uint8_t { kNone, kResolved, kUnresolved };
 +// Borrowed synchronous numeric/memory access. Never retain accessor_context,
 +// execute JavaScript, allocate V8 objects, or expose process addresses.
 +struct WasmGuestStateView {
@@ -14,6 +18,10 @@ index fedf1ce..afb84bf 100644
 +  void* accessor_context;
 +  bool (*read_numeric_local)(void*, uint32_t, uint64_t*, uint8_t*);
 +  bool (*copy_memory)(void*, uint32_t, uint64_t, uint32_t, uint8_t*);
++  // Meaningful at selected boundaries only: earlier unselected br_tables of
++  // the same activation see kNone before the walk has run.
++  uint64_t parent_invocation_id;
++  WasmGuestParent parent;
 +};
 +struct WasmGuestContext {
 +  uint64_t instance_id, invocation_id;
@@ -41,7 +49,7 @@ index fedf1ce..afb84bf 100644
    kCompile,
    kModule,
 diff --git a/include/v8-isolate.h b/include/v8-isolate.h
-index 09606fb..ae6b650 100644
+index 09606fb5cdb9e11d460981db51e8f7ec38b710c7..ae6b650ddad71523586a43a64195e52e4c621283 100644
 --- a/include/v8-isolate.h
 +++ b/include/v8-isolate.h
 @@ -1764,6 +1764,20 @@ class V8_EXPORT Isolate {
@@ -66,7 +74,7 @@ index 09606fb..ae6b650 100644
  
    void SetRuntimeBufferCallback(RuntimeBufferCallback callback);
 diff --git a/src/api/api.cc b/src/api/api.cc
-index c128c92..652d1b3 100644
+index c128c929236f39661b429928f47788365d2ebe99..652d1b3b90f38bd118f4bfb95a49334dccbbef60 100644
 --- a/src/api/api.cc
 +++ b/src/api/api.cc
 @@ -164,6 +164,7 @@
@@ -119,7 +127,7 @@ index c128c92..652d1b3 100644
                  wasm_module_bytes_callback)
  
 diff --git a/src/execution/isolate.h b/src/execution/isolate.h
-index a695fec..78d3310 100644
+index a695feca20c4a9f496c941f5aabf41b37fa373f3..35b0352360aabe847b399dd278b37538a50aa8d8 100644
 --- a/src/execution/isolate.h
 +++ b/src/execution/isolate.h
 @@ -204,6 +204,7 @@ namespace wasm {
@@ -143,7 +151,7 @@ index a695fec..78d3310 100644
    V(WasmModuleBytesCallback, wasm_module_bytes_callback, nullptr)           \
    V(SharedArrayBufferConstructorEnabledCallback,                            \
      sharedarraybuffer_constructor_enabled_callback, nullptr)                \
-@@ -1446,6 +1453,36 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
+@@ -1446,6 +1453,42 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
    wasm::StackPool& stack_pool() { return stack_pool_; }
  #endif  // V8_ENABLE_WEBASSEMBLY
  
@@ -154,6 +162,9 @@ index a695fec..78d3310 100644
 +  struct RebGuestFrame {
 +    Address fp = 0;
 +    uint64_t instance_id = 0, invocation_id = 0;
++    // Resolved once, by the walk at the first selected boundary.
++    uint64_t parent_invocation_id = 0;
++    v8::WasmGuestParent parent = v8::WasmGuestParent::kNone;
 +    bool selected_dispatch_seen = false;
 +  };
 +  // A module the embedder definitely rejected. The weak owner prevents a
@@ -173,6 +184,9 @@ index a695fec..78d3310 100644
 +    // Set when the Wasm stack outgrew the frame table. Entries then recheck
 +    // depth until it fits again, so deeper frames stay untracked meanwhile.
 +    bool stack_overflowed = false;
++    // Parent walks performed. Only enabled capture reaches the walk, so this
++    // stays unchanged while the probe is off.
++    uint64_t parent_walks = 0;
 +  };
 +  RebGuestCaptureState& reb_guest_capture_state() {
 +    return reb_guest_capture_state_;
@@ -180,7 +194,7 @@ index a695fec..78d3310 100644
    GlobalHandles* global_handles() const { return global_handles_; }
  
    TracedHandles* traced_handles() { return &traced_handles_; }
-@@ -2679,6 +2716,7 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
+@@ -2679,6 +2722,7 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
    UnicodeCache* unicode_cache_ = nullptr;
    AccountingAllocator* allocator_ = nullptr;
    InnerPointerToCodeCache* inner_pointer_to_code_cache_ = nullptr;
@@ -189,7 +203,7 @@ index a695fec..78d3310 100644
    TracedHandles traced_handles_;
    EternalHandles* eternal_handles_ = nullptr;
 diff --git a/src/flags/flag-definitions.h b/src/flags/flag-definitions.h
-index 3b73178..df42efb 100644
+index 3b731787cce92609899c25ef9b4d905713ee3d17..df42efb20be40c27d3abff0e5cd9f73e37fb1b76 100644
 --- a/src/flags/flag-definitions.h
 +++ b/src/flags/flag-definitions.h
 @@ -2051,6 +2051,10 @@ DEFINE_BOOL(reb_wasm_br_table_dispatch, false,
@@ -204,7 +218,7 @@ index 3b73178..df42efb 100644
  DEFINE_NEG_IMPLICATION(liftoff_only, wasm_tier_up)
  DEFINE_NEG_IMPLICATION(liftoff_only, wasm_dynamic_tiering)
 diff --git a/src/runtime/runtime-wasm.cc b/src/runtime/runtime-wasm.cc
-index c3b231c..960eb71 100644
+index c3b231c1f032bc646c73742c1e3b8fac4dbe705a..23f1bc8326f45cc5e8d54ab9581d3afdf221e669 100644
 --- a/src/runtime/runtime-wasm.cc
 +++ b/src/runtime/runtime-wasm.cc
 @@ -2,6 +2,8 @@
@@ -224,7 +238,7 @@ index c3b231c..960eb71 100644
  #include "src/handles/handles.h"
  #include "src/heap/factory.h"
  #include "src/heap/read-only-heap.h"
-@@ -149,47 +152,328 @@ RUNTIME_FUNCTION(Runtime_WasmJSToWasmObject) {
+@@ -149,47 +152,367 @@ RUNTIME_FUNCTION(Runtime_WasmJSToWasmObject) {
    return ret;
  }
  
@@ -283,6 +297,38 @@ index c3b231c..960eb71 100644
 +    if (!found) saved = {};
 +  }
 +  return true;
++}
++// One walk of at most kFrameLimit Wasm frames, at the activation's first
++// selected boundary. The nearest enclosing activation that reached a selected
++// boundary is the parent; JavaScript frames between them (host reentry) are
++// skipped as in host attribution. An enclosing frame of the same dispatcher
++// function without identity (lost interval, untracked instance or deeper
++// table) could be that parent, so it makes the result unresolved instead of
++// skipping to an older activation. So do a non-Liftoff frame and the bound.
++void ResolveGuestParent(Isolate* isolate, WasmFrame* current,
++                        Isolate::RebGuestFrame* identity) {
++  ++isolate->reb_guest_capture_state().parent_walks;
++  identity->parent_invocation_id = 0;
++  identity->parent = v8::WasmGuestParent::kUnresolved;
++  const int function = current->GetInnermostFunctionIndex();
++  StackFrameIterator it(isolate);
++  while (!it.done() && it.frame()->fp() != current->fp()) it.Advance();
++  if (it.done()) return;
++  size_t depth = 0;
++  for (it.Advance(); !it.done(); it.Advance()) {
++    if (!it.frame()->is_wasm()) continue;
++    if (++depth > Isolate::RebGuestCaptureState::kFrameLimit) return;
++    auto* frame = static_cast<WasmFrame*>(it.frame());
++    if (!frame->wasm_code()->is_liftoff()) return;
++    if (const auto* ancestor = FindGuestFrame(isolate, frame)) {
++      if (!ancestor->selected_dispatch_seen) continue;
++      identity->parent_invocation_id = ancestor->invocation_id;
++      identity->parent = v8::WasmGuestParent::kResolved;
++      return;
++    }
++    if (frame->GetInnermostFunctionIndex() == function) return;
++  }
++  identity->parent = v8::WasmGuestParent::kNone;
 +}
 +bool IsRejectedGuestModule(const Isolate::RebGuestCaptureState& state,
 +                           const NativeModule* module) {
@@ -523,8 +569,12 @@ index c3b231c..960eb71 100644
 +  if (guest_enabled) {
 +    auto* identity = wasm::FindGuestFrame(isolate, frame);
 +    auto selected = isolate->wasm_guest_selected_site();
-+    if (identity && (!selected ||
-+                     selected(static_cast<uint32_t>(function_index), offset))) {
++    if (identity && !identity->selected_dispatch_seen &&
++        (!selected ||
++         selected(static_cast<uint32_t>(function_index), offset))) {
++      // The parent is fixed when this activation becomes a guest boundary;
++      // later boundaries reuse it without walking again.
++      wasm::ResolveGuestParent(isolate, frame, identity);
 +      identity->selected_dispatch_seen = true;
 +    }
    }
@@ -558,22 +608,25 @@ index c3b231c..960eb71 100644
 +    wasm::BorrowedGuestState access{frame, site};
 +    // Even a failed identity/descriptor admission reaches the consumer. It
 +    // revokes the previous configured-site parent and records an explicit gap.
-+    const v8::WasmGuestStateView view{identity ? identity->instance_id : 0,
-+                                      identity ? identity->invocation_id : 0,
-+                                      static_cast<uint32_t>(function_index),
-+                                      offset,
-+                                      info->selector,
-+                                      info->table_count,
-+                                      &access,
-+                                      &wasm::ReadGuestNumericLocal,
-+                                      &wasm::CopyGuestMemory};
++    const v8::WasmGuestStateView view{
++        identity ? identity->instance_id : 0,
++        identity ? identity->invocation_id : 0,
++        static_cast<uint32_t>(function_index),
++        offset,
++        info->selector,
++        info->table_count,
++        &access,
++        &wasm::ReadGuestNumericLocal,
++        &wasm::CopyGuestMemory,
++        identity ? identity->parent_invocation_id : 0,
++        identity ? identity->parent : v8::WasmGuestParent::kNone};
 +    guest_callback(context, bytes.data(), bytes.size(), view);
 +  }
    return ReadOnlyRoots(isolate).undefined_value();
  }
  
 diff --git a/src/wasm/baseline/liftoff-compiler.cc b/src/wasm/baseline/liftoff-compiler.cc
-index 2197c8c..b8249ab 100644
+index 2197c8cc28c0b83312cf0bec73237c386561b810..b8249ab8fc4dc22f56f007935db1c0844f03a9f4 100644
 --- a/src/wasm/baseline/liftoff-compiler.cc
 +++ b/src/wasm/baseline/liftoff-compiler.cc
 @@ -1312,6 +1312,11 @@ class LiftoffCompiler {
@@ -673,7 +726,7 @@ index 2197c8c..b8249ab 100644
    result.trapping_instructions_data = compiler->GetTrappingInstructionsData();
    result.frame_slot_count = compiler->GetTotalFrameSlotCountForGC();
 diff --git a/src/wasm/function-compiler.h b/src/wasm/function-compiler.h
-index ff05192..a898c22 100644
+index ff0519264a40bef7f6b6bc9af33943a764f82802..a898c229deb2984b616897f3273617629865c297 100644
 --- a/src/wasm/function-compiler.h
 +++ b/src/wasm/function-compiler.h
 @@ -71,6 +71,7 @@ struct WasmCompilationResult {
@@ -685,7 +738,7 @@ index ff05192..a898c22 100644
    std::unique_ptr<AssemblerBuffer> instr_buffer;
    uint32_t frame_slot_count = 0;
 diff --git a/src/wasm/wasm-code-manager.cc b/src/wasm/wasm-code-manager.cc
-index 61d23d6..abb4ad1 100644
+index 61d23d6dc7f1864293ae04b0e5abdbfc5426818b..abb4ad14cf9fb2cede47736b47be53d6f97a2789 100644
 --- a/src/wasm/wasm-code-manager.cc
 +++ b/src/wasm/wasm-code-manager.cc
 @@ -644,8 +644,16 @@ std::tuple<int, bool, SourcePosition> WasmCode::GetInliningPosition(
@@ -719,7 +772,7 @@ index 61d23d6..abb4ad1 100644
    DCHECK_EQ(0, code_space.size());
  
 diff --git a/src/wasm/wasm-code-manager.h b/src/wasm/wasm-code-manager.h
-index 7227a1b..76f0163 100644
+index 7227a1be43d7c0441b06f5699934da2c0b9c12ab..76f01637f912b02132222cb6d09736ea273477e3 100644
 --- a/src/wasm/wasm-code-manager.h
 +++ b/src/wasm/wasm-code-manager.h
 @@ -54,6 +54,49 @@ class DebugInfo;
@@ -794,7 +847,7 @@ index 7227a1b..76f0163 100644
    const uint32_t instructions_size_;
    const uint32_t reloc_info_size_;
 diff --git a/src/wasm/wasm-tracing.h b/src/wasm/wasm-tracing.h
-index 7106d5a..2a24e26 100644
+index 7106d5aec75cbb46f3158ce7e7394332f14c3537..2a24e2639dc805071b51a2315e3d13fa042b653b 100644
 --- a/src/wasm/wasm-tracing.h
 +++ b/src/wasm/wasm-tracing.h
 @@ -11,6 +11,7 @@
@@ -820,7 +873,7 @@ index 7106d5a..2a24e26 100644
  struct GlobalTracingInfo {
    uint32_t global_index;
 diff --git a/test/cctest/wasm/test-run-wasm.cc b/test/cctest/wasm/test-run-wasm.cc
-index 7f4c541..7156fa9 100644
+index 7f4c54127ec468e06e60235ee347fca620733e65..2c3c3772e45e0d4f6e01d25f1d3c5ab74f883b00 100644
 --- a/test/cctest/wasm/test-run-wasm.cc
 +++ b/test/cctest/wasm/test-run-wasm.cc
 @@ -6,13 +6,17 @@
@@ -841,7 +894,7 @@ index 7f4c541..7156fa9 100644
  #include "test/cctest/wasm/wasm-runner.h"
  #include "test/common/value-helper.h"
  #include "test/common/wasm/test-signatures.h"
-@@ -1355,6 +1359,652 @@ TEST(RebNativeBrTableDisabledCompilation) {
+@@ -1355,6 +1359,931 @@ TEST(RebNativeBrTableDisabledCompilation) {
    CHECK_EQ(0, reb_dispatch_observation.count);
  }
  
@@ -1489,6 +1542,285 @@ index 7f4c541..7156fa9 100644
 +  CHECK(!RebGuestDescriptorCharge::Acquire(0));
 +  CHECK(!RebGuestDescriptorCharge::Acquire(std::numeric_limits<size_t>::max()));
 +  CHECK(!RebGuestDescriptorCharge::Acquire(64 * 1024 * 1024 + 1));
++}
++
++namespace {
++// Models the renderer sink: one sequence number per guest callback, each
++// activation's latest dispatch, and the outer dispatch an inner activation
++// names at its first boundary. An unresolved parent counts the
++// native_guest_parent_unresolved gap the sink emits instead of a link.
++struct NestedGuestActivation {
++  uint64_t invocation = 0, parent = 0, parent_dispatch = 0, latest = 0;
++  v8::WasmGuestParent state = v8::WasmGuestParent::kNone;
++  size_t dispatches = 0;
++};
++thread_local std::vector<NestedGuestActivation> nested_activations;
++thread_local uint64_t nested_sequence = 0, nested_parent_gaps = 0,
++                      nested_failures = 0;
++thread_local bool nested_enabled = true, nested_enable_at_host = false,
++                  nested_disable_at_dispatch = false;
++thread_local WasmRunner<int32_t, int32_t>* nested_reentry = nullptr;
++thread_local WasmRunner<int32_t, int32_t>* nested_deep_module = nullptr;
++thread_local int32_t nested_deep_depth = 0;
++void ResetNestedGuests() {
++  nested_activations.clear();
++  nested_sequence = nested_parent_gaps = nested_failures = 0;
++  nested_enabled = true;
++  nested_enable_at_host = nested_disable_at_dispatch = false;
++}
++NestedGuestActivation* FindNestedGuest(uint64_t invocation) {
++  for (auto& activation : nested_activations) {
++    if (activation.invocation == invocation) return &activation;
++  }
++  return nullptr;
++}
++bool EnableNestedGuests() { return nested_enabled; }
++void ObserveNestedGuest(v8::Local<v8::Context>, const uint8_t*, size_t,
++                        const v8::WasmGuestStateView& view) {
++  if (!view.instance_id || !view.invocation_id) {
++    ++nested_failures;
++    return;
++  }
++  const uint64_t sequence = ++nested_sequence;
++  auto* activation = FindNestedGuest(view.invocation_id);
++  if (!activation) {
++    nested_activations.push_back({view.invocation_id});
++    activation = &nested_activations.back();
++    activation->state = view.parent;
++    if (view.parent == v8::WasmGuestParent::kResolved) {
++      CHECK_NE(view.invocation_id, view.parent_invocation_id);
++      const auto* parent = FindNestedGuest(view.parent_invocation_id);
++      CHECK_NOT_NULL(parent);
++      activation->parent = view.parent_invocation_id;
++      activation->parent_dispatch = parent->latest;
++    } else {
++      CHECK_EQ(uint64_t{0}, view.parent_invocation_id);
++      if (view.parent == v8::WasmGuestParent::kUnresolved) ++nested_parent_gaps;
++    }
++  }
++  // Later boundaries repeat the parent fixed at the first one.
++  CHECK_EQ(activation->state, view.parent);
++  CHECK_EQ(activation->parent, view.parent_invocation_id);
++  activation->latest = sequence;
++  ++activation->dispatches;
++  if (nested_disable_at_dispatch) nested_enabled = false;
++}
++void ReenterNestedGuest(const v8::FunctionCallbackInfo<v8::Value>&) {
++  if (nested_enable_at_host) nested_enabled = true;
++  CHECK_NOT_NULL(nested_reentry);
++  CHECK_EQ(9, nested_reentry->Call(1));
++}
++// mode 0: two boundaries, then JavaScript reenters this function in mode 1.
++// mode 1: an inner activation with two boundaries.
++// mode 2: one boundary, then a direct guest call in mode 1.
++// mode 3: one boundary, then a native-only activation (mode 4) calls mode 1.
++void BuildNestedGuest(WasmRunner<int32_t, int32_t>& r) {
++  r.Build(
++      {WASM_IF(WASM_I32_EQ(WASM_LOCAL_GET(0), WASM_I32V_1(0)),
++               WASM_SEQ(B1(WASM_BR_TABLE(WASM_I32V_1(0), 1, BR_TARGET(0),
++                                         BR_TARGET(0))),
++                        B1(WASM_BR_TABLE(WASM_I32V_1(0), 1, BR_TARGET(0),
++                                         BR_TARGET(0))),
++                        WASM_CALL_FUNCTION0(0), WASM_RETURN(WASM_I32V_1(9)))),
++       WASM_IF(WASM_I32_EQ(WASM_LOCAL_GET(0), WASM_I32V_1(4)),
++               WASM_RETURN(WASM_CALL_FUNCTION(1, WASM_I32V_1(1)))),
++       B1(WASM_BR_TABLE(WASM_I32V_1(0), 1, BR_TARGET(0), BR_TARGET(0))),
++       WASM_IF(WASM_I32_EQ(WASM_LOCAL_GET(0), WASM_I32V_1(2)),
++               WASM_RETURN(WASM_CALL_FUNCTION(1, WASM_I32V_1(1)))),
++       WASM_IF(WASM_I32_EQ(WASM_LOCAL_GET(0), WASM_I32V_1(3)),
++               WASM_RETURN(WASM_CALL_FUNCTION(1, WASM_I32V_1(4)))),
++       B1(WASM_BR_TABLE(WASM_I32V_1(0), 1, BR_TARGET(0), BR_TARGET(0))),
++       WASM_I32V_1(9)});
++}
++}  // namespace
++
++TEST(RebNativeGuestNestedActivationExactParent) {
++  FlagScope<bool> sampling(&v8_flags.reb_wasm_br_table_dispatch, true);
++  FlagScope<bool> guest_frames(&v8_flags.reb_wasm_guest_capture, true);
++  HandleScope handles(CcTest::InitIsolateOnce());
++  auto* isolate = CcTest::isolate();
++  auto host =
++      v8::Function::New(isolate->GetCurrentContext(), ReenterNestedGuest)
++          .ToLocalChecked();
++  TestSignatures sigs;
++  ManuallyImportedJSFunction import{
++      sigs.v_v(), Cast<JSFunction>(v8::Utils::OpenDirectHandle(*host))};
++  WasmRunner<int32_t, int32_t> r(TestExecutionTier::kLiftoff, kWasmOrigin,
++                                 &import);
++  BuildNestedGuest(r);
++  auto& state = r.isolate()->reb_guest_capture_state();
++  nested_reentry = &r;
++  ResetNestedGuests();
++  isolate->SetWasmGuestDispatchCallback(ObserveNestedGuest, EnableNestedGuests);
++  const uint64_t walks = state.parent_walks;
++  // JavaScript reentry: the inner activation names the outer's second, still
++  // current dispatch (sequence 2), not its first and not a sequence guess.
++  CHECK_EQ(9, r.Call(0));
++  CHECK_EQ(size_t{2}, nested_activations.size());
++  const auto outer = nested_activations[0], inner = nested_activations[1];
++  CHECK_EQ(v8::WasmGuestParent::kNone, outer.state);
++  CHECK_EQ(size_t{2}, outer.dispatches);
++  CHECK_EQ(v8::WasmGuestParent::kResolved, inner.state);
++  CHECK_EQ(outer.invocation, inner.parent);
++  CHECK_EQ(uint64_t{2}, inner.parent_dispatch);
++  CHECK_EQ(size_t{2}, inner.dispatches);
++  // One walk per activation, not per boundary.
++  CHECK_EQ(walks + 2, state.parent_walks);
++  // A direct guest call, with or without a tracked native-only activation of
++  // the same dispatcher between them, names the caller exactly.
++  for (const int32_t mode : {2, 3}) {
++    ResetNestedGuests();
++    CHECK_EQ(9, r.Call(mode));
++    CHECK_EQ(size_t{2}, nested_activations.size());
++    CHECK_EQ(v8::WasmGuestParent::kResolved, nested_activations[1].state);
++    CHECK_EQ(nested_activations[0].invocation, nested_activations[1].parent);
++    CHECK_EQ(uint64_t{1}, nested_activations[1].parent_dispatch);
++  }
++  // A returned activation is never a parent, even when its frame address is
++  // reused by the next top-level activation.
++  ResetNestedGuests();
++  CHECK_EQ(9, r.Call(1));
++  CHECK_EQ(v8::WasmGuestParent::kNone, nested_activations[0].state);
++  CHECK_EQ(uint64_t{0}, nested_parent_gaps);
++  CHECK_EQ(uint64_t{0}, nested_failures);
++  isolate->SetWasmGuestDispatchCallback(nullptr, nullptr);
++}
++
++namespace {
++// Module A: import 0 enters module B, main 1 calls dispatcher 2. Module B's
++// only function 1 recurses, then reenters A through its import, so B frames
++// are untracked Wasm frames of another function between two A activations.
++v8::WasmGuestModuleAdmission AdmitDeepDispatcher(v8::Local<v8::Context>,
++                                                 const uint8_t*, size_t,
++                                                 uint32_t function) {
++  return function == 2 ? v8::WasmGuestModuleAdmission::kAdmit
++                       : v8::WasmGuestModuleAdmission::kNotDispatcher;
++}
++void EnterDeepModule(const v8::FunctionCallbackInfo<v8::Value>&) {
++  if (nested_enable_at_host) nested_enabled = true;
++  CHECK_NOT_NULL(nested_deep_module);
++  CHECK_EQ(0, nested_deep_module->Call(nested_deep_depth));
++}
++}  // namespace
++
++TEST(RebNativeGuestParentUnresolvedFailsClosed) {
++  FlagScope<bool> sampling(&v8_flags.reb_wasm_br_table_dispatch, true);
++  FlagScope<bool> guest_frames(&v8_flags.reb_wasm_guest_capture, true);
++  HandleScope handles(CcTest::InitIsolateOnce());
++  auto* isolate = CcTest::isolate();
++  auto enter = v8::Function::New(isolate->GetCurrentContext(), EnterDeepModule)
++                   .ToLocalChecked();
++  auto reenter =
++      v8::Function::New(isolate->GetCurrentContext(), ReenterNestedGuest)
++          .ToLocalChecked();
++  TestSignatures sigs;
++  ManuallyImportedJSFunction enter_import{
++      sigs.v_v(), Cast<JSFunction>(v8::Utils::OpenDirectHandle(*enter))};
++  ManuallyImportedJSFunction reenter_import{
++      sigs.v_v(), Cast<JSFunction>(v8::Utils::OpenDirectHandle(*reenter))};
++  WasmRunner<int32_t, int32_t> a(TestExecutionTier::kLiftoff, kWasmOrigin,
++                                 &enter_import);
++  auto& dispatcher = a.NewFunction<int32_t, int32_t>();
++  dispatcher.Build(
++      {B1(WASM_BR_TABLE(WASM_I32V_1(0), 1, BR_TARGET(0), BR_TARGET(0))),
++       WASM_IF(WASM_I32_EQ(WASM_LOCAL_GET(0), WASM_I32V_1(0)),
++               WASM_CALL_FUNCTION0(0)),
++       WASM_I32V_1(9)});
++  a.Build({WASM_CALL_FUNCTION(dispatcher.function_index(), WASM_LOCAL_GET(0))});
++  WasmRunner<int32_t, int32_t> b(TestExecutionTier::kLiftoff, kWasmOrigin,
++                                 &reenter_import);
++  b.Build({WASM_IF(WASM_LOCAL_GET(0),
++                   WASM_RETURN(WASM_CALL_FUNCTION(
++                       1, WASM_I32_SUB(WASM_LOCAL_GET(0), WASM_I32V_1(1))))),
++           WASM_CALL_FUNCTION0(0), WASM_I32V_1(0)});
++  nested_reentry = &a;
++  nested_deep_module = &b;
++  isolate->SetWasmGuestDispatchCallback(ObserveNestedGuest, EnableNestedGuests,
++                                        nullptr, AdmitDeepDispatcher);
++  // Untracked frames of another function are skipped within the bound.
++  ResetNestedGuests();
++  nested_deep_depth = 100;
++  CHECK_EQ(9, a.Call(0));
++  CHECK_EQ(size_t{2}, nested_activations.size());
++  CHECK_EQ(v8::WasmGuestParent::kResolved, nested_activations[1].state);
++  CHECK_EQ(nested_activations[0].invocation, nested_activations[1].parent);
++  CHECK_EQ(uint64_t{1}, nested_activations[1].parent_dispatch);
++  CHECK_EQ(uint64_t{0}, nested_parent_gaps);
++  // Past 128 Wasm frames the walk stops: no parent is named, never an older
++  // one, and the consumer records the unresolved gap.
++  ResetNestedGuests();
++  nested_deep_depth = 140;
++  CHECK_EQ(9, a.Call(0));
++  CHECK_EQ(size_t{2}, nested_activations.size());
++  CHECK_EQ(v8::WasmGuestParent::kUnresolved, nested_activations[1].state);
++  CHECK_EQ(uint64_t{0}, nested_activations[1].parent);
++  CHECK_EQ(uint64_t{1}, nested_parent_gaps);
++  // The outer activation began while capture was off, so it has no identity.
++  // The same dispatcher on the stack without identity is a possible parent:
++  // unresolved, not a top-level activation.
++  ResetNestedGuests();
++  nested_deep_depth = 10;
++  nested_enabled = false;
++  nested_enable_at_host = true;
++  CHECK_EQ(9, a.Call(0));
++  CHECK_EQ(size_t{1}, nested_activations.size());
++  CHECK_EQ(v8::WasmGuestParent::kUnresolved, nested_activations[0].state);
++  CHECK_EQ(uint64_t{1}, nested_parent_gaps);
++  // The next top-level activation is resolved again.
++  ResetNestedGuests();
++  CHECK_EQ(9, a.Call(1));
++  CHECK_EQ(v8::WasmGuestParent::kNone, nested_activations[0].state);
++  CHECK_EQ(uint64_t{0}, nested_failures);
++  isolate->SetWasmGuestDispatchCallback(nullptr, nullptr);
++}
++
++TEST(RebNativeGuestParentWalkNeedsEnabledCapture) {
++  FlagScope<bool> sampling(&v8_flags.reb_wasm_br_table_dispatch, true);
++  HandleScope handles(CcTest::InitIsolateOnce());
++  auto* isolate = CcTest::isolate();
++  auto& state = CcTest::i_isolate()->reb_guest_capture_state();
++  auto host =
++      v8::Function::New(isolate->GetCurrentContext(), ReenterNestedGuest)
++          .ToLocalChecked();
++  TestSignatures sigs;
++  ManuallyImportedJSFunction import{
++      sigs.v_v(), Cast<JSFunction>(v8::Utils::OpenDirectHandle(*host))};
++  isolate->ResetWasmGuestCapture();
++  const uint64_t walks = state.parent_walks;
++  for (const bool compiled : {false, true}) {
++    FlagScope<bool> guest_frames(&v8_flags.reb_wasm_guest_capture, compiled);
++    WasmRunner<int32_t, int32_t> r(TestExecutionTier::kLiftoff, kWasmOrigin,
++                                   &import);
++    BuildNestedGuest(r);
++    nested_reentry = &r;
++    ResetNestedGuests();
++    // Without frame hooks, or with capture off: no identity, walk, handle or
++    // callback, even across reentry.
++    nested_enabled = !compiled;
++    isolate->SetWasmGuestDispatchCallback(ObserveNestedGuest,
++                                          EnableNestedGuests);
++    CHECK_EQ(9, r.Call(0));
++    CHECK(nested_activations.empty());
++    CHECK_EQ(uint64_t{0}, nested_failures);
++    CHECK_EQ(walks, state.parent_walks);
++    for (const auto& frame : state.frames) CHECK_EQ(Address{0}, frame.fp);
++    for (const auto& instance : state.instances) CHECK_NULL(instance.root);
++    if (compiled) {
++      // Expiry at the outer's first boundary: that boundary walked once; the
++      // reentered inner activation is neither tracked nor walked.
++      nested_enabled = nested_disable_at_dispatch = true;
++      CHECK_EQ(9, r.Call(0));
++      CHECK_EQ(size_t{1}, nested_activations.size());
++      CHECK_EQ(size_t{1}, nested_activations[0].dispatches);
++      CHECK_EQ(walks + 1, state.parent_walks);
++      for (const auto& instance : state.instances) CHECK_NULL(instance.root);
++      // A later interval never inherits the expired outer as a parent.
++      ResetNestedGuests();
++      CHECK_EQ(9, r.Call(1));
++      CHECK_EQ(v8::WasmGuestParent::kNone, nested_activations[0].state);
++    }
++    isolate->SetWasmGuestDispatchCallback(nullptr, nullptr);
++  }
 +}
 +
  WASM_EXEC_TEST(BrTable0a) {

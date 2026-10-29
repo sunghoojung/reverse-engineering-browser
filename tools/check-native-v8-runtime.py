@@ -47,6 +47,9 @@ TEST_NAMES = [
     "RebNativeGuestWeakIdentityLifetime",
     "RebNativeGuestDescriptorBudgetRejectsOverflow",
     "RebNativeGuestZeroLocalDescriptorBudget",
+    "RebNativeGuestNestedActivationExactParent",
+    "RebNativeGuestParentUnresolvedFailsClosed",
+    "RebNativeGuestParentWalkNeedsEnabledCapture",
 ]
 
 
@@ -412,7 +415,10 @@ def main():
                 and witness.get("brave_validated") is False
                 and witness.get("host_calls") == 8
                 and isinstance(witness.get("dispatches"), int)
-                and witness["dispatches"] >= 8):
+                and witness["dispatches"] >= 8
+                # Both visit() guest calls name their caller's exact dispatch.
+                and isinstance(witness.get("exact_parent_activations"), int)
+                and witness["exact_parent_activations"] >= 2):
             raise RuntimeError("Incomplete public native-hook witness")
         receipt["public_native_hook"] = witness
         receipt["public_native_hook_validated"] = True

@@ -1485,6 +1485,7 @@ int main() {
   transport.Connect(mojo::PendingRemote<reb::mojom::NativeProbeHost>(&host));
   Run<&NativeGuestAdmission>();
   Run<&NativeGuestModuleVerdictsAndHostBudget>();
+  Run<&NativeGuestParentDispatch>();
   Run<&NativeWasmRuntimeAdmission>();
   Run<&NativeWasmIndirectAdmission>();
   Run<&DispatchSampleAdmission>();

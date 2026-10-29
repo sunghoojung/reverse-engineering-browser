@@ -28,9 +28,10 @@ recovery. This target establishes no hCaptcha-specific support.
 
 ## Capture and identity
 
-Event 18 (`wasm_guest_dispatch`) and event 19 (`wasm_guest_invocation`) each have
-128-byte version-1 little-endian payloads. Their authoritative offsets and
-encoders are `include/reb/wasm_guest.hpp` and overlay
+Event 18 (`wasm_guest_dispatch`) has a 128-byte version-1 little-endian payload
+and event 19 (`wasm_guest_invocation`) a 128-byte version-2 payload. Readers
+still accept version-1 invocations, which reserved bytes 72..128. The
+authoritative offsets and encoders are `include/reb/wasm_guest.hpp` and overlay
 `common/native_wasm_guest_wire.h`; no native structure padding is serialized.
 The event header retains the original renderer process/sequence identity.
 Invocation events identify exact module, instance, activation and retained
@@ -57,6 +58,42 @@ records retain original parent IDs and wait for that exact retained dispatch.
 Rejection, navigation, expiry and bounded-queue loss clear the binding; they do
 not retarget it to the last successful sample. Delayed IDs retract provisional
 sequence holes in broker/Rust/JS/Swift summaries. Explicit drops remain drops.
+
+### Parent activation and exact outer dispatch
+
+| Invocation bytes | Field |
+| --- | --- |
+| 64..72 | `parent_invocation_id`: the enclosing guest activation, or 0 |
+| 72..80 | `parent_dispatch_sequence_number`: that activation's retained dispatch that was current when this one began, or 0 |
+| 80..128 | reserved, zero |
+
+A nonzero parent dispatch requires a nonzero parent and a smaller sequence
+number than the invocation marker. Version 1 reserved bytes 72..80, so a
+version-1 marker has no exact dispatch.
+
+V8 resolves the parent once per activation, at its first selected boundary,
+with one walk of at most 128 Wasm frames. JavaScript frames between them, such
+as a host import that reenters Wasm, are skipped, as in host attribution. The
+nearest enclosing activation that reached a selected boundary is the parent.
+Tracked activations that never did, such as a dispatcher call that only runs a
+native function, are skipped. An enclosing frame of the same dispatcher function
+without identity (it began while capture was off, its instance was not tracked,
+or the frame table overflowed), a non-Liftoff frame, or a deeper stack makes
+the parent unresolved: V8 never skips to an older activation. Without guest
+capture compiled in, enabled and unexpired there is no walk and no state.
+
+The renderer names the parent's retained current dispatch, the same exact
+dispatch used for host parents. Every later selected boundary of the parent
+revokes it, and so does a selected boundary without identity. When the parent
+is unresolved, or its current dispatch was not retained (sample limit,
+snapshot failure, transport loss, revocation or another document), the marker
+names at most the parent activation with dispatch 0, and the renderer emits
+`native_guest_parent_unresolved` once per capture configuration. Nothing is
+guessed. The browser validates these fields and never retargets them; a named
+dispatch that the browser later turns into a gap leaves the link unproven in
+the [opcode workspace](vm-opcode-workspace-v2.md#observed-claims-and-nested-guests).
+A guest call or host reentry of the same interpreter, such as QuickJS
+`JS_CallInternal` recursion, therefore names its caller's call dispatch.
 
 ### Module binding and loss accounting
 
@@ -110,9 +147,10 @@ and 65536-byte snapshot limits. At a synchronous native host probe the actual Wa
 stack must contain the same instance and interpreter activation as the current
 retained instruction. Reentry uses its own activation; returns, traps, exceptions
 and new dispatch failures invalidate stale parents. An empty import list proves
-no host association. Parent invocation token zero means nesting is not asserted.
-The renderer currently always writes zero. When a retained invocation names a
-nonzero parent, the opcode workspace can link it as a nested guest; see
+no host association. Parent invocation zero means no enclosing activation was
+resolved; see [parent activation](#parent-activation-and-exact-outer-dispatch).
+When a retained invocation names a parent at another dispatch site, the opcode
+workspace can link it as a nested guest; see
 [observed claims and nested guests](vm-opcode-workspace-v2.md#observed-claims-and-nested-guests).
 
 Native host reports expose a semantic guest position only for the source-verified
@@ -128,7 +166,14 @@ instruction observations.
 
 Portable native admission/ACK tests, actual C++-encoded cross-language fixtures,
 strict Rust artifact/site validation, and actual-script offline UI tests cover
-contracts and rejection paths. Running the public interpreter normally proves
+contracts and rejection paths. The V8 cctests
+`RebNativeGuestNestedActivationExactParent`,
+`RebNativeGuestParentUnresolvedFailsClosed` and
+`RebNativeGuestParentWalkNeedsEnabledCapture` cover the parent walk, its bound
+and its absence while capture is off; the public QuickJS cctest witnesses
+exact parents for guest calls. The portable admission suite drives the real
+renderer sink through exact, lost, revoked, unresolved, cross-document,
+disabled and expired parents. Running the public interpreter normally proves
 its fixture behavior only, not that the patched hook fired. Compiled V8 cctests
 and a rebuilt Brave run retaining QuickJS guest records and synchronous Canvas
 parents are separate required acceptance layers. Do not describe source replay,

@@ -297,3 +297,118 @@ void NativeGuestModuleVerdictsAndHostBudget() {
   std::cout << "PASS guest module verdict resend, bounded attempts, stale verdicts and bounded "
                "host parent routing without host loss\n";
 }
+
+// An inner activation names its parent's retained current dispatch exactly.
+// Otherwise it names at most the parent activation and the renderer emits one
+// explicit gap per configuration; it never substitutes an older dispatch.
+void NativeGuestParentDispatch() {
+  const std::array<std::uint8_t, 11> module{0, 97, 115, 109, 1, 0, 0, 0, 0x0e, 0, 0};
+  auto adapter = std::make_shared<reb::NativeWasmGuestAdapter>();
+  adapter->module_sha256 = reb::NativeGuestDigest(module);
+  adapter->function_index = 414;
+  adapter->dispatch_module_offset = 8;
+  adapter->pc_local_index = 320;
+  adapter->memory_length.constant = 16;
+  adapter->sample_limit = 3;
+  adapter->json = "owned boundary recipe";
+  adapter->recipe_sha256 = reb::NativeGuestDigest(
+      std::span(reinterpret_cast<const std::uint8_t*>(adapter->json.data()), adapter->json.size()));
+  std::uint64_t expires = kForever;
+  const auto configure = [&] {
+    sink.SetEmitters(&RecordGuestQueue, &CaptureRuntimeMetadata, 44,
+                     reb::kAllNativeProbeCategoryMask, expires, false, &GuestFrame);
+    sink.ConfigureNativeWasmGuest(adapter, &GuestCapture, &GuestHost);
+    sink.SetNativeWasmGuestRuntime(&GuestContext, nullptr);
+    guest_queue_events.clear();
+  };
+  guest_dispatches.clear();
+  guest_invocations.clear();
+  guest_module_sizes.clear();
+  guest_capture_accept = true;
+  guest_pc = 0;
+  guest_memory[0] = 0x41;
+  reb::NativeWasmGuestStateView outer{7, 41, 414, 8, 0, 0, nullptr, &GuestRead, &GuestCopy};
+  auto inner = outer;
+  inner.parent_invocation_id = 41;
+  inner.parent = reb::NativeWasmGuestParent::kResolved;
+  // Blink revokes the activation's previous dispatch before recording.
+  const auto record = [&](const reb::NativeWasmGuestStateView& view, std::uint64_t document = 5) {
+    sink.InvalidateNativeWasmGuest(view);
+    sink.RecordNativeWasmGuest(1, 8, "https://owned.test/module.wasm", module, view, document, 6);
+  };
+  const auto names = [&](std::uint64_t parent, std::uint64_t dispatch) {
+    reb::NativeWasmGuestInvocationPayload payload;
+    return reb::DecodeNativeWasmGuestInvocationPayload(guest_invocations.back().inline_payload,
+                                                       payload) &&
+           payload.protocol_version == 2 && payload.parent_invocation_id == parent &&
+           payload.parent_dispatch_sequence_number == dispatch;
+  };
+  const auto unresolved = [] { return GuestQueueHasGap("native_guest_parent_unresolved"); };
+
+  configure();
+  record(outer);
+  assert(guest_dispatches.size() == 1 && names(0, 0));
+  const auto outer_dispatch = guest_dispatches.back().header.sequence_number;
+  inner.invocation_id = 42;
+  record(inner);
+  assert(guest_dispatches.size() == 2 && names(41, outer_dispatch) && !unresolved());
+  assert(guest_invocations.back().header.sequence_number > outer_dispatch);
+  const auto inner_marker = guest_invocations.back();
+  record(inner);  // Later dispatches reuse the marker resolved at the first.
+  assert(guest_dispatches.size() == 3 &&
+         guest_invocations.back().inline_payload == inner_marker.inline_payload &&
+         guest_invocations.back().header.sequence_number == inner_marker.header.sequence_number);
+
+  // Queue loss of the parent's current dispatch: the earlier retained one is
+  // not current, so the inner marker names the activation only.
+  configure();
+  record(outer);
+  guest_capture_accept = false;
+  record(outer);
+  guest_capture_accept = true;
+  inner.invocation_id = 43;
+  record(inner);
+  assert(names(41, 0) && unresolved());
+
+  // The engine could not resolve the parent: no parent at all, and a gap.
+  configure();
+  auto lost = inner;
+  lost.invocation_id = 44;
+  lost.parent_invocation_id = 0;
+  lost.parent = reb::NativeWasmGuestParent::kUnresolved;
+  record(lost);
+  assert(names(0, 0) && unresolved());
+
+  // A selected dispatch without identity revokes every current dispatch, and
+  // a parent in another document is not joined.
+  for (const bool other_document : {false, true}) {
+    configure();
+    record(outer);
+    if (!other_document) {
+      auto anonymous = outer;
+      anonymous.instance_id = anonymous.invocation_id = 0;
+      sink.InvalidateNativeWasmGuest(anonymous);
+    }
+    inner.invocation_id = other_document ? 46 : 45;
+    record(inner, other_document ? 9 : 5);
+    assert(names(41, 0) && unresolved());
+  }
+
+  // Expired or disabled capture records nothing, so it names no parent.
+  expires = 500;
+  configure();
+  record(outer);
+  base::test_now_ns = 1000;
+  const auto before = guest_invocations.size();
+  inner.invocation_id = 47;
+  record(inner);
+  base::test_now_ns = 100;
+  sink.SetEmitters(nullptr, nullptr, 0, 0, 0);
+  inner.invocation_id = 48;
+  record(inner);
+  assert(guest_invocations.size() == before && !unresolved());
+  sink.SetNativeWasmGuestRuntime(nullptr, nullptr);
+  std::cout << "PASS guest invocations name the exact current parent dispatch; lost, revoked, "
+               "unresolved or cross-document parents are explicit gaps, and disabled or "
+               "expired capture names none\n";
+}

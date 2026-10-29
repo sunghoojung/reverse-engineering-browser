@@ -389,5 +389,8 @@ Guest-state capture additionally needs `REB_NATIVE_WASM_GUEST_ADAPTER`, which
 makes the launcher add `--reb-wasm-guest-capture`. That flag compiles a call on
 every Wasm function entry (frame identity) and numeric-local descriptors for
 each `br_table`; without it, physical dispatch observation alone pays neither
-cost. See [native guest observations](../../../protocol/native-wasm-guest-v1.md).
+cost. While capture is enabled, each guest activation also walks at most 128
+Wasm frames once, at its first selected dispatch, to name its parent
+activation and exact outer dispatch. See
+[native guest observations](../../../protocol/native-wasm-guest-v1.md).
 All CDP capture/transport functionality has been removed from the companion.

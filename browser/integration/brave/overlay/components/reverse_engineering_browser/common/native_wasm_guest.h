@@ -31,12 +31,17 @@ inline constexpr std::size_t kNativeGuestHeldHostLimit = 64;
 // Module transfers per document binding. The renderer resends the module only
 // after the browser reports that the previous transfer was not accepted.
 inline constexpr std::uint8_t kNativeGuestModuleAttemptLimit = 3;
+// The enclosing guest activation as the engine resolved it once, at this
+// activation's first selected dispatch. kUnresolved never names a guess.
+enum class NativeWasmGuestParent : std::uint8_t { kNone, kResolved, kUnresolved };
 struct NativeWasmGuestStateView final {
   std::uint64_t instance_id = 0, invocation_id = 0;
   std::uint32_t function_index = 0, module_byte_offset = 0, selector = 0, table_count = 0;
   void* accessor_context = nullptr;
   bool (*read_numeric_local)(void*, std::uint32_t, std::uint64_t*, std::uint8_t*) = nullptr;
   bool (*copy_memory)(void*, std::uint32_t, std::uint64_t, std::uint32_t, std::uint8_t*) = nullptr;
+  std::uint64_t parent_invocation_id = 0;
+  NativeWasmGuestParent parent = NativeWasmGuestParent::kNone;
 };
 struct NativeWasmGuestContext final {
   std::uint64_t instance_id = 0, invocation_id = 0;

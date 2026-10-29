@@ -1432,7 +1432,8 @@ const capturedExportPanel = installCapturedExportDialog({
         if (!site) return 'structure not classified';
         const axes = `${site.dispatch_kind} / ${site.selector_source} / ${site.repeats}`;
         if (site.role === 'multiplexer') return `${axes} · router, no guest opcodes claimed`;
-        if (site.role === 'interpreter-candidate') return `${axes} · cursor-loop interpreter candidate`;
+        const helper = site.selector.through_helper ? ', fetched through a helper' : '';
+        if (site.role === 'interpreter-candidate') return `${axes} · cursor-loop interpreter candidate${helper}`;
         if (['string', 'arguments'].includes(site.buffer_kind)) return `${axes} · ${site.buffer_kind} scan, no guest opcodes claimed`;
         if (site.selector.through_lookup) return `${axes} · second-level lookup, no guest opcodes claimed`;
         return `${axes} · not an interpreter loop`;

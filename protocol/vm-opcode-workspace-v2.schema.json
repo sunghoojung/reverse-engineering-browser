@@ -2425,7 +2425,8 @@
           "required": [
             "expression",
             "byte_offset",
-            "through_lookup"
+            "through_lookup",
+            "through_helper"
           ],
           "properties": {
             "expression": {
@@ -2445,6 +2446,10 @@
             "through_lookup": {
               "type": "boolean",
               "description": "The selector is a table read keyed by a value loaded at a cursor, such as types[q[head++]], rather than the fetched value itself."
+            },
+            "through_helper": {
+              "type": "boolean",
+              "description": "The selector is the value a statically bound helper call returns, followed into the helper: a JavaScript function, unreassigned binding or this method, or a Wasm function whose result is a fetch at a global or frame-slot position it advances. It does not change the role."
             }
           }
         },

@@ -93,7 +93,7 @@ static REGISTER_IDENTIFIER: LazyLock<Regex> =
 static CASE_BOUNDARY: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\bcase\b[^:;{}]*:|\bdefault\s*:").expect("case boundary"));
 static BYTE_READ: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"\b(program|bytecode|code|instructions|bytes)\s*\[\s*(pc|ip|instructionPointer|offset|cursor)\s*(?:(\+\+)|\+\s*([0-9]+))?\s*\]")
+    Regex::new(r"\b((?:[A-Za-z_$][\w$]*\.)?(?:program|bytecode|code|instructions|bytes))\s*\[\s*((?:[A-Za-z_$][\w$]*\.)?(?:pc|ip|instructionPointer|offset|cursor))\s*(?:(\+\+)|\+\s*([0-9]+))?\s*\]")
         .expect("adjacent byte read")
 });
 static IDENTIFIER: LazyLock<Regex> =
@@ -186,17 +186,66 @@ fn without_nested_functions(region: &str) -> String {
     String::from_utf8(masked).expect("nested function masking")
 }
 
+fn byte_read(expression: &str) -> bool {
+    BYTE_READ
+        .find(expression)
+        .is_some_and(|m| m.start() == 0 && m.end() == expression.len())
+}
+
+/// A helper call (`next()`, `this.fetch()`, `read(state)`) whose one
+/// definition in the artifact returns exactly one direct indexed byte read.
+fn helper_fetch(expression: &str, source: &str) -> bool {
+    static CALL: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r"^(?:this\s*\.\s*)?([A-Za-z_$][\w$]*)\s*\([^()]*\)$").expect("helper call")
+    });
+    let Some(call) = CALL.captures(expression) else {
+        return false;
+    };
+    let name = regex::escape(&call[1]);
+    let definition = Regex::new(&format!(
+        r"(?:\bfunction\s+{name}\s*\([^()]*\)\s*\{{|(?:^|[{{}};,\s]){name}\s*\([^()]*\)\s*\{{|\b{name}\s*=\s*(?:function\b[^{{]*\{{|(?:\([^()]*\)|[A-Za-z_$][\w$]*)\s*=>\s*(\{{)?))"
+    ))
+    .expect("helper definition");
+    let mut definitions = definition.captures_iter(source);
+    let (Some(found), None) = (definitions.next(), definitions.next()) else {
+        return false;
+    };
+    let header = found.get(0).expect("helper header");
+    if header.as_str().trim_end().ends_with("=>") {
+        // A concise arrow body is its one returned value.
+        let body = source[header.end()..]
+            .split([';', '\n', ',', ')', '}'])
+            .next()
+            .unwrap_or("");
+        return byte_read(body.trim());
+    }
+    let opening = header.end() - 1;
+    let Some(closing) = matching(source.as_bytes(), opening, b'{', b'}') else {
+        return false;
+    };
+    static RETURN: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"\breturn\b\s*([^;{}\n]*)").expect("helper return"));
+    let body = without_nested_functions(&source[opening..=closing]);
+    let mut returns = RETURN.captures_iter(&body);
+    matches!(
+        (returns.next(), returns.next()),
+        (Some(value), None) if byte_read(value[1].trim())
+    )
+}
+
 // These are deliberately syntactic checks, not an evaluator or a data-flow
 // proof. An unrecognized selector cannot establish a fixed opcode mapping.
-// `scope` is the region without nested function bodies and `before` the
-// dispatch offset in it.
-fn direct_selector(expression: &str, scope: &str, before: usize, depth: usize) -> bool {
+// `scope` is the region without nested function bodies, `before` the
+// dispatch offset in it, and `source` the masked artifact helpers live in.
+fn direct_selector(
+    expression: &str,
+    scope: &str,
+    before: usize,
+    source: &str,
+    depth: usize,
+) -> bool {
     let expression = expression.trim();
-    if integer(expression).is_some()
-        || BYTE_READ
-            .find(expression)
-            .is_some_and(|m| m.start() == 0 && m.end() == expression.len())
-    {
+    if integer(expression).is_some() || byte_read(expression) || helper_fetch(expression, source) {
         return true;
     }
     if depth == 8 || !IDENTIFIER.is_match(expression) {
@@ -215,7 +264,7 @@ fn direct_selector(expression: &str, scope: &str, before: usize, depth: usize) -
     // must itself be a direct selector, and one must precede the dispatch. A
     // variable written more than once with a literal is a state machine.
     let assignment = Regex::new(&format!(
-        r"(?:^|[^.\w$]){name}\s*=([^=>;{{}}\n,)][^;{{}}\n,)]*)"
+        r"(?:^|[^.\w$]){name}\s*=([^=>;{{}}\n,()](?:[^;{{}}\n,()]|\([^(){{}}]*\))*)"
     ))
     .expect("selector binding");
     let values = assignment
@@ -226,7 +275,7 @@ fn direct_selector(expression: &str, scope: &str, before: usize, depth: usize) -
         && values.iter().all(|value| {
             (values.len() == 1 || integer(value.as_str().trim()).is_none())
                 // Alias cycles end at the depth bound, not in a data-flow proof.
-                && direct_selector(value.as_str(), scope, value.start(), depth + 1)
+                && direct_selector(value.as_str(), scope, value.start(), source, depth + 1)
         })
 }
 
@@ -602,7 +651,8 @@ fn static_handlers(
     start: usize,
     end: usize,
 ) -> (Vec<Value>, String, Vec<String>, Vec<Value>) {
-    let region = vm::mask(&source[start..end]);
+    let masked = vm::mask(source);
+    let region = masked[start..end].to_owned();
     let outer = without_nested_functions(&region);
     let mut handlers = BTreeMap::new();
     let mut unknowns = Vec::new();
@@ -614,6 +664,7 @@ fn static_handlers(
             &captures[2],
             &outer,
             captures.get(0).expect("dispatch match").start(),
+            &masked,
             0,
         ) {
             blocked_tables.insert(captures[1].to_owned());
@@ -622,7 +673,7 @@ fn static_handlers(
     }
     for captures in aliased_reads(&outer) {
         let read = captures.get(3).expect("aliased selector");
-        if !direct_selector(read.as_str(), &outer, read.start(), 0) {
+        if !direct_selector(read.as_str(), &outer, read.start(), &masked, 0) {
             blocked_tables.insert(last_segment(&captures[2]).to_owned());
             unknowns.push("A computed, position-dependent, or saved-state handler selector has no proven fixed opcode mapping.".into());
         }
@@ -650,6 +701,7 @@ fn static_handlers(
             &region[opening_paren + 1..closing_paren],
             &outer,
             switch_match.start(),
+            &masked,
             0,
         ) {
             unknowns.push("A computed, position-dependent, or saved-state switch selector has no proven fixed opcode mapping.".into());

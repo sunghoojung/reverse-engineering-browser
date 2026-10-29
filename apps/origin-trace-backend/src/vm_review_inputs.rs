@@ -99,9 +99,131 @@ pub(crate) const STATIC_SHAPES: &[(&str, &str, &[u64])] = &[
         &[],
     ),
     (
+        "helper-closure-fetch",
+        "function run(code){let pc=0;const stack=[];function next(){return code[pc++];}while(pc<code.length){switch(next()){case 1:stack.push(code[pc++]);break;case 2:stack.pop();break;case 3:return stack;}}return stack;}",
+        &[1, 2, 3],
+    ),
+    (
+        "helper-this-fetch",
+        "class VM{constructor(code){this.code=code;this.pc=0;this.stack=[];}fetch(){return this.code[this.pc++];}run(){while(this.pc<this.code.length){switch(this.fetch()){case 1:this.stack.push(this.code[this.pc++]);break;case 2:this.stack.pop();break;case 3:return this.stack;}}return this.stack;}}",
+        &[1, 2, 3],
+    ),
+    (
+        "helper-state-fetch",
+        "function read(state){return state.code[state.pc++];}function run(code){let pc=0;const state={code:code,pc:pc,stack:[]};while(state.pc<code.length){switch(read(state)){case 1:state.stack.push(code[state.pc]);pc=state.pc++;break;case 2:state.stack.pop();break;case 3:return state.stack;}}return state.stack;}",
+        &[1, 2, 3],
+    ),
+    (
+        "helper-loop-advances",
+        "function run(code){let pc=0;const stack=[];const at=(code,pc)=>code[pc];while(pc<code.length){const op=at(code,pc);pc++;switch(op){case 1:stack.push(code[pc++]);break;case 2:stack.pop();break;case 3:return stack;}}return stack;}",
+        &[1, 2, 3],
+    ),
+    (
+        "helper-reassigned",
+        "function run(code){let pc=0;const stack=[];let next=function(){return code[pc++];};next=function(){return 0;};while(pc<code.length){switch(next()){case 1:stack.push(code[pc++]);break;case 2:stack.pop();break;case 3:return stack;}pc++;}return stack;}",
+        &[],
+    ),
+    (
+        "helper-parameter-copy",
+        "function next(code,pc){return code[pc++];}function run(code){let pc=0;const stack=[];while(stack.length<9){switch(next(code,pc)){case 1:stack.push(code[pc]);break;case 2:stack.pop();break;case 3:return stack;}}return stack;}",
+        &[],
+    ),
+    (
+        "helper-overridden",
+        "class VM{constructor(code){this.code=code;this.pc=0;this.stack=[];}fetch(){return this.code[this.pc++];}run(){while(this.pc<this.code.length){switch(this.fetch()){case 1:this.stack.push(this.code[this.pc++]);break;case 2:this.stack.pop();break;case 3:return this.stack;}}return this.stack;}}class Replay extends VM{fetch(){return this.code[0];}}",
+        &[],
+    ),
+    (
+        "helper-lookup-walk",
+        "function run(code,types){let pc=0;const stack=[];function next(){return types[code[pc++]];}while(pc<code.length){switch(next()){case 1:stack.push(code[pc++]);break;case 2:stack.pop();break;case 3:return stack;}}return stack;}",
+        &[],
+    ),
+    (
         "rotated-state-machine",
         "function run(code){let pc=0,acc=0;let op=1;while(op){switch(op){case 1:acc+=code[pc++];op=2;break;case 2:acc-=1;op=3;break;case 3:op=0;break;}}return acc;}",
         &[],
+    ),
+];
+
+/// Owned Wasm shapes for fetch helpers and threaded handler cycles beside
+/// look-alikes: (name, module text, instruction, role, through_helper) of
+/// the first site with that instruction.
+pub(crate) const WASM_STATIC_SHAPES: &[(&str, &str, &str, &str, bool)] = &[
+    (
+        "helper-global-pc",
+        r#"(module (memory 1)
+  (global $pc (mut i32) (i32.const 0))
+  (func $next (result i32) (local $at i32)
+    (local.set $at (global.get $pc))
+    (global.set $pc (i32.add (global.get $pc) (i32.const 1)))
+    (i32.load8_u (local.get $at)))
+  (func (export "run") (param $n i32) (result i32) (local $acc i32)
+    (block $exit (loop $again
+      (block $b2 (block $b1 (block $b0
+        (br_table $b0 $b1 $b2 $exit (call $next)))
+        (local.set $acc (i32.add (local.get $acc) (i32.const 1))) (br $again))
+        (local.set $acc (i32.sub (local.get $acc) (i32.const 1))) (br $again))
+      (br $exit)))
+    (local.get $acc)))"#,
+        "br_table",
+        "interpreter-candidate",
+        true,
+    ),
+    (
+        "helper-frame-slot-pc",
+        r#"(module (memory 1)
+  (func $read (param $state i32) (result i32) (local $pc i32)
+    (local.set $pc (i32.load offset=4 (local.get $state)))
+    (i32.store offset=4 (local.get $state) (i32.add (local.get $pc) (i32.const 1)))
+    (i32.load8_u (i32.add (i32.load (local.get $state)) (local.get $pc))))
+  (func (export "run") (param $state i32) (result i32) (local $acc i32)
+    (block $exit (loop $again
+      (block $b2 (block $b1 (block $b0
+        (br_table $b0 $b1 $b2 $exit (call $read (local.get $state))))
+        (local.set $acc (i32.add (local.get $acc) (i32.const 1))) (br $again))
+        (local.set $acc (i32.sub (local.get $acc) (i32.const 1))) (br $again))
+      (br $exit)))
+    (local.get $acc)))"#,
+        "br_table",
+        "interpreter-candidate",
+        true,
+    ),
+    (
+        "helper-local-cursor",
+        r#"(module (memory 1)
+  (func $peek (param $p i32) (result i32) (local $q i32)
+    (local.set $q (local.get $p))
+    (local.set $q (i32.add (local.get $q) (i32.const 1)))
+    (i32.load8_u (local.get $q)))
+  (func (export "run") (param $p i32) (result i32) (local $acc i32)
+    (block $exit (loop $again
+      (block $b2 (block $b1 (block $b0
+        (br_table $b0 $b1 $b2 $exit (call $peek (local.get $p))))
+        (local.set $acc (i32.add (local.get $acc) (i32.const 1))) (br $again))
+        (local.set $acc (i32.sub (local.get $acc) (i32.const 1))) (br $again))
+      (br $exit)))
+    (local.get $acc)))"#,
+        "br_table",
+        "other",
+        false,
+    ),
+    (
+        "helper-outside-loop",
+        r#"(module (memory 1)
+  (global $pc (mut i32) (i32.const 0))
+  (func $next (result i32) (local $at i32)
+    (local.set $at (global.get $pc))
+    (global.set $pc (i32.add (global.get $pc) (i32.const 1)))
+    (i32.load8_u (local.get $at)))
+  (func (export "run") (result i32)
+    (block $b2 (block $b1 (block $b0
+      (br_table $b0 $b1 $b2 (call $next)))
+      (return (i32.const 1)))
+      (return (i32.const 2)))
+    (i32.const 3)))"#,
+        "br_table",
+        "other",
+        true,
     ),
 ];
 
@@ -742,6 +864,13 @@ pub(crate) fn differential_inputs() -> Vec<(String, Vec<u8>, &'static str)> {
     }
     for (name, source) in javascript().into_iter().chain(third_review_javascript()) {
         inputs.push((format!("review:{name}"), source.into_bytes(), "javascript"));
+    }
+    for (name, text, _, _, _) in WASM_STATIC_SHAPES {
+        inputs.push((
+            format!("shape:{name}"),
+            wat::parse_str(text).expect("static shape module"),
+            "wasm",
+        ));
     }
     for (name, bytes) in wasm().into_iter().chain(third_review_wasm()) {
         inputs.push((format!("review:{name}"), bytes, "wasm"));

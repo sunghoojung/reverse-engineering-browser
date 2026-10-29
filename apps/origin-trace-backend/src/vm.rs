@@ -1582,6 +1582,7 @@ mod dispatch_shape_tests {
                 for (key, value) in want.as_object().unwrap() {
                     let actual = match key.as_str() {
                         "function_index" | "line" => &site["location"][key],
+                        "through_helper" => &site["selector"][key],
                         _ => &site[key],
                     };
                     failed |= actual != value;
@@ -1825,6 +1826,29 @@ mod dispatch_shape_tests {
     fn classify_module(bytes: &[u8]) -> Value {
         let classified = dispatch_shape::wasm(bytes, &dispatch_shape::Meter::new()).unwrap();
         dispatch_shape::document(&json!("9"), classified.sites, classified.omissions)
+    }
+
+    /// Fetch helpers and threaded handler cycles in Wasm: a helper whose
+    /// result is a load at a global or frame-slot position it advances, and
+    /// a tail-call cycle whose next index is such a fetch, are interpreter
+    /// candidates. A per-call local cursor or a dispatch outside any loop or
+    /// cycle is not.
+    #[test]
+    fn wasm_fetch_helpers_and_threaded_cycles_classify_structurally() {
+        for (name, text, instruction, role, helper) in review_inputs::WASM_STATIC_SHAPES {
+            let classification = classify_module(&wat::parse_str(text).unwrap());
+            let site = classification["sites"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|site| site["instruction"] == *instruction)
+                .unwrap_or_else(|| panic!("{name}: {classification}"));
+            assert_eq!(
+                (&site["role"], &site["selector"]["through_helper"]),
+                (&json!(role), &json!(helper)),
+                "{name}: {site}"
+            );
+        }
     }
 
     /// Review regression: a trace cap never yields a confident different

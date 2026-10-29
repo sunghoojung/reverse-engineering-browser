@@ -187,7 +187,14 @@ struct Trace<'a> {
     buffer: Option<Key<'a>>,
     buffer_kind: Option<&'static str>,
     lookup: bool,
+    /// The selector is the value a statically bound helper returns.
+    helper: bool,
 }
+/// A followed helper call and the function it resolves to. Its parameters
+/// stand for the call's arguments.
+type Frame<'a> = (&'a CallExpression<'a>, NodeId);
+/// Nested helper calls followed for one selector.
+const MAX_HELPER_FRAMES: usize = 4;
 impl Trace<'_> {
     fn new(source: Source) -> Self {
         Self {
@@ -197,6 +204,7 @@ impl Trace<'_> {
             buffer: None,
             buffer_kind: None,
             lookup: false,
+            helper: false,
         }
     }
 }
@@ -234,6 +242,26 @@ struct Facts<'s, 'a> {
     /// Tables whose entries are written through a computed member, deleted
     /// or reordered in place: an entry's position no longer names its handler.
     element_writes: HashSet<Key<'a>>,
+    /// Values each function returns, including concise arrow bodies.
+    returns: HashMap<NodeId, Vec<&'a Expression<'a>>>,
+    /// A simple parameter's function and position.
+    parameter_positions: HashMap<SymbolId, (NodeId, usize)>,
+    /// Statically bound helpers: unreassigned function declarations and
+    /// variables bound once to a function.
+    helpers: HashMap<SymbolId, NodeId>,
+    /// `this` methods per class body or object literal; None when a name is
+    /// defined more than once there or also as a field or accessor.
+    methods: HashMap<(NodeId, &'a str), Option<NodeId>>,
+    /// The class body or object literal defining each method function, and
+    /// the class symbol a subclass could extend.
+    method_owners: HashMap<NodeId, (NodeId, Option<SymbolId>)>,
+    /// Static member names written anywhere, which can replace a method.
+    member_names_written: HashSet<&'a str>,
+    /// Classes extended by name, and whether any class extends an
+    /// expression that could be any class.
+    extended: HashSet<SymbolId>,
+    opaque_extends: bool,
+    this_computed_write: bool,
     candidates: Vec<Candidate<'a>>,
 }
 impl<'s, 'a> Facts<'s, 'a> {
@@ -396,6 +424,15 @@ impl<'s, 'a> Facts<'s, 'a> {
             member_write_counts: HashMap::new(),
             objects: HashMap::new(),
             element_writes: HashSet::new(),
+            returns: HashMap::new(),
+            parameter_positions: HashMap::new(),
+            helpers: HashMap::new(),
+            methods: HashMap::new(),
+            method_owners: HashMap::new(),
+            member_names_written: HashSet::new(),
+            extended: HashSet::new(),
+            opaque_extends: false,
+            this_computed_write: false,
             candidates: Vec::new(),
         };
         // Scope IDs and node IDs are preorder. Inherited facts take one lookup,
@@ -554,6 +591,114 @@ impl<'s, 'a> Facts<'s, 'a> {
                         aliased.push((id, symbol));
                     }
                 }
+                AstKind::ReturnStatement(statement) => {
+                    if let (Some(value), Some(function)) = (&statement.argument, context.function) {
+                        facts.returns.entry(function).or_default().push(value);
+                    }
+                }
+                AstKind::ArrowFunctionExpression(arrow) => {
+                    if let Some(value) = arrow.get_expression() {
+                        facts.returns.entry(id).or_default().push(value);
+                    }
+                }
+                AstKind::FormalParameters(parameters) => {
+                    if let Some(function) = context.function {
+                        for (position, parameter) in parameters.items.iter().enumerate() {
+                            if let BindingPattern::BindingIdentifier(binding) = &parameter.pattern
+                                && let Some(symbol) = binding.symbol_id.get()
+                            {
+                                facts
+                                    .parameter_positions
+                                    .insert(symbol, (function, position));
+                            }
+                        }
+                    }
+                }
+                AstKind::Class(class) => {
+                    if let Some(heritage) = &class.heritage {
+                        match heritage.expression.get_inner_expression() {
+                            Expression::Identifier(id) => {
+                                if let Some(symbol) = facts.symbol(id) {
+                                    facts.extended.insert(symbol);
+                                }
+                            }
+                            _ => facts.opaque_extends = true,
+                        }
+                    }
+                }
+                AstKind::MethodDefinition(method) => {
+                    let container = nodes.parent_id(id);
+                    if let Some(std::borrow::Cow::Borrowed(name)) = method
+                        .key
+                        .static_name()
+                        .and_then(|name| name.into_cow_str())
+                        && !method.computed
+                    {
+                        let plain = method.kind == MethodDefinitionKind::Method && !method.r#static;
+                        let class = match nodes.parent_kind(container) {
+                            AstKind::Class(class) => class
+                                .id
+                                .as_ref()
+                                .and_then(|id| id.symbol_id.get())
+                                .or_else(|| match nodes.parent_kind(nodes.parent_id(container)) {
+                                    AstKind::VariableDeclarator(declarator) => {
+                                        match &declarator.id {
+                                            BindingPattern::BindingIdentifier(id) => {
+                                                id.symbol_id.get()
+                                            }
+                                            _ => None,
+                                        }
+                                    }
+                                    _ => None,
+                                }),
+                            _ => None,
+                        };
+                        let function = method.value.node_id.get();
+                        let defined = facts.methods.contains_key(&(container, name));
+                        facts
+                            .methods
+                            .insert((container, name), (plain && !defined).then_some(function));
+                        if plain {
+                            facts.method_owners.insert(function, (container, class));
+                        }
+                    }
+                }
+                AstKind::ObjectProperty(property) => {
+                    if !property.computed
+                        && let Some(std::borrow::Cow::Borrowed(name)) = property
+                            .key
+                            .static_name()
+                            .and_then(|name| name.into_cow_str())
+                    {
+                        let container = nodes.parent_id(id);
+                        // An arrow's `this` is lexical, never the object.
+                        let function = match &property.value {
+                            Expression::FunctionExpression(function)
+                                if property.kind == PropertyKind::Init =>
+                            {
+                                Some(function.node_id.get())
+                            }
+                            _ => None,
+                        };
+                        let defined = facts.methods.contains_key(&(container, name));
+                        facts
+                            .methods
+                            .insert((container, name), function.filter(|_| !defined));
+                        if let Some(function) = function {
+                            facts.method_owners.insert(function, (container, None));
+                        }
+                    }
+                }
+                AstKind::PropertyDefinition(property) => {
+                    // A field replaces a prototype method on every instance.
+                    if let Some(std::borrow::Cow::Borrowed(name)) = property
+                        .key
+                        .static_name()
+                        .and_then(|name| name.into_cow_str())
+                    {
+                        facts.methods.insert((nodes.parent_id(id), name), None);
+                    }
+                }
                 AstKind::SwitchStatement(switch) => {
                     facts.candidates.push(Candidate {
                         node: id,
@@ -604,6 +749,20 @@ impl<'s, 'a> Facts<'s, 'a> {
                     facts.element_writes.insert(key);
                 }
             }
+            if let AstKind::ComputedMemberExpression(member) = node.kind()
+                && matches!(
+                    member.object.get_inner_expression(),
+                    Expression::ThisExpression(_)
+                )
+                && match nodes.parent_kind(node.id()) {
+                    AstKind::AssignmentExpression(a) => a.left.span() == member.span,
+                    AstKind::UpdateExpression(_) => true,
+                    AstKind::UnaryExpression(u) => u.operator.as_str() == "delete",
+                    _ => false,
+                }
+            {
+                facts.this_computed_write = true;
+            }
             if let AstKind::StaticMemberExpression(member) = node.kind()
                 && matches!(
                     nodes.parent_kind(node.id()),
@@ -634,6 +793,24 @@ impl<'s, 'a> Facts<'s, 'a> {
                 if write {
                     *facts.member_write_counts.entry(key).or_default() += 1;
                 }
+            }
+            if let AstKind::StaticMemberExpression(member) = node.kind()
+                && match nodes.parent_kind(node.id()) {
+                    AstKind::AssignmentExpression(a) => a.left.span() == member.span,
+                    AstKind::UpdateExpression(_)
+                    | AstKind::ArrayAssignmentTarget(_)
+                    | AstKind::AssignmentTargetRest(_)
+                    | AstKind::AssignmentTargetWithDefault(_)
+                    | AstKind::AssignmentTargetPropertyProperty(_) => true,
+                    AstKind::UnaryExpression(u) => u.operator.as_str() == "delete",
+                    AstKind::ForInStatement(f) => f.left.span() == member.span,
+                    AstKind::ForOfStatement(f) => f.left.span() == member.span,
+                    _ => false,
+                }
+            {
+                facts
+                    .member_names_written
+                    .insert(member.property.name.as_str());
             }
         }
         let mut comparisons = HashMap::<
@@ -819,39 +996,62 @@ impl<'s, 'a> Facts<'s, 'a> {
                 }
             }
         }
-        // Follow statically bound direct helper calls, at most 16 edges. This
-        // lets a step function's dispatch inherit the invoking loop without
-        // rewalking its body or following unknown call targets.
-        let mut functions = HashMap::new();
+        // Statically bound helpers: unreassigned function declarations, and
+        // variables bound once to a function or arrow.
+        for node in nodes.iter() {
+            if !meter.charge(1) {
+                break;
+            }
+            if let AstKind::Function(function) = node.kind()
+                && let Some(id) = &function.id
+                && let Some(symbol) = id.symbol_id.get()
+                && !facts.changed_symbols.contains(&symbol)
+            {
+                facts.helpers.insert(symbol, node.id());
+            }
+        }
+        let bound = facts
+            .definitions
+            .iter()
+            .filter_map(|(key, definitions)| match (key, definitions.as_slice()) {
+                (Key::Symbol(symbol), [definition])
+                    if facts.symbol_write_counts.get(symbol) == Some(&1)
+                        && !facts.scope_opaque(definition.scope)
+                        && matches!(
+                            definition.value.get_inner_expression(),
+                            Expression::FunctionExpression(_)
+                                | Expression::ArrowFunctionExpression(_)
+                        ) =>
+                {
+                    Some((*symbol, definition.value.get_inner_expression().node_id()))
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        meter.charge(facts.definitions.len() as u64);
+        facts.helpers.extend(bound);
+        // Follow statically bound helper calls, at most 16 edges. This lets a
+        // step function's dispatch, and a fetch helper's cursor writes,
+        // inherit the invoking loop without rewalking bodies or following
+        // unknown call targets.
         let mut calls = Vec::new();
         for node in nodes.iter() {
-            match node.kind() {
-                AstKind::Function(function) => {
-                    if let Some(id) = &function.id
-                        && let Some(symbol) = id.symbol_id.get()
-                        && !facts.changed_symbols.contains(&symbol)
-                    {
-                        functions.insert(symbol, node.id());
-                    }
-                }
-                AstKind::CallExpression(call) => {
-                    if let Expression::Identifier(id) = call.callee.get_inner_expression()
-                        && let Some(symbol) = facts.symbol(id)
-                    {
-                        calls.push((node.id(), symbol));
-                    }
-                }
-                _ => (),
+            if !meter.charge(1) {
+                break;
+            }
+            if let AstKind::CallExpression(call) = node.kind()
+                && let Some(function) = facts.helper(&call.callee, facts.context(node.id()))
+            {
+                calls.push((node.id(), function));
             }
         }
         for _ in 0..16 {
             let mut changed = false;
-            for &(call, symbol) in &calls {
+            for &(call, function) in &calls {
                 if !meter.charge(1) {
                     break;
                 }
-                if let (Some(&function), Some(loop_id)) =
-                    (functions.get(&symbol), facts.loop_id(call))
+                if let Some(loop_id) = facts.loop_id(call)
                     && let std::collections::hash_map::Entry::Vacant(entry) =
                         facts.invoked_loops.entry(function)
                 {
@@ -869,6 +1069,35 @@ impl<'s, 'a> Facts<'s, 'a> {
             }
         }
         facts
+    }
+    /// The function a call statically resolves to: a bound helper, or a
+    /// `this.m()` method defined once in the class body or object literal
+    /// of the calling method. A name written as a member anywhere, a computed
+    /// `this` write, or a subclass that could override it resolves nothing.
+    fn helper(&self, callee: &'a Expression<'a>, context: Context) -> Option<NodeId> {
+        match callee.get_inner_expression() {
+            Expression::Identifier(id) => self.helpers.get(&self.symbol(id)?).copied(),
+            Expression::StaticMemberExpression(member)
+                if matches!(
+                    member.object.get_inner_expression(),
+                    Expression::ThisExpression(_)
+                ) =>
+            {
+                let name = member.property.name.as_str();
+                if self.this_computed_write || self.member_names_written.contains(name) {
+                    return None;
+                }
+                let &(container, class) = self.method_owners.get(&context.this?)?;
+                if class.is_some_and(|class| self.extended.contains(&class))
+                    || (self.opaque_extends
+                        && matches!(self.semantic.nodes().kind(container), AstKind::ClassBody(_)))
+                {
+                    return None;
+                }
+                *self.methods.get(&(container, name))?
+            }
+            _ => None,
+        }
     }
     /// A table key followed through aliases bound once (`var t = ops`), by
     /// Oxc symbol, at most 8 links. A link with any other write, a parameter
@@ -981,18 +1210,74 @@ impl<'s, 'a> Facts<'s, 'a> {
         }
         false
     }
+    /// The argument a followed helper call passes for a parameter, and the
+    /// frames that remain outside that call.
+    fn argument<'f>(
+        &self,
+        symbol: SymbolId,
+        frames: &'f [Frame<'a>],
+    ) -> Option<(&'a Expression<'a>, &'f [Frame<'a>])> {
+        let &(function, position) = self.parameter_positions.get(&symbol)?;
+        let at = frames.iter().rposition(|(_, frame)| *frame == function)?;
+        let argument = frames[at].0.arguments.get(position)?.as_expression()?;
+        Some((argument, &frames[..at]))
+    }
+    /// Whether a key read inside followed helpers advances in the loop. A
+    /// parameter stands for its argument; a member reached through a
+    /// parameter is shared with the caller, so the helper's own writes to it
+    /// count too. A write to a plain parameter changes only the helper's copy.
+    fn advances_through(
+        &self,
+        key: Key<'a>,
+        candidate: &Candidate<'a>,
+        arithmetic: bool,
+        query: &mut Query,
+        frames: &[Frame<'a>],
+    ) -> Option<Key<'a>> {
+        let substituted = self.substitute(key, frames);
+        if let Some(caller) = substituted
+            && self.advances(caller, candidate, arithmetic, query)
+        {
+            return Some(caller);
+        }
+        (matches!(key, Key::Member(..)) && substituted != Some(key))
+            .then(|| self.advances(key, candidate, arithmetic, query))
+            .filter(|advances| *advances)
+            .map(|_| key)
+    }
+    /// A key read inside a followed helper, restated in its caller's terms
+    /// when it names a parameter (`pc`, or `state.pc` for a `state` argument).
+    fn substitute(&self, key: Key<'a>, frames: &[Frame<'a>]) -> Option<Key<'a>> {
+        let (symbol, name) = match key {
+            Key::Symbol(symbol) => (symbol, None),
+            Key::Member(symbol, name) => (symbol, Some(name)),
+            _ => return Some(key),
+        };
+        let Some((argument, outer)) = self.argument(symbol, frames) else {
+            return Some(key);
+        };
+        let context = self.context(argument.node_id());
+        let key = match name {
+            None => self.index_key(argument, context, 0)?,
+            Some(name) => self.member(argument, name, context)?,
+        };
+        self.substitute(key, outer)
+    }
     fn trace(
         &self,
         expression: &'a Expression<'a>,
         candidate: &Candidate<'a>,
         query: &mut Query,
         depth: u8,
+        frames: &[Frame<'a>],
     ) -> Trace<'a> {
         if !query.step(self.meter, depth) {
             return Trace::new(Source::Unknown);
         }
-        let context = self.context(candidate.node);
         let expression = expression.get_inner_expression();
+        // Each expression resolves `this` and its function where it is
+        // written, which inside a followed helper is the helper.
+        let context = self.context(expression.node_id());
         match expression {
             Expression::NumericLiteral(_)
             | Expression::StringLiteral(_)
@@ -1002,6 +1287,9 @@ impl<'s, 'a> Facts<'s, 'a> {
                 let Some(symbol) = self.symbol(identifier) else {
                     return Trace::new(Source::Unknown);
                 };
+                if let Some((argument, outer)) = self.argument(symbol, frames) {
+                    return self.trace(argument, candidate, query, depth + 1, outer);
+                }
                 let mut best = Trace::new(if self.parameters.contains(&symbol) {
                     Source::CallArgument
                 } else {
@@ -1024,8 +1312,12 @@ impl<'s, 'a> Facts<'s, 'a> {
                     {
                         continue;
                     }
-                    let mut trace = self.trace(definition.value, candidate, query, depth + 1);
-                    trace.anchor = Some(definition.at);
+                    let mut trace =
+                        self.trace(definition.value, candidate, query, depth + 1, frames);
+                    trace.anchor = trace
+                        .anchor
+                        .filter(|_| trace.helper)
+                        .or(Some(definition.at));
                     if !self.executes_in_loop(
                         definition.function,
                         definition.value.span(),
@@ -1050,11 +1342,14 @@ impl<'s, 'a> Facts<'s, 'a> {
                 query,
                 depth,
                 None,
+                frames,
             ),
             Expression::StaticMemberExpression(_) => {
                 let mut trace = Trace::new(Source::FrameSlot);
                 if let Some(key) = self.key(expression, context) {
-                    trace.repeats = self.advances(key, candidate, true, query);
+                    trace.repeats = self
+                        .advances_through(key, candidate, true, query, frames)
+                        .is_some();
                 }
                 trace.anchor = Some(expression.span().start);
                 trace
@@ -1089,14 +1384,37 @@ impl<'s, 'a> Facts<'s, 'a> {
                         query,
                         depth,
                         text,
+                        frames,
                     )
+                } else if frames.len() < MAX_HELPER_FRAMES
+                    && let Some(helper) = self.helper(&call.callee, context)
+                {
+                    // The value a statically bound helper returns. Each
+                    // returned expression is one alternative, as each write
+                    // of a variable is.
+                    let mut inner = frames.to_vec();
+                    inner.push((call, helper));
+                    let mut best = Trace::new(Source::Unknown);
+                    for value in self.returns.get(&helper).into_iter().flatten() {
+                        if !query.step(self.meter, depth) {
+                            break;
+                        }
+                        let mut trace = self.trace(value, candidate, query, depth + 1, &inner);
+                        trace.helper = trace.source != Source::Unknown;
+                        if (trace.repeats, priority(trace.source))
+                            > (best.repeats, priority(best.source))
+                        {
+                            best = trace;
+                        }
+                    }
+                    best
                 } else {
                     Trace::new(Source::Unknown)
                 }
             }
             Expression::BinaryExpression(binary) => {
-                let left = self.trace(&binary.left, candidate, query, depth + 1);
-                let right = self.trace(&binary.right, candidate, query, depth + 1);
+                let left = self.trace(&binary.left, candidate, query, depth + 1, frames);
+                let right = self.trace(&binary.right, candidate, query, depth + 1, frames);
                 if (left.repeats, priority(left.source)) >= (right.repeats, priority(right.source))
                 {
                     left
@@ -1105,19 +1423,21 @@ impl<'s, 'a> Facts<'s, 'a> {
                 }
             }
             Expression::UnaryExpression(unary) => {
-                self.trace(&unary.argument, candidate, query, depth + 1)
+                self.trace(&unary.argument, candidate, query, depth + 1, frames)
             }
             Expression::AssignmentExpression(a) => {
-                self.trace(&a.right, candidate, query, depth + 1)
+                self.trace(&a.right, candidate, query, depth + 1, frames)
             }
             Expression::SequenceExpression(sequence) => sequence.expressions.last().map_or_else(
                 || Trace::new(Source::Unknown),
-                |value| self.trace(value, candidate, query, depth + 1),
+                |value| self.trace(value, candidate, query, depth + 1, frames),
             ),
             Expression::UpdateExpression(update) => {
                 let mut trace = Trace::new(Source::Constant);
                 if let Some(key) = self.simple_target(&update.argument, context) {
-                    trace.repeats = self.advances(key, candidate, true, query);
+                    trace.repeats = self
+                        .advances_through(key, candidate, true, query, frames)
+                        .is_some();
                 }
                 trace
             }
@@ -1134,23 +1454,47 @@ impl<'s, 'a> Facts<'s, 'a> {
         query: &mut Query,
         depth: u8,
         buffer_kind: Option<&'static str>,
+        frames: &[Frame<'a>],
     ) -> Trace<'a> {
-        let context = self.context(candidate.node);
-        if let Some(key) = self.index_key(index, context, 0)
-            && self.advances(key, candidate, !matches!(key, Key::Symbol(_)), query)
-        {
+        let context = self.context(index.node_id());
+        if let Some(key) = self.index_key(index, context, 0).and_then(|key| {
+            self.advances_through(
+                key,
+                candidate,
+                !matches!(key, Key::Symbol(_)),
+                query,
+                frames,
+            )
+        }) {
             let mut trace = Trace::new(if matches!(key, Key::Symbol(_)) {
                 Source::CursorIndex
             } else {
                 Source::FrameSlot
             });
-            trace.repeats = self.executes_in_loop(context.function, span, candidate);
+            // A read inside a followed helper repeats when the outermost
+            // followed call does.
+            trace.repeats = match frames.first() {
+                Some((call, _)) => self.executes_in_loop(
+                    self.context(call.node_id()).function,
+                    call.span,
+                    candidate,
+                ),
+                None => self.executes_in_loop(context.function, span, candidate),
+            };
             trace.anchor = Some(span.start);
+            let buffer = match buffer.get_inner_expression() {
+                Expression::Identifier(id) => self
+                    .symbol(id)
+                    .and_then(|symbol| self.argument(symbol, frames))
+                    .map_or(buffer, |(argument, _)| argument),
+                _ => buffer,
+            };
+            let context = self.context(buffer.node_id());
             trace.buffer = self.key(buffer, context);
             trace.buffer_kind = buffer_kind.or_else(|| self.buffer_kind(buffer, context));
             return trace;
         }
-        let mut trace = self.trace(index, candidate, query, depth + 1);
+        let mut trace = self.trace(index, candidate, query, depth + 1, frames);
         if trace.source.cursor_like() {
             trace.lookup = true;
         }
@@ -1376,7 +1720,7 @@ fn parsed(
             trace.repeats = facts.loop_id(candidate.node).is_some();
             trace
         } else {
-            facts.trace(candidate.selector, candidate, &mut query, 0)
+            facts.trace(candidate.selector, candidate, &mut query, 0, &[])
         };
         let trace = if query.limited {
             Trace::new(Source::Unknown)
@@ -1431,6 +1775,7 @@ fn parsed(
             selector_expression: selector.to_owned(),
             selector_offset: trace.anchor.map(|at| at as usize),
             through_lookup: trace.lookup,
+            through_helper: trace.helper,
             arm_count: candidate.arms,
             loop_range: facts
                 .loop_span(candidate.node)

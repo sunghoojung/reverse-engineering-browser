@@ -234,7 +234,9 @@ read, literal, or a bounded chain of aliases to one, with no compound update
 anywhere in the region. Every plain write of an alias must be direct and one
 must precede the dispatch, so a rotated loop that fetches before the loop and
 again at its latch qualifies. A selector written more than once with a literal
-is a state machine. Transformed, position-dependent, saved-state, and
+is a state machine. A call to a helper (`next()`, `this.fetch()`,
+`read(state)`) whose one definition returns exactly one direct indexed read is
+direct, including `state.code[state.pc++]`. Transformed, position-dependent, saved-state, and
 unresolved selectors do not establish a fixed opcode mapping. The analyzer retains at most 1024 distinct handlers and
 reports `handler-limit` when additional candidates are omitted.
 

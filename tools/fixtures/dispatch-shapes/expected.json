@@ -396,6 +396,22 @@
           "buffer_kind": "arguments"
         }
       ]
+    },
+    {
+      "artifact": "fetch-helper-interpreter.js",
+      "kind": "javascript",
+      "sites": [
+        {
+          "line": 10,
+          "instruction": "switch",
+          "dispatch_kind": "switch_on_value",
+          "selector_source": "cursor_index",
+          "repeats": "loop",
+          "role": "interpreter-candidate",
+          "buffer_kind": "unknown",
+          "through_helper": true
+        }
+      ]
     }
   ]
 }

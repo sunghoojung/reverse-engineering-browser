@@ -1497,8 +1497,8 @@
             !isSafeIntegerInRange(location.column, 1, Number.MAX_SAFE_INTEGER)
             : !(location.function_index === null || isSafeIntegerInRange(location.function_index, 0, 4294967295)) ||
               location.line !== null || location.column !== null)) return false;
-        if (!vmWorkspaceExact(site.selector, ['expression', 'byte_offset', 'through_lookup']) ||
-          typeof site.selector.through_lookup !== 'boolean' ||
+        if (!vmWorkspaceExact(site.selector, ['expression', 'byte_offset', 'through_lookup', 'through_helper']) ||
+          typeof site.selector.through_lookup !== 'boolean' || typeof site.selector.through_helper !== 'boolean' ||
           typeof site.selector.expression !== 'string' || site.selector.expression.length === 0 ||
           !isBoundedText(site.selector.expression, 160) ||
           !(site.selector.byte_offset === null || isSafeIntegerInRange(site.selector.byte_offset, 0, Number.MAX_SAFE_INTEGER))) return false;

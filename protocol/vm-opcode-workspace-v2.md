@@ -514,7 +514,8 @@ be completed. See [dispatch classification](vm-dispatch-classification-v1.md).
 Producer 2.12.0 also recovers function-array tables: a function or arrow
 element's opcode is its position in the literal, and the gate requires the
 element's AST position to match. Recovery follows a dispatched name through
-plain aliases (`t = ops`) and called temporaries (`h = ops[op]; h(s)`), and
-a rotated selector through every one of its writes. Earlier producers
+plain aliases (`t = ops`) and called temporaries (`h = ops[op]; h(s)`), a
+rotated selector through every one of its writes, and a selector returned by a
+fetch helper. Earlier producers
 recovered no handlers for these shapes, so an analysis could demote a real
 interpreter to `candidate`.

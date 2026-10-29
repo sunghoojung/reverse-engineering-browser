@@ -12,7 +12,11 @@ drifts from the standalone schema.
 This contract lands as one unit with the commits that introduce and then
 correct it (526178a, 7258370, f4092e3 and their follow-ups). No document was
 released against an earlier draft, so it keeps version 1; do not treat any of
-those commits alone as a released contract.
+those commits alone as a released contract. The static-shape commits that add
+the `aliased call` instruction and `selector.through_helper` belong to the
+same unreleased unit: release tags up to v0.3.2 predate the schema. VM
+detector producer 1.9.0 and workspace producer 2.12.0 write them; documents
+from the earlier drafts lack the field and are not accepted.
 
 ## Why it exists
 
@@ -30,7 +34,9 @@ opcode or decode logic runs.
 
 `role` is derived from those three fields plus two recorded refinements,
 `buffer_kind` and `selector.through_lookup`. Consumers recompute it and reject
-a document whose role disagrees.
+a document whose role disagrees. A third refinement,
+`selector.through_helper`, records that the selector is the value a
+statically bound helper call returns; it is evidence, not a role input.
 
 - `interpreter-candidate`: `repeats=loop` with `cursor_index`,
   `cursor_pointer` or `frame_slot`, on `switch_on_value`, `handler_table` or
@@ -70,7 +76,17 @@ unknown; its operands never become the selector.
 - A load through `base + index` with an arithmetically advanced index
   (`pc = pc ± n`, through masks or width casts) is `cursor_index`; through one
   advanced pointer it is `cursor_pointer`. A linked-list step, a reload or a
-  call result is not an advance.
+  call result is not an advance. A global the function advances
+  (`global.set g (global.get g + n)`), read directly or copied into a local,
+  is a cursor too; it persists across calls.
+- A call to a function of the module whose result is a fetch at a position
+  that function advances itself, a global or a frame slot it stores back
+  advanced, takes that fetch's source and sets `through_helper`. A loop
+  enclosing the call repeats the selector. A cursor held only in the callee's
+  locals starts fresh on every call and does not count, and a second-level
+  lookup is a walk. Only callees of functions with dispatch sites are
+  summarized, once each in index order and under the same meter; a helper's
+  own helper calls are not followed.
 - A table read at an index nothing advances is a lookup, not a cursor. It takes
   the source of its index: `call_argument` when every index is an unwritten
   argument, `unknown` when one comes from a call, as in a worklist drained by
@@ -131,10 +147,22 @@ semicolon insertion and Unicode names do not require text-based guessing.
   when assigned a new position. Writes in functions stored in the dispatched
   table count, including `pc++`, `pc += k` and `pc = code.length`. A switch arm
   dispatching that table shares this evidence.
-- Direct calls to statically bound, unreassigned function declarations propagate
-  an invoking loop for at most 16 edges. This recognizes a loop calling a
-  `step()` helper without repeatedly traversing function bodies. Unknown call
-  targets and values returned by helpers are not inferred.
+- Calls to statically bound helpers propagate an invoking loop for at most 16
+  edges. This recognizes a loop calling a `step()` helper without repeatedly
+  traversing function bodies. A helper is an unreassigned function
+  declaration, a variable bound once to a function or arrow, or a `this.m()`
+  method defined once in the class body or object literal of the calling
+  method. A name also written as a member anywhere, a computed `this` write,
+  a class field or accessor of that name, or a subclass that could override
+  it resolves nothing; an arrow property's `this` is never the object.
+- A helper call's returned values are followed, each return one alternative,
+  through at most 4 nested helper calls, setting `through_helper`. Inside a
+  followed call a parameter stands for its argument, so a helper returning
+  `code[pc]` is a cursor read when the loop advances the `pc` it passes. A
+  member reached through a parameter (`state.pc`) is shared with the caller,
+  so the helper's own `state.pc++` advances it; a write to a plain parameter
+  changes only the helper's copy. A read inside a followed helper repeats when
+  the outermost followed call is in the loop.
 - Object positions are `frame_slot`; a repeating frame slot requires an
   arithmetic advance. A worklist index assigned from `queue.pop()` is unknown.
 - In-place parameter coercions preserve `call_argument`. Definitions and writes
@@ -160,8 +188,9 @@ Every site carries the artifact ID, `location` (Wasm function index and code
 entry offset, or JavaScript line, column and region start), the byte offset and
 size of the dispatch instruction or first comparison, a bounded `selector`
 rendering of the instructions or source expression that produced the
-selector, the offset of the closest producing write or load, the arm or
-comparison count, and the loop range.
+selector, the offset of the closest producing write or load (inside the
+helper for a helper fetch), whether a lookup or a helper produced it, the arm
+or comparison count, and the loop range.
 
 `call_indirect` sites keep `table`: table index, type index, and the real table
 slots whose function signature equals the call type, scanned once per table
@@ -360,9 +389,12 @@ executes.
 - A byte-cursor loop over text, such as a format-string or tokenizer loop, is
   structurally an interpreter candidate. `buffer_kind` flags JavaScript string
   buffers; Wasm has no equivalent signal.
-- An opcode fetched through a helper call (`op = next(state)`) is `unknown`.
-  Only a statically bound direct helper invocation can propagate loop context;
-  returned values are not followed.
+- A helper is resolved only by static binding. Methods reached other than
+  through `this` in their own class or object literal, `call`, `apply` and
+  `bind`, and callees chosen at run time are not followed. A helper invoked
+  from several loops propagates the first of them. A Wasm helper that reads
+  at a cursor passed as its argument, so the caller advances it, is not
+  summarized.
 - Without flow order, an argument that is unconditionally overwritten before
   dispatch still counts as a reaching `call_argument` alternative.
 - On the pinned public QuickJS debug build, 13 of 384 sites are interpreter

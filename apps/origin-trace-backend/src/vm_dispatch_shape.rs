@@ -200,6 +200,8 @@ pub(crate) struct Site {
     pub selector_offset: Option<usize>,
     /// The selector is a table read keyed by a cursor-loaded value.
     pub through_lookup: bool,
+    /// The selector is the value a statically bound helper call returns.
+    pub through_helper: bool,
     pub arm_count: Option<u64>,
     pub loop_range: Option<(usize, usize)>,
     pub buffer_kind: Option<std::borrow::Cow<'static, str>>,
@@ -315,6 +317,7 @@ pub(crate) fn document(artifact_id: &Value, mut sites: Vec<Site>, omissions: Vec
                     "expression": bounded_expression(&site.selector_expression),
                     "byte_offset": site.selector_offset,
                     "through_lookup": site.through_lookup,
+                    "through_helper": site.through_helper,
                 },
                 "arm_count": site.arm_count,
                 "loop": site.loop_range.map(|(start, end)| json!({
@@ -462,6 +465,13 @@ struct Facts<'a> {
     loops: Vec<(usize, usize)>,
     dispatch: Vec<Dispatch>,
     compares: Vec<Compare>,
+    /// Writes of each global, in offset order.
+    global_defs: BTreeMap<u32, Vec<(usize, NodeId)>>,
+    /// Values left as the function's result at `return` or its final `end`.
+    returns: Vec<NodeId>,
+    /// Functions of the module whose result is a cursor fetch at a position
+    /// they advance themselves, with that fetch's source.
+    fetchers: std::rc::Rc<HashMap<u32, Source>>,
     local_memo: RefCell<BTreeMap<u32, Memo>>,
     in_progress: RefCell<Vec<u32>>,
     steps: Cell<u64>,
@@ -656,6 +666,11 @@ struct Trace {
     /// The selector is a table read keyed by a cursor-loaded value, not the
     /// fetched value itself.
     through_lookup: bool,
+    /// Globals the function advances arithmetically, used as the cursor.
+    globals: Vec<u32>,
+    /// The function whose result is the fetched value, when the selector is
+    /// a call to a helper that fetches at a cursor it advances itself.
+    helper: Option<u32>,
 }
 
 impl Trace {
@@ -667,6 +682,8 @@ impl Trace {
             anchor: None,
             definition: None,
             through_lookup: false,
+            globals: Vec::new(),
+            helper: None,
         }
     }
 }
@@ -788,6 +805,9 @@ impl<'a> Facts<'a> {
             loops: Vec::new(),
             dispatch: Vec::new(),
             compares: Vec::new(),
+            global_defs: BTreeMap::new(),
+            returns: Vec::new(),
+            fetchers: std::rc::Rc::default(),
             local_memo: RefCell::new(BTreeMap::new()),
             in_progress: RefCell::new(Vec::new()),
             steps: Cell::new(0),
@@ -892,7 +912,20 @@ impl<'a> Facts<'a> {
                                 return None;
                             }
                         }
+                    } else if let Some(&value) = stack.last() {
+                        // The function's final `end`: its result.
+                        facts.memory.push(&mut facts.returns, value);
                     }
+                }
+                Operator::GlobalSet { global_index } => {
+                    let value = pop(&mut stack);
+                    if !facts.global_defs.contains_key(global_index) && !facts.memory.keep(96) {
+                        return None;
+                    }
+                    facts.memory.push(
+                        facts.global_defs.entry(*global_index).or_default(),
+                        (start, value),
+                    );
                 }
                 Operator::LocalGet { local_index } => {
                     let id = facts.node(Node::Local(*local_index));
@@ -1013,6 +1046,10 @@ impl<'a> Facts<'a> {
                     }
                 }
                 other => {
+                    if matches!(other, Operator::Return) && stack.len() > floor {
+                        let value = *stack.last().expect("returned value");
+                        facts.memory.push(&mut facts.returns, value);
+                    }
                     if let Some((name, offset)) = load_op(other) {
                         let addr = pop(&mut stack);
                         let id = facts.node(Node::Load {
@@ -1212,6 +1249,51 @@ impl<'a> Facts<'a> {
         advanced
     }
 
+    /// A global some write in this function advances arithmetically
+    /// (`global.set g (global.get g + n)`): a program position that
+    /// persists across calls.
+    fn advanced_global(&self, global: u32) -> bool {
+        let defs = self.global_defs.get(&global).map_or(&[][..], Vec::as_slice);
+        self.meter.charge(defs.len() as u64);
+        defs.iter().any(|(_, def)| {
+            match self.nodes[self.strip_masks(*def)] {
+                Node::Bin { op, a, b } if op.ends_with(".add") || op.ends_with(".sub") => [a, b]
+                    .iter()
+                    .any(|side| matches!(self.nodes[self.strip_masks(*side)], Node::Global(g) if g == global)),
+                _ => false,
+            }
+        })
+    }
+
+    /// The advanced global an address term reads, directly or through a
+    /// local every write of which copies it (`pc = global.get g`).
+    fn global_cursor(&self, term: NodeId) -> Option<u32> {
+        match self.nodes[term] {
+            Node::Global(global) => self.advanced_global(global).then_some(global),
+            Node::Local(local) if local >= self.params => {
+                let defs = self.definitions(local);
+                self.meter.charge(defs.len() as u64);
+                let mut global = None;
+                for (_, def) in defs.iter().take(64) {
+                    match self.nodes[self.strip(*def)] {
+                        Node::Global(g) if global.is_none_or(|known| known == g) => {
+                            global = Some(g)
+                        }
+                        _ => return None,
+                    }
+                }
+                global.filter(|global| defs.len() <= 64 && self.advanced_global(*global))
+            }
+            _ => None,
+        }
+    }
+
+    fn global_written_inside(&self, global: u32, (start, end): (usize, usize)) -> bool {
+        let defs = self.global_defs.get(&global).map_or(&[][..], Vec::as_slice);
+        let first = defs.partition_point(|(offset, _)| *offset <= start);
+        defs.get(first).is_some_and(|(offset, _)| *offset < end)
+    }
+
     fn loop_index(&self) -> &Intervals {
         self.loop_tree
             .get_or_init(|| Intervals::new(self.loops.iter().copied(), self.meter))
@@ -1346,6 +1428,18 @@ impl<'a> Facts<'a> {
             Node::Call { callee: None, at } => {
                 let mut trace = Trace::new(Source::HandlerAddress);
                 trace.anchor = Some(at);
+                (vec![trace], false)
+            }
+            Node::Call {
+                callee: Some(callee),
+                at,
+            } => {
+                let mut trace = Trace::new(Source::Unknown);
+                if let Some(source) = self.fetchers.get(&callee) {
+                    trace.source = *source;
+                    trace.helper = Some(callee);
+                    trace.anchor = Some(at);
+                }
                 (vec![trace], false)
             }
             _ => (vec![Trace::new(Source::Unknown)], false),
@@ -1556,6 +1650,19 @@ impl<'a> Facts<'a> {
             trace.advancing = advanced;
             return (vec![trace], provisional);
         }
+        let globals = terms
+            .iter()
+            .filter_map(|(term, _)| self.global_cursor(*term))
+            .collect::<Vec<_>>();
+        if !globals.is_empty() {
+            trace.source = if terms.len() >= 2 {
+                Source::CursorIndex
+            } else {
+                Source::CursorPointer
+            };
+            trace.globals = globals;
+            return (vec![trace], provisional);
+        }
         // A pc reloaded from a saved slot before each fetch: frame_slot.
         let reloaded = locals
             .iter()
@@ -1723,6 +1830,18 @@ impl<'a> Facts<'a> {
             return (Repeats::Once, None);
         };
         let innermost = loops.ranges[index];
+        // A helper advances its own persistent cursor on every call, so a
+        // loop around the call re-derives the selector each iteration.
+        if trace.helper.is_some() {
+            let matching = loops.matching(index, |(start, end)| {
+                trace
+                    .anchor
+                    .is_some_and(|anchor| start < anchor && anchor < end)
+            });
+            return matching.map_or((Repeats::Unknown, Some(innermost)), |range| {
+                (Repeats::Loop, Some(range))
+            });
+        }
         if !matches!(
             trace.source,
             Source::CursorIndex
@@ -1734,7 +1853,9 @@ impl<'a> Facts<'a> {
             return (Repeats::Unknown, Some(innermost));
         }
         if (trace.source == Source::FrameSlot && trace.slots.is_empty())
-            || (trace.source != Source::FrameSlot && trace.advancing.is_empty())
+            || (trace.source != Source::FrameSlot
+                && trace.advancing.is_empty()
+                && trace.globals.is_empty())
         {
             return (Repeats::Unknown, Some(innermost));
         }
@@ -1751,10 +1872,16 @@ impl<'a> Facts<'a> {
                     local.is_none_or(|local| self.written_inside(local, (start, end)))
                         && self.stores_back(slot, *local, (start, end))
                 }),
-                _ => trace
-                    .advancing
-                    .iter()
-                    .any(|local| self.written_inside(*local, (start, end))),
+                _ => {
+                    trace
+                        .advancing
+                        .iter()
+                        .any(|local| self.written_inside(*local, (start, end)))
+                        || trace
+                            .globals
+                            .iter()
+                            .any(|global| self.global_written_inside(*global, (start, end)))
+                }
             }
         });
         matching.map_or((Repeats::Unknown, Some(innermost)), |range| {
@@ -1831,6 +1958,38 @@ impl<'a> Facts<'a> {
             range,
             limited,
         })
+    }
+
+    /// The source of a cursor fetch this function returns at a position it
+    /// advances itself: a global it advances, or a frame slot it stores back
+    /// advanced. A cursor held only in a local starts fresh on every call,
+    /// and a second-level lookup is a walk, so neither makes a fetch helper.
+    fn fetch_summary(&self) -> Option<Source> {
+        for &value in self.returns.iter().take(16) {
+            self.steps.set(0);
+            self.step_limit.set(MAX_QUERY_STEPS);
+            self.deepest.set(0);
+            self.limited.set(false);
+            self.depth_cut.set(false);
+            let (traces, _) = self.classify(value, 0);
+            if self.limited.get() || self.nodes_exhausted {
+                continue;
+            }
+            for trace in traces {
+                let persistent = !trace.through_lookup
+                    && match trace.source {
+                        Source::CursorIndex | Source::CursorPointer => !trace.globals.is_empty(),
+                        Source::FrameSlot => trace.slots.iter().any(|(carrier, slot)| {
+                            self.stores_back(slot, *carrier, (0, usize::MAX))
+                        }),
+                        _ => false,
+                    };
+                if persistent {
+                    return Some(trace.source);
+                }
+            }
+        }
+        None
     }
 
     fn render(&self, id: NodeId, depth: u8) -> String {
@@ -1915,7 +2074,11 @@ impl<'a> Facts<'a> {
             }
             _ => text,
         };
-        if trace.source == Source::FrameSlot
+        if let Some(helper) = trace.helper {
+            text.push_str(&format!(
+                "; f{helper} returns a fetch at a cursor it advances"
+            ));
+        } else if trace.source == Source::FrameSlot
             && let Some((local, (base, offset))) = trace.slots.first()
         {
             let carrier = local.map_or_else(|| "selector".into(), |local| self.render_local(local));
@@ -2246,6 +2409,53 @@ pub(crate) fn wasm(bytes: &[u8], meter: &Meter) -> Option<Classified> {
             _ => (),
         }
     }
+    // Helpers whose result is a cursor fetch they advance themselves. Only
+    // callees of functions with dispatch sites are summarized, once each in
+    // index order. Their memoized local traces are then discarded, so a site
+    // query never depends on whether a summary ran first.
+    let positions = functions
+        .iter()
+        .enumerate()
+        .map(|(position, (index, _, _))| (*index, position))
+        .collect::<HashMap<_, _>>();
+    let mut callees = BTreeSet::new();
+    for (_, _, facts) in &functions {
+        if facts.dispatch.is_empty() && facts.compares.is_empty() {
+            continue;
+        }
+        if !meter.charge(facts.nodes.len() as u64) {
+            break;
+        }
+        for node in &facts.nodes {
+            if let Node::Call {
+                callee: Some(callee),
+                ..
+            } = node
+                && positions.contains_key(callee)
+                && !callees.contains(callee)
+                && auxiliary.keep(64)
+            {
+                callees.insert(*callee);
+            }
+        }
+    }
+    let mut fetchers = HashMap::new();
+    for callee in callees {
+        if meter.exhausted() {
+            break;
+        }
+        let facts = &functions[positions[&callee]].2;
+        if let Some(source) = facts.fetch_summary()
+            && auxiliary.keep(64)
+        {
+            fetchers.insert(callee, source);
+        }
+        facts.local_memo.borrow_mut().clear();
+    }
+    let fetchers = std::rc::Rc::new(fetchers);
+    for (_, _, facts) in &mut functions {
+        facts.fetchers = fetchers.clone();
+    }
     let mut candidates = Vec::new();
     for (position, (_, _, facts)) in functions.iter().enumerate() {
         for (dispatch, entry) in facts.dispatch.iter().enumerate() {
@@ -2316,6 +2526,7 @@ pub(crate) fn wasm(bytes: &[u8], meter: &Meter) -> Option<Classified> {
                 "The host selects an exported function by name; no in-module selector.".into(),
             selector_offset: None,
             through_lookup: false,
+            through_helper: false,
             arm_count: Some(exports.len() as u64),
             loop_range: None,
             buffer_kind: None,
@@ -2343,6 +2554,10 @@ impl Facts<'_> {
         let core = self.strip(selector);
         let loaded = match self.nodes[core] {
             Node::Load { .. } => true,
+            Node::Call {
+                callee: Some(callee),
+                ..
+            } => self.fetchers.contains_key(&callee),
             Node::Local(local) => self.definitions(local).iter().take(8).any(|(_, def)| {
                 self.meter.charge(1);
                 matches!(self.nodes[self.strip(*def)], Node::Load { .. })
@@ -2445,6 +2660,7 @@ fn classify_candidate(
                 selector_expression: facts.selector_text(dispatch.selector, &trace),
                 selector_offset: trace.anchor,
                 through_lookup: trace.through_lookup,
+                through_helper: trace.helper.is_some(),
                 arm_count,
                 loop_range,
                 buffer_kind: None,
@@ -2478,6 +2694,7 @@ fn classify_candidate(
                 ),
                 selector_offset: trace.anchor,
                 through_lookup: trace.through_lookup,
+                through_helper: trace.helper.is_some(),
                 arm_count: Some(compares.len() as u64),
                 loop_range,
                 buffer_kind: None,

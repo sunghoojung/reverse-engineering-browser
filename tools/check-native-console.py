@@ -221,7 +221,11 @@ def bridge(binary, browser=None, binary_mode=True):
         finally:
             for process in [console, child]:
                 if process:
-                    if process is child:
+                    # Only a real browser owns a process tree. The synthetic
+                    # peer is one process that can be mid-exit as the console
+                    # closes, when macOS refuses killpg with EPERM before the
+                    # exit is visible to poll().
+                    if process is child and browser:
                         kill_browser_group(process)
                     process.kill()
                     process.wait(timeout=5)

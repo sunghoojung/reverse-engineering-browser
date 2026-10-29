@@ -16,6 +16,9 @@ pub(super) struct Function {
     pub br_tables: BTreeMap<u32, u32>,
     /// Module byte offsets of direct calls to imported functions.
     pub import_calls: BTreeSet<u32>,
+    /// Module byte offset of each call_indirect or return_call_indirect to
+    /// its table index and whether it is the tail-call form.
+    pub call_indirects: BTreeMap<u32, (u32, bool)>,
 }
 
 pub(super) struct Module<'a> {
@@ -101,6 +104,11 @@ impl<'a> Module<'a> {
         self.function(self.imported.checked_add(u32::try_from(position).ok()?)?)
     }
 
+    /// Functions in the module's index space, imports first.
+    pub fn function_count(&self) -> usize {
+        self.function_types.len()
+    }
+
     /// Guest memory chains read only unshared 32-bit memories.
     pub fn memory_supported(&self, index: u32) -> bool {
         self.memories
@@ -115,6 +123,7 @@ impl<'a> Module<'a> {
         let locals = self.locals(index, body);
         let mut br_tables = BTreeMap::new();
         let mut import_calls = BTreeSet::new();
+        let mut call_indirects = BTreeMap::new();
         let mut reader = body.get_operators_reader().ok()?;
         while !reader.eof() {
             let offset = u32::try_from(reader.original_position()).ok()?;
@@ -125,6 +134,12 @@ impl<'a> Module<'a> {
                 Operator::Call { function_index } if function_index < self.imported => {
                     import_calls.insert(offset);
                 }
+                Operator::CallIndirect { table_index, .. } => {
+                    call_indirects.insert(offset, (table_index, false));
+                }
+                Operator::ReturnCallIndirect { table_index, .. } => {
+                    call_indirects.insert(offset, (table_index, true));
+                }
                 _ => {}
             }
         }
@@ -132,6 +147,7 @@ impl<'a> Module<'a> {
             locals,
             br_tables,
             import_calls,
+            call_indirects,
         })
     }
 

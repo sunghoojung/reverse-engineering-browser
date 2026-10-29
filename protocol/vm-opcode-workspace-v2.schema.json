@@ -945,6 +945,19 @@
           "type": "integer",
           "minimum": 0
         },
+        "native_wasm_indirect_observations": {
+          "description": "Producer 2.14.0 and later: accepted physical call_indirect and return_call_indirect executions. A slot is a dynamic table index, not a guest opcode.",
+          "type": "array",
+          "maxItems": 4096,
+          "items": {
+            "$ref": "#/$defs/nativeWasmIndirectObservation"
+          }
+        },
+        "native_wasm_indirect_observation_count": {
+          "description": "Accepted physical call_indirect executions, including any outside the retained rows.",
+          "type": "integer",
+          "minimum": 0
+        },
         "native_guest_samples": {
           "type": "array",
           "maxItems": 4096,
@@ -1008,6 +1021,20 @@
         {
           "if": {
             "required": [
+              "native_wasm_indirect_observations"
+            ]
+          },
+          "then": {
+            "properties": {
+              "runtime": {
+                "const": "webassembly"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "required": [
               "native_guest_samples"
             ]
           },
@@ -1040,6 +1067,12 @@
         ],
         "native_wasm_observation_count": [
           "native_wasm_observations"
+        ],
+        "native_wasm_indirect_observations": [
+          "native_wasm_indirect_observation_count"
+        ],
+        "native_wasm_indirect_observation_count": [
+          "native_wasm_indirect_observations"
         ],
         "native_guest_samples": [
           "native_guest_sample_count"
@@ -1868,6 +1901,112 @@
         }
       }
     },
+    "nativeWasmIndirectObservation": {
+      "description": "Producer 2.14.0 and later: one accepted physical call_indirect or return_call_indirect execution. The callee is the table entry the call was about to use; it is null unless that entry is a function of this module.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "function_index",
+        "module_byte_offset",
+        "instruction",
+        "table_index",
+        "slot",
+        "resolution",
+        "callee_function_index",
+        "sample_index",
+        "event"
+      ],
+      "properties": {
+        "function_index": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 16777215
+        },
+        "module_byte_offset": {
+          "type": "integer",
+          "minimum": 8,
+          "maximum": 16777215
+        },
+        "instruction": {
+          "enum": [
+            "call_indirect",
+            "return_call_indirect"
+          ]
+        },
+        "table_index": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 16777215
+        },
+        "slot": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 4294967295
+        },
+        "resolution": {
+          "enum": [
+            "resolved",
+            "null",
+            "out-of-bounds",
+            "foreign",
+            "unresolved"
+          ]
+        },
+        "callee_function_index": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 16777215
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "sample_index": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 15
+        },
+        "event": {
+          "$ref": "#/$defs/eventIdentity"
+        },
+        "monotonic_time_ns": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/nativeUint64"
+            }
+          ],
+          "description": "Monotonic time of the accepted observation event, copied from the native event."
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "resolution": {
+                "const": "resolved"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "callee_function_index": {
+                "type": "integer"
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "callee_function_index": {
+                "type": "null"
+              }
+            }
+          }
+        }
+      ]
+    },
     "nativeUint64": {
       "type": "string",
       "maxLength": 20,
@@ -2596,7 +2735,7 @@
       }
     },
     "observedClaim": {
-      "description": "Producer 2.12.0 and later: one observed runtime claim at an interpreter-candidate dispatch site, aggregated from retained rows of one stream that agree on site, selector, opcode and handler. Never structural, never merged into handlers.",
+      "description": "Producer 2.12.0 and later (call_indirect claims since 2.14.0): one observed runtime claim at an interpreter-candidate dispatch site, aggregated from retained rows of one stream that agree on site, selector, opcode and handler. Never structural, never merged into handlers.",
       "type": "object",
       "additionalProperties": false,
       "required": [
@@ -2616,6 +2755,7 @@
           "enum": [
             "native-guest",
             "native-wasm",
+            "native-wasm-indirect",
             "dispatch-sample"
           ]
         },
@@ -2749,6 +2889,30 @@
                   "type": "integer",
                   "minimum": 0,
                   "maximum": 4294967295
+                }
+              }
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "kind",
+                "table_index",
+                "callee_function_index"
+              ],
+              "properties": {
+                "kind": {
+                  "const": "table-entry"
+                },
+                "table_index": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 16777215
+                },
+                "callee_function_index": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 16777215
                 }
               }
             }
@@ -2929,7 +3093,23 @@
               },
               "selector": {
                 "type": "integer"
-              },
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "stream": {
+                "enum": [
+                  "native-guest",
+                  "native-wasm"
+                ]
+              }
+            }
+          },
+          "then": {
+            "properties": {
               "handler": {
                 "properties": {
                   "kind": {
@@ -2948,6 +3128,45 @@
                   },
                   "handler_index": {
                     "type": "null"
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "stream": {
+                "const": "native-wasm-indirect"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "opcode": {
+                "type": "null"
+              },
+              "handler": {
+                "properties": {
+                  "kind": {
+                    "const": "table-entry"
+                  }
+                }
+              },
+              "static_claim": {
+                "if": {
+                  "properties": {
+                    "state": {
+                      "const": "agrees"
+                    }
+                  }
+                },
+                "then": {
+                  "properties": {
+                    "handler_index": {
+                      "type": "integer"
+                    }
                   }
                 }
               }

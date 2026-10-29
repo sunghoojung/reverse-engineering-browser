@@ -1,5 +1,6 @@
-// Emits the real native payload encoder through the production core JSON writer.
-// Authored test observations, not evidence of a running Brave/V8 build.
+// Emits the real native payload encoders through the production core JSON writer.
+// Authored test observations, not evidence of a running Brave/V8 build. Cases
+// named indirect-* emit a call_indirect observation instead of a br_table one.
 #include <bit>
 #include <cassert>
 #include <cstddef>
@@ -77,9 +78,51 @@ int main(int argc, char** argv) {
     syntactically_valid = false;
   } else if (mode == "big-endian")
     syntactically_valid = false;
-  else
+  else if (!mode.starts_with("indirect-"))
     return 2;
   native.inline_payload = reb::EncodeNativeWasmDispatchObservationPayload(payload);
+  if (mode.starts_with("indirect-")) {
+    // INDIRECT_MODULE in vm_opcode_native_wasm.rs: function 1, table 0, offset 94.
+    native.header.type = reb::NativeProbeType::kWasmIndirectObservation;
+    reb::NativeWasmIndirectObservationPayload indirect;
+    indirect.function_index = 1;
+    indirect.module_byte_offset = 94;
+    indirect.slot = 1;
+    indirect.callee_function_index = 2;
+    indirect.resolution = static_cast<std::uint32_t>(reb::NativeWasmIndirectResolution::kResolved);
+    const auto kind = mode.substr(9);
+    if (kind == "resolved") {
+    } else if (kind == "out-of-bounds") {
+      indirect.slot = std::numeric_limits<std::uint32_t>::max();
+      indirect.callee_function_index = 0;
+      indirect.resolution =
+          static_cast<std::uint32_t>(reb::NativeWasmIndirectResolution::kOutOfBounds);
+    } else if (kind == "wide-identities") {
+      native.header.session_id = native.header.sequence_number = native.header.monotonic_time_ns =
+          native.header.frame_id = native.header.artifact_id =
+              std::numeric_limits<std::uint64_t>::max();
+      native.header.process_id = native.header.thread_id =
+          std::numeric_limits<std::uint32_t>::max();
+    } else if (kind == "table")
+      indirect.table_index = 1;
+    else if (kind == "offset")
+      indirect.module_byte_offset = 93;
+    else if (kind == "reserved") {
+      indirect.reserved[95] = std::byte{1};
+      syntactically_valid = false;
+    } else if (kind == "resolution") {
+      indirect.resolution = 5;
+      syntactically_valid = false;
+    } else if (kind == "callee") {
+      indirect.resolution = static_cast<std::uint32_t>(reb::NativeWasmIndirectResolution::kNull);
+      syntactically_valid = false;
+    } else if (kind == "sample-index") {
+      indirect.sample_index = 16;
+      syntactically_valid = false;
+    } else
+      return 2;
+    native.inline_payload = reb::EncodeNativeWasmIndirectObservationPayload(indirect);
+  }
   if (mode == "big-endian") {
     native.inline_payload[0] = std::byte{0};
     native.inline_payload[1] = std::byte{1};
@@ -121,8 +164,14 @@ int main(int argc, char** argv) {
 #undef CHECK_FIELD
   const auto event = std::bit_cast<reb::EventRecord>(native);
   assert(reb::IsValidEvent(event) == syntactically_valid);
-  reb::WasmDispatchObservationPayload decoded;
-  assert(reb::DecodeWasmDispatchObservationPayload(event.inline_payload, decoded));
-  assert(reb::EncodeWasmDispatchObservationPayload(decoded) == native.inline_payload);
+  if (mode.starts_with("indirect-")) {
+    reb::WasmIndirectObservationPayload decoded;
+    assert(reb::DecodeWasmIndirectObservationPayload(event.inline_payload, decoded));
+    assert(reb::EncodeWasmIndirectObservationPayload(decoded) == native.inline_payload);
+  } else {
+    reb::WasmDispatchObservationPayload decoded;
+    assert(reb::DecodeWasmDispatchObservationPayload(event.inline_payload, decoded));
+    assert(reb::EncodeWasmDispatchObservationPayload(decoded) == native.inline_payload);
+  }
   std::cout << reb::EventToJson(event) << '\n';
 }

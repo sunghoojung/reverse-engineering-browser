@@ -22,7 +22,7 @@ mod observed;
 #[path = "vm_opcode_wasm.rs"]
 mod wasm;
 
-const PRODUCER_VERSION: &str = "2.13.0";
+const PRODUCER_VERSION: &str = "2.14.0";
 const MAX_SAMPLES: usize = 4096;
 const MAX_HANDLERS: usize = 1024;
 const MAX_SNAPSHOTS: usize = 16;
@@ -1563,6 +1563,7 @@ pub(crate) fn workspace(
         .then(|| native_module::Module::parse(bytes))
         .flatten();
     let observations = native_wasm::collect(artifact, module.as_mut(), events);
+    let indirect = native_wasm::collect_indirect(artifact, module.as_mut(), events);
     let guest_samples = native_guest::collect(
         root,
         artifact,
@@ -1584,15 +1585,17 @@ pub(crate) fn workspace(
         omissions.push(json!({"reason":"caller-samples-unverified", "detail":
             "Caller-supplied dispatch reports were retained, not independently observed by a native sampler. They cannot confirm handlers, PC units, invocation identity or host-call causality."}));
     }
-    let undecodable = observations.undecodable + guest_samples.undecodable;
+    let physical_undecodable = observations.undecodable + indirect.undecodable;
+    let undecodable = physical_undecodable + guest_samples.undecodable;
     if undecodable > 0 {
         omissions.push(json!({"reason":"native-wasm-module-undecodable","detail":format!(
             "The captured module's sections did not decode, so {} native Wasm observations and {} native guest samples could not be checked against an exact site.",
-            observations.undecodable, guest_samples.undecodable
+            physical_undecodable, guest_samples.undecodable
         )}));
     }
     if native_samples.is_empty()
         && observations.count == 0
+        && indirect.count == 0
         && guest_samples.count == 0
         && budget_dropped == 0
         && undecodable == 0
@@ -1647,6 +1650,15 @@ pub(crate) fn workspace(
     if observations.count > 0 {
         unknowns.push("Native br_table observations prove physical Wasm site and selector execution, not a guest PC, guest opcode ISA, invocation or host-call causality.".into());
     }
+    if indirect.invalid > 0 {
+        omissions.push(json!({"reason":"native-wasm-indirect-observation-invalid","detail":format!("Rejected {} malformed, mismatched or out-of-scope native call_indirect observations.", indirect.invalid)}));
+    }
+    if indirect.count > indirect.rows.len() as u64 {
+        omissions.push(json!({"reason":"native-wasm-indirect-observation-limit","detail":"Only the first 4096 native call_indirect observations are retained; counts include all accepted observations."}));
+    }
+    if indirect.count > 0 {
+        unknowns.push("Native call_indirect observations prove the physical site, table slot and resolved callee of one call, not a guest PC, guest opcode ISA, invocation or host-call causality.".into());
+    }
     if opcode_sites
         .iter()
         .any(|(opcode, count)| *count > 1 && samples.contains_key(opcode))
@@ -1689,6 +1701,17 @@ pub(crate) fn workspace(
             ));
         }
     }
+    // Slot claims come from the same metered table layout as the handler
+    // tables; it is parsed again only when call_indirect rows need it.
+    let fallback = vm::dispatch_shape::Meter::new();
+    let tables = (!indirect.rows.is_empty())
+        .then(|| {
+            vm::wasm_tables::Tables::parse_under(
+                bytes,
+                roles.map_or(&fallback, |roles| &roles.meter),
+            )
+        })
+        .flatten();
     // Runtime rows supply observed claims beside, never inside, the handlers.
     let observed = observed::derive(observed::Inputs {
         runtime,
@@ -1699,6 +1722,8 @@ pub(crate) fn workspace(
         samples: &retained_samples,
         physical: &observations.rows,
         guest: &guest_samples.rows,
+        indirect: &indirect.rows,
+        tables: tables.as_ref(),
         events,
     });
     unknowns.extend(observed.unknowns);
@@ -1826,6 +1851,8 @@ pub(crate) fn workspace(
         workspace["native_guest_sample_count"] = json!(guest_samples.count);
         workspace["native_wasm_observations"] = json!(observations.rows);
         workspace["native_wasm_observation_count"] = json!(observations.count);
+        workspace["native_wasm_indirect_observations"] = json!(indirect.rows);
+        workspace["native_wasm_indirect_observation_count"] = json!(indirect.count);
     }
     if runtime == "webassembly"
         && let Some(inventory) = result["frontend"].get("dispatch_inventory")

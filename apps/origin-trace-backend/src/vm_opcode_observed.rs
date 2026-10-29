@@ -3,6 +3,7 @@
 //! never changed: each claim sits beside them, names the exact retained events
 //! that support it, and states how it compares with the static claim.
 use crate::vm::dispatch_shape::{Role, Roles};
+use crate::vm::wasm_tables::{Entry, Placement, Tables};
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
@@ -28,6 +29,10 @@ pub(super) struct Inputs<'a> {
     pub samples: &'a [Value],
     pub physical: &'a [Value],
     pub guest: &'a [Value],
+    /// Accepted call_indirect rows and the module's static table layout,
+    /// which supplies their static slot claims.
+    pub indirect: &'a [Value],
+    pub tables: Option<&'a Tables>,
     pub events: &'a [Value],
 }
 
@@ -54,6 +59,8 @@ struct Claim {
     site: Value,
     attribution: &'static str,
     is_default: bool,
+    /// The site's table for a call_indirect claim.
+    table: Option<u32>,
     events: Vec<Value>,
     count: u64,
 }
@@ -110,8 +117,18 @@ fn javascript_site(inputs: &Inputs<'_>) -> Option<(Value, &'static str)> {
 /// opcode (JavaScript) or the same site and arm (WebAssembly). Static arms are
 /// labeled by their selector, so a guest opcode observed on another arm
 /// contradicts that label rather than replacing it.
-fn static_claim(inputs: &Inputs<'_>, key: &Key, is_default: bool) -> Value {
+fn static_claim(inputs: &Inputs<'_>, key: &Key, claim: &Claim) -> Value {
     let (stream, _, site, selector, opcode, handler) = *key;
+    let is_default = claim.is_default;
+    if stream == "native-wasm-indirect" {
+        return indirect_static_claim(
+            inputs.tables,
+            claim.table.expect("call_indirect claims name a table"),
+            selector.expect("call_indirect claims name a slot"),
+            handler,
+            site.expect("call_indirect claims name a site"),
+        );
+    }
     let row = |state: &str, opcode: Option<u64>, index: &Value, offset: &Value| json!({"state":state,"opcode":opcode,"handler_index":index,"byte_offset":offset});
     if stream == "dispatch-sample" {
         let opcode = opcode.expect("dispatch samples carry an opcode");
@@ -162,6 +179,110 @@ fn static_claim(inputs: &Inputs<'_>, key: &Key, is_default: bool) -> Value {
     }
 }
 
+/// The element segments' claim for one table slot. A slot the layout places
+/// agrees or disagrees with the observed callee; a placed null slot that ran a
+/// function disagrees. A slot the module fills only at run time, through a
+/// relative, unresolved or passive segment or an unexpanded table, has its
+/// static claim withheld, as does an entry whose function is unknown. Any
+/// other slot has no static claim.
+fn indirect_static_claim(
+    tables: Option<&Tables>,
+    table: u32,
+    slot: u64,
+    callee: u64,
+    site: u64,
+) -> Value {
+    let row = |state: &str, handler: Option<u32>, offset: Option<u64>| json!({"state":state,"opcode":slot,"handler_index":handler,"byte_offset":offset});
+    let Some(tables) = tables else {
+        return row("withheld", None, None);
+    };
+    let placed = u32::try_from(slot).ok().and_then(|slot| {
+        let entries = tables.slots.get(&table)?;
+        let index = entries.binary_search_by_key(&slot, |(at, _)| *at).ok()?;
+        Some(entries[index].1)
+    });
+    let runtime = || {
+        tables.oversized.contains(&table)
+            || tables.segments_for(table).iter().any(|index| {
+                matches!(
+                    tables.segments[*index].placement,
+                    Placement::Relative(_) | Placement::Unresolved
+                )
+            })
+            || tables
+                .segments
+                .iter()
+                .any(|segment| segment.placement == Placement::Passive)
+    };
+    match placed {
+        Some(Entry::Function(function)) => row(
+            if u64::from(function) == callee {
+                "agrees"
+            } else {
+                "disagrees"
+            },
+            Some(function),
+            Some(site),
+        ),
+        Some(Entry::Null) => row("disagrees", None, Some(site)),
+        Some(Entry::Unknown) => row("withheld", None, None),
+        None if runtime() => row("withheld", None, None),
+        None => json!({"state":"absent","opcode":null,"handler_index":null,"byte_offset":null}),
+    }
+}
+
+/// A call_indirect row claims the callee it resolved at an exact site. A row
+/// whose entry was null, out of bounds, from another instance or unresolved
+/// names no callee and supplies no claim. Returns (not interpreter, no callee).
+fn indirect_rows(
+    claims: &mut BTreeMap<Key, Claim>,
+    roles: Option<&Roles>,
+    rows: &[Value],
+) -> (u64, u64) {
+    let (mut unattached, mut unresolved) = (0, 0);
+    for row in rows {
+        let (Some(function), Some(site), Some(slot), Some(table)) = (
+            row["function_index"].as_u64(),
+            row["module_byte_offset"].as_u64(),
+            row["slot"].as_u64(),
+            row["table_index"]
+                .as_u64()
+                .and_then(|v| u32::try_from(v).ok()),
+        ) else {
+            continue;
+        };
+        if !interpreter(roles, site) {
+            unattached += 1;
+            continue;
+        }
+        let Some(callee) = row["callee_function_index"].as_u64() else {
+            unresolved += 1;
+            continue;
+        };
+        add(
+            claims,
+            (
+                "native-wasm-indirect",
+                Some(function),
+                Some(site),
+                Some(slot),
+                None,
+                callee,
+            ),
+            || Claim {
+                site: json!({"function_index":function,"byte_offset":site,"line":null,"column":null}),
+                attribution: "exact",
+                is_default: false,
+                table: Some(table),
+                events: Vec::new(),
+                count: 0,
+            },
+            &row["event"],
+        );
+    }
+    (unattached, unresolved)
+}
+
 fn add(claims: &mut BTreeMap<Key, Claim>, key: Key, make: impl FnOnce() -> Claim, event: &Value) {
     let claim = claims.entry(key).or_insert_with(make);
     claim.count += 1;
@@ -208,6 +329,7 @@ fn wasm_rows(
                 site: json!({"function_index":function,"byte_offset":site,"line":null,"column":null}),
                 attribution: "exact",
                 is_default,
+                table: None,
                 events: Vec::new(),
                 count: 0,
             },
@@ -228,6 +350,7 @@ pub(super) fn derive(inputs: Inputs<'_>) -> Derived {
         .collect::<Vec<_>>();
     let mut unsited = 0u64;
     let mut unattached = 0u64;
+    let mut unresolved = 0u64;
     if inputs.runtime == "javascript" {
         match javascript_site(&inputs) {
             Some((site, attribution)) => {
@@ -244,6 +367,7 @@ pub(super) fn derive(inputs: Inputs<'_>) -> Derived {
                             site: site.clone(),
                             attribution,
                             is_default: false,
+                            table: None,
                             events: Vec::new(),
                             count: 0,
                         },
@@ -258,12 +382,15 @@ pub(super) fn derive(inputs: Inputs<'_>) -> Derived {
         unsited = native.len() as u64;
         unattached += wasm_rows(&mut claims, inputs.roles, "native-guest", inputs.guest);
         unattached += wasm_rows(&mut claims, inputs.roles, "native-wasm", inputs.physical);
+        let (outside, unnamed) = indirect_rows(&mut claims, inputs.roles, inputs.indirect);
+        unattached += outside;
+        unresolved = unnamed;
     }
     let omitted = claims.len().saturating_sub(MAX_CLAIMS);
     let mut disagreements = 0u64;
     for (key, claim) in claims.into_iter().take(MAX_CLAIMS) {
         let (stream, _, _, selector, opcode, handler) = key;
-        let comparison = static_claim(&inputs, &key, claim.is_default);
+        let comparison = static_claim(&inputs, &key, &claim);
         disagreements += u64::from(comparison["state"] == "disagrees");
         derived.claims.push(json!({
             "stream": stream,
@@ -272,10 +399,10 @@ pub(super) fn derive(inputs: Inputs<'_>) -> Derived {
             "site_attribution": claim.attribution,
             "selector": selector,
             "opcode": opcode,
-            "handler": if stream == "dispatch-sample" {
-                json!({"kind":"handler-index","handler_index":handler})
-            } else {
-                json!({"kind":"br-table-arm","arm":handler,"is_default":claim.is_default})
+            "handler": match (stream, claim.table) {
+                ("dispatch-sample", _) => json!({"kind":"handler-index","handler_index":handler}),
+                (_, Some(table)) => json!({"kind":"table-entry","table_index":table,"callee_function_index":handler}),
+                _ => json!({"kind":"br-table-arm","arm":handler,"is_default":claim.is_default}),
             },
             "sample_count": claim.count,
             "events": claim.events,
@@ -284,7 +411,7 @@ pub(super) fn derive(inputs: Inputs<'_>) -> Derived {
     }
     if disagreements > 0 {
         derived.unknowns.push(format!(
-            "{} with the static handler claim for the same opcode or arm. Both are kept; neither replaces the other.",
+            "{} with the static handler claim for the same opcode, arm or table slot. Both are kept; neither replaces the other.",
             plural(disagreements, "observed dispatch claim disagrees", "observed dispatch claims disagree")
         ));
     }
@@ -297,6 +424,12 @@ pub(super) fn derive(inputs: Inputs<'_>) -> Derived {
         derived.omissions.push(json!({"reason":"observed-claims-not-interpreter","detail":format!(
             "{} at a dispatch site that is not a classified interpreter candidate. The rows stay retained and supply no observed claims.",
             plural(unattached, "retained native dispatch record is", "retained native dispatch records are")
+        )}));
+    }
+    if unresolved > 0 {
+        derived.omissions.push(json!({"reason":"observed-claims-unresolved-callee","detail":format!(
+            "{} no callee in this module: the table entry was null, out of bounds, from another instance or unresolved. The rows stay retained and supply no observed claims.",
+            plural(unresolved, "retained call_indirect observation names", "retained call_indirect observations name")
         )}));
     }
     if unsited > 0 {
@@ -738,6 +871,154 @@ mod tests {
         );
         assert_eq!(claims[1]["static_claim"]["state"], "absent");
     }
+    /// Owned synthetic handler-table interpreter. Table 0 is placed by its
+    /// element segment; table 1 is placed through an imported global, so only
+    /// run time decides its slots.
+    const INDIRECT: &str = r#"(module
+      (import "env" "base" (global $base i32))
+      (memory 1)
+      (type $op (func (param i32) (result i32)))
+      (table $placed 3 funcref)
+      (table $runtime 4 funcref)
+      (func $inc (type $op) (i32.add (local.get 0) (i32.const 1)))
+      (func $dec (type $op) (i32.sub (local.get 0) (i32.const 1)))
+      (func $dbl (type $op) (i32.shl (local.get 0) (i32.const 1)))
+      (elem (table $placed) (i32.const 0) func $inc $dec)
+      (elem (table $runtime) (global.get $base) func $dbl)
+      (func (export "run") (param $code i32) (param $len i32) (result i32)
+        (local $pc i32) (local $acc i32)
+        (block $exit (loop $again
+          (br_if $exit (i32.ge_u (local.get $pc) (local.get $len)))
+          (local.set $acc (call_indirect $placed (type $op) (local.get $acc)
+            (i32.load8_u (i32.add (local.get $code) (local.get $pc)))))
+          (local.set $acc (call_indirect $runtime (type $op) (local.get $acc)
+            (i32.load8_u (i32.add (local.get $code) (local.get $pc)))))
+          (local.set $pc (i32.add (local.get $pc) (i32.const 1)))
+          (br $again)))
+        (local.get $acc)))"#;
+
+    /// One native `wasm_indirect_observation` at `site` in function 3.
+    fn indirect(seq: u64, site: u64, table: u64, slot: u64, resolution: u64, callee: u64) -> Value {
+        let mut p = vec![0u8; 128];
+        p[..4].copy_from_slice(&[1, 0, 128, 0]);
+        for (at, value) in [
+            (4, 3),
+            (8, site),
+            (12, table),
+            (16, slot),
+            (20, callee),
+            (24, resolution),
+        ] {
+            put(&mut p, at, value, 4);
+        }
+        event("wasm_indirect_observation", seq, 0, MODULE, &p)
+    }
+
+    #[test]
+    fn wasm_call_indirect_claims_compare_with_element_slots() {
+        let bytes = wat::parse_str(INDIRECT).unwrap();
+        let mut module = super::super::native_module::Module::parse(&bytes).unwrap();
+        let sites = module.function(3).unwrap().call_indirects.clone();
+        let sites = sites
+            .keys()
+            .map(|offset| u64::from(*offset))
+            .collect::<Vec<_>>();
+        let (placed, runtime) = (sites[0], sites[1]);
+        let root = tempfile::tempdir().unwrap();
+        let wasm = artifact(root.path(), MODULE, "wasm", &bytes, 0, 0);
+        let events = [
+            indirect(10, placed, 0, 0, 0, 0),
+            indirect(11, placed, 0, 0, 0, 0),
+            // The host replaced slot 1 at run time.
+            indirect(12, placed, 0, 1, 0, 2),
+            // Slot 2 is never placed by an element segment.
+            indirect(13, placed, 0, 2, 0, 1),
+            indirect(14, runtime, 1, 3, 0, 2),
+            // Traps and foreign entries name no callee here.
+            indirect(15, placed, 0, 9, 2, 0),
+            indirect(16, runtime, 1, 0, 3, 0),
+            // Never accepted: the wrong table for the site, and a callee
+            // reported for a null entry.
+            indirect(17, placed, 1, 0, 0, 0),
+            indirect(18, placed, 0, 0, 1, 2),
+        ];
+        let workspace = analyze(root.path(), &[wasm], &events);
+        assert_eq!(
+            workspace["native_wasm_indirect_observation_count"], 7,
+            "{workspace:#}"
+        );
+        let rows = workspace["native_wasm_indirect_observations"]
+            .as_array()
+            .unwrap();
+        assert_eq!(rows[5]["resolution"], "out-of-bounds");
+        assert!(rows[5]["callee_function_index"].is_null());
+        assert!(
+            omission(&workspace, "native-wasm-indirect-observation-invalid")
+                .unwrap()
+                .starts_with("Rejected 2 ")
+        );
+        let claims = workspace["observed_claims"].as_array().unwrap();
+        let summary = claims
+            .iter()
+            .map(|c| {
+                (
+                    c["site"]["byte_offset"].as_u64().unwrap(),
+                    c["selector"].as_u64().unwrap(),
+                    c["handler"]["callee_function_index"].as_u64().unwrap(),
+                    c["sample_count"].as_u64().unwrap(),
+                    c["static_claim"]["state"].as_str().unwrap(),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            summary,
+            [
+                (placed, 0, 0, 2, "agrees"),
+                (placed, 1, 2, 1, "disagrees"),
+                (placed, 2, 1, 1, "absent"),
+                (runtime, 3, 2, 1, "withheld"),
+            ]
+        );
+        for claim in claims {
+            assert_eq!(claim["stream"], "native-wasm-indirect");
+            assert_eq!(claim["confidence"], "observed");
+            assert!(claim["opcode"].is_null());
+        }
+        assert_eq!(
+            claims[1]["static_claim"],
+            json!({"state":"disagrees","opcode":1,"handler_index":1,"byte_offset":placed})
+        );
+        assert_eq!(
+            claims[3]["static_claim"],
+            json!({"state":"withheld","opcode":3,"handler_index":null,"byte_offset":null})
+        );
+        assert_eq!(claims[3]["handler"]["table_index"], 1);
+        assert!(
+            omission(&workspace, "observed-claims-unresolved-callee")
+                .unwrap()
+                .starts_with("2 retained call_indirect observations name no callee")
+        );
+        assert!(workspace["unknowns"].as_array().unwrap().iter().any(|u| {
+            u.as_str()
+                .unwrap()
+                .starts_with("1 observed dispatch claim disagrees")
+        }));
+        // The viewer recomputes each comparison against the listed element slots.
+        let mut forged = document(root.path());
+        forged["workspaces"][0]["observed_claims"][1]["static_claim"]["state"] = json!("agrees");
+        assert!(!ui_accepts(&forged));
+        let mut forged = document(root.path());
+        forged["workspaces"][0]["observed_claims"][0]["static_claim"]["handler_index"] = json!(2);
+        forged["workspaces"][0]["observed_claims"][0]["static_claim"]["state"] = json!("disagrees");
+        assert!(!ui_accepts(&forged));
+        let mut forged = document(root.path());
+        forged["workspaces"][0]["observed_claims"]
+            .as_array_mut()
+            .unwrap()
+            .pop();
+        assert!(!ui_accepts(&forged), "every resolved row needs its claim");
+    }
+
     /// Owned two-level interpreter. The outer loop masks each fetched byte to
     /// a selector, and its arm 2 runs a second interpreter over its own buffer.
     /// `route` is a one-shot router, never an interpreter.

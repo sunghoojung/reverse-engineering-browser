@@ -19,6 +19,11 @@ const harness = join(root, 'tools/origin-trace-rendered-ui');
 const report = join(root, 'build/rendered-ui-qa');
 const usage = 'usage: node tools/check-origin-trace-rendered-ui.mjs [--only <testName>]';
 const argv = process.argv.slice(2);
+const maximumHeight = process.env.REB_RENDERED_UI_MAX_HEIGHT;
+if (maximumHeight !== undefined) {
+  assert(/^\d+$/.test(maximumHeight) && Number.isSafeInteger(Number(maximumHeight)) && Number(maximumHeight) >= 560,
+    'REB_RENDERED_UI_MAX_HEIGHT must be an integer of at least 560 CSS pixels');
+}
 let only = null;
 for (let index = 0; index < argv.length; index += 1) {
   if (argv[index] === '--only' && argv[index + 1]) only = argv[++index];
@@ -127,6 +132,7 @@ try {
     IsAppHostedTestBundle: true,
     CommandLineArguments: ['--ui-url', uiURL],
     EnvironmentVariables: {
+      ...(maximumHeight === undefined ? {} : {REB_RENDERED_UI_MAX_HEIGHT: maximumHeight}),
       REB_DISABLE_AUTOMATIC_LIVE_SESSION: '1',
       REB_RENDERED_UI_OUTPUT: join(report, 'screenshots'),
       REB_RENDERED_UI_PROBES: join(harness, 'probes.js'),

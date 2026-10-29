@@ -1,6 +1,6 @@
 // Rendered-layout probes evaluated by the hosted XCTest inside the packaged
-// Origin Trace WKWebView. They only read the DOM and computed layout; every
-// interaction is a native AppKit event sent by the Swift test.
+// Origin Trace WKWebView. They inspect the DOM and computed layout and scroll
+// targets into view; clicks and keys are native AppKit events from the Swift test.
 (() => {
   if (window.__rebUiProbe) return;
   const CONTROLS = 'button,a[href],input:not([type=hidden]),select,textarea,summary,[role=tab],[role=treeitem],[role=option],[tabindex]:not([tabindex="-1"])';
@@ -124,12 +124,12 @@
     };
   }
 
-  function center(selector, text) {
+  function center(selector, text, block = 'nearest') {
     const candidates = [...document.querySelectorAll(selector)].filter(rendered)
       .filter(element => !text || element.textContent.replace(/\s+/g, ' ').includes(text));
     const element = candidates[0];
     if (!element) return null;
-    element.scrollIntoView({block: 'nearest', inline: 'nearest'});
+    element.scrollIntoView({block, inline: 'nearest'});
     const visible = visibleRect(element);
     if (visible.width === 0 || visible.height === 0) return null;
     return {x: (visible.left + visible.right) / 2, y: (visible.top + visible.bottom) / 2, element: describe(element)};
@@ -199,5 +199,14 @@
   const count = selector => [...document.querySelectorAll(selector)].filter(rendered).length;
   const exists = selector => document.querySelectorAll(selector).length;
 
-  window.__rebUiProbe = {layoutIssues, clippedText, scrollToEnd, focusState, center, inertness, scrollProbe, text, visibleText, count, exists, describe};
+  function box(selector) {
+    const node = document.querySelector(selector);
+    if (!node) return {};
+    const rect = node.getBoundingClientRect(), visible = visibleRect(node);
+    return {left: rect.left, top: rect.top, right: rect.right, bottom: rect.bottom,
+      width: rect.width, height: rect.height, visibleHeight: visible.height, visibleWidth: visible.width,
+      scrollTop: node.scrollTop, scrollHeight: node.scrollHeight, clientHeight: node.clientHeight};
+  }
+
+  window.__rebUiProbe = {layoutIssues, clippedText, scrollToEnd, focusState, center, inertness, scrollProbe, text, visibleText, count, exists, describe, box};
 })();

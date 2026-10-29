@@ -1985,6 +1985,7 @@ const capturedExportPanel = installCapturedExportDialog({
           machine.register_count === null ? '' : `${machine.register_count} registers named by effects`
         ].filter(Boolean).join(' · ');
         const body = document.createElement('div'); body.className = 'vm-workbench-body';
+        body.id = 'vm-analysis-handlers';
         const selectedInspector = document.createElement('aside'); selectedInspector.className = 'vm-selection-inspector';
         selectedInspector.setAttribute('aria-label', 'Selected handler');
         const updateSelection = key => {
@@ -2058,7 +2059,10 @@ const capturedExportPanel = installCapturedExportDialog({
           const label = action === 'search' ? 'Filter retained handlers' : action === 'next' ? 'Next handler' : 'Previous handler';
           const target = root.querySelector(`[aria-label="${label}"]`);
           if (!target || target.disabled) return false;
-          if (invoke) { if (action === 'search') target.focus(); else target.click(); }
+          if (invoke) {
+            setVmAnalysisExpanded(true);
+            if (action === 'search') target.focus(); else target.click();
+          }
           return true;
         }
         const capabilities = {search: false, previous: false, next: false};
@@ -2066,6 +2070,11 @@ const capturedExportPanel = installCapturedExportDialog({
         if (!capabilities[action]) return false;
         if (invoke) root.dispatchEvent(new CustomEvent(`vm-workspace-${action}`));
         return true;
+      }
+
+      function setVmAnalysisExpanded(expanded) {
+        document.querySelector('#vm-analysis-toggle').setAttribute('aria-expanded', String(expanded));
+        document.querySelector('#vm-findings-workspace > .vm-grid').scrollTop = 0;
       }
 
       function updateVmNavigationMenus() {
@@ -7309,6 +7318,9 @@ const capturedExportPanel = installCapturedExportDialog({
         }));
       }
 
+      document.querySelector('#vm-analysis-toggle').addEventListener('click', event => {
+        setVmAnalysisExpanded(event.currentTarget.getAttribute('aria-expanded') !== 'true');
+      });
       document.querySelectorAll('[data-screen]').forEach(button => button.addEventListener('click', async () => {
         if (button.classList.contains('back-button') && investigationNavigation?.back()) return;
         showScreen(button.dataset.screen, button);

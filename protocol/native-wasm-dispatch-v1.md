@@ -188,6 +188,10 @@ the module's function space. Accepted rows become
 rows become `native-wasm-indirect` observed claims compared with the element
 segments' slot claim. See
 [observed claims](vm-opcode-workspace-v2.md#observed-claims-and-nested-guests).
+Rows are read only into an opcode workspace, which the detector creates for a
+module with a `br_table` or `call_indirect` inside a loop. A module whose only
+dispatch is a loop-free `return_call_indirect` chain has no workspace, so its
+rows stay in the event store without rows or claims in VM Lab.
 
 ### Validation boundary
 

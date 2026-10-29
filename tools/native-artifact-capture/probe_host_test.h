@@ -33,8 +33,11 @@ void NativeProbeHostGuestBoundary(reb::ArtifactReceiver& receiver) {
   adapter->module_sha256 = reb::NativeGuestDigest(module);
   adapter->recipe_sha256 = reb::NativeGuestDigest(
       std::span(reinterpret_cast<const std::uint8_t*>(recipe.data()), recipe.size()));
-  adapter->function_index = 1;
-  adapter->dispatch_module_offset = 8;
+  adapter->sites[0].function_index = 1;
+  adapter->sites[0].dispatch_module_offset = 8;
+  adapter->sites[1].function_index = 2;  // A second dispatcher of the same module.
+  adapter->sites[1].dispatch_module_offset = 9;
+  adapter->site_count = 2;
   adapter->sample_limit = 16;
   reb::test_guest_adapter = adapter;
 
@@ -86,7 +89,7 @@ void NativeProbeHostGuestBoundary(reb::ArtifactReceiver& receiver) {
   reb::NativeGuestPut(dispatch.inline_payload, 32, 30, 8);
   reb::NativeGuestPut(dispatch.inline_payload, 72, code.size(), 4);
   reb::NativeGuestPut(dispatch.inline_payload, 92, 7, 4);
-  reb::NativeGuestPut(invocation.inline_payload, 0, 2, 2);
+  reb::NativeGuestPut(invocation.inline_payload, 0, 3, 2);
   reb::NativeGuestPut(invocation.inline_payload, 2, 128, 2);
   reb::NativeGuestPut(invocation.inline_payload, 4, 1, 4);
   reb::NativeGuestPut(invocation.inline_payload, 8, 20, 8);
@@ -165,6 +168,32 @@ void NativeProbeHostGuestBoundary(reb::ArtifactReceiver& receiver) {
             Payload(events.back()) == "native_guest_host_malformed",
         "Foreign host identity has one bounded marker");
 
+  // A dispatch at site 1 is admitted only from an activation whose marker
+  // names site 1; both sites count against the one browser sample budget.
+  invocation.header.sequence_number = 510;
+  d.sequence_number = 511;
+  d.parent_event_id = 510;
+  reb::NativeGuestPut(invocation.inline_payload, 4, 2, 4);
+  reb::NativeGuestPut(invocation.inline_payload, 16, 31, 8);
+  reb::NativeGuestPut(dispatch.inline_payload, 4, 2, 4);
+  reb::NativeGuestPut(dispatch.inline_payload, 8, 9, 4);
+  reb::NativeGuestPut(dispatch.inline_payload, 32, 31, 8);
+  send({}, recipe);
+  Check(transfers.empty() && gap_for(511, "native_guest_capture_invalid"),
+        "A site 1 dispatch under a site 0 marker is an explicit gap");
+  reb::NativeGuestPut(invocation.inline_payload, 80, 1, 4);
+  d.sequence_number = 512;
+  send({}, recipe);
+  Check(transfers.size() == 1 && !gap_for(512, "native_guest_capture_invalid"),
+        "A site 1 dispatch under its own marker reaches the production sink");
+  while (!transfers.empty())
+    Receive(receiver, transfers.begin()->first);
+  Check(std::any_of(events.begin(), events.end(),
+                    [](const auto& e) {
+                      return e.header.sequence_number == 510 &&
+                             e.inline_payload[80] == std::byte{1};
+                    }),
+        "The published marker keeps its site");
   const auto stale = events.size();
   d.sequence_number = 509;
   host.CaptureNativeGuest(epoch + 1, record(invocation), record(dispatch), 10, 11, 12,

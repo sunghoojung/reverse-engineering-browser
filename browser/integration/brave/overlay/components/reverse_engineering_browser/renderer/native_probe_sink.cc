@@ -2457,6 +2457,8 @@ namespace {
 struct GuestInvocationState final {
   std::uint64_t instance = 0, invocation = 0, frame = 0, document_high = 0, document_low = 0,
                 dispatch_sequence = 0;
+  // The adapter site of this activation's dispatcher function.
+  std::uint32_t site = 0;
   NativeProbeEvent invocation_event{};
 };
 struct GuestDocumentBinding final {
@@ -2544,8 +2546,7 @@ void NativeProbeSink::InvalidateNativeWasmGuest(const NativeWasmGuestStateView& 
     ResetGuestThread(generation);
   }
   const auto* adapter = native_guest_adapter_.load(std::memory_order_acquire);
-  if (!adapter || view.function_index != adapter->function_index ||
-      view.module_byte_offset != adapter->dispatch_module_offset)
+  if (!adapter || !FindNativeGuestSite(*adapter, view.function_index, view.module_byte_offset))
     return;
   if (!view.instance_id || !view.invocation_id) {
     for (auto& state : guest_thread.invocations)
@@ -2630,8 +2631,13 @@ bool NativeProbeSink::IsNativeWasmGuestDispatchSite(
   // Engine ancestry markers must survive sample caps and metadata rejection.
   // This predicate describes the immutable recipe, not capture admission.
   const auto* adapter = native_guest_adapter_.load(std::memory_order_acquire);
-  return adapter && function_index == adapter->function_index &&
-         module_byte_offset == adapter->dispatch_module_offset;
+  return adapter && FindNativeGuestSite(*adapter, function_index, module_byte_offset);
+}
+bool NativeProbeSink::IsNativeWasmGuestDispatcherFunction(
+    std::uint32_t function_index) const noexcept {
+  // Like the site predicate, recipe identity rather than capture admission.
+  const auto* adapter = native_guest_adapter_.load(std::memory_order_acquire);
+  return adapter && FindNativeGuestDispatcher(*adapter, function_index);
 }
 NativeWasmGuestModuleDecision NativeProbeSink::AdmitNativeWasmGuestModule(
     std::span<const std::uint8_t> module,
@@ -2639,7 +2645,8 @@ NativeWasmGuestModuleDecision NativeProbeSink::AdmitNativeWasmGuestModule(
   const auto* adapter = native_guest_adapter_.load(std::memory_order_acquire);
   // Capture state is transient; the engine resets remembered rejections when
   // the enabled interval or capture epoch changes.
-  if (!adapter || function_index != adapter->function_index || !IsNativeWasmGuestEnabled())
+  if (!adapter || !FindNativeGuestDispatcher(*adapter, function_index) ||
+      !IsNativeWasmGuestEnabled())
     return NativeWasmGuestModuleDecision::kNotDispatcher;
   return !module.empty() && module.size() <= kNativeArtifactMaxContentBytes &&
                  NativeGuestDigest(module) == adapter->module_sha256
@@ -2659,8 +2666,11 @@ void NativeProbeSink::RecordNativeWasmGuest(std::uint64_t execution_context_id,
   }
   const auto* adapter = native_guest_adapter_.load(std::memory_order_acquire);
   // A helper br_table in an opcode handler is not a guest instruction boundary.
-  if (!adapter || view.function_index != adapter->function_index ||
-      view.module_byte_offset != adapter->dispatch_module_offset)
+  std::uint32_t site_index = 0;
+  const auto* site = adapter ? FindNativeGuestSite(*adapter, view.function_index,
+                                                   view.module_byte_offset, &site_index)
+                             : nullptr;
+  if (!site)
     return;
   if (!view.instance_id || !view.invocation_id) {
     for (auto& state : guest_thread.invocations)
@@ -2747,9 +2757,10 @@ void NativeProbeSink::RecordNativeWasmGuest(std::uint64_t execution_context_id,
     state->frame = frame_id;
     state->document_high = document_token_high;
     state->document_low = document_token_low;
+    state->site = site_index;
   }
   if (state->frame != frame_id || state->document_high != document_token_high ||
-      state->document_low != document_token_low)
+      state->document_low != document_token_low || state->site != site_index)
     return;
   if (guest_snapshot_busy) {
     guest_snapshot_cancelled = true;
@@ -2758,11 +2769,12 @@ void NativeProbeSink::RecordNativeWasmGuest(std::uint64_t execution_context_id,
   }
   GuestSnapshotGuard snapshot_guard;
   auto& snapshot = guest_snapshot;
-  if (!ResolveNativeGuestSnapshot(*adapter, view, snapshot) || guest_snapshot_cancelled) {
+  if (!ResolveNativeGuestSnapshot(*site, view, snapshot) || guest_snapshot_cancelled) {
     NoteNativeGuestOmission(generation, frame_id, 2, "native_guest_state_unavailable");
     return;
   }
   // Generation tags prevent stale in-flight work consuming a replacement budget.
+  // Every site claims from these same slots, so sites share one sample limit.
   std::uint32_t sample_index = UINT32_MAX;
   for (std::size_t index = 0; index < adapter->sample_limit; ++index) {
     auto& slot = native_guest_slots_[index];
@@ -2808,6 +2820,7 @@ void NativeProbeSink::RecordNativeWasmGuest(std::uint64_t execution_context_id,
     payload.parent_dispatch_sequence_number = parent.dispatch;
     if (parent.unresolved)
       NoteNativeGuestOmission(generation, frame_id, 10, "native_guest_parent_unresolved");
+    payload.site_index = site_index;
     for (std::size_t i = 0; i < 32; ++i)
       payload.recipe_sha256[i] = static_cast<std::byte>(adapter->recipe_sha256[i]);
     invocation.inline_payload = EncodeNativeWasmGuestInvocationPayload(payload);
@@ -2827,9 +2840,9 @@ void NativeProbeSink::RecordNativeWasmGuest(std::uint64_t execution_context_id,
   payload.raw_pc_bits = snapshot.raw_pc;
   payload.memory_base = snapshot.memory_base;
   payload.memory_length = snapshot.memory_length;
-  payload.pc_local_index = adapter->pc_local_index;
-  payload.pc_adjustment = adapter->pc_adjustment;
-  payload.memory_index = adapter->memory_index;
+  payload.pc_local_index = site->pc_local_index;
+  payload.pc_adjustment = site->pc_adjustment;
+  payload.memory_index = site->memory_index;
   payload.opcode = snapshot.opcode;
   for (std::size_t i = 0; i < 32; ++i)
     payload.recipe_sha256[i] = static_cast<std::byte>(adapter->recipe_sha256[i]);
@@ -2861,14 +2874,34 @@ bool NativeProbeSink::TryRecordNativeGuestHost(NativeProbeEvent& event,
   const auto emit = native_guest_host_.load(std::memory_order_acquire);
   if (!adapter || !context_provider || !emit || guest_thread.generation != generation)
     return false;
-  NativeWasmGuestContext context;
-  if (!context_provider(adapter->function_index, &context) ||
-      context.function_index != adapter->function_index)
+  // An empty import list proves no host association, so it needs no walk.
+  if (std::none_of(adapter->sites.begin(),
+                   adapter->sites.begin() + static_cast<std::ptrdiff_t>(adapter->site_count),
+                   [](const NativeWasmGuestSite& site) { return site.import_call_count != 0; }))
     return false;
-  const auto end = adapter->import_call_offsets.begin() +
-                   static_cast<std::ptrdiff_t>(adapter->import_call_count);
-  if (std::find(adapter->import_call_offsets.begin(), end, context.import_module_byte_offset) ==
-      end)
+  // The host belongs to the innermost selected activation of any site. Each
+  // walk finds the nearest activation of one dispatcher function; engine
+  // invocation identities grow with entry, so among activations on the current
+  // stack the largest is the innermost. Only that site's imports attribute the
+  // host: an outer site's import list never claims an inner interpreter's call.
+  NativeWasmGuestContext context;
+  const NativeWasmGuestSite* site = nullptr;
+  for (std::size_t i = 0; i < adapter->site_count; ++i) {
+    const auto& candidate = adapter->sites[i];
+    NativeWasmGuestContext found;
+    if (!context_provider(candidate.function_index, &found) ||
+        found.function_index != candidate.function_index)
+      continue;
+    if (!site || found.invocation_id > context.invocation_id) {
+      context = found;
+      site = &candidate;
+    }
+  }
+  if (!site)
+    return false;
+  const auto end =
+      site->import_call_offsets.begin() + static_cast<std::ptrdiff_t>(site->import_call_count);
+  if (std::find(site->import_call_offsets.begin(), end, context.import_module_byte_offset) == end)
     return false;
   for (auto& state : guest_thread.invocations) {
     if (state.instance != context.instance_id || state.invocation != context.invocation_id ||

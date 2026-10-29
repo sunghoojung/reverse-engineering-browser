@@ -134,6 +134,16 @@ int main(int argc, char** argv) {
     invocation.parent_invocation_id = 10;
     invocation.parent_dispatch_sequence_number = 103;
     valid_invocation = false;
+  } else if (mode == "site") {
+    invocation.site_index = 7;
+  } else if (mode == "site-limit") {
+    invocation.site_index = 8;
+    valid_invocation = false;
+  } else if (mode == "legacy-site") {
+    // Version 2 reserved the site bytes.
+    invocation.protocol_version = 2;
+    invocation.site_index = 1;
+    valid_invocation = false;
   } else if (mode == "parent" || mode == "truncated" || mode == "big-endian") {
     valid_sample = false;
   } else

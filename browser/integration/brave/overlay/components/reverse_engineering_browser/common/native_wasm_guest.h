@@ -21,6 +21,10 @@ namespace reb {
 inline constexpr std::size_t kNativeGuestSnapshotLimit = 65536;
 inline constexpr std::size_t kNativeGuestSampleLimit = 256;
 inline constexpr std::size_t kNativeGuestAdapterLimit = 8192;
+// Dispatch sites per adapter. Every site draws on the one shared sample limit,
+// so the snapshot budget (sample limit x snapshot limit, at most 16 MiB) and
+// the 128 sampled activations are never multiplied per site.
+inline constexpr std::size_t kNativeGuestSiteLimit = 8;
 // Host events per capture configuration that may travel the parent-binding
 // path. Later hosts stay on the ordinary bounded queue, unparented, after one
 // explicit omission marker; the events themselves are never dropped here.
@@ -59,10 +63,11 @@ struct NativeGuestValueSource final {
   std::uint32_t local_index = 0;
   std::uint64_t constant = 0;
 };
-struct NativeWasmGuestAdapter final {
-  std::array<std::uint8_t, 32> module_sha256{}, recipe_sha256{};
-  std::uint32_t function_index = 0, dispatch_module_offset = 0, pc_local_index = 0,
-                sample_limit = 16;
+// One configured dispatch site. The sites of an adapter name distinct
+// dispatcher functions, so an activation belongs to exactly one site and its
+// parent walk and host attribution stay unambiguous.
+struct NativeWasmGuestSite final {
+  std::uint32_t function_index = 0, dispatch_module_offset = 0, pc_local_index = 0;
   std::uint8_t pc_value_type = 32, opcode_width = 1;
   bool subtract_memory_base = false, opcode_big_endian = false;
   std::int64_t pc_adjustment = 0;
@@ -70,6 +75,15 @@ struct NativeWasmGuestAdapter final {
   NativeGuestValueSource memory_base{}, memory_length{};
   std::array<std::uint32_t, 64> import_call_offsets{};
   std::size_t import_call_count = 0;
+};
+// A version 1 recipe parses as one site; version 2 lists 1 to 8 sites in
+// strictly increasing function index order. The array index is the site index
+// that every invocation marker carries.
+struct NativeWasmGuestAdapter final {
+  std::array<std::uint8_t, 32> module_sha256{}, recipe_sha256{};
+  std::uint32_t sample_limit = 16;
+  std::array<NativeWasmGuestSite, kNativeGuestSiteLimit> sites{};
+  std::size_t site_count = 0;
   std::string json;
 };
 // Module, recipe and adapter identities. Uses Chromium's BoringSSL-backed
@@ -78,28 +92,59 @@ inline std::array<std::uint8_t, 32> NativeGuestDigest(
     std::span<const std::uint8_t> bytes) noexcept {
   return crypto::hash::Sha256(bytes);
 }
-inline bool IsValidNativeGuestAdapterShape(const NativeWasmGuestAdapter& adapter) noexcept {
-  if (adapter.json.empty() || adapter.json.size() > kNativeGuestAdapterLimit ||
-      !adapter.sample_limit || adapter.sample_limit > kNativeGuestSampleLimit ||
-      adapter.dispatch_module_offset < 8 ||
-      (adapter.pc_value_type != 32 && adapter.pc_value_type != 64) ||
-      (adapter.opcode_width != 1 && adapter.opcode_width != 2 && adapter.opcode_width != 4) ||
-      adapter.import_call_count > adapter.import_call_offsets.size())
+inline bool IsValidNativeGuestSiteShape(const NativeWasmGuestSite& site) noexcept {
+  if (site.dispatch_module_offset < 8 || (site.pc_value_type != 32 && site.pc_value_type != 64) ||
+      (site.opcode_width != 1 && site.opcode_width != 2 && site.opcode_width != 4) ||
+      site.import_call_count > site.import_call_offsets.size())
     return false;
-  for (const auto* source : {&adapter.memory_base, &adapter.memory_length}) {
+  for (const auto* source : {&site.memory_base, &site.memory_length}) {
     if (source->chain_count > source->offsets.size() ||
         (!source->is_local && source->chain_count) ||
         (source->is_local && source->value_type != 32 && source->value_type != 64) ||
         (source->chain_count && source->value_type != 32))
       return false;
   }
-  for (std::size_t i = 0; i < adapter.import_call_count; ++i)
-    if (adapter.import_call_offsets[i] < 8 ||
-        (i && adapter.import_call_offsets[i] <= adapter.import_call_offsets[i - 1]))
+  for (std::size_t i = 0; i < site.import_call_count; ++i)
+    if (site.import_call_offsets[i] < 8 ||
+        (i && site.import_call_offsets[i] <= site.import_call_offsets[i - 1]))
+      return false;
+  return true;
+}
+inline bool IsValidNativeGuestAdapterShape(const NativeWasmGuestAdapter& adapter) noexcept {
+  if (adapter.json.empty() || adapter.json.size() > kNativeGuestAdapterLimit ||
+      !adapter.sample_limit || adapter.sample_limit > kNativeGuestSampleLimit ||
+      !adapter.site_count || adapter.site_count > adapter.sites.size())
+    return false;
+  for (std::size_t i = 0; i < adapter.site_count; ++i)
+    if (!IsValidNativeGuestSiteShape(adapter.sites[i]) ||
+        (i && adapter.sites[i].function_index <= adapter.sites[i - 1].function_index))
       return false;
   return adapter.recipe_sha256 ==
          NativeGuestDigest(std::span(reinterpret_cast<const std::uint8_t*>(adapter.json.data()),
                                      adapter.json.size()));
+}
+// The site whose dispatcher function this is, or null. Sites are sorted by
+// function index and there are at most eight, so this is a short scan.
+inline const NativeWasmGuestSite* FindNativeGuestDispatcher(
+    const NativeWasmGuestAdapter& adapter,
+    std::uint32_t function_index,
+    std::uint32_t* site_index = nullptr) noexcept {
+  for (std::size_t i = 0; i < adapter.site_count && i < adapter.sites.size(); ++i)
+    if (adapter.sites[i].function_index == function_index) {
+      if (site_index)
+        *site_index = static_cast<std::uint32_t>(i);
+      return &adapter.sites[i];
+    }
+  return nullptr;
+}
+// The configured site at exactly this br_table, or null for a helper br_table.
+inline const NativeWasmGuestSite* FindNativeGuestSite(
+    const NativeWasmGuestAdapter& adapter,
+    std::uint32_t function_index,
+    std::uint32_t module_byte_offset,
+    std::uint32_t* site_index = nullptr) noexcept {
+  const auto* site = FindNativeGuestDispatcher(adapter, function_index, site_index);
+  return site && site->dispatch_module_offset == module_byte_offset ? site : nullptr;
 }
 inline bool NativeGuestReadValue(const NativeWasmGuestStateView& view,
                                  const NativeGuestValueSource& source,
@@ -132,49 +177,49 @@ struct NativeGuestSnapshot final {
   std::uint32_t memory_length = 0, opcode = 0;
   std::array<std::uint8_t, kNativeGuestSnapshotLimit> bytes{};
 };
-inline bool ResolveNativeGuestSnapshot(const NativeWasmGuestAdapter& adapter,
+inline bool ResolveNativeGuestSnapshot(const NativeWasmGuestSite& site,
                                        const NativeWasmGuestStateView& view,
                                        NativeGuestSnapshot& out) noexcept {
-  if (!view.instance_id || !view.invocation_id || view.function_index != adapter.function_index ||
-      view.module_byte_offset != adapter.dispatch_module_offset || !view.copy_memory ||
-      (adapter.opcode_width != 1 && adapter.opcode_width != 2 && adapter.opcode_width != 4))
+  if (!view.instance_id || !view.invocation_id || view.function_index != site.function_index ||
+      view.module_byte_offset != site.dispatch_module_offset || !view.copy_memory ||
+      (site.opcode_width != 1 && site.opcode_width != 2 && site.opcode_width != 4))
     return false;
   NativeGuestValueSource pc_source;
   pc_source.is_local = true;
-  pc_source.value_type = adapter.pc_value_type;
-  pc_source.local_index = adapter.pc_local_index;
+  pc_source.value_type = site.pc_value_type;
+  pc_source.local_index = site.pc_local_index;
   std::uint64_t length = 0;
   if (!NativeGuestReadValue(view, pc_source, out.raw_pc) ||
-      !NativeGuestReadValue(view, adapter.memory_base, out.memory_base) ||
-      !NativeGuestReadValue(view, adapter.memory_length, length) || !length ||
+      !NativeGuestReadValue(view, site.memory_base, out.memory_base) ||
+      !NativeGuestReadValue(view, site.memory_length, length) || !length ||
       length > kNativeGuestSnapshotLimit || out.memory_base > UINT64_MAX - length)
     return false;
   out.pc = out.raw_pc;
-  if (adapter.pc_adjustment >= 0) {
-    const auto delta = static_cast<std::uint64_t>(adapter.pc_adjustment);
+  if (site.pc_adjustment >= 0) {
+    const auto delta = static_cast<std::uint64_t>(site.pc_adjustment);
     if (out.pc > UINT64_MAX - delta)
       return false;
     out.pc += delta;
   } else {
-    const auto delta = static_cast<std::uint64_t>(-(adapter.pc_adjustment + 1)) + 1;
+    const auto delta = static_cast<std::uint64_t>(-(site.pc_adjustment + 1)) + 1;
     if (out.pc < delta)
       return false;
     out.pc -= delta;
   }
-  if (adapter.subtract_memory_base) {
+  if (site.subtract_memory_base) {
     if (out.pc < out.memory_base)
       return false;
     out.pc -= out.memory_base;
   }
-  if (length < adapter.opcode_width || out.pc > length - adapter.opcode_width)
+  if (length < site.opcode_width || out.pc > length - site.opcode_width)
     return false;
   out.memory_length = static_cast<std::uint32_t>(length);
-  if (!view.copy_memory(view.accessor_context, adapter.memory_index, out.memory_base,
+  if (!view.copy_memory(view.accessor_context, site.memory_index, out.memory_base,
                         out.memory_length, out.bytes.data()))
     return false;
   out.opcode = 0;
-  for (std::uint32_t i = 0; i < adapter.opcode_width; ++i) {
-    const auto shift = adapter.opcode_big_endian ? 8U * (adapter.opcode_width - i - 1U) : 8U * i;
+  for (std::uint32_t i = 0; i < site.opcode_width; ++i) {
+    const auto shift = site.opcode_big_endian ? 8U * (site.opcode_width - i - 1U) : 8U * i;
     out.opcode |= static_cast<std::uint32_t>(out.bytes[static_cast<std::size_t>(out.pc) + i])
                   << shift;
   }

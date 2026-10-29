@@ -413,19 +413,27 @@ dispatch site, and the child's first guest buffer (memory, base, length)
 differs from the outer dispatch's. A child at the parent's own site is a
 reentrant activation of one dispatcher, such as a guest call, and is not
 nested. The outer handler is the parent's last retained dispatch sample before
-the child's invocation marker. `basis` is `contiguous-sequence` when every
-renderer sequence number between them is retained and none is a gap or another
-guest dispatch; otherwise it is `nearest-retained`, which does not prove the
-exact driving dispatch. A window longer than 4096, or past 65536 lookups shared
-by the workspace, is not scanned and stays `nearest-retained`. The inner side lists its own observed
-opcodes (at most 64, with `omitted_opcode_count`) and its retained samples.
+the child's invocation marker. When the child's version-2 marker names the
+parent dispatch exactly, that sample must be the named one and `basis` is
+`exact-parent-dispatch`; a named dispatch that was lost or is contradicted by a
+later retained parent dispatch leaves the child unproven instead of falling
+back. Version-1 markers, and markers whose renderer could not resolve the
+parent dispatch (it is 0), use sequence order: `basis` is `contiguous-sequence`
+when every renderer sequence number between them is retained and none is a gap
+or another guest dispatch; otherwise it is `nearest-retained`, which does not
+prove the exact driving dispatch. A window longer than 4096, or past 65536
+lookups shared by the workspace, is not scanned and stays `nearest-retained`.
+Producers before 2.15.0 never write `exact-parent-dispatch`. The inner side
+lists its own observed opcodes (at most 64, with `omitted_opcode_count`) and its retained samples.
 Other activations that name a parent are counted as `nested-guest-unproven`;
 `nested-guest-limit` counts nested guests past 64.
 
-Live capture does not produce nested guests yet. The renderer writes
-`parent_invocation_id` 0 (nesting not asserted), and one adapter covers one
-dispatch site per browser lifetime, so an inner interpreter at another site is
-not guest-captured. JavaScript samplers record no dispatch site, handler
+Live capture names each activation's parent and exact outer dispatch (see
+[native guest observations](native-wasm-guest-v1.md#parent-activation-and-exact-outer-dispatch)),
+but one adapter covers one dispatch site per browser lifetime. A live
+reentrant activation at that site, such as a QuickJS guest call, names its
+parent in its rows but is not a nested guest, and an inner interpreter at
+another site is not guest-captured. JavaScript samplers record no dispatch site, handler
 location or call stack. The analyzer path is exercised with owned synthetic
 programs in `vm_opcode_observed.rs`; its exported store backs the rendered VM
 Lab acceptance.
@@ -641,3 +649,8 @@ claims from them. A threaded or handler-table interpreter whose table is filled
 at run time, which static recovery withholds, therefore gets observed handler
 claims naming the callee each slot actually ran, compared with the element
 segments' claim for that slot. Static recovery, tier and score are unchanged.
+
+Producer 2.15.0 links a nested guest through the outer dispatch its version-2
+invocation marker names exactly, with basis `exact-parent-dispatch`; see
+[observed claims and nested guests](#observed-claims-and-nested-guests).
+Version-1 markers and unresolved parent dispatches keep the sequence bases.

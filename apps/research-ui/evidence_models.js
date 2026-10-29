@@ -1847,7 +1847,7 @@
           const {outer, inner} = row;
           if (!vmWorkspaceExact(outer, [...side, 'dispatch_event', 'selector', 'opcode', 'selected_arm', 'is_default', 'instruction_pointer', 'basis']) ||
             !vmWorkspaceExact(inner, [...side, 'sample_count', 'events', 'observed_opcodes', 'omitted_opcode_count']) ||
-            !['contiguous-sequence', 'nearest-retained'].includes(outer.basis) || !vmSampleEvent(outer.dispatch_event)) return false;
+            !['exact-parent-dispatch', 'contiguous-sequence', 'nearest-retained'].includes(outer.basis) || !vmSampleEvent(outer.dispatch_event)) return false;
           const driver = byEvent.get(vmSampleEventKey(outer.dispatch_event));
           const children = guest.filter(sample => sample.invocation_id === inner.invocation_id);
           if (!driver || !sameSide(outer, driver) || driver.instance_id !== row.instance_id ||

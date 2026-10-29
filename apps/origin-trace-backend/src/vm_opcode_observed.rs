@@ -469,7 +469,9 @@ fn identity(reference: &Value) -> Option<Identity> {
 /// A guest activation that names a parent invocation, runs at another
 /// dispatch site and reads another guest buffer is an inner interpreter driven
 /// by the parent's handler. Same-site children are reentrant activations of
-/// one dispatcher and are not nested guests.
+/// one dispatcher and are not nested guests. A version 2 marker names the
+/// driving dispatch exactly; version 1 evidence and parents whose dispatch the
+/// renderer could not resolve fall back to sequence order.
 fn nested(inputs: &Inputs<'_>, derived: &mut Derived) {
     if !inputs.guest.iter().any(|row| {
         row["parent_invocation_id"]
@@ -539,17 +541,26 @@ fn nested(inputs: &Inputs<'_>, derived: &mut Derived) {
             {
                 return None;
             }
-            // The parent's handler running when the child activation began.
+            // The parent's handler running when the child activation began: its
+            // last retained dispatch before the child's marker. An exact name
+            // must be that dispatch; a lost or contradicted one stays unproven
+            // rather than falling back to the sequence-order guess.
             let outer = parents
                 .iter()
                 .filter(|row| sequence(&row["event"]).is_some_and(|seq| seq < child_key.2))
                 .max_by_key(|row| sequence(&row["event"]))?;
+            let exact = super::native_guest::exact_parent_dispatch(index.get(&child_key)?);
+            if exact.is_some_and(|seq| sequence(&outer["event"]) != Some(seq)) {
+                return None;
+            }
             if buffer(outer) == buffer(first) {
                 return None;
             }
             let start = sequence(&outer["event"])?;
             let window = child_key.2 - start - 1;
-            let contiguous = window <= MAX_SEQUENCE_WINDOW.min(sequence_work)
+            let basis = if exact.is_some() {
+                "exact-parent-dispatch"
+            } else if window <= MAX_SEQUENCE_WINDOW.min(sequence_work)
                 && {
                     sequence_work -= window;
                     true
@@ -560,7 +571,12 @@ fn nested(inputs: &Inputs<'_>, derived: &mut Derived) {
                         .is_some_and(|event| {
                             !matches!(event["type"].as_str(), Some("gap" | "wasm_guest_dispatch"))
                         })
-                });
+                })
+            {
+                "contiguous-sequence"
+            } else {
+                "nearest-retained"
+            };
             let mut opcodes = BTreeMap::<u64, u64>::new();
             for row in rows {
                 if let Some(opcode) = row["opcode"].as_u64() {
@@ -591,11 +607,7 @@ fn nested(inputs: &Inputs<'_>, derived: &mut Derived) {
                 outer_side[key] = outer[key].clone();
             }
             outer_side["dispatch_event"] = outer["event"].clone();
-            outer_side["basis"] = json!(if contiguous {
-                "contiguous-sequence"
-            } else {
-                "nearest-retained"
-            });
+            outer_side["basis"] = json!(basis);
             let mut inner = side(first, id);
             inner["sample_count"] = json!(rows.len());
             inner["events"] = json!(
@@ -1309,6 +1321,54 @@ mod tests {
                 "{change}"
             );
         }
+    }
+
+    /// Rewrites the inner invocation marker as version 2 naming `dispatch`.
+    fn name_parent_dispatch(guest: &mut Guest, dispatch: u64) {
+        let marker = &mut guest.events[3];
+        assert_eq!(marker["type"], "wasm_guest_invocation");
+        let mut p = hex::decode(marker["payload"].as_str().unwrap()).unwrap();
+        p[0] = 2;
+        put(&mut p, 72, dispatch, 8);
+        marker["payload"] = json!(hex::encode(p));
+    }
+
+    #[test]
+    fn nested_guest_uses_the_exact_parent_dispatch_when_named() {
+        let mut guest = guest();
+        name_parent_dispatch(&mut guest, 3);
+        let workspace = rerun(&guest);
+        assert_eq!(workspace["native_guest_sample_count"], 5, "{workspace:#}");
+        let outer = &workspace["nested_guests"][0]["outer"];
+        assert_eq!(outer["dispatch_event"]["sequence_number"], "3");
+        assert_eq!(outer["basis"], "exact-parent-dispatch");
+        assert!(omission(&workspace, "nested-guest-unproven").is_none());
+        // A named dispatch that is lost (3 removed), contradicted by a later
+        // retained parent dispatch (2), or not a dispatch at all (1, the outer
+        // marker) is unproven. It never falls back to the nearest retained guess.
+        for named in [3, 2, 1] {
+            let mut guest = super::tests::guest();
+            name_parent_dispatch(&mut guest, named);
+            if named == 3 {
+                guest.events.remove(2);
+            }
+            let workspace = rerun(&guest);
+            assert_eq!(
+                workspace["native_guest_sample_count"],
+                5 - u64::from(named == 3)
+            );
+            assert!(workspace.get("nested_guests").is_none(), "{named}");
+            assert!(
+                omission(&workspace, "nested-guest-unproven").is_some(),
+                "{named}"
+            );
+        }
+        // A version 2 parent without an exact dispatch keeps the sequence basis.
+        let mut guest = super::tests::guest();
+        name_parent_dispatch(&mut guest, 0);
+        let outer = &rerun(&guest)["nested_guests"][0]["outer"];
+        assert_eq!(outer["basis"], "contiguous-sequence");
+        assert_eq!(outer["dispatch_event"]["sequence_number"], "3");
     }
 
     /// The OpenAPI component carries the same definitions without descriptions.

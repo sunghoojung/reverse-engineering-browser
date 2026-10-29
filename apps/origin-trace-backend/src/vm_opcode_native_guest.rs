@@ -84,6 +84,11 @@ fn invocation_payload(marker: &Value) -> Option<Vec<u8>> {
             || (le64(&m, 64) != 0 && dispatch < decimal(&marker["sequence_number"])?)))
     .then_some(m)
 }
+/// The renderer sequence number of the parent dispatch that a version 2
+/// invocation marker names exactly; `None` when it names no exact dispatch.
+pub(super) fn exact_parent_dispatch(marker: &Value) -> Option<u64> {
+    Some(le64(&invocation_payload(marker)?, 72)).filter(|seq| *seq != 0)
+}
 fn child<'a>(artifacts: &'a [Value], id: u64, module: &Value, kind: &str) -> Option<&'a Value> {
     if id == 0 {
         return None;

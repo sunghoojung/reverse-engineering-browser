@@ -3364,6 +3364,7 @@
             },
             "basis": {
               "enum": [
+                "exact-parent-dispatch",
                 "contiguous-sequence",
                 "nearest-retained"
               ]

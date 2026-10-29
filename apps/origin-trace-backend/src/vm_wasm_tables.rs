@@ -4,8 +4,8 @@
 //! order, so a later segment overwrites an earlier one exactly as
 //! instantiation would. An offset that reads an imported global, directly or
 //! through a defined global, is only known at instantiation; those segments
-//! stay relative and never receive a slot. A segment that ends past the
-//! table's declared minimum is out of range and is not placed, because
+//! stay relative and invalidate earlier concrete slots in that table. A segment
+//! that ends past the table's declared minimum is out of range and is not placed, because
 //! instantiation is only guaranteed to have that many slots. Instantiation
 //! applies active segments in order and traps at the first one that does not
 //! fit, so every later active segment is unreached: it never writes a slot.
@@ -288,6 +288,19 @@ impl Tables {
                             ElementKind::Passive => (None, Placement::Passive),
                             ElementKind::Declared => (None, Placement::Declared),
                         };
+                        if !trapped
+                            && entry_count > 0
+                            && matches!(placement, Placement::Relative(_) | Placement::Unresolved)
+                            && let Some(slots) =
+                                table.and_then(|table| tables.slots.get_mut(&table))
+                        {
+                            if !meter.charge(slots.len() as u64) {
+                                return None;
+                            }
+                            // Unknown placement may reach any earlier slot. Later
+                            // concrete segments can establish those slots again.
+                            slots.clear();
+                        }
                         let segment_index = tables.segments.len();
                         if let Some(table) = table {
                             if !tables.by_table.contains_key(&table) && !tables.memory.keep(256) {
@@ -765,6 +778,28 @@ mod tests {
     }
 
     #[test]
+    fn unknown_segment_placement_invalidates_only_earlier_slots_in_its_table() {
+        for offset in ["global.get $base", "i32.div_u (i32.const 0) (i32.const 1)"] {
+            let bytes = wat::parse_str(format!(
+                r#"(module
+                (import "env" "base" (global $base i32))
+                (table 8 funcref) (table 8 funcref)
+                (func $a) (func $b)
+                (elem (table 0) (i32.const 1) func $a $a)
+                (elem (table 1) (i32.const 1) func $a)
+                (elem (table 0) ({offset}) func $b)
+                (elem (table 0) (i32.const 5) func $a))"#
+            ))
+            .unwrap();
+            let tables = Tables::parse(&bytes).unwrap();
+            assert_eq!(tables.slots[&0], vec![(5, Entry::Function(0))]);
+            assert_eq!(tables.slots[&1], vec![(1, Entry::Function(0))]);
+            let matching = tables.matching_slots(0, 0, &Meter::new()).unwrap();
+            assert_eq!(matching.0, vec![5]);
+        }
+    }
+
+    #[test]
     fn segments_place_at_offsets_overwrite_in_order_and_keep_relative_apart() {
         let bytes = wat::parse_str(
             r#"(module
@@ -801,19 +836,9 @@ mod tests {
                 Placement::Declared,
             ]
         );
-        let slots = &tables.slots[&0];
-        assert_eq!(
-            slots.iter().map(|(s, f)| (*s, *f)).collect::<Vec<_>>(),
-            [
-                (1, Entry::Function(0)),
-                (2, Entry::Function(0)),
-                (3, Entry::Function(2)),
-                (9, Entry::Function(1))
-            ]
-        );
-        // Four populated placed slots plus one relative entry.
-        let meter = crate::vm::dispatch_shape::Meter::new();
+        assert!(tables.slots[&0].is_empty());
+        let meter = Meter::new();
         let matching = tables.matching_slots(0, 0, &meter).unwrap();
-        assert_eq!((&matching.0, matching.1), (&vec![1, 2, 9], 4));
+        assert_eq!((&matching.0, matching.1), (&vec![], 0));
     }
 }

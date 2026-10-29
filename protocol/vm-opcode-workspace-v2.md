@@ -505,7 +505,7 @@ validate PC units or establish invocation/host parentage. They keep
 and host-link omissions also remain. Mixed reports never promote caller-only
 opcodes. The UI labels their positions and exposes their provenance audit.
 
-Producer 2.10.0 shares the artifact classification budget with table layout and
+Producer 2.11.0 shares the artifact classification budget with table layout and
 the lexical claim gate. The gate indexes complete tokens and lexical extents,
 including arrows, implicit function bindings and loop heads. Ambiguous bindings
 withhold claims; budget exhaustion remains visible even if a workspace cannot

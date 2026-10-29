@@ -29,32 +29,13 @@ pub(crate) fn parser_arena_bytes() -> usize {
 #[derive(Clone, Copy, serde::Serialize, serde::Deserialize)]
 enum Refusal {
     Binding,
-    Global,
-    Receiver,
-    Dominance,
 }
 impl Refusal {
     fn reason(self) -> &'static str {
-        match self {
-            Self::Binding => "handler-binding-unproven",
-            Self::Global => "global-binding-unstable",
-            Self::Receiver => "receiver-binding-unstable",
-            Self::Dominance => "initialization-not-dominating",
-        }
+        "handler-binding-unproven"
     }
     fn detail(self) -> &'static str {
-        match self {
-            Self::Binding => AMBIGUOUS,
-            Self::Global => {
-                "Global table binding may be replaced by dynamic code or a write through a global alias in this artifact."
-            }
-            Self::Receiver => {
-                "Table receiver may be reflective, aliased or replaced; its property identity is not proven."
-            }
-            Self::Dominance => {
-                "Table initialization is not an unconditional statement in the dispatch loop's function body before that loop."
-            }
-        }
+        AMBIGUOUS
     }
 }
 type Verdict = Result<Option<Role>, Refusal>;
@@ -232,14 +213,7 @@ struct Facts<'s, 'a> {
     loop_tables: HashMap<NodeId, HashSet<Key<'a>>>,
     invoked_loops: HashMap<NodeId, NodeId>,
     table_functions: HashMap<NodeId, Key<'a>>,
-    property_writes: HashMap<&'a str, usize>,
-    unknown_property_write: bool,
-    reflective_receiver: bool,
-    non_fresh_this: HashSet<NodeId>,
-    unknown_this_call: bool,
-    dynamic_code: bool,
-    global_writes: HashSet<&'a str>,
-    unknown_global_write: bool,
+    member_write_counts: HashMap<Key<'a>, usize>,
     objects: HashMap<NodeId, (Key<'a>, u32, ScopeId)>,
     candidates: Vec<Candidate<'a>>,
 }
@@ -396,14 +370,7 @@ impl<'s, 'a> Facts<'s, 'a> {
             loop_tables: HashMap::new(),
             invoked_loops: HashMap::new(),
             table_functions: HashMap::new(),
-            property_writes: HashMap::new(),
-            unknown_property_write: false,
-            reflective_receiver: false,
-            non_fresh_this: HashSet::new(),
-            unknown_this_call: false,
-            dynamic_code: false,
-            global_writes: HashSet::new(),
-            unknown_global_write: false,
+            member_write_counts: HashMap::new(),
             objects: HashMap::new(),
             candidates: Vec::new(),
         };
@@ -411,8 +378,7 @@ impl<'s, 'a> Facts<'s, 'a> {
         // including at thousands of nested functions, never an ancestor walk.
         for scope in scoping.scope_descendants_from_root() {
             let flags = scoping.scope_flags(scope);
-            facts.opaque[scope.index()] = flags.contains_direct_eval()
-                || flags.is_with()
+            facts.opaque[scope.index()] = flags.is_with()
                 || scoping
                     .scope_parent_id(scope)
                     .is_some_and(|parent| facts.opaque[parent.index()]);
@@ -454,14 +420,6 @@ impl<'s, 'a> Facts<'s, 'a> {
             }
             match node.kind() {
                 AstKind::IdentifierReference(reference) => {
-                    // References include extracted aliases and indirect eval.
-                    // Harmless Object/Reflect reads are not mutators.
-                    if reference.name == "Proxy" {
-                        facts.reflective_receiver = true;
-                    }
-                    if matches!(reference.name.as_str(), "eval" | "Function") {
-                        facts.dynamic_code = true;
-                    }
                     if let Some(reference_id) = reference.reference_id.get() {
                         let reference = scoping.get_reference(reference_id);
                         if reference.is_write()
@@ -478,35 +436,11 @@ impl<'s, 'a> Facts<'s, 'a> {
                     }
                 }
                 AstKind::VariableDeclarator(d) => {
-                    if let BindingPattern::ObjectPattern(pattern) = &d.id {
-                        for property in &pattern.properties {
-                            if property.computed
-                                || property.key.static_name().is_some_and(|key| {
-                                    key.as_str().is_some_and(|name| {
-                                        matches!(
-                                            name,
-                                            "defineProperty"
-                                                | "defineProperties"
-                                                | "setPrototypeOf"
-                                                | "assign"
-                                                | "set"
-                                                | "deleteProperty"
-                                                | "Proxy"
-                                        )
-                                    })
-                                })
-                            {
-                                facts.reflective_receiver = true;
-                            }
-                        }
-                        if pattern.rest.is_some() {
-                            facts.reflective_receiver = true;
-                        }
-                    }
                     if let (BindingPattern::BindingIdentifier(binding), Some(value)) =
                         (&d.id, &d.init)
                         && let Some(symbol) = binding.symbol_id.get()
                     {
+                        *facts.symbol_write_counts.entry(symbol).or_default() += 1;
                         facts.add_definition(Key::Symbol(symbol), value, d.span.start, context);
                     }
                 }
@@ -523,18 +457,6 @@ impl<'s, 'a> Facts<'s, 'a> {
                             facts.add_definition(key, &a.right, a.span.start, context);
                         }
                     }
-                    match &a.left {
-                        AssignmentTarget::StaticMemberExpression(m) => {
-                            *facts
-                                .property_writes
-                                .entry(m.property.name.as_str())
-                                .or_default() += 1;
-                        }
-                        AssignmentTarget::AssignmentTargetIdentifier(_) => (),
-                        // Destructuring may write a member several levels deep.
-                        // No claim is made about arbitrary computed key values.
-                        _ => facts.unknown_property_write = true,
-                    }
                 }
                 AstKind::UpdateExpression(update) => {
                     if let Some(key) = facts.simple_target(&update.argument, context) {
@@ -544,126 +466,13 @@ impl<'s, 'a> Facts<'s, 'a> {
                             arithmetic: true,
                         });
                     }
-                    match &update.argument {
-                        SimpleAssignmentTarget::StaticMemberExpression(m) => {
-                            *facts
-                                .property_writes
-                                .entry(m.property.name.as_str())
-                                .or_default() += 1;
-                        }
-                        SimpleAssignmentTarget::AssignmentTargetIdentifier(_) => (),
-                        _ => facts.unknown_property_write = true,
-                    }
                 }
-                AstKind::UnaryExpression(unary) if unary.operator.as_str() == "delete" => {
-                    facts.unknown_property_write = true
-                }
-                AstKind::StaticMemberExpression(member) => {
-                    let name = member.property.name.as_str();
-                    if name == "Proxy" {
-                        facts.reflective_receiver = true;
-                    }
-                    if matches!(name, "eval" | "Function") {
-                        facts.dynamic_code = true;
-                    }
-                    if matches!(
-                        name,
-                        "__defineGetter__"
-                            | "__defineSetter__"
-                            | "defineProperty"
-                            | "defineProperties"
-                            | "setPrototypeOf"
-                            | "assign"
-                            | "set"
-                            | "deleteProperty"
-                    ) {
-                        facts.reflective_receiver = true;
-                    }
-                }
-                AstKind::ComputedMemberExpression(member) if matches!(member.object.get_inner_expression(), Expression::Identifier(id) if matches!(id.name.as_str(), "Object" | "Reflect")) =>
-                {
-                    // Unknown API extraction may name a mutator. Static harmless
-                    // keys are permitted just like their dot notation form.
-                    if !matches!(member.expression.get_inner_expression(), Expression::StringLiteral(key)
-                        if key.value.as_str().is_some_and(|name| matches!(name, "keys" | "values" | "entries" | "getOwnPropertyNames" | "getOwnPropertyDescriptor" | "getPrototypeOf" | "is" | "has" | "get")))
-                    {
-                        facts.reflective_receiver = true;
-                    }
-                }
-                AstKind::ComputedMemberExpression(member) => {
-                    if let Expression::StringLiteral(name) =
-                        member.expression.get_inner_expression()
-                    {
-                        match name.value.as_str() {
-                            Some("eval" | "Function") => facts.dynamic_code = true,
-                            Some(
-                                "Proxy" | "defineProperty" | "defineProperties" | "setPrototypeOf"
-                                | "assign" | "set" | "deleteProperty" | "__defineGetter__"
-                                | "__defineSetter__",
-                            ) => facts.reflective_receiver = true,
-                            _ => (),
-                        }
-                    }
-                }
-                AstKind::ImportExpression(_) => facts.dynamic_code = true,
-                AstKind::ObjectProperty(property) => {
-                    if property.computed {
-                        facts.unknown_property_write = true;
-                    } else if let PropertyKey::StaticIdentifier(id) = &property.key {
-                        *facts.property_writes.entry(id.name.as_str()).or_default() += 1;
-                    } else if let PropertyKey::StringLiteral(key) = &property.key
-                        && let Some(name) = key.value.as_str()
-                    {
-                        *facts.property_writes.entry(name).or_default() += 1;
-                    }
-                }
-                AstKind::PropertyDefinition(property) => {
-                    if property.computed {
-                        facts.unknown_property_write = true;
-                    } else if let PropertyKey::StaticIdentifier(id) = &property.key {
-                        *facts.property_writes.entry(id.name.as_str()).or_default() += 1;
-                    } else if let PropertyKey::StringLiteral(key) = &property.key
-                        && let Some(name) = key.value.as_str()
-                    {
-                        *facts.property_writes.entry(name).or_default() += 1;
-                    }
-                }
-                AstKind::MethodDefinition(method) => {
-                    if method.computed {
-                        facts.unknown_property_write = true;
-                    } else if let PropertyKey::StaticIdentifier(id) = &method.key {
-                        *facts.property_writes.entry(id.name.as_str()).or_default() += 1;
-                    } else if let PropertyKey::StringLiteral(key) = &method.key
-                        && let Some(name) = key.value.as_str()
-                    {
-                        *facts.property_writes.entry(name).or_default() += 1;
-                    }
-                }
-                AstKind::SpreadElement(_) => facts.unknown_property_write = true,
                 AstKind::ObjectExpression(object) => {
                     if let Some(owner) = facts.object_owner(id) {
                         facts.objects.insert(object.node_id.get(), owner);
                     }
                 }
                 AstKind::CallExpression(call) => {
-                    let name = match call.callee.get_inner_expression() {
-                        Expression::Identifier(id) => Some(id.name.as_str()),
-                        Expression::StaticMemberExpression(member) => {
-                            Some(member.property.name.as_str())
-                        }
-                        _ => None,
-                    };
-                    if matches!(name, Some("setTimeout" | "setInterval"))
-                        && call.arguments.first().is_some_and(|arg| {
-                            !matches!(
-                                arg,
-                                Argument::FunctionExpression(_)
-                                    | Argument::ArrowFunctionExpression(_)
-                            )
-                        })
-                    {
-                        facts.dynamic_code = true;
-                    }
                     let callee = match call.callee.get_inner_expression() {
                         Expression::StaticMemberExpression(member)
                             if matches!(member.property.name.as_str(), "call" | "apply") =>
@@ -701,119 +510,42 @@ impl<'s, 'a> Facts<'s, 'a> {
                 _ => (),
             }
         }
+        // Count only writes to this exact resolved receiver and static key.
+        // This also includes destructuring, loop targets and deletes, whose
+        // member targets are not direct AssignmentExpression children.
         for node in nodes.iter() {
             if !meter.charge(1) {
                 break;
             }
-            let context = facts.context(node.id());
-            let target = match node.kind() {
-                AstKind::StaticMemberExpression(member)
-                    if matches!(
-                        nodes.parent_kind(node.id()),
-                        AstKind::AssignmentExpression(_)
-                            | AstKind::UpdateExpression(_)
-                            | AstKind::UnaryExpression(_)
-                            | AstKind::ArrayAssignmentTarget(_)
-                            | AstKind::AssignmentTargetRest(_)
-                            | AstKind::AssignmentTargetWithDefault(_)
-                            | AstKind::AssignmentTargetPropertyProperty(_)
-                            | AstKind::ForInStatement(_)
-                            | AstKind::ForOfStatement(_)
-                    ) =>
-                {
-                    Some((&member.object, Some(member.property.name.as_str())))
-                }
-                AstKind::ComputedMemberExpression(member)
-                    if matches!(
-                        nodes.parent_kind(node.id()),
-                        AstKind::AssignmentExpression(_)
-                            | AstKind::UpdateExpression(_)
-                            | AstKind::UnaryExpression(_)
-                            | AstKind::ArrayAssignmentTarget(_)
-                            | AstKind::AssignmentTargetRest(_)
-                            | AstKind::AssignmentTargetWithDefault(_)
-                            | AstKind::AssignmentTargetPropertyProperty(_)
-                            | AstKind::ForInStatement(_)
-                            | AstKind::ForOfStatement(_)
-                    ) =>
-                {
-                    Some((
-                        &member.object,
-                        match member.expression.get_inner_expression() {
-                            Expression::StringLiteral(key) => key.value.as_str(),
-                            _ => None,
-                        },
-                    ))
-                }
-                _ => None,
-            };
-            if let Some((receiver, name)) = target {
-                if name == Some("__proto__") {
-                    facts.reflective_receiver = true;
-                }
-                if facts.global_alias(receiver, context, 0) {
-                    if let Some(name) = name {
-                        facts.global_writes.insert(name);
-                    } else {
-                        facts.unknown_global_write = true;
-                    }
-                }
-            }
-            if let AstKind::CallExpression(call) = node.kind() {
-                if let Expression::StaticMemberExpression(member) =
-                    call.callee.get_inner_expression()
-                    && matches!(member.property.name.as_str(), "call" | "apply" | "bind")
-                {
-                    let reflect_apply = matches!(member.object.get_inner_expression(), Expression::Identifier(id) if id.name == "Reflect");
-                    let target = if reflect_apply {
-                        call.arguments.first().and_then(Argument::as_expression)
-                    } else {
-                        Some(&member.object)
-                    };
-                    let receiver = call.arguments.get(usize::from(reflect_apply));
-                    // An indexed handler call changes the handler's receiver,
-                    // not the function owning this table's initialization.
-                    let handler = matches!(
-                        target.map(Expression::get_inner_expression),
-                        Some(Expression::ComputedMemberExpression(_))
-                    );
-                    if !handler && !matches!(receiver, Some(Argument::ObjectExpression(_))) {
-                        if let Some(function) =
-                            target.and_then(|target| facts.called_function(target, 0))
-                        {
-                            facts.non_fresh_this.insert(function);
-                        } else {
-                            facts.unknown_this_call = true;
-                        }
-                    }
-                }
-                let mutator = match call.callee.get_inner_expression() {
-                    Expression::StaticMemberExpression(m) => matches!(
-                        m.property.name.as_str(),
-                        "defineProperty"
-                            | "defineProperties"
-                            | "set"
-                            | "deleteProperty"
-                            | "assign"
-                            | "setPrototypeOf"
-                    ),
-                    // API aliases cannot prove the destination is different.
-                    Expression::Identifier(_) | Expression::ComputedMemberExpression(_) => true,
-                    _ => false,
+            if let AstKind::StaticMemberExpression(member) = node.kind()
+                && matches!(
+                    nodes.parent_kind(node.id()),
+                    AstKind::AssignmentExpression(_)
+                        | AstKind::UpdateExpression(_)
+                        | AstKind::UnaryExpression(_)
+                        | AstKind::ArrayAssignmentTarget(_)
+                        | AstKind::AssignmentTargetRest(_)
+                        | AstKind::AssignmentTargetWithDefault(_)
+                        | AstKind::AssignmentTargetPropertyProperty(_)
+                        | AstKind::ForInStatement(_)
+                        | AstKind::ForOfStatement(_)
+                )
+                && let Some(key) = facts.member(
+                    &member.object,
+                    member.property.name.as_str(),
+                    facts.context(node.id()),
+                )
+            {
+                // A member read on an assignment's right is not a write.
+                let write = match nodes.parent_kind(node.id()) {
+                    AstKind::AssignmentExpression(a) => a.left.span() == member.span,
+                    AstKind::UnaryExpression(u) => u.operator.as_str() == "delete",
+                    AstKind::ForInStatement(f) => f.left.span() == member.span,
+                    AstKind::ForOfStatement(f) => f.left.span() == member.span,
+                    _ => true,
                 };
-                if mutator
-                    && call
-                        .arguments
-                        .first()
-                        .and_then(Argument::as_expression)
-                        .is_some_and(|target| facts.global_alias(target, context, 0))
-                {
-                    match call.arguments.get(1) {
-                        Some(Argument::StringLiteral(key)) if key.value.as_str().is_some() => {
-                            facts.global_writes.insert(key.value.as_str().unwrap());
-                        }
-                        _ => facts.unknown_global_write = true,
-                    }
+                if write {
+                    *facts.member_write_counts.entry(key).or_default() += 1;
                 }
             }
         }
@@ -1296,151 +1028,30 @@ impl<'s, 'a> Facts<'s, 'a> {
             value.or(Some("unknown"))
         }
     }
-    fn called_function(&self, value: &'a Expression<'a>, depth: u8) -> Option<NodeId> {
-        if depth > 16 || !self.meter.charge(1) {
-            return None;
-        }
-        match value.get_inner_expression() {
-            Expression::FunctionExpression(function) => Some(function.node_id.get()),
-            Expression::Identifier(id) => {
-                let symbol = self.symbol(id)?;
-                let declaration = self.semantic.scoping().symbol_declaration(symbol);
-                if matches!(
-                    self.semantic.nodes().kind(declaration),
-                    AstKind::Function(_)
-                ) {
-                    return Some(declaration);
-                }
-                let definitions = self.definitions.get(&Key::Symbol(symbol))?;
-                if definitions.len() != 1 {
-                    return None;
-                }
-                self.called_function(definitions[0].value, depth + 1)
-            }
-            _ => None,
-        }
-    }
-    fn global_alias(&self, value: &'a Expression<'a>, context: Context, depth: u8) -> bool {
-        if depth > 16 || !self.meter.charge(1) {
-            return true;
-        }
-        match value.get_inner_expression() {
-            Expression::ThisExpression(_) => context.this.is_none(),
-            Expression::Identifier(id) => {
-                if matches!(
-                    id.name.as_str(),
-                    "globalThis" | "window" | "self" | "global" | "frames" | "top" | "parent"
-                ) {
-                    return true;
-                }
-                self.symbol(id)
-                    .and_then(|symbol| self.definitions.get(&Key::Symbol(symbol)))
-                    .is_some_and(|definitions| {
-                        definitions.len() > 16
-                            || definitions.iter().any(|definition| {
-                                self.global_alias(
-                                    definition.value,
-                                    Context {
-                                        this: definition.function,
-                                        ..context
-                                    },
-                                    depth + 1,
-                                )
-                            })
-                    })
-            }
-            _ => false,
-        }
-    }
     fn stable(&self, key: Key<'a>, at: u32, scope: ScopeId) -> Result<(), Refusal> {
-        match key {
-            Key::Symbol(symbol) => {
-                let scoping = self.semantic.scoping();
-                if self.semantic.source_type().is_script()
-                    && scoping.symbol_scope_id(symbol) == scoping.root_scope_id()
-                    && (self.dynamic_code
-                        || self.unknown_global_write
-                        || self.global_writes.contains(scoping.symbol_name(symbol)))
-                {
-                    return Err(Refusal::Global);
-                }
-                if self.scope_opaque(scope) {
-                    return Err(Refusal::Binding);
-                }
-                let single_initialization = self
-                    .definitions
-                    .get(&key)
-                    .is_some_and(|definitions| definitions.len() == 1 && definitions[0].at == at);
-                let single_assignment = self.writes.get(&key).is_some_and(|writes| {
-                    writes.len() == 1 && writes[0].span.start == at && !writes[0].arithmetic
-                }) && self.symbol_write_counts.get(&symbol) == Some(&1);
-                if single_initialization
-                    && (!self.changed_symbols.contains(&symbol) || single_assignment)
-                {
-                    Ok(())
-                } else {
-                    Err(Refusal::Binding)
-                }
+        let single_definition = self
+            .definitions
+            .get(&key)
+            .is_some_and(|definitions| definitions.len() == 1 && definitions[0].at == at);
+        let single_write = match key {
+            Key::Symbol(symbol) => self.symbol_write_counts.get(&symbol) == Some(&1),
+            Key::Member(symbol, _) => {
+                self.symbol_write_counts.get(&symbol).copied().unwrap_or(0) <= 1
+                    && self.member_write_counts.get(&key) == Some(&1)
             }
-            Key::Member(symbol, name) => {
-                if !self.scope_opaque(scope)
-                    && !self.changed_symbols.contains(&symbol)
+            Key::This(owner, _) => {
+                self.member_write_counts.get(&key) == Some(&1)
                     && self
                         .definitions
-                        .get(&Key::Symbol(symbol))
-                        .is_none_or(|definitions| definitions.len() <= 1)
-                    && !self.unknown_property_write
-                    && !self.reflective_receiver
-                    && self.property_writes.get(name) == Some(&1)
-                {
-                    Ok(())
-                } else {
-                    Err(Refusal::Receiver)
-                }
+                        .get(&key)
+                        .is_some_and(|definitions| definitions[0].function == Some(owner))
             }
-            Key::This(owner, name) => {
-                if !self.non_fresh_this.contains(&owner)
-                    && !self.unknown_this_call
-                    && !self.scope_opaque(scope)
-                    && !self.unknown_property_write
-                    && !self.reflective_receiver
-                    && self.property_writes.get(name) == Some(&1)
-                {
-                    Ok(())
-                } else {
-                    Err(Refusal::Receiver)
-                }
-            }
-            Key::Slot(_, _) => Err(Refusal::Binding),
-        }
-    }
-    fn dominates(&self, object: NodeId, dispatch: NodeId) -> bool {
-        let nodes = self.semantic.nodes();
-        let initializer = nodes.parent_id(object);
-        let target = self.loop_id(dispatch).unwrap_or(dispatch);
-        if self.context(initializer).function != self.context(target).function
-            || nodes.get_node(initializer).span().end > nodes.get_node(target).span().start
-        {
-            return false;
-        }
-        // A direct statement can be wrapped in plain blocks or an export, but
-        // cannot acquire conditional execution or cross a deferred function.
-        let mut current = initializer;
-        loop {
-            if !self.meter.charge(1) {
-                return false;
-            }
-            match nodes.kind(current) {
-                AstKind::FunctionBody(_) | AstKind::Program(_) => return true,
-                AstKind::VariableDeclarator(_)
-                | AstKind::VariableDeclaration(_)
-                | AstKind::AssignmentExpression(_)
-                | AstKind::ExpressionStatement(_)
-                | AstKind::BlockStatement(_)
-                | AstKind::ExportNamedDeclaration(_) => (),
-                _ => return false,
-            }
-            current = nodes.parent_id(current);
+            Key::Slot(_, _) => false,
+        };
+        if !self.scope_opaque(scope) && single_definition && single_write {
+            Ok(())
+        } else {
+            Err(Refusal::Binding)
         }
     }
     fn bounded(
@@ -1699,13 +1310,16 @@ fn parsed(
                 if facts.scope_opaque(site.scope_id()) {
                     continue;
                 }
-                let before = facts.dominates(object, dispatch);
-                if before && (verdict.is_none() || role == Role::InterpreterCandidate) {
+                if matches!(key, Key::This(owner, _) if facts.context(dispatch).function != Some(owner))
+                {
+                    continue;
+                }
+                if verdict.is_none() || role == Role::InterpreterCandidate {
                     verdict = Some(role);
                 }
             }
             if verdict.is_none() && tables.contains_key(&key) {
-                Err(Refusal::Dominance)
+                Err(Refusal::Binding)
             } else {
                 Ok(verdict)
             }
@@ -1918,7 +1532,8 @@ fn syntax_stack(source: &str) -> Option<usize> {
                     operand = false;
                 }
                 b'$' if bytes.get(index + 1) == Some(&b'{') => {
-                    delimiters.push(Delimiter::Template);
+                    delimiters.push((Delimiter::Template, chain));
+                    chain = 0;
                     index += 2;
                     template = false;
                     operand = true;
@@ -2020,24 +1635,31 @@ fn syntax_stack(source: &str) -> Option<usize> {
             index += 1;
             match byte {
                 b'(' | b'[' | b'{' => {
-                    delimiters.push(if byte == b'(' && control {
-                        Delimiter::Control
-                    } else {
-                        Delimiter::Plain
-                    });
+                    delimiters.push((
+                        if byte == b'(' && control {
+                            Delimiter::Control
+                        } else {
+                            Delimiter::Plain
+                        },
+                        chain,
+                    ));
+                    chain = 0;
                     operand = true;
                 }
                 b')' | b']' | b'}' => {
-                    let kind = delimiters.pop();
+                    let (kind, parent_chain) = delimiters
+                        .pop()
+                        .map_or((None, 0), |(kind, chain)| (Some(kind), chain));
+                    chain = parent_chain;
                     template = byte == b'}' && matches!(kind, Some(Delimiter::Template));
                     operand = byte == b'}' || matches!(kind, Some(Delimiter::Control));
                 }
                 _ => operand = true,
             }
             control = false;
-            if matches!(byte, b';' | b'{' | b'}') {
+            if matches!(byte, b';' | b',' | b':') {
                 chain = 0;
-            } else if b"=+-!~?&|*/%<>^:.()[]".contains(&byte) {
+            } else if b"=+-!~?&|*/%<>^.".contains(&byte) {
                 chain += 1;
             }
         }

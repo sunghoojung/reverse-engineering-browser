@@ -21,9 +21,6 @@ pub(crate) const OMISSION_REASONS: &[&str] = &[
     "parse-failed",
     "analysis-worker-failed",
     "handler-binding-unproven",
-    "global-binding-unstable",
-    "receiver-binding-unstable",
-    "initialization-not-dominating",
 ];
 
 use serde::{Deserialize, Serialize};

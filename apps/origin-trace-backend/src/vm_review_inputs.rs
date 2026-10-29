@@ -10,7 +10,27 @@ const VM_HEAD: &str = "function run(program){var pc=0,stack=[];";
 
 /// Compact, byte-exact owned review sources. Repeated bundles/literals stay
 /// recipes in the retention ledger; hashes prevent generators drifting apart.
-pub(crate) fn retention_source(root: &std::path::Path, row: &serde_json::Value) -> Vec<u8> {
+pub(crate) fn retention_source(
+    root: &std::path::Path,
+    row: &serde_json::Value,
+    ledger: &serde_json::Value,
+) -> Vec<u8> {
+    if let Some(key) = row["source_ref"].as_str() {
+        let source = ledger["sources"][key].as_str().unwrap().as_bytes();
+        let mut output = Vec::new();
+        let mut cursor = 0;
+        for edit in row["edits"].as_array().into_iter().flatten() {
+            let offset = edit[0].as_u64().unwrap() as usize;
+            output.extend_from_slice(&source[cursor..offset]);
+            output.extend_from_slice(edit[2].as_str().unwrap().as_bytes());
+            cursor = offset + edit[1].as_u64().unwrap() as usize;
+        }
+        output.extend_from_slice(&source[cursor..]);
+        if let Some(index) = row["mutation"].as_u64() {
+            output.extend_from_slice(format!("\n/* unique {index} */").as_bytes());
+        }
+        return output;
+    }
     if let Some(hex) = row["hex"].as_str() {
         return hex::decode(hex).unwrap();
     }
@@ -20,7 +40,14 @@ pub(crate) fn retention_source(root: &std::path::Path, row: &serde_json::Value) 
     if let Some(parts) = row["parts"].as_array() {
         let mut source = String::new();
         for part in parts {
-            if let Some(template) = part["template"].as_str() {
+            if let Some(seed) = part["seed"].as_u64() {
+                let mut state = seed as u32;
+                let alphabet = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+                for _ in 0..part["count"].as_u64().unwrap() {
+                    state = state.wrapping_mul(1664525).wrapping_add(1013904223);
+                    source.push(alphabet[(state >> 26) as usize] as char);
+                }
+            } else if let Some(template) = part["template"].as_str() {
                 let start = part["start"].as_u64().unwrap();
                 let count = part["count"].as_u64().unwrap();
                 let modulus = part["modulus"].as_u64().unwrap();

@@ -7694,10 +7694,7 @@
                         "classification-unavailable",
                         "parse-failed",
                         "analysis-worker-failed",
-                        "handler-binding-unproven",
-                        "global-binding-unstable",
-                        "receiver-binding-unstable",
-                        "initialization-not-dominating"
+                        "handler-binding-unproven"
                       ]
                     },
                     "detail": {
@@ -9352,10 +9349,7 @@
                         "classification-unavailable",
                         "parse-failed",
                         "analysis-worker-failed",
-                        "handler-binding-unproven",
-                        "global-binding-unstable",
-                        "receiver-binding-unstable",
-                        "initialization-not-dominating"
+                        "handler-binding-unproven"
                       ]
                     },
                     "detail": {

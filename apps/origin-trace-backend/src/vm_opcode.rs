@@ -20,7 +20,7 @@ mod native_wasm;
 #[path = "vm_opcode_wasm.rs"]
 mod wasm;
 
-const PRODUCER_VERSION: &str = "2.10.0";
+const PRODUCER_VERSION: &str = "2.11.0";
 const MAX_SAMPLES: usize = 4096;
 const MAX_HANDLERS: usize = 1024;
 const MAX_SNAPSHOTS: usize = 16;
@@ -4047,8 +4047,7 @@ if (!validate(document)) throw new Error('Backend workspace rejected by shipped 
         if let Some(workspace) = document["workspaces"].as_array().unwrap().first() {
             assert_eq!(workspace["handlers"], json!([]));
         }
-        // Proof also requires same-function dominance, including when a
-        // nested function's loop is structurally an interpreter candidate.
+        // A nested dispatch resolves the same statically bound table.
         for (source, expected) in [
             (
                 "function run(code,stack){let pc=0;const handlers={1:function(){stack.push(code[pc++])},2:function(){stack.pop()}};while(pc<code.length){handlers[code[pc++]](stack);}}",
@@ -4056,7 +4055,7 @@ if (!validate(document)) throw new Error('Backend workspace rejected by shipped 
             ),
             (
                 "function run(code,stack){let pc=0;const handlers={1:function(){stack.push(code[pc++])},2:function(){stack.pop()}};function inner(){while(pc<code.length){handlers[code[pc++]](stack);}}return inner;}",
-                0,
+                2,
             ),
         ] {
             let start = source.find('{').unwrap() + 1;
@@ -4179,21 +4178,14 @@ if (!validate(document)) throw new Error('Backend workspace rejected by shipped 
             .join("../../tools/fixtures/dispatch-retention");
         let ledger: Value =
             serde_json::from_slice(&fs::read(root.join("ledger.json")).unwrap()).unwrap();
-        let mut reviews = Vec::new();
-        for file in ledger["review_case_files"].as_array().unwrap() {
-            let rows: Vec<Value> =
-                serde_json::from_slice(&fs::read(root.join(file.as_str().unwrap())).unwrap())
-                    .unwrap();
-            reviews.extend(rows);
-        }
-        assert_eq!(
-            reviews.len() as u64,
-            ledger["review_case_count"].as_u64().unwrap(),
-            "Every judged review case must be loaded"
-        );
-        for row in ledger["cases"].as_array().unwrap().iter().chain(&reviews) {
+        for row in ledger["cases"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .chain(ledger["review_cases"].as_array().into_iter().flatten())
+        {
             let name = row["file"].as_str().unwrap();
-            let bytes = vm::review_inputs::retention_source(&root, row);
+            let bytes = vm::review_inputs::retention_source(&root, row, &ledger);
             if let Some(expected) = row["sha256"].as_str() {
                 assert_eq!(hex::encode(Sha256::digest(&bytes)), expected, "{name}");
             }
@@ -4285,6 +4277,78 @@ if (!validate(document)) throw new Error('Backend workspace rejected by shipped 
                 );
             }
             assert!(!meter.exhausted(), "{name}");
+        }
+    }
+
+    #[test]
+    fn shallow_sibling_syntax_never_accumulates_depth() {
+        let interpreter =
+            include_str!("../../../tools/fixtures/dispatch-retention/owned/control.js");
+        let catalogue = (0..9000)
+            .map(|i| format!("'locale_{i}':'A localized value {i}',"))
+            .collect::<String>();
+        let objects = (0..10000)
+            .map(|i| format!("k{i}:{{value:{i},label:'text'}},"))
+            .collect::<String>();
+        let cases = (0..10000)
+            .map(|i| format!("case {i}: "))
+            .collect::<String>();
+        for noise in [
+            format!("const catalogue={{{catalogue}}};"),
+            format!("const objects={{{objects}}};"),
+            format!("function lookup(x){{switch(x){{{cases}return 1;}}}}"),
+        ] {
+            let source = format!("{noise}\n{interpreter}");
+            let (analysis, workspace, meter) = pipeline_work("javascript", source.as_bytes());
+            assert!(!meter.exhausted());
+            assert_eq!(
+                analysis["frontend"]["dispatch_classification"]["omissions"],
+                json!([])
+            );
+            assert_eq!(workspace.unwrap()["handlers"].as_array().unwrap().len(), 3);
+        }
+    }
+
+    #[test]
+    fn static_table_writes_use_exact_symbols_and_receivers() {
+        let source = include_str!("../../../tools/fixtures/dispatch-retention/owned/control.js");
+        for (changed, expected) in [
+            (source.replace("var ops=", "var ops;ops="), 3),
+            (
+                source
+                    .replace("var ops=", "var ops;(ops=")
+                    .replace(";while", ",0);while"),
+                3,
+            ),
+            (source.replace("var ops=", "var ops=0;ops="), 0),
+            (
+                source
+                    .replace(
+                        "var ops=",
+                        "var first={},second={};second.ops={};first.ops=",
+                    )
+                    .replace("ops[code", "first.ops[code"),
+                3,
+            ),
+            (
+                source
+                    .replace("var ops=", "this.ops=")
+                    .replace("ops[code", "this.ops[code"),
+                3,
+            ),
+            (
+                source
+                    .replace("var ops=", "this.ops=0;this.ops=")
+                    .replace("ops[code", "this.ops[code"),
+                0,
+            ),
+        ] {
+            let (_, workspace, _) = pipeline_work("javascript", changed.as_bytes());
+            assert_eq!(
+                workspace.unwrap()["handlers"].as_array().unwrap().len(),
+                expected,
+                "{changed}"
+            );
         }
     }
 

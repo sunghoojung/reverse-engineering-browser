@@ -163,8 +163,8 @@ comparison count, and the loop range.
 slots whose function signature equals the call type, scanned once per table
 and type. Slots come from element segments placed at their evaluated offsets,
 evaluating defined globals through earlier globals. An offset that reads an
-imported global, directly or through a defined global, is relative and fills
-no slot. A segment ending past the table's declared minimum is out of range
+imported global, directly or through a defined global, is relative: it fills no concrete slot and invalidates earlier slots in that
+table that it could overwrite. Later concrete segments establish their slots again. A segment ending past the table's declared minimum is out of range
 and fills no slot. Instantiation applies active segments in order and traps at
 the first that does not fit, so every later active segment is `unreached` and
 fills no slot either; earlier placements only matter for an imported table,
@@ -203,7 +203,7 @@ retaining the last segment assignment at each slot. Active functions and segment
 membership are indexed by table during parsing, and canonical signature groups
 share matching-slot lists across all indirect sites.
 
-Producer 1.7.0 and workspace producer 2.10.0 share the same meter through
+Producer 1.8.0 and workspace producer 2.11.0 share the same meter through
 classification, semantic claim resolution and workspace table extraction. Vector
 capacities, table layouts, matching lists and symbolic indexes reserve their
 retained bytes before growing. Temporary JavaScript parser/semantic storage has
@@ -250,7 +250,8 @@ resident stack pages, allocator slack, both processes and unchanged recovery;
 the measured 8 MiB target is approximately 1 GiB or less on a local workstation.
 
 An iterative lexical guard refuses more than 8192 nested delimiters or operators
-in a statement. Strings, template text, comments and regexp bodies are atomic
+in one expression. Delimiter scopes and sibling expression boundaries reset the
+local expression counter; object properties and switch arms never accumulate. Strings, template text, comments and regexp bodies are atomic
 for this guard; template substitutions re-enter syntax. Literal bytes never count
 as nesting. This admission pass cannot create claims; Oxc owns syntax and binding. A linear AST prepass bounds hoisting by intervening block scopes
 times binding-pattern bytes (at most twice source bytes). It also pre-charges
@@ -281,10 +282,8 @@ is simulated, then sites are classified module-wide in strength order.
 - JavaScript parser admission refusal is a counted `classification-work-limit`.
   A module whose sections do not decode adds `classification-unavailable`.
 - `parse-failed` counts syntax or semantic failures. `analysis-worker-failed`
-  counts retryable execution failures. `handler-binding-unproven`,
-  `global-binding-unstable`, `receiver-binding-unstable`, and
-  `initialization-not-dominating` count unproven numeric function entries under
-  their respective binding rules. `classification-region-limit` counts bounded
+  counts retryable execution failures. `handler-binding-unproven` counts numeric
+  function entries without a unique static binding. `classification-region-limit` counts bounded
   region omissions. All producer reasons are accepted by every embedded schema
   and the real UI validator and displayed as inert text.
 
@@ -304,45 +303,21 @@ classification is never an input to handler recovery, tier or score:
   a temporary (`h = t[op]; h()`) ties nothing, and a table with no such site
   is withheld as unclassified.
 - A table ties only to references resolving to its declaration's Oxc symbol,
-  with exactly one initializer and no other write that could replace it. A
+  with exactly one static write (initializer or assignment). A
   declaration without an initializer followed by its only assignment qualifies.
   Block `let`/`const`, hoisting, Annex B, catch parameters, named functions,
   parameter defaults, classes and shorthand use Oxc's semantic rules. Unresolved
   globals and implicit non-arrow `arguments` have no provable table symbol.
-  Direct `eval` or `with` in an enclosing scope makes the proof ambiguous,
-  including executable template interpolations. A failed/incomplete analysis
+  `with` in an enclosing scope makes static name resolution ambiguous. A failed/incomplete analysis
   always withholds claims.
   An Annex B block function's implicit replacement of an existing `var` table
   also counts as a write, although it has no ordinary reference-write AST node.
-- A top-level classic-script binding belongs to the global object or global
-  lexical environment. `global-binding-unstable` withholds it if this artifact
-  contains dynamic code evaluation (direct/indirect `eval`, `Function`, string
-  timers or `import()`), or a write/define/delete through `globalThis`, `window`,
-  `self`, `global`, `frames`, `top`, `parent`, top-level `this`, or their tracked
-  aliases whose key could equal the binding. Unknown keys are conservative.
-  Per-artifact analysis cannot see other scripts sharing that global object or
-  lexical environment. Stability is conditional on this explicit scope limit;
-  it is not a whole-page proof. Module, IIFE and function-local bindings do not
-  use the classic-script global rule.
 - `obj.ops` requires the same resolved receiver symbol and static, non-computed
-  property name. Private `#ops` never matches ordinary `ops`. `this.ops` also
-  requires the same non-arrow `this` owner. Reflective receivers are withheld
-  under `receiver-binding-unstable`: `Proxy`, mutating `Reflect` operations,
-  `Object.defineProperty`/`defineProperties`/`setPrototypeOf`/`assign`, extracted
-  mutator aliases, legacy getter/setter APIs, prototype writes, and ambiguous
-  writes/accessor definitions with a matching or unknown key. Receiver alias
-  analysis is deliberately conservative across the artifact, including unknown
-  computed API names, destructuring and spreads. A non-fresh `.call`, `.apply`,
-  `.bind` or `Reflect.apply` receiver also withholds `this` proof. Harmless
-  `Object.keys` and other known read APIs do not themselves invalidate a table.
-- Every identifier, member and `this` table initializer must be an unconditional
-  statement in the dispatch loop's function body that completes before the
-  loop. Plain statement blocks are allowed. `if`, loops, `try`/`catch`, `switch`,
-  logical/conditional expressions, callbacks and nested functions do not prove
-  dominance. An arrow preserves lexical `this` but does not prove execution.
-  Cross-function initialization is conservatively withheld even when a runtime
-  witness calls that function. These entries count as
-  `initialization-not-dominating`; source order alone is insufficient.
+  property name, with a single static write to that key. Distinct receivers are
+  independent; private `#ops` never matches ordinary `ops`. `this.ops` requires
+  initialization and dispatch in the same function, with exactly one static
+  assignment in that function's own `this` scope and no other static write to
+  that key through `this` in it.
 - Operand-width guesses and owned-effect reachability use only surviving
   handlers. Exact AST case/property spans connect proof records to unchanged
   recovery; workspace extraction never parses the artifact a second time.
@@ -358,6 +333,12 @@ classification is never an input to handler recovery, tier or score:
 - A multiplexer is shown as `router, no guest opcodes claimed`.
 
 ## Limits and known gaps
+
+Claims describe the statically bound table. Runtime replacement through `eval`
+or `Function`, Proxy or reflection, global-object writes, sloppy `arguments`
+aliasing, and conditional or never-executed initialization are not modeled.
+Runtime evidence from native guest capture is the authority for what actually
+executes.
 
 - A byte-cursor loop over text, such as a format-string or tokenizer loop, is
   structurally an interpreter candidate. `buffer_kind` flags JavaScript string

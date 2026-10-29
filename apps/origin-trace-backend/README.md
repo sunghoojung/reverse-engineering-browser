@@ -93,9 +93,8 @@ Oversize, dense, excessively nested and unavailable-worker inputs have counted
 omissions. The [owned retention ledger](../../tools/fixtures/dispatch-retention/README.md)
 checks emitted claims and separately verifies runtime ground truth with Node.
 
-Classic-script global tables require no artifact-local dynamic evaluation or
-potential replacement through global aliases. Other scripts sharing the global
-object remain outside this per-artifact proof. Reflective receivers and
-non-dominating initializations have distinct counted omissions. A unique separate
-assignment is accepted; harmless Object read APIs and literal contents do not
-erase a proof. See the contract for conservative receiver and dominance limits.
+Claims describe the statically bound table. Runtime replacement through `eval`
+or `Function`, Proxy or reflection, global-object writes, sloppy `arguments`
+aliasing, and conditional or never-executed initialization are not modeled.
+Runtime evidence from native guest capture is the authority for what actually
+executes.

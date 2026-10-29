@@ -7799,7 +7799,7 @@
                   "multiplexer",
                   "other"
                 ],
-                "description": "Derived from the record. interpreter-candidate: repeats=loop with cursor_index, cursor_pointer or frame_slot on switch_on_value, handler_table or compare_chain, unless buffer_kind is string or arguments, and unless the selector is a second-level lookup (through_lookup) on a switch or ladder; a handler table reads its handler through one lookup by design. multiplexer: repeats=once with call_argument on the same kinds; its arms or constants are routing labels and no guest opcode is claimed. other: everything else."
+                "description": "Derived from the record. interpreter-candidate: repeats=loop with cursor_index, cursor_pointer or frame_slot on switch_on_value, handler_table, compare_chain or threaded, unless buffer_kind is string or arguments, and unless the selector is a second-level lookup (through_lookup) on a switch or ladder; a handler table, threaded or not, reads its handler through one lookup by design. A threaded record repeats when each step fetches its next-handler index at an advancing cursor. multiplexer: repeats=once with call_argument on switch_on_value, handler_table or compare_chain; its arms or constants are routing labels and no guest opcode is claimed. other: everything else."
               },
               "confidence": {
                 "const": "structural"
@@ -7813,6 +7813,7 @@
                   "export",
                   "switch",
                   "indexed call",
+                  "aliased call",
                   "if ladder",
                   "self call"
                 ]
@@ -7879,7 +7880,8 @@
                 "required": [
                   "expression",
                   "byte_offset",
-                  "through_lookup"
+                  "through_lookup",
+                  "through_helper"
                 ],
                 "properties": {
                   "expression": {
@@ -7899,6 +7901,10 @@
                   "through_lookup": {
                     "type": "boolean",
                     "description": "The selector is a table read keyed by a value loaded at a cursor, such as types[q[head++]], rather than the fetched value itself."
+                  },
+                  "through_helper": {
+                    "type": "boolean",
+                    "description": "The selector is the value a statically bound helper call returns, followed into the helper: a JavaScript function, unreassigned binding or this method, or a Wasm function whose result is a fetch at a global or frame-slot position it advances. It does not change the role."
                   }
                 }
               },
@@ -7935,7 +7941,7 @@
                     }
                   }
                 ],
-                "description": "The selector-advancing loop for repeats=loop, otherwise the innermost enclosing loop; null outside loops."
+                "description": "The selector-advancing loop for repeats=loop, which for a threaded cycle is the Wasm handler body or the JavaScript table literal; otherwise the innermost enclosing loop; null outside loops."
               },
               "buffer_kind": {
                 "enum": [
@@ -9141,8 +9147,11 @@
               },
               "javascript_scoring_version": {
                 "type": "integer",
-                "const": 2,
-                "description": "Version 2 scores same-length comment/literal-masked JavaScript regions. Absent in earlier v1 documents."
+                "enum": [
+                  2,
+                  3
+                ],
+                "description": "Version 2 scores same-length comment/literal-masked JavaScript regions. Version 3 also counts a loop that calls a temporary holding an indexed read, and a table literal whose own functions dispatch the table again (a threaded cycle), as a dispatch loop. Absent in earlier v1 documents."
               },
               "javascript_likely_vm_requires_handlers": {
                 "const": true,
@@ -10101,7 +10110,7 @@
                   "multiplexer",
                   "other"
                 ],
-                "description": "Derived from the record. interpreter-candidate: repeats=loop with cursor_index, cursor_pointer or frame_slot on switch_on_value, handler_table or compare_chain, unless buffer_kind is string or arguments, and unless the selector is a second-level lookup (through_lookup) on a switch or ladder; a handler table reads its handler through one lookup by design. multiplexer: repeats=once with call_argument on the same kinds; its arms or constants are routing labels and no guest opcode is claimed. other: everything else."
+                "description": "Derived from the record. interpreter-candidate: repeats=loop with cursor_index, cursor_pointer or frame_slot on switch_on_value, handler_table, compare_chain or threaded, unless buffer_kind is string or arguments, and unless the selector is a second-level lookup (through_lookup) on a switch or ladder; a handler table, threaded or not, reads its handler through one lookup by design. A threaded record repeats when each step fetches its next-handler index at an advancing cursor. multiplexer: repeats=once with call_argument on switch_on_value, handler_table or compare_chain; its arms or constants are routing labels and no guest opcode is claimed. other: everything else."
               },
               "confidence": {
                 "const": "structural"
@@ -10115,6 +10124,7 @@
                   "export",
                   "switch",
                   "indexed call",
+                  "aliased call",
                   "if ladder",
                   "self call"
                 ]
@@ -10181,7 +10191,8 @@
                 "required": [
                   "expression",
                   "byte_offset",
-                  "through_lookup"
+                  "through_lookup",
+                  "through_helper"
                 ],
                 "properties": {
                   "expression": {
@@ -10201,6 +10212,10 @@
                   "through_lookup": {
                     "type": "boolean",
                     "description": "The selector is a table read keyed by a value loaded at a cursor, such as types[q[head++]], rather than the fetched value itself."
+                  },
+                  "through_helper": {
+                    "type": "boolean",
+                    "description": "The selector is the value a statically bound helper call returns, followed into the helper: a JavaScript function, unreassigned binding or this method, or a Wasm function whose result is a fetch at a global or frame-slot position it advances. It does not change the role."
                   }
                 }
               },
@@ -10237,7 +10252,7 @@
                     }
                   }
                 ],
-                "description": "The selector-advancing loop for repeats=loop, otherwise the innermost enclosing loop; null outside loops."
+                "description": "The selector-advancing loop for repeats=loop, which for a threaded cycle is the Wasm handler body or the JavaScript table literal; otherwise the innermost enclosing loop; null outside loops."
               },
               "buffer_kind": {
                 "enum": [

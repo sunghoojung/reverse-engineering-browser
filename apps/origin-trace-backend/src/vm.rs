@@ -88,7 +88,7 @@ static ANTI: LazyLock<Vec<(&str, u64, Regex)>> = LazyLock::new(|| {
 ].into_iter().map(|(id,weight,p)|(id,weight,Regex::new(p).expect("Anti-bot rule"))).collect()
 });
 pub(crate) fn current_producer() -> Value {
-    json!({"id":"origin-trace-vm-detector","version":"1.8.0"})
+    json!({"id":"origin-trace-vm-detector","version":"1.9.0"})
 }
 
 // The catalog and generated documents share this exact profile projection.
@@ -102,7 +102,7 @@ pub(crate) fn current_profile() -> Value {
             limits.insert(format!("max_{}", name.to_ascii_lowercase()), value.clone());
         }
     }
-    json!({"profile_id":PROFILE,"javascript_scoring_version":2,"javascript_likely_vm_requires_handlers":true,"candidate_threshold":20,"likely_vm_threshold":60,"likely_vm_required_families":3,"rule_weights":CONFIG["RULE_WEIGHTS"],"runtime_evidence_version":2,"runtime_rule_weights":runtime_weights(),"limits":limits})
+    json!({"profile_id":PROFILE,"javascript_scoring_version":3,"javascript_likely_vm_requires_handlers":true,"candidate_threshold":20,"likely_vm_threshold":60,"likely_vm_required_families":3,"rule_weights":CONFIG["RULE_WEIGHTS"],"runtime_evidence_version":2,"runtime_rule_weights":runtime_weights(),"limits":limits})
 }
 
 pub(crate) fn current_rule_definitions() -> Vec<Value> {
@@ -110,7 +110,7 @@ pub(crate) fn current_rule_definitions() -> Vec<Value> {
     for (id, weight) in CONFIG["RULE_WEIGHTS"].as_object().unwrap() {
         let detail = JS_RULES.iter().find(|(rule, _, _)| *rule == id)
             .map(|(_, detail, _)| *detail).unwrap_or_else(|| match id.as_str() {
-                "js.dispatch-loop" => "A loop and switch or indexed call occur in one approximate function region.",
+                "js.dispatch-loop" => "A loop and a switch, indexed call or called alias of an indexed read, or a threaded cycle of a table literal's functions dispatching it again, occur in one approximate function region.",
                 "wasm.dispatch-loop" => "Decoded br_table or call_indirect occurs inside a loop.",
                 "wasm.instruction-pointer" => "A decoded variable is both read and written, with arithmetic in the function.",
                 "wasm.linear-memory" => "A decoded instruction accesses linear memory.",
@@ -208,6 +208,29 @@ fn js(source: &str) -> Result<(Vec<Value>, Vec<Value>)> {
         Regex::new(r"\bswitch\s*\(|\b[A-Za-z_$][\w$]*\s*\[(?:[^\[\]]+|\[[^\[\]]*\])+\]\s*\(")
             .unwrap()
     });
+    // `h = t[selector]` whose temporary the same region calls.
+    static ALIASED_READ: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r"\b([A-Za-z_$][\w$]*)\s*=\s*[A-Za-z_$][\w$.]*\s*\[(?:[^\[\]]+|\[[^\[\]]*\])+\]\s*(?:[;,)\n]|$)")
+            .unwrap()
+    });
+    static CALLED: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r"\b([A-Za-z_$][\w$]*)\s*(?:\(|\.\s*(?:call|apply)\s*\()").unwrap()
+    });
+    let dispatch = |region: &str| {
+        let direct = DISPATCH.find(region).map(|m| (m.start(), m.end()));
+        let called = CALLED
+            .captures_iter(region)
+            .map(|captures| captures.get(1).unwrap().as_str())
+            .collect::<BTreeSet<_>>();
+        let aliased = ALIASED_READ
+            .captures_iter(region)
+            .find(|captures| called.contains(&captures[1]))
+            .map(|captures| {
+                let m = captures.get(0).unwrap();
+                (m.start(), m.end())
+            });
+        direct.into_iter().chain(aliased).min()
+    };
     let masked = mask(source);
     let mut openings = BTreeSet::new();
     let mut omissions = Vec::new();
@@ -274,12 +297,22 @@ fn js(source: &str) -> Result<(Vec<Value>, Vec<Value>)> {
         }
         let region = String::from_utf8(bytes).expect("masked nested source");
         let mut observations = Vec::new();
-        if let (Some(a), Some(b)) = (LOOP.find(&region), DISPATCH.find(&region)) {
+        let nested = children.get(&(start, end)).map_or(&[][..], Vec::as_slice);
+        if let Some(a) = LOOP.find(&region)
+            && let Some(b) = dispatch(&region)
+        {
             observations.push(observation(
                 "js.dispatch-loop",
-                a.start().min(b.start()),
-                a.end().max(b.end()),
-                "A loop and switch or indexed callable dispatch occur in the same function region.",
+                a.start().min(b.0),
+                a.end().max(b.1),
+                "A loop and a switch, an indexed callable, or a called alias of an indexed read occur in the same function region.",
+            ));
+        } else if let Some((a, b)) = threaded_cycle(&masked, &region, start, nested) {
+            observations.push(observation(
+                "js.dispatch-loop",
+                a,
+                b,
+                "A table literal's own functions dispatch the table again, directly or through a function of the region: a threaded cycle that repeats without a syntactic loop.",
             ));
         }
         for (id, detail, patterns) in JS_RULES.iter() {
@@ -324,6 +357,101 @@ fn js(source: &str) -> Result<(Vec<Value>, Vec<Value>)> {
     }
     Ok((best, omissions))
 }
+/// A table literal of a region whose own function elements dispatch that
+/// table again (`ops = [function(s){ return ops[code[pc++]](s); }]`),
+/// directly or through a named function of the region they call (a shared
+/// `next()`), threads each handler to the next: a dispatch cycle without a
+/// syntactic loop. Returns the literal's span in region coordinates. Each
+/// child body is scanned once, so the work is linear in the region.
+fn threaded_cycle(
+    masked: &str,
+    region: &str,
+    start: usize,
+    children: &[(usize, usize)],
+) -> Option<(usize, usize)> {
+    static TABLE_LITERAL: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"\b([A-Za-z_$][\w$]*)\s*=\s*[\[{]").unwrap());
+    static INDEXED_CALL: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r"\b([A-Za-z_$][\w$]*)\s*\[(?:[^\[\]]+|\[[^\[\]]*\])+\]\s*\(").unwrap()
+    });
+    static CALLED_NAME: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"\b([A-Za-z_$][\w$]*)\s*\(").unwrap());
+    // The name a child function is declared or bound to, just before its body.
+    static NAMED: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r"(?:\bfunction\s+([A-Za-z_$][\w$]*)\s*\([^()]*\)|\b([A-Za-z_$][\w$]*)\s*=\s*(?:function\b[^(){}]*\([^()]*\)|\([^()]*\)\s*=>))\s*$").unwrap()
+    });
+    if !TABLE_LITERAL.is_match(region) {
+        return None;
+    }
+    let bytes = region.as_bytes();
+    let bodies = children
+        .iter()
+        .map(|&(a, b)| {
+            let text = &masked[a..b];
+            let dispatched = INDEXED_CALL
+                .captures_iter(text)
+                .map(|captures| captures.get(1).unwrap().as_str())
+                .collect::<BTreeSet<_>>();
+            let called = CALLED_NAME
+                .captures_iter(text)
+                .map(|captures| captures.get(1).unwrap().as_str())
+                .collect::<BTreeSet<_>>();
+            let header = &region[..(a - start).saturating_sub(1)];
+            let window = header.len().saturating_sub(1100);
+            let name = (0..=window)
+                .rev()
+                .find(|at| header.is_char_boundary(*at))
+                .and_then(|at| NAMED.captures(&header[at..]))
+                .and_then(|captures| captures.get(1).or_else(|| captures.get(2)))
+                .map(|name| name.as_str());
+            (a - start, b - start, name, dispatched, called)
+        })
+        .collect::<Vec<_>>();
+    let helpers = bodies
+        .iter()
+        .filter_map(|(_, _, name, dispatched, _)| Some((name.as_ref()?, dispatched)))
+        .filter(|(_, dispatched)| !dispatched.is_empty())
+        .collect::<BTreeMap<_, _>>();
+    for captures in TABLE_LITERAL.captures_iter(region).take(32) {
+        let table = captures.get(1).unwrap();
+        if region[..table.start()].trim_end().ends_with('.') {
+            continue;
+        }
+        let opening = captures.get(0).unwrap().end() - 1;
+        let (open, close) = if bytes[opening] == b'[' {
+            (b'[', b']')
+        } else {
+            (b'{', b'}')
+        };
+        let mut depth = 0usize;
+        let Some(closing) = (opening..bytes.len()).find(|&at| {
+            if bytes[at] == open {
+                depth += 1;
+            } else if bytes[at] == close {
+                depth -= 1;
+            }
+            depth == 0
+        }) else {
+            continue;
+        };
+        let table = table.as_str();
+        let threads = bodies.iter().any(|(a, b, _, dispatched, called)| {
+            opening < *a
+                && *b < closing
+                && (dispatched.contains(table)
+                    || called.iter().any(|name| {
+                        helpers
+                            .get(name)
+                            .is_some_and(|dispatched| dispatched.contains(table))
+                    }))
+        });
+        if threads {
+            return Some((captures.get(0).unwrap().start(), closing + 1));
+        }
+    }
+    None
+}
+
 /// Classify an artifact's dispatch sites under one fresh meter.
 fn classify_artifact(
     runtime: &str,
@@ -1429,13 +1557,15 @@ mod profile_tests {
     #[test]
     fn handler_recovery_requirement_has_distinct_profile_and_accepts_older_profiles() {
         let current = current_profile();
-        assert_eq!(current_producer()["version"], "1.8.0");
+        assert_eq!(current_producer()["version"], "1.9.0");
         assert_eq!(current["javascript_likely_vm_requires_handlers"], true);
         let mut historical = current.clone();
         historical
             .as_object_mut()
             .unwrap()
             .remove("javascript_likely_vm_requires_handlers");
+        // The pinned digest is the version 2 profile that preceded both.
+        historical["javascript_scoring_version"] = json!(2);
         assert_eq!(
             digest(&historical).unwrap(),
             "61900fb0d5f5e7b8db28d67086c4e2648aca6a604c1fd2ef509941e95c974824"
@@ -1555,6 +1685,7 @@ mod dispatch_shape_tests {
                 for (key, value) in want.as_object().unwrap() {
                     let actual = match key.as_str() {
                         "function_index" | "line" => &site["location"][key],
+                        "through_helper" => &site["selector"][key],
                         _ => &site[key],
                     };
                     failed |= actual != value;
@@ -1798,6 +1929,82 @@ mod dispatch_shape_tests {
     fn classify_module(bytes: &[u8]) -> Value {
         let classified = dispatch_shape::wasm(bytes, &dispatch_shape::Meter::new()).unwrap();
         dispatch_shape::document(&json!("9"), classified.sites, classified.omissions)
+    }
+
+    /// Fetch helpers and threaded handler cycles in Wasm: a helper whose
+    /// result is a load at a global or frame-slot position it advances, and
+    /// a tail-call cycle whose next index is such a fetch, are interpreter
+    /// candidates. A per-call local cursor or a dispatch outside any loop or
+    /// cycle is not.
+    #[test]
+    fn wasm_fetch_helpers_and_threaded_cycles_classify_structurally() {
+        for (name, text, instruction, role, helper) in review_inputs::WASM_STATIC_SHAPES {
+            let classification = classify_module(&wat::parse_str(text).unwrap());
+            let site = classification["sites"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|site| site["instruction"] == *instruction)
+                .unwrap_or_else(|| panic!("{name}: {classification}"));
+            assert_eq!(
+                (&site["role"], &site["selector"]["through_helper"]),
+                (&json!(role), &json!(helper)),
+                "{name}: {site}"
+            );
+        }
+    }
+
+    /// JavaScript threaded dispatch: a self call tied to a table whose
+    /// handlers return a cursor fetch, and handlers that dispatch their own
+    /// table again, directly or through a shared helper, are threaded
+    /// interpreter candidates. A chain of constant indexes and a router
+    /// forwarding its argument are not, nor is a self call whose variable a
+    /// loop head also writes; a reassigned table is structurally
+    /// threaded but its binding proof fails, so it claims nothing.
+    #[test]
+    fn javascript_threaded_chains_and_cycles_classify_structurally() {
+        for (name, role, source_kind) in [
+            (
+                "threaded-returned-handler",
+                "interpreter-candidate",
+                "cursor_index",
+            ),
+            (
+                "threaded-tail-call",
+                "interpreter-candidate",
+                "cursor_index",
+            ),
+            (
+                "threaded-shared-next",
+                "interpreter-candidate",
+                "cursor_index",
+            ),
+            ("threaded-callback-chain", "other", "handler_address"),
+            ("threaded-router", "other", "call_argument"),
+            ("threaded-loop-head-write", "other", "handler_address"),
+            (
+                "threaded-reassigned-table",
+                "interpreter-candidate",
+                "cursor_index",
+            ),
+        ] {
+            let (_, source, _) = review_inputs::STATIC_SHAPES
+                .iter()
+                .find(|(shape, _, _)| *shape == name)
+                .unwrap();
+            let classification = javascript_classification(source);
+            let site = classification["sites"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|site| site["dispatch_kind"] == "threaded")
+                .unwrap_or_else(|| panic!("{name}: {classification}"));
+            assert_eq!(
+                (&site["role"], &site["selector_source"]),
+                (&json!(role), &json!(source_kind)),
+                "{name}: {site}"
+            );
+        }
     }
 
     /// Review regression: a trace cap never yields a confident different

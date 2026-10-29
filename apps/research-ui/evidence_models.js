@@ -1463,16 +1463,21 @@
 
       const vmDispatchKinds = ['switch_on_value', 'handler_table', 'compare_chain', 'export_per_role', 'threaded', 'unknown'];
       const vmSelectorSources = ['cursor_index', 'cursor_pointer', 'frame_slot', 'call_argument', 'handler_address', 'constant', 'unknown'];
-      const vmDispatchInstructions = ['br_table', 'call_indirect', 'return_call_indirect', 'i32.eq ladder', 'export', 'switch', 'indexed call', 'if ladder', 'self call'];
+      const vmDispatchInstructions = ['br_table', 'call_indirect', 'return_call_indirect', 'i32.eq ladder', 'export', 'switch', 'indexed call', 'aliased call', 'if ladder', 'self call'];
 
       // The role is derived from the three axes; a document cannot assert it.
       function vmDispatchRole(site) {
         const selects = ['switch_on_value', 'handler_table', 'compare_chain'].includes(site.dispatch_kind);
+        // A threaded dispatch interprets when its next-handler index is a
+        // cursor fetch re-derived each step.
+        const interprets = selects || site.dispatch_kind === 'threaded';
         // A text or argument scan reads characters, and a switch on a
-        // second-level lookup is a walk; neither fetches opcodes.
+        // second-level lookup is a walk; neither fetches opcodes. A handler
+        // table, threaded or not, reads its handler through one lookup.
         const text = ['string', 'arguments'].includes(site.buffer_kind);
-        const lookup = site.selector?.through_lookup === true && site.dispatch_kind !== 'handler_table';
-        if (selects && site.repeats === 'loop' && ['cursor_index', 'cursor_pointer', 'frame_slot'].includes(site.selector_source) &&
+        const lookup = site.selector?.through_lookup === true &&
+          !['handler_table', 'threaded'].includes(site.dispatch_kind);
+        if (interprets && site.repeats === 'loop' && ['cursor_index', 'cursor_pointer', 'frame_slot'].includes(site.selector_source) &&
           !text && !lookup) return 'interpreter-candidate';
         if (selects && site.repeats === 'once' && site.selector_source === 'call_argument') return 'multiplexer';
         return 'other';
@@ -1497,8 +1502,8 @@
             !isSafeIntegerInRange(location.column, 1, Number.MAX_SAFE_INTEGER)
             : !(location.function_index === null || isSafeIntegerInRange(location.function_index, 0, 4294967295)) ||
               location.line !== null || location.column !== null)) return false;
-        if (!vmWorkspaceExact(site.selector, ['expression', 'byte_offset', 'through_lookup']) ||
-          typeof site.selector.through_lookup !== 'boolean' ||
+        if (!vmWorkspaceExact(site.selector, ['expression', 'byte_offset', 'through_lookup', 'through_helper']) ||
+          typeof site.selector.through_lookup !== 'boolean' || typeof site.selector.through_helper !== 'boolean' ||
           typeof site.selector.expression !== 'string' || site.selector.expression.length === 0 ||
           !isBoundedText(site.selector.expression, 160) ||
           !(site.selector.byte_offset === null || isSafeIntegerInRange(site.selector.byte_offset, 0, Number.MAX_SAFE_INTEGER))) return false;

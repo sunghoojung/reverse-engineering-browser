@@ -396,6 +396,55 @@
           "buffer_kind": "arguments"
         }
       ]
+    },
+    {
+      "artifact": "fetch-helper-interpreter.js",
+      "kind": "javascript",
+      "sites": [
+        {
+          "line": 10,
+          "instruction": "switch",
+          "dispatch_kind": "switch_on_value",
+          "selector_source": "cursor_index",
+          "repeats": "loop",
+          "role": "interpreter-candidate",
+          "buffer_kind": "unknown",
+          "through_helper": true
+        }
+      ]
+    },
+    {
+      "artifact": "threaded-interpreter.js",
+      "kind": "javascript",
+      "sites": [
+        {
+          "line": 10,
+          "instruction": "indexed call",
+          "dispatch_kind": "threaded",
+          "selector_source": "cursor_index",
+          "repeats": "loop",
+          "role": "interpreter-candidate",
+          "buffer_kind": "unknown"
+        },
+        {
+          "line": 14,
+          "instruction": "indexed call",
+          "dispatch_kind": "threaded",
+          "selector_source": "cursor_index",
+          "repeats": "loop",
+          "role": "interpreter-candidate",
+          "buffer_kind": "unknown"
+        },
+        {
+          "line": 20,
+          "instruction": "indexed call",
+          "dispatch_kind": "handler_table",
+          "selector_source": "constant",
+          "repeats": "once",
+          "role": "other",
+          "buffer_kind": null
+        }
+      ]
     }
   ]
 }

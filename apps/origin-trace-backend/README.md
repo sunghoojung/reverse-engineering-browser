@@ -59,6 +59,11 @@ Classification and workspace extraction share one per-artifact work and memory
 budget. The parsed semantic gate only removes recovered opcode claims and reports their
 count; it never changes the detector tier, score, finding ID or dispatch
 inventory. See the [classification contract](../../protocol/vm-dispatch-classification-v1.md).
+Claims come from switches and handler tables, including function arrays,
+rotated loops, aliases and called temporaries, helper fetches, and threaded
+chains and cycles whose next-handler index is fetched at an advancing
+cursor. Their short owned test programs, each beside look-alikes that must
+claim nothing, are inline in `src/vm_review_inputs.rs`.
 The scaling test exercises analysis plus workspace extraction, and the ignored
 `vm_opcode::tests::measure_classifier_pipeline` test accepts a newline-separated
 input list through `REB_CLASSIFIER_MEASURE_INPUTS` for local measurements.

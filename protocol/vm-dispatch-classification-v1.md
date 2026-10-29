@@ -12,7 +12,12 @@ drifts from the standalone schema.
 This contract lands as one unit with the commits that introduce and then
 correct it (526178a, 7258370, f4092e3 and their follow-ups). No document was
 released against an earlier draft, so it keeps version 1; do not treat any of
-those commits alone as a released contract.
+those commits alone as a released contract. The static-shape commits that add
+the `aliased call` instruction, `selector.through_helper` and the threaded
+interpreter-candidate rule belong to the same unreleased unit: release tags
+up to v0.3.2 predate the schema. VM detector producer 1.9.0 and workspace
+producer 2.13.0 write them; documents from the earlier drafts lack the field
+and are not accepted.
 
 ## Why it exists
 
@@ -30,20 +35,25 @@ opcode or decode logic runs.
 
 `role` is derived from those three fields plus two recorded refinements,
 `buffer_kind` and `selector.through_lookup`. Consumers recompute it and reject
-a document whose role disagrees.
+a document whose role disagrees. A third refinement,
+`selector.through_helper`, records that the selector is the value a
+statically bound helper call returns; it is evidence, not a role input.
 
 - `interpreter-candidate`: `repeats=loop` with `cursor_index`,
-  `cursor_pointer` or `frame_slot`, on `switch_on_value`, `handler_table` or
-  `compare_chain`, except a cursor loop over text or call arguments
-  (`buffer_kind` `string` or `arguments`), whose cases are characters or
-  argument values, and a switch or ladder whose selector is a second-level
-  lookup (`through_lookup`, such as `types[q[head++]]`), which is a walk. A
-  handler table reads its handler through one lookup by design, so
-  `through_lookup` does not demote it.
-- `multiplexer`: `repeats=once` with `call_argument` on the same kinds. One call
-  routes to one function. Its arms or constants are routing labels.
-- `other`: everything else, including threaded chains, flattened state
-  machines and ordinary compiled branching.
+  `cursor_pointer` or `frame_slot`, on `switch_on_value`, `handler_table`,
+  `compare_chain` or `threaded`, except a cursor loop over text or call
+  arguments (`buffer_kind` `string` or `arguments`), whose cases are
+  characters or argument values, and a switch or ladder whose selector is a
+  second-level lookup (`through_lookup`, such as `types[q[head++]]`), which is
+  a walk. A handler table, threaded or not, reads its handler through one
+  lookup by design, so `through_lookup` does not demote it. A threaded site
+  qualifies when each step fetches its next-handler index at an advancing
+  cursor.
+- `multiplexer`: `repeats=once` with `call_argument` on `switch_on_value`,
+  `handler_table` or `compare_chain`. One call routes to one function. Its arms
+  or constants are routing labels.
+- `other`: everything else, including chains of handler addresses, flattened
+  state machines and ordinary compiled branching.
 
 `confidence` is always `structural`, never `observed`. Classification is
 analyzer interpretation of stored artifact bytes. It never rewrites captured
@@ -54,8 +64,23 @@ evidence, never raises a VM tier and does not feed the structural score.
 WebAssembly, per function body:
 
 - `br_table` is `switch_on_value`. `call_indirect` is `handler_table`, or
-  `threaded` when its table index is the result of an earlier indirect call.
+  `threaded` when its table index is the result of an earlier indirect call
+  or it closes a threaded cycle.
   `return_call_indirect` is `threaded`.
+- A threaded chain (`h = call_indirect(h)` in a loop) takes a cursor source
+  when every defined function of the call's type placed in the table returns
+  a fetch at a global or frame-slot position it advances itself, or only
+  constants (a halt handler), and at least one fetches. The selector repeats
+  when a loop encloses the call. Otherwise its source stays
+  `handler_address`. A table expanded past the slot bound, or with more than
+  1024 such functions, is a counted `classification-trace-limit` unknown.
+- A threaded cycle is a function placed in a table that dispatches that
+  table again with a cursor fetch that outlives the call (a global or a
+  frame slot it advances), as a `return_call_indirect` or a `call_indirect`.
+  Its loop is the function body. Membership alone is not threading: a
+  compiled module places every address-taken function in one table. A tail
+  call leaves its function, so outside a cycle a `return_call_indirect` is
+  `once` even inside a loop.
 - An equality ladder (`local.get; i32.const C; i32.eq; if` or `br_if`, also
   `i32.ne` and `i32.eqz`) on one subject with at least three distinct constants
   is `compare_chain`.
@@ -70,7 +95,17 @@ unknown; its operands never become the selector.
 - A load through `base + index` with an arithmetically advanced index
   (`pc = pc ± n`, through masks or width casts) is `cursor_index`; through one
   advanced pointer it is `cursor_pointer`. A linked-list step, a reload or a
-  call result is not an advance.
+  call result is not an advance. A global the function advances
+  (`global.set g (global.get g + n)`), read directly or copied into a local,
+  is a cursor too; it persists across calls.
+- A call to a function of the module whose result is a fetch at a position
+  that function advances itself, a global or a frame slot it stores back
+  advanced, takes that fetch's source and sets `through_helper`. A loop
+  enclosing the call repeats the selector. A cursor held only in the callee's
+  locals starts fresh on every call and does not count, and a second-level
+  lookup is a walk. Only callees of functions with dispatch sites are
+  summarized, once each in index order and under the same meter; a helper's
+  own helper calls are not followed.
 - A table read at an index nothing advances is a lookup, not a cursor. It takes
   the source of its index: `call_argument` when every index is an unwritten
   argument, `unknown` when one comes from a call, as in a worklist drained by
@@ -119,18 +154,48 @@ original UTF-8 byte offsets; comments, regex literals, templates, automatic
 semicolon insertion and Unicode names do not require text-based guessing.
 
 - `switch (selector)` is `switch_on_value`; computed member calls, including
-  `.call` and `.apply`, are `handler_table`.
+  `.call` and `.apply`, are `handler_table`. A call through a temporary bound
+  once, in the calling function, to an indexed table read
+  (`const h = t[op]; h(s)` or `h.call(...)`) is also `handler_table`, with
+  instruction `aliased call` and selector `op`. A temporary read outside the
+  loop that calls it is fetched once, so the site does not repeat.
 - Equality tests on one resolved symbol with at least three distinct integer
   constants are `compare_chain`. `h = h(...)` is `threaded`.
+- A self call `h = h(s)` ties to a table when `h` is a variable, not a
+  parameter, every other write of which reads that one table
+  (`h = ops[code[pc++]]`) or is a literal (`h = null`). A compound write,
+  or a write that is neither an assignment nor an initializer (destructuring,
+  a `for (h of ...)` head, an Annex B function), leaves it untied. Each such write and each value a function of the table returns is
+  then one alternative; a table read contributes its index. Inside a handler,
+  a parameter stands for the self call's argument, and a read repeats when
+  the self call does. An untied self call is a `handler_address` chain.
+- A dispatch of a table outside any loop of its own function, from a
+  function stored in that table (`return ops[code[pc++]](s)`) or from a helper
+  such a function calls (a shared `next()`), is `threaded`: a cycle whose loop
+  is the table literal. A cursor that a handler or the helper advances in that
+  cycle makes it repeat. A dispatch inside a loop stays driven by that loop,
+  so a handler that re-enters the interpreter loop is not a cycle.
 - Indexed reads and byte/string accessors are cursor reads when the bound
   index advances in the loop. A numerically initialized cursor also qualifies
   when assigned a new position. Writes in functions stored in the dispatched
   table count, including `pc++`, `pc += k` and `pc = code.length`. A switch arm
   dispatching that table shares this evidence.
-- Direct calls to statically bound, unreassigned function declarations propagate
-  an invoking loop for at most 16 edges. This recognizes a loop calling a
-  `step()` helper without repeatedly traversing function bodies. Unknown call
-  targets and values returned by helpers are not inferred.
+- Calls to statically bound helpers propagate an invoking loop for at most 16
+  edges. This recognizes a loop calling a `step()` helper without repeatedly
+  traversing function bodies. A helper is an unreassigned function
+  declaration, a variable bound once to a function or arrow, or a `this.m()`
+  method defined once in the class body or object literal of the calling
+  method. A name also written as a member anywhere, a computed `this` write,
+  a class field or accessor of that name, or a subclass that could override
+  it resolves nothing; an arrow property's `this` is never the object.
+- A helper call's returned values are followed, each return one alternative,
+  through at most 4 nested helper calls, setting `through_helper`. Inside a
+  followed call a parameter stands for its argument, so a helper returning
+  `code[pc]` is a cursor read when the loop advances the `pc` it passes. A
+  member reached through a parameter (`state.pc`) is shared with the caller,
+  so the helper's own `state.pc++` advances it; a write to a plain parameter
+  changes only the helper's copy. A read inside a followed helper repeats when
+  the outermost followed call is in the loop.
 - Object positions are `frame_slot`; a repeating frame slot requires an
   arithmetic advance. A worklist index assigned from `queue.pop()` is unknown.
 - In-place parameter coercions preserve `call_argument`. Definitions and writes
@@ -156,8 +221,10 @@ Every site carries the artifact ID, `location` (Wasm function index and code
 entry offset, or JavaScript line, column and region start), the byte offset and
 size of the dispatch instruction or first comparison, a bounded `selector`
 rendering of the instructions or source expression that produced the
-selector, the offset of the closest producing write or load, the arm or
-comparison count, and the loop range.
+selector, the offset of the closest producing write or load (inside the
+helper for a helper fetch, inside the handler for a threaded fetch), whether
+a lookup or a helper produced it, the arm or comparison count, and the loop
+range.
 
 `call_indirect` sites keep `table`: table index, type index, and the real table
 slots whose function signature equals the call type, scanned once per table
@@ -296,12 +363,19 @@ classification is never an input to handler recovery, tier or score:
   score. The opcode-claim gate is a pure post-filter on what recovery returns:
   it removes claims and never adds one.
 - A recovered `switch` case survives only when that switch is an
-  interpreter-candidate site. A recovered table entry (`t[3] = function` or an
-  object map) survives only when the region dispatches through that table, as
+  interpreter-candidate site. A recovered table entry (`t[3] = function`, an
+  object map, or a function element of an array literal) survives only when
+  the region dispatches through that table, as
   `t[selector](...)` or `t[selector].call(...)`, including from a nested
-  function of the region, at an interpreter-candidate site. A dispatch through
-  a temporary (`h = t[op]; h()`) ties nothing, and a table with no such site
-  is withheld as unclassified.
+  function of the region, through an `aliased call`, from the table's own
+  handlers or through a self call tied to it, at an interpreter-candidate
+  site. A table with no such site is withheld as unclassified.
+- A dispatched table is followed through aliases bound once (`var t = ops`,
+  `var a = ops, t = a`), by Oxc symbol, for at most 8 links. Each link needs
+  exactly one static write; a second write, a parameter or an ambiguous
+  `with` scope ends the chain at that alias, which binds no table literal.
+  A shadowing declaration is a different symbol and never reaches the outer
+  table.
 - A table ties only to references resolving to its declaration's Oxc symbol,
   with exactly one static write (initializer or assignment). A
   declaration without an initializer followed by its only assignment qualifies.
@@ -312,6 +386,12 @@ classification is never an input to handler recovery, tier or score:
   always withholds claims.
   An Annex B block function's implicit replacement of an existing `var` table
   also counts as a write, although it has no ordinary reference-write AST node.
+- An array entry's opcode is its AST position, counting holes, and a recovered
+  handler index must equal it. Elements after a spread have no static position
+  and no proof. A table whose entries are written through a computed member
+  (`t[k] = f`, `delete t[k]`, destructuring) or reordered in place (`splice`,
+  `shift`, `unshift`, `reverse`, `sort`, `copyWithin`, `fill`) is unproven:
+  an entry's position no longer names its handler.
 - `obj.ops` requires the same resolved receiver symbol and static, non-computed
   property name, with a single static write to that key. Distinct receivers are
   independent; private `#ops` never matches ordinary `ops`. `this.ops` requires
@@ -347,20 +427,31 @@ Observed claims never feed this classification, the claim gate or a tier.
 - A byte-cursor loop over text, such as a format-string or tokenizer loop, is
   structurally an interpreter candidate. `buffer_kind` flags JavaScript string
   buffers; Wasm has no equivalent signal.
-- An opcode fetched through a helper call (`op = next(state)`) is `unknown`.
-  Only a statically bound direct helper invocation can propagate loop context;
-  returned values are not followed.
+- A helper is resolved only by static binding. Methods reached other than
+  through `this` in their own class or object literal, `call`, `apply` and
+  `bind`, and callees chosen at run time are not followed. A helper invoked
+  from several loops propagates the first of them. A Wasm helper that reads
+  at a cursor passed as its argument, so the caller advances it, is not
+  summarized.
+- A threaded program counter carried as a handler argument and passed on
+  advanced (`return ops[code[pc]](s, pc + 1)`, or a Wasm handler forwarding
+  `pc + 1`) is not followed; only a cursor that outlives the call, a closure
+  variable, a shared member, a global or a frame slot, repeats a threaded
+  site. A Wasm handler that dispatches through a shared helper function is
+  not a cycle, and a self call through a member (`s.h = s.h(s)`) ties no
+  table.
+- The JavaScript pattern scorer reads only a region's own text. A threaded
+  interpreter whose every bytecode read is inside a nested handler or helper
+  scores no indexed bytecode read, so it can stay a `candidate` without a
+  workspace even when its sites are interpreter candidates.
 - Without flow order, an argument that is unconditionally overwritten before
   dispatch still counts as a reaching `call_argument` alternative.
-- A JavaScript rotated loop (`op = code[pc++]` before the loop and at its end)
-  classifies as an interpreter candidate, but handler recovery, which is
-  unchanged, yields no handlers for it, as it did before classification
-  existed. This is a known false negative of recovery, not of the
-  classification.
 - On the pinned public QuickJS debug build, 13 of 384 sites are interpreter
   candidates, including the opcode dispatch at function 414; 7 sites are
   trace-limited unknowns, among them byte-cursor format-string parsers.
-- A table used through a temporary supplies no opcode claims.
+- A temporary written more than once, other than a tied self call, an alias
+  chain longer than 8 links, and a temporary read in another function supply
+  no opcode claims.
 - Structural scheduling is not semantic proof. More than 4096 equally strong
   sites in one artifact can still omit a later interpreter. The omitted site count
   is explicit; neither strength ordering nor withholding changes VM ranking.

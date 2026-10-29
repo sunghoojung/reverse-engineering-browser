@@ -6,7 +6,7 @@ use crate::{
 use regex::Regex;
 use serde_json::{Value, json};
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, HashMap},
     path::Path,
     sync::LazyLock,
 };
@@ -22,7 +22,7 @@ mod observed;
 #[path = "vm_opcode_wasm.rs"]
 mod wasm;
 
-const PRODUCER_VERSION: &str = "2.12.0";
+const PRODUCER_VERSION: &str = "2.13.0";
 const MAX_SAMPLES: usize = 4096;
 const MAX_HANDLERS: usize = 1024;
 const MAX_SNAPSHOTS: usize = 16;
@@ -61,6 +61,20 @@ static INDEXED_DISPATCH: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"\b([A-Za-z_$][\w$]*)\s*\[((?:[^\[\]]+|\[[^\[\]]*\])+)\]\s*\(")
         .expect("indexed dispatch")
 });
+/// `h = t[selector]` for a callable temporary, and `t = ops` for an alias.
+static ALIASED_READ: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"\b([A-Za-z_$][\w$]*)\s*=\s*((?:[A-Za-z_$][\w$]*\.)*[A-Za-z_$][\w$]*)\s*\[((?:[^\[\]]+|\[[^\[\]]*\])+)\]\s*(?:[;,)\n]|$)")
+        .expect("aliased read")
+});
+static TABLE_ALIAS: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"\b([A-Za-z_$][\w$]*)\s*=\s*((?:[A-Za-z_$][\w$]*\.)*[A-Za-z_$][\w$]*)\s*(?:[;,)\n]|$)",
+    )
+    .expect("table alias")
+});
+static CALLED: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"\b([A-Za-z_$][\w$]*)\s*(?:\(|\.\s*(?:call|apply)\s*\()").expect("called name")
+});
 static NUMERIC_OBJECT_ENTRY: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
         r"(?im)\b(0x[0-9a-f]+|\d+)\s*:\s*(?:function\b|\([^)]*\)\s*=>|[A-Za-z_$][\w$]*\s*=>)",
@@ -81,7 +95,7 @@ static REGISTER_IDENTIFIER: LazyLock<Regex> =
 static CASE_BOUNDARY: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\bcase\b[^:;{}]*:|\bdefault\s*:").expect("case boundary"));
 static BYTE_READ: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"\b(program|bytecode|code|instructions|bytes)\s*\[\s*(pc|ip|instructionPointer|offset|cursor)\s*(?:(\+\+)|\+\s*([0-9]+))?\s*\]")
+    Regex::new(r"\b((?:[A-Za-z_$][\w$]*\.)?(?:program|bytecode|code|instructions|bytes))\s*\[\s*((?:[A-Za-z_$][\w$]*\.)?(?:pc|ip|instructionPointer|offset|cursor))\s*(?:(\+\+)|\+\s*([0-9]+))?\s*\]")
         .expect("adjacent byte read")
 });
 static IDENTIFIER: LazyLock<Regex> =
@@ -174,41 +188,145 @@ fn without_nested_functions(region: &str) -> String {
     String::from_utf8(masked).expect("nested function masking")
 }
 
+fn byte_read(expression: &str) -> bool {
+    BYTE_READ
+        .find(expression)
+        .is_some_and(|m| m.start() == 0 && m.end() == expression.len())
+}
+
+/// A helper call (`next()`, `this.fetch()`, `read(state)`) whose one
+/// definition in the artifact returns exactly one direct indexed byte read.
+fn helper_fetch(expression: &str, source: &str) -> bool {
+    static CALL: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r"^(?:this\s*\.\s*)?([A-Za-z_$][\w$]*)\s*\([^()]*\)$").expect("helper call")
+    });
+    let Some(call) = CALL.captures(expression) else {
+        return false;
+    };
+    let name = regex::escape(&call[1]);
+    let definition = Regex::new(&format!(
+        r"(?:\bfunction\s+{name}\s*\([^()]*\)\s*\{{|(?:^|[{{}};,\s]){name}\s*\([^()]*\)\s*\{{|\b{name}\s*=\s*(?:function\b[^{{]*\{{|(?:\([^()]*\)|[A-Za-z_$][\w$]*)\s*=>\s*(\{{)?))"
+    ))
+    .expect("helper definition");
+    let mut definitions = definition.captures_iter(source);
+    let (Some(found), None) = (definitions.next(), definitions.next()) else {
+        return false;
+    };
+    let header = found.get(0).expect("helper header");
+    if header.as_str().trim_end().ends_with("=>") {
+        // A concise arrow body is its one returned value.
+        let body = source[header.end()..]
+            .split([';', '\n', ',', ')', '}'])
+            .next()
+            .unwrap_or("");
+        return byte_read(body.trim());
+    }
+    let opening = header.end() - 1;
+    let Some(closing) = matching(source.as_bytes(), opening, b'{', b'}') else {
+        return false;
+    };
+    static RETURN: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"\breturn\b\s*([^;{}\n]*)").expect("helper return"));
+    let body = without_nested_functions(&source[opening..=closing]);
+    let mut returns = RETURN.captures_iter(&body);
+    matches!(
+        (returns.next(), returns.next()),
+        (Some(value), None) if byte_read(value[1].trim())
+    )
+}
+
+/// Per-region memo for [`direct_selector`]. Every dispatch site in a region
+/// asks about the same names in the same scope and artifact, so each name's
+/// writes and each helper definition are found and judged once, not once per
+/// site. Without it, thousands of sites sharing one selector are quadratic.
+#[derive(Default)]
+struct SelectorFacts {
+    /// (name, depth) to the offset of its first write when every write is a
+    /// direct selector and the name is never mutated.
+    names: HashMap<(String, usize), Option<usize>>,
+    helpers: HashMap<String, bool>,
+}
+
 // These are deliberately syntactic checks, not an evaluator or a data-flow
 // proof. An unrecognized selector cannot establish a fixed opcode mapping.
-fn direct_selector(expression: &str, region: &str, depth: usize) -> bool {
+// `scope` is the region without nested function bodies, `before` the
+// dispatch offset in it, and `source` the masked artifact helpers live in.
+fn direct_selector(
+    expression: &str,
+    scope: &str,
+    before: usize,
+    source: &str,
+    depth: usize,
+    facts: &mut SelectorFacts,
+) -> bool {
     let expression = expression.trim();
-    if integer(expression).is_some()
-        || BYTE_READ
-            .find(expression)
-            .is_some_and(|m| m.start() == 0 && m.end() == expression.len())
-    {
+    if integer(expression).is_some() || byte_read(expression) {
+        return true;
+    }
+    let helper = match facts.helpers.get(expression) {
+        Some(&known) => known,
+        None => {
+            let known = helper_fetch(expression, source);
+            facts.helpers.insert(expression.to_owned(), known);
+            known
+        }
+    };
+    if helper {
         return true;
     }
     if depth == 8 || !IDENTIFIER.is_match(expression) {
         return false;
     }
+    let key = (expression.to_owned(), depth);
+    let first = match facts.names.get(&key) {
+        Some(&first) => first,
+        None => {
+            let first = first_direct_write(expression, scope, source, depth, facts);
+            facts.names.insert(key, first);
+            first
+        }
+    };
+    // One write must precede the dispatch.
+    first.is_some_and(|first| first < before)
+}
+
+fn first_direct_write(
+    expression: &str,
+    scope: &str,
+    source: &str,
+    depth: usize,
+    facts: &mut SelectorFacts,
+) -> Option<usize> {
     let name = regex::escape(expression);
     let mutation = Regex::new(&format!(
         r"(?:\b{name}\s*(?:\+\+|--|[+\-^|&*/%<>=]+=)|(?:\+\+|--)\s*\b{name}\b)"
     ))
     .expect("selector mutation");
-    if mutation.is_match(region) {
-        return false;
+    if mutation.is_match(scope) {
+        return None;
     }
-    let assignment =
-        Regex::new(&format!(r"\bconst\s+{name}\s*=\s*([^;{{}}\n]+)")).expect("selector binding");
-    let mut assignments = assignment.captures_iter(region);
-    let Some(binding) = assignments.next() else {
-        return false;
-    };
-    // Multiple writes and alias cycles are ambiguous, not a data-flow proof.
-    assignments.next().is_none()
-        && direct_selector(
-            &binding[1],
-            &region[..binding.get(0).expect("const binding").start()],
-            depth + 1,
-        )
+    // Every plain write, declared or assigned, anywhere in the region. A
+    // rotated loop fetches before the loop and again at its latch; each write
+    // must itself be a direct selector, and one must precede the dispatch. A
+    // variable written more than once with a literal is a state machine.
+    let assignment = Regex::new(&format!(
+        r"(?:^|[^.\w$]){name}\s*=([^=>;{{}}\n,()](?:[^;{{}}\n,()]|\([^(){{}}]*\))*)"
+    ))
+    .expect("selector binding");
+    let values = assignment
+        .captures_iter(scope)
+        .map(|binding| binding.get(1).expect("selector value"))
+        .collect::<Vec<_>>();
+    let direct = values.iter().all(|value| {
+        (values.len() == 1 || integer(value.as_str().trim()).is_none())
+            // Alias cycles end at the depth bound, not in a data-flow proof.
+            && direct_selector(value.as_str(), scope, value.start(), source, depth + 1, facts)
+    });
+    if direct {
+        values.first().map(|value| value.start())
+    } else {
+        None
+    }
 }
 
 fn operand_width(body: &str) -> (usize, &'static str) {
@@ -359,17 +477,42 @@ fn shallow_braces(region: &str) -> String {
     String::from_utf8(bytes).expect("masked object members")
 }
 
-fn object_handlers(
+fn last_segment(path: &str) -> &str {
+    path.rsplit('.').next().unwrap_or(path)
+}
+
+/// A binding written as a bare name, not a member such as `x.h = ...`.
+fn bare_write(text: &str, captures: &regex::Captures<'_>) -> bool {
+    let start = captures.get(0).expect("write").start();
+    !text[..start].trim_end().ends_with('.')
+}
+
+/// Tables read into a temporary that the same body calls (`h = t[op]; h()`).
+fn aliased_reads(outer: &str) -> Vec<regex::Captures<'_>> {
+    let called = CALLED
+        .captures_iter(outer)
+        .map(|captures| captures.get(1).expect("called name").as_str())
+        .collect::<BTreeSet<_>>();
+    ALIASED_READ
+        .captures_iter(outer)
+        .filter(|captures| called.contains(&captures[1]) && bare_write(outer, captures))
+        .collect()
+}
+
+/// Names a region may dispatch a handler table through, followed through
+/// plain aliases (`t = ops`) for at most 8 links. An alias whose dispatch is
+/// blocked blocks the table it names.
+fn table_names(
     region: &str,
-    base: usize,
-    blocked_tables: &BTreeSet<String>,
-    handlers: &mut BTreeMap<u32, Value>,
-    unknowns: &mut Vec<String>,
-    handler_limit_hit: &mut bool,
-) {
+    outer: &str,
+    mut blocked_tables: BTreeSet<String>,
+) -> BTreeSet<String> {
     let mut names = BTreeSet::new();
     for captures in INDEXED_DISPATCH.captures_iter(region) {
         names.insert(captures[1].to_owned());
+    }
+    for captures in aliased_reads(outer) {
+        names.insert(last_segment(&captures[2]).to_owned());
     }
     names.extend([
         "handler".into(),
@@ -377,11 +520,44 @@ fn object_handlers(
         "opcode".into(),
         "opcodes".into(),
     ]);
-    for name in names {
-        if blocked_tables.contains(&name) {
-            continue;
+    let aliases = TABLE_ALIAS
+        .captures_iter(region)
+        .filter(|captures| bare_write(region, captures))
+        .map(|captures| {
+            (
+                captures[1].to_owned(),
+                last_segment(&captures[2]).to_owned(),
+            )
+        })
+        .collect::<Vec<_>>();
+    for _ in 0..8 {
+        let mut changed = false;
+        for (alias, target) in &aliases {
+            if names.contains(alias) {
+                changed |= names.insert(target.clone());
+            }
+            if blocked_tables.contains(alias) {
+                changed |= blocked_tables.insert(target.clone());
+            }
         }
-        let assignment = Regex::new(&format!(r"\b{}\s*=\s*\{{", regex::escape(&name)))
+        if !changed {
+            break;
+        }
+    }
+    names.retain(|name| !blocked_tables.contains(name));
+    names
+}
+
+fn object_handlers(
+    region: &str,
+    base: usize,
+    names: &BTreeSet<String>,
+    handlers: &mut BTreeMap<u32, Value>,
+    unknowns: &mut Vec<String>,
+    handler_limit_hit: &mut bool,
+) {
+    for name in names {
+        let assignment = Regex::new(&format!(r"\b{}\s*=\s*\{{", regex::escape(name)))
             .expect("object assignment");
         for candidate in assignment.find_iter(region) {
             let opening = candidate.end() - 1;
@@ -423,25 +599,134 @@ fn object_handlers(
     }
 }
 
+/// Byte ranges of the top-level elements of `[ ... ]`, holes included.
+/// The text is masked, so brackets and commas inside literals are gone.
+fn array_elements(text: &str) -> Vec<(usize, usize)> {
+    let mut elements = Vec::new();
+    let mut depth = 0usize;
+    let mut start = 0;
+    for (index, byte) in text.bytes().enumerate() {
+        match byte {
+            b'(' | b'[' | b'{' => depth += 1,
+            b')' | b']' | b'}' => depth = depth.saturating_sub(1),
+            b',' if depth == 0 => {
+                elements.push((start, index));
+                start = index + 1;
+            }
+            _ => (),
+        }
+    }
+    // A trailing comma ends the list; it does not add a hole.
+    if !text[start..].trim().is_empty() {
+        elements.push((start, text.len()));
+    }
+    elements
+}
+
+/// Function-array tables (`t = [function(s){...}, (s) => ..., ...]`): each
+/// function element's opcode is its position. Arrays come from the region's
+/// own body, not its nested functions, whose arrays are their own dispatch.
+fn array_handlers(
+    region: &str,
+    outer: &str,
+    base: usize,
+    names: &BTreeSet<String>,
+    handlers: &mut BTreeMap<u32, Value>,
+    handler_limit_hit: &mut bool,
+) {
+    static ELEMENT: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r"^(?:function\b[^{]*\{|(?:\([^()]*\)|[A-Za-z_$][\w$]*)\s*=>)")
+            .expect("array function element")
+    });
+    for name in names {
+        let assignment =
+            Regex::new(&format!(r"\b{}\s*=\s*\[", regex::escape(name))).expect("array assignment");
+        for candidate in assignment.find_iter(outer) {
+            let opening = candidate.end() - 1;
+            let Some(closing) = matching(outer.as_bytes(), opening, b'[', b']') else {
+                continue;
+            };
+            let list = &outer[opening + 1..closing];
+            for (position, (start, end)) in array_elements(list).into_iter().enumerate() {
+                let piece = &list[start..end];
+                let element = piece.trim_start();
+                if element.starts_with("...") {
+                    break;
+                }
+                let Some(header) = ELEMENT.find(element) else {
+                    continue;
+                };
+                let from = opening + 1 + start + (piece.len() - element.len());
+                let to = opening + 1 + start + piece.trim_end().len();
+                let text = &region[from..to];
+                let body = if header.as_str().ends_with('{') {
+                    let open = from + header.end() - 1;
+                    match matching(region.as_bytes(), open, b'{', b'}') {
+                        Some(close) if close < to => &region[open + 1..close],
+                        _ => continue,
+                    }
+                } else {
+                    let arrow = text[header.end()..].trim_start();
+                    match arrow.strip_prefix('{') {
+                        Some(_) => {
+                            let open = to - arrow.len();
+                            match matching(region.as_bytes(), open, b'{', b'}') {
+                                Some(close) if close < to => &region[open + 1..close],
+                                _ => continue,
+                            }
+                        }
+                        None => arrow,
+                    }
+                };
+                let Ok(opcode) = u32::try_from(position) else {
+                    break;
+                };
+                if !add_handler(
+                    handlers,
+                    opcode,
+                    Some(opcode),
+                    (base + from, base + to),
+                    body,
+                    "A function-array handler is statically visible; its opcode is its position.",
+                ) {
+                    *handler_limit_hit = true;
+                }
+            }
+        }
+    }
+}
+
 fn static_handlers(
     source: &str,
     start: usize,
     end: usize,
 ) -> (Vec<Value>, String, Vec<String>, Vec<Value>) {
-    let region = vm::mask(&source[start..end]);
+    let masked = vm::mask(source);
+    let region = masked[start..end].to_owned();
     let outer = without_nested_functions(&region);
     let mut handlers = BTreeMap::new();
     let mut unknowns = Vec::new();
     let mut omissions = Vec::new();
     let mut handler_limit_hit = false;
     let mut blocked_tables = BTreeSet::new();
+    let mut facts = SelectorFacts::default();
     for captures in INDEXED_DISPATCH.captures_iter(&outer) {
         if !direct_selector(
             &captures[2],
-            &outer[..captures.get(0).expect("dispatch match").start()],
+            &outer,
+            captures.get(0).expect("dispatch match").start(),
+            &masked,
             0,
+            &mut facts,
         ) {
             blocked_tables.insert(captures[1].to_owned());
+            unknowns.push("A computed, position-dependent, or saved-state handler selector has no proven fixed opcode mapping.".into());
+        }
+    }
+    for captures in aliased_reads(&outer) {
+        let read = captures.get(3).expect("aliased selector");
+        if !direct_selector(read.as_str(), &outer, read.start(), &masked, 0, &mut facts) {
+            blocked_tables.insert(last_segment(&captures[2]).to_owned());
             unknowns.push("A computed, position-dependent, or saved-state handler selector has no proven fixed opcode mapping.".into());
         }
     }
@@ -466,8 +751,11 @@ fn static_handlers(
         previous_switch_end = closing_brace + 1;
         if !direct_selector(
             &region[opening_paren + 1..closing_paren],
-            &outer[..switch_match.start()],
+            &outer,
+            switch_match.start(),
+            &masked,
             0,
+            &mut facts,
         ) {
             unknowns.push("A computed, position-dependent, or saved-state switch selector has no proven fixed opcode mapping.".into());
             continue;
@@ -549,12 +837,21 @@ fn static_handlers(
             unknowns.push("A computed handler index cannot be assigned a static opcode.".into());
         }
     }
+    let names = table_names(&region, &outer, blocked_tables);
     object_handlers(
         &region,
         start,
-        &blocked_tables,
+        &names,
         &mut handlers,
         &mut unknowns,
+        &mut handler_limit_hit,
+    );
+    array_handlers(
+        &region,
+        &outer,
+        start,
+        &names,
+        &mut handlers,
         &mut handler_limit_hit,
     );
     if handler_limit_hit {
@@ -631,7 +928,11 @@ fn gate_handlers(
         let offset = handler["source"]["byte_offset"].as_u64().unwrap_or(0) as usize;
         let verdict = if roles.meter.charge(1) {
             roles.javascript.as_ref().map_or(Ok(None), |proofs| {
-                proofs.verdict(offset, handler.get("handler_index").is_some())
+                proofs.verdict(
+                    offset,
+                    handler.get("handler_index").is_some(),
+                    handler["handler_index"].as_u64(),
+                )
             })
         } else {
             Ok(None)
@@ -3807,6 +4108,36 @@ if (!validate(document)) throw new Error('Backend workspace rejected by shipped 
         );
     }
 
+    /// Function-array tables, rotated loops, aliases, fetch helpers and
+    /// threaded handlers claim exactly their statically bound handlers; each
+    /// look-alike claims none. The canonical fixtures also keep likely-vm.
+    #[test]
+    fn static_shapes_claim_only_their_bound_handlers() {
+        let claims = |source: &[u8]| {
+            let (_, analysis, document) =
+                analyze_artifact_with_snapshot(source, "javascript", &[], None);
+            let opcodes = document["workspaces"]
+                .as_array()
+                .unwrap()
+                .first()
+                .map_or_else(Vec::new, |_| handler_opcodes(&document));
+            (analysis["results"][0]["tier"].clone(), opcodes)
+        };
+        for (name, source, expected) in vm::review_inputs::STATIC_SHAPES {
+            assert_eq!(claims(source.as_bytes()).1, *expected, "{name}");
+        }
+        let root =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tools/fixtures/dispatch-shapes");
+        for (fixture, expected) in [
+            ("handler-array-interpreter.js", vec![0, 1, 2]),
+            ("rotated-loop.js", vec![1, 2, 3]),
+            ("threaded-interpreter.js", vec![0, 1, 2]),
+        ] {
+            let (tier, opcodes) = claims(&fs::read(root.join(fixture)).unwrap());
+            assert_eq!((tier, opcodes), (json!("likely-vm"), expected), "{fixture}");
+        }
+    }
+
     /// Third review: tables bind by declaring scope. A nested `ops` that an
     /// inner cursor loop dispatches does not tie the outer `ops` handlers.
     #[test]
@@ -3835,10 +4166,11 @@ if (!validate(document)) throw new Error('Backend workspace rejected by shipped 
     }
 
     /// Third review: a handler table no indexed call dispatches is withheld
-    /// as unclassified, not as "not a cursor-advancing loop".
+    /// as unclassified, not as "not a cursor-advancing loop". A temporary
+    /// written twice is not an alias of the table read.
     #[test]
     fn a_table_without_a_dispatch_site_is_withheld_as_unclassified() {
-        let source = "function run(code,stack){var pc=0;var handlers={1:function(){stack.push(code[pc++])},2:function(){stack.pop()}};while(pc<code.length){var fn=handlers[code[pc++]];fn(stack);}return stack;}";
+        let source = "function run(code,stack){var pc=0;var handlers={1:function(){stack.push(code[pc++])},2:function(){stack.pop()}};while(pc<code.length){var fn=handlers[code[pc++]];fn=fn||handlers[1];fn(stack);}return stack;}";
         let start = source.find('{').unwrap() + 1;
         let (handlers, _, unknowns, _) = classified_handlers(source, start, source.len() - 1);
         assert!(handlers.is_empty());
@@ -4014,7 +4346,7 @@ if (!validate(document)) throw new Error('Backend workspace rejected by shipped 
             "function route(k,code,stack){let pc=0;const handlers={1:function(){stack.push(code[pc++])},2:function(){stack.pop()},3:function(){}};while(pc<code.length){stack.push(code[pc++]);}switch(k){case 9:break;}return handlers[k].call(null,stack);}",
             "function route(k,x,stack){const handlers={1:function(){stack.push(x)},2:function(){stack.pop()},3:function(){stack.length=0}};for(const v of x){switch(v.kind){case 1:log(v);break;}}return handlers[k].call(null,x);}",
             "function route(k,x,stack){const handlers={1:function(){stack.push(x)},2:function(){stack.pop()},3:function(){stack.length=0}};for(const v of x){log(v);}return handlers[k](x);}",
-            "function run(code,stack){let pc=0;const handlers={1:function(){stack.push(code[pc++])},2:function(){stack.pop()}};while(pc<code.length){const h=handlers[code[pc++]];h(stack);}}",
+            "function run(code,stack){let pc=0;const handlers={1:function(){stack.push(code[pc++])},2:function(){stack.pop()}};while(pc<code.length){let h=handlers[code[pc++]];h=h||handlers[1];h(stack);}}",
             "function run(code,stack){let pc=0;handlers[1]=function(){stack.push(code[pc++])};handlers[2]=function(){stack.pop()};while(pc<code.length){stack.push(code[pc++]);}}",
         ] {
             let start = source.find('{').unwrap() + 1;
@@ -4033,8 +4365,13 @@ if (!validate(document)) throw new Error('Backend workspace rejected by shipped 
         if let Some(workspace) = document["workspaces"].as_array().unwrap().first() {
             assert_eq!(workspace["handlers"], json!([]));
         }
-        // A nested dispatch resolves the same statically bound table.
+        // A nested dispatch or a temporary bound once to the indexed read
+        // resolves the same statically bound table.
         for (source, expected) in [
+            (
+                "function run(code,stack){let pc=0;const handlers={1:function(){stack.push(code[pc++])},2:function(){stack.pop()}};while(pc<code.length){const h=handlers[code[pc++]];h(stack);}}",
+                2,
+            ),
             (
                 "function run(code,stack){let pc=0;const handlers={1:function(){stack.push(code[pc++])},2:function(){stack.pop()}};while(pc<code.length){handlers[code[pc++]](stack);}}",
                 2,

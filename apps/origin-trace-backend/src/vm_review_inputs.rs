@@ -24,6 +24,348 @@ pub(crate) const NESTED_TABLE_VM: &str = "function vm(code, stack){var pc=0;var 
 /// A loop dispatch beside a one-shot router on the same table.
 pub(crate) const LOOP_BODY_ROUTER_VM: &str = "function route(k,code,stack){var pc=0;var handlers={1:function(){stack.push(code[pc++])},2:function(){stack.pop()},3:function(){}};while(pc<code.length){handlers[code[pc++]](stack);}return handlers[k](stack);}\n";
 
+/// Owned interpreter shapes whose handler claims need a static table, alias,
+/// helper or threaded proof, each beside look-alikes that must claim none:
+/// (name, source, opcodes the workspace keeps).
+pub(crate) const STATIC_SHAPES: &[(&str, &str, &[u64])] = &[
+    (
+        "array-arrows-and-hole",
+        "function run(code){const s={acc:0,h:false};const ops=[(s)=>{s.acc++;},s=>s.acc--,,function(s){s.h=true;}];let pc=0;while(!s.h&&pc<code.length){ops[code[pc++]](s);}return s.acc;}",
+        &[0, 1, 3],
+    ),
+    (
+        "array-reassigned",
+        "function run(code){const s={acc:0,h:false};let ops=[function(s){s.acc++;},function(s){s.acc--;},function(s){s.h=true;}];ops=[function(s){s.h=true;}];let pc=0;while(!s.h&&pc<code.length){ops[code[pc++]](s);}return s.acc;}",
+        &[],
+    ),
+    (
+        "array-entry-written",
+        "function run(code){const s={acc:0,h:false};const ops=[function(s){s.acc++;},function(s){s.acc--;},function(s){s.h=true;}];ops[1]=function(s){s.acc+=2;};let pc=0;while(!s.h&&pc<code.length){ops[code[pc++]](s);}return s.acc;}",
+        &[],
+    ),
+    (
+        "array-reordered",
+        "function run(code){const s={acc:0,h:false};const ops=[function(s){s.acc++;},function(s){s.acc--;},function(s){s.h=true;}];ops.reverse();let pc=0;while(!s.h&&pc<code.length){ops[code[pc++]](s);}return s.acc;}",
+        &[],
+    ),
+    (
+        "array-after-spread",
+        "function run(code,base){const s={acc:0,h:false};const ops=[...base,function(s){s.acc++;},function(s){s.h=true;}];let pc=0;while(!s.h&&pc<code.length){ops[code[pc++]](s);}return s.acc;}",
+        &[],
+    ),
+    (
+        "array-router",
+        "function route(k,s){const ops=[function(s){s.acc++;},function(s){s.acc--;},function(s){s.h=true;}];for(const v of s.items){log(v);}while(s.busy){s.tick();}return ops[k](s);}",
+        &[],
+    ),
+    (
+        "rotated-for-update",
+        "function run(code){var pc=0,acc=0,op=code[pc++];for(;op;op=code[pc++]){switch(op){case 1:acc+=1;break;case 2:acc-=1;break;case 3:return acc;}}return acc;}",
+        &[1, 2, 3],
+    ),
+    (
+        "rotated-transformed-latch",
+        "function run(code,key){let pc=0,acc=0;let op=code[pc++];while(op!==0){switch(op){case 1:acc+=1;break;case 2:acc-=1;break;case 3:return acc;}op=code[pc++]^key;}return acc;}",
+        &[],
+    ),
+    (
+        "alias-of-table",
+        "function run(code){const s={acc:0,h:false};const ops=[function(s){s.acc++;},function(s){s.acc--;},function(s){s.h=true;}];var a=ops,t=a;let pc=0;while(!s.h&&pc<code.length){t[code[pc++]](s);}return s.acc;}",
+        &[0, 1, 2],
+    ),
+    (
+        "alias-temporary-call",
+        "function run(code){const s={acc:0,h:false};const ops={1:function(s){s.acc++;},2:function(s){s.acc--;},3:function(s){s.h=true;}};let pc=0;while(!s.h&&pc<code.length){const h=ops[code[pc++]];h.call(null,s);}return s.acc;}",
+        &[1, 2, 3],
+    ),
+    (
+        "alias-reassigned",
+        "function run(code,other){const s={acc:0,h:false};const ops=[function(s){s.acc++;},function(s){s.acc--;},function(s){s.h=true;}];var t=ops;t=other;let pc=0;while(!s.h&&pc<code.length){t[code[pc++]](s);}return s.acc;}",
+        &[],
+    ),
+    (
+        "alias-shadowed",
+        "function run(code,other){const s={acc:0,h:false};const ops=[function(s){s.acc++;},function(s){s.acc--;},function(s){s.h=true;}];var t=ops;{let t=other;let pc=0;while(!s.h&&pc<code.length){t[code[pc++]](s);}}return s.acc;}",
+        &[],
+    ),
+    (
+        "alias-temporary-hoisted",
+        "function run(code){const s={acc:0,h:false};const ops=[function(s){s.acc++;},function(s){s.acc--;},function(s){s.h=true;}];let pc=0;const h=ops[code[pc++]];while(!s.h&&pc<code.length){h(s);pc++;}return s.acc;}",
+        &[],
+    ),
+    (
+        "alias-temporary-router",
+        "function route(k,s){const ops=[function(s){s.acc++;},function(s){s.acc--;},function(s){s.h=true;}];while(s.busy){s.tick();}const h=ops[k];return h(s);}",
+        &[],
+    ),
+    (
+        "helper-closure-fetch",
+        "function run(code){let pc=0;const stack=[];function next(){return code[pc++];}while(pc<code.length){switch(next()){case 1:stack.push(code[pc++]);break;case 2:stack.pop();break;case 3:return stack;}}return stack;}",
+        &[1, 2, 3],
+    ),
+    (
+        "helper-this-fetch",
+        "class VM{constructor(code){this.code=code;this.pc=0;this.stack=[];}fetch(){return this.code[this.pc++];}run(){while(this.pc<this.code.length){switch(this.fetch()){case 1:this.stack.push(this.code[this.pc++]);break;case 2:this.stack.pop();break;case 3:return this.stack;}}return this.stack;}}",
+        &[1, 2, 3],
+    ),
+    (
+        "helper-state-fetch",
+        "function read(state){return state.code[state.pc++];}function run(code){let pc=0;const state={code:code,pc:pc,stack:[]};while(state.pc<code.length){switch(read(state)){case 1:state.stack.push(code[state.pc]);pc=state.pc++;break;case 2:state.stack.pop();break;case 3:return state.stack;}}return state.stack;}",
+        &[1, 2, 3],
+    ),
+    (
+        "helper-loop-advances",
+        "function run(code){let pc=0;const stack=[];const at=(code,pc)=>code[pc];while(pc<code.length){const op=at(code,pc);pc++;switch(op){case 1:stack.push(code[pc++]);break;case 2:stack.pop();break;case 3:return stack;}}return stack;}",
+        &[1, 2, 3],
+    ),
+    (
+        "helper-reassigned",
+        "function run(code){let pc=0;const stack=[];let next=function(){return code[pc++];};next=function(){return 0;};while(pc<code.length){switch(next()){case 1:stack.push(code[pc++]);break;case 2:stack.pop();break;case 3:return stack;}pc++;}return stack;}",
+        &[],
+    ),
+    (
+        "helper-parameter-copy",
+        "function next(code,pc){return code[pc++];}function run(code){let pc=0;const stack=[];while(stack.length<9){switch(next(code,pc)){case 1:stack.push(code[pc]);break;case 2:stack.pop();break;case 3:return stack;}}return stack;}",
+        &[],
+    ),
+    (
+        "helper-overridden",
+        "class VM{constructor(code){this.code=code;this.pc=0;this.stack=[];}fetch(){return this.code[this.pc++];}run(){while(this.pc<this.code.length){switch(this.fetch()){case 1:this.stack.push(this.code[this.pc++]);break;case 2:this.stack.pop();break;case 3:return this.stack;}}return this.stack;}}class Replay extends VM{fetch(){return this.code[0];}}",
+        &[],
+    ),
+    (
+        "helper-lookup-walk",
+        "function run(code,types){let pc=0;const stack=[];function next(){return types[code[pc++]];}while(pc<code.length){switch(next()){case 1:stack.push(code[pc++]);break;case 2:stack.pop();break;case 3:return stack;}}return stack;}",
+        &[],
+    ),
+    (
+        "rotated-state-machine",
+        "function run(code){let pc=0,acc=0;let op=1;while(op){switch(op){case 1:acc+=code[pc++];op=2;break;case 2:acc-=1;op=3;break;case 3:op=0;break;}}return acc;}",
+        &[],
+    ),
+    (
+        "threaded-returned-handler",
+        "function run(code){const s={acc:0};let pc=0;const ops=[function(s){s.acc++;return ops[code[pc++]];},function(s){s.acc--;return ops[code[pc++]];},function(s){return null;}];let h=ops[code[pc++]];while(h){h=h(s);}return s.acc;}",
+        &[0, 1, 2],
+    ),
+    (
+        "threaded-tail-call",
+        "function run(code){const s={acc:0};let pc=0;const ops=[function(s){s.acc++;return ops[code[pc++]](s);},function(s){s.acc--;return ops[code[pc++]](s);},function(s){return s.acc;}];return ops[code[pc++]](s);}",
+        &[0, 1, 2],
+    ),
+    (
+        "threaded-shared-next",
+        "function run(code){const s={acc:0};let pc=0;function next(s){return ops[code[pc++]](s);}const ops=[function(s){s.acc++;return next(s);},function(s){s.acc--;return next(s);},function(s){return s.acc;}];return ops[code[pc++]](s);}",
+        &[0, 1, 2],
+    ),
+    (
+        "threaded-callback-chain",
+        "function run(s){const ops=[function(s){s.acc++;return ops[1];},function(s){s.acc--;return ops[2];},function(s){return null;}];let h=ops[0];while(h){h=h(s);}return s.acc;}",
+        &[],
+    ),
+    (
+        "threaded-router",
+        "function route(k,s){const ops=[function(s){s.acc++;return ops[k](s);},function(s){s.acc--;return null;},function(s){return s.acc;}];return ops[k](s);}",
+        &[],
+    ),
+    (
+        "threaded-loop-head-write",
+        "function run(code,list){const s={acc:0};let pc=0;const ops=[function(s){s.acc++;return ops[code[pc++]];},function(s){s.acc--;return ops[code[pc++]];},function(s){return null;}];let h=ops[code[pc++]];for(h of list){h=h(s);}return s.acc;}",
+        &[],
+    ),
+    (
+        "threaded-reassigned-table",
+        "function run(code){const s={acc:0};let pc=0;let ops=[function(s){s.acc++;return ops[code[pc++]];},function(s){s.acc--;return ops[code[pc++]];},function(s){return null;}];ops=[function(s){return null;}];let h=ops[code[pc++]];while(h){h=h(s);}return s.acc;}",
+        &[],
+    ),
+];
+
+/// Owned Wasm shapes for fetch helpers and threaded handler chains and
+/// cycles beside look-alikes: a chain of constant handler indexes, a router
+/// forwarding its argument, and a table a relative segment may overwrite.
+/// (name, module text, instruction, role, through_helper) of the first site
+/// with that instruction.
+pub(crate) const WASM_STATIC_SHAPES: &[(&str, &str, &str, &str, bool)] = &[
+    (
+        "helper-global-pc",
+        r#"(module (memory 1)
+  (global $pc (mut i32) (i32.const 0))
+  (func $next (result i32) (local $at i32)
+    (local.set $at (global.get $pc))
+    (global.set $pc (i32.add (global.get $pc) (i32.const 1)))
+    (i32.load8_u (local.get $at)))
+  (func (export "run") (param $n i32) (result i32) (local $acc i32)
+    (block $exit (loop $again
+      (block $b2 (block $b1 (block $b0
+        (br_table $b0 $b1 $b2 $exit (call $next)))
+        (local.set $acc (i32.add (local.get $acc) (i32.const 1))) (br $again))
+        (local.set $acc (i32.sub (local.get $acc) (i32.const 1))) (br $again))
+      (br $exit)))
+    (local.get $acc)))"#,
+        "br_table",
+        "interpreter-candidate",
+        true,
+    ),
+    (
+        "helper-frame-slot-pc",
+        r#"(module (memory 1)
+  (func $read (param $state i32) (result i32) (local $pc i32)
+    (local.set $pc (i32.load offset=4 (local.get $state)))
+    (i32.store offset=4 (local.get $state) (i32.add (local.get $pc) (i32.const 1)))
+    (i32.load8_u (i32.add (i32.load (local.get $state)) (local.get $pc))))
+  (func (export "run") (param $state i32) (result i32) (local $acc i32)
+    (block $exit (loop $again
+      (block $b2 (block $b1 (block $b0
+        (br_table $b0 $b1 $b2 $exit (call $read (local.get $state))))
+        (local.set $acc (i32.add (local.get $acc) (i32.const 1))) (br $again))
+        (local.set $acc (i32.sub (local.get $acc) (i32.const 1))) (br $again))
+      (br $exit)))
+    (local.get $acc)))"#,
+        "br_table",
+        "interpreter-candidate",
+        true,
+    ),
+    (
+        "helper-local-cursor",
+        r#"(module (memory 1)
+  (func $peek (param $p i32) (result i32) (local $q i32)
+    (local.set $q (local.get $p))
+    (local.set $q (i32.add (local.get $q) (i32.const 1)))
+    (i32.load8_u (local.get $q)))
+  (func (export "run") (param $p i32) (result i32) (local $acc i32)
+    (block $exit (loop $again
+      (block $b2 (block $b1 (block $b0
+        (br_table $b0 $b1 $b2 $exit (call $peek (local.get $p))))
+        (local.set $acc (i32.add (local.get $acc) (i32.const 1))) (br $again))
+        (local.set $acc (i32.sub (local.get $acc) (i32.const 1))) (br $again))
+      (br $exit)))
+    (local.get $acc)))"#,
+        "br_table",
+        "other",
+        false,
+    ),
+    (
+        "helper-outside-loop",
+        r#"(module (memory 1)
+  (global $pc (mut i32) (i32.const 0))
+  (func $next (result i32) (local $at i32)
+    (local.set $at (global.get $pc))
+    (global.set $pc (i32.add (global.get $pc) (i32.const 1)))
+    (i32.load8_u (local.get $at)))
+  (func (export "run") (result i32)
+    (block $b2 (block $b1 (block $b0
+      (br_table $b0 $b1 $b2 (call $next)))
+      (return (i32.const 1)))
+      (return (i32.const 2)))
+    (i32.const 3)))"#,
+        "br_table",
+        "other",
+        true,
+    ),
+    (
+        "threaded-tail-call",
+        r#"(module (memory 1)
+  (type $op (func (param i32) (result i32)))
+  (table 3 funcref)
+  (global $pc (mut i32) (i32.const 0))
+  (func $inc (type $op) (local $at i32)
+    (local.set $at (global.get $pc))
+    (global.set $pc (i32.add (global.get $pc) (i32.const 1)))
+    (return_call_indirect (type $op)
+      (i32.add (local.get 0) (i32.const 1)) (i32.load8_u (local.get $at))))
+  (func $dec (type $op) (local $at i32)
+    (local.set $at (global.get $pc))
+    (global.set $pc (i32.add (global.get $pc) (i32.const 1)))
+    (return_call_indirect (type $op)
+      (i32.sub (local.get 0) (i32.const 1)) (i32.load8_u (local.get $at))))
+  (func $halt (type $op) (local.get 0))
+  (elem (i32.const 0) func $inc $dec $halt))"#,
+        "return_call_indirect",
+        "interpreter-candidate",
+        false,
+    ),
+    (
+        "threaded-returned-index",
+        r#"(module (memory 1)
+  (type $op (func (result i32)))
+  (table 3 funcref)
+  (global $pc (mut i32) (i32.const 0))
+  (global $acc (mut i32) (i32.const 0))
+  (func $inc (type $op) (local $at i32)
+    (global.set $acc (i32.add (global.get $acc) (i32.const 1)))
+    (local.set $at (global.get $pc))
+    (global.set $pc (i32.add (global.get $pc) (i32.const 1)))
+    (i32.load8_u (local.get $at)))
+  (func $dec (type $op) (local $at i32)
+    (global.set $acc (i32.sub (global.get $acc) (i32.const 1)))
+    (local.set $at (global.get $pc))
+    (global.set $pc (i32.add (global.get $pc) (i32.const 1)))
+    (i32.load8_u (local.get $at)))
+  (func $halt (type $op) (i32.const 2))
+  (elem (i32.const 0) func $inc $dec $halt)
+  (func (export "run") (result i32) (local $h i32)
+    (block $exit (loop $again
+      (br_if $exit (i32.eq (local.get $h) (i32.const 2)))
+      (local.set $h (call_indirect (type $op) (local.get $h)))
+      (br $again)))
+    (global.get $acc)))"#,
+        "call_indirect",
+        "interpreter-candidate",
+        false,
+    ),
+    (
+        "threaded-callback-chain",
+        r#"(module
+  (type $op (func (result i32)))
+  (table 3 funcref)
+  (func $first (type $op) (i32.const 1))
+  (func $second (type $op) (i32.const 2))
+  (func $halt (type $op) (i32.const 2))
+  (elem (i32.const 0) func $first $second $halt)
+  (func (export "run") (result i32) (local $h i32)
+    (block $exit (loop $again
+      (br_if $exit (i32.eq (local.get $h) (i32.const 2)))
+      (local.set $h (call_indirect (type $op) (local.get $h)))
+      (br $again)))
+    (local.get $h)))"#,
+        "call_indirect",
+        "other",
+        false,
+    ),
+    (
+        "threaded-router",
+        r#"(module
+  (type $op (func (param i32) (result i32)))
+  (table 2 funcref)
+  (func $forward (type $op) (return_call_indirect (type $op) (local.get 0) (local.get 0)))
+  (func $halt (type $op) (local.get 0))
+  (elem (i32.const 0) func $forward $halt))"#,
+        "return_call_indirect",
+        "other",
+        false,
+    ),
+    (
+        "threaded-replaced-table",
+        r#"(module
+  (import "env" "base" (global $base i32))
+  (memory 1)
+  (type $op (func (param i32) (result i32)))
+  (table 3 funcref)
+  (global $pc (mut i32) (i32.const 0))
+  (func $inc (type $op) (local $at i32)
+    (local.set $at (global.get $pc))
+    (global.set $pc (i32.add (global.get $pc) (i32.const 1)))
+    (return_call_indirect (type $op)
+      (i32.add (local.get 0) (i32.const 1)) (i32.load8_u (local.get $at))))
+  (func $halt (type $op) (local.get 0))
+  (elem (i32.const 0) func $inc $halt)
+  (elem (global.get $base) func $halt $halt))"#,
+        "return_call_indirect",
+        "other",
+        false,
+    ),
+];
+
 const BINDING_HEAD: &str = "function vm(code, stack){var pc=0;var ops={1:function(){stack.push(code[pc++])},2:function(){stack.pop()},3:function(){pc=code.length}};";
 const BINDING_TAIL: &str =
     "while(pc<code.length){switch(code[pc]){default:ops[code[pc]]();}}return stack;}";
@@ -649,11 +991,25 @@ pub(crate) fn differential_inputs() -> Vec<(String, Vec<u8>, &'static str)> {
             "javascript",
         ));
     }
+    for (name, source, _) in STATIC_SHAPES {
+        inputs.push((
+            format!("shape:{name}"),
+            source.as_bytes().to_vec(),
+            "javascript",
+        ));
+    }
     for (name, source) in proven_bindings() {
         inputs.push((format!("binding:{name}"), source.into_bytes(), "javascript"));
     }
     for (name, source) in javascript().into_iter().chain(third_review_javascript()) {
         inputs.push((format!("review:{name}"), source.into_bytes(), "javascript"));
+    }
+    for (name, text, _, _, _) in WASM_STATIC_SHAPES {
+        inputs.push((
+            format!("shape:{name}"),
+            wat::parse_str(text).expect("static shape module"),
+            "wasm",
+        ));
     }
     for (name, bytes) in wasm().into_iter().chain(third_review_wasm()) {
         inputs.push((format!("review:{name}"), bytes, "wasm"));

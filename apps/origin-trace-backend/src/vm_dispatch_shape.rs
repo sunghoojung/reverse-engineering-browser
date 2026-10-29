@@ -55,6 +55,9 @@ const MAX_ALTERNATIVES: usize = 16;
 /// Logical trace steps for one selector query. Memo hits replay what a fresh
 /// computation would spend, so a query's result never depends on order.
 const MAX_QUERY_STEPS: u64 = 4096;
+/// Handlers checked for one indirect call's threaded chain. A larger table is
+/// an honest, counted unknown rather than a guessed chain.
+const MAX_CHAIN_HANDLERS: usize = 1024;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) enum Kind {
@@ -154,11 +157,12 @@ impl Role {
 }
 
 /// Derived from the three axes plus two recorded refinements. A threaded
-/// chain computes handler addresses, not opcodes, so it is never an opcode
-/// interpreter candidate. A cursor loop over text (`buffer_kind` string or
-/// arguments) reads characters or argument values, not opcodes. A switch or
-/// ladder on a table read keyed by a cursor-loaded value is a lookup-driven
-/// walk, such as a worklist or graph traversal; only a handler table reads
+/// dispatch is an interpreter only when its next-handler index is re-derived
+/// from a cursor each step; a chain of computed handler addresses is not. A
+/// cursor loop over text (`buffer_kind` string or arguments) reads
+/// characters or argument values, not opcodes. A switch or ladder on a table
+/// read keyed by a cursor-loaded value is a lookup-driven walk, such as a
+/// worklist or graph traversal; only a handler table, threaded or not, reads
 /// its handler through that one lookup by design.
 pub(crate) fn role(
     kind: Kind,
@@ -171,9 +175,10 @@ pub(crate) fn role(
         kind,
         Kind::SwitchOnValue | Kind::HandlerTable | Kind::CompareChain
     );
+    let interprets = selects || kind == Kind::Threaded;
     let text = matches!(buffer_kind, Some("string" | "arguments"));
-    let lookup = through_lookup && kind != Kind::HandlerTable;
-    if selects && repeats == Repeats::Loop && source.cursor_like() && !text && !lookup {
+    let lookup = through_lookup && !matches!(kind, Kind::HandlerTable | Kind::Threaded);
+    if interprets && repeats == Repeats::Loop && source.cursor_like() && !text && !lookup {
         Role::InterpreterCandidate
     } else if selects && repeats == Repeats::Once && source == Source::CallArgument {
         Role::Multiplexer
@@ -200,6 +205,8 @@ pub(crate) struct Site {
     pub selector_offset: Option<usize>,
     /// The selector is a table read keyed by a cursor-loaded value.
     pub through_lookup: bool,
+    /// The selector is the value a statically bound helper call returns.
+    pub through_helper: bool,
     pub arm_count: Option<u64>,
     pub loop_range: Option<(usize, usize)>,
     pub buffer_kind: Option<std::borrow::Cow<'static, str>>,
@@ -315,6 +322,7 @@ pub(crate) fn document(artifact_id: &Value, mut sites: Vec<Site>, omissions: Vec
                     "expression": bounded_expression(&site.selector_expression),
                     "byte_offset": site.selector_offset,
                     "through_lookup": site.through_lookup,
+                    "through_helper": site.through_helper,
                 },
                 "arm_count": site.arm_count,
                 "loop": site.loop_range.map(|(start, end)| json!({
@@ -462,6 +470,17 @@ struct Facts<'a> {
     loops: Vec<(usize, usize)>,
     dispatch: Vec<Dispatch>,
     compares: Vec<Compare>,
+    /// Writes of each global, in offset order.
+    global_defs: BTreeMap<u32, Vec<(usize, NodeId)>>,
+    /// Values left as the function's result at `return` or its final `end`.
+    returns: Vec<NodeId>,
+    /// Functions of the module whose result is a cursor fetch at a position
+    /// they advance themselves, with that fetch's source.
+    fetchers: std::rc::Rc<HashMap<u32, Source>>,
+    /// Per (table, type) of an indirect call whose reachable handlers each
+    /// return a persistent fetch or only constants, at least one fetching:
+    /// that fetch's source, or None when too many handlers to check.
+    chains: std::rc::Rc<HashMap<(u32, u32), Option<Source>>>,
     local_memo: RefCell<BTreeMap<u32, Memo>>,
     in_progress: RefCell<Vec<u32>>,
     steps: Cell<u64>,
@@ -656,6 +675,15 @@ struct Trace {
     /// The selector is a table read keyed by a cursor-loaded value, not the
     /// fetched value itself.
     through_lookup: bool,
+    /// Globals the function advances arithmetically, used as the cursor.
+    globals: Vec<u32>,
+    /// The function whose result is the fetched value, when the selector is
+    /// a call to a helper that fetches at a cursor it advances itself.
+    helper: Option<u32>,
+    /// The selector is an earlier indirect call's result, and every handler
+    /// that call can reach returns such a fetch or ends the chain with a
+    /// constant: a threaded chain.
+    chained: bool,
 }
 
 impl Trace {
@@ -667,6 +695,9 @@ impl Trace {
             anchor: None,
             definition: None,
             through_lookup: false,
+            globals: Vec::new(),
+            helper: None,
+            chained: false,
         }
     }
 }
@@ -788,6 +819,10 @@ impl<'a> Facts<'a> {
             loops: Vec::new(),
             dispatch: Vec::new(),
             compares: Vec::new(),
+            global_defs: BTreeMap::new(),
+            returns: Vec::new(),
+            fetchers: std::rc::Rc::default(),
+            chains: std::rc::Rc::default(),
             local_memo: RefCell::new(BTreeMap::new()),
             in_progress: RefCell::new(Vec::new()),
             steps: Cell::new(0),
@@ -892,7 +927,20 @@ impl<'a> Facts<'a> {
                                 return None;
                             }
                         }
+                    } else if let Some(&value) = stack.last() {
+                        // The function's final `end`: its result.
+                        facts.memory.push(&mut facts.returns, value);
                     }
+                }
+                Operator::GlobalSet { global_index } => {
+                    let value = pop(&mut stack);
+                    if !facts.global_defs.contains_key(global_index) && !facts.memory.keep(96) {
+                        return None;
+                    }
+                    facts.memory.push(
+                        facts.global_defs.entry(*global_index).or_default(),
+                        (start, value),
+                    );
                 }
                 Operator::LocalGet { local_index } => {
                     let id = facts.node(Node::Local(*local_index));
@@ -1013,6 +1061,10 @@ impl<'a> Facts<'a> {
                     }
                 }
                 other => {
+                    if matches!(other, Operator::Return) && stack.len() > floor {
+                        let value = *stack.last().expect("returned value");
+                        facts.memory.push(&mut facts.returns, value);
+                    }
                     if let Some((name, offset)) = load_op(other) {
                         let addr = pop(&mut stack);
                         let id = facts.node(Node::Load {
@@ -1212,6 +1264,51 @@ impl<'a> Facts<'a> {
         advanced
     }
 
+    /// A global some write in this function advances arithmetically
+    /// (`global.set g (global.get g + n)`): a program position that
+    /// persists across calls.
+    fn advanced_global(&self, global: u32) -> bool {
+        let defs = self.global_defs.get(&global).map_or(&[][..], Vec::as_slice);
+        self.meter.charge(defs.len() as u64);
+        defs.iter().any(|(_, def)| {
+            match self.nodes[self.strip_masks(*def)] {
+                Node::Bin { op, a, b } if op.ends_with(".add") || op.ends_with(".sub") => [a, b]
+                    .iter()
+                    .any(|side| matches!(self.nodes[self.strip_masks(*side)], Node::Global(g) if g == global)),
+                _ => false,
+            }
+        })
+    }
+
+    /// The advanced global an address term reads, directly or through a
+    /// local every write of which copies it (`pc = global.get g`).
+    fn global_cursor(&self, term: NodeId) -> Option<u32> {
+        match self.nodes[term] {
+            Node::Global(global) => self.advanced_global(global).then_some(global),
+            Node::Local(local) if local >= self.params => {
+                let defs = self.definitions(local);
+                self.meter.charge(defs.len() as u64);
+                let mut global = None;
+                for (_, def) in defs.iter().take(64) {
+                    match self.nodes[self.strip(*def)] {
+                        Node::Global(g) if global.is_none_or(|known| known == g) => {
+                            global = Some(g)
+                        }
+                        _ => return None,
+                    }
+                }
+                global.filter(|global| defs.len() <= 64 && self.advanced_global(*global))
+            }
+            _ => None,
+        }
+    }
+
+    fn global_written_inside(&self, global: u32, (start, end): (usize, usize)) -> bool {
+        let defs = self.global_defs.get(&global).map_or(&[][..], Vec::as_slice);
+        let first = defs.partition_point(|(offset, _)| *offset <= start);
+        defs.get(first).is_some_and(|(offset, _)| *offset < end)
+    }
+
     fn loop_index(&self) -> &Intervals {
         self.loop_tree
             .get_or_init(|| Intervals::new(self.loops.iter().copied(), self.meter))
@@ -1346,6 +1443,35 @@ impl<'a> Facts<'a> {
             Node::Call { callee: None, at } => {
                 let mut trace = Trace::new(Source::HandlerAddress);
                 trace.anchor = Some(at);
+                let call = self
+                    .dispatch
+                    .binary_search_by_key(&at, |dispatch| dispatch.offset)
+                    .ok()
+                    .and_then(|position| match self.dispatch[position].op {
+                        DispatchOp::CallIndirect { table, ty, .. } => Some((table, ty)),
+                        DispatchOp::BrTable { .. } => None,
+                    });
+                match call.and_then(|call| self.chains.get(&call)) {
+                    Some(Some(source)) => {
+                        trace.source = *source;
+                        trace.chained = true;
+                    }
+                    // Too many reachable handlers to prove: an honest limit.
+                    Some(None) => self.limited.set(true),
+                    None => (),
+                }
+                (vec![trace], false)
+            }
+            Node::Call {
+                callee: Some(callee),
+                at,
+            } => {
+                let mut trace = Trace::new(Source::Unknown);
+                if let Some(source) = self.fetchers.get(&callee) {
+                    trace.source = *source;
+                    trace.helper = Some(callee);
+                    trace.anchor = Some(at);
+                }
                 (vec![trace], false)
             }
             _ => (vec![Trace::new(Source::Unknown)], false),
@@ -1556,6 +1682,19 @@ impl<'a> Facts<'a> {
             trace.advancing = advanced;
             return (vec![trace], provisional);
         }
+        let globals = terms
+            .iter()
+            .filter_map(|(term, _)| self.global_cursor(*term))
+            .collect::<Vec<_>>();
+        if !globals.is_empty() {
+            trace.source = if terms.len() >= 2 {
+                Source::CursorIndex
+            } else {
+                Source::CursorPointer
+            };
+            trace.globals = globals;
+            return (vec![trace], provisional);
+        }
         // A pc reloaded from a saved slot before each fetch: frame_slot.
         let reloaded = locals
             .iter()
@@ -1723,6 +1862,18 @@ impl<'a> Facts<'a> {
             return (Repeats::Once, None);
         };
         let innermost = loops.ranges[index];
+        // A helper advances its own persistent cursor on every call, so a
+        // loop around the call re-derives the selector each iteration.
+        if trace.helper.is_some() || trace.chained {
+            let matching = loops.matching(index, |(start, end)| {
+                trace
+                    .anchor
+                    .is_some_and(|anchor| start < anchor && anchor < end)
+            });
+            return matching.map_or((Repeats::Unknown, Some(innermost)), |range| {
+                (Repeats::Loop, Some(range))
+            });
+        }
         if !matches!(
             trace.source,
             Source::CursorIndex
@@ -1734,7 +1885,9 @@ impl<'a> Facts<'a> {
             return (Repeats::Unknown, Some(innermost));
         }
         if (trace.source == Source::FrameSlot && trace.slots.is_empty())
-            || (trace.source != Source::FrameSlot && trace.advancing.is_empty())
+            || (trace.source != Source::FrameSlot
+                && trace.advancing.is_empty()
+                && trace.globals.is_empty())
         {
             return (Repeats::Unknown, Some(innermost));
         }
@@ -1751,10 +1904,16 @@ impl<'a> Facts<'a> {
                     local.is_none_or(|local| self.written_inside(local, (start, end)))
                         && self.stores_back(slot, *local, (start, end))
                 }),
-                _ => trace
-                    .advancing
-                    .iter()
-                    .any(|local| self.written_inside(*local, (start, end))),
+                _ => {
+                    trace
+                        .advancing
+                        .iter()
+                        .any(|local| self.written_inside(*local, (start, end)))
+                        || trace
+                            .globals
+                            .iter()
+                            .any(|global| self.global_written_inside(*global, (start, end)))
+                }
             }
         });
         matching.map_or((Repeats::Unknown, Some(innermost)), |range| {
@@ -1831,6 +1990,58 @@ impl<'a> Facts<'a> {
             range,
             limited,
         })
+    }
+
+    /// The source of a cursor fetch this function returns at a position it
+    /// advances itself: a global it advances, or a frame slot it stores back
+    /// advanced. A cursor held only in a local starts fresh on every call,
+    /// and a second-level lookup is a walk, so neither makes a fetch helper.
+    fn fetch_summary(&self) -> Option<Source> {
+        for &value in self.returns.iter().take(16) {
+            self.steps.set(0);
+            self.step_limit.set(MAX_QUERY_STEPS);
+            self.deepest.set(0);
+            self.limited.set(false);
+            self.depth_cut.set(false);
+            let (traces, _) = self.classify(value, 0);
+            if self.limited.get() || self.nodes_exhausted {
+                continue;
+            }
+            for trace in traces {
+                if self.persistent(&trace) {
+                    return Some(trace.source);
+                }
+            }
+        }
+        None
+    }
+
+    /// Every value this function returns is a constant: a handler that ends
+    /// a threaded chain, such as halt. A function with more returns than a
+    /// summary examines is not terminal.
+    fn terminal(&self) -> bool {
+        self.returns.len() <= 16
+            && self
+                .returns
+                .iter()
+                .all(|value| matches!(self.nodes[self.strip(*value)], Node::Const(_)))
+    }
+
+    /// A cursor fetch whose position outlives one call of this function: a
+    /// global it advances, a frame slot it stores back advanced, or a fetch
+    /// helper or threaded chain that advances its own.
+    fn persistent(&self, trace: &Trace) -> bool {
+        !trace.through_lookup
+            && (trace.helper.is_some()
+                || trace.chained
+                || match trace.source {
+                    Source::CursorIndex | Source::CursorPointer => !trace.globals.is_empty(),
+                    Source::FrameSlot => trace
+                        .slots
+                        .iter()
+                        .any(|(carrier, slot)| self.stores_back(slot, *carrier, (0, usize::MAX))),
+                    _ => false,
+                })
     }
 
     fn render(&self, id: NodeId, depth: u8) -> String {
@@ -1915,7 +2126,13 @@ impl<'a> Facts<'a> {
             }
             _ => text,
         };
-        if trace.source == Source::FrameSlot
+        if let Some(helper) = trace.helper {
+            text.push_str(&format!(
+                "; f{helper} returns a fetch at a cursor it advances"
+            ));
+        } else if trace.chained {
+            text.push_str("; each reachable handler returns a fetch at a cursor it advances");
+        } else if trace.source == Source::FrameSlot
             && let Some((local, (base, offset))) = trace.slots.first()
         {
             let carrier = local.map_or_else(|| "selector".into(), |local| self.render_local(local));
@@ -2234,7 +2451,8 @@ pub(crate) fn wasm(bytes: &[u8], meter: &Meter) -> Option<Classified> {
                 match Facts::simulate(&body, function, params, meter) {
                     Some(facts) => {
                         let pending = facts.dispatch.len() as u64;
-                        if !auxiliary.push(&mut functions, (index, range.start, facts)) {
+                        if !auxiliary.push(&mut functions, (index, (range.start, range.end), facts))
+                        {
                             meter.count_unclassified(pending);
                             meter.count_unexamined(1);
                         }
@@ -2245,6 +2463,122 @@ pub(crate) fn wasm(bytes: &[u8], meter: &Meter) -> Option<Classified> {
             }
             _ => (),
         }
+    }
+    // Helpers whose result is a cursor fetch they advance themselves. Only
+    // callees of functions with dispatch sites are summarized, once each in
+    // index order. Their memoized local traces are then discarded, so a site
+    // query never depends on whether a summary ran first.
+    let positions = functions
+        .iter()
+        .enumerate()
+        .map(|(position, (index, _, _))| (*index, position))
+        .collect::<HashMap<_, _>>();
+    // Defined functions placed in each table with each call type, which an
+    // indirect call of that (table, type) can reach; None when too many.
+    let mut members = BTreeMap::<(u32, u32), Option<BTreeSet<u32>>>::new();
+    let mut callees = BTreeSet::new();
+    for (_, _, facts) in &functions {
+        if facts.dispatch.is_empty() && facts.compares.is_empty() {
+            continue;
+        }
+        if !meter.charge(facts.nodes.len() as u64) {
+            break;
+        }
+        for node in &facts.nodes {
+            if let Node::Call {
+                callee: Some(callee),
+                ..
+            } = node
+                && positions.contains_key(callee)
+                && !callees.contains(callee)
+                && auxiliary.keep(64)
+            {
+                callees.insert(*callee);
+            }
+        }
+        for dispatch in &facts.dispatch {
+            let (DispatchOp::CallIndirect { table, ty, .. }, Some(tables)) = (&dispatch.op, tables)
+            else {
+                continue;
+            };
+            if members.contains_key(&(*table, *ty)) || !auxiliary.keep(128) {
+                continue;
+            }
+            // An expanded table too large to place is an honest limit.
+            let reachable = if tables.oversized.contains(table) {
+                None
+            } else {
+                let mut reachable = BTreeSet::new();
+                let matching = tables.matching_slots(*table, *ty, meter);
+                let placed = tables.slots.get(table).map_or(&[][..], Vec::as_slice);
+                for slot in matching.iter().flat_map(|matching| matching.0.iter()) {
+                    if !meter.charge(1) || reachable.len() > MAX_CHAIN_HANDLERS {
+                        break;
+                    }
+                    if let Ok(at) = placed.binary_search_by_key(slot, |(slot, _)| *slot)
+                        && let Some(function) = placed[at].1.function()
+                        && positions.contains_key(&function)
+                        && auxiliary.keep(32)
+                    {
+                        reachable.insert(function);
+                    }
+                }
+                (reachable.len() <= MAX_CHAIN_HANDLERS).then_some(reachable)
+            };
+            members.insert((*table, *ty), reachable);
+        }
+    }
+    for reachable in members.values().flatten() {
+        callees.extend(reachable.iter().copied());
+    }
+    let mut fetchers = HashMap::new();
+    let mut terminals = BTreeSet::new();
+    for callee in callees {
+        if meter.exhausted() {
+            break;
+        }
+        let facts = &functions[positions[&callee]].2;
+        if let Some(source) = facts.fetch_summary()
+            && auxiliary.keep(64)
+        {
+            fetchers.insert(callee, source);
+        } else if facts.terminal() && auxiliary.keep(32) {
+            terminals.insert(callee);
+        }
+        facts.local_memo.borrow_mut().clear();
+    }
+    // A chain is threaded through a cursor when every handler its indirect
+    // call can reach returns a fetch at a position it advances itself, or
+    // only constants (a halt handler), and at least one fetches. None marks
+    // a table too large to check, an honest limit.
+    let mut chains = HashMap::new();
+    for (call, reachable) in &members {
+        let source = match reachable {
+            None => None,
+            Some(reachable) => {
+                let mut source = None;
+                let mut proven = true;
+                for function in reachable {
+                    match fetchers.get(function) {
+                        Some(fetched) => source = source.or(Some(*fetched)),
+                        None => proven &= terminals.contains(function),
+                    }
+                }
+                match source.filter(|_| proven) {
+                    Some(source) => Some(source),
+                    None => continue,
+                }
+            }
+        };
+        if auxiliary.keep(32) {
+            chains.insert(*call, source);
+        }
+    }
+    let fetchers = std::rc::Rc::new(fetchers);
+    let chains = std::rc::Rc::new(chains);
+    for (_, _, facts) in &mut functions {
+        facts.fetchers = fetchers.clone();
+        facts.chains = chains.clone();
     }
     let mut candidates = Vec::new();
     for (position, (_, _, facts)) in functions.iter().enumerate() {
@@ -2283,12 +2617,12 @@ pub(crate) fn wasm(bytes: &[u8], meter: &Meter) -> Option<Classified> {
     });
     let mut sites = Vec::new();
     for (_, position, _, candidate) in candidates {
-        let (index, body_offset, facts) = &functions[position];
+        let (index, body, facts) = &functions[position];
         if meter.exhausted() {
             meter.count_unclassified(1);
             continue;
         }
-        match classify_candidate(facts, *index, *body_offset, tables, candidate, meter) {
+        match classify_candidate(facts, *index, *body, tables, &members, candidate, meter) {
             Some(site) => {
                 if meter.retain(site.retained_bytes()) {
                     sites.push(site);
@@ -2316,6 +2650,7 @@ pub(crate) fn wasm(bytes: &[u8], meter: &Meter) -> Option<Classified> {
                 "The host selects an exported function by name; no in-module selector.".into(),
             selector_offset: None,
             through_lookup: false,
+            through_helper: false,
             arm_count: Some(exports.len() as u64),
             loop_range: None,
             buffer_kind: None,
@@ -2343,6 +2678,10 @@ impl Facts<'_> {
         let core = self.strip(selector);
         let loaded = match self.nodes[core] {
             Node::Load { .. } => true,
+            Node::Call {
+                callee: Some(callee),
+                ..
+            } => self.fetchers.contains_key(&callee),
             Node::Local(local) => self.definitions(local).iter().take(8).any(|(_, def)| {
                 self.meter.charge(1);
                 matches!(self.nodes[self.strip(*def)], Node::Load { .. })
@@ -2383,8 +2722,9 @@ impl Facts<'_> {
 fn classify_candidate(
     facts: &Facts,
     index: u32,
-    body_offset: usize,
+    (body_offset, body_end): (usize, usize),
     tables: Option<&crate::vm::wasm_tables::Tables>,
+    members: &BTreeMap<(u32, u32), Option<BTreeSet<u32>>>,
     candidate: Candidate,
     meter: &Meter,
 ) -> Option<Site> {
@@ -2393,11 +2733,39 @@ fn classify_candidate(
             let dispatch = &facts.dispatch[position];
             let Query {
                 trace,
-                repeats,
-                range: loop_range,
+                mut repeats,
+                range: mut loop_range,
                 limited,
             } = facts.query(dispatch.selector, dispatch.offset)?;
             meter.count_limited(limited);
+            // A handler that dispatches the table it is placed in with a
+            // cursor fetch that outlives one call re-enters that table each
+            // step: a threaded cycle through the function body. Membership
+            // alone is not threading, because a compiled module places every
+            // address-taken function in one table. A tail call leaves its
+            // function, so an enclosing loop never runs it again; outside a
+            // cycle it fires once.
+            let (cycle, tail) = match dispatch.op {
+                DispatchOp::CallIndirect { table, ty, tail } => (
+                    trace.source.cursor_like()
+                        && facts.persistent(&trace)
+                        && members
+                            .get(&(table, ty))
+                            .and_then(Option::as_ref)
+                            .is_some_and(|reachable| reachable.contains(&index)),
+                    tail,
+                ),
+                DispatchOp::BrTable { .. } => (false, false),
+            };
+            if cycle {
+                if repeats != Repeats::Loop || tail {
+                    repeats = Repeats::Loop;
+                    loop_range = Some((body_offset, body_end));
+                }
+            } else if tail {
+                repeats = Repeats::Once;
+                loop_range = facts.innermost_loop(Some(dispatch.offset));
+            }
             let (kind, instruction, arm_count, table) = match dispatch.op {
                 DispatchOp::BrTable { arms } => {
                     (Kind::SwitchOnValue, "br_table", Some(u64::from(arms)), None)
@@ -2407,11 +2775,13 @@ fn classify_candidate(
                     ty,
                     tail,
                 } => {
-                    let kind = if tail || trace.source == Source::HandlerAddress {
-                        Kind::Threaded
-                    } else {
-                        Kind::HandlerTable
-                    };
+                    let kind =
+                        if tail || cycle || trace.chained || trace.source == Source::HandlerAddress
+                        {
+                            Kind::Threaded
+                        } else {
+                            Kind::HandlerTable
+                        };
                     let matching =
                         tables.and_then(|tables| tables.matching_slots(table_index, ty, meter));
                     (
@@ -2445,6 +2815,7 @@ fn classify_candidate(
                 selector_expression: facts.selector_text(dispatch.selector, &trace),
                 selector_offset: trace.anchor,
                 through_lookup: trace.through_lookup,
+                through_helper: trace.helper.is_some(),
                 arm_count,
                 loop_range,
                 buffer_kind: None,
@@ -2478,6 +2849,7 @@ fn classify_candidate(
                 ),
                 selector_offset: trace.anchor,
                 through_lookup: trace.through_lookup,
+                through_helper: trace.helper.is_some(),
                 arm_count: Some(compares.len() as u64),
                 loop_range,
                 buffer_kind: None,

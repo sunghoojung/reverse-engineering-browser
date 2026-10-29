@@ -210,7 +210,10 @@ The analyzer reads:
 It writes, per likely-vm artifact:
 
 - handler candidates extracted from `switch` cases, function arrays, or
-  object maps inside the dispatch region;
+  object maps inside the dispatch region; a function-array element's opcode
+  is its position, and arrays come from the region's own body rather than a
+  nested function's. A dispatched name is followed through plain aliases
+  (`t = ops`) and called temporaries (`h = ops[op]; h(s)`);
 - operand width guesses from adjacent indexed reads;
 - bytecode hex preview from the linked snapshot (cap 4096 bytes in the
   document, full bytes remain in the artifact store);
@@ -227,9 +230,14 @@ outer handler opcodes. An adjacent 1-, 2-, or 4-byte indexed-read sequence yield
 a static operand-width guess; absent, nonadjacent, conditional, or repeated
 reads retain width 0 with an explanation. This is not a runtime layout proof.
 Computed property names stay unknown. Selectors must be a direct indexed byte
-read, literal, or a bounded chain of preceding immutable `const` aliases to one; transformed,
-position-dependent, saved-state, and unresolved selectors do not establish a
-fixed opcode mapping. The analyzer retains at most 1024 distinct handlers and
+read, literal, or a bounded chain of aliases to one, with no compound update
+anywhere in the region. Every plain write of an alias must be direct and one
+must precede the dispatch, so a rotated loop that fetches before the loop and
+again at its latch qualifies. A selector written more than once with a literal
+is a state machine. A call to a helper (`next()`, `this.fetch()`,
+`read(state)`) whose one definition returns exactly one direct indexed read is
+direct, including `state.code[state.pc++]`. Transformed, position-dependent, saved-state, and
+unresolved selectors do not establish a fixed opcode mapping. The analyzer retains at most 1024 distinct handlers and
 reports `handler-limit` when additional candidates are omitted.
 
 ## VM Lab UI

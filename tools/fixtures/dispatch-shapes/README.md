@@ -22,13 +22,15 @@ map, or role label is used as a fixture, label, or ground truth.
 | `match-in-loop.wat` | counting loop with a `br_table` on a struct field the loop never advances |
 | `multi-site-interpreter.wat` | three sites in one function: argument mode switch, opcode, operand mode |
 | `host-step.wat` | host-driven `step()`: pc reloaded and stored back once per call, no loop |
-| `rotated-loop.js` | `let op = code[pc++]; while (op) { switch (op) ...; op = code[pc++]; }` (classification only: handler recovery does not follow the rotated selector, a known false negative) |
+| `rotated-loop.js` | `let op = code[pc++]; while (op) { switch (op) ...; op = code[pc++]; }`: recovery follows every write of the rotated selector |
 | `worklist.js` | `while (q.length) { const id = q.pop(); switch (types[id]) ... }` |
 | `minified.js` | comma declarations and statement-form `do switch (...) {...} while (...)` |
 | `normalized-router.js` | `k = k \| 0` then an `if (k === C)` ladder |
 | `text-walk.js` | `switch (s.charCodeAt(i))` loop: a string scan, role `other` |
 | `bfs-lookup.js` | `id = q[head++]; switch (types[id])`: a second-level lookup, role `other` |
 | `arguments-loop.js` | `switch (arguments[i])` loop: an arguments scan, role `other` |
+| `fetch-helper-interpreter.js` | `switch (fetch())` where `fetch` returns `code[pc++]`: `through_helper`, an interpreter candidate |
+| `threaded-interpreter.js` | handlers that return `ops[code[pc++]](s)`: a threaded cycle through the table with no loop, an interpreter candidate |
 
 Short review repro programs are inlined in
 `apps/origin-trace-backend/src/vm_review_inputs.rs`.

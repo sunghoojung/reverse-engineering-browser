@@ -1,0 +1,254 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://reverse-engineering-browser.local/protocol/native-wasm-guest-adapter-v2.schema.json",
+  "title": "Native Wasm guest adapter v2",
+  "description": "Digest-bound interpretation of native numeric locals and bounded memory at 1 to 8 dispatch sites of one module. Admission additionally requires exact compact canonical JSON, at most 8192 UTF-8 bytes, strictly increasing site function_index (each site is a distinct dispatcher function, so duplicate sites are rejected), supported non-shared Wasm32 memory, verified local types and sites. All sites share one sample_limit and therefore one snapshot budget of at most 256 samples of 65536 bytes; no budget is multiplied per site. Version 1 adapters remain valid as one-site adapters. Schema validation alone does not prove interpreter semantics.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "version",
+    "sample_limit",
+    "module_sha256",
+    "sites"
+  ],
+  "properties": {
+    "version": {
+      "const": 2
+    },
+    "sample_limit": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 256,
+      "description": "Shared by every site: the renderer and browser count one sample budget for the whole adapter."
+    },
+    "module_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$",
+      "minLength": 64,
+      "maxLength": 64
+    },
+    "sites": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 8,
+      "uniqueItems": true,
+      "items": {
+        "$ref": "#/$defs/site"
+      },
+      "description": "Configured dispatch sites in strictly increasing function_index order. A site's array position is the site_index that invocation markers carry."
+    }
+  },
+  "$defs": {
+    "site": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "function_index",
+        "dispatch_module_offset",
+        "pc",
+        "bytecode",
+        "opcode",
+        "import_call_offsets"
+      ],
+      "properties": {
+        "function_index": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 2147483647
+        },
+        "dispatch_module_offset": {
+          "type": "integer",
+          "minimum": 8,
+          "maximum": 2147483647
+        },
+        "pc": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "local_index",
+            "value_type",
+            "adjustment",
+            "subtract_memory_base"
+          ],
+          "properties": {
+            "local_index": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 2147483647
+            },
+            "value_type": {
+              "enum": [
+                "i32",
+                "i64"
+              ]
+            },
+            "adjustment": {
+              "$ref": "#/$defs/int64"
+            },
+            "subtract_memory_base": {
+              "type": "boolean"
+            }
+          }
+        },
+        "bytecode": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "memory_index",
+            "base",
+            "length"
+          ],
+          "properties": {
+            "memory_index": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 2147483647
+            },
+            "base": {
+              "$ref": "#/$defs/valueSource"
+            },
+            "length": {
+              "$ref": "#/$defs/valueSource"
+            }
+          }
+        },
+        "opcode": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "width",
+            "endian"
+          ],
+          "properties": {
+            "width": {
+              "enum": [
+                1,
+                2,
+                4
+              ]
+            },
+            "endian": {
+              "enum": [
+                "little",
+                "big"
+              ]
+            }
+          }
+        },
+        "import_call_offsets": {
+          "type": "array",
+          "maxItems": 64,
+          "uniqueItems": true,
+          "items": {
+            "type": "integer",
+            "minimum": 8,
+            "maximum": 2147483647
+          },
+          "description": "Strictly increasing physical Wasm import call offsets; ordering and actual instructions are verified by consumers."
+        }
+      }
+    },
+    "uint64": {
+      "type": "string",
+      "maxLength": 20,
+      "pattern": "^(?:0|[1-9][0-9]{0,18}|1[0-7][0-9]{18}|18[0-3][0-9]{17}|184[0-3][0-9]{16}|1844[0-5][0-9]{15}|18446[0-6][0-9]{14}|184467[0-3][0-9]{13}|1844674[0-3][0-9]{12}|184467440[0-6][0-9]{10}|1844674407[0-2][0-9]{9}|18446744073[0-6][0-9]{8}|1844674407370[0-8][0-9]{6}|18446744073709[0-4][0-9]{5}|184467440737095[0-4][0-9]{4}|18446744073709550[0-9]{3}|18446744073709551[0-5][0-9]{2}|1844674407370955160[0-9]{1}|1844674407370955161[0-4]|18446744073709551615)$",
+      "description": "Canonical unsigned 64-bit decimal, 0 through 18446744073709551615; no sign or leading zeros.",
+      "not": {
+        "pattern": "[^0-9]"
+      }
+    },
+    "int64": {
+      "type": "string",
+      "maxLength": 20,
+      "pattern": "^(?:(?:0|[1-9][0-9]{0,17}|[1-8][0-9]{18}|9[0-1][0-9]{17}|92[0-1][0-9]{16}|922[0-2][0-9]{15}|9223[0-2][0-9]{14}|92233[0-6][0-9]{13}|922337[0-1][0-9]{12}|92233720[0-2][0-9]{10}|922337203[0-5][0-9]{9}|9223372036[0-7][0-9]{8}|92233720368[0-4][0-9]{7}|922337203685[0-3][0-9]{6}|9223372036854[0-6][0-9]{5}|92233720368547[0-6][0-9]{4}|922337203685477[0-4][0-9]{3}|9223372036854775[0-7][0-9]{2}|922337203685477580[0-6]|9223372036854775807)|-(?:[1-9][0-9]{0,17}|[1-8][0-9]{18}|9[0-1][0-9]{17}|92[0-1][0-9]{16}|922[0-2][0-9]{15}|9223[0-2][0-9]{14}|92233[0-6][0-9]{13}|922337[0-1][0-9]{12}|92233720[0-2][0-9]{10}|922337203[0-5][0-9]{9}|9223372036[0-7][0-9]{8}|92233720368[0-4][0-9]{7}|922337203685[0-3][0-9]{6}|9223372036854[0-6][0-9]{5}|92233720368547[0-6][0-9]{4}|922337203685477[0-4][0-9]{3}|9223372036854775[0-7][0-9]{2}|922337203685477580[0-7]|9223372036854775808))$",
+      "description": "Canonical signed 64-bit decimal, -9223372036854775808 through 9223372036854775807; no plus sign, leading zeros, or negative zero.",
+      "not": {
+        "pattern": "[^0-9-]"
+      }
+    },
+    "valueSource": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "value"
+          ],
+          "properties": {
+            "kind": {
+              "const": "constant"
+            },
+            "value": {
+              "$ref": "#/$defs/uint64"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "local_index",
+            "value_type"
+          ],
+          "properties": {
+            "kind": {
+              "const": "local"
+            },
+            "local_index": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 2147483647
+            },
+            "value_type": {
+              "enum": [
+                "i32",
+                "i64"
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "local_index",
+            "value_type",
+            "memory_index",
+            "offsets"
+          ],
+          "properties": {
+            "kind": {
+              "const": "memory-chain"
+            },
+            "local_index": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 2147483647
+            },
+            "value_type": {
+              "const": "i32"
+            },
+            "memory_index": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 2147483647
+            },
+            "offsets": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 3,
+              "items": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 2147483647
+              }
+            }
+          }
+        }
+      ]
+    }
+  }
+}

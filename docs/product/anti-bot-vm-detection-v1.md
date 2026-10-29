@@ -243,7 +243,12 @@ the `profile_id` remains `anti-bot-vm-detection-v1`.
 Producer `1.9.0` emits `profile.javascript_scoring_version: 3`. A loop that
 calls a temporary holding an indexed read (`const h = ops[op]; h(s)`) is
 also a dispatch loop, so such an interpreter is no longer scored as if it had
-no dispatch. Version 2 documents remain valid.
+no dispatch. So is a threaded cycle: a table literal whose own functions
+dispatch the table again, directly or through a named function of the region
+(`ops = [function (s) { return ops[code[pc++]](s); }]`), which repeats without
+a syntactic loop. A region whose table re-enters itself this way can
+therefore rise from `candidate` to `likely-vm` when recovery finds handlers.
+Version 2 documents remain valid.
 
 The generic JavaScript signal families include:
 

@@ -193,7 +193,7 @@
             "multiplexer",
             "other"
           ],
-          "description": "Derived from the record. interpreter-candidate: repeats=loop with cursor_index, cursor_pointer or frame_slot on switch_on_value, handler_table or compare_chain, unless buffer_kind is string or arguments, and unless the selector is a second-level lookup (through_lookup) on a switch or ladder; a handler table reads its handler through one lookup by design. multiplexer: repeats=once with call_argument on the same kinds; its arms or constants are routing labels and no guest opcode is claimed. other: everything else."
+          "description": "Derived from the record. interpreter-candidate: repeats=loop with cursor_index, cursor_pointer or frame_slot on switch_on_value, handler_table, compare_chain or threaded, unless buffer_kind is string or arguments, and unless the selector is a second-level lookup (through_lookup) on a switch or ladder; a handler table, threaded or not, reads its handler through one lookup by design. A threaded record repeats when each step fetches its next-handler index at an advancing cursor. multiplexer: repeats=once with call_argument on switch_on_value, handler_table or compare_chain; its arms or constants are routing labels and no guest opcode is claimed. other: everything else."
         },
         "confidence": {
           "const": "structural"
@@ -335,7 +335,7 @@
               }
             }
           ],
-          "description": "The selector-advancing loop for repeats=loop, otherwise the innermost enclosing loop; null outside loops."
+          "description": "The selector-advancing loop for repeats=loop, which for a threaded cycle is the Wasm handler body or the JavaScript table literal; otherwise the innermost enclosing loop; null outside loops."
         },
         "buffer_kind": {
           "enum": [

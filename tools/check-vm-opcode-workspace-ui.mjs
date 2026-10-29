@@ -446,6 +446,27 @@ assert(validateModule(helped), 'a helper fetch keeps the interpreter role');
 assert(renderApi.renderVmDispatchSites(helped.workspaces[0]).textContent.includes('cursor-loop interpreter candidate, fetched through a helper'));
 delete helped.workspaces[0].dispatch_classification.sites[0].selector.through_helper;
 assert(!validateModule(helped), 'through_helper is required');
+// A threaded site whose next-handler index is a repeated cursor fetch is an
+// interpreter candidate, through its table lookup or not. A chain of handler
+// addresses is not.
+const threaded = structuredClone(bounded);
+const threadedShapes = threaded.workspaces[0].dispatch_classification;
+threadedShapes.sites[1].dispatch_kind = 'threaded';
+threadedShapes.sites[1].instruction = 'return_call_indirect';
+threadedShapes.kind_counts.handler_table = 0; threadedShapes.kind_counts.threaded = 1;
+assert(validateModule(threaded), 'a cursor-fetched threaded site is an interpreter candidate');
+threadedShapes.sites[1].selector.through_lookup = true;
+assert(validateModule(threaded), 'a table lookup does not demote a threaded site');
+assert(renderApi.renderVmDispatchSites(threaded.workspaces[0]).textContent.includes('threaded / cursor_index / loop · cursor-loop interpreter candidate'));
+const addressChain = structuredClone(threaded);
+const chainShapes = addressChain.workspaces[0].dispatch_classification;
+chainShapes.sites[1].selector_source = 'handler_address';
+chainShapes.sites[1].selector.through_lookup = false;
+assert(!validateModule(addressChain), 'a handler-address chain cannot keep an interpreter role');
+chainShapes.sites[1].role = 'other';
+chainShapes.role_counts['interpreter-candidate'] -= 1; chainShapes.role_counts.other += 1;
+assert(validateModule(addressChain), 'a handler-address chain is other');
+assert(renderApi.renderVmDispatchSites(addressChain.workspaces[0]).textContent.includes('threaded / handler_address / loop · not an interpreter loop'));
 const unreached = structuredClone(bounded);
 unreached.workspaces[0].handler_tables[2].segments.push({segment_index: 3, placement: 'unreached', offset: 1, global_index: null, entry_count: 2});
 unreached.workspaces[0].handler_tables[2].omitted_segment_count = 0;

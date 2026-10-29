@@ -4048,6 +4048,7 @@ if (!validate(document)) throw new Error('Backend workspace rejected by shipped 
         for (fixture, expected) in [
             ("handler-array-interpreter.js", vec![0, 1, 2]),
             ("rotated-loop.js", vec![1, 2, 3]),
+            ("threaded-interpreter.js", vec![0, 1, 2]),
         ] {
             let (tier, opcodes) = claims(&fs::read(root.join(fixture)).unwrap());
             assert_eq!((tier, opcodes), (json!("likely-vm"), expected), "{fixture}");

@@ -30,6 +30,7 @@ map, or role label is used as a fixture, label, or ground truth.
 | `bfs-lookup.js` | `id = q[head++]; switch (types[id])`: a second-level lookup, role `other` |
 | `arguments-loop.js` | `switch (arguments[i])` loop: an arguments scan, role `other` |
 | `fetch-helper-interpreter.js` | `switch (fetch())` where `fetch` returns `code[pc++]`: `through_helper`, an interpreter candidate |
+| `threaded-interpreter.js` | handlers that return `ops[code[pc++]](s)`: a threaded cycle through the table with no loop, an interpreter candidate |
 
 Short review repro programs are inlined in
 `apps/origin-trace-backend/src/vm_review_inputs.rs`.

@@ -1468,11 +1468,16 @@
       // The role is derived from the three axes; a document cannot assert it.
       function vmDispatchRole(site) {
         const selects = ['switch_on_value', 'handler_table', 'compare_chain'].includes(site.dispatch_kind);
+        // A threaded dispatch interprets when its next-handler index is a
+        // cursor fetch re-derived each step.
+        const interprets = selects || site.dispatch_kind === 'threaded';
         // A text or argument scan reads characters, and a switch on a
-        // second-level lookup is a walk; neither fetches opcodes.
+        // second-level lookup is a walk; neither fetches opcodes. A handler
+        // table, threaded or not, reads its handler through one lookup.
         const text = ['string', 'arguments'].includes(site.buffer_kind);
-        const lookup = site.selector?.through_lookup === true && site.dispatch_kind !== 'handler_table';
-        if (selects && site.repeats === 'loop' && ['cursor_index', 'cursor_pointer', 'frame_slot'].includes(site.selector_source) &&
+        const lookup = site.selector?.through_lookup === true &&
+          !['handler_table', 'threaded'].includes(site.dispatch_kind);
+        if (interprets && site.repeats === 'loop' && ['cursor_index', 'cursor_pointer', 'frame_slot'].includes(site.selector_source) &&
           !text && !lookup) return 'interpreter-candidate';
         if (selects && site.repeats === 'once' && site.selector_source === 'call_argument') return 'multiplexer';
         return 'other';

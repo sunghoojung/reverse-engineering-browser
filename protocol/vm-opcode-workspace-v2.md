@@ -275,13 +275,15 @@ the workspace counts such tables in an `element-table-limit` omission.
 Producer 2.9.0 copies the analysis result's
 [`dispatch_classification`](vm-dispatch-classification-v1.md) onto each
 workspace. Only `interpreter-candidate` sites, a cursor-like selector re-derived
-in a loop, can carry guest-opcode claims:
+in a loop or each step of a threaded chain or cycle, can carry guest-opcode
+claims:
 
 - JavaScript handler recovery is unchanged and alone decides tier and score.
   The opcode-claim gate is a post-filter on its handlers: a switch case
   survives only at an interpreter-candidate switch, a table entry only when the
   region (nested functions included) dispatches through that table's own
-  binding at an interpreter-candidate site. The gate resolves a table name to
+  binding at an interpreter-candidate site, including from the table's own
+  handlers or through a self call `h = h(s)` tied to it. The gate resolves a table name to
   its declaring function scope, so a nested function's own `ops` is a
   different table. Each removed claim adds why: a router, a site that is not a
   cursor-advancing loop, a table with no structural classification, a table
@@ -518,4 +520,6 @@ plain aliases (`t = ops`) and called temporaries (`h = ops[op]; h(s)`), a
 rotated selector through every one of its writes, and a selector returned by a
 fetch helper. Earlier producers
 recovered no handlers for these shapes, so an analysis could demote a real
-interpreter to `candidate`.
+interpreter to `candidate`. Its gate also keeps the handlers of a threaded
+table, one whose handlers return or tail-call `ops[code[pc++]]`, when the
+classification proves that chain or cycle is an interpreter candidate.

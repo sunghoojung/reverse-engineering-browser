@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import {spawn, execFileSync} from 'node:child_process';
 import {access, cp, mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile} from 'node:fs/promises';
-import {constants} from 'node:fs';
+import {constants, readFileSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join, resolve} from 'node:path';
 import {fileURLToPath} from 'node:url';
@@ -63,6 +63,7 @@ export async function checkPackageContract() {
   assert(native.includes('resourcesURL.appendingPathComponent("OriginTrace.icns")'));
   const removedBytes = (await Promise.all([...publicAssets, 'analyst_runner_core.js'].map(async asset => (await stat(join(root, 'apps/research-ui', asset))).size))).reduce((a, b) => a + b, 0);
   await checkClientProjectScreenshotContract();
+  await checkNativeDiagnosticsContract();
   console.log(`PASS packaging contract: ${assets.length} canonical assets; ${publicAssets.length + 1} redundant copies removed (${removedBytes} bytes)`);
   return {assets, publicAssets};
 }
@@ -175,6 +176,38 @@ async function checkClientProjectScreenshotContract(){
   }finally{await rm(directory,{recursive:true,force:true});}
 }
 
+// XCUIApplication does not forward the app's streams, so an XCTest failure shows
+// only its symptom. The app retains its stage trace and any SMOKE_ERROR in
+// native-smoke.log; name that native cause beside the XCTest failure.
+function nativeClientProjectDiagnostics(output){
+  let text;
+  try{text=readFileSync(join(output,'native-smoke.log'),'utf8');}
+  catch(error){return '\nApp-side native smoke log unavailable: '+(error.code??error.message);}
+  // Periodic page resource loads are not stage evidence and can displace it.
+  const lines=text.split('\n').filter(line=>line&&!line.startsWith('SMOKE_RESOURCE '));
+  const last=lines.findLast(line=>line.startsWith('NATIVE_CLIENT_PROJECT_TRACE '));
+  const errors=lines.filter(line=>line.includes('SMOKE_ERROR'));
+  return ['','--- App-side native smoke (native-smoke.log) ---','Last stage: '+(last??'none recorded'),
+    'App failure: '+(errors.join('\n')||'none recorded'),'Recent app lines:',...lines.slice(-60)].join('\n');
+}
+
+async function checkNativeDiagnosticsContract(){
+  const directory=await mkdtemp(join(tmpdir(),'reb-native-diagnostics-contract-'));
+  try{
+    assert.match(nativeClientProjectDiagnostics(directory),/native smoke log unavailable: ENOENT/);
+    await writeFile(join(directory,'native-smoke.log'),['NATIVE_CLIENT_PROJECT_PHASE cancel',
+      'NATIVE_CLIENT_PROJECT_TRACE save await-xcode-save-click mode=kCFRunLoopDefaultMode sheet=true modal=false',
+      ...Array.from({length:100},()=>'SMOKE_RESOURCE reb://app/api/events?limit=5000'),
+      'NATIVE_CLIENT_PROJECT_TRACE save atomic-write mode=kCFRunLoopDefaultMode sheet=true modal=false',
+      'SMOKE_ERROR native client-project: unexpected write destination',''].join('\n'));
+    const diagnostics=nativeClientProjectDiagnostics(directory);
+    assert.match(diagnostics,/^Last stage: NATIVE_CLIENT_PROJECT_TRACE save atomic-write /m);
+    assert.match(diagnostics,/^App failure: SMOKE_ERROR native client-project: unexpected write destination$/m);
+    assert.match(diagnostics,/^NATIVE_CLIENT_PROJECT_PHASE cancel$/m);
+    assert.doesNotMatch(diagnostics,/SMOKE_RESOURCE/);
+  }finally{await rm(directory,{recursive:true,force:true});}
+}
+
 async function runClientProjectSmoke(app, directory) {
   const stores=join(directory,'client-project'),output=join(directory,'client-project-panels');
   await mkdir(stores);await mkdir(output);
@@ -189,9 +222,9 @@ async function runClientProjectSmoke(app, directory) {
   for(const stream of [child.stdout,child.stderr])stream.on('data',chunk=>{log=(log+chunk).slice(-256*1024);});
   try {
     await new Promise((done,reject)=>{
-      timer=setTimeout(()=>{child.kill('SIGKILL');reject(new Error('Xcode native Save-panel test timed out\n'+log));},240000);
+      timer=setTimeout(()=>{child.kill('SIGKILL');reject(new Error('Xcode native Save-panel test timed out\n'+log+nativeClientProjectDiagnostics(output)));},240000);
       child.once('error',reject);
-      child.once('close',(code,signal)=>code===0?done():reject(new Error(`Xcode native Save-panel test exited ${code}/${signal}\n${log}`)));
+      child.once('close',(code,signal)=>code===0?done():reject(new Error(`Xcode native Save-panel test exited ${code}/${signal}\n${log}${nativeClientProjectDiagnostics(output)}`)));
     });
   } finally {
     clearTimeout(timer);await writeFile(join(directory,'client-project.log'),log);
@@ -203,7 +236,11 @@ async function runClientProjectSmoke(app, directory) {
     } catch(error) {exportError=error;await writeFile(join(output,'attachment-export-error.log'),String(error));}
   }
   if(exportError)throw new Error('XCTest screenshot export failed',{cause:exportError});
-  const receipt=JSON.parse(await readFile(join(output,'result.json'),'utf8'));
+  // XCTest only waits for the app to exit, so a native failure after the last
+  // Save click still passes the UI test and leaves no receipt.
+  let receipt;
+  try{receipt=JSON.parse(await readFile(join(output,'result.json'),'utf8'));}
+  catch(error){throw new Error('Native Save-panel receipt is missing or malformed'+nativeClientProjectDiagnostics(output),{cause:error});}
   assert.deepEqual(receipt,{savedExactBytes:true,cancelNoWrite:true,busyRefused:true,
     navigationNoWrite:true,writeFailureRefused:true,replacementSaved:true,panelCount:5});
   const attachmentDirectory=join(output,'attachments');

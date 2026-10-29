@@ -50,6 +50,15 @@ final class ClientProjectExportSmoke: NSObject {
       .appendingPathComponent("destinations", isDirectory: true)
     do { try manager.createDirectory(at: directory, withIntermediateDirectories: false) }
     catch { fail("cannot create owned temporary directory") }
+    // The UI test cannot choose which form of this folder the panel returns.
+    // Check on every run that the destination guard accepts its resolved alias.
+    if let resolved = realpath(directory.path, nil) {
+      let alias = URL(fileURLWithPath: String(cString: resolved), isDirectory: true)
+      free(resolved)
+      let name = ClientProjectArchive.Mode.raw.filename
+      require(canonicalFile(alias.appendingPathComponent(name)) == canonicalFile(directory.appendingPathComponent(name)),
+              "destination guard rejects the resolved alias of the owned folder")
+    } else { fail("cannot resolve owned temporary directory") }
     exporter.installSmokeObservers(panel: { [weak self] panel in self?.presented(panel) },
       willWrite: { [weak self] destination in self?.willWrite(destination) },
       reply: { [weak self] status in
@@ -180,10 +189,20 @@ final class ClientProjectExportSmoke: NSObject {
     }
   }
 
+  // Apple's panel can return /private/var or /var for the same temporary folder;
+  // identical Go to Folder input has produced both. resolvingSymlinksInPath()
+  // strips /private only from a path that exists, and the file is not written
+  // yet, so canonicalize its existing parent instead.
+  private func canonicalFile(_ url: URL) -> URL {
+    url.deletingLastPathComponent().resolvingSymlinksInPath()
+      .appendingPathComponent(url.lastPathComponent, isDirectory: false)
+  }
+
   private func willWrite(_ url: URL) {
     stage("atomic-write")
-    let actual = url.resolvingSymlinksInPath()
-    let expected = destination.resolvingSymlinksInPath()
+    trace("write-destination privateAlias=\(url.path.hasPrefix("/private/"))")
+    let actual = canonicalFile(url)
+    let expected = canonicalFile(destination)
     // Keep the exact destination guard. Diagnose URL representation versus
     // navigation/filename mismatches without recording arbitrary selected paths.
     let mismatch = "unexpected write destination"

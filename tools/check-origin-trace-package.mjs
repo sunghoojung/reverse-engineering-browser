@@ -30,6 +30,8 @@ export async function checkPackageContract() {
   const clientUI=await readFile(join(root,'tools/client-project-ui/ClientProjectUITests.swift'),'utf8');
   assert(!clientSmoke.includes('panel.ok('),'Modern Save panels cannot be approved in process');
   assert(clientSmoke.includes('actual == expected') && clientSmoke.includes('children.isEmpty'));
+  assert(clientSmoke.includes('let actual = canonicalFile(url)') && clientSmoke.includes('realpath(directory.path, nil)'),
+    'The destination guard must accept, and self-check, the /private/var alias of the owned folder');
   assert(clientUI.includes('XCUIApplication(url:') && clientUI.includes('save.click()'));
   assert(clientUI.includes('XCTAttachment(screenshot:') && !clientUI.includes('.write(to:'));
   assert(!clientUI.includes('Data(contentsOf:'),'Byte receipts are checked outside the UI-test sandbox');

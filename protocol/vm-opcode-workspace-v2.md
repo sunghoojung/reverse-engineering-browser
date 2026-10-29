@@ -383,9 +383,10 @@ differs from the outer dispatch's. A child at the parent's own site is a
 reentrant activation of one dispatcher, such as a guest call, and is not
 nested. The outer handler is the parent's last retained dispatch sample before
 the child's invocation marker. `basis` is `contiguous-sequence` when every
-renderer sequence number between them (at most 4096) is retained and none is
-a gap or another guest dispatch; otherwise it is `nearest-retained`, which does
-not prove the exact driving dispatch. The inner side lists its own observed
+renderer sequence number between them is retained and none is a gap or another
+guest dispatch; otherwise it is `nearest-retained`, which does not prove the
+exact driving dispatch. A window longer than 4096, or past 65536 lookups shared
+by the workspace, is not scanned and stays `nearest-retained`. The inner side lists its own observed
 opcodes (at most 64, with `omitted_opcode_count`) and its retained samples.
 Other activations that name a parent are counted as `nested-guest-unproven`;
 `nested-guest-limit` counts nested guests past 64.

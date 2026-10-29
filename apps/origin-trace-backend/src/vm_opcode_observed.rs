@@ -12,8 +12,11 @@ const MAX_CLAIMS: usize = 256;
 const MAX_LISTED_EVENTS: usize = 8;
 const MAX_NESTED: usize = 64;
 const MAX_INNER_OPCODES: usize = 64;
-/// Longest renderer sequence window checked for a contiguous outer dispatch.
+/// Longest renderer sequence window checked for a contiguous outer dispatch,
+/// and the lookups shared by every window of one workspace. Past either bound
+/// the basis stays `nearest-retained`, which claims less.
 const MAX_SEQUENCE_WINDOW: u64 = 4096;
+const MAX_SEQUENCE_WORK: u64 = 65536;
 
 pub(super) struct Inputs<'a> {
     pub runtime: &'a str,
@@ -372,6 +375,7 @@ fn nested(inputs: &Inputs<'_>, derived: &mut Derived) {
     };
     let mut unproven = 0u64;
     let mut omitted = 0u64;
+    let mut sequence_work = MAX_SEQUENCE_WORK;
     for id in order {
         let rows = &groups[id];
         let first = rows[0];
@@ -411,7 +415,12 @@ fn nested(inputs: &Inputs<'_>, derived: &mut Derived) {
                 return None;
             }
             let start = sequence(&outer["event"])?;
-            let contiguous = child_key.2 - start - 1 <= MAX_SEQUENCE_WINDOW
+            let window = child_key.2 - start - 1;
+            let contiguous = window <= MAX_SEQUENCE_WINDOW.min(sequence_work)
+                && {
+                    sequence_work -= window;
+                    true
+                }
                 && (start + 1..child_key.2).all(|seq| {
                     index
                         .get(&(child_key.0.clone(), child_key.1, seq))

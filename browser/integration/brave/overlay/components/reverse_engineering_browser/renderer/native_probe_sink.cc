@@ -2803,8 +2803,7 @@ void NativeProbeSink::RecordNativeWasmGuest(std::uint64_t execution_context_id,
     payload.function_index = view.function_index;
     payload.instance_id = view.instance_id;
     payload.invocation_id = view.invocation_id;
-    const auto parent =
-        ResolveGuestParent(view, frame_id, document_token_high, document_token_low);
+    const auto parent = ResolveGuestParent(view, frame_id, document_token_high, document_token_low);
     payload.parent_invocation_id = parent.invocation;
     payload.parent_dispatch_sequence_number = parent.dispatch;
     if (parent.unresolved)

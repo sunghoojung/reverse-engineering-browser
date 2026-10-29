@@ -272,8 +272,7 @@ static_assert(offsetof(WasmGuestInvocationPayload, recipe_sha256) == 32);
          (!value.parent_dispatch_sequence_number ||
           (value.parent_invocation_id &&
            value.parent_dispatch_sequence_number < event.header.sequence_number)) &&
-         value.adapter_artifact_id &&
-         value.adapter_artifact_id != event.header.artifact_id &&
+         value.adapter_artifact_id && value.adapter_artifact_id != event.header.artifact_id &&
          std::any_of(value.recipe_sha256.begin(), value.recipe_sha256.end(),
                      [](std::byte b) { return b != std::byte{0}; }) &&
          std::all_of(value.reserved.begin(), value.reserved.end(),

@@ -143,11 +143,43 @@ pub(crate) const STATIC_SHAPES: &[(&str, &str, &[u64])] = &[
         "function run(code){let pc=0,acc=0;let op=1;while(op){switch(op){case 1:acc+=code[pc++];op=2;break;case 2:acc-=1;op=3;break;case 3:op=0;break;}}return acc;}",
         &[],
     ),
+    (
+        "threaded-returned-handler",
+        "function run(code){const s={acc:0};let pc=0;const ops=[function(s){s.acc++;return ops[code[pc++]];},function(s){s.acc--;return ops[code[pc++]];},function(s){return null;}];let h=ops[code[pc++]];while(h){h=h(s);}return s.acc;}",
+        &[0, 1, 2],
+    ),
+    (
+        "threaded-tail-call",
+        "function run(code){const s={acc:0};let pc=0;const ops=[function(s){s.acc++;return ops[code[pc++]](s);},function(s){s.acc--;return ops[code[pc++]](s);},function(s){return s.acc;}];return ops[code[pc++]](s);}",
+        &[0, 1, 2],
+    ),
+    (
+        "threaded-shared-next",
+        "function run(code){const s={acc:0};let pc=0;function next(s){return ops[code[pc++]](s);}const ops=[function(s){s.acc++;return next(s);},function(s){s.acc--;return next(s);},function(s){return s.acc;}];return ops[code[pc++]](s);}",
+        &[0, 1, 2],
+    ),
+    (
+        "threaded-callback-chain",
+        "function run(s){const ops=[function(s){s.acc++;return ops[1];},function(s){s.acc--;return ops[2];},function(s){return null;}];let h=ops[0];while(h){h=h(s);}return s.acc;}",
+        &[],
+    ),
+    (
+        "threaded-router",
+        "function route(k,s){const ops=[function(s){s.acc++;return ops[k](s);},function(s){s.acc--;return null;},function(s){return s.acc;}];return ops[k](s);}",
+        &[],
+    ),
+    (
+        "threaded-reassigned-table",
+        "function run(code){const s={acc:0};let pc=0;let ops=[function(s){s.acc++;return ops[code[pc++]];},function(s){s.acc--;return ops[code[pc++]];},function(s){return null;}];ops=[function(s){return null;}];let h=ops[code[pc++]];while(h){h=h(s);}return s.acc;}",
+        &[],
+    ),
 ];
 
-/// Owned Wasm shapes for fetch helpers and threaded handler cycles beside
-/// look-alikes: (name, module text, instruction, role, through_helper) of
-/// the first site with that instruction.
+/// Owned Wasm shapes for fetch helpers and threaded handler chains and
+/// cycles beside look-alikes: a chain of constant handler indexes, a router
+/// forwarding its argument, and a table a relative segment may overwrite.
+/// (name, module text, instruction, role, through_helper) of the first site
+/// with that instruction.
 pub(crate) const WASM_STATIC_SHAPES: &[(&str, &str, &str, &str, bool)] = &[
     (
         "helper-global-pc",
@@ -224,6 +256,108 @@ pub(crate) const WASM_STATIC_SHAPES: &[(&str, &str, &str, &str, bool)] = &[
         "br_table",
         "other",
         true,
+    ),
+    (
+        "threaded-tail-call",
+        r#"(module (memory 1)
+  (type $op (func (param i32) (result i32)))
+  (table 3 funcref)
+  (global $pc (mut i32) (i32.const 0))
+  (func $inc (type $op) (local $at i32)
+    (local.set $at (global.get $pc))
+    (global.set $pc (i32.add (global.get $pc) (i32.const 1)))
+    (return_call_indirect (type $op)
+      (i32.add (local.get 0) (i32.const 1)) (i32.load8_u (local.get $at))))
+  (func $dec (type $op) (local $at i32)
+    (local.set $at (global.get $pc))
+    (global.set $pc (i32.add (global.get $pc) (i32.const 1)))
+    (return_call_indirect (type $op)
+      (i32.sub (local.get 0) (i32.const 1)) (i32.load8_u (local.get $at))))
+  (func $halt (type $op) (local.get 0))
+  (elem (i32.const 0) func $inc $dec $halt))"#,
+        "return_call_indirect",
+        "interpreter-candidate",
+        false,
+    ),
+    (
+        "threaded-returned-index",
+        r#"(module (memory 1)
+  (type $op (func (result i32)))
+  (table 3 funcref)
+  (global $pc (mut i32) (i32.const 0))
+  (global $acc (mut i32) (i32.const 0))
+  (func $inc (type $op) (local $at i32)
+    (global.set $acc (i32.add (global.get $acc) (i32.const 1)))
+    (local.set $at (global.get $pc))
+    (global.set $pc (i32.add (global.get $pc) (i32.const 1)))
+    (i32.load8_u (local.get $at)))
+  (func $dec (type $op) (local $at i32)
+    (global.set $acc (i32.sub (global.get $acc) (i32.const 1)))
+    (local.set $at (global.get $pc))
+    (global.set $pc (i32.add (global.get $pc) (i32.const 1)))
+    (i32.load8_u (local.get $at)))
+  (func $halt (type $op) (i32.const 2))
+  (elem (i32.const 0) func $inc $dec $halt)
+  (func (export "run") (result i32) (local $h i32)
+    (block $exit (loop $again
+      (br_if $exit (i32.eq (local.get $h) (i32.const 2)))
+      (local.set $h (call_indirect (type $op) (local.get $h)))
+      (br $again)))
+    (global.get $acc)))"#,
+        "call_indirect",
+        "interpreter-candidate",
+        false,
+    ),
+    (
+        "threaded-callback-chain",
+        r#"(module
+  (type $op (func (result i32)))
+  (table 3 funcref)
+  (func $first (type $op) (i32.const 1))
+  (func $second (type $op) (i32.const 2))
+  (func $halt (type $op) (i32.const 2))
+  (elem (i32.const 0) func $first $second $halt)
+  (func (export "run") (result i32) (local $h i32)
+    (block $exit (loop $again
+      (br_if $exit (i32.eq (local.get $h) (i32.const 2)))
+      (local.set $h (call_indirect (type $op) (local.get $h)))
+      (br $again)))
+    (local.get $h)))"#,
+        "call_indirect",
+        "other",
+        false,
+    ),
+    (
+        "threaded-router",
+        r#"(module
+  (type $op (func (param i32) (result i32)))
+  (table 2 funcref)
+  (func $forward (type $op) (return_call_indirect (type $op) (local.get 0) (local.get 0)))
+  (func $halt (type $op) (local.get 0))
+  (elem (i32.const 0) func $forward $halt))"#,
+        "return_call_indirect",
+        "other",
+        false,
+    ),
+    (
+        "threaded-replaced-table",
+        r#"(module
+  (import "env" "base" (global $base i32))
+  (memory 1)
+  (type $op (func (param i32) (result i32)))
+  (table 3 funcref)
+  (global $pc (mut i32) (i32.const 0))
+  (func $inc (type $op) (local $at i32)
+    (local.set $at (global.get $pc))
+    (global.set $pc (i32.add (global.get $pc) (i32.const 1)))
+    (return_call_indirect (type $op)
+      (i32.add (local.get 0) (i32.const 1)) (i32.load8_u (local.get $at))))
+  (func $halt (type $op) (local.get 0))
+  (elem (i32.const 0) func $inc $halt)
+  (elem (global.get $base) func $halt $halt))"#,
+        "return_call_indirect",
+        "other",
+        false,
     ),
 ];
 

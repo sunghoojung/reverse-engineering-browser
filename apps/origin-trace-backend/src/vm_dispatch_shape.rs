@@ -55,6 +55,9 @@ const MAX_ALTERNATIVES: usize = 16;
 /// Logical trace steps for one selector query. Memo hits replay what a fresh
 /// computation would spend, so a query's result never depends on order.
 const MAX_QUERY_STEPS: u64 = 4096;
+/// Handlers checked for one indirect call's threaded chain. A larger table is
+/// an honest, counted unknown rather than a guessed chain.
+const MAX_CHAIN_HANDLERS: usize = 1024;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) enum Kind {
@@ -154,11 +157,12 @@ impl Role {
 }
 
 /// Derived from the three axes plus two recorded refinements. A threaded
-/// chain computes handler addresses, not opcodes, so it is never an opcode
-/// interpreter candidate. A cursor loop over text (`buffer_kind` string or
-/// arguments) reads characters or argument values, not opcodes. A switch or
-/// ladder on a table read keyed by a cursor-loaded value is a lookup-driven
-/// walk, such as a worklist or graph traversal; only a handler table reads
+/// dispatch is an interpreter only when its next-handler index is re-derived
+/// from a cursor each step; a chain of computed handler addresses is not. A
+/// cursor loop over text (`buffer_kind` string or arguments) reads
+/// characters or argument values, not opcodes. A switch or ladder on a table
+/// read keyed by a cursor-loaded value is a lookup-driven walk, such as a
+/// worklist or graph traversal; only a handler table, threaded or not, reads
 /// its handler through that one lookup by design.
 pub(crate) fn role(
     kind: Kind,
@@ -171,9 +175,10 @@ pub(crate) fn role(
         kind,
         Kind::SwitchOnValue | Kind::HandlerTable | Kind::CompareChain
     );
+    let interprets = selects || kind == Kind::Threaded;
     let text = matches!(buffer_kind, Some("string" | "arguments"));
-    let lookup = through_lookup && kind != Kind::HandlerTable;
-    if selects && repeats == Repeats::Loop && source.cursor_like() && !text && !lookup {
+    let lookup = through_lookup && !matches!(kind, Kind::HandlerTable | Kind::Threaded);
+    if interprets && repeats == Repeats::Loop && source.cursor_like() && !text && !lookup {
         Role::InterpreterCandidate
     } else if selects && repeats == Repeats::Once && source == Source::CallArgument {
         Role::Multiplexer
@@ -472,6 +477,9 @@ struct Facts<'a> {
     /// Functions of the module whose result is a cursor fetch at a position
     /// they advance themselves, with that fetch's source.
     fetchers: std::rc::Rc<HashMap<u32, Source>>,
+    /// Per (table, type) of an indirect call: the fetch source every
+    /// reachable handler returns, or None when too many handlers to check.
+    chains: std::rc::Rc<HashMap<(u32, u32), Option<Source>>>,
     local_memo: RefCell<BTreeMap<u32, Memo>>,
     in_progress: RefCell<Vec<u32>>,
     steps: Cell<u64>,
@@ -671,6 +679,9 @@ struct Trace {
     /// The function whose result is the fetched value, when the selector is
     /// a call to a helper that fetches at a cursor it advances itself.
     helper: Option<u32>,
+    /// The selector is an earlier indirect call's result, and every handler
+    /// that call can reach returns such a fetch: a threaded chain.
+    chained: bool,
 }
 
 impl Trace {
@@ -684,6 +695,7 @@ impl Trace {
             through_lookup: false,
             globals: Vec::new(),
             helper: None,
+            chained: false,
         }
     }
 }
@@ -808,6 +820,7 @@ impl<'a> Facts<'a> {
             global_defs: BTreeMap::new(),
             returns: Vec::new(),
             fetchers: std::rc::Rc::default(),
+            chains: std::rc::Rc::default(),
             local_memo: RefCell::new(BTreeMap::new()),
             in_progress: RefCell::new(Vec::new()),
             steps: Cell::new(0),
@@ -1428,6 +1441,23 @@ impl<'a> Facts<'a> {
             Node::Call { callee: None, at } => {
                 let mut trace = Trace::new(Source::HandlerAddress);
                 trace.anchor = Some(at);
+                let call = self
+                    .dispatch
+                    .binary_search_by_key(&at, |dispatch| dispatch.offset)
+                    .ok()
+                    .and_then(|position| match self.dispatch[position].op {
+                        DispatchOp::CallIndirect { table, ty, .. } => Some((table, ty)),
+                        DispatchOp::BrTable { .. } => None,
+                    });
+                match call.and_then(|call| self.chains.get(&call)) {
+                    Some(Some(source)) => {
+                        trace.source = *source;
+                        trace.chained = true;
+                    }
+                    // Too many reachable handlers to prove: an honest limit.
+                    Some(None) => self.limited.set(true),
+                    None => (),
+                }
                 (vec![trace], false)
             }
             Node::Call {
@@ -1832,7 +1862,7 @@ impl<'a> Facts<'a> {
         let innermost = loops.ranges[index];
         // A helper advances its own persistent cursor on every call, so a
         // loop around the call re-derives the selector each iteration.
-        if trace.helper.is_some() {
+        if trace.helper.is_some() || trace.chained {
             let matching = loops.matching(index, |(start, end)| {
                 trace
                     .anchor
@@ -1976,20 +2006,40 @@ impl<'a> Facts<'a> {
                 continue;
             }
             for trace in traces {
-                let persistent = !trace.through_lookup
-                    && match trace.source {
-                        Source::CursorIndex | Source::CursorPointer => !trace.globals.is_empty(),
-                        Source::FrameSlot => trace.slots.iter().any(|(carrier, slot)| {
-                            self.stores_back(slot, *carrier, (0, usize::MAX))
-                        }),
-                        _ => false,
-                    };
-                if persistent {
+                if self.persistent(&trace) {
                     return Some(trace.source);
                 }
             }
         }
         None
+    }
+
+    /// Every value this function returns is a constant: a handler that ends
+    /// a threaded chain, such as halt. A function with more returns than a
+    /// summary examines is not terminal.
+    fn terminal(&self) -> bool {
+        self.returns.len() <= 16
+            && self
+                .returns
+                .iter()
+                .all(|value| matches!(self.nodes[self.strip(*value)], Node::Const(_)))
+    }
+
+    /// A cursor fetch whose position outlives one call of this function: a
+    /// global it advances, a frame slot it stores back advanced, or a fetch
+    /// helper or threaded chain that advances its own.
+    fn persistent(&self, trace: &Trace) -> bool {
+        !trace.through_lookup
+            && (trace.helper.is_some()
+                || trace.chained
+                || match trace.source {
+                    Source::CursorIndex | Source::CursorPointer => !trace.globals.is_empty(),
+                    Source::FrameSlot => trace
+                        .slots
+                        .iter()
+                        .any(|(carrier, slot)| self.stores_back(slot, *carrier, (0, usize::MAX))),
+                    _ => false,
+                })
     }
 
     fn render(&self, id: NodeId, depth: u8) -> String {
@@ -2078,6 +2128,8 @@ impl<'a> Facts<'a> {
             text.push_str(&format!(
                 "; f{helper} returns a fetch at a cursor it advances"
             ));
+        } else if trace.chained {
+            text.push_str("; each reachable handler returns a fetch at a cursor it advances");
         } else if trace.source == Source::FrameSlot
             && let Some((local, (base, offset))) = trace.slots.first()
         {
@@ -2397,7 +2449,8 @@ pub(crate) fn wasm(bytes: &[u8], meter: &Meter) -> Option<Classified> {
                 match Facts::simulate(&body, function, params, meter) {
                     Some(facts) => {
                         let pending = facts.dispatch.len() as u64;
-                        if !auxiliary.push(&mut functions, (index, range.start, facts)) {
+                        if !auxiliary.push(&mut functions, (index, (range.start, range.end), facts))
+                        {
                             meter.count_unclassified(pending);
                             meter.count_unexamined(1);
                         }
@@ -2418,6 +2471,9 @@ pub(crate) fn wasm(bytes: &[u8], meter: &Meter) -> Option<Classified> {
         .enumerate()
         .map(|(position, (index, _, _))| (*index, position))
         .collect::<HashMap<_, _>>();
+    // Defined functions placed in each table with each call type, which an
+    // indirect call of that (table, type) can reach; None when too many.
+    let mut members = BTreeMap::<(u32, u32), Option<BTreeSet<u32>>>::new();
     let mut callees = BTreeSet::new();
     for (_, _, facts) in &functions {
         if facts.dispatch.is_empty() && facts.compares.is_empty() {
@@ -2438,8 +2494,43 @@ pub(crate) fn wasm(bytes: &[u8], meter: &Meter) -> Option<Classified> {
                 callees.insert(*callee);
             }
         }
+        for dispatch in &facts.dispatch {
+            let (DispatchOp::CallIndirect { table, ty, .. }, Some(tables)) = (&dispatch.op, tables)
+            else {
+                continue;
+            };
+            if members.contains_key(&(*table, *ty)) || !auxiliary.keep(128) {
+                continue;
+            }
+            // An expanded table too large to place is an honest limit.
+            let reachable = if tables.oversized.contains(table) {
+                None
+            } else {
+                let mut reachable = BTreeSet::new();
+                let matching = tables.matching_slots(*table, *ty, meter);
+                let placed = tables.slots.get(table).map_or(&[][..], Vec::as_slice);
+                for slot in matching.iter().flat_map(|matching| matching.0.iter()) {
+                    if !meter.charge(1) || reachable.len() > MAX_CHAIN_HANDLERS {
+                        break;
+                    }
+                    if let Ok(at) = placed.binary_search_by_key(slot, |(slot, _)| *slot)
+                        && let Some(function) = placed[at].1.function()
+                        && positions.contains_key(&function)
+                        && auxiliary.keep(32)
+                    {
+                        reachable.insert(function);
+                    }
+                }
+                (reachable.len() <= MAX_CHAIN_HANDLERS).then_some(reachable)
+            };
+            members.insert((*table, *ty), reachable);
+        }
+    }
+    for reachable in members.values().flatten() {
+        callees.extend(reachable.iter().copied());
     }
     let mut fetchers = HashMap::new();
+    let mut terminals = BTreeSet::new();
     for callee in callees {
         if meter.exhausted() {
             break;
@@ -2449,12 +2540,43 @@ pub(crate) fn wasm(bytes: &[u8], meter: &Meter) -> Option<Classified> {
             && auxiliary.keep(64)
         {
             fetchers.insert(callee, source);
+        } else if facts.terminal() && auxiliary.keep(32) {
+            terminals.insert(callee);
         }
         facts.local_memo.borrow_mut().clear();
     }
+    // A chain is threaded through a cursor when every handler its indirect
+    // call can reach returns a fetch at a position it advances itself, or
+    // only constants (a halt handler), and at least one fetches. None marks
+    // a table too large to check, an honest limit.
+    let mut chains = HashMap::new();
+    for (call, reachable) in &members {
+        let source = match reachable {
+            None => None,
+            Some(reachable) => {
+                let mut source = None;
+                let mut proven = true;
+                for function in reachable {
+                    match fetchers.get(function) {
+                        Some(fetched) => source = source.or(Some(*fetched)),
+                        None => proven &= terminals.contains(function),
+                    }
+                }
+                match source.filter(|_| proven) {
+                    Some(source) => Some(source),
+                    None => continue,
+                }
+            }
+        };
+        if auxiliary.keep(32) {
+            chains.insert(*call, source);
+        }
+    }
     let fetchers = std::rc::Rc::new(fetchers);
+    let chains = std::rc::Rc::new(chains);
     for (_, _, facts) in &mut functions {
         facts.fetchers = fetchers.clone();
+        facts.chains = chains.clone();
     }
     let mut candidates = Vec::new();
     for (position, (_, _, facts)) in functions.iter().enumerate() {
@@ -2493,12 +2615,12 @@ pub(crate) fn wasm(bytes: &[u8], meter: &Meter) -> Option<Classified> {
     });
     let mut sites = Vec::new();
     for (_, position, _, candidate) in candidates {
-        let (index, body_offset, facts) = &functions[position];
+        let (index, body, facts) = &functions[position];
         if meter.exhausted() {
             meter.count_unclassified(1);
             continue;
         }
-        match classify_candidate(facts, *index, *body_offset, tables, candidate, meter) {
+        match classify_candidate(facts, *index, *body, tables, &members, candidate, meter) {
             Some(site) => {
                 if meter.retain(site.retained_bytes()) {
                     sites.push(site);
@@ -2598,8 +2720,9 @@ impl Facts<'_> {
 fn classify_candidate(
     facts: &Facts,
     index: u32,
-    body_offset: usize,
+    (body_offset, body_end): (usize, usize),
     tables: Option<&crate::vm::wasm_tables::Tables>,
+    members: &BTreeMap<(u32, u32), Option<BTreeSet<u32>>>,
     candidate: Candidate,
     meter: &Meter,
 ) -> Option<Site> {
@@ -2608,11 +2731,35 @@ fn classify_candidate(
             let dispatch = &facts.dispatch[position];
             let Query {
                 trace,
-                repeats,
-                range: loop_range,
+                mut repeats,
+                range: mut loop_range,
                 limited,
             } = facts.query(dispatch.selector, dispatch.offset)?;
             meter.count_limited(limited);
+            // A handler that dispatches the table it is placed in re-enters
+            // that table each step: a threaded cycle through the function
+            // body. It repeats when its selector is a cursor that outlives
+            // one call. A tail call leaves its function, so an enclosing loop
+            // never runs it again; outside a cycle it fires once.
+            let (cycle, tail) = match dispatch.op {
+                DispatchOp::CallIndirect { table, ty, tail } => (
+                    members
+                        .get(&(table, ty))
+                        .and_then(Option::as_ref)
+                        .is_some_and(|reachable| reachable.contains(&index)),
+                    tail,
+                ),
+                DispatchOp::BrTable { .. } => (false, false),
+            };
+            if cycle && trace.source.cursor_like() && facts.persistent(&trace) {
+                if repeats != Repeats::Loop || tail {
+                    repeats = Repeats::Loop;
+                    loop_range = Some((body_offset, body_end));
+                }
+            } else if tail {
+                repeats = Repeats::Once;
+                loop_range = facts.innermost_loop(Some(dispatch.offset));
+            }
             let (kind, instruction, arm_count, table) = match dispatch.op {
                 DispatchOp::BrTable { arms } => {
                     (Kind::SwitchOnValue, "br_table", Some(u64::from(arms)), None)
@@ -2622,11 +2769,13 @@ fn classify_candidate(
                     ty,
                     tail,
                 } => {
-                    let kind = if tail || trace.source == Source::HandlerAddress {
-                        Kind::Threaded
-                    } else {
-                        Kind::HandlerTable
-                    };
+                    let kind =
+                        if tail || cycle || trace.chained || trace.source == Source::HandlerAddress
+                        {
+                            Kind::Threaded
+                        } else {
+                            Kind::HandlerTable
+                        };
                     let matching =
                         tables.and_then(|tables| tables.matching_slots(table_index, ty, meter));
                     (

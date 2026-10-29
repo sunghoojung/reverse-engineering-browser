@@ -235,7 +235,11 @@ struct Facts<'s, 'a> {
     symbol_write_counts: HashMap<SymbolId, usize>,
     loop_tables: HashMap<NodeId, HashSet<Key<'a>>>,
     invoked_loops: HashMap<NodeId, NodeId>,
-    table_functions: HashMap<NodeId, Key<'a>>,
+    /// Each function stored directly in a table literal: the table's key
+    /// and the literal node.
+    table_functions: HashMap<NodeId, (Key<'a>, NodeId)>,
+    /// The functions stored in each table, in AST order.
+    table_members: HashMap<Key<'a>, Vec<NodeId>>,
     member_write_counts: HashMap<Key<'a>, usize>,
     /// Object and array table literals with the key they are bound to.
     objects: HashMap<NodeId, (Key<'a>, u32, ScopeId)>,
@@ -421,6 +425,7 @@ impl<'s, 'a> Facts<'s, 'a> {
             loop_tables: HashMap::new(),
             invoked_loops: HashMap::new(),
             table_functions: HashMap::new(),
+            table_members: HashMap::new(),
             member_write_counts: HashMap::new(),
             objects: HashMap::new(),
             element_writes: HashSet::new(),
@@ -854,14 +859,14 @@ impl<'s, 'a> Facts<'s, 'a> {
                     let context = facts.context(node.id());
                     if let Expression::CallExpression(call) =
                         assignment.right.get_inner_expression()
-                        && facts.target(&assignment.left, context).is_some()
-                        && facts.target(&assignment.left, context)
-                            == facts.key(&call.callee, context)
+                        && let Some(key) = facts.target(&assignment.left, context)
+                        && Some(key) == facts.key(&call.callee, context)
                     {
+                        let table = facts.threaded_table(key, call);
                         facts.candidates.push(Candidate {
                             node: node.id(),
                             selector: &call.callee,
-                            table: None,
+                            table,
                             kind: Kind::Threaded,
                             instruction: "self call",
                             arms: None,
@@ -986,13 +991,14 @@ impl<'s, 'a> Facts<'s, 'a> {
                 AstKind::Function(_) | AstKind::ArrowFunctionExpression(_)
             ) {
                 let parent = nodes.parent_id(node.id());
-                let table = match nodes.kind(parent) {
-                    AstKind::ObjectProperty(_) => facts.objects.get(&nodes.parent_id(parent)),
-                    AstKind::ArrayExpression(_) => facts.objects.get(&parent),
-                    _ => None,
+                let literal = match nodes.kind(parent) {
+                    AstKind::ObjectProperty(_) => nodes.parent_id(parent),
+                    AstKind::ArrayExpression(_) => parent,
+                    _ => continue,
                 };
-                if let Some((key, _, _)) = table {
-                    facts.table_functions.insert(node.id(), *key);
+                if let Some(&(key, _, _)) = facts.objects.get(&literal) {
+                    facts.table_functions.insert(node.id(), (key, literal));
+                    facts.table_members.entry(key).or_default().push(node.id());
                 }
             }
         }
@@ -1044,6 +1050,52 @@ impl<'s, 'a> Facts<'s, 'a> {
             {
                 calls.push((node.id(), function));
             }
+        }
+        // A table's own handler that dispatches it again outside any loop
+        // threads to the next handler, directly or through a helper it calls
+        // (a shared `next()`). The table literal is the cycle that repeats
+        // it, so the handler, and through it that helper, inherit it as
+        // their loop. A dispatch inside a loop is driven by that loop.
+        let mut dispatching = HashMap::<NodeId, Vec<(usize, Key<'a>)>>::new();
+        for (position, candidate) in facts.candidates.iter().enumerate() {
+            let context = facts.context(candidate.node);
+            if let (None, Some(function), Some(table)) =
+                (context.loop_id, context.function, candidate.table)
+            {
+                dispatching
+                    .entry(function)
+                    .or_default()
+                    .push((position, table));
+            }
+        }
+        let mut threaded = Vec::new();
+        let mut cycles = Vec::new();
+        let mut enter = |function: NodeId, dispatcher: NodeId| {
+            let Some(&(key, literal)) = facts.table_functions.get(&function) else {
+                return;
+            };
+            for &(position, table) in dispatching.get(&dispatcher).into_iter().flatten() {
+                if table == key {
+                    threaded.push(position);
+                    cycles.push((function, literal));
+                }
+            }
+        };
+        for &function in facts.table_functions.keys() {
+            meter.charge(1);
+            enter(function, function);
+        }
+        for &(call, helper) in &calls {
+            meter.charge(1);
+            if let Some(function) = facts.context(call).function {
+                enter(function, helper);
+            }
+        }
+        for position in threaded {
+            facts.candidates[position].kind = Kind::Threaded;
+        }
+        for (function, literal) in cycles {
+            facts.invoked_loops.entry(function).or_insert(literal);
         }
         for _ in 0..16 {
             let mut changed = false;
@@ -1098,6 +1150,116 @@ impl<'s, 'a> Facts<'s, 'a> {
             }
             _ => None,
         }
+    }
+    /// The table a self call `h = h(...)` threads through: a variable every
+    /// other write of which reads one table (`h = ops[code[pc++]]`) or is a
+    /// literal (`h = null`). A parameter, a compound write or a `with`
+    /// scope leaves the chain untied, and its handlers unknown.
+    fn threaded_table(&self, key: Key<'a>, call: &'a CallExpression<'a>) -> Option<Key<'a>> {
+        let Key::Symbol(symbol) = key else {
+            return None;
+        };
+        if self.parameters.contains(&symbol)
+            || self
+                .writes
+                .get(&key)
+                .is_some_and(|writes| writes.iter().any(|write| write.arithmetic))
+        {
+            return None;
+        }
+        let mut table = None;
+        for definition in self.definitions.get(&key).into_iter().flatten() {
+            if !self.meter.charge(1) || self.scope_opaque(definition.scope) {
+                return None;
+            }
+            let context = Context {
+                this: definition.this,
+                ..self.context(definition.value.node_id())
+            };
+            match definition.value.get_inner_expression() {
+                Expression::CallExpression(other) if std::ptr::eq(other.as_ref(), call) => (),
+                Expression::NullLiteral(_)
+                | Expression::BooleanLiteral(_)
+                | Expression::NumericLiteral(_) => (),
+                Expression::ComputedMemberExpression(member) => {
+                    let read = self.resolve_table(self.key(&member.object, context)?);
+                    if table.is_some_and(|table| table != read) {
+                        return None;
+                    }
+                    table = Some(read);
+                }
+                _ => return None,
+            }
+        }
+        table
+    }
+    /// The next-handler index of a self call `h = h(...)`. Untied, it is
+    /// a chain of handler addresses. Tied to a table, each other write of
+    /// the variable and each value a handler of the table returns is one
+    /// alternative. A table read contributes its index; inside a handler, a
+    /// parameter stands for the self call's argument, and a read repeats
+    /// when the self call does.
+    fn threaded(&self, candidate: &Candidate<'a>, query: &mut Query) -> Trace<'a> {
+        let mut chain = Trace::new(Source::HandlerAddress);
+        chain.repeats = self.loop_id(candidate.node).is_some();
+        let (AstKind::AssignmentExpression(assignment), Some(table)) =
+            (self.semantic.nodes().kind(candidate.node), candidate.table)
+        else {
+            return chain;
+        };
+        let Expression::CallExpression(call) = assignment.right.get_inner_expression() else {
+            return chain;
+        };
+        let index = |value: &'a Expression<'a>| match value.get_inner_expression() {
+            Expression::ComputedMemberExpression(member)
+                if self
+                    .key(&member.object, self.context(member.node_id()))
+                    .map(|key| self.resolve_table(key))
+                    == Some(table) =>
+            {
+                &member.expression
+            }
+            value => value,
+        };
+        let mut best = chain;
+        let context = self.context(candidate.node);
+        let key = self.key(candidate.selector, context);
+        let writes = key
+            .and_then(|key| self.definitions.get(&key))
+            .into_iter()
+            .flatten()
+            .filter(|definition| {
+                !matches!(definition.value.get_inner_expression(), Expression::CallExpression(other) if std::ptr::eq(other.as_ref(), call.as_ref()))
+            })
+            .map(|definition| (definition.value, None));
+        let returns = self
+            .table_members
+            .get(&table)
+            .into_iter()
+            .flatten()
+            .flat_map(|function| {
+                self.returns
+                    .get(function)
+                    .into_iter()
+                    .flatten()
+                    .map(move |value| (*value, Some(*function)))
+            });
+        for (value, handler) in writes.chain(returns) {
+            if !query.step(self.meter, 0) {
+                break;
+            }
+            let frames = handler.map(|handler| (call.as_ref(), handler));
+            let mut trace = self.trace(index(value), candidate, query, 1, frames.as_slice());
+            if handler.is_none()
+                && !self.executes_in_loop(context.function, value.span(), candidate)
+            {
+                trace.repeats = false;
+            }
+            if (trace.repeats, priority(trace.source)) > (best.repeats, priority(best.source)) {
+                best = trace;
+            }
+        }
+        best
     }
     /// A table key followed through aliases bound once (`var t = ops`), by
     /// Oxc symbol, at most 8 links. A link with any other write, a parameter
@@ -1190,7 +1352,7 @@ impl<'s, 'a> Facts<'s, 'a> {
             {
                 return true;
             }
-            if let Some(table) = write
+            if let Some((table, _)) = write
                 .function
                 .and_then(|function| self.table_functions.get(&function))
             {
@@ -1715,10 +1877,8 @@ fn parsed(
             left: 4096,
             limited: false,
         };
-        let trace = if candidate.kind == Kind::Threaded {
-            let mut trace = Trace::new(Source::HandlerAddress);
-            trace.repeats = facts.loop_id(candidate.node).is_some();
-            trace
+        let trace = if candidate.instruction == "self call" {
+            facts.threaded(candidate, &mut query)
         } else {
             facts.trace(candidate.selector, candidate, &mut query, 0, &[])
         };

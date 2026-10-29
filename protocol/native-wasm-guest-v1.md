@@ -111,6 +111,9 @@ stack must contain the same instance and interpreter activation as the current
 retained instruction. Reentry uses its own activation; returns, traps, exceptions
 and new dispatch failures invalidate stale parents. An empty import list proves
 no host association. Parent invocation token zero means nesting is not asserted.
+The renderer currently always writes zero. When a retained invocation names a
+nonzero parent, the opcode workspace can link it as a nested guest; see
+[observed claims and nested guests](vm-opcode-workspace-v2.md#observed-claims-and-nested-guests).
 
 Native host reports expose a semantic guest position only for the source-verified
 dataflow binding; explicit adapters retain raw observations without upgrading

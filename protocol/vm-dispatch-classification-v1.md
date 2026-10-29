@@ -338,7 +338,11 @@ Claims describe the statically bound table. Runtime replacement through `eval`
 or `Function`, Proxy or reflection, global-object writes, sloppy `arguments`
 aliasing, and conditional or never-executed initialization are not modeled.
 Runtime evidence from native guest capture is the authority for what actually
-executes.
+executes. Opcode workspace producer 2.12.0 records that evidence as separate
+`observed_claims` at interpreter-candidate sites, including sites whose static
+claims are withheld or absent, and states where they disagree with static
+claims; see [observed claims](vm-opcode-workspace-v2.md#observed-claims-and-nested-guests).
+Observed claims never feed this classification, the claim gate or a tier.
 
 - A byte-cursor loop over text, such as a format-string or tokenizer loop, is
   structurally an interpreter candidate. `buffer_kind` flags JavaScript string

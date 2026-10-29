@@ -868,6 +868,15 @@ The **Dispatch sites** panel shows each site's structural
 rows, and lists every classified site, including JavaScript workspaces. A
 one-shot router reads `router, no guest opcodes claimed`. Element handler
 tables list each segment's evaluated slot placement.
+The **Runtime claims** panel lists
+[observed claims](../../protocol/vm-opcode-workspace-v2.md#observed-claims-and-nested-guests)
+from retained native rows beside, never inside, the handler list. Each claim
+shows its stream, site, selector, opcode, handler and supporting events, and
+whether the static claim agrees, disagrees, was withheld or is absent; a
+disagreement keeps both statements under an amber rule. WebAssembly workspaces
+also list nested guests: an inner interpreter, its buffer and opcodes, and the
+outer site and handler that drove it. The viewer recomputes every claim and
+link from the retained rows and rejects a document that does not match.
 Parse failures and binding refusals remain counted, visible text in the
 Dispatch sites panel. Worker execution failures return a retryable API error and
 are never persisted or cached as an analysis. Workspace failures retain the last

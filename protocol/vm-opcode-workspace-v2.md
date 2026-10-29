@@ -323,6 +323,88 @@ ranks each ≥100-arm site ahead of an 11-arm helper, labels the large sites
 `call-indirect-table`, and refuses `guest-opcode-isa`. The module bytes are
 not in this repository. Producer version 2.5.0 emits the class.
 
+## Observed claims and nested guests
+
+Producer 2.12.0 adds two optional fields that interpret retained runtime rows.
+Neither changes a handler row, a sample, the evidence class, the tier or the
+score. Both are derived only from rows retained in the same document, so every
+event identity they name resolves to a row the viewer already holds. When a
+stream's 4096-row retention limit is reached, claims cover only the retained
+prefix and the existing limit omission names the rest.
+
+`observed_claims` lists at most 256 claims. One claim aggregates the retained
+rows of one stream that agree on site, selector, opcode and handler. Its
+`confidence` is always `observed`, never `structural`. A claim exists only at
+an interpreter-candidate site of the same metered classification:
+
+| `stream` | Rows | Site | Selector | Opcode | Handler |
+| --- | --- | --- | --- | --- | --- |
+| `native-guest` | `native_guest_samples` | `exact` function and module offset | br_table selector | opcode the adapter decoded from the guest snapshot | `br-table-arm` |
+| `native-wasm` | `native_wasm_observations` | `exact` | br_table selector | null; a selector is not a guest opcode | `br-table-arm` |
+| `dispatch-sample` | native JavaScript `samples` | `sole-interpreter-candidate` or `artifact` | null | sampled opcode | `handler-index`, the sampler's selected handler |
+
+A JavaScript dispatch sample names its interpreter artifact, not a dispatch
+site. Its claims attach only when the artifact has an interpreter-candidate
+site. They name that site only when the complete classification (no omission
+other than `handler-binding-unproven`) has exactly one; otherwise the site is
+null and attribution is `artifact`. WebAssembly claims need an exact site, so
+Wasm `vm_dispatch_sample` rows and caller reports never become claims.
+
+`events` lists the first 8 supporting event identities in row order and
+`sample_count` counts every supporting retained row. `static_claim` compares
+the claim with the unchanged static claim and is recomputed by the viewer:
+
+- JavaScript: the surviving handler row for the same opcode `agrees` when it
+  names the observed handler (a table entry's `handler_index`, or a switch
+  case's own value) and `disagrees` otherwise. With no surviving row, an opcode
+  that recovery found and the claim gate removed is `withheld`; any other is
+  `absent`.
+- WebAssembly: the static row for the observed arm (same site, `opcode` equal
+  to the selector) `agrees` when the guest opcode equals that selector and
+  `disagrees` when the adapter decoded another guest opcode for the same arm,
+  as with a masked or decoded opcode stream. A physical observation names no
+  opcode and only agrees. A default arm and an arm outside the retained
+  neighborhood or handler budget have no static opcode claim and are `absent`.
+
+A disagreement never edits either claim. It adds one residual unknown that
+counts the disagreeing claims, so coverage stays incomplete. Rows that cannot
+supply a claim stay retained and are counted: `observed-claims-not-interpreter`
+for native rows at a site that is not a classified interpreter candidate,
+`observed-claims-unsited` for dispatch samples without a usable site, and
+`observed-claim-limit` past 256 claims.
+
+`nested_guests` is a WebAssembly-only list of at most 64 inner interpreters.
+A native guest activation becomes a nested guest when its invocation marker
+names a nonzero `parent_invocation_id` whose rows are retained here, and both
+activations share session, process, renderer thread and instance, the parent
+began first, both sites are interpreter candidates, the child runs at another
+dispatch site, and the child's first guest buffer (memory, base, length)
+differs from the outer dispatch's. A child at the parent's own site is a
+reentrant activation of one dispatcher, such as a guest call, and is not
+nested. The outer handler is the parent's last retained dispatch sample before
+the child's invocation marker. `basis` is `contiguous-sequence` when every
+renderer sequence number between them is retained and none is a gap or another
+guest dispatch; otherwise it is `nearest-retained`, which does not prove the
+exact driving dispatch. A window longer than 4096, or past 65536 lookups shared
+by the workspace, is not scanned and stays `nearest-retained`. The inner side lists its own observed
+opcodes (at most 64, with `omitted_opcode_count`) and its retained samples.
+Other activations that name a parent are counted as `nested-guest-unproven`;
+`nested-guest-limit` counts nested guests past 64.
+
+Live capture does not produce nested guests yet. The renderer writes
+`parent_invocation_id` 0 (nesting not asserted), and one adapter covers one
+dispatch site per browser lifetime, so an inner interpreter at another site is
+not guest-captured. JavaScript samplers record no dispatch site, handler
+location or call stack. The analyzer path is exercised with owned synthetic
+programs in `vm_opcode_observed.rs`; its exported store backs the rendered VM
+Lab acceptance.
+
+VM Lab shows both lists on a Runtime claims tab. A contradicting claim keeps
+both statements and an amber rule; each nested guest names the inner site,
+invocation and buffer, the outer site, handler and dispatch event, and its
+basis. The tab appears only when the workspace carries claims, nested guests
+or a claim omission.
+
 ## Validation
 
 `make native-tests` rejects short and dirty-reserved dispatch payloads.

@@ -18,7 +18,9 @@ The driver, [`check-origin-trace-rendered-ui.mjs`](../check-origin-trace-rendere
    demo stores and the native Wasm evidence stores that `make native-wasm-golden-check`
    exports under `build/native-golden/`. Those stores are the exact artifacts and
    events the Rust golden tests built from `build/reb-native-wasm-guest-golden`
-   and `build/reb-native-wasm-dispatch-golden`, so nothing is mirrored by hand;
+   and `build/reb-native-wasm-dispatch-golden`, so nothing is mirrored by hand.
+   `make vm-observed-evidence` adds the owned two-level interpreter store that
+   the observed-claims analyzer test builds under `build/vm-observed-evidence/`;
 3. starts the bundled `OriginTraceBackend` on a loopback port chosen by the OS;
 4. builds this bundle with `xcodebuild build-for-testing`, then rewrites the
    generated `.xctestrun` so the bundle is hosted by the copied app
@@ -42,6 +44,10 @@ the DOM and computed layout and scrolls targets into view.
 No smoke flag or test hook exists in the product, and nothing here uses the
 Chrome DevTools Protocol. The evidence is synthetic; this suite does not
 establish live browser capture.
+
+The Runtime claims panel is opened on that store at all four sizes: the
+contradicting claim expands with native input, and the claims heading, the
+contradiction and the nested guest row are each revealed and photographed.
 
 VM layout assertions check full-width compact evidence, complete footer and
 tab-strip visibility, and an exact boundary between the analysis scroller and

@@ -22,7 +22,7 @@ map, or role label is used as a fixture, label, or ground truth.
 | `match-in-loop.wat` | counting loop with a `br_table` on a struct field the loop never advances |
 | `multi-site-interpreter.wat` | three sites in one function: argument mode switch, opcode, operand mode |
 | `host-step.wat` | host-driven `step()`: pc reloaded and stored back once per call, no loop |
-| `rotated-loop.js` | `let op = code[pc++]; while (op) { switch (op) ...; op = code[pc++]; }` (classification only: handler recovery does not follow the rotated selector, a known false negative) |
+| `rotated-loop.js` | `let op = code[pc++]; while (op) { switch (op) ...; op = code[pc++]; }`: recovery follows every write of the rotated selector |
 | `worklist.js` | `while (q.length) { const id = q.pop(); switch (types[id]) ... }` |
 | `minified.js` | comma declarations and statement-form `do switch (...) {...} while (...)` |
 | `normalized-router.js` | `k = k \| 0` then an `if (k === C)` ladder |

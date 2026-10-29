@@ -355,11 +355,6 @@ executes.
   returned values are not followed.
 - Without flow order, an argument that is unconditionally overwritten before
   dispatch still counts as a reaching `call_argument` alternative.
-- A JavaScript rotated loop (`op = code[pc++]` before the loop and at its end)
-  classifies as an interpreter candidate, but handler recovery, which is
-  unchanged, yields no handlers for it, as it did before classification
-  existed. This is a known false negative of recovery, not of the
-  classification.
 - On the pinned public QuickJS debug build, 13 of 384 sites are interpreter
   candidates, including the opcode dispatch at function 414; 7 sites are
   trace-limited unknowns, among them byte-cursor format-string parsers.

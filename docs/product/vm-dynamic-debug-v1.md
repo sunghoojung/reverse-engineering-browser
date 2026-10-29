@@ -229,9 +229,12 @@ outer handler opcodes. An adjacent 1-, 2-, or 4-byte indexed-read sequence yield
 a static operand-width guess; absent, nonadjacent, conditional, or repeated
 reads retain width 0 with an explanation. This is not a runtime layout proof.
 Computed property names stay unknown. Selectors must be a direct indexed byte
-read, literal, or a bounded chain of preceding immutable `const` aliases to one; transformed,
-position-dependent, saved-state, and unresolved selectors do not establish a
-fixed opcode mapping. The analyzer retains at most 1024 distinct handlers and
+read, literal, or a bounded chain of aliases to one, with no compound update
+anywhere in the region. Every plain write of an alias must be direct and one
+must precede the dispatch, so a rotated loop that fetches before the loop and
+again at its latch qualifies. A selector written more than once with a literal
+is a state machine. Transformed, position-dependent, saved-state, and
+unresolved selectors do not establish a fixed opcode mapping. The analyzer retains at most 1024 distinct handlers and
 reports `handler-limit` when additional candidates are omitted.
 
 ## VM Lab UI

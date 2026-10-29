@@ -174,7 +174,9 @@ fn without_nested_functions(region: &str) -> String {
 
 // These are deliberately syntactic checks, not an evaluator or a data-flow
 // proof. An unrecognized selector cannot establish a fixed opcode mapping.
-fn direct_selector(expression: &str, region: &str, depth: usize) -> bool {
+// `scope` is the region without nested function bodies and `before` the
+// dispatch offset in it.
+fn direct_selector(expression: &str, scope: &str, before: usize, depth: usize) -> bool {
     let expression = expression.trim();
     if integer(expression).is_some()
         || BYTE_READ
@@ -191,22 +193,27 @@ fn direct_selector(expression: &str, region: &str, depth: usize) -> bool {
         r"(?:\b{name}\s*(?:\+\+|--|[+\-^|&*/%<>=]+=)|(?:\+\+|--)\s*\b{name}\b)"
     ))
     .expect("selector mutation");
-    if mutation.is_match(region) {
+    if mutation.is_match(scope) {
         return false;
     }
-    let assignment =
-        Regex::new(&format!(r"\bconst\s+{name}\s*=\s*([^;{{}}\n]+)")).expect("selector binding");
-    let mut assignments = assignment.captures_iter(region);
-    let Some(binding) = assignments.next() else {
-        return false;
-    };
-    // Multiple writes and alias cycles are ambiguous, not a data-flow proof.
-    assignments.next().is_none()
-        && direct_selector(
-            &binding[1],
-            &region[..binding.get(0).expect("const binding").start()],
-            depth + 1,
-        )
+    // Every plain write, declared or assigned, anywhere in the region. A
+    // rotated loop fetches before the loop and again at its latch; each write
+    // must itself be a direct selector, and one must precede the dispatch. A
+    // variable written more than once with a literal is a state machine.
+    let assignment = Regex::new(&format!(
+        r"(?:^|[^.\w$]){name}\s*=([^=>;{{}}\n,)][^;{{}}\n,)]*)"
+    ))
+    .expect("selector binding");
+    let values = assignment
+        .captures_iter(scope)
+        .map(|binding| binding.get(1).expect("selector value"))
+        .collect::<Vec<_>>();
+    values.iter().any(|value| value.start() < before)
+        && values.iter().all(|value| {
+            (values.len() == 1 || integer(value.as_str().trim()).is_none())
+                // Alias cycles end at the depth bound, not in a data-flow proof.
+                && direct_selector(value.as_str(), scope, value.start(), depth + 1)
+        })
 }
 
 fn operand_width(body: &str) -> (usize, &'static str) {
@@ -536,7 +543,8 @@ fn static_handlers(
     for captures in INDEXED_DISPATCH.captures_iter(&outer) {
         if !direct_selector(
             &captures[2],
-            &outer[..captures.get(0).expect("dispatch match").start()],
+            &outer,
+            captures.get(0).expect("dispatch match").start(),
             0,
         ) {
             blocked_tables.insert(captures[1].to_owned());
@@ -564,7 +572,8 @@ fn static_handlers(
         previous_switch_end = closing_brace + 1;
         if !direct_selector(
             &region[opening_paren + 1..closing_paren],
-            &outer[..switch_match.start()],
+            &outer,
+            switch_match.start(),
             0,
         ) {
             unknowns.push("A computed, position-dependent, or saved-state switch selector has no proven fixed opcode mapping.".into());
@@ -3908,13 +3917,13 @@ if (!validate(document)) throw new Error('Backend workspace rejected by shipped 
         }
         let root =
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tools/fixtures/dispatch-shapes");
-        let fixture = "handler-array-interpreter.js";
-        let (tier, opcodes) = claims(&fs::read(root.join(fixture)).unwrap());
-        assert_eq!(
-            (tier, opcodes),
-            (json!("likely-vm"), vec![0, 1, 2]),
-            "{fixture}"
-        );
+        for (fixture, expected) in [
+            ("handler-array-interpreter.js", vec![0, 1, 2]),
+            ("rotated-loop.js", vec![1, 2, 3]),
+        ] {
+            let (tier, opcodes) = claims(&fs::read(root.join(fixture)).unwrap());
+            assert_eq!((tier, opcodes), (json!("likely-vm"), expected), "{fixture}");
+        }
     }
 
     /// Third review: tables bind by declaring scope. A nested `ops` that an

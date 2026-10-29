@@ -58,6 +58,21 @@ pub(crate) const STATIC_SHAPES: &[(&str, &str, &[u64])] = &[
         "function route(k,s){const ops=[function(s){s.acc++;},function(s){s.acc--;},function(s){s.h=true;}];for(const v of s.items){log(v);}while(s.busy){s.tick();}return ops[k](s);}",
         &[],
     ),
+    (
+        "rotated-for-update",
+        "function run(code){var pc=0,acc=0,op=code[pc++];for(;op;op=code[pc++]){switch(op){case 1:acc+=1;break;case 2:acc-=1;break;case 3:return acc;}}return acc;}",
+        &[1, 2, 3],
+    ),
+    (
+        "rotated-transformed-latch",
+        "function run(code,key){let pc=0,acc=0;let op=code[pc++];while(op!==0){switch(op){case 1:acc+=1;break;case 2:acc-=1;break;case 3:return acc;}op=code[pc++]^key;}return acc;}",
+        &[],
+    ),
+    (
+        "rotated-state-machine",
+        "function run(code){let pc=0,acc=0;let op=1;while(op){switch(op){case 1:acc+=code[pc++];op=2;break;case 2:acc-=1;op=3;break;case 3:op=0;break;}}return acc;}",
+        &[],
+    ),
 ];
 
 const BINDING_HEAD: &str = "function vm(code, stack){var pc=0;var ops={1:function(){stack.push(code[pc++])},2:function(){stack.pop()},3:function(){pc=code.length}};";

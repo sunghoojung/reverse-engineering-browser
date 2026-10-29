@@ -1595,7 +1595,7 @@ const capturedExportPanel = installCapturedExportDialog({
         const listingCount = workspace.runtime !== 'webassembly'
           ? counted(workspace.handlers.length, 'candidate handler')
           : rows.length === workspace.handlers.length
-            ? counted(workspace.handlers.length, 'dispatch-arm candidate')
+            ? counted(workspace.handlers.length, 'dispatch-arm candidate', 'dispatch-arm candidates')
             : `${counted(rows.length, 'dispatch site')} · ${counted(workspace.handlers.length, 'retained arm')}`;
         heading.append(textElement('h4', '', 'Handler listing'), textElement('span', '', listingCount));
         section.append(heading);

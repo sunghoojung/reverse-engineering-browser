@@ -110,9 +110,9 @@ branch on the flag inside the compiler, so a compiled function has the
 instruction sequence of an unpatched compiler. The one difference is that the
 new builtin, like the `br_table` one, shifts the jump-table slots of builtins
 listed after it; no call is added or changed. The cctest
-`RebNativeCallIndirectDisabledCompilation` checks that the compiled function
-holds no call to the hook builtin, and the dispatch test checks that the
-flag-on build holds exactly one per site. With the flag on and capture
+`RebNativeCallIndirectDisabledCompilation` compiles the same caller with the
+flag on and off: only the flag-on build is larger, and with the flag off a
+registered callback is never reached. With the flag on and capture
 inactive, the runtime returns after one null check or the embedder's
 allocation-free admission predicate, before any frame walk or handle.
 

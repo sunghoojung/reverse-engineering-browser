@@ -47,21 +47,33 @@ pub(crate) struct Proofs {
     // Exact original-byte starts of AST cases and object properties. No source
     // rescan is needed when base recovery asks whether a claim is justified.
     handlers: HashMap<(usize, bool), Verdict>,
+    /// Array entries are keyed by position: the AST index of each element,
+    /// counting holes, which a recovered handler index must equal.
+    positions: HashMap<usize, u32>,
     failure: Option<String>,
     _memory: Memory,
 }
 impl Proofs {
-    pub(crate) fn verdict(&self, offset: usize, table: bool) -> Result<Option<Role>, &str> {
-        self.failure.as_deref().map_or_else(
-            || {
-                self.handlers
-                    .get(&(offset, table))
-                    .copied()
-                    .unwrap_or(Err(Refusal::Binding))
-                    .map_err(Refusal::detail)
-            },
-            Err,
-        )
+    pub(crate) fn verdict(
+        &self,
+        offset: usize,
+        table: bool,
+        index: Option<u64>,
+    ) -> Result<Option<Role>, &str> {
+        if let Some(failure) = self.failure.as_deref() {
+            return Err(failure);
+        }
+        if table
+            && let Some(position) = self.positions.get(&offset)
+            && index != Some(u64::from(*position))
+        {
+            return Err(Refusal::Binding.detail());
+        }
+        self.handlers
+            .get(&(offset, table))
+            .copied()
+            .unwrap_or(Err(Refusal::Binding))
+            .map_err(Refusal::detail)
     }
 }
 
@@ -214,7 +226,11 @@ struct Facts<'s, 'a> {
     invoked_loops: HashMap<NodeId, NodeId>,
     table_functions: HashMap<NodeId, Key<'a>>,
     member_write_counts: HashMap<Key<'a>, usize>,
+    /// Object and array table literals with the key they are bound to.
     objects: HashMap<NodeId, (Key<'a>, u32, ScopeId)>,
+    /// Tables whose entries are written through a computed member, deleted
+    /// or reordered in place: an entry's position no longer names its handler.
+    element_writes: HashSet<Key<'a>>,
     candidates: Vec<Candidate<'a>>,
 }
 impl<'s, 'a> Facts<'s, 'a> {
@@ -372,6 +388,7 @@ impl<'s, 'a> Facts<'s, 'a> {
             table_functions: HashMap::new(),
             member_write_counts: HashMap::new(),
             objects: HashMap::new(),
+            element_writes: HashSet::new(),
             candidates: Vec::new(),
         };
         // Scope IDs and node IDs are preorder. Inherited facts take one lookup,
@@ -472,7 +489,28 @@ impl<'s, 'a> Facts<'s, 'a> {
                         facts.objects.insert(object.node_id.get(), owner);
                     }
                 }
+                AstKind::ArrayExpression(array) => {
+                    if let Some(owner) = facts.object_owner(id) {
+                        facts.objects.insert(array.node_id.get(), owner);
+                    }
+                }
                 AstKind::CallExpression(call) => {
+                    if let Expression::StaticMemberExpression(member) =
+                        call.callee.get_inner_expression()
+                        && matches!(
+                            member.property.name.as_str(),
+                            "splice"
+                                | "shift"
+                                | "unshift"
+                                | "reverse"
+                                | "sort"
+                                | "copyWithin"
+                                | "fill"
+                        )
+                        && let Some(key) = facts.key(&member.object, context)
+                    {
+                        facts.element_writes.insert(key);
+                    }
                     let callee = match call.callee.get_inner_expression() {
                         Expression::StaticMemberExpression(member)
                             if matches!(member.property.name.as_str(), "call" | "apply") =>
@@ -516,6 +554,32 @@ impl<'s, 'a> Facts<'s, 'a> {
         for node in nodes.iter() {
             if !meter.charge(1) {
                 break;
+            }
+            if let AstKind::ComputedMemberExpression(member) = node.kind()
+                && matches!(
+                    nodes.parent_kind(node.id()),
+                    AstKind::AssignmentExpression(_)
+                        | AstKind::UpdateExpression(_)
+                        | AstKind::UnaryExpression(_)
+                        | AstKind::ArrayAssignmentTarget(_)
+                        | AstKind::AssignmentTargetRest(_)
+                        | AstKind::AssignmentTargetWithDefault(_)
+                        | AstKind::AssignmentTargetPropertyProperty(_)
+                        | AstKind::ForInStatement(_)
+                        | AstKind::ForOfStatement(_)
+                )
+                && let Some(key) = facts.key(&member.object, facts.context(node.id()))
+            {
+                let write = match nodes.parent_kind(node.id()) {
+                    AstKind::AssignmentExpression(a) => a.left.span() == member.span,
+                    AstKind::UnaryExpression(u) => u.operator.as_str() == "delete",
+                    AstKind::ForInStatement(f) => f.left.span() == member.span,
+                    AstKind::ForOfStatement(f) => f.left.span() == member.span,
+                    _ => true,
+                };
+                if write {
+                    facts.element_writes.insert(key);
+                }
             }
             if let AstKind::StaticMemberExpression(member) = node.kind()
                 && matches!(
@@ -673,9 +737,12 @@ impl<'s, 'a> Facts<'s, 'a> {
                 AstKind::Function(_) | AstKind::ArrowFunctionExpression(_)
             ) {
                 let parent = nodes.parent_id(node.id());
-                if matches!(nodes.kind(parent), AstKind::ObjectProperty(_))
-                    && let Some((key, _, _)) = facts.objects.get(&nodes.parent_id(parent))
-                {
+                let table = match nodes.kind(parent) {
+                    AstKind::ObjectProperty(_) => facts.objects.get(&nodes.parent_id(parent)),
+                    AstKind::ArrayExpression(_) => facts.objects.get(&parent),
+                    _ => None,
+                };
+                if let Some((key, _, _)) = table {
                     facts.table_functions.insert(node.id(), *key);
                 }
             }
@@ -1048,7 +1115,11 @@ impl<'s, 'a> Facts<'s, 'a> {
             }
             Key::Slot(_, _) => false,
         };
-        if !self.scope_opaque(scope) && single_definition && single_write {
+        if !self.scope_opaque(scope)
+            && single_definition
+            && single_write
+            && !self.element_writes.contains(&key)
+        {
             Ok(())
         } else {
             Err(Refusal::Binding)
@@ -1288,6 +1359,7 @@ fn parsed(
     }
     let memory = Memory::new(meter);
     let mut handlers = HashMap::new();
+    let mut positions = HashMap::new();
     let mut refusals = std::collections::BTreeMap::<&str, (u64, &str)>::new();
     let nodes = semantic.semantic.nodes();
     // Prove each object once, not once per property times every dispatch.
@@ -1330,6 +1402,37 @@ fn parsed(
         if !meter.charge(1) {
             break;
         }
+        // An array entry's opcode is its position. Elements after a spread
+        // have no static position and get no proof.
+        if let AstKind::ArrayExpression(array) = node.kind()
+            && let Some(verdict) = object_verdicts.get(&node.id()).copied()
+        {
+            for (position, element) in array.elements.iter().enumerate() {
+                if !meter.charge(1) || !memory.keep(128) {
+                    break;
+                }
+                if matches!(element, ArrayExpressionElement::SpreadElement(_)) {
+                    break;
+                }
+                if !matches!(
+                    element,
+                    ArrayExpressionElement::FunctionExpression(_)
+                        | ArrayExpressionElement::ArrowFunctionExpression(_)
+                ) {
+                    continue;
+                }
+                let offset = element.span().start as usize;
+                if let Err(reason) = verdict {
+                    let entry = refusals
+                        .entry(reason.reason())
+                        .or_insert((0, reason.detail()));
+                    entry.0 += 1;
+                }
+                positions.insert(offset, position as u32);
+                handlers.insert((offset, true), verdict);
+            }
+            continue;
+        }
         let (offset, table, verdict) = match node.kind() {
             AstKind::SwitchCase(case) => (
                 case.span.start as usize,
@@ -1368,6 +1471,7 @@ fn parsed(
         omissions,
         javascript: Some(Rc::new(Proofs {
             handlers,
+            positions,
             failure: None,
             _memory: memory,
         })),
@@ -1497,6 +1601,7 @@ fn unavailable(meter: &Meter, reason: &str, detail: &'static str) -> Classified 
         omissions: vec![json!({"reason": reason, "omitted_records": 1, "detail": detail})],
         javascript: Some(Rc::new(Proofs {
             handlers: HashMap::new(),
+            positions: HashMap::new(),
             failure: Some(detail.to_owned()),
             _memory: Memory::new(meter),
         })),
@@ -1732,6 +1837,7 @@ struct WorkerReply {
     sites: Vec<Site>,
     omissions: Vec<serde_json::Value>,
     handlers: Vec<(usize, bool, Option<Role>, Option<Refusal>)>,
+    positions: Vec<(usize, u32)>,
     failure: Option<String>,
     work: u64,
     retained_peak: u64,
@@ -1779,6 +1885,11 @@ pub fn worker_main() -> std::io::Result<()> {
             .map(|(&(offset, table), verdict)| {
                 (offset, table, verdict.ok().flatten(), verdict.err())
             })
+            .collect(),
+        positions: proofs
+            .positions
+            .iter()
+            .map(|(&offset, &position)| (offset, position))
             .collect(),
         failure: proofs.failure.clone(),
         work: meter.used.get(),
@@ -2028,7 +2139,7 @@ fn classify_with_heap(source: &str, meter: &Meter, heap: u64) -> Classified {
             #[cfg(test)]
             PARSER_ARENA.set(reply.arena);
             let memory = Memory::new(meter);
-            if !memory.keep(reply.handlers.len() as u64 * 96) {
+            if !memory.keep(reply.handlers.len() as u64 * 96 + reply.positions.len() as u64 * 32) {
                 meter.count_unexamined(1);
                 return unavailable(meter, "classification-work-limit", WORKER_FAILED);
             }
@@ -2050,6 +2161,7 @@ fn classify_with_heap(source: &str, meter: &Meter, heap: u64) -> Classified {
                             ((at, table), ambiguous.map_or(Ok(role), Err))
                         })
                         .collect(),
+                    positions: reply.positions.into_iter().collect(),
                     failure: reply.failure,
                     _memory: memory,
                 })),

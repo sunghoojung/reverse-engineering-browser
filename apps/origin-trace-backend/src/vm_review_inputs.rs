@@ -24,6 +24,42 @@ pub(crate) const NESTED_TABLE_VM: &str = "function vm(code, stack){var pc=0;var 
 /// A loop dispatch beside a one-shot router on the same table.
 pub(crate) const LOOP_BODY_ROUTER_VM: &str = "function route(k,code,stack){var pc=0;var handlers={1:function(){stack.push(code[pc++])},2:function(){stack.pop()},3:function(){}};while(pc<code.length){handlers[code[pc++]](stack);}return handlers[k](stack);}\n";
 
+/// Owned interpreter shapes whose handler claims need a static table, alias,
+/// helper or threaded proof, each beside look-alikes that must claim none:
+/// (name, source, opcodes the workspace keeps).
+pub(crate) const STATIC_SHAPES: &[(&str, &str, &[u64])] = &[
+    (
+        "array-arrows-and-hole",
+        "function run(code){const s={acc:0,h:false};const ops=[(s)=>{s.acc++;},s=>s.acc--,,function(s){s.h=true;}];let pc=0;while(!s.h&&pc<code.length){ops[code[pc++]](s);}return s.acc;}",
+        &[0, 1, 3],
+    ),
+    (
+        "array-reassigned",
+        "function run(code){const s={acc:0,h:false};let ops=[function(s){s.acc++;},function(s){s.acc--;},function(s){s.h=true;}];ops=[function(s){s.h=true;}];let pc=0;while(!s.h&&pc<code.length){ops[code[pc++]](s);}return s.acc;}",
+        &[],
+    ),
+    (
+        "array-entry-written",
+        "function run(code){const s={acc:0,h:false};const ops=[function(s){s.acc++;},function(s){s.acc--;},function(s){s.h=true;}];ops[1]=function(s){s.acc+=2;};let pc=0;while(!s.h&&pc<code.length){ops[code[pc++]](s);}return s.acc;}",
+        &[],
+    ),
+    (
+        "array-reordered",
+        "function run(code){const s={acc:0,h:false};const ops=[function(s){s.acc++;},function(s){s.acc--;},function(s){s.h=true;}];ops.reverse();let pc=0;while(!s.h&&pc<code.length){ops[code[pc++]](s);}return s.acc;}",
+        &[],
+    ),
+    (
+        "array-after-spread",
+        "function run(code,base){const s={acc:0,h:false};const ops=[...base,function(s){s.acc++;},function(s){s.h=true;}];let pc=0;while(!s.h&&pc<code.length){ops[code[pc++]](s);}return s.acc;}",
+        &[],
+    ),
+    (
+        "array-router",
+        "function route(k,s){const ops=[function(s){s.acc++;},function(s){s.acc--;},function(s){s.h=true;}];for(const v of s.items){log(v);}while(s.busy){s.tick();}return ops[k](s);}",
+        &[],
+    ),
+];
+
 const BINDING_HEAD: &str = "function vm(code, stack){var pc=0;var ops={1:function(){stack.push(code[pc++])},2:function(){stack.pop()},3:function(){pc=code.length}};";
 const BINDING_TAIL: &str =
     "while(pc<code.length){switch(code[pc]){default:ops[code[pc]]();}}return stack;}";
@@ -645,6 +681,13 @@ pub(crate) fn differential_inputs() -> Vec<(String, Vec<u8>, &'static str)> {
     ] {
         inputs.push((
             format!("review:{name}"),
+            source.as_bytes().to_vec(),
+            "javascript",
+        ));
+    }
+    for (name, source, _) in STATIC_SHAPES {
+        inputs.push((
+            format!("shape:{name}"),
             source.as_bytes().to_vec(),
             "javascript",
         ));

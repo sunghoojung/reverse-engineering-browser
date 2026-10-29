@@ -88,7 +88,7 @@ static ANTI: LazyLock<Vec<(&str, u64, Regex)>> = LazyLock::new(|| {
 ].into_iter().map(|(id,weight,p)|(id,weight,Regex::new(p).expect("Anti-bot rule"))).collect()
 });
 pub(crate) fn current_producer() -> Value {
-    json!({"id":"origin-trace-vm-detector","version":"1.8.0"})
+    json!({"id":"origin-trace-vm-detector","version":"1.9.0"})
 }
 
 // The catalog and generated documents share this exact profile projection.
@@ -1429,7 +1429,7 @@ mod profile_tests {
     #[test]
     fn handler_recovery_requirement_has_distinct_profile_and_accepts_older_profiles() {
         let current = current_profile();
-        assert_eq!(current_producer()["version"], "1.8.0");
+        assert_eq!(current_producer()["version"], "1.9.0");
         assert_eq!(current["javascript_likely_vm_requires_handlers"], true);
         let mut historical = current.clone();
         historical

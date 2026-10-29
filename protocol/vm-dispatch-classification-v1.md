@@ -296,8 +296,9 @@ classification is never an input to handler recovery, tier or score:
   score. The opcode-claim gate is a pure post-filter on what recovery returns:
   it removes claims and never adds one.
 - A recovered `switch` case survives only when that switch is an
-  interpreter-candidate site. A recovered table entry (`t[3] = function` or an
-  object map) survives only when the region dispatches through that table, as
+  interpreter-candidate site. A recovered table entry (`t[3] = function`, an
+  object map, or a function element of an array literal) survives only when
+  the region dispatches through that table, as
   `t[selector](...)` or `t[selector].call(...)`, including from a nested
   function of the region, at an interpreter-candidate site. A dispatch through
   a temporary (`h = t[op]; h()`) ties nothing, and a table with no such site
@@ -312,6 +313,12 @@ classification is never an input to handler recovery, tier or score:
   always withholds claims.
   An Annex B block function's implicit replacement of an existing `var` table
   also counts as a write, although it has no ordinary reference-write AST node.
+- An array entry's opcode is its AST position, counting holes, and a recovered
+  handler index must equal it. Elements after a spread have no static position
+  and no proof. A table whose entries are written through a computed member
+  (`t[k] = f`, `delete t[k]`, destructuring) or reordered in place (`splice`,
+  `shift`, `unshift`, `reverse`, `sort`, `copyWithin`, `fill`) is unproven:
+  an entry's position no longer names its handler.
 - `obj.ops` requires the same resolved receiver symbol and static, non-computed
   property name, with a single static write to that key. Distinct receivers are
   independent; private `#ops` never matches ordinary `ops`. `this.ops` requires

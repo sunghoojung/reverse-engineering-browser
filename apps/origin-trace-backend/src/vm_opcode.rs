@@ -20,7 +20,7 @@ mod native_wasm;
 #[path = "vm_opcode_wasm.rs"]
 mod wasm;
 
-const PRODUCER_VERSION: &str = "2.11.0";
+const PRODUCER_VERSION: &str = "2.12.0";
 const MAX_SAMPLES: usize = 4096;
 const MAX_HANDLERS: usize = 1024;
 const MAX_SNAPSHOTS: usize = 16;
@@ -357,14 +357,8 @@ fn shallow_braces(region: &str) -> String {
     String::from_utf8(bytes).expect("masked object members")
 }
 
-fn object_handlers(
-    region: &str,
-    base: usize,
-    blocked_tables: &BTreeSet<String>,
-    handlers: &mut BTreeMap<u32, Value>,
-    unknowns: &mut Vec<String>,
-    handler_limit_hit: &mut bool,
-) {
+/// Names a region may dispatch a handler table through.
+fn table_names(region: &str, blocked_tables: &BTreeSet<String>) -> BTreeSet<String> {
     let mut names = BTreeSet::new();
     for captures in INDEXED_DISPATCH.captures_iter(region) {
         names.insert(captures[1].to_owned());
@@ -375,11 +369,20 @@ fn object_handlers(
         "opcode".into(),
         "opcodes".into(),
     ]);
+    names.retain(|name| !blocked_tables.contains(name));
+    names
+}
+
+fn object_handlers(
+    region: &str,
+    base: usize,
+    names: &BTreeSet<String>,
+    handlers: &mut BTreeMap<u32, Value>,
+    unknowns: &mut Vec<String>,
+    handler_limit_hit: &mut bool,
+) {
     for name in names {
-        if blocked_tables.contains(&name) {
-            continue;
-        }
-        let assignment = Regex::new(&format!(r"\b{}\s*=\s*\{{", regex::escape(&name)))
+        let assignment = Regex::new(&format!(r"\b{}\s*=\s*\{{", regex::escape(name)))
             .expect("object assignment");
         for candidate in assignment.find_iter(region) {
             let opening = candidate.end() - 1;
@@ -416,6 +419,103 @@ fn object_handlers(
                 unknowns.push(
                     "A computed object-map property cannot be assigned a static opcode.".into(),
                 );
+            }
+        }
+    }
+}
+
+/// Byte ranges of the top-level elements of `[ ... ]`, holes included.
+/// The text is masked, so brackets and commas inside literals are gone.
+fn array_elements(text: &str) -> Vec<(usize, usize)> {
+    let mut elements = Vec::new();
+    let mut depth = 0usize;
+    let mut start = 0;
+    for (index, byte) in text.bytes().enumerate() {
+        match byte {
+            b'(' | b'[' | b'{' => depth += 1,
+            b')' | b']' | b'}' => depth = depth.saturating_sub(1),
+            b',' if depth == 0 => {
+                elements.push((start, index));
+                start = index + 1;
+            }
+            _ => (),
+        }
+    }
+    // A trailing comma ends the list; it does not add a hole.
+    if !text[start..].trim().is_empty() {
+        elements.push((start, text.len()));
+    }
+    elements
+}
+
+/// Function-array tables (`t = [function(s){...}, (s) => ..., ...]`): each
+/// function element's opcode is its position. Arrays come from the region's
+/// own body, not its nested functions, whose arrays are their own dispatch.
+fn array_handlers(
+    region: &str,
+    outer: &str,
+    base: usize,
+    names: &BTreeSet<String>,
+    handlers: &mut BTreeMap<u32, Value>,
+    handler_limit_hit: &mut bool,
+) {
+    static ELEMENT: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r"^(?:function\b[^{]*\{|(?:\([^()]*\)|[A-Za-z_$][\w$]*)\s*=>)")
+            .expect("array function element")
+    });
+    for name in names {
+        let assignment =
+            Regex::new(&format!(r"\b{}\s*=\s*\[", regex::escape(name))).expect("array assignment");
+        for candidate in assignment.find_iter(outer) {
+            let opening = candidate.end() - 1;
+            let Some(closing) = matching(outer.as_bytes(), opening, b'[', b']') else {
+                continue;
+            };
+            let list = &outer[opening + 1..closing];
+            for (position, (start, end)) in array_elements(list).into_iter().enumerate() {
+                let piece = &list[start..end];
+                let element = piece.trim_start();
+                if element.starts_with("...") {
+                    break;
+                }
+                let Some(header) = ELEMENT.find(element) else {
+                    continue;
+                };
+                let from = opening + 1 + start + (piece.len() - element.len());
+                let to = opening + 1 + start + piece.trim_end().len();
+                let text = &region[from..to];
+                let body = if header.as_str().ends_with('{') {
+                    let open = from + header.end() - 1;
+                    match matching(region.as_bytes(), open, b'{', b'}') {
+                        Some(close) if close < to => &region[open + 1..close],
+                        _ => continue,
+                    }
+                } else {
+                    let arrow = text[header.end()..].trim_start();
+                    match arrow.strip_prefix('{') {
+                        Some(_) => {
+                            let open = to - arrow.len();
+                            match matching(region.as_bytes(), open, b'{', b'}') {
+                                Some(close) if close < to => &region[open + 1..close],
+                                _ => continue,
+                            }
+                        }
+                        None => arrow,
+                    }
+                };
+                let Ok(opcode) = u32::try_from(position) else {
+                    break;
+                };
+                if !add_handler(
+                    handlers,
+                    opcode,
+                    Some(opcode),
+                    (base + from, base + to),
+                    body,
+                    "A function-array handler is statically visible; its opcode is its position.",
+                ) {
+                    *handler_limit_hit = true;
+                }
             }
         }
     }
@@ -547,12 +647,21 @@ fn static_handlers(
             unknowns.push("A computed handler index cannot be assigned a static opcode.".into());
         }
     }
+    let names = table_names(&region, &blocked_tables);
     object_handlers(
         &region,
         start,
-        &blocked_tables,
+        &names,
         &mut handlers,
         &mut unknowns,
+        &mut handler_limit_hit,
+    );
+    array_handlers(
+        &region,
+        &outer,
+        start,
+        &names,
+        &mut handlers,
         &mut handler_limit_hit,
     );
     if handler_limit_hit {
@@ -629,7 +738,11 @@ fn gate_handlers(
         let offset = handler["source"]["byte_offset"].as_u64().unwrap_or(0) as usize;
         let verdict = if roles.meter.charge(1) {
             roles.javascript.as_ref().map_or(Ok(None), |proofs| {
-                proofs.verdict(offset, handler.get("handler_index").is_some())
+                proofs.verdict(
+                    offset,
+                    handler.get("handler_index").is_some(),
+                    handler["handler_index"].as_u64(),
+                )
             })
         } else {
             Ok(None)
@@ -3772,6 +3885,35 @@ if (!validate(document)) throw new Error('Backend workspace rejected by shipped 
             site["role"] == "interpreter-candidate"
                 || (site["selector_source"] == "unknown" && limited),
             "{site}"
+        );
+    }
+
+    /// Function-array tables, rotated loops, aliases, fetch helpers and
+    /// threaded handlers claim exactly their statically bound handlers; each
+    /// look-alike claims none. The canonical fixtures also keep likely-vm.
+    #[test]
+    fn static_shapes_claim_only_their_bound_handlers() {
+        let claims = |source: &[u8]| {
+            let (_, analysis, document) =
+                analyze_artifact_with_snapshot(source, "javascript", &[], None);
+            let opcodes = document["workspaces"]
+                .as_array()
+                .unwrap()
+                .first()
+                .map_or_else(Vec::new, |_| handler_opcodes(&document));
+            (analysis["results"][0]["tier"].clone(), opcodes)
+        };
+        for (name, source, expected) in vm::review_inputs::STATIC_SHAPES {
+            assert_eq!(claims(source.as_bytes()).1, *expected, "{name}");
+        }
+        let root =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tools/fixtures/dispatch-shapes");
+        let fixture = "handler-array-interpreter.js";
+        let (tier, opcodes) = claims(&fs::read(root.join(fixture)).unwrap());
+        assert_eq!(
+            (tier, opcodes),
+            (json!("likely-vm"), vec![0, 1, 2]),
+            "{fixture}"
         );
     }
 

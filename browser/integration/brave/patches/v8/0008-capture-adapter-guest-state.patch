@@ -873,13 +873,14 @@ index 7106d5aec75cbb46f3158ce7e7394332f14c3537..2a24e2639dc805071b51a2315e3d13fa
  struct GlobalTracingInfo {
    uint32_t global_index;
 diff --git a/test/cctest/wasm/test-run-wasm.cc b/test/cctest/wasm/test-run-wasm.cc
-index 7f4c54127ec468e06e60235ee347fca620733e65..2c3c3772e45e0d4f6e01d25f1d3c5ab74f883b00 100644
+index 7f4c54127ec468e06e60235ee347fca620733e65..bc4739aadf5ff5ebf4e68864f29b66ed5d2800fc 100644
 --- a/test/cctest/wasm/test-run-wasm.cc
 +++ b/test/cctest/wasm/test-run-wasm.cc
-@@ -6,13 +6,17 @@
+@@ -6,13 +6,18 @@
  #include <stdlib.h>
  #include <string.h>
  
++#include "include/v8-external.h"
 +#include "include/v8-function.h"
 +#include "src/api/api-inl.h"
  #include "src/base/functional/function-ref.h"
@@ -894,7 +895,7 @@ index 7f4c54127ec468e06e60235ee347fca620733e65..2c3c3772e45e0d4f6e01d25f1d3c5ab7
  #include "test/cctest/wasm/wasm-runner.h"
  #include "test/common/value-helper.h"
  #include "test/common/wasm/test-signatures.h"
-@@ -1355,6 +1359,931 @@ TEST(RebNativeBrTableDisabledCompilation) {
+@@ -1355,6 +1360,948 @@ TEST(RebNativeBrTableDisabledCompilation) {
    CHECK_EQ(0, reb_dispatch_observation.count);
  }
  
@@ -1559,9 +1560,28 @@ index 7f4c54127ec468e06e60235ee347fca620733e65..2c3c3772e45e0d4f6e01d25f1d3c5ab7
 +                      nested_failures = 0;
 +thread_local bool nested_enabled = true, nested_enable_at_host = false,
 +                  nested_disable_at_dispatch = false;
-+thread_local WasmRunner<int32_t, int32_t>* nested_reentry = nullptr;
-+thread_local WasmRunner<int32_t, int32_t>* nested_deep_module = nullptr;
-+thread_local int32_t nested_deep_depth = 0;
++// Runners live on each test's stack. Host functions reach them through their
++// callback data, so no namespace-scope global ever holds a stack address.
++struct NestedGuestRunners {
++  WasmRunner<int32_t, int32_t>* reentry = nullptr;
++  WasmRunner<int32_t, int32_t>* deep_module = nullptr;
++  int32_t deep_depth = 0;
++};
++NestedGuestRunners& NestedRunners(
++    const v8::FunctionCallbackInfo<v8::Value>& args) {
++  return *static_cast<NestedGuestRunners*>(
++      args.Data().As<v8::External>()->Value(
++          v8::kExternalPointerTypeTagDefault));
++}
++v8::Local<v8::Function> NewNestedGuestHost(v8::Isolate* isolate,
++                                           v8::FunctionCallback callback,
++                                           NestedGuestRunners* runners) {
++  return v8::Function::New(
++             isolate->GetCurrentContext(), callback,
++             v8::External::New(isolate, runners,
++                               v8::kExternalPointerTypeTagDefault))
++      .ToLocalChecked();
++}
 +void ResetNestedGuests() {
 +  nested_activations.clear();
 +  nested_sequence = nested_parent_gaps = nested_failures = 0;
@@ -1605,10 +1625,11 @@ index 7f4c54127ec468e06e60235ee347fca620733e65..2c3c3772e45e0d4f6e01d25f1d3c5ab7
 +  ++activation->dispatches;
 +  if (nested_disable_at_dispatch) nested_enabled = false;
 +}
-+void ReenterNestedGuest(const v8::FunctionCallbackInfo<v8::Value>&) {
++void ReenterNestedGuest(const v8::FunctionCallbackInfo<v8::Value>& args) {
 +  if (nested_enable_at_host) nested_enabled = true;
-+  CHECK_NOT_NULL(nested_reentry);
-+  CHECK_EQ(9, nested_reentry->Call(1));
++  auto* reentry = NestedRunners(args).reentry;
++  CHECK_NOT_NULL(reentry);
++  CHECK_EQ(9, reentry->Call(1));
 +}
 +// mode 0: two boundaries, then JavaScript reenters this function in mode 1.
 +// mode 1: an inner activation with two boundaries.
@@ -1639,9 +1660,8 @@ index 7f4c54127ec468e06e60235ee347fca620733e65..2c3c3772e45e0d4f6e01d25f1d3c5ab7
 +  FlagScope<bool> guest_frames(&v8_flags.reb_wasm_guest_capture, true);
 +  HandleScope handles(CcTest::InitIsolateOnce());
 +  auto* isolate = CcTest::isolate();
-+  auto host =
-+      v8::Function::New(isolate->GetCurrentContext(), ReenterNestedGuest)
-+          .ToLocalChecked();
++  NestedGuestRunners runners;
++  auto host = NewNestedGuestHost(isolate, ReenterNestedGuest, &runners);
 +  TestSignatures sigs;
 +  ManuallyImportedJSFunction import{
 +      sigs.v_v(), Cast<JSFunction>(v8::Utils::OpenDirectHandle(*host))};
@@ -1649,7 +1669,7 @@ index 7f4c54127ec468e06e60235ee347fca620733e65..2c3c3772e45e0d4f6e01d25f1d3c5ab7
 +                                 &import);
 +  BuildNestedGuest(r);
 +  auto& state = r.isolate()->reb_guest_capture_state();
-+  nested_reentry = &r;
++  runners.reentry = &r;
 +  ResetNestedGuests();
 +  isolate->SetWasmGuestDispatchCallback(ObserveNestedGuest, EnableNestedGuests);
 +  const uint64_t walks = state.parent_walks;
@@ -1696,10 +1716,11 @@ index 7f4c54127ec468e06e60235ee347fca620733e65..2c3c3772e45e0d4f6e01d25f1d3c5ab7
 +  return function == 2 ? v8::WasmGuestModuleAdmission::kAdmit
 +                       : v8::WasmGuestModuleAdmission::kNotDispatcher;
 +}
-+void EnterDeepModule(const v8::FunctionCallbackInfo<v8::Value>&) {
++void EnterDeepModule(const v8::FunctionCallbackInfo<v8::Value>& args) {
 +  if (nested_enable_at_host) nested_enabled = true;
-+  CHECK_NOT_NULL(nested_deep_module);
-+  CHECK_EQ(0, nested_deep_module->Call(nested_deep_depth));
++  const auto& runners = NestedRunners(args);
++  CHECK_NOT_NULL(runners.deep_module);
++  CHECK_EQ(0, runners.deep_module->Call(runners.deep_depth));
 +}
 +}  // namespace
 +
@@ -1708,11 +1729,9 @@ index 7f4c54127ec468e06e60235ee347fca620733e65..2c3c3772e45e0d4f6e01d25f1d3c5ab7
 +  FlagScope<bool> guest_frames(&v8_flags.reb_wasm_guest_capture, true);
 +  HandleScope handles(CcTest::InitIsolateOnce());
 +  auto* isolate = CcTest::isolate();
-+  auto enter = v8::Function::New(isolate->GetCurrentContext(), EnterDeepModule)
-+                   .ToLocalChecked();
-+  auto reenter =
-+      v8::Function::New(isolate->GetCurrentContext(), ReenterNestedGuest)
-+          .ToLocalChecked();
++  NestedGuestRunners runners;
++  auto enter = NewNestedGuestHost(isolate, EnterDeepModule, &runners);
++  auto reenter = NewNestedGuestHost(isolate, ReenterNestedGuest, &runners);
 +  TestSignatures sigs;
 +  ManuallyImportedJSFunction enter_import{
 +      sigs.v_v(), Cast<JSFunction>(v8::Utils::OpenDirectHandle(*enter))};
@@ -1733,13 +1752,13 @@ index 7f4c54127ec468e06e60235ee347fca620733e65..2c3c3772e45e0d4f6e01d25f1d3c5ab7
 +                   WASM_RETURN(WASM_CALL_FUNCTION(
 +                       1, WASM_I32_SUB(WASM_LOCAL_GET(0), WASM_I32V_1(1))))),
 +           WASM_CALL_FUNCTION0(0), WASM_I32V_1(0)});
-+  nested_reentry = &a;
-+  nested_deep_module = &b;
++  runners.reentry = &a;
++  runners.deep_module = &b;
 +  isolate->SetWasmGuestDispatchCallback(ObserveNestedGuest, EnableNestedGuests,
 +                                        nullptr, AdmitDeepDispatcher);
 +  // Untracked frames of another function are skipped within the bound.
 +  ResetNestedGuests();
-+  nested_deep_depth = 100;
++  runners.deep_depth = 100;
 +  CHECK_EQ(9, a.Call(0));
 +  CHECK_EQ(size_t{2}, nested_activations.size());
 +  CHECK_EQ(v8::WasmGuestParent::kResolved, nested_activations[1].state);
@@ -1749,7 +1768,7 @@ index 7f4c54127ec468e06e60235ee347fca620733e65..2c3c3772e45e0d4f6e01d25f1d3c5ab7
 +  // Past 128 Wasm frames the walk stops: no parent is named, never an older
 +  // one, and the consumer records the unresolved gap.
 +  ResetNestedGuests();
-+  nested_deep_depth = 140;
++  runners.deep_depth = 140;
 +  CHECK_EQ(9, a.Call(0));
 +  CHECK_EQ(size_t{2}, nested_activations.size());
 +  CHECK_EQ(v8::WasmGuestParent::kUnresolved, nested_activations[1].state);
@@ -1759,7 +1778,7 @@ index 7f4c54127ec468e06e60235ee347fca620733e65..2c3c3772e45e0d4f6e01d25f1d3c5ab7
 +  // The same dispatcher on the stack without identity is a possible parent:
 +  // unresolved, not a top-level activation.
 +  ResetNestedGuests();
-+  nested_deep_depth = 10;
++  runners.deep_depth = 10;
 +  nested_enabled = false;
 +  nested_enable_at_host = true;
 +  CHECK_EQ(9, a.Call(0));
@@ -1779,20 +1798,19 @@ index 7f4c54127ec468e06e60235ee347fca620733e65..2c3c3772e45e0d4f6e01d25f1d3c5ab7
 +  HandleScope handles(CcTest::InitIsolateOnce());
 +  auto* isolate = CcTest::isolate();
 +  auto& state = CcTest::i_isolate()->reb_guest_capture_state();
-+  auto host =
-+      v8::Function::New(isolate->GetCurrentContext(), ReenterNestedGuest)
-+          .ToLocalChecked();
 +  TestSignatures sigs;
-+  ManuallyImportedJSFunction import{
-+      sigs.v_v(), Cast<JSFunction>(v8::Utils::OpenDirectHandle(*host))};
 +  isolate->ResetWasmGuestCapture();
 +  const uint64_t walks = state.parent_walks;
 +  for (const bool compiled : {false, true}) {
 +    FlagScope<bool> guest_frames(&v8_flags.reb_wasm_guest_capture, compiled);
++    NestedGuestRunners runners;
++    auto host = NewNestedGuestHost(isolate, ReenterNestedGuest, &runners);
++    ManuallyImportedJSFunction import{
++        sigs.v_v(), Cast<JSFunction>(v8::Utils::OpenDirectHandle(*host))};
 +    WasmRunner<int32_t, int32_t> r(TestExecutionTier::kLiftoff, kWasmOrigin,
 +                                   &import);
 +    BuildNestedGuest(r);
-+    nested_reentry = &r;
++    runners.reentry = &r;
 +    ResetNestedGuests();
 +    // Without frame hooks, or with capture off: no identity, walk, handle or
 +    // callback, even across reentry.

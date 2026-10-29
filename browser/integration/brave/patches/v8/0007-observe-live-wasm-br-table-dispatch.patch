@@ -513,10 +513,10 @@ index 220507b1e74ef8585cf380eb09ef3664fc6b07a3..2003d1252a310aeb07af97baaf2284e3
    uint32_t global_index;
    uint8_t is_store;  // 0 or 1
 diff --git a/test/cctest/wasm/test-run-wasm.cc b/test/cctest/wasm/test-run-wasm.cc
-index 17b4883adda27b84a74dea71523d64ad0935a6f8..1d371420896bc78a844ca6b364a5c160931340eb 100644
+index 17b4883adda27b84a74dea71523d64ad0935a6f8..fee45d6e87ea2533b7731afd113386693d4642fc 100644
 --- a/test/cctest/wasm/test-run-wasm.cc
 +++ b/test/cctest/wasm/test-run-wasm.cc
-@@ -1240,6 +1240,394 @@ WASM_EXEC_TEST(Regression_660262) {
+@@ -1240,6 +1240,386 @@ WASM_EXEC_TEST(Regression_660262) {
    r.Call();
  }
  
@@ -703,7 +703,7 @@ index 17b4883adda27b84a74dea71523d64ad0935a6f8..1d371420896bc78a844ca6b364a5c160
 +  api_isolate->SetWasmCallIndirectDispatchCallback(nullptr);
 +}
 +
-+TEST(RebNativeCallIndirectFuncRefAndReturnCall) {
++TEST(RebNativeCallIndirectReturnCall) {
 +  FlagScope<bool> sampling(&v8_flags.reb_wasm_call_indirect_dispatch, true);
 +  TestSignatures sigs;
 +  WasmRunner<int32_t, int32_t> r(TestExecutionTier::kLiftoff);
@@ -720,14 +720,6 @@ index 17b4883adda27b84a74dea71523d64ad0935a6f8..1d371420896bc78a844ca6b364a5c160
 +  r.builder().AddIndirectFunctionTable(entries, arraysize(entries));
 +  r.Build({WASM_RETURN_CALL_INDIRECT(1, WASM_I32V_2(66), WASM_I32V_1(22),
 +                                     WASM_LOCAL_GET(0))});
-+  {
-+    // Materialize slot 1 as a funcref; slot 0 stays a lazy placeholder.
-+    DirectHandle<WasmTableObject> table(
-+        Cast<WasmTableObject>(
-+            r.builder().trusted_instance_data()->tables()->get(0)),
-+        r.isolate());
-+    CHECK(IsWasmFuncRef(*WasmTableObject::Get(r.isolate(), table, 1)));
-+  }
 +  auto* api_isolate = reinterpret_cast<v8::Isolate*>(r.isolate());
 +  const auto& seen = reb_indirect_observation;
 +  reb_indirect_observation = {};

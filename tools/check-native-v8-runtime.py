@@ -30,7 +30,7 @@ TEST_NAMES = [
     "RebNativeCallIndirectRuntimeDispatch",
     "RebNativeCallIndirectAdmissionPredicate",
     "RebNativeCallIndirectNullAndOutOfBounds",
-    "RebNativeCallIndirectFuncRefAndReturnCall",
+    "RebNativeCallIndirectReturnCall",
     "RebNativeCallIndirectPreservesLiveValues",
     "RebNativeCallIndirectDisabledCompilation",
     "RebNativeBrTablePhysicalOnlyHasNoGuestMetadata",

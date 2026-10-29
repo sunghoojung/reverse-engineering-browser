@@ -162,16 +162,22 @@ static_assert(offsetof(NativeWasmGuestDispatchPayload, recipe_sha256) == 96);
   std::copy_n(bytes.begin() + 96, 32, value.recipe_sha256.begin());
   return true;
 }
+// Version 2 adds the exact outer dispatch at bytes 72..80. Version 1 reserved
+// bytes 72..128 and still decodes, with a zero parent dispatch.
 struct NativeWasmGuestInvocationPayload final {
-  std::uint16_t protocol_version = 1;
+  std::uint16_t protocol_version = 2;
   std::uint16_t payload_size = 128;
   std::uint32_t function_index = 0;
   std::uint64_t instance_id = 0;
   std::uint64_t invocation_id = 0;
   std::uint64_t adapter_artifact_id = 0;
   std::array<std::byte, 32> recipe_sha256{};
+  // The enclosing guest activation, and the renderer sequence number of its
+  // retained dispatch that was current when this activation began. Zero is
+  // not asserted; a parent without a dispatch names only the activation.
   std::uint64_t parent_invocation_id = 0;
-  std::array<std::byte, 56> reserved{};
+  std::uint64_t parent_dispatch_sequence_number = 0;
+  std::array<std::byte, 48> reserved{};
 };
 static_assert(sizeof(NativeWasmGuestInvocationPayload) == 128);
 static_assert(std::is_trivially_copyable_v<NativeWasmGuestInvocationPayload>);
@@ -183,6 +189,7 @@ static_assert(offsetof(NativeWasmGuestInvocationPayload, instance_id) == 8);
 static_assert(offsetof(NativeWasmGuestInvocationPayload, invocation_id) == 16);
 static_assert(offsetof(NativeWasmGuestInvocationPayload, adapter_artifact_id) == 24);
 static_assert(offsetof(NativeWasmGuestInvocationPayload, parent_invocation_id) == 64);
+static_assert(offsetof(NativeWasmGuestInvocationPayload, parent_dispatch_sequence_number) == 72);
 static_assert(offsetof(NativeWasmGuestInvocationPayload, recipe_sha256) == 32);
 [[nodiscard]] inline std::array<std::byte, 128> EncodeNativeWasmGuestInvocationPayload(
     const NativeWasmGuestInvocationPayload& value) noexcept {
@@ -201,8 +208,10 @@ static_assert(offsetof(NativeWasmGuestInvocationPayload, recipe_sha256) == 32);
                                 sizeof(value.adapter_artifact_id));
   native_guest_wire_detail::Put(out, 64, static_cast<std::uint64_t>(value.parent_invocation_id),
                                 sizeof(value.parent_invocation_id));
+  native_guest_wire_detail::Put(out, 72, value.parent_dispatch_sequence_number,
+                                sizeof(value.parent_dispatch_sequence_number));
   std::copy(value.recipe_sha256.begin(), value.recipe_sha256.end(), out.begin() + 32);
-  std::copy(value.reserved.begin(), value.reserved.end(), out.begin() + 72);
+  std::copy(value.reserved.begin(), value.reserved.end(), out.begin() + 80);
   return out;
 }
 [[nodiscard]] inline bool DecodeNativeWasmGuestInvocationPayload(
@@ -224,8 +233,10 @@ static_assert(offsetof(NativeWasmGuestInvocationPayload, recipe_sha256) == 32);
       native_guest_wire_detail::Get(bytes, 24, sizeof(value.adapter_artifact_id)));
   value.parent_invocation_id = static_cast<std::uint64_t>(
       native_guest_wire_detail::Get(bytes, 64, sizeof(value.parent_invocation_id)));
+  value.parent_dispatch_sequence_number =
+      native_guest_wire_detail::Get(bytes, 72, sizeof(value.parent_dispatch_sequence_number));
   std::copy_n(bytes.begin() + 32, 32, value.recipe_sha256.begin());
-  std::copy_n(bytes.begin() + 72, 56, value.reserved.begin());
+  std::copy_n(bytes.begin() + 80, 48, value.reserved.begin());
   return true;
 }
 }  // namespace reb

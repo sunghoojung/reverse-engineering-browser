@@ -240,9 +240,11 @@ def validate_event(event: object, line_number: int) -> None:
     ):
         raise ValueError(f"line {line_number}: native Wasm call_indirect observation is invalid")
     if event["type"] in ("wasm_guest_dispatch", "wasm_guest_invocation"):
+        # Invocation version 2 adds the exact parent dispatch at bytes 72..80.
+        versions = (1, 2) if event["type"] == "wasm_guest_invocation" else (1,)
         if (protocol_version != 3 or event["category"] != "vm" or event["flags"] != 0
                 or event["payload_truncated"] or len(payload) != 128
-                or payload[:4] != bytes((1, 0, 128, 0))
+                or payload[0] not in versions or payload[1:4] != bytes((0, 128, 0))
                 or any(event[k] == "0" for k in ("session_id", "sequence_number", "monotonic_time_ns", "frame_id", "artifact_id"))
                 or not 1 <= event["process_id"] <= 0xFFFFFFFF
                 or not 1 <= event["thread_id"] <= 0xFFFFFFFF):
@@ -253,9 +255,13 @@ def validate_event(event: object, line_number: int) -> None:
 
         invalid = at(4, 4) >= 16777216
         if event["type"] == "wasm_guest_invocation":
+            parent_dispatch = at(72, 8)
             invalid |= (event["parent_event_id"] != "0" or at(8, 8) == 0 or at(16, 8) == 0
                         or at(24, 8) == 0 or at(24, 8) == int(event["artifact_id"])
-                        or at(64, 8) == at(16, 8) or not any(payload[32:64]) or any(payload[72:]))
+                        or at(64, 8) == at(16, 8) or not any(payload[32:64]) or any(payload[80:])
+                        or (parent_dispatch != 0
+                            and (payload[0] != 2 or at(64, 8) == 0
+                                 or parent_dispatch >= int(event["sequence_number"]))))
         else:
             invalid |= (not 0 < int(event["parent_event_id"]) < int(event["sequence_number"])
                         or not 8 <= at(8, 4) < 16777216 or at(16, 4) >= 16777216

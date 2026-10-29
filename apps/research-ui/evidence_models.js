@@ -278,11 +278,16 @@
         const bytes = Uint8Array.from(event.payload.match(/../g), b => parseInt(b,16));
         const view = new DataView(bytes.buffer);
         const u64 = n => view.getBigUint64(n,true);
-        if (view.getUint16(0,true) !== 1 || view.getUint16(2,true) !== 128 || view.getUint32(4,true) >= 16777216) return null;
+        const version = view.getUint16(0,true);
+        if (!(version === 1 || (version === 2 && event.type === 'wasm_guest_invocation')) ||
+          view.getUint16(2,true) !== 128 || view.getUint32(4,true) >= 16777216) return null;
         if (event.type === 'wasm_guest_invocation') {
+          // Version 2 names the exact parent dispatch at bytes 72..80; version 1 reserved them.
+          const parentDispatch = u64(72);
           return event.parent_event_id === '0' && u64(8) > 0n && u64(16) > 0n && u64(24) > 0n &&
             u64(24) !== BigInt(event.artifact_id) && u64(64) !== u64(16) &&
-            bytes.slice(32,64).some(b => b !== 0) && bytes.slice(72).every(b => b === 0) ? {} : null;
+            (parentDispatch === 0n || (version === 2 && u64(64) > 0n && parentDispatch < BigInt(event.sequence_number))) &&
+            bytes.slice(32,64).some(b => b !== 0) && bytes.slice(80).every(b => b === 0) ? {} : null;
         }
         const length = view.getUint32(72,true);
         return isCanonicalInteger(event.parent_event_id,1n,uint64Max) && BigInt(event.parent_event_id) < BigInt(event.sequence_number) &&

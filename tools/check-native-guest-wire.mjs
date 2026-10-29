@@ -31,12 +31,14 @@ for (const [key,value] of Object.entries({monotonic_time_ns:'01',instruction_poi
  const bad=structuredClone(doc); bad.workspaces[0].native_guest_samples[0][key]=value;
  assert.equal(model.isVmOpcodeWorkspaceDocument(bad),false,key);
 }
-for(const mode of ['default','wide-identities','version','size','reserved','pc-range','snapshot-limit','memory-overflow','sample-limit','digest','signed-adjustment','parent','truncated','big-endian']){
+const invalidInvocation=['reserved','parent-dispatch-order','parent-dispatch-orphan','legacy-reserved'];
+const wireModes=['default','wide-identities','version','size','reserved','pc-range','snapshot-limit','memory-overflow','sample-limit','digest','signed-adjustment','parent','truncated','big-endian','legacy-invocation','parent-dispatch',...invalidInvocation.slice(1)];
+for(const mode of wireModes){
  const events=execFileSync(exe,['--case',mode],{encoding:'utf8'}).trim().split('\n').map(JSON.parse);
- const expected=[mode!=='reserved',['default','wide-identities','reserved','signed-adjustment'].includes(mode)];
+ const expected=[!invalidInvocation.includes(mode),['default','wide-identities','signed-adjustment','legacy-invocation','parent-dispatch',...invalidInvocation].includes(mode)];
  events.forEach((event,index)=>assert.equal(model.isBrokerEvent(event),expected[index],mode+' '+index));
  const python="import importlib.util,json,sys\ns=importlib.util.spec_from_file_location('validator',sys.argv[1]);m=importlib.util.module_from_spec(s);s.loader.exec_module(m)\nfor event in json.load(sys.stdin):\n try:m.validate_event(event,1);print('true')\n except ValueError:print('false')";
  const verdict=execFileSync('python3',['-c',python,new URL('tools/validate-evidence-store.py',root).pathname],{input:JSON.stringify(events),encoding:'utf8'}).trim().split('\n').map(v=>v==='true');
  assert.deepEqual(verdict,expected,'Python '+mode);
 }
-console.log('PASS actual C++ encoder → Rust artifact-backed guest workspace → JS/Python (14 wire cases); no live browser claim');
+console.log(`PASS actual C++ encoder → Rust artifact-backed guest workspace → JS/Python (${wireModes.length} wire cases); no live browser claim`);

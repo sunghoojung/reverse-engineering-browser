@@ -54,7 +54,7 @@ fn scope(a: &Value, b: &Value) -> bool {
         .iter()
         .all(|k| a[*k] == b[*k])
 }
-fn payload(event: &Value, kind: &str) -> Option<Vec<u8>> {
+fn payload(event: &Value, kind: &str, versions: &[u8]) -> Option<Vec<u8>> {
     if event["protocol_version"] != 3
         || event["payload_size"] != 128
         || event["payload_encoding"] != "hex"
@@ -70,7 +70,19 @@ fn payload(event: &Value, kind: &str) -> Option<Vec<u8>> {
     {
         return None;
     }
-    super::event_payload(event, kind)
+    super::event_payload_versions(event, kind, versions)
+}
+/// An invocation marker's payload. Version 2 names the exact parent dispatch
+/// at bytes 72..80; version 1 reserved them, so its parent dispatch is zero.
+/// A parent dispatch names its activation and precedes the marker.
+fn invocation_payload(marker: &Value) -> Option<Vec<u8>> {
+    let m = payload(marker, "wasm_guest_invocation", &[1, 2])?;
+    let dispatch = le64(&m, 72);
+    let reserved = if m[0] == 1 { 72 } else { 80 };
+    (m[reserved..].iter().all(|b| *b == 0)
+        && (dispatch == 0
+            || (le64(&m, 64) != 0 && dispatch < decimal(&marker["sequence_number"])?)))
+    .then_some(m)
 }
 fn child<'a>(artifacts: &'a [Value], id: u64, module: &Value, kind: &str) -> Option<&'a Value> {
     if id == 0 {
@@ -208,7 +220,7 @@ fn resolve(
     invocations: &BTreeMap<(String, u32, String), &Value>,
     facts: &mut ModuleFacts,
 ) -> Option<Value> {
-    let p = payload(event, "wasm_guest_dispatch")?;
+    let p = payload(event, "wasm_guest_dispatch", &[1])?;
     if !scope(event, module) || event["artifact_id"] != module["artifact_id"] {
         return None;
     }
@@ -241,12 +253,11 @@ fn resolve(
     let mut key = super::event_identity(event)?;
     key.2 = event["parent_event_id"].as_str()?.to_owned();
     let marker = *invocations.get(&key)?;
-    let m = payload(marker, "wasm_guest_invocation")?;
+    let m = invocation_payload(marker)?;
     if !scope(marker, event)
         || marker["artifact_id"] != module["artifact_id"]
         || marker["thread_id"] != event["thread_id"]
         || marker["parent_event_id"] != "0"
-        || m[72..].iter().any(|b| *b != 0)
         || le32(&m, 4) != function
         || le64(&m, 8) != instance
         || le64(&m, 16) != invocation
@@ -266,7 +277,7 @@ fn resolve(
     let mut creator_key = super::event_identity(marker)?;
     creator_key.2 = adapter["creator_event_id"].as_str()?.to_owned();
     let creator = *invocations.get(&creator_key)?;
-    let creator_payload = payload(creator, "wasm_guest_invocation")?;
+    let creator_payload = invocation_payload(creator)?;
     if !scope(creator, marker)
         || creator["artifact_id"] != module["artifact_id"]
         || creator["parent_event_id"] != "0"
@@ -276,7 +287,6 @@ fn resolve(
         || le64(&creator_payload, 64) == le64(&creator_payload, 16)
         || le64(&creator_payload, 24) != le64(&m, 24)
         || creator_payload[32..64] != m[32..64]
-        || creator_payload[72..].iter().any(|b| *b != 0)
         || decimal(&creator["sequence_number"])? > decimal(&marker["sequence_number"])?
         || decimal(&creator["monotonic_time_ns"])? > decimal(&marker["monotonic_time_ns"])?
     {
@@ -692,6 +702,43 @@ mod tests {
         assert_eq!(f.read().count, 0);
     }
     #[test]
+    fn native_guest_invocation_version_2_names_a_prior_parent_dispatch() {
+        let mut f = Fixture::new();
+        mutate(&mut f.events[0], |p| {
+            p[0] = 2;
+            p[64] = 5;
+        });
+        let rows = f.read();
+        assert_eq!(rows.count, 1);
+        assert_eq!(rows.rows[0]["parent_invocation_id"], "5");
+        // Bytes past the parent dispatch stay reserved, version 1 reserved the
+        // dispatch itself, and a dispatch must precede its marker (sequence 1).
+        for (version, offset) in [(2, 80), (2, 72), (1, 72), (3, 127)] {
+            let mut f = Fixture::new();
+            mutate(&mut f.events[0], |p| {
+                p[0] = version;
+                p[64] = 5;
+                p[offset] = 1;
+            });
+            assert_eq!(f.read().count, 0, "version {version} offset {offset}");
+        }
+        // Marker 9 may name dispatch 3 of parent 5, but never without a parent.
+        for parent in [5, 0] {
+            let mut f = Fixture::new();
+            f.events[0]["sequence_number"] = json!("9");
+            f.events[1]["parent_event_id"] = json!("9");
+            f.events[1]["sequence_number"] = json!("10");
+            f.aux[0]["creator_event_id"] = json!("9");
+            f.aux[1]["creator_event_id"] = json!("10");
+            mutate(&mut f.events[0], |p| {
+                p[0] = 2;
+                p[64] = parent;
+                p[72] = 3;
+            });
+            assert_eq!(f.read().count, u64::from(parent != 0), "parent {parent}");
+        }
+    }
+    #[test]
     fn native_guest_large_module_keeps_exact_site_samples() {
         let (bytes, site) = crate::vm_opcode::native_wasm::tests::padded_module(1_000_001);
         let f = Fixture::with_module(bytes, 0, site);
@@ -935,6 +982,11 @@ mod tests {
             "parent",
             "truncated",
             "big-endian",
+            "legacy-invocation",
+            "parent-dispatch",
+            "parent-dispatch-order",
+            "parent-dispatch-orphan",
+            "legacy-reserved",
         ] {
             let output = std::process::Command::new(&exe)
                 .args([
@@ -960,7 +1012,10 @@ mod tests {
                 .lines()
                 .map(|s| serde_json::from_str::<Value>(s).unwrap())
                 .collect::<Vec<_>>();
-            let accepted = matches!(mode, "default" | "wide-identities");
+            let accepted = matches!(
+                mode,
+                "default" | "wide-identities" | "legacy-invocation" | "parent-dispatch"
+            );
             let rows = collect(
                 root.path(),
                 &module,

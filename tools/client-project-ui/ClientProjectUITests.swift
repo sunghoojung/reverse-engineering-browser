@@ -32,6 +32,11 @@ final class ClientProjectUITests: XCTestCase {
       let destination = URL(fileURLWithPath: output).appendingPathComponent("destinations")
         .appendingPathComponent(phase, isDirectory: true).path
       app.typeKey("g", modifierFlags: [.command, .shift])
+      // The panel can apply the shortcut late, and a "/" typed into Save As
+      // opens a second Go to Folder that reappears after Return and keeps Save
+      // disabled. Type only once the shortcut's own path field exists.
+      let pathField = app.textFields["PathTextField"]
+      XCTAssertTrue(pathField.waitForExistence(timeout: 10), "Go to Folder did not open: " + app.debugDescription)
       app.typeKey("a", modifierFlags: [.command])
       app.typeText(destination)
       // Prove typing reached a separate path field, not Save As. Focus that
@@ -48,11 +53,16 @@ final class ClientProjectUITests: XCTestCase {
       navigation.lifetime = .keepAlways
       add(navigation)
       folder.typeKey(.return, modifierFlags: [])
+      // The app preselects this folder, so the location below can match before
+      // navigation. Save stays disabled while Go to Folder remains attached.
+      let closed = XCTNSPredicateExpectation(predicate: NSPredicate(format: "exists == false"), object: pathField)
+      XCTAssertEqual(XCTWaiter.wait(for: [closed], timeout: 10), .completed,
+                     "Go to Folder did not close after Return: " + app.debugDescription)
       let location = window.sheets.popUpButtons.matching(
         NSPredicate(format: "value == %@ OR label == %@", phase, phase)).firstMatch
       XCTAssertTrue(location.waitForExistence(timeout: 10),
                     "Save panel did not select the owned phase directory: " + app.debugDescription)
-      XCTAssertTrue(save.isEnabled, "Real Save button is disabled")
+      XCTAssertTrue(save.isEnabled, "Real Save button is disabled: " + app.debugDescription)
       let screenshot = app.screenshot()
       // The UI-test runner is sandboxed. XCTest owns screenshot persistence;
       // the outer driver exports attachments and checks the native byte receipt.

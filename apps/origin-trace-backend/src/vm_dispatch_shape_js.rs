@@ -2559,6 +2559,10 @@ pub fn worker_entry() {
                 unsafe { libc::raise(libc::SIGKILL) };
             }
             Ok("protocol") => {
+                // Read the whole request first, as a real worker does. Exiting
+                // with input unread races the parent's write into a broken
+                // pipe, which is reported as a crash instead.
+                let _ = std::io::copy(&mut std::io::stdin(), &mut std::io::sink());
                 print!("invalid worker reply");
                 std::process::exit(0);
             }

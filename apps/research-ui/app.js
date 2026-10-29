@@ -2042,6 +2042,91 @@ const capturedExportPanel = installCapturedExportDialog({
         return panel;
       }
 
+      const vmObservedStreamLabels = {'native-guest': 'Native guest', 'native-wasm': 'Native br_table', 'dispatch-sample': 'Native dispatch sample'};
+      const vmObservedOmission = reason => /^(?:observed-claim|nested-guest)/.test(reason);
+      function vmHasRuntimeClaims(workspace) {
+        return workspace.observed_claims !== undefined || workspace.nested_guests !== undefined ||
+          workspace.coverage.omissions.some(row => vmObservedOmission(row.reason));
+      }
+      function vmObservedSiteText(claim) {
+        if (claim.site === null) return 'site not recorded, artifact scope';
+        if (claim.site.line !== null) return `line ${claim.site.line}:${claim.site.column}, sole interpreter candidate`;
+        return `f${claim.site.function_index} · byte ${claim.site.byte_offset}`;
+      }
+      function vmObservedHandlerText(claim) {
+        if (claim.handler.kind === 'handler-index') return `handler ${claim.handler.handler_index}`;
+        return claim.handler.is_default ? `default arm ${claim.handler.arm}` : `arm ${claim.handler.arm}`;
+      }
+      function vmObservedStaticText(claim) {
+        const comparison = claim.static_claim;
+        const javascript = claim.stream === 'dispatch-sample';
+        if (comparison.state === 'agrees') return javascript
+          ? `Static claim agrees: recovery names handler ${comparison.handler_index ?? comparison.opcode} for opcode ${comparison.opcode}.`
+          : `Static claim agrees: this arm is labeled selector ${comparison.opcode}.`;
+        if (comparison.state === 'disagrees') return javascript
+          ? `Static claim disagrees: recovery names handler ${comparison.handler_index ?? comparison.opcode} for opcode ${comparison.opcode}. Both are kept.`
+          : `Static claim disagrees: this arm is labeled opcode ${comparison.opcode}, but guest opcode ${claim.opcode} ran here. Both are kept.`;
+        if (comparison.state === 'withheld') return `Static claim withheld: recovery found opcode ${comparison.opcode}, but no interpreter-candidate site ties it to a table or switch.`;
+        return 'No static claim: only runtime evidence names this handler.';
+      }
+      function vmObservedEventsText(events, total) {
+        const listed = events.map(event => `process ${event.process_id} seq ${event.sequence_number}`).join(', ');
+        return `Events ${listed}${total > events.length ? `, and ${total - events.length} more retained rows` : ''}`;
+      }
+      function vmGuestBufferText(side) {
+        return `memory ${side.memory_index} at ${side.memory_base}, ${side.memory_length} bytes, snapshot ${side.bytecode_artifact_id}`;
+      }
+
+      function renderVmRuntimeClaims(workspace) {
+        const panel = document.createElement('section'); panel.className = 'vm-workspace-card';
+        panel.append(textElement('h4', '', 'Observed dispatch claims'),
+          textElement('p', 'vm-workspace-notice', 'Runtime claims from retained native rows at interpreter-candidate sites. They sit beside the static handler list and never replace it. Each claim names its supporting events and how it compares with the static claim.'));
+        const claims = workspace.observed_claims ?? [];
+        appendVmPagedRows(panel, claims, 'observed claims', claim => {
+          const row = document.createElement('details'); row.className = 'vm-effect-row';
+          row.dataset.staticClaim = claim.static_claim.state;
+          const summary = document.createElement('summary');
+          const opcode = claim.opcode === null ? 'guest opcode not observed' : `opcode ${claim.opcode}`;
+          const selector = claim.selector === null ? '' : `selector ${claim.selector} to `;
+          summary.append(textElement('span', 'vm-native-row-identity', `${vmObservedStreamLabels[claim.stream]} · ${vmObservedSiteText(claim)}`), document.createElement('br'),
+            textElement('span', 'vm-native-row-position', `${opcode} · ${selector}${vmObservedHandlerText(claim)} · ${vmCountText(claim.sample_count, 'sample')}`));
+          row.append(summary, textElement('p', 'vm-effect-detail vm-observed-static', vmObservedStaticText(claim)),
+            textElement('p', 'vm-effect-detail', vmObservedEventsText(claim.events, claim.sample_count)),
+            textElement('pre', 'vm-effect-detail vm-evidence-audit', JSON.stringify(claim, null, 2)));
+          return row;
+        });
+        if (!claims.length) panel.append(textElement('p', 'vm-selection-empty', 'No observed claims. Retained native rows at an interpreter-candidate site would appear here.'));
+        for (const omission of workspace.coverage.omissions.filter(row => vmObservedOmission(row.reason))) {
+          panel.append(textElement('p', 'vm-workspace-notice', `${omission.reason}: ${omission.detail}`));
+        }
+        if (workspace.runtime !== 'webassembly') return panel;
+        panel.append(textElement('h4', '', 'Nested guests'),
+          textElement('p', 'vm-workspace-notice', 'An inner interpreter is a guest activation that names a parent invocation, runs at another interpreter-candidate site and reads another guest buffer. Its outer handler is the parent dispatch retained last before it began.'));
+        const nested = workspace.nested_guests ?? [];
+        appendVmPagedRows(panel, nested, 'nested guests', guest => {
+          const {outer, inner} = guest;
+          const row = document.createElement('details'); row.className = 'vm-effect-row';
+          const summary = document.createElement('summary');
+          const arm = outer.is_default ? `default arm ${outer.selected_arm}` : `arm ${outer.selected_arm}`;
+          summary.append(textElement('span', 'vm-native-row-identity', `Inner f${inner.function_index} · byte ${inner.module_byte_offset} · invocation ${inner.invocation_id}`), document.createElement('br'),
+            textElement('span', 'vm-native-row-position', `Driven by outer f${outer.function_index} · byte ${outer.module_byte_offset} · opcode ${outer.opcode}, selector ${outer.selector} to ${arm}`));
+          const opcodes = inner.observed_opcodes.map(entry => `${entry.opcode} (${vmCountText(entry.sample_count, 'sample')})`).join(', ');
+          const omitted = inner.omitted_opcode_count ? `, and ${inner.omitted_opcode_count} more opcodes` : '';
+          const basis = outer.basis === 'contiguous-sequence'
+            ? 'Every renderer event between the outer dispatch and the inner invocation is retained, so no other outer dispatch ran in between.'
+            : 'Events between the outer dispatch and the inner invocation are missing or include a gap, so this is the nearest retained outer dispatch, not proof of the exact one.';
+          row.append(summary,
+            textElement('p', 'vm-effect-detail', `Inner guest opcodes: ${opcodes || 'none'}${omitted} · ${vmCountText(inner.sample_count, 'retained sample')}`),
+            textElement('p', 'vm-effect-detail', `Inner buffer ${vmGuestBufferText(inner)}. Outer buffer ${vmGuestBufferText(outer)}.`),
+            textElement('p', 'vm-effect-detail', `Outer dispatch process ${outer.dispatch_event.process_id} seq ${outer.dispatch_event.sequence_number}, invocation ${outer.invocation_id}. ${basis}`),
+            textElement('p', 'vm-effect-detail', vmObservedEventsText(inner.events, inner.sample_count)),
+            textElement('pre', 'vm-effect-detail vm-evidence-audit', JSON.stringify(guest, null, 2)));
+          return row;
+        });
+        if (!nested.length) panel.append(textElement('p', 'vm-selection-empty', 'No nested guest retained. Live capture does not assert parent invocations yet.'));
+        return panel;
+      }
+
       function renderVmOpcodeWorkspace(selected) {
         const workspace = vmOpcodeWorkspaceForFinding(state.vmOpcodeWorkspace, selected);
         const container = document.createElement('section'); container.className = 'vm-workspace';
@@ -2108,6 +2193,7 @@ const capturedExportPanel = installCapturedExportDialog({
           ['effects', 'Effects', renderVmEffects],
           ...(workspace.runtime === 'webassembly' ? [['dispatch', 'Dispatch sites', renderVmDispatchSites], ['tables', 'Handler tables', renderVmHandlerTables], ['native-wasm', 'Native observations', renderNativeWasmObservations]]
             : workspace.dispatch_classification ? [['dispatch', 'Dispatch sites', renderVmDispatchStructure]] : []),
+          ...(vmHasRuntimeClaims(workspace) ? [['runtime', 'Runtime claims', renderVmRuntimeClaims]] : []),
           ['bytecode', 'Bytes', renderVmBytecode],
           ['reachability', 'Reachability', renderVmReachability],
           ['coverage', 'Coverage', renderVmWorkspaceCoverage],

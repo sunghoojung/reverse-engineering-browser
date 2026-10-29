@@ -87,10 +87,21 @@ app-build: heap-snapshot decoder broker artifact-receiver native-console-build $
 
 # Rendered acceptance of the packaged app: a hosted XCTest drives its real
 # WKWebView with native AppKit input against the packaged backend. Its native
-# Wasm evidence is the store exported by native-wasm-golden-check. macOS and
-# full Xcode only; screenshots land in build/rendered-ui-qa/screenshots.
-rendered-ui-check: app-build e2e native-wasm-golden-check
+# Wasm evidence is the store exported by native-wasm-golden-check, plus the
+# owned two-level interpreter store behind observed claims and nested guests.
+# macOS and full Xcode only; screenshots land in build/rendered-ui-qa/screenshots.
+rendered-ui-check: app-build e2e native-wasm-golden-check vm-observed-evidence
 	node tools/check-origin-trace-rendered-ui.mjs
+
+# The exact store the observed-claims analyzer test builds and validates.
+VM_OBSERVED_EVIDENCE := $(abspath $(BUILD_DIR)/vm-observed-evidence)
+.PHONY: vm-observed-evidence
+vm-observed-evidence:
+	rm -rf "$(VM_OBSERVED_EVIDENCE)"
+	REB_VM_OBSERVED_EVIDENCE_OUTPUT="$(VM_OBSERVED_EVIDENCE)" cargo test --locked \
+		--manifest-path apps/origin-trace-backend/Cargo.toml --lib -- --exact \
+		vm_opcode::observed::tests::nested_guest_links_inner_interpreter_to_outer_handler
+	test -s "$(VM_OBSERVED_EVIDENCE)/manifest.jsonl"
 
 app: app-build
 	open "$(CURDIR)/$(BUILD_DIR)/Origin Trace.app"

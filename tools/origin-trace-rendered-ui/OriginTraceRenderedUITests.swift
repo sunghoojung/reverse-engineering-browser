@@ -772,6 +772,36 @@ final class OriginTraceRenderedUITests: XCTestCase {
       try await ui.revealVmHeading(dispatch, "Dispatch structure")
       try await assertLayout(ui, "#screen-vm", "\(size.name) vm parse failure")
       try await ui.screenshot("vm-parse-failed-\(size.name)")
+
+      // Observed claims sit beside the static handlers. The owned two-level
+      // interpreter keeps one contradiction and one inner interpreter.
+      try await setVmAnalysisExpanded(ui, true)
+      try await ui.click("#vm-list .vm-row", containing: "artifact 401")
+      try await setVmAnalysisExpanded(ui, false)
+      try await ui.click("[data-vm-panel='runtime']")
+      let runtime = "[data-vm-panel-content='runtime']"
+      try await ui.waitUntil("!document.querySelector(\"\(runtime)\")?.hidden", "runtime claims panel did not open")
+      let claims = try await ui.value("document.querySelector(\"\(runtime)\").innerText") as? String ?? ""
+      XCTAssertTrue(claims.contains("of 5 observed claims"), "\(size.name): every observed claim is listed: \(claims)")
+      XCTAssertTrue(claims.contains("Driven by outer f1"), "\(size.name): the nested guest names its outer site: \(claims)")
+      let contradiction = "\(runtime) details[data-static-claim='disagrees']"
+      try await ui.click("\(contradiction) summary")
+      let opened = try await ui.value("document.querySelector(\"\(contradiction)\").open") as? Bool
+      XCTAssertEqual(opened, true, "\(size.name): native input expands the contradicting claim")
+      let comparison = try await ui.value("document.querySelector(\"\(contradiction) .vm-observed-static\").textContent") as? String ?? ""
+      XCTAssertTrue(comparison.contains("labeled opcode 2, but guest opcode 6 ran here"), "\(size.name): disagreement is explicit: \(comparison)")
+      try await assertInert(ui, "\(size.name) vm runtime claims")
+      try await ui.revealVmHeading(runtime, "Observed dispatch claims")
+      try await assertLayout(ui, "#screen-vm", "\(size.name) vm runtime claims")
+      try await assertVmDock(ui, size.name)
+      let runtimeInset = try await ui.vmCardInsetOffenders(runtime)
+      XCTAssertEqual(runtimeInset, [], "\(size.name) vm runtime claims: card content shares the 12px inset")
+      try await ui.screenshot("vm-runtime-claims-\(size.name)")
+      try await revealAndAssertFullyVisible(ui, "\(contradiction) .vm-observed-static", "\(size.name) contradiction")
+      try await ui.screenshot("vm-runtime-contradiction-\(size.name)")
+      try await ui.revealVmHeading(runtime, "Nested guests")
+      try await revealAndAssertFullyVisible(ui, "\(runtime) [data-vm-paged-rows='nested guests'] summary", "\(size.name) nested guest")
+      try await ui.screenshot("vm-nested-guest-\(size.name)")
     }
   }
 

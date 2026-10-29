@@ -3388,6 +3388,8 @@ body.resizing-panes-y, body.resizing-panes-y * { cursor: row-resize !important; 
 .vm-effect-row summary { padding: 10px; cursor: pointer; overflow-wrap: anywhere; }
 .vm-effect-row summary:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 .vm-native-row-identity { color: var(--muted); font: 11px/1.5 var(--mono); }
+/* The rule replaces 3px of inset, so the contradiction text stays aligned with its row. */
+.vm-workspace-card .vm-effect-row[data-static-claim="disagrees"] > .vm-observed-static { border-left: 3px solid color-mix(in srgb, var(--amber) 70%, var(--line)); padding-left: 9px; color: var(--text); }
 .vm-evidence-pager { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding: 6px 10px; min-width: 0; }
 .vm-evidence-pager button { max-width: 100%; height: auto; white-space: normal; }
 .vm-selection-inspector { min-width: 0; }

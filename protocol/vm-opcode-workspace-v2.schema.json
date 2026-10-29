@@ -956,6 +956,24 @@
           "description": "Accepted native guest samples. Each one coincides with a physical br_table execution when the physical sampler is enabled, so this count overlaps native_wasm_observation_count.",
           "type": "integer",
           "minimum": 0
+        },
+        "observed_claims": {
+          "description": "Producer 2.12.0 and later: runtime claims beside the static handler list. Absent when no retained runtime row supports a claim.",
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 256,
+          "items": {
+            "$ref": "#/$defs/observedClaim"
+          }
+        },
+        "nested_guests": {
+          "description": "Producer 2.12.0 and later: inner interpreters linked to the outer site and handler that drove them. Absent when no retained guest activation qualifies.",
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 64,
+          "items": {
+            "$ref": "#/$defs/nestedGuest"
+          }
         }
       },
       "allOf": [
@@ -991,6 +1009,20 @@
           "if": {
             "required": [
               "native_guest_samples"
+            ]
+          },
+          "then": {
+            "properties": {
+              "runtime": {
+                "const": "webassembly"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "nested_guests"
             ]
           },
           "then": {
@@ -2560,6 +2592,655 @@
               }
             }
           ]
+        }
+      }
+    },
+    "observedClaim": {
+      "description": "Producer 2.12.0 and later: one observed runtime claim at an interpreter-candidate dispatch site, aggregated from retained rows of one stream that agree on site, selector, opcode and handler. Never structural, never merged into handlers.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "stream",
+        "confidence",
+        "site",
+        "site_attribution",
+        "selector",
+        "opcode",
+        "handler",
+        "sample_count",
+        "events",
+        "static_claim"
+      ],
+      "properties": {
+        "stream": {
+          "enum": [
+            "native-guest",
+            "native-wasm",
+            "dispatch-sample"
+          ]
+        },
+        "confidence": {
+          "const": "observed"
+        },
+        "site": {
+          "anyOf": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "function_index",
+                "byte_offset",
+                "line",
+                "column"
+              ],
+              "properties": {
+                "function_index": {
+                  "anyOf": [
+                    {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 16777215
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "byte_offset": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "line": {
+                  "anyOf": [
+                    {
+                      "type": "integer",
+                      "minimum": 1
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "column": {
+                  "anyOf": [
+                    {
+                      "type": "integer",
+                      "minimum": 1
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                }
+              }
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "site_attribution": {
+          "enum": [
+            "exact",
+            "sole-interpreter-candidate",
+            "artifact"
+          ]
+        },
+        "selector": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4294967295
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "opcode": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4294967295
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "handler": {
+          "oneOf": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "kind",
+                "arm",
+                "is_default"
+              ],
+              "properties": {
+                "kind": {
+                  "const": "br-table-arm"
+                },
+                "arm": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 16777215
+                },
+                "is_default": {
+                  "type": "boolean"
+                }
+              }
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "kind",
+                "handler_index"
+              ],
+              "properties": {
+                "kind": {
+                  "const": "handler-index"
+                },
+                "handler_index": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 4294967295
+                }
+              }
+            }
+          ]
+        },
+        "sample_count": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "events": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 8,
+          "items": {
+            "$ref": "#/$defs/eventIdentity"
+          }
+        },
+        "static_claim": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "state",
+            "opcode",
+            "handler_index",
+            "byte_offset"
+          ],
+          "properties": {
+            "state": {
+              "enum": [
+                "agrees",
+                "disagrees",
+                "withheld",
+                "absent"
+              ]
+            },
+            "opcode": {
+              "anyOf": [
+                {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 4294967295
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "handler_index": {
+              "anyOf": [
+                {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 4294967295
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "byte_offset": {
+              "anyOf": [
+                {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "allOf": [
+            {
+              "if": {
+                "properties": {
+                  "state": {
+                    "const": "absent"
+                  }
+                }
+              },
+              "then": {
+                "properties": {
+                  "opcode": {
+                    "type": "null"
+                  },
+                  "handler_index": {
+                    "type": "null"
+                  },
+                  "byte_offset": {
+                    "type": "null"
+                  }
+                }
+              }
+            },
+            {
+              "if": {
+                "properties": {
+                  "state": {
+                    "const": "withheld"
+                  }
+                }
+              },
+              "then": {
+                "properties": {
+                  "opcode": {
+                    "type": "integer"
+                  },
+                  "handler_index": {
+                    "type": "null"
+                  },
+                  "byte_offset": {
+                    "type": "null"
+                  }
+                }
+              }
+            },
+            {
+              "if": {
+                "properties": {
+                  "state": {
+                    "enum": [
+                      "agrees",
+                      "disagrees"
+                    ]
+                  }
+                }
+              },
+              "then": {
+                "properties": {
+                  "opcode": {
+                    "type": "integer"
+                  },
+                  "byte_offset": {
+                    "type": "integer"
+                  }
+                }
+              }
+            }
+          ]
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "stream": {
+                "const": "dispatch-sample"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "site_attribution": {
+                "enum": [
+                  "sole-interpreter-candidate",
+                  "artifact"
+                ]
+              },
+              "selector": {
+                "type": "null"
+              },
+              "opcode": {
+                "type": "integer"
+              },
+              "handler": {
+                "properties": {
+                  "kind": {
+                    "const": "handler-index"
+                  }
+                }
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "site_attribution": {
+                "const": "exact"
+              },
+              "selector": {
+                "type": "integer"
+              },
+              "handler": {
+                "properties": {
+                  "kind": {
+                    "const": "br-table-arm"
+                  }
+                }
+              },
+              "static_claim": {
+                "properties": {
+                  "state": {
+                    "enum": [
+                      "agrees",
+                      "disagrees",
+                      "absent"
+                    ]
+                  },
+                  "handler_index": {
+                    "type": "null"
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "stream": {
+                "const": "native-wasm"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "opcode": {
+                "type": "null"
+              },
+              "static_claim": {
+                "properties": {
+                  "state": {
+                    "enum": [
+                      "agrees",
+                      "absent"
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "stream": {
+                "const": "native-guest"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "opcode": {
+                "type": "integer"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "site_attribution": {
+                "const": "artifact"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "site": {
+                "type": "null"
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "site": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "site_attribution": {
+                "const": "exact"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "site": {
+                "properties": {
+                  "function_index": {
+                    "type": "integer"
+                  },
+                  "line": {
+                    "type": "null"
+                  },
+                  "column": {
+                    "type": "null"
+                  }
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "nestedGuest": {
+      "description": "Producer 2.12.0 and later: a native guest activation that names a parent invocation, runs at another interpreter-candidate dispatch site and reads another guest buffer. The outer dispatch is the parent's last retained sample before the inner invocation began.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "confidence",
+        "instance_id",
+        "outer",
+        "inner"
+      ],
+      "properties": {
+        "confidence": {
+          "const": "observed"
+        },
+        "instance_id": {
+          "$ref": "#/$defs/nativeNonzeroUint64"
+        },
+        "outer": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "invocation_id",
+            "invocation_event",
+            "function_index",
+            "module_byte_offset",
+            "memory_index",
+            "memory_base",
+            "memory_length",
+            "bytecode_artifact_id",
+            "dispatch_event",
+            "selector",
+            "opcode",
+            "selected_arm",
+            "is_default",
+            "instruction_pointer",
+            "basis"
+          ],
+          "properties": {
+            "invocation_id": {
+              "$ref": "#/$defs/nativeNonzeroUint64"
+            },
+            "invocation_event": {
+              "$ref": "#/$defs/nativeEventIdentity"
+            },
+            "function_index": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 16777215
+            },
+            "module_byte_offset": {
+              "type": "integer",
+              "minimum": 8,
+              "maximum": 16777215
+            },
+            "memory_index": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4294967295
+            },
+            "memory_base": {
+              "$ref": "#/$defs/nativeUint64"
+            },
+            "memory_length": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 65536
+            },
+            "bytecode_artifact_id": {
+              "$ref": "#/$defs/nativeNonzeroUint64"
+            },
+            "dispatch_event": {
+              "$ref": "#/$defs/nativeEventIdentity"
+            },
+            "selector": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4294967295
+            },
+            "opcode": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4294967295
+            },
+            "selected_arm": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 16777215
+            },
+            "is_default": {
+              "type": "boolean"
+            },
+            "instruction_pointer": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 65535
+            },
+            "basis": {
+              "enum": [
+                "contiguous-sequence",
+                "nearest-retained"
+              ]
+            }
+          }
+        },
+        "inner": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "invocation_id",
+            "invocation_event",
+            "function_index",
+            "module_byte_offset",
+            "memory_index",
+            "memory_base",
+            "memory_length",
+            "bytecode_artifact_id",
+            "sample_count",
+            "events",
+            "observed_opcodes",
+            "omitted_opcode_count"
+          ],
+          "properties": {
+            "invocation_id": {
+              "$ref": "#/$defs/nativeNonzeroUint64"
+            },
+            "invocation_event": {
+              "$ref": "#/$defs/nativeEventIdentity"
+            },
+            "function_index": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 16777215
+            },
+            "module_byte_offset": {
+              "type": "integer",
+              "minimum": 8,
+              "maximum": 16777215
+            },
+            "memory_index": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4294967295
+            },
+            "memory_base": {
+              "$ref": "#/$defs/nativeUint64"
+            },
+            "memory_length": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 65536
+            },
+            "bytecode_artifact_id": {
+              "$ref": "#/$defs/nativeNonzeroUint64"
+            },
+            "sample_count": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "events": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 8,
+              "items": {
+                "$ref": "#/$defs/nativeEventIdentity"
+              }
+            },
+            "observed_opcodes": {
+              "type": "array",
+              "maxItems": 64,
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "opcode",
+                  "sample_count"
+                ],
+                "properties": {
+                  "opcode": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 4294967295
+                  },
+                  "sample_count": {
+                    "type": "integer",
+                    "minimum": 1
+                  }
+                }
+              }
+            },
+            "omitted_opcode_count": {
+              "type": "integer",
+              "minimum": 0
+            }
+          }
         }
       }
     }

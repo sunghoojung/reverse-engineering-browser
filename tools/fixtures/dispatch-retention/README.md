@@ -4,6 +4,9 @@ These are repository-owned synthetic JavaScript interpreters and adversarial
 binding cases. No captured website source, vendor key or function map is used.
 `ledger.json` is the judged oracle, including base emitted handler counts,
 expected gated counts, the runtime invocation and observed result or error.
+Its ordered `review_case_files` hold up to 1,000 cases each to stay below the
+repository's 2 MiB tracked-file limit. Both checkers load every listed file and
+require the combined count to equal `review_case_count`.
 
 The Rust `owned_handler_retention_ledger` test runs the complete analysis and
 workspace path. `node --experimental-vm-modules tools/check-dispatch-retention.mjs`

@@ -7,7 +7,9 @@ import {createHash} from 'node:crypto';
 import {fileURLToPath} from 'node:url';
 const root=fileURLToPath(new URL('./fixtures/dispatch-retention/',import.meta.url));
 const ledger=JSON.parse(fs.readFileSync(path.join(root,'ledger.json'),'utf8'));
-for(const row of [...ledger.cases, ...(ledger.review_cases ?? [])]){
+const reviews=ledger.review_case_files.flatMap(file=>JSON.parse(fs.readFileSync(path.join(root,file),'utf8')));
+assert.equal(reviews.length,ledger.review_case_count,'Every judged review case must be loaded');
+for(const row of [...ledger.cases, ...reviews]){
   const bytes = row.hex ? Buffer.from(row.hex, 'hex') : row.parts ? Buffer.from(row.parts.map(part => part.template
     ? Array.from({length: part.count}, (_, offset) => part.template.replaceAll('%i%', String(part.start + offset))
       .replaceAll('%mod%', String((part.start + offset) % part.modulus))).join('')
@@ -34,4 +36,4 @@ for(const row of [...ledger.cases, ...(ledger.review_cases ?? [])]){
     if(row.runtime.error==='Error')assert.equal(result.message,row.runtime.message,row.file);
   }else assert.equal(result.value,row.runtime.value,`${row.file}: ${JSON.stringify(result)}`);
 }
-console.log(`PASS ${ledger.cases.length + (ledger.review_cases?.length ?? 0)} owned dispatch retention runtime judgments`);
+console.log(`PASS ${ledger.cases.length + reviews.length} owned dispatch retention runtime judgments`);

@@ -4179,12 +4179,19 @@ if (!validate(document)) throw new Error('Backend workspace rejected by shipped 
             .join("../../tools/fixtures/dispatch-retention");
         let ledger: Value =
             serde_json::from_slice(&fs::read(root.join("ledger.json")).unwrap()).unwrap();
-        for row in ledger["cases"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .chain(ledger["review_cases"].as_array().into_iter().flatten())
-        {
+        let mut reviews = Vec::new();
+        for file in ledger["review_case_files"].as_array().unwrap() {
+            let rows: Vec<Value> =
+                serde_json::from_slice(&fs::read(root.join(file.as_str().unwrap())).unwrap())
+                    .unwrap();
+            reviews.extend(rows);
+        }
+        assert_eq!(
+            reviews.len() as u64,
+            ledger["review_case_count"].as_u64().unwrap(),
+            "Every judged review case must be loaded"
+        );
+        for row in ledger["cases"].as_array().unwrap().iter().chain(&reviews) {
             let name = row["file"].as_str().unwrap();
             let bytes = vm::review_inputs::retention_source(&root, row);
             if let Some(expected) = row["sha256"].as_str() {

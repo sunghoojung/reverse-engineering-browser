@@ -1449,6 +1449,7 @@ pub(crate) fn workspace(
     // document and never runs a second classification pass.
     let roles = roles.filter(|_| gate_enabled());
     let mut withheld_opcodes = BTreeSet::new();
+    let mut layout = None;
     let (mut handlers, model, mut unknowns, mut omissions, module_dispatch, handler_tables) =
         match runtime {
             "javascript" => {
@@ -1500,6 +1501,7 @@ pub(crate) fn workspace(
                 let fallback = vm::dispatch_shape::Meter::new();
                 let meter = roles.map_or(&fallback, |roles| &roles.meter);
                 let extracted = wasm::handlers_under(bytes, result, meter)?;
+                layout = Some(extracted.tables);
                 (
                     extracted.handlers,
                     "unknown".into(),
@@ -1701,17 +1703,6 @@ pub(crate) fn workspace(
             ));
         }
     }
-    // Slot claims come from the same metered table layout as the handler
-    // tables; it is parsed again only when call_indirect rows need it.
-    let fallback = vm::dispatch_shape::Meter::new();
-    let tables = (!indirect.rows.is_empty())
-        .then(|| {
-            vm::wasm_tables::Tables::parse_under(
-                bytes,
-                roles.map_or(&fallback, |roles| &roles.meter),
-            )
-        })
-        .flatten();
     // Runtime rows supply observed claims beside, never inside, the handlers.
     let observed = observed::derive(observed::Inputs {
         runtime,
@@ -1723,7 +1714,8 @@ pub(crate) fn workspace(
         physical: &observations.rows,
         guest: &guest_samples.rows,
         indirect: &indirect.rows,
-        tables: tables.as_ref(),
+        // Slot claims read the same layout the element handler tables list.
+        tables: layout.as_ref(),
         events,
     });
     unknowns.extend(observed.unknowns);

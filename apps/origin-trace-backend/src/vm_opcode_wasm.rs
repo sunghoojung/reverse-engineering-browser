@@ -40,6 +40,8 @@ pub(super) struct ExtractedHandlers {
     pub omissions: Vec<Value>,
     pub dispatch: ModuleDispatch,
     pub handler_tables: Vec<Value>,
+    /// The table layout the element handler tables were built from.
+    pub tables: Tables,
 }
 
 struct Arm {
@@ -380,6 +382,7 @@ pub(super) fn handlers_under(
             functions: emitted_functions,
         },
         handler_tables,
+        tables,
     })
 }
 

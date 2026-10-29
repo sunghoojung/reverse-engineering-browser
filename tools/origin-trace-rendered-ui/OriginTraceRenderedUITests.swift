@@ -574,7 +574,13 @@ final class OriginTraceRenderedUITests: XCTestCase {
       try await ui.click("#vm-list .vm-row", containing: "artifact 18446744073709551615")
       try await assertCompleteCompactFindings(ui, size.name)
       try await ui.click("#vm-symbol-list .vm-symbol-row")
-      try await revealAndAssertFullyVisible(ui, ".vm-workspace-title", "\(size.name) opcode header")
+      try await assertFullyVisible(ui, ".vm-workspace-title", "\(size.name) opcode header")
+      try await assertFullyVisible(ui, ".vm-workbench-listing .vm-handler-row[aria-selected='true']", "\(size.name) opcode navigation")
+      if try await usesCompactVmLayout(ui) {
+        let tree = try await ui.json("__rebUiProbe.box('.vm-list-pane')")
+        XCTAssertEqual(tree["visibleHeight"] as? Double ?? -1, 0, accuracy: 1,
+          "\(size.name): opcode navigation leaves no partial tree above the evidence")
+      }
       let spacing = try await ui.json("""
         (() => { const head = document.querySelector('.vm-workspace-title');
           const evidence = head.nextElementSibling;

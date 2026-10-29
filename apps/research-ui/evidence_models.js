@@ -1636,11 +1636,169 @@
             : handler.opcode === row.selector);
       }
 
-      function isVmOpcodeWorkspace(workspace, summed = false) {
+      // Producers since 2.12.0 derive observed claims from every qualifying
+      // retained runtime row; older documents never carry them.
+      function vmProducerEmitsObservedClaims(version) {
+        const match = /^([0-9]+)\.([0-9]+)\.[0-9]+$/.exec(version);
+        return match !== null && (Number(match[1]) > 2 || (Number(match[1]) === 2 && Number(match[2]) >= 12));
+      }
+      function vmObservedInterpreterSite(workspace, offset) {
+        const classification = workspace.dispatch_classification;
+        if (!classification) return false;
+        const listed = classification.sites.find(site => site.location.byte_offset === offset);
+        return listed ? listed.role === 'interpreter-candidate' : classification.omitted_site_count > 0;
+      }
+      function vmObservedRowKey(stream, row) {
+        return stream === 'dispatch-sample' ? `${stream}:${row.opcode}:${row.handler_index}`
+          : `${stream}:${row.function_index}:${row.module_byte_offset}:${row.selector}:${stream === 'native-guest' ? row.opcode : 'null'}:${row.selected_arm}`;
+      }
+      function vmObservedClaimKey(claim) {
+        return claim.stream === 'dispatch-sample' ? `${claim.stream}:${claim.opcode}:${claim.handler.handler_index}`
+          : `${claim.stream}:${claim.site.function_index}:${claim.site.byte_offset}:${claim.selector}:${claim.opcode}:${claim.handler.arm}`;
+      }
+      // Rows a claim of each stream may name. Caller reports never become claims.
+      function vmObservedStreamRows(workspace) {
+        return {
+          'dispatch-sample': workspace.runtime === 'javascript' ? workspace.samples.filter(sample => sample.provenance === undefined) : [],
+          'native-guest': workspace.native_guest_samples ?? [],
+          'native-wasm': workspace.native_wasm_observations ?? [],
+        };
+      }
+      function vmObservedSoleSite(workspace) {
+        const classification = workspace.dispatch_classification;
+        if (!classification || classification.role_counts['interpreter-candidate'] !== 1 ||
+          !classification.omissions.every(row => row.reason === 'handler-binding-unproven')) return null;
+        return classification.sites.find(site => site.role === 'interpreter-candidate') ?? null;
+      }
+      // Static and observed claims stay separate; the comparison is recomputed
+      // from the unchanged handler rows, never trusted from the document.
+      function vmObservedStaticClaimMatches(workspace, claim) {
+        const comparison = claim.static_claim;
+        if (!vmWorkspaceExact(comparison, ['state', 'opcode', 'handler_index', 'byte_offset'])) return false;
+        const empty = state => comparison.state === state && comparison.handler_index === null && comparison.byte_offset === null;
+        if (claim.stream === 'dispatch-sample') {
+          const row = workspace.handlers.find(handler => handler.opcode === claim.opcode);
+          if (row) {
+            const named = row.handler_index ?? claim.opcode;
+            return comparison.state === (named === claim.handler.handler_index ? 'agrees' : 'disagrees') &&
+              comparison.opcode === claim.opcode && comparison.handler_index === (row.handler_index ?? null) &&
+              comparison.byte_offset === row.source.byte_offset;
+          }
+          if (comparison.state === 'withheld') return empty('withheld') && comparison.opcode === claim.opcode &&
+            workspace.coverage.omissions.some(row => row.reason === 'handler-withheld');
+          return empty('absent') && comparison.opcode === null;
+        }
+        const row = claim.handler.is_default ? undefined : workspace.handlers.find(handler =>
+          handler.source.byte_offset === claim.site.byte_offset && handler.opcode === claim.selector);
+        if (!row) return empty('absent') && comparison.opcode === null;
+        return comparison.state === (claim.stream === 'native-guest' && claim.opcode !== claim.selector ? 'disagrees' : 'agrees') &&
+          comparison.opcode === claim.selector && comparison.handler_index === null && comparison.byte_offset === row.source.byte_offset;
+      }
+      function isVmObservedClaims(workspace, complete) {
+        const claims = workspace.observed_claims;
+        const streams = vmObservedStreamRows(workspace);
+        const rowsByKey = new Map();
+        for (const [stream, rows] of Object.entries(streams)) {
+          for (const row of rows) {
+            const qualifies = stream === 'dispatch-sample'
+              ? (workspace.dispatch_classification?.role_counts['interpreter-candidate'] ?? 0) > 0
+              : vmObservedInterpreterSite(workspace, row.module_byte_offset);
+            if (!qualifies) continue;
+            const key = vmObservedRowKey(stream, row);
+            if (!rowsByKey.has(key)) rowsByKey.set(key, []);
+            rowsByKey.get(key).push(row);
+          }
+        }
+        const limited = workspace.coverage.omissions.some(row => row.reason === 'observed-claim-limit');
+        if (claims === undefined) return !complete || rowsByKey.size === 0;
+        if (!Array.isArray(claims) || claims.length < 1 || claims.length > 256 || !workspace.dispatch_classification) return false;
+        const sole = vmObservedSoleSite(workspace);
+        const seen = new Set();
+        let disagreements = 0;
+        for (const claim of claims) {
+          if (!vmWorkspaceExact(claim, ['stream', 'confidence', 'site', 'site_attribution', 'selector', 'opcode', 'handler',
+            'sample_count', 'events', 'static_claim']) || !Object.hasOwn(streams, claim.stream) || claim.confidence !== 'observed' ||
+            !isSafeIntegerInRange(claim.sample_count, 1, 4096) || !Array.isArray(claim.events) ||
+            claim.events.length !== Math.min(claim.sample_count, 8) || !claim.events.every(event => vmSampleEvent(event))) return false;
+          if (claim.stream === 'dispatch-sample') {
+            if (workspace.runtime !== 'javascript' || !vmWorkspaceExact(claim.handler, ['kind', 'handler_index']) ||
+              claim.handler.kind !== 'handler-index' || !isSafeIntegerInRange(claim.handler.handler_index, 0, 0xffffffff) ||
+              claim.selector !== null || !isSafeIntegerInRange(claim.opcode, 0, 0xffffffff)) return false;
+            if (sole ? claim.site_attribution !== 'sole-interpreter-candidate' || !vmWorkspaceExact(claim.site, ['function_index', 'byte_offset', 'line', 'column']) ||
+              claim.site.function_index !== null || claim.site.byte_offset !== sole.location.byte_offset ||
+              claim.site.line !== sole.location.line || claim.site.column !== sole.location.column
+              : claim.site_attribution !== 'artifact' || claim.site !== null) return false;
+          } else {
+            if (workspace.runtime !== 'webassembly' || claim.site_attribution !== 'exact' ||
+              !vmWorkspaceExact(claim.site, ['function_index', 'byte_offset', 'line', 'column']) || claim.site.line !== null ||
+              claim.site.column !== null || !isSafeIntegerInRange(claim.site.function_index, 0, 16777215) ||
+              !isSafeIntegerInRange(claim.site.byte_offset, 8, 16777215) || !vmObservedInterpreterSite(workspace, claim.site.byte_offset) ||
+              !vmWorkspaceExact(claim.handler, ['kind', 'arm', 'is_default']) || claim.handler.kind !== 'br-table-arm' ||
+              typeof claim.handler.is_default !== 'boolean' || !isSafeIntegerInRange(claim.handler.arm, 0, 16777215) ||
+              !isSafeIntegerInRange(claim.selector, 0, 0xffffffff) ||
+              (claim.stream === 'native-guest' ? !isSafeIntegerInRange(claim.opcode, 0, 0xffffffff) : claim.opcode !== null)) return false;
+          }
+          const key = vmObservedClaimKey(claim);
+          const rows = rowsByKey.get(key) ?? [];
+          if (seen.has(key) || rows.length !== claim.sample_count ||
+            claim.events.some((event, index) => vmSampleEventKey(event) !== vmSampleEventKey(rows[index].event)) ||
+            (claim.handler.kind === 'br-table-arm' && rows.some(row => row.is_default !== claim.handler.is_default)) ||
+            !vmObservedStaticClaimMatches(workspace, claim)) return false;
+          seen.add(key);
+          if (claim.static_claim.state === 'disagrees') disagreements += 1;
+        }
+        if (disagreements > 0 && !workspace.unknowns.some(text => text.startsWith(`${disagreements} observed dispatch claim`))) return false;
+        return !complete || limited || [...rowsByKey.keys()].every(key => seen.has(key));
+      }
+      function isVmNestedGuests(workspace) {
+        const nested = workspace.nested_guests;
+        if (nested === undefined) return true;
+        if (workspace.runtime !== 'webassembly' || !Array.isArray(nested) || nested.length < 1 || nested.length > 64) return false;
+        const guest = workspace.native_guest_samples ?? [];
+        const byEvent = new Map(guest.map(row => [vmSampleEventKey(row.event), row]));
+        const side = ['invocation_id', 'invocation_event', 'function_index', 'module_byte_offset', 'memory_index', 'memory_base',
+          'memory_length', 'bytecode_artifact_id'];
+        const sameSide = (value, row) => side.every(key => key === 'invocation_event'
+          ? vmSampleEvent(value[key]) && vmSampleEventKey(value[key]) === vmSampleEventKey(row[key]) : value[key] === row[key]);
+        const inners = new Set();
+        for (const row of nested) {
+          if (!vmWorkspaceExact(row, ['confidence', 'instance_id', 'outer', 'inner']) || row.confidence !== 'observed' ||
+            !isCanonicalInteger(row.instance_id, 1n, uint64Max)) return false;
+          const {outer, inner} = row;
+          if (!vmWorkspaceExact(outer, [...side, 'dispatch_event', 'selector', 'opcode', 'selected_arm', 'is_default', 'instruction_pointer', 'basis']) ||
+            !vmWorkspaceExact(inner, [...side, 'sample_count', 'events', 'observed_opcodes', 'omitted_opcode_count']) ||
+            !['contiguous-sequence', 'nearest-retained'].includes(outer.basis) || !vmSampleEvent(outer.dispatch_event)) return false;
+          const driver = byEvent.get(vmSampleEventKey(outer.dispatch_event));
+          const children = guest.filter(sample => sample.invocation_id === inner.invocation_id);
+          if (!driver || !sameSide(outer, driver) || driver.instance_id !== row.instance_id ||
+            !['selector', 'opcode', 'selected_arm', 'is_default', 'instruction_pointer'].every(key => outer[key] === driver[key]) ||
+            children.length === 0 || !sameSide(inner, children[0]) || inners.has(inner.invocation_id) ||
+            !children.every(sample => sample.parent_invocation_id === outer.invocation_id && sample.instance_id === row.instance_id) ||
+            inner.sample_count !== children.length || !Array.isArray(inner.events) ||
+            inner.events.length !== Math.min(children.length, 8) ||
+            inner.events.some((event, index) => !vmSampleEvent(event) || vmSampleEventKey(event) !== vmSampleEventKey(children[index].event)) ||
+            (outer.function_index === inner.function_index && outer.module_byte_offset === inner.module_byte_offset) ||
+            (outer.memory_index === inner.memory_index && outer.memory_base === inner.memory_base && outer.memory_length === inner.memory_length) ||
+            BigInt(outer.dispatch_event.sequence_number) >= BigInt(inner.invocation_event.sequence_number) ||
+            !vmObservedInterpreterSite(workspace, outer.module_byte_offset) || !vmObservedInterpreterSite(workspace, inner.module_byte_offset)) return false;
+          inners.add(inner.invocation_id);
+          const counts = new Map();
+          for (const sample of children) counts.set(sample.opcode, (counts.get(sample.opcode) ?? 0) + 1);
+          const expected = [...counts.entries()].sort(([left], [right]) => left - right);
+          if (!Array.isArray(inner.observed_opcodes) || inner.omitted_opcode_count !== Math.max(0, expected.length - 64) ||
+            inner.observed_opcodes.length !== Math.min(expected.length, 64) ||
+            !inner.observed_opcodes.every((entry, index) => vmWorkspaceExact(entry, ['opcode', 'sample_count']) &&
+              entry.opcode === expected[index][0] && entry.sample_count === expected[index][1])) return false;
+        }
+        return true;
+      }
+
+      function isVmOpcodeWorkspace(workspace, summed = false, claims = false) {
         if (!isPlainObject(workspace) || !hasOnlyKeys(workspace, new Set([
           'interpreter_artifact_id', 'bytecode_artifact_id', 'finding_id', 'model', 'handlers', 'snapshots', 'coverage',
           'unknowns', 'runtime', 'source_artifact_sha256', 'capture_mode', 'samples', 'sample_count', 'traversal', 'captured_module_preview', 'dispatch_inventory',
-          'dispatch_classification', 'evidence_class', 'machine_state', 'handler_tables', 'native_wasm_observations', 'native_wasm_observation_count', 'native_guest_samples', 'native_guest_sample_count'
+          'dispatch_classification', 'evidence_class', 'machine_state', 'handler_tables', 'native_wasm_observations', 'native_wasm_observation_count', 'native_guest_samples', 'native_guest_sample_count',
+          'observed_claims', 'nested_guests'
         ])) || !isCanonicalInteger(workspace.interpreter_artifact_id, 0n, uint64Max) ||
           (workspace.bytecode_artifact_id !== undefined && !isCanonicalInteger(workspace.bytecode_artifact_id, 0n, uint64Max)) ||
           typeof workspace.finding_id !== 'string' || !/^[0-9a-f]{24}$/.test(workspace.finding_id) ||
@@ -1726,6 +1884,7 @@
           !workspace.coverage.omissions.some(row => row.reason === 'caller-samples-unverified')) return false;
         if (!truncated && nativeCount === 0 && guestCount === 0 && workspace.samples.length > 0 && workspace.samples.every(sample => sample.provenance !== undefined) &&
           !workspace.coverage.omissions.some(row => ['sampler-unavailable', 'dispatch-sample-budget'].includes(row.reason))) return false;
+        if (!isVmObservedClaims(workspace, claims) || !isVmNestedGuests(workspace)) return false;
         return total <= workspace.sample_count;
       }
 
@@ -1739,7 +1898,8 @@
           !vmWorkspaceDigest(document.analysis_digest) || !vmWorkspaceDigest(document.document_digest) ||
           !vmWorkspaceExact(document.inputs, ['artifact_manifest_digest', 'event_store_digest', 'capture_provenance_digest']) ||
           !Object.values(document.inputs).every(value => value === null || vmWorkspaceDigest(value)) ||
-          !Array.isArray(document.workspaces) || document.workspaces.length > 256 || !document.workspaces.every(workspace => isVmOpcodeWorkspace(workspace, vmProducerSumsNativeCounts(document.producer.version))) ||
+          !Array.isArray(document.workspaces) || document.workspaces.length > 256 || !document.workspaces.every(workspace => isVmOpcodeWorkspace(workspace, vmProducerSumsNativeCounts(document.producer.version),
+            vmProducerEmitsObservedClaims(document.producer.version))) ||
           !vmWorkspaceExact(document.summary, ['workspace_count', 'handler_count', 'snapshot_count', 'sample_count', 'unknown_count'])) return false;
         const counts = {workspace_count: document.workspaces.length, handler_count: 0, snapshot_count: 0, sample_count: 0, unknown_count: 0};
         for (const workspace of document.workspaces) {

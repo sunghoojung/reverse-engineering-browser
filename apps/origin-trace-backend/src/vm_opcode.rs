@@ -17,10 +17,12 @@ mod native_guest;
 mod native_module;
 #[path = "vm_opcode_native_wasm.rs"]
 mod native_wasm;
+#[path = "vm_opcode_observed.rs"]
+mod observed;
 #[path = "vm_opcode_wasm.rs"]
 mod wasm;
 
-const PRODUCER_VERSION: &str = "2.11.0";
+const PRODUCER_VERSION: &str = "2.12.0";
 const MAX_SAMPLES: usize = 4096;
 const MAX_HANDLERS: usize = 1024;
 const MAX_SNAPSHOTS: usize = 16;
@@ -1145,6 +1147,7 @@ pub(crate) fn workspace(
     // that produced the analysis: the gate never reads the bounded listed
     // document and never runs a second classification pass.
     let roles = roles.filter(|_| gate_enabled());
+    let mut withheld_opcodes = BTreeSet::new();
     let (mut handlers, model, mut unknowns, mut omissions, module_dispatch, handler_tables) =
         match runtime {
             "javascript" => {
@@ -1169,6 +1172,12 @@ pub(crate) fn workspace(
                 // The gate only removes claims from its output afterwards.
                 let (handlers, model, mut unknowns, mut omissions) =
                     static_handlers(source, region.0, end);
+                let opcodes = |rows: &[Value]| -> BTreeSet<u32> {
+                    rows.iter()
+                        .filter_map(|row| row["opcode"].as_u64().map(|op| op as u32))
+                        .collect()
+                };
+                let recovered = opcodes(&handlers);
                 let handlers = match &roles {
                     Some(roles) => {
                         let gated = gate_handlers(source, region.0, end, handlers, roles);
@@ -1183,6 +1192,7 @@ pub(crate) fn workspace(
                     }
                     None => handlers,
                 };
+                withheld_opcodes = &recovered - &opcodes(&handlers);
                 (handlers, model, unknowns, omissions, None, Vec::new())
             }
             "webassembly" => {
@@ -1378,6 +1388,20 @@ pub(crate) fn workspace(
             ));
         }
     }
+    // Runtime rows supply observed claims beside, never inside, the handlers.
+    let observed = observed::derive(observed::Inputs {
+        runtime,
+        roles,
+        classification: result["frontend"].get("dispatch_classification"),
+        handlers: &handlers,
+        withheld: &withheld_opcodes,
+        samples: &retained_samples,
+        physical: &observations.rows,
+        guest: &guest_samples.rows,
+        events,
+    });
+    unknowns.extend(observed.unknowns);
+    omissions.extend(observed.omissions);
     let (snapshots, snapshot_omissions) = snapshots(root, artifact, snapshot_artifacts);
     omissions.extend(snapshot_omissions);
     // Source instruction bytes are display evidence, not a zero-based guest image.
@@ -1513,6 +1537,12 @@ pub(crate) fn workspace(
     if let Some(class) = evidence_class {
         workspace["evidence_class"] = json!(class);
     }
+    if !observed.claims.is_empty() {
+        workspace["observed_claims"] = json!(observed.claims);
+    }
+    if !observed.nested.is_empty() {
+        workspace["nested_guests"] = json!(observed.nested);
+    }
     if let Some(state) = machine {
         workspace["machine_state"] = state;
     }
@@ -1641,6 +1671,8 @@ mod tests {
         payload[0..2].copy_from_slice(&1u16.to_le_bytes());
         payload[2..4].copy_from_slice(&128u16.to_le_bytes());
         payload[8..12].copy_from_slice(&opcode.to_le_bytes());
+        // Native producers name the handler they selected; owned ones select the opcode.
+        payload[12..16].copy_from_slice(&opcode.to_le_bytes());
         payload[24..32].copy_from_slice(&1u64.to_le_bytes());
         payload[32..40].copy_from_slice(&1u64.to_le_bytes());
         payload[40..48].copy_from_slice(&1u64.to_le_bytes());

@@ -47,7 +47,9 @@ VM layout assertions check full-width compact evidence, complete footer and
 tab-strip visibility, and an exact boundary between the analysis scroller and
 its tabs. Native observation checks reveal and photograph each section heading
 and retained row separately after exercising the disclosure. They do not require
-both targets to fit in one viewport. Separate 1180x560 and 760x790 cases exercise
+both targets to fit in one viewport. Native cards and the Dispatch structure
+card also assert their 12px content inset at all four sizes. Separate 1180x560
+and 760x790 cases exercise
 the height and width breakpoints, compact trees,
 keyboard focus, and the example disclosure independently. Text bounds also
 verify that handler opcodes keep a readable gap before their operation labels.

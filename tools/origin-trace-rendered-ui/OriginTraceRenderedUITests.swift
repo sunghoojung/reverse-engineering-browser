@@ -629,7 +629,11 @@ final class OriginTraceRenderedUITests: XCTestCase {
 
   @MainActor
   func test4VmNativeGuestRows() async throws {
-    for size in windowSizes {
+    let sizes: [(name: String, width: CGFloat, height: CGFloat)] = [
+      ("normal", 1180, 790), ("narrow", 760, 560),
+      ("short", 1180, 560), ("narrow-tall", 760, 790),
+    ]
+    for size in sizes {
       let ui = try await prepare(size)
       try await show(ui, "vm")
       try await ui.waitUntil("document.querySelectorAll('#vm-list .vm-row').length > 0", "VM findings did not load")

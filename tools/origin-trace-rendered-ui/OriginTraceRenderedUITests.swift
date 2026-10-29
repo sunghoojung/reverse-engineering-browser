@@ -499,6 +499,9 @@ final class OriginTraceRenderedUITests: XCTestCase {
         XCTAssertGreaterThanOrEqual(viewport["visibleHeight"] as? Double ?? 0, 120, "\(size.name): expanded analysis has a useful viewport")
         try await ui.click("#vm-symbol-list .vm-symbol-row")
         try await assertFullyVisible(ui, ".vm-workbench-listing .vm-handler-row", "\(size.name) reachable handler")
+        let tree = try await ui.json("__rebUiProbe.box('.vm-list-pane')")
+        XCTAssertEqual(tree["visibleHeight"] as? Double ?? -1, 0, accuracy: 1,
+          "\(size.name): Symbol Tree navigation leaves no clipped tree fragment above the evidence")
         try await ui.screenshot("vm-analysis-expanded-\(size.name)")
         try await ui.click("#vm-analysis-toggle")
         // WebKit on macOS does not focus buttons on a pointer click. Reach
@@ -516,6 +519,31 @@ final class OriginTraceRenderedUITests: XCTestCase {
         try await ui.key(49, " ")
         try await assertFullyVisible(ui, "#vm-analysis-toggle", "\(size.name) keyboard collapse")
       }
+    }
+  }
+
+  @MainActor
+  func test12VmRetainedSiteNavigation() async throws {
+    let sizes: [(name: String, width: CGFloat, height: CGFloat)] = [
+      ("normal", 1180, 790), ("narrow", 760, 560),
+      ("short", 1180, 560), ("narrow-tall", 760, 790),
+    ]
+    for size in sizes {
+      let ui = try await prepare(size)
+      try await show(ui, "vm")
+      try await ui.waitUntil("document.querySelectorAll('#vm-list .vm-row').length > 0", "VM findings did not load")
+      try await setVmAnalysisExpanded(ui, true)
+      try await ui.click("#vm-list .vm-row", containing: "artifact 107")
+      try await setVmAnalysisExpanded(ui, false)
+      try await ui.click("[data-vm-panel='dispatch']")
+      try await ui.click("[data-vm-panel-content='dispatch'] button", containing: "Select retained site")
+      try await assertFullyVisible(ui, ".vm-workbench-listing .vm-handler-row[aria-selected='true']", "\(size.name) retained site navigation")
+      if try await usesCompactVmLayout(ui) {
+        let tree = try await ui.json("__rebUiProbe.box('.vm-list-pane')")
+        XCTAssertEqual(tree["visibleHeight"] as? Double ?? -1, 0, accuracy: 1,
+          "\(size.name): navigation starts at the evidence without a clipped tree fragment")
+      }
+      try await ui.screenshot("vm-retained-site-navigation-\(size.name)")
     }
   }
 
@@ -700,7 +728,16 @@ final class OriginTraceRenderedUITests: XCTestCase {
       XCTAssertEqual(dispatchInset, [], "\(size.name) vm dispatch structure: card content shares the 12px inset")
       try await ui.screenshot("vm-dispatch-structure-\(size.name)")
 
+      try await setVmAnalysisExpanded(ui, true)
       try await ui.click("#vm-list .vm-row", containing: "artifact 311")
+      let emptyInspector = try await ui.json("""
+        (() => { const panel = document.querySelector('.vm-selection-inspector');
+          const text = document.createRange(); text.selectNodeContents(panel.querySelector('.vm-selection-empty'));
+          return {inset: text.getBoundingClientRect().left - panel.getBoundingClientRect().left - parseFloat(getComputedStyle(panel).borderLeftWidth)}; })()
+        """)
+      XCTAssertEqual(emptyInspector["inset"] as? Double ?? -1, 10, accuracy: 1,
+        "\(size.name): empty selected-handler text keeps the inspector's content inset")
+      try await setVmAnalysisExpanded(ui, false)
       try await ui.click("[data-vm-panel='dispatch']")
       try await ui.waitUntil("document.querySelector(\"\(dispatch)\").innerText.includes('parse-failed')", "parse failure omission did not render")
       let omitted = try await ui.value("document.querySelector(\"\(dispatch)\").innerText") as? String ?? ""
@@ -726,13 +763,17 @@ final class OriginTraceRenderedUITests: XCTestCase {
         (() => { const panel = document.querySelector('[data-vm-panel-content="host-links"]');
           const empty = getComputedStyle(panel.querySelector('.vm-workspace-empty'));
           const paragraph = getComputedStyle(panel.querySelector('p'));
+          const text = document.createRange(); text.selectNodeContents(panel.querySelector('.vm-workspace-empty'));
           return {emptyTop: parseFloat(empty.paddingTop), emptyBottom: parseFloat(empty.paddingBottom),
+            textInset: text.getBoundingClientRect().left - panel.getBoundingClientRect().left,
             paragraphTop: parseFloat(paragraph.paddingTop), paragraphBottom: parseFloat(paragraph.paddingBottom)}; })()
         """)
       XCTAssertEqual(spacing["emptyTop"] as? Double, spacing["paragraphTop"] as? Double,
         "\(size.name): empty paragraphs use the panel's paragraph spacing")
       XCTAssertEqual(spacing["emptyBottom"] as? Double, spacing["paragraphBottom"] as? Double,
         "\(size.name): empty paragraphs do not add a second vertical inset")
+      XCTAssertEqual(spacing["textInset"] as? Double ?? -1, 12, accuracy: 1,
+        "\(size.name): empty paragraph text shares the card's 12px content edge")
       try await revealAndAssertFullyVisible(ui, "[data-vm-panel-content='host-links'] details.vm-effect-row summary", "\(size.name) host link")
       try await assertVmDock(ui, size.name)
       try await assertLayout(ui, "#screen-vm", "\(size.name) host links")

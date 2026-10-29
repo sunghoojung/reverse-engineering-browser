@@ -55,8 +55,14 @@ class TestElement {
   dispatchEvent(event) { this.events[event.type]?.(event); }
 }
 const testDocument = {createElement: tag => new TestElement(tag), createTextNode: text => { const node = new TestElement('#text'); node.textContent = text; return node; }, querySelector: () => null};
+const analysisToggle = new TestElement('button');
+const analysisGrid = {scrollTop: 0, getBoundingClientRect: () => ({top: 100})};
+const analysisTree = {scrollTop: 27};
+const analysisDetail = {getBoundingClientRect: () => ({top: 150})};
+testDocument.querySelector = selector => ({'#vm-analysis-toggle': analysisToggle,
+  '#vm-findings-workspace > .vm-grid': analysisGrid, '#vm-list': analysisTree, '#vm-detail': analysisDetail})[selector] ?? null;
 const renderApiState = {vmOpcodeWorkspace: hostWorkspace, vmHostLinks: hostLinks, vmHostLinksStatus: 'ready'};
-const renderApi = runInNewContext(`${model}\n${helper}\n${renders}\n({renderVmEffects,renderVmReachability,renderVmBytecode,renderVmHostLinks,renderVmSessionSources,renderVmWorkspaceCoverage,appendVmPagedRows,renderVmHandlers,renderVmDispatchInventory,renderVmDispatchStructure,renderVmDispatchSites,renderVmHandlerTables,renderNativeWasmObservations,vmOpcodeRows})`, {document: testDocument, state: renderApiState, TextEncoder, Event});
+const renderApi = runInNewContext(`${model}\n${helper}\n${renders}\n({renderVmEffects,renderVmReachability,renderVmBytecode,renderVmHostLinks,renderVmSessionSources,renderVmWorkspaceCoverage,appendVmPagedRows,renderVmHandlers,renderVmDispatchInventory,renderVmDispatchStructure,renderVmDispatchSites,renderVmHandlerTables,renderNativeWasmObservations,vmOpcodeRows})`, {document: testDocument, window: {matchMedia: () => ({matches: true})}, state: renderApiState, TextEncoder, Event});
 const descendants = element => [element, ...element.children.flatMap(descendants)];
 const findButton = (root, label) => descendants(root).find(node => node.tagName === 'button' && node.textContent === label);
 const many = structuredClone(hostSource);
@@ -513,6 +519,9 @@ assert.equal(retainedFilter.value, '', 'the production selection callback clears
 assert.equal(filteredRows[0].hidden, false);
 assert.equal(testDocument.activeElement, filteredRows[0]);
 assert.equal(renderApiState.selectedVmHandlerKey, '0::45');
+assert.equal(analysisToggle.attributes['aria-expanded'], 'true', 'retained-site navigation opens compact analysis');
+assert.equal(analysisTree.scrollTop, 0, 'reopening starts with a complete finding row');
+assert.equal(analysisGrid.scrollTop, 50, 'navigation moves past the partial tree to the evidence');
 retainedFilter.value = 'call_indirect'; retainedFilter.dispatchEvent(new Event('input'));
 assert.equal(filteredRows[0].hidden, true);
 const retainedButton = findButton(inventoryPanel, 'Select retained site');

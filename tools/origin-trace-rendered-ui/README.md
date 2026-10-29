@@ -49,15 +49,16 @@ its tabs. Native observation checks reveal and photograph each section heading
 and retained row separately after exercising the disclosure. They do not require
 both targets to fit in one viewport. Native cards and the Dispatch structure
 card also assert their 12px content inset at all four sizes. Separate 1180x560
-and 760x790 cases exercise
-the height and width breakpoints, compact trees,
+and 760x790 cases exercise the height and width breakpoints, compact trees,
 keyboard focus, and the example disclosure independently. Text bounds also
 verify that handler opcodes keep a readable gap before their operation labels.
 At all four window sizes, every dock tab must leave either a useful analysis
 pane with a complete heading and row or a complete collapsed analysis header,
 with no change in height between tabs. Compact cases also expand the header,
 navigate from the Symbol Tree to a complete handler row, and toggle it with
-Space. A separate geometry check rejects a blank band between the Opcode
+Space. Retained-site buttons must open that same handler pane; both routes reject
+clipped tree fragments above it. Empty paragraphs check their text inset as well
+as their vertical spacing. A separate geometry check rejects a blank band between the Opcode
 workspace header and its evidence notice.
 
 AppKit can clamp requested window sizes to the display. The harness logs the

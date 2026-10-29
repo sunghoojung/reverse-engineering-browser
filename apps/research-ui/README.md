@@ -55,6 +55,8 @@ Symbols and the up/down toolbar navigate the same selection. The literal handler
 filter matches retained source offsets, opcodes and labels; selecting a symbol
 clears an excluding filter. Arrow keys, Home and End navigate visible listing
 rows. No-match filters keep the selected evidence available and disable stepping.
+Selecting a retained dispatch site or a Symbol Tree entry opens compact analysis
+and reveals its handler at the evidence pane, without a clipped tree fragment.
 These docks expose existing evidence, not a native-code decompiler or editable
 Ghidra project. The deterministic fixture remains explicitly opt-in.
 

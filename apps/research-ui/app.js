@@ -1562,7 +1562,7 @@ const capturedExportPanel = installCapturedExportDialog({
                 const filter = scope.querySelector('input[aria-label="Filter retained handlers"], input[type="search"]');
                 if (filter) { filter.value = ''; filter.dispatchEvent(new Event('input')); }
               }
-              handler.click(); handler.focus({preventScroll: true}); handler.scrollIntoView({block: 'nearest'});
+              handler.click(); revealVmHandler(handler); handler.focus({preventScroll: true});
             };
             select.addEventListener('click', chooseRetainedSite);
             // Own Enter and Space here. A keydown without the browser's default
@@ -2156,6 +2156,21 @@ const capturedExportPanel = installCapturedExportDialog({
       function setVmAnalysisExpanded(expanded) {
         document.querySelector('#vm-analysis-toggle').setAttribute('aria-expanded', String(expanded));
         document.querySelector('#vm-findings-workspace > .vm-grid').scrollTop = 0;
+        // Reopen the compact navigator on complete rows. A prior selection can
+        // leave its nested scroller partway through the first finding.
+        if (expanded) document.querySelector('#vm-list').scrollTop = 0;
+      }
+
+      function revealVmHandler(handler) {
+        setVmAnalysisExpanded(true);
+        handler.scrollIntoView({block: 'nearest'});
+        if (window.matchMedia('(max-width: 900px), (max-height: 650px)').matches) {
+          const grid = document.querySelector('#vm-findings-workspace > .vm-grid');
+          const detail = document.querySelector('#vm-detail');
+          // Native navigation can reveal the row while leaving a thin tree
+          // fragment above the evidence. Start at the complete detail pane.
+          grid.scrollTop += Math.max(0, detail.getBoundingClientRect().top - grid.getBoundingClientRect().top);
+        }
       }
 
       function updateVmNavigationMenus() {
@@ -2192,7 +2207,7 @@ const capturedExportPanel = installCapturedExportDialog({
               if (!target) return;
               const filter = host.querySelector('input[aria-label="Filter retained handlers"]');
               if (filter && target.hidden) { filter.value = ''; filter.dispatchEvent(new Event('input')); }
-              target.click(); target.scrollIntoView({block: 'nearest'});
+              target.click(); revealVmHandler(target);
             });
             symbols.append(button);
           }

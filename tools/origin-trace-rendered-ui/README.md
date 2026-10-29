@@ -57,7 +57,8 @@ pane with a complete heading and row or a complete collapsed analysis header,
 with no change in height between tabs. Compact cases also expand the header,
 navigate from the Symbol Tree to a complete handler row, and toggle it with
 Space. Retained-site buttons must open that same handler pane; both routes reject
-clipped tree fragments above it. Empty paragraphs check their text inset as well
+clipped tree fragments above it. Compact Program Trees settle on two complete
+finding rows after selection. Empty paragraphs check their text inset as well
 as their vertical spacing. A separate geometry check rejects a blank band between the Opcode
 workspace header and its evidence notice.
 

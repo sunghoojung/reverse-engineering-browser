@@ -384,6 +384,19 @@ final class OriginTraceRenderedUITests: XCTestCase {
   }
 
   @MainActor
+  private func assertCompleteCompactFindings(_ ui: Harness, _ context: String) async throws {
+    guard try await usesCompactVmLayout(ui) else { return }
+    let complete = """
+      (() => { const list = document.querySelector('#vm-list').getBoundingClientRect();
+        const rows = [...document.querySelectorAll('#vm-list .vm-row')].map(row => row.getBoundingClientRect());
+        const visible = rows.filter(row => Math.min(row.bottom, list.bottom) - Math.max(row.top, list.top) > 1);
+        return visible.length === 2 && visible.every(row => row.top >= list.top - 1 && row.bottom <= list.bottom + 1); })()
+      """
+    try await ui.waitUntil(complete, "\(context): compact Program Trees must settle on two complete findings")
+    try await assertFullyVisible(ui, "#vm-list .vm-row[aria-selected='true']", "\(context) selected finding")
+  }
+
+  @MainActor
   private func assertHandlerColumns(_ ui: Harness, _ context: String) async throws {
     let columns = try await ui.json("""
       (() => { const row = document.querySelector('.vm-workbench-listing .vm-handler-row');
@@ -559,6 +572,8 @@ final class OriginTraceRenderedUITests: XCTestCase {
       try await ui.waitUntil("document.querySelectorAll('#vm-list .vm-row').length > 0", "VM findings did not load")
       try await setVmAnalysisExpanded(ui, true)
       try await ui.click("#vm-list .vm-row", containing: "artifact 18446744073709551615")
+      try await assertCompleteCompactFindings(ui, size.name)
+      try await ui.click("#vm-symbol-list .vm-symbol-row")
       try await revealAndAssertFullyVisible(ui, ".vm-workspace-title", "\(size.name) opcode header")
       let spacing = try await ui.json("""
         (() => { const head = document.querySelector('.vm-workspace-title');
@@ -669,6 +684,7 @@ final class OriginTraceRenderedUITests: XCTestCase {
       try await ui.click("#vm-list .vm-row", containing: "artifact 107")
       try await assertFullyVisible(ui, "#vm-symbol-list .vm-symbol-row", "\(size.name) symbol tree")
       try await assertHandlerColumns(ui, size.name)
+      try await assertCompleteCompactFindings(ui, size.name)
       try await ui.screenshot("vm-navigator-\(size.name)")
       try await setVmAnalysisExpanded(ui, false)
       try await ui.click("[data-vm-panel='native-wasm']")
@@ -799,6 +815,7 @@ final class OriginTraceRenderedUITests: XCTestCase {
       XCTAssertLessThanOrEqual(tree["height"] as? Double ?? .infinity, 141,
         "\(size.name): trees stay in a compact band above the evidence")
       try await assertHandlerColumns(ui, size.name)
+      try await assertCompleteCompactFindings(ui, size.name)
       try await ui.screenshot("vm-navigator-\(size.name)")
       try await ui.click("#vm-symbol-list .vm-symbol-row")
       try await ui.tab()

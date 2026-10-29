@@ -1,5 +1,5 @@
 diff --git a/third_party/blink/renderer/bindings/core/v8/v8_initializer.cc b/third_party/blink/renderer/bindings/core/v8/v8_initializer.cc
-index 7dedb733ba60fb319c246e476066eaf70b82cb7f..85addbb5b75658146845a61871e70007de22d1be 100644
+index 7dedb733ba60fb319c246e476066eaf70b82cb7f..46ac734a8414c150fb85637438167dcff9184c61 100644
 --- a/third_party/blink/renderer/bindings/core/v8/v8_initializer.cc
 +++ b/third_party/blink/renderer/bindings/core/v8/v8_initializer.cc
 @@ -25,13 +25,8 @@
@@ -59,7 +59,7 @@ index 7dedb733ba60fb319c246e476066eaf70b82cb7f..85addbb5b75658146845a61871e70007
  #include "third_party/blink/renderer/platform/wtf/sanitizers.h"
  #include "third_party/blink/renderer/platform/wtf/stack_util.h"
  #include "third_party/blink/renderer/platform/wtf/text/strcat.h"
-@@ -360,6 +360,133 @@ void CaptureWasmBrTableDispatch(v8::Local<v8::Context> context,
+@@ -360,6 +360,137 @@ void CaptureWasmBrTableDispatch(v8::Local<v8::Context> context,
        document_token.GetLowForSerialization());
  }
  
@@ -71,6 +71,10 @@ index 7dedb733ba60fb319c246e476066eaf70b82cb7f..85addbb5b75658146845a61871e70007
 +bool NativeWasmGuestSelectedSite(std::uint32_t function, std::uint32_t offset) {
 +  return reb::NativeProbeSink::Get().IsNativeWasmGuestDispatchSite(function,
 +                                                                   offset);
++}
++bool NativeWasmGuestDispatcherFunction(std::uint32_t function) {
++  return reb::NativeProbeSink::Get().IsNativeWasmGuestDispatcherFunction(
++      function);
 +}
 +bool NativeWasmGuestEnabled() {
 +  return reb::NativeProbeSink::Get().IsNativeWasmGuestEnabled();
@@ -193,13 +197,14 @@ index 7dedb733ba60fb319c246e476066eaf70b82cb7f..85addbb5b75658146845a61871e70007
  void CaptureWasmModuleBytes(v8::Local<v8::Context> context,
                              const v8::WasmModuleBytesOrigin origin,
                              const std::uint8_t* bytes,
-@@ -1395,6 +1522,11 @@ void V8Initializer::InitializeV8Common(v8::Isolate* isolate) {
+@@ -1395,6 +1526,12 @@ void V8Initializer::InitializeV8Common(v8::Isolate* isolate) {
    isolate->SetWasmModuleBytesCallback(CaptureWasmModuleBytes);
    isolate->SetWasmBrTableDispatchCallback(CaptureWasmBrTableDispatch,
                                          NativeWasmBrTableDispatchEnabled);
 +  isolate->SetWasmGuestDispatchCallback(
 +      CaptureWasmGuestDispatch, NativeWasmGuestEnabled, NativeWasmGuestEpoch,
-+      AdmitNativeWasmGuestModule, NativeWasmGuestSelectedSite);
++      AdmitNativeWasmGuestModule, NativeWasmGuestSelectedSite,
++      NativeWasmGuestDispatcherFunction);
 +  reb::NativeProbeSink::Get().SetNativeWasmGuestRuntime(CurrentNativeWasmGuest,
 +                                                        ResetNativeWasmGuest);
    isolate->SetRuntimeBufferCallback(CaptureRuntimeBuffer);

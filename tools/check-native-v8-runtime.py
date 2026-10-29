@@ -49,6 +49,7 @@ TEST_NAMES = [
     "RebNativeGuestZeroLocalDescriptorBudget",
     "RebNativeGuestNestedActivationExactParent",
     "RebNativeGuestParentUnresolvedFailsClosed",
+    "RebNativeGuestParentBarrierCoversEveryDispatcher",
     "RebNativeGuestParentWalkNeedsEnabledCapture",
 ]
 

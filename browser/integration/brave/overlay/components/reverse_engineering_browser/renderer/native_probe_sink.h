@@ -205,6 +205,12 @@ class COMPONENT_EXPORT(REB_NATIVE_PROBE_SINK) NativeProbeSink final {
                                 std::uint32_t table_count,
                                 std::uint64_t document_token_high,
                                 std::uint64_t document_token_low) noexcept;
+  // Physical call_indirect observations share the br_table admission rules
+  // with their own emitter, 16-record budget and coalesced omission gaps. The
+  // caller fills identity, site, slot and resolution; the sink fills the rest.
+  void SetNativeWasmIndirectEmitter(NativeWasmIndirectEmitter emitter) noexcept;
+  [[nodiscard]] bool IsNativeWasmIndirectEnabled() const noexcept;
+  void RecordNativeWasmIndirect(NativeWasmIndirectObservation observation) noexcept;
   void RecordApiCall(NativeProbeCategory category, std::string_view operation) noexcept;
   void RecordPropertyRead(NativeProbeCategory category, std::string_view operation) noexcept;
   // Call-site state is an opaque, monotonically ordered configuration claim,
@@ -305,6 +311,13 @@ class COMPONENT_EXPORT(REB_NATIVE_PROBE_SINK) NativeProbeSink final {
   std::array<std::atomic<std::uint64_t>, kNativeWasmDispatchSampleBudget> native_wasm_slots_{};
   std::array<std::atomic<std::uint64_t>, 3> native_wasm_gap_generations_{};
   std::atomic<std::uint64_t> native_wasm_capped_generation_{0};
+  bool NoteNativeWasmIndirectOmission(const VmAdmission& admission,
+                                      NativeWasmOmission reason) noexcept;
+  std::atomic<NativeWasmIndirectEmitter> native_wasm_indirect_emitter_{nullptr};
+  std::array<std::atomic<std::uint64_t>, kNativeWasmIndirectSampleBudget>
+      native_wasm_indirect_slots_{};
+  std::array<std::atomic<std::uint64_t>, 3> native_wasm_indirect_gap_generations_{};
+  std::atomic<std::uint64_t> native_wasm_indirect_capped_generation_{0};
   std::atomic<NativeRendererProbeEmitter> emitter_{nullptr};
   std::atomic<NativeProbeFrameIdProvider> frame_id_provider_{nullptr};
   std::atomic<NativeGeneratedArtifactEmitter> artifact_emitter_{nullptr};

@@ -79,6 +79,26 @@ NativeProbeEvent RendererGap(const NativeProbeEvent& source, const std::string_v
   return gap;
 }
 
+// The active frame whose live document a renderer observation names, if any.
+content::RenderFrameHost* ActiveDocumentOwner(content::RenderProcessHost& process,
+                                              const std::uint64_t frame_id,
+                                              const std::uint64_t document_token_high,
+                                              const std::uint64_t document_token_low) {
+  content::RenderFrameHost* owner = nullptr;
+  process.ForEachRenderFrameHost([&](content::RenderFrameHost* frame) {
+    if (!frame->IsActive())
+      return;
+    const auto& token = frame->GetFrameToken().value();
+    const auto& document = frame->GetDocumentToken().value();
+    if ((std::rotl(token.GetHighForSerialization(), 17) ^ token.GetLowForSerialization()) ==
+            frame_id &&
+        document.GetHighForSerialization() == document_token_high &&
+        document.GetLowForSerialization() == document_token_low)
+      owner = frame;
+  });
+  return owner;
+}
+
 }  // namespace
 
 NativeProbeHost::NativeProbeHost(NativeProbeSession& session, const int renderer_process_id)
@@ -135,18 +155,8 @@ void NativeProbeHost::CaptureWasmDispatch(const std::uint64_t capture_epoch,
   if (!process || process_id != static_cast<std::uint32_t>(process->GetProcess().Pid()))
     return;
   ++wasm_capture_count_;
-  content::RenderFrameHost* owner = nullptr;
-  process->ForEachRenderFrameHost([&](content::RenderFrameHost* frame) {
-    if (!frame->IsActive())
-      return;
-    const auto& token = frame->GetFrameToken().value();
-    const auto& document = frame->GetDocumentToken().value();
-    if ((std::rotl(token.GetHighForSerialization(), 17) ^ token.GetLowForSerialization()) ==
-            frame_id &&
-        document.GetHighForSerialization() == document_token_high &&
-        document.GetLowForSerialization() == document_token_low)
-      owner = frame;
-  });
+  content::RenderFrameHost* owner =
+      ActiveDocumentOwner(*process, frame_id, document_token_high, document_token_low);
   NativeWasmDispatchObservation observation;
   observation.header.category = NativeProbeCategory::kVm;
   observation.header.type = NativeProbeType::kWasmDispatchObservation;
@@ -187,6 +197,85 @@ void NativeProbeHost::CaptureWasmDispatch(const std::uint64_t capture_epoch,
   const auto document = owner->GetWeakDocumentPtr();
   const std::weak_ptr<const std::uint64_t> lifetime = wasm_epoch_lifetime_;
   NativeArtifactCaptureSink::Get().CaptureWasmDispatch(
+      observation, std::move(content), [document, lifetime]() {
+        return !lifetime.expired() && document.AsRenderFrameHostIfValid() != nullptr;
+      });
+}
+
+void NativeProbeHost::CaptureWasmIndirect(const std::uint64_t capture_epoch,
+                                          const std::uint64_t session_id,
+                                          const std::uint64_t sequence_number,
+                                          const std::uint64_t monotonic_time_ns,
+                                          const std::uint32_t process_id,
+                                          const std::uint32_t thread_id,
+                                          const std::uint64_t frame_id,
+                                          const std::uint64_t execution_context_id,
+                                          const std::uint64_t document_token_high,
+                                          const std::uint64_t document_token_low,
+                                          const std::uint32_t function_index,
+                                          const std::uint32_t module_byte_offset,
+                                          const std::uint32_t table_index,
+                                          const std::uint32_t slot,
+                                          const std::uint32_t callee_function_index,
+                                          const std::uint32_t resolution,
+                                          const std::uint32_t sample_index,
+                                          const std::string& source_url,
+                                          mojo_base::BigBuffer content) {
+  constexpr auto mask = NativeProbeCategoryMask(NativeProbeCategory::kVm) |
+                        NativeProbeCategoryMask(NativeProbeCategory::kArtifact);
+  const auto now =
+      static_cast<std::uint64_t>(base::TimeTicks::Now().since_origin().InNanoseconds());
+  if (!queue_ || !wasm_epoch_lifetime_ || capture_epoch != wasm_capture_epoch_ ||
+      !session_->IsActive() || session_id != session_->session_id() ||
+      (session_->category_mask() & mask) != mask || !sequence_number || !monotonic_time_ns ||
+      monotonic_time_ns > now || now >= session_->expires_at_monotonic_ns() || !thread_id ||
+      !frame_id || !execution_context_id || sample_index >= kNativeWasmIndirectSampleBudget ||
+      resolution >= kNativeWasmIndirectResolutionCount ||
+      wasm_indirect_capture_count_ >= kNativeWasmIndirectSampleBudget ||
+      content.size() > kNativeArtifactMaxContentBytes)
+    return;
+  auto* process = content::RenderProcessHost::FromID(renderer_process_id_);
+  if (!process || process_id != static_cast<std::uint32_t>(process->GetProcess().Pid()))
+    return;
+  ++wasm_indirect_capture_count_;
+  content::RenderFrameHost* owner =
+      ActiveDocumentOwner(*process, frame_id, document_token_high, document_token_low);
+  NativeWasmIndirectObservation observation;
+  observation.header.category = NativeProbeCategory::kVm;
+  observation.header.type = NativeProbeType::kWasmIndirectObservation;
+  observation.header.session_id = session_id;
+  observation.header.sequence_number = sequence_number;
+  observation.header.monotonic_time_ns = monotonic_time_ns;
+  observation.header.process_id = process_id;
+  observation.header.thread_id = thread_id;
+  observation.header.frame_id = frame_id;
+  if (!owner) {
+    if (!wasm_indirect_document_gap_emitted_) {
+      wasm_indirect_document_gap_emitted_ = true;
+      session_->Emit(RendererGap(NativeProbeEvent{.header = observation.header},
+                                 "native_wasm_indirect_document_unavailable"));
+    }
+    return;
+  }
+  auto* contents = content::WebContents::FromRenderFrameHost(owner);
+  auto* main_frame = contents ? contents->GetPrimaryMainFrame() : nullptr;
+  if (main_frame)
+    observation.header.tab_id =
+        static_cast<std::uint32_t>(main_frame->GetFrameTreeNodeId().value());
+  observation.execution_context_id = execution_context_id;
+  observation.document_token_high = document_token_high;
+  observation.document_token_low = document_token_low;
+  observation.function_index = function_index;
+  observation.module_byte_offset = module_byte_offset;
+  observation.table_index = table_index;
+  observation.slot = slot;
+  observation.callee_function_index = callee_function_index;
+  observation.resolution = static_cast<NativeWasmIndirectResolution>(resolution);
+  observation.sample_index = sample_index;
+  observation.source_url = source_url;
+  const auto document = owner->GetWeakDocumentPtr();
+  const std::weak_ptr<const std::uint64_t> lifetime = wasm_epoch_lifetime_;
+  NativeArtifactCaptureSink::Get().CaptureWasmIndirect(
       observation, std::move(content), [document, lifetime]() {
         return !lifetime.expired() && document.AsRenderFrameHostIfValid() != nullptr;
       });
@@ -449,8 +538,10 @@ void NativeProbeHost::Disable() {
   if (wasm_capture_epoch_ != std::numeric_limits<std::uint64_t>::max())
     ++wasm_capture_epoch_;
   wasm_capture_count_ = 0;
+  wasm_indirect_capture_count_ = 0;
   guest_capture_count_ = 0;
   wasm_document_gap_emitted_ = false;
+  wasm_indirect_document_gap_emitted_ = false;
   guest_budget_gap_emitted_ = false;
   guest_host_malformed_gap_emitted_ = false;
   if (client_.is_bound()) {

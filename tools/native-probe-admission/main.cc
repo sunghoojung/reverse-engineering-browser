@@ -1348,6 +1348,128 @@ void NativeWasmRuntimeAdmission() {
                "transport retry and full-ring cap retry\n";
 }
 
+std::size_t native_indirect_retained = 0;
+bool native_indirect_accept = true;
+bool CaptureNativeIndirect(const reb::NativeWasmIndirectObservation& observation,
+                           std::uint64_t generation) noexcept {
+  assert(generation != 0);
+  assert(observation.header.type == reb::NativeProbeType::kWasmIndirectObservation);
+  assert(observation.header.artifact_id == 0 && observation.header.parent_event_id == 0);
+  assert(observation.execution_context_id == 7 && observation.header.frame_id == 8);
+  assert(observation.document_token_high == 9 && observation.document_token_low == 10);
+  assert(observation.module_byte_offset == 8 && observation.table_index == 0);
+  assert(observation.slot == UINT32_MAX && observation.callee_function_index == 0);
+  assert(observation.resolution == reb::NativeWasmIndirectResolution::kOutOfBounds);
+  assert(observation.sample_index == native_indirect_retained);
+  if (!native_indirect_accept)
+    return false;
+  ++native_indirect_retained;
+  return true;
+}
+void NativeWasmIndirectAdmission() {
+  // Heap-held: main inlines each test, and two rings would overflow its stack.
+  const auto owned_queue = std::make_unique<NativeProbeQueue>();
+  NativeProbeQueue& queue = *owned_queue;
+  // call_indirect type 0, table 0, then return_call_indirect type 0, table 1.
+  constexpr std::array<std::uint8_t, 14> module{0, 97,   115, 109, 1,    0, 0,
+                                                0, 0x11, 0,   0,   0x13, 0, 1};
+  reb::NativeWasmIndirectObservation input;
+  input.header.frame_id = 8;
+  input.execution_context_id = 7;
+  input.document_token_high = 9;
+  input.document_token_low = 10;
+  input.source_url = "https://owned.test/module.wasm";
+  input.module_bytes = module;
+  input.module_byte_offset = 8;
+  input.slot = UINT32_MAX;
+  input.resolution = reb::NativeWasmIndirectResolution::kOutOfBounds;
+  assert(reb::IsValidNativeWasmIndirectInput(input));
+  input.table_index = 1;
+  assert(!reb::IsValidNativeWasmIndirectInput(input));
+  input.module_byte_offset = 11;
+  assert(reb::IsValidNativeWasmIndirectInput(input));
+  input.module_byte_offset = 9;
+  assert(!reb::IsValidNativeWasmIndirectInput(input));
+  input.module_byte_offset = 8;
+  input.table_index = 0;
+  input.callee_function_index = 3;
+  assert(!reb::IsValidNativeWasmIndirectInput(input));
+  input.resolution = reb::NativeWasmIndirectResolution::kResolved;
+  assert(reb::IsValidNativeWasmIndirectInput(input));
+  input.resolution = static_cast<reb::NativeWasmIndirectResolution>(5);
+  input.callee_function_index = 0;
+  assert(!reb::IsValidNativeWasmIndirectInput(input));
+  input.resolution = reb::NativeWasmIndirectResolution::kOutOfBounds;
+  input.module_bytes = std::span(module).first(10);
+  assert(!reb::IsValidNativeWasmIndirectInput(input));
+  input.module_bytes = module;
+  input.sample_index = 16;
+  assert(!reb::IsValidNativeWasmIndirectInput(input));
+  input.sample_index = 0;
+  const auto record = [&] { sink.RecordNativeWasmIndirect(input); };
+  transport.Disable();
+  sink.SetNativeWasmIndirectEmitter(&CaptureNativeIndirect);
+  const auto before = allocations.load();
+  assert(!sink.IsNativeWasmIndirectEnabled());
+  record();
+  assert(allocations.load() == before && native_indirect_retained == 0);
+  Configure(queue, 42, kForever, reb::NativeProbeCategoryMask(reb::NativeProbeCategory::kVm));
+  assert(!sink.IsNativeWasmIndirectEnabled());
+  Configure(queue, 42, 0);  // Expired.
+  assert(!sink.IsNativeWasmIndirectEnabled());
+  record();
+  assert(native_indirect_retained == 0 && Drain(queue) == 0);
+  Configure(queue);
+  sink.SetNativeWasmIndirectEmitter(&CaptureNativeIndirect);
+  assert(sink.IsNativeWasmIndirectEnabled());
+  auto malformed = input;
+  malformed.module_byte_offset = 9;
+  sink.RecordNativeWasmIndirect(malformed);
+  auto gap = One(queue);
+  assert(gap.header.type == reb::NativeProbeType::kGap);
+  assert(std::string_view(reinterpret_cast<const char*>(gap.inline_payload.data()),
+                          gap.header.payload_size) == "native_wasm_indirect_input_unavailable");
+  assert(native_indirect_retained == 0);
+  native_indirect_accept = false;
+  record();
+  gap = One(queue);
+  assert(std::string_view(reinterpret_cast<const char*>(gap.inline_payload.data()),
+                          gap.header.payload_size) == "native_wasm_indirect_transport_unavailable");
+  native_indirect_accept = true;
+  // The br_table budget is independent: exhausting it leaves this stream open.
+  for (unsigned i = 0; i < 16; ++i)
+    record();
+  const auto initial_drain = Drain(queue);
+  assert(native_indirect_retained == 16 && initial_drain == 0);
+  Fill(queue);
+  record();  // A full ring must NOT permanently suppress the cap omission.
+  assert(sink.IsNativeWasmIndirectEnabled());
+  assert(Drain(queue) == reb::kNativeProbeQueueCapacity);
+  record();
+  gap = One(queue);
+  assert(std::string_view(reinterpret_cast<const char*>(gap.inline_payload.data()),
+                          gap.header.payload_size) == "native_wasm_indirect_budget_incomplete");
+  assert(!sink.IsNativeWasmIndirectEnabled());
+  record();
+  assert(native_indirect_retained == 16 && Drain(queue) == 0);
+  Configure(queue);
+  sink.SetNativeWasmIndirectEmitter(&CaptureNativeIndirect);  // Fresh policy generation.
+  native_indirect_retained = 0;
+  assert(sink.IsNativeWasmIndirectEnabled());
+  record();
+  assert(native_indirect_retained == 1);
+  sink.SetEmitters(&AcceptRuntimeEvent, &CaptureRuntimeMetadata, 42,
+                   reb::kAllNativeProbeCategoryMask, kForever, false, &NativeWasmFrameLookup);
+  native_wasm_frame_lookups = 0;
+  assert(sink.IsNativeWasmIndirectEnabled());
+  assert(native_wasm_frame_lookups == 0);  // Enabled callback must not re-enter V8.
+  sink.SetNativeWasmIndirectEmitter(nullptr);
+  assert(!sink.IsNativeWasmIndirectEnabled());
+  transport.Disable();
+  std::cout << "PASS native Wasm call_indirect admission; disabled, expired, input, transport, "
+               "separate 16-record budget and full-ring cap retry\n";
+}
+
 #include "guest_sampler_tests.h"
 
 // Each test keeps a multi-megabyte ring on its own stack. Inlining every test
@@ -1364,6 +1486,7 @@ int main() {
   Run<&NativeGuestAdmission>();
   Run<&NativeGuestModuleVerdictsAndHostBudget>();
   Run<&NativeWasmRuntimeAdmission>();
+  Run<&NativeWasmIndirectAdmission>();
   Run<&DispatchSampleAdmission>();
   Run<&DispatchEmitFailureReleasesBudget>();
   Run<&OwnedRegisterSamplerAdmission>();

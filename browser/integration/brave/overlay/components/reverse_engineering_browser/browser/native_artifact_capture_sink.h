@@ -63,6 +63,10 @@ class NativeArtifactCaptureSink final {
   void CaptureWasmDispatch(const NativeWasmDispatchObservation& observation,
                            mojo_base::BigBuffer content,
                            std::function<bool()> is_current_document);
+  // Same module transfer and ACK ordering as CaptureWasmDispatch.
+  void CaptureWasmIndirect(const NativeWasmIndirectObservation& observation,
+                           mojo_base::BigBuffer content,
+                           std::function<bool()> is_current_document);
   // module_status receives the browser verdict for module bytes this capture
   // carried (accepted once module and adapter artifacts are both accepted).
   void CaptureNativeGuest(const NativeGuestCapture& capture,
@@ -145,6 +149,15 @@ class NativeArtifactCaptureSink final {
     bool published = false, failed = false;
   };
   void DrainGuestDependencies();
+  // Holds a physical Wasm observation until its document's module artifact is
+  // accepted, transferring the module once per document.
+  void PublishAfterWasmModule(NativeProbeEvent event,
+                              const std::vector<std::uint8_t>& bytes,
+                              std::uint64_t execution_context_id,
+                              std::uint64_t document_token_high,
+                              std::uint64_t document_token_low,
+                              std::string_view source_url,
+                              std::function<bool()> is_current_document);
   // Fills the renderer sequence slot of an unpublished record with a gap.
   void EmitRendererGap(const NativeProbeEvent& source, std::string_view reason) noexcept;
   // Publishes a host record without its guest parent; one marker per reason.
@@ -214,6 +227,8 @@ class NativeArtifactCaptureSink final {
                                    std::array<std::uint8_t, 32>>;
   std::map<WasmModuleKey, std::pair<std::uint64_t, bool>> wasm_dispatch_modules_;
   bool wasm_dispatch_budget_gap_emitted_ = false;
+  std::size_t wasm_indirect_count_ = 0;
+  bool wasm_indirect_budget_gap_emitted_ = false;
   // Only the browser assigns artifact IDs. Never key this relation by URL.
   using ScriptKey = std::tuple<int, std::uint64_t, std::uint64_t, std::uint64_t>;
   std::map<ScriptKey, std::uint64_t> allocating_scripts_;

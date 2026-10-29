@@ -2361,6 +2361,98 @@ void NativeProbeSink::RecordNativeWasmDispatch(std::uint64_t execution_context_i
   }
 }
 
+void NativeProbeSink::SetNativeWasmIndirectEmitter(NativeWasmIndirectEmitter emitter) noexcept {
+  native_wasm_indirect_emitter_.store(emitter, std::memory_order_release);
+}
+bool NativeProbeSink::IsNativeWasmIndirectEnabled() const noexcept {
+  // Called by V8 before handle allocation/frame walking, like the br_table
+  // predicate. Do not invoke the frame-id provider here.
+  const auto generation = config_generation_.load(std::memory_order_acquire);
+  if (generation == 0 || (generation & 1U) != 0 ||
+      native_wasm_indirect_capped_generation_.load(std::memory_order_acquire) >= generation ||
+      !native_wasm_indirect_emitter_.load(std::memory_order_acquire))
+    return false;
+  const auto categories = category_mask_.load(std::memory_order_relaxed);
+  constexpr auto required = NativeProbeCategoryMask(NativeProbeCategory::kVm) |
+                            NativeProbeCategoryMask(NativeProbeCategory::kArtifact);
+  const bool active = (categories & required) == required &&
+                      session_id_.load(std::memory_order_relaxed) != 0 &&
+                      emitter_.load(std::memory_order_relaxed) != nullptr &&
+                      MonotonicTimeNs() < expires_at_monotonic_ns_.load(std::memory_order_relaxed);
+  std::atomic_thread_fence(std::memory_order_acquire);
+  return active && config_generation_.load(std::memory_order_acquire) == generation;
+}
+bool NativeProbeSink::NoteNativeWasmIndirectOmission(const VmAdmission& admission,
+                                                     NativeWasmOmission reason) noexcept {
+  auto& slot = native_wasm_indirect_gap_generations_[static_cast<std::size_t>(reason)];
+  auto previous = slot.load(std::memory_order_acquire);
+  // Odd generation is an in-flight claim; never overwrite a newer configuration.
+  while (previous < admission.generation - 1) {
+    if (slot.compare_exchange_weak(previous, admission.generation - 1, std::memory_order_acq_rel)) {
+      constexpr std::array<std::string_view, 3> reasons{
+          "native_wasm_indirect_input_unavailable", "native_wasm_indirect_transport_unavailable",
+          "native_wasm_indirect_budget_incomplete"};
+      const bool retained = RecordRuntimeBufferEvent(NativeProbeType::kGap, admission.frame_id,
+                                                     reasons[static_cast<std::size_t>(reason)],
+                                                     admission.generation) != 0;
+      auto claimed = admission.generation - 1;
+      slot.compare_exchange_strong(claimed, retained ? admission.generation : previous,
+                                   std::memory_order_acq_rel);
+      return retained;
+    }
+  }
+  return previous == admission.generation;
+}
+void NativeProbeSink::RecordNativeWasmIndirect(NativeWasmIndirectObservation observation) noexcept {
+  if (!IsNativeWasmIndirectEnabled())
+    return;
+  VmAdmission admission;
+  if (!SnapshotVmAdmission(admission) || !(category_mask_.load(std::memory_order_relaxed) &
+                                           NativeProbeCategoryMask(NativeProbeCategory::kArtifact)))
+    return;
+  admission.frame_id = observation.header.frame_id;
+  const auto frame_id = observation.header.frame_id;
+  observation.header = NativeProbeHeader{};
+  observation.header.category = NativeProbeCategory::kVm;
+  observation.header.type = NativeProbeType::kWasmIndirectObservation;
+  observation.header.payload_size = 128;
+  observation.header.session_id = admission.session_id;
+  observation.header.monotonic_time_ns = admission.monotonic_time_ns;
+  observation.header.process_id = admission.process_id;
+  observation.header.thread_id = admission.thread_id;
+  observation.header.frame_id = frame_id;
+  observation.sample_index = 0;
+  if (!IsValidNativeWasmIndirectInput(observation)) {
+    NoteNativeWasmIndirectOmission(admission, NativeWasmOmission::kInput);
+    return;
+  }
+  for (std::size_t i = 0; i < native_wasm_indirect_slots_.size(); ++i) {
+    auto& slot = native_wasm_indirect_slots_[i];
+    auto previous = slot.load(std::memory_order_acquire);
+    while (previous < admission.generation) {
+      if (slot.compare_exchange_weak(previous, admission.generation, std::memory_order_acq_rel)) {
+        observation.sample_index = static_cast<std::uint32_t>(i);
+        observation.header.sequence_number = next_sequence_.fetch_add(1, std::memory_order_relaxed);
+        const auto emitter = native_wasm_indirect_emitter_.load(std::memory_order_acquire);
+        if (config_generation_.load(std::memory_order_acquire) != admission.generation ||
+            !emitter || !emitter(observation, admission.generation)) {
+          auto claimed = admission.generation;
+          slot.compare_exchange_strong(claimed, previous, std::memory_order_acq_rel);
+          NoteNativeWasmIndirectOmission(admission, NativeWasmOmission::kTransport);
+        }
+        return;
+      }
+    }
+  }
+  if (NoteNativeWasmIndirectOmission(admission, NativeWasmOmission::kBudget)) {
+    auto previous = native_wasm_indirect_capped_generation_.load(std::memory_order_acquire);
+    while (previous < admission.generation &&
+           !native_wasm_indirect_capped_generation_.compare_exchange_weak(
+               previous, admission.generation, std::memory_order_acq_rel)) {
+    }
+  }
+}
+
 namespace {
 struct GuestInvocationState final {
   std::uint64_t instance = 0, invocation = 0, frame = 0, document_high = 0, document_low = 0,

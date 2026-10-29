@@ -52,6 +52,25 @@ class NativeProbeHost final : public mojom::NativeProbeHost {
                            std::uint32_t sample_index,
                            const std::string& source_url,
                            mojo_base::BigBuffer content) override;
+  void CaptureWasmIndirect(std::uint64_t capture_epoch,
+                           std::uint64_t session_id,
+                           std::uint64_t sequence_number,
+                           std::uint64_t monotonic_time_ns,
+                           std::uint32_t process_id,
+                           std::uint32_t thread_id,
+                           std::uint64_t frame_id,
+                           std::uint64_t execution_context_id,
+                           std::uint64_t document_token_high,
+                           std::uint64_t document_token_low,
+                           std::uint32_t function_index,
+                           std::uint32_t module_byte_offset,
+                           std::uint32_t table_index,
+                           std::uint32_t slot,
+                           std::uint32_t callee_function_index,
+                           std::uint32_t resolution,
+                           std::uint32_t sample_index,
+                           const std::string& source_url,
+                           mojo_base::BigBuffer content) override;
   void CaptureNativeGuest(std::uint64_t capture_epoch,
                           const std::vector<std::uint8_t>& invocation_record,
                           const std::vector<std::uint8_t>& dispatch_record,
@@ -99,9 +118,10 @@ class NativeProbeHost final : public mojom::NativeProbeHost {
   std::uint64_t reported_dropped_events_ = 0;
   std::uint64_t wasm_capture_epoch_ = 0;
   std::uint32_t wasm_capture_count_ = 0;
+  std::uint32_t wasm_indirect_capture_count_ = 0;
   std::uint32_t guest_capture_count_ = 0;
-  bool wasm_document_gap_emitted_ = false, guest_budget_gap_emitted_ = false,
-       guest_host_malformed_gap_emitted_ = false;
+  bool wasm_document_gap_emitted_ = false, wasm_indirect_document_gap_emitted_ = false,
+       guest_budget_gap_emitted_ = false, guest_host_malformed_gap_emitted_ = false;
   std::shared_ptr<const std::uint64_t> wasm_epoch_lifetime_;
   base::WeakPtrFactory<NativeProbeHost> weak_factory_{this};
 };

@@ -133,6 +133,8 @@ void NativeArtifactCaptureSink::SetEmitter(const NativeProbeEmitter emitter,
   wasm_dispatch_modules_.clear();
   wasm_dispatch_count_ = 0;
   wasm_dispatch_budget_gap_emitted_ = false;
+  wasm_indirect_count_ = 0;
+  wasm_indirect_budget_gap_emitted_ = false;
   runtime_typed_array_count_.store(0, std::memory_order_relaxed);
   allocating_scripts_.clear();
   emitter_.store(emitter, std::memory_order_release);
@@ -750,10 +752,78 @@ void NativeArtifactCaptureSink::CaptureWasmDispatch(
       .table_count = observation.table_count,
       .sample_index = observation.sample_index};
   event.inline_payload = EncodeNativeWasmDispatchObservationPayload(sample);
-  // Observations of one module in one document share a single artifact.
-  const WasmModuleKey module_key{observation.header.process_id,    observation.header.frame_id,
-                                 observation.execution_context_id, observation.document_token_high,
-                                 observation.document_token_low,   NativeGuestDigest(bytes)};
+  PublishAfterWasmModule(event, bytes, observation.execution_context_id,
+                         observation.document_token_high, observation.document_token_low,
+                         observation.source_url, std::move(is_current_document));
+}
+
+void NativeArtifactCaptureSink::CaptureWasmIndirect(
+    const NativeWasmIndirectObservation& observation,
+    mojo_base::BigBuffer content,
+    std::function<bool()> is_current_document) {
+  if (!IsEnabledFor(NativeProbeCategory::kVm) || !IsEnabled() ||
+      observation.header.session_id != session_id_.load(std::memory_order_relaxed) ||
+      !is_current_document || !is_current_document())
+    return;
+  const auto gap = [&](const char* reason) {
+    EmitResult(NativeProbeType::kGap, 0, 0, observation.header.frame_id, reason,
+               NativeProbeCategory::kVm);
+  };
+  // A budget separate from br_table: one stream never starves the other.
+  if (wasm_indirect_count_ >= kNativeWasmIndirectSampleBudget) {
+    if (!wasm_indirect_budget_gap_emitted_) {
+      wasm_indirect_budget_gap_emitted_ = true;
+      gap("native_wasm_indirect_browser_budget_incomplete");
+    }
+    return;
+  }
+  ++wasm_indirect_count_;
+  if (content.size() < 8 || content.size() > kNativeArtifactMaxContentBytes ||
+      !observation.header.sequence_number || !observation.header.monotonic_time_ns ||
+      !observation.header.process_id || !observation.header.thread_id) {
+    gap("native_wasm_indirect_limit_or_invalid");
+    return;
+  }
+  // Renderer shared memory remains writable: validate a private immutable copy.
+  std::vector<std::uint8_t> bytes(content.begin(), content.end());
+  auto checked = observation;
+  checked.module_bytes = bytes;
+  if (!IsValidNativeWasmIndirectInput(checked)) {
+    gap("native_wasm_indirect_module_invalid");
+    return;
+  }
+  NativeProbeEvent event;
+  event.header = observation.header;
+  event.header.category = NativeProbeCategory::kVm;
+  event.header.type = NativeProbeType::kWasmIndirectObservation;
+  event.header.parent_event_id = 0;
+  event.header.payload_size = 128;
+  const NativeWasmIndirectObservationPayload sample{
+      .function_index = observation.function_index,
+      .module_byte_offset = observation.module_byte_offset,
+      .table_index = observation.table_index,
+      .slot = observation.slot,
+      .callee_function_index = observation.callee_function_index,
+      .resolution = static_cast<std::uint32_t>(observation.resolution),
+      .sample_index = observation.sample_index};
+  event.inline_payload = EncodeNativeWasmIndirectObservationPayload(sample);
+  PublishAfterWasmModule(event, bytes, observation.execution_context_id,
+                         observation.document_token_high, observation.document_token_low,
+                         observation.source_url, std::move(is_current_document));
+}
+
+void NativeArtifactCaptureSink::PublishAfterWasmModule(NativeProbeEvent event,
+                                                       const std::vector<std::uint8_t>& bytes,
+                                                       const std::uint64_t execution_context_id,
+                                                       const std::uint64_t document_token_high,
+                                                       const std::uint64_t document_token_low,
+                                                       const std::string_view source_url,
+                                                       std::function<bool()> is_current_document) {
+  // Observations of one module in one document share a single artifact,
+  // whichever physical stream (br_table or call_indirect) recorded them.
+  const WasmModuleKey module_key{event.header.process_id, event.header.frame_id,
+                                 execution_context_id,    document_token_high,
+                                 document_token_low,      NativeGuestDigest(bytes)};
   if (const auto known = wasm_dispatch_modules_.find(module_key);
       known != wasm_dispatch_modules_.end()) {
     event.header.artifact_id = known->second.first;
@@ -768,9 +838,8 @@ void NativeArtifactCaptureSink::CaptureWasmDispatch(
     }
   }
   const auto artifact_id = CaptureGeneratedArtifactInternal(
-      NativeArtifactKind::kWasm, NativeArtifactCaptureOrigin::kUnknown, 0,
-      observation.execution_context_id, observation.header.frame_id, observation.source_url,
-      mojo_base::BigBuffer(bytes), 0, true);
+      NativeArtifactKind::kWasm, NativeArtifactCaptureOrigin::kUnknown, 0, execution_context_id,
+      event.header.frame_id, source_url, mojo_base::BigBuffer(bytes), 0, true);
   const auto found = pending_.find(artifact_id);
   if (!artifact_id || found == pending_.end()) {
     EmitRendererGap(event, "native_wasm_dispatch_artifact_unavailable");

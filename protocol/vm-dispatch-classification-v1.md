@@ -163,8 +163,9 @@ semicolon insertion and Unicode names do not require text-based guessing.
   constants are `compare_chain`. `h = h(...)` is `threaded`.
 - A self call `h = h(s)` ties to a table when `h` is a variable, not a
   parameter, every other write of which reads that one table
-  (`h = ops[code[pc++]]`) or is a literal (`h = null`), with no compound
-  write. Each such write and each value a function of the table returns is
+  (`h = ops[code[pc++]]`) or is a literal (`h = null`). A compound write,
+  or a write that is neither an assignment nor an initializer (destructuring,
+  a `for (h of ...)` head, an Annex B function), leaves it untied. Each such write and each value a function of the table returns is
   then one alternative; a table read contributes its index. Inside a handler,
   a parameter stands for the self call's argument, and a read repeats when
   the self call does. An untied self call is a `handler_address` chain.

@@ -169,6 +169,11 @@ pub(crate) const STATIC_SHAPES: &[(&str, &str, &[u64])] = &[
         &[],
     ),
     (
+        "threaded-loop-head-write",
+        "function run(code,list){const s={acc:0};let pc=0;const ops=[function(s){s.acc++;return ops[code[pc++]];},function(s){s.acc--;return ops[code[pc++]];},function(s){return null;}];let h=ops[code[pc++]];for(h of list){h=h(s);}return s.acc;}",
+        &[],
+    ),
+    (
         "threaded-reassigned-table",
         "function run(code){const s={acc:0};let pc=0;let ops=[function(s){s.acc++;return ops[code[pc++]];},function(s){s.acc--;return ops[code[pc++]];},function(s){return null;}];ops=[function(s){return null;}];let h=ops[code[pc++]];while(h){h=h(s);}return s.acc;}",
         &[],

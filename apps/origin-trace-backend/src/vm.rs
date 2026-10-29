@@ -1958,7 +1958,8 @@ mod dispatch_shape_tests {
     /// handlers return a cursor fetch, and handlers that dispatch their own
     /// table again, directly or through a shared helper, are threaded
     /// interpreter candidates. A chain of constant indexes and a router
-    /// forwarding its argument are not; a reassigned table is structurally
+    /// forwarding its argument are not, nor is a self call whose variable a
+    /// loop head also writes; a reassigned table is structurally
     /// threaded but its binding proof fails, so it claims nothing.
     #[test]
     fn javascript_threaded_chains_and_cycles_classify_structurally() {
@@ -1980,6 +1981,7 @@ mod dispatch_shape_tests {
             ),
             ("threaded-callback-chain", "other", "handler_address"),
             ("threaded-router", "other", "call_argument"),
+            ("threaded-loop-head-write", "other", "handler_address"),
             (
                 "threaded-reassigned-table",
                 "interpreter-candidate",

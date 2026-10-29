@@ -477,8 +477,9 @@ struct Facts<'a> {
     /// Functions of the module whose result is a cursor fetch at a position
     /// they advance themselves, with that fetch's source.
     fetchers: std::rc::Rc<HashMap<u32, Source>>,
-    /// Per (table, type) of an indirect call: the fetch source every
-    /// reachable handler returns, or None when too many handlers to check.
+    /// Per (table, type) of an indirect call whose reachable handlers each
+    /// return a persistent fetch or only constants, at least one fetching:
+    /// that fetch's source, or None when too many handlers to check.
     chains: std::rc::Rc<HashMap<(u32, u32), Option<Source>>>,
     local_memo: RefCell<BTreeMap<u32, Memo>>,
     in_progress: RefCell<Vec<u32>>,
@@ -680,7 +681,8 @@ struct Trace {
     /// a call to a helper that fetches at a cursor it advances itself.
     helper: Option<u32>,
     /// The selector is an earlier indirect call's result, and every handler
-    /// that call can reach returns such a fetch: a threaded chain.
+    /// that call can reach returns such a fetch or ends the chain with a
+    /// constant: a threaded chain.
     chained: bool,
 }
 

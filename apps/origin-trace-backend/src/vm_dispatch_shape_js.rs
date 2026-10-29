@@ -1153,22 +1153,33 @@ impl<'s, 'a> Facts<'s, 'a> {
     }
     /// The table a self call `h = h(...)` threads through: a variable every
     /// other write of which reads one table (`h = ops[code[pc++]]`) or is a
-    /// literal (`h = null`). A parameter, a compound write or a `with`
-    /// scope leaves the chain untied, and its handlers unknown.
+    /// literal (`h = null`). A parameter, a compound write, a write that is
+    /// neither an assignment nor an initializer (destructuring, a loop head,
+    /// an Annex B function) or a `with` scope leaves the chain untied, and
+    /// its handlers unknown.
     fn threaded_table(&self, key: Key<'a>, call: &'a CallExpression<'a>) -> Option<Key<'a>> {
         let Key::Symbol(symbol) = key else {
             return None;
         };
+        let writes = self.writes.get(&key).map_or(&[][..], Vec::as_slice);
+        let definitions = self.definitions.get(&key).map_or(&[][..], Vec::as_slice);
+        // Initializers are the definitions no assignment write produced.
+        let initializers = definitions
+            .iter()
+            .filter(|definition| {
+                self.meter.charge(1);
+                !writes.iter().any(|write| write.span.start == definition.at)
+            })
+            .count();
         if self.parameters.contains(&symbol)
-            || self
-                .writes
-                .get(&key)
-                .is_some_and(|writes| writes.iter().any(|write| write.arithmetic))
+            || writes.iter().any(|write| write.arithmetic)
+            || self.symbol_write_counts.get(&symbol).copied().unwrap_or(0)
+                != writes.len() + initializers
         {
             return None;
         }
         let mut table = None;
-        for definition in self.definitions.get(&key).into_iter().flatten() {
+        for definition in definitions {
             if !self.meter.charge(1) || self.scope_opaque(definition.scope) {
                 return None;
             }

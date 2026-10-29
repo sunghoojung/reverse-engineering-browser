@@ -119,7 +119,7 @@ try {
   // permission from its copied binary makes self-reexecution fail at spawn.
   const failureRoot = join(temporary, 'worker-failure');
   await mkdir(join(failureRoot, 'blobs'), {recursive: true});
-  const source = await readFile(join(root, 'tools/fixtures/dispatch-retention/owned/control.js'));
+  const source = await readFile(join(root, 'tools/fixtures/dispatch-shapes/handler-array-interpreter.js'));
   const sha = createHash('sha256').update(source).digest('hex');
   await writeFile(join(failureRoot, 'blobs', `${sha}.bin`), source);
   await writeFile(join(failureRoot, 'manifest.jsonl'), JSON.stringify({protocol_version: 1,

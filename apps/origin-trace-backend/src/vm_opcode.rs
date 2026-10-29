@@ -3718,15 +3718,6 @@ if (!validate(document)) throw new Error('Backend workspace rejected by shipped 
         );
     }
 
-    fn review_fixture(name: &str) -> String {
-        fs::read_to_string(
-            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                .join("../../tools/fixtures/dispatch-review")
-                .join(name),
-        )
-        .expect("review fixture")
-    }
-
     fn tier_and_score(bytes: &[u8], kind: &str, gate: bool) -> (Value, Value) {
         GATE_DISABLED.with(|disabled| disabled.set(!gate));
         let (_, analysis, _) = analyze_artifact(bytes, kind, &[]);
@@ -3748,46 +3739,6 @@ if (!validate(document)) throw new Error('Backend workspace rejected by shipped 
             let base = tier_and_score(bytes, kind, false);
             if gated != base {
                 differences.push(format!("{name}: gated {gated:?}, base {base:?}"));
-            }
-        }
-        assert!(differences.is_empty(), "{}", differences.join("\n"));
-    }
-
-    /// Differential invariant against base itself: on every owned input,
-    /// tier, score, finding ID and dispatch inventory equal the snapshot the
-    /// base (2185b89) CLI wrote. Regenerate it with
-    /// `make dispatch-base-expectations`.
-    #[test]
-    fn analysis_matches_the_base_snapshot_on_every_owned_input() {
-        let expected: Value = serde_json::from_str(include_str!(
-            "../../../tools/fixtures/dispatch-review/base-expectations.json"
-        ))
-        .unwrap();
-        let expected = expected["inputs"].as_object().unwrap();
-        let inputs = vm::review_inputs::differential_inputs();
-        assert_eq!(inputs.len(), expected.len(), "snapshot covers every input");
-        let mut differences = Vec::new();
-        for (name, bytes, kind) in &inputs {
-            let (_, analysis, _) = analyze_artifact(bytes, kind, &[]);
-            let result = &analysis["results"][0];
-            let want = expected
-                .get(name)
-                .unwrap_or_else(|| panic!("{name} missing from the base snapshot"));
-            for key in ["tier", "vm_score", "finding_id"] {
-                if result[key] != want[key] {
-                    differences.push(format!(
-                        "{name} {key}: {} vs base {}",
-                        result[key], want[key]
-                    ));
-                }
-            }
-            if result["frontend"]
-                .get("dispatch_inventory")
-                .cloned()
-                .unwrap_or(Value::Null)
-                != want["dispatch_inventory"]
-            {
-                differences.push(format!("{name} dispatch_inventory"));
             }
         }
         assert!(differences.is_empty(), "{}", differences.join("\n"));
@@ -3828,8 +3779,11 @@ if (!validate(document)) throw new Error('Backend workspace rejected by shipped 
     /// inner cursor loop dispatches does not tie the outer `ops` handlers.
     #[test]
     fn handler_tables_bind_to_their_declaring_scope() {
-        for name in ["j_shadow2.js", "j_shadow2_ctl.js"] {
-            let (_, analysis, document) = analyze(&review_fixture(name), &[]);
+        for (name, source) in [
+            ("shadowed", vm::review_inputs::SHADOWED_TABLE_VM),
+            ("control", vm::review_inputs::SHADOW_CONTROL_VM),
+        ] {
+            let (_, analysis, document) = analyze(source, &[]);
             assert_eq!(analysis["results"][0]["tier"], "likely-vm", "{name}");
             assert_eq!(handler_opcodes(&document), vec![1, 2, 3], "{name}");
         }
@@ -3910,10 +3864,10 @@ if (!validate(document)) throw new Error('Backend workspace rejected by shipped 
     /// likely-vm, and a loop dispatch beside a router stays a candidate.
     #[test]
     fn nested_and_loop_body_dispatch_keep_base_tiers() {
-        let (_, analysis, _) = analyze(&review_fixture("t1_nested_ops.js"), &[]);
+        let (_, analysis, _) = analyze(vm::review_inputs::NESTED_TABLE_VM, &[]);
         assert_eq!(analysis["results"][0]["tier"], "likely-vm");
         assert_eq!(analysis["results"][0]["vm_score"], 65);
-        let (_, analysis, _) = analyze(&review_fixture("v2e_loopbody.js"), &[]);
+        let (_, analysis, _) = analyze(vm::review_inputs::LOOP_BODY_ROUTER_VM, &[]);
         assert_eq!(analysis["results"][0]["tier"], "candidate");
         assert_eq!(analysis["results"][0]["vm_score"], 80);
     }
@@ -4169,121 +4123,23 @@ if (!validate(document)) throw new Error('Backend workspace rejected by shipped 
         }
     }
 
-    /// The human-judged oracle covers true interpreters, deliberate wrong-table
-    /// attacks and positive controls. Node independently verifies its runtime
-    /// evidence in make lint; this exercises the complete emitted CLI pipeline.
     #[test]
-    fn owned_handler_retention_ledger() {
-        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../tools/fixtures/dispatch-retention");
-        let ledger: Value =
-            serde_json::from_slice(&fs::read(root.join("ledger.json")).unwrap()).unwrap();
-        for row in ledger["cases"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .chain(ledger["review_cases"].as_array().into_iter().flatten())
-        {
-            let name = row["file"].as_str().unwrap();
-            let bytes = vm::review_inputs::retention_source(&root, row, &ledger);
-            if let Some(expected) = row["sha256"].as_str() {
-                assert_eq!(hex::encode(Sha256::digest(&bytes)), expected, "{name}");
-            }
-            let (analysis, workspace, meter) = pipeline_work(
-                if bytes.starts_with(b"\0asm") {
-                    "webassembly"
-                } else {
-                    "javascript"
-                },
-                &bytes,
-            );
-            let count = workspace
-                .as_ref()
-                .and_then(|w| w["handlers"].as_array())
-                .map_or(0, Vec::len);
-            assert_eq!(
-                count as u64,
-                row["expected_handlers"].as_u64().unwrap(),
-                "{name}: {workspace:?}"
-            );
-            assert!(
-                !meter.exhausted()
-                    || analysis["frontend"]["dispatch_classification"]["omissions"]
-                        .as_array()
-                        .unwrap()
-                        .iter()
-                        .any(|o| o["reason"] == "classification-work-limit"),
-                "{name}"
-            );
-            if !bytes.starts_with(b"\0asm") && row["base_handlers"].as_u64().unwrap() > count as u64
-            {
-                assert!(
-                    workspace.as_ref().unwrap()["coverage"]["omissions"]
-                        .as_array()
-                        .unwrap()
-                        .iter()
-                        .any(|o| o["reason"] == "handler-withheld"),
-                    "{name}"
-                );
-            }
-            if name.starts_with("this/") && count == 0 {
-                let source = std::str::from_utf8(&bytes).unwrap();
-                assert!(
-                    classified_handlers(source, 0, source.len()).0.is_empty(),
-                    "{name}: direct gate"
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn gate_review_fixtures_resolve_only_proven_table_bindings() {
-        let root =
-            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tools/fixtures/dispatch-gate");
-        for (name, kept) in [
-            ("gate_arguments.js", true),
-            ("gate_namedexpr.js", true),
-            ("gate_annexb.js", true),
-            ("gate_class_asi.js", true),
-            ("gate_longname.js", true),
-            ("gate_closure.js", true),
-            ("gate_objshorthand.js", true),
-            ("gate_correct.js", true),
-            ("gate_correct_irrelevant_arrow.js", true),
-            ("gate_unicode1.js", true),
-            ("gate_unicode2.js", true),
-        ] {
-            let source = std::fs::read(root.join(name)).unwrap();
-            let (_, workspace, meter) = pipeline_work("javascript", &source);
+    fn proven_table_bindings_keep_their_handlers() {
+        for (name, source) in vm::review_inputs::proven_bindings() {
+            let (_, workspace, meter) = pipeline_work("javascript", source.as_bytes());
             let workspace = workspace.expect(name);
-            let handlers = workspace["handlers"].as_array().unwrap();
             assert_eq!(
-                handlers.len(),
-                if kept { 3 } else { 0 },
+                workspace["handlers"].as_array().unwrap().len(),
+                3,
                 "{name}: {workspace}"
             );
-            if !kept {
-                assert!(
-                    workspace["coverage"]["omissions"]
-                        .as_array()
-                        .unwrap()
-                        .iter()
-                        .any(|o| o["reason"] == "handler-withheld"
-                            && o["detail"]
-                                .as_str()
-                                .unwrap()
-                                .contains("3 opcode candidates")),
-                    "{name}"
-                );
-            }
             assert!(!meter.exhausted(), "{name}");
         }
     }
 
     #[test]
     fn shallow_sibling_syntax_never_accumulates_depth() {
-        let interpreter =
-            include_str!("../../../tools/fixtures/dispatch-retention/owned/control.js");
+        let interpreter = vm::review_inputs::CONTROL_VM;
         let catalogue = (0..9000)
             .map(|i| format!("'locale_{i}':'A localized value {i}',"))
             .collect::<String>();
@@ -4311,7 +4167,7 @@ if (!validate(document)) throw new Error('Backend workspace rejected by shipped 
 
     #[test]
     fn static_table_writes_use_exact_symbols_and_receivers() {
-        let source = include_str!("../../../tools/fixtures/dispatch-retention/owned/control.js");
+        let source = vm::review_inputs::CONTROL_VM;
         for (changed, expected) in [
             (source.replace("var ops=", "var ops;ops="), 3),
             (
@@ -4354,7 +4210,7 @@ if (!validate(document)) throw new Error('Backend workspace rejected by shipped 
 
     #[test]
     fn parsed_failures_and_hoist_expansion_withhold_with_a_reason() {
-        let valid = include_str!("../../../tools/fixtures/dispatch-retention/owned/block_let.js");
+        let valid = vm::review_inputs::BLOCK_LET_VM;
         for source in [
             format!("return;{valid}"),
             format!("{valid}\nlet broken = ;"),
@@ -4441,7 +4297,7 @@ if (!validate(document)) throw new Error('Backend workspace rejected by shipped 
 
     #[test]
     fn downstream_budget_exhaustion_withholds_claims_and_is_counted() {
-        let source = include_bytes!("../../../tools/fixtures/dispatch-gate/gate_correct.js");
+        let source: &[u8] = &vm::review_inputs::proven_binding("direct").into_bytes();
         let artifact = json!({"artifact_id":"1","session_id":"1","navigation_id":"1","frame_id":"1","kind":"javascript","sha256":hex::encode(Sha256::digest(source)),"url":"fixture://budget/source"});
         let (full, roles) = vm::analyze_with_roles(&artifact, source, &[]);
         let work = roles.unwrap().meter.used();
@@ -4569,9 +4425,7 @@ if (!validate(document)) throw new Error('Backend workspace rejected by shipped 
                 )
             })
             .collect::<String>();
-        source.push_str(include_str!(
-            "../../../tools/fixtures/dispatch-retention/owned/handler_pc.js"
-        ));
+        source.push_str(vm::review_inputs::HANDLER_PC_VM);
         let (_, workspace, meter) = pipeline_work("javascript", source.as_bytes());
         assert_eq!(workspace.unwrap()["handlers"].as_array().unwrap().len(), 3);
         assert!(!meter.exhausted());

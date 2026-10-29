@@ -1,75 +1,96 @@
-//! Owned generators for the large, repetitive review repro inputs. Each one
-//! reproduces a reviewer probe byte for byte from its shape, so tests never
-//! read anything outside the repository. Small repros are checked-in files
-//! under `tools/fixtures/dispatch-review/`. The parametrized shapes below
-//! also drive the N-versus-4N classifier scaling test.
+//! Owned review inputs: short interpreter programs and generators for the
+//! large, repetitive review repro inputs. Each reproduces a reviewer probe
+//! byte for byte, so tests never read anything outside the repository. The
+//! parametrized shapes below also drive the N-versus-4N classifier scaling
+//! test.
 
 /// The interpreter loop the third review appends after its noise.
 const VM_TAIL: &str = "while(pc<program.length){switch(program[pc++]){case 0:stack.push(1);break;case 1:stack.pop();break;case 2:return stack;}}}";
 const VM_HEAD: &str = "function run(program){var pc=0,stack=[];";
 
-/// Compact, byte-exact owned review sources. Repeated bundles/literals stay
-/// recipes in the retention ledger; hashes prevent generators drifting apart.
-pub(crate) fn retention_source(
-    root: &std::path::Path,
-    row: &serde_json::Value,
-    ledger: &serde_json::Value,
-) -> Vec<u8> {
-    if let Some(key) = row["source_ref"].as_str() {
-        let source = ledger["sources"][key].as_str().unwrap().as_bytes();
-        let mut output = Vec::new();
-        let mut cursor = 0;
-        for edit in row["edits"].as_array().into_iter().flatten() {
-            let offset = edit[0].as_u64().unwrap() as usize;
-            output.extend_from_slice(&source[cursor..offset]);
-            output.extend_from_slice(edit[2].as_str().unwrap().as_bytes());
-            cursor = offset + edit[1].as_u64().unwrap() as usize;
-        }
-        output.extend_from_slice(&source[cursor..]);
-        if let Some(index) = row["mutation"].as_u64() {
-            output.extend_from_slice(format!("\n/* unique {index} */").as_bytes());
-        }
-        return output;
-    }
-    if let Some(hex) = row["hex"].as_str() {
-        return hex::decode(hex).unwrap();
-    }
-    if let Some(source) = row["source"].as_str() {
-        return source.as_bytes().to_vec();
-    }
-    if let Some(parts) = row["parts"].as_array() {
-        let mut source = String::new();
-        for part in parts {
-            if let Some(seed) = part["seed"].as_u64() {
-                let mut state = seed as u32;
-                let alphabet = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-                for _ in 0..part["count"].as_u64().unwrap() {
-                    state = state.wrapping_mul(1664525).wrapping_add(1013904223);
-                    source.push(alphabet[(state >> 26) as usize] as char);
-                }
-            } else if let Some(template) = part["template"].as_str() {
-                let start = part["start"].as_u64().unwrap();
-                let count = part["count"].as_u64().unwrap();
-                let modulus = part["modulus"].as_u64().unwrap();
-                for i in start..start + count {
-                    source.push_str(
-                        &template
-                            .replace("%i%", &i.to_string())
-                            .replace("%mod%", &(i % modulus).to_string()),
-                    );
-                }
-            } else {
-                source.push_str(
-                    &part["text"]
-                        .as_str()
-                        .unwrap()
-                        .repeat(part["repeat"].as_u64().unwrap() as usize),
-                );
-            }
-        }
-        return source.into_bytes();
-    }
-    std::fs::read(root.join(row["file"].as_str().unwrap())).unwrap()
+/// A cursor loop dispatching a three-handler object table.
+pub(crate) const CONTROL_VM: &str = "function vm(code,stack){var pc=0;var ops={1:function(){stack.push(code[pc++])},2:function(){stack.pop()},3:function(){pc=code.length}};while(pc<code.length){ops[code[pc++]]();}return stack;}\n";
+/// The same table bound by `let` inside a block.
+pub(crate) const BLOCK_LET_VM: &str = "function vm(code,stack){var pc=0;{let ops={1:function(){stack.push(code[pc++])},2:function(){stack.pop()},3:function(){pc=code.length}};while(pc<code.length){ops[code[pc++]]();}}return stack;}\n";
+/// Handlers advance the program counter themselves.
+pub(crate) const HANDLER_PC_VM: &str = "function vm(code,stack){var pc=0;var ops={1:function(){pc+=2;stack.push(1)},2:function(){pc+=1;stack.pop()},3:function(){pc=code.length}};while(pc<code.length){ops[code[pc]]();}return stack;}\n";
+/// An inner cursor loop dispatches a shadowing `ops`; the outer table keeps
+/// its own handlers.
+pub(crate) const SHADOWED_TABLE_VM: &str = "function vm(code, stack){var pc=0;var ops={1:function(){stack.push(code[pc++])},2:function(){stack.pop()},3:function(){pc=code.length}};function step(){var ops=[function(){},function(){}];var i=0;while(i<code.length){ops[code[i++]]();}}while(pc<code.length){switch(code[pc]){default:ops[code[pc]]();}}return stack;}\n";
+/// Control for [`SHADOWED_TABLE_VM`] with a distinctly named inner table.
+pub(crate) const SHADOW_CONTROL_VM: &str = "function vm(code, stack){var pc=0;var ops={1:function(){stack.push(code[pc++])},2:function(){stack.pop()},3:function(){pc=code.length}};function step(){var tbl=[function(){},function(){}];var i=0;while(i<code.length){tbl[code[i++]]();}}while(pc<code.length){switch(code[pc]){default:ops[code[pc]]();}}return stack;}\n";
+/// The table is dispatched from a nested function the loop calls.
+pub(crate) const NESTED_TABLE_VM: &str = "function vm(code, stack){var pc=0;var ops={1:function(){stack.push(code[pc++])},2:function(){stack.pop()},3:function(){pc=code.length}};function step(){return ops[code[pc++]]();}while(pc<code.length){switch(code[pc]){default:step();}}return stack;}\n";
+/// A loop dispatch beside a one-shot router on the same table.
+pub(crate) const LOOP_BODY_ROUTER_VM: &str = "function route(k,code,stack){var pc=0;var handlers={1:function(){stack.push(code[pc++])},2:function(){stack.pop()},3:function(){}};while(pc<code.length){handlers[code[pc++]](stack);}return handlers[k](stack);}\n";
+
+const BINDING_HEAD: &str = "function vm(code, stack){var pc=0;var ops={1:function(){stack.push(code[pc++])},2:function(){stack.pop()},3:function(){pc=code.length}};";
+const BINDING_TAIL: &str =
+    "while(pc<code.length){switch(code[pc]){default:ops[code[pc]]();}}return stack;}";
+
+/// Table bindings the static-binding rule proves despite a neighbouring
+/// declaration, name or token that a text matcher would confuse. Every case
+/// keeps its three handlers.
+pub(crate) fn proven_bindings() -> Vec<(&'static str, String)> {
+    let case = |middle: &str| [BINDING_HEAD, middle, BINDING_TAIL].concat();
+    let closure = case("function step(){var i=0;while(i<code.length){ops[code[i++]]();}}");
+    let wide = format!("var a{}=1;", "\u{96ea}".repeat(100));
+    vec![
+        (
+            "annex-b",
+            case(
+                "var step=function(){if(false){function ops(){}}var i=0;while(i<code.length){ops[code[i++]]();}};",
+            ),
+        ),
+        ("arguments", closure.replace("ops", "arguments")),
+        (
+            "class-asi",
+            case(
+                "var step=function(){var q=1\nclass ops {}\nvar i=0;while(i<code.length){ops[code[i++]]();}};",
+            ),
+        ),
+        (
+            "long-name",
+            case("function step(){var ops=[];var i=0;while(i<code.length){ops[code[i++]]();}}")
+                .replace("ops", &format!("h{}", "a".repeat(300))),
+        ),
+        (
+            "named-expression",
+            case("var step=function ops(){var i=0;while(i<code.length){ops[code[i++]]();}};"),
+        ),
+        (
+            "object-shorthand",
+            case("var obj={ops};function step(){var i=0;while(i<code.length){ops[code[i++]]();}}"),
+        ),
+        (
+            "direct",
+            [
+                BINDING_HEAD,
+                "while(pc<code.length){ops[code[pc++]]();}return stack;}",
+            ]
+            .concat(),
+        ),
+        (
+            "irrelevant-arrow",
+            [
+                BINDING_HEAD,
+                "var f=ops=>ops;while(pc<code.length){ops[code[pc++]]();}return stack;}",
+            ]
+            .concat(),
+        ),
+        ("wide-name", case(&format!("{wide}var z =x=>x;"))),
+        ("wide-name-spaced", case(&format!("{wide}var z  =x=>x;"))),
+        ("closure", closure),
+    ]
+}
+
+/// One named [`proven_bindings`] case.
+pub(crate) fn proven_binding(name: &str) -> String {
+    proven_bindings()
+        .into_iter()
+        .find(|(case, _)| *case == name)
+        .map(|(_, source)| source)
+        .unwrap_or_else(|| panic!("no proven binding {name}"))
 }
 
 /// `count` copies of one loop statement, one per line.
@@ -565,15 +586,14 @@ pub(crate) fn scaling_generators() -> Vec<Generator> {
     ]
 }
 
-/// Every owned input the differential invariants cover: repository
-/// fixtures, dispatch-shape fixtures, review repro copies and generated
-/// review inputs, as (name, bytes, kind).
+/// Every owned input the differential invariant covers: repository
+/// fixtures, dispatch-shape fixtures and the review inputs above, as
+/// (name, bytes, kind).
 pub(crate) fn differential_inputs() -> Vec<(String, Vec<u8>, &'static str)> {
     let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
     let mut inputs = Vec::new();
     for directory in [
         "tools/fixtures/dispatch-shapes",
-        "tools/fixtures/dispatch-review",
         "tools/fixtures/vm-dynamic-debug",
         "tools/fixtures/vm-dynamic-debug/xor-decoded",
         "tools/fixtures/vm-workspace-effects",
@@ -614,6 +634,24 @@ pub(crate) fn differential_inputs() -> Vec<(String, Vec<u8>, &'static str)> {
             }
         }
     }
+    for (name, source) in [
+        ("control", CONTROL_VM),
+        ("block-let", BLOCK_LET_VM),
+        ("handler-pc", HANDLER_PC_VM),
+        ("shadowed-table", SHADOWED_TABLE_VM),
+        ("shadow-control", SHADOW_CONTROL_VM),
+        ("nested-table", NESTED_TABLE_VM),
+        ("loop-body-router", LOOP_BODY_ROUTER_VM),
+    ] {
+        inputs.push((
+            format!("review:{name}"),
+            source.as_bytes().to_vec(),
+            "javascript",
+        ));
+    }
+    for (name, source) in proven_bindings() {
+        inputs.push((format!("binding:{name}"), source.into_bytes(), "javascript"));
+    }
     for (name, source) in javascript().into_iter().chain(third_review_javascript()) {
         inputs.push((format!("review:{name}"), source.into_bytes(), "javascript"));
     }
@@ -627,7 +665,7 @@ pub(crate) fn differential_inputs() -> Vec<(String, Vec<u8>, &'static str)> {
 /// and exports. The real VM sits in the middle, not before the large prefix.
 pub(crate) fn owned_bundle(bytes: usize) -> String {
     use std::fmt::Write;
-    let vm = include_str!("../../../tools/fixtures/dispatch-retention/owned/handler_pc.js");
+    let vm = HANDLER_PC_VM;
     let mut source = String::from("const ownedModules=[];");
     let mut inserted = false;
     let mut i = 0;

@@ -1,1 +1,0 @@
-(function(){var pc=0,code=[1,4,3],stack=[];var ops={1:function(){stack.push(code[pc++])},2:function(){stack.pop()},3:function(){pc=code.length}};function run(){while(pc<code.length){ops[code[pc++]]();}}run();})();

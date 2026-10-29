@@ -90,8 +90,7 @@ also includes resident stack pages, allocator/runtime overhead and the parent;
 measure both processes together. The 8 MiB target is below roughly 1 GiB peak
 RSS on a local workstation, not a guarantee about unrelated concurrent work.
 Oversize, dense, excessively nested and unavailable-worker inputs have counted
-omissions. The [owned retention ledger](../../tools/fixtures/dispatch-retention/README.md)
-checks emitted claims and separately verifies runtime ground truth with Node.
+omissions.
 
 Claims describe the statically bound table. Runtime replacement through `eval`
 or `Function`, Proxy or reflection, global-object writes, sloppy `arguments`

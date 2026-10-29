@@ -1909,34 +1909,6 @@ mod dispatch_shape_tests {
         assert_eq!(result(0, "local13"), result(1, "local13"));
     }
 
-    /// Writes every differential input for the base CLI to snapshot. Run
-    /// through `make dispatch-base-expectations`; see the dispatch-review
-    /// README.
-    #[test]
-    #[ignore = "writes inputs; run through make dispatch-base-expectations"]
-    fn write_differential_inputs() {
-        let directory = PathBuf::from(
-            std::env::var("REB_DIFFERENTIAL_INPUTS").expect("REB_DIFFERENTIAL_INPUTS"),
-        );
-        std::fs::create_dir_all(&directory).unwrap();
-        let mut index = Vec::new();
-        for (position, (name, bytes, kind)) in
-            review_inputs::differential_inputs().iter().enumerate()
-        {
-            let file = format!(
-                "{position:04}.{}",
-                if *kind == "wasm" { "wasm" } else { "js" }
-            );
-            std::fs::write(directory.join(&file), bytes).unwrap();
-            index.push(json!({"name": name, "file": file, "kind": kind}));
-        }
-        std::fs::write(
-            directory.join("inputs.json"),
-            serde_json::to_string_pretty(&index).unwrap(),
-        )
-        .unwrap();
-    }
-
     #[test]
     fn module_without_dispatch_records_export_per_role() {
         let bytes = wat::parse_str(

@@ -2093,7 +2093,7 @@ fn allocation_refusal_is_counted_and_does_not_poison_the_next_artifact() {
     assert_eq!(result.omissions[0]["omitted_records"], 1);
     assert!(meter.parser_peak() <= 2 << 20);
     assert!(meter.parser_peak() > 0);
-    let source = include_str!("../../../tools/fixtures/dispatch-retention/owned/control.js");
+    let source = crate::vm::review_inputs::CONTROL_VM;
     let result = classify(source, &Meter::new());
     assert!(
         result
@@ -2122,7 +2122,7 @@ thread_local! { static WORKER_FAULT: std::cell::Cell<Option<&'static str>> = con
 fn worker_failures_are_counted_not_saved_and_retry_without_input_changes() {
     use std::fs;
     let root = tempfile::tempdir().unwrap();
-    let source = include_bytes!("../../../tools/fixtures/dispatch-retention/owned/control.js");
+    let source = crate::vm::review_inputs::CONTROL_VM.as_bytes();
     let hash = {
         use sha2::{Digest, Sha256};
         hex::encode(Sha256::digest(source))
@@ -2168,10 +2168,7 @@ fn worker_failures_are_counted_not_saved_and_retry_without_input_changes() {
 #[test]
 fn worker_drops_inherited_environment_descriptors_and_network() {
     WORKER_FAULT.set(Some("capabilities"));
-    let result = classify(
-        include_str!("../../../tools/fixtures/dispatch-retention/owned/control.js"),
-        &Meter::new(),
-    );
+    let result = classify(crate::vm::review_inputs::CONTROL_VM, &Meter::new());
     WORKER_FAULT.set(None);
     assert!(result.omissions.is_empty(), "{:?}", result.omissions);
     assert!(

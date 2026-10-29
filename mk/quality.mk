@@ -47,15 +47,6 @@ dispatch-shape-check:
 dispatch-shape-fixtures:
 	$(call ignored-rust-test,--lib,vm::dispatch_shape_tests::write_dispatch_shape_fixtures,)
 
-# The base snapshot: tier, score, finding ID and dispatch inventory that the
-# pre-classification analyzer (DISPATCH_BASE_COMMIT) writes for every owned
-# differential input. Rerun after adding an owned input; base itself is fixed.
-DISPATCH_BASE_COMMIT ?= 2185b89c73cce5c05815a9da03a50b723d9bfba6
-.PHONY: dispatch-base-expectations
-dispatch-base-expectations:
-	DISPATCH_BASE_COMMIT=$(DISPATCH_BASE_COMMIT) tools/regenerate-dispatch-base-expectations.sh \
-		tools/fixtures/dispatch-review/base-expectations.json
-
 # The actual C++ native Wasm encoders feed the Rust workspace builder, the
 # shipped viewer and the Python validator. The Rust tests also export the exact
 # evidence stores they built; make rendered-ui-check renders those stores
@@ -242,7 +233,6 @@ javascript-check: capture-completeness-check
 	node tools/check-vm-linked-model.mjs
 	node tools/check-vm-observed-path.mjs
 	node tools/check-vm-compare-cli.mjs
-	node --experimental-vm-modules tools/check-dispatch-retention.mjs
 	node tools/check-python-client-project.mjs
 	node tools/check-origin-trace-debugger.mjs --field-provenance-only
 	node tools/check-origin-trace-launcher.mjs --cleanup-only

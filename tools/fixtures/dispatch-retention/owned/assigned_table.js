@@ -1,1 +1,0 @@
-function vm(code,stack){var pc=0;var ops={};ops[1]=function(){stack.push(code[pc++])};ops[2]=function(){stack.pop()};ops[3]=function(){pc=code.length};while(pc<code.length){ops[code[pc++]]();}return stack;}

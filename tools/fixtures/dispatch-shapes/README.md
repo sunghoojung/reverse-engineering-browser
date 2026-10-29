@@ -30,7 +30,8 @@ map, or role label is used as a fixture, label, or ground truth.
 | `bfs-lookup.js` | `id = q[head++]; switch (types[id])`: a second-level lookup, role `other` |
 | `arguments-loop.js` | `switch (arguments[i])` loop: an arguments scan, role `other` |
 
-Review repro inputs live in [`../dispatch-review`](../dispatch-review/README.md).
+Short review repro programs are inlined in
+`apps/origin-trace-backend/src/vm_review_inputs.rs`.
 
 `expected.json` is the classification each site must receive. The checked-in
 `.wasm` files are built from the `.wat` sources by the exactly pinned `wat`

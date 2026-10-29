@@ -241,6 +241,7 @@ const capturedExportPanel = installCapturedExportDialog({
         element.textContent = String(value);
         return element;
       }
+      function counted(count, singular, plural = `${singular}s`) { return `${count} ${count === 1 ? singular : plural}`; }
 
       function emptyListboxOption(className, value) {
         const element = textElement('div', className, value);
@@ -1540,8 +1541,8 @@ const capturedExportPanel = installCapturedExportDialog({
           const row = document.createElement('details'); row.className = 'vm-effect-row';
           const selected = site.byte_offset === inventory.selected_byte_offset;
           const count = site.kind === 'call_indirect'
-            ? (site.element_fanout === null ? 'element fanout unknown' : `${site.element_fanout} static element entries`)
-            : `${site.arm_count} arms + default · ${site.unique_target_count} unique branch targets`;
+            ? (site.element_fanout === null ? 'element fanout unknown' : counted(site.element_fanout, 'static element entry', 'static element entries'))
+            : `${counted(site.arm_count, 'arm')} + default · ${counted(site.unique_target_count, 'unique branch target')}`;
           const rank = inventory.candidates.indexOf(site) + 1;
           const classification = classificationLabel(site.classification);
           const honesty = site.kind === 'call_indirect'
@@ -1592,10 +1593,10 @@ const capturedExportPanel = installCapturedExportDialog({
         const rows = vmOpcodeRows(workspace);
         const heading = document.createElement('div'); heading.className = 'vm-workspace-heading';
         const listingCount = workspace.runtime !== 'webassembly'
-          ? `${workspace.handlers.length} candidate ${workspace.handlers.length === 1 ? 'handler' : 'handlers'}`
+          ? counted(workspace.handlers.length, 'candidate handler')
           : rows.length === workspace.handlers.length
-            ? `${workspace.handlers.length} dispatch-arm candidates`
-            : `${rows.length} dispatch sites · ${workspace.handlers.length} retained arms`;
+            ? counted(workspace.handlers.length, 'dispatch-arm candidate')
+            : `${counted(rows.length, 'dispatch site')} · ${counted(workspace.handlers.length, 'retained arm')}`;
         heading.append(textElement('h4', '', 'Handler listing'), textElement('span', '', listingCount));
         section.append(heading);
         if (!rows.some(row => row.key === state.selectedVmHandlerKey)) {
@@ -1672,7 +1673,7 @@ const capturedExportPanel = installCapturedExportDialog({
         }
         const search = document.createElement('input'); search.type = 'search'; search.placeholder = 'Filter handlers';
         search.setAttribute('aria-label', 'Filter retained handlers'); search.maxLength = 256;
-        const count = textElement('span', 'vm-listing-count', `${rows.length} handlers`);
+        const count = textElement('span', 'vm-listing-count', counted(rows.length, 'handler'));
         count.setAttribute('role', 'status');
         search.addEventListener('input', () => {
           const query = search.value.trim().toLowerCase();
@@ -1683,7 +1684,7 @@ const capturedExportPanel = installCapturedExportDialog({
           [...list.children].forEach(row => { row.tabIndex = -1; });
           const selected = visible.find(row => row.dataset.handlerKey === state.selectedVmHandlerKey) ?? visible[0];
           if (selected) selected.tabIndex = 0;
-          count.textContent = `${visible.length} / ${rows.length} handlers`;
+          count.textContent = `${visible.length} / ${counted(rows.length, 'handler')}`;
           [...toolbar.querySelectorAll('button')].forEach(button => { button.disabled = !visible.length; });
           updateVmNavigationMenus();
         });

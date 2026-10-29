@@ -1350,27 +1350,35 @@ void NativeWasmRuntimeAdmission() {
 
 #include "guest_sampler_tests.h"
 
+// Each test keeps a multi-megabyte ring on its own stack. Inlining every test
+// into main can exceed the default 8 MiB main-thread stack, so each runs in
+// its own frame.
+template <auto Test>
+[[gnu::noinline]] void Run() {
+  Test();
+}
+
 int main() {
   reb::mojom::NativeProbeHost host;
   transport.Connect(mojo::PendingRemote<reb::mojom::NativeProbeHost>(&host));
-  NativeGuestAdmission();
-  NativeGuestModuleVerdictsAndHostBudget();
-  NativeWasmRuntimeAdmission();
-  DispatchSampleAdmission();
-  DispatchEmitFailureReleasesBudget();
-  OwnedRegisterSamplerAdmission();
-  PageGuestSamplerAdmission();
-  QueueMappingAndCanvasBurst();
-  RecoveryAndSaturation();
-  ConcurrentSameSite();
-  ConfigurationRaces();
-  DisabledExpiredAndMalformed();
-  CanvasCreatorAdmission();
-  RuntimeCreatorAdmission();
-  RuntimeScriptProvenance();
-  RuntimeKeepList();
-  RuntimeBufferFrameSelection();
-  RuntimeSourceFeed();
-  RuntimeCheckpointQueue();
+  Run<&NativeGuestAdmission>();
+  Run<&NativeGuestModuleVerdictsAndHostBudget>();
+  Run<&NativeWasmRuntimeAdmission>();
+  Run<&DispatchSampleAdmission>();
+  Run<&DispatchEmitFailureReleasesBudget>();
+  Run<&OwnedRegisterSamplerAdmission>();
+  Run<&PageGuestSamplerAdmission>();
+  Run<&QueueMappingAndCanvasBurst>();
+  Run<&RecoveryAndSaturation>();
+  Run<&ConcurrentSameSite>();
+  Run<&ConfigurationRaces>();
+  Run<&DisabledExpiredAndMalformed>();
+  Run<&CanvasCreatorAdmission>();
+  Run<&RuntimeCreatorAdmission>();
+  Run<&RuntimeScriptProvenance>();
+  Run<&RuntimeKeepList>();
+  Run<&RuntimeBufferFrameSelection>();
+  Run<&RuntimeSourceFeed>();
+  Run<&RuntimeCheckpointQueue>();
   std::cout << "Renderer ring admission only; no full Chromium/Mojo/runtime validation.\n";
 }

@@ -2736,22 +2736,26 @@ fn classify_candidate(
                 limited,
             } = facts.query(dispatch.selector, dispatch.offset)?;
             meter.count_limited(limited);
-            // A handler that dispatches the table it is placed in re-enters
-            // that table each step: a threaded cycle through the function
-            // body. It repeats when its selector is a cursor that outlives
-            // one call. A tail call leaves its function, so an enclosing loop
-            // never runs it again; outside a cycle it fires once.
+            // A handler that dispatches the table it is placed in with a
+            // cursor fetch that outlives one call re-enters that table each
+            // step: a threaded cycle through the function body. Membership
+            // alone is not threading, because a compiled module places every
+            // address-taken function in one table. A tail call leaves its
+            // function, so an enclosing loop never runs it again; outside a
+            // cycle it fires once.
             let (cycle, tail) = match dispatch.op {
                 DispatchOp::CallIndirect { table, ty, tail } => (
-                    members
-                        .get(&(table, ty))
-                        .and_then(Option::as_ref)
-                        .is_some_and(|reachable| reachable.contains(&index)),
+                    trace.source.cursor_like()
+                        && facts.persistent(&trace)
+                        && members
+                            .get(&(table, ty))
+                            .and_then(Option::as_ref)
+                            .is_some_and(|reachable| reachable.contains(&index)),
                     tail,
                 ),
                 DispatchOp::BrTable { .. } => (false, false),
             };
-            if cycle && trace.source.cursor_like() && facts.persistent(&trace) {
+            if cycle {
                 if repeats != Repeats::Loop || tail {
                     repeats = Repeats::Loop;
                     loop_range = Some((body_offset, body_end));

@@ -3845,6 +3845,20 @@ body.resizing-panes-y, body.resizing-panes-y * { cursor: row-resize !important; 
 /* The pager has nothing to page until a comparison returns rows. */
 #evidence-comparison-panel > .package-toolbar:last-child:has(> span:empty) { display: none; }
 
+/* Backtraces: one 16px inset for the heading, steps and inspector. Recorded
+   links are the normal case; only shared-identifier and gap steps keep color. */
+#screen-backtrace .trace-toolbar :is(select, button) { min-height: 32px; }
+#screen-backtrace .trace-list-heading { padding: 12px 16px; }
+#screen-backtrace .trace-row { padding: 12px 16px; }
+#screen-backtrace .trace-link-type { font-size: 11px; }
+#screen-backtrace .trace-link-type.exact { color: var(--muted); }
+#screen-backtrace .trace-inspector { padding: 12px 16px 24px; }
+#screen-backtrace .trace-inspector > h2 { margin-bottom: 16px; }
+#screen-backtrace .trace-detail-relation { margin: 4px 0 16px; }
+#screen-backtrace .trace-facts { gap: 8px 12px; margin-bottom: 16px; }
+#screen-backtrace .trace-inspector .workspace-disclosure > summary { padding-inline: 0; }
+#screen-backtrace .trace-value { padding: 12px 16px; }
+#screen-backtrace .trace-empty { padding: 32px; border-radius: 8px; }
 /* End evidence and backtraces */
 
 /* Sources */

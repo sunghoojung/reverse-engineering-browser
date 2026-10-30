@@ -3803,6 +3803,9 @@ body.resizing-panes-y, body.resizing-panes-y * { cursor: row-resize !important; 
 /* End evidence and backtraces */
 
 /* Sources */
+/* The details sidebar is one scrolling stack of panes. Its earlier three-row
+   grid kept a 35px slot for a removed tab bar and clipped every pane to it. */
+#screen-sources .sources-debugger { grid-template-rows: minmax(0, 1fr); }
 /* End sources */
 
 /* Fingerprinting */

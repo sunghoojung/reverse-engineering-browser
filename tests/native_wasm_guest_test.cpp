@@ -70,6 +70,7 @@ void CheckGuestWireParity() {
                       std::uint64_t{0x4142434445464748});
   CheckGuestWireField(&OI::parent_dispatch_sequence_number, &CI::parent_dispatch_sequence_number,
                       std::uint64_t{0x5152535455565758});
+  CheckGuestWireField(&OI::site_index, &CI::site_index, std::uint32_t{0x61626364});
   // A version 1 record reserved bytes 72..128; it still decodes, with no
   // parent dispatch, and the new field occupies exactly bytes 72..80.
   OI legacy;
@@ -82,7 +83,44 @@ void CheckGuestWireParity() {
   legacy.parent_dispatch_sequence_number = 0x0102030405060708;
   bytes = reb::EncodeNativeWasmGuestInvocationPayload(legacy);
   assert(bytes[72] == std::byte{8} && bytes[79] == std::byte{1} && bytes[80] == std::byte{0});
+  // Version 3 adds the adapter site at exactly bytes 80..84.
+  OI sited;
+  sited.site_index = 7;
+  bytes = reb::EncodeNativeWasmGuestInvocationPayload(sited);
+  assert(bytes[0] == std::byte{3} && bytes[80] == std::byte{7} && bytes[84] == std::byte{0});
   std::puts("PASS overlay renderer encoder and core decoder agree byte-for-byte on every field");
+}
+// Sites name distinct dispatcher functions in increasing order, 1 to 8 of
+// them, under one shared sample limit.
+void CheckAdapterSiteShape() {
+  reb::NativeWasmGuestAdapter adapter;
+  adapter.json = "{}";
+  adapter.recipe_sha256 = reb::NativeGuestDigest(
+      std::span(reinterpret_cast<const std::uint8_t*>(adapter.json.data()), adapter.json.size()));
+  for (std::uint32_t n = 0; n < reb::kNativeGuestSiteLimit; ++n) {
+    adapter.sites[n].function_index = 10 + n;
+    adapter.sites[n].dispatch_module_offset = 8 + n;
+  }
+  adapter.site_count = 2;
+  assert(reb::IsValidNativeGuestAdapterShape(adapter));
+  std::uint32_t index = 0;
+  assert(reb::FindNativeGuestSite(adapter, 11, 9, &index) == &adapter.sites[1] && index == 1);
+  assert(!reb::FindNativeGuestSite(adapter, 11, 8) && !reb::FindNativeGuestDispatcher(adapter, 12));
+  adapter.site_count = reb::kNativeGuestSiteLimit;
+  assert(reb::IsValidNativeGuestAdapterShape(adapter));
+  for (const std::size_t count : {std::size_t{0}, reb::kNativeGuestSiteLimit + 1}) {
+    adapter.site_count = count;
+    assert(!reb::IsValidNativeGuestAdapterShape(adapter));
+  }
+  adapter.site_count = 2;
+  adapter.sites[1].function_index = 10;  // Duplicate dispatcher.
+  assert(!reb::IsValidNativeGuestAdapterShape(adapter));
+  adapter.sites[1].function_index = 9;  // Out of order.
+  assert(!reb::IsValidNativeGuestAdapterShape(adapter));
+  adapter.sites[1].function_index = 11;
+  adapter.sample_limit = reb::kNativeGuestSampleLimit + 1;  // Over the shared budget.
+  assert(!reb::IsValidNativeGuestAdapterShape(adapter));
+  std::puts("PASS adapter sites are 1 to 8 distinct ordered dispatchers under one sample limit");
 }
 struct Runtime {
   std::array<std::uint8_t, 256> memory{};
@@ -126,55 +164,55 @@ int main() {
   runtime.locals[320] = 103;
   runtime.memory[102] = 0x42;
   reb::NativeWasmGuestStateView view{1, 1, 414, 0x20677, 3, 244, &runtime, &Read, &Copy};
-  reb::NativeWasmGuestAdapter adapter;
-  adapter.function_index = 414;
-  adapter.dispatch_module_offset = 0x20677;
-  adapter.pc_local_index = 320;
-  adapter.pc_adjustment = -1;
-  adapter.subtract_memory_base = true;  // Authored preincrement case, not QuickJS recipe.
-  adapter.memory_base.is_local = true;
-  adapter.memory_base.local_index = 10;
-  adapter.memory_base.chain_count = 2;
-  adapter.memory_base.offsets = {4, 4, 0};
-  adapter.memory_length = adapter.memory_base;
-  adapter.memory_length.offsets = {4, 8, 0};
+  reb::NativeWasmGuestSite site;
+  site.function_index = 414;
+  site.dispatch_module_offset = 0x20677;
+  site.pc_local_index = 320;
+  site.pc_adjustment = -1;
+  site.subtract_memory_base = true;  // Authored preincrement case, not QuickJS recipe.
+  site.memory_base.is_local = true;
+  site.memory_base.local_index = 10;
+  site.memory_base.chain_count = 2;
+  site.memory_base.offsets = {4, 4, 0};
+  site.memory_length = site.memory_base;
+  site.memory_length.offsets = {4, 8, 0};
   reb::NativeGuestSnapshot out;
-  assert(reb::ResolveNativeGuestSnapshot(adapter, view, out));
+  assert(reb::ResolveNativeGuestSnapshot(site, view, out));
   assert(out.pc == 2 && out.raw_pc == 103 && out.opcode == 0x42 && out.memory_base == 100 &&
          out.memory_length == 8);
   runtime.locals[320] = 105;
   runtime.memory[104] = 0x9e;
-  assert(reb::ResolveNativeGuestSnapshot(adapter, view, out) && out.pc == 4 && out.opcode == 0x9e);
+  assert(reb::ResolveNativeGuestSnapshot(site, view, out) && out.pc == 4 && out.opcode == 0x9e);
   runtime.shared = true;
-  assert(!reb::ResolveNativeGuestSnapshot(adapter, view, out));
+  assert(!reb::ResolveNativeGuestSnapshot(site, view, out));
   runtime.shared = false;
   runtime.locals[10] = UINT32_MAX;
-  assert(!reb::ResolveNativeGuestSnapshot(adapter, view, out));
+  assert(!reb::ResolveNativeGuestSnapshot(site, view, out));
   runtime.locals[10] = 8;
   runtime.locals[320] = UINT64_MAX;
-  assert(!reb::ResolveNativeGuestSnapshot(adapter, view, out));
+  assert(!reb::ResolveNativeGuestSnapshot(site, view, out));
   runtime.locals[320] = 0;
-  assert(!reb::ResolveNativeGuestSnapshot(adapter, view, out));
+  assert(!reb::ResolveNativeGuestSnapshot(site, view, out));
   runtime.locals[320] = 103;
-  adapter.pc_value_type = 64;
-  assert(!reb::ResolveNativeGuestSnapshot(adapter, view, out));
-  adapter.pc_value_type = 32;
-  adapter.memory_base.chain_count = 4;
-  assert(!reb::ResolveNativeGuestSnapshot(adapter, view, out));
-  adapter.memory_base.chain_count = 2;
+  site.pc_value_type = 64;
+  assert(!reb::ResolveNativeGuestSnapshot(site, view, out));
+  site.pc_value_type = 32;
+  site.memory_base.chain_count = 4;
+  assert(!reb::ResolveNativeGuestSnapshot(site, view, out));
+  site.memory_base.chain_count = 2;
   Put(runtime, 40, 65537);
-  assert(!reb::ResolveNativeGuestSnapshot(adapter, view, out));
+  assert(!reb::ResolveNativeGuestSnapshot(site, view, out));
   Put(runtime, 40, 8);
-  adapter.opcode_width = 4;
+  site.opcode_width = 4;
   runtime.memory[102] = 1;
   runtime.memory[103] = 2;
   runtime.memory[104] = 3;
   runtime.memory[105] = 4;
-  assert(reb::ResolveNativeGuestSnapshot(adapter, view, out) && out.opcode == 0x04030201);
-  adapter.opcode_big_endian = true;
-  assert(reb::ResolveNativeGuestSnapshot(adapter, view, out) && out.opcode == 0x01020304);
+  assert(reb::ResolveNativeGuestSnapshot(site, view, out) && out.opcode == 0x04030201);
+  site.opcode_big_endian = true;
+  assert(reb::ResolveNativeGuestSnapshot(site, view, out) && out.opcode == 0x01020304);
   view.instance_id = 0;
-  assert(!reb::ResolveNativeGuestSnapshot(adapter, view, out));
+  assert(!reb::ResolveNativeGuestSnapshot(site, view, out));
   const std::array<std::uint8_t, 3> abc{'a', 'b', 'c'};
   const std::array<std::uint8_t, 32> expected{0xba, 0x78, 0x16, 0xbf, 0x8f, 0x01, 0xcf, 0xea,
                                               0x41, 0x41, 0x40, 0xde, 0x5d, 0xae, 0x22, 0x23,
@@ -182,6 +220,7 @@ int main() {
                                               0xb4, 0x10, 0xff, 0x61, 0xf2, 0x00, 0x15, 0xad};
   assert(reb::NativeGuestDigest(abc) == expected);
   CheckGuestWireParity();
+  CheckAdapterSiteShape();
   std::puts(
       "PASS actual borrowed local320/memory resolution, pointer chains, checked "
       "limits/type/shared/endian and digest");

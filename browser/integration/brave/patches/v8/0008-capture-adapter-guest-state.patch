@@ -1,8 +1,8 @@
 diff --git a/include/v8-callbacks.h b/include/v8-callbacks.h
-index c682ee627fb10847eae3cc29b5a100876e124c58..3e93774cb730c0643d81b4b6bfc6fd0ea0aee6cc 100644
+index c682ee627fb10847eae3cc29b5a100876e124c58..d61d790a84881d386f04ffc56827a15669d8dc1f 100644
 --- a/include/v8-callbacks.h
 +++ b/include/v8-callbacks.h
-@@ -354,6 +354,45 @@ using WasmBrTableDispatchCallback = void (*)(
+@@ -354,6 +354,49 @@ using WasmBrTableDispatchCallback = void (*)(
  // into V8. Null means enabled; embedders should reject inactive/capped captures.
  using WasmBrTableDispatchEnabledCallback = bool (*)();
  
@@ -32,6 +32,10 @@ index c682ee627fb10847eae3cc29b5a100876e124c58..3e93774cb730c0643d81b4b6bfc6fd0e
 +// Pure configured-site identity, independent of capture budgets/admission.
 +// Null conservatively treats every br_table as a selected boundary.
 +using WasmGuestDispatchSiteCallback = bool (*)(uint32_t, uint32_t);
++// Whether a function index is the dispatcher of any configured site. The
++// parent walk treats an enclosing frame of such a function without identity
++// as a possible parent. Null treats only the current function this way.
++using WasmGuestDispatcherFunctionCallback = bool (*)(uint32_t);
 +// kNotDispatcher defers the decision to a later function entry of the same
 +// instance. kRejectModule is final for the module within one capture interval
 +// (V8 remembers it and stops calling back for that module).
@@ -49,10 +53,10 @@ index c682ee627fb10847eae3cc29b5a100876e124c58..3e93774cb730c0643d81b4b6bfc6fd0e
    kCompile,
    kModule,
 diff --git a/include/v8-isolate.h b/include/v8-isolate.h
-index bd7058a59709f3697d19bd61370a740098f8bd83..3359dab923802bb39098528ba208940ca1eb53ca 100644
+index bd7058a59709f3697d19bd61370a740098f8bd83..1e15d99d04ae1b90ec133745ef9524cb287b64ec 100644
 --- a/include/v8-isolate.h
 +++ b/include/v8-isolate.h
-@@ -1770,6 +1770,20 @@ class V8_EXPORT Isolate {
+@@ -1770,6 +1770,21 @@ class V8_EXPORT Isolate {
        WasmBrTableDispatchCallback callback,
        WasmBrTableDispatchEnabledCallback enabled_callback = nullptr);
  
@@ -61,7 +65,8 @@ index bd7058a59709f3697d19bd61370a740098f8bd83..3359dab923802bb39098528ba208940c
 +      WasmBrTableDispatchEnabledCallback enabled,
 +      WasmGuestCaptureEpochCallback epoch = nullptr,
 +      WasmGuestModuleAdmissionCallback admit_module = nullptr,
-+      WasmGuestDispatchSiteCallback selected_site = nullptr);
++      WasmGuestDispatchSiteCallback selected_site = nullptr,
++      WasmGuestDispatcherFunctionCallback dispatcher_function = nullptr);
 +  // Actual current stack only, including exact import caller and nearest
 +  // matching dispatcher ancestor that encountered a selected boundary.
 +  // Never-selected activations are skipped; selected-but-dropped ones are not.
@@ -74,7 +79,7 @@ index bd7058a59709f3697d19bd61370a740098f8bd83..3359dab923802bb39098528ba208940c
  
    void SetRuntimeBufferCallback(RuntimeBufferCallback callback);
 diff --git a/src/api/api.cc b/src/api/api.cc
-index cf6dd1f95f7fd9285f77fa3ac2e430f713c4e0a0..4bc04dfcdd815b45c86c659784510a2f0ca63130 100644
+index cf6dd1f95f7fd9285f77fa3ac2e430f713c4e0a0..88aa455542564baaf1e44053db7c355c567d311a 100644
 --- a/src/api/api.cc
 +++ b/src/api/api.cc
 @@ -164,6 +164,7 @@
@@ -85,7 +90,7 @@ index cf6dd1f95f7fd9285f77fa3ac2e430f713c4e0a0..4bc04dfcdd815b45c86c659784510a2f
  #endif  // V8_ENABLE_WEBASSEMBLY
  
  #ifdef V8_INTL_SUPPORT
-@@ -11020,6 +11021,40 @@ void Isolate::SetWasmBrTableDispatchCallback(
+@@ -11020,6 +11021,42 @@ void Isolate::SetWasmBrTableDispatchCallback(
    i_isolate->set_wasm_br_table_dispatch_callback(callback);
  }
  
@@ -94,7 +99,8 @@ index cf6dd1f95f7fd9285f77fa3ac2e430f713c4e0a0..4bc04dfcdd815b45c86c659784510a2f
 +    WasmBrTableDispatchEnabledCallback enabled,
 +    WasmGuestCaptureEpochCallback epoch,
 +    WasmGuestModuleAdmissionCallback admit_module,
-+    WasmGuestDispatchSiteCallback selected_site) {
++    WasmGuestDispatchSiteCallback selected_site,
++    WasmGuestDispatcherFunctionCallback dispatcher_function) {
 +  i::Isolate* isolate = reinterpret_cast<i::Isolate*>(this);
 +#if V8_ENABLE_WEBASSEMBLY
 +  // Previously admitted instances must never bypass a replacement policy,
@@ -104,6 +110,7 @@ index cf6dd1f95f7fd9285f77fa3ac2e430f713c4e0a0..4bc04dfcdd815b45c86c659784510a2f
 +  isolate->set_wasm_guest_epoch_callback(epoch);
 +  isolate->set_wasm_guest_module_admission(admit_module);
 +  isolate->set_wasm_guest_selected_site(selected_site);
++  isolate->set_wasm_guest_dispatcher_function(dispatcher_function);
 +  isolate->set_wasm_guest_enabled_callback(enabled);
 +  isolate->set_wasm_guest_dispatch_callback(callback);
 +}
@@ -127,7 +134,7 @@ index cf6dd1f95f7fd9285f77fa3ac2e430f713c4e0a0..4bc04dfcdd815b45c86c659784510a2f
                  wasm_module_bytes_callback)
  
 diff --git a/src/execution/isolate.h b/src/execution/isolate.h
-index 59734eea68165a96ebe2ef75c505e68550a70085..ebe1367ba8472782328afb16c3d48962ce5e06d2 100644
+index 59734eea68165a96ebe2ef75c505e68550a70085..ee736a9fccffc0e456a8f44bcc9da819a18a2991 100644
 --- a/src/execution/isolate.h
 +++ b/src/execution/isolate.h
 @@ -204,6 +204,7 @@ namespace wasm {
@@ -138,20 +145,22 @@ index 59734eea68165a96ebe2ef75c505e68550a70085..ebe1367ba8472782328afb16c3d48962
  class WasmCodeLookupCache;
  class WasmOrphanedGlobalHandle;
  }
-@@ -510,6 +511,12 @@ using DebugObjectCache = std::vector<Handle<HeapObject>>;
+@@ -510,6 +511,14 @@ using DebugObjectCache = std::vector<Handle<HeapObject>>;
    V(WasmBrTableDispatchEnabledCallback,                                    \
      wasm_br_table_dispatch_enabled_callback, nullptr)                      \
    V(WasmBrTableDispatchCallback, wasm_br_table_dispatch_callback, nullptr) \
 +  V(WasmGuestCaptureEpochCallback, wasm_guest_epoch_callback, nullptr)      \
 +  V(WasmGuestModuleAdmissionCallback, wasm_guest_module_admission, nullptr) \
 +  V(WasmGuestDispatchSiteCallback, wasm_guest_selected_site, nullptr)       \
++  V(WasmGuestDispatcherFunctionCallback, wasm_guest_dispatcher_function,    \
++    nullptr)                                                                \
 +  V(WasmGuestDispatchCallback, wasm_guest_dispatch_callback, nullptr)       \
 +  V(WasmBrTableDispatchEnabledCallback,                                     \
 +    wasm_guest_enabled_callback, nullptr)                                   \
    V(WasmModuleBytesCallback, wasm_module_bytes_callback, nullptr)           \
    V(SharedArrayBufferConstructorEnabledCallback,                            \
      sharedarraybuffer_constructor_enabled_callback, nullptr)                \
-@@ -1450,6 +1457,42 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
+@@ -1450,6 +1459,42 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
    wasm::StackPool& stack_pool() { return stack_pool_; }
  #endif  // V8_ENABLE_WEBASSEMBLY
  
@@ -194,7 +203,7 @@ index 59734eea68165a96ebe2ef75c505e68550a70085..ebe1367ba8472782328afb16c3d48962
    GlobalHandles* global_handles() const { return global_handles_; }
  
    TracedHandles* traced_handles() { return &traced_handles_; }
-@@ -2683,6 +2726,7 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
+@@ -2683,6 +2728,7 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
    UnicodeCache* unicode_cache_ = nullptr;
    AccountingAllocator* allocator_ = nullptr;
    InnerPointerToCodeCache* inner_pointer_to_code_cache_ = nullptr;
@@ -218,7 +227,7 @@ index 84783e90625b04f2e7512721040f033d4cb2f30b..1e479d9f44db52d64d15550ff789b247
  DEFINE_NEG_IMPLICATION(liftoff_only, wasm_tier_up)
  DEFINE_NEG_IMPLICATION(liftoff_only, wasm_dynamic_tiering)
 diff --git a/src/runtime/runtime-wasm.cc b/src/runtime/runtime-wasm.cc
-index 75ae9324ddde94bbfea44f66e14f0f30dd73aa3e..5365f614779a846452e6d0331163a4619f2b7e9b 100644
+index 75ae9324ddde94bbfea44f66e14f0f30dd73aa3e..0907ef2546dd50bcd72dcb8d4db705c5cde85935 100644
 --- a/src/runtime/runtime-wasm.cc
 +++ b/src/runtime/runtime-wasm.cc
 @@ -2,6 +2,8 @@
@@ -238,7 +247,7 @@ index 75ae9324ddde94bbfea44f66e14f0f30dd73aa3e..5365f614779a846452e6d0331163a461
  #include "src/handles/handles.h"
  #include "src/heap/factory.h"
  #include "src/heap/read-only-heap.h"
-@@ -149,47 +152,367 @@ RUNTIME_FUNCTION(Runtime_WasmJSToWasmObject) {
+@@ -149,47 +152,372 @@ RUNTIME_FUNCTION(Runtime_WasmJSToWasmObject) {
    return ret;
  }
  
@@ -302,9 +311,10 @@ index 75ae9324ddde94bbfea44f66e14f0f30dd73aa3e..5365f614779a846452e6d0331163a461
 +// selected boundary. The nearest enclosing activation that reached a selected
 +// boundary is the parent; JavaScript frames between them (host reentry) are
 +// skipped as in host attribution. An enclosing frame of the same dispatcher
-+// function without identity (lost interval, untracked instance or deeper
-+// table) could be that parent, so it makes the result unresolved instead of
-+// skipping to an older activation. So do a non-Liftoff frame and the bound.
++// function, or of any other configured dispatcher function, without identity
++// (lost interval, untracked instance or deeper table) could be that parent, so
++// it makes the result unresolved instead of skipping to an older activation.
++// So do a non-Liftoff frame and the bound.
 +void ResolveGuestParent(Isolate* isolate, WasmFrame* current,
 +                        Isolate::RebGuestFrame* identity) {
 +  ++isolate->reb_guest_capture_state().parent_walks;
@@ -326,7 +336,11 @@ index 75ae9324ddde94bbfea44f66e14f0f30dd73aa3e..5365f614779a846452e6d0331163a461
 +      identity->parent = v8::WasmGuestParent::kResolved;
 +      return;
 +    }
-+    if (frame->GetInnermostFunctionIndex() == function) return;
++    const int index = frame->GetInnermostFunctionIndex();
++    auto dispatcher = isolate->wasm_guest_dispatcher_function();
++    if (index == function ||
++        (dispatcher && index >= 0 && dispatcher(static_cast<uint32_t>(index))))
++      return;
 +  }
 +  identity->parent = v8::WasmGuestParent::kNone;
 +}
@@ -873,7 +887,7 @@ index 2003d1252a310aeb07af97baaf2284e3bc80b8c7..48fe2755fd3ee65a6c3d0dfd8bee56c4
  struct GlobalTracingInfo {
    uint32_t global_index;
 diff --git a/test/cctest/wasm/test-run-wasm.cc b/test/cctest/wasm/test-run-wasm.cc
-index 05543acc7ca416893e9f1f6fe9b7a5981029a975..b2803eb1ce077aa742d33b2466c6389f05eeb2d1 100644
+index 05543acc7ca416893e9f1f6fe9b7a5981029a975..2369f951b236c1e5d95c158ef132d313463edbf6 100644
 --- a/test/cctest/wasm/test-run-wasm.cc
 +++ b/test/cctest/wasm/test-run-wasm.cc
 @@ -6,13 +6,18 @@
@@ -895,7 +909,7 @@ index 05543acc7ca416893e9f1f6fe9b7a5981029a975..b2803eb1ce077aa742d33b2466c6389f
  #include "test/cctest/wasm/wasm-runner.h"
  #include "test/common/value-helper.h"
  #include "test/common/wasm/test-signatures.h"
-@@ -1613,6 +1618,954 @@ TEST(RebNativeBrTableDisabledCompilation) {
+@@ -1613,6 +1618,1036 @@ TEST(RebNativeBrTableDisabledCompilation) {
    CHECK_EQ(0, reb_dispatch_observation.count);
  }
  
@@ -1795,6 +1809,88 @@ index 05543acc7ca416893e9f1f6fe9b7a5981029a975..b2803eb1ce077aa742d33b2466c6389f
 +  ResetNestedGuests();
 +  CHECK_EQ(9, a.Call(1));
 +  CHECK_EQ(v8::WasmGuestParent::kNone, nested_activations[0].state);
++  CHECK_EQ(uint64_t{0}, nested_failures);
++  isolate->SetWasmGuestDispatchCallback(nullptr, nullptr);
++}
++
++namespace {
++// One module, two dispatcher functions: main 1 calls outer 3, whose handler
++// calls host import 0 and then inner 2. The host can enable capture, so the
++// outer activation can begin without identity while the inner one has it.
++v8::WasmGuestModuleAdmission AdmitTwoDispatchers(v8::Local<v8::Context>,
++                                                 const uint8_t*, size_t,
++                                                 uint32_t function) {
++  return function == 2 || function == 3
++             ? v8::WasmGuestModuleAdmission::kAdmit
++             : v8::WasmGuestModuleAdmission::kNotDispatcher;
++}
++bool IsTwoSiteDispatcher(uint32_t function) {
++  return function == 2 || function == 3;
++}
++// Flips a flag only. No runner is reachable from it, and each runner's first
++// Call, which caches its export wrapper, happens at the test's own scope.
++void EnableNestedGuestsAtHost(const v8::FunctionCallbackInfo<v8::Value>&) {
++  if (nested_enable_at_host) nested_enabled = true;
++}
++}  // namespace
++
++TEST(RebNativeGuestParentBarrierCoversEveryDispatcher) {
++  FlagScope<bool> sampling(&v8_flags.reb_wasm_br_table_dispatch, true);
++  FlagScope<bool> guest_frames(&v8_flags.reb_wasm_guest_capture, true);
++  HandleScope handles(CcTest::InitIsolateOnce());
++  auto* isolate = CcTest::isolate();
++  auto host =
++      v8::Function::New(isolate->GetCurrentContext(), EnableNestedGuestsAtHost)
++          .ToLocalChecked();
++  TestSignatures sigs;
++  ManuallyImportedJSFunction import{
++      sigs.v_v(), Cast<JSFunction>(v8::Utils::OpenDirectHandle(*host))};
++  WasmRunner<int32_t, int32_t> r(TestExecutionTier::kLiftoff, kWasmOrigin,
++                                 &import);
++  auto& inner = r.NewFunction<int32_t, int32_t>();
++  auto& outer = r.NewFunction<int32_t, int32_t>();
++  inner.Build(
++      {B1(WASM_BR_TABLE(WASM_I32V_1(0), 1, BR_TARGET(0), BR_TARGET(0))),
++       WASM_I32V_1(9)});
++  outer.Build(
++      {B1(WASM_BR_TABLE(WASM_I32V_1(0), 1, BR_TARGET(0), BR_TARGET(0))),
++       WASM_CALL_FUNCTION0(0),
++       WASM_CALL_FUNCTION(inner.function_index(), WASM_LOCAL_GET(0))});
++  r.Build({WASM_CALL_FUNCTION(outer.function_index(), WASM_LOCAL_GET(0))});
++  CHECK_EQ(uint32_t{2}, inner.function_index());
++  CHECK_EQ(uint32_t{3}, outer.function_index());
++  isolate->SetWasmGuestDispatchCallback(ObserveNestedGuest, EnableNestedGuests,
++                                        nullptr, AdmitTwoDispatchers, nullptr,
++                                        IsTwoSiteDispatcher);
++  // An inner interpreter at another dispatcher names the outer's exact
++  // current dispatch.
++  ResetNestedGuests();
++  CHECK_EQ(9, r.Call(0));
++  CHECK_EQ(size_t{2}, nested_activations.size());
++  CHECK_EQ(v8::WasmGuestParent::kNone, nested_activations[0].state);
++  CHECK_EQ(v8::WasmGuestParent::kResolved, nested_activations[1].state);
++  CHECK_EQ(nested_activations[0].invocation, nested_activations[1].parent);
++  CHECK_EQ(uint64_t{1}, nested_activations[1].parent_dispatch);
++  // The outer activation began while capture was off. Its frame is another
++  // configured dispatcher without identity: unresolved, not a top level.
++  ResetNestedGuests();
++  nested_enabled = false;
++  nested_enable_at_host = true;
++  CHECK_EQ(9, r.Call(0));
++  CHECK_EQ(size_t{1}, nested_activations.size());
++  CHECK_EQ(v8::WasmGuestParent::kUnresolved, nested_activations[0].state);
++  CHECK_EQ(uint64_t{1}, nested_parent_gaps);
++  // Without the predicate the walk only knows its own function, so it skips
++  // the outer frame and finds no enclosing activation.
++  isolate->SetWasmGuestDispatchCallback(ObserveNestedGuest, EnableNestedGuests,
++                                        nullptr, AdmitTwoDispatchers);
++  ResetNestedGuests();
++  nested_enabled = false;
++  nested_enable_at_host = true;
++  CHECK_EQ(9, r.Call(0));
++  CHECK_EQ(size_t{1}, nested_activations.size());
++  CHECK_EQ(v8::WasmGuestParent::kNone, nested_activations[0].state);
++  CHECK_EQ(uint64_t{0}, nested_parent_gaps);
 +  CHECK_EQ(uint64_t{0}, nested_failures);
 +  isolate->SetWasmGuestDispatchCallback(nullptr, nullptr);
 +}

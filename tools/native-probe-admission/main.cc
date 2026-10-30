@@ -1486,6 +1486,7 @@ int main() {
   Run<&NativeGuestAdmission>();
   Run<&NativeGuestModuleVerdictsAndHostBudget>();
   Run<&NativeGuestParentDispatch>();
+  Run<&NativeGuestTwoSiteNesting>();
   Run<&NativeWasmRuntimeAdmission>();
   Run<&NativeWasmIndirectAdmission>();
   Run<&DispatchSampleAdmission>();

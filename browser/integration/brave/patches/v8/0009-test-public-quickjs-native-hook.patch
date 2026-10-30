@@ -1,5 +1,5 @@
 diff --git a/test/cctest/wasm/test-run-wasm.cc b/test/cctest/wasm/test-run-wasm.cc
-index b2803eb1ce077aa742d33b2466c6389f05eeb2d1..b5d131570757078e3cc7aab0c35593b6b8a5dd3d 100644
+index 2369f951b236c1e5d95c158ef132d313463edbf6..30eb46b77811882ae0b40c88c0ebaa634a10c873 100644
 --- a/test/cctest/wasm/test-run-wasm.cc
 +++ b/test/cctest/wasm/test-run-wasm.cc
 @@ -3,6 +3,7 @@
@@ -18,7 +18,7 @@ index b2803eb1ce077aa742d33b2466c6389f05eeb2d1..b5d131570757078e3cc7aab0c35593b6
  #include "src/wasm/wasm-opcodes-inl.h"
  #include "src/wasm/wasm-tracing.h"
  #include "test/cctest/cctest.h"
-@@ -5484,6 +5486,340 @@ WASM_EXEC_TEST(I64RemUOnDifferentRegisters) {
+@@ -5566,6 +5568,340 @@ WASM_EXEC_TEST(I64RemUOnDifferentRegisters) {
        });
  }
  

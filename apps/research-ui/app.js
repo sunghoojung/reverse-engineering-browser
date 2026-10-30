@@ -2145,7 +2145,7 @@ const capturedExportPanel = installCapturedExportDialog({
             textElement('pre', 'vm-effect-detail vm-evidence-audit', JSON.stringify(guest, null, 2)));
           return row;
         });
-        if (!nested.length) panel.append(textElement('p', 'vm-selection-empty', 'No nested guest retained. A live adapter covers one dispatch site, so an activation reentering that site names its parent but is not a nested guest.'));
+        if (!nested.length) panel.append(textElement('p', 'vm-selection-empty', 'No nested guest retained. An inner interpreter is linked only when it runs at another configured adapter site than its parent; an activation reentering its parent\'s site names that parent but is not a nested guest.'));
         return panel;
       }
 

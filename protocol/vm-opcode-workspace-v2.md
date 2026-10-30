@@ -413,7 +413,7 @@ dispatch site, and the child's first guest buffer (memory, base, length)
 differs from the outer dispatch's. A child at the parent's own site is a
 reentrant activation of one dispatcher, such as a guest call, and is not
 nested. The outer handler is the parent's last retained dispatch sample before
-the child's invocation marker. When the child's version-2 marker names the
+the child's invocation marker. When the child's version-2 or 3 marker names the
 parent dispatch exactly, that sample must be the named one and `basis` is
 `exact-parent-dispatch`; a named dispatch that was lost or is contradicted by a
 later retained parent dispatch leaves the child unproven instead of falling
@@ -429,11 +429,15 @@ Other activations that name a parent are counted as `nested-guest-unproven`;
 `nested-guest-limit` counts nested guests past 64.
 
 Live capture names each activation's parent and exact outer dispatch (see
-[native guest observations](native-wasm-guest-v1.md#parent-activation-and-exact-outer-dispatch)),
-but one adapter covers one dispatch site per browser lifetime. A live
-reentrant activation at that site, such as a QuickJS guest call, names its
-parent in its rows but is not a nested guest, and an inner interpreter at
-another site is not guest-captured. JavaScript samplers record no dispatch site, handler
+[native guest observations](native-wasm-guest-v1.md#parent-activation-and-exact-outer-dispatch)).
+A version 2 adapter configures up to eight dispatch sites of one module, and
+each version 3 invocation marker names its site. Producer 2.16.0 reads those
+recipes: a sample is admitted only at the site its marker names, so an inner
+interpreter at one configured site links to the outer handler at another
+through the exact parent dispatch. Producers before 2.16.0 accept only
+version 1 recipes and version 1 or 2 markers. A live reentrant activation at
+one site, such as a QuickJS guest call, still names its parent in its rows but
+is not a nested guest. JavaScript samplers record no dispatch site, handler
 location or call stack. The analyzer path is exercised with owned synthetic
 programs in `vm_opcode_observed.rs`; its exported store backs the rendered VM
 Lab acceptance.
@@ -654,3 +658,12 @@ Producer 2.15.0 links a nested guest through the outer dispatch its version-2
 invocation marker names exactly, with basis `exact-parent-dispatch`; see
 [observed claims and nested guests](#observed-claims-and-nested-guests).
 Version-1 markers and unresolved parent dispatches keep the sequence bases.
+
+Producer 2.16.0 reads version 2 adapter recipes, which configure 1 to 8
+dispatch sites of one module under one shared sample limit, and version 3
+invocation markers, which name the configured site at bytes 80..84. A sample
+is kept only at the site its marker names, and the adapter's creator may be
+at any site. One shared adapter can therefore link an inner interpreter at
+one site to the outer handler at another with basis `exact-parent-dispatch`.
+Version 1 recipes read as one site, and version 1 and 2 markers as site 0.
+See [native guest observations](native-wasm-guest-v1.md#multi-site-adapters).

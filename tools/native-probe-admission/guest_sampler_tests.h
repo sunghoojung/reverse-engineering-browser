@@ -2,8 +2,8 @@
 #include <functional>
 std::array<std::uint8_t, 16> guest_memory{};
 std::uint64_t guest_pc = 0;
-reb::NativeWasmGuestContext guest_context{};
-bool guest_context_valid = true, guest_capture_accept = true;
+reb::NativeWasmGuestContext guest_context{}, guest_outer_context{};
+bool guest_context_valid = true, guest_outer_context_valid = false, guest_capture_accept = true;
 std::function<void()> guest_reenter;
 std::vector<NativeProbeEvent> guest_dispatches, guest_hosts, guest_invocations;
 std::vector<std::size_t> guest_module_sizes;
@@ -32,7 +32,13 @@ bool GuestCopy(void*,
   std::copy_n(guest_memory.data() + offset, length, out);
   return true;
 }
+// Models the engine's per-dispatcher walk: the nearest activation of that
+// function, with the innermost Wasm frame's import call either way.
 bool GuestContext(std::uint32_t function, reb::NativeWasmGuestContext* out) noexcept {
+  if (guest_outer_context_valid && function == guest_outer_context.function_index) {
+    *out = guest_outer_context;
+    return true;
+  }
   if (!guest_context_valid || function != guest_context.function_index)
     return false;
   *out = guest_context;
@@ -50,20 +56,39 @@ bool GuestHost(const NativeProbeEvent& event, std::uint64_t) noexcept {
   guest_hosts.push_back(event);
   return true;
 }
-void NativeGuestAdmission() {
-  const std::array<std::uint8_t, 11> module{0, 97, 115, 109, 1, 0, 0, 0, 0x0e, 0, 0};
+// The sink retains its first adapter for the process, so every guest test
+// uses this one owned recipe. Site 0 is the outer dispatcher; site 1 is a
+// second dispatcher of the same module reading the upper half of memory.
+// Both sites share the sample limit of 3.
+std::shared_ptr<reb::NativeWasmGuestAdapter> GuestTestAdapter(
+    std::span<const std::uint8_t> module) {
   auto adapter = std::make_shared<reb::NativeWasmGuestAdapter>();
   adapter->module_sha256 = reb::NativeGuestDigest(module);
-  adapter->function_index = 414;
-  adapter->dispatch_module_offset = 8;
-  adapter->pc_local_index = 320;
-  adapter->memory_length.constant = 16;
-  adapter->import_call_offsets[0] = 9;
-  adapter->import_call_count = 1;
+  auto& outer = adapter->sites[0];
+  outer.function_index = 414;
+  outer.dispatch_module_offset = 8;
+  outer.pc_local_index = 320;
+  outer.memory_length.constant = 16;
+  outer.import_call_offsets[0] = 9;
+  outer.import_call_count = 1;
+  auto& inner = adapter->sites[1];
+  inner.function_index = 500;
+  inner.dispatch_module_offset = 16;
+  inner.pc_local_index = 320;
+  inner.memory_base.constant = 8;
+  inner.memory_length.constant = 8;
+  inner.import_call_offsets[0] = 12;
+  inner.import_call_count = 1;
+  adapter->site_count = 2;
   adapter->sample_limit = 3;
   adapter->json = "owned boundary recipe";
   adapter->recipe_sha256 = reb::NativeGuestDigest(
       std::span(reinterpret_cast<const std::uint8_t*>(adapter->json.data()), adapter->json.size()));
+  return adapter;
+}
+void NativeGuestAdmission() {
+  const std::array<std::uint8_t, 11> module{0, 97, 115, 109, 1, 0, 0, 0, 0x0e, 0, 0};
+  const auto adapter = GuestTestAdapter(module);
   const auto configure = [&] {
     sink.SetEmitters(&AcceptRuntimeEvent, &CaptureRuntimeMetadata, 42,
                      reb::kAllNativeProbeCategoryMask, kForever, false, &GuestFrame);
@@ -74,8 +99,14 @@ void NativeGuestAdmission() {
   assert(sink.IsNativeWasmGuestDispatchSite(414, 8));
   assert(!sink.IsNativeWasmGuestDispatchSite(413, 8));
   assert(!sink.IsNativeWasmGuestDispatchSite(414, 9));
+  assert(sink.IsNativeWasmGuestDispatchSite(500, 16));
+  assert(!sink.IsNativeWasmGuestDispatchSite(500, 8));  // Another site's br_table.
+  assert(sink.IsNativeWasmGuestDispatcherFunction(414));
+  assert(sink.IsNativeWasmGuestDispatcherFunction(500));
+  assert(!sink.IsNativeWasmGuestDispatcherFunction(413));
   using Decision = reb::NativeWasmGuestModuleDecision;
   assert(sink.AdmitNativeWasmGuestModule(module, 414) == Decision::kAdmit);
+  assert(sink.AdmitNativeWasmGuestModule(module, 500) == Decision::kAdmit);
   // Another function of an unknown module defers; it must not be remembered
   // as a module rejection before the dispatcher itself is entered.
   assert(sink.AdmitNativeWasmGuestModule(module, 413) == Decision::kNotDispatcher);
@@ -216,19 +247,7 @@ bool GuestQueueHasGap(std::string_view reason) {
 // number of attempts; host parent routing is bounded without losing hosts.
 void NativeGuestModuleVerdictsAndHostBudget() {
   const std::array<std::uint8_t, 11> module{0, 97, 115, 109, 1, 0, 0, 0, 0x0e, 0, 0};
-  auto adapter = std::make_shared<reb::NativeWasmGuestAdapter>();
-  adapter->module_sha256 = reb::NativeGuestDigest(module);
-  adapter->function_index = 414;
-  adapter->dispatch_module_offset = 8;
-  adapter->pc_local_index = 320;
-  adapter->memory_length.constant = 16;
-  adapter->import_call_offsets[0] = 9;
-  adapter->import_call_count = 1;
-  // The adapter is immutable for the process: reuse the earlier recipe.
-  adapter->sample_limit = 3;
-  adapter->json = "owned boundary recipe";
-  adapter->recipe_sha256 = reb::NativeGuestDigest(
-      std::span(reinterpret_cast<const std::uint8_t*>(adapter->json.data()), adapter->json.size()));
+  const auto adapter = GuestTestAdapter(module);
   const auto configure = [&] {
     sink.SetEmitters(&RecordGuestQueue, &CaptureRuntimeMetadata, 43,
                      reb::kAllNativeProbeCategoryMask, kForever, false, &GuestFrame);
@@ -303,16 +322,7 @@ void NativeGuestModuleVerdictsAndHostBudget() {
 // explicit gap per configuration; it never substitutes an older dispatch.
 void NativeGuestParentDispatch() {
   const std::array<std::uint8_t, 11> module{0, 97, 115, 109, 1, 0, 0, 0, 0x0e, 0, 0};
-  auto adapter = std::make_shared<reb::NativeWasmGuestAdapter>();
-  adapter->module_sha256 = reb::NativeGuestDigest(module);
-  adapter->function_index = 414;
-  adapter->dispatch_module_offset = 8;
-  adapter->pc_local_index = 320;
-  adapter->memory_length.constant = 16;
-  adapter->sample_limit = 3;
-  adapter->json = "owned boundary recipe";
-  adapter->recipe_sha256 = reb::NativeGuestDigest(
-      std::span(reinterpret_cast<const std::uint8_t*>(adapter->json.data()), adapter->json.size()));
+  const auto adapter = GuestTestAdapter(module);
   std::uint64_t expires = kForever;
   const auto configure = [&] {
     sink.SetEmitters(&RecordGuestQueue, &CaptureRuntimeMetadata, 44,
@@ -340,7 +350,8 @@ void NativeGuestParentDispatch() {
     reb::NativeWasmGuestInvocationPayload payload;
     return reb::DecodeNativeWasmGuestInvocationPayload(guest_invocations.back().inline_payload,
                                                        payload) &&
-           payload.protocol_version == 2 && payload.parent_invocation_id == parent &&
+           payload.protocol_version == 3 && payload.site_index == 0 &&
+           payload.parent_invocation_id == parent &&
            payload.parent_dispatch_sequence_number == dispatch;
   };
   const auto unresolved = [] { return GuestQueueHasGap("native_guest_parent_unresolved"); };
@@ -411,4 +422,125 @@ void NativeGuestParentDispatch() {
   std::cout << "PASS guest invocations name the exact current parent dispatch; lost, revoked, "
                "unresolved or cross-document parents are explicit gaps, and disabled or "
                "expired capture names none\n";
+}
+
+// Two sites, two levels: an inner interpreter at site 1 names the exact
+// current dispatch of the outer interpreter at site 0. Both sites draw on one
+// sample budget, and a host belongs only to the innermost activation's site.
+void NativeGuestTwoSiteNesting() {
+  const std::array<std::uint8_t, 11> module{0, 97, 115, 109, 1, 0, 0, 0, 0x0e, 0, 0};
+  const auto adapter = GuestTestAdapter(module);
+  std::uint64_t expires = kForever;
+  const auto configure = [&] {
+    sink.SetEmitters(&RecordGuestQueue, &CaptureRuntimeMetadata, 45,
+                     reb::kAllNativeProbeCategoryMask, expires, false, &GuestFrame);
+    sink.ConfigureNativeWasmGuest(adapter, &GuestCapture, &GuestHost);
+    sink.SetNativeWasmGuestRuntime(&GuestContext, nullptr);
+    guest_queue_events.clear();
+  };
+  guest_dispatches.clear();
+  guest_invocations.clear();
+  guest_hosts.clear();
+  guest_module_sizes.clear();
+  guest_capture_accept = guest_context_valid = true;
+  guest_pc = 0;
+  guest_memory[0] = 0x41;
+  guest_memory[8] = 0x52;
+  reb::NativeWasmGuestStateView outer{7, 61, 414, 8, 0, 0, nullptr, &GuestRead, &GuestCopy};
+  reb::NativeWasmGuestStateView inner{7, 62, 500, 16, 0, 0, nullptr, &GuestRead, &GuestCopy};
+  inner.parent_invocation_id = 61;
+  inner.parent = reb::NativeWasmGuestParent::kResolved;
+  const auto record = [&](const reb::NativeWasmGuestStateView& view) {
+    sink.InvalidateNativeWasmGuest(view);
+    sink.RecordNativeWasmGuest(1, 8, "https://owned.test/module.wasm", module, view, 5, 6);
+  };
+  const auto marker = [] {
+    reb::NativeWasmGuestInvocationPayload payload;
+    assert(reb::DecodeNativeWasmGuestInvocationPayload(guest_invocations.back().inline_payload,
+                                                       payload) &&
+           payload.protocol_version == 3);
+    return payload;
+  };
+  const auto unresolved = [] { return GuestQueueHasGap("native_guest_parent_unresolved"); };
+
+  configure();
+  record(outer);
+  assert(guest_dispatches.size() == 1 && marker().site_index == 0);
+  const auto outer_dispatch = guest_dispatches.back().header.sequence_number;
+  record(inner);
+  assert(guest_dispatches.size() == 2 && guest_module_sizes.back() == 0);  // One module binding.
+  const auto nested = marker();
+  assert(nested.site_index == 1 && nested.function_index == 500 &&
+         nested.parent_invocation_id == 61 &&
+         nested.parent_dispatch_sequence_number == outer_dispatch && !unresolved());
+  reb::NativeWasmGuestDispatchPayload sample;
+  assert(
+      reb::DecodeNativeWasmGuestDispatchPayload(guest_dispatches.back().inline_payload, sample) &&
+      sample.function_index == 500 && sample.module_byte_offset == 16 && sample.memory_base == 8 &&
+      sample.memory_length == 8 && sample.opcode == 0x52);
+  const auto inner_dispatch = guest_dispatches.back().header.sequence_number;
+
+  // Site 1's import inside the inner interpreter: its current dispatch.
+  guest_outer_context = {7, 61, 414, 8, 9, 12};
+  guest_outer_context_valid = true;
+  guest_context = {7, 62, 500, 16, 9, 12};
+  sink.RecordApiCall(kRuntime, "Math.acos");
+  assert(guest_hosts.size() == 1 && guest_hosts.back().header.parent_event_id == inner_dispatch);
+  // Site 0's import while the inner interpreter is innermost is not claimed.
+  guest_outer_context.import_module_byte_offset = guest_context.import_module_byte_offset = 9;
+  sink.RecordApiCall(kRuntime, "Math.acos");
+  assert(guest_hosts.size() == 1);
+  // Once the inner activation has returned, that import is the outer's.
+  guest_context_valid = false;
+  sink.RecordApiCall(kRuntime, "Math.acos");
+  assert(guest_hosts.size() == 2 && guest_hosts.back().header.parent_event_id == outer_dispatch);
+  guest_context_valid = true;
+  guest_outer_context_valid = false;
+
+  // One budget for every site: the third sample is the last at either site.
+  record(inner);
+  assert(guest_dispatches.size() == 3 && !GuestQueueHasGap("native_guest_sample_limit"));
+  record(outer);
+  record(inner);
+  assert(guest_dispatches.size() == 3 && GuestQueueHasGap("native_guest_sample_limit"));
+
+  // Queue loss of the outer's current dispatch: the inner at site 1 names
+  // only the outer activation, with a gap, never the earlier outer dispatch.
+  configure();
+  record(outer);
+  guest_capture_accept = false;
+  record(outer);
+  guest_capture_accept = true;
+  inner.invocation_id = 63;
+  record(inner);
+  assert(marker().site_index == 1 && marker().parent_invocation_id == 61 &&
+         marker().parent_dispatch_sequence_number == 0 && unresolved());
+
+  // The engine met an outer-site frame without identity: unresolved, a gap.
+  configure();
+  inner.invocation_id = 64;
+  inner.parent_invocation_id = 0;
+  inner.parent = reb::NativeWasmGuestParent::kUnresolved;
+  record(inner);
+  assert(marker().site_index == 1 && !marker().parent_invocation_id && unresolved());
+
+  // Expired or disabled capture records nothing at either site.
+  expires = 500;
+  configure();
+  const auto before = guest_invocations.size();
+  base::test_now_ns = 1000;
+  outer.invocation_id = 65;
+  inner.invocation_id = 66;
+  record(outer);
+  record(inner);
+  base::test_now_ns = 100;
+  sink.SetEmitters(nullptr, nullptr, 0, 0, 0);
+  record(outer);
+  record(inner);
+  assert(guest_invocations.size() == before && !unresolved());
+  assert(!sink.IsNativeWasmGuestDispatcherFunction(500));  // Configuration reset clears recipe.
+  sink.SetNativeWasmGuestRuntime(nullptr, nullptr);
+  std::cout << "PASS two-site guests: an inner interpreter at site 1 names the exact current "
+               "dispatch of site 0, sites share one sample budget, hosts belong to the "
+               "innermost site, and loss, unresolved, disabled and expired cases stay explicit\n";
 }

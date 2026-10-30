@@ -44,7 +44,7 @@ void NativeGuestDependencies(reb::ArtifactReceiver& receiver) {
   reb::NativeGuestPut(d.inline_payload, 32, 30, 8);
   reb::NativeGuestPut(d.inline_payload, 72, code.size(), 4);
   reb::NativeGuestPut(d.inline_payload, 92, 7, 4);
-  reb::NativeGuestPut(i.inline_payload, 0, 2, 2);
+  reb::NativeGuestPut(i.inline_payload, 0, 3, 2);
   reb::NativeGuestPut(i.inline_payload, 2, 128, 2);
   reb::NativeGuestPut(i.inline_payload, 8, 20, 8);
   reb::NativeGuestPut(i.inline_payload, 16, 30, 8);
@@ -207,8 +207,8 @@ void NativeGuestDependencies(reb::ArtifactReceiver& receiver) {
             verdicts.size() == reb::kNativeGuestModuleAttemptLimit + 1u,
         "Module attempts are bounded");
 
-  // An invocation names its exact parent dispatch; a malformed parent is
-  // refused explicitly and never published.
+  // An invocation names its exact parent dispatch and its adapter site; a
+  // malformed parent or site is refused explicitly and never published.
   configure();
   capture.module_bytes = module;
   i.header.sequence_number = 500;
@@ -216,6 +216,7 @@ void NativeGuestDependencies(reb::ArtifactReceiver& receiver) {
   d.header.parent_event_id = 500;
   reb::NativeGuestPut(i.inline_payload, 64, 29, 8);
   reb::NativeGuestPut(i.inline_payload, 72, 499, 8);
+  reb::NativeGuestPut(i.inline_payload, 80, 1, 4);
   sink.CaptureNativeGuest(capture, 5, [] { return true; });
   receive_all();
   const auto parented = typed();
@@ -225,29 +226,32 @@ void NativeGuestDependencies(reb::ArtifactReceiver& receiver) {
                              reb::IsValidWasmGuestInvocation(std::bit_cast<reb::EventRecord>(e)) &&
                              e.inline_payload[64] == std::byte{29} &&
                              e.inline_payload[72] == std::byte{0xf3} &&
-                             e.inline_payload[73] == std::byte{1};
+                             e.inline_payload[73] == std::byte{1} &&
+                             e.inline_payload[80] == std::byte{1};
                     }),
-        "Exact parent dispatch is published unchanged and passes the core validator");
-  for (const auto& [sequence, parent, dispatch, reserved] :
-       {std::tuple{510, 29, 510, 0}, std::tuple{512, 0, 511, 0}, std::tuple{514, 30, 0, 0},
-        std::tuple{516, 29, 499, 1}}) {
+        "Exact parent dispatch and site are published unchanged and pass the core validator");
+  // Fields: sequence, parent, parent dispatch, then one byte written at 80 + offset.
+  for (const auto& [sequence, parent, dispatch, at, value] :
+       {std::tuple{510, 29, 510, 0, 0}, std::tuple{512, 0, 511, 0, 0}, std::tuple{514, 30, 0, 0, 0},
+        std::tuple{516, 29, 499, 4, 1}, std::tuple{518, 29, 499, 0, 8}}) {
     configure();
     i.header.sequence_number = static_cast<std::uint64_t>(sequence);
     d.header.sequence_number = static_cast<std::uint64_t>(sequence + 1);
     d.header.parent_event_id = static_cast<std::uint64_t>(sequence);
     reb::NativeGuestPut(i.inline_payload, 64, static_cast<std::uint64_t>(parent), 8);
     reb::NativeGuestPut(i.inline_payload, 72, static_cast<std::uint64_t>(dispatch), 8);
-    i.inline_payload[80] = static_cast<std::byte>(reserved);
+    std::fill(i.inline_payload.begin() + 80, i.inline_payload.end(), std::byte{0});
+    i.inline_payload[80 + static_cast<std::size_t>(at)] = static_cast<std::byte>(value);
     sink.CaptureNativeGuest(capture, 6, [] { return true; });
     Check(transfers.empty() &&
               gap_for(static_cast<std::uint64_t>(sequence + 1), "native_guest_dependency_rejected"),
-          "Self, orphan, later or reserved parent fields are refused");
+          "Self, orphan, later or reserved parent fields and a ninth site are refused");
   }
   i.header.sequence_number = 100;
   d.header.parent_event_id = 100;
   reb::NativeGuestPut(i.inline_payload, 64, 0, 8);
   reb::NativeGuestPut(i.inline_payload, 72, 0, 8);
-  i.inline_payload[80] = std::byte{0};
+  std::fill(i.inline_payload.begin() + 80, i.inline_payload.end(), std::byte{0});
 
   // Hosts whose parent never existed are kept, unparented, with one marker.
   configure();

@@ -469,7 +469,7 @@ fn identity(reference: &Value) -> Option<Identity> {
 /// A guest activation that names a parent invocation, runs at another
 /// dispatch site and reads another guest buffer is an inner interpreter driven
 /// by the parent's handler. Same-site children are reentrant activations of
-/// one dispatcher and are not nested guests. A version 2 marker names the
+/// one dispatcher and are not nested guests. A version 2 or 3 marker names the
 /// driving dispatch exactly; version 1 evidence and parents whose dispatch the
 /// renderer could not resolve fall back to sequence order.
 fn nested(inputs: &Inputs<'_>, derived: &mut Derived) {
@@ -1369,6 +1369,110 @@ mod tests {
         let outer = &rerun(&guest)["nested_guests"][0]["outer"];
         assert_eq!(outer["basis"], "contiguous-sequence");
         assert_eq!(outer["dispatch_event"]["sequence_number"], "3");
+    }
+
+    /// Rewrites the store as one live multi-site capture: a single version 2
+    /// adapter names both dispatchers (site 0 the inner function 0, site 1 the
+    /// outer function 1) and every marker is version 3 with its site.
+    fn share_one_adapter(guest: &mut Guest) {
+        let recipe = |id: u64| -> Value {
+            let row = guest
+                .artifacts
+                .iter()
+                .find(|a| a["artifact_id"] == id.to_string())
+                .unwrap();
+            serde_json::from_slice(
+                &fs::read(
+                    guest
+                        .root
+                        .path()
+                        .join(row["content_path"].as_str().unwrap()),
+                )
+                .unwrap(),
+            )
+            .unwrap()
+        };
+        let site = |mut r: Value| {
+            let map = r.as_object_mut().unwrap();
+            for key in ["version", "sample_limit", "module_sha256"] {
+                map.remove(key);
+            }
+            r
+        };
+        let (outer, inner) = (recipe(MODULE + 1), recipe(MODULE + 2));
+        let shared = json!({"version":2,"sample_limit":16,"module_sha256":outer["module_sha256"],
+            "sites":[site(inner),site(outer)]});
+        let row = artifact(
+            guest.root.path(),
+            MODULE + 1,
+            "wasm_guest_adapter",
+            &crate::vm::canonical(&shared).unwrap(),
+            MODULE,
+            1,
+        );
+        let sha = hex::decode(row["sha256"].as_str().unwrap()).unwrap();
+        guest
+            .artifacts
+            .retain(|a| a["kind"] != "wasm_guest_adapter");
+        guest.artifacts.push(row);
+        for event in &mut guest.events {
+            let mut p = hex::decode(event["payload"].as_str().unwrap()).unwrap();
+            match event["type"].as_str() {
+                Some("wasm_guest_invocation") => {
+                    p[0] = 3;
+                    put(&mut p, 24, MODULE + 1, 8);
+                    p[32..64].copy_from_slice(&sha);
+                    let function = u64::from(p[4]);
+                    put(&mut p, 80, if function == 0 { 0 } else { 1 }, 4);
+                }
+                Some("wasm_guest_dispatch") => p[96..].copy_from_slice(&sha),
+                _ => continue,
+            }
+            event["payload"] = json!(hex::encode(p));
+        }
+    }
+
+    #[test]
+    fn nested_guest_links_two_sites_of_one_adapter() {
+        // The inner interpreter at site 0 names the outer interpreter's exact
+        // current dispatch at site 1, as a live two-site capture writes it.
+        let mut guest = guest();
+        name_parent_dispatch(&mut guest, 3);
+        share_one_adapter(&mut guest);
+        let workspace = rerun(&guest);
+        assert_eq!(workspace["native_guest_sample_count"], 5, "{workspace:#}");
+        let nested = workspace["nested_guests"].as_array().unwrap();
+        assert_eq!(nested.len(), 1, "{workspace:#}");
+        let (outer, inner) = (&nested[0]["outer"], &nested[0]["inner"]);
+        assert_eq!(
+            (
+                outer["function_index"].as_u64(),
+                outer["invocation_id"].as_str(),
+                outer["dispatch_event"]["sequence_number"].as_str(),
+                outer["basis"].as_str()
+            ),
+            (Some(1), Some("8"), Some("3"), Some("exact-parent-dispatch"))
+        );
+        assert_eq!(
+            (
+                inner["function_index"].as_u64(),
+                inner["sample_count"].as_u64()
+            ),
+            (Some(0), Some(2))
+        );
+        assert!(omission(&workspace, "nested-guest-unproven").is_none());
+        // A marker naming the other site of the same adapter is refused, so the
+        // inner rows are not retained and nothing is linked.
+        let mut wrong = super::tests::guest();
+        name_parent_dispatch(&mut wrong, 3);
+        share_one_adapter(&mut wrong);
+        let marker = &mut wrong.events[3];
+        let mut p = hex::decode(marker["payload"].as_str().unwrap()).unwrap();
+        put(&mut p, 80, 1, 4);
+        marker["payload"] = json!(hex::encode(p));
+        let workspace = rerun(&wrong);
+        assert_eq!(workspace["native_guest_sample_count"], 3);
+        assert!(workspace.get("nested_guests").is_none());
     }
 
     /// The OpenAPI component carries the same definitions without descriptions.

@@ -71,8 +71,56 @@ inline bool Source(const base::DictValue* dict, NativeGuestValueSource& out) {
   out.chain_count = static_cast<std::uint8_t>(offsets->size());
   return true;
 }
+// One site's local, memory and opcode interpretation. A version 1 recipe
+// carries these keys at its top level; version 2 carries them per site.
+inline bool Site(const base::DictValue& dict, NativeWasmGuestSite& out) {
+  if (!U32(dict, "function_index", out.function_index) ||
+      !U32(dict, "dispatch_module_offset", out.dispatch_module_offset) ||
+      out.dispatch_module_offset < 8)
+    return false;
+  const auto* pc = dict.FindDict("pc");
+  const auto* memory = dict.FindDict("bytecode");
+  const auto* opcode = dict.FindDict("opcode");
+  if (!pc || !Keys(*pc, {"local_index", "value_type", "adjustment", "subtract_memory_base"}) ||
+      !U32(*pc, "local_index", out.pc_local_index) ||
+      !Type(pc->FindString("value_type"), out.pc_value_type) ||
+      !Decimal(pc->FindString("adjustment"), out.pc_adjustment) ||
+      !pc->FindBool("subtract_memory_base"))
+    return false;
+  out.subtract_memory_base = *pc->FindBool("subtract_memory_base");
+  if (!memory || !Keys(*memory, {"memory_index", "base", "length"}) ||
+      !U32(*memory, "memory_index", out.memory_index) ||
+      !Source(memory->FindDict("base"), out.memory_base) ||
+      !Source(memory->FindDict("length"), out.memory_length))
+    return false;
+  std::uint32_t width = 0;
+  if (!opcode || !Keys(*opcode, {"width", "endian"}) || !U32(*opcode, "width", width) ||
+      (width != 1 && width != 2 && width != 4))
+    return false;
+  const auto* endian = opcode->FindString("endian");
+  if (!endian || (*endian != "little" && *endian != "big"))
+    return false;
+  out.opcode_width = static_cast<std::uint8_t>(width);
+  out.opcode_big_endian = *endian == "big";
+  const auto* imports = dict.FindList("import_call_offsets");
+  if (!imports || imports->size() > out.import_call_offsets.size())
+    return false;
+  for (std::size_t i = 0; i < imports->size(); ++i) {
+    const auto value = (*imports)[i].GetIfInt();
+    if (!value || *value < 8)
+      return false;
+    out.import_call_offsets[i] = static_cast<std::uint32_t>(*value);
+    if (i && out.import_call_offsets[i] <= out.import_call_offsets[i - 1])
+      return false;
+  }
+  out.import_call_count = imports->size();
+  return true;
+}
 }  // namespace native_guest_adapter_detail
 // Exact compact canonical JSON rejects duplicates and ambiguous spellings.
+// Version 1 is one site. Version 2 lists 1 to 8 sites of the same module in
+// strictly increasing function index order, which rejects duplicate sites and
+// keeps one canonical spelling; all of them share one sample limit.
 inline std::shared_ptr<const NativeWasmGuestAdapter> ParseNativeWasmGuestAdapter(
     std::string_view json) {
   using namespace native_guest_adapter_detail;
@@ -85,11 +133,32 @@ inline std::shared_ptr<const NativeWasmGuestAdapter> ParseNativeWasmGuestAdapter
   if (!base::JSONWriter::Write(*parsed, &canonical) || canonical != json)
     return {};
   const auto& dict = parsed->GetDict();
-  if (!Keys(dict, {"version", "module_sha256", "function_index", "dispatch_module_offset", "pc",
-                   "bytecode", "opcode", "import_call_offsets", "sample_limit"}) ||
-      dict.FindInt("version") != 1)
-    return {};
+  const auto version = dict.FindInt("version");
   auto result = std::make_shared<NativeWasmGuestAdapter>();
+  if (version == 1) {
+    if (!Keys(dict, {"version", "module_sha256", "function_index", "dispatch_module_offset", "pc",
+                     "bytecode", "opcode", "import_call_offsets", "sample_limit"}) ||
+        !Site(dict, result->sites[0]))
+      return {};
+    result->site_count = 1;
+  } else if (version == 2) {
+    const auto* sites = dict.FindList("sites");
+    if (!Keys(dict, {"version", "module_sha256", "sample_limit", "sites"}) || !sites ||
+        sites->empty() || sites->size() > result->sites.size())
+      return {};
+    for (std::size_t i = 0; i < sites->size(); ++i) {
+      const auto* site = (*sites)[i].GetIfDict();
+      if (!site ||
+          !Keys(*site, {"function_index", "dispatch_module_offset", "pc", "bytecode", "opcode",
+                        "import_call_offsets"}) ||
+          !Site(*site, result->sites[i]) ||
+          (i && result->sites[i].function_index <= result->sites[i - 1].function_index))
+        return {};
+    }
+    result->site_count = sites->size();
+  } else {
+    return {};
+  }
   if (!U32(dict, "sample_limit", result->sample_limit) || !result->sample_limit ||
       result->sample_limit > kNativeGuestSampleLimit)
     return {};
@@ -105,46 +174,6 @@ inline std::shared_ptr<const NativeWasmGuestAdapter> ParseNativeWasmGuestAdapter
       return {};
     result->module_sha256[i] = static_cast<std::uint8_t>(high * 16 + low);
   }
-  if (!U32(dict, "function_index", result->function_index) ||
-      !U32(dict, "dispatch_module_offset", result->dispatch_module_offset) ||
-      result->dispatch_module_offset < 8)
-    return {};
-  const auto* pc = dict.FindDict("pc");
-  const auto* memory = dict.FindDict("bytecode");
-  const auto* opcode = dict.FindDict("opcode");
-  if (!pc || !Keys(*pc, {"local_index", "value_type", "adjustment", "subtract_memory_base"}) ||
-      !U32(*pc, "local_index", result->pc_local_index) ||
-      !Type(pc->FindString("value_type"), result->pc_value_type) ||
-      !Decimal(pc->FindString("adjustment"), result->pc_adjustment) ||
-      !pc->FindBool("subtract_memory_base"))
-    return {};
-  result->subtract_memory_base = *pc->FindBool("subtract_memory_base");
-  if (!memory || !Keys(*memory, {"memory_index", "base", "length"}) ||
-      !U32(*memory, "memory_index", result->memory_index) ||
-      !Source(memory->FindDict("base"), result->memory_base) ||
-      !Source(memory->FindDict("length"), result->memory_length))
-    return {};
-  std::uint32_t width = 0;
-  if (!opcode || !Keys(*opcode, {"width", "endian"}) || !U32(*opcode, "width", width) ||
-      (width != 1 && width != 2 && width != 4))
-    return {};
-  const auto* endian = opcode->FindString("endian");
-  if (!endian || (*endian != "little" && *endian != "big"))
-    return {};
-  result->opcode_width = static_cast<std::uint8_t>(width);
-  result->opcode_big_endian = *endian == "big";
-  const auto* imports = dict.FindList("import_call_offsets");
-  if (!imports || imports->size() > result->import_call_offsets.size())
-    return {};
-  for (std::size_t i = 0; i < imports->size(); ++i) {
-    const auto value = (*imports)[i].GetIfInt();
-    if (!value || *value < 8)
-      return {};
-    result->import_call_offsets[i] = static_cast<std::uint32_t>(*value);
-    if (i && result->import_call_offsets[i] <= result->import_call_offsets[i - 1])
-      return {};
-  }
-  result->import_call_count = imports->size();
   result->json = std::move(canonical);
   result->recipe_sha256 = NativeGuestDigest(
       std::span(reinterpret_cast<const std::uint8_t*>(result->json.data()), result->json.size()));

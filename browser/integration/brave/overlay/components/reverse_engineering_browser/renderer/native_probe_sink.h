@@ -178,6 +178,11 @@ class COMPONENT_EXPORT(REB_NATIVE_PROBE_SINK) NativeProbeSink final {
   [[nodiscard]] bool IsNativeWasmGuestEnabled() const noexcept;
   [[nodiscard]] bool IsNativeWasmGuestDispatchSite(std::uint32_t function_index,
                                                    std::uint32_t module_byte_offset) const noexcept;
+  // Whether a function is the dispatcher of any configured site. V8's parent
+  // walk treats an enclosing frame of such a function without identity as a
+  // possible parent, so it reports an unresolved parent instead of none.
+  [[nodiscard]] bool IsNativeWasmGuestDispatcherFunction(
+      std::uint32_t function_index) const noexcept;
   void InvalidateNativeWasmGuest(const NativeWasmGuestStateView& view) noexcept;
   // kNotDispatcher defers to a later function entry (or a later enabled
   // interval). kRejectModule is final for these exact module bytes under the

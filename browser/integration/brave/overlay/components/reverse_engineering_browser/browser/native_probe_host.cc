@@ -378,18 +378,27 @@ void NativeProbeHost::CaptureNativeGuest(const std::uint64_t capture_epoch,
                << (n * 8U);
     return value;
   };
-  if (guest_capture_count_ > adapter->sample_limit || field(20, 4) >= adapter->sample_limit ||
-      field(4, 4) != adapter->function_index || field(8, 4) != adapter->dispatch_module_offset ||
-      field(76, 4) != adapter->pc_local_index || field(88, 4) != adapter->memory_index ||
-      field(80, 8) != static_cast<std::uint64_t>(adapter->pc_adjustment) ||
-      bytecode_copy.size() < adapter->opcode_width ||
-      field(40, 8) > bytecode_copy.size() - adapter->opcode_width) {
+  // The dispatch must be at the configured site its invocation marker names.
+  // All sites count against the one browser sample budget above.
+  std::uint32_t site_index = 0;
+  const auto* site = FindNativeGuestSite(*adapter, static_cast<std::uint32_t>(field(4, 4)),
+                                         static_cast<std::uint32_t>(field(8, 4)), &site_index);
+  std::uint64_t marker_site = 0;
+  for (std::size_t n = 0; n < 4; ++n)
+    marker_site |= std::to_integer<std::uint64_t>(capture.invocation.inline_payload[80 + n])
+                   << (n * 8U);
+  if (!site || marker_site != site_index || guest_capture_count_ > adapter->sample_limit ||
+      field(20, 4) >= adapter->sample_limit || field(76, 4) != site->pc_local_index ||
+      field(88, 4) != site->memory_index ||
+      field(80, 8) != static_cast<std::uint64_t>(site->pc_adjustment) ||
+      bytecode_copy.size() < site->opcode_width ||
+      field(40, 8) > bytecode_copy.size() - site->opcode_width) {
     refuse("native_guest_capture_invalid");
     return;
   }
   std::uint32_t opcode = 0;
-  for (std::uint32_t n = 0; n < adapter->opcode_width; ++n) {
-    const auto shift = adapter->opcode_big_endian ? 8U * (adapter->opcode_width - n - 1U) : 8U * n;
+  for (std::uint32_t n = 0; n < site->opcode_width; ++n) {
+    const auto shift = site->opcode_big_endian ? 8U * (site->opcode_width - n - 1U) : 8U * n;
     opcode |= static_cast<std::uint32_t>(bytecode_copy[static_cast<std::size_t>(field(40, 8)) + n])
               << shift;
   }

@@ -10,6 +10,8 @@
 #include <type_traits>
 #include "reb/event.hpp"
 namespace reb {
+// Dispatch sites one adapter recipe may configure.
+inline constexpr std::uint32_t kWasmGuestSiteLimit = 8;
 // Adapter-interpreted values from an actual native execution. Semantics require
 // a separately validated adapter and retained module/bytecode artifacts.
 namespace wasm_guest_detail {
@@ -163,10 +165,11 @@ static_assert(offsetof(WasmGuestDispatchPayload, recipe_sha256) == 96);
   std::copy_n(bytes.begin() + 96, 32, value.recipe_sha256.begin());
   return true;
 }
-// Version 2 adds the exact outer dispatch at bytes 72..80. Version 1 reserved
-// bytes 72..128 and still decodes, with a zero parent dispatch.
+// Version 2 adds the exact outer dispatch at bytes 72..80 and version 3 the
+// configured adapter site at bytes 80..84. Earlier versions reserved those
+// bytes and still decode, with a zero parent dispatch and site 0.
 struct WasmGuestInvocationPayload final {
-  std::uint16_t protocol_version = 2;
+  std::uint16_t protocol_version = 3;
   std::uint16_t payload_size = 128;
   std::uint32_t function_index = 0;
   std::uint64_t instance_id = 0;
@@ -178,7 +181,10 @@ struct WasmGuestInvocationPayload final {
   // not asserted; a parent without a dispatch names only the activation.
   std::uint64_t parent_invocation_id = 0;
   std::uint64_t parent_dispatch_sequence_number = 0;
-  std::array<std::byte, 48> reserved{};
+  // The adapter site this activation dispatches at: its index in the recipe's
+  // sorted site list. Every dispatch of the activation is at that site.
+  std::uint32_t site_index = 0;
+  std::array<std::byte, 44> reserved{};
 };
 static_assert(sizeof(WasmGuestInvocationPayload) == 128);
 static_assert(std::is_trivially_copyable_v<WasmGuestInvocationPayload>);
@@ -191,6 +197,7 @@ static_assert(offsetof(WasmGuestInvocationPayload, invocation_id) == 16);
 static_assert(offsetof(WasmGuestInvocationPayload, adapter_artifact_id) == 24);
 static_assert(offsetof(WasmGuestInvocationPayload, parent_invocation_id) == 64);
 static_assert(offsetof(WasmGuestInvocationPayload, parent_dispatch_sequence_number) == 72);
+static_assert(offsetof(WasmGuestInvocationPayload, site_index) == 80);
 static_assert(offsetof(WasmGuestInvocationPayload, recipe_sha256) == 32);
 [[nodiscard]] inline std::array<std::byte, 128> EncodeWasmGuestInvocationPayload(
     const WasmGuestInvocationPayload& value) noexcept {
@@ -212,7 +219,9 @@ static_assert(offsetof(WasmGuestInvocationPayload, recipe_sha256) == 32);
   wasm_guest_detail::Put(out, 72, value.parent_dispatch_sequence_number,
                          sizeof(value.parent_dispatch_sequence_number));
   std::copy(value.recipe_sha256.begin(), value.recipe_sha256.end(), out.begin() + 32);
-  std::copy(value.reserved.begin(), value.reserved.end(), out.begin() + 80);
+  wasm_guest_detail::Put(out, 80, static_cast<std::uint64_t>(value.site_index),
+                         sizeof(value.site_index));
+  std::copy(value.reserved.begin(), value.reserved.end(), out.begin() + 84);
   return out;
 }
 [[nodiscard]] inline bool DecodeWasmGuestInvocationPayload(
@@ -237,7 +246,9 @@ static_assert(offsetof(WasmGuestInvocationPayload, recipe_sha256) == 32);
   value.parent_dispatch_sequence_number =
       wasm_guest_detail::Get(bytes, 72, sizeof(value.parent_dispatch_sequence_number));
   std::copy_n(bytes.begin() + 32, 32, value.recipe_sha256.begin());
-  std::copy_n(bytes.begin() + 80, 48, value.reserved.begin());
+  value.site_index =
+      static_cast<std::uint32_t>(wasm_guest_detail::Get(bytes, 80, sizeof(value.site_index)));
+  std::copy_n(bytes.begin() + 84, 44, value.reserved.begin());
   return true;
 }
 [[nodiscard]] inline bool IsValidWasmGuestDispatch(const EventRecord& event) noexcept {
@@ -262,13 +273,16 @@ static_assert(offsetof(WasmGuestInvocationPayload, recipe_sha256) == 32);
   return wasm_guest_detail::Envelope(event) &&
          event.header.type == EventType::kWasmGuestInvocation && !event.header.parent_event_id &&
          DecodeWasmGuestInvocationPayload(event.inline_payload, value) &&
-         (value.protocol_version == 1 || value.protocol_version == 2) &&
-         value.payload_size == 128 && value.function_index < 16U * 1024U * 1024U &&
-         value.instance_id && value.invocation_id &&
+         value.protocol_version >= 1 && value.protocol_version <= 3 && value.payload_size == 128 &&
+         value.function_index < 16U * 1024U * 1024U && value.instance_id && value.invocation_id &&
          value.parent_invocation_id != value.invocation_id &&
          // Version 1 reserved the parent dispatch bytes. An exact parent
          // dispatch names its activation and precedes this marker.
-         (value.protocol_version == 2 || !value.parent_dispatch_sequence_number) &&
+         (value.protocol_version >= 2 || !value.parent_dispatch_sequence_number) &&
+         // Version 3 names one of at most eight adapter sites; earlier
+         // versions reserved those bytes.
+         (value.protocol_version == 3 || !value.site_index) &&
+         value.site_index < kWasmGuestSiteLimit &&
          (!value.parent_dispatch_sequence_number ||
           (value.parent_invocation_id &&
            value.parent_dispatch_sequence_number < event.header.sequence_number)) &&

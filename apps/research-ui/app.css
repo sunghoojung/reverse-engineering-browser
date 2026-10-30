@@ -3800,6 +3800,51 @@ body.resizing-panes-y, body.resizing-panes-y * { cursor: row-resize !important; 
 /* End traffic and request inspector */
 
 /* Evidence and backtraces */
+/* Captured evidence carries mono and color; labels, notices and controls stay
+   quiet. Properties that narrow-layout rules also set are left to those rules. */
+#screen-evidence .screen-head-actions .secondary-button, #screen-backtrace .screen-head-actions .package-navigation { align-items: center; }
+#screen-evidence .evidence-eyebrow { font-size: 11px; }
+#screen-evidence .evidence-context h2 { font-weight: 500; }
+#screen-evidence .evidence-coverage > span { color: var(--muted); }
+#screen-evidence .evidence-coverage > span[data-kind="gap"] { color: var(--amber); }
+#screen-evidence .evidence-coverage-popover { padding: 12px 16px 16px; }
+#screen-evidence .evidence-observation-tools label, #screen-evidence .evidence-list-caption, #screen-evidence .evidence-group-note { font-size: 11px; }
+#screen-evidence .evidence-observation-group h3 { margin: 16px 8px 4px; font-weight: 500; }
+#screen-evidence .evidence-observation { margin: 4px 0; border: 0; }
+#screen-evidence .evidence-observation[aria-current="true"] { background: var(--accent-soft); box-shadow: inset 2px 0 var(--accent); }
+#screen-evidence .evidence-observation-meta, #screen-evidence .evidence-observation-preview { font-size: 11px; }
+#screen-evidence .evidence-observation-meta time { font-variant-numeric: tabular-nums; }
+#screen-evidence .evidence-observation strong { font: 500 12px/1.5 var(--sans); }
+#screen-evidence .evidence-detail-head h2 { margin: 4px 0; font-family: var(--sans); font-weight: 500; }
+#screen-evidence :is(.evidence-observation strong, .evidence-detail-head h2).evidence-captured-title { font-family: var(--mono); font-weight: 400; }
+#screen-evidence .evidence-relation { display: block; padding: 0; border-radius: 0; background: transparent; font-size: 12px; }
+#screen-evidence .evidence-detail-section h3 { font-weight: 500; }
+#screen-evidence .evidence-provenance .evidence-record-facts dd { font-family: var(--mono); font-variant-numeric: tabular-nums; }
+#screen-evidence .evidence-list-footer { padding-inline: 16px; font-size: 11px; }
+#screen-evidence .evidence-list-footer button { font-size: 11px; }
+#screen-evidence .evidence-list-empty { padding: 24px 8px 12px; font: 400 12px/1.6 var(--sans); }
+
+/* Package mode reads from the same left edge as its heading row. */
+#screen-evidence .evidence-package-panel { margin: 0; }
+#screen-evidence .evidence-package-panel :is(h2, h3, h4) { font-weight: 500; }
+#screen-evidence .package-window-toolbar { padding-block: 8px; }
+#screen-evidence .package-candidate { gap: 8px; padding: 8px 12px; }
+#screen-evidence .package-candidate input[type="checkbox"] { appearance: none; width: 14px; height: 14px; margin: 2px 0 0; display: grid; place-content: center; border: 1px solid var(--line); border-radius: 4px; background: var(--bg); cursor: pointer; }
+#screen-evidence .package-candidate input[type="checkbox"]:checked { border-color: var(--accent); background: var(--accent); }
+#screen-evidence .package-candidate input[type="checkbox"]:checked::before { content: ""; width: 8px; height: 4px; margin-top: -2px; border: solid var(--panel); border-width: 0 0 2px 2px; transform: rotate(-45deg); }
+#screen-evidence .package-disclosure { margin-top: 16px; padding-top: 12px; }
+#screen-evidence .package-notice { padding: 0; border-left: 0; background: transparent; color: var(--muted); }
+#screen-evidence .package-notice:is([data-kind="error"], [data-kind="invalid"], [data-kind="unsupported"]) { color: var(--red); }
+#screen-evidence .package-notice[data-kind="ready"] { color: var(--text); }
+#screen-evidence .primary-button { min-height: 28px; padding: 0 12px; border: 1px solid transparent; border-radius: 4px; color: var(--panel); background: var(--accent); font: 500 11px var(--sans); }
+#screen-evidence .primary-button:hover:not(:disabled) { filter: brightness(1.08); }
+#screen-evidence .primary-button:disabled { cursor: not-allowed; opacity: .45; }
+#screen-evidence input[type="file"] { color: var(--muted); font: 12px var(--sans); }
+#screen-evidence input[type="file"]::file-selector-button { min-height: 28px; margin-right: 8px; padding: 0 10px; border: 1px solid var(--line-soft); border-radius: 4px; background: var(--panel-2); color: var(--text); font: 500 11px var(--sans); cursor: pointer; }
+#screen-evidence input[type="file"]:hover::file-selector-button { border-color: var(--accent); }
+/* The pager has nothing to page until a comparison returns rows. */
+#evidence-comparison-panel > .package-toolbar:last-child:has(> span:empty) { display: none; }
+
 /* End evidence and backtraces */
 
 /* Sources */

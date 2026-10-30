@@ -3833,6 +3833,7 @@ const capturedExportPanel = installCapturedExportDialog({
         elements.collectionFolderDraftStatus.textContent = state.collectionFolderDirty ? `· ${folder.name} · Unsaved` : '';
         elements.collectionDeleteFolder.disabled = root || state.apiCollectionSaving;
         elements.collectionDeleteFolder.textContent = state.collectionDeleteFolderId === folder.id ? 'Confirm delete' : 'Delete folder';
+        elements.collectionDeleteFolder.dataset.confirm = String(state.collectionDeleteFolderId === folder.id);
       }
 
       function renderCollectionVariableStatus() {
@@ -3887,7 +3888,8 @@ const capturedExportPanel = installCapturedExportDialog({
           elements.collectionRequestUrl.value = request.url;
           elements.collectionRequestMethod.value = request.method;
           elements.collectionRequestTimeout.value = String(request.timeout_ms);
-
+          elements.collectionRequestHeaders.value = request.headers.length
+            ? JSON.stringify(Object.fromEntries(request.headers.map(header => [header.name, header.value])), null, 2) : '';
           elements.collectionRequestBody.value = request.body;
           elements.collectionRequestVariables.value = collectionVariablesText(request.variables);
         }
@@ -3901,6 +3903,7 @@ const capturedExportPanel = installCapturedExportDialog({
         elements.collectionDuplicateRequest.disabled = state.apiCollectionSaving || state.apiCollection.requests.length >= 128;
         elements.collectionDeleteRequest.disabled = state.apiCollectionSaving;
         elements.collectionDeleteRequest.textContent = state.collectionDeleteRequestId === request.id ? 'Confirm delete' : 'Delete request';
+        elements.collectionDeleteRequest.dataset.confirm = String(state.collectionDeleteRequestId === request.id);
         renderCollectionVariableStatus();
       }
 
@@ -4543,7 +4546,7 @@ const capturedExportPanel = installCapturedExportDialog({
             .sort((left, right) => left.name.localeCompare(right.name));
           const expanded = state.analystExpandedFolderIds.has(folder.id);
           const row = document.createElement('button'); row.type = 'button'; row.className = 'analyst-tree-row';
-          row.dataset.folderId = String(folder.id); row.style.setProperty('--analyst-depth', String(depth));
+          row.title = folder.name; row.dataset.folderId = String(folder.id); row.style.setProperty('--analyst-depth', String(depth));
           row.setAttribute('role', 'treeitem'); row.setAttribute('aria-level', String(depth + 1));
           row.setAttribute('aria-expanded', String(expanded));
           row.setAttribute('aria-selected', String(state.analystSelectedFileId === null && state.analystSelectedFolderId === folder.id));
@@ -4564,7 +4567,7 @@ const capturedExportPanel = installCapturedExportDialog({
           children.forEach(child => appendFolder(child, depth + 1));
           files.forEach(file => {
             const fileRow = document.createElement('button'); fileRow.type = 'button'; fileRow.className = 'analyst-tree-row';
-            fileRow.dataset.fileId = String(file.id); fileRow.style.setProperty('--analyst-depth', String(depth + 1));
+            fileRow.title = file.name; fileRow.dataset.fileId = String(file.id); fileRow.style.setProperty('--analyst-depth', String(depth + 1));
             fileRow.setAttribute('role', 'treeitem'); fileRow.setAttribute('aria-level', String(depth + 2));
             fileRow.setAttribute('aria-selected', String(state.analystSelectedFileId === file.id));
             fileRow.append(textElement('span', 'analyst-tree-glyph', file.kind === 'analyst-script' ? 'JS' : '·'),
@@ -4623,6 +4626,7 @@ const capturedExportPanel = installCapturedExportDialog({
           state.localAnalyst.files.some(file => file.folder_id === folder.id);
         analystElements.deleteFolder.disabled = folder.id === 1 || hasContents || state.localAnalystSaving;
         analystElements.deleteFolder.textContent = state.analystDeleteFolderId === folder.id ? 'Confirm delete' : 'Delete empty folder';
+        analystElements.deleteFolder.dataset.confirm = String(state.analystDeleteFolderId === folder.id);
       }
 
       function renderAnalystEditor() {
@@ -4653,9 +4657,10 @@ const capturedExportPanel = installCapturedExportDialog({
         analystElements.revert.disabled = state.localAnalystSaving || !state.analystDraftDirty;
         analystElements.deleteFile.disabled = state.localAnalystSaving;
         analystElements.deleteFile.textContent = state.analystDeleteFileId === file.id ? 'Confirm delete' : 'Delete';
+        analystElements.deleteFile.dataset.confirm = String(state.analystDeleteFileId === file.id);
         analystElements.draftStatus.dataset.kind = state.analystDraftDirty ? 'dirty' : 'saved';
         analystElements.draftStatus.textContent = state.analystDraftDirty
-          ? 'Unsaved changes cannot run. Save or discard this draft before choosing another item. Save before closing the app.'
+          ? 'Unsaved changes cannot run. Save or discard them before choosing another item or closing the app.'
           : `${formatByteSize(file.content_bytes)} saved · file ${file.id} · ${new Date(file.updated_at_ms).toLocaleString()}`;
       }
 
@@ -7856,12 +7861,20 @@ const capturedExportPanel = installCapturedExportDialog({
       elements.collectionFolderForm.addEventListener('submit', event => {
         event.preventDefault(); saveCollectionFolder();
       });
-
+      elements.collectionFolderForm.querySelectorAll('input, textarea, select').forEach(field => field.addEventListener('input', () => {
+        state.collectionFolderDirty = true;
+        state.collectionDeleteFolderId = null;
+        renderCollectionFolderForm();
+      }));
       elements.collectionDeleteFolder.addEventListener('click', deleteCollectionFolder);
       elements.collectionRequestForm.addEventListener('submit', event => {
         event.preventDefault(); saveCollectionRequest();
       });
-
+      elements.collectionRequestForm.querySelectorAll('input, textarea, select').forEach(field => field.addEventListener('input', () => {
+        state.collectionDraftDirty = true;
+        state.collectionDeleteRequestId = null;
+        renderCollectionRequestForm();
+      }));
       elements.collectionDuplicateRequest.addEventListener('click', duplicateCollectionRequest);
       elements.collectionDeleteRequest.addEventListener('click', deleteCollectionRequest);
 

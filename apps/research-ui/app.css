@@ -4112,6 +4112,123 @@ body.resizing-panes-y, body.resizing-panes-y * { cursor: row-resize !important; 
 /* End VM static bytecode, contextual, analysis packs and opcode ledger */
 
 /* Collection and analyst */
+/* Authored names, labels and choices read in the interface face. Mono stays on
+   request data, script content, results, counts and identifiers, so the text a
+   script reads or a request carries is what stands apart. */
+#screen-api-collection .collection-tree-row, #screen-analyst .analyst-tree-row {
+  min-height: 32px; grid-template-columns: 16px minmax(0, 1fr) auto; gap: 8px; padding-block: 4px; padding-right: 12px;
+}
+#screen-api-collection .collection-tree-row { padding-left: calc(12px + var(--collection-depth, 0) * 12px); }
+#screen-analyst .analyst-tree-row { padding-left: calc(12px + var(--analyst-depth, 0) * 12px); }
+#screen-api-collection .collection-tree-row[aria-selected="true"], #screen-analyst .analyst-tree-row[aria-selected="true"] { box-shadow: inset 2px 0 var(--accent); }
+#screen-api-collection .collection-tree-name, #screen-analyst .analyst-tree-name { font: 12px var(--sans); }
+#screen-api-collection .collection-tree-meta, #screen-analyst .analyst-tree-meta { font: 11px var(--mono); }
+#screen-api-collection .collection-pane-actions, #screen-analyst .analyst-actions { gap: 8px; padding: 8px 12px; }
+#screen-api-collection .collection-pane-head, #screen-analyst .analyst-pane-head, #screen-analyst .analyst-card > header { align-items: baseline; }
+#screen-analyst :is(.analyst-pane-head, .analyst-card > header) h2 { font-size: 12px; }
+#screen-api-collection .collection-notice, #screen-analyst .analyst-notice { min-height: 32px; padding: 8px 12px; }
+#screen-api-collection .collection-notice::before, #screen-analyst .analyst-notice::before { width: 6px; height: 6px; }
+#screen-analyst #analyst-generation { color: var(--faint); }
+/* The library keeps the 240px it has while empty, so names do not truncate. */
+#screen-analyst .analyst-grid:not([data-state="empty"]) { grid-template-columns: 240px minmax(320px, 1fr) minmax(290px, .8fr); }
+@media (max-width: 1200px) and (min-width: 761px) {
+  #screen-analyst .analyst-grid:not([data-state="empty"]) { grid-template-columns: 240px minmax(0, 1fr); }
+}
+#screen-analyst #analyst-generation::before { content: none; }
+#collection-new-folder-form { border-bottom: 1px solid var(--line); }
+
+/* Library cards: one inset, one radius, no doubled hairlines at the edges. */
+#screen-api-collection .collection-scope-card, #screen-analyst .analyst-storage {
+  margin: 12px; border: 1px solid var(--line-soft); border-radius: 6px; background: var(--panel-2); overflow: hidden;
+}
+#screen-analyst .analyst-storage + .analyst-storage { margin-top: 0; }
+#screen-analyst .analyst-storage > .analyst-pane-head { padding: 0 12px; border-bottom: 0; background: transparent; }
+#screen-analyst .analyst-storage > .analyst-pane-head p { margin: 0; }
+#screen-analyst .analyst-storage-grid { margin-top: 12px; border-top: 1px solid var(--line-soft); }
+#screen-analyst .analyst-storage-grid div, #screen-analyst .analyst-snapshot div { padding: 8px 12px; }
+#screen-analyst .analyst-storage-grid div:nth-last-child(-n + 2) { border-bottom: 0; }
+#screen-analyst :is(.analyst-storage-grid, .analyst-snapshot) span { color: var(--faint); font: 11px var(--sans); }
+#screen-analyst :is(.analyst-storage-grid, .analyst-snapshot) strong { color: var(--text); font: 12px var(--mono); font-variant-numeric: tabular-nums; }
+
+/* Forms share one control style; fields that hold names or choices use sans. */
+#screen-api-collection .collection-form, #screen-analyst .analyst-form { gap: 12px; padding: 12px; }
+#screen-api-collection .collection-form :is(input, select, textarea),
+#screen-analyst .analyst-form :is(input:not([type="checkbox"]), select, textarea) {
+  padding: 6px 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); font-family: var(--mono); font-size: 12px;
+}
+#screen-api-collection .collection-form :is(input, select), #screen-analyst .analyst-form :is(input:not([type="checkbox"]), select) { min-height: 32px; }
+#screen-api-collection :is(#collection-new-folder-name, #collection-folder-name, #collection-folder-parent, #collection-request-name, #collection-request-folder, #collection-request-timeout),
+#screen-analyst :is(#analyst-name, #analyst-folder, #analyst-kind, #analyst-language, #analyst-folder-name, #analyst-folder-parent) { font-family: var(--sans); }
+#screen-api-collection #collection-request-timeout { font-variant-numeric: tabular-nums; }
+#screen-api-collection .collection-command-row { grid-template-columns: 80px minmax(0, 1fr); }
+#screen-api-collection .collection-form-row, #screen-analyst .analyst-form-row { gap: 12px; }
+#screen-analyst .analyst-form-row { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+
+/* Details content is not a grid item of <details>, so rows get explicit
+   spacing; the timeout holds five digits and does not need the full width. */
+#screen-api-collection .collection-properties, #screen-api-collection .collection-properties[open] {
+  display: block; padding: 0; border: 1px solid var(--line-soft); border-radius: 6px;
+}
+#screen-api-collection .collection-properties > summary, #screen-api-collection .collection-properties[open] > summary {
+  margin: 0; padding: 8px 12px; color: var(--muted); font: 500 12px var(--sans);
+}
+#screen-api-collection .collection-properties[open] > summary { color: var(--text); }
+#screen-api-collection .collection-properties > :not(summary) { margin: 0 12px 12px; }
+#screen-api-collection .collection-properties > label { max-width: 160px; }
+#screen-analyst .analyst-form > .workspace-disclosure { margin-inline: -12px; }
+#screen-analyst .analyst-form > .workspace-disclosure > summary { padding: 8px 12px; }
+#screen-analyst .analyst-form > .workspace-disclosure > .analyst-form-row { padding: 0 12px 12px; }
+#screen-analyst .analyst-form > .workspace-disclosure > label { margin: 0 12px 12px; }
+
+/* Actions read left to right as one row: commit, discard, then the
+   destructive action set apart. Labels never wrap inside a button. */
+#screen-api-collection :is(.collection-author-actions, .collection-form-actions), #screen-analyst .analyst-form-actions {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 8px;
+}
+#screen-api-collection :is(.collection-author-actions, .collection-form-actions) button, #screen-analyst .analyst-form-actions button {
+  width: auto; min-height: 28px; margin: 0; padding: 0 12px; white-space: nowrap;
+}
+#screen-api-collection #collection-delete-request, #screen-analyst #analyst-delete { margin-left: auto; }
+#screen-api-collection button[data-confirm="true"], #screen-analyst button[data-confirm="true"] {
+  border-color: color-mix(in srgb, var(--red) 55%, var(--line)); color: var(--red);
+}
+
+/* Request content tabs match the inspector tabs: text and an underline. */
+#screen-api-collection .collection-tabs { gap: 16px; }
+#screen-api-collection .collection-tabs button { padding: 8px 0; }
+#screen-api-collection .collection-tabs button[aria-selected="true"] { background: transparent; }
+#screen-api-collection .collection-variable-status { gap: 4px 16px; min-height: 20px; }
+#screen-api-collection .collection-variable-chip { padding: 0; border: 0; border-radius: 0; color: var(--muted); font: 11px var(--mono); }
+#screen-api-collection .collection-variable-chip[data-kind="missing"] { color: var(--red); }
+
+/* Empty editors sit centered in their pane in both workspaces. */
+#screen-api-collection .collection-editor-empty, #screen-analyst .analyst-editor-empty { gap: 12px; }
+#screen-analyst .analyst-pane:has(> .analyst-editor-empty:not([hidden])) { display: flex; flex-direction: column; }
+#screen-analyst .analyst-editor-empty { flex: 1 1 auto; min-height: 240px; }
+/* The content row takes the editor's spare height; its label stays on top. */
+#screen-analyst .analyst-editor-form > label { grid-template-rows: auto minmax(0, 1fr); }
+#screen-analyst .analyst-draft-status { color: var(--faint); font: 11px/1.5 var(--mono); }
+#screen-analyst .analyst-draft-status[data-kind="dirty"] { color: var(--amber); font: 12px/1.5 var(--sans); }
+
+/* Run pane: the permission choice reads as sentences, the result as evidence. */
+#screen-analyst .analyst-run-pane { gap: 12px; padding: 12px; }
+#screen-analyst .analyst-card { border-color: var(--line-soft); border-radius: 6px; overflow: hidden; }
+#screen-analyst .analyst-card > header { padding: 12px; }
+#screen-analyst details.analyst-card > header { padding-top: 0; }
+#screen-analyst .analyst-run-pane > .analyst-card:last-child { min-height: 0; }
+#screen-analyst .analyst-options { gap: 8px 12px; }
+#screen-analyst .analyst-check { color: var(--text) !important; font: 400 12px/1.5 var(--sans) !important; }
+#screen-analyst .analyst-sensitive { padding: 8px 12px; border-radius: 6px; }
+#screen-analyst .analyst-history-row { gap: 4px 12px; padding: 8px 12px; }
+#screen-analyst .analyst-history-row:hover, #screen-analyst .analyst-history-row:focus { background: var(--panel-3); }
+#screen-analyst .analyst-history-row[aria-selected="true"] { background: var(--accent-soft); box-shadow: inset 2px 0 var(--accent); }
+#screen-analyst .analyst-history-row span:first-child { font: 12px var(--sans); }
+#screen-analyst .analyst-history-row :is(strong, small) { font: 11px var(--mono); }
+#screen-analyst .analyst-result { min-height: 0; padding: 12px; }
+#screen-analyst .analyst-result pre { padding: 12px; border-radius: 6px; background: var(--bg); color: var(--text); font: 12px/1.6 var(--mono); }
+#screen-analyst .analyst-card:has(#analyst-result-badge[data-kind="error"]) .analyst-result pre { color: var(--red); }
+#screen-analyst .analyst-log-row { padding: 4px 8px; font: 11px/1.5 var(--mono); }
+#screen-analyst :is(.analyst-history, .analyst-result) .analyst-empty { min-height: 0; padding: 24px 12px; font-size: 12px; }
 /* End collection and analyst */
 
 /* Console, tools and dialogs */

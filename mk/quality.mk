@@ -22,7 +22,7 @@ define ignored-rust-test
 		{ echo "Expected exactly one passing ignored test: $(2)" >&2; exit 1; }
 endef
 
-check: native-wasm-golden-check dispatch-shape-check all heap-snapshot-check native-artifact-capture-check native-request-identity-check wire-decoder-check magic-decoder-check native-vm-recorder-check owned-vm-helper-check native-probe-compile native-probe-admission-check native-network-capture-check native-proxy-policy-check native-build-test native-tests workspace-check deob-benchmark vm-lab-check native-only-check
+check: native-wasm-golden-check native-js-golden-check dispatch-shape-check all heap-snapshot-check native-artifact-capture-check native-request-identity-check wire-decoder-check magic-decoder-check native-vm-recorder-check owned-vm-helper-check native-probe-compile native-probe-admission-check native-network-capture-check native-proxy-policy-check native-build-test native-tests workspace-check deob-benchmark vm-lab-check native-only-check
 	cargo test --locked --manifest-path apps/origin-trace-backend/Cargo.toml
 	cargo test --locked --manifest-path apps/deobfuscator-worker/Cargo.toml
 	$(call ignored-rust-test,--lib,owned_vm_debugger::tests::owned_vm_real_helper_control_and_independent_goldens,\
@@ -70,6 +70,22 @@ native-wasm-golden-check: $(NATIVE_WASM_GUEST_GOLDEN) $(NATIVE_WASM_DISPATCH_GOL
 	REB_NATIVE_GUEST_GOLDEN="$(abspath $(NATIVE_WASM_GUEST_GOLDEN))" \
 		REB_NATIVE_GUEST_WORKSPACE_INPUT="$(NATIVE_GOLDEN_DIR)/native-guest-workspace.json" \
 		node tools/check-native-guest-wire.mjs
+
+# The actual C++ native JavaScript dispatch encoder feeds the Rust workspace
+# builder, the shipped viewer and the Python validator, over the owned
+# two-level fixture tools/fixtures/native-js-dispatch/two-level-vm.js.
+.PHONY: native-js-golden-check
+NATIVE_JS_GOLDEN_DIR := $(abspath $(BUILD_DIR)/native-js-golden)
+native-js-golden-check: $(NATIVE_JS_DISPATCH_GOLDEN)
+	rm -rf "$(NATIVE_JS_GOLDEN_DIR)"
+	mkdir -p "$(NATIVE_JS_GOLDEN_DIR)"
+	$(call ignored-rust-test,--lib,vm_opcode::native_js::tests::native_js_cpp_golden,\
+		REB_NATIVE_JS_GOLDEN="$(abspath $(NATIVE_JS_DISPATCH_GOLDEN))" \
+		REB_NATIVE_JS_WORKSPACE_OUTPUT="$(NATIVE_JS_GOLDEN_DIR)/native-js-workspace.json" \
+		REB_NATIVE_JS_EVIDENCE_OUTPUT="$(NATIVE_JS_GOLDEN_DIR)/js-evidence")
+	REB_NATIVE_JS_GOLDEN="$(abspath $(NATIVE_JS_DISPATCH_GOLDEN))" \
+		REB_NATIVE_JS_WORKSPACE_INPUT="$(NATIVE_JS_GOLDEN_DIR)/native-js-workspace.json" \
+		node tools/check-vm-opcode-workspace-ui.mjs
 
 # The public QuickJS module is a pinned development dependency installed with
 # npm ci --prefix tools/quickjs-native-fixture; it is not native capture.

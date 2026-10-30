@@ -29,7 +29,7 @@
           'request_initiated', 'request_redirected', 'response_started',
           'request_completed', 'request_failed', 'vm_finding',
           'vm_dispatch_sample', 'wasm_dispatch_observation', 'wasm_guest_dispatch', 'wasm_guest_invocation',
-          'wasm_indirect_observation', 'artifact_captured', 'artifact_capture_failed'
+          'wasm_indirect_observation', 'js_dispatch_observation', 'artifact_captured', 'artifact_capture_failed'
         ])
       };
       const uint64Fields = [
@@ -267,6 +267,33 @@
           row.table_index < 16777216 && row.callee_function_index < 16777216 && row.resolution < 5 &&
           (row.resolution === 0 || row.callee_function_index === 0) && row.sample_index < 16 ? row : null;
       }
+      // Native JavaScript dispatch, protocol/native-js-dispatch-v1.md: a
+      // renderer record with full identity and no artifact, navigation,
+      // request or parent event, and the 128-byte payload table rule by rule.
+      function decodeNativeJsObservation(event) {
+        if (event?.type !== 'js_dispatch_observation' || event.protocol_version !== 3 || event.category !== 'vm' ||
+          event.payload_size !== 128 || event.payload_encoding !== 'hex' || event.payload_truncated !== false ||
+          event.flags !== 0 || ['artifact_id', 'navigation_id', 'parent_event_id', 'request_id'].some(key => event[key] !== '0') ||
+          !['session_id','sequence_number','monotonic_time_ns','frame_id'].every(key => isCanonicalInteger(event[key], 1n, uint64Max)) ||
+          !['process_id','thread_id'].every(key => isSafeIntegerInRange(event[key], 1, 0xffffffff)) ||
+          typeof event.payload !== 'string' || !/^[0-9a-f]{256}$/i.test(event.payload)) return null;
+        const bytes = Uint8Array.from(event.payload.match(/../g), byte => Number.parseInt(byte, 16));
+        const view = new DataView(bytes.buffer);
+        const u32 = at => view.getUint32(at, true);
+        const [shape, kind, slot, flags] = [bytes[4], bytes[5], bytes[6], bytes[7]];
+        const row = {shape, kind, slot, flags, script: u32(8), anchor: u32(12), length: u32(16), selector: u32(20),
+          handler_script: u32(24), handler_start: u32(28), handler_end: u32(32), activation: u32(36), parent: u32(40),
+          site_sample: view.getUint16(44, true), sample: view.getUint16(46, true)};
+        const handler = (flags & 8) !== 0;
+        if (view.getUint16(0, true) !== 1 || view.getUint16(2, true) !== 128 || bytes.slice(80).some(byte => byte !== 0) ||
+          ![1, 2].includes(shape) || kind < 1 || kind > 9 || slot > 7 || (flags & ~0x0f) !== 0 || row.script === 0 ||
+          row.length === 0 || row.anchor >= row.length || row.activation === 0 || row.site_sample >= 64 || row.sample >= 256 ||
+          (kind === 7 && row.selector > 1) || (kind !== 1 && kind !== 7 && row.selector !== 0) ||
+          (handler ? shape !== 2 || row.handler_script === 0 || row.handler_start >= row.handler_end
+            : row.handler_script !== 0 || row.handler_start !== 0 || row.handler_end !== 0) ||
+          (row.parent !== 0 && (row.parent >= row.activation || (flags & 6) !== 0))) return null;
+        return row;
+      }
 
       function decodeNativeGuestRecord(event) {
         if (!['wasm_guest_dispatch','wasm_guest_invocation'].includes(event?.type) || event.protocol_version !== 3 ||
@@ -337,6 +364,7 @@
         return event.payload_truncated === Boolean(event.flags & 1) &&
           (event.type !== 'wasm_dispatch_observation' || decodeNativeWasmObservation(event) !== null) &&
           (event.type !== 'wasm_indirect_observation' || decodeNativeWasmIndirectObservation(event) !== null) &&
+          (event.type !== 'js_dispatch_observation' || decodeNativeJsObservation(event) !== null) &&
           (!['wasm_guest_dispatch','wasm_guest_invocation'].includes(event.type) || decodeNativeGuestRecord(event) !== null);
       }
 
@@ -1511,6 +1539,17 @@
         return 'other';
       }
 
+      // Producers since detector 1.10.0 record where the native JavaScript
+      // dispatch probe anchors a site: the switch keyword, or the [ of the
+      // callee's computed member inside the call. Other shapes have none.
+      function vmDispatchAnchorValid(site, javascript) {
+        const anchor = site.location?.anchor_offset;
+        if (anchor === null) return true;
+        if (!javascript || !isSafeIntegerInRange(anchor, 0, Number.MAX_SAFE_INTEGER)) return false;
+        if (site.instruction === 'switch') return anchor === site.location.byte_offset;
+        return site.instruction === 'indexed call' && anchor > site.location.byte_offset &&
+          anchor < site.location.byte_offset + site.location.byte_size;
+      }
       function isVmDispatchClassificationSite(site, artifactId, runtime) {
         if (!vmWorkspaceExact(site, ['artifact_id', 'dispatch_kind', 'selector_source', 'repeats', 'role', 'confidence',
           'instruction', 'location', 'selector', 'arm_count', 'loop', 'buffer_kind', 'table']) ||
@@ -1522,7 +1561,8 @@
           ![null, 'string', 'typed-array', 'array', 'arguments', 'unknown'].includes(site.buffer_kind)) return false;
         const location = site.location;
         const javascript = runtime === 'javascript';
-        if (!vmWorkspaceExact(location, ['function_index', 'function_body_offset', 'byte_offset', 'byte_size', 'line', 'column']) ||
+        if (!vmWorkspaceExact(location, ['function_index', 'function_body_offset', 'byte_offset', 'byte_size', 'line', 'column', 'anchor_offset']) ||
+          !vmDispatchAnchorValid(site, javascript) ||
           !isSafeIntegerInRange(location.byte_offset, 0, Number.MAX_SAFE_INTEGER) ||
           !isSafeIntegerInRange(location.byte_size, 1, Number.MAX_SAFE_INTEGER) ||
           !(location.function_body_offset === null || isSafeIntegerInRange(location.function_body_offset, 0, Number.MAX_SAFE_INTEGER)) ||
@@ -1643,6 +1683,84 @@
         return !classified || (classified.instruction === row.instruction && classified.location.function_index === row.function_index &&
           (classified.table === null || classified.table.table_index === row.table_index));
       }
+      const vmNativeJsSelectorKinds = ['integer', 'number', 'string', 'symbol', 'undefined', 'null', 'boolean', 'bigint', 'object'];
+      // Producer 2.17.0 and later: native JavaScript dispatch rows of this
+      // artifact's script text. Offsets are artifact bytes.
+      function isNativeJsObservation(row) {
+        if (!vmWorkspaceExact(row, ['event', 'monotonic_time_ns', 'thread_id', 'shape', 'site_slot', 'script_id', 'anchor_offset',
+          'selector_kind', 'selector', 'selector_bits', 'handler', 'activation_id', 'parent_activation_id', 'new_activation',
+          'parent_unknown', 'parent_search_truncated', 'site_sample_index', 'sample_index']) ||
+          !vmSampleEvent(row.event) || !isCanonicalInteger(row.monotonic_time_ns, 1n, uint64Max) ||
+          !isSafeIntegerInRange(row.thread_id, 1, 0xffffffff) || !['switch', 'indexed-call'].includes(row.shape) ||
+          !isSafeIntegerInRange(row.site_slot, 0, 7) || !isSafeIntegerInRange(row.script_id, 1, 0xffffffff) ||
+          !isSafeIntegerInRange(row.anchor_offset, 0, Number.MAX_SAFE_INTEGER) ||
+          !vmNativeJsSelectorKinds.includes(row.selector_kind) || !isSafeIntegerInRange(row.selector_bits, 0, 0xffffffff) ||
+          !isSafeIntegerInRange(row.activation_id, 1, 0xffffffff) ||
+          !['new_activation', 'parent_unknown', 'parent_search_truncated'].every(key => typeof row[key] === 'boolean') ||
+          !isSafeIntegerInRange(row.site_sample_index, 0, 63) || !isSafeIntegerInRange(row.sample_index, 0, 255)) return false;
+        if (row.selector_kind === 'integer' ? row.selector !== row.selector_bits
+          : row.selector !== null || row.selector_bits > (row.selector_kind === 'boolean' ? 1 : 0)) return false;
+        if (row.parent_activation_id !== null && (!isSafeIntegerInRange(row.parent_activation_id, 1, row.activation_id - 1) ||
+          row.parent_unknown || row.parent_search_truncated)) return false;
+        if (row.handler === null) return true;
+        const handler = row.handler;
+        return row.shape === 'indexed-call' && vmWorkspaceExact(handler, ['script_id', 'start', 'end', 'byte_offset', 'byte_size']) &&
+          isSafeIntegerInRange(handler.script_id, 1, 0xffffffff) && isSafeIntegerInRange(handler.start, 0, 0xffffffff) &&
+          isSafeIntegerInRange(handler.end, handler.start + 1, 0xffffffff) &&
+          ((handler.byte_offset === null && handler.byte_size === null && handler.script_id !== row.script_id) ||
+            (handler.script_id === row.script_id && isSafeIntegerInRange(handler.byte_offset, 0, Number.MAX_SAFE_INTEGER) &&
+              isSafeIntegerInRange(handler.byte_size, 1, Number.MAX_SAFE_INTEGER)));
+      }
+      // The listed classification site a native JavaScript row names, by
+      // probe anchor and shape; undefined when no listed site has it.
+      function vmNativeJsSite(workspace, anchor, shape) {
+        const instruction = shape === 'switch' ? 'switch' : 'indexed call';
+        return workspace.dispatch_classification?.sites.find(site =>
+          site.location.anchor_offset === anchor && site.instruction === instruction);
+      }
+      function vmNativeJsHandler(row) {
+        if (row.shape === 'switch') return {kind: 'switch-case', case_value: row.selector};
+        return {kind: 'handler-span', byte_offset: row.handler?.byte_offset ?? null, byte_size: row.handler?.byte_size ?? null};
+      }
+      function vmNativeJsHandlerKey(handler) {
+        return handler.kind === 'switch-case' ? `case:${handler.case_value}` : `span:${handler.byte_offset}:${handler.byte_size}`;
+      }
+      function vmCanonicalJson(value) {
+        if (Array.isArray(value)) return `[${value.map(vmCanonicalJson).join(',')}]`;
+        if (isPlainObject(value)) return `{${Object.keys(value).sort().map(key => `${JSON.stringify(key)}:${vmCanonicalJson(value[key])}`).join(',')}}`;
+        return JSON.stringify(value);
+      }
+      // Producer 2.17.0 and later: the native-js-dispatch-sites-v1 file for
+      // this artifact's armable interpreter-candidate sites.
+      function isVmJsDispatchArming(arming, workspace) {
+        if (!vmWorkspaceExact(arming, ['version', 'source_sha256', 'source_length', 'sites', 'refused', 'omitted_refused_count', 'file']) ||
+          arming.version !== 1 || !(arming.source_sha256 === null || vmWorkspaceDigest(arming.source_sha256)) ||
+          !(arming.source_length === null || isSafeIntegerInRange(arming.source_length, 0, 0xffffffff)) ||
+          (arming.source_sha256 === null) !== (arming.source_length === null) ||
+          !Array.isArray(arming.sites) || arming.sites.length > 8 || !Array.isArray(arming.refused) || arming.refused.length > 64 ||
+          !isSafeIntegerInRange(arming.omitted_refused_count, 0, Number.MAX_SAFE_INTEGER) ||
+          (arming.omitted_refused_count > 0 && arming.refused.length !== 64)) return false;
+        const seen = new Set();
+        for (const site of arming.sites) {
+          if (!vmWorkspaceExact(site, ['anchor_offset', 'artifact_id', 'artifact_sha256', 'byte_offset', 'shape', 'source_length', 'source_sha256']) ||
+            site.artifact_id !== workspace.interpreter_artifact_id || site.artifact_sha256 !== workspace.source_artifact_sha256 ||
+            site.source_sha256 !== arming.source_sha256 || site.source_length !== arming.source_length ||
+            !['switch', 'indexed-call'].includes(site.shape) || !isSafeIntegerInRange(site.anchor_offset, 0, site.source_length - 1) ||
+            !isSafeIntegerInRange(site.byte_offset, 0, Number.MAX_SAFE_INTEGER) || seen.has(site.anchor_offset)) return false;
+          seen.add(site.anchor_offset);
+          const listed = workspace.dispatch_classification?.sites.find(entry => entry.location.byte_offset === site.byte_offset &&
+            entry.instruction === (site.shape === 'switch' ? 'switch' : 'indexed call') && entry.location.anchor_offset !== null);
+          if (listed && listed.role !== 'interpreter-candidate') return false;
+        }
+        if (!arming.refused.every(row => vmWorkspaceExact(row, ['byte_offset', 'instruction', 'reason']) &&
+          isSafeIntegerInRange(row.byte_offset, 0, Number.MAX_SAFE_INTEGER) &&
+          ['switch', 'indexed call', 'aliased call', 'if ladder', 'self call'].includes(row.instruction) &&
+          ['js-dispatch-shape-unobservable', 'js-dispatch-anchor-unresolved', 'js-dispatch-site-limit', 'js-dispatch-source-not-utf8'].includes(row.reason) &&
+          (row.reason !== 'js-dispatch-site-limit' || arming.sites.length === 8))) return false;
+        if (arming.sites.length === 0) return arming.file === null;
+        return typeof arming.file === 'string' && arming.file.length <= 4096 &&
+          arming.file === vmCanonicalJson({sites: arming.sites, version: 1});
+      }
       function isNativeGuestSample(row, workspace) {
         const keys = ['event','invocation_event','invocation_id','instance_id','parent_invocation_id','function_index',
           'module_byte_offset','selector','table_count','selected_arm','is_default','sample_index','instruction_pointer',
@@ -1700,11 +1818,13 @@
       }
       function vmObservedRowKey(stream, row) {
         if (stream === 'native-wasm-indirect') return `${stream}:${row.function_index}:${row.module_byte_offset}:${row.slot}:null:${row.callee_function_index}`;
+        if (stream === 'native-js') return `${stream}:${row.anchor_offset}:${row.selector}:${vmNativeJsHandlerKey(vmNativeJsHandler(row))}`;
         return stream === 'dispatch-sample' ? `${stream}:${row.opcode}:${row.handler_index}`
           : `${stream}:${row.function_index}:${row.module_byte_offset}:${row.selector}:${stream === 'native-guest' ? row.opcode : 'null'}:${row.selected_arm}`;
       }
       function vmObservedClaimKey(claim) {
         if (claim.stream === 'native-wasm-indirect') return `${claim.stream}:${claim.site.function_index}:${claim.site.byte_offset}:${claim.selector}:${claim.opcode}:${claim.handler.callee_function_index}`;
+        if (claim.stream === 'native-js') return `${claim.stream}:${claim.site.anchor_offset}:${claim.selector}:${vmNativeJsHandlerKey(claim.handler)}`;
         return claim.stream === 'dispatch-sample' ? `${claim.stream}:${claim.opcode}:${claim.handler.handler_index}`
           : `${claim.stream}:${claim.site.function_index}:${claim.site.byte_offset}:${claim.selector}:${claim.opcode}:${claim.handler.arm}`;
       }
@@ -1716,7 +1836,32 @@
           'native-wasm': workspace.native_wasm_observations ?? [],
           // Only a resolved entry names a callee; other rows supply no claim.
           'native-wasm-indirect': (workspace.native_wasm_indirect_observations ?? []).filter(row => row.resolution === 'resolved'),
+          'native-js': workspace.runtime === 'javascript' ? workspace.native_js_observations ?? [] : [],
         };
+      }
+      // A native JavaScript claim compares with this site's own static claim:
+      // a case of this switch outside every switch nested in it, or the table
+      // entry for the opcode, which agrees only when it spans the invoked function.
+      function vmNativeJsStaticClaim(workspace, claim, site) {
+        const opcode = claim.opcode;
+        const inside = (offset, entry) => offset >= entry.location.byte_offset && offset < entry.location.byte_offset + entry.location.byte_size;
+        let row;
+        if (claim.handler.kind === 'switch-case') {
+          const nested = (workspace.dispatch_classification?.sites ?? []).filter(entry => entry.instruction === 'switch' &&
+            entry.location.byte_offset > site.location.byte_offset && entry.location.byte_offset < site.location.byte_offset + site.location.byte_size);
+          row = workspace.handlers.find(handler => handler.opcode === opcode && handler.handler_index === undefined &&
+            inside(handler.source.byte_offset, site) && !nested.some(entry => inside(handler.source.byte_offset, entry)));
+        } else {
+          row = workspace.handlers.find(handler => handler.opcode === opcode && handler.handler_index !== undefined);
+        }
+        if (row) {
+          const span = claim.handler;
+          const agrees = span.kind === 'switch-case' || (span.byte_offset !== null && row.source.byte_offset <= span.byte_offset &&
+            span.byte_offset + span.byte_size <= row.source.byte_offset + row.source.byte_size);
+          return {state: agrees ? 'agrees' : 'disagrees', opcode, handler_index: row.handler_index ?? null, byte_offset: row.source.byte_offset};
+        }
+        if (workspace.coverage.omissions.some(entry => entry.reason === 'handler-withheld')) return {state: 'withheld-or-absent', opcode};
+        return {state: 'absent', opcode: null, handler_index: null, byte_offset: null};
       }
       function vmObservedSoleSite(workspace) {
         const classification = workspace.dispatch_classification;
@@ -1730,6 +1875,15 @@
         const comparison = claim.static_claim;
         if (!vmWorkspaceExact(comparison, ['state', 'opcode', 'handler_index', 'byte_offset'])) return false;
         const empty = state => comparison.state === state && comparison.handler_index === null && comparison.byte_offset === null;
+        if (claim.stream === 'native-js') {
+          const site = vmNativeJsSite(workspace, claim.site.anchor_offset, claim.handler.kind === 'switch-case' ? 'switch' : 'indexed-call');
+          if (!site) return false;
+          const expected = vmNativeJsStaticClaim(workspace, claim, site);
+          if (expected.state === 'withheld-or-absent') return (empty('withheld') && comparison.opcode === claim.opcode) ||
+            (empty('absent') && comparison.opcode === null);
+          return comparison.state === expected.state && comparison.opcode === expected.opcode &&
+            comparison.handler_index === expected.handler_index && comparison.byte_offset === expected.byte_offset;
+        }
         if (claim.stream === 'dispatch-sample') {
           const row = workspace.handlers.find(handler => handler.opcode === claim.opcode);
           if (row) {
@@ -1773,9 +1927,16 @@
         const rowsByKey = new Map();
         for (const [stream, rows] of Object.entries(streams)) {
           for (const row of rows) {
-            const qualifies = stream === 'dispatch-sample'
-              ? (workspace.dispatch_classification?.role_counts['interpreter-candidate'] ?? 0) > 0
-              : vmObservedInterpreterSite(workspace, row.module_byte_offset);
+            let qualifies;
+            if (stream === 'native-js') {
+              const site = vmNativeJsSite(workspace, row.anchor_offset, row.shape);
+              qualifies = row.selector !== null && (site ? site.role === 'interpreter-candidate'
+                : (workspace.dispatch_classification?.omitted_site_count ?? 0) > 0);
+            } else {
+              qualifies = stream === 'dispatch-sample'
+                ? (workspace.dispatch_classification?.role_counts['interpreter-candidate'] ?? 0) > 0
+                : vmObservedInterpreterSite(workspace, row.module_byte_offset);
+            }
             if (!qualifies) continue;
             const key = vmObservedRowKey(stream, row);
             if (!rowsByKey.has(key)) rowsByKey.set(key, []);
@@ -1810,6 +1971,20 @@
               !isSafeIntegerInRange(claim.handler.table_index, 0, 16777215) ||
               !isSafeIntegerInRange(claim.handler.callee_function_index, 0, 16777215) ||
               !isSafeIntegerInRange(claim.selector, 0, 0xffffffff) || claim.opcode !== null) return false;
+          } else if (claim.stream === 'native-js') {
+            const site = isPlainObject(claim.site) && isPlainObject(claim.handler) ? vmNativeJsSite(workspace, claim.site.anchor_offset,
+              claim.handler.kind === 'switch-case' ? 'switch' : 'indexed-call') : undefined;
+            if (workspace.runtime !== 'javascript' || claim.site_attribution !== 'exact' || !site || site.role !== 'interpreter-candidate' ||
+              !vmWorkspaceExact(claim.site, ['function_index', 'byte_offset', 'line', 'column', 'anchor_offset']) ||
+              claim.site.function_index !== null || claim.site.byte_offset !== site.location.byte_offset ||
+              claim.site.line !== site.location.line || claim.site.column !== site.location.column ||
+              !isSafeIntegerInRange(claim.selector, 0, 0xffffffff) || claim.opcode !== claim.selector ||
+              !(claim.handler.kind === 'switch-case'
+                ? vmWorkspaceExact(claim.handler, ['kind', 'case_value']) && claim.handler.case_value === claim.selector
+                : claim.handler.kind === 'handler-span' && vmWorkspaceExact(claim.handler, ['kind', 'byte_offset', 'byte_size']) &&
+                  ((claim.handler.byte_offset === null && claim.handler.byte_size === null) ||
+                    (isSafeIntegerInRange(claim.handler.byte_offset, 0, Number.MAX_SAFE_INTEGER) &&
+                      isSafeIntegerInRange(claim.handler.byte_size, 1, Number.MAX_SAFE_INTEGER))))) return false;
           } else {
             if (workspace.runtime !== 'webassembly' || claim.site_attribution !== 'exact' ||
               !vmWorkspaceExact(claim.site, ['function_index', 'byte_offset', 'line', 'column']) || claim.site.line !== null ||
@@ -1833,9 +2008,63 @@
         if (disagreements > 0 && !workspace.unknowns.some(text => text.startsWith(`${disagreements} observed dispatch claim`))) return false;
         return !complete || limited || [...rowsByKey.keys()].every(key => seen.has(key));
       }
+      // Producer 2.17.0 and later: a native JavaScript activation whose first
+      // dispatch named a parent that dispatched first at another
+      // interpreter-candidate site, neither site a threaded cycle.
+      function isVmJavaScriptNestedGuests(workspace, nested) {
+        const rows = workspace.native_js_observations ?? [];
+        const byEvent = new Map(rows.map(row => [vmSampleEventKey(row.event), row]));
+        const scope = row => `${row.event.session_id}:${row.event.process_id}:${row.thread_id}`;
+        const siteMatches = (value, row) => {
+          const site = vmNativeJsSite(workspace, row.anchor_offset, row.shape);
+          return site && site.role === 'interpreter-candidate' && site.dispatch_kind !== 'threaded' &&
+            vmWorkspaceExact(value, ['function_index', 'byte_offset', 'line', 'column', 'anchor_offset']) &&
+            value.function_index === null && value.byte_offset === site.location.byte_offset && value.line === site.location.line &&
+            value.column === site.location.column && value.anchor_offset === site.location.anchor_offset;
+        };
+        const inners = new Set();
+        for (const row of nested) {
+          if (!vmWorkspaceExact(row, ['confidence', 'runtime', 'outer', 'inner']) || row.confidence !== 'observed' || row.runtime !== 'javascript') return false;
+          const {outer, inner} = row;
+          if (!vmWorkspaceExact(outer, ['activation_id', 'site', 'dispatch_event', 'selector', 'selector_kind', 'handler', 'basis']) ||
+            !vmWorkspaceExact(inner, ['activation_id', 'site', 'first_event', 'sample_count', 'events', 'observed_opcodes', 'omitted_opcode_count']) ||
+            !['contiguous-sequence', 'nearest-retained'].includes(outer.basis) || !vmSampleEvent(outer.dispatch_event) ||
+            !vmSampleEvent(inner.first_event)) return false;
+          const driver = byEvent.get(vmSampleEventKey(outer.dispatch_event));
+          const first = byEvent.get(vmSampleEventKey(inner.first_event));
+          if (!driver || !first || driver.activation_id !== outer.activation_id || !siteMatches(outer.site, driver) ||
+            !siteMatches(inner.site, first) || outer.site.anchor_offset === inner.site.anchor_offset ||
+            outer.selector !== driver.selector || outer.selector_kind !== driver.selector_kind ||
+            vmCanonicalJson(outer.handler) !== vmCanonicalJson(driver.selector === null ? null : vmNativeJsHandler(driver)) ||
+            scope(driver) !== scope(first) || inner.activation_id !== first.activation_id ||
+            first.parent_activation_id !== outer.activation_id || inners.has(`${scope(first)}:${inner.activation_id}`)) return false;
+          const children = rows.filter(sample => scope(sample) === scope(first) && sample.activation_id === inner.activation_id)
+            .sort((left, right) => (BigInt(left.event.sequence_number) < BigInt(right.event.sequence_number) ? -1 : 1));
+          if (children[0] !== first || BigInt(driver.event.sequence_number) >= BigInt(first.event.sequence_number) ||
+            !rows.some(sample => scope(sample) === scope(first) && sample.activation_id === outer.activation_id &&
+              BigInt(sample.event.sequence_number) < BigInt(first.event.sequence_number)) ||
+            rows.some(sample => scope(sample) === scope(first) && sample.activation_id === outer.activation_id &&
+              BigInt(sample.event.sequence_number) > BigInt(driver.event.sequence_number) &&
+              BigInt(sample.event.sequence_number) < BigInt(first.event.sequence_number)) ||
+            inner.sample_count !== children.length || !Array.isArray(inner.events) || inner.events.length !== Math.min(children.length, 8) ||
+            inner.events.some((event, index) => !vmSampleEvent(event) || vmSampleEventKey(event) !== vmSampleEventKey(children[index].event))) return false;
+          inners.add(`${scope(first)}:${inner.activation_id}`);
+          const counts = new Map();
+          for (const sample of children) if (sample.selector !== null) counts.set(sample.selector, (counts.get(sample.selector) ?? 0) + 1);
+          const expected = [...counts.entries()].sort(([left], [right]) => left - right);
+          if (!Array.isArray(inner.observed_opcodes) || inner.omitted_opcode_count !== Math.max(0, expected.length - 64) ||
+            inner.observed_opcodes.length !== Math.min(expected.length, 64) ||
+            !inner.observed_opcodes.every((entry, index) => vmWorkspaceExact(entry, ['opcode', 'sample_count']) &&
+              entry.opcode === expected[index][0] && entry.sample_count === expected[index][1])) return false;
+        }
+        return true;
+      }
       function isVmNestedGuests(workspace) {
         const nested = workspace.nested_guests;
         if (nested === undefined) return true;
+        if (Array.isArray(nested) && nested.length >= 1 && nested.length <= 64 && workspace.runtime === 'javascript') {
+          return isVmJavaScriptNestedGuests(workspace, nested);
+        }
         if (workspace.runtime !== 'webassembly' || !Array.isArray(nested) || nested.length < 1 || nested.length > 64) return false;
         const guest = workspace.native_guest_samples ?? [];
         const byEvent = new Map(guest.map(row => [vmSampleEventKey(row.event), row]));
@@ -1882,7 +2111,7 @@
           'unknowns', 'runtime', 'source_artifact_sha256', 'capture_mode', 'samples', 'sample_count', 'traversal', 'captured_module_preview', 'dispatch_inventory',
           'dispatch_classification', 'evidence_class', 'machine_state', 'handler_tables', 'native_wasm_observations', 'native_wasm_observation_count', 'native_guest_samples', 'native_guest_sample_count',
           'native_wasm_indirect_observations', 'native_wasm_indirect_observation_count',
-          'observed_claims', 'nested_guests'
+          'observed_claims', 'nested_guests', 'native_js_observations', 'native_js_observation_count', 'js_dispatch_arming'
         ])) || !isCanonicalInteger(workspace.interpreter_artifact_id, 0n, uint64Max) ||
           (workspace.bytecode_artifact_id !== undefined && !isCanonicalInteger(workspace.bytecode_artifact_id, 0n, uint64Max)) ||
           typeof workspace.finding_id !== 'string' || !/^[0-9a-f]{24}$/.test(workspace.finding_id) ||
@@ -1918,13 +2147,23 @@
         const guestTruncated = guestCount > guestRows.length;
         if (guestTruncated !== workspace.coverage.omissions.some(row => row.reason === 'native-guest-sample-limit') ||
           (guestTruncated && guestRows.length !== 4096)) return false;
+        const jsRows = workspace.native_js_observations ?? [];
+        const jsCount = workspace.native_js_observation_count ?? 0;
+        if ((workspace.native_js_observations === undefined) !== (workspace.native_js_observation_count === undefined) ||
+          (workspace.native_js_observations !== undefined && workspace.runtime !== 'javascript') ||
+          !Array.isArray(jsRows) || jsRows.length > 4096 || !jsRows.every(isNativeJsObservation) ||
+          !isSafeIntegerInRange(jsCount, jsRows.length, Number.MAX_SAFE_INTEGER) ||
+          (jsCount > jsRows.length) !== workspace.coverage.omissions.some(row => row.reason === 'native-js-observation-limit') ||
+          (jsCount > jsRows.length && jsRows.length !== 4096) ||
+          (workspace.js_dispatch_arming !== undefined && (workspace.runtime !== 'javascript' ||
+            !isVmJsDispatchArming(workspace.js_dispatch_arming, workspace)))) return false;
         const nativeRows = workspace.native_wasm_observations ?? [];
         const nativeCount = workspace.native_wasm_observation_count ?? 0;
         if ((workspace.native_wasm_observations === undefined) !== (workspace.native_wasm_observation_count === undefined) ||
           (workspace.native_wasm_observations !== undefined && workspace.runtime !== 'webassembly') ||
           !Array.isArray(nativeRows) || nativeRows.length > 4096 || !nativeRows.every(row => isNativeWasmObservation(row,workspace)) ||
           !isSafeIntegerInRange(nativeCount,nativeRows.length,summed ? workspace.sample_count : Number.MAX_SAFE_INTEGER) ||
-          new Set([...workspace.samples,...nativeRows,...guestRows].map(row => vmSampleEventKey(row.event))).size !== workspace.samples.length + nativeRows.length + guestRows.length) return false;
+          new Set([...workspace.samples,...nativeRows,...guestRows,...jsRows].map(row => vmSampleEventKey(row.event))).size !== workspace.samples.length + nativeRows.length + guestRows.length + jsRows.length) return false;
         if (nativeRows.some(row => workspace.handlers.filter(handler => nativeWasmMatchesHandler(row,handler)).length > 1)) return false;
         const indirectRows = workspace.native_wasm_indirect_observations ?? [];
         const indirectCount = workspace.native_wasm_indirect_observation_count ?? 0;
@@ -1977,7 +2216,7 @@
         }
         if (workspace.samples.some(sample => sample.provenance !== undefined) &&
           !workspace.coverage.omissions.some(row => row.reason === 'caller-samples-unverified')) return false;
-        if (!truncated && nativeCount === 0 && guestCount === 0 && workspace.samples.length > 0 && workspace.samples.every(sample => sample.provenance !== undefined) &&
+        if (!truncated && nativeCount === 0 && guestCount === 0 && jsCount === 0 && workspace.samples.length > 0 && workspace.samples.every(sample => sample.provenance !== undefined) &&
           !workspace.coverage.omissions.some(row => ['sampler-unavailable', 'dispatch-sample-budget'].includes(row.reason))) return false;
         if (!isVmObservedClaims(workspace, claims) || !isVmNestedGuests(workspace)) return false;
         return total <= workspace.sample_count;

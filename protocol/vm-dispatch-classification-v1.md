@@ -15,8 +15,9 @@ released against an earlier draft, so it keeps version 1; do not treat any of
 those commits alone as a released contract. The static-shape commits that add
 the `aliased call` instruction, `selector.through_helper` and the threaded
 interpreter-candidate rule belong to the same unreleased unit: release tags
-up to v0.3.2 predate the schema. VM detector producer 1.9.0 and workspace
-producer 2.13.0 write them; documents from the earlier drafts lack the field
+up to v0.3.2 predate the schema. So does `location.anchor_offset`, the native
+JavaScript dispatch probe anchor. VM detector producer 1.10.0 and workspace
+producer 2.17.0 write them; documents from the earlier drafts lack the fields
 and are not accepted.
 
 ## Why it exists
@@ -219,12 +220,27 @@ a partial AST; recovered claims are withheld with that reason.
 
 Every site carries the artifact ID, `location` (Wasm function index and code
 entry offset, or JavaScript line, column and region start), the byte offset and
-size of the dispatch instruction or first comparison, a bounded `selector`
+size of the dispatch instruction or first comparison, the probe anchor, a bounded `selector`
 rendering of the instructions or source expression that produced the
 selector, the offset of the closest producing write or load (inside the
 helper for a helper fetch, inside the handler for a threaded fetch), whether
 a lookup or a helper produced it, the arm or comparison count, and the loop
 range.
+
+`location.anchor_offset` is where the
+[native JavaScript dispatch probe](native-js-dispatch-v1.md) anchors the site,
+as an artifact byte offset: the `switch` keyword (equal to `byte_offset`), or
+the `[` that opens the callee's computed member of an `indexed call`, including
+the receiver member of `t[k].call(...)` and `t[k].apply(...)`. V8 records the
+same two positions for `SwitchStatement` and a keyed `Property`, so the anchor,
+not the call's start, names one site exactly even when two calls start at the
+same byte. The Oxc worker finds the `[` from the AST: it scans forward from the
+end of the member's object, skipping only whitespace, comments, `)` and `?.`,
+and leaves the anchor null if anything else precedes the bracket. It is null
+for WebAssembly, for aliased calls, self calls and if ladders, which have no
+single dispatching node, and for optional-chain calls (`t?.[k]()`,
+`t[k]?.()`), which the probe does not instrument. A null anchor never changes
+the role; it only means the site cannot be armed.
 
 `call_indirect` sites keep `table`: table index, type index, and the real table
 slots whose function signature equals the call type, scanned once per table
@@ -424,7 +440,8 @@ claims are withheld or absent, and states where they disagree with static
 claims; see [observed claims](vm-opcode-workspace-v2.md#observed-claims-and-nested-guests).
 Producer 2.14.0 adds claims from native `call_indirect` observations, so a
 threaded or handler-table site whose table is filled at run time names the
-callee each observed slot ran.
+callee each observed slot ran. Producer 2.17.0 adds exact JavaScript sites
+from native JavaScript dispatch records joined by probe anchor.
 Observed claims never feed this classification, the claim gate or a tier.
 
 - A byte-cursor loop over text, such as a format-string or tokenizer loop, is

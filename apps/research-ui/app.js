@@ -2054,25 +2054,33 @@ const capturedExportPanel = installCapturedExportDialog({
       }
 
       const vmObservedStreamLabels = {'native-guest': 'Native guest', 'native-wasm': 'Native br_table',
-        'native-wasm-indirect': 'Native call_indirect', 'dispatch-sample': 'Native dispatch sample'};
-      const vmObservedOmission = reason => /^(?:observed-claim|nested-guest)/.test(reason);
+        'native-wasm-indirect': 'Native call_indirect', 'native-js': 'Native JS dispatch', 'dispatch-sample': 'Native dispatch sample'};
+      const vmObservedOmission = reason => /^(?:observed-claim|nested-guest|native-js-)/.test(reason);
       function vmHasRuntimeClaims(workspace) {
         return workspace.observed_claims !== undefined || workspace.nested_guests !== undefined ||
-          workspace.coverage.omissions.some(row => vmObservedOmission(row.reason));
+          workspace.js_dispatch_arming !== undefined || workspace.coverage.omissions.some(row => vmObservedOmission(row.reason));
       }
       function vmObservedSiteText(claim) {
         if (claim.site === null) return 'site not recorded, artifact scope';
+        if (claim.stream === 'native-js') return `line ${claim.site.line}:${claim.site.column} · anchor byte ${claim.site.anchor_offset}`;
         if (claim.site.line !== null) return `line ${claim.site.line}:${claim.site.column}, sole interpreter candidate`;
         return `f${claim.site.function_index} · byte ${claim.site.byte_offset}`;
       }
       function vmObservedHandlerText(claim) {
         if (claim.handler.kind === 'handler-index') return `handler ${claim.handler.handler_index}`;
         if (claim.handler.kind === 'table-entry') return `function ${claim.handler.callee_function_index}`;
+        if (claim.handler.kind === 'switch-case') return `case ${claim.handler.case_value}`;
+        if (claim.handler.kind === 'handler-span') return claim.handler.byte_offset === null
+          ? 'handler outside this script' : `handler bytes ${claim.handler.byte_offset} + ${claim.handler.byte_size}`;
         return claim.handler.is_default ? `default arm ${claim.handler.arm}` : `arm ${claim.handler.arm}`;
       }
       function vmObservedStaticText(claim) {
         const comparison = claim.static_claim;
-        const javascript = claim.stream === 'dispatch-sample';
+        if (claim.stream === 'native-js') {
+          if (comparison.state === 'agrees') return `Static claim agrees: recovery at this site names opcode ${comparison.opcode} at byte ${comparison.byte_offset}.`;
+          if (comparison.state === 'disagrees') return `Static claim disagrees: recovery names another handler for opcode ${comparison.opcode} at byte ${comparison.byte_offset}. Both are kept.`;
+        }
+        const javascript = claim.stream === 'dispatch-sample' || claim.stream === 'native-js';
         if (claim.stream === 'native-wasm-indirect') {
           const placed = comparison.handler_index === null ? 'leave this slot empty' : `place function ${comparison.handler_index} in this slot`;
           if (comparison.state === 'agrees') return `Static claim agrees: the element segments ${placed}.`;
@@ -2119,6 +2127,10 @@ const capturedExportPanel = installCapturedExportDialog({
         for (const omission of workspace.coverage.omissions.filter(row => vmObservedOmission(row.reason))) {
           panel.append(textElement('p', 'vm-workspace-notice', `${omission.reason}: ${omission.detail}`));
         }
+        if (workspace.runtime === 'javascript') {
+          if (workspace.js_dispatch_arming) renderVmJsDispatchArming(workspace.js_dispatch_arming, panel);
+          return renderVmJavaScriptNestedGuests(workspace, panel);
+        }
         if (workspace.runtime !== 'webassembly') return panel;
         panel.append(textElement('h4', '', 'Nested guests'),
           textElement('p', 'vm-workspace-notice', 'An inner interpreter is a guest activation that names a parent invocation, runs at another interpreter-candidate site and reads another guest buffer. Its outer handler is the parent dispatch its invocation names exactly, or for older evidence the parent dispatch retained last before it began.'));
@@ -2146,6 +2158,48 @@ const capturedExportPanel = installCapturedExportDialog({
           return row;
         });
         if (!nested.length) panel.append(textElement('p', 'vm-selection-empty', 'No nested guest retained. An inner interpreter is linked only when it runs at another configured adapter site than its parent; an activation reentering its parent\'s site names that parent but is not a nested guest.'));
+        return panel;
+      }
+
+      // The native-js-dispatch-sites-v1 file text is shown inert, to save
+      // and pass with REB_NATIVE_JS_DISPATCH_SITES; nothing here arms a probe.
+      function renderVmJsDispatchArming(arming, panel) {
+        panel.append(textElement('h4', '', 'Native probe sites'),
+          textElement('p', 'vm-workspace-notice', `${vmCountText(arming.sites.length, 'interpreter-candidate site')} can be armed for the native JavaScript dispatch probe (at most 8). A rebuilt browser reads the file below only from an explicit launch setting.`));
+        for (const site of arming.sites) {
+          panel.append(textElement('p', 'vm-effect-detail', `${site.shape} · byte ${site.byte_offset} · UTF-16 anchor ${site.anchor_offset}`));
+        }
+        for (const row of arming.refused) {
+          panel.append(textElement('p', 'vm-effect-detail', `Not armed: ${row.instruction} at byte ${row.byte_offset} (${row.reason})`));
+        }
+        if (arming.omitted_refused_count) panel.append(textElement('p', 'vm-workspace-notice', `${arming.omitted_refused_count} more refused sites are not listed.`));
+        if (arming.file !== null) panel.append(textElement('pre', 'vm-effect-detail vm-evidence-audit', arming.file));
+      }
+
+      function renderVmJavaScriptNestedGuests(workspace, panel) {
+        panel.append(textElement('h4', '', 'Nested guests'),
+          textElement('p', 'vm-workspace-notice', 'An inner interpreter is a native JavaScript activation whose first dispatch named a parent activation that had already dispatched at another interpreter-candidate site. The parent is a call-stack relation, not proof of which outer handler ran it.'));
+        const nested = workspace.nested_guests ?? [];
+        appendVmPagedRows(panel, nested, 'nested guests', guest => {
+          const {outer, inner} = guest;
+          const row = document.createElement('details'); row.className = 'vm-effect-row';
+          const summary = document.createElement('summary');
+          const selector = outer.selector === null ? `${outer.selector_kind} selector` : `selector ${outer.selector}`;
+          summary.append(textElement('span', 'vm-native-row-identity', `Inner line ${inner.site.line}:${inner.site.column} · activation ${inner.activation_id}`), document.createElement('br'),
+            textElement('span', 'vm-native-row-position', `Driven by outer line ${outer.site.line}:${outer.site.column} · activation ${outer.activation_id}, ${selector}`));
+          const opcodes = inner.observed_opcodes.map(entry => `${entry.opcode} (${vmCountText(entry.sample_count, 'sample')})`).join(', ');
+          const omitted = inner.omitted_opcode_count ? `, and ${inner.omitted_opcode_count} more opcodes` : '';
+          const basis = outer.basis === 'contiguous-sequence'
+            ? 'Every renderer event between the outer dispatch and the inner activation is retained, so no other outer dispatch ran in between.'
+            : 'Events between the outer dispatch and the inner activation are missing or include a gap, so this is the nearest retained outer dispatch, not proof of the exact one.';
+          row.append(summary,
+            textElement('p', 'vm-effect-detail', `Inner opcodes: ${opcodes || 'none'}${omitted} · ${vmCountText(inner.sample_count, 'retained sample')}`),
+            textElement('p', 'vm-effect-detail', `Outer dispatch process ${outer.dispatch_event.process_id} seq ${outer.dispatch_event.sequence_number}. ${basis}`),
+            textElement('p', 'vm-effect-detail', vmObservedEventsText(inner.events, inner.sample_count)),
+            textElement('pre', 'vm-effect-detail vm-evidence-audit', JSON.stringify(guest, null, 2)));
+          return row;
+        });
+        if (!nested.length) panel.append(textElement('p', 'vm-selection-empty', 'No nested guest retained. An activation needs a parent that dispatched first at another interpreter-candidate site.'));
         return panel;
       }
 

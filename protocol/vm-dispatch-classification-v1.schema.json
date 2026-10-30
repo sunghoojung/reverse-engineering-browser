@@ -221,7 +221,8 @@
             "byte_offset",
             "byte_size",
             "line",
-            "column"
+            "column",
+            "anchor_offset"
           ],
           "properties": {
             "function_index": {
@@ -265,6 +266,14 @@
               ],
               "minimum": 1,
               "description": "JavaScript one-based character column; null for Wasm."
+            },
+            "anchor_offset": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "minimum": 0,
+              "description": "JavaScript only: artifact byte offset where the native dispatch probe anchors the site, the switch keyword or the [ that opens the callee's computed member. Null for WebAssembly and for sites the probe cannot observe: aliased calls, self calls, if ladders and optional-chain calls."
             }
           }
         },

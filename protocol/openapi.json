@@ -6410,6 +6410,20 @@
                 "items": {
                   "$ref": "#/components/schemas/VmOpcodeWorkspace/$defs/nestedGuest"
                 }
+              },
+              "native_js_observations": {
+                "type": "array",
+                "maxItems": 4096,
+                "items": {
+                  "$ref": "#/components/schemas/VmOpcodeWorkspace/$defs/nativeJsObservation"
+                }
+              },
+              "native_js_observation_count": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "js_dispatch_arming": {
+                "$ref": "#/components/schemas/VmOpcodeWorkspace/$defs/jsDispatchArming"
               }
             },
             "allOf": [
@@ -6473,12 +6487,62 @@
                 "if": {
                   "required": [
                     "nested_guests"
+                  ],
+                  "properties": {
+                    "runtime": {
+                      "const": "javascript"
+                    }
+                  }
+                },
+                "then": {
+                  "properties": {
+                    "nested_guests": {
+                      "items": {
+                        "required": [
+                          "runtime"
+                        ]
+                      }
+                    }
+                  }
+                },
+                "else": {
+                  "properties": {
+                    "nested_guests": {
+                      "items": {
+                        "not": {
+                          "required": [
+                            "runtime"
+                          ]
+                        }
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "if": {
+                  "required": [
+                    "native_js_observations"
                   ]
                 },
                 "then": {
                   "properties": {
                     "runtime": {
-                      "const": "webassembly"
+                      "const": "javascript"
+                    }
+                  }
+                }
+              },
+              {
+                "if": {
+                  "required": [
+                    "js_dispatch_arming"
+                  ]
+                },
+                "then": {
+                  "properties": {
+                    "runtime": {
+                      "const": "javascript"
                     }
                   }
                 }
@@ -7966,7 +8030,8 @@
                   "byte_offset",
                   "byte_size",
                   "line",
-                  "column"
+                  "column",
+                  "anchor_offset"
                 ],
                 "properties": {
                   "function_index": {
@@ -8010,6 +8075,14 @@
                     ],
                     "minimum": 1,
                     "description": "JavaScript one-based character column; null for Wasm."
+                  },
+                  "anchor_offset": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "minimum": 0,
+                    "description": "JavaScript only: artifact byte offset where the native dispatch probe anchors the site, the switch keyword or the [ that opens the callee's computed member. Null for WebAssembly and for sites the probe cannot observe: aliased calls, self calls, if ladders and optional-chain calls."
                   }
                 }
               },
@@ -8178,6 +8251,7 @@
                   "native-guest",
                   "native-wasm",
                   "native-wasm-indirect",
+                  "native-js",
                   "dispatch-sample"
                 ]
               },
@@ -8233,6 +8307,10 @@
                             "type": "null"
                           }
                         ]
+                      },
+                      "anchor_offset": {
+                        "type": "integer",
+                        "minimum": 0
                       }
                     }
                   },
@@ -8335,6 +8413,60 @@
                         "type": "integer",
                         "minimum": 0,
                         "maximum": 16777215
+                      }
+                    }
+                  },
+                  {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "kind",
+                      "case_value"
+                    ],
+                    "properties": {
+                      "kind": {
+                        "const": "switch-case"
+                      },
+                      "case_value": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 4294967295
+                      }
+                    }
+                  },
+                  {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "kind",
+                      "byte_offset",
+                      "byte_size"
+                    ],
+                    "properties": {
+                      "kind": {
+                        "const": "handler-span"
+                      },
+                      "byte_offset": {
+                        "anyOf": [
+                          {
+                            "type": "integer",
+                            "minimum": 0
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "byte_size": {
+                        "anyOf": [
+                          {
+                            "type": "integer",
+                            "minimum": 1
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
                       }
                     }
                   }
@@ -8599,6 +8731,54 @@
                 "if": {
                   "properties": {
                     "stream": {
+                      "const": "native-js"
+                    }
+                  }
+                },
+                "then": {
+                  "properties": {
+                    "site_attribution": {
+                      "const": "exact"
+                    },
+                    "selector": {
+                      "type": "integer"
+                    },
+                    "opcode": {
+                      "type": "integer"
+                    },
+                    "handler": {
+                      "properties": {
+                        "kind": {
+                          "enum": [
+                            "switch-case",
+                            "handler-span"
+                          ]
+                        }
+                      }
+                    },
+                    "site": {
+                      "required": [
+                        "anchor_offset"
+                      ],
+                      "properties": {
+                        "function_index": {
+                          "type": "null"
+                        },
+                        "line": {
+                          "type": "integer"
+                        },
+                        "column": {
+                          "type": "integer"
+                        }
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "if": {
+                  "properties": {
+                    "stream": {
                       "const": "native-wasm"
                     }
                   }
@@ -8663,8 +8843,12 @@
               {
                 "if": {
                   "properties": {
-                    "site_attribution": {
-                      "const": "exact"
+                    "stream": {
+                      "enum": [
+                        "native-guest",
+                        "native-wasm",
+                        "native-wasm-indirect"
+                      ]
                     }
                   }
                 },
@@ -8685,203 +8869,859 @@
                     }
                   }
                 }
+              },
+              {
+                "if": {
+                  "properties": {
+                    "stream": {
+                      "enum": [
+                        "native-guest",
+                        "native-wasm",
+                        "native-wasm-indirect",
+                        "dispatch-sample"
+                      ]
+                    }
+                  }
+                },
+                "then": {
+                  "properties": {
+                    "site": {
+                      "anyOf": [
+                        {
+                          "type": "null"
+                        },
+                        {
+                          "not": {
+                            "required": [
+                              "anchor_offset"
+                            ]
+                          }
+                        }
+                      ]
+                    }
+                  }
+                }
               }
             ]
           },
           "nestedGuest": {
-            "type": "object",
-            "additionalProperties": false,
-            "required": [
-              "confidence",
-              "instance_id",
-              "outer",
-              "inner"
-            ],
-            "properties": {
-              "confidence": {
-                "const": "observed"
-              },
-              "instance_id": {
-                "$ref": "#/components/schemas/VmOpcodeWorkspace/$defs/nativeNonzeroUint64"
-              },
-              "outer": {
+            "oneOf": [
+              {
                 "type": "object",
                 "additionalProperties": false,
                 "required": [
-                  "invocation_id",
-                  "invocation_event",
-                  "function_index",
-                  "module_byte_offset",
-                  "memory_index",
-                  "memory_base",
-                  "memory_length",
-                  "bytecode_artifact_id",
-                  "dispatch_event",
-                  "selector",
-                  "opcode",
-                  "selected_arm",
-                  "is_default",
-                  "instruction_pointer",
-                  "basis"
+                  "confidence",
+                  "instance_id",
+                  "outer",
+                  "inner"
                 ],
                 "properties": {
-                  "invocation_id": {
+                  "confidence": {
+                    "const": "observed"
+                  },
+                  "instance_id": {
                     "$ref": "#/components/schemas/VmOpcodeWorkspace/$defs/nativeNonzeroUint64"
                   },
-                  "invocation_event": {
-                    "$ref": "#/components/schemas/VmOpcodeWorkspace/$defs/nativeEventIdentity"
-                  },
-                  "function_index": {
-                    "type": "integer",
-                    "minimum": 0,
-                    "maximum": 16777215
-                  },
-                  "module_byte_offset": {
-                    "type": "integer",
-                    "minimum": 8,
-                    "maximum": 16777215
-                  },
-                  "memory_index": {
-                    "type": "integer",
-                    "minimum": 0,
-                    "maximum": 4294967295
-                  },
-                  "memory_base": {
-                    "$ref": "#/components/schemas/VmOpcodeWorkspace/$defs/nativeUint64"
-                  },
-                  "memory_length": {
-                    "type": "integer",
-                    "minimum": 1,
-                    "maximum": 65536
-                  },
-                  "bytecode_artifact_id": {
-                    "$ref": "#/components/schemas/VmOpcodeWorkspace/$defs/nativeNonzeroUint64"
-                  },
-                  "dispatch_event": {
-                    "$ref": "#/components/schemas/VmOpcodeWorkspace/$defs/nativeEventIdentity"
-                  },
-                  "selector": {
-                    "type": "integer",
-                    "minimum": 0,
-                    "maximum": 4294967295
-                  },
-                  "opcode": {
-                    "type": "integer",
-                    "minimum": 0,
-                    "maximum": 4294967295
-                  },
-                  "selected_arm": {
-                    "type": "integer",
-                    "minimum": 0,
-                    "maximum": 16777215
-                  },
-                  "is_default": {
-                    "type": "boolean"
-                  },
-                  "instruction_pointer": {
-                    "type": "integer",
-                    "minimum": 0,
-                    "maximum": 65535
-                  },
-                  "basis": {
-                    "enum": [
-                      "exact-parent-dispatch",
-                      "contiguous-sequence",
-                      "nearest-retained"
-                    ]
-                  }
-                }
-              },
-              "inner": {
-                "type": "object",
-                "additionalProperties": false,
-                "required": [
-                  "invocation_id",
-                  "invocation_event",
-                  "function_index",
-                  "module_byte_offset",
-                  "memory_index",
-                  "memory_base",
-                  "memory_length",
-                  "bytecode_artifact_id",
-                  "sample_count",
-                  "events",
-                  "observed_opcodes",
-                  "omitted_opcode_count"
-                ],
-                "properties": {
-                  "invocation_id": {
-                    "$ref": "#/components/schemas/VmOpcodeWorkspace/$defs/nativeNonzeroUint64"
-                  },
-                  "invocation_event": {
-                    "$ref": "#/components/schemas/VmOpcodeWorkspace/$defs/nativeEventIdentity"
-                  },
-                  "function_index": {
-                    "type": "integer",
-                    "minimum": 0,
-                    "maximum": 16777215
-                  },
-                  "module_byte_offset": {
-                    "type": "integer",
-                    "minimum": 8,
-                    "maximum": 16777215
-                  },
-                  "memory_index": {
-                    "type": "integer",
-                    "minimum": 0,
-                    "maximum": 4294967295
-                  },
-                  "memory_base": {
-                    "$ref": "#/components/schemas/VmOpcodeWorkspace/$defs/nativeUint64"
-                  },
-                  "memory_length": {
-                    "type": "integer",
-                    "minimum": 1,
-                    "maximum": 65536
-                  },
-                  "bytecode_artifact_id": {
-                    "$ref": "#/components/schemas/VmOpcodeWorkspace/$defs/nativeNonzeroUint64"
-                  },
-                  "sample_count": {
-                    "type": "integer",
-                    "minimum": 1
-                  },
-                  "events": {
-                    "type": "array",
-                    "minItems": 1,
-                    "maxItems": 8,
-                    "items": {
-                      "$ref": "#/components/schemas/VmOpcodeWorkspace/$defs/nativeEventIdentity"
-                    }
-                  },
-                  "observed_opcodes": {
-                    "type": "array",
-                    "maxItems": 64,
-                    "items": {
-                      "type": "object",
-                      "additionalProperties": false,
-                      "required": [
-                        "opcode",
-                        "sample_count"
-                      ],
-                      "properties": {
-                        "opcode": {
-                          "type": "integer",
-                          "minimum": 0,
-                          "maximum": 4294967295
-                        },
-                        "sample_count": {
-                          "type": "integer",
-                          "minimum": 1
-                        }
+                  "outer": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "invocation_id",
+                      "invocation_event",
+                      "function_index",
+                      "module_byte_offset",
+                      "memory_index",
+                      "memory_base",
+                      "memory_length",
+                      "bytecode_artifact_id",
+                      "dispatch_event",
+                      "selector",
+                      "opcode",
+                      "selected_arm",
+                      "is_default",
+                      "instruction_pointer",
+                      "basis"
+                    ],
+                    "properties": {
+                      "invocation_id": {
+                        "$ref": "#/components/schemas/VmOpcodeWorkspace/$defs/nativeNonzeroUint64"
+                      },
+                      "invocation_event": {
+                        "$ref": "#/components/schemas/VmOpcodeWorkspace/$defs/nativeEventIdentity"
+                      },
+                      "function_index": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 16777215
+                      },
+                      "module_byte_offset": {
+                        "type": "integer",
+                        "minimum": 8,
+                        "maximum": 16777215
+                      },
+                      "memory_index": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 4294967295
+                      },
+                      "memory_base": {
+                        "$ref": "#/components/schemas/VmOpcodeWorkspace/$defs/nativeUint64"
+                      },
+                      "memory_length": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 65536
+                      },
+                      "bytecode_artifact_id": {
+                        "$ref": "#/components/schemas/VmOpcodeWorkspace/$defs/nativeNonzeroUint64"
+                      },
+                      "dispatch_event": {
+                        "$ref": "#/components/schemas/VmOpcodeWorkspace/$defs/nativeEventIdentity"
+                      },
+                      "selector": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 4294967295
+                      },
+                      "opcode": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 4294967295
+                      },
+                      "selected_arm": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 16777215
+                      },
+                      "is_default": {
+                        "type": "boolean"
+                      },
+                      "instruction_pointer": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 65535
+                      },
+                      "basis": {
+                        "enum": [
+                          "exact-parent-dispatch",
+                          "contiguous-sequence",
+                          "nearest-retained"
+                        ]
                       }
                     }
                   },
-                  "omitted_opcode_count": {
-                    "type": "integer",
-                    "minimum": 0
+                  "inner": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "invocation_id",
+                      "invocation_event",
+                      "function_index",
+                      "module_byte_offset",
+                      "memory_index",
+                      "memory_base",
+                      "memory_length",
+                      "bytecode_artifact_id",
+                      "sample_count",
+                      "events",
+                      "observed_opcodes",
+                      "omitted_opcode_count"
+                    ],
+                    "properties": {
+                      "invocation_id": {
+                        "$ref": "#/components/schemas/VmOpcodeWorkspace/$defs/nativeNonzeroUint64"
+                      },
+                      "invocation_event": {
+                        "$ref": "#/components/schemas/VmOpcodeWorkspace/$defs/nativeEventIdentity"
+                      },
+                      "function_index": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 16777215
+                      },
+                      "module_byte_offset": {
+                        "type": "integer",
+                        "minimum": 8,
+                        "maximum": 16777215
+                      },
+                      "memory_index": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 4294967295
+                      },
+                      "memory_base": {
+                        "$ref": "#/components/schemas/VmOpcodeWorkspace/$defs/nativeUint64"
+                      },
+                      "memory_length": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 65536
+                      },
+                      "bytecode_artifact_id": {
+                        "$ref": "#/components/schemas/VmOpcodeWorkspace/$defs/nativeNonzeroUint64"
+                      },
+                      "sample_count": {
+                        "type": "integer",
+                        "minimum": 1
+                      },
+                      "events": {
+                        "type": "array",
+                        "minItems": 1,
+                        "maxItems": 8,
+                        "items": {
+                          "$ref": "#/components/schemas/VmOpcodeWorkspace/$defs/nativeEventIdentity"
+                        }
+                      },
+                      "observed_opcodes": {
+                        "type": "array",
+                        "maxItems": 64,
+                        "items": {
+                          "type": "object",
+                          "additionalProperties": false,
+                          "required": [
+                            "opcode",
+                            "sample_count"
+                          ],
+                          "properties": {
+                            "opcode": {
+                              "type": "integer",
+                              "minimum": 0,
+                              "maximum": 4294967295
+                            },
+                            "sample_count": {
+                              "type": "integer",
+                              "minimum": 1
+                            }
+                          }
+                        }
+                      },
+                      "omitted_opcode_count": {
+                        "type": "integer",
+                        "minimum": 0
+                      }
+                    }
                   }
                 }
+              },
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "confidence",
+                  "runtime",
+                  "outer",
+                  "inner"
+                ],
+                "properties": {
+                  "confidence": {
+                    "const": "observed"
+                  },
+                  "runtime": {
+                    "const": "javascript"
+                  },
+                  "outer": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "activation_id",
+                      "site",
+                      "dispatch_event",
+                      "selector",
+                      "selector_kind",
+                      "handler",
+                      "basis"
+                    ],
+                    "properties": {
+                      "activation_id": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 4294967295
+                      },
+                      "site": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "required": [
+                          "function_index",
+                          "byte_offset",
+                          "line",
+                          "column",
+                          "anchor_offset"
+                        ],
+                        "properties": {
+                          "function_index": {
+                            "type": "null"
+                          },
+                          "byte_offset": {
+                            "type": "integer",
+                            "minimum": 0
+                          },
+                          "line": {
+                            "type": "integer",
+                            "minimum": 1
+                          },
+                          "column": {
+                            "type": "integer",
+                            "minimum": 1
+                          },
+                          "anchor_offset": {
+                            "type": "integer",
+                            "minimum": 0
+                          }
+                        }
+                      },
+                      "dispatch_event": {
+                        "$ref": "#/components/schemas/VmOpcodeWorkspace/$defs/nativeEventIdentity"
+                      },
+                      "selector": {
+                        "anyOf": [
+                          {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 4294967295
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "selector_kind": {
+                        "enum": [
+                          "integer",
+                          "number",
+                          "string",
+                          "symbol",
+                          "undefined",
+                          "null",
+                          "boolean",
+                          "bigint",
+                          "object"
+                        ]
+                      },
+                      "handler": {
+                        "anyOf": [
+                          {
+                            "type": "null"
+                          },
+                          {
+                            "type": "object",
+                            "additionalProperties": false,
+                            "required": [
+                              "kind",
+                              "case_value"
+                            ],
+                            "properties": {
+                              "kind": {
+                                "const": "switch-case"
+                              },
+                              "case_value": {
+                                "type": "integer",
+                                "minimum": 0,
+                                "maximum": 4294967295
+                              }
+                            }
+                          },
+                          {
+                            "type": "object",
+                            "additionalProperties": false,
+                            "required": [
+                              "kind",
+                              "byte_offset",
+                              "byte_size"
+                            ],
+                            "properties": {
+                              "kind": {
+                                "const": "handler-span"
+                              },
+                              "byte_offset": {
+                                "anyOf": [
+                                  {
+                                    "type": "integer",
+                                    "minimum": 0
+                                  },
+                                  {
+                                    "type": "null"
+                                  }
+                                ]
+                              },
+                              "byte_size": {
+                                "anyOf": [
+                                  {
+                                    "type": "integer",
+                                    "minimum": 1
+                                  },
+                                  {
+                                    "type": "null"
+                                  }
+                                ]
+                              }
+                            }
+                          }
+                        ]
+                      },
+                      "basis": {
+                        "enum": [
+                          "contiguous-sequence",
+                          "nearest-retained"
+                        ]
+                      }
+                    }
+                  },
+                  "inner": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "activation_id",
+                      "site",
+                      "first_event",
+                      "sample_count",
+                      "events",
+                      "observed_opcodes",
+                      "omitted_opcode_count"
+                    ],
+                    "properties": {
+                      "activation_id": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 4294967295
+                      },
+                      "site": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "required": [
+                          "function_index",
+                          "byte_offset",
+                          "line",
+                          "column",
+                          "anchor_offset"
+                        ],
+                        "properties": {
+                          "function_index": {
+                            "type": "null"
+                          },
+                          "byte_offset": {
+                            "type": "integer",
+                            "minimum": 0
+                          },
+                          "line": {
+                            "type": "integer",
+                            "minimum": 1
+                          },
+                          "column": {
+                            "type": "integer",
+                            "minimum": 1
+                          },
+                          "anchor_offset": {
+                            "type": "integer",
+                            "minimum": 0
+                          }
+                        }
+                      },
+                      "first_event": {
+                        "$ref": "#/components/schemas/VmOpcodeWorkspace/$defs/nativeEventIdentity"
+                      },
+                      "sample_count": {
+                        "type": "integer",
+                        "minimum": 1
+                      },
+                      "events": {
+                        "type": "array",
+                        "minItems": 1,
+                        "maxItems": 8,
+                        "items": {
+                          "$ref": "#/components/schemas/VmOpcodeWorkspace/$defs/nativeEventIdentity"
+                        }
+                      },
+                      "observed_opcodes": {
+                        "type": "array",
+                        "maxItems": 64,
+                        "items": {
+                          "type": "object",
+                          "additionalProperties": false,
+                          "required": [
+                            "opcode",
+                            "sample_count"
+                          ],
+                          "properties": {
+                            "opcode": {
+                              "type": "integer",
+                              "minimum": 0,
+                              "maximum": 4294967295
+                            },
+                            "sample_count": {
+                              "type": "integer",
+                              "minimum": 1
+                            }
+                          }
+                        }
+                      },
+                      "omitted_opcode_count": {
+                        "type": "integer",
+                        "minimum": 0
+                      }
+                    }
+                  }
+                }
+              }
+            ]
+          },
+          "nativeJsObservation": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "event",
+              "monotonic_time_ns",
+              "thread_id",
+              "shape",
+              "site_slot",
+              "script_id",
+              "anchor_offset",
+              "selector_kind",
+              "selector",
+              "selector_bits",
+              "handler",
+              "activation_id",
+              "parent_activation_id",
+              "new_activation",
+              "parent_unknown",
+              "parent_search_truncated",
+              "site_sample_index",
+              "sample_index"
+            ],
+            "properties": {
+              "event": {
+                "$ref": "#/components/schemas/VmOpcodeWorkspace/$defs/nativeEventIdentity"
+              },
+              "monotonic_time_ns": {
+                "$ref": "#/components/schemas/VmOpcodeWorkspace/$defs/nativeNonzeroUint64"
+              },
+              "thread_id": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 4294967295
+              },
+              "shape": {
+                "enum": [
+                  "switch",
+                  "indexed-call"
+                ]
+              },
+              "site_slot": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 7
+              },
+              "script_id": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 4294967295
+              },
+              "anchor_offset": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "selector_kind": {
+                "enum": [
+                  "integer",
+                  "number",
+                  "string",
+                  "symbol",
+                  "undefined",
+                  "null",
+                  "boolean",
+                  "bigint",
+                  "object"
+                ]
+              },
+              "selector": {
+                "anyOf": [
+                  {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 4294967295
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "selector_bits": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 4294967295
+              },
+              "handler": {
+                "anyOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "script_id",
+                      "start",
+                      "end",
+                      "byte_offset",
+                      "byte_size"
+                    ],
+                    "properties": {
+                      "script_id": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 4294967295
+                      },
+                      "start": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 4294967295
+                      },
+                      "end": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 4294967295
+                      },
+                      "byte_offset": {
+                        "anyOf": [
+                          {
+                            "type": "integer",
+                            "minimum": 0
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "byte_size": {
+                        "anyOf": [
+                          {
+                            "type": "integer",
+                            "minimum": 1
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      }
+                    }
+                  }
+                ]
+              },
+              "activation_id": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 4294967295
+              },
+              "parent_activation_id": {
+                "anyOf": [
+                  {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 4294967295
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "new_activation": {
+                "type": "boolean"
+              },
+              "parent_unknown": {
+                "type": "boolean"
+              },
+              "parent_search_truncated": {
+                "type": "boolean"
+              },
+              "site_sample_index": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 63
+              },
+              "sample_index": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 255
+              }
+            },
+            "allOf": [
+              {
+                "if": {
+                  "properties": {
+                    "shape": {
+                      "const": "switch"
+                    }
+                  }
+                },
+                "then": {
+                  "properties": {
+                    "handler": {
+                      "type": "null"
+                    }
+                  }
+                }
+              },
+              {
+                "if": {
+                  "properties": {
+                    "selector_kind": {
+                      "const": "integer"
+                    }
+                  }
+                },
+                "then": {
+                  "properties": {
+                    "selector": {
+                      "type": "integer"
+                    }
+                  }
+                },
+                "else": {
+                  "properties": {
+                    "selector": {
+                      "type": "null"
+                    }
+                  }
+                }
+              }
+            ]
+          },
+          "jsDispatchArming": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "version",
+              "source_sha256",
+              "source_length",
+              "sites",
+              "refused",
+              "omitted_refused_count",
+              "file"
+            ],
+            "properties": {
+              "version": {
+                "const": 1
+              },
+              "source_sha256": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/VmOpcodeWorkspace/$defs/digest"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "source_length": {
+                "anyOf": [
+                  {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 4294967295
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "sites": {
+                "type": "array",
+                "maxItems": 8,
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "anchor_offset",
+                    "artifact_id",
+                    "artifact_sha256",
+                    "byte_offset",
+                    "shape",
+                    "source_length",
+                    "source_sha256"
+                  ],
+                  "properties": {
+                    "anchor_offset": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 4294967295
+                    },
+                    "artifact_id": {
+                      "$ref": "#/components/schemas/VmOpcodeWorkspace/$defs/uint64"
+                    },
+                    "artifact_sha256": {
+                      "$ref": "#/components/schemas/VmOpcodeWorkspace/$defs/digest"
+                    },
+                    "byte_offset": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "shape": {
+                      "enum": [
+                        "switch",
+                        "indexed-call"
+                      ]
+                    },
+                    "source_length": {
+                      "type": "integer",
+                      "minimum": 1,
+                      "maximum": 4294967295
+                    },
+                    "source_sha256": {
+                      "$ref": "#/components/schemas/VmOpcodeWorkspace/$defs/digest"
+                    }
+                  }
+                }
+              },
+              "refused": {
+                "type": "array",
+                "maxItems": 64,
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "byte_offset",
+                    "instruction",
+                    "reason"
+                  ],
+                  "properties": {
+                    "byte_offset": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "instruction": {
+                      "enum": [
+                        "switch",
+                        "indexed call",
+                        "aliased call",
+                        "if ladder",
+                        "self call"
+                      ]
+                    },
+                    "reason": {
+                      "enum": [
+                        "js-dispatch-shape-unobservable",
+                        "js-dispatch-anchor-unresolved",
+                        "js-dispatch-site-limit",
+                        "js-dispatch-source-not-utf8"
+                      ]
+                    }
+                  }
+                }
+              },
+              "omitted_refused_count": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "file": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 4096
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
               }
             }
           }
@@ -10358,7 +11198,8 @@
                   "byte_offset",
                   "byte_size",
                   "line",
-                  "column"
+                  "column",
+                  "anchor_offset"
                 ],
                 "properties": {
                   "function_index": {
@@ -10402,6 +11243,14 @@
                     ],
                     "minimum": 1,
                     "description": "JavaScript one-based character column; null for Wasm."
+                  },
+                  "anchor_offset": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "minimum": 0,
+                    "description": "JavaScript only: artifact byte offset where the native dispatch probe anchors the site, the switch keyword or the [ that opens the callee's computed member. Null for WebAssembly and for sites the probe cannot observe: aliased calls, self calls, if ladders and optional-chain calls."
                   }
                 }
               },

@@ -1,5 +1,5 @@
 diff --git a/third_party/blink/renderer/bindings/core/v8/v8_initializer.cc b/third_party/blink/renderer/bindings/core/v8/v8_initializer.cc
-index aaa9dde..997fadf 100644
+index 7dedb733ba60fb319c246e476066eaf70b82cb7f..85addbb5b75658146845a61871e70007de22d1be 100644
 --- a/third_party/blink/renderer/bindings/core/v8/v8_initializer.cc
 +++ b/third_party/blink/renderer/bindings/core/v8/v8_initializer.cc
 @@ -25,13 +25,8 @@
@@ -59,7 +59,7 @@ index aaa9dde..997fadf 100644
  #include "third_party/blink/renderer/platform/wtf/sanitizers.h"
  #include "third_party/blink/renderer/platform/wtf/stack_util.h"
  #include "third_party/blink/renderer/platform/wtf/text/strcat.h"
-@@ -297,6 +297,120 @@ void CaptureWasmBrTableDispatch(v8::Local<v8::Context> context,
+@@ -360,6 +360,133 @@ void CaptureWasmBrTableDispatch(v8::Local<v8::Context> context,
        document_token.GetLowForSerialization());
  }
  
@@ -126,6 +126,18 @@ index aaa9dde..997fadf 100644
 +  return true;
 +}
 +
++reb::NativeWasmGuestParent NativeWasmGuestParent(v8::WasmGuestParent parent) {
++  switch (parent) {
++    case v8::WasmGuestParent::kNone:
++      return reb::NativeWasmGuestParent::kNone;
++    case v8::WasmGuestParent::kResolved:
++      return reb::NativeWasmGuestParent::kResolved;
++    case v8::WasmGuestParent::kUnresolved:
++      return reb::NativeWasmGuestParent::kUnresolved;
++  }
++  return reb::NativeWasmGuestParent::kUnresolved;
++}
++
 +void CaptureWasmGuestDispatch(v8::Local<v8::Context> context,
 +                              const std::uint8_t* module_bytes,
 +                              const std::size_t module_size,
@@ -134,7 +146,8 @@ index aaa9dde..997fadf 100644
 +  const reb::NativeWasmGuestStateView state{
 +      view.instance_id,        view.invocation_id,      view.function_index,
 +      view.module_byte_offset, view.selector,           view.table_count,
-+      view.accessor_context,   view.read_numeric_local, view.copy_memory};
++      view.accessor_context,   view.read_numeric_local, view.copy_memory,
++      view.parent_invocation_id, NativeWasmGuestParent(view.parent)};
 +  // Revoke the preceding configured-site parent before any metadata rejection.
 +  sink.InvalidateNativeWasmGuest(state);
 +  if (!sink.IsNativeWasmGuestEnabled() || context.IsEmpty() ||
@@ -180,7 +193,7 @@ index aaa9dde..997fadf 100644
  void CaptureWasmModuleBytes(v8::Local<v8::Context> context,
                              const v8::WasmModuleBytesOrigin origin,
                              const std::uint8_t* bytes,
-@@ -1330,6 +1444,11 @@ void V8Initializer::InitializeV8Common(v8::Isolate* isolate) {
+@@ -1395,6 +1522,11 @@ void V8Initializer::InitializeV8Common(v8::Isolate* isolate) {
    isolate->SetWasmModuleBytesCallback(CaptureWasmModuleBytes);
    isolate->SetWasmBrTableDispatchCallback(CaptureWasmBrTableDispatch,
                                          NativeWasmBrTableDispatchEnabled);

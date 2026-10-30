@@ -2118,7 +2118,7 @@ const capturedExportPanel = installCapturedExportDialog({
         }
         if (workspace.runtime !== 'webassembly') return panel;
         panel.append(textElement('h4', '', 'Nested guests'),
-          textElement('p', 'vm-workspace-notice', 'An inner interpreter is a guest activation that names a parent invocation, runs at another interpreter-candidate site and reads another guest buffer. Its outer handler is the parent dispatch retained last before it began.'));
+          textElement('p', 'vm-workspace-notice', 'An inner interpreter is a guest activation that names a parent invocation, runs at another interpreter-candidate site and reads another guest buffer. Its outer handler is the parent dispatch its invocation names exactly, or for older evidence the parent dispatch retained last before it began.'));
         const nested = workspace.nested_guests ?? [];
         appendVmPagedRows(panel, nested, 'nested guests', guest => {
           const {outer, inner} = guest;
@@ -2129,9 +2129,11 @@ const capturedExportPanel = installCapturedExportDialog({
             textElement('span', 'vm-native-row-position', `Driven by outer f${outer.function_index} · byte ${outer.module_byte_offset} · opcode ${outer.opcode}, selector ${outer.selector} to ${arm}`));
           const opcodes = inner.observed_opcodes.map(entry => `${entry.opcode} (${vmCountText(entry.sample_count, 'sample')})`).join(', ');
           const omitted = inner.omitted_opcode_count ? `, and ${inner.omitted_opcode_count} more opcodes` : '';
-          const basis = outer.basis === 'contiguous-sequence'
-            ? 'Every renderer event between the outer dispatch and the inner invocation is retained, so no other outer dispatch ran in between.'
-            : 'Events between the outer dispatch and the inner invocation are missing or include a gap, so this is the nearest retained outer dispatch, not proof of the exact one.';
+          const basis = outer.basis === 'exact-parent-dispatch'
+            ? 'The inner invocation names this outer dispatch: it was the outer activation\'s current dispatch on the native stack when the inner one began.'
+            : outer.basis === 'contiguous-sequence'
+              ? 'Every renderer event between the outer dispatch and the inner invocation is retained, so no other outer dispatch ran in between.'
+              : 'Events between the outer dispatch and the inner invocation are missing or include a gap, so this is the nearest retained outer dispatch, not proof of the exact one.';
           row.append(summary,
             textElement('p', 'vm-effect-detail', `Inner guest opcodes: ${opcodes || 'none'}${omitted} · ${vmCountText(inner.sample_count, 'retained sample')}`),
             textElement('p', 'vm-effect-detail', `Inner buffer ${vmGuestBufferText(inner)}. Outer buffer ${vmGuestBufferText(outer)}.`),
@@ -2140,7 +2142,7 @@ const capturedExportPanel = installCapturedExportDialog({
             textElement('pre', 'vm-effect-detail vm-evidence-audit', JSON.stringify(guest, null, 2)));
           return row;
         });
-        if (!nested.length) panel.append(textElement('p', 'vm-selection-empty', 'No nested guest retained. Live capture does not assert parent invocations yet.'));
+        if (!nested.length) panel.append(textElement('p', 'vm-selection-empty', 'No nested guest retained. A live adapter covers one dispatch site, so an activation reentering that site names its parent but is not a nested guest.'));
         return panel;
       }
 

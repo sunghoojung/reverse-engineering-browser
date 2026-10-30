@@ -86,7 +86,7 @@ void NativeProbeHostGuestBoundary(reb::ArtifactReceiver& receiver) {
   reb::NativeGuestPut(dispatch.inline_payload, 32, 30, 8);
   reb::NativeGuestPut(dispatch.inline_payload, 72, code.size(), 4);
   reb::NativeGuestPut(dispatch.inline_payload, 92, 7, 4);
-  reb::NativeGuestPut(invocation.inline_payload, 0, 1, 2);
+  reb::NativeGuestPut(invocation.inline_payload, 0, 2, 2);
   reb::NativeGuestPut(invocation.inline_payload, 2, 128, 2);
   reb::NativeGuestPut(invocation.inline_payload, 4, 1, 4);
   reb::NativeGuestPut(invocation.inline_payload, 8, 20, 8);

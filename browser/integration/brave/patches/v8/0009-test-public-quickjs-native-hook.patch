@@ -1,5 +1,5 @@
 diff --git a/test/cctest/wasm/test-run-wasm.cc b/test/cctest/wasm/test-run-wasm.cc
-index 7156fa9..57279d0 100644
+index b2803eb1ce077aa742d33b2466c6389f05eeb2d1..b5d131570757078e3cc7aab0c35593b6b8a5dd3d 100644
 --- a/test/cctest/wasm/test-run-wasm.cc
 +++ b/test/cctest/wasm/test-run-wasm.cc
 @@ -3,6 +3,7 @@
@@ -10,7 +10,7 @@ index 7156fa9..57279d0 100644
  #include <stdlib.h>
  #include <string.h>
  
-@@ -13,6 +14,7 @@
+@@ -14,6 +15,7 @@
  #include "src/utils/utils.h"
  #include "src/wasm/code-space-access.h"
  #include "src/wasm/compilation-environment-inl.h"
@@ -18,7 +18,7 @@ index 7156fa9..57279d0 100644
  #include "src/wasm/wasm-opcodes-inl.h"
  #include "src/wasm/wasm-tracing.h"
  #include "test/cctest/cctest.h"
-@@ -4923,6 +4925,277 @@ WASM_EXEC_TEST(I64RemUOnDifferentRegisters) {
+@@ -5484,6 +5486,340 @@ WASM_EXEC_TEST(I64RemUOnDifferentRegisters) {
        });
  }
  
@@ -35,6 +35,17 @@ index 7156fa9..57279d0 100644
 +std::vector<uint8_t> public_quickjs_bytes;
 +std::vector<PublicQuickJSObservation> public_quickjs_latest;
 +std::vector<PublicQuickJSObservation> public_quickjs_hosts;
++// The parent each activation's first configured dispatch names, joined to the
++// parent's latest native observation at that moment.
++struct PublicQuickJSParent {
++  uint64_t invocation;
++  v8::WasmGuestParent state;
++  uint64_t parent;
++  uint32_t parent_pc;
++  uint32_t parent_selector;
++};
++std::vector<PublicQuickJSParent> public_quickjs_parents;
++std::vector<PublicQuickJSParent> public_quickjs_host_parents;
 +size_t public_quickjs_dispatches = 0;
 +
 +std::vector<uint8_t> ReadPublicQuickJSFile(const char* variable) {
@@ -94,11 +105,13 @@ index 7156fa9..57279d0 100644
 +  // Retain only a native observation of this invocation's latest configured
 +  // dispatch. Other handler-internal br_tables are not guest instruction
 +  // boundaries.
++  bool first = true;
 +  for (auto it = public_quickjs_latest.begin();
 +       it != public_quickjs_latest.end(); ++it) {
 +    if (it->instance == view.instance_id &&
 +        it->invocation == view.invocation_id) {
 +      public_quickjs_latest.erase(it);
++      first = false;
 +      break;
 +    }
 +  }
@@ -120,6 +133,23 @@ index 7156fa9..57279d0 100644
 +  uint8_t opcode = 0;
 +  CHECK(view.copy_memory(view.accessor_context, 0, address, 1, &opcode));
 +  CHECK_EQ(view.selector, uint32_t{opcode});
++  if (first) {
++    PublicQuickJSParent parent{view.invocation_id, view.parent,
++                               view.parent_invocation_id, 0, 0};
++    if (view.parent == v8::WasmGuestParent::kResolved) {
++      const PublicQuickJSObservation* outer = nullptr;
++      for (const auto& observation : public_quickjs_latest) {
++        if (observation.invocation == view.parent_invocation_id) {
++          outer = &observation;
++        }
++      }
++      CHECK_NOT_NULL(outer);
++      parent.parent_pc = outer->pc;
++      parent.parent_selector = outer->selector;
++    }
++    CHECK_LT(public_quickjs_parents.size(), size_t{4096});
++    public_quickjs_parents.push_back(parent);
++  }
 +  CHECK_LT(public_quickjs_latest.size(), size_t{4096});
 +  public_quickjs_latest.push_back({view.instance_id, view.invocation_id,
 +                                   address - base, base, length,
@@ -197,6 +227,12 @@ index 7156fa9..57279d0 100644
 +  }
 +  CHECK_NOT_NULL(match);
 +  public_quickjs_hosts.push_back(*match);
++  const PublicQuickJSParent* parent = nullptr;
++  for (const auto& record : public_quickjs_parents) {
++    if (record.invocation == match->invocation) parent = &record;
++  }
++  CHECK_NOT_NULL(parent);
++  public_quickjs_host_parents.push_back(*parent);
 +}
 +}  // namespace
 +
@@ -235,6 +271,8 @@ index 7156fa9..57279d0 100644
 +  CHECK_EQ(7u, public_quickjs_latest[0].pc);
 +  public_quickjs_latest.clear();
 +  public_quickjs_hosts.clear();
++  public_quickjs_parents.clear();
++  public_quickjs_host_parents.clear();
 +  public_quickjs_dispatches = 0;
 +  auto buffer = v8::ArrayBuffer::New(isolate, public_quickjs_bytes.size());
 +  memcpy(buffer->GetBackingStore()->Data(), public_quickjs_bytes.data(),
@@ -281,15 +319,40 @@ index 7156fa9..57279d0 100644
 +    CHECK_EQ(public_quickjs_hosts[i % 2].selector, observation.selector);
 +    CHECK_LT(observation.pc, observation.length);
 +  }
++  // Each visit() call reenters the same dispatcher as a guest call. Its first
++  // configured dispatch names the eval activation and that activation's call
++  // dispatch, resolved on the native stack: two call sites, one call opcode.
++  const auto first_visit = public_quickjs_host_parents[0];
++  const auto second_visit = public_quickjs_host_parents[4];
++  for (size_t i = 0; i < public_quickjs_host_parents.size(); ++i) {
++    const auto& record = public_quickjs_host_parents[i];
++    CHECK_EQ(v8::WasmGuestParent::kResolved, record.state);
++    CHECK_EQ((i < 4 ? first_visit : second_visit).invocation, record.invocation);
++  }
++  CHECK_NE(first_visit.invocation, second_visit.invocation);
++  CHECK_EQ(first_visit.parent, second_visit.parent);
++  CHECK_NE(first_visit.parent_pc, second_visit.parent_pc);
++  CHECK_EQ(first_visit.parent_selector, second_visit.parent_selector);
++  size_t exact_parents = 0;
++  for (const auto& record : public_quickjs_parents) {
++    CHECK_NE(v8::WasmGuestParent::kUnresolved, record.state);
++    if (record.invocation == first_visit.parent) {
++      CHECK_EQ(v8::WasmGuestParent::kNone, record.state);
++    }
++    if (record.state == v8::WasmGuestParent::kResolved) ++exact_parents;
++  }
 +  v8::WasmGuestContext absent{};
 +  CHECK(!isolate->GetCurrentWasmGuestContext(414, &absent));
 +  isolate->SetWasmGuestDispatchCallback(nullptr, nullptr);
 +  printf(
 +      "{\"target\":\"public-quickjs-0.32.0\",\"native_hook_validated\":true,"
-+      "\"host_calls\":8,\"dispatches\":%zu,\"brave_validated\":false}\n",
-+      public_quickjs_dispatches);
++      "\"host_calls\":8,\"dispatches\":%zu,\"exact_parent_activations\":%zu,"
++      "\"brave_validated\":false}\n",
++      public_quickjs_dispatches, exact_parents);
 +  public_quickjs_latest.clear();
 +  public_quickjs_hosts.clear();
++  public_quickjs_parents.clear();
++  public_quickjs_host_parents.clear();
 +  public_quickjs_bytes.clear();
 +}
 +

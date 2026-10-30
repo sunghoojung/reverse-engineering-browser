@@ -44,7 +44,7 @@ void NativeGuestDependencies(reb::ArtifactReceiver& receiver) {
   reb::NativeGuestPut(d.inline_payload, 32, 30, 8);
   reb::NativeGuestPut(d.inline_payload, 72, code.size(), 4);
   reb::NativeGuestPut(d.inline_payload, 92, 7, 4);
-  reb::NativeGuestPut(i.inline_payload, 0, 1, 2);
+  reb::NativeGuestPut(i.inline_payload, 0, 2, 2);
   reb::NativeGuestPut(i.inline_payload, 2, 128, 2);
   reb::NativeGuestPut(i.inline_payload, 8, 20, 8);
   reb::NativeGuestPut(i.inline_payload, 16, 30, 8);
@@ -206,6 +206,48 @@ void NativeGuestDependencies(reb::ArtifactReceiver& receiver) {
   Check(transfers.empty() && gap_for(130, "native_guest_module_unavailable") &&
             verdicts.size() == reb::kNativeGuestModuleAttemptLimit + 1u,
         "Module attempts are bounded");
+
+  // An invocation names its exact parent dispatch; a malformed parent is
+  // refused explicitly and never published.
+  configure();
+  capture.module_bytes = module;
+  i.header.sequence_number = 500;
+  d.header.sequence_number = 501;
+  d.header.parent_event_id = 500;
+  reb::NativeGuestPut(i.inline_payload, 64, 29, 8);
+  reb::NativeGuestPut(i.inline_payload, 72, 499, 8);
+  sink.CaptureNativeGuest(capture, 5, [] { return true; });
+  receive_all();
+  const auto parented = typed();
+  Check(std::any_of(parented.begin(), parented.end(),
+                    [](const auto& e) {
+                      return e.header.sequence_number == 500 &&
+                             reb::IsValidWasmGuestInvocation(std::bit_cast<reb::EventRecord>(e)) &&
+                             e.inline_payload[64] == std::byte{29} &&
+                             e.inline_payload[72] == std::byte{0xf3} &&
+                             e.inline_payload[73] == std::byte{1};
+                    }),
+        "Exact parent dispatch is published unchanged and passes the core validator");
+  for (const auto& [sequence, parent, dispatch, reserved] :
+       {std::tuple{510, 29, 510, 0}, std::tuple{512, 0, 511, 0}, std::tuple{514, 30, 0, 0},
+        std::tuple{516, 29, 499, 1}}) {
+    configure();
+    i.header.sequence_number = static_cast<std::uint64_t>(sequence);
+    d.header.sequence_number = static_cast<std::uint64_t>(sequence + 1);
+    d.header.parent_event_id = static_cast<std::uint64_t>(sequence);
+    reb::NativeGuestPut(i.inline_payload, 64, static_cast<std::uint64_t>(parent), 8);
+    reb::NativeGuestPut(i.inline_payload, 72, static_cast<std::uint64_t>(dispatch), 8);
+    i.inline_payload[80] = static_cast<std::byte>(reserved);
+    sink.CaptureNativeGuest(capture, 6, [] { return true; });
+    Check(transfers.empty() &&
+              gap_for(static_cast<std::uint64_t>(sequence + 1), "native_guest_dependency_rejected"),
+          "Self, orphan, later or reserved parent fields are refused");
+  }
+  i.header.sequence_number = 100;
+  d.header.parent_event_id = 100;
+  reb::NativeGuestPut(i.inline_payload, 64, 0, 8);
+  reb::NativeGuestPut(i.inline_payload, 72, 0, 8);
+  i.inline_payload[80] = std::byte{0};
 
   // Hosts whose parent never existed are kept, unparented, with one marker.
   configure();

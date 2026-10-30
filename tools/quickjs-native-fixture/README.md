@@ -66,6 +66,9 @@ import stack is live; it joins instance/invocation to the latest native dispatch
 checks helper import0 at0x6816 and all eight ordinary callback values. The live
 dispatcher frame's CALL offset is intentionally distinct from its earlier
 dispatch offset. Outside the import stack, context lookup must fail.
+Each `visit()` call reenters dispatcher 414 as a guest call; its first
+configured dispatch must name the eval activation and that activation's call
+dispatch, resolved on the native stack (two call sites, one call opcode).
 
 ```sh
 npm ci --prefix tools/quickjs-native-fixture --ignore-scripts --no-audit --no-fund

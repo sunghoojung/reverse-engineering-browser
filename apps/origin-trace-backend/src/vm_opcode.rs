@@ -22,7 +22,7 @@ mod observed;
 #[path = "vm_opcode_wasm.rs"]
 mod wasm;
 
-const PRODUCER_VERSION: &str = "2.14.0";
+const PRODUCER_VERSION: &str = "2.15.0";
 const MAX_SAMPLES: usize = 4096;
 const MAX_HANDLERS: usize = 1024;
 const MAX_SNAPSHOTS: usize = 16;
@@ -1003,6 +1003,11 @@ fn event_reference(event: &Value) -> Value {
 }
 
 fn event_payload(event: &Value, kind: &str) -> Option<Vec<u8>> {
+    event_payload_versions(event, kind, &[1])
+}
+
+/// The 128-byte payload of a VM record whose payload version is listed.
+fn event_payload_versions(event: &Value, kind: &str, versions: &[u8]) -> Option<Vec<u8>> {
     if event["category"] != "vm"
         || event["type"] != kind
         || !matches!(event["protocol_version"].as_u64(), Some(2 | 3))
@@ -1026,7 +1031,7 @@ fn event_payload(event: &Value, kind: &str) -> Option<Vec<u8>> {
         return None;
     }
     let payload = hex::decode(text).ok()?;
-    (payload[0..4] == [1, 0, 128, 0]).then_some(payload)
+    (versions.contains(&payload[0]) && payload[1..4] == [0, 128, 0]).then_some(payload)
 }
 
 pub(crate) struct DispatchBudgetLoss {

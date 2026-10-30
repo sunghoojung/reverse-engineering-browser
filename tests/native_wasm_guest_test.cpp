@@ -6,7 +6,7 @@
 #include "reb/wasm_guest.hpp"
 
 // The renderer encoder (overlay) and the core decoder each own a copy of the
-// version-1 layout. Set one field at a time to a distinct value and require
+// wire layout. Set one field at a time to a distinct value and require
 // identical bytes and identical cross-decoding, so the copies cannot drift.
 template <class Overlay, class Core, class Field>
 void CheckGuestWireField(Field Overlay::*overlay_field, Field Core::*core_field, Field value) {
@@ -66,6 +66,22 @@ void CheckGuestWireParity() {
   CheckGuestWireField(&OI::adapter_artifact_id, &CI::adapter_artifact_id,
                       std::uint64_t{0x3132333435363738});
   CheckGuestWireField(&OI::recipe_sha256, &CI::recipe_sha256, digest);
+  CheckGuestWireField(&OI::parent_invocation_id, &CI::parent_invocation_id,
+                      std::uint64_t{0x4142434445464748});
+  CheckGuestWireField(&OI::parent_dispatch_sequence_number, &CI::parent_dispatch_sequence_number,
+                      std::uint64_t{0x5152535455565758});
+  // A version 1 record reserved bytes 72..128; it still decodes, with no
+  // parent dispatch, and the new field occupies exactly bytes 72..80.
+  OI legacy;
+  legacy.protocol_version = 1;
+  legacy.parent_invocation_id = 9;
+  auto bytes = reb::EncodeNativeWasmGuestInvocationPayload(legacy);
+  CI decoded;
+  assert(reb::DecodeWasmGuestInvocationPayload(bytes, decoded) && decoded.protocol_version == 1 &&
+         decoded.parent_invocation_id == 9 && decoded.parent_dispatch_sequence_number == 0);
+  legacy.parent_dispatch_sequence_number = 0x0102030405060708;
+  bytes = reb::EncodeNativeWasmGuestInvocationPayload(legacy);
+  assert(bytes[72] == std::byte{8} && bytes[79] == std::byte{1} && bytes[80] == std::byte{0});
   std::puts("PASS overlay renderer encoder and core decoder agree byte-for-byte on every field");
 }
 struct Runtime {

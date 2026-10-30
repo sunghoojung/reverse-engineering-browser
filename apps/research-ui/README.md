@@ -879,7 +879,8 @@ disagreement keeps both statements under an amber rule. A `call_indirect` claim
 names the slot and callee function and compares them with the element
 segments' entry for that slot; a table filled at run time is withheld. WebAssembly workspaces
 also list nested guests: an inner interpreter, its buffer and opcodes, and the
-outer site and handler that drove it. The viewer recomputes every claim and
+outer site and handler that drove it, named exactly by the capture or inferred
+from sequence order. The viewer recomputes every claim and
 link from the retained rows and rejects a document that does not match.
 Parse failures and binding refusals remain counted, visible text in the
 Dispatch sites panel. Worker execution failures return a retryable API error and

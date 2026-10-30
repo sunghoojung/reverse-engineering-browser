@@ -2493,6 +2493,30 @@ void ResetGuestThread(std::uint64_t generation) noexcept {
     document = {};
   guest_thread.generation = generation;
 }
+struct GuestParentLink final {
+  std::uint64_t invocation = 0, dispatch = 0;
+  bool unresolved = false;
+};
+// The exact outer dispatch is the parent activation's retained dispatch that
+// is still current: the same value host records use as their parent. Every
+// later boundary of the parent, and every boundary without identity, revokes
+// it, so a missing value is reported rather than replaced by an older one.
+GuestParentLink ResolveGuestParent(const NativeWasmGuestStateView& view,
+                                   std::uint64_t frame,
+                                   std::uint64_t document_high,
+                                   std::uint64_t document_low) noexcept {
+  if (view.parent == NativeWasmGuestParent::kNone)
+    return {};
+  if (view.parent != NativeWasmGuestParent::kResolved || !view.parent_invocation_id ||
+      view.parent_invocation_id == view.invocation_id)
+    return {0, 0, true};
+  for (const auto& state : guest_thread.invocations)
+    if (state.invocation == view.parent_invocation_id && state.frame == frame &&
+        state.document_high == document_high && state.document_low == document_low &&
+        state.dispatch_sequence)
+      return {view.parent_invocation_id, state.dispatch_sequence, false};
+  return {view.parent_invocation_id, 0, true};
+}
 
 }  // namespace
 void NativeProbeSink::NoteNativeGuestOmission(std::uint64_t generation,
@@ -2779,6 +2803,11 @@ void NativeProbeSink::RecordNativeWasmGuest(std::uint64_t execution_context_id,
     payload.function_index = view.function_index;
     payload.instance_id = view.instance_id;
     payload.invocation_id = view.invocation_id;
+    const auto parent = ResolveGuestParent(view, frame_id, document_token_high, document_token_low);
+    payload.parent_invocation_id = parent.invocation;
+    payload.parent_dispatch_sequence_number = parent.dispatch;
+    if (parent.unresolved)
+      NoteNativeGuestOmission(generation, frame_id, 10, "native_guest_parent_unresolved");
     for (std::size_t i = 0; i < 32; ++i)
       payload.recipe_sha256[i] = static_cast<std::byte>(adapter->recipe_sha256[i]);
     invocation.inline_payload = EncodeNativeWasmGuestInvocationPayload(payload);

@@ -280,13 +280,14 @@ std::uint64_t GuestField(const NativeProbeEvent& event, std::size_t offset, std:
     value |= std::to_integer<std::uint64_t>(event.inline_payload[offset + i]) << (i * 8U);
   return value;
 }
-bool GuestEnvelope(const NativeProbeEvent& event) {
+// The renderer writes dispatch payload version 1 and invocation version 2.
+bool GuestEnvelope(const NativeProbeEvent& event, std::uint64_t payload_version) {
   const auto& h = event.header;
   return h.protocol_version == kNativeProbeProtocolVersion && h.header_size == sizeof(h) &&
          h.category == NativeProbeCategory::kVm && h.payload_size == 128 && h.flags == 0 &&
          h.reserved1 == 0 && h.session_id && h.process_id && h.thread_id && h.frame_id &&
          h.sequence_number && h.monotonic_time_ns && h.artifact_id == 0 && h.navigation_id == 0 &&
-         GuestField(event, 0, 2) == 1 && GuestField(event, 2, 2) == 128 &&
+         GuestField(event, 0, 2) == payload_version && GuestField(event, 2, 2) == 128 &&
          std::all_of(event.reserved.begin(), event.reserved.end(),
                      [](auto b) { return b == std::byte{0}; });
 }
@@ -363,8 +364,8 @@ void NativeArtifactCaptureSink::CaptureNativeGuest(const NativeGuestCapture& cap
     return;
   }
   ++guest_capture_count_;
-  if (!epoch || !is_current_document || !is_current_document() || !GuestEnvelope(dispatch) ||
-      !GuestEnvelope(invocation) || !GuestSameScope(dispatch, invocation) ||
+  if (!epoch || !is_current_document || !is_current_document() || !GuestEnvelope(dispatch, 1) ||
+      !GuestEnvelope(invocation, 2) || !GuestSameScope(dispatch, invocation) ||
       dispatch.header.type != NativeProbeType::kWasmGuestDispatch ||
       invocation.header.type != NativeProbeType::kWasmGuestInvocation ||
       invocation.header.parent_event_id ||
@@ -384,7 +385,13 @@ void NativeArtifactCaptureSink::CaptureNativeGuest(const NativeGuestCapture& cap
       GuestField(dispatch, 32) != GuestField(invocation, 16) ||
       GuestField(dispatch, 4, 4) != GuestField(invocation, 4, 4) || GuestField(invocation, 24) ||
       GuestField(dispatch, 20, 4) >= kNativeGuestSampleLimit ||
-      !std::all_of(invocation.inline_payload.begin() + 64, invocation.inline_payload.end(),
+      // A parent is another activation; its exact dispatch names it and
+      // precedes this marker. The browser does not retarget a lost parent.
+      GuestField(invocation, 64) == GuestField(invocation, 16) ||
+      (GuestField(invocation, 72) &&
+       (!GuestField(invocation, 64) ||
+        GuestField(invocation, 72) >= invocation.header.sequence_number)) ||
+      !std::all_of(invocation.inline_payload.begin() + 80, invocation.inline_payload.end(),
                    [](auto b) { return b == std::byte{0}; })) {
     refuse("native_guest_dependency_rejected");
     return;

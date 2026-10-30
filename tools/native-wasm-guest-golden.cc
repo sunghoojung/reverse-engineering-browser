@@ -116,6 +116,24 @@ int main(int argc, char** argv) {
     sample.pc_adjustment = std::numeric_limits<std::int64_t>::min();
   } else if (mode == "wide-identities") {
     invocation.instance_id = sample.instance_id = std::numeric_limits<std::uint64_t>::max();
+  } else if (mode == "legacy-invocation") {
+    invocation.protocol_version = 1;
+  } else if (mode == "parent-dispatch") {
+    invocation.parent_invocation_id = 10;
+    invocation.parent_dispatch_sequence_number = 103;
+  } else if (mode == "parent-dispatch-order") {
+    invocation.parent_invocation_id = 10;
+    invocation.parent_dispatch_sequence_number = 104;
+    valid_invocation = false;
+  } else if (mode == "parent-dispatch-orphan") {
+    invocation.parent_dispatch_sequence_number = 103;
+    valid_invocation = false;
+  } else if (mode == "legacy-reserved") {
+    // Version 1 reserved the parent dispatch bytes.
+    invocation.protocol_version = 1;
+    invocation.parent_invocation_id = 10;
+    invocation.parent_dispatch_sequence_number = 103;
+    valid_invocation = false;
   } else if (mode == "parent" || mode == "truncated" || mode == "big-endian") {
     valid_sample = false;
   } else

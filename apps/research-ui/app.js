@@ -378,7 +378,8 @@ const capturedExportPanel = installCapturedExportDialog({
       }
 
       function signalTypeLabel(type) {
-        return type.split('_').map(part => part[0].toUpperCase() + part.slice(1)).join(' ');
+        const label = type.split('_').map(part => part === 'api' ? 'API' : part).join(' ');
+        return label.charAt(0).toUpperCase() + label.slice(1);
       }
 
       function formatSignalOffset(nanoseconds) {
@@ -656,7 +657,6 @@ const capturedExportPanel = installCapturedExportDialog({
         header.className = 'signal-render-card-head';
         const title = document.createElement('div');
         title.append(
-          textElement('span', 'signal-render-icon', '▱'),
           textElement('h3', '', capture.id),
           textElement('p', '', `${capture.context}${capture.width ? ` · ${capture.width} × ${capture.height}` : ''} · ${capture.readback} · ${capture.calls.length} observed drawing ${capture.calls.length === 1 ? 'call' : 'calls'}`)
         );
@@ -684,7 +684,7 @@ const capturedExportPanel = installCapturedExportDialog({
         const callsHead = document.createElement('div');
         callsHead.className = 'signal-draw-calls-head';
         callsHead.append(
-          textElement('h4', '', 'Drawing functions'),
+          textElement('h4', '', 'Drawing calls'),
           textElement('span', '', capture.calls.length
             ? `${capture.calls.length} ${capture.callsTruncated ? 'newest ' : ''}observed in renderer order`
             : 'None observed')
@@ -850,7 +850,7 @@ const capturedExportPanel = installCapturedExportDialog({
       function renderSignalRequestProfile() {
         const selectedRequest = state.requests.find(request => request.id === state.selectedRequestId);
         if (state.signalProfileStatus === 'loading') {
-          elements.signalRequestProfile.replaceChildren(textElement('div', 'signal-render-empty', 'Building the selected request profile...'));
+          elements.signalRequestProfile.replaceChildren(textElement('div', 'signal-render-empty', 'Building the selected request profile…'));
           return;
         }
         if (!state.signalProfile || !selectedRequest) {

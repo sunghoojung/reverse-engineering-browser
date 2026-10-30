@@ -394,7 +394,7 @@
 
           <section id="screen-api-collection" class="screen" aria-label="API Collection" hidden>
             <header class="screen-head">
-              <div><h1>Collection</h1><div class="screen-subtitle">Author and organize saved request definitions locally. Browser replay has been removed.</div></div>
+              <div><h1>Collection</h1><div class="screen-subtitle">Author and organize saved request definitions locally. Nothing is sent from this screen.</div></div>
               <div class="screen-head-actions"><span class="memory-readonly">Local only</span></div>
             </header>
             <div class="collection-statusbar"><div id="collection-notice" class="collection-notice" data-kind="loading" role="status" aria-live="polite">Loading your local collection…</div><button id="collection-retry" class="secondary-button" type="button" hidden>Retry load</button></div>
@@ -430,7 +430,7 @@
                 </div>
                 <form id="collection-request-form" class="collection-form" hidden>
                   <div class="collection-command-row"><label>Method<input id="collection-request-method" type="text" maxlength="256" value="GET" autocomplete="off" /></label><label>Request URL<input id="collection-request-url" type="text" maxlength="8192" placeholder="https://{{host}}/path/{{id}}" autocomplete="off" /></label></div>
-                  <div class="collection-author-actions"><button id="collection-save-request" class="secondary-button" type="submit">Save request</button><button id="collection-discard-request" class="secondary-button" type="button" disabled>Discard edits</button></div>
+                  <div class="collection-author-actions"><button id="collection-save-request" class="trace-button collection-primary" type="submit">Save request</button><button id="collection-discard-request" class="secondary-button" type="button" disabled>Discard edits</button></div>
 
                   <details class="collection-properties" open><summary>Request settings</summary>
                     <div class="collection-form-row"><label>Name<input id="collection-request-name" type="text" maxlength="128" autocomplete="off" /></label><label>Folder<select id="collection-request-folder"></select></label></div>
@@ -444,7 +444,7 @@
                   </div>
                   <section id="collection-panel-headers" class="collection-content-panel" role="tabpanel" aria-labelledby="collection-tab-headers"><label>Headers (JSON)<textarea id="collection-request-headers" maxlength="20000" spellcheck="false" placeholder='{"accept":"application/json"}'></textarea></label><p class="collection-help">Credential, cookie and transport-owned headers are rejected.</p></section>
                   <section id="collection-panel-body" class="collection-content-panel" role="tabpanel" aria-labelledby="collection-tab-body" hidden><label>Request body<textarea id="collection-request-body" maxlength="65536" spellcheck="false" placeholder='{"id":"{{id}}"}'></textarea></label><p class="collection-help">Up to 64 KiB. GET and HEAD requests cannot include a body.</p></section>
-                  <section id="collection-panel-variables" class="collection-content-panel" role="tabpanel" aria-labelledby="collection-tab-variables" hidden><label>Request variables (JSON)<textarea id="collection-request-variables" maxlength="40000" spellcheck="false" placeholder='{"id":"42"}'></textarea></label><p class="collection-help">Text values replace {{name}} placeholders when you explicitly run a saved request.</p></section>
+                  <section id="collection-panel-variables" class="collection-content-panel" role="tabpanel" aria-labelledby="collection-tab-variables" hidden><label>Request variables (JSON)<textarea id="collection-request-variables" maxlength="40000" spellcheck="false" placeholder='{"id":"42"}'></textarea></label><p class="collection-help">Text values replace matching {{name}} placeholders in the method, URL, headers and body.</p></section>
                   <div id="collection-variable-status" class="collection-variable-status" role="status" aria-live="polite"><span class="collection-variable-chip">No variables used</span></div>
                 </form>
               </section>
@@ -489,7 +489,7 @@
               </aside>
 
               <section class="analyst-pane" aria-label="Analyst file editor">
-                <div class="analyst-pane-head"><div><h2>Editor</h2><p>Select saved work to edit it.</p></div><span id="analyst-editor-badge" class="experiment-card-badge" data-kind="offline">No file</span></div>
+                <div class="analyst-pane-head"><div><h2>Editor</h2><p>Edit a saved script or note.</p></div><span id="analyst-editor-badge" class="experiment-card-badge" data-kind="offline">No file</span></div>
                 <div id="analyst-editor-empty" class="analyst-empty analyst-editor-empty">
                   <h2>Start with saved work</h2>
                   <p>Create a script to inspect captured evidence, or a note to record a finding.</p>

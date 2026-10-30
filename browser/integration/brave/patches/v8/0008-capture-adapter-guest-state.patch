@@ -873,7 +873,7 @@ index 7106d5aec75cbb46f3158ce7e7394332f14c3537..2a24e2639dc805071b51a2315e3d13fa
  struct GlobalTracingInfo {
    uint32_t global_index;
 diff --git a/test/cctest/wasm/test-run-wasm.cc b/test/cctest/wasm/test-run-wasm.cc
-index 7f4c54127ec468e06e60235ee347fca620733e65..bc4739aadf5ff5ebf4e68864f29b66ed5d2800fc 100644
+index 7f4c54127ec468e06e60235ee347fca620733e65..75ea7f04087e02fc40b50ec9aa095c3b0b82fe55 100644
 --- a/test/cctest/wasm/test-run-wasm.cc
 +++ b/test/cctest/wasm/test-run-wasm.cc
 @@ -6,13 +6,18 @@
@@ -895,7 +895,7 @@ index 7f4c54127ec468e06e60235ee347fca620733e65..bc4739aadf5ff5ebf4e68864f29b66ed
  #include "test/cctest/wasm/wasm-runner.h"
  #include "test/common/value-helper.h"
  #include "test/common/wasm/test-signatures.h"
-@@ -1355,6 +1360,948 @@ TEST(RebNativeBrTableDisabledCompilation) {
+@@ -1355,6 +1360,954 @@ TEST(RebNativeBrTableDisabledCompilation) {
    CHECK_EQ(0, reb_dispatch_observation.count);
  }
  
@@ -1754,6 +1754,12 @@ index 7f4c54127ec468e06e60235ee347fca620733e65..bc4739aadf5ff5ebf4e68864f29b66ed
 +           WASM_CALL_FUNCTION0(0), WASM_I32V_1(0)});
 +  runners.reentry = &a;
 +  runners.deep_module = &b;
++  // WasmRunner::Call caches each export wrapper as a handle in the scope that
++  // is current at its first call. A first call inside a host callback would
++  // leave a handle that dangles once the callback returns, so make both first
++  // calls here. No guest callback is installed yet, so they leave no state.
++  CHECK_EQ(9, a.Call(1));
++  CHECK_EQ(0, b.Call(0));
 +  isolate->SetWasmGuestDispatchCallback(ObserveNestedGuest, EnableNestedGuests,
 +                                        nullptr, AdmitDeepDispatcher);
 +  // Untracked frames of another function are skipped within the bound.

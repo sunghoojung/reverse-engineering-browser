@@ -1139,6 +1139,8 @@ const capturedExportPanel = installCapturedExportDialog({
           ));
         } else if (state.sessionMode === 'demo') {
           setSignalNotice('demo', 'Demo mode: both Canvas images are reconstructed locally from the visible calls. They are not native-captured pixels.');
+        } else if (state.sessionMode === 'idle') {
+          setSignalNotice('idle', 'Showing stored native fingerprint evidence. No capture session is running.');
         } else {
           setSignalNotice('live', 'Native fingerprint surface activity is streaming from the local browser capture.');
         }

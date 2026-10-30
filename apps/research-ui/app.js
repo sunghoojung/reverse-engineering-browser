@@ -5920,7 +5920,7 @@ const capturedExportPanel = installCapturedExportDialog({
           name.title = node.source?.url || node.label;
           row.setAttribute('aria-label', label);
           icon.className = node.source ? `source-file-icon ${node.source.kind}` : 'tree-glyph';
-          icon.textContent = node.source ? sourceIcon(node.source) : scope.collapsed.has(node.key) ? '›' : '⌄';
+          icon.textContent = node.source ? sourceIcon(node.source) : scope.collapsed.has(node.key) ? '▸' : '▾';
           icon.title = node.source ? sourceKindLabel(node.source.kind)?.[1] ?? node.source.kind : '';
           detail.textContent = node.children ? String(node.count) : sourceDisplayMeta(node.source);
           if (node.source) {

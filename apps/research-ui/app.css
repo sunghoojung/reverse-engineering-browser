@@ -3806,6 +3806,91 @@ body.resizing-panes-y, body.resizing-panes-y * { cursor: row-resize !important; 
 /* The details sidebar is one scrolling stack of panes. Its earlier three-row
    grid kept a 35px slot for a removed tab bar and clipped every pane to it. */
 #screen-sources .sources-debugger { grid-template-rows: minmax(0, 1fr); }
+#screen-sources .sources-navigator { grid-template-rows: 36px auto minmax(0, 1fr); }
+/* The editor owns the quick-open overlay, so it opens over the editor rather
+   than over the investigation bar above the screen. */
+#screen-sources .sources-editor { position: relative; grid-template-rows: 36px auto minmax(0, 1fr) 28px; }
+
+/* Chrome stays neutral. The accent marks the open file and the selection; file
+   kinds are read from their two-letter code, not from a color per kind. */
+#screen-sources .source-side-tab { padding: 0 12px; font-size: 12px; }
+#screen-sources .source-side-tab[aria-selected="true"]::after { left: 12px; right: 12px; background: var(--faint); }
+#screen-sources .source-file-icon { color: var(--faint); font: 500 10px var(--mono); text-align: left; }
+#screen-sources :is(.source-tree-row, .source-editor-tab)[aria-selected="true"] .source-file-icon { color: var(--muted); }
+#screen-sources .source-tree .tree-glyph { color: var(--faint); font: 11px var(--mono); text-align: left; }
+#screen-sources .source-tree-row { grid-template-columns: 16px minmax(0, 1fr) auto; gap: 8px; }
+#screen-sources .source-tree-row[data-artifact-id] { grid-template-columns: 16px minmax(0, 1fr); }
+#screen-sources .source-tree-empty { padding: 24px 12px; }
+#screen-sources .source-health { padding: 8px 12px; font-size: 11px; line-height: 16px; }
+
+#screen-sources .source-editor-tab { padding: 0 8px 0 12px; }
+#screen-sources .source-editor-tab:hover { color: var(--text); }
+#screen-sources .source-tab-close { display: grid; flex: 0 0 auto; width: 16px; height: 16px; place-items: center; border-radius: 4px; }
+#screen-sources .source-tab-close:hover { background: var(--panel-3); color: var(--text); }
+#screen-sources .source-tab-placeholder { padding: 0 12px; }
+
+/* Commands are set in the interface face; mono is kept for evidence values:
+   the URL, Find text, line and column numbers and the displayed window. */
+/* The URL yields its width (with an ellipsis) before the commands wrap. */
+#screen-sources .source-location { flex: 1 1 160px; padding-right: 8px; }
+#screen-sources .source-tool { min-width: 24px; padding: 0 8px; border-radius: 4px; font: 400 11px var(--sans); }
+#screen-sources #source-pretty { font: 400 11px var(--mono); }
+#screen-sources .source-tool[aria-pressed="true"] { border-color: var(--line); background: var(--accent-soft); color: var(--text); }
+#screen-sources .source-search { height: 24px; border-radius: 4px; }
+#screen-sources .source-window { gap: 4px 8px; color: var(--muted); font: 400 11px var(--sans); }
+#screen-sources #source-window-label { font: 11px var(--mono); }
+#screen-sources .source-window input { width: 72px; height: 24px; padding: 0 4px 0 8px; font: 11px var(--mono); }
+#screen-sources .source-search-status { font-size: 11px; line-height: 16px; }
+#screen-sources .source-empty { padding: 24px; }
+
+/* Matching lines get a faint band; the current match keeps the solid mark. */
+#screen-sources .source-line.search-match { background: color-mix(in srgb, var(--amber) 6%, transparent); }
+
+/* The view kind says whether the editor shows original evidence or a derived
+   display, so it carries the provenance dot. Position, size and hash stay meta. */
+#screen-sources .source-editor-status { gap: 16px; padding: 0 12px; }
+#screen-sources #source-view-kind { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); }
+#screen-sources #source-view-kind::before { content: ""; width: 6px; height: 6px; flex: 0 0 auto; border-radius: 50%; background: currentColor; }
+
+#screen-sources .quick-open { top: 40px; overflow: hidden; border-radius: 8px; box-shadow: 0 8px 24px var(--shadow); }
+#screen-sources .quick-open input { height: 36px; padding: 0 12px; }
+#screen-sources .quick-open-results { padding: 4px; }
+#screen-sources .quick-open-row { min-height: 32px; grid-template-columns: minmax(0, max-content) minmax(0, 1fr); gap: 12px; padding: 0 8px; border-radius: 4px; }
+#screen-sources .quick-open-row > * { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#screen-sources .quick-open-row small { text-align: right; }
+
+/* Details panes: titles and bodies share one left edge on the 4px grid, and a
+   nested disclosure shows its own open state, not its parent pane's. */
+#screen-sources .debug-pane > summary { min-height: 32px; padding: 0 12px 0 8px; font-weight: 500; }
+#screen-sources .debug-pane summary::before { content: "▸"; flex: 0 0 auto; width: 16px; color: var(--faint); font: 400 11px var(--mono); }
+#screen-sources .debug-pane[open] > summary::before,
+#screen-sources .debug-pane-body details[open] > summary::before { content: "▾"; }
+#screen-sources .debug-pane-body { padding: 4px 12px 12px 24px; }
+#screen-sources .debug-pane-body details > summary { min-height: 28px; padding: 0; font-size: 11px; font-weight: 500; }
+#screen-sources .debug-select { height: 24px; padding: 0 28px 0 8px; border-radius: 4px; font: 400 12px var(--sans); }
+#screen-sources .artifact-facts { gap: 4px 12px; }
+
+#screen-sources .source-facts-actions { gap: 8px; }
+#screen-sources .source-facts-search input { height: 28px; padding: 0 8px; }
+#screen-sources :is(.source-fact, .source-facts-binding) > strong { color: var(--text); font: 500 11px var(--mono); }
+#screen-sources .source-fact { gap: 8px; padding: 12px 0; border-top-color: var(--line-soft); }
+#screen-sources :is(.source-fact, .source-facts-binding) > button { justify-self: start; max-width: 100%; }
+#screen-sources .source-fact > details > summary { color: var(--muted); font-weight: 400; }
+
+#screen-sources .deobfuscation-assumption { padding: 4px 12px 8px 24px; color: var(--muted); font-size: 11px; line-height: 16px; }
+#screen-sources .deobfuscation-title { padding: 12px 0 8px; font-weight: 500; }
+#screen-sources #deobfuscation-report .deobfuscation-row { grid-template-columns: 104px minmax(0, 1fr); gap: 8px; margin-bottom: 0; }
+#screen-sources #deobfuscation-report .deobfuscation-row strong { color: var(--muted); font: 400 11px var(--sans); }
+#screen-sources .deobfuscation-notice { padding: 8px 12px; }
+#screen-sources .deobfuscation-controls { gap: 8px; }
+#screen-sources .deobfuscation-change-position { color: var(--muted); font-size: 11px; }
+#screen-sources .deobfuscation-snippet { margin: 12px 0; }
+#screen-sources .deobfuscation-disclosure + .deobfuscation-disclosure { margin-top: 0; }
+#screen-sources .deobfuscation-disclosure > summary { padding: 0; color: var(--text); }
+
+@media (max-width: 650px) {
+  #screen-sources .source-tree-row { gap: 4px; padding-left: calc(4px + var(--source-depth, 0) * 8px); }
+}
 /* End sources */
 
 /* Fingerprinting */

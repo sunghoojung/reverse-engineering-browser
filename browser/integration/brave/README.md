@@ -378,6 +378,13 @@ Rebuilt browsers can record physical `br_table` operands with
 not arbitrary interpreter guest-PC recovery. See
 [wire contract and verification limits](../../../protocol/native-wasm-dispatch-v1.md).
 
+`call_indirect` and `return_call_indirect` dispatch has a separate opt-in:
+`REB_NATIVE_WASM_CALL_INDIRECT=1`, or `--js-flags=--reb-wasm-call-indirect-dispatch`.
+Each record names the table slot and, when the entry is a function of the same
+module, the callee it was about to run; arguments and memory are never read.
+It has its own 16-record budget and shares the module artifact and transport.
+See [call_indirect observations](../../../protocol/native-wasm-dispatch-v1.md#call_indirect-observations).
+
 Guest-state capture additionally needs `REB_NATIVE_WASM_GUEST_ADAPTER`, which
 makes the launcher add `--reb-wasm-guest-capture`. That flag compiles a call on
 every Wasm function entry (frame identity) and numeric-local descriptors for

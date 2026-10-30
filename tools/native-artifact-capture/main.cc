@@ -490,6 +490,138 @@ void NativeWasmDispatch(reb::ArtifactReceiver& receiver) {
                "retirement and bounds\n";
 }
 
+void NativeWasmIndirect(reb::ArtifactReceiver& receiver) {
+  record_corpus = false;
+  Configure();
+  auto& sink = NativeArtifactCaptureSink::Get();
+  auto& transfers = NativeArtifactSocketClient::Get().transfers;
+  // br_table with one arm at 8, then call_indirect type 0 table 0 at 12.
+  const std::vector<std::uint8_t> module{0, 97, 115, 109, 1, 0, 0, 0, 0x0e, 1, 0, 0, 0x11, 0, 0};
+  reb::NativeWasmIndirectObservation observation;
+  observation.header.session_id = kSession;
+  observation.header.frame_id = kFrame;
+  observation.header.sequence_number = 3000;
+  observation.header.monotonic_time_ns = 99;
+  observation.header.process_id = 123;
+  observation.header.thread_id = 7;
+  observation.execution_context_id = 81;
+  observation.document_token_high = 72;
+  observation.document_token_low = 73;
+  observation.function_index = 1;
+  observation.module_byte_offset = 12;
+  observation.slot = 3;
+  observation.callee_function_index = 2;
+  observation.resolution = reb::NativeWasmIndirectResolution::kResolved;
+  observation.source_url = "fixture://native-wasm-indirect";
+  reb::NativeWasmDispatchObservation physical;
+  physical.header = observation.header;
+  physical.header.sequence_number = 3001;
+  physical.execution_context_id = 81;
+  physical.document_token_high = 72;
+  physical.document_token_low = 73;
+  physical.module_byte_offset = 8;
+  physical.table_count = 1;
+  physical.source_url = observation.source_url;
+  bool current = true;
+  const auto count = [](NativeProbeType type) {
+    return std::count_if(events.begin(), events.end(),
+                         [type](const auto& e) { return e.header.type == type; });
+  };
+  const auto indirect = [&] { return count(NativeProbeType::kWasmIndirectObservation); };
+  const auto before = indirect();
+  const auto before_physical = count(NativeProbeType::kWasmDispatchObservation);
+  sink.CaptureWasmIndirect(observation, mojo_base::BigBuffer(module), [&] { return current; });
+  Check(transfers.size() == 1 && indirect() == before,
+        "No call_indirect record before module acknowledgement");
+  sink.CaptureWasmDispatch(physical, mojo_base::BigBuffer(module), [&] { return current; });
+  Check(transfers.size() == 1, "br_table and call_indirect share one module artifact");
+  const auto id = transfers.begin()->first;
+  Receive(receiver, id);
+  Check(indirect() == before + 1 &&
+            count(NativeProbeType::kWasmDispatchObservation) == before_physical + 1,
+        "Accepted module publishes both physical streams");
+  const auto found = std::find_if(events.rbegin(), events.rend(), [](const auto& e) {
+    return e.header.type == NativeProbeType::kWasmIndirectObservation;
+  });
+  Check(found->header.artifact_id == id && found->header.sequence_number == 3000 &&
+            found->header.category == reb::NativeProbeCategory::kVm &&
+            !found->header.navigation_id && !found->header.parent_event_id,
+        "call_indirect provenance preserved without causal claims");
+  reb::WasmIndirectObservationPayload payload;
+  Check(reb::DecodeWasmIndirectObservationPayload(found->inline_payload, payload),
+        "Indirect payload decodes");
+  Check(payload.function_index == 1 && payload.module_byte_offset == 12 &&
+            payload.table_index == 0 && payload.slot == 3 && payload.callee_function_index == 2 &&
+            payload.resolution == 0 && payload.sample_index == 0,
+        "Explicit little endian call_indirect fields retained");
+  Check(reb::IsValidWasmIndirectObservation(std::bit_cast<reb::EventRecord>(*found)),
+        "Broker accepts the produced record");
+  observation.header.sequence_number = 3002;
+  observation.table_index = 1;
+  sink.CaptureWasmIndirect(observation, mojo_base::BigBuffer(module), [] { return true; });
+  Check(transfers.empty() && Payload(events.back()) == "native_wasm_indirect_module_invalid",
+        "Mismatched table immediate is an explicit omission");
+  observation.table_index = 0;
+  observation.document_token_low = 74;
+  observation.header.sequence_number = 3003;
+  sink.CaptureWasmIndirect(observation, mojo_base::BigBuffer(module), [&] { return current; });
+  Check(transfers.size() == 1, "Another document gets its own module artifact");
+  current = false;
+  Receive(receiver, transfers.begin()->first);
+  Check(std::any_of(events.begin(), events.end(),
+                    [](const auto& e) {
+                      return e.header.type == NativeProbeType::kGap &&
+                             e.header.sequence_number == 3003 && e.header.process_id == 123;
+                    }),
+        "A navigated document's observation fills its sequence slot with a gap");
+  current = true;
+  observation.document_token_low = 73;
+  Configure();
+  const auto before_budget = indirect();
+  for (unsigned i = 0; i < 17; ++i) {
+    observation.header.sequence_number = 4000 + i;
+    sink.CaptureWasmIndirect(observation, mojo_base::BigBuffer(module), [] { return true; });
+  }
+  Check(transfers.size() == 1, "Sixteen observations of one module share one artifact");
+  Check(Payload(events.back()) == "native_wasm_indirect_browser_budget_incomplete",
+        "The browser call_indirect budget reports incompleteness");
+  const auto after_budget_gap = events.size();
+  sink.CaptureWasmIndirect(observation, mojo_base::BigBuffer(module), [] { return true; });
+  Check(events.size() == after_budget_gap, "The budget marker is bounded per configuration");
+  physical.header.sequence_number = 4100;
+  sink.CaptureWasmDispatch(physical, mojo_base::BigBuffer(module), [] { return true; });
+  while (!transfers.empty())
+    Receive(receiver, transfers.begin()->first);
+  Check(indirect() == before_budget + 16, "Every admitted observation is published after one ACK");
+  Check(std::any_of(events.begin(), events.end(),
+                    [](const auto& e) {
+                      return e.header.type == NativeProbeType::kWasmDispatchObservation &&
+                             e.header.sequence_number == 4100;
+                    }),
+        "An exhausted call_indirect budget leaves br_table observation open");
+  // A record still waiting for its module ACK becomes a gap before expiry.
+  auto& runner = *base::SequencedTaskRunner::GetCurrentDefault();
+  runner.tasks.clear();
+  Configure();
+  observation.header.sequence_number = 4200;
+  sink.CaptureWasmIndirect(observation, mojo_base::BigBuffer(module), [] { return true; });
+  Check(transfers.size() == 1 && runner.tasks.size() == 1, "Pending record and flush scheduled");
+  runner.tasks.back().second();
+  Check(std::any_of(events.begin(), events.end(),
+                    [](const auto& e) {
+                      return e.header.type == NativeProbeType::kGap &&
+                             e.header.sequence_number == 4200 &&
+                             Payload(e) == "native_wasm_dispatch_pending_at_expiry";
+                    }),
+        "A held call_indirect record is an explicit gap at expiry");
+  transfers.clear();
+  Configure(kSession, reb::NativeProbeCategoryMask(reb::NativeProbeCategory::kArtifact));
+  sink.CaptureWasmIndirect(observation, mojo_base::BigBuffer(module), [] { return true; });
+  Check(transfers.empty(), "Artifact permission alone cannot admit call_indirect observation");
+  std::cout << "PASS native Wasm call_indirect artifact ACK, shared module artifact, typed "
+               "payload, document retirement, pre-expiry flush and separate budget\n";
+}
+
 #include "guest_dependencies_test.h"
 #include "probe_host_test.h"
 }  // namespace
@@ -516,6 +648,7 @@ int main(int argc, char** argv) {
     Lifecycle(receiver);
     Admission(output);
     NativeWasmDispatch(receiver);
+    NativeWasmIndirect(receiver);
     NativeGuestDependencies(receiver);
     NativeProbeHostGuestBoundary(receiver);
     event_wire.flush();

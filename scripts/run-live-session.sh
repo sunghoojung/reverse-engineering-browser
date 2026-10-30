@@ -43,6 +43,7 @@ readonly duration_seconds="${REB_CAPTURE_DURATION_SECONDS:-3600}"
 readonly open_command="${REB_OPEN_COMMAND:-open}"
 readonly native_quiet_mode="${REB_NATIVE_QUIET_MODE:-0}"
 readonly native_wasm_dispatch="${REB_NATIVE_WASM_DISPATCH:-0}"
+readonly native_wasm_call_indirect="${REB_NATIVE_WASM_CALL_INDIRECT:-0}"
 readonly native_guest_adapter="${REB_NATIVE_WASM_GUEST_ADAPTER:-}"
 readonly capture_canvas_images="${REB_CAPTURE_CANVAS_IMAGES:-0}"
 readonly use_system_keychain="${REB_USE_SYSTEM_KEYCHAIN:-1}"
@@ -63,6 +64,13 @@ fi
 if [[ "${native_wasm_dispatch}" == 1 ]] &&
    (( (category_mask & 512) == 0 || (category_mask & 1024) == 0 )); then
   fail_live_session 2 "REB_NATIVE_WASM_DISPATCH requires VM and Artifact capture categories."
+fi
+if [[ "${native_wasm_call_indirect}" != 0 && "${native_wasm_call_indirect}" != 1 ]]; then
+  fail_live_session 2 "REB_NATIVE_WASM_CALL_INDIRECT must be 0 or 1."
+fi
+if [[ "${native_wasm_call_indirect}" == 1 ]] &&
+   (( (category_mask & 512) == 0 || (category_mask & 1024) == 0 )); then
+  fail_live_session 2 "REB_NATIVE_WASM_CALL_INDIRECT requires VM and Artifact capture categories."
 fi
 if [[ -n "${native_guest_adapter}" ]]; then
   if [[ "${native_wasm_dispatch}" != 1 ]]; then
@@ -397,6 +405,9 @@ if [[ "${native_quiet_mode}" == 1 ]]; then
 fi
 if [[ "${native_wasm_dispatch}" == 1 ]]; then
   native_js_flags+=(--reb-wasm-br-table-dispatch)
+fi
+if [[ "${native_wasm_call_indirect}" == 1 ]]; then
+  native_js_flags+=(--reb-wasm-call-indirect-dispatch)
 fi
 # Per-function-entry frame hooks cost a runtime call on every Wasm call, so
 # they are compiled in only when a guest adapter actually needs them.

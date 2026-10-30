@@ -85,6 +85,7 @@ void NativeProbeTransport::Configure(const std::uint64_t session_id,
   queue_.store(queue, std::memory_order_release);
   wasm_capture_epoch_.store(wasm_capture_epoch, std::memory_order_release);
   NativeProbeSink::Get().SetNativeWasmDispatchEmitter(&EmitWasmDispatch);
+  NativeProbeSink::Get().SetNativeWasmIndirectEmitter(&EmitWasmIndirect);
   NativeProbeSink::Get().SetEmitters(
       &NativeProbeTransport::EmitStatus, &NativeProbeTransport::EmitArtifact, session_id,
       category_mask, expires_at_monotonic_ns, capture_canvas_images, &CurrentFrameId);
@@ -133,6 +134,29 @@ bool NativeProbeTransport::EmitWasmDispatch(const NativeWasmDispatchObservation&
       observation.execution_context_id, observation.document_token_high,
       observation.document_token_low, observation.function_index, observation.module_byte_offset,
       observation.selector, observation.table_count, observation.sample_index,
+      std::string(observation.source_url), mojo_base::BigBuffer(observation.module_bytes));
+  return true;
+}
+
+bool NativeProbeTransport::EmitWasmIndirect(const NativeWasmIndirectObservation& observation,
+                                            const std::uint64_t generation) noexcept {
+  auto& transport = Get();
+  const auto epoch = transport.wasm_capture_epoch_.load(std::memory_order_acquire);
+  NativeProbeEvent event;
+  event.header = observation.header;
+  if (!epoch || !NativeProbeSink::Get().CanAdmitEvent(event, generation))
+    return false;
+  auto* host = transport.HostForCurrentSequence();
+  if (!*host || !NativeProbeSink::Get().CanAdmitEvent(event, generation) ||
+      epoch != transport.wasm_capture_epoch_.load(std::memory_order_acquire))
+    return false;
+  (*host)->CaptureWasmIndirect(
+      epoch, event.header.session_id, event.header.sequence_number, event.header.monotonic_time_ns,
+      event.header.process_id, event.header.thread_id, event.header.frame_id,
+      observation.execution_context_id, observation.document_token_high,
+      observation.document_token_low, observation.function_index, observation.module_byte_offset,
+      observation.table_index, observation.slot, observation.callee_function_index,
+      static_cast<std::uint32_t>(observation.resolution), observation.sample_index,
       std::string(observation.source_url), mojo_base::BigBuffer(observation.module_bytes));
   return true;
 }

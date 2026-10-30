@@ -122,6 +122,10 @@ struct NativeProbeHost {
     ++artifacts;
   }
   template <class... Args>
+  void CaptureWasmIndirect(Args&&...) {
+    ++artifacts;
+  }
+  template <class... Args>
   void CaptureNativeGuest(Args&&...) {
     ++artifacts;
   }

@@ -29,7 +29,7 @@
           'request_initiated', 'request_redirected', 'response_started',
           'request_completed', 'request_failed', 'vm_finding',
           'vm_dispatch_sample', 'wasm_dispatch_observation', 'wasm_guest_dispatch', 'wasm_guest_invocation',
-          'artifact_captured', 'artifact_capture_failed'
+          'wasm_indirect_observation', 'artifact_captured', 'artifact_capture_failed'
         ])
       };
       const uint64Fields = [
@@ -249,6 +249,25 @@
           row.table_count < 16777216 && row.sample_index < 16 ? row : null;
       }
 
+      // Physical call_indirect: function, offset, table, slot, callee, resolution, sample.
+      function decodeNativeWasmIndirectObservation(event) {
+        if (event?.type !== 'wasm_indirect_observation' || event.protocol_version !== 3 || event.category !== 'vm' ||
+          event.payload_size !== 128 || event.payload_encoding !== 'hex' || event.payload_truncated !== false ||
+          event.flags !== 0 || event.parent_event_id !== '0' || Object.hasOwn(event,'dispatch_provenance') ||
+          !['session_id','sequence_number','monotonic_time_ns','frame_id','artifact_id'].every(key => isCanonicalInteger(event[key], 1n, uint64Max)) ||
+          !['process_id','thread_id'].every(key => isSafeIntegerInRange(event[key], 1, 0xffffffff)) ||
+          typeof event.payload !== 'string' || !/^[0-9a-f]{256}$/i.test(event.payload)) return null;
+        const bytes = Uint8Array.from(event.payload.match(/../g), byte => Number.parseInt(byte, 16));
+        const view = new DataView(bytes.buffer);
+        if (view.getUint16(0,true) !== 1 || view.getUint16(2,true) !== 128 || bytes.slice(32).some(byte => byte !== 0)) return null;
+        const row = {function_index:view.getUint32(4,true),module_byte_offset:view.getUint32(8,true),
+          table_index:view.getUint32(12,true),slot:view.getUint32(16,true),callee_function_index:view.getUint32(20,true),
+          resolution:view.getUint32(24,true),sample_index:view.getUint32(28,true)};
+        return row.function_index < 16777216 && row.module_byte_offset >= 8 && row.module_byte_offset < 16777216 &&
+          row.table_index < 16777216 && row.callee_function_index < 16777216 && row.resolution < 5 &&
+          (row.resolution === 0 || row.callee_function_index === 0) && row.sample_index < 16 ? row : null;
+      }
+
       function decodeNativeGuestRecord(event) {
         if (!['wasm_guest_dispatch','wasm_guest_invocation'].includes(event?.type) || event.protocol_version !== 3 ||
           event.category !== 'vm' || event.flags !== 0 || event.payload_size !== 128 || event.payload_encoding !== 'hex' ||
@@ -309,6 +328,7 @@
         if (typeof event.payload_truncated !== 'boolean') return false;
         return event.payload_truncated === Boolean(event.flags & 1) &&
           (event.type !== 'wasm_dispatch_observation' || decodeNativeWasmObservation(event) !== null) &&
+          (event.type !== 'wasm_indirect_observation' || decodeNativeWasmIndirectObservation(event) !== null) &&
           (!['wasm_guest_dispatch','wasm_guest_invocation'].includes(event.type) || decodeNativeGuestRecord(event) !== null);
       }
 
@@ -1598,6 +1618,23 @@
         return site ? site.kind === 'br_table' && site.function_index === row.function_index && site.arm_count === row.table_count
           : (workspace.dispatch_inventory?.omitted_site_count ?? 0) > 0;
       }
+      const vmIndirectResolutions = ['resolved', 'null', 'out-of-bounds', 'foreign', 'unresolved'];
+      // A listed inventory or classification site must be this exact call
+      // site; an unlisted one cannot contradict the row.
+      function isNativeWasmIndirectObservation(row, workspace) {
+        if (!vmWorkspaceExact(row, vmNativeRowKeys(row, ['event','function_index','module_byte_offset','instruction','table_index',
+          'slot','resolution','callee_function_index','sample_index'])) ||
+          !vmSampleEvent(row.event) || !vmNativeRowTimeValid(row) || !isSafeIntegerInRange(row.function_index,0,16777215) ||
+          !isSafeIntegerInRange(row.module_byte_offset,8,16777215) || !['call_indirect','return_call_indirect'].includes(row.instruction) ||
+          !isSafeIntegerInRange(row.table_index,0,16777215) || !isSafeIntegerInRange(row.slot,0,0xffffffff) ||
+          !vmIndirectResolutions.includes(row.resolution) || !isSafeIntegerInRange(row.sample_index,0,15) ||
+          (row.resolution === 'resolved' ? !isSafeIntegerInRange(row.callee_function_index,0,16777215) : row.callee_function_index !== null)) return false;
+        const site = workspace.dispatch_inventory?.candidates.find(site => site.byte_offset === row.module_byte_offset);
+        if (site && (site.kind !== 'call_indirect' || row.instruction !== 'call_indirect' || site.function_index !== row.function_index)) return false;
+        const classified = workspace.dispatch_classification?.sites.find(site => site.location.byte_offset === row.module_byte_offset);
+        return !classified || (classified.instruction === row.instruction && classified.location.function_index === row.function_index &&
+          (classified.table === null || classified.table.table_index === row.table_index));
+      }
       function isNativeGuestSample(row, workspace) {
         const keys = ['event','invocation_event','invocation_id','instance_id','parent_invocation_id','function_index',
           'module_byte_offset','selector','table_count','selected_arm','is_default','sample_index','instruction_pointer',
@@ -1654,10 +1691,12 @@
         return listed ? listed.role === 'interpreter-candidate' : classification.omitted_site_count > 0;
       }
       function vmObservedRowKey(stream, row) {
+        if (stream === 'native-wasm-indirect') return `${stream}:${row.function_index}:${row.module_byte_offset}:${row.slot}:null:${row.callee_function_index}`;
         return stream === 'dispatch-sample' ? `${stream}:${row.opcode}:${row.handler_index}`
           : `${stream}:${row.function_index}:${row.module_byte_offset}:${row.selector}:${stream === 'native-guest' ? row.opcode : 'null'}:${row.selected_arm}`;
       }
       function vmObservedClaimKey(claim) {
+        if (claim.stream === 'native-wasm-indirect') return `${claim.stream}:${claim.site.function_index}:${claim.site.byte_offset}:${claim.selector}:${claim.opcode}:${claim.handler.callee_function_index}`;
         return claim.stream === 'dispatch-sample' ? `${claim.stream}:${claim.opcode}:${claim.handler.handler_index}`
           : `${claim.stream}:${claim.site.function_index}:${claim.site.byte_offset}:${claim.selector}:${claim.opcode}:${claim.handler.arm}`;
       }
@@ -1667,6 +1706,8 @@
           'dispatch-sample': workspace.runtime === 'javascript' ? workspace.samples.filter(sample => sample.provenance === undefined) : [],
           'native-guest': workspace.native_guest_samples ?? [],
           'native-wasm': workspace.native_wasm_observations ?? [],
+          // Only a resolved entry names a callee; other rows supply no claim.
+          'native-wasm-indirect': (workspace.native_wasm_indirect_observations ?? []).filter(row => row.resolution === 'resolved'),
         };
       }
       function vmObservedSoleSite(workspace) {
@@ -1693,11 +1734,30 @@
             workspace.coverage.omissions.some(row => row.reason === 'handler-withheld');
           return empty('absent') && comparison.opcode === null;
         }
+        if (claim.stream === 'native-wasm-indirect') return vmIndirectStaticClaimMatches(workspace, claim);
         const row = claim.handler.is_default ? undefined : workspace.handlers.find(handler =>
           handler.source.byte_offset === claim.site.byte_offset && handler.opcode === claim.selector);
         if (!row) return empty('absent') && comparison.opcode === null;
         return comparison.state === (claim.stream === 'native-guest' && claim.opcode !== claim.selector ? 'disagrees' : 'agrees') &&
           comparison.opcode === claim.selector && comparison.handler_index === null && comparison.byte_offset === row.source.byte_offset;
+      }
+      // The element layout behind a slot claim is only partly listed, so the
+      // comparison is checked for internal consistency, and against every
+      // element cluster that lists the slot.
+      function vmIndirectStaticClaimMatches(workspace, claim) {
+        const comparison = claim.static_claim;
+        const slot = claim.selector;
+        const listed = (workspace.handler_tables ?? []).filter(table => table.kind === 'element' &&
+          table.table_index === claim.handler.table_index).flatMap(table => table.clusters)
+          .find(cluster => cluster.selectors.includes(slot));
+        if (comparison.state === 'absent') return !listed && comparison.opcode === null &&
+          comparison.handler_index === null && comparison.byte_offset === null;
+        if (comparison.opcode !== slot) return false;
+        if (comparison.state === 'withheld') return !listed && comparison.handler_index === null && comparison.byte_offset === null;
+        if (comparison.byte_offset !== claim.site.byte_offset || (comparison.handler_index !== null &&
+          !isSafeIntegerInRange(comparison.handler_index, 0, 16777215))) return false;
+        if (listed && comparison.handler_index !== listed.target) return false;
+        return comparison.state === (comparison.handler_index === claim.handler.callee_function_index ? 'agrees' : 'disagrees');
       }
       function isVmObservedClaims(workspace, complete) {
         const claims = workspace.observed_claims;
@@ -1733,6 +1793,15 @@
               claim.site.function_index !== null || claim.site.byte_offset !== sole.location.byte_offset ||
               claim.site.line !== sole.location.line || claim.site.column !== sole.location.column
               : claim.site_attribution !== 'artifact' || claim.site !== null) return false;
+          } else if (claim.stream === 'native-wasm-indirect') {
+            if (workspace.runtime !== 'webassembly' || claim.site_attribution !== 'exact' ||
+              !vmWorkspaceExact(claim.site, ['function_index', 'byte_offset', 'line', 'column']) || claim.site.line !== null ||
+              claim.site.column !== null || !isSafeIntegerInRange(claim.site.function_index, 0, 16777215) ||
+              !isSafeIntegerInRange(claim.site.byte_offset, 8, 16777215) || !vmObservedInterpreterSite(workspace, claim.site.byte_offset) ||
+              !vmWorkspaceExact(claim.handler, ['kind', 'table_index', 'callee_function_index']) || claim.handler.kind !== 'table-entry' ||
+              !isSafeIntegerInRange(claim.handler.table_index, 0, 16777215) ||
+              !isSafeIntegerInRange(claim.handler.callee_function_index, 0, 16777215) ||
+              !isSafeIntegerInRange(claim.selector, 0, 0xffffffff) || claim.opcode !== null) return false;
           } else {
             if (workspace.runtime !== 'webassembly' || claim.site_attribution !== 'exact' ||
               !vmWorkspaceExact(claim.site, ['function_index', 'byte_offset', 'line', 'column']) || claim.site.line !== null ||
@@ -1748,6 +1817,7 @@
           if (seen.has(key) || rows.length !== claim.sample_count ||
             claim.events.some((event, index) => vmSampleEventKey(event) !== vmSampleEventKey(rows[index].event)) ||
             (claim.handler.kind === 'br-table-arm' && rows.some(row => row.is_default !== claim.handler.is_default)) ||
+            (claim.handler.kind === 'table-entry' && rows.some(row => row.table_index !== claim.handler.table_index)) ||
             !vmObservedStaticClaimMatches(workspace, claim)) return false;
           seen.add(key);
           if (claim.static_claim.state === 'disagrees') disagreements += 1;
@@ -1803,6 +1873,7 @@
           'interpreter_artifact_id', 'bytecode_artifact_id', 'finding_id', 'model', 'handlers', 'snapshots', 'coverage',
           'unknowns', 'runtime', 'source_artifact_sha256', 'capture_mode', 'samples', 'sample_count', 'traversal', 'captured_module_preview', 'dispatch_inventory',
           'dispatch_classification', 'evidence_class', 'machine_state', 'handler_tables', 'native_wasm_observations', 'native_wasm_observation_count', 'native_guest_samples', 'native_guest_sample_count',
+          'native_wasm_indirect_observations', 'native_wasm_indirect_observation_count',
           'observed_claims', 'nested_guests'
         ])) || !isCanonicalInteger(workspace.interpreter_artifact_id, 0n, uint64Max) ||
           (workspace.bytecode_artifact_id !== undefined && !isCanonicalInteger(workspace.bytecode_artifact_id, 0n, uint64Max)) ||
@@ -1847,6 +1918,17 @@
           !isSafeIntegerInRange(nativeCount,nativeRows.length,summed ? workspace.sample_count : Number.MAX_SAFE_INTEGER) ||
           new Set([...workspace.samples,...nativeRows,...guestRows].map(row => vmSampleEventKey(row.event))).size !== workspace.samples.length + nativeRows.length + guestRows.length) return false;
         if (nativeRows.some(row => workspace.handlers.filter(handler => nativeWasmMatchesHandler(row,handler)).length > 1)) return false;
+        const indirectRows = workspace.native_wasm_indirect_observations ?? [];
+        const indirectCount = workspace.native_wasm_indirect_observation_count ?? 0;
+        if ((workspace.native_wasm_indirect_observations === undefined) !== (workspace.native_wasm_indirect_observation_count === undefined) ||
+          (workspace.native_wasm_indirect_observations !== undefined && workspace.runtime !== 'webassembly') ||
+          !Array.isArray(indirectRows) || indirectRows.length > 4096 || !indirectRows.every(row => isNativeWasmIndirectObservation(row,workspace)) ||
+          !isSafeIntegerInRange(indirectCount,indirectRows.length,Number.MAX_SAFE_INTEGER) ||
+          new Set([...workspace.samples,...nativeRows,...guestRows,...indirectRows].map(row => vmSampleEventKey(row.event))).size !==
+            workspace.samples.length + nativeRows.length + guestRows.length + indirectRows.length) return false;
+        const indirectTruncated = indirectCount > indirectRows.length;
+        if (indirectTruncated !== workspace.coverage.omissions.some(row => row.reason === 'native-wasm-indirect-observation-limit') ||
+          (indirectTruncated && indirectRows.length !== 4096)) return false;
         const nativeTruncated = nativeCount > nativeRows.length;
         if (nativeTruncated !== workspace.coverage.omissions.some(row => row.reason === 'native-wasm-observation-limit') ||
           (nativeTruncated && nativeRows.length !== 4096)) return false;
@@ -1944,6 +2026,10 @@
       function vmNativeWasmPositionText(row) {
         return `Native Wasm byte ${row.module_byte_offset} · function ${row.function_index} · selector ${row.selector} · ${row.is_default ? 'default arm' : `arm ${row.selected_arm}`} · guest PC unknown`;
       }
+      function vmNativeWasmIndirectPositionText(row) {
+        const callee = row.callee_function_index === null ? `no callee (${row.resolution})` : `callee function ${row.callee_function_index}`;
+        return `Native Wasm byte ${row.module_byte_offset} · function ${row.function_index} · ${row.instruction} table ${row.table_index} · slot ${row.slot} · ${callee} · guest PC unknown`;
+      }
       function vmNativeGuestPositionText(row) {
         return `PC ${row.instruction_pointer} bytes · opcode ${row.opcode} · instance ${row.instance_id} · ${row.interpretation}`;
       }
@@ -1953,7 +2039,8 @@
       // Workspace rows carry the exact native event identity but not its time.
       // Time comes only from the same retained event; it is never estimated.
       function vmNativeRowIdentityText(row, events = []) {
-        const operation = vmNativeIsGuestRow(row) ? 'wasm_guest_dispatch' : 'wasm_dispatch_observation';
+        const operation = vmNativeIsGuestRow(row) ? 'wasm_guest_dispatch'
+          : row?.slot !== undefined && row?.instruction !== undefined ? 'wasm_indirect_observation' : 'wasm_dispatch_observation';
         const event = row?.event;
         if (!isPlainObject(event)) return `native probe · vm/${operation} · event identity unavailable`;
         const key = [event.session_id, event.process_id, event.sequence_number].map(String);

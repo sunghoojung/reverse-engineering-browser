@@ -57,6 +57,41 @@ int main() {
         return 1;
     }
   }
+  {
+    static_assert(static_cast<std::uint16_t>(reb::EventType::kWasmIndirectObservation) ==
+                  static_cast<std::uint16_t>(reb::NativeProbeType::kWasmIndirectObservation));
+    reb::NativeWasmIndirectObservationPayload wasm;
+    wasm.function_index = 0x00010203;
+    wasm.module_byte_offset = 0x04050607;
+    wasm.table_index = 0x08090a0b;
+    wasm.slot = UINT32_MAX;
+    wasm.callee_function_index = 0x0c0d0e0f;
+    wasm.resolution = static_cast<std::uint32_t>(reb::NativeWasmIndirectResolution::kForeign);
+    wasm.sample_index = 15;
+    const auto encoded = reb::EncodeNativeWasmIndirectObservationPayload(wasm);
+    reb::WasmIndirectObservationPayload decoded;
+    if (!Check(encoded[4] == std::byte{3} && encoded[8] == std::byte{7} &&
+                   encoded[12] == std::byte{11} && encoded[20] == std::byte{15} &&
+                   encoded[24] == std::byte{3} && encoded[28] == std::byte{15},
+               "native call_indirect payload is not LE") ||
+        !Check(reb::DecodeWasmIndirectObservationPayload(encoded, decoded),
+               "native call_indirect bytes decode") ||
+        !Check(decoded.function_index == wasm.function_index &&
+                   decoded.module_byte_offset == wasm.module_byte_offset &&
+                   decoded.table_index == wasm.table_index && decoded.slot == UINT32_MAX &&
+                   decoded.callee_function_index == wasm.callee_function_index &&
+                   decoded.resolution == wasm.resolution && decoded.sample_index == 15,
+               "call_indirect payload field parity") ||
+        !Check(reb::EncodeWasmIndirectObservationPayload(decoded) == encoded,
+               "call_indirect core/native encoder parity"))
+      return 1;
+    for (std::size_t size : {std::size_t{0}, std::size_t{32}, std::size_t{127}}) {
+      if (!Check(
+              !reb::DecodeWasmIndirectObservationPayload(std::span(encoded).first(size), decoded),
+              "call_indirect truncation accepted"))
+        return 1;
+    }
+  }
   // Model a reader paused after policy validation, then a replacement config.
   // This is the same reservation state used by NativeProbeSink, not a copy of
   // its algorithm. No timing sleeps or native browser are required.

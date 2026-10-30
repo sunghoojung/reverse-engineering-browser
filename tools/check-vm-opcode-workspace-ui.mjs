@@ -645,6 +645,17 @@ renderApiState.events=[{session_id:'1',process_id:1,sequence_number:'1',monotoni
 assert(renderApi.renderNativeWasmObservations({...nativeWorkspace,native_wasm_observations:[nativeRow],native_wasm_observation_count:1}).textContent
   .includes('time 4242 ns · session 1 · process 1 · seq 1 · native probe · vm/wasm_dispatch_observation'));
 delete renderApiState.events;
+// call_indirect rows name their own operation, slot and callee, never a guest PC.
+const indirectRow={event:{session_id:'1',process_id:1,sequence_number:'2'},function_index:1,module_byte_offset:94,
+  instruction:'return_call_indirect',table_index:0,slot:3,resolution:'resolved',callee_function_index:2,sample_index:0};
+const indirectPanel=renderApi.renderNativeWasmObservations({...nativeWorkspace,native_wasm_indirect_observations:
+  [indirectRow,{...indirectRow,event:{...indirectRow.event,sequence_number:'3'},resolution:'foreign',callee_function_index:null}],
+  native_wasm_indirect_observation_count:3}).textContent;
+assert(indirectPanel.includes('seq 2 · native probe · vm/wasm_indirect_observation'));
+assert(indirectPanel.includes('return_call_indirect table 0 · slot 3 · callee function 2 · guest PC unknown'));
+assert(indirectPanel.includes('slot 3 · no callee (foreign)'));
+assert(indirectPanel.includes('1 accepted call_indirect observations are outside the retained window.'));
+assert(renderApi.renderNativeWasmObservations(nativeWorkspace).textContent.includes('No native call_indirect observations retained.'));
 const guestRow={event:{session_id:'101',process_id:3,sequence_number:'105'},invocation_event:{session_id:'101',process_id:3,sequence_number:'104'},
   instance_id:'18446744073709551615',instruction_pointer:1,instruction_pointer_units:'byte-offset',opcode:66,interpretation:'explicit-adapter',module_byte_offset:58};
 const guestPanel=renderApi.renderNativeWasmObservations({native_wasm_observations:[],native_wasm_observation_count:0,native_guest_samples:[guestRow],native_guest_sample_count:3});

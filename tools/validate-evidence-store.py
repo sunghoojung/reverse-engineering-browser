@@ -108,6 +108,7 @@ EVENT_TYPES = {
     "wasm_dispatch_observation",
     "wasm_guest_dispatch",
     "wasm_guest_invocation",
+    "wasm_indirect_observation",
 }
 UINT64_MAX = (1 << 64) - 1
 INT64_MIN = -(1 << 63)
@@ -215,6 +216,29 @@ def validate_event(event: object, line_number: int) -> None:
         or any(payload[24:])
     ):
         raise ValueError(f"line {line_number}: native Wasm dispatch observation is invalid")
+    if event["type"] == "wasm_indirect_observation" and (
+        protocol_version != 3
+        or event["category"] != "vm"
+        or event["flags"] != 0
+        or event["payload_truncated"]
+        or event["parent_event_id"] != "0"
+        or any(event[key] == "0" for key in (
+            "session_id", "sequence_number", "monotonic_time_ns", "frame_id", "artifact_id"
+        ))
+        or not 1 <= event["process_id"] <= 0xFFFFFFFF
+        or not 1 <= event["thread_id"] <= 0xFFFFFFFF
+        or len(payload) != 128
+        or payload[:4] != bytes((1, 0, 128, 0))
+        or int.from_bytes(payload[4:8], "little") >= 16777216
+        or not 8 <= int.from_bytes(payload[8:12], "little") < 16777216
+        or int.from_bytes(payload[12:16], "little") >= 16777216
+        or int.from_bytes(payload[20:24], "little") >= 16777216
+        or int.from_bytes(payload[24:28], "little") >= 5
+        or (int.from_bytes(payload[24:28], "little") != 0 and any(payload[20:24]))
+        or int.from_bytes(payload[28:32], "little") >= 16
+        or any(payload[32:])
+    ):
+        raise ValueError(f"line {line_number}: native Wasm call_indirect observation is invalid")
     if event["type"] in ("wasm_guest_dispatch", "wasm_guest_invocation"):
         if (protocol_version != 3 or event["category"] != "vm" or event["flags"] != 0
                 or event["payload_truncated"] or len(payload) != 128

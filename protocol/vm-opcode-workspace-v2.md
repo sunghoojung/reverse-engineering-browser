@@ -51,6 +51,19 @@ needs a lower bound on distinct executions at one handler uses the largest of
 the three counts. Producers before 2.7.0 summed all three into `sample_count`;
 consumers read those documents with that older arithmetic.
 
+Producer 2.14.0 adds a fourth native stream to every Wasm workspace.
+`native_wasm_indirect_observations` keeps at most 4096 accepted
+`wasm_indirect_observation` rows and `native_wasm_indirect_observation_count`
+counts every accepted one; `native-wasm-indirect-observation-limit` names the
+rest and `native-wasm-indirect-observation-invalid` counts rejected records.
+A row names the exact `call_indirect` or `return_call_indirect` instruction
+(function, module byte offset and its table immediate), the dynamic `slot`, the
+`resolution` of the table entry the call was about to use (`resolved`, `null`,
+`out-of-bounds`, `foreign` or `unresolved`) and, only when resolved, the callee
+function index in this module. A slot is not a guest opcode. These rows never
+change a handler row or `sample_count`. See
+[native Wasm dispatch](native-wasm-dispatch-v1.md#call_indirect-observations).
+
 Each `native_wasm_observations` and `native_guest_samples` row carries
 `monotonic_time_ns`, the accepted native event's monotonic time as a canonical
 unsigned decimal string, like the other 64-bit identifiers. A consumer can show
@@ -343,6 +356,7 @@ an interpreter-candidate site of the same metered classification:
 | --- | --- | --- | --- | --- | --- |
 | `native-guest` | `native_guest_samples` | `exact` function and module offset | br_table selector | opcode the adapter decoded from the guest snapshot | `br-table-arm` |
 | `native-wasm` | `native_wasm_observations` | `exact` | br_table selector | null; a selector is not a guest opcode | `br-table-arm` |
+| `native-wasm-indirect` | `resolved` rows of `native_wasm_indirect_observations` | `exact` | table slot | null | `table-entry`: table and callee function |
 | `dispatch-sample` | native JavaScript `samples` | `sole-interpreter-candidate` or `artifact` | null | sampled opcode | `handler-index`, the sampler's selected handler |
 
 A JavaScript dispatch sample names its interpreter artifact, not a dispatch
@@ -368,10 +382,25 @@ the claim with the unchanged static claim and is recomputed by the viewer:
   opcode and only agrees. A default arm and an arm outside the retained
   neighborhood or handler budget have no static opcode claim and are `absent`.
 
+- WebAssembly `call_indirect` (producer 2.14.0): the static claim is the
+  element segments' entry for the observed slot of the site's table, from the
+  same metered table layout as `handler_tables`. A placed function `agrees`
+  when it is the observed callee and `disagrees` otherwise; a placed null slot
+  that ran a function `disagrees`. `opcode` is the slot, `handler_index` the
+  placed function (null for a null slot) and `byte_offset` the site. A table
+  filled at run time, through a relative, unresolved or passive segment or an
+  unexpanded oversized table, or an entry whose function is not statically
+  known, is `withheld` for an unplaced slot. Any other unplaced slot is
+  `absent`. The viewer checks the comparison for consistency and against every
+  listed element cluster that holds the slot, since clusters list at most 32
+  slots.
+
 A disagreement never edits either claim. It adds one residual unknown that
 counts the disagreeing claims, so coverage stays incomplete. Rows that cannot
 supply a claim stay retained and are counted: `observed-claims-not-interpreter`
 for native rows at a site that is not a classified interpreter candidate,
+`observed-claims-unresolved-callee` for `call_indirect` rows whose entry was
+null, out of bounds, from another instance or unresolved,
 `observed-claims-unsited` for dispatch samples without a usable site, and
 `observed-claim-limit` past 256 claims.
 
@@ -605,3 +634,10 @@ recovered no handlers for these shapes, so an analysis could demote a real
 interpreter to `candidate`. Its gate also keeps the handlers of a threaded
 table, one whose handlers return or tail-call `ops[code[pc++]]`, when the
 classification proves that chain or cycle is an interpreter candidate.
+
+Producer 2.14.0 reads native `call_indirect` observations into
+`native_wasm_indirect_observations` and derives `native-wasm-indirect` observed
+claims from them. A threaded or handler-table interpreter whose table is filled
+at run time, which static recovery withholds, therefore gets observed handler
+claims naming the callee each slot actually ran, compared with the element
+segments' claim for that slot. Static recovery, tier and score are unchanged.

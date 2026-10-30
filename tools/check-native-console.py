@@ -263,11 +263,24 @@ class Fixture(http.server.BaseHTTPRequestHandler):
         pass
 
 
+def wait_unreaped(pid, timeout=5):
+    """Return once pid has exited, leaving it unreaped like waitid(WNOWAIT)."""
+    if hasattr(os, "waitid"):
+        os.waitid(os.P_PID, pid, os.WEXITED | os.WNOWAIT)
+        return
+    # macOS Python before 3.13 has no waitid; ps reports the zombie as Z.
+    deadline = time.monotonic() + timeout
+    while not subprocess.run(["ps", "-o", "stat=", "-p", str(pid)], capture_output=True,
+                             text=True).stdout.strip().startswith("Z"):
+        assert time.monotonic() < deadline, "Exited fixture never became a zombie"
+        time.sleep(0.01)
+
+
 def check(binary, browser):
     # Keep an exited group leader unreaped, exactly as a peer can be when
     # the console closes its socket before bridge() tears the fixture down.
     with subprocess.Popen([sys.executable, "-c", "pass"], start_new_session=True) as exited:
-        os.waitid(os.P_PID, exited.pid, os.WEXITED | os.WNOWAIT)
+        wait_unreaped(exited.pid)
         kill_browser_group(exited)
         assert exited.wait(timeout=5) == 0, "Exited browser fixture was not reaped"
     for flag in ["--version", "-v", "-V"]:

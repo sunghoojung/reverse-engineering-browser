@@ -172,6 +172,37 @@ void NativeProbeHostGuestBoundary(reb::ArtifactReceiver& receiver) {
                           mojo_base::BigBuffer(code));
   Check(events.size() == stale && transfers.empty(),
         "A retired configuration's capture is discarded like its queue records");
+
+  // Physical call_indirect through the production host: stale epochs and
+  // invalid resolutions are discarded, a missing document is one bounded gap.
+  const std::vector<std::uint8_t> indirect_module{0, 97, 115, 109, 1, 0, 0, 0, 0x11, 0, 0};
+  const auto indirect = [&](std::uint64_t capture_epoch, std::uint64_t sequence,
+                            std::uint32_t resolution, std::uint32_t callee) {
+    host.CaptureWasmIndirect(capture_epoch, kSession, sequence, 100, 123, 7, frame_id, 10, 11, 12,
+                             1, 8, 0, 4, callee, resolution, 0, "fixture://host-indirect",
+                             mojo_base::BigBuffer(indirect_module));
+  };
+  const auto before_indirect = events.size();
+  indirect(epoch + 1, 600, 0, 2);
+  indirect(epoch, 601, 5, 0);
+  Check(events.size() == before_indirect && transfers.empty(),
+        "Retired epochs and unknown resolutions are discarded");
+  frame.document = {11, 99};
+  indirect(epoch, 602, 0, 2);
+  indirect(epoch, 603, 0, 2);
+  Check(gap_for(602, "native_wasm_indirect_document_unavailable") &&
+            events.size() == before_indirect + 1 && transfers.empty(),
+        "A missing owning document is one bounded gap");
+  frame.document = {11, 12};
+  indirect(epoch, 604, 0, 2);
+  Check(transfers.size() == 1, "A valid call_indirect observation reaches the production sink");
+  Receive(receiver, transfers.begin()->first);
+  Check(std::any_of(events.begin(), events.end(),
+                    [](const auto& e) {
+                      return e.header.type == NativeProbeType::kWasmIndirectObservation &&
+                             e.header.sequence_number == 604 && e.header.tab_id == 1;
+                    }),
+        "The host keeps the observation's own sequence and tab");
   host.Disable();
   session.active = false;
   session.emitted = {};

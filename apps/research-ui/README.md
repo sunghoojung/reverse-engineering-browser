@@ -37,7 +37,9 @@ The Findings **Native observations** tab displays native Wasm module offsets,
 function indexes and unsigned selectors/default arms. These are physical Wasm
 dispatch observations, not recovered guest-interpreter PCs or guest opcodes.
 Guest rows interpreted through an explicit adapter appear beneath them with
-their evidence identities. Host causality remains unproven.
+their evidence identities. Native `call_indirect` rows follow, naming the
+instruction, table, slot and the callee the entry held, or why there was none.
+A slot is not a guest opcode. Host causality remains unproven.
 `make native-only-check` (part of `make check`) enforces the native-only
 contract and `make rendered-ui-check` verifies the rendered packaged app.
 
@@ -873,7 +875,9 @@ The **Runtime claims** panel lists
 from retained native rows beside, never inside, the handler list. Each claim
 shows its stream, site, selector, opcode, handler and supporting events, and
 whether the static claim agrees, disagrees, was withheld or is absent; a
-disagreement keeps both statements under an amber rule. WebAssembly workspaces
+disagreement keeps both statements under an amber rule. A `call_indirect` claim
+names the slot and callee function and compares them with the element
+segments' entry for that slot; a table filled at run time is withheld. WebAssembly workspaces
 also list nested guests: an inner interpreter, its buffer and opcodes, and the
 outer site and handler that drove it. The viewer recomputes every claim and
 link from the retained rows and rejects a document that does not match.

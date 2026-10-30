@@ -31,17 +31,21 @@ const flagsStart = launch.indexOf('native_js_flags=()');
 const flagsEnd = launch.indexOf('if [[ "${capture_canvas_images}"', flagsStart);
 assert(flagsStart >= 0 && flagsEnd > flagsStart);
 const flagsCode = launch.slice(flagsStart, flagsEnd);
-for (const quiet of [0, 1]) for (const dispatch of [0, 1]) {
-  const result = spawnSync('bash', ['-c', `set -eu; brave_arguments=(); native_quiet_mode=${quiet}; native_wasm_dispatch=${dispatch}; native_guest_adapter=""; ${flagsCode}
+for (const quiet of [0, 1]) for (const dispatch of [0, 1]) for (const indirect of [0, 1]) {
+  const result = spawnSync('bash', ['-c', `set -eu; brave_arguments=(); native_quiet_mode=${quiet}; native_wasm_dispatch=${dispatch}; native_wasm_call_indirect=${indirect}; native_guest_adapter=""; ${flagsCode}
 printf '%s' "${'${brave_arguments[*]-}'}"`], {encoding:'utf8'});
   assert.equal(result.status, 0, result.stderr);
-  const expected = [quiet ? '--reb-ignore-debugger-statements' : '', dispatch ? '--reb-wasm-br-table-dispatch' : ''].filter(Boolean);
+  const expected = [quiet ? '--reb-ignore-debugger-statements' : '', dispatch ? '--reb-wasm-br-table-dispatch' : '',
+    indirect ? '--reb-wasm-call-indirect-dispatch' : ''].filter(Boolean);
   assert.equal(result.stdout, expected.length ? '--js-flags=' + expected.join(' ') : '');
 }
-for (const options of [{REB_NATIVE_WASM_DISPATCH:'invalid'}, {REB_NATIVE_WASM_DISPATCH:'1',REB_CAPTURE_CATEGORY_MASK:'1'}]) {
+for (const [variable, options] of [['REB_NATIVE_WASM_DISPATCH', {REB_NATIVE_WASM_DISPATCH:'invalid'}],
+  ['REB_NATIVE_WASM_DISPATCH', {REB_NATIVE_WASM_DISPATCH:'1',REB_CAPTURE_CATEGORY_MASK:'1'}],
+  ['REB_NATIVE_WASM_CALL_INDIRECT', {REB_NATIVE_WASM_CALL_INDIRECT:'invalid'}],
+  ['REB_NATIVE_WASM_CALL_INDIRECT', {REB_NATIVE_WASM_CALL_INDIRECT:'1',REB_CAPTURE_CATEGORY_MASK:'1'}]]) {
   const result = spawnSync('bash', [join(root,'scripts/run-live-session.sh')], {env:{...process.env,...options},encoding:'utf8'});
   assert.equal(result.status,2,result.stderr);
-  assert.match(result.stderr,/REB_NATIVE_WASM_DISPATCH/);
+  assert.match(result.stderr,new RegExp(variable));
 }
 console.log('PASS native Wasm launch is explicit opt-in, category-gated, and composes with quiet mode');
 
@@ -68,7 +72,7 @@ try {
   // Native browser code owns strict recipe validation; the shell only gates
   // opt-in, file bounds and propagation as a single argument.
   await writeFile(adapterPath,'{}');
-  const result = spawnSync('bash',['-c',`set -eu; brave_arguments=(); native_quiet_mode=1; native_wasm_dispatch=1; native_guest_adapter="$TEST_ADAPTER"; ${flagsCode}
+  const result = spawnSync('bash',['-c',`set -eu; brave_arguments=(); native_quiet_mode=1; native_wasm_dispatch=1; native_wasm_call_indirect=0; native_guest_adapter="$TEST_ADAPTER"; ${flagsCode}
     printf '%s\\n' "${'${brave_arguments[@]-}'}"`],{env:{...process.env,TEST_ADAPTER:adapterPath},encoding:'utf8'});
   assert.equal(result.status,0,result.stderr);
   assert.deepEqual(result.stdout.trimEnd().split('\n'), ['--js-flags=--reb-ignore-debugger-statements --reb-wasm-br-table-dispatch --reb-wasm-guest-capture','--reb-wasm-guest-adapter='+adapterPath]);

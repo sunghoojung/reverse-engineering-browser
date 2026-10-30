@@ -29,7 +29,10 @@ class StateGuards(unittest.TestCase):
         # repository. Restore the caller's environment after each test.
         environment = {key: value for key, value in os.environ.items()
                        if not key.startswith("GIT_")}
-        self.enterContext(patch.dict(os.environ, environment, clear=True))
+        # TestCase.enterContext needs Python 3.11; the documented floor is 3.8.
+        environment_patch = patch.dict(os.environ, environment, clear=True)
+        environment_patch.start()
+        self.addCleanup(environment_patch.stop)
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)

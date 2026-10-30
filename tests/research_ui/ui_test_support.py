@@ -1,5 +1,8 @@
 """Read the shipped interface for focused source-contract tests."""
 
+# Keeps PEP 604 annotations unevaluated on the macOS system Python 3.9.
+from __future__ import annotations
+
 from pathlib import Path
 from html.parser import HTMLParser
 

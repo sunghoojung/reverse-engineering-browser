@@ -14,8 +14,10 @@ pub(super) struct Observations {
     counts: BTreeMap<(u32, Option<u32>), u64>,
 }
 
-fn observation(event: &Value, artifact: &Value, module: &mut Module<'_>) -> Option<Value> {
-    if event["protocol_version"] != 3
+/// Envelope rules shared by both physical streams: exact artifact scope, no
+/// caller provenance or parent, and canonical native identities.
+fn envelope(event: &Value, artifact: &Value) -> bool {
+    !(event["protocol_version"] != 3
         || event["payload_size"] != 128
         || event["payload_encoding"] != "hex"
         || event["payload_truncated"] != false
@@ -30,8 +32,11 @@ fn observation(event: &Value, artifact: &Value, module: &mut Module<'_>) -> Opti
             .is_none_or(|v| v == 0 || v > u32::MAX as u64)
         || !crate::evidence::canonical(&event["monotonic_time_ns"], 64, true)
         || !crate::evidence::canonical(&event["frame_id"], 64, true)
-        || !crate::evidence::canonical(&event["artifact_id"], 64, true)
-    {
+        || !crate::evidence::canonical(&event["artifact_id"], 64, true))
+}
+
+fn observation(event: &Value, artifact: &Value, module: &mut Module<'_>) -> Option<Value> {
+    if !envelope(event, artifact) {
         return None;
     }
     let bytes = super::event_payload(event, "wasm_dispatch_observation")?;
@@ -94,6 +99,82 @@ pub(super) fn collect(
     output
 }
 
+/// Accepted call_indirect observations. Only `resolved` names a callee in
+/// this module's function index space.
+#[derive(Default)]
+pub(super) struct IndirectObservations {
+    pub rows: Vec<Value>,
+    pub count: u64,
+    pub invalid: u64,
+    pub undecodable: u64,
+}
+
+const RESOLUTIONS: [&str; 5] = ["resolved", "null", "out-of-bounds", "foreign", "unresolved"];
+
+fn indirect_observation(event: &Value, artifact: &Value, module: &mut Module<'_>) -> Option<Value> {
+    if !envelope(event, artifact) {
+        return None;
+    }
+    let bytes = super::event_payload(event, "wasm_indirect_observation")?;
+    if bytes[32..].iter().any(|v| *v != 0) {
+        return None;
+    }
+    let at =
+        |offset| u32::from_le_bytes(bytes[offset..offset + 4].try_into().expect("fixed payload"));
+    let (function, offset, table, slot, callee, resolution, index) =
+        (at(4), at(8), at(12), at(16), at(20), at(24), at(28));
+    let resolution = *RESOLUTIONS.get(resolution as usize)?;
+    let resolved = resolution == "resolved";
+    let functions = module.function_count();
+    if function >= 16 * 1024 * 1024
+        || !(8..16 * 1024 * 1024).contains(&offset)
+        || index >= 16
+        || (!resolved && callee != 0)
+        || (resolved && callee as usize >= functions)
+    {
+        return None;
+    }
+    let &(site_table, tail) = module.function(function)?.call_indirects.get(&offset)?;
+    if site_table != table {
+        return None;
+    }
+    Some(
+        json!({"event":super::event_reference(event),"monotonic_time_ns":event["monotonic_time_ns"],
+        "function_index":function,"module_byte_offset":offset,
+        "instruction":if tail {"return_call_indirect"} else {"call_indirect"},"table_index":table,"slot":slot,
+        "resolution":resolution,"callee_function_index":resolved.then_some(callee),"sample_index":index}),
+    )
+}
+
+pub(super) fn collect_indirect(
+    artifact: &Value,
+    mut module: Option<&mut Module<'_>>,
+    events: &[Value],
+) -> IndirectObservations {
+    let mut output = IndirectObservations::default();
+    if artifact["kind"] != "wasm" {
+        return output;
+    }
+    // The caller verified the artifact digest and deduplicated event identities.
+    for event in events.iter().filter(|e| {
+        e["type"] == "wasm_indirect_observation" && e["artifact_id"] == artifact["artifact_id"]
+    }) {
+        let Some(module) = module.as_deref_mut() else {
+            output.undecodable += 1;
+            continue;
+        };
+        let Some(row) = indirect_observation(event, artifact, module) else {
+            output.invalid += 1;
+            continue;
+        };
+        output.count += 1;
+        if output.rows.len() < super::MAX_SAMPLES {
+            output.rows.push(row);
+        }
+    }
+    output
+}
+
 impl Observations {
     pub fn attach(&self, handlers: &mut [Value]) {
         for handler in handlers {
@@ -126,6 +207,92 @@ pub(super) mod tests {
     use super::*;
     fn module() -> Vec<u8> {
         hex::decode("0061736d010000000104016000000302010005030100010a1d011b01017f0340200041016a210041002d00001a41000e020000000b0b").unwrap()
+    }
+    /// Owned handler-table loop: function 1 dispatches table 0, whose slots
+    /// hold functions 0 and 2. The C++ golden producer names its site.
+    pub(crate) const INDIRECT_MODULE: &str = r#"(module (memory 1)
+      (type $t (func (param i32) (result i32)))
+      (table 2 funcref)
+      (func $inc (type $t) (i32.add (local.get 0) (i32.const 1)))
+      (func (export "run") (param $code i32) (param $len i32) (result i32)
+        (local $pc i32) (local $acc i32)
+        (block $exit (loop $again
+          (br_if $exit (i32.ge_u (local.get $pc) (local.get $len)))
+          (local.set $acc (call_indirect (type $t) (local.get $acc)
+            (i32.load8_u (i32.add (local.get $code) (local.get $pc)))))
+          (local.set $pc (i32.add (local.get $pc) (i32.const 1)))
+          (br $again)))
+        (local.get $acc))
+      (func $dbl (type $t) (i32.shl (local.get 0) (i32.const 1)))
+      (elem (i32.const 0) func $inc $dbl))"#;
+    const INDIRECT_SITE: u32 = 94;
+    fn indirect_event(slot: u32, resolution: u32, callee: u32) -> Value {
+        let mut bytes = [0u8; 128];
+        bytes[..4].copy_from_slice(&[1, 0, 128, 0]);
+        for (at, value) in [
+            (4, 1),
+            (8, INDIRECT_SITE),
+            (16, slot),
+            (20, callee),
+            (24, resolution),
+        ] {
+            bytes[at..at + 4].copy_from_slice(&value.to_le_bytes());
+        }
+        let mut event = event(0);
+        event["type"] = json!("wasm_indirect_observation");
+        event["payload"] = json!(hex::encode(bytes));
+        event
+    }
+    #[test]
+    fn native_wasm_indirect_exact_site_table_and_callee() {
+        let bytes = wat::parse_str(INDIRECT_MODULE).unwrap();
+        let event = indirect_event(1, 0, 2);
+        let scope = artifact(&event);
+        let read =
+            |events: &[Value]| collect_indirect(&scope, Module::parse(&bytes).as_mut(), events);
+        let output = read(std::slice::from_ref(&event));
+        assert_eq!((output.count, output.invalid), (1, 0));
+        let row = &output.rows[0];
+        assert_eq!(row["instruction"], "call_indirect");
+        assert_eq!(
+            (row["table_index"].clone(), row["slot"].clone()),
+            (json!(0), json!(1))
+        );
+        assert_eq!(
+            (
+                row["resolution"].clone(),
+                row["callee_function_index"].clone()
+            ),
+            (json!("resolved"), json!(2))
+        );
+        let trap = read(&[indirect_event(u32::MAX, 2, 0)]);
+        assert_eq!(trap.rows[0]["resolution"], "out-of-bounds");
+        assert!(trap.rows[0]["callee_function_index"].is_null());
+        // Wrong table, a non-site offset, a callee on a null entry, an unknown
+        // resolution, a callee past the function space, the sample budget and
+        // a reserved byte are each rejected.
+        for (offset, value) in [
+            (12, 1u32),
+            (8, INDIRECT_SITE - 1),
+            (24, 1),
+            (24, 5),
+            (20, 3),
+            (28, 16),
+            (32, 1),
+        ] {
+            let mut bad = event.clone();
+            let mut payload = hex::decode(bad["payload"].as_str().unwrap()).unwrap();
+            payload[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+            bad["payload"] = json!(hex::encode(payload));
+            assert_eq!(read(&[bad]).invalid, 1, "payload offset {offset}");
+        }
+        for field in ["session_id", "navigation_id", "frame_id"] {
+            let mut bad = event.clone();
+            bad[field] = json!("2");
+            assert_eq!(read(&[bad]).invalid, 1, "{field}");
+        }
+        let output = collect_indirect(&artifact(&event), None, std::slice::from_ref(&event));
+        assert_eq!((output.count, output.undecodable), (0, 1));
     }
     fn read(artifact: &Value, bytes: &[u8], events: &[Value]) -> Observations {
         collect(artifact, Module::parse(bytes).as_mut(), events)
@@ -369,6 +536,69 @@ pub(super) mod tests {
                         "REB_NATIVE_WASM_EVIDENCE_OUTPUT",
                     );
                 }
+            }
+        }
+        // call_indirect records from the same producer, read against the
+        // owned module whose site the producer names.
+        let bytes = wat::parse_str(INDIRECT_MODULE).unwrap();
+        for (case, accepted) in [
+            ("indirect-resolved", true),
+            ("indirect-out-of-bounds", true),
+            ("indirect-wide-identities", true),
+            ("indirect-table", false),
+            ("indirect-offset", false),
+            ("indirect-reserved", false),
+            ("indirect-resolution", false),
+            ("indirect-callee", false),
+            ("indirect-sample-index", false),
+        ] {
+            let process = std::process::Command::new(&exe)
+                .args(["--case", case])
+                .output()
+                .expect("run C++ producer");
+            assert!(process.status.success(), "C++ case {case}");
+            let event: Value = serde_json::from_slice(&process.stdout).expect("EventToJson output");
+            let output = collect_indirect(
+                &artifact(&event),
+                Module::parse(&bytes).as_mut(),
+                std::slice::from_ref(&event),
+            );
+            assert_eq!(output.count, u64::from(accepted), "C++ case {case}");
+            if case == "indirect-resolved" {
+                use sha2::{Digest, Sha256};
+                let root = tempfile::tempdir().unwrap();
+                let hash = hex::encode(Sha256::digest(&bytes));
+                std::fs::create_dir(root.path().join("blobs")).unwrap();
+                std::fs::write(root.path().join(format!("blobs/{hash}.bin")), &bytes).unwrap();
+                let mut manifest = artifact(&event);
+                for (key,value) in json!({"protocol_version":1,"parent_artifact_id":"0","creator_event_id":"0","execution_context_id":"1","capture_origin":"unknown","url":"fixture://native-wasm-golden","mime_type":"application/wasm","byte_size":bytes.len(),"sha256":hash,"sensitive":false,"content_path":format!("blobs/{hash}.bin")}).as_object().unwrap() {manifest[key]=value.clone();}
+                std::fs::write(root.path().join("manifest.jsonl"), format!("{manifest}\n"))
+                    .unwrap();
+                let events = root.path().join("events.jsonl");
+                std::fs::write(&events, format!("{event}\n")).unwrap();
+                crate::vm::store(root.path(), &events).unwrap();
+                let document: Value = serde_json::from_slice(
+                    &std::fs::read(root.path().join("analysis/vm-opcode-workspace-v2.json"))
+                        .unwrap(),
+                )
+                .unwrap();
+                let workspace = &document["workspaces"][0];
+                assert_eq!(
+                    workspace["native_wasm_indirect_observation_count"], 1,
+                    "{workspace:#}"
+                );
+                assert_eq!(
+                    workspace["observed_claims"][0]["static_claim"]["state"],
+                    "agrees"
+                );
+                let schema: Value = serde_json::from_str(include_str!(
+                    "../../../protocol/vm-opcode-workspace-v2.schema.json"
+                ))
+                .unwrap();
+                jsonschema::validator_for(&schema)
+                    .unwrap()
+                    .validate(&document)
+                    .unwrap();
             }
         }
     }

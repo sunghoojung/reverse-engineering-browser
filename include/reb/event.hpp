@@ -55,6 +55,7 @@ enum class EventType : std::uint16_t {
   kWasmDispatchObservation = 17,
   kWasmGuestDispatch = 18,
   kWasmGuestInvocation = 19,
+  kWasmIndirectObservation = 20,
 };
 
 enum class EventFlag : std::uint16_t {

@@ -3806,6 +3806,130 @@ body.resizing-panes-y, body.resizing-panes-y * { cursor: row-resize !important; 
 /* End sources */
 
 /* Fingerprinting */
+/* One 20px gutter from the header down to the activity rows, so the bars,
+   tabs and evidence start on the same line. */
+#screen-signals .signal-scopebar { padding: 8px 20px; }
+#screen-signals .signal-commandbar { padding: 0 20px; }
+#screen-signals .signal-view-tabs { gap: 20px; }
+#screen-signals .signal-view-tabs button { padding: 0; }
+#screen-signals :is(.signal-rendering-panel, .signal-request-panel) { padding: 20px 20px 32px; }
+#screen-signals :is(.signal-panel-intro, .signal-surface-overview, .signal-inactive-toggle, .signal-render-list, .signal-request-profile) { margin-inline: 0; }
+#screen-signals .signal-filters { min-height: 40px; padding: 0 20px; }
+#screen-signals .signal-activity-panel { grid-template-rows: auto minmax(0, 1fr); }
+#screen-signals .signal-pane-head { padding: 8px 20px; }
+#screen-signals .signal-event-row { min-height: 0; gap: 4px; padding: 12px 20px; }
+#screen-signals .signal-detail { padding: 20px; }
+
+/* Header and scope: headings at 600, counts and meta as plain mono. */
+#screen-signals .signal-hero h1 { font-weight: 600; }
+#screen-signals .signal-session-summary { color: var(--faint); font: 400 11px var(--mono); }
+#screen-signals .signal-session-summary strong { color: var(--text); font-weight: 400; }
+.signal-notice { font-size: 11px; }
+.signal-notice[data-kind="live"]::before { background: var(--green); }
+.signal-notice:is([data-kind="loading"], [data-kind="idle"])::before { background: var(--faint); }
+#screen-signals .signal-live-tabs { order: -1; color: var(--faint); }
+#screen-signals .signal-tab-scope { font-size: 11px; }
+#screen-signals .signal-tab-scope strong { font-weight: 500; }
+#screen-signals .signal-tab-scope span, #screen-signals .signal-tab-scope[aria-selected="true"] span { color: var(--faint); font: 400 11px var(--mono); }
+#screen-signals .signal-tab-scope[aria-selected="true"] { border-color: color-mix(in srgb, var(--accent) 55%, var(--line)); }
+#screen-signals :is(.signal-capture-actions, .signal-feed-actions) button { font-size: 11px; }
+#screen-signals :is(.signal-capture-actions, .signal-feed-actions) button:hover:not(:disabled) { border-color: var(--line); background: var(--panel-3); }
+#screen-signals .signal-view-tabs button span,
+#screen-signals .signal-view-tabs button[aria-selected="true"] span { min-width: 0; padding: 0; border-radius: 0; background: transparent; color: var(--faint); font: 400 11px var(--mono); }
+
+/* Overview: active surfaces read in primary text, inactive ones fall back to
+   the faint role; the count never carries its own color. */
+#screen-signals .signal-panel-intro h2 { font-weight: 600; }
+#screen-signals .signal-panel-intro p { font-size: 11px; }
+#screen-signals .signal-panel-intro > span { font-size: 11px; }
+#screen-signals .signal-surface-overview { margin-bottom: 12px; }
+#screen-signals .signal-inactive-toggle { gap: 8px; }
+#screen-signals .signal-inactive-toggle input { margin: 0; }
+#screen-signals .signal-surface-card { min-height: 32px; gap: 12px; padding: 0 12px; }
+#screen-signals .signal-surface-card[data-present="true"] { color: var(--text); }
+#screen-signals .signal-surface-card[data-present="false"] { color: var(--faint); }
+#screen-signals .signal-surface-card strong { color: var(--faint); font: 400 12px var(--mono); }
+#screen-signals .signal-canvas-intro { margin-top: 0; padding-top: 20px; }
+
+/* Canvas cards: depth from the surface step and hairline only, one 16px
+   inner gutter, and the captured output as the one rich element. */
+#screen-signals .signal-render-list { gap: 16px; }
+#screen-signals .signal-render-card { box-shadow: none; }
+#screen-signals .signal-render-card-head { min-height: 56px; padding: 12px 16px; }
+#screen-signals .signal-render-card-head > div:first-child { display: block; }
+#screen-signals .signal-render-card-head h3 { font: 500 13px var(--mono); }
+#screen-signals .signal-render-card-head p { margin-top: 4px; font-size: 11px; }
+#screen-signals .signal-canvas-preview { padding: 12px 16px 16px; }
+#screen-signals .signal-canvas-preview figcaption { font: 500 11px var(--sans); }
+#screen-signals .signal-canvas-frame.unavailable { padding: 16px; }
+#screen-signals .signal-canvas-frame.unavailable strong { font-size: 12px; font-weight: 500; }
+#screen-signals .signal-canvas-frame.unavailable span { max-width: 400px; color: var(--faint); font-size: 11px; line-height: 1.5; }
+#screen-signals .signal-capture-disclosure > summary { padding: 12px 16px; }
+#screen-signals .signal-capture-disclosure[open] > summary { color: var(--text); }
+#screen-signals .signal-draw-calls { padding: 12px 16px 16px; }
+#screen-signals .signal-render-evidence { padding: 12px 16px; }
+#screen-signals :is(.signal-draw-calls, .signal-render-evidence) h4 { font-size: 11px; font-weight: 600; }
+#screen-signals .signal-draw-calls-head span { font-size: 11px; }
+#screen-signals .signal-draw-calls li { min-height: 24px; grid-template-columns: 24px minmax(0, 1fr); }
+#screen-signals :is(.signal-draw-empty, .signal-render-evidence > p) { font-size: 11px; }
+#screen-signals .signal-render-evidence > div span { font-size: 11px; }
+
+/* Activity rows and detail. */
+#screen-signals .signal-filters button { height: 28px; }
+#screen-signals .signal-pane-head p { font-size: 11px; }
+#screen-signals .signal-feed-actions { gap: 8px; }
+#screen-signals .signal-feed-actions > span { color: var(--faint); font-size: 11px; }
+#screen-signals .signal-event-time, #screen-signals .signal-event-meta { font-size: 11px; }
+#screen-signals .signal-new-badge { font: 500 11px var(--mono); }
+#screen-signals .signal-detail-eyebrow { color: var(--faint); font: 400 11px var(--mono); }
+#screen-signals .signal-detail-subtitle { font-size: 12px; }
+#screen-signals .signal-detail-badges { gap: 4px 12px; margin-bottom: 16px; }
+#screen-signals .signal-detail-badges span {
+  display: inline-flex; align-items: center; gap: 6px; padding: 0; border: 0; border-radius: 0;
+  background: transparent; font: 400 11px var(--mono); white-space: nowrap;
+}
+#screen-signals .signal-detail-badges span::before { content: ""; width: 6px; height: 6px; flex: 0 0 auto; border-radius: 50%; background: currentColor; }
+#screen-signals :is(.signal-detail-snapshot, .signal-evidence-disclosure, .signal-request-context) { margin: 0 0 16px; border-radius: 6px; }
+#screen-signals :is(.signal-detail-snapshot, .signal-request-context) { padding: 16px; }
+#screen-signals .signal-evidence-disclosure { padding: 8px 12px; }
+#screen-signals :is(.signal-detail-snapshot, .signal-request-context) h3 { font-size: 12px; font-weight: 600; }
+#screen-signals .signal-detail-snapshot dl { gap: 8px 12px; }
+#screen-signals .signal-detail-snapshot dt { font-size: 11px; }
+#screen-signals .signal-detail-snapshot dd { font-size: 11px; }
+#screen-signals .signal-evidence-disclosure summary, #screen-signals .signal-facts { font-size: 11px; }
+#screen-signals .signal-request-context p { margin: 8px 0 12px; font-size: 11px; }
+#screen-signals .signal-interpretation { margin-top: 0; font-size: 11px; }
+
+/* Request link: the same text roles as the surface chips, no dimmed cells
+   and no tinted counts. */
+#screen-signals .signal-request-card > header span { font-size: 11px; }
+#screen-signals .signal-request-card h3 { font: 500 13px var(--mono); }
+#screen-signals .signal-request-card p { font-size: 11px; }
+#screen-signals .signal-request-family { padding: 16px; opacity: 1; }
+#screen-signals .signal-request-family span { color: var(--text); font-size: 11px; }
+#screen-signals .signal-request-family strong { color: var(--faint); font: 400 12px var(--mono); }
+#screen-signals .signal-request-family small { color: var(--faint); font-size: 11px; }
+#screen-signals .signal-request-family[data-present="false"] :is(span, strong, small) { color: var(--faint); }
+
+@media (max-width: 800px) {
+  #screen-signals .signal-tab-scopes { flex: 1 1 0; }
+}
+@media (max-width: 520px) {
+  #screen-signals .signal-hero { padding: 12px 16px; }
+  #screen-signals .signal-notice { padding-inline: 16px; }
+  #screen-signals .signal-scopebar { padding: 8px 16px; }
+  #screen-signals .signal-capture-actions { flex: 1 1 100%; }
+  #screen-signals .signal-commandbar { padding: 0 16px; }
+  #screen-signals :is(.signal-rendering-panel, .signal-request-panel) { padding: 16px 16px 24px; }
+  #screen-signals .signal-filters { padding: 0 16px; }
+  #screen-signals .signal-pane-head { padding: 8px 16px; }
+  #screen-signals .signal-event-row { padding: 12px 16px; }
+  #screen-signals .signal-detail { padding: 16px; }
+  #screen-signals .signal-render-badges { padding-left: 0; }
+  #screen-signals :is(.signal-canvas-preview, .signal-draw-calls, .signal-render-evidence) { padding-inline: 12px; }
+  #screen-signals .signal-capture-disclosure > summary { padding-inline: 12px; }
+  #screen-signals .signal-render-card-head { padding-inline: 12px; }
+}
 /* End fingerprinting */
 
 /* VM findings, execution and live fixture */

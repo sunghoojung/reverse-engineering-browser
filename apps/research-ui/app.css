@@ -3809,6 +3809,19 @@ body.resizing-panes-y, body.resizing-panes-y * { cursor: row-resize !important; 
 /* End fingerprinting */
 
 /* VM findings, execution and live fixture */
+/* Tab rows mark selection with an underline, as the top navigation does: no
+   fill and no box. The dock strip keeps its 1px tab borders, only transparent,
+   so its asserted geometry (scroller boundary, insets) does not move. */
+#screen-vm .vm-workspace-switch button[aria-pressed="true"]:not(:disabled) { background: transparent; border-color: transparent; color: var(--text); box-shadow: inset 0 -2px var(--accent); }
+#screen-vm .vm-workbench-tabs button { border-color: transparent; background: transparent; color: var(--muted); }
+#screen-vm .vm-workbench-tabs button:hover { color: var(--text); }
+#screen-vm .vm-workbench-tabs button[aria-pressed="true"] { border-color: transparent; background: transparent; color: var(--text); box-shadow: inset 0 -2px var(--accent); }
+#screen-vm .vm-inspector-tabs > button:not(:disabled), #screen-vm .owned-vm-debugger-tabs button:not(:disabled), #screen-vm .vmp-detail-tabs button { border-color: transparent; border-radius: 0; background: transparent; color: var(--muted); box-shadow: none; }
+#screen-vm :is(.vm-inspector-tabs > button, .owned-vm-debugger-tabs button):not(:disabled):hover { color: var(--text); }
+#screen-vm .vm-inspector-tabs > button[aria-selected="true"]:not(:disabled), #screen-vm .owned-vm-debugger-tabs button[aria-selected="true"]:not(:disabled), #screen-vm .vmp-detail-tabs button[aria-pressed="true"] { border-color: transparent; background: transparent; color: var(--text); box-shadow: inset 0 -2px var(--accent); }
+#screen-vm .vm-context-header .vm-inspector-tabs > button { flex: 0 1 auto; padding: 8px 12px; }
+#screen-vm .owned-vm-debugger-tabs { gap: 0; border-bottom: 1px solid var(--line); }
+#screen-vm .vmp-detail-tabs { gap: 0; padding-bottom: 0; }
 /* End VM findings, execution and live fixture */
 
 /* VM static bytecode, contextual, analysis packs and opcode ledger */

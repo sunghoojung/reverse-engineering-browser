@@ -3885,7 +3885,8 @@ const capturedExportPanel = installCapturedExportDialog({
           elements.collectionRequestUrl.value = request.url;
           elements.collectionRequestMethod.value = request.method;
           elements.collectionRequestTimeout.value = String(request.timeout_ms);
-
+          elements.collectionRequestHeaders.value = request.headers.length
+            ? JSON.stringify(Object.fromEntries(request.headers.map(header => [header.name, header.value])), null, 2) : '';
           elements.collectionRequestBody.value = request.body;
           elements.collectionRequestVariables.value = collectionVariablesText(request.variables);
         }
@@ -7854,12 +7855,20 @@ const capturedExportPanel = installCapturedExportDialog({
       elements.collectionFolderForm.addEventListener('submit', event => {
         event.preventDefault(); saveCollectionFolder();
       });
-
+      elements.collectionFolderForm.querySelectorAll('input, textarea, select').forEach(field => field.addEventListener('input', () => {
+        state.collectionFolderDirty = true;
+        state.collectionDeleteFolderId = null;
+        renderCollectionFolderForm();
+      }));
       elements.collectionDeleteFolder.addEventListener('click', deleteCollectionFolder);
       elements.collectionRequestForm.addEventListener('submit', event => {
         event.preventDefault(); saveCollectionRequest();
       });
-
+      elements.collectionRequestForm.querySelectorAll('input, textarea, select').forEach(field => field.addEventListener('input', () => {
+        state.collectionDraftDirty = true;
+        state.collectionDeleteRequestId = null;
+        renderCollectionRequestForm();
+      }));
       elements.collectionDuplicateRequest.addEventListener('click', duplicateCollectionRequest);
       elements.collectionDeleteRequest.addEventListener('click', deleteCollectionRequest);
 

@@ -27,8 +27,9 @@ VM_DISPATCH_TEST_BINARY := $(BUILD_DIR)/tests/vm-dispatch-test
 OWNED_REGISTER_SAMPLER_TEST := $(BUILD_DIR)/tests/owned-register-sampler-test
 PAGE_GUEST_SAMPLER_TEST := $(BUILD_DIR)/tests/page-guest-sampler-test
 NATIVE_GUEST_TEST := $(BUILD_DIR)/tests/native-wasm-guest-test
+JS_DISPATCH_TEST := $(BUILD_DIR)/tests/js-dispatch-test
 ARTIFACT_TEST_BINARY := $(BUILD_DIR)/tests/artifact-test
-NATIVE_TEST_BINARIES := $(ARTIFACT_TEST_BINARY) $(EVENT_TEST_BINARY) $(EVENT_BROKER_TEST_BINARY) $(VM_DISPATCH_TEST_BINARY) $(OWNED_REGISTER_SAMPLER_TEST) $(PAGE_GUEST_SAMPLER_TEST) $(NATIVE_GUEST_TEST)
+NATIVE_TEST_BINARIES := $(ARTIFACT_TEST_BINARY) $(EVENT_TEST_BINARY) $(EVENT_BROKER_TEST_BINARY) $(VM_DISPATCH_TEST_BINARY) $(OWNED_REGISTER_SAMPLER_TEST) $(PAGE_GUEST_SAMPLER_TEST) $(NATIVE_GUEST_TEST) $(JS_DISPATCH_TEST)
 ORIGIN_TRACE_BACKEND := apps/origin-trace-backend/target/debug/origin-trace-backend
 VM_ANALYZER := apps/origin-trace-backend/target/debug/origin-trace-vm
 
@@ -153,3 +154,15 @@ $(NATIVE_WASM_GUEST_GOLDEN): $(BUILD_DIR)/tools/native-wasm-guest-golden.o $(BUI
 
 $(BUILD_DIR)/tests/native_wasm_guest_test.o: CPPFLAGS += -Ibrowser/integration/brave/overlay -Itools/native-test-support
 $(NATIVE_GUEST_TEST): $(BUILD_DIR)/tests/native_wasm_guest_test.o
+
+# Overlay renderer encoder and core decoder must agree on every JavaScript
+# dispatch field; the same producer emits the cross-language golden cases.
+$(BUILD_DIR)/tests/js_dispatch_test.o: CPPFLAGS += -Ibrowser/integration/brave/overlay
+$(JS_DISPATCH_TEST): $(BUILD_DIR)/tests/js_dispatch_test.o $(BUILD_DIR)/src/capture/event.o
+NATIVE_JS_DISPATCH_GOLDEN := $(BUILD_DIR)/reb-native-js-dispatch-golden
+.PHONY: native-js-dispatch-golden
+native-js-dispatch-golden: $(NATIVE_JS_DISPATCH_GOLDEN)
+$(BUILD_DIR)/tools/native-js-dispatch-golden.o: mk/config.mk mk/native.mk
+$(NATIVE_JS_DISPATCH_GOLDEN): $(BUILD_DIR)/tools/native-js-dispatch-golden.o $(BUILD_DIR)/src/capture/event.o mk/native.mk
+	$(CXX) $(filter %.o,$^) $(LDFLAGS) $(LDLIBS) -o $@
+-include $(BUILD_DIR)/tools/native-js-dispatch-golden.d

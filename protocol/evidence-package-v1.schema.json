@@ -567,7 +567,8 @@
             "artifact_capture_failed",
             "wasm_guest_dispatch",
             "wasm_guest_invocation",
-            "wasm_indirect_observation"
+            "wasm_indirect_observation",
+            "js_dispatch_observation"
           ]
         },
         "status_code": {

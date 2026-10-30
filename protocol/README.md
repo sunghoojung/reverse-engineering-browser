@@ -318,3 +318,23 @@ kept as historical records: [API observation catalog v1](api-observation-catalog
 [Native Wasm dispatch observations](native-wasm-dispatch-v1.md) use a separate
 typed128-byte payload and exact artifact/site validation; they are not legacy
 guest-PC samples.
+
+[Native JavaScript dispatch observations](native-js-dispatch-v1.md) are the
+JavaScript counterpart: a typed 128-byte payload naming an armed static site
+by script text key and UTF-16 anchor, with activation and parent activation.
+
+### Native VM event types
+
+The numeric type is defined once per language: `reb::EventType` in
+`include/reb/event.hpp` and `reb::NativeProbeType` in the overlay's
+`common/native_probe_event.h`, kept equal by static assertions. JSON readers
+use the names.
+
+| Type | Name | Payload | Contract |
+| --- | --- | --- | --- |
+| 16 | `vm_dispatch_sample` | `include/reb/vm_dispatch.hpp` | [VM Dynamic Debug v1](../docs/product/vm-dynamic-debug-v1.md) |
+| 17 | `wasm_dispatch_observation` | `include/reb/wasm_dispatch.hpp` | [native Wasm dispatch](native-wasm-dispatch-v1.md) |
+| 18 | `wasm_guest_dispatch` | `include/reb/wasm_guest.hpp` | [native Wasm guest](native-wasm-guest-v1.md) |
+| 19 | `wasm_guest_invocation` | `include/reb/wasm_guest.hpp` | [native Wasm guest](native-wasm-guest-v1.md) |
+| 20 | `wasm_indirect_observation` | `include/reb/wasm_dispatch.hpp` | [native Wasm call_indirect](native-wasm-dispatch-v1.md#call_indirect-observations) |
+| 21 | `js_dispatch_observation` | `include/reb/js_dispatch.hpp` | [native JavaScript dispatch](native-js-dispatch-v1.md) |

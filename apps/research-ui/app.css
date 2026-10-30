@@ -3809,6 +3809,10 @@ body.resizing-panes-y, body.resizing-panes-y * { cursor: row-resize !important; 
 /* End fingerprinting */
 
 /* VM findings, execution and live fixture */
+/* Weights stay at 400 to 600. Headings, strong runs and table headers in these
+   workspaces otherwise fall back to the browser bold (700). Zero class
+   specificity keeps every explicit weight above. */
+:where(#screen-vm > .screen-head, #vm-owned-controls, #vm-findings-workspace, #vm-semantics-workflow, #vm-owned-debugger) :is(h2, h3, h4, strong, b, th) { font-weight: 600; }
 /* Tab rows mark selection with an underline, as the top navigation does: no
    fill and no box. The dock strip keeps its 1px tab borders, only transparent,
    so its asserted geometry (scroller boundary, insets) does not move. */

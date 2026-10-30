@@ -51,7 +51,22 @@ TEST_NAMES = [
     "RebNativeGuestParentUnresolvedFailsClosed",
     "RebNativeGuestParentBarrierCoversEveryDispatcher",
     "RebNativeGuestParentWalkNeedsEnabledCapture",
+    "test-api/RebNativeJsDispatchDisabledAndUnarmedBytecodeIdentity",
+    "test-api/RebNativeJsDispatchSelectorKinds",
+    "test-api/RebNativeJsDispatchIndexedCallHandlerSpan",
+    "test-api/RebNativeJsDispatchEvalAndFunction",
+    "test-api/RebNativeJsDispatchLateArmingAndLazyFunctions",
+    "test-api/RebNativeJsDispatchFlushRegenerationAndRearm",
+    "test-api/RebNativeJsDispatchRefusesCodeCache",
+    "test-api/RebNativeJsDispatchSparkplugAndNoOptimization",
+    "test-api/RebNativeJsDispatchParentActivation",
+    "test-api/RebNativeJsDispatchAdmissionAndSiteCap",
 ]
+
+
+def cctest_name(name):
+    """Bare names are Wasm runner tests; others already name their cctest file."""
+    return name if "/" in name else "test-run-wasm/" + name
 
 
 def split_patch(text):
@@ -150,6 +165,10 @@ def self_test():
         assert source == original_source, patch
         assert "brave/" not in build and "brave_" not in build, patch
         assert len(omitted) <= 8, patch
+    assert cctest_name("RebNativeBrTableRuntimeDispatch") == "test-run-wasm/RebNativeBrTableRuntimeDispatch"
+    assert cctest_name("test-api/RebNativeJsDispatchSelectorKinds") == "test-api/RebNativeJsDispatchSelectorKinds"
+    assert len({cctest_name(name) for name in TEST_NAMES}) == len(TEST_NAMES)
+    assert all(re.fullmatch(r"(?:[a-z0-9-]+/)?Reb[A-Za-z0-9]+", name) for name in TEST_NAMES)
     assert binary_dependencies("deps={'tool':{'dep_type':'gcs'},'src':'git','gn':{'dep_type':'cipd'}}") == {
         "v8/tool": None, "v8/gn": None,
     }
@@ -393,7 +412,7 @@ def main():
         binary = v8 / "out/native-runtime/cctest"
         listed = run([str(binary), "--list"], v8, True)
         for name in TEST_NAMES:
-            test = "test-run-wasm/" + name
+            test = cctest_name(name)
             if test not in listed.split():
                 raise RuntimeError("Expected compiled test missing: " + test)
             run([str(binary), test], v8)

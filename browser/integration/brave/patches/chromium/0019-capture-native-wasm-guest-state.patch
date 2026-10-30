@@ -1,5 +1,5 @@
 diff --git a/third_party/blink/renderer/bindings/core/v8/v8_initializer.cc b/third_party/blink/renderer/bindings/core/v8/v8_initializer.cc
-index aaa9ddeb1fd12ab8c207b79c58a8d5536e1347b5..719133252f7c73f33b84f7fe1483b84a847b2c60 100644
+index 7dedb733ba60fb319c246e476066eaf70b82cb7f..85addbb5b75658146845a61871e70007de22d1be 100644
 --- a/third_party/blink/renderer/bindings/core/v8/v8_initializer.cc
 +++ b/third_party/blink/renderer/bindings/core/v8/v8_initializer.cc
 @@ -25,13 +25,8 @@
@@ -59,7 +59,7 @@ index aaa9ddeb1fd12ab8c207b79c58a8d5536e1347b5..719133252f7c73f33b84f7fe1483b84a
  #include "third_party/blink/renderer/platform/wtf/sanitizers.h"
  #include "third_party/blink/renderer/platform/wtf/stack_util.h"
  #include "third_party/blink/renderer/platform/wtf/text/strcat.h"
-@@ -297,6 +297,133 @@ void CaptureWasmBrTableDispatch(v8::Local<v8::Context> context,
+@@ -360,6 +360,133 @@ void CaptureWasmBrTableDispatch(v8::Local<v8::Context> context,
        document_token.GetLowForSerialization());
  }
  
@@ -193,7 +193,7 @@ index aaa9ddeb1fd12ab8c207b79c58a8d5536e1347b5..719133252f7c73f33b84f7fe1483b84a
  void CaptureWasmModuleBytes(v8::Local<v8::Context> context,
                              const v8::WasmModuleBytesOrigin origin,
                              const std::uint8_t* bytes,
-@@ -1330,6 +1457,11 @@ void V8Initializer::InitializeV8Common(v8::Isolate* isolate) {
+@@ -1395,6 +1522,11 @@ void V8Initializer::InitializeV8Common(v8::Isolate* isolate) {
    isolate->SetWasmModuleBytesCallback(CaptureWasmModuleBytes);
    isolate->SetWasmBrTableDispatchCallback(CaptureWasmBrTableDispatch,
                                          NativeWasmBrTableDispatchEnabled);

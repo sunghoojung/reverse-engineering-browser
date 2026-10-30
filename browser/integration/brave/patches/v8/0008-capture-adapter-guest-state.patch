@@ -1,8 +1,8 @@
 diff --git a/include/v8-callbacks.h b/include/v8-callbacks.h
-index fedf1ce7d0b7be7c76a705427982a38c375ba01c..337c95b0e34e30282c681eaab795e1d3f3d38690 100644
+index c682ee627fb10847eae3cc29b5a100876e124c58..3e93774cb730c0643d81b4b6bfc6fd0ea0aee6cc 100644
 --- a/include/v8-callbacks.h
 +++ b/include/v8-callbacks.h
-@@ -330,6 +330,45 @@ using WasmBrTableDispatchCallback = void (*)(
+@@ -354,6 +354,45 @@ using WasmBrTableDispatchCallback = void (*)(
  // into V8. Null means enabled; embedders should reject inactive/capped captures.
  using WasmBrTableDispatchEnabledCallback = bool (*)();
  
@@ -49,10 +49,10 @@ index fedf1ce7d0b7be7c76a705427982a38c375ba01c..337c95b0e34e30282c681eaab795e1d3
    kCompile,
    kModule,
 diff --git a/include/v8-isolate.h b/include/v8-isolate.h
-index 09606fb5cdb9e11d460981db51e8f7ec38b710c7..ae6b650ddad71523586a43a64195e52e4c621283 100644
+index bd7058a59709f3697d19bd61370a740098f8bd83..3359dab923802bb39098528ba208940ca1eb53ca 100644
 --- a/include/v8-isolate.h
 +++ b/include/v8-isolate.h
-@@ -1764,6 +1764,20 @@ class V8_EXPORT Isolate {
+@@ -1770,6 +1770,20 @@ class V8_EXPORT Isolate {
        WasmBrTableDispatchCallback callback,
        WasmBrTableDispatchEnabledCallback enabled_callback = nullptr);
  
@@ -74,7 +74,7 @@ index 09606fb5cdb9e11d460981db51e8f7ec38b710c7..ae6b650ddad71523586a43a64195e52e
  
    void SetRuntimeBufferCallback(RuntimeBufferCallback callback);
 diff --git a/src/api/api.cc b/src/api/api.cc
-index c128c929236f39661b429928f47788365d2ebe99..652d1b3b90f38bd118f4bfb95a49334dccbbef60 100644
+index cf6dd1f95f7fd9285f77fa3ac2e430f713c4e0a0..4bc04dfcdd815b45c86c659784510a2f0ca63130 100644
 --- a/src/api/api.cc
 +++ b/src/api/api.cc
 @@ -164,6 +164,7 @@
@@ -85,7 +85,7 @@ index c128c929236f39661b429928f47788365d2ebe99..652d1b3b90f38bd118f4bfb95a49334d
  #endif  // V8_ENABLE_WEBASSEMBLY
  
  #ifdef V8_INTL_SUPPORT
-@@ -11012,6 +11013,40 @@ void Isolate::SetWasmBrTableDispatchCallback(
+@@ -11020,6 +11021,40 @@ void Isolate::SetWasmBrTableDispatchCallback(
    i_isolate->set_wasm_br_table_dispatch_callback(callback);
  }
  
@@ -127,7 +127,7 @@ index c128c929236f39661b429928f47788365d2ebe99..652d1b3b90f38bd118f4bfb95a49334d
                  wasm_module_bytes_callback)
  
 diff --git a/src/execution/isolate.h b/src/execution/isolate.h
-index a695feca20c4a9f496c941f5aabf41b37fa373f3..35b0352360aabe847b399dd278b37538a50aa8d8 100644
+index 59734eea68165a96ebe2ef75c505e68550a70085..ebe1367ba8472782328afb16c3d48962ce5e06d2 100644
 --- a/src/execution/isolate.h
 +++ b/src/execution/isolate.h
 @@ -204,6 +204,7 @@ namespace wasm {
@@ -138,7 +138,7 @@ index a695feca20c4a9f496c941f5aabf41b37fa373f3..35b0352360aabe847b399dd278b37538
  class WasmCodeLookupCache;
  class WasmOrphanedGlobalHandle;
  }
-@@ -506,6 +507,12 @@ using DebugObjectCache = std::vector<Handle<HeapObject>>;
+@@ -510,6 +511,12 @@ using DebugObjectCache = std::vector<Handle<HeapObject>>;
    V(WasmBrTableDispatchEnabledCallback,                                    \
      wasm_br_table_dispatch_enabled_callback, nullptr)                      \
    V(WasmBrTableDispatchCallback, wasm_br_table_dispatch_callback, nullptr) \
@@ -151,7 +151,7 @@ index a695feca20c4a9f496c941f5aabf41b37fa373f3..35b0352360aabe847b399dd278b37538
    V(WasmModuleBytesCallback, wasm_module_bytes_callback, nullptr)           \
    V(SharedArrayBufferConstructorEnabledCallback,                            \
      sharedarraybuffer_constructor_enabled_callback, nullptr)                \
-@@ -1446,6 +1453,42 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
+@@ -1450,6 +1457,42 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
    wasm::StackPool& stack_pool() { return stack_pool_; }
  #endif  // V8_ENABLE_WEBASSEMBLY
  
@@ -194,7 +194,7 @@ index a695feca20c4a9f496c941f5aabf41b37fa373f3..35b0352360aabe847b399dd278b37538
    GlobalHandles* global_handles() const { return global_handles_; }
  
    TracedHandles* traced_handles() { return &traced_handles_; }
-@@ -2679,6 +2722,7 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
+@@ -2683,6 +2726,7 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
    UnicodeCache* unicode_cache_ = nullptr;
    AccountingAllocator* allocator_ = nullptr;
    InnerPointerToCodeCache* inner_pointer_to_code_cache_ = nullptr;
@@ -203,10 +203,10 @@ index a695feca20c4a9f496c941f5aabf41b37fa373f3..35b0352360aabe847b399dd278b37538
    TracedHandles traced_handles_;
    EternalHandles* eternal_handles_ = nullptr;
 diff --git a/src/flags/flag-definitions.h b/src/flags/flag-definitions.h
-index 3b731787cce92609899c25ef9b4d905713ee3d17..df42efb20be40c27d3abff0e5cd9f73e37fb1b76 100644
+index 84783e90625b04f2e7512721040f033d4cb2f30b..1e479d9f44db52d64d15550ff789b2470eabb86b 100644
 --- a/src/flags/flag-definitions.h
 +++ b/src/flags/flag-definitions.h
-@@ -2051,6 +2051,10 @@ DEFINE_BOOL(reb_wasm_br_table_dispatch, false,
+@@ -2057,6 +2057,10 @@ DEFINE_BOOL(reb_wasm_br_table_dispatch, false,
              "emit native REB br_table observations (baseline-only research mode)")
  DEFINE_IMPLICATION(reb_wasm_br_table_dispatch, liftoff_only)
  DEFINE_NEG_IMPLICATION(reb_wasm_br_table_dispatch, wasm_native_module_cache)
@@ -218,7 +218,7 @@ index 3b731787cce92609899c25ef9b4d905713ee3d17..df42efb20be40c27d3abff0e5cd9f73e
  DEFINE_NEG_IMPLICATION(liftoff_only, wasm_tier_up)
  DEFINE_NEG_IMPLICATION(liftoff_only, wasm_dynamic_tiering)
 diff --git a/src/runtime/runtime-wasm.cc b/src/runtime/runtime-wasm.cc
-index c3b231c1f032bc646c73742c1e3b8fac4dbe705a..23f1bc8326f45cc5e8d54ab9581d3afdf221e669 100644
+index 75ae9324ddde94bbfea44f66e14f0f30dd73aa3e..5365f614779a846452e6d0331163a4619f2b7e9b 100644
 --- a/src/runtime/runtime-wasm.cc
 +++ b/src/runtime/runtime-wasm.cc
 @@ -2,6 +2,8 @@
@@ -626,7 +626,7 @@ index c3b231c1f032bc646c73742c1e3b8fac4dbe705a..23f1bc8326f45cc5e8d54ab9581d3afd
  }
  
 diff --git a/src/wasm/baseline/liftoff-compiler.cc b/src/wasm/baseline/liftoff-compiler.cc
-index 2197c8cc28c0b83312cf0bec73237c386561b810..b8249ab8fc4dc22f56f007935db1c0844f03a9f4 100644
+index 03bb86c58e177eb3cdb402c0b20490d1a7bff39c..6c6ea3c4a90f0cb3d8d3fa27ab38f4fb2921ffe8 100644
 --- a/src/wasm/baseline/liftoff-compiler.cc
 +++ b/src/wasm/baseline/liftoff-compiler.cc
 @@ -1312,6 +1312,11 @@ class LiftoffCompiler {
@@ -708,7 +708,7 @@ index 2197c8cc28c0b83312cf0bec73237c386561b810..b8249ab8fc4dc22f56f007935db1c084
      WasmTraceMemoryDescriptor descriptor;
      Register param_reg = descriptor.GetRegisterParameter(0);
      if (info.gp() != param_reg) __ Move(param_reg, info.gp(), kIntPtrKind);
-@@ -11155,6 +11205,8 @@ class LiftoffCompiler {
+@@ -11194,6 +11244,8 @@ class LiftoffCompiler {
        // Extern ref:
        kRef, kRefNull, kI8, kI16};
  
@@ -717,7 +717,7 @@ index 2197c8cc28c0b83312cf0bec73237c386561b810..b8249ab8fc4dc22f56f007935db1c084
    LiftoffAssembler asm_;
    Label return_label_;
    LiftoffAssembler::CacheState return_label_state_;
-@@ -11350,6 +11402,7 @@ WasmCompilationResult ExecuteLiftoffCompilation(
+@@ -11389,6 +11441,7 @@ WasmCompilationResult ExecuteLiftoffCompilation(
    WasmCompilationResult result;
    compiler->GetCode(&result.code_desc);
    result.instr_buffer = compiler->ReleaseBuffer();
@@ -847,7 +847,7 @@ index 7227a1be43d7c0441b06f5699934da2c0b9c12ab..76f01637f912b02132222cb6d09736ea
    const uint32_t instructions_size_;
    const uint32_t reloc_info_size_;
 diff --git a/src/wasm/wasm-tracing.h b/src/wasm/wasm-tracing.h
-index 7106d5aec75cbb46f3158ce7e7394332f14c3537..2a24e2639dc805071b51a2315e3d13fa042b653b 100644
+index 2003d1252a310aeb07af97baaf2284e3bc80b8c7..48fe2755fd3ee65a6c3d0dfd8bee56c43cd02720 100644
 --- a/src/wasm/wasm-tracing.h
 +++ b/src/wasm/wasm-tracing.h
 @@ -11,6 +11,7 @@
@@ -858,7 +858,7 @@ index 7106d5aec75cbb46f3158ce7e7394332f14c3537..2a24e2639dc805071b51a2315e3d13fa
  #include "src/codegen/machine-type.h"
  #include "src/execution/frames.h"
  #include "src/wasm/value-type.h"
-@@ -37,9 +38,13 @@ struct alignas(uintptr_t) RebBrTableTracingInfo {
+@@ -48,9 +49,13 @@ struct alignas(uintptr_t) RebBrTableTracingInfo {
    uint32_t function_byte_offset;
    uint32_t selector;
    uint32_t table_count;
@@ -873,7 +873,7 @@ index 7106d5aec75cbb46f3158ce7e7394332f14c3537..2a24e2639dc805071b51a2315e3d13fa
  struct GlobalTracingInfo {
    uint32_t global_index;
 diff --git a/test/cctest/wasm/test-run-wasm.cc b/test/cctest/wasm/test-run-wasm.cc
-index 7f4c54127ec468e06e60235ee347fca620733e65..75ea7f04087e02fc40b50ec9aa095c3b0b82fe55 100644
+index 05543acc7ca416893e9f1f6fe9b7a5981029a975..b2803eb1ce077aa742d33b2466c6389f05eeb2d1 100644
 --- a/test/cctest/wasm/test-run-wasm.cc
 +++ b/test/cctest/wasm/test-run-wasm.cc
 @@ -6,13 +6,18 @@
@@ -895,7 +895,7 @@ index 7f4c54127ec468e06e60235ee347fca620733e65..75ea7f04087e02fc40b50ec9aa095c3b
  #include "test/cctest/wasm/wasm-runner.h"
  #include "test/common/value-helper.h"
  #include "test/common/wasm/test-signatures.h"
-@@ -1355,6 +1360,954 @@ TEST(RebNativeBrTableDisabledCompilation) {
+@@ -1613,6 +1618,954 @@ TEST(RebNativeBrTableDisabledCompilation) {
    CHECK_EQ(0, reb_dispatch_observation.count);
  }
  

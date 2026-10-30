@@ -10,6 +10,8 @@ use wasmparser::ValType;
 // components/reverse_engineering_browser/common/native_wasm_guest.h.
 const MAX_ADAPTER_BYTES: usize = 8192;
 const MAX_SNAPSHOT_BYTES: usize = 65536;
+// Match kNativeGuestSiteLimit: dispatch sites one adapter recipe configures.
+const MAX_SITES: usize = 8;
 #[derive(Default)]
 pub(super) struct Samples {
     pub rows: Vec<Value>,
@@ -73,16 +75,26 @@ fn payload(event: &Value, kind: &str, versions: &[u8]) -> Option<Vec<u8>> {
     super::event_payload_versions(event, kind, versions)
 }
 /// An invocation marker's payload. Version 2 names the exact parent dispatch
-/// at bytes 72..80; version 1 reserved them, so its parent dispatch is zero.
-/// A parent dispatch names its activation and precedes the marker.
+/// at bytes 72..80 and version 3 the adapter site at bytes 80..84; earlier
+/// versions reserved those bytes, so their parent dispatch is zero and their
+/// site is 0. A parent dispatch names its activation and precedes the marker.
 fn invocation_payload(marker: &Value) -> Option<Vec<u8>> {
-    let m = payload(marker, "wasm_guest_invocation", &[1, 2])?;
+    let m = payload(marker, "wasm_guest_invocation", &[1, 2, 3])?;
     let dispatch = le64(&m, 72);
-    let reserved = if m[0] == 1 { 72 } else { 80 };
+    let reserved = match m[0] {
+        1 => 72,
+        2 => 80,
+        _ => 84,
+    };
     (m[reserved..].iter().all(|b| *b == 0)
+        && (le32(&m, 80) as usize) < MAX_SITES
         && (dispatch == 0
             || (le64(&m, 64) != 0 && dispatch < decimal(&marker["sequence_number"])?)))
     .then_some(m)
+}
+/// The configured adapter site an admitted invocation payload names.
+fn site_index(m: &[u8]) -> usize {
+    le32(m, 80) as usize
 }
 /// The renderer sequence number of the parent dispatch that a version 2
 /// invocation marker names exactly; `None` when it names no exact dispatch.
@@ -161,6 +173,19 @@ fn adapter_recipe<'c>(
     }
     cache.get(key)?.as_ref()
 }
+/// One site's interpretation keys. Version 1 carries them at the top level of
+/// the recipe; version 2 carries them in each of 1 to 8 sites.
+const SITE_KEYS: [&str; 6] = [
+    "function_index",
+    "dispatch_module_offset",
+    "pc",
+    "bytecode",
+    "opcode",
+    "import_call_offsets",
+];
+/// Reads a retained adapter as `{sample_limit, sites}`. A version 1 recipe is
+/// one site. Version 2 sites name distinct dispatcher functions in strictly
+/// increasing order and share the one sample limit.
 fn read_recipe(
     root: &Path,
     adapter: &Value,
@@ -173,48 +198,71 @@ fn read_recipe(
     if crate::vm::canonical(&recipe).ok()? != adapter_bytes {
         return None;
     }
-    if !exact(
-        &recipe,
-        &[
-            "version",
-            "sample_limit",
-            "module_sha256",
-            "function_index",
-            "dispatch_module_offset",
-            "pc",
-            "bytecode",
-            "opcode",
-            "import_call_offsets",
-        ],
-    ) || recipe["version"] != 1
+    let sites = match recipe["version"].as_u64() {
+        Some(1) => {
+            let mut keys = vec!["version", "sample_limit", "module_sha256"];
+            keys.extend(SITE_KEYS);
+            if !exact(&recipe, &keys) {
+                return None;
+            }
+            vec![
+                SITE_KEYS
+                    .iter()
+                    .map(|key| ((*key).to_owned(), recipe[*key].clone()))
+                    .collect::<serde_json::Map<_, _>>()
+                    .into(),
+            ]
+        }
+        Some(2) => {
+            if !exact(
+                &recipe,
+                &["version", "sample_limit", "module_sha256", "sites"],
+            ) {
+                return None;
+            }
+            recipe["sites"].as_array()?.clone()
+        }
+        _ => return None,
+    };
+    if sites.is_empty()
+        || sites.len() > MAX_SITES
         || recipe["sample_limit"]
             .as_u64()
             .is_none_or(|n| n == 0 || n > 256)
         || recipe["module_sha256"] != module["sha256"]
-        || uint(&recipe["function_index"]).is_none()
-        || uint(&recipe["dispatch_module_offset"]).is_none()
     {
         return None;
     }
-    // The native parser requires strictly increasing offsets of actual
-    // direct calls to imported functions.
-    let offsets = recipe["import_call_offsets"].as_array()?;
-    if offsets.len() > 64 {
-        return None;
-    }
-    let mut previous = None;
-    for offset in offsets {
-        let offset = uint(offset)?;
-        if previous.is_some_and(|before| offset <= before)
-            || !wasm
-                .function_at(offset)
-                .is_some_and(|facts| facts.import_calls.contains(&offset))
+    let mut previous_function = None;
+    for site in &sites {
+        let function = uint(&site["function_index"])?;
+        if !exact(site, &SITE_KEYS)
+            || previous_function.is_some_and(|before| function <= before)
+            || uint(&site["dispatch_module_offset"]).is_none()
         {
             return None;
         }
-        previous = Some(offset);
+        previous_function = Some(function);
+        // The native parser requires strictly increasing offsets of actual
+        // direct calls to imported functions.
+        let offsets = site["import_call_offsets"].as_array()?;
+        if offsets.len() > 64 {
+            return None;
+        }
+        let mut previous = None;
+        for offset in offsets {
+            let offset = uint(offset)?;
+            if previous.is_some_and(|before| offset <= before)
+                || !wasm
+                    .function_at(offset)
+                    .is_some_and(|facts| facts.import_calls.contains(&offset))
+            {
+                return None;
+            }
+            previous = Some(offset);
+        }
     }
-    Some(recipe)
+    Some(json!({"sample_limit":recipe["sample_limit"],"sites":sites}))
 }
 fn resolve(
     root: &Path,
@@ -277,8 +325,18 @@ fn resolve(
     if adapter["sha256"] != recipe_sha {
         return None;
     }
+    let recipe = adapter_recipe(root, adapter, module, wasm, &mut facts.adapters)?;
+    // The marker names this activation's configured site; the dispatch must be
+    // at exactly that site.
+    let site_recipe = &recipe["sites"][site_index(&m)];
+    if uint(&site_recipe["function_index"]) != Some(function)
+        || uint(&site_recipe["dispatch_module_offset"]) != Some(site)
+    {
+        return None;
+    }
     // A cached adapter belongs to the first retained invocation that created it,
-    // not whichever activation happens to use its bytes later.
+    // not whichever activation happens to use its bytes later. That activation
+    // may be at any site of the recipe.
     let mut creator_key = super::event_identity(marker)?;
     creator_key.2 = adapter["creator_event_id"].as_str()?.to_owned();
     let creator = *invocations.get(&creator_key)?;
@@ -286,7 +344,8 @@ fn resolve(
     if !scope(creator, marker)
         || creator["artifact_id"] != module["artifact_id"]
         || creator["parent_event_id"] != "0"
-        || le32(&creator_payload, 4) != function
+        || uint(&recipe["sites"][site_index(&creator_payload)]["function_index"])
+            != Some(le32(&creator_payload, 4))
         || le64(&creator_payload, 8) == 0
         || le64(&creator_payload, 16) == 0
         || le64(&creator_payload, 64) == le64(&creator_payload, 16)
@@ -297,18 +356,15 @@ fn resolve(
     {
         return None;
     }
-    let recipe = adapter_recipe(root, adapter, module, wasm, &mut facts.adapters)?;
     if recipe["sample_limit"]
         .as_u64()
         .is_none_or(|n| u64::from(index) >= n)
-        || uint(&recipe["function_index"]) != Some(function)
-        || uint(&recipe["dispatch_module_offset"]) != Some(site)
     {
         return None;
     }
-    let pc_recipe = &recipe["pc"];
-    let byte_recipe = &recipe["bytecode"];
-    let op_recipe = &recipe["opcode"];
+    let pc_recipe = &site_recipe["pc"];
+    let byte_recipe = &site_recipe["bytecode"];
+    let op_recipe = &site_recipe["opcode"];
     if !wasm.memory_supported(memory) {
         return None;
     }
@@ -357,7 +413,7 @@ fn resolve(
     if resolved != pc {
         return None;
     }
-    let import_sites = &recipe["import_call_offsets"];
+    let import_sites = &site_recipe["import_call_offsets"];
     let width = uint(&op_recipe["width"])? as usize;
     if ![1, 2, 4].contains(&width) {
         return None;
@@ -644,6 +700,85 @@ mod tests {
         let mut f = Fixture::new();
         f.events.remove(0);
         assert_eq!(f.read().count, 0);
+    }
+    /// The fixture's v1 recipe as site 0 of a version 2 recipe whose site 1
+    /// is another dispatcher function at another offset.
+    fn two_sites(hash: &Value) -> Value {
+        let mut site = recipe(hash);
+        let map = site.as_object_mut().unwrap();
+        for key in ["version", "sample_limit", "module_sha256"] {
+            map.remove(key);
+        }
+        let mut second = site.clone();
+        second["function_index"] = json!(3);
+        second["dispatch_module_offset"] = json!(99);
+        json!({"version":2,"sample_limit":16,"module_sha256":hash,"sites":[site,second]})
+    }
+    /// Rewrites the marker as version 3, naming `site`.
+    fn name_site(f: &mut Fixture, site: u32) {
+        mutate(&mut f.events[0], |p| {
+            p[0] = 3;
+            put32(p, 80, site);
+        });
+    }
+    #[test]
+    fn native_guest_version_two_recipe_names_each_site() {
+        // Only a marker naming the sampled dispatcher's own site is admitted.
+        let mut f = Fixture::new();
+        f.set_recipe(two_sites(&f.module["sha256"].clone()));
+        name_site(&mut f, 0);
+        let rows = f.read();
+        assert_eq!(rows.count, 1);
+        assert_eq!(rows.rows[0]["host_import_call_offsets"], json!([]));
+        name_site(&mut f, 1);
+        assert_eq!(f.read().count, 0, "marker names the other site");
+        name_site(&mut f, 8);
+        assert_eq!(f.read().count, 0, "ninth site");
+        // A version 2 marker reserved the site bytes.
+        let mut f = Fixture::new();
+        f.set_recipe(two_sites(&f.module["sha256"].clone()));
+        mutate(&mut f.events[0], |p| {
+            p[0] = 2;
+            put32(p, 80, 1);
+        });
+        assert_eq!(f.read().count, 0);
+        // Malformed version 2 recipes are refused.
+        let hash = Fixture::new().module["sha256"].clone();
+        let site = two_sites(&hash)["sites"][0].clone();
+        let with = |sites: Vec<Value>| json!({"version":2,"sample_limit":16,"module_sha256":hash,"sites":sites});
+        let numbered = |n: u32| {
+            let mut s = site.clone();
+            s["function_index"] = json!(n);
+            s
+        };
+        let mut per_site = site.clone();
+        per_site["sample_limit"] = json!(16);
+        let mut over = with(vec![site.clone()]);
+        over["sample_limit"] = json!(257);
+        let mut mixed = with(vec![site.clone()]);
+        mixed["function_index"] = json!(0);
+        // Each marker names the site that would otherwise match the sample.
+        for (label, r, marker) in [
+            ("no site", with(vec![]), 0),
+            ("nine sites", with((0..9).map(numbered).collect()), 0),
+            ("duplicate", with(vec![site.clone(), site.clone()]), 0),
+            ("out of order", with(vec![numbered(3), site.clone()]), 1),
+            ("per-site budget", with(vec![per_site]), 0),
+            ("budget", over, 0),
+            ("version 1 keys", mixed, 0),
+        ] {
+            let mut f = Fixture::new();
+            f.set_recipe(r);
+            name_site(&mut f, marker);
+            assert_eq!(f.read().count, 0, "{label}");
+        }
+        // A one-site version 2 recipe reads exactly like its version 1 form.
+        let mut f = Fixture::new();
+        f.set_recipe(with(vec![site]));
+        name_site(&mut f, 0);
+        let rows = f.read();
+        assert_eq!(rows.count, 1);
+        assert_eq!(rows.rows[0]["opcode"], 5);
     }
     #[test]
     fn native_guest_envelope_and_adapter_rejections() {

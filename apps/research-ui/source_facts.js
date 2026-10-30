@@ -364,7 +364,7 @@ function createSourceFactsPanel({getSource, onNavigate, openSidebar}) {
     const report = model.report;
     if (report) {
       const coverage = report.coverage;
-      content.push(node('p', `${coverage.status === 'complete' ? 'Complete within lexical-effects-v1 only' : coverage.status === 'partial' ? 'Partial coverage: unknown effects remain' : 'Analysis unavailable'} · ${coverage.truncated ? 'TRUNCATED: analysis budget reached' : 'Analysis not truncated'} · ${coverage.frontiers.length} unknown frontiers`, 'source-facts-coverage'));
+      content.push(node('p', `${coverage.status === 'complete' ? 'Complete within lexical-effects-v1 only' : coverage.status === 'partial' ? 'Partial coverage: unknown effects remain' : 'Analysis unavailable'} · ${coverage.truncated ? 'Truncated: analysis budget reached' : 'Analysis not truncated'} · ${coverage.frontiers.length} unknown frontiers`, 'source-facts-coverage'));
       for (const message of coverage.diagnostics) content.push(node('p', message));
       content.push(node('p', 'The last successful facts remain visible for these exact original bytes.', 'source-facts-retained'));
       const select = document.createElement('select'); select.className = 'debug-select'; select.setAttribute('aria-label', 'JavaScript fact category');

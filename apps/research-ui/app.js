@@ -5927,7 +5927,7 @@ const capturedExportPanel = installCapturedExportDialog({
           name.title = node.source?.url || node.label;
           row.setAttribute('aria-label', label);
           icon.className = node.source ? `source-file-icon ${node.source.kind}` : 'tree-glyph';
-          icon.textContent = node.source ? sourceIcon(node.source) : scope.collapsed.has(node.key) ? '›' : '⌄';
+          icon.textContent = node.source ? sourceIcon(node.source) : scope.collapsed.has(node.key) ? '▸' : '▾';
           icon.title = node.source ? sourceKindLabel(node.source.kind)?.[1] ?? node.source.kind : '';
           detail.textContent = node.children ? String(node.count) : sourceDisplayMeta(node.source);
           if (node.source) {
@@ -6027,8 +6027,7 @@ const capturedExportPanel = installCapturedExportDialog({
           close.className = 'source-tab-close';
           close.textContent = '×';
           close.setAttribute('aria-hidden', 'true');
-          const kind = document.createElement('span'); kind.className = 'source-tab-kind'; kind.textContent = 'captured';
-          tab.append(icon, name, kind, close);
+          tab.append(icon, name, close);
           tab.addEventListener('click', event => {
             if (event.target === close) {
               closeSource(source);
@@ -7184,7 +7183,7 @@ const capturedExportPanel = installCapturedExportDialog({
           row.type = 'button';
           row.className = 'quick-open-row';
           const name = document.createElement('span'); name.textContent = sourceDisplayName(source);
-          const path = document.createElement('small'); path.textContent = `Captured · ${source.url || '(anonymous)'}`;
+          const path = document.createElement('small'); path.textContent = source.url || '(anonymous)';
           row.append(name, path);
           row.addEventListener('click', () => {
             elements.quickOpen.hidden = true;

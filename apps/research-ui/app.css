@@ -3847,6 +3847,25 @@ body.resizing-panes-y, body.resizing-panes-y * { cursor: row-resize !important; 
 #screen-vm .vm-semantics-workflow[data-context-open="true"] > .vm-context-launchers { display: none; }
 #screen-vm .vm-listing-row[aria-selected="true"] { font-weight: 500; }
 #screen-vm .vm-execution-navigation .vm-step-controls button { flex-basis: 100%; }
+/* Live fixture: one filled action per state (Create before a fixture exists,
+   Step after it), and one window of hairline-divided panes. History rows are
+   list rows selected by the shared fill and rail; filter toggles need no rail. */
+#screen-vm [data-owned-vm-action="run"]:not(:disabled) { background: var(--vm-control-bg); color: var(--vm-control-fg); border-color: var(--vm-control-line); }
+#screen-vm [data-owned-vm-action="run"]:focus { outline-color: var(--vm-focus); }
+#screen-vm .owned-vm-debugger-toolbar { border-width: 0 0 1px; }
+#screen-vm .owned-vm-debugger-panes { gap: 0; }
+#screen-vm :is(.owned-vm-debugger-navigation, .owned-vm-debugger-listing, .owned-vm-debugger-inspector) { padding: 12px; border: 0; }
+#screen-vm :is(.owned-vm-debugger-listing, .owned-vm-debugger-inspector) { border-left: 1px solid var(--line); }
+#screen-vm .owned-vm-debugger-table-scroll th { color: var(--muted); font: 500 10px var(--sans); }
+#screen-vm .owned-vm-debugger-history button { margin: 0; border-width: 0 0 1px; border-color: var(--line-soft); border-radius: 0; background: transparent; }
+#screen-vm .owned-vm-debugger-opcodes [aria-pressed="true"]:not(:disabled) { box-shadow: none; }
+@media (max-width: 1050px) {
+  #screen-vm .owned-vm-debugger-navigation { border-bottom: 1px solid var(--line); }
+  #screen-vm .owned-vm-debugger-listing { border-left: 0; }
+}
+@media (max-width: 650px) {
+  #screen-vm .owned-vm-debugger-inspector { border-left: 0; border-top: 1px solid var(--line); }
+}
 /* End VM findings, execution and live fixture */
 
 /* VM static bytecode, contextual, analysis packs and opcode ledger */

@@ -42,6 +42,11 @@ class NativeProbeSession final {
   [[nodiscard]] const std::string& guest_adapter_json() const noexcept {
     return guest_adapter_json_;
   }
+  // Fixed 44-byte native JavaScript dispatch site records for this session;
+  // empty unless a valid --reb-js-dispatch-sites file was supplied.
+  [[nodiscard]] const std::vector<std::uint8_t>& js_dispatch_sites() const noexcept {
+    return js_dispatch_sites_;
+  }
   [[nodiscard]] bool IsActive() const noexcept;
   [[nodiscard]] std::uint64_t session_id() const noexcept;
   [[nodiscard]] std::uint64_t category_mask() const noexcept;
@@ -62,6 +67,8 @@ class NativeProbeSession final {
   static void EmitBrowserEvent(const NativeProbeEvent& event) noexcept;
 
   std::string guest_adapter_json_, guest_startup_adapter_json_;
+  std::string js_dispatch_startup_sites_json_;
+  std::vector<std::uint8_t> js_dispatch_sites_;
   std::vector<raw_ptr<NativeProbeHost>> hosts_;
   std::atomic<NativeProbeEmitter> downstream_{nullptr};
   std::atomic<std::uint64_t> session_id_{0};

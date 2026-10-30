@@ -15,6 +15,13 @@ coalescing, and allocation-free disabled calls. Looping/waiting in the fixture c
 probe calls make one claim CAS and one TryPush call. The existing queue is
 lock-free, not wait-free; its internal contention retries are unchanged.
 
+Native JavaScript dispatch cases check the byte-exact 128-byte payload and every
+validation rule, the 44-byte site records, the inactive epoch, expiry and VM
+category refusal, the 64-per-site and 256-per-configuration budgets with their
+coalesced gaps, ring-full claim release, transport and input gaps,
+compiled-before-arming gaps per slot, and the fixed site list. The V8-facing
+calls are checked not to invoke the frame-id provider.
+
 For ASan/UBSan, run:
 
 ```sh

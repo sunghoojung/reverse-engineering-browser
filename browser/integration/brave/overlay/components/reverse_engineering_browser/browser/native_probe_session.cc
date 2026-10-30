@@ -16,6 +16,7 @@
 #include "brave/components/reverse_engineering_browser/browser/native_artifact_capture_sink.h"
 #include "brave/components/reverse_engineering_browser/browser/native_network_capture_sink.h"
 #include "brave/components/reverse_engineering_browser/browser/native_probe_host.h"
+#include "brave/components/reverse_engineering_browser/common/native_js_dispatch_sites.h"
 #include "brave/components/reverse_engineering_browser/common/native_wasm_guest_adapter.h"
 #include "content/public/browser/render_process_host.h"
 #include "mojo/public/cpp/bindings/self_owned_receiver.h"
@@ -76,6 +77,26 @@ bool NativeProbeSession::StartSession(const std::uint64_t session_id,
       return false;
     }
   }
+  js_dispatch_sites_.clear();
+  if (command_line->HasSwitch("reb-js-dispatch-sites")) {
+    // Armed bytecode cannot be retargeted, so the file is fixed for the
+    // browser lifetime and a changed or invalid file refuses the session.
+    const auto path = command_line->GetSwitchValuePath("reb-js-dispatch-sites");
+    std::string json;
+    if (path.empty() ||
+        !base::ReadFileToStringWithMaxSize(path, &json, kNativeJsDispatchSitesFileLimit) ||
+        (!js_dispatch_startup_sites_json_.empty() && js_dispatch_startup_sites_json_ != json) ||
+        (category_mask & NativeProbeCategoryMask(NativeProbeCategory::kVm)) == 0) {
+      guest_adapter_json_.clear();
+      return false;
+    }
+    js_dispatch_sites_ = ParseNativeJsDispatchSites(json);
+    if (js_dispatch_sites_.empty()) {
+      guest_adapter_json_.clear();
+      return false;
+    }
+    js_dispatch_startup_sites_json_ = std::move(json);
+  }
   category_mask_.store(category_mask, std::memory_order_relaxed);
   expires_at_monotonic_ns_.store(expires_at_monotonic_ns, std::memory_order_relaxed);
   capture_canvas_images_.store(capture_canvas_images, std::memory_order_relaxed);
@@ -94,6 +115,7 @@ bool NativeProbeSession::StartSession(const std::uint64_t session_id,
 
 void NativeProbeSession::StopSession() noexcept {
   guest_adapter_json_.clear();
+  js_dispatch_sites_.clear();
   NativeArtifactCaptureSink::Get().SetEmitter(nullptr, 0, 0, 0);
   NativeNetworkCaptureSink::Get().SetEmitter(nullptr, 0, 0, 0);
   session_id_.store(0, std::memory_order_release);

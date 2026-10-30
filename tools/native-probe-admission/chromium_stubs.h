@@ -10,6 +10,7 @@
 #include <span>
 #include <string>
 #include <utility>
+#include <vector>
 
 #define COMPONENT_EXPORT(component)
 #define UNSAFE_BUFFERS(...) __VA_ARGS__
@@ -108,7 +109,8 @@ struct NativeProbeClient {
                          bool,
                          base::UnsafeSharedMemoryRegion,
                          std::uint64_t,
-                         const std::string&) = 0;
+                         const std::string&,
+                         const std::vector<std::uint8_t>&) = 0;
   virtual void Disable() = 0;
   virtual void NativeGuestModuleStatus(std::uint64_t, std::uint64_t, bool) = 0;
 };

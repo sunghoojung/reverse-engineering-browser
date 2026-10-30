@@ -5,10 +5,12 @@
 
 #include "brave/components/reverse_engineering_browser/renderer/native_probe_transport.h"
 
+#include <array>
 #include <bit>
 #include <cstring>
 #include <memory>
 #include <utility>
+#include <vector>
 #include "brave/components/reverse_engineering_browser/common/native_wasm_guest_adapter.h"
 
 #include "base/functional/bind.h"
@@ -61,7 +63,8 @@ void NativeProbeTransport::Configure(const std::uint64_t session_id,
                                      const bool capture_canvas_images,
                                      base::UnsafeSharedMemoryRegion queue_region,
                                      const std::uint64_t wasm_capture_epoch,
-                                     const std::string& guest_adapter_json) {
+                                     const std::string& guest_adapter_json,
+                                     const std::vector<std::uint8_t>& js_dispatch_sites) {
   Disable();
   const std::uint64_t now =
       static_cast<std::uint64_t>(base::TimeTicks::Now().since_origin().InNanoseconds());
@@ -92,6 +95,14 @@ void NativeProbeTransport::Configure(const std::uint64_t session_id,
   if (!guest_adapter_json.empty())
     NativeProbeSink::Get().ConfigureNativeWasmGuest(ParseNativeWasmGuestAdapter(guest_adapter_json),
                                                     &EmitNativeGuest, &EmitNativeGuestHost);
+  if (!js_dispatch_sites.empty()) {
+    // A malformed list arms nothing. Its zero-length placeholder site is
+    // refused by the sink, which reports the configuration's input gap.
+    std::array<NativeJsDispatchSite, kNativeJsDispatchSiteLimit> sites{};
+    const std::size_t count = DecodeNativeJsDispatchSites(js_dispatch_sites, sites);
+    NativeProbeSink::Get().ConfigureNativeJsDispatch(
+        std::span<const NativeJsDispatchSite>(sites.data(), count ? count : 1));
+  }
 }
 
 void NativeProbeTransport::Disable() {

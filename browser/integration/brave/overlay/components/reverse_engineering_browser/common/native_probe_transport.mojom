@@ -15,7 +15,10 @@ interface NativeProbeClient {
             bool capture_canvas_images,
             mojo_base.mojom.UnsafeSharedMemoryRegion queue_region,
             uint64 wasm_capture_epoch,
-            string guest_adapter_json);
+            string guest_adapter_json,
+            // Fixed 44-byte native JavaScript dispatch site records (at most 8),
+            // already validated by the browser; empty when not armed.
+            array<uint8> js_dispatch_sites);
   Disable();
   // Browser verdict on the module bytes carried by the guest capture whose
   // dispatch sequence number is module_token. The renderer keeps sending an

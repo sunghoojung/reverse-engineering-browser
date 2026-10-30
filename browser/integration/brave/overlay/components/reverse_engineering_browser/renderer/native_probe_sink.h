@@ -17,6 +17,7 @@
 
 #include "base/component_export.h"
 #include "brave/components/reverse_engineering_browser/common/native_artifact_header.h"
+#include "brave/components/reverse_engineering_browser/common/native_js_dispatch.h"
 #include "brave/components/reverse_engineering_browser/common/native_probe_event.h"
 #include "brave/components/reverse_engineering_browser/common/native_vm_dispatch_emit.h"
 #include "brave/components/reverse_engineering_browser/common/native_vm_finding.h"
@@ -216,6 +217,31 @@ class COMPONENT_EXPORT(REB_NATIVE_PROBE_SINK) NativeProbeSink final {
   void SetNativeWasmIndirectEmitter(NativeWasmIndirectEmitter emitter) noexcept;
   [[nodiscard]] bool IsNativeWasmIndirectEnabled() const noexcept;
   void RecordNativeWasmIndirect(NativeWasmIndirectObservation observation) noexcept;
+  // Native JavaScript dispatch at armed static sites. The browser keeps the
+  // site list immutable for its lifetime; a different list is refused with an
+  // input gap. Configure after SetEmitters, which disarms the previous list.
+  void ConfigureNativeJsDispatch(std::span<const NativeJsDispatchSite> sites) noexcept;
+  // The configuration generation while JS dispatch is configured for it and
+  // the session is active with the VM category and unexpired; otherwise 0.
+  // V8 pulls it and must not be re-entered: these never call the frame-id
+  // provider, allocate or block.
+  [[nodiscard]] std::uint64_t NativeJsDispatchEpoch() const noexcept;
+  // Copies the armed sites for a still-current epoch; returns 0 otherwise.
+  [[nodiscard]] std::size_t CopyNativeJsDispatchSites(
+      std::uint64_t epoch,
+      std::span<NativeJsDispatchSite> out) const noexcept;
+  // False once the configuration's 256 samples or the slot's 64 are spent.
+  [[nodiscard]] bool IsNativeJsDispatchEnabled(std::uint64_t epoch,
+                                               std::uint32_t slot) const noexcept;
+  // Assigns both sample indices and emits through the ordinary ring. The
+  // payload must name the configured site of its slot exactly.
+  void RecordNativeJsDispatch(std::uint64_t epoch,
+                              std::uint64_t frame_id,
+                              NativeJsDispatchObservationPayload payload) noexcept;
+  void NoteNativeJsDispatchStatus(std::uint64_t epoch,
+                                  std::uint32_t slot,
+                                  NativeJsDispatchSiteStatus status) noexcept;
+  void NoteNativeJsDispatchInputUnavailable(std::uint64_t epoch, std::uint64_t frame_id) noexcept;
   void RecordApiCall(NativeProbeCategory category, std::string_view operation) noexcept;
   void RecordPropertyRead(NativeProbeCategory category, std::string_view operation) noexcept;
   // Call-site state is an opaque, monotonically ordered configuration claim,
@@ -312,6 +338,32 @@ class COMPONENT_EXPORT(REB_NATIVE_PROBE_SINK) NativeProbeSink final {
   enum class NativeWasmOmission : std::size_t { kInput, kTransport, kBudget };
   bool NoteNativeWasmDispatchOmission(const VmAdmission& admission,
                                       NativeWasmOmission reason) noexcept;
+  // Coalesced JS dispatch gaps: budget, site budget, transport, input, then
+  // one compiled-before-arming reason per site slot.
+  static constexpr std::size_t kNativeJsBudgetGap = 0, kNativeJsSiteBudgetGap = 1,
+                               kNativeJsTransportGap = 2, kNativeJsInputGap = 3,
+                               kNativeJsCompiledBeforeArmingGap = 4;
+  [[nodiscard]] bool NativeJsDispatchActive(std::uint64_t generation) const noexcept;
+  bool NoteNativeJsDispatchOmission(std::uint64_t generation,
+                                    std::uint64_t frame_id,
+                                    std::size_t gap) noexcept;
+  // Written once before native_js_site_count_ is release-published and never
+  // rewritten, so V8-thread readers need no lock.
+  std::array<NativeJsDispatchSite, kNativeJsDispatchSiteLimit> native_js_sites_{};
+  std::atomic<std::size_t> native_js_site_count_{0};
+  std::atomic<std::uint64_t> native_js_generation_{0};
+  // Generation-tagged claims, as for Wasm dispatch: a slot holding an older
+  // generation is free for the current one.
+  std::array<std::atomic<std::uint64_t>, kNativeJsDispatchSampleBudget> native_js_slots_{};
+  std::array<std::array<std::atomic<std::uint64_t>, kNativeJsDispatchSiteSampleBudget>,
+             kNativeJsDispatchSiteLimit>
+      native_js_site_slots_{};
+  std::atomic<std::uint64_t> native_js_capped_generation_{0};
+  std::array<std::atomic<std::uint64_t>, kNativeJsDispatchSiteLimit>
+      native_js_site_capped_generations_{};
+  std::array<std::atomic<std::uint64_t>,
+             kNativeJsCompiledBeforeArmingGap + kNativeJsDispatchSiteLimit>
+      native_js_gap_generations_{};
   std::atomic<NativeWasmDispatchEmitter> native_wasm_emitter_{nullptr};
   std::array<std::atomic<std::uint64_t>, kNativeWasmDispatchSampleBudget> native_wasm_slots_{};
   std::array<std::atomic<std::uint64_t>, 3> native_wasm_gap_generations_{};

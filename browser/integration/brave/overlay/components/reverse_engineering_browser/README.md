@@ -141,6 +141,17 @@ uses an embedder callback and never wraps JavaScript constructors. At most 16
 snapshots are submitted per renderer and per browser session, then all bytes
 use the existing bounded artifact transfer queue.
 
+Native JavaScript dispatch observations (`js_dispatch_observation`, event 21)
+use `common/native_js_dispatch.h` for the 128-byte payload and the fixed 44-byte
+site records, and `common/native_js_dispatch_sites.h` for the browser-side
+canonical site file. The renderer sink exposes a pulled epoch and an
+allocation-free admission predicate to V8, never calls the frame-id provider on
+that path, and claims one of 256 configuration samples and one of 64 site samples
+before emitting through the ordinary ring. A full ring returns both claims and
+keeps its drop count; budget, emitter, invalid-input and compiled-before-arming
+refusals are coalesced gaps. See the
+[contract](../../../../../../protocol/native-js-dispatch-v1.md).
+
 Renderer code never writes files or sockets directly.
 
 The dedicated-worker source foundation uses a separate, dormant process-wide

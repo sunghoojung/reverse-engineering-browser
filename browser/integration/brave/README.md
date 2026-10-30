@@ -397,3 +397,25 @@ interpreter at one site links to its outer handler at another; the walk then
 treats an untracked frame of any configured dispatcher as a possible parent.
 See [native guest observations](../../../protocol/native-wasm-guest-v1.md).
 All CDP capture/transport functionality has been removed from the companion.
+
+## Native JavaScript dispatch (opt-in)
+
+Rebuilt browsers can record live dispatch at up to 8 static interpreter-candidate
+JavaScript sites (`switch` and `t[k](...)`) named in an analyzer-written site
+file. Launch with `REB_NATIVE_JS_DISPATCH_SITES=/absolute/path/sites.json`; the
+launcher adds `--js-flags=--reb-js-dispatch-capture` and
+`--reb-js-dispatch-sites=<path>`, and the session requires the VM category. The
+browser validates the canonical file once per session, refuses a changed file
+until restart, and sends the renderer fixed 44-byte site records. Chromium patch
+`0020` installs the V8 callbacks for the main-thread isolate only, so workers
+are never armed. Records use the ordinary renderer ring (256 per configuration,
+64 per site) and every refusal is a coalesced `gap`.
+
+The V8 flag turns off code caching, script streaming and the in-memory
+compilation cache browser-wide and never optimizes an armed function, so this
+mode is not performance-neutral. See the
+[wire contract and limits](../../../protocol/native-js-dispatch-v1.md) and the
+[design review](../../../docs/product/native-js-dispatch-v1.md).
+`./tools/check-native-probe-admission.sh` covers the renderer budgets, expiry
+and gaps; `native_js_dispatch_sites_unittests` covers the site-file parser and
+needs the pinned Chromium build.

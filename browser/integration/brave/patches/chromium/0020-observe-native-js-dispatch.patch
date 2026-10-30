@@ -1,0 +1,129 @@
+diff --git a/third_party/blink/renderer/bindings/core/v8/v8_initializer.cc b/third_party/blink/renderer/bindings/core/v8/v8_initializer.cc
+index 46ac734a8414c150fb85637438167dcff9184c61..80e13505a580cc9884ce7c7ec6b17c2f4df102af 100644
+--- a/third_party/blink/renderer/bindings/core/v8/v8_initializer.cc
++++ b/third_party/blink/renderer/bindings/core/v8/v8_initializer.cc
+@@ -26,6 +26,7 @@
+ #include "third_party/blink/renderer/bindings/core/v8/v8_initializer.h"
+ 
+ #include <algorithm>
++#include <array>
+ #include <atomic>
+ #include <bit>
+ #include <cstdint>
+@@ -491,6 +492,98 @@ void CaptureWasmGuestDispatch(v8::Local<v8::Context> context,
+       document_token.GetLowForSerialization());
+ }
+ 
++// Native JavaScript dispatch: V8 pulls the epoch and armed sites, then reports
++// dispatches at those sites. These run on the main isolate thread and only
++// read the renderer sink; none of them calls back into V8.
++std::uint64_t NativeJsDispatchEpoch() {
++  return reb::NativeProbeSink::Get().NativeJsDispatchEpoch();
++}
++
++std::size_t NativeJsDispatchSites(const std::uint64_t epoch,
++                                  v8::JsDispatchSite* const sites,
++                                  const std::size_t capacity) {
++  if (!sites || capacity == 0) {
++    return 0;
++  }
++  std::array<reb::NativeJsDispatchSite, reb::kNativeJsDispatchSiteLimit> copied;
++  const std::size_t count =
++      std::min(reb::NativeProbeSink::Get().CopyNativeJsDispatchSites(epoch, copied),
++               capacity);
++  const auto out = UNSAFE_BUFFERS(base::span(sites, capacity));
++  for (std::size_t i = 0; i < count; ++i) {
++    base::span(out[i].source_sha256).copy_from(base::span(copied[i].source_sha256));
++    out[i].source_length = copied[i].source_length;
++    out[i].anchor_offset = copied[i].anchor_offset;
++    out[i].shape = static_cast<v8::JsDispatchShape>(copied[i].shape);
++  }
++  return count;
++}
++
++bool NativeJsDispatchEnabled(const std::uint64_t epoch, const std::uint32_t slot) {
++  // V8 calls this before frame walking or creating handles.
++  return reb::NativeProbeSink::Get().IsNativeJsDispatchEnabled(epoch, slot);
++}
++
++void CaptureJsDispatch(v8::Local<v8::Context> context,
++                       const std::uint64_t epoch,
++                       const v8::JsDispatchObservation& observation) {
++  reb::NativeProbeSink& sink = reb::NativeProbeSink::Get();
++  // Only a live local document has the frame identity the record needs.
++  // Workers and other realms are never armed and are not retargeted.
++  ExecutionContext* execution_context =
++      context.IsEmpty() ? nullptr : ToExecutionContext(context);
++  auto* window = execution_context && !execution_context->IsContextDestroyed()
++                     ? DynamicTo<LocalDOMWindow>(execution_context)
++                     : nullptr;
++  const std::uint64_t frame_id = window && window->GetFrame() && window->document()
++                                     ? StableFrameId(*execution_context)
++                                     : 0;
++  if (frame_id == 0 || !observation.source_sha256 || observation.script_id <= 0 ||
++      observation.handler_script_id < 0) {
++    sink.NoteNativeJsDispatchInputUnavailable(epoch, frame_id);
++    return;
++  }
++  reb::NativeJsDispatchObservationPayload payload;
++  payload.shape = static_cast<std::uint8_t>(observation.shape);
++  payload.selector_kind = static_cast<std::uint8_t>(observation.selector_kind);
++  payload.site_slot = observation.slot < reb::kNativeJsDispatchSiteLimit
++                          ? static_cast<std::uint8_t>(observation.slot)
++                          : static_cast<std::uint8_t>(reb::kNativeJsDispatchSiteLimit);
++  payload.flags = static_cast<std::uint8_t>(
++      (observation.new_activation ? reb::kNativeJsDispatchNewActivation : 0) |
++      (observation.parent_unknown ? reb::kNativeJsDispatchParentUnknown : 0) |
++      (observation.parent_search_truncated
++           ? reb::kNativeJsDispatchParentSearchTruncated
++           : 0) |
++      (observation.handler_script_id != 0 ? reb::kNativeJsDispatchHandlerSpan
++                                          : 0));
++  payload.script_id = static_cast<std::uint32_t>(observation.script_id);
++  payload.anchor_offset = observation.anchor_offset;
++  payload.source_length = observation.source_length;
++  payload.selector_low32 = observation.selector_low32;
++  payload.handler_script_id =
++      static_cast<std::uint32_t>(observation.handler_script_id);
++  payload.handler_start = observation.handler_start;
++  payload.handler_end = observation.handler_end;
++  payload.activation_id = observation.activation_id;
++  payload.parent_activation_id = observation.parent_activation_id;
++  base::span(payload.source_sha256)
++      .copy_from(UNSAFE_BUFFERS(base::span<const std::uint8_t, 32>(
++          observation.source_sha256, 32u)));
++  // The sink validates every wire rule and the configured site of the slot.
++  sink.RecordNativeJsDispatch(epoch, frame_id, payload);
++}
++
++void NoteJsDispatchStatus(const std::uint64_t epoch,
++                          const std::uint32_t slot,
++                          const v8::JsDispatchSiteStatus status,
++                          int /*script_id*/) {
++  if (status == v8::JsDispatchSiteStatus::kCompiledBeforeArming) {
++    reb::NativeProbeSink::Get().NoteNativeJsDispatchStatus(
++        epoch, slot, reb::NativeJsDispatchSiteStatus::kCompiledBeforeArming);
++  }
++}
++
+ void CaptureWasmModuleBytes(v8::Local<v8::Context> context,
+                             const v8::WasmModuleBytesOrigin origin,
+                             const std::uint8_t* bytes,
+@@ -1532,6 +1625,17 @@ void V8Initializer::InitializeV8Common(v8::Isolate* isolate) {
+       NativeWasmGuestDispatcherFunction);
+   reb::NativeProbeSink::Get().SetNativeWasmGuestRuntime(CurrentNativeWasmGuest,
+                                                         ResetNativeWasmGuest);
++  if (IsMainThread()) {
++    // Document-only: worker isolates never arm JavaScript dispatch sites, so
++    // their bytecode and optimization stay unchanged.
++    v8::JsDispatchCallbacks js_dispatch;
++    js_dispatch.epoch = NativeJsDispatchEpoch;
++    js_dispatch.sites = NativeJsDispatchSites;
++    js_dispatch.enabled = NativeJsDispatchEnabled;
++    js_dispatch.observe = CaptureJsDispatch;
++    js_dispatch.status = NoteJsDispatchStatus;
++    isolate->SetJsDispatchCallbacks(js_dispatch);
++  }
+   isolate->SetRuntimeBufferCallback(CaptureRuntimeBuffer);
+   isolate->SetWasmCustomDescriptorsEnabledCallback(
+       WasmCustomDescriptorsEnabledCallback);

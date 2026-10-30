@@ -249,6 +249,7 @@ class NativeProbeSession {
   std::uint64_t expires_at_monotonic_ns() const { return expires; }
   bool capture_canvas_images() const { return false; }
   const std::string& guest_adapter_json() const { return adapter_json; }
+  const std::vector<std::uint8_t>& js_dispatch_sites() const { return js_sites; }
   void Emit(const NativeProbeEvent& event) const {
     if (emitted)
       emitted(event);
@@ -258,6 +259,7 @@ class NativeProbeSession {
   bool active = false;
   std::uint64_t id = 0, mask = 0, expires = 0;
   std::string adapter_json;
+  std::vector<std::uint8_t> js_sites;
   std::function<void(const NativeProbeEvent&)> emitted;
 
  private:
@@ -365,7 +367,8 @@ class NativeProbeClient {
                          bool,
                          base::UnsafeSharedMemoryRegion,
                          std::uint64_t,
-                         const std::string&) = 0;
+                         const std::string&,
+                         const std::vector<std::uint8_t>&) = 0;
   virtual void Disable() = 0;
   virtual void NativeGuestModuleStatus(std::uint64_t, std::uint64_t, bool) = 0;
 };

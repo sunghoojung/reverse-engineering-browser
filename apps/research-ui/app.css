@@ -3797,6 +3797,88 @@ body.resizing-panes-y, body.resizing-panes-y * { cursor: row-resize !important; 
    named screen; shared shell rules live above. */
 
 /* Traffic and request inspector */
+/* Filters and tab scopes select with a surface step and a hairline, so the
+   accent stays on the selected request, the active tab and Trace origin. */
+#screen-traffic .network-tools { padding: 8px; }
+#screen-traffic .request-filters .type-filter[aria-pressed="true"],
+#screen-traffic .request-tab-scope[aria-selected="true"] { border-color: var(--line); background: var(--panel-3); color: var(--text); }
+#screen-traffic .request-tab-scope { height: 24px; min-height: 24px; padding: 0 8px; }
+#screen-traffic .request-tab-scope strong { font-weight: 500; }
+#screen-traffic .request-tab-scope span { font-variant-numeric: tabular-nums; }
+#screen-traffic .request-domain-filter { gap: 8px; font-size: 11px; }
+#screen-traffic .request-domain-filter select { height: 24px; }
+#screen-traffic #request-window-status { font: 10px var(--mono); font-variant-numeric: tabular-nums; }
+#screen-traffic .request-window button { padding: 2px 4px; }
+
+/* The detail pane's strip, tabs and panels share one 12px inset. */
+#screen-traffic .selection-strip { min-height: 36px; gap: 4px 8px; padding: 4px 12px; }
+#screen-traffic .selection-strip .secondary-button { min-height: 24px; padding: 0 8px; font-size: 11px; }
+#screen-traffic #request-detail-close { width: 24px; padding: 0; border-color: transparent; background: transparent; color: var(--muted); font-size: 14px; }
+#screen-traffic .secondary-button:hover:not(:disabled) { border-color: var(--line); background: var(--panel-3); }
+#screen-traffic #request-detail-close:hover { border-color: transparent; color: var(--text); }
+#screen-traffic .inspector-tabs { gap: 16px; padding: 0 12px; }
+#screen-traffic .field-tabs { gap: 16px; }
+#screen-traffic .traffic-general { padding: 12px; border-bottom: 0; }
+#screen-traffic .request-inspector { padding: 12px; }
+#screen-traffic .traffic-general h2,
+#screen-traffic .request-inspector > h1 { margin: 0 0 8px; font: 500 12px/16px var(--sans); }
+
+/* General: captured values stay mono, coverage notes read as prose and the
+   Source row carries the provenance tag. Rows match the other tabs' rows. */
+#screen-traffic .traffic-general-row { grid-template-columns: 120px minmax(0, 1fr); align-items: baseline; gap: 12px; padding: 8px 0; border-bottom: 1px solid var(--line-soft); font: 11px/16px var(--mono); }
+#screen-traffic .traffic-general-row > :first-child { font: 12px/16px var(--sans); }
+#screen-traffic .traffic-general-value[data-kind="prose"] { font: 12px/16px var(--sans); }
+#screen-traffic .traffic-general-value[data-kind="provenance"] { display: inline-flex; align-items: center; gap: 6px; justify-self: start; color: var(--muted); }
+#screen-traffic .traffic-general-value[data-kind="provenance"]::before { content: ""; width: 6px; height: 6px; flex: 0 0 auto; border-radius: 50%; background: var(--faint); }
+#screen-traffic .traffic-general-value[data-origin="live"]::before { background: var(--green); }
+#screen-traffic .traffic-general-value[data-origin="demo"]::before { background: var(--amber); }
+
+/* Rows share the tree's columns, so values and types align whatever each
+   type label's width. Detail values wrap instead of hiding evidence. */
+#screen-traffic .field-tree { min-height: 0; padding-top: 0; display: grid; grid-template-columns: fit-content(40%) minmax(0, 1fr) auto; column-gap: 12px; align-content: start; }
+#screen-traffic .field-row { grid-column: 1 / -1; grid-template-columns: subgrid; min-height: 32px; padding: 8px 0; align-items: baseline; font: 11px/16px var(--mono); }
+#screen-traffic .field-tree:has(.field-row.selectable) .field-row { padding-inline: 8px; }
+#screen-traffic .field-row[aria-pressed="true"] { box-shadow: inset 2px 0 var(--accent); }
+#screen-traffic .field-key { min-width: 120px; padding-left: calc(var(--depth, 0) * 12px); line-height: 16px; }
+#screen-traffic .field-type { line-height: 16px; }
+#screen-traffic .field-row:not(.selectable) .field-value { overflow: visible; white-space: normal; overflow-wrap: anywhere; }
+#screen-traffic .field-row:is([data-type="unavailable"], [data-type="source"]) .field-value { color: var(--muted); font: 12px/16px var(--sans); }
+#screen-traffic .field-empty { grid-column: 1 / -1; min-height: 0; display: block; padding: 8px 0; border-bottom: 0; color: var(--muted); text-align: left; font: 12px/16px var(--sans); }
+#screen-traffic .field-key.group::before,
+#screen-traffic .field-key.traceable::before { content: ""; display: inline-block; width: 12px; height: 12px; margin-right: 8px; vertical-align: -2px; background: var(--faint); }
+#screen-traffic .field-tree:has(.field-row.selectable) .field-key:not(.group, .traceable)::before { content: ""; display: inline-block; width: 12px; margin-right: 8px; }
+#screen-traffic .field-key.group::before {
+  -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='black' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m4 6 4 4 4-4'/%3E%3C/svg%3E") center / contain no-repeat;
+  mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='black' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m4 6 4 4 4-4'/%3E%3C/svg%3E") center / contain no-repeat;
+}
+#screen-traffic .field-key.traceable::before {
+  -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='black' stroke-width='1.5' stroke-linecap='round'%3E%3Ccircle cx='8' cy='8' r='4.5'/%3E%3Cpath d='M8 1v3M8 12v3M1 8h3M12 8h3'/%3E%3C/svg%3E") center / contain no-repeat;
+  mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='black' stroke-width='1.5' stroke-linecap='round'%3E%3Ccircle cx='8' cy='8' r='4.5'/%3E%3Cpath d='M8 1v3M8 12v3M1 8h3M12 8h3'/%3E%3C/svg%3E") center / contain no-repeat;
+}
+
+/* Trace dock: the target is evidence text, the actions share one weight. */
+#screen-traffic .trace-label { font-size: 11px; }
+#screen-traffic .trace-target { color: var(--text); }
+#screen-traffic .trace-dock :is(.secondary-button, .trace-button) { font-weight: 500; }
+@media (max-width: 900px), (min-width: 1200px) {
+  #screen-traffic .request-inspector > .trace-dock { margin-top: 16px; }
+  #screen-traffic .trace-dock .trace-button { margin-top: 0; }
+}
+
+/* Export dialog: one column of fields, a quiet close and one primary action. */
+.captured-export-dialog { border-radius: 8px; box-shadow: 0 16px 48px var(--shadow); }
+.captured-export-header { padding: 16px 20px; }
+.captured-export-header h2 { font-size: 16px; font-weight: 500; }
+.captured-export-header > button { width: 28px; min-width: 28px; padding: 0; border-color: transparent; background: transparent; color: var(--muted); font-size: 16px; font-weight: 400; }
+.captured-export-header > button:hover { background: var(--panel-3); color: var(--text); }
+.captured-export-fields { grid-template-columns: minmax(0, 1fr); gap: 12px; }
+.captured-export-fields label { gap: 8px; }
+.captured-export-fields input[type="file"] { padding: 4px; }
+.captured-export-fields input[type="file"]::file-selector-button { height: 22px; margin-right: 8px; padding: 0 8px; border: 1px solid var(--line); border-radius: 4px; background: var(--panel-3); color: var(--text); font: 500 11px var(--sans); cursor: pointer; }
+.captured-export-status { padding: 8px 12px; }
+.captured-export-footer > span { font-size: 11px; }
+.captured-export-footer .secondary-button { font-weight: 500; }
+.captured-export-footer .secondary-button:not(.captured-export-primary):hover:not(:disabled) { border-color: var(--line); background: var(--panel-3); }
 /* End traffic and request inspector */
 
 /* Evidence and backtraces */

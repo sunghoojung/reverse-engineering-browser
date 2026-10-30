@@ -3866,6 +3866,21 @@ body.resizing-panes-y, body.resizing-panes-y * { cursor: row-resize !important; 
 @media (max-width: 650px) {
   #screen-vm .owned-vm-debugger-inspector { border-left: 0; border-top: 1px solid var(--line); }
 }
+/* Owned example: replay state is quiet text with a dot, a refusal keeps an
+   amber rule, and executed cells are tinted so the listing leads, not the ruler. */
+#screen-vm .vmp-pill { padding: 0; background: transparent; font: 11px var(--mono); }
+#screen-vm .vmp-chip { padding: 0; background: transparent; font: 11px var(--mono); }
+#screen-vm .vmp-claims { gap: 4px 12px; }
+#screen-vm .vmp-row.inferred .ev, #screen-vm .vmp-chip.inf { color: var(--muted); }
+#screen-vm .vmp-provenance { border-left: 2px solid var(--line); }
+#screen-vm .vmp-refusal { border: 0; border-left: 2px solid var(--amber); border-radius: 0; background: var(--panel-2); font-size: 11px; }
+#screen-vm .vmp-cells { gap: 4px; }
+#screen-vm .vmp-cell.exec { background: color-mix(in srgb, var(--cyan) 24%, var(--panel)); border-color: color-mix(in srgb, var(--cyan) 55%, var(--line)); color: var(--text); font-weight: 500; }
+#screen-vm .vmp-cell.exec.live { border-color: var(--amber); }
+#screen-vm .vmp-key .obs { background: color-mix(in srgb, var(--cyan) 24%, var(--panel)); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--cyan) 55%, var(--line)); }
+#screen-vm :is(.vmp-row, .vmp-item strong) { font-size: 11px; }
+#screen-vm .vmp-meta { margin-top: 4px; }
+#screen-vm :is(.vmp-mode button, .vmp-op) { border-radius: 4px; }
 /* End VM findings, execution and live fixture */
 
 /* VM static bytecode, contextual, analysis packs and opcode ledger */

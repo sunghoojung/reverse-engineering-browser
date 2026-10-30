@@ -3847,6 +3847,7 @@ body.resizing-panes-y, body.resizing-panes-y * { cursor: row-resize !important; 
 #screen-vm .vm-semantics-workflow[data-context-open="true"] > .vm-context-launchers { display: none; }
 #screen-vm .vm-listing-row[aria-selected="true"] { font-weight: 500; }
 #screen-vm .vm-execution-navigation .vm-step-controls button { flex-basis: 100%; }
+#screen-vm .vm-navigation-toggle { align-items: center; }
 /* Live fixture: one filled action per state (Create before a fixture exists,
    Step after it), and one window of hairline-divided panes. History rows are
    list rows selected by the shared fill and rail; filter toggles need no rail. */

@@ -57,7 +57,7 @@
             <div class="traffic-grid" data-detail-open="false">
               <div class="request-pane">
                 <div class="network-tools">
-                  <label class="filter-box"><input id="request-filter" type="search" maxlength="512" placeholder="Search requests…" aria-label="Filter requests" /></label>
+                  <label class="filter-box"><input id="request-filter" type="search" maxlength="512" placeholder="Search requests" aria-label="Filter requests" /></label>
                   <div class="request-filters" id="request-filters">
                   <div class="type-filters" aria-label="Resource type filters">
                     <button class="type-filter" type="button" data-filter="all" aria-pressed="true">All</button>
@@ -126,7 +126,7 @@
 
                     <button id="request-decoder-pivot" class="secondary-button" type="button">Decode value</button>
                     <button id="request-vm-candidates" class="secondary-button" type="button">Related VM candidates</button>
-                    <button id="trace-origin" class="trace-button" type="button">⌘ Trace origin</button>
+                    <button id="trace-origin" class="trace-button" type="button">Trace origin</button>
                   </div>
                 </div>
               </div>
@@ -282,7 +282,7 @@
               </nav>
               <button class="back-button" type="button" data-screen="traffic" aria-label="Back to traffic">←</button>
               <div class="vm-window-title"><h1>VM workbench</h1></div>
-              <nav class="vm-workspace-switch" aria-label="VM workspace"><button id="vm-show-findings" class="secondary-button" type="button" aria-pressed="true" aria-controls="vm-findings-workspace"><span class="vm-tool-icon" aria-hidden="true">▤</span>Findings</button><button id="vm-show-execution" class="secondary-button" type="button" aria-pressed="false" aria-controls="vm-semantics-workflow"><span class="vm-tool-icon" aria-hidden="true">▷</span>Execution</button><button id="vm-show-owned" class="secondary-button" type="button" aria-pressed="false" aria-controls="vm-owned-debugger"><span class="vm-tool-icon" aria-hidden="true">◉</span>Live fixture</button><button id="vm-show-static" class="secondary-button" type="button" aria-pressed="false" aria-controls="vm-static-workspace"><span class="vm-tool-icon" aria-hidden="true">▦</span>Static bytecode</button><button id="vm-show-contextual" class="secondary-button" type="button" aria-pressed="false" aria-controls="vm-contextual-workspace"><span class="vm-tool-icon" aria-hidden="true">⌘</span>Contextual</button><button id="vm-show-packs" class="secondary-button" type="button" aria-pressed="false" aria-controls="vm-packs-workspace"><span class="vm-tool-icon" aria-hidden="true">◇</span>Analysis packs</button><button id="vm-show-ledger" class="secondary-button" type="button" aria-pressed="false" aria-controls="vm-ledger-workspace"><span class="vm-tool-icon" aria-hidden="true">≡</span>Opcode ledger</button></nav>
+              <nav class="vm-workspace-switch" aria-label="VM workspace"><button id="vm-show-findings" class="secondary-button" type="button" aria-pressed="true" aria-controls="vm-findings-workspace">Findings</button><button id="vm-show-execution" class="secondary-button" type="button" aria-pressed="false" aria-controls="vm-semantics-workflow">Execution</button><button id="vm-show-owned" class="secondary-button" type="button" aria-pressed="false" aria-controls="vm-owned-debugger">Live fixture</button><button id="vm-show-static" class="secondary-button" type="button" aria-pressed="false" aria-controls="vm-static-workspace">Static bytecode</button><button id="vm-show-contextual" class="secondary-button" type="button" aria-pressed="false" aria-controls="vm-contextual-workspace">Contextual</button><button id="vm-show-packs" class="secondary-button" type="button" aria-pressed="false" aria-controls="vm-packs-workspace">Analysis packs</button><button id="vm-show-ledger" class="secondary-button" type="button" aria-pressed="false" aria-controls="vm-ledger-workspace">Opcode ledger</button></nav>
               <div id="vm-session-status" class="vm-session-status" role="status" aria-live="polite"></div>
             </header>
             <div id="vm-owned-controls" hidden></div>
@@ -708,7 +708,7 @@
       </div>
 
       <dialog id="captured-export-dialog" class="captured-export-dialog" aria-labelledby="captured-export-title" aria-describedby="captured-export-context">
-        <header class="captured-export-header"><div><p class="captured-export-eyebrow">LOCAL EXPORT</p><h2 id="captured-export-title">Export capture</h2></div><button class="secondary-button" type="button" data-export-close aria-label="Close export">×</button></header>
+        <header class="captured-export-header"><div><p class="captured-export-eyebrow">Local export</p><h2 id="captured-export-title">Export capture</h2></div><button class="secondary-button" type="button" data-export-close aria-label="Close export">×</button></header>
         <div class="captured-export-body">
           <p id="captured-export-context" class="captured-export-context"></p>
           <div class="captured-export-fields">

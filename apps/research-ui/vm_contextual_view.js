@@ -164,7 +164,7 @@ function mountVmContextual(root, model = vmContextual, evidenceModel = vmContext
     finally { if(owner===generation){busy=false;update();} }
   }
   for(const kind of ['definition','image','evidence']) {
-    const control=node('label',`${kind==='evidence'?'Optional runtime evidence':kind} JSON `),input=node('input');input.type='file';input.accept='.json,application/json';input.setAttribute('aria-label',`Import contextual ${kind} JSON`);
+    const control=node('label',`${kind==='evidence'?'Optional runtime evidence':kind==='definition'?'Definition':'Image'} JSON `),input=node('input');input.type='file';input.accept='.json,application/json';input.setAttribute('aria-label',`Import contextual ${kind} JSON`);
     input.addEventListener('change',()=>importFile(kind,input.files?.[0]));fileInputs[kind]=input;control.append(input);toolbar.append(control);
   }
   const analyze=button('Analyze build',analyzeInputs); analyze.className = 'secondary-button vm-tool-primary';

@@ -662,20 +662,20 @@ const capturedExportPanel = installCapturedExportDialog({
         );
         const badges = document.createElement('div');
         badges.className = 'signal-render-badges';
-        badges.append(textElement('span', capture.demo ? 'demo' : 'live', capture.demo ? 'DEMO REPLAY' : 'NATIVE EVENT'));
+        badges.append(textElement('span', capture.demo ? 'demo' : 'live', capture.demo ? 'Demo replay' : 'Native event'));
 
         header.append(title, badges);
 
         const comparison = document.createElement('div');
         comparison.className = 'signal-canvas-comparison';
         comparison.append(
-          canvasPreview(capture, capture.demo ? 'DEMO OUTPUT' : 'CAPTURED OUTPUT', `${capture.id} captured output`, true)
+          canvasPreview(capture, capture.demo ? 'Demo output' : 'Captured output', `${capture.id} captured output`, true)
         );
         const replay = document.createElement('details');
         replay.className = 'signal-capture-disclosure';
         replay.dataset.captureKey = `${signalEventKey(capture.evidenceEvent)}:replay`;
         replay.append(textElement('summary', '', 'Compare with local replay'),
-          canvasPreview(capture, 'LOCAL REPLAY', `${capture.id} local replay`));
+          canvasPreview(capture, 'Local replay', `${capture.id} local replay`));
 
         const body = document.createElement('div');
         body.className = 'signal-render-body';
@@ -864,7 +864,7 @@ const capturedExportPanel = installCapturedExportDialog({
         const head = document.createElement('header');
         const identity = document.createElement('div');
         identity.append(
-          textElement('span', '', 'SELECTED REQUEST'),
+          textElement('span', '', 'Selected request'),
           textElement('h3', '', `${selectedRequest.method} ${selectedRequest.path}`),
           textElement('p', '', `${state.signalProfile.signals.length} linked surface ${state.signalProfile.signals.length === 1 ? 'family' : 'families'} · ${signalCoverageLabel().toLowerCase()} coverage`)
         );
@@ -1191,7 +1191,7 @@ const capturedExportPanel = installCapturedExportDialog({
             textElement('span', 'signal-event-operation', decodePayload(event) || signalTypeLabel(event.type)),
             textElement('span', 'signal-event-time', formatSignalOffset(integerValue(event, 'monotonic_time_ns') - firstTime))
           );
-          if (row.dataset.new === 'true') primary.append(textElement('span', 'signal-new-badge', 'NEW'));
+          if (row.dataset.new === 'true') primary.append(textElement('span', 'signal-new-badge', 'New'));
           const meta = document.createElement('span');
           meta.className = 'signal-event-meta';
           meta.append(textElement('span', '', `${signalTypeLabel(event.type)} · ${signalTabKey(event) === 'unattributed' ? 'unattributed' : `tab ${signalTabKey(event)}`} · frame ${integerText(event, 'frame_id')} · event ${integerText(event, 'sequence_number')}`));
@@ -1608,7 +1608,7 @@ const capturedExportPanel = installCapturedExportDialog({
         }
         const header = document.createElement('div'); header.className = 'vm-handler-head';
         header.setAttribute('aria-hidden', 'true');
-        ['source offset', 'opcode', 'operation / handler', 'evidence', 'samples'].forEach(label => header.append(textElement('span', '', label)));
+        ['Source offset', 'Opcode', 'Operation / handler', 'Evidence', 'Samples'].forEach(label => header.append(textElement('span', '', label)));
         const list = document.createElement('div'); list.className = 'vm-handler-list';
         list.setAttribute('role', 'listbox'); list.setAttribute('aria-label', 'Opcode handlers');
         const selectRow = (row, focus = true) => {
@@ -3101,7 +3101,7 @@ const capturedExportPanel = installCapturedExportDialog({
           }));
           const coverage = state.signalProfile.coverage;
           details.push({
-            key: 'coverage',
+            key: 'Coverage',
             value: `${coverage.parent_depth}/${coverage.parent_depth_limit} parent steps${coverage.copied_from_initiator ? ' · renderer initiator bridged' : ''}`,
             type: coverage.retention_truncated || coverage.parent_depth_limited || coverage.count_saturated ? 'Partial' : 'Bounded'
           });
@@ -3118,22 +3118,22 @@ const capturedExportPanel = installCapturedExportDialog({
           const contextEvent = lifecycleEvents.find(event => browserContextToken(event));
           if (correlated || initiated || contextEvent) {
             const source = correlated ?? initiated ?? contextEvent;
-            const details = [{ key: 'correlation', value: request.id, type: 'id' }];
+            const details = [{ key: 'Correlation', value: request.id, type: 'id' }];
             if (contextEvent) {
-              details.push({ key: 'browser context', value: browserContextToken(contextEvent), type: 'token' });
+              details.push({ key: 'Browser context', value: browserContextToken(contextEvent), type: 'token' });
             }
             if (correlated || initiated) {
               details.push(
-                { key: 'renderer process', value: correlated?.initiator_process_id ?? initiated.process_id, type: 'pid' },
-                { key: 'renderer request', value: correlated?.initiator_request_id ?? integerText(initiated, 'request_id'), type: 'id' }
+                { key: 'Renderer process', value: correlated?.initiator_process_id ?? initiated.process_id, type: 'pid' },
+                { key: 'Renderer request', value: correlated?.initiator_request_id ?? integerText(initiated, 'request_id'), type: 'id' }
               );
             } else {
               details.push(
-                { key: 'browser process', value: contextEvent.process_id, type: 'pid' },
-                { key: 'browser request', value: integerText(contextEvent, 'request_id'), type: 'id' }
+                { key: 'Browser process', value: contextEvent.process_id, type: 'pid' },
+                { key: 'Browser request', value: integerText(contextEvent, 'request_id'), type: 'id' }
               );
             }
-            details.push({ key: 'frame', value: integerText(source, 'frame_id'), type: 'id' });
+            details.push({ key: 'Frame', value: integerText(source, 'frame_id'), type: 'id' });
             renderInspectorDetails(details);
           } else {
             renderInspectorMessage(request?.origin === 'sample'
@@ -3150,17 +3150,17 @@ const capturedExportPanel = installCapturedExportDialog({
           elements.traceDock.hidden = true;
           if (request?.origin === 'live') {
             renderInspectorDetails([
-              { key: 'first event', value: request.firstTimestamp, type: 'ns' },
-              { key: 'last event', value: request.lastTimestamp, type: 'ns' },
-              { key: 'duration', value: trafficTimeLabel(request.time), type: 'time' },
-              { key: 'lifecycle', value: request.operation, type: 'state' },
-              { key: 'events', value: request.events.length, type: 'count' },
-              { key: 'phase breakdown', value: 'DNS, connection, TLS, waiting and download phases were not captured.', type: 'unavailable' }
+              { key: 'First event', value: request.firstTimestamp, type: 'ns' },
+              { key: 'Last event', value: request.lastTimestamp, type: 'ns' },
+              { key: 'Duration', value: trafficTimeLabel(request.time), type: 'time' },
+              { key: 'Lifecycle', value: request.operation, type: 'state' },
+              { key: 'Events', value: request.events.length, type: 'count' },
+              { key: 'Phase breakdown', value: 'DNS, connection, TLS, waiting and download phases were not captured.', type: 'unavailable' }
             ]);
           } else if (request) {
             renderInspectorDetails([
-              { key: 'duration', value: trafficTimeLabel(request.time), type: 'time' },
-              { key: 'source', value: request.origin === 'demo' ? 'demo evidence' : 'sample workspace data', type: 'source' }
+              { key: 'Duration', value: trafficTimeLabel(request.time), type: 'time' },
+              { key: 'Source', value: request.origin === 'demo' ? 'demo evidence' : 'sample workspace data', type: 'source' }
             ]);
           } else {
             renderInspectorMessage('No request timing is available.');
@@ -3795,7 +3795,7 @@ const capturedExportPanel = installCapturedExportDialog({
             requestRow.setAttribute('role', 'treeitem'); requestRow.setAttribute('aria-level', String(level + 1));
             requestRow.setAttribute('aria-selected', String(state.collectionSelectedRequestId === request.id));
             requestRow.tabIndex = state.collectionSelectedRequestId === request.id ? 0 : -1;
-            requestRow.append(textElement('span', 'collection-tree-glyph', '↗'),
+            requestRow.append(textElement('span', 'collection-tree-glyph', ''),
               textElement('span', 'collection-tree-name', request.name),
               textElement('span', 'collection-tree-meta', request.method));
             requestRow.addEventListener('click', () => selectCollectionRequest(request.id, true));

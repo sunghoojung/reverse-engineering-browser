@@ -3840,4 +3840,45 @@ body.resizing-panes-y, body.resizing-panes-y * { cursor: row-resize !important; 
 .native-console-composer-footer kbd { display: inline-block; min-width: 16px; padding: 0 4px; border: 1px solid var(--line); border-radius: 4px; background: var(--panel); color: var(--muted); font: 10px/14px var(--sans); text-align: center; }
 .native-console-composer-footer kbd + kbd { margin-left: 2px; }
 
+/* Tools: headings stay at 600 and open or selected states use the text role,
+   so the accent marks only the active tab and the primary action. */
+.decoder-card h2 { font-weight: 600; }
+details.decoder-card > header p { margin-top: 0; }
+.tool-disclosure > summary { font-weight: 500; }
+.tool-disclosure[open] > summary, .tool-disclosure > summary:hover, .tool-detail-disclosure[open] > summary { color: var(--text); }
+.decoder-view-tabs button[aria-pressed="true"] { border-color: var(--line); background: var(--panel-3); color: var(--text); }
+.decoder-field-origin { border: 1px solid var(--line-soft); border-radius: 6px; background: var(--panel-2); }
+
+/* JWT trust state is meta text; only the signature state carries a dot. */
+.jwt-status { align-items: center; gap: 4px 16px; }
+.jwt-status span { display: inline-flex; align-items: center; gap: 6px; padding: 0; border: 0; border-radius: 0; color: var(--faint); font: 11px var(--mono); }
+.jwt-status span[data-kind] { color: var(--text); }
+.jwt-status span[data-kind]::before { content: ""; width: 6px; height: 6px; flex: 0 0 auto; border-radius: 50%; background: var(--amber); }
+.jwt-status span[data-kind="verified"]::before { background: var(--green); }
+.jwt-status span[data-kind="invalid"]::before, .jwt-status span[data-kind="expired"]::before { background: var(--red); }
+.jwt-json pre { font: 11px/1.5 var(--mono); }
+
+/* Float32 shares the flush two-pane layout of Decoder and JWT: a hairline
+   between columns and between sections instead of boxed cards and fieldsets. */
+.float32-workspace { gap: 0; align-items: stretch; min-height: 100%; }
+.float32-form, .float32-output { padding: 12px; border: 0; border-radius: 0; }
+.float32-form { border-right: 1px solid var(--line); }
+.float32-form h2 { margin: 0 0 4px; font-size: 12px; }
+.float32-form > p { margin: 0 0 12px; color: var(--muted); font-size: 11px; line-height: 1.5; }
+.float32-form fieldset { margin: 16px 0 0; padding: 12px 0 0; border: 0; border-top: 1px solid var(--line-soft); border-radius: 0; }
+.float32-form legend { float: left; width: 100%; margin: 0 0 4px; padding: 0; color: var(--text); font-weight: 500; }
+.float32-form legend + * { clear: both; }
+.float32-form fieldset > p { margin: 8px 0 0; color: var(--muted); font-size: 11px; }
+.float32-form label { gap: 4px; color: var(--faint); font-size: 11px; }
+.float32-form label.float32-check { gap: 8px; margin: 16px 0 0; color: var(--text); font-size: 12px; }
+.float32-form input:not([type="checkbox"]), .float32-form select, .float32-form textarea { min-height: 32px; padding: 6px 8px; border-color: var(--line-soft); border-radius: 6px; font-size: 12px; }
+.float32-form textarea { min-height: 96px; }
+.float32-actions { margin: 16px 0 0; }
+.float32-receipt { color: var(--text); font-weight: 500; }
+.float32-output > p:first-child { margin-top: 0; }
+.float32-metrics { grid-template-columns: max-content minmax(0, 1fr); align-items: baseline; gap: 4px 24px; line-height: 1.6; }
+.float32-metrics dd { font: 11px/1.6 var(--mono); }
+.float32-row h4 { font-weight: 600; }
+@media (max-width: 1000px) { .float32-form { border-right: 0; border-bottom: 1px solid var(--line); } }
+
 /* End console, tools and dialogs */

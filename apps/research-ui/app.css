@@ -3832,7 +3832,7 @@ body.resizing-panes-y, body.resizing-panes-y * { cursor: row-resize !important; 
 #screen-signals .signal-tab-scope strong { font-weight: 500; }
 #screen-signals .signal-tab-scope span, #screen-signals .signal-tab-scope[aria-selected="true"] span { color: var(--faint); font: 400 11px var(--mono); }
 #screen-signals .signal-tab-scope[aria-selected="true"] { border-color: color-mix(in srgb, var(--accent) 55%, var(--line)); }
-#screen-signals :is(.signal-capture-actions, .signal-feed-actions) button { font-size: 11px; }
+#screen-signals :is(.signal-capture-actions, .signal-feed-actions) button { font-size: 11px; white-space: nowrap; }
 #screen-signals :is(.signal-capture-actions, .signal-feed-actions) button:hover:not(:disabled) { border-color: var(--line); background: var(--panel-3); }
 #screen-signals .signal-view-tabs button span,
 #screen-signals .signal-view-tabs button[aria-selected="true"] span { min-width: 0; padding: 0; border-radius: 0; background: transparent; color: var(--faint); font: 400 11px var(--mono); }

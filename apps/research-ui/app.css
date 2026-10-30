@@ -3826,6 +3826,21 @@ body.resizing-panes-y, body.resizing-panes-y * { cursor: row-resize !important; 
 #screen-vm .vm-context-header .vm-inspector-tabs > button { flex: 0 1 auto; padding: 8px 12px; }
 #screen-vm .owned-vm-debugger-tabs { gap: 0; border-bottom: 1px solid var(--line); }
 #screen-vm .vmp-detail-tabs { gap: 0; padding-bottom: 0; }
+/* Menus step the neutral surface on hover; the accent is kept for selection. */
+#screen-vm .vm-menu[open] > summary, #screen-vm .vm-menu > summary:hover, #screen-vm .vm-menu-items button:hover:not(:disabled) { background: var(--panel-3); }
+/* Findings notices are callouts on the panel surface. A left rule carries the
+   kind instead of a full colored box; the 12px card inset is unchanged. */
+#vm-findings-workspace .vm-workspace-notice { border: 0; border-left: 2px solid var(--line); }
+#vm-findings-workspace .vm-workspace-notice[data-kind="static-only"] { border-left-color: color-mix(in srgb, var(--amber) 60%, var(--line)); }
+#vm-findings-workspace .vm-workspace-notice:is([data-kind="malformed"], [data-kind="unavailable"]) { border-left-color: var(--red); }
+#vm-findings-workspace .vm-workspace-notice[data-kind="loading"] { border-left-color: var(--accent); }
+#vm-findings-workspace .vm-workspace > .vm-workspace-notice { border-bottom: 1px solid var(--line-soft); }
+/* Verdicts, scores and glyphs are meta, so they stay neutral. Dock card titles
+   share one size whether they sit in a heading bar or open the card. */
+#screen-vm .vm-confidence { padding: 0; background: transparent; font-weight: 400; }
+#screen-vm .vm-symbol-row::before { color: var(--faint); }
+#screen-vm .vm-analysis-rule b { color: var(--text); font-weight: 500; }
+#screen-vm .vm-workbench-panels :is(.vm-workspace-card > h4, .vm-workspace-heading h4) { font-size: 12px; }
 /* End VM findings, execution and live fixture */
 
 /* VM static bytecode, contextual, analysis packs and opcode ledger */

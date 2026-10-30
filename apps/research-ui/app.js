@@ -6020,8 +6020,7 @@ const capturedExportPanel = installCapturedExportDialog({
           close.className = 'source-tab-close';
           close.textContent = '×';
           close.setAttribute('aria-hidden', 'true');
-          const kind = document.createElement('span'); kind.className = 'source-tab-kind'; kind.textContent = 'captured';
-          tab.append(icon, name, kind, close);
+          tab.append(icon, name, close);
           tab.addEventListener('click', event => {
             if (event.target === close) {
               closeSource(source);
@@ -7177,7 +7176,7 @@ const capturedExportPanel = installCapturedExportDialog({
           row.type = 'button';
           row.className = 'quick-open-row';
           const name = document.createElement('span'); name.textContent = sourceDisplayName(source);
-          const path = document.createElement('small'); path.textContent = `Captured · ${source.url || '(anonymous)'}`;
+          const path = document.createElement('small'); path.textContent = source.url || '(anonymous)';
           row.append(name, path);
           row.addEventListener('click', () => {
             elements.quickOpen.hidden = true;

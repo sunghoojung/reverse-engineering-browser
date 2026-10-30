@@ -3841,6 +3841,7 @@ body.resizing-panes-y, body.resizing-panes-y * { cursor: row-resize !important; 
 #screen-vm .vm-symbol-row::before { color: var(--faint); }
 #screen-vm .vm-analysis-rule b { color: var(--text); font-weight: 500; }
 #screen-vm .vm-workbench-panels :is(.vm-workspace-card > h4, .vm-workspace-heading h4) { font-size: 12px; }
+#screen-vm .vm-workspace-card > label { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 10px 12px; color: var(--muted); font-size: 11px; }
 /* End VM findings, execution and live fixture */
 
 /* VM static bytecode, contextual, analysis packs and opcode ledger */

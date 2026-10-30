@@ -489,13 +489,12 @@ Traffic search is a literal, case-insensitive match over the URL or host,
 method and status that native rows carry. Tab, domain, and resource filters
 scope it. Search never enables capture or fetches anything.
 
-Collection uses a saved-request library, template editor, and submitted-response
-pane. Headers, Body, and Variables are keyboard-accessible request sections;
-responses have Body and Headers views with the submitted run identity. Folder
-settings and history are expandable. Unsaved edits stay with the selected item
-until explicitly saved or discarded, including across refresh failures. Run is
-labeled **Save & Run** when it will first persist edits. Selection never sends.
-See [API Collection v1](../../docs/product/api-collection-v1.md).
+Collection uses a saved-request library and a template editor; it never sends
+a request. Headers, Body, and Variables are keyboard-accessible request
+sections, and folder settings are expandable. Unsaved edits stay with the
+selected item until explicitly saved or discarded, including across refresh
+failures. See [API Collection v1](../../docs/product/api-collection-v1.md) for
+the stored template contract.
 
 The dark theme uses [Rosé Pine Moon](https://rosepinetheme.com/palette/), with
 slightly brighter secondary labels for legibility. Appearance switches to the

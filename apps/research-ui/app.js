@@ -2808,7 +2808,7 @@ const capturedExportPanel = installCapturedExportDialog({
         state.signalProfileGeneration += 1;
         updateSelectionSummary(request);
         if (request.traceable) {
-          elements.prompt.textContent = 'Choose a request value and trace where it came from.';
+          elements.prompt.textContent = 'Choose a request value and trace where it came from';
           state.fieldTab = 'body';
           state.selectedField = fieldSets.body.find(field => field.traceable);
         } else {
@@ -3016,7 +3016,7 @@ const capturedExportPanel = installCapturedExportDialog({
       function renderInspectorDetails(rows) {
         elements.fieldTree.replaceChildren(...rows.map(detail => {
           const row = document.createElement('div');
-          row.className = 'field-row';
+          row.className = 'field-row'; row.dataset.type = detail.type;
           const key = document.createElement('span'); key.className = 'field-key'; key.textContent = detail.key;
           const value = document.createElement('span'); value.className = 'field-value'; value.textContent = String(detail.value);
           const type = document.createElement('span'); type.className = 'field-type'; type.textContent = detail.type;
@@ -3065,10 +3065,10 @@ const capturedExportPanel = installCapturedExportDialog({
           const traceable = Boolean(request?.traceable);
           const requestTraceable = Boolean(requestTraceRoot(request));
           elements.prompt.textContent = traceable
-            ? 'Choose a request value and trace where it came from.'
+            ? 'Choose a request value and trace where it came from'
             : requestTraceable
-              ? 'Trace this request backward through observed event relationships.'
-              : 'No structured request payload was captured.';
+              ? 'Trace this request backward through observed event relationships'
+              : 'No structured request payload was captured';
           elements.fieldTabs.hidden = !traceable;
           elements.traceDock.hidden = !traceable && !requestTraceable;
           renderFields();

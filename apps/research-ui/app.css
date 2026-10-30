@@ -3812,6 +3812,120 @@ body.resizing-panes-y, body.resizing-panes-y * { cursor: row-resize !important; 
 /* End VM findings, execution and live fixture */
 
 /* VM static bytecode, contextual, analysis packs and opcode ledger */
+/* The four local tools share one rhythm: title and subtitle, inputs, one action
+   row with a single filled primary, then results. A rule separates those groups
+   once and a results box never nests a second border, so the decoded evidence,
+   not the chrome, carries the detail. */
+#screen-vm .vm-tool-shell { gap: 12px; }
+#screen-vm .vm-tool-shell > .vm-tool-title + .vm-tool-subtitle,
+#screen-vm .vm-tool-shell > .vm-tool-status + .vm-tool-subtitle { margin-top: -8px; }
+#screen-vm .vm-tool-shell > .vm-tool-subtitle:empty { display: none; }
+#screen-vm .vm-tool-shell > details[data-pack-inputs], #screen-vm .vm-tool-shell > details[data-ledger-inputs] { margin: 0; padding: 0; border: 0; }
+#screen-vm .vm-tool-shell > .vm-tool-editor { margin-top: 0; padding-top: 12px; }
+#screen-vm .vm-tool-shell > .vm-tool-results + .vm-tool-editor,
+#vm-ledger-workspace > .vm-tool-results + .vm-tool-imports > .vm-tool-editor { margin-top: 0; padding-top: 0; border-top: 0; }
+#screen-vm .vm-tool-shell .vm-tool-editor > summary, #vm-contextual-workspace :is(.vm-review-imports, .vm-tool-editor) > summary { line-height: 16px; }
+#screen-vm .vm-tool-shell > details > .vm-tool-imports { margin-top: 8px; }
+/* Secondary actions share one outlined style; only the primary is filled. */
+#screen-vm .vm-tool-shell .vm-tool-tertiary:not(:disabled) { background: var(--panel-2); border-color: var(--line-soft); color: var(--text); }
+#screen-vm .vm-tool-shell .vm-tool-tertiary:not(:disabled):hover { border-color: var(--accent); }
+
+/* Import cards: name, file button, then the loaded file as quiet meta. The
+   native "No file chosen" text is hidden because these inputs reset after a
+   read; the view's own state line says what was loaded. */
+#screen-vm .vm-tool-shell .vm-tool-import-card, #vm-contextual-workspace .vm-contextual-imports label { border-radius: 4px; font-size: 12px; }
+#vm-ledger-workspace .vm-tool-import-card > label { display: grid; justify-items: start; gap: 8px; }
+#vm-ledger-workspace .vm-tool-import-card .vm-tool-subtitle, #vm-packs-workspace .vm-pack-inputs label > span,
+#vm-contextual-workspace .vm-contextual-imports label > span { margin: 0; color: var(--muted); font-size: 11px; }
+:is(#vm-contextual-workspace, #vm-packs-workspace, #vm-ledger-workspace) input[type="file"] { width: auto; max-width: 100%; font-size: 0; color: transparent; }
+:is(#vm-contextual-workspace, #vm-packs-workspace, #vm-ledger-workspace) input[type="file"]::file-selector-button { margin-right: 0; color: var(--text); }
+/* The pack card has no disclosure summary above it, so it starts one summary
+   line lower to share a top edge with the Apply and Compare cards. */
+#vm-packs-workspace .vm-pack-inputs { align-items: start; gap: 12px; }
+#vm-packs-workspace .vm-pack-inputs label { align-content: start; gap: 8px; }
+#vm-packs-workspace .vm-pack-inputs > label { margin-top: 24px; }
+#vm-packs-workspace .vm-pack-inputs > details > summary { margin-bottom: 8px; }
+#vm-packs-workspace .vm-pack-inputs > details > label + label { margin-top: 8px; }
+
+/* Results: one box, its header copy on the 12px inset, then the workbench. */
+#screen-vm .vm-tool-shell .vm-tool-results { border-radius: 4px; }
+#screen-vm .vm-tool-shell .vm-tool-results > p { padding: 0 12px 4px; }
+#screen-vm .vm-tool-shell .vm-tool-results > p:last-child { padding-bottom: 12px; }
+#screen-vm .vm-tool-shell .vm-tool-results > .vm-tool-empty { padding: 0 12px 12px; text-align: left; font-size: 12px; }
+#screen-vm .vm-tool-shell .vm-tool-results > .vm-review-workbench { margin-top: 8px; border: 0; border-top: 1px solid var(--line); }
+#vm-ledger-workspace .vm-tool-results > .vm-review-filter { display: flex; flex-wrap: wrap; align-items: end; gap: 8px 12px; width: auto; margin: 0; padding: 8px 12px 0; border-bottom: 0; }
+#vm-ledger-workspace .vm-tool-results > .vm-review-filter + .vm-review-workbench { margin-top: 12px; }
+#screen-vm .vm-tool-shell .vm-review-filter > label, #vm-packs-workspace label.vm-review-filter { display: grid; gap: 4px; color: var(--muted); font-size: 11px; }
+#vm-ledger-workspace .vm-review-filter > label:first-child { flex: 1 1 280px; }
+#screen-vm .vm-tool-shell .vm-review-filter input { margin-top: 0; }
+/* Pagers and counts inside a listing are meta: plain muted mono, no rule. */
+#screen-vm .vm-tool-shell .vm-review-listing > .vm-tool-toolbar { padding: 0; border-bottom: 0; }
+#screen-vm .vm-tool-shell .vm-review-listing > .vm-tool-toolbar:first-child { margin-bottom: 8px; }
+#screen-vm .vm-tool-shell .vm-review-listing > .vm-tool-toolbar:not(:first-child) { margin-top: 8px; }
+#screen-vm .vm-tool-shell .vm-review-listing > .vm-tool-toolbar > :is(p, span) { margin: 0; color: var(--muted); font: 11px/1.5 var(--mono); }
+#screen-vm .vm-tool-shell .vm-review-listing > p.vm-tool-subtitle { margin: 0 0 8px; color: var(--muted); font: 11px/1.5 var(--mono); }
+#vm-ledger-workspace .vm-tool-table td > button { min-height: 0; margin: -2px -4px; padding: 2px 4px; border-color: transparent; background: transparent; color: var(--text); font: 500 12px var(--mono); }
+/* Borderless links keep the focus ring outside their text. */
+#vm-ledger-workspace .vm-tool-table td > button:focus, #vm-static-workspace .vm-static-cfg-node .secondary-button:focus { outline-offset: 2px; }
+/* Inspector fields: a muted label over the exact value in mono. */
+#screen-vm .vm-tool-shell .vm-review-inspector { font-size: 12px; }
+#screen-vm .vm-tool-shell .vm-review-inspector h3 { margin: 8px 0 4px; font-size: 13px; }
+#vm-ledger-workspace .vm-review-inspector > .vm-tool-subtitle { margin: 0 0 8px; }
+#vm-packs-workspace .vm-review-detail > h4, #vm-ledger-workspace .vm-review-field > h4 { margin: 12px 0 4px; color: var(--muted); font-size: 11px; font-weight: 400; }
+#vm-packs-workspace .vm-review-detail > h4 + p, #vm-ledger-workspace .vm-review-field > p { margin: 0; color: var(--text); font: 12px/1.5 var(--mono); }
+#vm-ledger-workspace .vm-review-inspector section > h4 { margin: 16px 0 4px; font-size: 12px; font-weight: 500; }
+#vm-ledger-workspace [data-ledger-editor] > label { display: block; margin-top: 8px; color: var(--muted); font-size: 11px; }
+
+/* Contextual follows the same rhythm without the shared shell class. */
+#vm-contextual-workspace { font-size: 12px; }
+#vm-contextual-workspace > .vm-tool-title + p { margin: 4px 0 0; }
+#vm-contextual-workspace > .vm-review-imports { margin-top: 12px; padding: 0 0 12px; }
+#vm-contextual-workspace .vm-contextual-imports { gap: 12px; margin: 8px 0 12px; }
+#vm-contextual-workspace .vm-contextual-actions { gap: 8px; padding-bottom: 0; border-bottom: 0; }
+#vm-contextual-workspace > .vm-review-imports + p { margin: 12px 0; }
+#vm-contextual-workspace .vm-contextual-panes:has(button) { margin-top: 0; border-radius: 4px; overflow: hidden; }
+#vm-contextual-workspace .vm-review-listing { display: flex; flex-wrap: wrap; align-content: start; gap: 8px; }
+#vm-contextual-workspace .vm-review-listing > input.vm-review-filter { flex: 1 1 200px; width: auto; margin: 0; }
+#vm-contextual-workspace .vm-review-listing > .vm-contextual-list { flex: 1 0 100%; padding: 0; background: transparent; }
+#vm-contextual-workspace .vm-contextual-list > h2 { margin: 4px 0 0; }
+#vm-contextual-workspace .vm-contextual-list > p { margin: 4px 0 0; color: var(--muted); font-size: 11px; }
+#vm-contextual-workspace .vm-contextual-toolbar:not(.vm-contextual-imports) { margin: 8px 0; }
+#vm-contextual-workspace .vm-contextual-toolbar:not(.vm-contextual-imports) > span { color: var(--muted); font: 11px var(--mono); }
+#vm-contextual-workspace .vm-contextual-list > button { min-height: 0; margin: 0; padding: 6px 8px; border: 0; border-bottom: 1px solid var(--line-soft); border-radius: 0; background: transparent; color: var(--text); font: 400 11px/1.4 var(--mono); }
+#vm-contextual-workspace .vm-contextual-list > button:hover { background: var(--panel-2); }
+#vm-contextual-workspace .vm-contextual-list > button[aria-pressed="true"] { background: var(--vm-selected-bg); color: var(--vm-selected-fg); box-shadow: inset 4px 0 var(--vm-selected-line); }
+#vm-contextual-workspace .vm-contextual-detail > h2 { margin: 4px 0 8px; }
+#vm-contextual-workspace .vm-contextual-detail > p { margin: 0; color: var(--muted); font-size: 11px; }
+#vm-contextual-workspace .vm-contextual-detail h3 { margin: 12px 0 4px; font-size: 12px; font-weight: 600; }
+#vm-contextual-workspace .vm-contextual-detail section > p { margin: 4px 0; }
+#vm-contextual-workspace .vm-contextual-detail :is(pre, li) { font: 11px/1.5 var(--mono); }
+#vm-contextual-workspace > .vm-contextual-diagnostics:not(:empty) { margin-top: 16px; }
+#vm-contextual-workspace > .vm-contextual-diagnostics > h2 { margin: 0; font-size: 13px; }
+#vm-contextual-workspace > .vm-contextual-diagnostics > pre { margin: 4px 0; font: 11px/1.5 var(--mono); }
+#vm-contextual-workspace > .vm-tool-editor { margin-top: 16px; padding-top: 12px; }
+
+/* Static bytecode: 12px insets, underline detail tabs like the other tools,
+   and a pseudocode listing drawn as rows instead of a stack of boxes. */
+#vm-static-workspace .vm-static-toolbar { gap: 8px; padding: 8px 12px; }
+#vm-static-workspace .vm-static-summary > p { margin: 4px 0; }
+#vm-static-workspace .vm-static-filter { gap: 8px; }
+#vm-static-workspace .vm-static-pager { padding: 8px 12px; }
+#vm-static-workspace .vm-static-detail .vm-static-pager { padding: 8px 0; }
+#vm-static-workspace .vm-static-pager span { font-family: var(--mono); }
+#vm-static-workspace .vm-static-detail-head { padding: 12px 12px 0; }
+#vm-static-workspace .vm-static-tabs { gap: 0; padding: 8px 0 0; border-bottom: 1px solid var(--line); }
+#vm-static-workspace .vm-static-tabs > button { flex: 0 1 auto; min-height: 28px; padding: 4px 10px; border: 0; border-bottom: 2px solid transparent; border-radius: 0; background: transparent; color: var(--text); white-space: nowrap; overflow-wrap: normal; }
+#vm-static-workspace .vm-static-tabs > button[aria-selected="true"] { border-bottom-color: var(--accent); background: var(--accent-soft); color: var(--text); }
+#vm-static-workspace[data-layout="medium"] .vm-static-tabs > button { padding: 4px 6px; }
+#vm-static-workspace .vm-static-detail { padding: 8px 12px; }
+#vm-static-workspace .vm-static-inspector > button { margin: 8px 12px; }
+#vm-static-workspace .vm-static-code-line { margin: 0; padding: 6px 8px; border: 0; border-bottom: 1px solid var(--line-soft); border-radius: 0; }
+#vm-static-workspace .vm-static-cfg-node { padding: 8px 12px; border: 1px solid var(--line-soft); border-radius: 4px; background: transparent; }
+#vm-static-workspace .vm-static-cfg-node[data-selected="true"] { border-color: var(--vm-selected-line); background: var(--vm-selected-bg); }
+#vm-static-workspace .vm-static-cfg-node .secondary-button { min-height: 0; padding: 0; border: 0; background: transparent; color: inherit; font: 11px/1.5 var(--mono); text-decoration: underline; text-decoration-color: var(--line); text-underline-offset: 3px; }
+#vm-static-workspace .vm-static-cfg-node > .secondary-button:first-child { font-size: 12px; font-weight: 500; text-decoration: none; }
+#vm-static-workspace .vm-static-cfg-node .secondary-button:hover { text-decoration: underline; text-decoration-color: var(--accent); }
+#vm-static-workspace .vm-static-edge { margin: 4px 0 0; }
 /* End VM static bytecode, contextual, analysis packs and opcode ledger */
 
 /* Collection and analyst */

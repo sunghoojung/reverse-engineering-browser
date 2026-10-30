@@ -3078,6 +3078,7 @@ const capturedExportPanel = installCapturedExportDialog({
           elements.prompt.textContent = 'Fingerprint activity before this request';
           elements.fieldTabs.hidden = true;
           elements.traceDock.hidden = !requestTraceRoot(request);
+          renderFields(); // Keep the shared dock's target and actions true for this request.
           if (state.signalProfileStatus === 'loading') {
             renderInspectorMessage('Building a bounded profile from retained browser-signal evidence.');
             return;

@@ -378,7 +378,8 @@ const capturedExportPanel = installCapturedExportDialog({
       }
 
       function signalTypeLabel(type) {
-        return type.split('_').map(part => part[0].toUpperCase() + part.slice(1)).join(' ');
+        const label = type.split('_').map(part => part === 'api' ? 'API' : part).join(' ');
+        return label.charAt(0).toUpperCase() + label.slice(1);
       }
 
       function formatSignalOffset(nanoseconds) {
@@ -656,26 +657,25 @@ const capturedExportPanel = installCapturedExportDialog({
         header.className = 'signal-render-card-head';
         const title = document.createElement('div');
         title.append(
-          textElement('span', 'signal-render-icon', '▱'),
           textElement('h3', '', capture.id),
           textElement('p', '', `${capture.context}${capture.width ? ` · ${capture.width} × ${capture.height}` : ''} · ${capture.readback} · ${capture.calls.length} observed drawing ${capture.calls.length === 1 ? 'call' : 'calls'}`)
         );
         const badges = document.createElement('div');
         badges.className = 'signal-render-badges';
-        badges.append(textElement('span', capture.demo ? 'demo' : 'live', capture.demo ? 'DEMO REPLAY' : 'NATIVE EVENT'));
+        badges.append(textElement('span', capture.demo ? 'demo' : 'live', capture.demo ? 'Demo replay' : 'Native event'));
 
         header.append(title, badges);
 
         const comparison = document.createElement('div');
         comparison.className = 'signal-canvas-comparison';
         comparison.append(
-          canvasPreview(capture, capture.demo ? 'DEMO OUTPUT' : 'CAPTURED OUTPUT', `${capture.id} captured output`, true)
+          canvasPreview(capture, capture.demo ? 'Demo output' : 'Captured output', `${capture.id} captured output`, true)
         );
         const replay = document.createElement('details');
         replay.className = 'signal-capture-disclosure';
         replay.dataset.captureKey = `${signalEventKey(capture.evidenceEvent)}:replay`;
         replay.append(textElement('summary', '', 'Compare with local replay'),
-          canvasPreview(capture, 'LOCAL REPLAY', `${capture.id} local replay`));
+          canvasPreview(capture, 'Local replay', `${capture.id} local replay`));
 
         const body = document.createElement('div');
         body.className = 'signal-render-body';
@@ -684,7 +684,7 @@ const capturedExportPanel = installCapturedExportDialog({
         const callsHead = document.createElement('div');
         callsHead.className = 'signal-draw-calls-head';
         callsHead.append(
-          textElement('h4', '', 'Drawing functions'),
+          textElement('h4', '', 'Drawing calls'),
           textElement('span', '', capture.calls.length
             ? `${capture.calls.length} ${capture.callsTruncated ? 'newest ' : ''}observed in renderer order`
             : 'None observed')
@@ -850,7 +850,7 @@ const capturedExportPanel = installCapturedExportDialog({
       function renderSignalRequestProfile() {
         const selectedRequest = state.requests.find(request => request.id === state.selectedRequestId);
         if (state.signalProfileStatus === 'loading') {
-          elements.signalRequestProfile.replaceChildren(textElement('div', 'signal-render-empty', 'Building the selected request profile...'));
+          elements.signalRequestProfile.replaceChildren(textElement('div', 'signal-render-empty', 'Building the selected request profile…'));
           return;
         }
         if (!state.signalProfile || !selectedRequest) {
@@ -864,7 +864,7 @@ const capturedExportPanel = installCapturedExportDialog({
         const head = document.createElement('header');
         const identity = document.createElement('div');
         identity.append(
-          textElement('span', '', 'SELECTED REQUEST'),
+          textElement('span', '', 'Selected request'),
           textElement('h3', '', `${selectedRequest.method} ${selectedRequest.path}`),
           textElement('p', '', `${state.signalProfile.signals.length} linked surface ${state.signalProfile.signals.length === 1 ? 'family' : 'families'} · ${signalCoverageLabel().toLowerCase()} coverage`)
         );
@@ -1139,6 +1139,8 @@ const capturedExportPanel = installCapturedExportDialog({
           ));
         } else if (state.sessionMode === 'demo') {
           setSignalNotice('demo', 'Demo mode: both Canvas images are reconstructed locally from the visible calls. They are not native-captured pixels.');
+        } else if (state.sessionMode === 'idle') {
+          setSignalNotice('idle', 'Showing stored native fingerprint evidence. No capture session is running.');
         } else {
           setSignalNotice('live', 'Native fingerprint surface activity is streaming from the local browser capture.');
         }
@@ -1191,7 +1193,7 @@ const capturedExportPanel = installCapturedExportDialog({
             textElement('span', 'signal-event-operation', decodePayload(event) || signalTypeLabel(event.type)),
             textElement('span', 'signal-event-time', formatSignalOffset(integerValue(event, 'monotonic_time_ns') - firstTime))
           );
-          if (row.dataset.new === 'true') primary.append(textElement('span', 'signal-new-badge', 'NEW'));
+          if (row.dataset.new === 'true') primary.append(textElement('span', 'signal-new-badge', 'New'));
           const meta = document.createElement('span');
           meta.className = 'signal-event-meta';
           meta.append(textElement('span', '', `${signalTypeLabel(event.type)} · ${signalTabKey(event) === 'unattributed' ? 'unattributed' : `tab ${signalTabKey(event)}`} · frame ${integerText(event, 'frame_id')} · event ${integerText(event, 'sequence_number')}`));
@@ -1608,7 +1610,7 @@ const capturedExportPanel = installCapturedExportDialog({
         }
         const header = document.createElement('div'); header.className = 'vm-handler-head';
         header.setAttribute('aria-hidden', 'true');
-        ['source offset', 'opcode', 'operation / handler', 'evidence', 'samples'].forEach(label => header.append(textElement('span', '', label)));
+        ['Source offset', 'Opcode', 'Operation / handler', 'Evidence', 'Samples'].forEach(label => header.append(textElement('span', '', label)));
         const list = document.createElement('div'); list.className = 'vm-handler-list';
         list.setAttribute('role', 'listbox'); list.setAttribute('aria-label', 'Opcode handlers');
         const selectRow = (row, focus = true) => {
@@ -1788,6 +1790,7 @@ const capturedExportPanel = installCapturedExportDialog({
         if (workspace.captured_module_preview) previews.push({...workspace.captured_module_preview, origin: 'captured-module'});
         const selector = document.createElement('select'); selector.className = 'vm-snapshot-selector'; selector.setAttribute('aria-label', 'Retained byte evidence');
         previews.forEach((snapshot, index) => { const option = document.createElement('option'); option.value = String(index); option.textContent = `Artifact ${snapshot.artifact_id} · ${snapshot.origin === 'captured-module' ? `dispatch at byte ${snapshot.byte_offset} · ` : ''}${snapshot.byte_count} bytes`; selector.append(option); });
+        if (!previews.length) selector.append(Object.assign(textElement('option', '', 'No retained byte evidence'), {value: '0'}));
         const initial = Math.max(0, previews.findIndex(snapshot => snapshot.artifact_id === workspace.bytecode_artifact_id));
         selector.value = String(initial); selector.disabled = previews.length === 0;
         const label = document.createElement('label'); label.append(document.createTextNode('Retained evidence '), selector);
@@ -2827,7 +2830,7 @@ const capturedExportPanel = installCapturedExportDialog({
         state.signalProfileGeneration += 1;
         updateSelectionSummary(request);
         if (request.traceable) {
-          elements.prompt.textContent = 'Choose a request value and trace where it came from.';
+          elements.prompt.textContent = 'Choose a request value and trace where it came from';
           state.fieldTab = 'body';
           state.selectedField = fieldSets.body.find(field => field.traceable);
         } else {
@@ -3035,7 +3038,7 @@ const capturedExportPanel = installCapturedExportDialog({
       function renderInspectorDetails(rows) {
         elements.fieldTree.replaceChildren(...rows.map(detail => {
           const row = document.createElement('div');
-          row.className = 'field-row';
+          row.className = 'field-row'; row.dataset.type = detail.type;
           const key = document.createElement('span'); key.className = 'field-key'; key.textContent = detail.key;
           const value = document.createElement('span'); value.className = 'field-value'; value.textContent = String(detail.value);
           const type = document.createElement('span'); type.className = 'field-type'; type.textContent = detail.type;
@@ -3084,10 +3087,10 @@ const capturedExportPanel = installCapturedExportDialog({
           const traceable = Boolean(request?.traceable);
           const requestTraceable = Boolean(requestTraceRoot(request));
           elements.prompt.textContent = traceable
-            ? 'Choose a request value and trace where it came from.'
+            ? 'Choose a request value and trace where it came from'
             : requestTraceable
-              ? 'Trace this request backward through observed event relationships.'
-              : 'No structured request payload was captured.';
+              ? 'Trace this request backward through observed event relationships'
+              : 'No structured request payload was captured';
           elements.fieldTabs.hidden = !traceable;
           elements.traceDock.hidden = !traceable && !requestTraceable;
           renderFields();
@@ -3097,6 +3100,7 @@ const capturedExportPanel = installCapturedExportDialog({
           elements.prompt.textContent = 'Fingerprint activity before this request';
           elements.fieldTabs.hidden = true;
           elements.traceDock.hidden = !requestTraceRoot(request);
+          renderFields(); // Keep the shared dock's target and actions true for this request.
           if (state.signalProfileStatus === 'loading') {
             renderInspectorMessage('Building a bounded profile from retained browser-signal evidence.');
             return;
@@ -3120,7 +3124,7 @@ const capturedExportPanel = installCapturedExportDialog({
           }));
           const coverage = state.signalProfile.coverage;
           details.push({
-            key: 'coverage',
+            key: 'Coverage',
             value: `${coverage.parent_depth}/${coverage.parent_depth_limit} parent steps${coverage.copied_from_initiator ? ' · renderer initiator bridged' : ''}`,
             type: coverage.retention_truncated || coverage.parent_depth_limited || coverage.count_saturated ? 'Partial' : 'Bounded'
           });
@@ -3137,22 +3141,22 @@ const capturedExportPanel = installCapturedExportDialog({
           const contextEvent = lifecycleEvents.find(event => browserContextToken(event));
           if (correlated || initiated || contextEvent) {
             const source = correlated ?? initiated ?? contextEvent;
-            const details = [{ key: 'correlation', value: request.id, type: 'id' }];
+            const details = [{ key: 'Correlation', value: request.id, type: 'id' }];
             if (contextEvent) {
-              details.push({ key: 'browser context', value: browserContextToken(contextEvent), type: 'token' });
+              details.push({ key: 'Browser context', value: browserContextToken(contextEvent), type: 'token' });
             }
             if (correlated || initiated) {
               details.push(
-                { key: 'renderer process', value: correlated?.initiator_process_id ?? initiated.process_id, type: 'pid' },
-                { key: 'renderer request', value: correlated?.initiator_request_id ?? integerText(initiated, 'request_id'), type: 'id' }
+                { key: 'Renderer process', value: correlated?.initiator_process_id ?? initiated.process_id, type: 'pid' },
+                { key: 'Renderer request', value: correlated?.initiator_request_id ?? integerText(initiated, 'request_id'), type: 'id' }
               );
             } else {
               details.push(
-                { key: 'browser process', value: contextEvent.process_id, type: 'pid' },
-                { key: 'browser request', value: integerText(contextEvent, 'request_id'), type: 'id' }
+                { key: 'Browser process', value: contextEvent.process_id, type: 'pid' },
+                { key: 'Browser request', value: integerText(contextEvent, 'request_id'), type: 'id' }
               );
             }
-            details.push({ key: 'frame', value: integerText(source, 'frame_id'), type: 'id' });
+            details.push({ key: 'Frame', value: integerText(source, 'frame_id'), type: 'id' });
             renderInspectorDetails(details);
           } else {
             renderInspectorMessage(request?.origin === 'sample'
@@ -3169,17 +3173,17 @@ const capturedExportPanel = installCapturedExportDialog({
           elements.traceDock.hidden = true;
           if (request?.origin === 'live') {
             renderInspectorDetails([
-              { key: 'first event', value: request.firstTimestamp, type: 'ns' },
-              { key: 'last event', value: request.lastTimestamp, type: 'ns' },
-              { key: 'duration', value: trafficTimeLabel(request.time), type: 'time' },
-              { key: 'lifecycle', value: request.operation, type: 'state' },
-              { key: 'events', value: request.events.length, type: 'count' },
-              { key: 'phase breakdown', value: 'DNS, connection, TLS, waiting and download phases were not captured.', type: 'unavailable' }
+              { key: 'First event', value: request.firstTimestamp, type: 'ns' },
+              { key: 'Last event', value: request.lastTimestamp, type: 'ns' },
+              { key: 'Duration', value: trafficTimeLabel(request.time), type: 'time' },
+              { key: 'Lifecycle', value: request.operation, type: 'state' },
+              { key: 'Events', value: request.events.length, type: 'count' },
+              { key: 'Phase breakdown', value: 'DNS, connection, TLS, waiting and download phases were not captured.', type: 'unavailable' }
             ]);
           } else if (request) {
             renderInspectorDetails([
-              { key: 'duration', value: trafficTimeLabel(request.time), type: 'time' },
-              { key: 'source', value: request.origin === 'demo' ? 'demo evidence' : 'sample workspace data', type: 'source' }
+              { key: 'Duration', value: trafficTimeLabel(request.time), type: 'time' },
+              { key: 'Source', value: request.origin === 'demo' ? 'demo evidence' : 'sample workspace data', type: 'source' }
             ]);
           } else {
             renderInspectorMessage('No request timing is available.');
@@ -3814,7 +3818,7 @@ const capturedExportPanel = installCapturedExportDialog({
             requestRow.setAttribute('role', 'treeitem'); requestRow.setAttribute('aria-level', String(level + 1));
             requestRow.setAttribute('aria-selected', String(state.collectionSelectedRequestId === request.id));
             requestRow.tabIndex = state.collectionSelectedRequestId === request.id ? 0 : -1;
-            requestRow.append(textElement('span', 'collection-tree-glyph', '↗'),
+            requestRow.append(textElement('span', 'collection-tree-glyph', ''),
               textElement('span', 'collection-tree-name', request.name),
               textElement('span', 'collection-tree-meta', request.method));
             requestRow.addEventListener('click', () => selectCollectionRequest(request.id, true));
@@ -3850,6 +3854,7 @@ const capturedExportPanel = installCapturedExportDialog({
         elements.collectionFolderDraftStatus.textContent = state.collectionFolderDirty ? `· ${folder.name} · Unsaved` : '';
         elements.collectionDeleteFolder.disabled = root || state.apiCollectionSaving;
         elements.collectionDeleteFolder.textContent = state.collectionDeleteFolderId === folder.id ? 'Confirm delete' : 'Delete folder';
+        elements.collectionDeleteFolder.dataset.confirm = String(state.collectionDeleteFolderId === folder.id);
       }
 
       function renderCollectionVariableStatus() {
@@ -3904,7 +3909,8 @@ const capturedExportPanel = installCapturedExportDialog({
           elements.collectionRequestUrl.value = request.url;
           elements.collectionRequestMethod.value = request.method;
           elements.collectionRequestTimeout.value = String(request.timeout_ms);
-
+          elements.collectionRequestHeaders.value = request.headers.length
+            ? JSON.stringify(Object.fromEntries(request.headers.map(header => [header.name, header.value])), null, 2) : '';
           elements.collectionRequestBody.value = request.body;
           elements.collectionRequestVariables.value = collectionVariablesText(request.variables);
         }
@@ -3918,6 +3924,7 @@ const capturedExportPanel = installCapturedExportDialog({
         elements.collectionDuplicateRequest.disabled = state.apiCollectionSaving || state.apiCollection.requests.length >= 128;
         elements.collectionDeleteRequest.disabled = state.apiCollectionSaving;
         elements.collectionDeleteRequest.textContent = state.collectionDeleteRequestId === request.id ? 'Confirm delete' : 'Delete request';
+        elements.collectionDeleteRequest.dataset.confirm = String(state.collectionDeleteRequestId === request.id);
         renderCollectionVariableStatus();
       }
 
@@ -4560,7 +4567,7 @@ const capturedExportPanel = installCapturedExportDialog({
             .sort((left, right) => left.name.localeCompare(right.name));
           const expanded = state.analystExpandedFolderIds.has(folder.id);
           const row = document.createElement('button'); row.type = 'button'; row.className = 'analyst-tree-row';
-          row.dataset.folderId = String(folder.id); row.style.setProperty('--analyst-depth', String(depth));
+          row.title = folder.name; row.dataset.folderId = String(folder.id); row.style.setProperty('--analyst-depth', String(depth));
           row.setAttribute('role', 'treeitem'); row.setAttribute('aria-level', String(depth + 1));
           row.setAttribute('aria-expanded', String(expanded));
           row.setAttribute('aria-selected', String(state.analystSelectedFileId === null && state.analystSelectedFolderId === folder.id));
@@ -4581,7 +4588,7 @@ const capturedExportPanel = installCapturedExportDialog({
           children.forEach(child => appendFolder(child, depth + 1));
           files.forEach(file => {
             const fileRow = document.createElement('button'); fileRow.type = 'button'; fileRow.className = 'analyst-tree-row';
-            fileRow.dataset.fileId = String(file.id); fileRow.style.setProperty('--analyst-depth', String(depth + 1));
+            fileRow.title = file.name; fileRow.dataset.fileId = String(file.id); fileRow.style.setProperty('--analyst-depth', String(depth + 1));
             fileRow.setAttribute('role', 'treeitem'); fileRow.setAttribute('aria-level', String(depth + 2));
             fileRow.setAttribute('aria-selected', String(state.analystSelectedFileId === file.id));
             fileRow.append(textElement('span', 'analyst-tree-glyph', file.kind === 'analyst-script' ? 'JS' : '·'),
@@ -4640,6 +4647,7 @@ const capturedExportPanel = installCapturedExportDialog({
           state.localAnalyst.files.some(file => file.folder_id === folder.id);
         analystElements.deleteFolder.disabled = folder.id === 1 || hasContents || state.localAnalystSaving;
         analystElements.deleteFolder.textContent = state.analystDeleteFolderId === folder.id ? 'Confirm delete' : 'Delete empty folder';
+        analystElements.deleteFolder.dataset.confirm = String(state.analystDeleteFolderId === folder.id);
       }
 
       function renderAnalystEditor() {
@@ -4670,9 +4678,10 @@ const capturedExportPanel = installCapturedExportDialog({
         analystElements.revert.disabled = state.localAnalystSaving || !state.analystDraftDirty;
         analystElements.deleteFile.disabled = state.localAnalystSaving;
         analystElements.deleteFile.textContent = state.analystDeleteFileId === file.id ? 'Confirm delete' : 'Delete';
+        analystElements.deleteFile.dataset.confirm = String(state.analystDeleteFileId === file.id);
         analystElements.draftStatus.dataset.kind = state.analystDraftDirty ? 'dirty' : 'saved';
         analystElements.draftStatus.textContent = state.analystDraftDirty
-          ? 'Unsaved changes cannot run. Save or discard this draft before choosing another item. Save before closing the app.'
+          ? 'Unsaved changes cannot run. Save or discard them before choosing another item or closing the app.'
           : `${formatByteSize(file.content_bytes)} saved · file ${file.id} · ${new Date(file.updated_at_ms).toLocaleString()}`;
       }
 
@@ -5939,7 +5948,7 @@ const capturedExportPanel = installCapturedExportDialog({
           name.title = node.source?.url || node.label;
           row.setAttribute('aria-label', label);
           icon.className = node.source ? `source-file-icon ${node.source.kind}` : 'tree-glyph';
-          icon.textContent = node.source ? sourceIcon(node.source) : scope.collapsed.has(node.key) ? '›' : '⌄';
+          icon.textContent = node.source ? sourceIcon(node.source) : scope.collapsed.has(node.key) ? '▸' : '▾';
           icon.title = node.source ? sourceKindLabel(node.source.kind)?.[1] ?? node.source.kind : '';
           detail.textContent = node.children ? String(node.count) : sourceDisplayMeta(node.source);
           if (node.source) {
@@ -6039,8 +6048,7 @@ const capturedExportPanel = installCapturedExportDialog({
           close.className = 'source-tab-close';
           close.textContent = '×';
           close.setAttribute('aria-hidden', 'true');
-          const kind = document.createElement('span'); kind.className = 'source-tab-kind'; kind.textContent = 'captured';
-          tab.append(icon, name, kind, close);
+          tab.append(icon, name, close);
           tab.addEventListener('click', event => {
             if (event.target === close) {
               closeSource(source);
@@ -7196,7 +7204,7 @@ const capturedExportPanel = installCapturedExportDialog({
           row.type = 'button';
           row.className = 'quick-open-row';
           const name = document.createElement('span'); name.textContent = sourceDisplayName(source);
-          const path = document.createElement('small'); path.textContent = `Captured · ${source.url || '(anonymous)'}`;
+          const path = document.createElement('small'); path.textContent = source.url || '(anonymous)';
           row.append(name, path);
           row.addEventListener('click', () => {
             elements.quickOpen.hidden = true;
@@ -7873,12 +7881,20 @@ const capturedExportPanel = installCapturedExportDialog({
       elements.collectionFolderForm.addEventListener('submit', event => {
         event.preventDefault(); saveCollectionFolder();
       });
-
+      elements.collectionFolderForm.querySelectorAll('input, textarea, select').forEach(field => field.addEventListener('input', () => {
+        state.collectionFolderDirty = true;
+        state.collectionDeleteFolderId = null;
+        renderCollectionFolderForm();
+      }));
       elements.collectionDeleteFolder.addEventListener('click', deleteCollectionFolder);
       elements.collectionRequestForm.addEventListener('submit', event => {
         event.preventDefault(); saveCollectionRequest();
       });
-
+      elements.collectionRequestForm.querySelectorAll('input, textarea, select').forEach(field => field.addEventListener('input', () => {
+        state.collectionDraftDirty = true;
+        state.collectionDeleteRequestId = null;
+        renderCollectionRequestForm();
+      }));
       elements.collectionDuplicateRequest.addEventListener('click', duplicateCollectionRequest);
       elements.collectionDeleteRequest.addEventListener('click', deleteCollectionRequest);
 

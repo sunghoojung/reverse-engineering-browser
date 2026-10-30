@@ -596,6 +596,8 @@ function createEvidenceWorkspace({getContext, packagePanel, onTrace, onRequest, 
   const relation = row => row.duplicate ? 'Ambiguous identity' : row.group === 'request' ? 'Native request record'
     : row.group === 'parent' ? 'Recorded parent relationship'
       : row.group === 'context' ? 'Same context · correlation only' : 'No recorded request relationship';
+  // Operation markers are titled by their captured text; other titles are labels.
+  const titleClass = row => ['api_call', 'property_read'].includes(row.event.type) && row.payload.encoding === 'UTF-8' && row.payload.text ? 'evidence-captured-title' : '';
   function renderDetail() {
     const row = model.rows.find(candidate => candidate.key === selectedKey);
     const signature = JSON.stringify([row, model.requestKey, canOpenSource()]);
@@ -612,7 +614,7 @@ function createEvidenceWorkspace({getContext, packagePanel, onTrace, onRequest, 
     }
     const event = row.event;
     const head = node('div', '', 'evidence-detail-head');
-    head.append(node('div', `${event.category.replaceAll('_', ' ')} · ${event.type.replaceAll('_', ' ')}`, 'evidence-eyebrow'), node('h2', row.title), node('p', relation(row), `evidence-relation evidence-relation-${row.group}`));
+    head.append(node('div', `${event.category.replaceAll('_', ' ')} · ${event.type.replaceAll('_', ' ')}`, 'evidence-eyebrow'), node('h2', row.title, titleClass(row)), node('p', relation(row), `evidence-relation evidence-relation-${row.group}`));
     const observation = node('section', '', 'evidence-detail-section');
     observation.append(node('h3', 'What was recorded'));
     const marker = ['api_call', 'property_read'].includes(event.type);
@@ -690,7 +692,7 @@ function createEvidenceWorkspace({getContext, packagePanel, onTrace, onRequest, 
           const element = node('button', '', 'evidence-observation'); element.type = 'button'; element.dataset.evidenceKey = row.key; element.dataset.relationship = row.group;
           element.setAttribute('aria-current', String(row.key === selectedKey));
           const line = node('span', '', 'evidence-observation-meta'); line.append(node('span', row.event.category.replaceAll('_', ' ')), node('time', evidenceMonotonicLabel(row.event.monotonic_time_ns)));
-          element.append(line, node('strong', row.title), node('span', row.duplicate ? 'Duplicate event identity · relationship unknown' : row.artifact.artifact?.url || (row.payload.text === row.title ? row.outcome : row.payload.text) || row.outcome, 'evidence-observation-preview'));
+          element.append(line, node('strong', row.title, titleClass(row)), node('span', row.duplicate ? 'Duplicate event identity · relationship unknown' : row.artifact.artifact?.url || (row.payload.text === row.title ? row.outcome : row.payload.text) || row.outcome, 'evidence-observation-preview'));
           element.addEventListener('click', () => {select(row.key); if (window.matchMedia('(max-width: 760px)').matches) setPane('detail', true);});
           element.addEventListener('keydown', event => {
             if (!['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) return;
@@ -733,6 +735,8 @@ function createEvidenceWorkspace({getContext, packagePanel, onTrace, onRequest, 
     find('evidence-context-note').textContent = model.request ? `${model.request.hostOnly ? 'Host-only metadata · ' : ''}${model.related.length} related observations · ${model.linkedArtifacts} exact artifact references` : 'Choose a request in Traffic to separate recorded links from context-only correlations.';
     find('evidence-count').textContent = `${model.rows.length} retained observations`;
     find('evidence-coverage-summary').textContent = `${model.missingParents} missing parent${model.missingParents === 1 ? '' : 's'} · coverage unknown`;
+    // Coverage is always unknown; the warning color is kept for retained loss observations.
+    find('evidence-coverage-summary').dataset.kind = model.missingParents || model.queueMarkers || model.sequence.holes !== '0' || model.unavailableRequest || model.duplicates ? 'gap' : 'unknown';
     find('evidence-gap-details').textContent = `${model.limited ? 'Latest 5,000-record window; earlier records may be evicted. ' : 'Retained window only; complete capture is not established. '}${model.queueMarkers} native queue-drop markers; ${model.sequence.holes} absent sequence IDs between retained stream endpoints (not proof of capture loss); ${model.sequence.arrivalDiscontinuities} forward-jump observations in arrival order; ${model.sequence.outOfOrderArrivals} later arrivals below a prior high-water ID; ${model.missingParents} missing or ambiguous parent references; ${model.unavailableRequest} attached request records outside this window; ${model.duplicates} duplicate identities; ${model.omitted} unsupported or unaddressable records omitted.${model.parentLimit ? ' Parent lookup stopped at its 32-link bound.' : ''}${model.parentCycle ? ' A repeated parent identity stopped lookup.' : ''} Queue markers, sequence holes and missing references can overlap and are not added into a loss total.`;
     find('evidence-trace').disabled = model.request?.origin !== 'live' || !model.related.length;
     find('evidence-trace').title = 'Inspect the selected request’s recorded predecessor chain.';

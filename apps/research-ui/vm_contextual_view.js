@@ -2,11 +2,11 @@
 function mountVmContextual(root, model = vmContextual, evidenceModel = vmContextualEvidence) {
   const node = (tag, text = '') => { const element = document.createElement(tag); element.textContent = text; return element; };
   const button = (text, action) => { const element = node('button', text); element.type = 'button'; element.className = 'secondary-button'; element.addEventListener('click', action); return element; };
-  const inputs = {}, fileInputs = {}, reads = {definition:0,image:0,evidence:0}, pending = new Set();
+  const inputs = {}, fileInputs = {}, inputStates = {}, reads = {definition:0,image:0,evidence:0}, pending = new Set();
   let generation = 0, busy = false, report = null, linked = null, selected = null, page = 0, diagnosticPage = 0, referencePage = 0, jumpPage = 0, auditPage = 0, activeTab = 'instruction';
   const size = 32, toolbar = node('div'), notice = node('p'), summary = node('p'), listing = node('div'), detail = node('div'), diagnostics = node('div');
   toolbar.className = 'vm-contextual-toolbar vm-contextual-imports'; notice.setAttribute('role','status'); notice.setAttribute('aria-live','polite');
-  listing.className = 'vm-contextual-list'; detail.className = 'vm-contextual-detail'; detail.tabIndex = 0; detail.setAttribute('aria-label','Selected decoder context');
+  listing.className = 'vm-contextual-list'; diagnostics.className = 'vm-contextual-diagnostics'; detail.className = 'vm-contextual-detail'; detail.tabIndex = 0; detail.setAttribute('aria-label','Selected decoder context');
   const label = (offset,state) => `${offset === null ? '?' : '0x'+offset.toString(16)} / state ${state ?? 'unknown'}`;
   const update = () => { analyze.disabled = !inputs.definition || !inputs.image || pending.size > 0 || busy; analyze.textContent = busy ? 'Analyzing…' : 'Analyze build'; };
   let detailBody = detail, detailPanels = {};
@@ -148,7 +148,7 @@ function mountVmContextual(root, model = vmContextual, evidenceModel = vmContext
       const text=new TextDecoder('utf-8',{fatal:true,ignoreBOM:true}).decode(bytes);
       if(owner!==reads[kind])return;
       (kind==='definition'?model.parseDefinition:kind==='image'?model.parseImage:evidenceModel.parseEvidence)(text);
-      inputs[kind]={text,name:String(file.name||kind+'.json').slice(0,256)}; invalidate(); notice.textContent=`${kind} loaded. Choose Analyze build.`;
+      inputs[kind]={text,name:String(file.name||kind+'.json').slice(0,256)}; inputStates[kind].textContent=inputs[kind].name; invalidate(); notice.textContent=`${kind} loaded. Choose Analyze build.`;
     } catch(error) { if(owner===reads[kind])notice.textContent=`Import refused: ${error.message}. Previous valid inputs and analysis retained.`; }
     finally { if(owner===reads[kind]){pending.delete(kind);fileInputs[kind].value='';update();} }
   }
@@ -164,12 +164,12 @@ function mountVmContextual(root, model = vmContextual, evidenceModel = vmContext
     finally { if(owner===generation){busy=false;update();} }
   }
   for(const kind of ['definition','image','evidence']) {
-    const control=node('label',`${kind==='evidence'?'Optional runtime evidence':kind} JSON `),input=node('input');input.type='file';input.accept='.json,application/json';input.setAttribute('aria-label',`Import contextual ${kind} JSON`);
-    input.addEventListener('change',()=>importFile(kind,input.files?.[0]));fileInputs[kind]=input;control.append(input);toolbar.append(control);
+    const control=node('label',`${kind==='evidence'?'Optional runtime evidence':kind==='definition'?'Definition':'Image'} JSON `),input=node('input');input.type='file';input.accept='.json,application/json';input.setAttribute('aria-label',`Import contextual ${kind} JSON`);
+    input.addEventListener('change',()=>importFile(kind,input.files?.[0]));fileInputs[kind]=input;inputStates[kind]=node('span','No file selected');control.append(input,inputStates[kind]);toolbar.append(control);
   }
   const analyze=button('Analyze build',analyzeInputs); analyze.className = 'secondary-button vm-tool-primary';
-  const clear=button('Clear',()=>{for(const kind of Object.keys(reads)){reads[kind]++;delete inputs[kind];fileInputs[kind].value='';}pending.clear();invalidate();update();notice.textContent='Contextual inputs cleared.';imports.open=true;fileInputs.definition.focus();});
-  const removeEvidence=button('Remove evidence',()=>{reads.evidence++;pending.delete('evidence');delete inputs.evidence;fileInputs.evidence.value='';invalidate();update();notice.textContent='Evidence removed. Analyze declarations again.';});
+  const clear=button('Clear',()=>{for(const kind of Object.keys(reads)){reads[kind]++;delete inputs[kind];fileInputs[kind].value='';inputStates[kind].textContent='No file selected';}pending.clear();invalidate();update();notice.textContent='Contextual inputs cleared.';imports.open=true;fileInputs.definition.focus();});
+  const removeEvidence=button('Remove evidence',()=>{reads.evidence++;pending.delete('evidence');delete inputs.evidence;fileInputs.evidence.value='';inputStates.evidence.textContent='No file selected';invalidate();update();notice.textContent='Evidence removed. Analyze declarations again.';});
   const actions=node('div'); actions.className='vm-contextual-actions'; actions.append(analyze,removeEvidence,clear);
   const intro=node('p','Supported: hash-bound per-build declarative decoding, explicit decoder contexts and ordered macro operations. Runtime links use supplied evidence only. Vendor recovery, encrypted images, seed/key extraction and anti-debug bypass are unsupported.');
   const heading=node('h2','Contextual decoding'); heading.className='vm-tool-title';

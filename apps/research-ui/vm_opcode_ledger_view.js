@@ -231,7 +231,7 @@ const RebVmOpcodeLedgerView = (() => {
       results.append(node('p', `${counts.observed} observed · ${counts.inferred} inferred · ${counts.unmodeled} unmodeled · ${counts.missing_entries} missing entries`, 'vm-tool-subtitle'));
       results.append(node('p', 'Researcher assertions only. Coverage does not establish runtime execution; references and supplied test outcomes are unverified.', 'vm-tool-subtitle'));
       const filters = node('div', '', 'vm-tool-toolbar vm-review-filter'), searchLabel = node('label', 'Filter opcode coverage');
-      filterInput = node('input'); filterInput.type = 'search'; filterInput.maxLength = 1024; filterInput.value = filterText; filterInput.placeholder = 'Opcode, meaning, artifact, question…'; filterInput.setAttribute('aria-label', 'Filter opcode coverage');
+      filterInput = node('input'); filterInput.type = 'search'; filterInput.maxLength = 1024; filterInput.value = filterText; filterInput.placeholder = 'Opcode, meaning, artifact or question'; filterInput.setAttribute('aria-label', 'Filter opcode coverage');
       filterInput.addEventListener('input', () => { filterText = filterInput.value; applyFilters(); }); searchLabel.append(filterInput);
       const statusLabel = node('label', 'Evidence status'), status = node('select'); status.setAttribute('aria-label', 'Filter evidence status');
       for (const [value, label] of [['all', 'All statuses'], ['observed', 'Observed'], ['inferred', 'Inferred'], ['unmodeled', 'Unmodeled'], ['missing', 'Missing entries']]) { const option = node('option', label); option.value = value; status.append(option); }

@@ -194,7 +194,7 @@ function renderTrafficDetails(container, request, notice = '') {
     }
     const general = trafficNode('section', 'traffic-general');
     general.append(trafficNode('h2', '', 'General'));
-    for (const label of ['Request URL', 'Document URL', 'Request Method', 'Status', 'Source', 'Request ID', 'Browser tab', 'Capture coverage']) {
+    for (const label of ['Request URL', 'Document URL', 'Request method', 'Status', 'Source', 'Request ID', 'Browser tab', 'Capture coverage']) {
       const row = trafficNode('div', 'traffic-general-row');
       row.append(trafficNode('span', '', label), trafficNode('span', 'traffic-general-value'));
       general.append(row);
@@ -208,8 +208,13 @@ function renderTrafficDetails(container, request, notice = '') {
       : request.status, trafficOriginLabel(request), request.id,
     request.tabId && request.tabId !== '0' ? request.tabId : 'Unattributed',
     `Native capture records method, URL or host, status and lifecycle timing. Request and response headers and bodies are not captured.${request.urlTruncated ? ' Request URL truncated.' : ''}${request.documentUrlTruncated ? ' Document URL truncated.' : ''}${request.methodTruncated ? ' Method truncated.' : ''}`];
+  // Captured values stay mono; coverage notes read as prose; Source is provenance.
+  const kinds = ['value', request.documentUrl ? 'value' : 'prose', 'value', /^\d+$/.test(String(values[3])) ? 'value' : 'prose',
+    'provenance', 'value', request.tabId && request.tabId !== '0' ? 'value' : 'prose', 'prose'];
   container.querySelectorAll('.traffic-general-value').forEach((node, index) => {
     if (node.textContent !== String(values[index])) node.textContent = String(values[index]);
+    node.dataset.kind = kinds[index];
+    if (kinds[index] === 'provenance') node.dataset.origin = request.origin ?? 'local';
   });
 }
 

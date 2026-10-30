@@ -57,7 +57,7 @@
             <div class="traffic-grid" data-detail-open="false">
               <div class="request-pane">
                 <div class="network-tools">
-                  <label class="filter-box"><input id="request-filter" type="search" maxlength="512" placeholder="Search requests…" aria-label="Filter requests" /></label>
+                  <label class="filter-box"><input id="request-filter" type="search" maxlength="512" placeholder="Search requests" aria-label="Filter requests" /></label>
                   <div class="request-filters" id="request-filters">
                   <div class="type-filters" aria-label="Resource type filters">
                     <button class="type-filter" type="button" data-filter="all" aria-pressed="true">All</button>
@@ -112,8 +112,8 @@
                 </div>
                 <div id="exchange-inspector" class="exchange-inspector" role="tabpanel" aria-labelledby="inspector-tab-general"></div>
                 <div hidden id="request-inspector" class="request-inspector" role="tabpanel" aria-labelledby="inspector-tab-initiator" tabindex="0">
-                  <h1 id="request-prompt">Choose a request value and trace where it came from.</h1>
-                  <div id="request-package-entry" class="package-entry" hidden><button class="secondary-button" type="button" data-screen="evidence">Inspect observations &amp; artifacts</button><span>Recorded links, context correlations and missing evidence.</span></div>
+                  <h1 id="request-prompt">Choose a request value and trace where it came from</h1>
+                  <div id="request-package-entry" class="package-entry" hidden><button class="secondary-button" type="button" data-screen="evidence">Inspect observations &amp; artifacts</button><span>Recorded links, context correlations and missing evidence</span></div>
                   <div id="field-tabs" class="field-tabs" role="tablist" aria-label="Request values">
                     <button id="field-tab-body" class="field-tab" type="button" role="tab" data-field-tab="body" aria-controls="field-tree" aria-selected="true">Body</button>
                     <button id="field-tab-headers" class="field-tab" type="button" role="tab" data-field-tab="headers" aria-controls="field-tree" aria-selected="false" tabindex="-1">Headers</button>
@@ -122,11 +122,11 @@
                   </div>
                   <div id="field-tree" class="field-tree" role="tabpanel" aria-labelledby="field-tab-body" tabindex="0"></div>
                   <div id="trace-dock" class="trace-dock">
-                    <div><div class="trace-label">Selected request field</div><div id="trace-target" class="trace-target">request-81 · Body · $.device.fingerprint</div></div>
+                    <div><div class="trace-label">Trace target</div><div id="trace-target" class="trace-target">No broker-backed trace target selected</div></div>
 
                     <button id="request-decoder-pivot" class="secondary-button" type="button">Decode value</button>
                     <button id="request-vm-candidates" class="secondary-button" type="button">Related VM candidates</button>
-                    <button id="trace-origin" class="trace-button" type="button">⌘ Trace origin</button>
+                    <button id="trace-origin" class="trace-button" type="button">Trace origin</button>
                   </div>
                 </div>
               </div>
@@ -138,7 +138,7 @@
               <div class="signal-hero-copy">
                 <div class="signal-kicker"><span aria-hidden="true"></span>Native surface capture</div>
                 <h1>Fingerprint inspector</h1>
-                <p>Browser surfaces accessed by this page.</p>
+                <p>Browser surfaces accessed by this page</p>
               </div>
               <div class="signal-session-summary">
                 <span id="signal-session-badge" class="signal-session-badge">Waiting for evidence</span>
@@ -147,7 +147,7 @@
                 <span id="signal-coverage">Waiting</span>
               </div>
             </header>
-            <div id="signal-notice" class="signal-notice" data-kind="loading" role="status" aria-live="polite">Loading fingerprint evidence...</div>
+            <div id="signal-notice" class="signal-notice" data-kind="loading" role="status" aria-live="polite">Loading fingerprint evidence…</div>
             <div class="signal-scopebar">
               <div id="signal-tab-scopes" class="signal-tab-scopes" role="tablist" aria-label="Captured browser tabs"></div>
               <span id="signal-live-tabs" class="signal-live-tabs" aria-live="polite">Live tabs unavailable</span>
@@ -203,7 +203,7 @@
 
             <section hidden id="signal-panel-request" class="signal-panel signal-request-panel" role="tabpanel" aria-labelledby="signal-view-request">
               <div class="signal-panel-intro">
-                <div><h2>Selected request relationship</h2><p>Observed parent chains stay distinct from same-context correlation.</p></div>
+                <div><h2>Selected request relationship</h2><p>Observed parent chains stay distinct from same-context correlation</p></div>
               </div>
               <div id="signal-request-profile" class="signal-request-profile"></div>
             </section>
@@ -223,7 +223,7 @@
               <div id="source-editor-tabs" class="source-editor-tabs" role="tablist" aria-label="Open source files"></div>
               <div class="source-editor-toolbar">
                 <span id="source-location" class="source-location">Select a captured artifact</span>
-                <button id="source-quick-open" class="source-tool" type="button" aria-label="Open file" title="Open file (⌘P)">⌘P</button>
+                <button id="source-quick-open" class="source-tool" type="button">Open file</button>
                 <label><span class="sr-only" hidden>Find in source</span><input id="source-search" class="source-search" type="search" maxlength="512" placeholder="Find" aria-label="Find in source" title="Find retained text; Enter for next, Shift+Enter for previous (single-line literal, first 1000 matches)" /></label>
                 <button id="source-pretty" class="source-tool" type="button" aria-label="Pretty print source" title="Pretty print source" disabled>{ }</button>
                 <button id="source-wasm" class="source-tool" type="button" aria-label="Inspect WebAssembly module" aria-pressed="false" hidden>Inspect</button>
@@ -282,7 +282,7 @@
               </nav>
               <button class="back-button" type="button" data-screen="traffic" aria-label="Back to traffic">←</button>
               <div class="vm-window-title"><h1>VM workbench</h1></div>
-              <nav class="vm-workspace-switch" aria-label="VM workspace"><button id="vm-show-findings" class="secondary-button" type="button" aria-pressed="true" aria-controls="vm-findings-workspace"><span class="vm-tool-icon" aria-hidden="true">▤</span>Findings</button><button id="vm-show-execution" class="secondary-button" type="button" aria-pressed="false" aria-controls="vm-semantics-workflow"><span class="vm-tool-icon" aria-hidden="true">▷</span>Execution</button><button id="vm-show-owned" class="secondary-button" type="button" aria-pressed="false" aria-controls="vm-owned-debugger"><span class="vm-tool-icon" aria-hidden="true">◉</span>Live fixture</button><button id="vm-show-static" class="secondary-button" type="button" aria-pressed="false" aria-controls="vm-static-workspace"><span class="vm-tool-icon" aria-hidden="true">▦</span>Static bytecode</button><button id="vm-show-contextual" class="secondary-button" type="button" aria-pressed="false" aria-controls="vm-contextual-workspace"><span class="vm-tool-icon" aria-hidden="true">⌘</span>Contextual</button><button id="vm-show-packs" class="secondary-button" type="button" aria-pressed="false" aria-controls="vm-packs-workspace"><span class="vm-tool-icon" aria-hidden="true">◇</span>Analysis packs</button><button id="vm-show-ledger" class="secondary-button" type="button" aria-pressed="false" aria-controls="vm-ledger-workspace"><span class="vm-tool-icon" aria-hidden="true">≡</span>Opcode ledger</button></nav>
+              <nav class="vm-workspace-switch" aria-label="VM workspace"><button id="vm-show-findings" class="secondary-button" type="button" aria-pressed="true" aria-controls="vm-findings-workspace">Findings</button><button id="vm-show-execution" class="secondary-button" type="button" aria-pressed="false" aria-controls="vm-semantics-workflow">Execution</button><button id="vm-show-owned" class="secondary-button" type="button" aria-pressed="false" aria-controls="vm-owned-debugger">Live fixture</button><button id="vm-show-static" class="secondary-button" type="button" aria-pressed="false" aria-controls="vm-static-workspace">Static bytecode</button><button id="vm-show-contextual" class="secondary-button" type="button" aria-pressed="false" aria-controls="vm-contextual-workspace">Contextual</button><button id="vm-show-packs" class="secondary-button" type="button" aria-pressed="false" aria-controls="vm-packs-workspace">Analysis packs</button><button id="vm-show-ledger" class="secondary-button" type="button" aria-pressed="false" aria-controls="vm-ledger-workspace">Opcode ledger</button></nav>
               <div id="vm-session-status" class="vm-session-status" role="status" aria-live="polite"></div>
             </header>
             <div id="vm-owned-controls" hidden></div>
@@ -394,7 +394,7 @@
 
           <section id="screen-api-collection" class="screen" aria-label="API Collection" hidden>
             <header class="screen-head">
-              <div><h1>Collection</h1><div class="screen-subtitle">Author and organize saved request definitions locally. Browser replay has been removed.</div></div>
+              <div><h1>Collection</h1><div class="screen-subtitle">Author and organize saved request definitions locally. Nothing is sent from this screen.</div></div>
               <div class="screen-head-actions"><span class="memory-readonly">Local only</span></div>
             </header>
             <div class="collection-statusbar"><div id="collection-notice" class="collection-notice" data-kind="loading" role="status" aria-live="polite">Loading your local collection…</div><button id="collection-retry" class="secondary-button" type="button" hidden>Retry load</button></div>
@@ -430,7 +430,7 @@
                 </div>
                 <form id="collection-request-form" class="collection-form" hidden>
                   <div class="collection-command-row"><label>Method<input id="collection-request-method" type="text" maxlength="256" value="GET" autocomplete="off" /></label><label>Request URL<input id="collection-request-url" type="text" maxlength="8192" placeholder="https://{{host}}/path/{{id}}" autocomplete="off" /></label></div>
-                  <div class="collection-author-actions"><button id="collection-save-request" class="secondary-button" type="submit">Save request</button><button id="collection-discard-request" class="secondary-button" type="button" disabled>Discard edits</button></div>
+                  <div class="collection-author-actions"><button id="collection-save-request" class="trace-button collection-primary" type="submit">Save request</button><button id="collection-discard-request" class="secondary-button" type="button" disabled>Discard edits</button></div>
 
                   <details class="collection-properties" open><summary>Request settings</summary>
                     <div class="collection-form-row"><label>Name<input id="collection-request-name" type="text" maxlength="128" autocomplete="off" /></label><label>Folder<select id="collection-request-folder"></select></label></div>
@@ -444,7 +444,7 @@
                   </div>
                   <section id="collection-panel-headers" class="collection-content-panel" role="tabpanel" aria-labelledby="collection-tab-headers"><label>Headers (JSON)<textarea id="collection-request-headers" maxlength="20000" spellcheck="false" placeholder='{"accept":"application/json"}'></textarea></label><p class="collection-help">Credential, cookie and transport-owned headers are rejected.</p></section>
                   <section id="collection-panel-body" class="collection-content-panel" role="tabpanel" aria-labelledby="collection-tab-body" hidden><label>Request body<textarea id="collection-request-body" maxlength="65536" spellcheck="false" placeholder='{"id":"{{id}}"}'></textarea></label><p class="collection-help">Up to 64 KiB. GET and HEAD requests cannot include a body.</p></section>
-                  <section id="collection-panel-variables" class="collection-content-panel" role="tabpanel" aria-labelledby="collection-tab-variables" hidden><label>Request variables (JSON)<textarea id="collection-request-variables" maxlength="40000" spellcheck="false" placeholder='{"id":"42"}'></textarea></label><p class="collection-help">Text values replace {{name}} placeholders when you explicitly run a saved request.</p></section>
+                  <section id="collection-panel-variables" class="collection-content-panel" role="tabpanel" aria-labelledby="collection-tab-variables" hidden><label>Request variables (JSON)<textarea id="collection-request-variables" maxlength="40000" spellcheck="false" placeholder='{"id":"42"}'></textarea></label><p class="collection-help">Text values replace matching {{name}} placeholders in the method, URL, headers and body.</p></section>
                   <div id="collection-variable-status" class="collection-variable-status" role="status" aria-live="polite"><span class="collection-variable-chip">No variables used</span></div>
                 </form>
               </section>
@@ -489,7 +489,7 @@
               </aside>
 
               <section class="analyst-pane" aria-label="Analyst file editor">
-                <div class="analyst-pane-head"><div><h2>Editor</h2><p>Select saved work to edit it.</p></div><span id="analyst-editor-badge" class="experiment-card-badge" data-kind="offline">No file</span></div>
+                <div class="analyst-pane-head"><div><h2>Editor</h2><p>Edit a saved script or note.</p></div><span id="analyst-editor-badge" class="experiment-card-badge" data-kind="offline">No file</span></div>
                 <div id="analyst-editor-empty" class="analyst-empty analyst-editor-empty">
                   <h2>Start with saved work</h2>
                   <p>Create a script to inspect captured evidence, or a note to record a finding.</p>
@@ -702,13 +702,13 @@
           <div class="native-console-transcript-footer"><span id="native-console-output-count">0 entries</span><button id="native-console-latest" type="button" class="native-console-button" hidden>Latest output ↓</button><span class="native-console-private">Ephemeral · disposable profile</span></div>
           <form id="native-console-form" class="native-console-input">
             <div class="native-console-composer-line"><span class="native-console-prompt" aria-hidden="true">&gt;</span><div class="native-console-editor"><pre id="native-console-highlight" aria-hidden="true"></pre><textarea id="native-console-source" aria-label="JavaScript command" rows="1" maxlength="8192" spellcheck="false" autocomplete="off" autocapitalize="off" autocorrect="off" aria-describedby="native-console-input-help native-console-composer-status" disabled></textarea></div><button id="native-console-run" type="submit" class="native-console-button native-console-primary" disabled>Run</button></div>
-            <div class="native-console-composer-footer"><span id="native-console-composer-status" role="status">Select a document to run commands</span><span id="native-console-input-help">Enter runs · Shift + Enter adds a line<span class="native-console-extended-help"> · Ctrl + Space suggests · ↑↓ history</span></span></div>
+            <div class="native-console-composer-footer"><span id="native-console-composer-status" role="status">Select a document to run commands</span><span id="native-console-input-help"><kbd>Enter</kbd> runs · <kbd>Shift</kbd> + <kbd>Enter</kbd> adds a line<span class="native-console-extended-help"> · <kbd>Ctrl</kbd> + <kbd>Space</kbd> suggests · <kbd>↑</kbd><kbd>↓</kbd> history</span></span></div>
           </form>
         </section>
       </div>
 
       <dialog id="captured-export-dialog" class="captured-export-dialog" aria-labelledby="captured-export-title" aria-describedby="captured-export-context">
-        <header class="captured-export-header"><div><p class="captured-export-eyebrow">LOCAL EXPORT</p><h2 id="captured-export-title">Export capture</h2></div><button class="secondary-button" type="button" data-export-close aria-label="Close export">×</button></header>
+        <header class="captured-export-header"><div><h2 id="captured-export-title">Export capture</h2></div><button class="secondary-button" type="button" data-export-close aria-label="Close export">×</button></header>
         <div class="captured-export-body">
           <p id="captured-export-context" class="captured-export-context"></p>
           <div class="captured-export-fields">

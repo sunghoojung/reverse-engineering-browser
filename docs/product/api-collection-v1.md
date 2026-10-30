@@ -7,6 +7,13 @@ isolation boundaries. Project-wide authorization and data-handling policy is
 in [`SAFETY.md`](../../SAFETY.md); this document describes the collection's
 credential-free request contract and local persistence behavior.
 
+> **Status:** Origin Trace is native-only. Request Lab execution, **Run saved
+> request**, **Save & Run**, the response pane and run history were removed
+> with authored execution in `2a52287`. Collection now authors and stores
+> templates and never sends a request. Sections on templates, variables, drafts
+> and storage still apply; sections on running requests, responses and
+> execution history describe the removed path.
+
 ## Workflow
 
 1. Open Collection and create folders or saved requests.

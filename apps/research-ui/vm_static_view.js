@@ -253,7 +253,7 @@ function mountVmStatic(root, model = vmStatic) {
   const update = () => {
     analyze.disabled = !inputs.definition || !inputs.image || pending.definition || pending.image || analyzing;
     analyze.textContent = analyzing ? 'Analyzing…' : 'Analyze';
-    for (const kind of ['definition', 'image']) inputStatus[kind].textContent = pending[kind] ? 'Reading…' : inputs[kind] ? 'Loaded' : 'Choose JSON';
+    for (const kind of ['definition', 'image']) inputStatus[kind].textContent = pending[kind] ? 'Reading…' : inputs[kind] ? 'Loaded' : 'Not loaded';
     sourceSummary.textContent = report ? `${report.definition.definition_id} / ${report.image.image_id} · ${report.coverage.decoded_bytes}/${report.coverage.total_bytes} bytes decoded · ${report.coverage.undecoded_bytes ? 'Unsupported bytes remain' : 'Declared semantics remain unverified'} · No code runs here.` :
       `${inputs.definition ? 'Definition ready' : 'Definition required'} · ${inputs.image ? 'Bytecode ready' : 'Bytecode required'} · Local static analysis only`;
     if (report && report.coverage.stop_reason !== 'end') sourceSummary.textContent += ` · stopped: ${report.coverage.stop_reason}`;
@@ -273,7 +273,7 @@ function mountVmStatic(root, model = vmStatic) {
     } catch (error) { if (owner === serials[kind]) notice.textContent = `Import refused: ${error.message}. Previous valid inputs${report ? ' and analysis' : ''} remain available.`; }
     finally { if (owner === serials[kind]) { pending[kind] = false; fileInputs[kind].value = ''; update(); } }
   }
-  for (const [kind, label] of [['definition', 'Definition…'], ['image', 'Bytecode…']]) {
+  for (const [kind, label] of [['definition', 'Definition JSON'], ['image', 'Bytecode JSON']]) {
     const control = node('label', '', 'vm-static-file secondary-button'); control.append(node('span', label));
     const input = node('input'); input.type = 'file'; input.accept = '.json,application/json'; input.setAttribute('aria-label', `Import static VM ${kind === 'definition' ? 'definition' : 'bytecode image'} JSON`);
     input.addEventListener('change', () => importFile(kind, input.files?.[0])); fileInputs[kind] = input;

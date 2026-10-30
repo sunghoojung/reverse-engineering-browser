@@ -4,6 +4,8 @@
 > been removed; saved historical evidence remains inert. Native Wasm dispatch
 > instrumentation requires a rebuild and explicit opt-in; see
 > [the contract and remaining limitations](protocol/native-wasm-dispatch-v1.md).
+> Native JavaScript dispatch-site observation is a separate rebuilt-browser
+> opt-in; see [its contract](protocol/native-js-dispatch-v1.md).
 
 <p align="center">
   <strong>See the browser evidence behind fingerprints, requests, scripts, and runtime behavior.</strong>

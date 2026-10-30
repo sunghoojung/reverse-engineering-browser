@@ -1,11 +1,16 @@
 # Native JavaScript dispatch-site probe v1
 
-Status: design review (step 1 of probe P3). This document answers the bytecode
-flushing, code cache, compilation-path, tiering, arming-scope and shape
-questions for a V8 probe that observes JavaScript dispatch at the static
-interpreter-candidate sites the analyzer already finds. Its conclusion and the
-conditions it depends on are in [Verdict](#verdict). The wire contract is
-versioned separately under `protocol/` with the implementation.
+Status: reviewed design, implemented by V8 patch `0010`, Chromium patch
+`0020`, the overlay and the analyzer (probe P3). The review was written before
+any probe code; [Implementation map](#implementation-map) records what each
+layer now does and which acceptance layers remain.
+
+This document answers the bytecode flushing, code cache, compilation-path,
+tiering, arming-scope and shape questions for a V8 probe that observes
+JavaScript dispatch at the static interpreter-candidate sites the analyzer
+already finds. Its conclusion and the conditions it depends on are in
+[Verdict](#verdict). The wire, site-file and loss contract is
+[native JavaScript dispatch observations v1](../../protocol/native-js-dispatch-v1.md).
 
 Static analysis ([dispatch classification v1](../../protocol/vm-dispatch-classification-v1.md))
 classifies every JavaScript dispatch site and gates opcode claims. Runtime
@@ -294,5 +299,12 @@ mode, or allows optimizing an armed function, reopens this review.
 Acceptance needs ordered replay on the pinned sources, the V8 cctests in
 `tools/check-native-v8-runtime.py`, renderer budget, expiry and queue-loss
 checks, bytecode identity for unarmed code, and the flush, re-arm and
-code-cache cases decided here. A rebuilt Brave run on an owned two-level
-fixture is the remaining live acceptance layer.
+code-cache cases decided here. The cctests (`test-api/RebNativeJsDispatch*`)
+cover disabled and unarmed bytecode identity, selector kinds, handler spans,
+`eval` and `new Function`, late arming, flush and re-arm, code-cache refusal,
+Sparkplug and disabled optimization, parent activation, and admission and the
+site cap; the native-v8-runtime CI job compiles and runs them. The renderer
+budgets, expiry and loss gaps run in `tools/check-native-probe-admission.sh`.
+A rebuilt Brave run on the owned two-level fixture
+(`tools/fixtures/native-js-dispatch/two-level-vm.js`) is the remaining live
+acceptance layer.

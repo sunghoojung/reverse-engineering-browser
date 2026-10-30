@@ -131,6 +131,25 @@ to one renderer process isolate; a parent is the nearest enclosing armed
 frame at the child's first admitted dispatch and only when that frame has
 already dispatched in the same configuration.
 
+## Analyzer join and arming export
+
+The opcode workspace (producer 2.17.0) retains a record as a
+`native_js_observations` row only for a JavaScript artifact of the same
+session and frame whose decoded text has the record's key, then joins it to the
+classified site whose `location.anchor_offset` (VM detector producer 1.10.0)
+maps to the record's UTF-16 anchor and has the same shape. A record that no
+analyzed artifact matches is counted as the analysis input-coverage omission
+`native-js-observation-unmatched`; it is never attached by URL or by guessing.
+Claims, nesting and the omissions are specified in
+[observed claims and nested guests](vm-opcode-workspace-v2.md#observed-claims-and-nested-guests).
+
+The workspace's `js_dispatch_arming.file` is the site file for its armable
+interpreter candidates, with every refused candidate and its reason listed
+beside it; see the
+[arming export](vm-opcode-workspace-v2.md#native-javascript-arming-export).
+Save that text as the file named by `REB_NATIVE_JS_DISPATCH_SITES`. Exporting
+or saving it arms nothing until a new browser launch reads it.
+
 ## Validation boundary
 
 `include/reb/js_dispatch.hpp` is the core encoder, decoder and validator; the

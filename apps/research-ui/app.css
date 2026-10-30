@@ -3881,4 +3881,24 @@ details.decoder-card > header p { margin-top: 0; }
 .float32-row h4 { font-weight: 600; }
 @media (max-width: 1000px) { .float32-form { border-right: 0; border-bottom: 1px solid var(--line); } }
 
+/* Notebook: one primary action (Save pin); reload, close and cancel are quiet;
+   destructive deletes sit apart at the end of their row. */
+.investigation-notebook { border-radius: 8px; box-shadow: 0 16px 48px var(--shadow); }
+.investigation-notebook::backdrop { background: color-mix(in srgb, var(--bg) 70%, transparent); }
+.notebook-header h2 { font-size: 16px; font-weight: 600; }
+.notebook-field > span { color: var(--muted); font-size: 11px; }
+.notebook-pin strong { font-size: 12px; font-weight: 500; }
+.notebook-pin span { font: 11px var(--mono); }
+.investigation-notebook :is(#notebook-close, #notebook-refresh, #notebook-cancel, #notebook-discard, #notebook-delete-book, #notebook-delete-pin) { border-color: transparent; background: transparent; color: var(--muted); }
+.investigation-notebook :is(#notebook-close, #notebook-refresh, #notebook-cancel, #notebook-discard):hover:enabled { background: var(--panel-3); color: var(--text); }
+.investigation-notebook :is(#notebook-delete-book, #notebook-delete-pin) { margin-left: auto; }
+.investigation-notebook :is(#notebook-delete-book, #notebook-delete-pin):hover:enabled { background: var(--panel-3); color: var(--red); }
+#notebook-save { border-color: var(--accent); background: var(--accent); color: var(--panel); }
+#notebook-save:disabled { border-color: var(--line-soft); background: var(--panel-2); color: var(--text); }
+@media (max-width: 760px) { .notebook-controls, .notebook-create { align-items: end; } }
+
+/* Link context: an empty notice takes no space; the stop count is meta. */
+#investigation-notice { margin-left: 4px; }
+#investigation-notice:empty { margin: 0; }
+#investigation-history-count { margin: 0 8px 0 4px; font: 11px var(--mono); }
 /* End console, tools and dialogs */

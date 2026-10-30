@@ -4475,4 +4475,87 @@ body.resizing-panes-y, body.resizing-panes-y * { cursor: row-resize !important; 
 /* End collection and analyst */
 
 /* Console, tools and dialogs */
+/* An unconfigured browser is a setup state, not an evidence error: the hint
+   and badge read as muted text with an off dot. A lost connection and
+   transport failures keep the red role. */
+.native-console-badge[data-state="unavailable"] { color: var(--muted); }
+.native-console-badge[data-state="unavailable"]::before { background: var(--faint); }
+.native-console-panel:has(.native-console-badge[data-state="unavailable"]) .native-console-notice[data-kind="error"] { color: var(--muted); }
+.native-console-panel .native-console-button:disabled { cursor: not-allowed; opacity: .45; }
+.native-console-connection-body { padding: 12px; }
+.native-console-connection-body strong { display: block; color: var(--text); font-size: 12px; }
+.native-console-connection-body .native-console-setting { gap: 8px; }
+.native-console-connection-body select { flex: 1; width: auto; min-width: 0; height: 28px; margin: 0; padding: 0 8px; border: 1px solid var(--line); border-radius: 4px; background: var(--panel); color: var(--text); font: 11px var(--sans); }
+.native-console-connection-body .native-console-button { border-color: var(--line); background: var(--panel); color: var(--text); }
+.native-console-connection-body .native-console-primary { border-color: transparent; background: var(--accent-soft); color: var(--accent); }
+.native-console-controls, .native-console-session-actions { gap: 8px; }
+#native-console-check { margin-top: 8px; }
+.native-console-utilities { padding-top: 8px; }
+.native-console-utilities > summary { color: var(--text); cursor: pointer; }
+.native-console-utilities select { width: 100%; margin-top: 8px; font-family: var(--mono); }
+.native-console-utilities .native-console-button { margin: 8px 8px 0 0; }
+.native-console-composer-footer kbd { display: inline-block; min-width: 16px; padding: 0 4px; border: 1px solid var(--line); border-radius: 4px; background: var(--panel); color: var(--muted); font: 10px/14px var(--sans); text-align: center; }
+.native-console-composer-footer kbd + kbd { margin-left: 2px; }
+
+/* Tools: headings stay at 600 and open or selected states use the text role,
+   so the accent marks only the active tab and the primary action. */
+.decoder-card h2 { font-weight: 600; }
+details.decoder-card > header p { margin-top: 0; }
+.tool-disclosure > summary { font-weight: 500; }
+.tool-disclosure[open] > summary, .tool-disclosure > summary:hover, .tool-detail-disclosure[open] > summary { color: var(--text); }
+.decoder-view-tabs button[aria-pressed="true"] { border-color: var(--line); background: var(--panel-3); color: var(--text); }
+.decoder-field-origin { border: 1px solid var(--line-soft); border-radius: 6px; background: var(--panel-2); }
+
+/* JWT trust state is meta text; only the signature state carries a dot. */
+.jwt-status { align-items: center; gap: 4px 16px; }
+.jwt-status span { display: inline-flex; align-items: center; gap: 6px; padding: 0; border: 0; border-radius: 0; color: var(--faint); font: 11px var(--mono); }
+.jwt-status span[data-kind] { color: var(--text); }
+.jwt-status span[data-kind]::before { content: ""; width: 6px; height: 6px; flex: 0 0 auto; border-radius: 50%; background: var(--amber); }
+.jwt-status span[data-kind="verified"]::before { background: var(--green); }
+.jwt-status span[data-kind="invalid"]::before, .jwt-status span[data-kind="expired"]::before { background: var(--red); }
+.jwt-json pre { font: 11px/1.5 var(--mono); }
+
+/* Float32 shares the flush two-pane layout of Decoder and JWT: a hairline
+   between columns and between sections instead of boxed cards and fieldsets. */
+.float32-workspace { gap: 0; align-items: stretch; min-height: 100%; }
+.float32-form, .float32-output { padding: 12px; border: 0; border-radius: 0; }
+.float32-form { border-right: 1px solid var(--line); }
+.float32-form h2 { margin: 0 0 4px; font-size: 12px; }
+.float32-form > p { margin: 0 0 12px; color: var(--muted); font-size: 11px; line-height: 1.5; }
+.float32-form fieldset { margin: 16px 0 0; padding: 12px 0 0; border: 0; border-top: 1px solid var(--line-soft); border-radius: 0; }
+.float32-form legend { float: left; width: 100%; margin: 0 0 4px; padding: 0; color: var(--text); font-weight: 500; }
+.float32-form legend + * { clear: both; }
+.float32-form fieldset > p { margin: 8px 0 0; color: var(--muted); font-size: 11px; }
+.float32-form label { gap: 4px; color: var(--faint); font-size: 11px; }
+.float32-form label.float32-check { gap: 8px; margin: 16px 0 0; color: var(--text); font-size: 12px; }
+.float32-form input:not([type="checkbox"]), .float32-form select, .float32-form textarea { min-height: 32px; padding: 6px 8px; border-color: var(--line-soft); border-radius: 6px; font-size: 12px; }
+.float32-form textarea { min-height: 96px; }
+.float32-actions { margin: 16px 0 0; }
+.float32-receipt { color: var(--text); font-weight: 500; }
+.float32-output > p:first-child { margin-top: 0; }
+.float32-metrics { grid-template-columns: max-content minmax(0, 1fr); align-items: baseline; gap: 4px 24px; line-height: 1.6; }
+.float32-metrics dd { font: 11px/1.6 var(--mono); }
+.float32-row h4 { font-weight: 600; }
+@media (max-width: 1000px) { .float32-form { border-right: 0; border-bottom: 1px solid var(--line); } }
+
+/* Notebook: one primary action (Save pin); reload, close and cancel are quiet;
+   destructive deletes sit apart at the end of their row. */
+.investigation-notebook { border-radius: 8px; box-shadow: 0 16px 48px var(--shadow); }
+.investigation-notebook::backdrop { background: color-mix(in srgb, var(--bg) 70%, transparent); }
+.notebook-header h2 { font-size: 16px; font-weight: 600; }
+.notebook-field > span { color: var(--muted); font-size: 11px; }
+.notebook-pin strong { font-size: 12px; font-weight: 500; }
+.notebook-pin span { font: 11px var(--mono); }
+.investigation-notebook :is(#notebook-close, #notebook-refresh, #notebook-cancel, #notebook-discard, #notebook-delete-book, #notebook-delete-pin) { border-color: transparent; background: transparent; color: var(--muted); }
+.investigation-notebook :is(#notebook-close, #notebook-refresh, #notebook-cancel, #notebook-discard):hover:enabled { background: var(--panel-3); color: var(--text); }
+.investigation-notebook :is(#notebook-delete-book, #notebook-delete-pin) { margin-left: auto; }
+.investigation-notebook :is(#notebook-delete-book, #notebook-delete-pin):hover:enabled { background: var(--panel-3); color: var(--red); }
+#notebook-save { border-color: var(--accent); background: var(--accent); color: var(--panel); }
+#notebook-save:disabled { border-color: var(--line-soft); background: var(--panel-2); color: var(--text); }
+@media (max-width: 760px) { .notebook-controls, .notebook-create { align-items: end; } }
+
+/* Link context: an empty notice takes no space; the stop count is meta. */
+#investigation-notice { margin-left: 4px; }
+#investigation-notice:empty { margin: 0; }
+#investigation-history-count { margin: 0 8px 0 4px; font: 11px var(--mono); }
 /* End console, tools and dialogs */

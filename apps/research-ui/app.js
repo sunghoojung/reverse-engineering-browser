@@ -1790,6 +1790,7 @@ const capturedExportPanel = installCapturedExportDialog({
         if (workspace.captured_module_preview) previews.push({...workspace.captured_module_preview, origin: 'captured-module'});
         const selector = document.createElement('select'); selector.className = 'vm-snapshot-selector'; selector.setAttribute('aria-label', 'Retained byte evidence');
         previews.forEach((snapshot, index) => { const option = document.createElement('option'); option.value = String(index); option.textContent = `Artifact ${snapshot.artifact_id} · ${snapshot.origin === 'captured-module' ? `dispatch at byte ${snapshot.byte_offset} · ` : ''}${snapshot.byte_count} bytes`; selector.append(option); });
+        if (!previews.length) selector.append(Object.assign(textElement('option', '', 'No retained byte evidence'), {value: '0'}));
         const initial = Math.max(0, previews.findIndex(snapshot => snapshot.artifact_id === workspace.bytecode_artifact_id));
         selector.value = String(initial); selector.disabled = previews.length === 0;
         const label = document.createElement('label'); label.append(document.createTextNode('Retained evidence '), selector);

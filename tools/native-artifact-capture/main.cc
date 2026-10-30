@@ -16,6 +16,8 @@
 #include "brave/components/reverse_engineering_browser/browser/native_artifact_capture_sink.h"
 #include "brave/components/reverse_engineering_browser/browser/native_network_capture_sink.h"
 #include "brave/components/reverse_engineering_browser/browser/native_probe_host.h"
+#include "brave/components/reverse_engineering_browser/common/native_js_dispatch.h"
+#include "brave/components/reverse_engineering_browser/common/native_probe_queue.h"
 #include "chromium_stubs.h"
 #include "reb/artifact.hpp"
 #include "reb/event.hpp"
@@ -651,6 +653,7 @@ int main(int argc, char** argv) {
     NativeWasmIndirect(receiver);
     NativeGuestDependencies(receiver);
     NativeProbeHostGuestBoundary(receiver);
+    NativeProbeHostJsDispatchForwarding();
     event_wire.flush();
     artifact_wire.flush();
     ack_wire.flush();

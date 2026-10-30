@@ -210,6 +210,14 @@ pub(crate) struct Site {
     pub arm_count: Option<u64>,
     pub loop_range: Option<(usize, usize)>,
     pub buffer_kind: Option<std::borrow::Cow<'static, str>>,
+    /// JavaScript only: UTF-8 byte offset of the `switch` keyword or of the
+    /// `[` opening the callee's computed member, where the native dispatch
+    /// probe anchors this site. None when the probe cannot observe it.
+    #[serde(default)]
+    pub anchor_offset: Option<usize>,
+    /// Why a JavaScript site has no probe anchor. Not part of the document.
+    #[serde(default)]
+    pub anchor_refusal: Option<std::borrow::Cow<'static, str>>,
     #[serde(skip)]
     pub table: Option<SiteTable>,
 }
@@ -317,6 +325,7 @@ pub(crate) fn document(artifact_id: &Value, mut sites: Vec<Site>, omissions: Vec
                     "byte_size": site.byte_size.max(1),
                     "line": site.line,
                     "column": site.column,
+                    "anchor_offset": site.anchor_offset,
                 },
                 "selector": {
                     "expression": bounded_expression(&site.selector_expression),
@@ -351,9 +360,37 @@ pub(crate) fn document(artifact_id: &Value, mut sites: Vec<Site>, omissions: Vec
 pub(crate) struct Roles {
     pub javascript: Option<std::rc::Rc<javascript::Proofs>>,
     roles: HashMap<usize, Role>,
+    /// Every classified JavaScript site, in source order, for joining native
+    /// dispatch observations by probe anchor and for the arming export.
+    js_sites: Vec<JsSite>,
     _memory: Memory,
     limited: bool,
     pub meter: Meter,
+}
+
+/// One classified JavaScript site as the native dispatch probe sees it.
+#[derive(Clone)]
+pub(crate) struct JsSite {
+    pub byte_offset: usize,
+    pub byte_size: usize,
+    pub line: Option<usize>,
+    pub column: Option<usize>,
+    pub anchor: Option<usize>,
+    pub refusal: Option<std::borrow::Cow<'static, str>>,
+    pub role: Role,
+    pub kind: Kind,
+    pub instruction: std::borrow::Cow<'static, str>,
+}
+
+impl JsSite {
+    /// `switch` or `indexed-call`, the probe's two shapes.
+    pub fn shape(&self) -> Option<&'static str> {
+        match self.instruction.as_ref() {
+            "switch" => Some("switch"),
+            "indexed call" => Some("indexed-call"),
+            _ => None,
+        }
+    }
 }
 
 impl Roles {
@@ -361,9 +398,30 @@ impl Roles {
         let memory = Memory::new(meter);
         let available = memory.keep(classified.sites.len() as u64 * 64)
             && meter.charge(classified.sites.len() as u64 * 64);
+        let javascript = classified.javascript.is_some();
+        let mut js_sites = Vec::new();
+        if available && javascript && memory.keep(classified.sites.len() as u64 * 128) {
+            js_sites = classified
+                .sites
+                .iter()
+                .map(|site| JsSite {
+                    byte_offset: site.byte_offset,
+                    byte_size: site.byte_size.max(1),
+                    line: site.line,
+                    column: site.column,
+                    anchor: site.anchor_offset,
+                    refusal: site.anchor_refusal.clone(),
+                    role: site.role(),
+                    kind: site.kind,
+                    instruction: site.instruction.clone(),
+                })
+                .collect();
+            js_sites.sort_by_key(|site| (site.byte_offset, site.anchor));
+        }
         Self {
             meter: meter.clone(),
             javascript: classified.javascript.clone(),
+            js_sites,
             _memory: memory,
             roles: if available {
                 classified
@@ -386,6 +444,18 @@ impl Roles {
     /// None when no classified site starts at this offset.
     pub fn get(&self, offset: usize) -> Option<Role> {
         self.roles.get(&offset).copied()
+    }
+
+    /// The JavaScript site the native probe anchors at this byte offset.
+    pub fn js_anchor(&self, anchor: usize) -> Option<&JsSite> {
+        self.js_sites
+            .iter()
+            .find(|site| site.anchor == Some(anchor))
+    }
+
+    /// Every classified JavaScript site in source order.
+    pub fn js_sites(&self) -> &[JsSite] {
+        &self.js_sites
     }
 
     /// A work bound refused sites, so an absent site may be unclassified.
@@ -2654,6 +2724,8 @@ pub(crate) fn wasm(bytes: &[u8], meter: &Meter) -> Option<Classified> {
             arm_count: Some(exports.len() as u64),
             loop_range: None,
             buffer_kind: None,
+            anchor_offset: None,
+            anchor_refusal: None,
             table: None,
         });
     }
@@ -2819,6 +2891,8 @@ fn classify_candidate(
                 arm_count,
                 loop_range,
                 buffer_kind: None,
+                anchor_offset: None,
+                anchor_refusal: None,
                 table,
             })
         }
@@ -2853,6 +2927,8 @@ fn classify_candidate(
                 arm_count: Some(compares.len() as u64),
                 loop_range,
                 buffer_kind: None,
+                anchor_offset: None,
+                anchor_refusal: None,
                 table: None,
             })
         }

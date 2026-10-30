@@ -5,10 +5,13 @@ struct RecordingProbeClient final : reb::mojom::NativeProbeClient {
                  std::uint64_t,
                  std::uint64_t,
                  bool,
-                 base::UnsafeSharedMemoryRegion,
+                 base::UnsafeSharedMemoryRegion queue_region,
                  std::uint64_t epoch,
-                 const std::string&) override {
+                 const std::string&,
+                 const std::vector<std::uint8_t>& js_dispatch_sites) override {
     configured_epoch = epoch;
+    region = std::move(queue_region);
+    js_sites = js_dispatch_sites;
   }
   void Disable() override {}
   void NativeGuestModuleStatus(std::uint64_t epoch, std::uint64_t token, bool accepted) override {
@@ -20,6 +23,8 @@ struct RecordingProbeClient final : reb::mojom::NativeProbeClient {
   };
   std::uint64_t configured_epoch = 0;
   std::vector<Verdict> verdicts;
+  base::UnsafeSharedMemoryRegion region;
+  std::vector<std::uint8_t> js_sites;
 };
 
 void NativeProbeHostGuestBoundary(reb::ArtifactReceiver& receiver) {
@@ -239,4 +244,75 @@ void NativeProbeHostGuestBoundary(reb::ArtifactReceiver& receiver) {
   process.frames.clear();
   std::cout << "PASS production NativeProbeHost guest refusals as explicit gaps, module verdicts "
                "to the renderer, exact host parents and bounded malformed markers\n";
+}
+
+// Native JavaScript dispatch records use the ordinary renderer ring: the host
+// forwards the session's site records and drains type 21 with tab attribution.
+void NativeProbeHostJsDispatchForwarding() {
+  record_corpus = false;
+  auto& session = reb::NativeProbeSession::Get();
+  session.active = true;
+  session.id = kSession;
+  session.mask = kMask;
+  session.expires = 200;
+  session.adapter_json.clear();
+  reb::NativeJsDispatchSite site;
+  site.source_sha256.fill(7);
+  site.source_length = 300;
+  site.anchor_offset = 41;
+  site.shape = reb::NativeJsDispatchShape::kIndexedCall;
+  const auto site_record = reb::EncodeNativeJsDispatchSite(site);
+  session.js_sites.assign(site_record.begin(), site_record.end());
+  session.emitted = [](const NativeProbeEvent& event) { Emit(event); };
+  Configure(kSession, kMask);
+  events.clear();
+
+  auto& process = content::RenderProcessHost::Instance();
+  content::RenderFrameHost frame;
+  frame.frame = {3, 5};
+  frame.document = {11, 12};
+  process.frames = {&frame};
+  RecordingProbeClient client;
+  reb::NativeProbeHost host(session, 1);
+  host.BindClient({&client});
+  Check(client.js_sites == session.js_sites && client.region.IsValid(),
+        "Renderer configuration carries the session's JS dispatch site records");
+
+  reb::NativeJsDispatchObservationPayload payload;
+  payload.shape = 2;
+  payload.selector_kind = 1;
+  payload.script_id = 9;
+  payload.anchor_offset = 41;
+  payload.source_length = 300;
+  payload.selector_low32 = 3;
+  payload.activation_id = 1;
+  payload.source_sha256 = site.source_sha256;
+  NativeProbeEvent record;
+  record.header.category = reb::NativeProbeCategory::kVm;
+  record.header.type = NativeProbeType::kJsDispatchObservation;
+  record.header.payload_size = 128;
+  record.header.session_id = kSession;
+  record.header.process_id = 123;
+  record.header.thread_id = 7;
+  record.header.frame_id = std::rotl(std::uint64_t{3}, 17) ^ std::uint64_t{5};
+  record.header.sequence_number = 601;
+  record.header.monotonic_time_ns = 100;
+  const auto bytes = reb::EncodeNativeJsDispatchObservationPayload(payload);
+  std::copy(bytes.begin(), bytes.end(), record.inline_payload.begin());
+  auto mapping = client.region.Map();
+  auto* queue = static_cast<reb::NativeProbeQueue*>(mapping.memory());
+  Check(queue->TryPush(record), "Renderer ring admits the JS dispatch record");
+  host.EventsAvailable();
+  Check(events.size() == 1 && events[0].header.type == NativeProbeType::kJsDispatchObservation &&
+            events[0].header.tab_id == 1 && events[0].header.sequence_number == 601 &&
+            reb::IsValidNativeJsDispatchHeader(events[0].header) &&
+            std::equal(bytes.begin(), bytes.end(), events[0].inline_payload.begin()),
+        "Host forwards the JS dispatch record unchanged with its tab");
+  host.Disable();
+  session.active = false;
+  session.js_sites.clear();
+  session.emitted = {};
+  process.frames.clear();
+  std::cout << "PASS production NativeProbeHost forwards JS dispatch site records and type 21 "
+               "ring records with tab attribution\n";
 }

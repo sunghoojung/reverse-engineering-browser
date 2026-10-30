@@ -93,6 +93,7 @@ EVENT_TYPES = {
     "artifact_capture_failed",
     "artifact_captured",
     "gap",
+    "js_dispatch_observation",
     "module_compiled",
     "module_instantiated",
     "property_read",
@@ -125,6 +126,39 @@ def parse_canonical_integer(value: object, field: str, line_number: int) -> int:
     elif not value.isdigit() or (value.startswith("0") and value != "0"):
         raise ValueError(f"line {line_number}: {field} is not canonical")
     return int(value)
+
+
+def valid_js_dispatch(event: dict, payload: bytes) -> bool:
+    """Rules of protocol/native-js-dispatch-v1.md, shared with C++, Rust and JS."""
+    if (event["protocol_version"] != 3 or event["category"] != "vm" or event["flags"] != 0
+            or event["payload_truncated"] or len(payload) != 128
+            or any(event[key] == "0" for key in (
+                "session_id", "sequence_number", "monotonic_time_ns", "frame_id"))
+            or any(event[key] != "0" for key in (
+                "artifact_id", "parent_event_id", "navigation_id", "request_id"))
+            or not 1 <= event["process_id"] <= 0xFFFFFFFF
+            or not 1 <= event["thread_id"] <= 0xFFFFFFFF):
+        return False
+
+    def at(offset: int, size: int) -> int:
+        return int.from_bytes(payload[offset:offset + size], "little")
+
+    shape, kind, slot, flags = payload[4], payload[5], payload[6], payload[7]
+    selector, activation, parent = at(20, 4), at(36, 4), at(40, 4)
+    handler = (at(24, 4), at(28, 4), at(32, 4))
+    if (at(0, 2) != 1 or at(2, 2) != 128 or shape not in (1, 2) or not 1 <= kind <= 9
+            or slot >= 8 or flags & ~0x0F or at(8, 4) == 0 or at(16, 4) == 0
+            or at(12, 4) >= at(16, 4) or activation == 0 or at(44, 2) >= 64
+            or at(46, 2) >= 256 or any(payload[80:])):
+        return False
+    if (kind == 7 and selector > 1) or (kind not in (1, 7) and selector != 0):
+        return False
+    if flags & 0x08:
+        if shape != 2 or handler[0] == 0 or handler[1] >= handler[2]:
+            return False
+    elif any(handler):
+        return False
+    return parent == 0 or (parent < activation and not flags & 0x06)
 
 
 def validate_event(event: object, line_number: int) -> None:
@@ -239,6 +273,8 @@ def validate_event(event: object, line_number: int) -> None:
         or any(payload[32:])
     ):
         raise ValueError(f"line {line_number}: native Wasm call_indirect observation is invalid")
+    if event["type"] == "js_dispatch_observation" and not valid_js_dispatch(event, payload):
+        raise ValueError(f"line {line_number}: native JavaScript dispatch observation is invalid")
     if event["type"] in ("wasm_guest_dispatch", "wasm_guest_invocation"):
         # Invocation version 2 adds the exact parent dispatch at bytes 72..80
         # and version 3 the adapter site (at most 8) at bytes 80..84.

@@ -63,7 +63,9 @@ evidence reader. REB no longer launches a DevTools endpoint or a CDP transport.
 Legacy debugger routes return a removal error and are absent from CLI/MCP
 discovery. Native console and owned VM fixture controls are separate capabilities,
 not fallbacks for the removed debugger. Physical Wasm observations use the
-[typed native contract](../../protocol/native-wasm-dispatch-v1.md).
+[typed native contract](../../protocol/native-wasm-dispatch-v1.md). JavaScript
+dispatch at armed static interpreter-candidate sites uses the
+[native JavaScript dispatch contract](../../protocol/native-js-dispatch-v1.md).
 
 Decoder Lab uses a separate native transform helper. API Collection and Local
 Analyst Workspace persist user-authored templates and scripts separately from

@@ -178,6 +178,56 @@ struct Candidate<'a> {
     instruction: &'static str,
     arms: Option<u64>,
     strings: bool,
+    probe: Probe,
+}
+/// Where the native dispatch probe anchors a site, from the AST alone.
+#[derive(Clone, Copy)]
+enum Probe {
+    /// The `switch` keyword, the statement's own start.
+    Switch,
+    /// A computed-member callee: its object's end and its key's start
+    /// bound the `[` that the probe anchors.
+    Member { object_end: u32, key_start: u32 },
+    /// An optional chain at the call or its callee member.
+    Optional,
+    /// A shape with no single anchor node: aliased call, self call, ladder.
+    Unobservable,
+}
+/// The probe's reason for a site with no anchor.
+pub(crate) const ANCHOR_UNOBSERVABLE: &str = "js-dispatch-shape-unobservable";
+pub(crate) const ANCHOR_UNRESOLVED: &str = "js-dispatch-anchor-unresolved";
+
+/// The `[` opening a computed member, found from the end of its object.
+/// Between them a member that parsed can hold only whitespace, comments,
+/// `)` and `?.`; anything else refuses the anchor rather than guessing.
+pub(crate) fn member_bracket(source: &str, object_end: usize, key_start: usize) -> Option<usize> {
+    let bytes = source.as_bytes();
+    let end = key_start.min(source.len());
+    let mut at = object_end;
+    while at < end {
+        match bytes[at] {
+            b'[' => return Some(at),
+            b')' => at += 1,
+            b'?' if bytes.get(at + 1) == Some(&b'.') => at += 2,
+            b'/' if bytes.get(at + 1) == Some(&b'*') => {
+                at += 2 + source.get(at + 2..end)?.find("*/")? + 2;
+            }
+            b'/' if bytes.get(at + 1) == Some(&b'/') => {
+                let rest = source.get(at..end)?;
+                at += rest
+                    .find(['\n', '\r', '\u{2028}', '\u{2029}'])
+                    .unwrap_or(rest.len());
+            }
+            _ => {
+                let c = source.get(at..)?.chars().next()?;
+                if !(c.is_whitespace() || c == '\u{feff}') {
+                    return None;
+                }
+                at += c.len_utf8();
+            }
+        }
+    }
+    None
 }
 #[derive(Clone, Copy)]
 struct Trace<'a> {
@@ -572,10 +622,12 @@ impl<'s, 'a> Facts<'s, 'a> {
                     {
                         facts.element_writes.insert(key);
                     }
+                    let mut optional = call.optional;
                     let callee = match call.callee.get_inner_expression() {
                         Expression::StaticMemberExpression(member)
                             if matches!(member.property.name.as_str(), "call" | "apply") =>
                         {
+                            optional |= member.optional;
                             member.object.get_inner_expression()
                         }
                         other => other,
@@ -589,6 +641,14 @@ impl<'s, 'a> Facts<'s, 'a> {
                             instruction: "indexed call",
                             arms: None,
                             strings: false,
+                            probe: if optional || member.optional {
+                                Probe::Optional
+                            } else {
+                                Probe::Member {
+                                    object_end: member.object.span().end,
+                                    key_start: member.expression.span().start,
+                                }
+                            },
                         });
                     } else if let Expression::Identifier(callee) = callee
                         && let Some(symbol) = facts.symbol(callee)
@@ -716,6 +776,7 @@ impl<'s, 'a> Facts<'s, 'a> {
                             .cases
                             .iter()
                             .any(|case| matches!(case.test, Some(Expression::StringLiteral(_)))),
+                        probe: Probe::Switch,
                     });
                 }
                 _ => (),
@@ -871,6 +932,7 @@ impl<'s, 'a> Facts<'s, 'a> {
                             instruction: "self call",
                             arms: None,
                             strings: false,
+                            probe: Probe::Unobservable,
                         });
                     }
                 }
@@ -887,6 +949,7 @@ impl<'s, 'a> Facts<'s, 'a> {
                     instruction: "if ladder",
                     arms: Some(constants.len() as u64),
                     strings: false,
+                    probe: Probe::Unobservable,
                 });
             }
         }
@@ -970,6 +1033,7 @@ impl<'s, 'a> Facts<'s, 'a> {
                 instruction: "aliased call",
                 arms: None,
                 strings: false,
+                probe: Probe::Unobservable,
             });
         }
         let resolved = facts
@@ -1925,6 +1989,17 @@ fn parsed(
                 _ => 0,
             })
             .unwrap_or(0);
+        let (anchor_offset, anchor_refusal) = match candidate.probe {
+            Probe::Switch => (Some(span.start as usize), None),
+            Probe::Member {
+                object_end,
+                key_start,
+            } => match member_bracket(source, object_end as usize, key_start as usize) {
+                Some(at) => (Some(at), None),
+                None => (None, Some(ANCHOR_UNRESOLVED.into())),
+            },
+            Probe::Optional | Probe::Unobservable => (None, Some(ANCHOR_UNOBSERVABLE.into())),
+        };
         let site = Site {
             strength: strengths[*index],
             kind: candidate.kind,
@@ -1956,6 +2031,8 @@ fn parsed(
             } else {
                 trace.buffer_kind.map(Into::into)
             },
+            anchor_offset,
+            anchor_refusal,
             table: None,
         };
         if !meter.retain(site.retained_bytes()) {

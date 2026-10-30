@@ -8,7 +8,7 @@ import {fileURLToPath} from 'node:url';
 import {runInNewContext} from 'node:vm';
 
 const root = fileURLToPath(new URL('..', import.meta.url));
-// Inputs come only from REB_NATIVE_WASM_* variables. Rendered acceptance is
+// Inputs come only from REB_NATIVE_WASM_* and REB_NATIVE_JS_* variables. Rendered acceptance is
 // `make rendered-ui-check`; a stale or misspelled flag must fail, not be ignored.
 if (process.argv.length > 2) throw new Error(`Unexpected arguments: ${process.argv.slice(2).join(' ')}`);
 const app = await readFile(join(root, 'apps/research-ui/app.js'), 'utf8');
@@ -351,7 +351,7 @@ assert(inventoryPanel.textContent.includes('3 module sites'));
 const shape = (offset, kind, source, repeats, role, extra = {}) => ({artifact_id: workspace.interpreter_artifact_id,
   dispatch_kind: kind, selector_source: source, repeats, role, confidence: 'structural',
   instruction: kind === 'handler_table' ? 'call_indirect' : kind === 'compare_chain' ? 'i32.eq ladder' : 'br_table',
-  location: {function_index: 0, function_body_offset: 40, byte_offset: offset, byte_size: 5, line: null, column: null},
+  location: {function_index: 0, function_body_offset: 40, byte_offset: offset, byte_size: 5, line: null, column: null, anchor_offset: null},
   selector: {expression: 'local4 = i32.load8_u[(param0 + local2)]', byte_offset: offset - 4, through_lookup: false, through_helper: false}, arm_count: 200,
   loop: repeats === 'once' ? null : {byte_offset: 41, byte_size: 300}, buffer_kind: null, table: null, ...extra});
 const classification = {classification_version: 1, site_count: 4, omitted_site_count: 0, omissions: [],
@@ -500,7 +500,7 @@ const javascriptShape = {...javascript, dispatch_classification: {...classificat
   role_counts: {'interpreter-candidate': 0, multiplexer: 1, other: 0},
   kind_counts: {switch_on_value: 0, handler_table: 0, compare_chain: 1, export_per_role: 0, threaded: 0, unknown: 0},
   sites: [{...shape(12, 'compare_chain', 'call_argument', 'once', 'multiplexer'), artifact_id: javascript.interpreter_artifact_id,
-    instruction: 'if ladder', location: {function_index: null, function_body_offset: 3, byte_offset: 12, byte_size: 12, line: 7, column: 7}}]}};
+    instruction: 'if ladder', location: {function_index: null, function_body_offset: 3, byte_offset: 12, byte_size: 12, line: 7, column: 7, anchor_offset: null}}]}};
 const javascriptStructure = renderApi.renderVmDispatchStructure(javascriptShape);
 assert(javascriptStructure.textContent.includes('if ladder · line 7:7 · compare_chain / call_argument / once · router, no guest opcodes claimed'));
 // A sample cannot promote a router or ordinary branch arm to a guest opcode ISA.
@@ -694,5 +694,38 @@ if (process.env.REB_NATIVE_WASM_GOLDEN) {
     assert.equal(python.status === 0,valid,`Python/native event ${mode}: ${python.stderr}`);
   }
   console.log('PASS actual C++ → viewer typed payload, unsigned fields, envelope and reserved-byte cases');
+}
+const jsValid = ['default', 'indexed', 'nested', 'string-selector', 'parent-unknown', 'wide-identities'];
+if (process.env.REB_NATIVE_JS_GOLDEN) {
+  for (const mode of [...jsValid, 'reserved', 'version', 'size', 'truncated', 'shape', 'kind', 'slot', 'flags', 'parent-order',
+    'handler-without-flag', 'switch-handler', 'non-integer-bits', 'sample-index', 'site-sample-index', 'anchor', 'boolean-bits',
+    'activation', 'script', 'source-length', 'parent-flags', 'handler-order', 'handler-script', 'envelope-version',
+    'envelope-flags', 'identity', 'artifact', 'parent-event', 'navigation', 'request', 'big-endian']) {
+    const event=JSON.parse(execFileSync(process.env.REB_NATIVE_JS_GOLDEN,['--case',mode],{encoding:'utf8'}));
+    const valid=runInNewContext(`${model}\nisBrokerEvent(event)`,{event,TextEncoder});
+    assert.equal(valid,jsValid.includes(mode),`actual native JavaScript event ${mode}`);
+    const python = spawnSync('python3',['-c',"import runpy,json,sys; runpy.run_path('tools/validate-evidence-store.py')['validate_event'](json.load(sys.stdin),1)"],
+      {cwd:root,input:JSON.stringify(event),encoding:'utf8'});
+    assert.equal(python.status === 0,valid,`Python/native JavaScript event ${mode}: ${python.stderr}`);
+  }
+  console.log('PASS actual C++ → viewer native JavaScript payload table, envelope and reserved-byte cases');
+}
+if (process.env.REB_NATIVE_JS_WORKSPACE_INPUT) {
+  const actual=JSON.parse(await readFile(process.env.REB_NATIVE_JS_WORKSPACE_INPUT,'utf8'));
+  assert(validateModule(actual),'actual C++ → Rust JavaScript workspace accepted by shipped viewer');
+  const javascript=actual.workspaces.find(row=>row.native_js_observation_count>0);
+  assert(javascript && javascript.observed_claims.every(claim=>claim.stream==='native-js'));
+  const claimsApi = runInNewContext(`${model}\n${helper}\n${renders}\n({renderVmRuntimeClaims})`, {document: testDocument, window: {matchMedia: () => ({matches: true})}, state: renderApiState, TextEncoder, Event});
+  const panel=claimsApi.renderVmRuntimeClaims(javascript);
+  for (const text of ['Native JS dispatch · line', 'Driven by outer line', 'Native probe sites', '"version":1}'])
+    assert(panel.textContent.includes(text), `runtime claims panel shows ${text}`);
+  const forged=structuredClone(actual);forged.workspaces.find(row=>row.native_js_observation_count>0).nested_guests[0].outer.activation_id=7;
+  assert(!validateModule(forged),'a nested guest must name the retained parent activation');
+  const moved=structuredClone(actual);moved.workspaces.find(row=>row.native_js_observation_count>0).observed_claims[0].site.anchor_offset+=1;
+  assert(!validateModule(moved),'a native JavaScript claim must name a classified site anchor');
+  const armed=structuredClone(actual);const arming=armed.workspaces.find(row=>row.native_js_observation_count>0).js_dispatch_arming;
+  arming.file=arming.file.replace('"version":1','"version":2');
+  assert(!validateModule(armed),'the arming file must be the canonical rendering of its sites');
+  console.log('PASS actual C++ → Rust → viewer native JavaScript claims, nesting and arming file');
 }
 console.log('PASS native exact-site/default/counter schema regressions');

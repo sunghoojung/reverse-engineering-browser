@@ -2,7 +2,7 @@
 //! this workspace already retained. Static recovery and its handler rows are
 //! never changed: each claim sits beside them, names the exact retained events
 //! that support it, and states how it compares with the static claim.
-use crate::vm::dispatch_shape::{Role, Roles};
+use crate::vm::dispatch_shape::{JsSite, Role, Roles};
 use crate::vm::wasm_tables::{Entry, Placement, Tables};
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -29,6 +29,8 @@ pub(super) struct Inputs<'a> {
     pub samples: &'a [Value],
     pub physical: &'a [Value],
     pub guest: &'a [Value],
+    /// Native JavaScript dispatch rows of this artifact's script text.
+    pub javascript: &'a [Value],
     /// Accepted call_indirect rows and the module's static table layout,
     /// which supplies their static slot claims.
     pub indirect: &'a [Value],
@@ -63,6 +65,152 @@ struct Claim {
     table: Option<u32>,
     events: Vec<Value>,
     count: u64,
+    /// Native JavaScript only: the claim's handler and its static claim,
+    /// fixed by the site and handler span every supporting row shares.
+    javascript: Option<(Value, Value)>,
+}
+
+/// A native JavaScript handler: the selected case of a `switch`, or the
+/// artifact byte span of the function an indexed call invoked, when that
+/// function belongs to this script.
+fn javascript_handler(row: &Value) -> (Value, u64) {
+    if row["shape"] == "switch" {
+        let value = row["selector"].as_u64().expect("integer selector");
+        return (json!({"kind":"switch-case","case_value":value}), value);
+    }
+    match (
+        row["handler"]["byte_offset"].as_u64(),
+        row["handler"]["byte_size"].as_u64(),
+    ) {
+        (Some(offset), Some(size)) => (
+            json!({"kind":"handler-span","byte_offset":offset,"byte_size":size}),
+            (offset << 32) | (offset + size),
+        ),
+        _ => (
+            json!({"kind":"handler-span","byte_offset":null,"byte_size":null}),
+            u64::MAX,
+        ),
+    }
+}
+
+/// The site's own static claim for an observed opcode. A switch case counts
+/// only inside that switch and outside every switch nested in it; a table
+/// entry agrees only when it spans the function the call invoked.
+fn javascript_static_claim(
+    inputs: &Inputs<'_>,
+    site: &JsSite,
+    opcode: u64,
+    handler: &Value,
+) -> Value {
+    let row = |state: &str, opcode: Option<u64>, index: &Value, offset: &Value| json!({"state":state,"opcode":opcode,"handler_index":index,"byte_offset":offset});
+    let inside = |offset: u64, start: usize, size: usize| {
+        usize::try_from(offset).is_ok_and(|offset| start <= offset && offset < start + size)
+    };
+    let found = if handler["kind"] == "switch-case" {
+        let nested = inputs.roles.map_or(&[][..], Roles::js_sites);
+        inputs.handlers.iter().find(|row| {
+            row["opcode"].as_u64() == Some(opcode)
+                && row.get("handler_index").is_none()
+                && row["source"]["byte_offset"].as_u64().is_some_and(|offset| {
+                    inside(offset, site.byte_offset, site.byte_size)
+                        && !nested.iter().any(|inner| {
+                            inner.instruction == "switch"
+                                && inner.byte_offset > site.byte_offset
+                                && inner.byte_offset < site.byte_offset + site.byte_size
+                                && inside(offset, inner.byte_offset, inner.byte_size)
+                        })
+                })
+        })
+    } else {
+        inputs.handlers.iter().find(|row| {
+            row["opcode"].as_u64() == Some(opcode) && row["handler_index"].as_u64().is_some()
+        })
+    };
+    match found {
+        Some(found) => {
+            let agrees = handler["kind"] == "switch-case"
+                || match (
+                    handler["byte_offset"].as_u64(),
+                    handler["byte_size"].as_u64(),
+                    found["source"]["byte_offset"].as_u64(),
+                    found["source"]["byte_size"].as_u64(),
+                ) {
+                    (Some(start), Some(size), Some(row_start), Some(row_size)) => {
+                        row_start <= start && start + size <= row_start + row_size
+                    }
+                    _ => false,
+                };
+            row(
+                if agrees { "agrees" } else { "disagrees" },
+                Some(opcode),
+                found.get("handler_index").unwrap_or(&Value::Null),
+                &found["source"]["byte_offset"],
+            )
+        }
+        None if u32::try_from(opcode).is_ok_and(|op| inputs.withheld.contains(&op)) => {
+            row("withheld", Some(opcode), &Value::Null, &Value::Null)
+        }
+        None => row("absent", None, &Value::Null, &Value::Null),
+    }
+}
+
+/// The classified site a native JavaScript row names: the same anchor and
+/// the same probe shape.
+fn native_js_site<'r>(roles: Option<&'r Roles>, row: &Value) -> Option<&'r JsSite> {
+    let site = roles?.js_anchor(usize::try_from(row["anchor_offset"].as_u64()?).ok()?)?;
+    (site.shape() == row["shape"].as_str()).then_some(site)
+}
+
+fn javascript_site_json(site: &JsSite) -> Value {
+    json!({"function_index":null,"byte_offset":site.byte_offset,"line":site.line,"column":site.column,"anchor_offset":site.anchor})
+}
+
+/// Native JavaScript claims at exact interpreter-candidate sites. Returns
+/// rows at other sites, rows at no classified site, and rows whose selector
+/// is not an integer, each counted rather than dropped.
+fn javascript_rows(claims: &mut BTreeMap<Key, Claim>, inputs: &Inputs<'_>) -> (u64, u64, u64) {
+    let (mut unattached, mut unsited, mut unkeyed) = (0, 0, 0);
+    for row in inputs.javascript {
+        let Some(site) = native_js_site(inputs.roles, row) else {
+            unsited += 1;
+            continue;
+        };
+        if site.role != Role::InterpreterCandidate {
+            unattached += 1;
+            continue;
+        }
+        let Some(selector) = row["selector"].as_u64() else {
+            unkeyed += 1;
+            continue;
+        };
+        let (handler, handler_key) = javascript_handler(row);
+        let anchor = site.anchor.map(|at| at as u64);
+        add(
+            claims,
+            (
+                "native-js",
+                None,
+                anchor,
+                Some(selector),
+                Some(selector),
+                handler_key,
+            ),
+            || {
+                let comparison = javascript_static_claim(inputs, site, selector, &handler);
+                Claim {
+                    site: javascript_site_json(site),
+                    attribution: "exact",
+                    is_default: false,
+                    table: None,
+                    events: Vec::new(),
+                    count: 0,
+                    javascript: Some((handler, comparison)),
+                }
+            },
+            &row["event"],
+        );
+    }
+    (unattached, unsited, unkeyed)
 }
 
 fn plural(count: u64, singular: &str, plural: &str) -> String {
@@ -276,6 +424,7 @@ fn indirect_rows(
                 table: Some(table),
                 events: Vec::new(),
                 count: 0,
+                javascript: None,
             },
             &row["event"],
         );
@@ -332,6 +481,7 @@ fn wasm_rows(
                 table: None,
                 events: Vec::new(),
                 count: 0,
+                javascript: None,
             },
             &row["event"],
         );
@@ -350,8 +500,13 @@ pub(super) fn derive(inputs: Inputs<'_>) -> Derived {
         .collect::<Vec<_>>();
     let mut unsited = 0u64;
     let mut unattached = 0u64;
+    let (mut javascript_unsited, mut javascript_unkeyed) = (0u64, 0u64);
     let mut unresolved = 0u64;
     if inputs.runtime == "javascript" {
+        let (other, unsited_rows, unkeyed) = javascript_rows(&mut claims, &inputs);
+        unattached += other;
+        javascript_unsited = unsited_rows;
+        javascript_unkeyed = unkeyed;
         match javascript_site(&inputs) {
             Some((site, attribution)) => {
                 for row in native {
@@ -370,6 +525,7 @@ pub(super) fn derive(inputs: Inputs<'_>) -> Derived {
                             table: None,
                             events: Vec::new(),
                             count: 0,
+                            javascript: None,
                         },
                         &row["event"],
                     );
@@ -388,9 +544,23 @@ pub(super) fn derive(inputs: Inputs<'_>) -> Derived {
     }
     let omitted = claims.len().saturating_sub(MAX_CLAIMS);
     let mut disagreements = 0u64;
-    for (key, claim) in claims.into_iter().take(MAX_CLAIMS) {
+    for (key, mut claim) in claims.into_iter().take(MAX_CLAIMS) {
         let (stream, _, _, selector, opcode, handler) = key;
-        let comparison = static_claim(&inputs, &key, &claim);
+        let (handler, comparison) = match claim.javascript.take() {
+            Some(javascript) => javascript,
+            None => (
+                match (stream, claim.table) {
+                    ("dispatch-sample", _) => {
+                        json!({"kind":"handler-index","handler_index":handler})
+                    }
+                    (_, Some(table)) => {
+                        json!({"kind":"table-entry","table_index":table,"callee_function_index":handler})
+                    }
+                    _ => json!({"kind":"br-table-arm","arm":handler,"is_default":claim.is_default}),
+                },
+                static_claim(&inputs, &key, &claim),
+            ),
+        };
         disagreements += u64::from(comparison["state"] == "disagrees");
         derived.claims.push(json!({
             "stream": stream,
@@ -399,11 +569,7 @@ pub(super) fn derive(inputs: Inputs<'_>) -> Derived {
             "site_attribution": claim.attribution,
             "selector": selector,
             "opcode": opcode,
-            "handler": match (stream, claim.table) {
-                ("dispatch-sample", _) => json!({"kind":"handler-index","handler_index":handler}),
-                (_, Some(table)) => json!({"kind":"table-entry","table_index":table,"callee_function_index":handler}),
-                _ => json!({"kind":"br-table-arm","arm":handler,"is_default":claim.is_default}),
-            },
+            "handler": handler,
             "sample_count": claim.count,
             "events": claim.events,
             "static_claim": comparison,
@@ -440,7 +606,21 @@ pub(super) fn derive(inputs: Inputs<'_>) -> Derived {
             if unsited == 1 { "it supplies" } else { "they supply" }
         )}));
     }
+    if javascript_unsited > 0 {
+        derived.omissions.push(json!({"reason":"native-js-observation-unsited","detail":format!(
+            "{} no classified switch or indexed-call site of this script at its anchor. The rows stay retained and supply no observed claims.",
+            plural(javascript_unsited, "retained native JavaScript dispatch record names", "retained native JavaScript dispatch records name")
+        )}));
+    }
+    if javascript_unkeyed > 0 {
+        derived.omissions.push(json!({"reason":"native-js-selector-not-integer","detail":format!(
+            "{} a selector that is not an integer, so {} no opcode claim. Only the selector kind was recorded.",
+            plural(javascript_unkeyed, "retained native JavaScript dispatch record has", "retained native JavaScript dispatch records have"),
+            if javascript_unkeyed == 1 { "it supplies" } else { "they supply" }
+        )}));
+    }
     nested(&inputs, &mut derived);
+    javascript_nested(&inputs, &mut derived);
     derived
 }
 
@@ -646,6 +826,161 @@ fn nested(inputs: &Inputs<'_>, derived: &mut Derived) {
     if omitted > 0 {
         derived.omissions.push(json!({"reason":"nested-guest-limit","detail":format!(
             "Only the first 64 nested guests are kept; {omitted} more are omitted. Their guest sample rows are unchanged."
+        )}));
+    }
+}
+
+/// (session, process, thread, activation) of a native JavaScript row.
+type Activation = (String, u64, u64, u64);
+
+fn activation(row: &Value, id: u64) -> Option<Activation> {
+    Some((
+        row["event"]["session_id"].as_str()?.to_owned(),
+        row["event"]["process_id"].as_u64()?,
+        row["thread_id"].as_u64()?,
+        id,
+    ))
+}
+
+/// A native JavaScript activation whose first dispatch named a parent
+/// activation is an inner interpreter when the parent dispatched first at
+/// another interpreter-candidate site and neither site is a threaded cycle,
+/// whose handler-to-handler calls are the same guest rather than a nested one.
+/// The parent is a call-stack relation at the child's first dispatch.
+fn javascript_nested(inputs: &Inputs<'_>, derived: &mut Derived) {
+    if !inputs
+        .javascript
+        .iter()
+        .any(|row| row["parent_activation_id"].is_u64())
+    {
+        return;
+    }
+    let mut order = Vec::<Activation>::new();
+    let mut groups = HashMap::<Activation, Vec<&Value>>::new();
+    for row in inputs.javascript {
+        let Some(key) = row["activation_id"]
+            .as_u64()
+            .and_then(|id| activation(row, id))
+        else {
+            continue;
+        };
+        groups
+            .entry(key.clone())
+            .or_insert_with(|| {
+                order.push(key);
+                Vec::new()
+            })
+            .push(row);
+    }
+    for rows in groups.values_mut() {
+        rows.sort_by_key(|row| sequence(&row["event"]));
+    }
+    let index = inputs
+        .events
+        .iter()
+        .filter_map(|event| {
+            let reference = json!({"session_id":event["session_id"],"process_id":event["process_id"],"sequence_number":event["sequence_number"]});
+            identity(&reference).map(|key| (key, event))
+        })
+        .collect::<HashMap<_, _>>();
+    let mut unproven = 0u64;
+    let mut omitted = 0u64;
+    let mut sequence_work = MAX_SEQUENCE_WORK;
+    for key in &order {
+        let rows = &groups[key];
+        let first = rows[0];
+        let Some(parent) = first["parent_activation_id"].as_u64() else {
+            continue;
+        };
+        let linked = (|| {
+            let parents = groups.get(&activation(first, parent)?)?;
+            let child_key = identity(&first["event"])?;
+            let child_site = native_js_site(inputs.roles, first)?;
+            // The parent's dispatch running when the child activation began.
+            let outer = parents
+                .iter()
+                .filter(|row| sequence(&row["event"]).is_some_and(|seq| seq < child_key.2))
+                .max_by_key(|row| sequence(&row["event"]))?;
+            let outer_site = native_js_site(inputs.roles, outer)?;
+            if outer_site.anchor == child_site.anchor {
+                // A reentrant activation of one dispatcher, not a nested guest.
+                return Some(None);
+            }
+            if [outer_site, child_site].iter().any(|site| {
+                site.role != Role::InterpreterCandidate
+                    || site.kind == crate::vm::dispatch_shape::Kind::Threaded
+            }) {
+                return None;
+            }
+            let start = sequence(&outer["event"])?;
+            let window = child_key.2 - start - 1;
+            let contiguous = window <= MAX_SEQUENCE_WINDOW.min(sequence_work)
+                && {
+                    sequence_work -= window;
+                    true
+                }
+                && (start + 1..child_key.2).all(|seq| {
+                    index
+                        .get(&(child_key.0.clone(), child_key.1, seq))
+                        .is_some_and(|event| {
+                            !matches!(
+                                event["type"].as_str(),
+                                Some("gap" | "js_dispatch_observation")
+                            )
+                        })
+                });
+            let mut opcodes = BTreeMap::<u64, u64>::new();
+            for row in rows {
+                if let Some(opcode) = row["selector"].as_u64() {
+                    *opcodes.entry(opcode).or_default() += 1;
+                }
+            }
+            let omitted_opcodes = opcodes.len().saturating_sub(MAX_INNER_OPCODES);
+            let (handler, _) = if outer["selector"].is_u64() {
+                javascript_handler(outer)
+            } else {
+                (Value::Null, 0)
+            };
+            Some(Some(json!({
+                "confidence": "observed",
+                "runtime": "javascript",
+                "outer": {
+                    "activation_id": parent,
+                    "site": javascript_site_json(outer_site),
+                    "dispatch_event": outer["event"],
+                    "selector": outer["selector"],
+                    "selector_kind": outer["selector_kind"],
+                    "handler": handler,
+                    "basis": if contiguous { "contiguous-sequence" } else { "nearest-retained" },
+                },
+                "inner": {
+                    "activation_id": first["activation_id"],
+                    "site": javascript_site_json(child_site),
+                    "first_event": first["event"],
+                    "sample_count": rows.len(),
+                    "events": rows.iter().take(MAX_LISTED_EVENTS).map(|row| row["event"].clone()).collect::<Vec<_>>(),
+                    "observed_opcodes": opcodes.iter().take(MAX_INNER_OPCODES)
+                        .map(|(opcode, count)| json!({"opcode":opcode,"sample_count":count})).collect::<Vec<_>>(),
+                    "omitted_opcode_count": omitted_opcodes,
+                },
+            })))
+        })();
+        match linked {
+            Some(None) => (),
+            Some(Some(row)) if derived.nested.len() < MAX_NESTED => derived.nested.push(row),
+            Some(Some(_)) => omitted += 1,
+            None => unproven += 1,
+        }
+    }
+    if unproven > 0 {
+        derived.omissions.push(json!({"reason":"nested-guest-unproven","detail":format!(
+            "{} a parent activation but cannot be linked as a nested guest: a retained parent dispatch before it, interpreter-candidate sites or a site outside a threaded cycle is missing.",
+            plural(unproven, "native JavaScript activation names", "native JavaScript activations name")
+        )}));
+    }
+    if omitted > 0 {
+        derived.omissions.push(json!({"reason":"nested-guest-limit","detail":format!(
+            "Only the first 64 nested guests are kept; {omitted} more are omitted. Their dispatch rows are unchanged."
         )}));
     }
 }
@@ -1475,6 +1810,280 @@ mod tests {
         assert!(workspace.get("nested_guests").is_none());
     }
 
+    /// Owned two-level interpreter: an outer `switch` loop whose opcode 11
+    /// handler runs an inner `ops[code[ip++]](s)` loop, plus a one-shot router
+    /// that is not an interpreter. Opcode ranges are disjoint, so each site's
+    /// static claims are its own.
+    const TWO_LEVEL: &str = "function run(program,code,s){var pc=0;var ops=[function(t){t.acc+=1},function(t){t.acc*=2},function(t){t.halt=true}];function inner(){var ip=0;s.halt=false;while(!s.halt&&ip<code.length){ops[code[ip++]](s);}}while(pc<program.length){switch(program[pc++]){case 10:s.acc=0;break;case 11:inner();break;case 12:s.out.push(s.acc);break;case 13:return s.out;}}return s.out;}function name(k){switch(k){case 0:return 'a';case 1:return 'b';case 2:return 'c';}}";
+
+    fn utf16(source: &str, byte: usize) -> u32 {
+        source[..byte].encode_utf16().count() as u32
+    }
+
+    /// V8's SharedFunctionInfo span of the `index`th `function(t)` of the
+    /// inner table: its parameter `(` to just after its `}`.
+    fn table_function(source: &str, index: usize) -> (u32, u32) {
+        let start = source.match_indices("function(t)").nth(index).unwrap().0 + "function".len();
+        let end = start + source[start..].find('}').unwrap() + 1;
+        (utf16(source, start), utf16(source, end))
+    }
+
+    /// A native JavaScript dispatch record of `source` in the test scope.
+    #[allow(clippy::too_many_arguments)]
+    fn js_row(
+        source: &str,
+        seq: u64,
+        anchor: usize,
+        indexed: bool,
+        selector: Option<u32>,
+        handler: Option<(u32, u32)>,
+        activation: u32,
+        parent: u32,
+        flags: u8,
+    ) -> Value {
+        let key = crate::vm_opcode::native_js::source_key(source.as_bytes()).unwrap();
+        let mut payload = [0u8; 128];
+        payload[..4].copy_from_slice(&[1, 0, 128, 0]);
+        payload[4] = if indexed { 2 } else { 1 };
+        payload[5] = if selector.is_some() { 1 } else { 3 };
+        payload[7] = flags | if handler.is_some() { 8 } else { 0 };
+        put(&mut payload, 8, 9, 4);
+        put(&mut payload, 12, utf16(source, anchor).into(), 4);
+        put(&mut payload, 16, key.length.into(), 4);
+        put(&mut payload, 20, selector.unwrap_or(0).into(), 4);
+        if let Some((start, end)) = handler {
+            put(&mut payload, 24, 9, 4);
+            put(&mut payload, 28, start.into(), 4);
+            put(&mut payload, 32, end.into(), 4);
+        }
+        put(&mut payload, 36, activation.into(), 4);
+        put(&mut payload, 40, parent.into(), 4);
+        put(&mut payload, 46, seq % 256, 2);
+        payload[48..80].copy_from_slice(&key.sha256);
+        let mut row = event("js_dispatch_observation", seq, 0, 0, &payload);
+        row["navigation_id"] = json!("0");
+        row
+    }
+
+    fn two_level_sites() -> (usize, usize, usize) {
+        (
+            TWO_LEVEL.find("switch(program").unwrap(),
+            TWO_LEVEL.find("ops[code").unwrap() + 3,
+            TWO_LEVEL.find("switch(k)").unwrap(),
+        )
+    }
+
+    #[test]
+    fn native_javascript_claims_are_site_scoped_and_nesting_links_through_the_parent() {
+        let (outer, inner, router) = two_level_sites();
+        let root = tempfile::tempdir().unwrap();
+        let source = artifact(root.path(), 1, "javascript", TWO_LEVEL.as_bytes(), 0, 0);
+        let row = |seq, anchor, indexed, selector, handler, activation, parent, flags| {
+            js_row(
+                TWO_LEVEL, seq, anchor, indexed, selector, handler, activation, parent, flags,
+            )
+        };
+        let (add, double, halt) = (
+            table_function(TWO_LEVEL, 0),
+            table_function(TWO_LEVEL, 1),
+            table_function(TWO_LEVEL, 2),
+        );
+        let mut other = js_row("switch(z){}", 30, 0, false, Some(1), None, 9, 0, 1);
+        other["sequence_number"] = json!("30");
+        let events = [
+            row(10, outer, false, Some(10), None, 1, 0, 1),
+            row(11, outer, false, Some(11), None, 1, 0, 0),
+            row(12, inner, true, Some(0), Some(add), 2, 1, 1),
+            row(13, inner, true, Some(1), Some(double), 2, 1, 0),
+            row(14, inner, true, Some(2), Some(halt), 2, 1, 0),
+            // A runtime-replaced table entry: selector 1 ran the `add` handler.
+            row(15, inner, true, Some(1), Some(add), 2, 1, 0),
+            row(16, outer, false, Some(13), None, 1, 0, 0),
+            // A non-interpreter router, a position that is no site, and a
+            // string selector: retained and counted, never claimed.
+            row(17, router, false, Some(0), None, 3, 0, 1),
+            row(18, outer + 1, false, Some(10), None, 1, 0, 0),
+            row(19, outer, false, None, None, 1, 0, 0),
+            // Another script's record: not this workspace's evidence.
+            other,
+        ];
+        let workspace = analyze(root.path(), std::slice::from_ref(&source), &events);
+        assert_eq!(workspace["native_js_observation_count"], 10);
+        let claims = workspace["observed_claims"].as_array().unwrap();
+        let summary = claims
+            .iter()
+            .map(|claim| {
+                (
+                    claim["site"]["anchor_offset"].as_u64().unwrap() as usize,
+                    claim["opcode"].as_u64().unwrap(),
+                    claim["handler"]["kind"].as_str().unwrap(),
+                    claim["sample_count"].as_u64().unwrap(),
+                    claim["static_claim"]["state"].as_str().unwrap(),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            summary,
+            [
+                (inner, 0, "handler-span", 1, "agrees"),
+                // Keyed by handler span: the replaced entry ran `add`.
+                (inner, 1, "handler-span", 1, "disagrees"),
+                (inner, 1, "handler-span", 1, "agrees"),
+                (inner, 2, "handler-span", 1, "agrees"),
+                (outer, 10, "switch-case", 1, "agrees"),
+                (outer, 11, "switch-case", 1, "agrees"),
+                (outer, 13, "switch-case", 1, "agrees"),
+            ]
+        );
+        for claim in claims {
+            assert_eq!(claim["stream"], "native-js");
+            assert_eq!(claim["site_attribution"], "exact");
+            assert_eq!(claim["selector"], claim["opcode"]);
+            assert!(claim["site"]["line"].is_u64());
+        }
+        assert!(workspace["unknowns"].as_array().unwrap().iter().any(|u| {
+            u.as_str()
+                .unwrap()
+                .starts_with("1 observed dispatch claim disagrees")
+        }));
+        for reason in [
+            "observed-claims-not-interpreter",
+            "native-js-observation-unsited",
+            "native-js-selector-not-integer",
+        ] {
+            assert!(omission(&workspace, reason).is_some(), "{reason}");
+        }
+        let nested = workspace["nested_guests"].as_array().unwrap();
+        assert_eq!(nested.len(), 1);
+        let guest = &nested[0];
+        assert_eq!(guest["runtime"], "javascript");
+        assert_eq!(guest["outer"]["activation_id"], 1);
+        assert_eq!(guest["outer"]["selector"], 11);
+        assert_eq!(guest["outer"]["dispatch_event"]["sequence_number"], "11");
+        assert_eq!(guest["outer"]["basis"], "contiguous-sequence");
+        assert_eq!(guest["outer"]["site"]["anchor_offset"], outer);
+        assert_eq!(guest["inner"]["site"]["anchor_offset"], inner);
+        assert_eq!(guest["inner"]["sample_count"], 4);
+        assert_eq!(
+            guest["inner"]["observed_opcodes"],
+            json!([{"opcode":0,"sample_count":1},{"opcode":1,"sample_count":2},{"opcode":2,"sample_count":1}])
+        );
+        // The record of other text is visible at the analysis input.
+        let analysis: Value = serde_json::from_slice(
+            &fs::read(root.path().join("analysis/vm-analysis-v1.json")).unwrap(),
+        )
+        .unwrap();
+        assert!(
+            analysis["input_coverage"]["omissions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|row| row["reason"] == "native-js-observation-unmatched"
+                    && row["observed_records"] == 1)
+        );
+        // The arming export names both interpreter sites, not the router.
+        let arming = &workspace["js_dispatch_arming"];
+        let anchors = arming["sites"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|site| site["anchor_offset"].as_u64().unwrap() as usize)
+            .collect::<Vec<_>>();
+        assert_eq!(anchors, [inner, outer]);
+        let file = arming["file"].as_str().unwrap();
+        let key = crate::vm_opcode::native_js::source_key(TWO_LEVEL.as_bytes()).unwrap();
+        assert!(file.starts_with(&format!(
+            "{{\"sites\":[{{\"anchor_offset\":{inner},\"artifact_id\":\"1\",\"artifact_sha256\":\"{}\",\"byte_offset\":",
+            hex::encode(Sha256::digest(TWO_LEVEL.as_bytes()))
+        )));
+        assert!(file.contains(&format!(
+            "\"shape\":\"indexed-call\",\"source_length\":{},\"source_sha256\":\"{}\"",
+            key.length,
+            hex::encode(key.sha256)
+        )));
+        assert!(file.ends_with("],\"version\":1}"));
+        assert_eq!(arming["refused"], json!([]));
+    }
+
+    #[test]
+    fn native_javascript_nesting_refuses_unknown_parents_threads_and_reentry() {
+        let (outer, inner, _) = two_level_sites();
+        let root = tempfile::tempdir().unwrap();
+        let source = artifact(root.path(), 1, "javascript", TWO_LEVEL.as_bytes(), 0, 0);
+        let add = table_function(TWO_LEVEL, 0);
+        let row = |seq, anchor, indexed, selector, handler, activation, parent, flags| {
+            js_row(
+                TWO_LEVEL, seq, anchor, indexed, selector, handler, activation, parent, flags,
+            )
+        };
+        let events = [
+            row(10, outer, false, Some(11), None, 1, 0, 1),
+            // parent unknown: never linked, not counted as unproven.
+            row(11, inner, true, Some(0), Some(add), 2, 0, 1 | 2),
+            // A reentrant activation at the outer site is not a nested guest.
+            row(12, outer, false, Some(10), None, 3, 1, 1),
+            // A parent that never dispatched in the retained rows.
+            row(13, inner, true, Some(0), Some(add), 5, 4, 1),
+        ];
+        let workspace = analyze(root.path(), std::slice::from_ref(&source), &events);
+        assert!(workspace.get("nested_guests").is_none());
+        assert!(
+            omission(&workspace, "nested-guest-unproven")
+                .unwrap()
+                .starts_with("1 native JavaScript activation names")
+        );
+        // A threaded handler cycle is one guest, so a parent there is unproven.
+        let threaded =
+            include_str!("../../../tools/fixtures/dispatch-shapes/threaded-interpreter.js");
+        let roles = crate::vm::dispatch_roles("javascript", threaded.as_bytes()).unwrap();
+        let sites = roles
+            .js_sites()
+            .iter()
+            .filter(|site| site.kind == crate::vm::dispatch_shape::Kind::Threaded)
+            .map(|site| site.anchor.unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(sites.len(), 2);
+        let rows = [(1, sites[0], 1, 0), (2, sites[1], 2, 1)]
+            .map(|(seq, anchor, activation, parent)| {
+                let event = js_row(
+                    threaded,
+                    seq,
+                    anchor,
+                    true,
+                    Some(0),
+                    None,
+                    activation,
+                    parent,
+                    1,
+                );
+                let artifact = json!({"kind":"javascript","session_id":"41","frame_id":"43"});
+                super::super::native_js::collect(&artifact, threaded.as_bytes(), &[event]).rows
+            })
+            .concat();
+        assert_eq!(rows.len(), 2);
+        let derived = super::derive(super::Inputs {
+            runtime: "javascript",
+            roles: Some(&roles),
+            classification: None,
+            handlers: &[],
+            withheld: &Default::default(),
+            samples: &[],
+            physical: &[],
+            guest: &[],
+            javascript: &rows,
+            indirect: &[],
+            tables: None,
+            events: &[],
+        });
+        assert!(derived.nested.is_empty());
+        assert!(
+            derived
+                .omissions
+                .iter()
+                .any(|row| row["reason"] == "nested-guest-unproven")
+        );
+    }
+
     /// The OpenAPI component carries the same definitions without descriptions.
     #[test]
     fn observed_contract_copies_match_the_standalone_schema() {
@@ -1503,10 +2112,21 @@ mod tests {
             ))
             .unwrap()
         };
-        for name in ["observedClaim", "nestedGuest"] {
+        for name in [
+            "observedClaim",
+            "nestedGuest",
+            "nativeJsObservation",
+            "jsDispatchArming",
+        ] {
             assert_eq!(copy[name], rewrite(&standalone["$defs"][name]), "{name}");
         }
-        for field in ["observed_claims", "nested_guests"] {
+        for field in [
+            "observed_claims",
+            "nested_guests",
+            "native_js_observations",
+            "native_js_observation_count",
+            "js_dispatch_arming",
+        ] {
             let path = |defs: &Value| defs["workspace"]["properties"][field].clone();
             assert_eq!(path(copy), rewrite(&path(&standalone["$defs"])), "{field}");
         }

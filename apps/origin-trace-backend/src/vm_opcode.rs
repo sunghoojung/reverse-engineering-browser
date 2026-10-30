@@ -13,6 +13,8 @@ use std::{
 
 #[path = "vm_opcode_native_guest.rs"]
 mod native_guest;
+#[path = "vm_opcode_native_js.rs"]
+pub(crate) mod native_js;
 #[path = "vm_opcode_native_module.rs"]
 mod native_module;
 #[path = "vm_opcode_native_wasm.rs"]
@@ -22,7 +24,7 @@ mod observed;
 #[path = "vm_opcode_wasm.rs"]
 mod wasm;
 
-const PRODUCER_VERSION: &str = "2.16.0";
+const PRODUCER_VERSION: &str = "2.17.0";
 const MAX_SAMPLES: usize = 4096;
 const MAX_HANDLERS: usize = 1024;
 const MAX_SNAPSHOTS: usize = 16;
@@ -1430,6 +1432,14 @@ pub(crate) struct Analysis<'a> {
     pub roles: Option<&'a vm::dispatch_shape::Roles>,
 }
 
+/// Capture losses the store reported: dispatch-budget gaps and native
+/// JavaScript dispatch gaps, each scoped to its own artifact or session.
+#[derive(Clone, Copy, Default)]
+pub(crate) struct Losses<'a> {
+    pub budget: &'a [DispatchBudgetLoss],
+    pub native_js: &'a [native_js::Gap],
+}
+
 pub(crate) fn workspace(
     root: &Path,
     artifact: &Value,
@@ -1437,9 +1447,13 @@ pub(crate) fn workspace(
     analysis: Analysis<'_>,
     snapshot_artifacts: &[Value],
     events: &[Value],
-    budget_losses: &[DispatchBudgetLoss],
+    losses: Losses<'_>,
 ) -> Option<Value> {
     let Analysis { result, roles } = analysis;
+    let Losses {
+        budget: budget_losses,
+        native_js: native_js_gaps,
+    } = losses;
     // A ranked Wasm table may be worth inspecting without enough independent
     // evidence for likely-vm. Keeping its static workspace never raises that tier.
     let static_wasm_candidate = result["runtime"] == "webassembly"
@@ -1570,6 +1584,7 @@ pub(crate) fn workspace(
         .then(|| native_module::Module::parse(bytes))
         .flatten();
     let observations = native_wasm::collect(artifact, module.as_mut(), events);
+    let javascript_rows = native_js::collect(artifact, bytes, events);
     let indirect = native_wasm::collect_indirect(artifact, module.as_mut(), events);
     let guest_samples = native_guest::collect(
         root,
@@ -1600,10 +1615,25 @@ pub(crate) fn workspace(
             physical_undecodable, guest_samples.undecodable
         )}));
     }
+    if javascript_rows.invalid > 0 {
+        omissions.push(json!({"reason":"native-js-observation-invalid","detail":format!(
+            "Rejected {} malformed native JavaScript dispatch records of this script text, or records whose positions are not UTF-16 boundaries of it.",
+            javascript_rows.invalid
+        )}));
+    }
+    if javascript_rows.count > javascript_rows.rows.len() as u64 {
+        omissions.push(json!({"reason":"native-js-observation-limit","detail":"Only the first 4096 native JavaScript dispatch records are retained; counts include all accepted records."}));
+    }
+    if runtime == "javascript"
+        && let Some(omission) = native_js::gap_omission(artifact, native_js_gaps)
+    {
+        omissions.push(omission);
+    }
     if native_samples.is_empty()
         && observations.count == 0
         && indirect.count == 0
         && guest_samples.count == 0
+        && javascript_rows.count == 0
         && budget_dropped == 0
         && undecodable == 0
     {
@@ -1718,6 +1748,7 @@ pub(crate) fn workspace(
         samples: &retained_samples,
         physical: &observations.rows,
         guest: &guest_samples.rows,
+        javascript: &javascript_rows.rows,
         indirect: &indirect.rows,
         // Slot claims read the same layout the element handler tables list.
         tables: layout.as_ref(),
@@ -1850,6 +1881,13 @@ pub(crate) fn workspace(
         workspace["native_wasm_observation_count"] = json!(observations.count);
         workspace["native_wasm_indirect_observations"] = json!(indirect.rows);
         workspace["native_wasm_indirect_observation_count"] = json!(indirect.count);
+    }
+    if runtime == "javascript" {
+        workspace["native_js_observations"] = json!(javascript_rows.rows);
+        workspace["native_js_observation_count"] = json!(javascript_rows.count);
+        if let Some(arming) = roles.and_then(|roles| native_js::arming(artifact, bytes, roles)) {
+            workspace["js_dispatch_arming"] = arming;
+        }
     }
     if runtime == "webassembly"
         && let Some(inventory) = result["frontend"].get("dispatch_inventory")
@@ -3378,7 +3416,7 @@ mod tests {
             },
             &snapshots,
             &[],
-            &[],
+            Losses::default(),
         )
         .unwrap();
         assert_eq!(
@@ -4710,7 +4748,7 @@ if (!validate(document)) throw new Error('Backend workspace rejected by shipped 
                 },
                 &[],
                 &[],
-                &[],
+                Losses::default(),
             )
             .unwrap();
             vm::finish_classification(&mut result, Some(&mut workspace), &meter);
@@ -4780,7 +4818,7 @@ if (!validate(document)) throw new Error('Backend workspace rejected by shipped 
             },
             &[],
             &[],
-            &[],
+            Losses::default(),
         );
         vm::finish_classification(&mut result, workspace.as_mut(), &roles.meter);
         (result, workspace, roles.meter)

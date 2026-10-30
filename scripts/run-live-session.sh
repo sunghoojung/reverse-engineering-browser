@@ -45,6 +45,7 @@ readonly native_quiet_mode="${REB_NATIVE_QUIET_MODE:-0}"
 readonly native_wasm_dispatch="${REB_NATIVE_WASM_DISPATCH:-0}"
 readonly native_wasm_call_indirect="${REB_NATIVE_WASM_CALL_INDIRECT:-0}"
 readonly native_guest_adapter="${REB_NATIVE_WASM_GUEST_ADAPTER:-}"
+readonly native_js_dispatch_sites="${REB_NATIVE_JS_DISPATCH_SITES:-}"
 readonly capture_canvas_images="${REB_CAPTURE_CANVAS_IMAGES:-0}"
 readonly use_system_keychain="${REB_USE_SYSTEM_KEYCHAIN:-1}"
 readonly localhost_only="${REB_LOCALHOST_ONLY:-0}"
@@ -82,6 +83,19 @@ if [[ -n "${native_guest_adapter}" ]]; then
   adapter_bytes="$(wc -c < "${native_guest_adapter}")"
   if (( adapter_bytes == 0 || adapter_bytes > 8192 )); then
     fail_live_session 2 "REB_NATIVE_WASM_GUEST_ADAPTER must contain between 1 and 8192 bytes."
+  fi
+fi
+if [[ -n "${native_js_dispatch_sites}" ]]; then
+  if (( (category_mask & 512) == 0 )); then
+    fail_live_session 2 "REB_NATIVE_JS_DISPATCH_SITES requires the VM capture category."
+  fi
+  if [[ "${native_js_dispatch_sites}" != /* || ! -f "${native_js_dispatch_sites}" ||
+        ! -r "${native_js_dispatch_sites}" ]]; then
+    fail_live_session 2 "REB_NATIVE_JS_DISPATCH_SITES must name a readable absolute regular file."
+  fi
+  js_sites_bytes="$(wc -c < "${native_js_dispatch_sites}")"
+  if (( js_sites_bytes == 0 || js_sites_bytes > 4096 )); then
+    fail_live_session 2 "REB_NATIVE_JS_DISPATCH_SITES must contain between 1 and 4096 bytes."
   fi
 fi
 if [[ "${REB_CDP_NETWORK_CAPTURE:-0}" != 0 || -n "${REB_DEBUGGER_TRANSPORT_BINARY:-}" ]]; then
@@ -414,11 +428,19 @@ fi
 if [[ -n "${native_guest_adapter}" ]]; then
   native_js_flags+=(--reb-wasm-guest-capture)
 fi
+# JavaScript dispatch capture turns off code caching, streaming and the
+# compilation cache browser-wide, so it is added only with a site file.
+if [[ -n "${native_js_dispatch_sites:-}" ]]; then
+  native_js_flags+=(--reb-js-dispatch-capture)
+fi
 if [[ ${#native_js_flags[@]} -gt 0 ]]; then
   brave_arguments+=("--js-flags=${native_js_flags[*]}")
 fi
 if [[ -n "${native_guest_adapter}" ]]; then
   brave_arguments+=("--reb-wasm-guest-adapter=${native_guest_adapter}")
+fi
+if [[ -n "${native_js_dispatch_sites:-}" ]]; then
+  brave_arguments+=("--reb-js-dispatch-sites=${native_js_dispatch_sites}")
 fi
 if [[ "${capture_canvas_images}" == 1 ]]; then
   brave_arguments+=(--reb-capture-canvas-images)

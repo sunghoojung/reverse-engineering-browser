@@ -94,6 +94,7 @@ component("renderer_sink") {
   defines = [ "IS_REB_NATIVE_PROBE_SINK_IMPL" ]
 
   sources = [
+    "common/native_js_dispatch.h",
     "common/native_probe_event.h",
     "common/native_vm_dispatch_emit.h",
     "common/native_worker_source.cc",
@@ -118,6 +119,7 @@ static_library("renderer") {
   sources = [
     "common/native_console_messages.cc",
     "common/native_console_messages.h",
+    "common/native_js_dispatch.h",
     "common/native_vm_dispatch.h",
     "common/native_wasm_dispatch.h",
     "common/native_wasm_guest.h",
@@ -175,6 +177,8 @@ source_set("browser") {
     "common/native_artifact_queue_limits.h",
     "common/native_console_io.cc",
     "common/native_console_io.h",
+    "common/native_js_dispatch.h",
+    "common/native_js_dispatch_sites.h",
     "common/native_network_lifecycle.h",
     "common/native_probe_event.h",
     "common/native_probe_ipc.h",
@@ -207,6 +211,17 @@ source_set("browser") {
 # Requires the pinned Chromium JSON implementation; never covered by the portable stub.
 test("native_wasm_guest_adapter_unittests") {
   sources = [ "common/native_wasm_guest_adapter_unittest.cc" ]
+  deps = [
+    "//base",
+    "//base/test:test_support",
+    "//content/test:run_all_unittests",
+    "//testing/gtest",
+  ]
+}
+
+# Requires the pinned Chromium JSON implementation, like the guest adapter.
+test("native_js_dispatch_sites_unittests") {
+  sources = [ "common/native_js_dispatch_sites_unittest.cc" ]
   deps = [
     "//base",
     "//base/test:test_support",

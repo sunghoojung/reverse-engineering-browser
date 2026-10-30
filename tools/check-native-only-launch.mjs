@@ -78,3 +78,42 @@ try {
   assert.deepEqual(result.stdout.trimEnd().split('\n'), ['--js-flags=--reb-ignore-debugger-statements --reb-wasm-br-table-dispatch --reb-wasm-guest-capture','--reb-wasm-guest-adapter='+adapterPath]);
 } finally {await rm(adapterDirectory,{recursive:true,force:true});}
 console.log('PASS native guest adapter opt-in, bounded file preflight and quoted path propagation');
+
+const sitesDirectory = await mkdtemp(join(tmpdir(), 'reb-native-js-sites-'));
+try {
+  const sitesPath = join(sitesDirectory, 'js sites.json');
+  await writeFile(sitesPath, '{}');
+  for (const extra of [
+    {REB_NATIVE_JS_DISPATCH_SITES:sitesPath, REB_CAPTURE_CATEGORY_MASK:'1'},
+    {REB_NATIVE_JS_DISPATCH_SITES:'relative.json'},
+    {REB_NATIVE_JS_DISPATCH_SITES:join(sitesDirectory,'missing.json')},
+    {REB_NATIVE_JS_DISPATCH_SITES:sitesDirectory},
+  ]) {
+    const result = spawnSync('bash', [join(root,'scripts/run-live-session.sh')], {env:{...process.env,REB_NATIVE_WASM_DISPATCH:'0',...extra}, encoding:'utf8'});
+    assert.equal(result.status, 2, result.stderr);
+    assert.match(result.stderr, /REB_NATIVE_JS_DISPATCH_SITES/);
+  }
+  for (const size of [0,4097]) {
+    await writeFile(sitesPath, Buffer.alloc(size,32));
+    const result = spawnSync('bash', [join(root,'scripts/run-live-session.sh')], {env:{...process.env,REB_NATIVE_WASM_DISPATCH:'0',REB_NATIVE_JS_DISPATCH_SITES:sitesPath},encoding:'utf8'});
+    assert.equal(result.status,2,result.stderr);
+    assert.match(result.stderr,/between 1 and 4096/);
+  }
+  // Native browser code owns canonical site-file validation; the shell gates
+  // the opt-in and file bounds and passes the path as one argument.
+  await writeFile(sitesPath,'{}');
+  for (const [quiet, expected] of [[0, '--js-flags=--reb-js-dispatch-capture'],
+                                   [1, '--js-flags=--reb-ignore-debugger-statements --reb-js-dispatch-capture']]) {
+    const result = spawnSync('bash',['-c',`set -eu; brave_arguments=(); native_quiet_mode=${quiet}; native_wasm_dispatch=0; native_wasm_call_indirect=0; native_guest_adapter=""; native_js_dispatch_sites="$TEST_SITES"; ${flagsCode}
+      printf '%s\\n' "${'${brave_arguments[@]-}'}"`],{env:{...process.env,TEST_SITES:sitesPath},encoding:'utf8'});
+    assert.equal(result.status,0,result.stderr);
+    assert.deepEqual(result.stdout.trimEnd().split('\n'), [expected,'--reb-js-dispatch-sites='+sitesPath]);
+  }
+  const combined = spawnSync('bash',['-c',`set -eu; brave_arguments=(); native_quiet_mode=1; native_wasm_dispatch=1; native_wasm_call_indirect=0; native_guest_adapter="$TEST_SITES"; native_js_dispatch_sites="$TEST_SITES"; ${flagsCode}
+    printf '%s\\n' "${'${brave_arguments[@]-}'}"`],{env:{...process.env,TEST_SITES:sitesPath},encoding:'utf8'});
+  assert.equal(combined.status,0,combined.stderr);
+  assert.deepEqual(combined.stdout.trimEnd().split('\n'), [
+    '--js-flags=--reb-ignore-debugger-statements --reb-wasm-br-table-dispatch --reb-wasm-guest-capture --reb-js-dispatch-capture',
+    '--reb-wasm-guest-adapter='+sitesPath, '--reb-js-dispatch-sites='+sitesPath]);
+} finally {await rm(sitesDirectory,{recursive:true,force:true});}
+console.log('PASS native JS dispatch sites opt-in, VM-category gate, bounded file preflight and single js-flags merge');

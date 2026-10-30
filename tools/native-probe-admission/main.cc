@@ -1471,6 +1471,7 @@ void NativeWasmIndirectAdmission() {
 }
 
 #include "guest_sampler_tests.h"
+#include "js_dispatch_tests.h"
 
 // Each test keeps a multi-megabyte ring on its own stack. Inlining every test
 // into main can exceed the default 8 MiB main-thread stack, so each runs in
@@ -1489,6 +1490,8 @@ int main() {
   Run<&NativeGuestTwoSiteNesting>();
   Run<&NativeWasmRuntimeAdmission>();
   Run<&NativeWasmIndirectAdmission>();
+  Run<&NativeJsDispatchWire>();
+  Run<&NativeJsDispatchAdmission>();
   Run<&DispatchSampleAdmission>();
   Run<&DispatchEmitFailureReleasesBudget>();
   Run<&OwnedRegisterSamplerAdmission>();

@@ -88,7 +88,7 @@ static ANTI: LazyLock<Vec<(&str, u64, Regex)>> = LazyLock::new(|| {
 ].into_iter().map(|(id,weight,p)|(id,weight,Regex::new(p).expect("Anti-bot rule"))).collect()
 });
 pub(crate) fn current_producer() -> Value {
-    json!({"id":"origin-trace-vm-detector","version":"1.9.0"})
+    json!({"id":"origin-trace-vm-detector","version":"1.10.0"})
 }
 
 // The catalog and generated documents share this exact profile projection.
@@ -1349,6 +1349,8 @@ pub(crate) fn store_documents(root: &Path, event_store: &Path) -> Result<Documen
     let mut event_ids = BTreeMap::<EventReference, Option<usize>>::new();
     let mut capture_gaps = 0usize;
     let mut dispatch_budget_losses = Vec::new();
+    let mut native_js_gaps = Vec::new();
+    let mut native_js_sources = BTreeSet::new();
     for (line, event) in event_records {
         let reference = if event["type"] == "vm_dispatch_report" {
             crate::vm_dispatch_input::report_reference(&event)
@@ -1380,6 +1382,9 @@ pub(crate) fn store_documents(root: &Path, event_store: &Path) -> Result<Documen
             if let Some(loss) = crate::vm_opcode::dispatch_budget_loss(&event) {
                 dispatch_budget_losses.push(loss);
             }
+            if let Some(gap) = crate::vm_opcode::native_js::gap(&event) {
+                native_js_gaps.push(gap);
+            }
             continue;
         }
         let reference = reference.unwrap();
@@ -1402,6 +1407,10 @@ pub(crate) fn store_documents(root: &Path, event_store: &Path) -> Result<Documen
         omissions.push(json!({"reason":"capture-gap","observed_records":capture_gaps}));
     }
     let events = events.into_iter().flatten().collect::<Vec<_>>();
+    // Script text is keyed only when native JavaScript records exist to join.
+    let has_native_js = events
+        .iter()
+        .any(|event| event["type"] == "js_dispatch_observation");
     let profile = current_profile();
     let mut results = failures;
     let mut opcode_workspaces = Vec::new();
@@ -1411,6 +1420,17 @@ pub(crate) fn store_documents(root: &Path, event_store: &Path) -> Result<Documen
         }
         let (mut result, bytes) = match evidence::content(root, artifact, 16 * 1024 * 1024) {
             Ok(bytes) => {
+                if has_native_js
+                    && artifact["kind"] == "javascript"
+                    && let Some(key) = crate::vm_opcode::native_js::source_key(&bytes)
+                {
+                    native_js_sources.insert((
+                        artifact["session_id"].as_str().unwrap_or("").to_owned(),
+                        artifact["frame_id"].as_str().unwrap_or("").to_owned(),
+                        key.sha256,
+                        key.length,
+                    ));
+                }
                 let (result, roles) = analyze_with_roles(artifact, &bytes, &events);
                 (result, Some((bytes, roles)))
             }
@@ -1454,7 +1474,10 @@ pub(crate) fn store_documents(root: &Path, event_store: &Path) -> Result<Documen
                 },
                 &snapshot_artifacts,
                 &events,
-                &dispatch_budget_losses,
+                crate::vm_opcode::Losses {
+                    budget: &dispatch_budget_losses,
+                    native_js: &native_js_gaps,
+                },
             );
             if let Some(roles) = &roles {
                 finish_classification(&mut result, workspace.as_mut(), &roles.meter);
@@ -1499,6 +1522,18 @@ pub(crate) fn store_documents(root: &Path, event_store: &Path) -> Result<Documen
             crate::error::Code::DependencyUnavailable,
             crate::error::Phase::Worker,
         )));
+    }
+    // A native JavaScript record names its script by text. One no analyzed
+    // artifact of its session and frame has supplies no claim anywhere.
+    let unmatched = events
+        .iter()
+        .filter(|event| event["type"] == "js_dispatch_observation")
+        .filter_map(crate::vm_opcode::native_js::event_key)
+        .filter(|key| !native_js_sources.contains(key))
+        .count();
+    if unmatched > 0 {
+        omissions.push(json!({"reason":"native-js-observation-unmatched","observed_records":unmatched,
+            "detail":"Native JavaScript dispatch records name script text that no analyzed JavaScript artifact of the same session and frame has. They supply no observed claim."}));
     }
     let mut mixed = Vec::new();
     for wasm in results.iter().filter(|r| {
@@ -1557,7 +1592,7 @@ mod profile_tests {
     #[test]
     fn handler_recovery_requirement_has_distinct_profile_and_accepts_older_profiles() {
         let current = current_profile();
-        assert_eq!(current_producer()["version"], "1.9.0");
+        assert_eq!(current_producer()["version"], "1.10.0");
         assert_eq!(current["javascript_likely_vm_requires_handlers"], true);
         let mut historical = current.clone();
         historical
@@ -1723,6 +1758,54 @@ mod dispatch_shape_tests {
             );
         }
         assert!(mismatches.is_empty(), "{}", mismatches.join("\n"));
+    }
+
+    /// The native JavaScript dispatch probe anchors a switch at its keyword
+    /// and an indexed call at the `[` of its callee's computed member, found
+    /// from the AST. Optional chains and shapes without one node have none.
+    #[test]
+    fn javascript_sites_record_the_native_probe_anchor() {
+        let source = "\u{feff}// \u{3a9}\u{1d535}\nfunction run(c,t,s){var p=0;while(p<c.length){switch(c[p++]){case 0:(t) /* [ */ [c[p++]](s);t[c[p++]].call(null,s);t[c[p++]]?.(s);t?.[c[p++]](s);const h=t[c[p++]];h(s);break;}}}";
+        let classification = javascript_classification(source);
+        let sites = classification["sites"].as_array().unwrap();
+        let anchors = sites
+            .iter()
+            .map(|site| {
+                (
+                    site["instruction"].as_str().unwrap(),
+                    site["location"]["byte_offset"].as_u64().unwrap() as usize,
+                    site["location"]["anchor_offset"]
+                        .as_u64()
+                        .map(|v| v as usize),
+                )
+            })
+            .collect::<Vec<_>>();
+        let find = |needle: &str| source.find(needle).unwrap();
+        let expected = [
+            ("switch", find("switch"), Some(find("switch"))),
+            ("indexed call", find("(t)"), Some(find("[c[p++]](s);t["))),
+            (
+                "indexed call",
+                find("t[c[p++]].call"),
+                Some(find("t[c[p++]].call") + 1),
+            ),
+            ("indexed call", find("t[c[p++]]?.("), None),
+            ("indexed call", find("t?.["), None),
+            ("aliased call", find("h(s)"), None),
+        ];
+        for want in expected {
+            assert!(anchors.contains(&want), "{want:?} not in {anchors:?}");
+        }
+        // Anchors are artifact bytes: the mark and multibyte comment precede them.
+        assert!(anchors.iter().all(|(_, offset, _)| *offset > 10));
+        let schema: Value = serde_json::from_str(include_str!(
+            "../../../protocol/vm-dispatch-classification-v1.schema.json"
+        ))
+        .unwrap();
+        jsonschema::validator_for(&schema)
+            .unwrap()
+            .validate(&classification)
+            .unwrap();
     }
 
     /// Every embedded copy of the classification contract matches the

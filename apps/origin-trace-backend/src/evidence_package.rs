@@ -1725,21 +1725,25 @@ fn push_gap(package: &mut Value, gap: Value, memory: &mut ExportMemory) -> Resul
 mod tests {
     use super::*;
     #[test]
-    fn native_wasm_observation_exports_as_physical_metadata() {
+    fn native_dispatch_observations_export_as_physical_metadata() {
         let source = include_bytes!("../assets/evidence-packages/source-v1/events.jsonl");
         let first = source.split(|b| *b == b'\n').next().unwrap();
-        let mut event: Value = serde_json::from_slice(first).unwrap();
-        event["type"] = json!("wasm_dispatch_observation");
-        event["category"] = json!("vm");
-        event["payload"] = json!("00".repeat(128));
-        event["payload_size"] = json!(128);
-        let (_, projected, _, _) = source_event(&event, &Budget::new()).unwrap();
-        assert_eq!(projected["type"], "wasm_dispatch_observation");
-        assert!(projected["operation"].is_null());
-        assert!(projected.get("payload").is_none());
-        assert!(projected.get("guest_position").is_none());
-        event["type"] = json!("unsupported_native_event");
-        assert!(source_event(&event, &Budget::new()).is_err());
+        for kind in ["wasm_dispatch_observation", "js_dispatch_observation"] {
+            let mut event: Value = serde_json::from_slice(first).unwrap();
+            event["type"] = json!(kind);
+            event["category"] = json!("vm");
+            event["payload"] = json!("00".repeat(128));
+            event["payload_size"] = json!(128);
+            let (_, projected, _, _) = source_event(&event, &Budget::new()).unwrap();
+            assert_eq!(projected["type"], kind);
+            // A package keeps metadata only: selector bits, handler spans and
+            // the source key never leave the store through an export.
+            assert!(projected["operation"].is_null());
+            assert!(projected.get("payload").is_none());
+            assert!(projected.get("guest_position").is_none());
+            event["type"] = json!("unsupported_native_event");
+            assert!(source_event(&event, &Budget::new()).is_err());
+        }
     }
     #[test]
     fn trusted_schema_initialization_precedes_the_unchanged_input_budget() {

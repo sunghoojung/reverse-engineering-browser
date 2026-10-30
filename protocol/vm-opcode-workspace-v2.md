@@ -357,7 +357,25 @@ an interpreter-candidate site of the same metered classification:
 | `native-guest` | `native_guest_samples` | `exact` function and module offset | br_table selector | opcode the adapter decoded from the guest snapshot | `br-table-arm` |
 | `native-wasm` | `native_wasm_observations` | `exact` | br_table selector | null; a selector is not a guest opcode | `br-table-arm` |
 | `native-wasm-indirect` | `resolved` rows of `native_wasm_indirect_observations` | `exact` | table slot | null | `table-entry`: table and callee function |
+| `native-js` | `native_js_observations` | `exact` site anchor | integer selector | the selector, the dispatched case value or table index | `switch-case`, or `handler-span`, the invoked function's bytes |
 | `dispatch-sample` | native JavaScript `samples` | `sole-interpreter-candidate` or `artifact` | null | sampled opcode | `handler-index`, the sampler's selected handler |
+
+Producer 2.17.0 adds `native-js`. Each row of `native_js_observations` is one
+[native JavaScript dispatch record](native-js-dispatch-v1.md) of this
+artifact's script text, in the artifact's session and frame: the record's
+UTF-16LE SHA-256 and length equal the artifact decoded as strict UTF-8 with
+one leading U+FEFF removed. Its UTF-16 anchor and handler positions are mapped
+back to artifact bytes; a position that is not a UTF-16 boundary of that text
+makes the record invalid. A row joins the classified site with the same
+`location.anchor_offset` and shape, so its claim names that site exactly, with
+line, column and `anchor_offset`. Only an integer selector is an opcode. A
+`switch` claim's static claim is the case of that value inside that switch and
+outside every switch nested in it (`agrees`, or `withheld` or `absent` without
+one). An indexed-call claim's static claim is the table entry for the opcode: it
+`agrees` when the entry's bytes contain the invoked function's span and
+`disagrees` otherwise, including a handler outside this script, as when a table
+entry was replaced at run time. `native_js_observation_count` counts every
+accepted record; at most 4096 rows are retained.
 
 A JavaScript dispatch sample names its interpreter artifact, not a dispatch
 site. Its claims attach only when the artifact has an interpreter-candidate
@@ -402,10 +420,19 @@ for native rows at a site that is not a classified interpreter candidate,
 `observed-claims-unresolved-callee` for `call_indirect` rows whose entry was
 null, out of bounds, from another instance or unresolved,
 `observed-claims-unsited` for dispatch samples without a usable site, and
-`observed-claim-limit` past 256 claims.
+`observed-claim-limit` past 256 claims. Native JavaScript rows add
+`native-js-observation-unsited` (no classified switch or indexed call at the
+anchor) and `native-js-selector-not-integer`; malformed records of this text
+are `native-js-observation-invalid`, and retention past 4096 rows is
+`native-js-observation-limit`. Renderer losses named by
+`native_js_dispatch_*` gaps in the artifact's session become one
+`native-js-dispatch-incomplete` omission listing each reason and count. The
+analysis input coverage counts records whose script text no analyzed
+JavaScript artifact of their session and frame has as
+`native-js-observation-unmatched`.
 
-`nested_guests` is a WebAssembly-only list of at most 64 inner interpreters.
-A native guest activation becomes a nested guest when its invocation marker
+`nested_guests` lists at most 64 inner interpreters. For WebAssembly, a
+native guest activation becomes a nested guest when its invocation marker
 names a nonzero `parent_invocation_id` whose rows are retained here, and both
 activations share session, process, renderer thread and instance, the parent
 began first, both sites are interpreter candidates, the child runs at another
@@ -442,7 +469,42 @@ location or call stack. The analyzer path is exercised with owned synthetic
 programs in `vm_opcode_observed.rs`; its exported store backs the rendered VM
 Lab acceptance.
 
-VM Lab shows both lists on a Runtime claims tab. A contradicting claim keeps
+Producer 2.17.0 also links JavaScript nested guests through native JavaScript
+records, with `runtime` `javascript`. Rows group into activations by session,
+process, renderer thread and activation ID. An activation whose first retained
+row names a nonzero `parent_activation_id` is a nested guest when the parent
+activation's rows are retained, the parent's last row before the child's first
+is at another interpreter-candidate site, and neither site is `threaded`: a
+threaded handler cycle calls handler from handler within one guest, so that
+parent relation is not nesting. A child at the parent's own site is a reentrant
+activation and is skipped. The outer side names the parent activation, its site,
+that dispatch event, selector and handler; `basis` is computed as for Wasm. The
+inner side lists the child's site, first event, retained rows and integer
+selectors. A parent is the nearest enclosing armed frame at the child's first
+dispatch, a call-stack relation; rows whose parent was unknown or whose search
+was truncated never link. Activations that name a parent but fail a rule are
+counted as `nested-guest-unproven`.
+
+### Native JavaScript arming export
+
+A JavaScript workspace with at least one interpreter-candidate site carries
+`js_dispatch_arming`: the `native-js-dispatch-sites-v1` site file for its
+`switch` and `indexed call` interpreter candidates, at most 8 in source order,
+from the full classification. Each site names the artifact, its raw digest and
+static `byte_offset`, the shape, the decoded text's UTF-16LE SHA-256 and length,
+and the UTF-16 anchor. `file` is the exact canonical file text (sorted keys, no
+whitespace, as base::JSONWriter writes it), or null when nothing can be armed.
+Every interpreter candidate that is not armed is listed in `refused` (at most
+64, with `omitted_refused_count`) with `js-dispatch-shape-unobservable`
+(aliased call, self call, if ladder, optional chain),
+`js-dispatch-anchor-unresolved`, `js-dispatch-site-limit` past 8, or
+`js-dispatch-source-not-utf8`. The file is served by `get_vm_opcode_workspace`;
+for example `reb-api get_vm_opcode_workspace` piped to
+`jq -r '.workspaces[] | select(.interpreter_artifact_id == "12") | .js_dispatch_arming.file'`
+writes it for `REB_NATIVE_JS_DISPATCH_SITES`. Exporting arms nothing.
+
+VM Lab shows both lists, and for JavaScript the armable probe sites and file
+text, on a Runtime claims tab. A contradicting claim keeps
 both statements and an amber rule; each nested guest names the inner site,
 invocation and buffer, the outer site, handler and dispatch event, and its
 basis. The tab appears only when the workspace carries claims, nested guests
@@ -459,6 +521,11 @@ byte coverage. Rust workspace tests exercise identity mismatch, malformed and
 truncated payloads, unknown opcodes, scoped marker mismatch, retention bounds,
 all-sample counts, content digest/schema validity and v1 rejection. UI contract
 tests cover sample projection, strict v2 validation and preserved failure state.
+`make native-js-golden-check` runs the actual C++ native JavaScript dispatch
+encoder over the owned two-level fixture through the Rust store, workspace and
+schema, the shipped viewer and the Python store validator, including every
+malformed payload and envelope case. These checks prove the contracts, not that
+a rebuilt browser emitted the records.
 
 ## Captured module instruction preview
 

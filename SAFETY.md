@@ -37,6 +37,11 @@ it.
   adapter recipe file and records typed local values and bounded bytecode
   snapshots that the recipe names. Recipes are evidence inputs, not proof of
   guest semantics. Guest capture is native only; no debugger protocol is used.
+  Native JavaScript dispatch-site capture is a separate opt-in: it needs a
+  rebuilt browser and a researcher-supplied site file, observes at most 8
+  sites, and records only selector kinds and integer low bits, V8 script IDs,
+  source positions and the armed site's source digest, never argument,
+  receiver or string contents.
 - Standalone probes remain inactive without an enabled session. Enabled artifact
   capture retains raw source URLs locally; metadata is not necessarily secret-free.
 - Historical captures can include sensitive URLs, headers, bodies and source.

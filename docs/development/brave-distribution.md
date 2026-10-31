@@ -41,6 +41,13 @@ signature, and tests an extracted ZIP. It prints the archive's SHA-256 hash.
 The generated ZIP is under `build/` by default and is for development testing,
 not an automatically published release.
 
+Record a release candidate's provenance with
+[`tools/write-brave-provenance.py`](../../tools/write-brave-provenance.py). It
+takes the ZIP, the packager's SHA-256, the build commit, `out/Static_arm64/args.gn`,
+the extracted app's `--version` output and CDHash, and writes a deterministic
+`.provenance.json` beside the ZIP. The [paired release procedure](paired-release.md)
+gives the exact commands.
+
 ## Release gate
 
 Build the publishable artifact from the intended Git tag in a clean, trusted
@@ -57,6 +64,9 @@ self-hosted runners](https://docs.github.com/en/actions/reference/security/secur
 Use an isolated build host with a trusted-only job trigger and no personal
 credentials instead. Until that infrastructure exists, the local ZIP is a
 verified development preview, not the source of an official release asset.
+The v0.3.0 and v0.5.0 paired releases are explicit exceptions: they publish a
+local workstation build and disclose that in the browser provenance and release
+notes. See the [paired release procedure](paired-release.md).
 
 Ad-hoc signing is not Developer ID signing or notarization. A broadly
 distributed macOS browser also needs hardened-runtime signing, notarization,

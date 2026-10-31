@@ -12,6 +12,9 @@ from urllib.request import Request, urlopen
 
 
 REPOSITORY = "sunghoojung/reverse-engineering-browser"
+# The one paired release this source admits. Publishing another version needs
+# a new review of this constant, the browser pin and the release notes.
+REVIEWED_TAG = "v0.5.0"
 
 
 def digest(path):
@@ -92,8 +95,8 @@ def main():
     tag = os.environ["RELEASE_TAG"]
     source_sha = os.environ["RELEASE_SOURCE_SHA"]
     event = os.environ["GITHUB_EVENT_NAME"]
-    if tag != "v0.3.1" or not re.fullmatch(r"[0-9a-f]{40}", source_sha):
-        raise ValueError("Only the reviewed v0.3.1 release is admitted")
+    if tag != REVIEWED_TAG or not re.fullmatch(r"[0-9a-f]{40}", source_sha):
+        raise ValueError(f"Only the reviewed {REVIEWED_TAG} release is admitted")
     if event not in {"push", "workflow_dispatch"}:
         raise ValueError("Publication is forbidden for this event")
     directory = Path("build/release-pair")
@@ -110,7 +113,7 @@ def main():
     expected = {
         f"Origin-Trace-{tag}-macos.zip",
         f"Brave-Browser-Development-{tag}-macos-arm64.zip",
-        "Brave-Browser-Development-v0.3.0-macos-arm64.provenance.json",
+        f"Brave-Browser-Development-{tag}-macos-arm64.provenance.json",
         f"Origin-Trace-Brave-{tag}.provenance.json",
     }
     if names != expected:

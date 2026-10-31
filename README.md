@@ -2,7 +2,8 @@
 
 > Capture is native-only. CDP transport, injection and live debugger features have
 > been removed; saved historical evidence remains inert. Native Wasm dispatch
-> instrumentation requires a rebuild and explicit opt-in; see
+> instrumentation needs the matching rebuilt browser; the packaged app turns it
+> on by default. See
 > [the contract and remaining limitations](protocol/native-wasm-dispatch-v1.md).
 > Native JavaScript dispatch-site observation is a separate rebuilt-browser
 > opt-in; see [its contract](protocol/native-js-dispatch-v1.md).
@@ -27,36 +28,54 @@
 Origin Trace connects captured requests, source bytes, runtime observations and
 local research notes in one macOS workspace.
 
-[Download v0.3.1: Origin Trace + Brave](https://github.com/sunghoojung/reverse-engineering-browser/releases/tag/v0.3.1)
+[Download v0.5.0: Origin Trace + Brave](https://github.com/sunghoojung/reverse-engineering-browser/releases/tag/v0.5.0)
+· [Changes since v0.3.2](https://github.com/sunghoojung/reverse-engineering-browser/compare/v0.3.2...v0.5.0)
+· [Paired release procedure](docs/development/paired-release.md)
+
+### v0.5.0: Origin Trace + Brave
+
+v0.5.0 pairs Origin Trace with a new Brave Browser Development build for Apple
+silicon that carries the current native probes.
+
+- **Native capture on by default:** opening Origin Trace also turns on quiet
+  mode (page `debugger;` statements are ignored) and native Wasm `br_table`
+  and `call_indirect` dispatch capture. Set `REB_NATIVE_QUIET_MODE`,
+  `REB_NATIVE_WASM_DISPATCH` or `REB_NATIVE_WASM_CALL_INDIRECT` to `0` to opt
+  out.
+- **Researcher-supplied capture:** Wasm guest-state capture with an adapter
+  recipe and JavaScript dispatch-site capture with a site file, each at up to
+  eight sites. See the [capture policy](SAFETY.md) for what each records.
+- **VM analysis:** structural dispatch-site classification, more interpreter
+  shapes, and observed runtime claims compared with static claims, including
+  nested VMs.
+- **Live session without prompts:** opening Origin Trace starts the live session
+  directly with the Brave build beside it. The browser pairing prompt is gone.
+
+Brave is built locally on a workstation from pinned Brave v1.95.52 and Chromium
+151.0.7922.108 sources with this project's overlays and patches. It is not an
+official Brave release and is not built in clean CI; its provenance records the
+build commit, pins and build arguments. Bundled Brave consumer services stay
+off. Both apps are ad-hoc signed, not Apple-notarized. Worker and proxy
+foundations remain dormant. Before release, a live session with this browser
+build recorded Wasm `br_table` and `call_indirect` observations, the Canvas
+readback image, and network and fingerprint surfaces. Guest-state adapters,
+JavaScript dispatch sites and Finder automatic launch were not exercised live.
+
+### v0.3.2: Origin Trace companion only
+
+[v0.3.2](https://github.com/sunghoojung/reverse-engineering-browser/releases/tag/v0.3.2) updated Origin Trace without a Brave
+build. It had no validated native-browser pair and warned before starting any
+discovered browser. See the
+[companion release record](docs/development/companion-release.md).
+
+### v0.3.1: Origin Trace + Brave
+
+[v0.3.1](https://github.com/sunghoojung/reverse-engineering-browser/releases/tag/v0.3.1)
 · [Release validation](https://github.com/sunghoojung/reverse-engineering-browser/actions/runs/38192572669)
 · [Changes since v0.3.0](https://github.com/sunghoojung/reverse-engineering-browser/compare/v0.3.0...v0.3.1)
 
-### Preparing v0.3.2: Origin Trace companion only
-
-The v0.3.2 candidate updates Origin Trace without building or distributing Brave.
-The latest published paired release remains v0.3.1 until this candidate passes
-acceptance and is explicitly published. The companion ZIP targets Apple silicon; macOS 15 acceptance is required before
-publication. Earlier macOS versions are unverified; no Intel, Windows or Linux
-app is supplied.
-
-This candidate has **no validated native-browser pair**. Brave distributed with
-v0.3.0/v0.3.1 lacks newer native runtime-buffer and VM capture features. A matching
-bundle ID does not establish compatibility. Before starting a discovered browser,
-Origin Trace warns about these limits and defaults to **Continue Offline**;
-**Start Unverified Session** remains an explicit choice for each session.
-Offline evidence inspection remains available. Packaging checks do not establish
-native Brave instrumentation or Finder automatic launch. The current source
-provides no CDP or stock-browser capture fallback.
-
-The companion workflow records source/run identity, SHA256 checksums and these
-compatibility limits. It uses ad-hoc signing, without Apple notarization. The
-paired workflow and historical browser-equivalence guard remain separate and are
-not relaxed. See [companion release procedure](docs/development/companion-release.md).
-
-### Latest release: v0.3.1
-
 These published artifacts and their validation history are unchanged; they do
-not describe the current branch's native-only capabilities.
+not describe the current native-only capabilities.
 
 - **Native Close/Quit repair:** an aborted Close sheet cannot approve a fresh
   Quit. Stay preserves the exact draft and save state; Close Anyway requires a
@@ -75,7 +94,7 @@ not establish Finder automatic launch or complete native capture/Canvas QA.
 
 ### v0.3.0 feature highlights
 
-The v0.3.0 features remain available in v0.3.1:
+The v0.3.0 features remain available in later releases:
 
 - **Connected investigations:** follow retained Requests, Backtraces, Sources
   and Decoder ranges with identity-checked Back/Forward navigation. Save
@@ -102,6 +121,12 @@ boundaries and the [capture policy](SAFETY.md) before starting a session.
 
 ### Feature changelog
 
+- **v0.5.0:** paired release with a new Brave build: input-free native capture
+  switches on by default, researcher-supplied Wasm guest-state and JavaScript
+  dispatch-site capture, VM dispatch classification and observed claims,
+  native-only capture, prompt-free live sessions, and Brave build fixes.
+- **v0.3.2:** companion-only Origin Trace release with an explicit
+  unverified-browser decision before live sessions.
 - **v0.3.1:** released native Close/Quit lifecycle repair, per-request acceptance
   traces, and a checksum-verified Origin Trace + Brave pair with packaged QA.
 - **v0.3.0:** connected investigation notebooks, richer Traffic and source
@@ -173,28 +198,30 @@ boundaries and the [capture policy](SAFETY.md) before starting a session.
 
 ### Download the compiled macOS apps
 
-1. Download both apps from [v0.3.1](https://github.com/sunghoojung/reverse-engineering-browser/releases/tag/v0.3.1):
-   - [Origin Trace for macOS](https://github.com/sunghoojung/reverse-engineering-browser/releases/download/v0.3.1/Origin-Trace-v0.3.1-macos.zip)
-   - [Brave Browser Development for Apple silicon](https://github.com/sunghoojung/reverse-engineering-browser/releases/download/v0.3.1/Brave-Browser-Development-v0.3.1-macos-arm64.zip)
-2. Verify both ZIPs against [SHA256SUMS-v0.3.1.txt](https://github.com/sunghoojung/reverse-engineering-browser/releases/download/v0.3.1/SHA256SUMS-v0.3.1.txt).
-   The [pair provenance](https://github.com/sunghoojung/reverse-engineering-browser/releases/download/v0.3.1/Origin-Trace-Brave-v0.3.1.provenance.json)
-   records the exact companion source and reused browser pins.
+1. Download both apps from [v0.5.0](https://github.com/sunghoojung/reverse-engineering-browser/releases/tag/v0.5.0):
+   - [Origin Trace for macOS](https://github.com/sunghoojung/reverse-engineering-browser/releases/download/v0.5.0/Origin-Trace-v0.5.0-macos.zip)
+   - [Brave Browser Development for Apple silicon](https://github.com/sunghoojung/reverse-engineering-browser/releases/download/v0.5.0/Brave-Browser-Development-v0.5.0-macos-arm64.zip)
+2. Verify both ZIPs against [SHA256SUMS-v0.5.0.txt](https://github.com/sunghoojung/reverse-engineering-browser/releases/download/v0.5.0/SHA256SUMS-v0.5.0.txt).
+   The [pair provenance](https://github.com/sunghoojung/reverse-engineering-browser/releases/download/v0.5.0/Origin-Trace-Brave-v0.5.0.provenance.json)
+   records the exact companion source, the browser's CDHash and its build
+   provenance.
 3. Unzip both files and place the applications beside each other, or install
    Brave Browser Development in `/Applications`.
 4. Open Origin Trace. It starts the capture services and an isolated custom
    Brave session automatically.
 
 The compiled apps are for Apple silicon Macs. Origin Trace is built by the
-release workflow; the reused Brave bundle retains its local-build provenance.
+release workflow; Brave is a local workstation build with its own provenance.
 Read the selected release's validation results and limits. Origin Trace contains
 no bundled sample evidence. The applications are ad-hoc signed but not
 Apple-notarized.
 
-In these published releases, opening Origin Trace starts an isolated one-hour
-research session with the implemented capture categories, bounded request/response
-content and Canvas artifacts enabled. Use it only for authorized targets. **New Live
-Session…** offers metadata-only controls. Enabled content capture can retain
-credentials without automatic masking; review captures before sharing.
+In v0.5.0, opening Origin Trace starts an isolated one-hour research session with
+the implemented capture categories, bounded request/response content, Canvas
+artifacts, quiet mode and native Wasm dispatch capture enabled. Use it only for
+authorized targets. **New Live Session…** offers metadata-only controls. Enabled
+content capture can retain credentials without automatic masking; review
+captures before sharing.
 
 **Validation history:** the v0.3.0 tagged app build and packaging checks passed,
 but a separate [main CI run](https://github.com/sunghoojung/reverse-engineering-browser/actions/runs/37878440864)

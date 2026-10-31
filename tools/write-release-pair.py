@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Record the tested companion/browser pair without rewriting browser history."""
+"""Record the tested companion/browser pair and its release notes."""
 
 import hashlib
 import json
@@ -11,10 +11,18 @@ import shutil
 import subprocess
 
 
-BRAVE_NAME = "Brave-Browser-Development-v0.3.0-macos-arm64"
-BRAVE_SHA256 = "07209f53456ab30fc4ad6c6d6028daf56f0251c0910e15b5b1dc441f2c8469af"
-PROVENANCE_SHA256 = "8101ff5fe36a2f97e0363913ac6ef9469cd3acf19fecefd73d616f1f0b4ef01c"
 REPOSITORY = "https://github.com/sunghoojung/reverse-engineering-browser"
+PIN_SCRIPT = "scripts/prepare-release-brave.sh"
+PIN_BEGIN = "# BEGIN reviewed paired browser pin"
+PIN_END = "# END reviewed paired browser pin"
+PIN_SHAPES = {
+    "brave_name": r"Brave-Browser-Development-v[0-9]+\.[0-9]+\.[0-9]+-macos-arm64",
+    "source_url": re.escape(REPOSITORY) + r"/releases/download/[A-Za-z0-9._-]+",
+    "brave_sha256": r"[0-9a-f]{64}",
+    "provenance_sha256": r"[0-9a-f]{64}",
+    "build_source": r"[0-9a-f]{40}",
+}
+PROVENANCE_SCHEMA = "reb-brave-distribution-provenance-v1"
 
 
 def digest(path):
@@ -25,11 +33,103 @@ def digest(path):
     return result.hexdigest()
 
 
+def pin_block(text):
+    """Parse the one reviewed pin block that prepare-release-brave.sh also uses."""
+    if text.count(PIN_BEGIN) != 1 or text.count(PIN_END) != 1:
+        raise ValueError("The paired browser pin block is missing or repeated")
+    block = text.split(PIN_BEGIN, 1)[1].split(PIN_END, 1)[0]
+    values = {}
+    for line in block.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        match = re.fullmatch(r"readonly ([a-z0-9_]+)=([^\s'\"$`]+)", line)
+        if match is None or match.group(1) in values:
+            raise ValueError("The paired browser pin block has an unexpected line")
+        values[match.group(1)] = match.group(2)
+    if set(values) != set(PIN_SHAPES):
+        raise ValueError("The paired browser pin block has unexpected names")
+    return values
+
+
+def browser_pin(root):
+    values = pin_block((root / PIN_SCRIPT).read_text())
+    unfinished = [name for name, shape in PIN_SHAPES.items() if not re.fullmatch(shape, values[name])]
+    if unfinished:
+        raise ValueError("The paired browser pin is unfinished: " + ", ".join(unfinished))
+    return values
+
+
+def notes_text(tag, source_sha, run_url, assets, browser):
+    origin, brave, provenance, pair, sums = assets
+    downloads = f"{REPOSITORY}/releases/download/{tag}"
+    pins = browser["pins"]
+    return (
+        f"Origin Trace {tag} is a paired macOS Apple silicon release: the Origin Trace "
+        "app and a new Brave Browser Development build that carries its native probes.\n\n"
+        f"Download both [Origin Trace]({downloads}/{origin.name}) and "
+        f"[Brave Browser Development for Apple silicon]({downloads}/{brave.name}). "
+        "Extract the app bundles beside each other, or install Brave Browser "
+        "Development in `/Applications`.\n\n"
+        "## Changes since v0.3.2\n\n"
+        "- **Native capture on by default.** Opening Origin Trace now also turns on "
+        "every native capture switch that needs no researcher input: quiet mode "
+        "(page `debugger;` statements are ignored) and Wasm `br_table` and "
+        "`call_indirect` dispatch capture. Set `REB_NATIVE_QUIET_MODE`, "
+        "`REB_NATIVE_WASM_DISPATCH` or `REB_NATIVE_WASM_CALL_INDIRECT` to `0` to "
+        "opt out. Wasm dispatch capture compiles Wasm with Liftoff only.\n"
+        "- **Wasm guest-state capture** with a researcher-supplied adapter recipe: "
+        "typed locals and bounded memory snapshots at up to eight adapter sites, "
+        "with the exact parent dispatch of nested guests. Recipes are evidence "
+        "inputs, not proof of guest semantics.\n"
+        "- **JavaScript dispatch-site capture** with a researcher-supplied site file: "
+        "at most eight static interpreter-candidate sites. It records selector kinds and "
+        "integer low bits, script IDs, source positions and the site's source digest, "
+        "never argument, receiver or string contents.\n"
+        "- **VM analysis:** structural dispatch-site classification, handler claims "
+        "for array, rotated, aliased, helper-fetched and threaded interpreters, and "
+        "observed runtime claims compared with static claims, including nested VMs.\n"
+        "- **Native-only capture:** CDP transport, injected hooks and the live "
+        "debugger are removed. Saved historical evidence stays inert.\n"
+        "- **Interface:** a quieter Origin Trace shell and screens, and VM workspace "
+        "layout fixes at narrow and short window sizes.\n"
+        "- **Browser build:** depot_tools is pinned and a backported Brave init patch "
+        "lets a fresh pinned checkout initialize again. The native integration "
+        "now compiles in the full Brave build.\n\n"
+        "## Live sessions\n\n"
+        "Opening Origin Trace starts a live session directly with the Brave Browser "
+        "Development build it finds, with no pairing prompt. This release was validated "
+        f"with the Brave build published here (code signature CDHash `{browser['app_cdhash']}`); "
+        "other builds start the same way but may lack its native capture features.\n\n"
+        "## Release boundaries\n\n"
+        "- Brave Browser Development was built locally on a macOS arm64 workstation "
+        f"from pinned Brave {pins['brave_core']} and Chromium {pins['chromium']} "
+        "sources with this project's overlays and patches. It is not an official "
+        "Brave release and was not built in clean CI. "
+        f"[Browser provenance]({downloads}/{provenance.name}) records the build "
+        "commit, pins, build arguments and executable version.\n"
+        "- Both app bundles are ad-hoc signed, not Apple-notarized.\n"
+        "- Bundled Brave consumer services (Leo, News, Rewards, Talk, VPN and "
+        "Wallet) stay off in this build.\n"
+        "- Worker and proxy foundations remain dormant; live proxy routing is not "
+        "implemented.\n"
+        "- Before publishing, a fresh live session with this browser build on a local "
+        "fixture recorded Wasm `br_table` and `call_indirect` observations, the Canvas "
+        "readback image, network and fingerprint surfaces, and the native Console "
+        "runtime check passed on the extracted ZIP. Guest-state adapters, JavaScript "
+        "dispatch sites and Finder automatic launch were not exercised live.\n\n"
+        f"Source: `{source_sha}`. [Validation pipeline]({run_url}). "
+        f"[Pair provenance]({downloads}/{pair.name}). "
+        f"[Checksums]({downloads}/{sums.name}).\n"
+    )
+
+
 def main():
     root = Path(__file__).resolve().parents[1]
     output = root / "build/release-pair"
     with (root / "apps/research-ui/macos/Info.plist").open("rb") as source:
-        version = plistlib.load(source)["CFBundleShortVersionString"]
+        info = plistlib.load(source)
+    version = info["CFBundleShortVersionString"]
     if not re.fullmatch(r"\d+\.\d+\.\d+", version):
         raise ValueError("Invalid application version")
     tag = f"v{version}"
@@ -38,28 +138,42 @@ def main():
     if os.environ.get("GITHUB_REF_TYPE") == "tag":
         if os.environ["GITHUB_REF_NAME"] != tag:
             raise ValueError("Tag does not match the packaged application version")
+    if info.get("OriginTraceReleaseType") != "paired":
+        raise ValueError("Only a paired application can be recorded as a release pair")
+    pin = browser_pin(root)
+    name = f"Brave-Browser-Development-{tag}-macos-arm64"
+    if pin["brave_name"] != name:
+        raise ValueError("The paired browser was not built for this release")
     source_sha = subprocess.check_output(
         ["git", "rev-parse", "HEAD"], cwd=root, text=True
     ).strip()
     origin = output / f"Origin-Trace-{tag}-macos.zip"
-    previous = output / "source" / f"{BRAVE_NAME}.zip"
-    source_provenance = output / "source" / f"{BRAVE_NAME}.provenance.json"
-    provenance = output / source_provenance.name
-    if digest(previous) != BRAVE_SHA256 or digest(source_provenance) != PROVENANCE_SHA256:
-        raise ValueError("Published Brave bytes or provenance changed")
-    original = json.loads(source_provenance.read_text())
-    if original["sha256"] != BRAVE_SHA256:
-        raise ValueError("Brave provenance does not describe this archive")
-    brave = output / f"Brave-Browser-Development-{tag}-macos-arm64.zip"
-    if brave.exists():
-        raise FileExistsError(brave)
-    shutil.copyfile(previous, brave)
+    source_brave = output / "source" / f"{name}.zip"
+    source_provenance = output / "source" / f"{name}.provenance.json"
+    if (digest(source_brave) != pin["brave_sha256"]
+            or digest(source_provenance) != pin["provenance_sha256"]):
+        raise ValueError("Pinned Brave bytes or provenance changed")
+    browser = json.loads(source_provenance.read_text())
+    expected = {
+        "schema": PROVENANCE_SCHEMA, "release": tag, "artifact": f"{name}.zip",
+        "sha256": pin["brave_sha256"], "build_source_commit": pin["build_source"],
+    }
+    if any(browser.get(key) != value for key, value in expected.items()):
+        raise ValueError("Brave provenance does not describe this pinned archive")
+    if not re.fullmatch(r"[0-9a-f]{40}", str(browser.get("app_cdhash", ""))):
+        raise ValueError("Brave provenance does not record the app CDHash")
+    brave = output / f"{name}.zip"
+    provenance = output / f"{name}.provenance.json"
+    for path in (brave, provenance):
+        if path.exists():
+            raise FileExistsError(path)
+    shutil.copyfile(source_brave, brave)
     shutil.copyfile(source_provenance, provenance)
-    if digest(brave) != BRAVE_SHA256:
+    if digest(brave) != pin["brave_sha256"]:
         raise ValueError("Copied Brave bytes differ")
     run_url = f"{REPOSITORY}/actions/runs/{os.environ['GITHUB_RUN_ID']}"
     manifest = {
-        "schema": "origin-trace-release-pair-v1",
+        "schema": "origin-trace-release-pair-v2",
         "release": tag,
         "source_commit": source_sha,
         "validation_run": run_url,
@@ -73,30 +187,37 @@ def main():
         },
         "brave": {
             "artifact": brave.name,
-            "sha256": BRAVE_SHA256,
+            "sha256": pin["brave_sha256"],
             "size_bytes": brave.stat().st_size,
-            "reuse": "Exact v0.3.0 ZIP bytes; not a new browser compilation",
-            "original_provenance": original,
-            "original_provenance_artifact": provenance.name,
+            "cdhash": browser["app_cdhash"],
+            "build_source_commit": pin["build_source"],
+            "hosted_source": f"{pin['source_url']}/{brave.name}",
+            "provenance": browser,
+            "provenance_artifact": provenance.name,
         },
         "pairing": {
             "platform": "macOS arm64",
             "installation": "Extract both app bundles into the same directory",
             "source_equivalence": (
-                "Browser inputs and protocol bytes match the original build source"
+                "Browser inputs and protocol bytes match the browser build source"
             ),
             "checks": [
-                "Published Brave ZIP and provenance SHA256",
-                "Strict signatures and extracted Brave executable version",
+                "Pinned Brave ZIP and provenance SHA256 from the hosted source",
+                "Strict signatures, Brave CDHash equal to its provenance record, and "
+                "extracted Brave executable version",
                 "Real packaged launcher with disposable Brave profile",
-                "Live backend/debugger readiness and relocated WebKit UI",
+                "Broker/receiver readiness and relocated WebKit UI",
                 "Launcher shutdown and browser-exit cleanup",
                 "Full native close/Quit suite including five repeated attempts",
+                "Live sessions start without a pairing prompt; startup failure, Retry, "
+                "Continue Offline and reopen with an owned unsigned fake browser",
+                "Rendered packaged UI with hosted XCTest",
             ],
             "limits": [
                 "Ad-hoc signing, not Apple notarization",
-                "Brave retains its original local-build provenance",
-                "No claim of Finder automatic-launch or full native capture/Canvas QA",
+                "Brave is a local workstation build, not clean CI or an official Brave release",
+                "Guest-state adapters, JavaScript dispatch sites and Finder automatic "
+                "launch were not exercised live",
                 "Worker/proxy foundations remain dormant",
             ],
         },
@@ -106,28 +227,8 @@ def main():
     assets = [origin, brave, provenance, pair]
     sums = output / f"SHA256SUMS-{tag}.txt"
     sums.write_text("".join(f"{digest(path)}  {path.name}\n" for path in assets))
-    downloads = f"{REPOSITORY}/releases/download/{tag}"
     (output / "release-notes.md").write_text(
-        f"Origin Trace {tag} fixes the native repeated Close/Quit lifecycle gate.\n\n"
-        f"Download both [Origin Trace]({downloads}/{origin.name}) and "
-        f"[Brave Browser Development for Apple silicon]({downloads}/{brave.name}). "
-        "Extract the app bundles beside each other.\n\n"
-        "Quit can reach the guarded delegate while a Close sheet is open. AppKit "
-        "aborts that sheet first, and the fresh Quit decision checks the current "
-        "document again. Stay retains drafts; Close Anyway remains explicit. "
-        "The native test verifies request UUIDs, one query per decision, both "
-        "decisions and five fresh-process repeated attempts.\n\n"
-        f"Source: `{source_sha}`. [Validation pipeline]({run_url}). "
-        f"[Pair provenance and exact browser pins]({downloads}/{pair.name}). "
-        f"[Checksums]({downloads}/{sums.name}).\n\n"
-        "Brave is byte-for-byte the v0.3.0 browser archive, with unchanged browser "
-        "inputs/protocols and its original local-build provenance. It was not "
-        "rebuilt in clean CI. The new companion and that browser passed the "
-        "packaged live-session, readiness, relocated UI and cleanup checks. "
-        "These checks do not claim Finder automatic launch or complete native "
-        "capture/Canvas QA. Both bundles are ad-hoc signed, not notarized. "
-        "Worker/proxy foundations remain dormant. Existing v0.3.0 assets are "
-        "unchanged.\n"
+        notes_text(tag, source_sha, run_url, [*assets, sums], browser)
     )
 
 

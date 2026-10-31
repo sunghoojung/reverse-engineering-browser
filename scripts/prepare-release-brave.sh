@@ -2,18 +2,57 @@
 
 set -euo pipefail
 
+repository_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+readonly repository_root
+cd "${repository_root}"
+
+# BEGIN reviewed paired browser pin
+# One reviewed unit: the browser ZIP built for this paired release, its
+# provenance, where both are hosted, and the commit whose browser inputs built
+# them. Replace every PLACEHOLDER before release. tools/write-release-pair.py
+# reads this block too.
+readonly brave_name=Brave-Browser-Development-v0.5.0-macos-arm64
+readonly source_url=https://github.com/sunghoojung/reverse-engineering-browser/releases/download/brave-0.5.0-79a2b77
+readonly brave_sha256=2fbd6b09dba321550a3e360fcc62839ece0303b9ce356ecc98c903e1e3b09246
+readonly provenance_sha256=4de5d37fdda889753776acc263a94bfeaad44ff1011cefd81e2c68d49b1684c2
+readonly build_source=79a2b770c0e193bcae65ec76160cbc589151f8cb
+# END reviewed paired browser pin
+
+readonly plist=apps/research-ui/macos/Info.plist
+read_plist() {
+  python3 -I -c 'import plistlib, sys
+print(plistlib.load(open(sys.argv[1], "rb")).get(sys.argv[2], ""))' "${plist}" "$1"
+}
+version="$(read_plist CFBundleShortVersionString)"
+readonly version
+
+# Validate the whole pin before any platform, network or filesystem work, so an
+# unfinished release fails the same way everywhere.
+unfinished=()
+[[ "${brave_name}" == "Brave-Browser-Development-v${version}-macos-arm64" ]] ||
+  unfinished+=("brave_name (must match Info.plist version ${version})")
+[[ "${source_url}" =~ ^https://github\.com/sunghoojung/reverse-engineering-browser/releases/download/[A-Za-z0-9._-]+$ ]] ||
+  unfinished+=(source_url)
+[[ "${brave_sha256}" =~ ^[0-9a-f]{64}$ ]] || unfinished+=(brave_sha256)
+[[ "${provenance_sha256}" =~ ^[0-9a-f]{64}$ ]] || unfinished+=(provenance_sha256)
+[[ "${build_source}" =~ ^[0-9a-f]{40}$ ]] || unfinished+=(build_source)
+if ((${#unfinished[@]})); then
+  echo "The paired browser pin is unfinished. Fill these reviewed values:" >&2
+  printf '  %s\n' "${unfinished[@]}" >&2
+  exit 1
+fi
+
 if [[ "$(uname -s)" != Darwin || "$(uname -m)" != arm64 ]]; then
   echo "The paired Brave artifact requires an arm64 macOS runner." >&2
   exit 1
 fi
 
-repository_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-readonly repository_root
-cd "${repository_root}"
-
 # Reuse the published browser bytes only while every browser input and wire
-# contract still matches their recorded build. This is not a new Brave build.
-readonly build_source=f706286fb80ae60f0be5ae54260e781a70900adf
+# contract still matches the commit that built them.
+if ! git cat-file -e "${build_source}^{commit}" 2>/dev/null; then
+  echo "Browser build commit ${build_source} is not in this checkout's history." >&2
+  exit 1
+fi
 git diff --exit-code "${build_source}" -- \
   browser include src protocol services \
   scripts/bootstrap-brave.sh scripts/brave-toolchain.sh \
@@ -26,20 +65,28 @@ if [[ -e "${release_root}" ]]; then
   exit 1
 fi
 mkdir -p "${release_root}/source"
-readonly previous_name=Brave-Browser-Development-v0.3.0-macos-arm64
-readonly source_url=https://github.com/sunghoojung/reverse-engineering-browser/releases/download/v0.3.0
 curl --fail --location --silent --show-error --retry 3 \
-  "${source_url}/${previous_name}.zip" -o "${release_root}/source/${previous_name}.zip"
+  "${source_url}/${brave_name}.zip" -o "${release_root}/source/${brave_name}.zip"
 curl --fail --location --silent --show-error --retry 3 \
-  "${source_url}/${previous_name}.provenance.json" -o "${release_root}/source/${previous_name}.provenance.json"
+  "${source_url}/${brave_name}.provenance.json" -o "${release_root}/source/${brave_name}.provenance.json"
 (
   cd "${release_root}/source"
   printf '%s  %s\n' \
-    07209f53456ab30fc4ad6c6d6028daf56f0251c0910e15b5b1dc441f2c8469af "${previous_name}.zip" \
-    8101ff5fe36a2f97e0363913ac6ef9469cd3acf19fecefd73d616f1f0b4ef01c "${previous_name}.provenance.json" \
-    | shasum -a 256 --check
+    "${brave_sha256}" "${brave_name}.zip" \
+    "${provenance_sha256}" "${brave_name}.provenance.json" |
+    shasum -a 256 --check
 )
-ditto -x -k "${release_root}/source/${previous_name}.zip" "${release_root}/extracted"
+ditto -x -k "${release_root}/source/${brave_name}.zip" "${release_root}/extracted"
 readonly app="${release_root}/extracted/Brave Browser Development.app"
 codesign --verify --deep --strict "${app}"
+# The digest-pinned provenance records the packaged app's code signature, so a
+# matching CDHash ties the extracted bundle to that exact recorded build.
+cdhash="$(codesign -dvvv "${app}" 2>&1 | sed -n 's/^CDHash=//p')"
+recorded_cdhash="$(python3 -I -c 'import json, sys
+print(json.load(open(sys.argv[1]))["app_cdhash"])' \
+  "${release_root}/source/${brave_name}.provenance.json")"
+if [[ "${cdhash}" != "${recorded_cdhash}" ]]; then
+  echo "Extracted Brave CDHash ${cdhash:-<none>} differs from its provenance (${recorded_cdhash})." >&2
+  exit 1
+fi
 "${app}/Contents/MacOS/Brave Browser Development" --version

@@ -1,5 +1,10 @@
 # Origin Trace v0.3.2 companion release
 
+> Historical record of the published v0.3.2 release. Current source is the
+> v0.5.0 paired release; see [paired-release.md](paired-release.md). The
+> companion workflow now skips paired sources on pull requests and refuses to
+> publish them.
+
 This procedure publishes only Origin Trace. It does not build, upload or certify
 Brave. Do not use the paired release workflow or substitute the historical Brave
 archive for native compatibility evidence.

@@ -191,6 +191,7 @@ python-check: vm-lab-check
 	python3 tools/release-companion-test.py
 	python3 tools/write-release-pair-test.py
 	python3 tools/publish-release-pair-test.py
+	python3 tools/write-brave-provenance-test.py
 	python3 tools/check-integrated-brave-state-test.py
 	python3 tools/check-cookie-import-terminal.py
 	python3 tools/ci-scope-test.py

@@ -8,7 +8,7 @@ on:
         required: true
         type: string
       release_tag:
-        description: "New release tag matching the application version (v0.3.1)"
+        description: "New release tag matching the application version (v0.5.0)"
         required: true
         type: string
   push:
@@ -21,7 +21,11 @@ on:
       - "scripts/prepare-release-brave.sh"
       - "tools/write-release-pair*.py"
       - "tools/publish-release-pair*.py"
+      - "tools/write-brave-provenance*.py"
+      - "tools/check-companion-warning.mjs"
+      - "tools/companion-warning-ui/**"
       - "apps/research-ui/macos/Info.plist"
+      - "apps/research-ui/macos/OriginTraceApp.swift"
       - "apps/origin-trace-backend/Cargo.toml"
       - "apps/origin-trace-backend/Cargo.lock"
 
@@ -77,7 +81,7 @@ jobs:
           REQUESTED_TAG: ${{ inputs.release_tag }}
         run: |
           [[ "$REQUESTED_SHA" =~ ^[0-9a-f]{40}$ ]]
-          [[ "$REQUESTED_TAG" == v0.3.1 ]]
+          [[ "$REQUESTED_TAG" == v0.5.0 ]]
 
       - name: Check out repository
         uses: actions/checkout@v7
@@ -119,6 +123,7 @@ jobs:
         run: |
           python3 tools/write-release-pair-test.py
           python3 tools/publish-release-pair-test.py
+          python3 tools/write-brave-provenance-test.py
 
       - name: Run release checks
         run: make check
@@ -129,7 +134,7 @@ jobs:
       - name: Verify macOS application signature
         run: codesign --verify --deep --strict "build/Origin Trace.app"
 
-      - name: Prepare checksum-verified compatible Brave archive
+      - name: Prepare checksum-verified paired Brave archive
         run: ./scripts/prepare-release-brave.sh
 
       - name: Exercise the exact packaged application pair
@@ -140,6 +145,9 @@ jobs:
 
       - name: Exercise native Analyst close and Quit lifecycle
         run: node tools/check-origin-trace-native-close.mjs
+
+      - name: Exercise prompt-free live-session startup, Retry and reopen with an owned fixture
+        run: node tools/check-companion-warning.mjs
 
       - name: Exercise rendered packaged UI with hosted XCTest
         run: |
@@ -154,6 +162,7 @@ jobs:
           path: |
             build/package-qa
             build/native-close-qa
+            build/companion-warning-qa
             build/rendered-ui-qa/screenshots
             build/rendered-ui-qa/result.json
             build/rendered-ui-qa/xcodebuild.log

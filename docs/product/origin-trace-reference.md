@@ -79,8 +79,9 @@ to 2 MiB, and linked to the exact readback event. Without the switch, Canvas
 drawing and readback operation names remain visible but image bytes are not
 retained.
 
-Set `REB_NATIVE_QUIET_MODE=1` for a live capture with no DevTools endpoint or
-CDP connection to the page. The custom V8 runtime then ignores page-authored
+The packaged app enables quiet mode by default (`REB_NATIVE_QUIET_MODE=0` opts
+out); set `REB_NATIVE_QUIET_MODE=1` with `make live` for a live capture with no
+DevTools endpoint or CDP connection to the page. The custom V8 runtime then ignores page-authored
 `debugger;` statements before Inspector handling. Native evidence capture and
 the Captured Sources catalog continue to work, while live Page debugging,
 stepping, watches, and the console remain disconnected by design. The mode

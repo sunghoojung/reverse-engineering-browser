@@ -6,9 +6,11 @@ not arbitrary interpreter guest-PC recovery.
 
 ## Enablement
 
-Rebuild Brave with all tracked V8, Chromium and overlay changes. With the native
-live-session launcher, set `REB_NATIVE_WASM_DISPATCH=1` explicitly; VM and
-artifact categories must both be enabled. Manual browser launches may use
+Rebuild Brave with all tracked V8, Chromium and overlay changes. The packaged
+Origin Trace app sets `REB_NATIVE_WASM_DISPATCH=1` by default whenever VM and
+artifact categories are both enabled; an explicit `0` opts out. With the
+standalone `make live` launcher, set `REB_NATIVE_WASM_DISPATCH=1` explicitly; VM
+and artifact categories must both be enabled. Manual browser launches may use
 `--js-flags=--reb-wasm-br-table-dispatch`. The flag alone does not authorize or
 activate capture: the session must be active, connected and unexpired.
 
@@ -101,7 +103,8 @@ slot one indirect call used and which function the entry held.
 The V8 flag `--reb-wasm-call-indirect-dispatch` is off by default and separate
 from the `br_table` flag. The native launcher adds it for
 `REB_NATIVE_WASM_CALL_INDIRECT=1`, which also requires the VM and Artifact
-categories. Like the `br_table` flag it forces Liftoff-only compilation and
+categories. The packaged Origin Trace app sets that variable by default under
+the same rule as `br_table`; `make live` leaves it off unless set. Like the `br_table` flag it forces Liftoff-only compilation and
 refuses native-module cache reuse and deserialization, so a module never runs
 without the hook it was promised.
 

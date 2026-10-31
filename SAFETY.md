@@ -31,8 +31,12 @@ it.
 - Opening the packaged Origin Trace app starts a visibly labeled local research
   session with implemented native capture categories. CDP collection and injected
   JavaScript hooks have been removed. Launch only for authorized targets/data.
-  The session expires after one hour. Native Wasm dispatch instrumentation is
-  an additional explicit opt-in requiring a rebuilt browser. Native guest-program
+  The session expires after one hour. The packaged app also enables native Wasm
+  `br_table` and `call_indirect` dispatch instrumentation and ignores page
+  `debugger;` statements by default; set `REB_NATIVE_WASM_DISPATCH`,
+  `REB_NATIVE_WASM_CALL_INDIRECT` or `REB_NATIVE_QUIET_MODE` to `0` to opt out.
+  The standalone `make live` launcher leaves all three off unless set to `1`.
+  Wasm dispatch needs a rebuilt browser. Native guest-program
   capture is a further opt-in on top of it: it needs a researcher-supplied
   adapter recipe file and records typed local values and bounded bytecode
   snapshots that the recipe names. Recipes are evidence inputs, not proof of

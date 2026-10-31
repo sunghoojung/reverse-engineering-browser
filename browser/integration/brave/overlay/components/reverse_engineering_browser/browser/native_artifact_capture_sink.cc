@@ -6,9 +6,10 @@
 #include "brave/components/reverse_engineering_browser/browser/native_artifact_capture_sink.h"
 
 #include <algorithm>
+#include <array>
+#include <bit>
 #include <cstddef>
 #include <cstdint>
-#include <cstring>
 #include <limits>
 #include <memory>
 #include <span>
@@ -30,6 +31,12 @@
 
 namespace reb {
 namespace {
+
+// NativeProbeEvent has no padding, so equal bytes mean equal records.
+bool SameEventBytes(const NativeProbeEvent& left, const NativeProbeEvent& right) {
+  using Bytes = std::array<std::uint8_t, sizeof(NativeProbeEvent)>;
+  return std::bit_cast<Bytes>(left) == std::bit_cast<Bytes>(right);
+}
 
 constexpr std::size_t kMaxArtifactBytes = kNativeArtifactMaxContentBytes;
 constexpr std::size_t kMaxActiveCaptureBytes = 32U * 1024U * 1024U;
@@ -511,8 +518,7 @@ void NativeArtifactCaptureSink::CaptureNativeGuest(const NativeGuestCapture& cap
       prior->second = GuestInvocation{canonical_invocation, group->module_id, group->adapter_id,
                                       is_current_document, false};
     } else if (prior->second.module_id != group->module_id ||
-               std::memcmp(&prior->second.event, &canonical_invocation,
-                           sizeof(canonical_invocation)) != 0) {
+               !SameEventBytes(prior->second.event, canonical_invocation)) {
       refuse("native_guest_dependency_rejected");
       return;
     }

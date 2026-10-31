@@ -6,11 +6,12 @@
 #include "brave/components/reverse_engineering_browser/browser/native_probe_host.h"
 
 #include <algorithm>
+#include <array>
 #include <bit>
-#include <cstring>
 #include <functional>
 #include <limits>
 #include <memory>
+#include <span>
 #include <string_view>
 #include <unordered_map>
 #include <utility>
@@ -30,6 +31,13 @@
 namespace reb {
 
 namespace {
+
+// Callers have checked that the record holds exactly one fixed-layout event.
+NativeProbeEvent EventFromRecord(std::span<const std::uint8_t> record) {
+  std::array<std::uint8_t, sizeof(NativeProbeEvent)> bytes{};
+  std::ranges::copy(record.first(bytes.size()), bytes.begin());
+  return std::bit_cast<NativeProbeEvent>(bytes);
+}
 
 std::unordered_map<std::uint64_t, std::uint32_t> CurrentFrameTabs(const int renderer_process_id) {
   std::unordered_map<std::uint64_t, std::uint32_t> tabs;
@@ -303,8 +311,8 @@ void NativeProbeHost::CaptureNativeGuest(const std::uint64_t capture_epoch,
   if (!process)
     return;
   NativeGuestCapture capture;
-  std::memcpy(&capture.invocation, invocation_record.data(), sizeof(capture.invocation));
-  std::memcpy(&capture.dispatch, dispatch_record.data(), sizeof(capture.dispatch));
+  capture.invocation = EventFromRecord(invocation_record);
+  capture.dispatch = EventFromRecord(dispatch_record);
   const auto& h = capture.dispatch.header;
   const bool own_identity = h.session_id == session_->session_id() && h.sequence_number &&
                             h.process_id == static_cast<std::uint32_t>(process->GetProcess().Pid());
@@ -448,8 +456,7 @@ void NativeProbeHost::CaptureNativeGuestHost(const std::uint64_t capture_epoch,
   if (!queue_ || !capture_epoch || capture_epoch != wasm_capture_epoch_ || !session_->IsActive() ||
       event_record.size() != sizeof(NativeProbeEvent))
     return;
-  NativeProbeEvent event;
-  std::memcpy(&event, event_record.data(), sizeof(event));
+  NativeProbeEvent event = EventFromRecord(event_record);
   auto* process = content::RenderProcessHost::FromID(renderer_process_id_);
   if (!process)
     return;

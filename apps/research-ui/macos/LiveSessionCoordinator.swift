@@ -192,6 +192,17 @@ final class LiveSessionCoordinator {
     environment["REB_BRAVE_BINARY"] = braveExecutableURL.path
     environment["REB_CAPTURE_CANVAS_IMAGES"] =
       environment["REB_CAPTURE_CANVAS_IMAGES"] ?? (captureNetworkContent ? "1" : "0")
+    // The packaged app turns on every native switch that needs no per-target input
+    // file. Guest-state and JavaScript dispatch-site capture stay off because they
+    // need a researcher-supplied adapter or site file. An explicit "0" still opts
+    // out: Wasm dispatch forces Liftoff-only compilation. Both Wasm switches need
+    // the VM (512) and Artifact (1024) categories, so a narrower mask leaves them off.
+    let categoryMask = environment["REB_CAPTURE_CATEGORY_MASK"].flatMap { UInt32($0) } ?? 4095
+    let wasmDispatchCategories = (categoryMask & 1536) == 1536
+    environment["REB_NATIVE_QUIET_MODE"] = environment["REB_NATIVE_QUIET_MODE"] ?? "1"
+    for name in ["REB_NATIVE_WASM_DISPATCH", "REB_NATIVE_WASM_CALL_INDIRECT"] {
+      environment[name] = environment[name] ?? (wasmDispatchCategories ? "1" : "0")
+    }
     environment["REB_USE_SYSTEM_KEYCHAIN"] = useSystemKeychain ? "1" : "0"
     environment["REB_BROKER_BINARY"] =
       macOSURL.appendingPathComponent(

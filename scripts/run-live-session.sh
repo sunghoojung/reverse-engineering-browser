@@ -511,6 +511,7 @@ if [[ "${capture_canvas_images}" == 1 ]]; then
 else
   echo "Canvas image capture: disabled; set REB_CAPTURE_CANVAS_IMAGES=1 to enable it for one session"
 fi
+echo "Native switches: quiet=${native_quiet_mode} wasm_br_table=${native_wasm_dispatch} wasm_call_indirect=${native_wasm_call_indirect} wasm_guest=$([[ -n "${native_guest_adapter}" ]] && echo 1 || echo 0) js_dispatch=$([[ -n "${native_js_dispatch_sites}" ]] && echo 1 || echo 0)"
 echo "Capture transport: native only"
 echo "Close Brave to stop this capture session."
 

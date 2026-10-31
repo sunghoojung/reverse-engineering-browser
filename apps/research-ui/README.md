@@ -299,6 +299,13 @@ when teardown writes later shell messages; the full session log path stays visib
 **New Live Session…** in the application menu offers metadata-only capture and
 Keychain controls. `REB_AUTOMATIC_CAPTURE_MODE=metadata` selects metadata-only
 automatic launch, and `REB_CAPTURE_CANVAS_IMAGES=0` disables image retention.
+Every app session also enables quiet mode and native Wasm `br_table` and
+`call_indirect` dispatch capture; Wasm dispatch forces Liftoff-only compilation,
+so Wasm-heavy pages run slower. Set `REB_NATIVE_QUIET_MODE=0`,
+`REB_NATIVE_WASM_DISPATCH=0` or `REB_NATIVE_WASM_CALL_INDIRECT=0` to opt out.
+Guest-state and JavaScript dispatch-site capture still need an adapter or site
+file and stay off until one is supplied. The launcher log's `Native switches:`
+line records the effective state.
 
 The app creates a private evidence directory and isolated browser
 profile, starts its bundled broker, artifact receiver,
@@ -378,7 +385,8 @@ limited to 2 MiB per image, and is joined to its exact `toDataURL` event. The UI
 continues to show operation names when image capture is off or an image exceeds
 the limit.
 
-To make the browser ignore page `debugger;` statements during a live capture:
+The packaged app ignores page `debugger;` statements by default. To do the same
+for a development live capture:
 
 ```sh
 REB_NATIVE_QUIET_MODE=1 make live

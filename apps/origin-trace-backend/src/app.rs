@@ -466,6 +466,11 @@ impl App {
                     "sequence_gaps_saturated": window.sequence_gaps_saturated,
                     "queue_drops": window.queue_drops.to_string(),
                     "queue_drops_saturated": window.queue_drops_saturated,
+                    "named_gaps": window.named_gaps.iter().map(|gap| json!({
+                        "category": gap.category,
+                        "reason": gap.reason,
+                        "count": gap.count.to_string()
+                    })).collect::<Vec<_>>(),
                     "event_window": window.coverage
                 });
                 // json! serializes borrowed values; move the retained window instead

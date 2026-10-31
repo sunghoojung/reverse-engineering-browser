@@ -84,6 +84,40 @@ enum StoredEventWindowChecks {
     window = try saturated.read(path: path.path, limit: 1)
     precondition(window.sequenceGaps == 1, "late arrivals close observed holes")
     precondition(window.queueDrops == UInt64.max && window.queueDropsSaturated)
+    precondition(window.namedGaps.isEmpty, "numeric drop counts never name a reason")
+
+    // The live Wasm budgets keep their queue_drops weight and are listed by category.
+    var named = event(sequence: 1, category: "vm", type: "gap", payload: "native_wasm_dispatch_budget_incomplete")
+    named += event(sequence: 2, category: "vm", type: "gap", payload: "native_wasm_indirect_budget_incomplete")
+    named += event(sequence: 3, category: "canvas", type: "gap", payload: "5")
+    named += event(sequence: 4, category: "vm", type: "gap", payload: "native_wasm_dispatch_budget_incomplete")
+    named += event(sequence: 5, category: "vm", type: "gap", payload: "native_wasm_dispatch_transport_unavailable")
+    try named.write(to: path)
+    window = try StoredEventWindowCache().read(path: path.path, limit: 1)
+    precondition(window.queueDrops == 5 + 4 && window.sequenceGaps == 0)
+    precondition(window.namedGaps == [
+      NamedGap(category: "vm", reason: "native_wasm_dispatch_budget_incomplete", count: 2),
+      NamedGap(category: "vm", reason: "native_wasm_indirect_budget_incomplete", count: 1),
+      NamedGap(category: "vm", reason: "native_wasm_dispatch_transport_unavailable", count: 1),
+    ], "\(window.namedGaps)")
+    for payload in ["", "0", "01", "-1", "7", " 2", "Native_gap", "native-gap", "1native", "_native", "native gap", "<b>gap</b>"] {
+      try event(sequence: 1, category: "vm", type: "gap", payload: payload).write(to: path)
+      window = try StoredEventWindowCache().read(path: path.path, limit: 1)
+      precondition(window.namedGaps.isEmpty, "\(payload) is not a reason")
+      precondition(window.queueDrops == (payload == "7" ? 7 : 1))
+    }
+    let reasonHex = "native_wasm_dispatch_budget".utf8.map { String(format: "%02x", $0) }.joined()
+    try Data(#"{"session_id":"1","process_id":7,"sequence_number":"1","category":"vm","type":"gap","payload_truncated":true,"payload":"\#(reasonHex)"}"#.utf8).write(to: path)
+    window = try StoredEventWindowCache().read(path: path.path, limit: 1)
+    precondition(window.namedGaps.isEmpty && window.queueDrops == 1, "a truncated reason is not a named reason")
+    var reasons = Data()
+    for index in 0...StoredEventWindowCache.maxNamedGaps {
+      reasons += event(sequence: index + 1, category: "vm", type: "gap", payload: "native_reason_\(index)")
+    }
+    try reasons.write(to: path)
+    window = try StoredEventWindowCache().read(path: path.path, limit: 1)
+    precondition(window.namedGaps.count == StoredEventWindowCache.maxNamedGaps)
+    precondition(window.queueDrops == UInt64(StoredEventWindowCache.maxNamedGaps + 1), "an unlisted pair stays a queue drop")
 
     for sequences in [[3, 1, 2], [1, 4, 2, 3], [3, 1, 2, 2]] {
       var delayed = Data()
@@ -121,6 +155,6 @@ enum StoredEventWindowChecks {
     window = try reopen.read(path: path.path, limit: 2)
     precondition(sequences(window.events) == [10])
     precondition(sequences(window.networkEvents) == [10])
-    print("PASS stored evidence windows keep network rows under a canvas tail, with bounded scan, overlap reuse, and saturated summaries")
+    print("PASS stored evidence windows keep network rows under a canvas tail, with bounded scan, overlap reuse, saturated summaries, and named gap reasons beside queue drops")
   }
 }

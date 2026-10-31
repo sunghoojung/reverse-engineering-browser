@@ -1176,7 +1176,8 @@ fn event_response(events: &[Value], scan_end: usize, limited: bool) -> Value {
         "sequence_gaps": "0",
         "sequence_gaps_saturated": false,
         "queue_drops": "0",
-        "queue_drops_saturated": false
+        "queue_drops_saturated": false,
+        "named_gaps": []
     })
 }
 fn window_event(sequence: u64, category: &str, kind: &str, payload: &str) -> Value {
@@ -1345,6 +1346,41 @@ async fn capped_event_window_keeps_network_events_and_capture_totals() {
     assert!(events.iter().all(|event| event["sequence_number"] != "1"));
     assert_eq!(events[0]["sequence_number"], "283");
     assert_eq!(events.last().unwrap()["sequence_number"], "5282");
+    assert_eq!(body["named_gaps"], json!([]));
+
+    // Named vm reasons are bounded-capture limits from a live Wasm page. They
+    // keep their documented queue_drops weight and are listed beside it, so a
+    // reader can tell sampling budgets from queue loss in the same scope.
+    let mut budgets = vec![
+        window_event(1, "vm", "gap", "native_wasm_dispatch_budget_incomplete"),
+        window_event(2, "vm", "gap", "native_wasm_indirect_budget_incomplete"),
+    ];
+    for sequence in 3..=5002 {
+        budgets.push(window_event(sequence, "canvas", "api_call", "fillRect"));
+    }
+    server.file("events.jsonl", &jsonl(&budgets));
+    let response = server.get("/api/events?limit=5000").await;
+    let body: Value = serde_json::from_slice(
+        &assert_contract_response(response, "get", "/api/events", 200).await,
+    )
+    .unwrap();
+    assert_eq!(body["sequence_gaps"], "0");
+    assert_eq!(body["queue_drops"], "2");
+    assert!(
+        body["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|event| event["type"] != "gap"),
+        "both markers left the general window but stay in the scoped list"
+    );
+    assert_eq!(
+        body["named_gaps"],
+        json!([
+            {"category":"vm","reason":"native_wasm_dispatch_budget_incomplete","count":"1"},
+            {"category":"vm","reason":"native_wasm_indirect_budget_incomplete","count":"1"}
+        ])
+    );
 }
 #[tokio::test]
 async fn artifact_polling_preserves_public_fields_and_validation() {

@@ -16,6 +16,10 @@ export const HOSTILE_SOURCE_MARKER = '<img src=x onerror="window.__rebInjected=2
 // printable text, and invalid UTF-8 must not become decoded text.
 export const HOSTILE_BYTECODE_MARKUP = '<img src=x onerror="window.__rebInjected=3">';
 export const SYNTHETIC_REQUEST_COUNT = 72;
+// The reasons a live page produced when its Wasm br_table and call_indirect
+// interpreters exhausted their 16-observation budgets. Sampling limits in the
+// vm category, never queue drops or Traffic and Fingerprinting loss.
+export const NAMED_GAP_REASONS = ['native_wasm_dispatch_budget_incomplete', 'native_wasm_indirect_budget_incomplete'];
 export const SOURCE_LINE_COUNT = 400;
 
 const sha256 = bytes => createHash('sha256').update(bytes).digest('hex');
@@ -78,6 +82,17 @@ function syntheticRequests(template, firstSequence, firstTime) {
   return events;
 }
 
+// Like the browser, each gap takes its renderer's own sequence slot, so the
+// stream has no hole. The payload is the reason text, as the producers write it.
+function namedBudgetGaps(template, events) {
+  const processId = 4242;
+  assert(!events.some(event => event.session_id === template.session_id && event.process_id === processId), 'budget gap stream must be its own');
+  const time = BigInt(events.at(-1).monotonic_time_ns);
+  return NAMED_GAP_REASONS.map((reason, index) => ({...template, process_id: processId, thread_id: processId,
+    sequence_number: String(index + 1), monotonic_time_ns: String(time + BigInt(index + 1)), artifact_id: '0',
+    parent_event_id: '0', request_id: '0', type: 'gap', payload_size: Buffer.byteLength(reason), payload: hex(reason)}));
+}
+
 export async function buildEvidence({root, sessions, guestStore, dispatchStore, observedStore}) {
   const artifacts = join(root, 'artifacts');
   await mkdir(join(artifacts, 'blobs'), {recursive: true});
@@ -113,7 +128,10 @@ export async function buildEvidence({root, sessions, guestStore, dispatchStore, 
   const observed = await goldenEvidence(artifacts, observedStore);
   assert(observed.events.filter(event => event.type === 'wasm_guest_invocation').length === 2, 'observed store holds outer and inner activations');
   const manifest = [...demoArtifacts, source, bytecode, parseFailure, ...guest.artifacts, ...physical.artifacts, ...observed.artifacts];
-  const events = [...demoEvents, ...requests, ...guest.events, ...physical.events, ...observed.events];
+  const retained = [...demoEvents, ...requests, ...guest.events, ...physical.events, ...observed.events];
+  const vm = demoEvents.find(event => event.category === 'vm');
+  assert(vm, 'demo store must contain a native vm event');
+  const events = [...retained, ...namedBudgetGaps(vm, retained)];
   await writeFile(join(artifacts, 'manifest.jsonl'), manifest.map(record => JSON.stringify(record) + '\n').join(''));
   await writeFile(join(root, 'events.jsonl'), events.map(event => JSON.stringify(event) + '\n').join(''));
   return {

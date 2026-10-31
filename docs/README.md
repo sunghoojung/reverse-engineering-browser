@@ -32,6 +32,10 @@ skills under `.agents/skills/`.
   CLI inspection, exact evidence correlation, and offline client authoring
   with synthetic tests
 - [Fast local Brave builds](development/fast-browser-builds.md)
+- [Origin Trace + Brave paired release](development/paired-release.md):
+  browser build, provenance, pinned hosting, pairing pin and publication for v0.5.0
+- [Brave distribution builds](development/brave-distribution.md)
+- [v0.3.2 companion-only release](development/companion-release.md) (historical)
 - [October 21, 2026 integrated development build](development/dev-build-2026-10-21.md):
   source revisions, available companion preview, validation results, and remaining
   portable-browser packaging work

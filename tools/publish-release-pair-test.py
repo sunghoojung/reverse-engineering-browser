@@ -2,8 +2,12 @@
 """Fail-closed publication contracts with mocked GitHub responses; no writes."""
 
 import importlib.util
+import json
 import os
 from pathlib import Path
+import plistlib
+import re
+import tempfile
 import unittest
 from unittest.mock import call, patch
 from urllib.error import HTTPError
@@ -15,7 +19,8 @@ SPEC = importlib.util.spec_from_file_location(
 HELPER = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(HELPER)
 SHA = "a" * 40
-TAG = "v0.3.1"
+TAG = HELPER.REVIEWED_TAG
+ROOT = Path(__file__).resolve().parents[1]
 
 
 class Publication(unittest.TestCase):
@@ -100,6 +105,84 @@ class Publication(unittest.TestCase):
                     with self.assertRaises(ValueError):
                         HELPER.establish_tag(TAG, SHA, "push")
                 self.assertEqual(api.call_args_list, [call(f"releases/tags/{TAG}")])
+
+
+class Admission(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        previous = os.getcwd()
+        os.chdir(temporary.name)
+        self.addCleanup(os.chdir, previous)
+        self.directory = Path("build/release-pair")
+        self.directory.mkdir(parents=True)
+        self.names = [
+            f"Origin-Trace-{TAG}-macos.zip",
+            f"Brave-Browser-Development-{TAG}-macos-arm64.zip",
+            f"Brave-Browser-Development-{TAG}-macos-arm64.provenance.json",
+            f"Origin-Trace-Brave-{TAG}.provenance.json",
+        ]
+        for name in self.names[:3]:
+            (self.directory / name).write_text(f"synthetic {name}")
+        (self.directory / self.names[3]).write_text(
+            json.dumps({"release": TAG, "source_commit": SHA}))
+        (self.directory / "release-notes.md").write_text("synthetic notes")
+        self.write_sums(self.names)
+        self.environment = {
+            "RELEASE_TAG": TAG, "RELEASE_SOURCE_SHA": SHA,
+            "GITHUB_EVENT_NAME": "workflow_dispatch", "GH_TOKEN": "synthetic-test-value",
+        }
+
+    def write_sums(self, names):
+        (self.directory / f"SHA256SUMS-{TAG}.txt").write_text("".join(
+            f"{HELPER.digest(self.directory / name)}  {name}\n" for name in names))
+
+    def run_main(self):
+        with patch.dict(os.environ, self.environment, clear=True), patch.object(
+            HELPER, "establish_tag"
+        ) as establish, patch.object(HELPER.subprocess, "run") as command, patch.object(
+            HELPER, "tag_commit", return_value=SHA
+        ), patch.object(HELPER, "api") as api, patch.object(HELPER, "verify_assets") as verify:
+            try:
+                HELPER.main()
+            finally:
+                self.calls = establish, command, api, verify
+
+    def test_reviewed_pair_publishes_exact_assets(self):
+        self.run_main()
+        establish, command, api, verify = self.calls
+        establish.assert_called_once_with(TAG, SHA, "workflow_dispatch")
+        arguments = command.call_args.args[0]
+        self.assertEqual(arguments[:6], ["gh", "release", "create", TAG, "--repo", HELPER.REPOSITORY])
+        published = [Path(argument).name for argument in arguments[6:arguments.index("--verify-tag")]]
+        self.assertEqual(published, sorted(self.names) + [f"SHA256SUMS-{TAG}.txt"])
+        self.assertEqual(arguments[-1], str(self.directory / "release-notes.md"))
+        api.assert_called_once_with(f"releases/tags/{TAG}")
+        verify.assert_called_once()
+
+    def test_other_tags_and_assets_stop_before_any_publication(self):
+        cases = [("tag", "v0.3.1"), ("tag", "v0.5.1"), ("event", "pull_request"),
+                 ("sums", self.names[:3]), ("sums", self.names + ["release-notes.md"])]
+        for kind, value in cases:
+            with self.subTest(kind=kind, value=value):
+                self.write_sums(self.names)
+                if kind == "tag":
+                    self.environment["RELEASE_TAG"] = value
+                elif kind == "event":
+                    self.environment["GITHUB_EVENT_NAME"] = value
+                else:
+                    self.write_sums(value)
+                with self.assertRaises(ValueError):
+                    self.run_main()
+                for mocked in self.calls:
+                    mocked.assert_not_called()
+                self.environment.update(RELEASE_TAG=TAG, GITHUB_EVENT_NAME="workflow_dispatch")
+
+    def test_workflow_and_application_name_the_reviewed_release(self):
+        workflow = (ROOT / ".github/workflows/release.yml").read_text()
+        self.assertEqual(re.findall(r'\[\[ "\$REQUESTED_TAG" == (v[0-9.]+) \]\]', workflow), [TAG])
+        with (ROOT / "apps/research-ui/macos/Info.plist").open("rb") as source:
+            self.assertEqual("v" + plistlib.load(source)["CFBundleShortVersionString"], TAG)
 
 
 if __name__ == "__main__":

@@ -1,4 +1,4 @@
-// Cloud macOS acceptance of the production compatibility alert, with no real browser.
+// Cloud macOS acceptance of the production unverified-browser alert, with no real browser.
 import assert from 'node:assert/strict';
 import {spawn,execFileSync} from 'node:child_process';
 import {cp,mkdir,mkdtemp,readFile,readdir,realpath,rm,writeFile} from 'node:fs/promises';
@@ -28,7 +28,7 @@ try {
   await cp(join(root,'build/Origin Trace.app'),app,{recursive:true});
   execFileSync('codesign',['--verify','--deep','--strict',app],{stdio:'pipe'});
   const plist=join(app,'Contents/Info.plist');
-  assert.equal(execFileSync('/usr/libexec/PlistBuddy',['-c','Print :OriginTraceReleaseType',plist],{encoding:'utf8'}).trim(),'companion');
+  assert.equal(execFileSync('/usr/libexec/PlistBuddy',['-c','Print :OriginTraceReleaseType',plist],{encoding:'utf8'}).trim(),'paired');
   await mkdir(join(browser,'Contents/MacOS'),{recursive:true});
   await writeFile(join(browser,'Contents/Info.plist'),`<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -94,7 +94,7 @@ try {
     receipts[scenario]=expected;
   }
   await writeFile(join(report,'result.json'),JSON.stringify({productionAlert:true,realXCTest:true,fakeBrowserOnly:true,screenshots,receipts},null,2)+'\n');
-  console.log('PASS real companion warning decisions and launch receipts; owned fake browser only, no native-pair compatibility claim');
+  console.log('PASS real unverified-browser warning decisions and launch receipts; owned unsigned fake browser only, no native-pair compatibility claim');
 } finally {
   await writeFile(join(report,'xcodebuild.log'),log);
   // Match only this unique relocated bundle, including orphaned packaged helpers

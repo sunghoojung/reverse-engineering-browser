@@ -147,16 +147,17 @@ final class CompanionWarningUITests: XCTestCase {
   private func assertCompatibilityWarning(_ app: XCUIApplication) {
     let warning = app.staticTexts[warningTitle]
     XCTAssertTrue(warning.waitForExistence(timeout: 30),
-                  "Missing production companion warning: " + app.debugDescription)
+                  "Missing production unverified-browser warning: " + app.debugDescription)
     let explanation = app.staticTexts.matching(NSPredicate(
       format: "label CONTAINS %@ OR value CONTAINS %@",
-      "companion-only release", "companion-only release")).firstMatch
-    XCTAssertTrue(explanation.exists, "The companion release limitation must be visible")
+      "could not be identified as that build", "could not be identified as that build")).firstMatch
+    XCTAssertTrue(explanation.exists, "The unverified paired-browser limitation must be visible")
     let detail = explanation.label + " " + (explanation.value as? String ?? "")
-    for phrase in ["0.3.0", "0.3.1", "runtime-buffer", "VM capture",
-                   "Native capture completeness is not established"] {
+    for phrase in ["verified only with the exact Brave Browser Development build",
+                   "Wasm dispatch capture", "Native capture completeness is not established"] {
       XCTAssertTrue(detail.contains(phrase), "Missing warning detail: " + phrase)
     }
+    XCTAssertFalse(detail.contains("companion-only"), "A paired release must not describe itself as companion-only")
     XCTAssertFalse(detail.contains("CDP Traffic"), "Retired CDP support must not be advertised")
     let dialog = app.dialogs.containing(.staticText, identifier: warningTitle).element
     XCTAssertTrue(dialog.exists)

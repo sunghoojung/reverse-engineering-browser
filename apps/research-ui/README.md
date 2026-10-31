@@ -284,7 +284,8 @@ make app
 ```
 
 This packages `build/Origin Trace.app` and opens a complete live capture
-session without a setup dialog. This research launch enables every implemented
+session without a setup dialog when the discovered browser is the release's
+paired build (see below). This research launch enables every implemented
 native capture category and Canvas image artifacts. Retained credentials are unmasked; evidence stays
 local. Use this profile only for authorized targets. The default isolated research
 profile uses Chromium's mock Keychain so launch does not stop on a macOS password
@@ -320,6 +321,15 @@ build output, and among registered applications for Brave Browser Development.
 A `REB_BRAVE_BINARY` override takes precedence. The app bundles its Rust backend
 and VM analyzer, so Python is not required. A startup problem is shown explicitly
 and leaves the stored-evidence interface available offline.
+
+A paired release names its browser by code signature: `OriginTracePairedBrowserCDHash`
+in `Info.plist` must equal the discovered browser's CDHash
+([`BrowserPairing.swift`](macos/BrowserPairing.swift)). The browser version
+cannot identify a build, because every build from one Brave pin reports the same
+version. Any other browser, including a local development build, first shows
+**This browser pairing has not been verified** with **Continue Offline** as the
+default; **Start Unverified Session** starts it for that session only. See the
+[paired release procedure](../../docs/development/paired-release.md).
 Pass an explicit evidence-store or demo argument, or set
 `REB_DISABLE_AUTOMATIC_LIVE_SESSION=1`, when opening the native stored-evidence
 interface without starting Brave.

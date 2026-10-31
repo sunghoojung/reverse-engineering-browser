@@ -2681,16 +2681,18 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
       )
       return
     }
-    if Bundle.main.object(forInfoDictionaryKey: "OriginTraceReleaseType") as? String == "companion" {
+    // Bundle identity and version cannot establish support for this release's
+    // native capture features. Only the exact paired browser build skips the decision.
+    if let reason = BrowserPairing.unverifiedReason(
+      appInfo: Bundle.main.infoDictionary ?? [:],
+      browserCDHash: BrowserPairing.codeDirectoryHash(applicationURL: braveURL)
+    ) {
       liveSessionDecisionOpen = true
       defer { liveSessionDecisionOpen = false }
-      // This companion release has no validated native-browser pair. Bundle identity
-      // alone cannot establish support for the newer native capture capabilities.
       let compatibility = NSAlert()
       compatibility.alertStyle = .warning
       compatibility.messageText = "This browser pairing has not been verified"
-      compatibility.informativeText =
-        "Origin Trace 0.3.2 is a companion-only release. Brave supplied with 0.3.0 or 0.3.1 lacks newer native runtime-buffer and VM capture features. Native capture completeness is not established. Continue only if you accept these limits."
+      compatibility.informativeText = reason
       let offlineButton = compatibility.addButton(withTitle: "Continue Offline")
       compatibility.addButton(withTitle: "Start Unverified Session")
       // Keep Return explicitly bound to the safe choice on every macOS alert style.

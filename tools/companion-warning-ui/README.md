@@ -1,4 +1,4 @@
-# Companion warning acceptance
+# Unverified-browser warning acceptance
 
 This macOS XCUITest target operates the packaged Origin Trace production app.
 It uses neither smoke-mode arguments nor a production-only test hook. Run it
@@ -8,16 +8,24 @@ through the cloud-only driver from the repository root:
 node tools/check-companion-warning.mjs
 ```
 
-The driver requires macOS and `CI=true`, builds no browser, and owns an inert
-`com.brave.Browser.development` application whose executable records one line
-and exits. The release workflow supplies the built companion app. This test
-proves the warning decisions and launch boundary; it does **not** establish
-native browser compatibility or capture completeness.
+The target keeps its original companion-release name. It now covers the paired
+release: Origin Trace starts a live session without a decision only for the
+exact browser build named by `OriginTracePairedBrowserCDHash` in its
+`Info.plist` (see `apps/research-ui/macos/BrowserPairing.swift`). Every other
+browser gets this warning. The native app build runs
+`tools/check-browser-pairing.swift` for the matching, mismatched, unsigned and
+placeholder cases.
+
+The driver requires macOS and `CI=true`, builds no browser, and owns an inert,
+unsigned `com.brave.Browser.development` application whose executable records
+one line and exits. The paired release workflow supplies the built app. This
+test proves the warning decisions and launch boundary; it does **not**
+establish native browser compatibility or capture completeness.
 
 The driver passes these environment variables to the test runner through
 Xcode's `TEST_RUNNER_` prefix:
 
-- `REB_COMPANION_WARNING_APP`: absolute path to the packaged companion app
+- `REB_COMPANION_WARNING_APP`: absolute path to the packaged Origin Trace app
 - `REB_COMPANION_WARNING_ROOT`: owned temporary fixture directory
 - `REB_COMPANION_WARNING_BRAVE`: absolute path to the inert app executable
 

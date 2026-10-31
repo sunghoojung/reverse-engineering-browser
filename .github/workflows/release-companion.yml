@@ -28,7 +28,37 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  # Historical v0.3.2 path. Paired sources skip it on pull requests and refuse
+  # manual publication, mirroring the route job in release.yml.
+  route:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      release_type: ${{ steps.route.outputs.release_type }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.source_sha || github.sha }}
+          persist-credentials: false
+      - id: route
+        name: Select the declared release type
+        run: |
+          python3 - <<'PYTHON'
+          import os, plistlib
+          with open("apps/research-ui/macos/Info.plist", "rb") as source:
+              kind = plistlib.load(source).get("OriginTraceReleaseType", "paired")
+          if kind not in {"paired", "companion"}:
+              raise ValueError("Unknown release type")
+          if kind != "companion" and os.environ["GITHUB_EVENT_NAME"] != "pull_request":
+              raise ValueError("Paired sources require the paired release workflow")
+          with open(os.environ["GITHUB_OUTPUT"], "a") as output:
+              output.write(f"release_type={kind}\n")
+          PYTHON
+
   build:
+    needs: route
+    if: needs.route.outputs.release_type == 'companion'
     runs-on: macos-15
     timeout-minutes: 45
     outputs:

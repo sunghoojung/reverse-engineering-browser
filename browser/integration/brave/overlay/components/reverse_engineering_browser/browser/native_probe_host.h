@@ -79,7 +79,7 @@ class NativeProbeHost final : public mojom::NativeProbeHost {
                           std::uint64_t document_token_low,
                           const std::string& source_url,
                           const std::string& adapter_json,
-                          mojo_base::BigBuffer module,
+                          mojo_base::BigBuffer wasm_module,
                           mojo_base::BigBuffer bytecode) override;
   void CaptureNativeGuestHost(std::uint64_t capture_epoch,
                               const std::vector<std::uint8_t>& event_record) override;

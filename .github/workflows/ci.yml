@@ -5,8 +5,9 @@ name: Continuous integration
 # - Blobless history. Checkout of this repo is already a few seconds; the
 #   full history is only there so path scope and whitespace diffs work.
 # - sccache plus the Cargo registry. Pushes to main save caches that later
-#   pull requests can restore. Each saved compiler cache is capped at 500M
-#   so a unique-per-commit key still fits GitHub's repository cache quota.
+#   pull requests can restore. Each compiler cache is capped at 500M.
+#   actions/cache will not refresh an existing key, so the key includes the
+#   commit; the restore prefix omits it and the next push still hits.
 # - Parallel C++ compilation. Cargo stays one invocation at a time.
 # - macOS `make check` and the app/XCTest gate use two runners. The required
 #   check name remains `test (macos-latest)` and fails if either runner fails.

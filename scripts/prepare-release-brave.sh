@@ -10,9 +10,7 @@ cd "${repository_root}"
 # One reviewed unit: the browser ZIP built for this paired release, its
 # provenance, where both are hosted, and the commit whose browser inputs built
 # them. Replace every PLACEHOLDER before release. tools/write-release-pair.py
-# reads this block too. The browser's CDHash lives in
-# apps/research-ui/macos/Info.plist (OriginTracePairedBrowserCDHash) because
-# Origin Trace reads it at launch; this script verifies it below.
+# reads this block too.
 readonly brave_name=Brave-Browser-Development-v0.5.0-macos-arm64
 readonly source_url=https://github.com/sunghoojung/reverse-engineering-browser/releases/download/brave-0.5.0-3436163
 readonly brave_sha256=39d58fa8f542f3cb0957bc2349c4c812a516180fe6869d0bdc2b2d901df2179e
@@ -25,8 +23,6 @@ read_plist() {
   python3 -I -c 'import plistlib, sys
 print(plistlib.load(open(sys.argv[1], "rb")).get(sys.argv[2], ""))' "${plist}" "$1"
 }
-paired_cdhash="$(read_plist OriginTracePairedBrowserCDHash)"
-readonly paired_cdhash
 version="$(read_plist CFBundleShortVersionString)"
 readonly version
 
@@ -40,8 +36,6 @@ unfinished=()
 [[ "${brave_sha256}" =~ ^[0-9a-f]{64}$ ]] || unfinished+=(brave_sha256)
 [[ "${provenance_sha256}" =~ ^[0-9a-f]{64}$ ]] || unfinished+=(provenance_sha256)
 [[ "${build_source}" =~ ^[0-9a-f]{40}$ ]] || unfinished+=(build_source)
-[[ "${paired_cdhash}" =~ ^[0-9a-f]{40}$ ]] ||
-  unfinished+=("OriginTracePairedBrowserCDHash in ${plist}")
 if ((${#unfinished[@]})); then
   echo "The paired browser pin is unfinished. Fill these reviewed values:" >&2
   printf '  %s\n' "${unfinished[@]}" >&2
@@ -85,9 +79,14 @@ curl --fail --location --silent --show-error --retry 3 \
 ditto -x -k "${release_root}/source/${brave_name}.zip" "${release_root}/extracted"
 readonly app="${release_root}/extracted/Brave Browser Development.app"
 codesign --verify --deep --strict "${app}"
+# The digest-pinned provenance records the packaged app's code signature, so a
+# matching CDHash ties the extracted bundle to that exact recorded build.
 cdhash="$(codesign -dvvv "${app}" 2>&1 | sed -n 's/^CDHash=//p')"
-if [[ "${cdhash}" != "${paired_cdhash}" ]]; then
-  echo "Extracted Brave CDHash ${cdhash:-<none>} differs from ${plist} (${paired_cdhash})." >&2
+recorded_cdhash="$(python3 -I -c 'import json, sys
+print(json.load(open(sys.argv[1]))["app_cdhash"])' \
+  "${release_root}/source/${brave_name}.provenance.json")"
+if [[ "${cdhash}" != "${recorded_cdhash}" ]]; then
+  echo "Extracted Brave CDHash ${cdhash:-<none>} differs from its provenance (${recorded_cdhash})." >&2
   exit 1
 fi
 "${app}/Contents/MacOS/Brave Browser Development" --version

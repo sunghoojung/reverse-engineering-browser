@@ -2649,7 +2649,10 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
     alert.accessoryView = stack
     alert.addButton(withTitle: "Start Session")
     alert.addButton(withTitle: "Continue Offline")
+    // A reopen during this modal must not start a session behind it.
+    liveSessionDecisionOpen = true
     let response = alert.runModal()
+    liveSessionDecisionOpen = false
     guard response == .alertFirstButtonReturn else {
       automaticSessionSuppressed = true
       presentOriginTraceWindow()
@@ -2680,29 +2683,6 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
         useSystemKeychain: useSystemKeychain
       )
       return
-    }
-    // Bundle identity and version cannot establish support for this release's
-    // native capture features. Only the exact paired browser build skips the decision.
-    if let reason = BrowserPairing.unverifiedReason(
-      appInfo: Bundle.main.infoDictionary ?? [:],
-      browserCDHash: BrowserPairing.codeDirectoryHash(applicationURL: braveURL)
-    ) {
-      liveSessionDecisionOpen = true
-      defer { liveSessionDecisionOpen = false }
-      let compatibility = NSAlert()
-      compatibility.alertStyle = .warning
-      compatibility.messageText = "This browser pairing has not been verified"
-      compatibility.informativeText = reason
-      let offlineButton = compatibility.addButton(withTitle: "Continue Offline")
-      compatibility.addButton(withTitle: "Start Unverified Session")
-      // Keep Return explicitly bound to the safe choice on every macOS alert style.
-      offlineButton.keyEquivalent = "\r"
-      compatibility.window.defaultButtonCell = offlineButton.cell as? NSButtonCell
-      presentOriginTraceWindow()
-      guard compatibility.runModal() == .alertSecondButtonReturn else {
-        automaticSessionSuppressed = true
-        return
-      }
     }
     liveSessionCoordinator.start(
       braveExecutableURL: braveExecutableURL,
@@ -3077,7 +3057,10 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
     alert.informativeText = message
     alert.addButton(withTitle: "Retry")
     alert.addButton(withTitle: "Continue Offline")
+    // A reopen during this modal must not start a second session behind it.
+    liveSessionDecisionOpen = true
     let response = alert.runModal()
+    liveSessionDecisionOpen = false
     if response == .alertFirstButtonReturn {
       liveSessionCoordinator.stop()
       startAutomaticLiveSession(

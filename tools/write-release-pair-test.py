@@ -44,7 +44,6 @@ class ReleasePair(unittest.TestCase):
         self.info = {
             "CFBundleShortVersionString": "0.5.0",
             "OriginTraceReleaseType": "paired",
-            "OriginTracePairedBrowserCDHash": CDHASH,
         }
         self.plist = self.root / "apps/research-ui/macos/Info.plist"
         self.plist.parent.mkdir(parents=True)
@@ -125,10 +124,10 @@ class ReleasePair(unittest.TestCase):
                     self.run_helper()
                 path.write_bytes(original)
 
-    def test_provenance_for_another_archive_build_or_browser_is_rejected(self):
+    def test_provenance_for_another_archive_or_build_is_rejected(self):
+        # prepare-release-brave.sh compares the recorded CDHash with the extracted app.
         for key, value in [("schema", "other"), ("release", "v0.3.0"), ("sha256", "0" * 64),
-                           ("artifact", "other.zip"), ("build_source_commit", "d" * 40),
-                           ("app_cdhash", "e" * 40)]:
+                           ("artifact", "other.zip"), ("build_source_commit", "d" * 40)]:
             with self.subTest(key=key):
                 self.write_provenance({**self.browser, key: value})
                 with self.assertRaises(ValueError):
@@ -145,13 +144,21 @@ class ReleasePair(unittest.TestCase):
                     self.run_helper()
         self.assertFalse((self.output / f"{NAME}.zip").exists())
 
-    def test_application_must_be_paired_with_a_named_browser(self):
-        for key, value in [("OriginTraceReleaseType", "companion"),
-                           ("OriginTracePairedBrowserCDHash", "PLACEHOLDER")]:
-            with self.subTest(key=key):
-                self.plist.write_bytes(plistlib.dumps({**self.info, key: value}))
+    def test_application_must_be_a_paired_release(self):
+        self.plist.write_bytes(plistlib.dumps({**self.info, "OriginTraceReleaseType": "companion"}))
+        with self.assertRaises(ValueError):
+            self.run_helper()
+
+    def test_provenance_must_record_the_app_cdhash(self):
+        for value in [None, "PLACEHOLDER", CDHASH.upper()]:
+            with self.subTest(value=value):
+                browser = {key: item for key, item in self.browser.items() if key != "app_cdhash"}
+                if value is not None:
+                    browser["app_cdhash"] = value
+                self.write_provenance(browser)
                 with self.assertRaises(ValueError):
                     self.run_helper()
+        self.assertFalse((self.output / f"{NAME}.zip").exists())
 
     def test_tag_version_mismatch_is_rejected(self):
         self.environment["GITHUB_REF_NAME"] = "v0.3.2"
@@ -198,9 +205,7 @@ class RepositoryPin(unittest.TestCase):
             root = Path(directory)
             (root / "scripts").mkdir()
             (root / "apps/research-ui/macos").mkdir(parents=True)
-            (root / "apps/research-ui/macos/Info.plist").write_bytes(plistlib.dumps({
-                **self.info, "OriginTracePairedBrowserCDHash": "PLACEHOLDER",
-            }))
+            (root / "apps/research-ui/macos/Info.plist").write_bytes(plistlib.dumps(self.info))
             block = re.compile(r"# BEGIN reviewed paired browser pin\n.*# END reviewed paired browser pin\n",
                                re.DOTALL)
             placeholders = pin_script(
@@ -211,8 +216,7 @@ class RepositoryPin(unittest.TestCase):
             script.write_text(block.sub(lambda _: placeholders, self.script, count=1))
             result = subprocess.run(["bash", str(script)], cwd=root, capture_output=True, text=True)
             self.assertEqual(result.returncode, 1, result.stderr)
-            for name in ["source_url", "brave_sha256", "provenance_sha256", "build_source",
-                         "OriginTracePairedBrowserCDHash"]:
+            for name in ["source_url", "brave_sha256", "provenance_sha256", "build_source"]:
                 self.assertIn(name, result.stderr)
             self.assertNotIn("brave_name", result.stderr)
             self.assertFalse((root / "build").exists())

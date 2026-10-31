@@ -22,8 +22,6 @@
     <string>0.5.0</string>
     <key>OriginTraceReleaseType</key>
     <string>paired</string>
-    <key>OriginTracePairedBrowserCDHash</key>
-    <string>ee862c3843bf80da252dab782038c7bb8f8d6c96</string>
     <key>CFBundleVersion</key>
     <string>50</string>
     <key>LSMinimumSystemVersion</key>

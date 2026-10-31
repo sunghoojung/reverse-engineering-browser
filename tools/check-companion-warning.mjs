@@ -1,4 +1,4 @@
-// Cloud macOS acceptance of the production unverified-browser alert, with no real browser.
+// Cloud macOS acceptance of prompt-free live-session startup, failure, Retry and reopen, with no real browser.
 import assert from 'node:assert/strict';
 import {spawn,execFileSync} from 'node:child_process';
 import {cp,mkdir,mkdtemp,readFile,readdir,realpath,rm,writeFile} from 'node:fs/promises';
@@ -37,7 +37,7 @@ try {
 <key>CFBundleName</key><string>Owned warning fixture</string></dict></plist>\n`);
   // This owned fixture never opens a network connection or starts an actual browser.
   await writeFile(executable,'#!/bin/sh\nset -eu\n: "${REB_COMPANION_WARNING_RECEIPT:?}"\nprintf "launched\\n" >> "$REB_COMPANION_WARNING_RECEIPT"\nexit 17\n',{mode:0o700});
-  for(const scenario of ['keyboard-offline','button-offline','retry','modal-reopen']) {
+  for(const scenario of ['automatic','retry','modal-reopen']) {
     const stores=join(temporary,scenario,'stores');
     await mkdir(join(stores,'artifacts'),{recursive:true});
     await mkdir(join(temporary,scenario,'home'),{recursive:true});
@@ -64,11 +64,10 @@ try {
     } catch(error) {exportError=error;await writeFile(join(report,'attachment-export-error.log'),String(error));}
   }
   if(exportError)throw new Error('Native warning screenshots could not be exported',{cause:exportError});
-  const screenshots=['keyboard-offline-initial-warning','keyboard-offline-after-return',
-    'keyboard-offline-new-session-setup','keyboard-offline-later-session-warning',
-    'keyboard-offline-later-session-offline','button-offline-initial-warning','button-offline-after-click',
-    'retry-initial-warning','retry-real-startup-failure','retry-fresh-warning','retry-after-offline',
-    'modal-reopen-initial-warning','modal-reopen-single-warning','modal-reopen-still-offline'];
+  const screenshots=['automatic-startup-failure','automatic-after-offline',
+    'retry-initial-failure','retry-fresh-failure','retry-after-offline','retry-new-session-setup',
+    'retry-new-session-failure','retry-new-session-offline',
+    'modal-reopen-initial-failure','modal-reopen-single-failure','modal-reopen-still-offline'];
   const manifest=JSON.parse(await readFile(join(report,'attachments/manifest.json'),'utf8'));
   assert(Array.isArray(manifest),'Expected XCTest attachment manifest');
   const attachments=manifest.flatMap(test=>Array.isArray(test.attachments)?test.attachments:[]);
@@ -77,7 +76,7 @@ try {
     const suffix=new RegExp('^'+name+'_[0-9]+_[0-9a-fA-F-]{36}\\.png$');
     const matching=attachments.filter(item=>item.suggestedHumanReadableName===name ||
       item.suggestedHumanReadableName===name+'.png' || suffix.test(item.suggestedHumanReadableName));
-    assert.equal(matching.length,1,`Missing or duplicate named warning screenshot: ${name}`);
+    assert.equal(matching.length,1,`Missing or duplicate named startup screenshot: ${name}`);
     const filename=matching[0].exportedFileName;
     assert(typeof filename==='string' && /^[A-Za-z0-9_-][A-Za-z0-9_.-]*\.png$/.test(filename) && !seen.has(filename),'Unsafe or reused screenshot path');
     seen.add(filename);
@@ -86,15 +85,15 @@ try {
   }
   // Receipt expectations are checked here outside the UI-test runner sandbox.
   const receipts={};
-  for(const [scenario,expected] of Object.entries({'keyboard-offline':0,'button-offline':0,retry:1,'modal-reopen':0})) {
+  for(const [scenario,expected] of Object.entries({automatic:1,retry:3,'modal-reopen':2})) {
     let receipt='';
     try {receipt=await readFile(join(temporary,scenario,'launches.txt'),'utf8');}
     catch(error) {if(error.code!=='ENOENT')throw error;}
     assert.equal(receipt,'launched\n'.repeat(expected),`Unexpected browser launch for ${scenario}`);
     receipts[scenario]=expected;
   }
-  await writeFile(join(report,'result.json'),JSON.stringify({productionAlert:true,realXCTest:true,fakeBrowserOnly:true,screenshots,receipts},null,2)+'\n');
-  console.log('PASS real unverified-browser warning decisions and launch receipts; owned unsigned fake browser only, no native-pair compatibility claim');
+  await writeFile(join(report,'result.json'),JSON.stringify({pairingPrompt:false,realXCTest:true,fakeBrowserOnly:true,screenshots,receipts},null,2)+'\n');
+  console.log('PASS prompt-free live-session startup, failure Retry, Continue Offline and reopen with launch receipts; owned unsigned fake browser only, no native capture claim');
 } finally {
   await writeFile(join(report,'xcodebuild.log'),log);
   // Match only this unique relocated bundle, including orphaned packaged helpers

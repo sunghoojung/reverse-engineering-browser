@@ -148,7 +148,7 @@ jobs:
       - name: Exercise native Analyst close and Quit lifecycle
         run: node tools/check-origin-trace-native-close.mjs
 
-      - name: Exercise real unverified-browser warning decisions with an owned fixture
+      - name: Exercise prompt-free live-session startup, Retry and reopen with an owned fixture
         run: node tools/check-companion-warning.mjs
 
       - name: Exercise rendered packaged UI with hosted XCTest

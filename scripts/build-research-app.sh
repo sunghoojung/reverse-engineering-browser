@@ -22,7 +22,6 @@ close_guard_source="${repo_root}/apps/research-ui/macos/NativeCloseGuard.swift"
 client_project_export_source="${repo_root}/apps/research-ui/macos/ClientProjectExport.swift"
 client_project_smoke_source="${repo_root}/apps/research-ui/macos/ClientProjectExportSmoke.swift"
 live_session_source="${repo_root}/apps/research-ui/macos/LiveSessionCoordinator.swift"
-browser_pairing_source="${repo_root}/apps/research-ui/macos/BrowserPairing.swift"
 decoder_service_source="${repo_root}/apps/research-ui/macos/DecoderService.swift"
 decoder_binary="${repo_root}/build/reb-decoder"
 deobfuscation_service_source="${repo_root}/apps/research-ui/macos/DeobfuscationService.swift"
@@ -134,11 +133,6 @@ xcrun swiftc -parse-as-library \
   -o "${repo_root}/build/check-live-session-failure"
 "${repo_root}/build/check-live-session-failure"
 
-xcrun swiftc -parse-as-library \
-  "${browser_pairing_source}" "${repo_root}/tools/check-browser-pairing.swift" \
-  -o "${repo_root}/build/check-browser-pairing"
-"${repo_root}/build/check-browser-pairing"
-
 node "${repo_root}/tools/check-captured-client-project.mjs"
 xcrun swiftc -parse-as-library -framework Cocoa -framework WebKit \
   "${client_project_export_source}" "${repo_root}/tools/check-client-project-export.swift" \
@@ -155,7 +149,7 @@ xcrun swiftc \
   -parse-as-library \
   -framework Cocoa \
   -framework WebKit \
-  "${swift_source}" "${stored_event_window_source}" "${trace_document_source}" "${workspace_lease_source}" "${decoder_service_source}" "${deobfuscation_service_source}" "${wasm_service_source}" "${live_session_source}" "${browser_pairing_source}" "${close_guard_source}" "${close_smoke_source}" "${client_project_export_source}" "${client_project_smoke_source}" \
+  "${swift_source}" "${stored_event_window_source}" "${trace_document_source}" "${workspace_lease_source}" "${decoder_service_source}" "${deobfuscation_service_source}" "${wasm_service_source}" "${live_session_source}" "${close_guard_source}" "${close_smoke_source}" "${client_project_export_source}" "${client_project_smoke_source}" \
   -o "${macos_path}/OriginTrace"
 
 "${macos_path}/OriginTrace" --check-native-ui-url

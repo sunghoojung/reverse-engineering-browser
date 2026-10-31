@@ -96,12 +96,11 @@ def notes_text(tag, source_sha, run_url, assets, browser):
         "- **Browser build:** depot_tools is pinned and a backported Brave init patch "
         "lets a fresh pinned checkout initialize again. The native integration "
         "now compiles in the full Brave build.\n\n"
-        "## Browser pairing\n\n"
-        "Origin Trace starts a live session directly only with the exact Brave build "
-        f"published here (code signature CDHash `{browser['app_cdhash']}`). Any other "
-        "browser first shows **This browser pairing has not been verified**; "
-        "**Continue Offline** is the default and **Start Unverified Session** stays "
-        "an explicit choice.\n\n"
+        "## Live sessions\n\n"
+        "Opening Origin Trace starts a live session directly with the Brave Browser "
+        "Development build it finds, with no pairing prompt. This release was validated "
+        f"with the Brave build published here (code signature CDHash `{browser['app_cdhash']}`); "
+        "other builds start the same way but may lack its native capture features.\n\n"
         "## Release boundaries\n\n"
         "- Brave Browser Development was built locally on a macOS arm64 workstation "
         f"from pinned Brave {pins['brave_core']} and Chromium {pins['chromium']} "
@@ -141,9 +140,6 @@ def main():
             raise ValueError("Tag does not match the packaged application version")
     if info.get("OriginTraceReleaseType") != "paired":
         raise ValueError("Only a paired application can be recorded as a release pair")
-    cdhash = info.get("OriginTracePairedBrowserCDHash", "")
-    if not re.fullmatch(r"[0-9a-f]{40}", cdhash):
-        raise ValueError("The application does not name its paired browser CDHash")
     pin = browser_pin(root)
     name = f"Brave-Browser-Development-{tag}-macos-arm64"
     if pin["brave_name"] != name:
@@ -161,10 +157,11 @@ def main():
     expected = {
         "schema": PROVENANCE_SCHEMA, "release": tag, "artifact": f"{name}.zip",
         "sha256": pin["brave_sha256"], "build_source_commit": pin["build_source"],
-        "app_cdhash": cdhash,
     }
     if any(browser.get(key) != value for key, value in expected.items()):
         raise ValueError("Brave provenance does not describe this pinned archive")
+    if not re.fullmatch(r"[0-9a-f]{40}", str(browser.get("app_cdhash", ""))):
+        raise ValueError("Brave provenance does not record the app CDHash")
     brave = output / f"{name}.zip"
     provenance = output / f"{name}.provenance.json"
     for path in (brave, provenance):
@@ -192,7 +189,7 @@ def main():
             "artifact": brave.name,
             "sha256": pin["brave_sha256"],
             "size_bytes": brave.stat().st_size,
-            "cdhash": cdhash,
+            "cdhash": browser["app_cdhash"],
             "build_source_commit": pin["build_source"],
             "hosted_source": f"{pin['source_url']}/{brave.name}",
             "provenance": browser,
@@ -206,19 +203,21 @@ def main():
             ),
             "checks": [
                 "Pinned Brave ZIP and provenance SHA256 from the hosted source",
-                "Strict signatures, Brave CDHash equal to the Origin Trace pairing "
-                "pin, and extracted Brave executable version",
+                "Strict signatures, Brave CDHash equal to its provenance record, and "
+                "extracted Brave executable version",
                 "Real packaged launcher with disposable Brave profile",
                 "Broker/receiver readiness and relocated WebKit UI",
                 "Launcher shutdown and browser-exit cleanup",
                 "Full native close/Quit suite including five repeated attempts",
-                "Unverified-browser warning decisions with an owned unsigned fake browser",
+                "Live sessions start without a pairing prompt; startup failure, Retry, "
+                "Continue Offline and reopen with an owned unsigned fake browser",
                 "Rendered packaged UI with hosted XCTest",
             ],
             "limits": [
                 "Ad-hoc signing, not Apple notarization",
                 "Brave is a local workstation build, not clean CI or an official Brave release",
-                "No claim of Finder automatic-launch or full native capture/Canvas QA",
+                "Guest-state adapters, JavaScript dispatch sites and Finder automatic "
+                "launch were not exercised live",
                 "Worker/proxy foundations remain dormant",
             ],
         },

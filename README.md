@@ -48,10 +48,8 @@ silicon that carries the current native probes.
 - **VM analysis:** structural dispatch-site classification, more interpreter
   shapes, and observed runtime claims compared with static claims, including
   nested VMs.
-- **Browser pairing:** a live session starts directly only with the exact Brave
-  build published in the release, identified by its code signature. Any other
-  browser first shows **This browser pairing has not been verified**, with
-  **Continue Offline** as the default.
+- **Live session without prompts:** opening Origin Trace starts the live session
+  directly with the Brave build beside it. The browser pairing prompt is gone.
 
 Brave is built locally on a workstation from pinned Brave v1.95.52 and Chromium
 151.0.7922.108 sources with this project's overlays and patches. It is not an
@@ -126,7 +124,7 @@ boundaries and the [capture policy](SAFETY.md) before starting a session.
 - **v0.5.0:** paired release with a new Brave build: input-free native capture
   switches on by default, researcher-supplied Wasm guest-state and JavaScript
   dispatch-site capture, VM dispatch classification and observed claims,
-  native-only capture, exact browser pairing, and Brave build fixes.
+  native-only capture, prompt-free live sessions, and Brave build fixes.
 - **v0.3.2:** companion-only Origin Trace release with an explicit
   unverified-browser decision before live sessions.
 - **v0.3.1:** released native Close/Quit lifecycle repair, per-request acceptance

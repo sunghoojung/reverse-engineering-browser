@@ -7,7 +7,7 @@ include mk/native.mk
 include mk/workflows.mk
 include mk/quality.mk
 
-.PHONY: native-network-capture-check all app app-build app-demo artifact-producer artifact-receiver bootstrap-brave bootstrap-dev-tools brave-doctor brave-probe-check browser-sync broker check clean deob-benchmark deob-worker-build decoder demo e2e format format-check heap-snapshot javascript-check lint live native-build-test native-probe-compile native-probe-admission-check native-tests origin-trace-backend producer python-check repository-check sanitize shellcheck ui workflow-check workspace-check wire-decoder-check magic-decoder-check
+.PHONY: native-network-capture-check all app app-build app-demo artifact-producer artifact-receiver bootstrap-brave bootstrap-dev-tools brave-doctor brave-probe-check browser-sync broker check clean deob-benchmark deob-worker-build decoder demo e2e format format-check heap-snapshot javascript-check lint live native-build-test native-probe-compile native-probe-admission-check native-tests origin-trace-backend producer python-check repository-check sanitize shellcheck ui workflow-check workspace-check wire-decoder-check magic-decoder-check agent-preflight
 .PHONY: native-only-check rendered-ui-check
 .PHONY: native-console native-console-build native-console-check
 .PHONY: native-proxy-policy-check brave-foundation-check

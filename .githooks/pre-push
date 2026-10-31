@@ -1,0 +1,6 @@
+#!/bin/sh
+
+# Opt in with: git config core.hooksPath .githooks
+# The hook reads nothing from the remote and does not receive push options.
+
+exec "$(git rev-parse --show-toplevel)/tools/agent-preflight.sh"

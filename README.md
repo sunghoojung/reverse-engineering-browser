@@ -310,6 +310,17 @@ node tools/check-origin-trace-native-close.mjs
 make rendered-ui-check
 ```
 
+`make agent-preflight` formats and lints files changed since `origin/main`,
+including unstaged edits. `make agent-preflight TYPECHECK=1` also runs
+`cargo check` for a changed Rust crate. `make lint` remains the full source gate.
+`git config core.hooksPath .githooks` runs the preflight before `git push`.
+
+Pull requests that only change documentation skip the native, Rust, and macOS
+gates. Pull requests that only change the Rust backends still run those tests
+on Linux and macOS and skip the macOS app archive and rendered UI. A push to
+`main`, the daily schedule, and a manual run always use the full gate. The
+skip decision fails closed.
+
 `make rendered-ui-check` injects a hosted XCTest bundle into a relocated copy of
 the packaged app and drives its WKWebView with native pointer and keyboard input
 at the default and minimum window sizes. It covers Traffic, Sources,

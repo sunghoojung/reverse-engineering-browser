@@ -107,11 +107,26 @@ The explicit disposable root is resolved at startup to match Chromium's
 canonical profile paths, including macOS `/tmp` and `/var` aliases. An invalid
 root stays ineligible rather than admitting a fallback browser profile.
 
+## Pre-initialization patches
+
+`patches/init/` holds brave-core backports that Brave's own initialization
+needs, so `./scripts/bootstrap-brave.sh --init` applies them before Brave reads
+`DEPS`. The synchronization script never reads or reverses this stack.
+
+- `0001-remove-pip-cryptography-hooks.patch` backports brave-core
+  [#40095](https://github.com/brave/brave-core/pull/40095). Pinned `DEPS` runs
+  `python3 -m pip` hooks to install `cryptography`, which brave-core uses only
+  for Windows Widevine signing. Since depot_tools moved gclient to a `uv`
+  environment (`vpython.toml`, August 2026), that `python3` has no `pip`, so the
+  hook stopped initialization before the later toolchain, Node and version hooks.
+
 ## Layout
 
 - `overlay/` contains complete authored files, mirroring their `brave-core`
   destination paths.
 - `patches/` contains small edits to upstream-owned files.
+- `patches/init/` contains brave-core edits that bootstrap applies before
+  Brave's initialization; see [above](#pre-initialization-patches).
 
 Keep V8 edits in `patches/v8/`, relative to the independent V8 checkout.
 The synchronization script rejects destinations belonging to a nested Git

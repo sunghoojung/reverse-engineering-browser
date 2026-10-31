@@ -169,6 +169,12 @@ The source-of-truth pins remain:
 - Chromium: `151.0.7922.108` (`browser/config/chromium.rev`)
 - V8: `20ad8d002c17ccc7ccfbefc6c4dcf1242fe80921` (`browser/config/v8.rev`)
 
+The build tooling pin is depot_tools
+`a20039648c0de69d8156906b18052bd47e9bf230` (`browser/config/depot_tools.rev`),
+which `--init` writes to Brave's ignored `.env` before Brave installs depot_tools.
+`--init` also applies the pre-initialization stack in
+`browser/integration/brave/patches/init/` before Brave reads `DEPS`.
+
 A full browser build does **not** compile the proxy preparation-only targets by
 itself. Do not add proxy dependencies to `:browser` or activate dormant worker
 flags to make a build appear more complete. These require separate implemented

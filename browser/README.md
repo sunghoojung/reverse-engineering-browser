@@ -56,6 +56,18 @@ The sync command verifies `browser/config/brave-core.rev`,
 patching anything. A mismatch is reported with the current and pinned commits,
 and the checkout is left untouched.
 
+`browser/config/depot_tools.rev` pins the build tooling. Brave otherwise clones
+depot_tools at its moving tip on every fresh initialization, so two
+initializations of the same Brave pin can use different tooling. Before
+`--init`, bootstrap writes the revision to the ignored `src/brave/.env` as
+`projects_depot_tools_revision`, and Brave installs that exact commit.
+`make brave-doctor` reports the installed revision and fails on a mismatch.
+
+Bootstrap also applies `browser/integration/brave/patches/init/` to brave-core
+before Brave's own initialization reads `DEPS`. That stack holds backports that
+initialization itself needs; see the
+[integration guide](integration/brave/README.md#pre-initialization-patches).
+
 The initialized checkout requires at least 150 GiB free. Keep 200 to 250 GiB
 available for builds and updates.
 

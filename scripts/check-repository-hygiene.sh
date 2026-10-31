@@ -25,6 +25,11 @@ if [[ ! "${chromium_revision}" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
   echo "browser/config/chromium.rev is not a pinned Chromium release" >&2
   exit 1
 fi
+depot_tools_revision="$(tr -d '[:space:]' <browser/config/depot_tools.rev)"
+if [[ ! "${depot_tools_revision}" =~ ^[0-9a-f]{40}$ ]]; then
+  echo "browser/config/depot_tools.rev is not a full depot_tools commit" >&2
+  exit 1
+fi
 
 while IFS= read -r patch_file; do
   if ! git apply --numstat "${patch_file}" >/dev/null; then

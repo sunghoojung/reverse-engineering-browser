@@ -13,9 +13,10 @@ use `reb-validation` for the remaining repository gate.
 
 1. Read [AGENTS.md](../../../AGENTS.md), [browser/README.md](../../../browser/README.md),
    and [the integration guide](../../../browser/integration/brave/README.md).
-2. Inspect the project diff and all three files in `browser/config/`: Brave,
-   Chromium, and V8. Record the integration commit, pin values, resolved upstream
-   commits, and status of each independent checkout. Do not infer V8 from the
+2. Inspect the project diff and the three source pins in `browser/config/`:
+   Brave, Chromium, and V8, plus the `depot_tools.rev` tooling pin. Record the
+   integration commit, pin values, resolved upstream commits, and status of each
+   independent checkout. Do not infer V8 from the
    Chromium tag or use moving upstream HEAD as a reproducible baseline.
 3. Classify the request as verification, local iteration, an upstream refresh,
    or a complete build candidate. A verification or skill-writing task does not

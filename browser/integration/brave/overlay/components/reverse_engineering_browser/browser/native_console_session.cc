@@ -121,10 +121,14 @@ class Session final {
     if (!base::StringToUint64(command.GetSwitchValueASCII("reb-native-console-session-id"), &id) ||
         !id)
       return;
+    // Run waits on the owner's socket for the whole session. Thread pool
+    // shutdown joins a running SKIP_ON_SHUTDOWN task, so a connected console
+    // would keep the browser alive after Quit or SIGTERM. The never-destroyed
+    // Session and failed UI posts make abandoning the worker safe.
     base::ThreadPool::PostTask(
         FROM_HERE,
         {base::MayBlock(), base::WithBaseSyncPrimitives(), base::TaskPriority::USER_VISIBLE,
-         base::TaskShutdownBehavior::SKIP_ON_SHUTDOWN},
+         base::TaskShutdownBehavior::CONTINUE_ON_SHUTDOWN},
         base::BindOnce(&Session::Run, base::Unretained(this),
                        base::SingleThreadTaskRunner::GetCurrentDefault(),
                        command.GetSwitchValueASCII("reb-native-console-socket"),

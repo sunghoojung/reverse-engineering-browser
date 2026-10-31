@@ -25,6 +25,7 @@ readonly required_paths=(
   "browser/README.md"
   "browser/config/brave-core.rev"
   "browser/config/chromium.rev"
+  "browser/config/depot_tools.rev"
   "browser/integration/brave/README.md"
   "browser/integration/brave/patches/0001-register-native-probe-component.patch"
   "browser/integration/brave/patches/0002-observe-native-network-lifecycle.patch"

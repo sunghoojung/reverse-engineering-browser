@@ -8,6 +8,8 @@ repository_root="$(cd "${script_dir}/.." && pwd)"
 readonly repository_root
 readonly default_remote="https://github.com/brave/brave-core.git"
 readonly revision_file="${repository_root}/browser/config/brave-core.rev"
+readonly depot_tools_revision_file="${repository_root}/browser/config/depot_tools.rev"
+readonly init_patches_directory="${repository_root}/browser/integration/brave/patches/init"
 readonly minimum_init_free_gib=150
 
 if [[ -z "${DEVELOPER_DIR:-}" ]] &&
@@ -26,6 +28,52 @@ usage() {
   echo "Prepares the pinned upstream Brave checkout at browser/worktree/src/brave."
   echo "The --init flag runs Brave initialization with shallow Chromium history."
   echo "Use --full-history with --init only when complete Chromium Git history is required."
+}
+
+# Brave clones depot_tools at its moving tip unless the ignored brave-core .env
+# names a revision, so the same Brave pin can stop initializing when depot_tools
+# changes. Record the tracked revision before Brave first installs depot_tools.
+pin_depot_tools() {
+  local revision
+  local env_file="${brave_directory}/.env"
+  local key=projects_depot_tools_revision
+  revision="$(tr -d '[:space:]' < "${depot_tools_revision_file}")"
+  if [[ ! "${revision}" =~ ^[0-9a-f]{40}$ ]]; then
+    echo "browser/config/depot_tools.rev must name a full depot_tools commit." >&2
+    exit 1
+  fi
+  if [[ -f "${env_file}" ]] && grep -q "^${key}=" "${env_file}"; then
+    if ! grep -qx "${key}=${revision}" "${env_file}"; then
+      echo "${env_file} pins a different depot_tools revision." >&2
+      echo "Expected ${key}=${revision}; preserve or update that local setting first." >&2
+      exit 1
+    fi
+    return
+  fi
+  if [[ -s "${env_file}" && -n "$(tail -c 1 "${env_file}")" ]]; then
+    printf '\n' >> "${env_file}"
+  fi
+  printf '%s=%s\n' "${key}" "${revision}" >> "${env_file}"
+  echo "Pinned depot_tools to ${revision}"
+}
+
+# Brave's init runs DEPS hooks before sync-browser-integration.sh can apply the
+# ordered stacks, so backports that initialization itself needs live in a
+# separate stack applied here. Later syncs never read or reverse it.
+apply_init_patches() {
+  local patch_file
+  [[ -d "${init_patches_directory}" ]] || return 0
+  while IFS= read -r -d '' patch_file; do
+    if git -C "${brave_directory}" apply --reverse --check "${patch_file}" 2>/dev/null; then
+      continue
+    fi
+    if ! git -C "${brave_directory}" apply --check "${patch_file}" 2>/dev/null; then
+      echo "Pre-initialization patch does not apply: ${patch_file}" >&2
+      exit 1
+    fi
+    git -C "${brave_directory}" apply "${patch_file}"
+    echo "Applied pre-initialization patch $(basename "${patch_file}")"
+  done < <(find "${init_patches_directory}" -maxdepth 1 -type f -name '*.patch' -print0 | sort -z)
 }
 
 configure_node() {
@@ -191,6 +239,8 @@ if [[ "${run_init}" == true ]]; then
     echo "Corepack or pnpm is required for Brave initialization." >&2
     exit 1
   fi
+  pin_depot_tools
+  apply_init_patches
   (
     cd "${brave_directory}"
     # Chromium must become its own repository at worktree/src. Without this

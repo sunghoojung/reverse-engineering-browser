@@ -270,6 +270,18 @@ case "${command_name}" in
       echo "Node.js: $(node --version)"
     fi
     run_pnpm --version
+    depot_tools_pin="$(tr -d '[:space:]' < "${repository_root}/browser/config/depot_tools.rev")"
+    if [[ -d "${brave_directory}/vendor/depot_tools/.git" ]]; then
+      depot_tools_head="$(git -C "${brave_directory}/vendor/depot_tools" rev-parse HEAD)"
+      echo "depot_tools: ${depot_tools_head}"
+      if [[ "${depot_tools_head}" != "${depot_tools_pin}" ]]; then
+        echo "depot_tools does not match browser/config/depot_tools.rev (${depot_tools_pin})." >&2
+        echo "Initialize a fresh pinned worktree with ./scripts/bootstrap-brave.sh --init." >&2
+        exit 1
+      fi
+    else
+      echo "depot_tools: not installed yet (pin ${depot_tools_pin})"
+    fi
     ;;
   gen)
     "${repository_root}/scripts/sync-browser-integration.sh"

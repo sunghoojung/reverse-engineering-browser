@@ -16,6 +16,8 @@
 #include "brave/components/reverse_engineering_browser/common/native_wasm_guest.h"
 
 #include "base/component_export.h"
+#include "base/memory/raw_ptr.h"
+#include "base/no_destructor.h"
 #include "brave/components/reverse_engineering_browser/common/native_artifact_header.h"
 #include "brave/components/reverse_engineering_browser/common/native_js_dispatch.h"
 #include "brave/components/reverse_engineering_browser/common/native_probe_event.h"
@@ -301,6 +303,7 @@ class COMPONENT_EXPORT(REB_NATIVE_PROBE_SINK) NativeProbeSink final {
   void ObserveCapturedWasmModule(std::span<const std::uint8_t> module) noexcept;
 
  private:
+  friend class base::NoDestructor<NativeProbeSink>;
   NativeProbeSink() noexcept;
 
   [[nodiscard]] NativeProbeEmitStatus EmitStatus(const NativeProbeEvent& event,
@@ -425,7 +428,7 @@ class COMPONENT_EXPORT(REB_NATIVE_PROBE_SINK) NativeProbeSink final {
   std::atomic<std::uint64_t> wasm_br_table_interpreter_id_{0};
   std::atomic<std::uint64_t> wasm_br_table_bytecode_id_{0};
   std::atomic<std::uint64_t> page_guest_invocation_{1};
-  const NativeWasmGuestAdapter* native_guest_retained_adapter_ = nullptr;
+  raw_ptr<const NativeWasmGuestAdapter> native_guest_retained_adapter_ = nullptr;
   std::atomic<const NativeWasmGuestAdapter*> native_guest_adapter_{nullptr};
   std::atomic<NativeGuestCaptureEmitter> native_guest_capture_{nullptr};
   std::atomic<NativeGuestHostEmitter> native_guest_host_{nullptr};

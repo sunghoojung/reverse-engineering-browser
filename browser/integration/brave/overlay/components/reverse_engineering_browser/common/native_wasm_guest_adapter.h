@@ -31,8 +31,9 @@ bool Decimal(const std::string* text, T& out) {
   if (!text || text->empty() || (text->size() > 1 && (*text)[0] == '0') || *text == "-0" ||
       (text->size() > 2 && (*text)[0] == '-' && (*text)[1] == '0') || (*text)[0] == '+')
     return false;
-  const auto result = std::from_chars(text->data(), text->data() + text->size(), out);
-  return result.ec == std::errc{} && result.ptr == text->data() + text->size();
+  const char* const end = std::to_address(text->cend());
+  const auto result = std::from_chars(text->data(), end, out);
+  return result.ec == std::errc{} && result.ptr == end;
 }
 inline bool Type(const std::string* text, std::uint8_t& out) {
   if (!text || (*text != "i32" && *text != "i64"))

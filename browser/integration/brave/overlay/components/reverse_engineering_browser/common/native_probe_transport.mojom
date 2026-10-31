@@ -79,7 +79,7 @@ interface NativeProbeHost {
                      uint64 document_token_low,
                      string source_url,
                      string adapter_json,
-                     mojo_base.mojom.BigBuffer module,
+                     mojo_base.mojom.BigBuffer wasm_module,
                      mojo_base.mojom.BigBuffer bytecode);
   CaptureNativeGuestHost(uint64 capture_epoch, array<uint8> event_record);
   CaptureGeneratedArtifact(uint16 kind,

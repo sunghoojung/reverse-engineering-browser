@@ -6,11 +6,12 @@
 #include "brave/components/reverse_engineering_browser/browser/native_probe_host.h"
 
 #include <algorithm>
+#include <array>
 #include <bit>
-#include <cstring>
 #include <functional>
 #include <limits>
 #include <memory>
+#include <span>
 #include <string_view>
 #include <unordered_map>
 #include <utility>
@@ -30,6 +31,13 @@
 namespace reb {
 
 namespace {
+
+// Callers have checked that the record holds exactly one fixed-layout event.
+NativeProbeEvent EventFromRecord(std::span<const std::uint8_t> record) {
+  std::array<std::uint8_t, sizeof(NativeProbeEvent)> bytes{};
+  std::ranges::copy(record.first(bytes.size()), bytes.begin());
+  return std::bit_cast<NativeProbeEvent>(bytes);
+}
 
 std::unordered_map<std::uint64_t, std::uint32_t> CurrentFrameTabs(const int renderer_process_id) {
   std::unordered_map<std::uint64_t, std::uint32_t> tabs;
@@ -289,7 +297,7 @@ void NativeProbeHost::CaptureNativeGuest(const std::uint64_t capture_epoch,
                                          const std::uint64_t document_token_low,
                                          const std::string& source_url,
                                          const std::string& adapter_json,
-                                         mojo_base::BigBuffer module,
+                                         mojo_base::BigBuffer wasm_module,
                                          mojo_base::BigBuffer bytecode) {
   const auto mask = NativeProbeCategoryMask(NativeProbeCategory::kVm) |
                     NativeProbeCategoryMask(NativeProbeCategory::kArtifact);
@@ -303,12 +311,12 @@ void NativeProbeHost::CaptureNativeGuest(const std::uint64_t capture_epoch,
   if (!process)
     return;
   NativeGuestCapture capture;
-  std::memcpy(&capture.invocation, invocation_record.data(), sizeof(capture.invocation));
-  std::memcpy(&capture.dispatch, dispatch_record.data(), sizeof(capture.dispatch));
+  capture.invocation = EventFromRecord(invocation_record);
+  capture.dispatch = EventFromRecord(dispatch_record);
   const auto& h = capture.dispatch.header;
   const bool own_identity = h.session_id == session_->session_id() && h.sequence_number &&
                             h.process_id == static_cast<std::uint32_t>(process->GetProcess().Pid());
-  const bool carries_module = module.size() != 0;
+  const bool carries_module = wasm_module.size() != 0;
   // Every refusal is explicit: the dispatch slot becomes a gap and a refused
   // module transfer is reported so the renderer can resend those bytes.
   const auto refuse = [&](std::string_view reason) {
@@ -331,8 +339,9 @@ void NativeProbeHost::CaptureNativeGuest(const std::uint64_t capture_epoch,
       static_cast<std::uint64_t>(base::TimeTicks::Now().since_origin().InNanoseconds());
   if (!own_identity || !h.monotonic_time_ns || h.monotonic_time_ns > now ||
       capture.invocation.header.monotonic_time_ns > h.monotonic_time_ns ||
-      (carries_module && module.size() < 8) || module.size() > kNativeArtifactMaxContentBytes ||
-      bytecode.size() == 0 || bytecode.size() > kNativeGuestSnapshotLimit) {
+      (carries_module && wasm_module.size() < 8) ||
+      wasm_module.size() > kNativeArtifactMaxContentBytes || bytecode.size() == 0 ||
+      bytecode.size() > kNativeGuestSnapshotLimit) {
     refuse("native_guest_capture_invalid");
     return;
   }
@@ -363,7 +372,7 @@ void NativeProbeHost::CaptureNativeGuest(const std::uint64_t capture_epoch,
   capture.invocation.header.tab_id = tab;
   capture.dispatch.header.tab_id = tab;
   // Private copies defeat shared BigBuffer mutation between hashing and transfer.
-  const std::vector<std::uint8_t> module_copy(module.begin(), module.end());
+  const std::vector<std::uint8_t> module_copy(wasm_module.begin(), wasm_module.end());
   const std::vector<std::uint8_t> bytecode_copy(bytecode.begin(), bytecode.end());
   const auto adapter = ParseNativeWasmGuestAdapter(adapter_json);
   if (!adapter ||
@@ -447,8 +456,7 @@ void NativeProbeHost::CaptureNativeGuestHost(const std::uint64_t capture_epoch,
   if (!queue_ || !capture_epoch || capture_epoch != wasm_capture_epoch_ || !session_->IsActive() ||
       event_record.size() != sizeof(NativeProbeEvent))
     return;
-  NativeProbeEvent event;
-  std::memcpy(&event, event_record.data(), sizeof(event));
+  NativeProbeEvent event = EventFromRecord(event_record);
   auto* process = content::RenderProcessHost::FromID(renderer_process_id_);
   if (!process)
     return;

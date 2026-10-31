@@ -7,6 +7,7 @@
 #include <charconv>
 #include <cstdint>
 #include <initializer_list>
+#include <memory>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -52,8 +53,9 @@ inline bool Decimal(const std::string* text) {
   if (!text || text->empty() || text->size() > 20 || ((*text)[0] == '0' && text->size() > 1))
     return false;
   std::uint64_t value = 0;
-  const auto result = std::from_chars(text->data(), text->data() + text->size(), value);
-  return result.ec == std::errc{} && result.ptr == text->data() + text->size();
+  const char* const end = std::to_address(text->cend());
+  const auto result = std::from_chars(text->data(), end, value);
+  return result.ec == std::errc{} && result.ptr == end;
 }
 }  // namespace native_js_dispatch_sites_detail
 

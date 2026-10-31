@@ -14,6 +14,7 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include "base/memory/raw_ptr_exclusion.h"
 #include "crypto/hash.h"
 #include "native_probe_event.h"
 #include "native_wasm_guest_wire.h"
@@ -41,7 +42,10 @@ enum class NativeWasmGuestParent : std::uint8_t { kNone, kResolved, kUnresolved 
 struct NativeWasmGuestStateView final {
   std::uint64_t instance_id = 0, invocation_id = 0;
   std::uint32_t function_index = 0, module_byte_offset = 0, selector = 0, table_count = 0;
-  void* accessor_context = nullptr;
+  // V8's accessor for this synchronous dispatch only; never retained. It names
+  // engine frame state, not PartitionAlloc memory, and is read on every sampled
+  // dispatch, so raw_ptr would add per-call cost without any protection.
+  RAW_PTR_EXCLUSION void* accessor_context = nullptr;
   bool (*read_numeric_local)(void*, std::uint32_t, std::uint64_t*, std::uint8_t*) = nullptr;
   bool (*copy_memory)(void*, std::uint32_t, std::uint64_t, std::uint32_t, std::uint8_t*) = nullptr;
   std::uint64_t parent_invocation_id = 0;

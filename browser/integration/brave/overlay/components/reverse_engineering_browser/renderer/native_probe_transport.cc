@@ -7,7 +7,6 @@
 
 #include <array>
 #include <bit>
-#include <cstring>
 #include <memory>
 #include <utility>
 #include <vector>
@@ -32,6 +31,12 @@ std::uint64_t CurrentFrameId() noexcept {
   }
   const base::UnguessableToken& token = frame->GetLocalFrameToken().value();
   return std::rotl(token.GetHighForSerialization(), 17) ^ token.GetLowForSerialization();
+}
+
+// Fixed-layout probe records cross Mojo as their exact bytes.
+std::vector<std::uint8_t> EventRecordBytes(const NativeProbeEvent& event) {
+  const auto bytes = std::bit_cast<std::array<std::uint8_t, sizeof(NativeProbeEvent)>>(event);
+  return {bytes.begin(), bytes.end()};
 }
 
 }  // namespace
@@ -185,10 +190,8 @@ bool NativeProbeTransport::EmitNativeGuest(const NativeGuestCapture& capture,
   if (!*host || epoch != transport.wasm_capture_epoch_.load(std::memory_order_acquire) ||
       !NativeProbeSink::Get().CanAdmitEvent(capture.dispatch, generation))
     return false;
-  std::vector<std::uint8_t> invocation(sizeof(NativeProbeEvent)),
-      dispatch(sizeof(NativeProbeEvent));
-  std::memcpy(invocation.data(), &capture.invocation, sizeof(NativeProbeEvent));
-  std::memcpy(dispatch.data(), &capture.dispatch, sizeof(NativeProbeEvent));
+  const auto invocation = EventRecordBytes(capture.invocation);
+  const auto dispatch = EventRecordBytes(capture.dispatch);
   (*host)->CaptureNativeGuest(epoch, invocation, dispatch, capture.execution_context_id,
                               capture.document_token_high, capture.document_token_low,
                               std::string(capture.source_url), std::string(capture.adapter_json),
@@ -207,9 +210,7 @@ bool NativeProbeTransport::EmitNativeGuestHost(const NativeProbeEvent& event,
   if (!*host || epoch != transport.wasm_capture_epoch_.load(std::memory_order_acquire) ||
       !NativeProbeSink::Get().CanAdmitEvent(event, generation))
     return false;
-  std::vector<std::uint8_t> record(sizeof(NativeProbeEvent));
-  std::memcpy(record.data(), &event, sizeof(NativeProbeEvent));
-  (*host)->CaptureNativeGuestHost(epoch, record);
+  (*host)->CaptureNativeGuestHost(epoch, EventRecordBytes(event));
   return true;
 }
 

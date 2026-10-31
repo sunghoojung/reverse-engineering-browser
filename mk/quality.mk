@@ -193,6 +193,7 @@ python-check: vm-lab-check
 	python3 tools/publish-release-pair-test.py
 	python3 tools/check-integrated-brave-state-test.py
 	python3 tools/check-cookie-import-terminal.py
+	python3 tools/ci-scope-test.py
 	python3 -m compileall -q tools
 	$(RUFF) check tools
 
@@ -207,6 +208,11 @@ workflow-check:
 		echo "actionlint is not installed" >&2; exit 1; \
 	}
 	actionlint
+
+# Changed-file format and lint. TYPECHECK=1 also cargo-checks Rust crates
+# whose sources are in the diff. Clippy and the native gates stay in CI.
+agent-preflight:
+	TYPECHECK="$(TYPECHECK)" ./tools/agent-preflight.sh
 
 clean:
 	rm -rf $(BUILD_DIR)

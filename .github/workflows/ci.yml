@@ -1,13 +1,35 @@
 name: Continuous integration
 
+# Pull-request speed, without dropping a gate that can see the diff:
+# - Cancel a superseded push on the same pull request.
+# - Blobless history. Checkout of this repo is already a few seconds; the
+#   full history is only there so path scope and whitespace diffs work.
+# - sccache plus the Cargo registry. Pushes to main save caches that later
+#   pull requests can restore. Each compiler cache is capped at 500M.
+#   actions/cache will not refresh an existing key, so the key includes the
+#   commit; the restore prefix omits it and the next push still hits.
+# - Parallel C++ compilation. Cargo stays one invocation at a time.
+# - macOS `make check` and the app/XCTest gate use two runners. The required
+#   check name remains `test (macos-latest)` and fails if either runner fails.
+# - Documentation-only diffs skip native, Rust, and macOS gates. Rust-backend
+#   diffs still run those tests and skip the macOS app archive and rendered UI.
+#   Every other diff, plus push, schedule, and workflow_dispatch, runs the
+#   full gate. The classifier fails closed.
+# GitHub-hosted runner queue was a few seconds at the median in the October
+# 2026 audit, so this file stays on ubuntu-latest and macos-latest.
+
 on:
   push:
     branches:
       - main
   pull_request:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 8 * * *"
 
 permissions:
   contents: read
+  actions: write
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
@@ -16,18 +38,23 @@ concurrency:
 jobs:
   lint:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 10
 
     steps:
       - name: Check out repository
         uses: actions/checkout@v7
         with:
           fetch-depth: 0
+          filter: blob:none
 
-      - name: Install Node
-        uses: actions/setup-node@v6
+      - name: Prepare repository
+        uses: ./.github/actions/ci-prepare
+
+      - name: Restore compiler cache
+        id: cache
+        uses: ./.github/actions/ci-cache
         with:
-          node-version: '24'
+          role: lint-clippy
 
       - name: Install lightweight linters
         run: |
@@ -60,6 +87,10 @@ jobs:
         if: github.event_name == 'push'
         run: git show --check --oneline --no-renames HEAD
 
+      - name: Report compiler cache
+        if: always() && steps.cache.outcome == 'success'
+        run: sccache --show-stats
+
   graphql-sdl:
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -69,7 +100,7 @@ jobs:
       - name: Install Node
         uses: actions/setup-node@v6
         with:
-          node-version: '24'
+          node-version: "24"
       - name: Install explicit reference parser for authored fixtures
         run: npm install --prefix /tmp/reb-graphql --ignore-scripts --no-audit --no-fund graphql@16.11.0
       - name: Verify offline SDL with independent GraphQL parser
@@ -85,7 +116,7 @@ jobs:
       - name: Install Node
         uses: actions/setup-node@v6
         with:
-          node-version: '24'
+          node-version: "24"
 
       - name: Install explicit Python export test dependencies
         run: |
@@ -99,61 +130,148 @@ jobs:
           REB_PYTHON=/tmp/reb-python-export/bin/python \
             node tools/check-python-client-project.mjs --providers
 
-  test:
-    # macOS also packages, signs, and runs the real WebKit/XCTest lifecycle and
-    # rendered UI acceptance gates.
-    timeout-minutes: ${{ matrix.os == 'macos-latest' && 40 || 15 }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os:
-          - macos-latest
-          - ubuntu-latest
-    runs-on: ${{ matrix.os }}
+  ubuntu-test:
+    name: test (ubuntu-latest)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
 
     steps:
       - name: Check out repository
         uses: actions/checkout@v7
-
-      - name: Install Node
-        uses: actions/setup-node@v6
         with:
-          node-version: '24'
+          fetch-depth: 0
+          filter: blob:none
+
+      - name: Prepare repository
+        id: prep
+        uses: ./.github/actions/ci-prepare
+
+      - name: Record narrowed gate
+        if: success() && steps.prep.outputs.mode != 'full'
+        env:
+          CI_SCOPE: ${{ steps.prep.outputs.mode }}
+        run: |
+          echo "CI scope is ${CI_SCOPE}."
+          echo "Push to main, the daily schedule, and workflow_dispatch run the full gate."
+
+      - name: Restore compiler cache
+        id: cache
+        if: success() && steps.prep.outputs.mode != 'docs'
+        uses: ./.github/actions/ci-cache
+        with:
+          role: ubuntu-debug
 
       - name: Build and test native tools and Rust components
-        run: make check
+        if: success() && steps.prep.outputs.mode != 'docs'
+        run: ./tools/ci-run-make.sh check
+
+      - name: Release-compile Rust packages
+        if: success() && steps.prep.outputs.mode == 'rust'
+        run: |
+          cargo build --locked --release --manifest-path apps/origin-trace-backend/Cargo.toml
+          cargo build --locked --release --manifest-path apps/deobfuscator-worker/Cargo.toml
 
       - name: Exercise generated Go client against authored loopback fixtures
-        if: matrix.os == 'ubuntu-latest'
+        if: success() && steps.prep.outputs.mode != 'docs'
         run: |
           go version
           node tools/check-captured-client-project.mjs --go --mimic
 
       - name: Run end-to-end event path
-        if: matrix.os == 'ubuntu-latest'
-        run: make e2e
+        if: success() && steps.prep.outputs.mode != 'docs'
+        run: ./tools/ci-run-make.sh e2e
 
       - name: Run sanitizers
-        if: matrix.os == 'ubuntu-latest'
-        run: make sanitize
+        if: success() && steps.prep.outputs.mode == 'full'
+        run: ./tools/ci-run-make.sh sanitize
+
+      - name: Report compiler cache
+        if: always() && steps.cache.outcome == 'success'
+        run: sccache --show-stats
+
+  macos-check:
+    name: macos-check
+    runs-on: macos-latest
+    timeout-minutes: 25
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          filter: blob:none
+
+      - name: Prepare repository
+        id: prep
+        uses: ./.github/actions/ci-prepare
+
+      - name: Record narrowed gate
+        if: success() && steps.prep.outputs.mode == 'docs'
+        run: echo "Documentation-only diff; macOS make check runs on main and the daily schedule."
+
+      - name: Restore compiler cache
+        id: cache
+        if: success() && steps.prep.outputs.mode != 'docs'
+        uses: ./.github/actions/ci-cache
+        with:
+          role: macos-debug
+
+      - name: Build and test native tools and Rust components
+        if: success() && steps.prep.outputs.mode != 'docs'
+        run: ./tools/ci-run-make.sh check
+
+      - name: Report compiler cache
+        if: always() && steps.cache.outcome == 'success'
+        run: sccache --show-stats
+
+  macos-package:
+    name: macos-package
+    runs-on: macos-latest
+    timeout-minutes: 35
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          filter: blob:none
+
+      - name: Prepare repository
+        id: prep
+        uses: ./.github/actions/ci-prepare
+
+      - name: Record narrowed gate
+        if: success() && steps.prep.outputs.mode != 'full'
+        env:
+          CI_SCOPE: ${{ steps.prep.outputs.mode }}
+        run: |
+          echo "CI scope is ${CI_SCOPE}; skipping the macOS app archive and rendered UI."
+          echo "Push to main, the daily schedule, and workflow_dispatch run that gate."
+
+      - name: Restore compiler cache
+        id: cache
+        if: success() && steps.prep.outputs.mode == 'full'
+        uses: ./.github/actions/ci-cache
+        with:
+          role: macos-release
 
       - name: Build macOS application bundle
-        if: matrix.os == 'macos-latest'
-        run: make app-build
+        if: success() && steps.prep.outputs.mode == 'full'
+        run: ./tools/ci-run-make.sh app-build
 
       - name: Verify macOS application signature
-        if: matrix.os == 'macos-latest'
+        if: success() && steps.prep.outputs.mode == 'full'
         run: codesign --verify --deep --strict "build/Origin Trace.app"
 
       - name: Exercise relocated macOS package and live launcher
-        if: matrix.os == 'macos-latest'
+        if: success() && steps.prep.outputs.mode == 'full'
         run: |
           export ORIGIN_TRACE_TEST_BROWSER="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
           test -x "$ORIGIN_TRACE_TEST_BROWSER"
           node tools/check-origin-trace-package.mjs
 
       - name: Upload native package diagnostics
-        if: matrix.os == 'macos-latest' && always()
+        if: always() && steps.prep.outputs.mode == 'full'
         uses: actions/upload-artifact@v7
         with:
           name: native-package-${{ github.run_id }}
@@ -162,7 +280,7 @@ jobs:
           retention-days: 3
 
       - name: Upload named native Save-panel screenshots
-        if: matrix.os == 'macos-latest' && always()
+        if: always() && steps.prep.outputs.mode == 'full'
         uses: actions/upload-artifact@v7
         with:
           name: native-client-project-panels-${{ github.run_id }}
@@ -176,17 +294,17 @@ jobs:
           retention-days: 3
 
       - name: Exercise native Analyst close and Quit lifecycle
-        if: matrix.os == 'macos-latest'
+        if: success() && steps.prep.outputs.mode == 'full'
         run: node tools/check-origin-trace-native-close.mjs
 
       - name: Exercise rendered packaged UI with hosted XCTest
-        if: matrix.os == 'macos-latest'
+        if: success() && steps.prep.outputs.mode == 'full'
         run: |
           make e2e native-wasm-golden-check vm-observed-evidence
           node tools/check-origin-trace-rendered-ui.mjs
 
       - name: Upload rendered UI screenshots
-        if: matrix.os == 'macos-latest' && always()
+        if: always() && steps.prep.outputs.mode == 'full'
         uses: actions/upload-artifact@v7
         with:
           name: rendered-ui-${{ github.run_id }}
@@ -199,7 +317,7 @@ jobs:
           retention-days: 3
 
       - name: Upload native close diagnostics
-        if: matrix.os == 'macos-latest' && always()
+        if: always() && steps.prep.outputs.mode == 'full'
         uses: actions/upload-artifact@v7
         with:
           name: native-close-${{ github.run_id }}
@@ -208,14 +326,14 @@ jobs:
           retention-days: 3
 
       - name: Archive macOS application preview
-        if: matrix.os == 'macos-latest' && github.event_name == 'pull_request' && success()
+        if: success() && steps.prep.outputs.mode == 'full' && github.event_name == 'pull_request'
         run: >-
           ditto -c -k --sequesterRsrc --keepParent
           "build/Origin Trace.app"
           "build/Origin-Trace-macos-preview.zip"
 
       - name: Upload macOS application preview
-        if: matrix.os == 'macos-latest' && github.event_name == 'pull_request' && success()
+        if: success() && steps.prep.outputs.mode == 'full' && github.event_name == 'pull_request'
         uses: actions/upload-artifact@v7
         with:
           name: origin-trace-macos-${{ github.run_id }}
@@ -223,15 +341,57 @@ jobs:
           if-no-files-found: error
           retention-days: 3
 
+      - name: Report compiler cache
+        if: always() && steps.cache.outcome == 'success'
+        run: sccache --show-stats
+
+  macos-gate:
+    name: test (macos-latest)
+    needs: [macos-check, macos-package]
+    if: ${{ always() && !cancelled() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require both macOS gates
+        env:
+          MACOS_CHECK: ${{ needs.macos-check.result }}
+          MACOS_PACKAGE: ${{ needs.macos-package.result }}
+        run: |
+          set -eu
+          echo "macos-check ${MACOS_CHECK}"
+          echo "macos-package ${MACOS_PACKAGE}"
+          test "${MACOS_CHECK}" = success
+          test "${MACOS_PACKAGE}" = success
+
   public-quickjs-binding:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-node@v6
+      - name: Check out repository
+        uses: actions/checkout@v7
         with:
-          node-version: '24'
+          fetch-depth: 0
+          filter: blob:none
+
+      - name: Prepare repository
+        id: prep
+        uses: ./.github/actions/ci-prepare
+
+      - name: Restore compiler cache
+        id: cache
+        if: success() && steps.prep.outputs.mode != 'docs'
+        uses: ./.github/actions/ci-cache
+        with:
+          role: quickjs
+
       - name: Install pinned public interpreter without lifecycle scripts
+        if: success() && steps.prep.outputs.mode != 'docs'
         run: npm ci --prefix tools/quickjs-native-fixture --ignore-scripts --no-audit --no-fund
+
       - name: Verify the pinned public interpreter and authored ABI records (not native capture)
-        run: make quickjs-binding-check
+        if: success() && steps.prep.outputs.mode != 'docs'
+        run: ./tools/ci-run-make.sh quickjs-binding-check
+
+      - name: Report compiler cache
+        if: always() && steps.cache.outcome == 'success'
+        run: sccache --show-stats

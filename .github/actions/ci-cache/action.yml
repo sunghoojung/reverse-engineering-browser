@@ -1,0 +1,37 @@
+name: Restore compiler caches
+description: Cargo registry and sccache. Exact keys stay small enough to survive GitHub's per-repository cache quota; restore-keys reuse the newest entry from this branch or main.
+inputs:
+  role:
+    description: Cache namespace, so parallel jobs do not overwrite one key.
+    required: true
+runs:
+  using: composite
+  steps:
+    - name: Install sccache
+      shell: bash
+      run: tools/ci-install-compiler-cache.sh
+
+    - name: Restore Cargo registry
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/.cargo/registry/index
+          ~/.cargo/registry/cache
+          ~/.cargo/git/db
+        key: cargo-registry-v1-${{ runner.os }}-${{ hashFiles('apps/origin-trace-backend/Cargo.lock', 'apps/deobfuscator-worker/Cargo.lock') }}
+
+    - name: Restore compiler cache
+      uses: actions/cache@v4
+      with:
+        path: ~/.cache/sccache
+        key: sccache-v1-${{ runner.os }}-${{ runner.arch }}-${{ inputs.role }}-${{ hashFiles('apps/origin-trace-backend/Cargo.lock', 'apps/deobfuscator-worker/Cargo.lock') }}-${{ github.sha }}
+        restore-keys: |
+          sccache-v1-${{ runner.os }}-${{ runner.arch }}-${{ inputs.role }}-${{ hashFiles('apps/origin-trace-backend/Cargo.lock', 'apps/deobfuscator-worker/Cargo.lock') }}-
+          sccache-v1-${{ runner.os }}-${{ runner.arch }}-${{ inputs.role }}-
+          sccache-v1-${{ runner.os }}-${{ runner.arch }}-
+
+    - name: Start compiler cache
+      shell: bash
+      run: |
+        sccache --start-server
+        sccache --zero-stats

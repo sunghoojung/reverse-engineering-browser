@@ -1,0 +1,21 @@
+name: Prepare CI checkout
+description: Node.js and the pull-request path scope. The job checks out first so this local action is on disk.
+outputs:
+  mode:
+    description: full, rust, or docs
+    value: ${{ steps.scope.outputs.mode }}
+runs:
+  using: composite
+  steps:
+    - name: Install Node
+      uses: actions/setup-node@v6
+      with:
+        node-version: "24"
+
+    - name: Decide which gates this diff can skip
+      id: scope
+      shell: bash
+      env:
+        BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+      run: tools/ci-scope-decision.sh

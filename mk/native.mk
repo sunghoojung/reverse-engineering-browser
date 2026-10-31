@@ -166,3 +166,10 @@ $(BUILD_DIR)/tools/native-js-dispatch-golden.o: mk/config.mk mk/native.mk
 $(NATIVE_JS_DISPATCH_GOLDEN): $(BUILD_DIR)/tools/native-js-dispatch-golden.o $(BUILD_DIR)/src/capture/event.o mk/native.mk
 	$(CXX) $(filter %.o,$^) $(LDFLAGS) $(LDLIBS) -o $@
 -include $(BUILD_DIR)/tools/native-js-dispatch-golden.d
+
+# C++ outputs required by the native gates. CI builds this with -j before
+# invoking Cargo so the two compilers do not share one jobserver.
+.PHONY: cpp-build
+cpp-build: $(APP_BINARIES) $(NATIVE_TEST_BINARIES) $(NATIVE_PROXY_POLICY_TEST) $(OWNED_VM_FIXTURE_TEST) \
+	$(NATIVE_WASM_DISPATCH_GOLDEN) $(NATIVE_WASM_GUEST_GOLDEN) $(NATIVE_JS_DISPATCH_GOLDEN) \
+	$(BUILD_DIR)/check-magic-decoder-limits $(NATIVE_PROBE_QUEUE_OBJECT)

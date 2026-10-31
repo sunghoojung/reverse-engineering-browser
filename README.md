@@ -58,7 +58,10 @@ Brave is built locally on a workstation from pinned Brave v1.95.52 and Chromium
 official Brave release and is not built in clean CI; its provenance records the
 build commit, pins and build arguments. Bundled Brave consumer services stay
 off. Both apps are ad-hoc signed, not Apple-notarized. Worker and proxy
-foundations remain dormant.
+foundations remain dormant. Before release, a live session with this browser
+build recorded Wasm `br_table` and `call_indirect` observations, the Canvas
+readback image, and network and fingerprint surfaces. Guest-state adapters,
+JavaScript dispatch sites and Finder automatic launch were not exercised live.
 
 ### v0.3.2: Origin Trace companion only
 

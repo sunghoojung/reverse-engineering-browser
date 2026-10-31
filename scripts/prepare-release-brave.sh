@@ -14,10 +14,10 @@ cd "${repository_root}"
 # apps/research-ui/macos/Info.plist (OriginTracePairedBrowserCDHash) because
 # Origin Trace reads it at launch; this script verifies it below.
 readonly brave_name=Brave-Browser-Development-v0.5.0-macos-arm64
-readonly source_url=PLACEHOLDER
-readonly brave_sha256=PLACEHOLDER
-readonly provenance_sha256=PLACEHOLDER
-readonly build_source=PLACEHOLDER
+readonly source_url=https://github.com/sunghoojung/reverse-engineering-browser/releases/download/brave-0.5.0-3436163
+readonly brave_sha256=39d58fa8f542f3cb0957bc2349c4c812a516180fe6869d0bdc2b2d901df2179e
+readonly provenance_sha256=e038d83c14dd5030d65d89c42dbf5badf9ad0446bd0748c854a359227ce16cf2
+readonly build_source=3436163584124ce081de5b0da26948bf73cdfa46
 # END reviewed paired browser pin
 
 readonly plist=apps/research-ui/macos/Info.plist

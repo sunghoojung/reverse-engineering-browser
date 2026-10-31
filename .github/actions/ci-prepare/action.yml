@@ -1,5 +1,5 @@
 name: Prepare CI checkout
-description: Blobless clone, Node.js, and the pull-request path scope.
+description: Node.js and the pull-request path scope. The job checks out first so this local action is on disk.
 outputs:
   mode:
     description: full, rust, or docs
@@ -7,12 +7,6 @@ outputs:
 runs:
   using: composite
   steps:
-    - name: Check out repository
-      uses: actions/checkout@v7
-      with:
-        fetch-depth: 0
-        filter: blob:none
-
     - name: Install Node
       uses: actions/setup-node@v6
       with:

@@ -40,6 +40,12 @@ jobs:
     timeout-minutes: 10
 
     steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          filter: blob:none
+
       - name: Prepare repository
         uses: ./.github/actions/ci-prepare
 
@@ -129,6 +135,12 @@ jobs:
     timeout-minutes: 25
 
     steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          filter: blob:none
+
       - name: Prepare repository
         id: prep
         uses: ./.github/actions/ci-prepare
@@ -182,6 +194,12 @@ jobs:
     timeout-minutes: 25
 
     steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          filter: blob:none
+
       - name: Prepare repository
         id: prep
         uses: ./.github/actions/ci-prepare
@@ -211,6 +229,12 @@ jobs:
     timeout-minutes: 35
 
     steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          filter: blob:none
+
       - name: Prepare repository
         id: prep
         uses: ./.github/actions/ci-prepare
@@ -342,6 +366,12 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          filter: blob:none
+
       - name: Prepare repository
         id: prep
         uses: ./.github/actions/ci-prepare

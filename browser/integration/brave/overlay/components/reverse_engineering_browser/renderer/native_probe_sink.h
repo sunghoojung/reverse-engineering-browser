@@ -17,6 +17,7 @@
 
 #include "base/component_export.h"
 #include "base/memory/raw_ptr.h"
+#include "base/no_destructor.h"
 #include "brave/components/reverse_engineering_browser/common/native_artifact_header.h"
 #include "brave/components/reverse_engineering_browser/common/native_js_dispatch.h"
 #include "brave/components/reverse_engineering_browser/common/native_probe_event.h"
@@ -302,6 +303,7 @@ class COMPONENT_EXPORT(REB_NATIVE_PROBE_SINK) NativeProbeSink final {
   void ObserveCapturedWasmModule(std::span<const std::uint8_t> module) noexcept;
 
  private:
+  friend class base::NoDestructor<NativeProbeSink>;
   NativeProbeSink() noexcept;
 
   [[nodiscard]] NativeProbeEmitStatus EmitStatus(const NativeProbeEvent& event,

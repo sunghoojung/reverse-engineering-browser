@@ -1166,8 +1166,9 @@ void SetPayload(NativeProbeEvent& event,
 NativeProbeSink::NativeProbeSink() noexcept = default;
 
 NativeProbeSink& NativeProbeSink::Get() {
-  static NativeProbeSink sink;
-  return sink;
+  // Probe hooks on any thread may still run during process exit.
+  static base::NoDestructor<NativeProbeSink> sink;
+  return *sink;
 }
 
 void NativeProbeSink::SetEmitters(const NativeRendererProbeEmitter emitter,

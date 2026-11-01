@@ -181,6 +181,88 @@ if [[ -z "${brave_binary}" || ! -x "${brave_binary}" ]]; then
   fail_live_session 1 "A complete Brave app build is required. Build Brave, or set REB_BRAVE_BINARY to the custom Brave executable."
 fi
 
+# The project V8 flags are assembled before any helper starts, so a build that
+# cannot honor them is refused with nothing to stop and no window opened.
+native_js_flags=()
+if [[ "${native_quiet_mode}" == 1 ]]; then
+  native_js_flags+=(--reb-ignore-debugger-statements)
+fi
+if [[ "${native_wasm_dispatch}" == 1 ]]; then
+  native_js_flags+=(--reb-wasm-br-table-dispatch)
+fi
+if [[ "${native_wasm_call_indirect}" == 1 ]]; then
+  native_js_flags+=(--reb-wasm-call-indirect-dispatch)
+fi
+# Per-function-entry frame hooks cost a runtime call on every Wasm call, so
+# they are compiled in only when a guest adapter actually needs them.
+if [[ -n "${native_guest_adapter}" ]]; then
+  native_js_flags+=(--reb-wasm-guest-capture)
+fi
+# JavaScript dispatch capture turns off code caching, streaming and the
+# compilation cache browser-wide, so it is added only with a site file.
+if [[ -n "${native_js_dispatch_sites:-}" ]]; then
+  native_js_flags+=(--reb-js-dispatch-capture)
+fi
+
+# V8 stops parsing --js-flags at the first name it does not define and ignores
+# every later entry, so a stale Brave would run a healthy-looking session with
+# no evidence from the requested modes. V8 keeps each defined flag name, with
+# underscores, as a string in its flag table. Release builds link V8 into the
+# framework binary; component builds keep libv8.dylib in the output directory
+# beside the app. A miss reads the whole 600+ MB framework, so the per-flag
+# scans run concurrently and the check runs only when a flag is requested.
+require_brave_v8_flags() {
+  local executable="$1"
+  shift
+  local bundle
+  local output_directory
+  local framework
+  local framework_binary
+  local flag
+  local missing=""
+  local index=0
+  local scan_files=()
+  local scan_pids=()
+  bundle="${executable%/Contents/MacOS/*}"
+  if [[ "${executable}" == */Contents/MacOS/* && "${bundle}" == *.app ]]; then
+    for framework in "${bundle}/Contents/Frameworks/"*.framework; do
+      framework_binary="${framework}/$(basename "${framework}" .framework)"
+      if [[ -f "${framework_binary}" ]]; then
+        scan_files+=("${framework_binary}")
+      fi
+    done
+    output_directory="$(dirname "${bundle}")"
+  else
+    scan_files+=("${executable}")
+    output_directory="$(dirname "${executable}")"
+  fi
+  if [[ -f "${output_directory}/libv8.dylib" ]]; then
+    scan_files+=("${output_directory}/libv8.dylib")
+  fi
+  if [[ ${#scan_files[@]} -gt 0 ]]; then
+    for flag in "$@"; do
+      flag="${flag#--}"
+      LC_ALL=C grep -a -q -F -e "${flag//-/_}" -- "${scan_files[@]}" &
+      scan_pids+=($!)
+    done
+  fi
+  # Reap every scan before deciding so a refusal leaves no reader behind.
+  for flag in "$@"; do
+    if [[ ${#scan_pids[@]} -eq 0 ]] || ! wait "${scan_pids[index]}"; then
+      if [[ -z "${missing}" ]]; then
+        missing="${flag}"
+      fi
+    fi
+    index=$((index + 1))
+  done
+  if [[ -n "${missing}" ]]; then
+    fail_live_session 1 "Brave at ${executable} does not define the V8 flag ${missing}, so it would ignore that flag and every later --js-flags entry and record none of their evidence. Rebuild Brave from this checkout, or use the Brave release that matches this Origin Trace build."
+  fi
+}
+if [[ ${#native_js_flags[@]} -gt 0 ]]; then
+  require_brave_v8_flags "${brave_binary}" "${native_js_flags[@]}"
+fi
+
 broker_pid=""
 artifact_receiver_pid=""
 analyzer_pid=""
@@ -413,26 +495,6 @@ brave_arguments=(
   --reb-category-mask="${category_mask}" \
   --reb-duration-seconds="${duration_seconds}"
 )
-native_js_flags=()
-if [[ "${native_quiet_mode}" == 1 ]]; then
-  native_js_flags+=(--reb-ignore-debugger-statements)
-fi
-if [[ "${native_wasm_dispatch}" == 1 ]]; then
-  native_js_flags+=(--reb-wasm-br-table-dispatch)
-fi
-if [[ "${native_wasm_call_indirect}" == 1 ]]; then
-  native_js_flags+=(--reb-wasm-call-indirect-dispatch)
-fi
-# Per-function-entry frame hooks cost a runtime call on every Wasm call, so
-# they are compiled in only when a guest adapter actually needs them.
-if [[ -n "${native_guest_adapter}" ]]; then
-  native_js_flags+=(--reb-wasm-guest-capture)
-fi
-# JavaScript dispatch capture turns off code caching, streaming and the
-# compilation cache browser-wide, so it is added only with a site file.
-if [[ -n "${native_js_dispatch_sites:-}" ]]; then
-  native_js_flags+=(--reb-js-dispatch-capture)
-fi
 if [[ ${#native_js_flags[@]} -gt 0 ]]; then
   brave_arguments+=("--js-flags=${native_js_flags[*]}")
 fi

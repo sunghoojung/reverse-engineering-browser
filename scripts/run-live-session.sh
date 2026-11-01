@@ -181,86 +181,141 @@ if [[ -z "${brave_binary}" || ! -x "${brave_binary}" ]]; then
   fail_live_session 1 "A complete Brave app build is required. Build Brave, or set REB_BRAVE_BINARY to the custom Brave executable."
 fi
 
+# Chromium's loader finds its framework relative to the path it was started
+# from, so the launcher checks and starts the real file, not a symlink to it.
+resolve_physical_path() {
+  local path="$1"
+  local link
+  local hops=0
+  while [[ -L "${path}" ]]; do
+    if (( hops++ >= 32 )); then
+      return 1
+    fi
+    link="$(readlink "${path}")"
+    if [[ "${link}" != /* ]]; then
+      link="$(dirname "${path}")/${link}"
+    fi
+    path="${link}"
+  done
+  printf '%s/%s\n' "$(cd -P "$(dirname "${path}")" && pwd -P)" "$(basename "${path}")"
+}
+if ! brave_binary="$(resolve_physical_path "${brave_binary}")"; then
+  fail_live_session 1 "Could not resolve the Brave executable path. Set REB_BRAVE_BINARY to the executable inside a complete Brave build."
+fi
+readonly brave_binary
+
 # The project V8 flags are assembled before any helper starts, so a build that
-# cannot honor them is refused with nothing to stop and no window opened.
+# cannot honor them is refused with nothing to stop and no window opened. Each
+# flag keeps the setting that requested it and the setting that turns it off.
 native_js_flags=()
+native_js_flag_settings=()
+native_js_flag_opt_outs=()
+add_native_js_flag() {
+  native_js_flags+=("$1")
+  native_js_flag_settings+=("$2")
+  native_js_flag_opt_outs+=("$3")
+}
 if [[ "${native_quiet_mode}" == 1 ]]; then
-  native_js_flags+=(--reb-ignore-debugger-statements)
+  add_native_js_flag --reb-ignore-debugger-statements \
+    REB_NATIVE_QUIET_MODE=1 REB_NATIVE_QUIET_MODE=0
 fi
 if [[ "${native_wasm_dispatch}" == 1 ]]; then
-  native_js_flags+=(--reb-wasm-br-table-dispatch)
+  add_native_js_flag --reb-wasm-br-table-dispatch \
+    REB_NATIVE_WASM_DISPATCH=1 REB_NATIVE_WASM_DISPATCH=0
 fi
 if [[ "${native_wasm_call_indirect}" == 1 ]]; then
-  native_js_flags+=(--reb-wasm-call-indirect-dispatch)
+  add_native_js_flag --reb-wasm-call-indirect-dispatch \
+    REB_NATIVE_WASM_CALL_INDIRECT=1 REB_NATIVE_WASM_CALL_INDIRECT=0
 fi
 # Per-function-entry frame hooks cost a runtime call on every Wasm call, so
 # they are compiled in only when a guest adapter actually needs them.
 if [[ -n "${native_guest_adapter}" ]]; then
-  native_js_flags+=(--reb-wasm-guest-capture)
+  add_native_js_flag --reb-wasm-guest-capture \
+    REB_NATIVE_WASM_GUEST_ADAPTER "unset REB_NATIVE_WASM_GUEST_ADAPTER"
 fi
 # JavaScript dispatch capture turns off code caching, streaming and the
 # compilation cache browser-wide, so it is added only with a site file.
 if [[ -n "${native_js_dispatch_sites:-}" ]]; then
-  native_js_flags+=(--reb-js-dispatch-capture)
+  add_native_js_flag --reb-js-dispatch-capture \
+    REB_NATIVE_JS_DISPATCH_SITES "unset REB_NATIVE_JS_DISPATCH_SITES"
 fi
+
+# Print the one file that holds the V8 flag table Brave will load.
+# chrome/app/chrome_exe_main_mac.cc loads exactly
+# Contents/Frameworks/<name> Framework.framework/Versions/<version>/<name> Framework.
+# In a component build that framework re-exports @rpath/libchrome_dll.dylib
+# (chrome/BUILD.gn) or links @rpath/libv8.dylib, both resolved from the output
+# directory beside the app, and V8 is libv8.dylib there. Load commands sit at
+# the start of the Mach-O, so the first MiB decides which kind of build this is.
+locate_brave_v8_image() {
+  local executable="$1"
+  local bundle="${executable%/Contents/MacOS/*}"
+  local name="${executable##*/}"
+  local framework
+  if [[ "${bundle}" != *.app || "${executable}" != "${bundle}/Contents/MacOS/${name}" ]]; then
+    return 1
+  fi
+  framework="${bundle}/Contents/Frameworks/${name} Framework.framework/Versions/Current/${name} Framework"
+  if [[ ! -f "${framework}" ]]; then
+    return 1
+  fi
+  if head -c 1048576 "${framework}" |
+     LC_ALL=C grep -a -c -F -e '@rpath/libchrome_dll.dylib' -e '@rpath/libv8.dylib' >/dev/null; then
+    if [[ ! -f "${bundle%/*}/libv8.dylib" ]]; then
+      return 1
+    fi
+    printf '%s\n' "${bundle%/*}/libv8.dylib"
+  else
+    printf '%s\n' "${framework}"
+  fi
+}
+
+brave_v8_scan_pids=()
 
 # V8 stops parsing --js-flags at the first name it does not define and ignores
 # every later entry, so a stale Brave would run a healthy-looking session with
 # no evidence from the requested modes. V8 keeps each defined flag name, with
-# underscores, as a string in its flag table. Release builds link V8 into the
-# framework binary; component builds keep libv8.dylib in the output directory
-# beside the app. A miss reads the whole 600+ MB framework, so the per-flag
-# scans run concurrently and the check runs only when a flag is requested.
+# underscores, as a string in its flag table. A miss reads the whole 600+ MB
+# release framework, so the per-flag scans of that one file run concurrently.
 require_brave_v8_flags() {
-  local executable="$1"
-  shift
-  local bundle
-  local output_directory
-  local framework
-  local framework_binary
+  local image
   local flag
-  local missing=""
+  local status
   local index=0
-  local scan_files=()
-  local scan_pids=()
-  bundle="${executable%/Contents/MacOS/*}"
-  if [[ "${executable}" == */Contents/MacOS/* && "${bundle}" == *.app ]]; then
-    for framework in "${bundle}/Contents/Frameworks/"*.framework; do
-      framework_binary="${framework}/$(basename "${framework}" .framework)"
-      if [[ -f "${framework_binary}" ]]; then
-        scan_files+=("${framework_binary}")
-      fi
-    done
-    output_directory="$(dirname "${bundle}")"
-  else
-    scan_files+=("${executable}")
-    output_directory="$(dirname "${executable}")"
+  local missing=""
+  local opt_outs=""
+  local uninspected=0
+  if ! image="$(locate_brave_v8_image "${brave_binary}")"; then
+    fail_live_session 1 "Cannot locate the V8 library of Brave at ${brave_binary}, so its native V8 flags cannot be checked. Set REB_BRAVE_BINARY to <App>.app/Contents/MacOS/<executable> inside a complete Brave build, not a wrapper script or an app copied away from its build output."
   fi
-  if [[ -f "${output_directory}/libv8.dylib" ]]; then
-    scan_files+=("${output_directory}/libv8.dylib")
-  fi
-  if [[ ${#scan_files[@]} -gt 0 ]]; then
-    for flag in "$@"; do
-      flag="${flag#--}"
-      LC_ALL=C grep -a -q -F -e "${flag//-/_}" -- "${scan_files[@]}" &
-      scan_pids+=($!)
-    done
-  fi
-  # Reap every scan before deciding so a refusal leaves no reader behind.
-  for flag in "$@"; do
-    if [[ ${#scan_pids[@]} -eq 0 ]] || ! wait "${scan_pids[index]}"; then
-      if [[ -z "${missing}" ]]; then
-        missing="${flag}"
-      fi
+  for flag in "${native_js_flags[@]}"; do
+    flag="${flag#--}"
+    LC_ALL=C grep -a -q -F -e "${flag//-/_}" "${image}" &
+    brave_v8_scan_pids+=($!)
+  done
+  # Reap every scan before deciding, keeping each status: 1 is an absent
+  # name, anything else means the file could not be read.
+  for flag in "${native_js_flags[@]}"; do
+    status=0
+    wait "${brave_v8_scan_pids[index]}" || status=$?
+    if (( status == 1 )); then
+      missing+="${missing:+, }${flag} (from ${native_js_flag_settings[index]})"
+      opt_outs+="${opt_outs:+, }${native_js_flag_opt_outs[index]}"
+    elif (( status != 0 )); then
+      uninspected=1
     fi
     index=$((index + 1))
   done
+  brave_v8_scan_pids=()
+  if (( uninspected )); then
+    fail_live_session 1 "Could not inspect ${image}, the V8 library of Brave at ${brave_binary}, for the requested native V8 flags. Check that the file is readable."
+  fi
   if [[ -n "${missing}" ]]; then
-    fail_live_session 1 "Brave at ${executable} does not define the V8 flag ${missing}, so it would ignore that flag and every later --js-flags entry and record none of their evidence. Rebuild Brave from this checkout, or use the Brave release that matches this Origin Trace build."
+    fail_live_session 1 "Brave at ${brave_binary} does not define the requested V8 flags ${missing} in ${image}. V8 would stop at the first of them and ignore every later --js-flags entry, so that evidence would be silently missing. Use the Brave Browser Development build released with this Origin Trace, or rebuild Brave from this checkout, or turn that capture off with ${opt_outs}."
   fi
 }
 if [[ ${#native_js_flags[@]} -gt 0 ]]; then
-  require_brave_v8_flags "${brave_binary}" "${native_js_flags[@]}"
+  require_brave_v8_flags
 fi
 
 broker_pid=""

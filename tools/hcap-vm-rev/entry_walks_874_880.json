@@ -1,0 +1,260 @@
+{
+  "note": "Linear nextState walks only (ignores branch forks). Reconstructive.",
+  "f880_decrypt_entry_walk": [
+    {
+      "state": 70,
+      "cluster": "state_only",
+      "next": 56,
+      "calls": [],
+      "nops": 8
+    },
+    {
+      "state": 56,
+      "cluster": "codec_loopish",
+      "next": 51,
+      "calls": [
+        [
+          719,
+          7
+        ],
+        [
+          397,
+          6
+        ]
+      ],
+      "nops": 124
+    },
+    {
+      "state": 51,
+      "cluster": "state_only",
+      "next": 29,
+      "calls": [],
+      "nops": 14
+    },
+    {
+      "state": 29,
+      "cluster": "codec_bulk_via_537",
+      "next": 12,
+      "calls": [
+        [
+          219,
+          2
+        ],
+        [
+          537,
+          1
+        ]
+      ],
+      "nops": 21
+    },
+    {
+      "state": 12,
+      "cluster": "state_only",
+      "next": 82,
+      "calls": [],
+      "nops": 21
+    },
+    {
+      "state": 82,
+      "cluster": "state_only",
+      "next": 7,
+      "calls": [],
+      "nops": 8
+    },
+    {
+      "state": 7,
+      "cluster": "codec_bulk_via_537",
+      "next": 9,
+      "calls": [
+        [
+          219,
+          2
+        ],
+        [
+          537,
+          1
+        ]
+      ],
+      "nops": 19
+    },
+    {
+      "state": 9,
+      "cluster": "codec_bulk_via_537",
+      "next": 12,
+      "calls": [
+        [
+          219,
+          2
+        ],
+        [
+          537,
+          1
+        ]
+      ],
+      "nops": 21
+    },
+    {
+      "state": 12,
+      "note": "cycle"
+    }
+  ],
+  "f874_encrypt_entry_walk": [
+    {
+      "state": 103,
+      "cluster": "state_only",
+      "next": 112,
+      "calls": [],
+      "nops": 21
+    },
+    {
+      "state": 112,
+      "cluster": "codec_loopish",
+      "next": 38,
+      "calls": [
+        [
+          719,
+          4
+        ],
+        [
+          397,
+          3
+        ]
+      ],
+      "nops": 113
+    },
+    {
+      "state": 38,
+      "cluster": "codec_loopish",
+      "next": 9,
+      "calls": [
+        [
+          364,
+          10
+        ]
+      ],
+      "nops": 220
+    },
+    {
+      "state": 9,
+      "cluster": "sentinel_branch",
+      "next": 116,
+      "calls": [
+        [
+          719,
+          1
+        ]
+      ],
+      "nops": 13
+    },
+    {
+      "state": 116,
+      "cluster": "state_only",
+      "next": 118,
+      "calls": [],
+      "nops": 10
+    },
+    {
+      "state": 118,
+      "cluster": "codec_load_store",
+      "next": 23,
+      "calls": [
+        [
+          719,
+          2
+        ],
+        [
+          954,
+          1
+        ]
+      ],
+      "nops": 20
+    },
+    {
+      "state": 23,
+      "cluster": "codec_load_store",
+      "next": 18,
+      "calls": [
+        [
+          719,
+          2
+        ]
+      ],
+      "nops": 13
+    },
+    {
+      "state": 18,
+      "cluster": "codec_loopish",
+      "next": 48,
+      "calls": [
+        [
+          397,
+          4
+        ],
+        [
+          719,
+          3
+        ]
+      ],
+      "nops": 117
+    },
+    {
+      "state": 48,
+      "cluster": "frame_init_slots",
+      "next": 91,
+      "calls": [
+        [
+          719,
+          2
+        ],
+        [
+          397,
+          1
+        ]
+      ],
+      "nops": 21
+    },
+    {
+      "state": 91,
+      "cluster": "codec_bulk_via_537",
+      "next": 61,
+      "calls": [
+        [
+          219,
+          2
+        ],
+        [
+          537,
+          1
+        ]
+      ],
+      "nops": 21
+    },
+    {
+      "state": 61,
+      "cluster": "state_only",
+      "next": 40,
+      "calls": [],
+      "nops": 3
+    },
+    {
+      "state": 40,
+      "cluster": "codec_bulk_via_537",
+      "next": 61,
+      "calls": [
+        [
+          219,
+          2
+        ],
+        [
+          537,
+          1
+        ]
+      ],
+      "nops": 21
+    },
+    {
+      "state": 61,
+      "note": "cycle"
+    }
+  ]
+}

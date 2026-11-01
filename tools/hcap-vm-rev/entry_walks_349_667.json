@@ -1,0 +1,223 @@
+{
+  "note": "Linear nextState walks only. Reconstructive.",
+  "f349_decrypt_entry_walk": [
+    {
+      "state": 52,
+      "cluster": "state_only",
+      "next": 22,
+      "calls": [],
+      "nops": 17
+    },
+    {
+      "state": 22,
+      "cluster": "codec_load_store",
+      "next": 14,
+      "calls": [
+        [
+          859,
+          1
+        ]
+      ],
+      "nops": 11
+    },
+    {
+      "state": 14,
+      "cluster": "codec_bulk_via_937",
+      "next": 65,
+      "calls": [
+        [
+          863,
+          2
+        ],
+        [
+          937,
+          1
+        ]
+      ],
+      "nops": 21
+    },
+    {
+      "state": 65,
+      "cluster": "state_only",
+      "next": 90,
+      "calls": [],
+      "nops": 6
+    },
+    {
+      "state": 90,
+      "cluster": "state_only",
+      "next": 67,
+      "calls": [],
+      "nops": 8
+    },
+    {
+      "state": 67,
+      "cluster": "codec_bulk_via_937",
+      "next": 65,
+      "calls": [
+        [
+          863,
+          2
+        ],
+        [
+          937,
+          1
+        ]
+      ],
+      "nops": 21
+    },
+    {
+      "state": 65,
+      "note": "cycle"
+    }
+  ],
+  "f667_encrypt_entry_walk": [
+    {
+      "state": 121,
+      "cluster": "codec_loopish",
+      "next": 106,
+      "calls": [
+        [
+          859,
+          5
+        ],
+        [
+          366,
+          4
+        ]
+      ],
+      "nops": 115
+    },
+    {
+      "state": 106,
+      "cluster": "codec_bulk_via_937",
+      "next": 79,
+      "calls": [
+        [
+          863,
+          2
+        ],
+        [
+          937,
+          1
+        ]
+      ],
+      "nops": 19
+    },
+    {
+      "state": 79,
+      "cluster": "codec_bulk_via_937",
+      "next": 87,
+      "calls": [
+        [
+          863,
+          2
+        ],
+        [
+          937,
+          1
+        ]
+      ],
+      "nops": 21
+    },
+    {
+      "state": 87,
+      "cluster": "state_only",
+      "next": 13,
+      "calls": [],
+      "nops": 17
+    },
+    {
+      "state": 13,
+      "cluster": "frame_init_slots",
+      "next": 54,
+      "calls": [
+        [
+          366,
+          4
+        ],
+        [
+          637,
+          1
+        ],
+        [
+          752,
+          1
+        ],
+        [
+          859,
+          1
+        ]
+      ],
+      "nops": 33
+    },
+    {
+      "state": 54,
+      "cluster": "frame_init_slots",
+      "next": 77,
+      "calls": [
+        [
+          366,
+          3
+        ],
+        [
+          706,
+          1
+        ]
+      ],
+      "nops": 38
+    },
+    {
+      "state": 77,
+      "cluster": "codec_bulk_via_937",
+      "next": 122,
+      "calls": [
+        [
+          863,
+          2
+        ],
+        [
+          937,
+          1
+        ]
+      ],
+      "nops": 19
+    },
+    {
+      "state": 122,
+      "cluster": "result_pack_exit",
+      "next": 88,
+      "calls": [
+        [
+          859,
+          3
+        ],
+        [
+          366,
+          2
+        ],
+        [
+          635,
+          1
+        ],
+        [
+          782,
+          1
+        ],
+        [
+          1091,
+          1
+        ]
+      ],
+      "nops": 56
+    },
+    {
+      "state": 88,
+      "cluster": "unreachable_trap",
+      "next": null,
+      "calls": [],
+      "nops": 1,
+      "note": "exit"
+    }
+  ]
+}

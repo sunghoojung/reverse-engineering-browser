@@ -1,0 +1,283 @@
+{
+  "func": 537,
+  "body": "@286484+689",
+  "params": 2,
+  "locals": {
+    "i32": 6,
+    "i64": 11
+  },
+  "state_local": 2,
+  "entry_state": 0,
+  "br_table": {
+    "listed": 10,
+    "default": 10,
+    "unique": 11
+  },
+  "intern_calls": {
+    "719": 8,
+    "397": 6,
+    "364": 2,
+    "219": 1
+  },
+  "no_store_i64": true,
+  "role": "cursor_absorb_mba",
+  "role_note": "Structural: status@arg0, cursor struct@arg1 (fields 0/4/8/12/16/20); byte absorb+rotl+opaque i64 MBA folded into arm 9. Cryptographic identity (hash/Feistel/predicate) UNKNOWN — do not invent.",
+  "vs_937": {
+    "verdict": "remapped_cousin_smaller_machine",
+    "shared": [
+      "nested CFF called once per parent bulk arm",
+      "codec_load_bounds on 0/4/8/12",
+      "exit via store8×2 status (364)",
+      "state_pred_eq / state_pred_nz / cursor_advance / codec_store_len0 / codec_store_cursor",
+      "unreachable default",
+      "2 params",
+      "zero store_i64"
+    ],
+    "different": [
+      "11 vs 17 arms",
+      "entry 0 vs 4 (no i32.const seed before loop)",
+      "689B vs 1386B",
+      "537 folds absorb+i64 MBA into single arm 9; 937 splits mba_i64_mix (0/8) + codec_absorb_mba (5/7) + mba_i32_pred (9/10)",
+      "537 has no separate mba_i32_pred arms",
+      "537 entry has no seed XOR const (-1561962215 on 937)"
+    ]
+  },
+  "vs_1005": {
+    "verdict": "remapped_cousin_different_machine",
+    "shared": [
+      "nested CFF called once per parent bulk arm",
+      "codec_load_bounds on 0/4/8/12",
+      "exit via store8×2 status",
+      "2 params"
+    ],
+    "different": [
+      "11 vs 21 arms",
+      "entry 0 vs 15",
+      "689B vs ~4005B",
+      "537 has zero store_i64; 1005 has 858×147 lane pack consts 360..504 step8",
+      "537 dominated by single absorb+MBA arm; 1005 by bulk i64 stores"
+    ]
+  },
+  "parent_call_sites": {
+    "874": {
+      "n": 36,
+      "cursor_slot": 1100,
+      "status_slots": "frame+{80..256 step ~8}"
+    },
+    "880": {
+      "n": 36,
+      "cursor_slot": 1096,
+      "status_slots": "frame+{80..256 step ~8}"
+    },
+    "727": {
+      "n": 39,
+      "note": "update_token also calls 537×39"
+    }
+  },
+  "arms": [
+    {
+      "state": 0,
+      "n_ops": 35,
+      "cluster": "codec_load_bounds",
+      "next": [
+        {
+          "if": true,
+          "to": 3,
+          "else": 5
+        }
+      ],
+      "calls": {
+        "719": 4
+      },
+      "note": "ENTRY. flag=0; load32 cursor offs 4,0,8,12; bounds (limit vs select(0,end-begin-len,end-begin)) →3|5",
+      "i64_const_n": 0,
+      "big_i32": [],
+      "first_off": 286527
+    },
+    {
+      "state": 1,
+      "n_ops": 10,
+      "cluster": "state_pred_eq",
+      "next": [
+        {
+          "if": true,
+          "to": 2,
+          "else": 9
+        }
+      ],
+      "calls": {},
+      "note": "begin==mark ? →2 : →9",
+      "i64_const_n": 0,
+      "big_i32": [],
+      "first_off": 286595
+    },
+    {
+      "state": 2,
+      "n_ops": 3,
+      "cluster": "state_only",
+      "next": [
+        6
+      ],
+      "calls": {},
+      "note": "→6",
+      "i64_const_n": 0,
+      "big_i32": [],
+      "first_off": 286613
+    },
+    {
+      "state": 3,
+      "n_ops": 3,
+      "cluster": "state_only",
+      "next": [
+        6
+      ],
+      "calls": {},
+      "note": "→6",
+      "i64_const_n": 0,
+      "big_i32": [],
+      "first_off": 286620
+    },
+    {
+      "state": 4,
+      "n_ops": 7,
+      "cluster": "codec_store_cursor",
+      "next": [
+        6
+      ],
+      "calls": {
+        "397": 1
+      },
+      "note": "store32(cursor, mark, 0); →6",
+      "i64_const_n": 0,
+      "big_i32": [],
+      "first_off": 286627
+    },
+    {
+      "state": 5,
+      "n_ops": 8,
+      "cluster": "state_pred_nz",
+      "next": [
+        {
+          "if": true,
+          "to": 7,
+          "else": 1
+        }
+      ],
+      "calls": {},
+      "note": "len ? →7 : →1",
+      "i64_const_n": 0,
+      "big_i32": [],
+      "first_off": 286643
+    },
+    {
+      "state": 6,
+      "n_ops": 9,
+      "cluster": "exit_store8_status",
+      "next": [
+        "return"
+      ],
+      "calls": {
+        "364": 2
+      },
+      "note": "EXIT. store8(dst,bit,1); store8(dst,flag,0); return",
+      "i64_const_n": 0,
+      "big_i32": [],
+      "first_off": 286658
+    },
+    {
+      "state": 7,
+      "n_ops": 16,
+      "cluster": "codec_store_len0",
+      "next": [
+        {
+          "if": true,
+          "to": 8,
+          "else": 4
+        }
+      ],
+      "calls": {
+        "397": 1
+      },
+      "note": "flag=0; store32(cursor, 0, 8); (end-begin)>len ? →8 : →4",
+      "i64_const_n": 0,
+      "big_i32": [],
+      "first_off": 286678
+    },
+    {
+      "state": 8,
+      "n_ops": 7,
+      "cluster": "cursor_advance",
+      "next": [
+        9
+      ],
+      "calls": {},
+      "note": "begin += len; →9",
+      "i64_const_n": 0,
+      "big_i32": [],
+      "first_off": 286709
+    },
+    {
+      "state": 9,
+      "n_ops": 185,
+      "cluster": "codec_absorb_mba",
+      "next": [
+        6
+      ],
+      "calls": {
+        "219": 1,
+        "397": 4,
+        "719": 4
+      },
+      "note": "flag=1; bump begin@0 + counter@16; load8 absorb; rotl mix @secondary(+20); i64 MBA poly → wrap-1973926775 into local1; →6. Folds 937's separate mba_i64_mix arms.",
+      "i64_const_n": 23,
+      "big_i32": [
+        1973926775
+      ],
+      "first_off": 286723
+    },
+    {
+      "state": 10,
+      "n_ops": 1,
+      "cluster": "unreachable_trap",
+      "next": [],
+      "calls": {},
+      "note": "default trap",
+      "i64_const_n": 0,
+      "big_i32": [],
+      "first_off": 287171
+    }
+  ],
+  "mba_i64_constants_sample": [
+    3791927442663040578,
+    -7715504215185997053,
+    6807663086000598086,
+    2083539279290623862,
+    -8556353375204585132,
+    -3923576772522956476,
+    7715504215185997054,
+    2942411602390548,
+    8140823624271946208,
+    6672872839510840944,
+    4340050885772925300,
+    2514880299335710880,
+    859292522481919592,
+    5327851961803828544,
+    3480758363291005708
+  ],
+  "mba_406": {
+    "func": 406,
+    "body": "@166577+25",
+    "params": 1,
+    "role": "opaque_u8_roundtrip_sp15",
+    "analogue_63d9": 273,
+    "analogue_84feb": 710,
+    "proven": "sp-=16; store_u8(sp, arg, 15) via 364; return load_u8(sp, 15) via 219",
+    "parent": "880 arm 50 only (219×32 + 406×17); 874 has 0"
+  },
+  "blockers": [
+    "Meaning of i64 MBA constants (opaque; not simplified here)",
+    "Whether absorb+rotl is a known hash compress round vs opaque predicate",
+    "Secondary object at cursor+20 and MBA wrap bias (1973926775)",
+    "Mapping from status bytes to parent worker control flow"
+  ]
+}

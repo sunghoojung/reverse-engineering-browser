@@ -1,0 +1,163 @@
+{
+  "updated": "2026-11-01T13:15",
+  "live": {
+    "note": "ephemeral local Origin Trace endpoint omitted from shipped STATUS; see local LIVE_SESSION_NEW.md outside repo"
+  },
+  "dom_works": [
+    "Refresh",
+    "Skip",
+    "Next",
+    "canvas\u2192Next/Verify",
+    "menu"
+  ],
+  "dom_avoid": "Verify submit drops /tmp/reb-console-live.*/",
+  "builds": {
+    "84feb": {
+      "yc": 1166,
+      "decrypt": 298,
+      "encrypt": 796,
+      "bulk": 1005,
+      "bulk_role": "i64_lane_pack_bulk",
+      "mba": 710,
+      "mba_note": "sp15_core + vacuous 5-arm MBA wrapper",
+      "gate": "a.Va takeObject",
+      "glue": [
+        "akZ",
+        "aHO",
+        "aqa"
+      ]
+    },
+    "63d9": {
+      "yc": 1170,
+      "decrypt": 349,
+      "encrypt": 667,
+      "bulk": 937,
+      "bulk_role": "cursor_absorb_mba",
+      "mba": 273,
+      "mba_note": "linear sp15 store8/load8",
+      "gate": "a.Cc takeObject",
+      "uint8": "218\u2192a.hc",
+      "glue": [
+        "bbD",
+        "aVj",
+        "aOF"
+      ]
+    },
+    "e449": {
+      "yc": 1164,
+      "decrypt": 880,
+      "encrypt": 874,
+      "bulk": 537,
+      "bulk_role": "cursor_absorb_mba",
+      "mba": 406,
+      "mba_note": "linear sp15; byte-isomorphic to 273",
+      "gate": "a.t takeObject",
+      "glue": [
+        "aHz",
+        "aJp",
+        "GC"
+      ]
+    }
+  },
+  "isomorphism": {
+    "opaque_u8": {
+      "ids": [
+        710,
+        273,
+        406
+      ],
+      "verdict": "same_sp15_core",
+      "see": "MBA_OPAQUE.md"
+    },
+    "bulk_nested": {
+      "ids": [
+        1005,
+        937,
+        537
+      ],
+      "verdict": "not_isomorphic",
+      "note": "1005=lane_pack; 937/537=cursor_absorb_mba cousins"
+    }
+  },
+  "fixtures_green": [
+    "guest_ops_live_fixture",
+    "guest_ops_art13_fixture",
+    "guest_ops_e449_fixture",
+    "cff_test",
+    "hsw_reconstruct.test",
+    "mba_opaque_roundtrip.test",
+    "cff_graphs_fixture"
+  ],
+  "cff_graphs": {
+    "module": "cff_graphs.js",
+    "doc": "CFF_GRAPHS.md",
+    "workers": {
+      "298": {
+        "nodes": 116,
+        "edges": 143,
+        "entry": 21
+      },
+      "796": {
+        "nodes": 143,
+        "edges": 178,
+        "entry": 87
+      },
+      "349": {
+        "nodes": 114,
+        "edges": 141,
+        "entry": 52
+      },
+      "667": {
+        "nodes": 137,
+        "edges": 167,
+        "entry": 121
+      },
+      "874": {
+        "nodes": 121,
+        "edges": 155,
+        "entry": 103
+      },
+      "880": {
+        "nodes": 103,
+        "edges": 113,
+        "entry": 70
+      }
+    }
+  },
+  "remaining": [
+    "i64 MBA cipher identity for bulk helpers 1005/937/537 (samples exported; do not invent)",
+    "whether live SP+15 page is always warm for 710/273/406 XOR-cancel",
+    "optional: denser branch edges beyond constsTop heuristic"
+  ],
+  "workspace": "/tmp/hcap-vm-rev",
+  "e449_glue": "hsw-live-e449-glue.js ascii-proven aHz/aJp/GC magics",
+  "graphs": "cff_graphs.js (6 workers)",
+  "spoof_inventories": {
+    "request_stages": "REQUEST_STAGES_INVENTORY.md",
+    "fingerprint_surfaces": "FINGERPRINT_SURFACES_INVENTORY.md",
+    "spoof_checklist": "SPOOF_CHECKLIST.md",
+    "note": "analysis only; not a solver",
+    "body_shapes": "BODY_SHAPES_INVENTORY.md"
+  },
+  "hsw_typeof_live": {
+    "typeof": "function",
+    "length": 3,
+    "glue_preview": "aHz",
+    "probe": "DOM-only; no proof call"
+  },
+  "body_shape_notes": {
+    "getcaptcha_path": "observed via Performance",
+    "getcaptcha_response_json_bytes": "816-822",
+    "encrypt_response_octet_bytes": [
+      2613,
+      2376
+    ],
+    "request_body_layout": "unknown",
+    "manifest_keys_observed_in_api_js": true
+  },
+  "shipped": {
+    "path": "tools/hcap-vm-rev",
+    "wasm": false,
+    "binders": false
+  }
+}

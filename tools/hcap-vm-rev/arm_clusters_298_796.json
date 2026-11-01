@@ -1,0 +1,6699 @@
+{
+  "source": "/tmp/hcap-vm-rev/out_84feb/helpers.txt",
+  "f298": {
+    "entryState": 21,
+    "nArmsParsed": 116,
+    "byCluster": {
+      "empty": [
+        0
+      ],
+      "sentinel_branch": [
+        1
+      ],
+      "state_only": [
+        2,
+        6,
+        8,
+        9,
+        12,
+        15,
+        20,
+        24,
+        34,
+        37,
+        43,
+        44,
+        47,
+        49,
+        56,
+        58,
+        61,
+        64,
+        70,
+        71,
+        73,
+        74,
+        76,
+        87,
+        88,
+        92,
+        95,
+        96,
+        99,
+        105,
+        107,
+        109,
+        110
+      ],
+      "result_pack_exit": [
+        3,
+        22
+      ],
+      "opaque_misc": [
+        4,
+        46,
+        62,
+        86,
+        89,
+        111
+      ],
+      "frame_init_slots": [
+        5,
+        11,
+        21,
+        51,
+        53,
+        57,
+        66,
+        91,
+        94
+      ],
+      "codec_bulk_via_1005": [
+        7,
+        16,
+        17,
+        18,
+        25,
+        26,
+        28,
+        31,
+        32,
+        33,
+        35,
+        36,
+        39,
+        40,
+        42,
+        45,
+        50,
+        55,
+        59,
+        60,
+        67,
+        68,
+        69,
+        75,
+        80,
+        81,
+        82,
+        83,
+        84,
+        90,
+        93,
+        102,
+        103,
+        104,
+        106,
+        108,
+        113,
+        114
+      ],
+      "unreachable_trap": [
+        10,
+        72,
+        115
+      ],
+      "codec_load_store": [
+        13,
+        27,
+        29,
+        30,
+        41,
+        63,
+        79,
+        97,
+        100
+      ],
+      "codec_loopish": [
+        14,
+        23,
+        38,
+        48,
+        52,
+        77,
+        78,
+        98,
+        101,
+        112
+      ],
+      "mba_via_710": [
+        19
+      ],
+      "codec_i64_byte_mix": [
+        54,
+        65
+      ],
+      "host_a_Va_gate": [
+        85
+      ]
+    },
+    "entry": {
+      "idx": 21,
+      "nops": 83,
+      "cluster": "frame_init_slots",
+      "nextState": 90,
+      "returns": false,
+      "hostVa": false,
+      "callXc": false,
+      "globalSet0": false,
+      "calls": [
+        [
+          438,
+          5
+        ],
+        [
+          582,
+          5
+        ],
+        [
+          231,
+          1
+        ],
+        [
+          454,
+          1
+        ],
+        [
+          598,
+          1
+        ]
+      ],
+      "constsTop": [
+        1080,
+        -64,
+        68,
+        84,
+        88,
+        49152,
+        384,
+        46
+      ]
+    },
+    "notables": [
+      {
+        "idx": 3,
+        "nops": 13,
+        "cluster": "result_pack_exit",
+        "nextState": null,
+        "returns": true,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": true,
+        "calls": [
+          [
+            582,
+            2
+          ]
+        ],
+        "constsTop": [
+          2112
+        ]
+      },
+      {
+        "idx": 22,
+        "nops": 39,
+        "cluster": "result_pack_exit",
+        "nextState": 71,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": true,
+        "calls": [
+          [
+            438,
+            1
+          ],
+          [
+            582,
+            1
+          ],
+          [
+            600,
+            1
+          ],
+          [
+            786,
+            1
+          ]
+        ],
+        "constsTop": [
+          -450171964,
+          2112,
+          260,
+          2064473426,
+          264,
+          260,
+          272,
+          55
+        ]
+      },
+      {
+        "idx": 85,
+        "nops": 5,
+        "cluster": "host_a_Va_gate",
+        "nextState": 2,
+        "returns": false,
+        "hostVa": true,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [
+          [
+            101,
+            1
+          ]
+        ],
+        "constsTop": []
+      }
+    ],
+    "summaries": [
+      {
+        "idx": 0,
+        "nops": 0,
+        "cluster": "empty",
+        "nextState": null,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [],
+        "constsTop": []
+      },
+      {
+        "idx": 1,
+        "nops": 18,
+        "cluster": "sentinel_branch",
+        "nextState": 33,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [
+          [
+            225,
+            1
+          ],
+          [
+            438,
+            1
+          ]
+        ],
+        "constsTop": [
+          2076,
+          2076,
+          -2147483648,
+          42,
+          33
+        ]
+      },
+      {
+        "idx": 2,
+        "nops": 8,
+        "cluster": "state_only",
+        "nextState": 0,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [],
+        "constsTop": [
+          93
+        ]
+      },
+      {
+        "idx": 3,
+        "nops": 13,
+        "cluster": "result_pack_exit",
+        "nextState": null,
+        "returns": true,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": true,
+        "calls": [
+          [
+            582,
+            2
+          ]
+        ],
+        "constsTop": [
+          2112
+        ]
+      },
+      {
+        "idx": 4,
+        "nops": 6,
+        "cluster": "opaque_misc",
+        "nextState": 99,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [
+          [
+            964,
+            1
+          ]
+        ],
+        "constsTop": [
+          99
+        ]
+      },
+      {
+        "idx": 5,
+        "nops": 129,
+        "cluster": "frame_init_slots",
+        "nextState": 65,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [
+          [
+            957,
+            16
+          ],
+          [
+            582,
+            6
+          ],
+          [
+            438,
+            4
+          ],
+          [
+            197,
+            1
+          ],
+          [
+            746,
+            1
+          ]
+        ],
+        "constsTop": [
+          1496,
+          1488,
+          1528,
+          1528,
+          1532,
+          1532,
+          1548,
+          1548
+        ]
+      },
+      {
+        "idx": 6,
+        "nops": 21,
+        "cluster": "state_only",
+        "nextState": 39,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [],
+        "constsTop": [
+          1172450793,
+          1166021845,
+          930071803,
+          -930071804,
+          103,
+          39
+        ]
+      },
+      {
+        "idx": 7,
+        "nops": 21,
+        "cluster": "codec_bulk_via_1005",
+        "nextState": 71,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [
+          [
+            859,
+            2
+          ],
+          [
+            1005,
+            1
+          ]
+        ],
+        "constsTop": [
+          49,
+          40,
+          1080,
+          40,
+          58,
+          71
+        ]
+      },
+      {
+        "idx": 8,
+        "nops": 19,
+        "cluster": "state_only",
+        "nextState": 105,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [],
+        "constsTop": [
+          2132396597,
+          138154182,
+          80,
+          105
+        ]
+      },
+      {
+        "idx": 9,
+        "nops": 17,
+        "cluster": "state_only",
+        "nextState": 26,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [],
+        "constsTop": [
+          -2145305111,
+          201715824,
+          105293657,
+          96,
+          26
+        ]
+      },
+      {
+        "idx": 10,
+        "nops": 2,
+        "cluster": "unreachable_trap",
+        "nextState": null,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [
+          [
+            611,
+            1
+          ]
+        ],
+        "constsTop": []
+      },
+      {
+        "idx": 11,
+        "nops": 51,
+        "cluster": "frame_init_slots",
+        "nextState": 71,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [
+          [
+            582,
+            4
+          ],
+          [
+            858,
+            3
+          ],
+          [
+            859,
+            1
+          ],
+          [
+            1005,
+            1
+          ]
+        ],
+        "constsTop": [
+          796,
+          788,
+          1096,
+          1088,
+          1048,
+          1084,
+          2100,
+          1100
+        ]
+      },
+      {
+        "idx": 12,
+        "nops": 3,
+        "cluster": "state_only",
+        "nextState": 2,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [],
+        "constsTop": []
+      },
+      {
+        "idx": 13,
+        "nops": 13,
+        "cluster": "codec_load_store",
+        "nextState": 109,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [
+          [
+            438,
+            2
+          ]
+        ],
+        "constsTop": [
+          2084,
+          2080,
+          109
+        ]
+      },
+      {
+        "idx": 14,
+        "nops": 52,
+        "cluster": "codec_loopish",
+        "nextState": 13,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [
+          [
+            582,
+            6
+          ]
+        ],
+        "constsTop": [
+          276,
+          20,
+          24,
+          480,
+          61
+        ]
+      },
+      {
+        "idx": 15,
+        "nops": 14,
+        "cluster": "state_only",
+        "nextState": 2,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [],
+        "constsTop": [
+          1025,
+          1027,
+          84
+        ]
+      },
+      {
+        "idx": 16,
+        "nops": 19,
+        "cluster": "codec_bulk_via_1005",
+        "nextState": 63,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [
+          [
+            859,
+            2
+          ],
+          [
+            1005,
+            1
+          ]
+        ],
+        "constsTop": [
+          129,
+          120,
+          1080,
+          120,
+          63
+        ]
+      },
+      {
+        "idx": 17,
+        "nops": 21,
+        "cluster": "codec_bulk_via_1005",
+        "nextState": 71,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [
+          [
+            859,
+            2
+          ],
+          [
+            1005,
+            1
+          ]
+        ],
+        "constsTop": [
+          81,
+          72,
+          1080,
+          72,
+          81,
+          71
+        ]
+      },
+      {
+        "idx": 18,
+        "nops": 21,
+        "cluster": "codec_bulk_via_1005",
+        "nextState": 71,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [
+          [
+            859,
+            2
+          ],
+          [
+            1005,
+            1
+          ]
+        ],
+        "constsTop": [
+          105,
+          96,
+          1080,
+          96,
+          35,
+          71
+        ]
+      },
+      {
+        "idx": 19,
+        "nops": 259,
+        "cluster": "mba_via_710",
+        "nextState": 40,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [
+          [
+            859,
+            32
+          ],
+          [
+            710,
+            17
+          ],
+          [
+            582,
+            8
+          ],
+          [
+            858,
+            5
+          ],
+          [
+            438,
+            3
+          ],
+          [
+            297,
+            2
+          ],
+          [
+            974,
+            1
+          ],
+          [
+            1085,
+            1
+          ]
+        ],
+        "constsTop": [
+          1616,
+          1608,
+          16777216,
+          1604,
+          1600,
+          1596,
+          1592,
+          1080
+        ]
+      },
+      {
+        "idx": 20,
+        "nops": 9,
+        "cluster": "state_only",
+        "nextState": 87,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [],
+        "constsTop": [
+          1028,
+          87
+        ]
+      },
+      {
+        "idx": 21,
+        "nops": 83,
+        "cluster": "frame_init_slots",
+        "nextState": 90,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [
+          [
+            438,
+            5
+          ],
+          [
+            582,
+            5
+          ],
+          [
+            231,
+            1
+          ],
+          [
+            454,
+            1
+          ],
+          [
+            598,
+            1
+          ]
+        ],
+        "constsTop": [
+          1080,
+          -64,
+          68,
+          84,
+          88,
+          49152,
+          384,
+          46
+        ]
+      },
+      {
+        "idx": 22,
+        "nops": 39,
+        "cluster": "result_pack_exit",
+        "nextState": 71,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": true,
+        "calls": [
+          [
+            438,
+            1
+          ],
+          [
+            582,
+            1
+          ],
+          [
+            600,
+            1
+          ],
+          [
+            786,
+            1
+          ]
+        ],
+        "constsTop": [
+          -450171964,
+          2112,
+          260,
+          2064473426,
+          264,
+          260,
+          272,
+          55
+        ]
+      },
+      {
+        "idx": 23,
+        "nops": 27,
+        "cluster": "codec_loopish",
+        "nextState": 95,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [
+          [
+            582,
+            3
+          ],
+          [
+            746,
+            1
+          ]
+        ],
+        "constsTop": [
+          2080,
+          2076,
+          2084,
+          18,
+          95
+        ]
+      },
+      {
+        "idx": 24,
+        "nops": 19,
+        "cluster": "state_only",
+        "nextState": 91,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [],
+        "constsTop": [
+          1067429827,
+          189399404,
+          86,
+          91
+        ]
+      },
+      {
+        "idx": 25,
+        "nops": 19,
+        "cluster": "codec_bulk_via_1005",
+        "nextState": 63,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [
+          [
+            859,
+            2
+          ],
+          [
+            1005,
+            1
+          ]
+        ],
+        "constsTop": [
+          129,
+          120,
+          1080,
+          120,
+          63
+        ]
+      },
+      {
+        "idx": 26,
+        "nops": 19,
+        "cluster": "codec_bulk_via_1005",
+        "nextState": 106,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [
+          [
+            859,
+            2
+          ],
+          [
+            1005,
+            1
+          ]
+        ],
+        "constsTop": [
+          177,
+          168,
+          1080,
+          168,
+          106
+        ]
+      },
+      {
+        "idx": 27,
+        "nops": 8,
+        "cluster": "codec_load_store",
+        "nextState": 104,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [
+          [
+            438,
+            1
+          ],
+          [
+            964,
+            1
+          ]
+        ],
+        "constsTop": [
+          268,
+          104
+        ]
+      },
+      {
+        "idx": 28,
+        "nops": 19,
+        "cluster": "codec_bulk_via_1005",
+        "nextState": 52,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [
+          [
+            859,
+            2
+          ],
+          [
+            1005,
+            1
+          ]
+        ],
+        "constsTop": [
+          1080,
+          71,
+          52
+        ]
+      },
+      {
+        "idx": 29,
+        "nops": 11,
+        "cluster": "codec_load_store",
+        "nextState": 14,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [
+          [
+            438,
+            1
+          ]
+        ],
+        "constsTop": [
+          264,
+          29
+        ]
+      },
+      {
+        "idx": 30,
+        "nops": 8,
+        "cluster": "codec_load_store",
+        "nextState": 14,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [
+          [
+            438,
+            1
+          ],
+          [
+            964,
+            1
+          ]
+        ],
+        "constsTop": [
+          268
+        ]
+      },
+      {
+        "idx": 31,
+        "nops": 19,
+        "cluster": "codec_bulk_via_1005",
+        "nextState": 106,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [
+          [
+            859,
+            2
+          ],
+          [
+            1005,
+            1
+          ]
+        ],
+        "constsTop": [
+          177,
+          168,
+          1080,
+          168,
+          106
+        ]
+      },
+      {
+        "idx": 32,
+        "nops": 21,
+        "cluster": "codec_bulk_via_1005",
+        "nextState": 71,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [
+          [
+            859,
+            2
+          ],
+          [
+            1005,
+            1
+          ]
+        ],
+        "constsTop": [
+          185,
+          176,
+          1080,
+          176,
+          72,
+          71
+        ]
+      },
+      {
+        "idx": 33,
+        "nops": 21,
+        "cluster": "codec_bulk_via_1005",
+        "nextState": 71,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [
+          [
+            859,
+            2
+          ],
+          [
+            1005,
+            1
+          ]
+        ],
+        "constsTop": [
+          257,
+          248,
+          1080,
+          248,
+          44,
+          71
+        ]
+      },
+      {
+        "idx": 34,
+        "nops": 5,
+        "cluster": "state_only",
+        "nextState": 47,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [],
+        "constsTop": [
+          47
+        ]
+      },
+      {
+        "idx": 35,
+        "nops": 21,
+        "cluster": "codec_bulk_via_1005",
+        "nextState": 71,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [
+          [
+            859,
+            2
+          ],
+          [
+            1005,
+            1
+          ]
+        ],
+        "constsTop": [
+          233,
+          224,
+          1080,
+          224,
+          41,
+          71
+        ]
+      },
+      {
+        "idx": 36,
+        "nops": 21,
+        "cluster": "codec_bulk_via_1005",
+        "nextState": 71,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [
+          [
+            859,
+            2
+          ],
+          [
+            1005,
+            1
+          ]
+        ],
+        "constsTop": [
+          97,
+          88,
+          1080,
+          88,
+          71
+        ]
+      },
+      {
+        "idx": 37,
+        "nops": 21,
+        "cluster": "state_only",
+        "nextState": 15,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [],
+        "constsTop": [
+          1594706285,
+          1107667099,
+          1706293678,
+          -1706293679,
+          24
+        ]
+      },
+      {
+        "idx": 38,
+        "nops": 219,
+        "cluster": "codec_loopish",
+        "nextState": 111,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [
+          [
+            438,
+            19
+          ],
+          [
+            582,
+            15
+          ]
+        ],
+        "constsTop": [
+          1112,
+          1112,
+          1116,
+          1116,
+          1132,
+          1132,
+          1504,
+          51317760
+        ]
+      },
+      {
+        "idx": 39,
+        "nops": 21,
+        "cluster": "codec_bulk_via_1005",
+        "nextState": 71,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [
+          [
+            859,
+            2
+          ],
+          [
+            1005,
+            1
+          ]
+        ],
+        "constsTop": [
+          153,
+          144,
+          1080,
+          144,
+          57,
+          71
+        ]
+      },
+      {
+        "idx": 40,
+        "nops": 19,
+        "cluster": "codec_bulk_via_1005",
+        "nextState": 98,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [
+          [
+            859,
+            2
+          ],
+          [
+            1005,
+            1
+          ]
+        ],
+        "constsTop": [
+          137,
+          128,
+          1080,
+          128,
+          98
+        ]
+      },
+      {
+        "idx": 41,
+        "nops": 11,
+        "cluster": "codec_load_store",
+        "nextState": 33,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [
+          [
+            438,
+            1
+          ]
+        ],
+        "constsTop": [
+          2076,
+          78,
+          33
+        ]
+      },
+      {
+        "idx": 42,
+        "nops": 21,
+        "cluster": "codec_bulk_via_1005",
+        "nextState": 71,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [
+          [
+            859,
+            2
+          ],
+          [
+            1005,
+            1
+          ]
+        ],
+        "constsTop": [
+          225,
+          216,
+          1080,
+          216,
+          92,
+          71
+        ]
+      },
+      {
+        "idx": 43,
+        "nops": 19,
+        "cluster": "state_only",
+        "nextState": 12,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [],
+        "constsTop": [
+          487193629,
+          1660907182,
+          62
+        ]
+      },
+      {
+        "idx": 44,
+        "nops": 8,
+        "cluster": "state_only",
+        "nextState": 60,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [],
+        "constsTop": [
+          76,
+          60
+        ]
+      },
+      {
+        "idx": 45,
+        "nops": 21,
+        "cluster": "codec_bulk_via_1005",
+        "nextState": 71,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [
+          [
+            859,
+            2
+          ],
+          [
+            1005,
+            1
+          ]
+        ],
+        "constsTop": [
+          249,
+          240,
+          1080,
+          240,
+          49,
+          71
+        ]
+      },
+      {
+        "idx": 46,
+        "nops": 12,
+        "cluster": "opaque_misc",
+        "nextState": 9,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [
+          [
+            381,
+            1
+          ],
+          [
+            838,
+            1
+          ]
+        ],
+        "constsTop": [
+          22
+        ]
+      },
+      {
+        "idx": 47,
+        "nops": 5,
+        "cluster": "state_only",
+        "nextState": 56,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [],
+        "constsTop": [
+          56
+        ]
+      },
+      {
+        "idx": 48,
+        "nops": 52,
+        "cluster": "codec_loopish",
+        "nextState": 47,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [
+          [
+            582,
+            6
+          ]
+        ],
+        "constsTop": [
+          276,
+          20,
+          24,
+          480,
+          28,
+          47
+        ]
+      },
+      {
+        "idx": 49,
+        "nops": 8,
+        "cluster": "state_only",
+        "nextState": 68,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [],
+        "constsTop": [
+          71,
+          68
+        ]
+      },
+      {
+        "idx": 50,
+        "nops": 21,
+        "cluster": "codec_bulk_via_1005",
+        "nextState": 71,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [
+          [
+            859,
+            2
+          ],
+          [
+            1005,
+            1
+          ]
+        ],
+        "constsTop": [
+          241,
+          232,
+          1080,
+          232,
+          34,
+          71
+        ]
+      },
+      {
+        "idx": 51,
+        "nops": 129,
+        "cluster": "frame_init_slots",
+        "nextState": 65,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [
+          [
+            957,
+            16
+          ],
+          [
+            582,
+            6
+          ],
+          [
+            438,
+            4
+          ],
+          [
+            197,
+            1
+          ],
+          [
+            746,
+            1
+          ]
+        ],
+        "constsTop": [
+          1496,
+          1488,
+          1528,
+          1528,
+          1532,
+          1532,
+          1548,
+          1548
+        ]
+      },
+      {
+        "idx": 52,
+        "nops": 189,
+        "cluster": "codec_loopish",
+        "nextState": 4,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [
+          [
+            582,
+            11
+          ],
+          [
+            438,
+            9
+          ]
+        ],
+        "constsTop": [
+          1424,
+          1424,
+          1432,
+          1432,
+          1436,
+          1436,
+          1452,
+          1452
+        ]
+      },
+      {
+        "idx": 53,
+        "nops": 168,
+        "cluster": "frame_init_slots",
+        "nextState": 20,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [
+          [
+            957,
+            32
+          ],
+          [
+            848,
+            2
+          ],
+          [
+            328,
+            1
+          ]
+        ],
+        "constsTop": [
+          1078,
+          1077,
+          1076,
+          1075,
+          1074,
+          1073,
+          1072,
+          1071
+        ]
+      },
+      {
+        "idx": 54,
+        "nops": 137,
+        "cluster": "codec_i64_byte_mix",
+        "nextState": 10,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [
+          [
+            858,
+            31
+          ],
+          [
+            438,
+            1
+          ],
+          [
+            582,
+            1
+          ]
+        ],
+        "constsTop": [
+          268,
+          2100,
+          -951155132,
+          1044,
+          1036,
+          1028,
+          1020,
+          1012
+        ]
+      },
+      {
+        "idx": 55,
+        "nops": 19,
+        "cluster": "codec_bulk_via_1005",
+        "nextState": 70,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [
+          [
+            859,
+            2
+          ],
+          [
+            1005,
+            1
+          ]
+        ],
+        "constsTop": [
+          145,
+          136,
+          1080,
+          136,
+          70
+        ]
+      },
+      {
+        "idx": 56,
+        "nops": 21,
+        "cluster": "state_only",
+        "nextState": 53,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [],
+        "constsTop": [
+          -303361891,
+          1798433775,
+          2056090156,
+          -2056090157,
+          64,
+          53
+        ]
+      },
+      {
+        "idx": 57,
+        "nops": 253,
+        "cluster": "frame_init_slots",
+        "nextState": 77,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [
+          [
+            438,
+            8
+          ],
+          [
+            582,
+            8
+          ]
+        ],
+        "constsTop": [
+          1080,
+          -64,
+          251662080,
+          17,
+          32,
+          51317760,
+          17,
+          855651072
+        ]
+      },
+      {
+        "idx": 58,
+        "nops": 19,
+        "cluster": "state_only",
+        "nextState": 102,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [],
+        "constsTop": [
+          -529789457,
+          1786253934,
+          54,
+          102
+        ]
+      },
+      {
+        "idx": 59,
+        "nops": 21,
+        "cluster": "codec_bulk_via_1005",
+        "nextState": 71,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [
+          [
+            859,
+            2
+          ],
+          [
+            1005,
+            1
+          ]
+        ],
+        "constsTop": [
+          41,
+          32,
+          1080,
+          32,
+          89,
+          71
+        ]
+      },
+      {
+        "idx": 60,
+        "nops": 21,
+        "cluster": "codec_bulk_via_1005",
+        "nextState": 71,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [
+          [
+            859,
+            2
+          ],
+          [
+            1005,
+            1
+          ]
+        ],
+        "constsTop": [
+          17,
+          1080,
+          27,
+          71
+        ]
+      },
+      {
+        "idx": 61,
+        "nops": 5,
+        "cluster": "state_only",
+        "nextState": 1,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [],
+        "constsTop": []
+      },
+      {
+        "idx": 62,
+        "nops": 24,
+        "cluster": "opaque_misc",
+        "nextState": 99,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [
+          [
+            582,
+            1
+          ],
+          [
+            600,
+            1
+          ],
+          [
+            1116,
+            1
+          ],
+          [
+            1141,
+            1
+          ]
+        ],
+        "constsTop": [
+          2072,
+          2072,
+          2064473426,
+          99
+        ]
+      },
+      {
+        "idx": 63,
+        "nops": 13,
+        "cluster": "codec_load_store",
+        "nextState": 109,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [
+          [
+            438,
+            2
+          ]
+        ],
+        "constsTop": [
+          2084,
+          2080,
+          109
+        ]
+      },
+      {
+        "idx": 64,
+        "nops": 8,
+        "cluster": "state_only",
+        "nextState": 74,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [],
+        "constsTop": [
+          71,
+          74
+        ]
+      },
+      {
+        "idx": 65,
+        "nops": 137,
+        "cluster": "codec_i64_byte_mix",
+        "nextState": 10,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [
+          [
+            858,
+            31
+          ],
+          [
+            438,
+            1
+          ],
+          [
+            582,
+            1
+          ]
+        ],
+        "constsTop": [
+          268,
+          2100,
+          -951155132,
+          1044,
+          1036,
+          1028,
+          1020,
+          1012
+        ]
+      },
+      {
+        "idx": 66,
+        "nops": 69,
+        "cluster": "frame_init_slots",
+        "nextState": 100,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [
+          [
+            957,
+            16
+          ]
+        ],
+        "constsTop": [
+          1064,
+          1065,
+          1066,
+          1067,
+          1068,
+          1069,
+          1070,
+          1071
+        ]
+      },
+      {
+        "idx": 67,
+        "nops": 21,
+        "cluster": "codec_bulk_via_1005",
+        "nextState": 71,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [
+          [
+            859,
+            2
+          ],
+          [
+            1005,
+            1
+          ]
+        ],
+        "constsTop": [
+          209,
+          200,
+          1080,
+          200,
+          112,
+          71
+        ]
+      },
+      {
+        "idx": 68,
+        "nops": 19,
+        "cluster": "codec_bulk_via_1005",
+        "nextState": 48,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [
+          [
+            859,
+            2
+          ],
+          [
+            1005,
+            1
+          ]
+        ],
+        "constsTop": [
+          169,
+          160,
+          1080,
+          160,
+          48
+        ]
+      },
+      {
+        "idx": 69,
+        "nops": 21,
+        "cluster": "codec_bulk_via_1005",
+        "nextState": 71,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [
+          [
+            859,
+            2
+          ],
+          [
+            1005,
+            1
+          ]
+        ],
+        "constsTop": [
+          161,
+          152,
+          1080,
+          152,
+          38,
+          71
+        ]
+      },
+      {
+        "idx": 70,
+        "nops": 9,
+        "cluster": "state_only",
+        "nextState": 94,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [],
+        "constsTop": [
+          -1738242717,
+          582175347,
+          94
+        ]
+      },
+      {
+        "idx": 71,
+        "nops": 8,
+        "cluster": "state_only",
+        "nextState": 5,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [],
+        "constsTop": [
+          71
+        ]
+      },
+      {
+        "idx": 72,
+        "nops": 1,
+        "cluster": "unreachable_trap",
+        "nextState": null,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [],
+        "constsTop": []
+      },
+      {
+        "idx": 73,
+        "nops": 19,
+        "cluster": "state_only",
+        "nextState": 25,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [],
+        "constsTop": [
+          1691224563,
+          1389812933,
+          30,
+          25
+        ]
+      },
+      {
+        "idx": 74,
+        "nops": 3,
+        "cluster": "state_only",
+        "nextState": 33,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [],
+        "constsTop": [
+          33
+        ]
+      },
+      {
+        "idx": 75,
+        "nops": 21,
+        "cluster": "codec_bulk_via_1005",
+        "nextState": 71,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [
+          [
+            859,
+            2
+          ],
+          [
+            1005,
+            1
+          ]
+        ],
+        "constsTop": [
+          121,
+          112,
+          1080,
+          112,
+          113,
+          71
+        ]
+      },
+      {
+        "idx": 76,
+        "nops": 8,
+        "cluster": "state_only",
+        "nextState": 16,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [],
+        "constsTop": [
+          71
+        ]
+      },
+      {
+        "idx": 77,
+        "nops": 34,
+        "cluster": "codec_loopish",
+        "nextState": 1,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [
+          [
+            582,
+            3
+          ],
+          [
+            278,
+            1
+          ]
+        ],
+        "constsTop": [
+          2104,
+          2100,
+          2108,
+          2147483632,
+          788,
+          2100
+        ]
+      },
+      {
+        "idx": 78,
+        "nops": 182,
+        "cluster": "codec_loopish",
+        "nextState": 97,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [
+          [
+            438,
+            8
+          ],
+          [
+            582,
+            8
+          ]
+        ],
+        "constsTop": [
+          60,
+          51317760,
+          17,
+          855651072,
+          68,
+          251662080,
+          17,
+          72
+        ]
+      },
+      {
+        "idx": 79,
+        "nops": 7,
+        "cluster": "codec_load_store",
+        "nextState": 95,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [
+          [
+            438,
+            1
+          ]
+        ],
+        "constsTop": [
+          2080,
+          95
+        ]
+      },
+      {
+        "idx": 80,
+        "nops": 19,
+        "cluster": "codec_bulk_via_1005",
+        "nextState": 48,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [
+          [
+            859,
+            2
+          ],
+          [
+            1005,
+            1
+          ]
+        ],
+        "constsTop": [
+          169,
+          160,
+          1080,
+          160,
+          48
+        ]
+      },
+      {
+        "idx": 81,
+        "nops": 19,
+        "cluster": "codec_bulk_via_1005",
+        "nextState": 75,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [
+          [
+            859,
+            2
+          ],
+          [
+            1005,
+            1
+          ]
+        ],
+        "constsTop": [
+          89,
+          80,
+          1080,
+          80,
+          75
+        ]
+      },
+      {
+        "idx": 82,
+        "nops": 21,
+        "cluster": "codec_bulk_via_1005",
+        "nextState": 71,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [
+          [
+            859,
+            2
+          ],
+          [
+            1005,
+            1
+          ]
+        ],
+        "constsTop": [
+          73,
+          -64,
+          1080,
+          64,
+          82,
+          71
+        ]
+      },
+      {
+        "idx": 83,
+        "nops": 21,
+        "cluster": "codec_bulk_via_1005",
+        "nextState": 71,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [
+          [
+            859,
+            2
+          ],
+          [
+            1005,
+            1
+          ]
+        ],
+        "constsTop": [
+          65,
+          56,
+          1080,
+          56,
+          101,
+          71
+        ]
+      },
+      {
+        "idx": 84,
+        "nops": 21,
+        "cluster": "codec_bulk_via_1005",
+        "nextState": 71,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [
+          [
+            859,
+            2
+          ],
+          [
+            1005,
+            1
+          ]
+        ],
+        "constsTop": [
+          193,
+          184,
+          1080,
+          184,
+          31,
+          71
+        ]
+      },
+      {
+        "idx": 85,
+        "nops": 5,
+        "cluster": "host_a_Va_gate",
+        "nextState": 2,
+        "returns": false,
+        "hostVa": true,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [
+          [
+            101,
+            1
+          ]
+        ],
+        "constsTop": []
+      },
+      {
+        "idx": 86,
+        "nops": 6,
+        "cluster": "opaque_misc",
+        "nextState": 73,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [
+          [
+            964,
+            1
+          ]
+        ],
+        "constsTop": [
+          73
+        ]
+      },
+      {
+        "idx": 87,
+        "nops": 7,
+        "cluster": "state_only",
+        "nextState": 43,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [],
+        "constsTop": [
+          17,
+          43
+        ]
+      },
+      {
+        "idx": 88,
+        "nops": 8,
+        "cluster": "state_only",
+        "nextState": 11,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [],
+        "constsTop": [
+          84
+        ]
+      },
+      {
+        "idx": 89,
+        "nops": 17,
+        "cluster": "opaque_misc",
+        "nextState": 33,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [
+          [
+            746,
+            1
+          ]
+        ],
+        "constsTop": [
+          276,
+          1080,
+          512,
+          45,
+          33
+        ]
+      },
+      {
+        "idx": 90,
+        "nops": 21,
+        "cluster": "codec_bulk_via_1005",
+        "nextState": 71,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [
+          [
+            859,
+            2
+          ],
+          [
+            1005,
+            1
+          ]
+        ],
+        "constsTop": [
+          33,
+          24,
+          1080,
+          24,
+          107,
+          71
+        ]
+      },
+      {
+        "idx": 91,
+        "nops": 70,
+        "cluster": "frame_init_slots",
+        "nextState": 20,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [
+          [
+            438,
+            4
+          ],
+          [
+            582,
+            4
+          ],
+          [
+            231,
+            1
+          ],
+          [
+            454,
+            1
+          ],
+          [
+            598,
+            1
+          ]
+        ],
+        "constsTop": [
+          1080,
+          96,
+          100,
+          116,
+          120,
+          68,
+          -64,
+          20
+        ]
+      },
+      {
+        "idx": 92,
+        "nops": 7,
+        "cluster": "state_only",
+        "nextState": 43,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [],
+        "constsTop": [
+          17,
+          43
+        ]
+      },
+      {
+        "idx": 93,
+        "nops": 21,
+        "cluster": "codec_bulk_via_1005",
+        "nextState": 71,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [
+          [
+            859,
+            2
+          ],
+          [
+            1005,
+            1
+          ]
+        ],
+        "constsTop": [
+          217,
+          208,
+          1080,
+          208,
+          66,
+          71
+        ]
+      },
+      {
+        "idx": 94,
+        "nops": 49,
+        "cluster": "frame_init_slots",
+        "nextState": 0,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [
+          [
+            582,
+            3
+          ],
+          [
+            746,
+            2
+          ],
+          [
+            278,
+            1
+          ],
+          [
+            328,
+            1
+          ]
+        ],
+        "constsTop": [
+          1080,
+          2096,
+          2092,
+          2088,
+          788,
+          2088
+        ]
+      },
+      {
+        "idx": 95,
+        "nops": 9,
+        "cluster": "state_only",
+        "nextState": 87,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [],
+        "constsTop": [
+          1028,
+          87
+        ]
+      },
+      {
+        "idx": 96,
+        "nops": 9,
+        "cluster": "state_only",
+        "nextState": 85,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [],
+        "constsTop": [
+          -1789843361,
+          1034135724,
+          85
+        ]
+      },
+      {
+        "idx": 97,
+        "nops": 8,
+        "cluster": "codec_load_store",
+        "nextState": 104,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [
+          [
+            438,
+            1
+          ],
+          [
+            964,
+            1
+          ]
+        ],
+        "constsTop": [
+          268,
+          104
+        ]
+      },
+      {
+        "idx": 98,
+        "nops": 269,
+        "cluster": "codec_loopish",
+        "nextState": 56,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [
+          [
+            438,
+            8
+          ],
+          [
+            582,
+            8
+          ]
+        ],
+        "constsTop": [
+          96,
+          202310400,
+          17,
+          855651072,
+          100,
+          202310400,
+          17,
+          855651072
+        ]
+      },
+      {
+        "idx": 99,
+        "nops": 8,
+        "cluster": "state_only",
+        "nextState": 36,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [],
+        "constsTop": [
+          71,
+          36
+        ]
+      },
+      {
+        "idx": 100,
+        "nops": 11,
+        "cluster": "codec_load_store",
+        "nextState": 69,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [
+          [
+            438,
+            1
+          ]
+        ],
+        "constsTop": [
+          264,
+          69
+        ]
+      },
+      {
+        "idx": 101,
+        "nops": 46,
+        "cluster": "codec_loopish",
+        "nextState": 100,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [
+          [
+            957,
+            5
+          ]
+        ],
+        "constsTop": [
+          788,
+          260,
+          88,
+          100
+        ]
+      },
+      {
+        "idx": 102,
+        "nops": 21,
+        "cluster": "codec_bulk_via_1005",
+        "nextState": 71,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [
+          [
+            859,
+            2
+          ],
+          [
+            1005,
+            1
+          ]
+        ],
+        "constsTop": [
+          57,
+          48,
+          1080,
+          48,
+          71
+        ]
+      },
+      {
+        "idx": 103,
+        "nops": 19,
+        "cluster": "codec_bulk_via_1005",
+        "nextState": 70,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [
+          [
+            859,
+            2
+          ],
+          [
+            1005,
+            1
+          ]
+        ],
+        "constsTop": [
+          145,
+          136,
+          1080,
+          136,
+          70
+        ]
+      },
+      {
+        "idx": 104,
+        "nops": 19,
+        "cluster": "codec_bulk_via_1005",
+        "nextState": 98,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [
+          [
+            859,
+            2
+          ],
+          [
+            1005,
+            1
+          ]
+        ],
+        "constsTop": [
+          137,
+          128,
+          1080,
+          128,
+          98
+        ]
+      },
+      {
+        "idx": 105,
+        "nops": 3,
+        "cluster": "state_only",
+        "nextState": 69,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [],
+        "constsTop": [
+          69
+        ]
+      },
+      {
+        "idx": 106,
+        "nops": 19,
+        "cluster": "codec_bulk_via_1005",
+        "nextState": 75,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [
+          [
+            859,
+            2
+          ],
+          [
+            1005,
+            1
+          ]
+        ],
+        "constsTop": [
+          89,
+          80,
+          1080,
+          80,
+          75
+        ]
+      },
+      {
+        "idx": 107,
+        "nops": 8,
+        "cluster": "state_only",
+        "nextState": 108,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [],
+        "constsTop": [
+          71,
+          108
+        ]
+      },
+      {
+        "idx": 108,
+        "nops": 21,
+        "cluster": "codec_bulk_via_1005",
+        "nextState": 71,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [
+          [
+            859,
+            2
+          ],
+          [
+            1005,
+            1
+          ]
+        ],
+        "constsTop": [
+          25,
+          1080,
+          59,
+          71
+        ]
+      },
+      {
+        "idx": 109,
+        "nops": 9,
+        "cluster": "state_only",
+        "nextState": 79,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [],
+        "constsTop": [
+          2123074813,
+          29800106,
+          79
+        ]
+      },
+      {
+        "idx": 110,
+        "nops": 3,
+        "cluster": "state_only",
+        "nextState": 13,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [],
+        "constsTop": []
+      },
+      {
+        "idx": 111,
+        "nops": 6,
+        "cluster": "opaque_misc",
+        "nextState": 73,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [
+          [
+            964,
+            1
+          ]
+        ],
+        "constsTop": [
+          73
+        ]
+      },
+      {
+        "idx": 112,
+        "nops": 227,
+        "cluster": "codec_loopish",
+        "nextState": 51,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [
+          [
+            438,
+            28
+          ],
+          [
+            582,
+            28
+          ]
+        ],
+        "constsTop": [
+          1200,
+          1200,
+          1208,
+          1208,
+          1212,
+          1212,
+          1228,
+          1228
+        ]
+      },
+      {
+        "idx": 113,
+        "nops": 21,
+        "cluster": "codec_bulk_via_1005",
+        "nextState": 71,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [
+          [
+            859,
+            2
+          ],
+          [
+            1005,
+            1
+          ]
+        ],
+        "constsTop": [
+          201,
+          192,
+          1080,
+          192,
+          83,
+          71
+        ]
+      },
+      {
+        "idx": 114,
+        "nops": 21,
+        "cluster": "codec_bulk_via_1005",
+        "nextState": 71,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [
+          [
+            859,
+            2
+          ],
+          [
+            1005,
+            1
+          ]
+        ],
+        "constsTop": [
+          113,
+          104,
+          1080,
+          104,
+          17,
+          71
+        ]
+      },
+      {
+        "idx": 115,
+        "nops": 1,
+        "cluster": "unreachable_trap",
+        "nextState": null,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [],
+        "constsTop": []
+      }
+    ]
+  },
+  "f796": {
+    "entryState": 87,
+    "nArmsParsed": 143,
+    "byCluster": {
+      "empty": [
+        0
+      ],
+      "codec_load_store": [
+        1,
+        8,
+        10,
+        26,
+        42,
+        63,
+        64,
+        72,
+        82,
+        96,
+        98,
+        111,
+        118,
+        136,
+        139
+      ],
+      "state_only": [
+        2,
+        3,
+        11,
+        12,
+        14,
+        16,
+        35,
+        38,
+        43,
+        45,
+        47,
+        50,
+        51,
+        53,
+        57,
+        62,
+        65,
+        67,
+        68,
+        75,
+        79,
+        86,
+        87,
+        88,
+        91,
+        95,
+        99,
+        124,
+        125,
+        128,
+        131,
+        133,
+        134,
+        135,
+        141
+      ],
+      "codec_bulk_via_1005": [
+        4,
+        5,
+        6,
+        9,
+        13,
+        19,
+        20,
+        22,
+        24,
+        28,
+        29,
+        30,
+        31,
+        32,
+        36,
+        37,
+        41,
+        52,
+        55,
+        56,
+        59,
+        74,
+        76,
+        84,
+        89,
+        93,
+        101,
+        102,
+        107,
+        108,
+        109,
+        114,
+        115,
+        119,
+        120,
+        122,
+        127,
+        138
+      ],
+      "codec_loopish": [
+        7,
+        18,
+        21,
+        25,
+        34,
+        54,
+        69,
+        71,
+        92,
+        104,
+        129,
+        137,
+        140
+      ],
+      "frame_init_slots": [
+        15,
+        33,
+        39,
+        40,
+        58,
+        61,
+        77,
+        78,
+        103,
+        113,
+        123,
+        130
+      ],
+      "host_a_Va_gate": [
+        17
+      ],
+      "opaque_misc": [
+        23,
+        27,
+        44,
+        46,
+        60,
+        66,
+        73,
+        81,
+        83,
+        85,
+        90,
+        97,
+        100,
+        105,
+        106,
+        110,
+        126
+      ],
+      "unreachable_trap": [
+        48,
+        49,
+        70,
+        80,
+        142
+      ],
+      "result_pack_exit": [
+        94,
+        117,
+        121
+      ],
+      "export_Xc_call": [
+        112
+      ],
+      "sentinel_branch": [
+        116
+      ],
+      "codec_i64_byte_mix": [
+        132
+      ]
+    },
+    "entry": {
+      "idx": 87,
+      "nops": 9,
+      "cluster": "state_only",
+      "nextState": 57,
+      "returns": false,
+      "hostVa": false,
+      "callXc": false,
+      "globalSet0": false,
+      "calls": [],
+      "constsTop": [
+        -670341077,
+        2014280188,
+        57
+      ]
+    },
+    "notables": [
+      {
+        "idx": 17,
+        "nops": 5,
+        "cluster": "host_a_Va_gate",
+        "nextState": 116,
+        "returns": false,
+        "hostVa": true,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [
+          [
+            101,
+            1
+          ]
+        ],
+        "constsTop": [
+          116
+        ]
+      },
+      {
+        "idx": 94,
+        "nops": 40,
+        "cluster": "result_pack_exit",
+        "nextState": 41,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": true,
+        "calls": [
+          [
+            438,
+            2
+          ],
+          [
+            582,
+            2
+          ],
+          [
+            600,
+            1
+          ],
+          [
+            786,
+            1
+          ],
+          [
+            960,
+            1
+          ]
+        ],
+        "constsTop": [
+          2064,
+          264,
+          2007136710,
+          268,
+          264,
+          276,
+          272,
+          1068
+        ]
+      },
+      {
+        "idx": 112,
+        "nops": 23,
+        "cluster": "export_Xc_call",
+        "nextState": 82,
+        "returns": false,
+        "hostVa": false,
+        "callXc": true,
+        "globalSet0": false,
+        "calls": [
+          [
+            438,
+            3
+          ],
+          [
+            1158,
+            1
+          ]
+        ],
+        "constsTop": [
+          1068,
+          1068,
+          1072,
+          1076,
+          82
+        ]
+      },
+      {
+        "idx": 117,
+        "nops": 13,
+        "cluster": "result_pack_exit",
+        "nextState": null,
+        "returns": true,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": true,
+        "calls": [
+          [
+            582,
+            2
+          ]
+        ],
+        "constsTop": [
+          2064
+        ]
+      },
+      {
+        "idx": 121,
+        "nops": 40,
+        "cluster": "result_pack_exit",
+        "nextState": 41,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": true,
+        "calls": [
+          [
+            438,
+            2
+          ],
+          [
+            582,
+            2
+          ],
+          [
+            600,
+            1
+          ],
+          [
+            786,
+            1
+          ],
+          [
+            960,
+            1
+          ]
+        ],
+        "constsTop": [
+          2064,
+          264,
+          2007136710,
+          268,
+          264,
+          276,
+          272,
+          1068
+        ]
+      }
+    ],
+    "summaries": [
+      {
+        "idx": 0,
+        "nops": 0,
+        "cluster": "empty",
+        "nextState": null,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [],
+        "constsTop": []
+      },
+      {
+        "idx": 1,
+        "nops": 17,
+        "cluster": "codec_load_store",
+        "nextState": 86,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [
+          [
+            297,
+            1
+          ],
+          [
+            582,
+            1
+          ]
+        ],
+        "constsTop": [
+          264,
+          86
+        ]
+      },
+      {
+        "idx": 2,
+        "nops": 10,
+        "cluster": "state_only",
+        "nextState": 99,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [],
+        "constsTop": [
+          63,
+          63,
+          99
+        ]
+      },
+      {
+        "idx": 3,
+        "nops": 8,
+        "cluster": "state_only",
+        "nextState": 59,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [],
+        "constsTop": [
+          105,
+          59
+        ]
+      },
+      {
+        "idx": 4,
+        "nops": 21,
+        "cluster": "codec_bulk_via_1005",
+        "nextState": 79,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [
+          [
+            859,
+            2
+          ],
+          [
+            1005,
+            1
+          ]
+        ],
+        "constsTop": [
+          257,
+          248,
+          1068,
+          248,
+          113,
+          79
+        ]
+      },
+      {
+        "idx": 5,
+        "nops": 21,
+        "cluster": "codec_bulk_via_1005",
+        "nextState": 79,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [
+          [
+            859,
+            2
+          ],
+          [
+            1005,
+            1
+          ]
+        ],
+        "constsTop": [
+          89,
+          80,
+          1068,
+          80,
+          29,
+          79
+        ]
+      },
+      {
+        "idx": 6,
+        "nops": 21,
+        "cluster": "codec_bulk_via_1005",
+        "nextState": 79,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [
+          [
+            859,
+            2
+          ],
+          [
+            1005,
+            1
+          ]
+        ],
+        "constsTop": [
+          113,
+          104,
+          1068,
+          104,
+          51,
+          79
+        ]
+      },
+      {
+        "idx": 7,
+        "nops": 46,
+        "cluster": "codec_loopish",
+        "nextState": 6,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [
+          [
+            957,
+            5
+          ]
+        ],
+        "constsTop": [
+          801,
+          235,
+          89
+        ]
+      },
+      {
+        "idx": 8,
+        "nops": 13,
+        "cluster": "codec_load_store",
+        "nextState": 139,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [
+          [
+            438,
+            2
+          ]
+        ],
+        "constsTop": [
+          1076,
+          1072,
+          139
+        ]
+      },
+      {
+        "idx": 9,
+        "nops": 21,
+        "cluster": "codec_bulk_via_1005",
+        "nextState": 79,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [
+          [
+            859,
+            2
+          ],
+          [
+            1005,
+            1
+          ]
+        ],
+        "constsTop": [
+          177,
+          168,
+          1068,
+          168,
+          56,
+          79
+        ]
+      },
+      {
+        "idx": 10,
+        "nops": 8,
+        "cluster": "codec_load_store",
+        "nextState": 85,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [
+          [
+            438,
+            1
+          ],
+          [
+            964,
+            1
+          ]
+        ],
+        "constsTop": [
+          272,
+          85
+        ]
+      },
+      {
+        "idx": 11,
+        "nops": 3,
+        "cluster": "state_only",
+        "nextState": 16,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [],
+        "constsTop": []
+      },
+      {
+        "idx": 12,
+        "nops": 8,
+        "cluster": "state_only",
+        "nextState": 81,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [],
+        "constsTop": [
+          80,
+          81
+        ]
+      },
+      {
+        "idx": 13,
+        "nops": 19,
+        "cluster": "codec_bulk_via_1005",
+        "nextState": 124,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [
+          [
+            859,
+            2
+          ],
+          [
+            1005,
+            1
+          ]
+        ],
+        "constsTop": [
+          41,
+          32,
+          1068,
+          32,
+          124
+        ]
+      },
+      {
+        "idx": 14,
+        "nops": 5,
+        "cluster": "state_only",
+        "nextState": 24,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [],
+        "constsTop": [
+          24
+        ]
+      },
+      {
+        "idx": 15,
+        "nops": 83,
+        "cluster": "frame_init_slots",
+        "nextState": 122,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [
+          [
+            438,
+            5
+          ],
+          [
+            582,
+            5
+          ],
+          [
+            231,
+            1
+          ],
+          [
+            454,
+            1
+          ],
+          [
+            598,
+            1
+          ]
+        ],
+        "constsTop": [
+          1068,
+          -64,
+          68,
+          84,
+          88,
+          49152,
+          384,
+          133
+        ]
+      },
+      {
+        "idx": 16,
+        "nops": 19,
+        "cluster": "state_only",
+        "nextState": 54,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [],
+        "constsTop": [
+          -1754643781,
+          130734849,
+          73,
+          54
+        ]
+      },
+      {
+        "idx": 17,
+        "nops": 5,
+        "cluster": "host_a_Va_gate",
+        "nextState": 116,
+        "returns": false,
+        "hostVa": true,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [
+          [
+            101,
+            1
+          ]
+        ],
+        "constsTop": [
+          116
+        ]
+      },
+      {
+        "idx": 18,
+        "nops": 69,
+        "cluster": "codec_loopish",
+        "nextState": 132,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [
+          [
+            957,
+            16
+          ]
+        ],
+        "constsTop": [
+          1052,
+          1053,
+          1054,
+          1055,
+          1056,
+          1057,
+          1058,
+          1059
+        ]
+      },
+      {
+        "idx": 19,
+        "nops": 21,
+        "cluster": "codec_bulk_via_1005",
+        "nextState": 79,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [
+          [
+            859,
+            2
+          ],
+          [
+            1005,
+            1
+          ]
+        ],
+        "constsTop": [
+          121,
+          112,
+          1068,
+          112,
+          79
+        ]
+      },
+      {
+        "idx": 20,
+        "nops": 19,
+        "cluster": "codec_bulk_via_1005",
+        "nextState": 134,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [
+          [
+            859,
+            2
+          ],
+          [
+            1005,
+            1
+          ]
+        ],
+        "constsTop": [
+          241,
+          232,
+          1068,
+          232,
+          134
+        ]
+      },
+      {
+        "idx": 21,
+        "nops": 109,
+        "cluster": "codec_loopish",
+        "nextState": 131,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [
+          [
+            957,
+            4
+          ]
+        ],
+        "constsTop": [
+          131
+        ]
+      },
+      {
+        "idx": 22,
+        "nops": 21,
+        "cluster": "codec_bulk_via_1005",
+        "nextState": 79,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [
+          [
+            859,
+            2
+          ],
+          [
+            1005,
+            1
+          ]
+        ],
+        "constsTop": [
+          217,
+          208,
+          1068,
+          208,
+          58,
+          79
+        ]
+      },
+      {
+        "idx": 23,
+        "nops": 7,
+        "cluster": "opaque_misc",
+        "nextState": 102,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [
+          [
+            1047,
+            1
+          ]
+        ],
+        "constsTop": [
+          1068,
+          102
+        ]
+      },
+      {
+        "idx": 24,
+        "nops": 21,
+        "cluster": "codec_bulk_via_1005",
+        "nextState": 79,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [
+          [
+            859,
+            2
+          ],
+          [
+            1005,
+            1
+          ]
+        ],
+        "constsTop": [
+          57,
+          48,
+          1068,
+          48,
+          83,
+          79
+        ]
+      },
+      {
+        "idx": 25,
+        "nops": 52,
+        "cluster": "codec_loopish",
+        "nextState": 24,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [
+          [
+            582,
+            6
+          ]
+        ],
+        "constsTop": [
+          280,
+          20,
+          24,
+          480,
+          25,
+          24
+        ]
+      },
+      {
+        "idx": 26,
+        "nops": 16,
+        "cluster": "codec_load_store",
+        "nextState": 85,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [
+          [
+            438,
+            1
+          ],
+          [
+            964,
+            1
+          ]
+        ],
+        "constsTop": [
+          268,
+          85
+        ]
+      },
+      {
+        "idx": 27,
+        "nops": 10,
+        "cluster": "opaque_misc",
+        "nextState": 86,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [
+          [
+            264,
+            1
+          ],
+          [
+            297,
+            1
+          ]
+        ],
+        "constsTop": [
+          86
+        ]
+      },
+      {
+        "idx": 28,
+        "nops": 21,
+        "cluster": "codec_bulk_via_1005",
+        "nextState": 79,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [
+          [
+            859,
+            2
+          ],
+          [
+            1005,
+            1
+          ]
+        ],
+        "constsTop": [
+          225,
+          216,
+          1068,
+          216,
+          21,
+          79
+        ]
+      },
+      {
+        "idx": 29,
+        "nops": 21,
+        "cluster": "codec_bulk_via_1005",
+        "nextState": 79,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [
+          [
+            859,
+            2
+          ],
+          [
+            1005,
+            1
+          ]
+        ],
+        "constsTop": [
+          33,
+          24,
+          1068,
+          24,
+          114,
+          79
+        ]
+      },
+      {
+        "idx": 30,
+        "nops": 21,
+        "cluster": "codec_bulk_via_1005",
+        "nextState": 79,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [
+          [
+            859,
+            2
+          ],
+          [
+            1005,
+            1
+          ]
+        ],
+        "constsTop": [
+          81,
+          72,
+          1068,
+          72,
+          88,
+          79
+        ]
+      },
+      {
+        "idx": 31,
+        "nops": 21,
+        "cluster": "codec_bulk_via_1005",
+        "nextState": 79,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [
+          [
+            859,
+            2
+          ],
+          [
+            1005,
+            1
+          ]
+        ],
+        "constsTop": [
+          201,
+          192,
+          1068,
+          192,
+          106,
+          79
+        ]
+      },
+      {
+        "idx": 32,
+        "nops": 19,
+        "cluster": "codec_bulk_via_1005",
+        "nextState": 124,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [
+          [
+            859,
+            2
+          ],
+          [
+            1005,
+            1
+          ]
+        ],
+        "constsTop": [
+          41,
+          32,
+          1068,
+          32,
+          124
+        ]
+      },
+      {
+        "idx": 33,
+        "nops": 253,
+        "cluster": "frame_init_slots",
+        "nextState": 70,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [
+          [
+            438,
+            8
+          ],
+          [
+            582,
+            8
+          ]
+        ],
+        "constsTop": [
+          1068,
+          -64,
+          251662080,
+          17,
+          32,
+          51317760,
+          17,
+          855651072
+        ]
+      },
+      {
+        "idx": 34,
+        "nops": 109,
+        "cluster": "codec_loopish",
+        "nextState": 77,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [
+          [
+            582,
+            3
+          ]
+        ],
+        "constsTop": [
+          51317760,
+          17,
+          855651072,
+          1508,
+          51317760,
+          17,
+          855651072,
+          1504
+        ]
+      },
+      {
+        "idx": 35,
+        "nops": 8,
+        "cluster": "state_only",
+        "nextState": 137,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [],
+        "constsTop": [
+          79,
+          137
+        ]
+      },
+      {
+        "idx": 36,
+        "nops": 19,
+        "cluster": "codec_bulk_via_1005",
+        "nextState": 76,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [
+          [
+            859,
+            2
+          ],
+          [
+            1005,
+            1
+          ]
+        ],
+        "constsTop": [
+          1068,
+          79,
+          76
+        ]
+      },
+      {
+        "idx": 37,
+        "nops": 19,
+        "cluster": "codec_bulk_via_1005",
+        "nextState": 140,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [
+          [
+            859,
+            2
+          ],
+          [
+            1005,
+            1
+          ]
+        ],
+        "constsTop": [
+          169,
+          160,
+          1068,
+          160,
+          140
+        ]
+      },
+      {
+        "idx": 38,
+        "nops": 21,
+        "cluster": "state_only",
+        "nextState": 97,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [],
+        "constsTop": [
+          -1394539271,
+          218817997,
+          428003948,
+          -428003949,
+          71,
+          97
+        ]
+      },
+      {
+        "idx": 39,
+        "nops": 33,
+        "cluster": "frame_init_slots",
+        "nextState": 82,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [
+          [
+            582,
+            4
+          ],
+          [
+            297,
+            1
+          ],
+          [
+            438,
+            1
+          ],
+          [
+            858,
+            1
+          ]
+        ],
+        "constsTop": [
+          1072,
+          1068,
+          1076,
+          82
+        ]
+      },
+      {
+        "idx": 40,
+        "nops": 38,
+        "cluster": "frame_init_slots",
+        "nextState": 96,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [
+          [
+            582,
+            3
+          ],
+          [
+            746,
+            1
+          ]
+        ],
+        "constsTop": [
+          1072,
+          1068,
+          1076,
+          -1670612829,
+          1675636225,
+          -1692567287,
+          1692567286,
+          43
+        ]
+      },
+      {
+        "idx": 41,
+        "nops": 19,
+        "cluster": "codec_bulk_via_1005",
+        "nextState": 134,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [
+          [
+            859,
+            2
+          ],
+          [
+            1005,
+            1
+          ]
+        ],
+        "constsTop": [
+          241,
+          232,
+          1068,
+          232,
+          134
+        ]
+      },
+      {
+        "idx": 42,
+        "nops": 13,
+        "cluster": "codec_load_store",
+        "nextState": 110,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [
+          [
+            438,
+            1
+          ]
+        ],
+        "constsTop": [
+          264,
+          63,
+          110
+        ]
+      },
+      {
+        "idx": 43,
+        "nops": 17,
+        "cluster": "state_only",
+        "nextState": 109,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [],
+        "constsTop": [
+          -1003598319,
+          1155731887,
+          871770395,
+          72,
+          109
+        ]
+      },
+      {
+        "idx": 44,
+        "nops": 15,
+        "cluster": "opaque_misc",
+        "nextState": 49,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [
+          [
+            677,
+            1
+          ]
+        ],
+        "constsTop": [
+          280,
+          1068,
+          49
+        ]
+      },
+      {
+        "idx": 45,
+        "nops": 21,
+        "cluster": "state_only",
+        "nextState": 40,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [],
+        "constsTop": [
+          -567565453,
+          1267133596,
+          -110163907,
+          110163906,
+          19,
+          40
+        ]
+      },
+      {
+        "idx": 46,
+        "nops": 14,
+        "cluster": "opaque_misc",
+        "nextState": 127,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [
+          [
+            381,
+            1
+          ],
+          [
+            838,
+            1
+          ]
+        ],
+        "constsTop": [
+          39,
+          127
+        ]
+      },
+      {
+        "idx": 47,
+        "nops": 8,
+        "cluster": "state_only",
+        "nextState": 27,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [],
+        "constsTop": [
+          79,
+          27
+        ]
+      },
+      {
+        "idx": 48,
+        "nops": 1,
+        "cluster": "unreachable_trap",
+        "nextState": null,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [],
+        "constsTop": []
+      },
+      {
+        "idx": 49,
+        "nops": 2,
+        "cluster": "unreachable_trap",
+        "nextState": null,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [
+          [
+            611,
+            1
+          ]
+        ],
+        "constsTop": []
+      },
+      {
+        "idx": 50,
+        "nops": 8,
+        "cluster": "state_only",
+        "nextState": 138,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [],
+        "constsTop": [
+          115,
+          138
+        ]
+      },
+      {
+        "idx": 51,
+        "nops": 3,
+        "cluster": "state_only",
+        "nextState": 11,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [],
+        "constsTop": []
+      },
+      {
+        "idx": 52,
+        "nops": 21,
+        "cluster": "codec_bulk_via_1005",
+        "nextState": 79,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [
+          [
+            859,
+            2
+          ],
+          [
+            1005,
+            1
+          ]
+        ],
+        "constsTop": [
+          105,
+          96,
+          1068,
+          96,
+          101,
+          79
+        ]
+      },
+      {
+        "idx": 53,
+        "nops": 17,
+        "cluster": "state_only",
+        "nextState": 75,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [],
+        "constsTop": [
+          -1073237391,
+          1057021450,
+          -336158591,
+          92,
+          75
+        ]
+      },
+      {
+        "idx": 54,
+        "nops": 243,
+        "cluster": "codec_loopish",
+        "nextState": 136,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [
+          [
+            438,
+            22
+          ],
+          [
+            582,
+            18
+          ]
+        ],
+        "constsTop": [
+          1100,
+          1100,
+          1104,
+          1104,
+          1120,
+          1120,
+          1492,
+          51317760
+        ]
+      },
+      {
+        "idx": 55,
+        "nops": 19,
+        "cluster": "codec_bulk_via_1005",
+        "nextState": 66,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [
+          [
+            859,
+            2
+          ],
+          [
+            1005,
+            1
+          ]
+        ],
+        "constsTop": [
+          65,
+          56,
+          1068,
+          56,
+          66
+        ]
+      },
+      {
+        "idx": 56,
+        "nops": 21,
+        "cluster": "codec_bulk_via_1005",
+        "nextState": 79,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [
+          [
+            859,
+            2
+          ],
+          [
+            1005,
+            1
+          ]
+        ],
+        "constsTop": [
+          137,
+          128,
+          1068,
+          128,
+          121,
+          79
+        ]
+      },
+      {
+        "idx": 57,
+        "nops": 17,
+        "cluster": "state_only",
+        "nextState": 119,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [],
+        "constsTop": [
+          -1929683145,
+          1909399639,
+          654554373,
+          36,
+          119
+        ]
+      },
+      {
+        "idx": 58,
+        "nops": 16,
+        "cluster": "frame_init_slots",
+        "nextState": 2,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [
+          [
+            438,
+            2
+          ],
+          [
+            582,
+            1
+          ]
+        ],
+        "constsTop": [
+          1068
+        ]
+      },
+      {
+        "idx": 59,
+        "nops": 21,
+        "cluster": "codec_bulk_via_1005",
+        "nextState": 79,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [
+          [
+            859,
+            2
+          ],
+          [
+            1005,
+            1
+          ]
+        ],
+        "constsTop": [
+          209,
+          200,
+          1068,
+          200,
+          30,
+          79
+        ]
+      },
+      {
+        "idx": 60,
+        "nops": 7,
+        "cluster": "opaque_misc",
+        "nextState": 105,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [
+          [
+            1047,
+            1
+          ]
+        ],
+        "constsTop": [
+          1068,
+          105
+        ]
+      },
+      {
+        "idx": 61,
+        "nops": 16,
+        "cluster": "frame_init_slots",
+        "nextState": 2,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [
+          [
+            438,
+            2
+          ],
+          [
+            582,
+            1
+          ]
+        ],
+        "constsTop": [
+          1068
+        ]
+      },
+      {
+        "idx": 62,
+        "nops": 10,
+        "cluster": "state_only",
+        "nextState": 26,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [],
+        "constsTop": [
+          63,
+          62,
+          26
+        ]
+      },
+      {
+        "idx": 63,
+        "nops": 18,
+        "cluster": "codec_load_store",
+        "nextState": 86,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [
+          [
+            438,
+            2
+          ],
+          [
+            264,
+            1
+          ]
+        ],
+        "constsTop": [
+          260,
+          86
+        ]
+      },
+      {
+        "idx": 64,
+        "nops": 20,
+        "cluster": "codec_load_store",
+        "nextState": 112,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [
+          [
+            438,
+            2
+          ],
+          [
+            264,
+            1
+          ]
+        ],
+        "constsTop": [
+          260,
+          112
+        ]
+      },
+      {
+        "idx": 65,
+        "nops": 21,
+        "cluster": "state_only",
+        "nextState": 68,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [],
+        "constsTop": [
+          1812976533,
+          1714935523,
+          -1974247202,
+          1974247201,
+          20,
+          68
+        ]
+      },
+      {
+        "idx": 66,
+        "nops": 4,
+        "cluster": "opaque_misc",
+        "nextState": 47,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [
+          [
+            611,
+            1
+          ]
+        ],
+        "constsTop": [
+          47
+        ]
+      },
+      {
+        "idx": 67,
+        "nops": 8,
+        "cluster": "state_only",
+        "nextState": 23,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [],
+        "constsTop": [
+          79,
+          23
+        ]
+      },
+      {
+        "idx": 68,
+        "nops": 17,
+        "cluster": "state_only",
+        "nextState": 12,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [],
+        "constsTop": [
+          1438465687,
+          972587584,
+          -2106906407,
+          31
+        ]
+      },
+      {
+        "idx": 69,
+        "nops": 109,
+        "cluster": "codec_loopish",
+        "nextState": 131,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [
+          [
+            957,
+            4
+          ]
+        ],
+        "constsTop": [
+          131
+        ]
+      },
+      {
+        "idx": 70,
+        "nops": 2,
+        "cluster": "unreachable_trap",
+        "nextState": null,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [
+          [
+            611,
+            1
+          ]
+        ],
+        "constsTop": []
+      },
+      {
+        "idx": 71,
+        "nops": 310,
+        "cluster": "codec_loopish",
+        "nextState": 91,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [
+          [
+            438,
+            12
+          ],
+          [
+            582,
+            12
+          ]
+        ],
+        "constsTop": [
+          60,
+          51317760,
+          17,
+          855651072,
+          68,
+          251662080,
+          17,
+          72
+        ]
+      },
+      {
+        "idx": 72,
+        "nops": 8,
+        "cluster": "codec_load_store",
+        "nextState": 123,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [
+          [
+            438,
+            1
+          ],
+          [
+            964,
+            1
+          ]
+        ],
+        "constsTop": [
+          272,
+          123
+        ]
+      },
+      {
+        "idx": 73,
+        "nops": 6,
+        "cluster": "opaque_misc",
+        "nextState": 50,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [
+          [
+            964,
+            1
+          ]
+        ],
+        "constsTop": [
+          50
+        ]
+      },
+      {
+        "idx": 74,
+        "nops": 19,
+        "cluster": "codec_bulk_via_1005",
+        "nextState": 66,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [
+          [
+            859,
+            2
+          ],
+          [
+            1005,
+            1
+          ]
+        ],
+        "constsTop": [
+          65,
+          56,
+          1068,
+          56,
+          66
+        ]
+      },
+      {
+        "idx": 75,
+        "nops": 21,
+        "cluster": "state_only",
+        "nextState": 84,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [],
+        "constsTop": [
+          -1975496279,
+          1201287559,
+          1963250580,
+          -1963250581,
+          104,
+          84
+        ]
+      },
+      {
+        "idx": 76,
+        "nops": 19,
+        "cluster": "codec_bulk_via_1005",
+        "nextState": 34,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [
+          [
+            859,
+            2
+          ],
+          [
+            1005,
+            1
+          ]
+        ],
+        "constsTop": [
+          161,
+          152,
+          1068,
+          152,
+          34
+        ]
+      },
+      {
+        "idx": 77,
+        "nops": 160,
+        "cluster": "frame_init_slots",
+        "nextState": 14,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [
+          [
+            957,
+            32
+          ],
+          [
+            848,
+            2
+          ],
+          [
+            328,
+            1
+          ]
+        ],
+        "constsTop": [
+          1066,
+          1065,
+          1064,
+          1063,
+          1062,
+          1061,
+          1060,
+          1059
+        ]
+      },
+      {
+        "idx": 78,
+        "nops": 147,
+        "cluster": "frame_init_slots",
+        "nextState": 17,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [
+          [
+            957,
+            16
+          ],
+          [
+            582,
+            6
+          ],
+          [
+            438,
+            4
+          ],
+          [
+            197,
+            1
+          ],
+          [
+            746,
+            1
+          ]
+        ],
+        "constsTop": [
+          1484,
+          1476,
+          1516,
+          1516,
+          1520,
+          1520,
+          1536,
+          1536
+        ]
+      },
+      {
+        "idx": 79,
+        "nops": 8,
+        "cluster": "state_only",
+        "nextState": 61,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [],
+        "constsTop": [
+          61
+        ]
+      },
+      {
+        "idx": 80,
+        "nops": 1,
+        "cluster": "unreachable_trap",
+        "nextState": null,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [],
+        "constsTop": []
+      },
+      {
+        "idx": 81,
+        "nops": 6,
+        "cluster": "opaque_misc",
+        "nextState": 81,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [
+          [
+            964,
+            1
+          ]
+        ],
+        "constsTop": [
+          81
+        ]
+      },
+      {
+        "idx": 82,
+        "nops": 14,
+        "cluster": "codec_load_store",
+        "nextState": 130,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [
+          [
+            438,
+            1
+          ],
+          [
+            964,
+            1
+          ]
+        ],
+        "constsTop": [
+          268,
+          37,
+          130
+        ]
+      },
+      {
+        "idx": 83,
+        "nops": 34,
+        "cluster": "opaque_misc",
+        "nextState": 11,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [
+          [
+            582,
+            1
+          ],
+          [
+            600,
+            1
+          ],
+          [
+            746,
+            1
+          ],
+          [
+            1116,
+            1
+          ],
+          [
+            1141,
+            1
+          ]
+        ],
+        "constsTop": [
+          2060,
+          2060,
+          2007136710,
+          42
+        ]
+      },
+      {
+        "idx": 84,
+        "nops": 21,
+        "cluster": "codec_bulk_via_1005",
+        "nextState": 79,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [
+          [
+            859,
+            2
+          ],
+          [
+            1005,
+            1
+          ]
+        ],
+        "constsTop": [
+          49,
+          40,
+          1068,
+          40,
+          67,
+          79
+        ]
+      },
+      {
+        "idx": 85,
+        "nops": 12,
+        "cluster": "opaque_misc",
+        "nextState": 90,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [
+          [
+            381,
+            1
+          ],
+          [
+            838,
+            1
+          ]
+        ],
+        "constsTop": [
+          90
+        ]
+      },
+      {
+        "idx": 86,
+        "nops": 12,
+        "cluster": "state_only",
+        "nextState": 116,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [],
+        "constsTop": [
+          1025,
+          1027,
+          116
+        ]
+      },
+      {
+        "idx": 87,
+        "nops": 9,
+        "cluster": "state_only",
+        "nextState": 57,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [],
+        "constsTop": [
+          -670341077,
+          2014280188,
+          57
+        ]
+      },
+      {
+        "idx": 88,
+        "nops": 21,
+        "cluster": "state_only",
+        "nextState": 120,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [],
+        "constsTop": [
+          1750945056,
+          956775007,
+          779091018,
+          -846408795,
+          93,
+          120
+        ]
+      },
+      {
+        "idx": 89,
+        "nops": 21,
+        "cluster": "codec_bulk_via_1005",
+        "nextState": 79,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [
+          [
+            859,
+            2
+          ],
+          [
+            1005,
+            1
+          ]
+        ],
+        "constsTop": [
+          73,
+          -64,
+          1068,
+          64,
+          79
+        ]
+      },
+      {
+        "idx": 90,
+        "nops": 24,
+        "cluster": "opaque_misc",
+        "nextState": 127,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [
+          [
+            746,
+            1
+          ]
+        ],
+        "constsTop": [
+          280,
+          1068,
+          512,
+          45,
+          127
+        ]
+      },
+      {
+        "idx": 91,
+        "nops": 8,
+        "cluster": "state_only",
+        "nextState": 38,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [],
+        "constsTop": [
+          69,
+          38
+        ]
+      },
+      {
+        "idx": 92,
+        "nops": 141,
+        "cluster": "codec_loopish",
+        "nextState": 32,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [
+          [
+            438,
+            4
+          ],
+          [
+            582,
+            4
+          ]
+        ],
+        "constsTop": [
+          112,
+          202310400,
+          17,
+          855651072,
+          116,
+          202310400,
+          17,
+          855651072
+        ]
+      },
+      {
+        "idx": 93,
+        "nops": 19,
+        "cluster": "codec_bulk_via_1005",
+        "nextState": 34,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [
+          [
+            859,
+            2
+          ],
+          [
+            1005,
+            1
+          ]
+        ],
+        "constsTop": [
+          161,
+          152,
+          1068,
+          152,
+          34
+        ]
+      },
+      {
+        "idx": 94,
+        "nops": 40,
+        "cluster": "result_pack_exit",
+        "nextState": 41,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": true,
+        "calls": [
+          [
+            438,
+            2
+          ],
+          [
+            582,
+            2
+          ],
+          [
+            600,
+            1
+          ],
+          [
+            786,
+            1
+          ],
+          [
+            960,
+            1
+          ]
+        ],
+        "constsTop": [
+          2064,
+          264,
+          2007136710,
+          268,
+          264,
+          276,
+          272,
+          1068
+        ]
+      },
+      {
+        "idx": 95,
+        "nops": 19,
+        "cluster": "state_only",
+        "nextState": 100,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [],
+        "constsTop": [
+          -479002495,
+          1386533180,
+          118,
+          100
+        ]
+      },
+      {
+        "idx": 96,
+        "nops": 10,
+        "cluster": "codec_load_store",
+        "nextState": 78,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [
+          [
+            438,
+            1
+          ]
+        ],
+        "constsTop": [
+          264,
+          63,
+          78
+        ]
+      },
+      {
+        "idx": 97,
+        "nops": 15,
+        "cluster": "opaque_misc",
+        "nextState": 49,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [
+          [
+            677,
+            1
+          ]
+        ],
+        "constsTop": [
+          280,
+          1068,
+          49
+        ]
+      },
+      {
+        "idx": 98,
+        "nops": 8,
+        "cluster": "codec_load_store",
+        "nextState": 123,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [
+          [
+            438,
+            1
+          ],
+          [
+            964,
+            1
+          ]
+        ],
+        "constsTop": [
+          272,
+          123
+        ]
+      },
+      {
+        "idx": 99,
+        "nops": 15,
+        "cluster": "state_only",
+        "nextState": 69,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [],
+        "constsTop": [
+          74,
+          69
+        ]
+      },
+      {
+        "idx": 100,
+        "nops": 10,
+        "cluster": "opaque_misc",
+        "nextState": 112,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [
+          [
+            264,
+            1
+          ],
+          [
+            297,
+            1
+          ]
+        ],
+        "constsTop": [
+          112
+        ]
+      },
+      {
+        "idx": 101,
+        "nops": 19,
+        "cluster": "codec_bulk_via_1005",
+        "nextState": 46,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [
+          [
+            859,
+            2
+          ],
+          [
+            1005,
+            1
+          ]
+        ],
+        "constsTop": [
+          233,
+          224,
+          1068,
+          224,
+          46
+        ]
+      },
+      {
+        "idx": 102,
+        "nops": 21,
+        "cluster": "codec_bulk_via_1005",
+        "nextState": 79,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [
+          [
+            859,
+            2
+          ],
+          [
+            1005,
+            1
+          ]
+        ],
+        "constsTop": [
+          97,
+          88,
+          1068,
+          88,
+          79
+        ]
+      },
+      {
+        "idx": 103,
+        "nops": 30,
+        "cluster": "frame_init_slots",
+        "nextState": 117,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [
+          [
+            582,
+            1
+          ],
+          [
+            960,
+            1
+          ]
+        ],
+        "constsTop": [
+          1068,
+          -461135117,
+          1277431643,
+          69578350,
+          -69578351,
+          95,
+          117
+        ]
+      },
+      {
+        "idx": 104,
+        "nops": 109,
+        "cluster": "codec_loopish",
+        "nextState": 77,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [
+          [
+            582,
+            3
+          ]
+        ],
+        "constsTop": [
+          51317760,
+          17,
+          855651072,
+          1508,
+          51317760,
+          17,
+          855651072,
+          1504
+        ]
+      },
+      {
+        "idx": 105,
+        "nops": 12,
+        "cluster": "opaque_misc",
+        "nextState": 90,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [
+          [
+            381,
+            1
+          ],
+          [
+            838,
+            1
+          ]
+        ],
+        "constsTop": [
+          90
+        ]
+      },
+      {
+        "idx": 106,
+        "nops": 12,
+        "cluster": "opaque_misc",
+        "nextState": 48,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [
+          [
+            381,
+            1
+          ],
+          [
+            838,
+            1
+          ]
+        ],
+        "constsTop": [
+          64,
+          48
+        ]
+      },
+      {
+        "idx": 107,
+        "nops": 21,
+        "cluster": "codec_bulk_via_1005",
+        "nextState": 79,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [
+          [
+            859,
+            2
+          ],
+          [
+            1005,
+            1
+          ]
+        ],
+        "constsTop": [
+          193,
+          184,
+          1068,
+          184,
+          108,
+          79
+        ]
+      },
+      {
+        "idx": 108,
+        "nops": 21,
+        "cluster": "codec_bulk_via_1005",
+        "nextState": 79,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [
+          [
+            859,
+            2
+          ],
+          [
+            1005,
+            1
+          ]
+        ],
+        "constsTop": [
+          145,
+          136,
+          1068,
+          136,
+          55,
+          79
+        ]
+      },
+      {
+        "idx": 109,
+        "nops": 21,
+        "cluster": "codec_bulk_via_1005",
+        "nextState": 79,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [
+          [
+            859,
+            2
+          ],
+          [
+            1005,
+            1
+          ]
+        ],
+        "constsTop": [
+          185,
+          176,
+          1068,
+          176,
+          79
+        ]
+      },
+      {
+        "idx": 110,
+        "nops": 6,
+        "cluster": "opaque_misc",
+        "nextState": 50,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [
+          [
+            964,
+            1
+          ]
+        ],
+        "constsTop": [
+          50
+        ]
+      },
+      {
+        "idx": 111,
+        "nops": 17,
+        "cluster": "codec_load_store",
+        "nextState": 112,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [
+          [
+            297,
+            1
+          ],
+          [
+            582,
+            1
+          ]
+        ],
+        "constsTop": [
+          264,
+          112
+        ]
+      },
+      {
+        "idx": 112,
+        "nops": 23,
+        "cluster": "export_Xc_call",
+        "nextState": 82,
+        "returns": false,
+        "hostVa": false,
+        "callXc": true,
+        "globalSet0": false,
+        "calls": [
+          [
+            438,
+            3
+          ],
+          [
+            1158,
+            1
+          ]
+        ],
+        "constsTop": [
+          1068,
+          1068,
+          1072,
+          1076,
+          82
+        ]
+      },
+      {
+        "idx": 113,
+        "nops": 21,
+        "cluster": "frame_init_slots",
+        "nextState": 22,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [
+          [
+            438,
+            2
+          ],
+          [
+            582,
+            1
+          ]
+        ],
+        "constsTop": [
+          1068,
+          102,
+          22
+        ]
+      },
+      {
+        "idx": 114,
+        "nops": 21,
+        "cluster": "codec_bulk_via_1005",
+        "nextState": 79,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [
+          [
+            859,
+            2
+          ],
+          [
+            1005,
+            1
+          ]
+        ],
+        "constsTop": [
+          249,
+          240,
+          1068,
+          240,
+          44,
+          79
+        ]
+      },
+      {
+        "idx": 115,
+        "nops": 21,
+        "cluster": "codec_bulk_via_1005",
+        "nextState": 79,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [
+          [
+            859,
+            2
+          ],
+          [
+            1005,
+            1
+          ]
+        ],
+        "constsTop": [
+          25,
+          1068,
+          126,
+          79
+        ]
+      },
+      {
+        "idx": 116,
+        "nops": 13,
+        "cluster": "sentinel_branch",
+        "nextState": 13,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [
+          [
+            438,
+            1
+          ]
+        ],
+        "constsTop": [
+          1068,
+          -2147483648
+        ]
+      },
+      {
+        "idx": 117,
+        "nops": 13,
+        "cluster": "result_pack_exit",
+        "nextState": null,
+        "returns": true,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": true,
+        "calls": [
+          [
+            582,
+            2
+          ]
+        ],
+        "constsTop": [
+          2064
+        ]
+      },
+      {
+        "idx": 118,
+        "nops": 10,
+        "cluster": "codec_load_store",
+        "nextState": 78,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [
+          [
+            438,
+            1
+          ]
+        ],
+        "constsTop": [
+          264,
+          63,
+          78
+        ]
+      },
+      {
+        "idx": 119,
+        "nops": 19,
+        "cluster": "codec_bulk_via_1005",
+        "nextState": 46,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [
+          [
+            859,
+            2
+          ],
+          [
+            1005,
+            1
+          ]
+        ],
+        "constsTop": [
+          233,
+          224,
+          1068,
+          224,
+          46
+        ]
+      },
+      {
+        "idx": 120,
+        "nops": 19,
+        "cluster": "codec_bulk_via_1005",
+        "nextState": 140,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [
+          [
+            859,
+            2
+          ],
+          [
+            1005,
+            1
+          ]
+        ],
+        "constsTop": [
+          169,
+          160,
+          1068,
+          160,
+          140
+        ]
+      },
+      {
+        "idx": 121,
+        "nops": 40,
+        "cluster": "result_pack_exit",
+        "nextState": 41,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": true,
+        "calls": [
+          [
+            438,
+            2
+          ],
+          [
+            582,
+            2
+          ],
+          [
+            600,
+            1
+          ],
+          [
+            786,
+            1
+          ],
+          [
+            960,
+            1
+          ]
+        ],
+        "constsTop": [
+          2064,
+          264,
+          2007136710,
+          268,
+          264,
+          276,
+          272,
+          1068
+        ]
+      },
+      {
+        "idx": 122,
+        "nops": 21,
+        "cluster": "codec_bulk_via_1005",
+        "nextState": 79,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [
+          [
+            859,
+            2
+          ],
+          [
+            1005,
+            1
+          ]
+        ],
+        "constsTop": [
+          129,
+          120,
+          1068,
+          120,
+          18,
+          79
+        ]
+      },
+      {
+        "idx": 123,
+        "nops": 70,
+        "cluster": "frame_init_slots",
+        "nextState": 14,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [
+          [
+            438,
+            4
+          ],
+          [
+            582,
+            4
+          ],
+          [
+            231,
+            1
+          ],
+          [
+            454,
+            1
+          ],
+          [
+            598,
+            1
+          ]
+        ],
+        "constsTop": [
+          1068,
+          96,
+          100,
+          116,
+          120,
+          68,
+          -64
+        ]
+      },
+      {
+        "idx": 124,
+        "nops": 3,
+        "cluster": "state_only",
+        "nextState": 130,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [],
+        "constsTop": [
+          130
+        ]
+      },
+      {
+        "idx": 125,
+        "nops": 8,
+        "cluster": "state_only",
+        "nextState": 28,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [],
+        "constsTop": [
+          79,
+          28
+        ]
+      },
+      {
+        "idx": 126,
+        "nops": 4,
+        "cluster": "opaque_misc",
+        "nextState": 47,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [
+          [
+            611,
+            1
+          ]
+        ],
+        "constsTop": [
+          47
+        ]
+      },
+      {
+        "idx": 127,
+        "nops": 21,
+        "cluster": "codec_bulk_via_1005",
+        "nextState": 79,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [
+          [
+            859,
+            2
+          ],
+          [
+            1005,
+            1
+          ]
+        ],
+        "constsTop": [
+          17,
+          1068,
+          35,
+          79
+        ]
+      },
+      {
+        "idx": 128,
+        "nops": 19,
+        "cluster": "state_only",
+        "nextState": 125,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [],
+        "constsTop": [
+          1826666835,
+          1497967015,
+          65,
+          125
+        ]
+      },
+      {
+        "idx": 129,
+        "nops": 69,
+        "cluster": "codec_loopish",
+        "nextState": 132,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [
+          [
+            957,
+            16
+          ]
+        ],
+        "constsTop": [
+          1052,
+          1053,
+          1054,
+          1055,
+          1056,
+          1057,
+          1058,
+          1059
+        ]
+      },
+      {
+        "idx": 130,
+        "nops": 127,
+        "cluster": "frame_init_slots",
+        "nextState": 79,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [
+          [
+            858,
+            22
+          ],
+          [
+            582,
+            4
+          ],
+          [
+            859,
+            1
+          ],
+          [
+            1005,
+            1
+          ]
+        ],
+        "constsTop": [
+          961,
+          953,
+          945,
+          937,
+          929,
+          921,
+          913,
+          905
+        ]
+      },
+      {
+        "idx": 131,
+        "nops": 12,
+        "cluster": "state_only",
+        "nextState": 116,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [],
+        "constsTop": [
+          1028,
+          116
+        ]
+      },
+      {
+        "idx": 132,
+        "nops": 204,
+        "cluster": "codec_i64_byte_mix",
+        "nextState": 129,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [
+          [
+            858,
+            9
+          ],
+          [
+            957,
+            9
+          ],
+          [
+            322,
+            1
+          ]
+        ],
+        "constsTop": [
+          792,
+          247,
+          1035,
+          198,
+          1033,
+          1025,
+          1017,
+          1009
+        ]
+      },
+      {
+        "idx": 133,
+        "nops": 3,
+        "cluster": "state_only",
+        "nextState": 6,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [],
+        "constsTop": []
+      },
+      {
+        "idx": 134,
+        "nops": 5,
+        "cluster": "state_only",
+        "nextState": 32,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [],
+        "constsTop": [
+          32
+        ]
+      },
+      {
+        "idx": 135,
+        "nops": 8,
+        "cluster": "state_only",
+        "nextState": 94,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [],
+        "constsTop": [
+          79,
+          94
+        ]
+      },
+      {
+        "idx": 136,
+        "nops": 8,
+        "cluster": "codec_load_store",
+        "nextState": 13,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [
+          [
+            438,
+            1
+          ],
+          [
+            964,
+            1
+          ]
+        ],
+        "constsTop": [
+          1072
+        ]
+      },
+      {
+        "idx": 137,
+        "nops": 289,
+        "cluster": "codec_loopish",
+        "nextState": 103,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [
+          [
+            438,
+            34
+          ],
+          [
+            582,
+            33
+          ]
+        ],
+        "constsTop": [
+          1216,
+          1216,
+          1220,
+          1220,
+          1228,
+          1228,
+          1232,
+          1232
+        ]
+      },
+      {
+        "idx": 138,
+        "nops": 21,
+        "cluster": "codec_bulk_via_1005",
+        "nextState": 79,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [
+          [
+            859,
+            2
+          ],
+          [
+            1005,
+            1
+          ]
+        ],
+        "constsTop": [
+          153,
+          144,
+          1068,
+          144,
+          107,
+          79
+        ]
+      },
+      {
+        "idx": 139,
+        "nops": 11,
+        "cluster": "codec_load_store",
+        "nextState": 13,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [
+          [
+            438,
+            1
+          ]
+        ],
+        "constsTop": [
+          1068,
+          135
+        ]
+      },
+      {
+        "idx": 140,
+        "nops": 52,
+        "cluster": "codec_loopish",
+        "nextState": 139,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [
+          [
+            582,
+            6
+          ]
+        ],
+        "constsTop": [
+          280,
+          20,
+          24,
+          480,
+          98,
+          139
+        ]
+      },
+      {
+        "idx": 141,
+        "nops": 8,
+        "cluster": "state_only",
+        "nextState": 52,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [],
+        "constsTop": [
+          79,
+          52
+        ]
+      },
+      {
+        "idx": 142,
+        "nops": 1,
+        "cluster": "unreachable_trap",
+        "nextState": null,
+        "returns": false,
+        "hostVa": false,
+        "callXc": false,
+        "globalSet0": false,
+        "calls": [],
+        "constsTop": []
+      }
+    ]
+  }
+}

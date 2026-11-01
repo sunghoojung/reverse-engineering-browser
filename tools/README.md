@@ -113,3 +113,7 @@ competing builds stopped when comparing elapsed time; cloud-host scheduling and
 filesystem contention can dominate this small allocation change. These are
 component and real-broker measurements, not rebuilt-Brave performance or capture
 completeness evidence.
+
+## hcap-vm-rev
+
+Reconstructive hCaptcha HSW spoof-surface inventories and fixtures under `tools/hcap-vm-rev/`. **Not a solver.** See that directory README.

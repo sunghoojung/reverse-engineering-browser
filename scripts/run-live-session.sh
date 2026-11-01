@@ -241,8 +241,10 @@ if [[ -n "${native_js_dispatch_sites:-}" ]]; then
 fi
 
 # Print the one file that holds the V8 flag table Brave will load.
-# chrome/app/chrome_exe_main_mac.cc loads exactly
-# Contents/Frameworks/<name> Framework.framework/Versions/<version>/<name> Framework.
+# chrome/app/chrome_exe_main_mac.cc dlopens a path compiled into the executable,
+# ../Frameworks/<product> Framework.framework/Versions/<version>/<product> Framework,
+# relative to the executable. Versions/Current can point at another version, so
+# that literal is read from the small executable itself.
 # In a component build that framework re-exports @rpath/libchrome_dll.dylib
 # (chrome/BUILD.gn) or links @rpath/libv8.dylib, both resolved from the output
 # directory beside the app, and V8 is libv8.dylib there. Load commands sit at
@@ -250,12 +252,17 @@ fi
 locate_brave_v8_image() {
   local executable="$1"
   local bundle="${executable%/Contents/MacOS/*}"
-  local name="${executable##*/}"
+  local loader_path
   local framework
-  if [[ "${bundle}" != *.app || "${executable}" != "${bundle}/Contents/MacOS/${name}" ]]; then
+  if [[ "${bundle}" != *.app || "${executable}" != "${bundle}/Contents/MacOS/${executable##*/}" ]]; then
     return 1
   fi
-  framework="${bundle}/Contents/Frameworks/${name} Framework.framework/Versions/Current/${name} Framework"
+  if ! loader_path="$(LC_ALL=C grep -a -o -e \
+       '\.\./Frameworks/[^[:cntrl:]/]* Framework\.framework/Versions/[^[:cntrl:]/]*/[^[:cntrl:]/]* Framework' \
+       "${executable}")" || [[ "${loader_path}" == *$'\n'* ]]; then
+    return 1
+  fi
+  framework="${bundle}/Contents/${loader_path#../}"
   if [[ ! -f "${framework}" ]]; then
     return 1
   fi

@@ -178,19 +178,27 @@ exec ${quote(systemGrep)} "$@"
     Buffer.from(marker ? `\0${marker}\0` : ''), Buffer.alloc(4096, 0xfa),
     ...names.map(name => Buffer.from(`\0${name}\0`)), Buffer.alloc(4096, 0xfa)]);
   const appName = 'Brave Browser Development';
+  const version = '151.1.95.0';
   let fixtures = 0;
-  const braveApp = async ({framework = [], marker = null, libv8 = null, other = null, frameworks = true} = {}) => {
+  // Like the real executable, the stand-in names the framework version it loads.
+  // A newer version can sit beside it as Versions/Current without being loaded.
+  const braveApp = async ({framework = [], marker = null, libv8 = null, other = null, frameworks = true,
+    loads = version, newer = null} = {}) => {
     const output = at(`output ${fixtures++}`);
     const bundle = join(output, `${appName}.app`);
     const executable = join(bundle, 'Contents/MacOS', appName);
     const frameworkDirectory = join(bundle, 'Contents/Frameworks', `${appName} Framework.framework`);
     await mkdir(dirname(executable), {recursive:true});
-    await writeFile(executable, recorder('brave'), {mode:0o755});
+    await writeFile(executable, `${recorder('brave')}# ../Frameworks/${appName} Framework.framework/Versions/${loads}/${appName} Framework\n`, {mode:0o755});
     if (frameworks) {
       // Mirror the real versioned framework and its symlinks.
-      await mkdir(join(frameworkDirectory, 'Versions/151.1.95.0'), {recursive:true});
-      await writeFile(join(frameworkDirectory, 'Versions/151.1.95.0', `${appName} Framework`), image({names:framework, marker}));
-      await symlink('151.1.95.0', join(frameworkDirectory, 'Versions/Current'));
+      await mkdir(join(frameworkDirectory, 'Versions', version), {recursive:true});
+      await writeFile(join(frameworkDirectory, 'Versions', version, `${appName} Framework`), image({names:framework, marker}));
+      if (newer) {
+        await mkdir(join(frameworkDirectory, 'Versions/152.1.96.0'), {recursive:true});
+        await writeFile(join(frameworkDirectory, 'Versions/152.1.96.0', `${appName} Framework`), image({names:newer}));
+      }
+      await symlink(newer ? '152.1.96.0' : version, join(frameworkDirectory, 'Versions/Current'));
       await symlink(`Versions/Current/${appName} Framework`, join(frameworkDirectory, `${appName} Framework`));
     }
     if (other) {
@@ -200,7 +208,7 @@ exec ${quote(systemGrep)} "$@"
     }
     if (libv8) await writeFile(join(output, 'libv8.dylib'), image({names:libv8}));
     return {executable, output, bundle, libv8: join(output, 'libv8.dylib'),
-      framework: join(frameworkDirectory, 'Versions/Current', `${appName} Framework`)};
+      framework: join(frameworkDirectory, 'Versions', version, `${appName} Framework`)};
   };
   const adapterPath = at('adapter.json');
   const sitesPath = at('sites.json');
@@ -286,13 +294,25 @@ exec ${quote(systemGrep)} "$@"
   const strayLibrary = await braveApp({framework: ['reb_ignore_debugger_statements'], libv8: allNames});
   refused(await launchWith(strayLibrary.executable, switches.packaged), undefinedCause(strayLibrary.executable,
     strayLibrary.framework, ['--reb-wasm-br-table-dispatch', '--reb-wasm-call-indirect-dispatch']));
+  // Versions/Current points at a complete newer framework, but the executable
+  // loads the stale version compiled into it.
+  const mixed = await braveApp({framework: ['reb_ignore_debugger_statements'], newer: allNames});
+  refused(await launchWith(mixed.executable, switches.packaged), undefinedCause(mixed.executable,
+    mixed.framework, ['--reb-wasm-br-table-dispatch', '--reb-wasm-call-indirect-dispatch']));
   console.log('PASS a Brave whose loaded V8 lacks requested flags is refused before any helper or browser, listing each flag and its setting');
 
-  // A wrapper's own text is not capability evidence, and an app away from its
+  // A wrapper's own text is not capability evidence. An executable that names
+  // no framework, or names a version that is absent, and an app away from its
   // framework or component libraries cannot be checked.
   const wrapper = at('wrapper brave');
   await writeFile(wrapper, `${recorder('brave')}# ${allNames.join(' ')}\n`, {mode:0o755});
-  for (const executable of [wrapper, (await braveApp({frameworks: false})).executable,
+  const unnamed = await braveApp({framework: allNames});
+  await writeFile(unnamed.executable, recorder('brave'), {mode:0o755});
+  const ambiguous = await braveApp({framework: allNames});
+  await writeFile(ambiguous.executable, `${await readFile(ambiguous.executable, 'utf8')}` +
+    `# ../Frameworks/${appName} Framework.framework/Versions/152.1.96.0/${appName} Framework\n`, {mode:0o755});
+  for (const executable of [wrapper, unnamed.executable, ambiguous.executable, (await braveApp({frameworks: false})).executable,
+    (await braveApp({framework: allNames, loads: '150.1.94.0'})).executable,
     (await braveApp({marker: '@rpath/libchrome_dll.dylib'})).executable]) {
     const result = await launchWith(executable, switches.packaged);
     refused(result, locateCause(executable));

@@ -303,11 +303,17 @@ require_brave_v8_flags() {
   local status
   local index=0
   local missing=""
+  local missing_count=0
+  local missing_noun="flags"
+  local first_missing="the first of them"
   local opt_outs=""
   local uninspected=0
   local scan_pids=()
   if ! image="$(locate_brave_v8_image "${brave_binary}")"; then
-    fail_live_session 1 "Cannot locate the V8 library of Brave at ${brave_binary}, so its native V8 flags cannot be checked. Set REB_BRAVE_BINARY to <App>.app/Contents/MacOS/<executable> inside a complete Brave build, not a wrapper script or an app copied away from its build output."
+    for flag in "${native_js_flag_opt_outs[@]}"; do
+      opt_outs+="${opt_outs:+, }${flag}"
+    done
+    fail_live_session 1 "Cannot locate the V8 library of Brave at ${brave_binary}, so its native V8 flags cannot be checked. Set REB_BRAVE_BINARY to <App>.app/Contents/MacOS/<executable> inside a complete Brave build, not a wrapper script or an app copied away from its build output, or turn that capture off with ${opt_outs}."
   fi
   # No TERM or INT trap exists before this point; the launcher's own traps
   # are installed later, so the default disposition is restored below.
@@ -326,6 +332,7 @@ require_brave_v8_flags() {
     if (( status == 1 )); then
       missing+="${missing:+, }${flag} (from ${native_js_flag_settings[index]})"
       opt_outs+="${opt_outs:+, }${native_js_flag_opt_outs[index]}"
+      missing_count=$((missing_count + 1))
     elif (( status != 0 )); then
       uninspected=1
     fi
@@ -335,8 +342,12 @@ require_brave_v8_flags() {
   if (( uninspected )); then
     fail_live_session 1 "Could not inspect ${image}, the V8 library of Brave at ${brave_binary}, for the requested native V8 flags. Check that the file is readable."
   fi
-  if [[ -n "${missing}" ]]; then
-    fail_live_session 1 "Brave at ${brave_binary} does not define the requested V8 flags ${missing} in ${image}. V8 would stop at the first of them and ignore every later --js-flags entry, so that evidence would be silently missing. Use the Brave Browser Development build released with this Origin Trace, or rebuild Brave from this checkout, or turn that capture off with ${opt_outs}."
+  if (( missing_count > 0 )); then
+    if (( missing_count == 1 )); then
+      missing_noun="flag"
+      first_missing="it"
+    fi
+    fail_live_session 1 "Brave at ${brave_binary} does not define the requested V8 ${missing_noun} ${missing} in ${image}. V8 would stop at ${first_missing} and ignore every later --js-flags entry, so that evidence would be silently missing. Use the Brave Browser Development build released with this Origin Trace, or rebuild Brave from this checkout, or turn that capture off with ${opt_outs}."
   fi
 }
 if [[ ${#native_js_flags[@]} -gt 0 ]]; then

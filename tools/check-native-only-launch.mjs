@@ -232,14 +232,16 @@ exec ${quote(systemGrep)} "$@"
     '--reb-js-dispatch-capture': ['REB_NATIVE_JS_DISPATCH_SITES', 'unset REB_NATIVE_JS_DISPATCH_SITES'],
   };
   const prefix = 'REB_LIVE_SESSION_FAILURE: ';
+  const optOuts = flags => flags.map(flag => settings[flag][1]).join(', ');
   const undefinedCause = (executable, file, flags) => `${prefix}Brave at ${executable} does not define the requested ` +
-    `V8 flags ${flags.map(flag => `${flag} (from ${settings[flag][0]})`).join(', ')} in ${file}. V8 would stop at the ` +
-    'first of them and ignore every later --js-flags entry, so that evidence would be silently missing. Use the Brave ' +
-    'Browser Development build released with this Origin Trace, or rebuild Brave from this checkout, or turn that ' +
-    `capture off with ${flags.map(flag => settings[flag][1]).join(', ')}.`;
-  const locateCause = executable => `${prefix}Cannot locate the V8 library of Brave at ${executable}, so its native ` +
-    'V8 flags cannot be checked. Set REB_BRAVE_BINARY to <App>.app/Contents/MacOS/<executable> inside a complete ' +
-    'Brave build, not a wrapper script or an app copied away from its build output.';
+    `V8 ${flags.length === 1 ? 'flag' : 'flags'} ${flags.map(flag => `${flag} (from ${settings[flag][0]})`).join(', ')} ` +
+    `in ${file}. V8 would stop at ${flags.length === 1 ? 'it' : 'the first of them'} and ignore every later --js-flags ` +
+    'entry, so that evidence would be silently missing. Use the Brave Browser Development build released with this ' +
+    `Origin Trace, or rebuild Brave from this checkout, or turn that capture off with ${optOuts(flags)}.`;
+  const locateCause = (executable, flags) => `${prefix}Cannot locate the V8 library of Brave at ${executable}, so its ` +
+    'native V8 flags cannot be checked. Set REB_BRAVE_BINARY to <App>.app/Contents/MacOS/<executable> inside a ' +
+    'complete Brave build, not a wrapper script or an app copied away from its build output, or turn that capture ' +
+    `off with ${optOuts(flags)}.`;
   const inspectCause = (executable, file) => `${prefix}Could not inspect ${file}, the V8 library of Brave at ` +
     `${executable}, for the requested native V8 flags. Check that the file is readable.`;
   const lines = async file => {
@@ -317,9 +319,10 @@ exec ${quote(systemGrep)} "$@"
     (await braveApp({framework: allNames, loads: '150.1.94.0'})).executable,
     (await braveApp({marker: '@rpath/libchrome_dll.dylib'})).executable]) {
     const result = await launchWith(executable, switches.packaged);
-    refused(result, locateCause(executable));
+    refused(result, locateCause(executable, packaged));
     assert.deepEqual(result.scans, []);
   }
+  refused(await launchWith(wrapper, switches.every), locateCause(wrapper, every));
   // A read failure is not evidence that a flag is absent.
   const release = await braveApp({framework: allNames});
   await writeFile(mode.fail, '');

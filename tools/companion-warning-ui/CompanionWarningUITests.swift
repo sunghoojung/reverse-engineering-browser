@@ -110,7 +110,11 @@ final class CompanionWarningUITests: XCTestCase {
       "REB_AUTOMATIC_USE_SYSTEM_KEYCHAIN": "0",
       "REB_DISABLE_AUTOMATIC_LIVE_SESSION": "0",
       "REB_CAPTURE_CANVAS_IMAGES": "0",
+      // The inert browser has no V8, so the launcher would refuse any native V8
+      // switch before reaching it. These are the documented opt-outs.
       "REB_NATIVE_QUIET_MODE": "0",
+      "REB_NATIVE_WASM_DISPATCH": "0",
+      "REB_NATIVE_WASM_CALL_INDIRECT": "0",
       "REB_LOCALHOST_ONLY": "1",
       "REB_COMPANION_WARNING_RECEIPT": directory.appendingPathComponent("launches.txt").path,
     ]

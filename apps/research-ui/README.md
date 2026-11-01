@@ -322,10 +322,20 @@ A `REB_BRAVE_BINARY` override takes precedence. The app bundles its Rust backend
 and VM analyzer, so Python is not required. A startup problem is shown explicitly
 and leaves the stored-evidence interface available offline.
 
-The live session starts with whichever Brave Browser Development build is found,
-with no pairing prompt; a build without a native capture path simply records no
-events from it. A paired release identifies its own browser by bytes and code
-signature instead; see the
+The live session starts with the Brave Browser Development build it finds, with
+no pairing prompt, but only if that build defines every native V8 flag the
+session requests. V8 stops at the first `--js-flags` entry it does not know and
+ignores the rest, so a stale build would otherwise run a session that silently
+lacks quiet mode or dispatch capture. The launcher, shared with `make live`,
+refuses such a build and lists each missing flag with the setting that asked for
+it. Quiet mode is on by default in the app, so any Brave without the project's
+V8 patches is refused. Use the Brave Browser Development build released with
+this Origin Trace (it ships in the same GitHub release), placed beside it, or
+rebuild Brave from this checkout, or turn the switches off with
+`REB_NATIVE_QUIET_MODE=0`, `REB_NATIVE_WASM_DISPATCH=0` and
+`REB_NATIVE_WASM_CALL_INDIRECT=0`. The session summary prints the resolved
+Brave executable it started. A paired release identifies its own browser by
+bytes and code signature instead; see the
 [paired release procedure](../../docs/development/paired-release.md).
 Pass an explicit evidence-store or demo argument, or set
 `REB_DISABLE_AUTOMATIC_LIVE_SESSION=1`, when opening the native stored-evidence

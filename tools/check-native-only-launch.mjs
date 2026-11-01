@@ -363,28 +363,45 @@ exec ${quote(systemGrep)} "$@"
     try { process.kill(pid, 0); return true; }
     catch (error) { if (error.code === 'ESRCH') return false; throw error; }
   };
-  for (const [signal, code] of [['SIGTERM', 143], ['SIGINT', 130]]) {
+  const stopMidScan = async (script, signal, code, readerCount) => {
     await clearReceipts();
-    const child = spawn(shell, [join(root, 'scripts/run-live-session.sh')], {env:launchEnvironment(release.executable, switches.packaged)});
+    const child = spawn(shell, [script], {env:launchEnvironment(release.executable, switches.packaged)});
     let output = '';
     for (const pipe of [child.stdout, child.stderr]) pipe.on('data', chunk => { output += chunk; });
     const exited = new Promise(resolveExit => child.once('exit', (exitCode, exitSignal) => resolveExit({exitCode, exitSignal})));
     let readers = [];
-    for (const deadline = Date.now() + 10000; readers.length < packaged.length;) {
-      assert(Date.now() < deadline && child.exitCode === null, `Readers did not start: ${output}`);
-      await new Promise(resolvePause => setTimeout(resolvePause, 20));
-      readers = (await lines(started)).map(Number);
-    }
-    child.kill(signal);
     let timer;
-    const result = await Promise.race([exited, new Promise((_, reject) => {
-      timer = setTimeout(() => reject(new Error(`Launcher survived ${signal}: ${output}`)), 8000);
-    })]);
-    clearTimeout(timer);
-    assert.deepEqual(result, {exitCode: code, exitSignal: null}, output);
-    for (const pid of readers) assert.equal(alive(pid), false, `${signal} left reader ${pid} running`);
-    assert.deepEqual(await lines(receipts), []);
+    try {
+      for (const deadline = Date.now() + 10000; readers.length < readerCount;) {
+        assert(Date.now() < deadline && child.exitCode === null, `Readers did not start: ${output}`);
+        await new Promise(resolvePause => setTimeout(resolvePause, 20));
+        readers = (await lines(started)).map(Number);
+      }
+      child.kill(signal);
+      const result = await Promise.race([exited, new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error(`Launcher survived ${signal}: ${output}`)), 8000);
+      })]);
+      assert.deepEqual(result, {exitCode: code, exitSignal: null}, output);
+      for (const pid of readers) assert.equal(alive(pid), false, `${signal} left reader ${pid} running`);
+      assert.deepEqual(await lines(receipts), []);
+    } finally {
+      clearTimeout(timer);
+      for (const pid of readers) if (alive(pid)) process.kill(pid, 'SIGKILL');
+      if (child.exitCode === null) child.kill('SIGKILL');
+    }
+  };
+  const launcherPath = join(root, 'scripts/run-live-session.sh');
+  for (const [signal, code] of [['SIGTERM', 143], ['SIGINT', 130]]) {
+    await stopMidScan(launcherPath, signal, code, packaged.length);
   }
+  // A signal can arrive after a reader is forked but before its PID is saved.
+  // A copy of the launcher pauses at exactly that point; a foreground command
+  // defers the trap until it ends, so the trap runs inside that window.
+  const forkLine = '    LC_ALL=C grep -a -q -F -e "${flag//-/_}" "${image}" &\n';
+  assert(launch.includes(forkLine), 'Missing live launcher boundary: V8 flag scan fork');
+  const windowed = at('run-live-session-window.sh');
+  await writeFile(windowed, launch.replace(forkLine, `${forkLine}    sleep 2\n`), {mode:0o755});
+  await stopMidScan(windowed, 'SIGTERM', 143, 1);
   await rm(mode.hold);
-  console.log('PASS refusal waits for every scan, and SIGTERM or SIGINT mid-scan stops and reaps every reader');
+  console.log('PASS refusal waits for every scan, and SIGTERM or SIGINT mid-scan, even before a reader PID is saved, stops and reaps every reader');
 } finally {await rm(preflight,{recursive:true,force:true});}

@@ -277,14 +277,16 @@ locate_brave_v8_image() {
   fi
 }
 
-# A stopped launcher must not leave readers behind. Recorded readers are
-# stopped; the bare wait also reaps one started just before its PID was saved.
-brave_v8_scan_pids=()
+# A stopped launcher must not leave readers behind. No helper has started yet,
+# so every background job is a scan, and the job table already holds a reader
+# whose PID the loop below had not yet recorded when the signal arrived.
 stop_brave_v8_scans() {
-  local pid
-  for pid in ${brave_v8_scan_pids[@]+"${brave_v8_scan_pids[@]}"}; do
-    kill -TERM "${pid}" 2>/dev/null || true
-  done
+  local readers
+  readers="$(jobs -p)"
+  if [[ -n "${readers}" ]]; then
+    # shellcheck disable=SC2086  # One PID per word.
+    kill -TERM ${readers} 2>/dev/null || true
+  fi
   wait 2>/dev/null || true
 }
 
@@ -301,6 +303,7 @@ require_brave_v8_flags() {
   local missing=""
   local opt_outs=""
   local uninspected=0
+  local scan_pids=()
   if ! image="$(locate_brave_v8_image "${brave_binary}")"; then
     fail_live_session 1 "Cannot locate the V8 library of Brave at ${brave_binary}, so its native V8 flags cannot be checked. Set REB_BRAVE_BINARY to <App>.app/Contents/MacOS/<executable> inside a complete Brave build, not a wrapper script or an app copied away from its build output."
   fi
@@ -311,13 +314,13 @@ require_brave_v8_flags() {
   for flag in "${native_js_flags[@]}"; do
     flag="${flag#--}"
     LC_ALL=C grep -a -q -F -e "${flag//-/_}" "${image}" &
-    brave_v8_scan_pids+=($!)
+    scan_pids+=($!)
   done
   # Reap every scan before deciding, keeping each status: 1 is an absent
   # name, anything else means the file could not be read.
   for flag in "${native_js_flags[@]}"; do
     status=0
-    wait "${brave_v8_scan_pids[index]}" || status=$?
+    wait "${scan_pids[index]}" || status=$?
     if (( status == 1 )); then
       missing+="${missing:+, }${flag} (from ${native_js_flag_settings[index]})"
       opt_outs+="${opt_outs:+, }${native_js_flag_opt_outs[index]}"
@@ -326,7 +329,6 @@ require_brave_v8_flags() {
     fi
     index=$((index + 1))
   done
-  brave_v8_scan_pids=()
   trap - TERM INT
   if (( uninspected )); then
     fail_live_session 1 "Could not inspect ${image}, the V8 library of Brave at ${brave_binary}, for the requested native V8 flags. Check that the file is readable."

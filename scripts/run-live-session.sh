@@ -635,6 +635,7 @@ echo "Evidence store: ${store_path}"
 echo "Origin trace store: ${trace_store_path}"
 echo "Request signal profile store: ${signal_store_path}"
 echo "Artifact store: ${artifact_store_path}"
+echo "Brave executable: ${brave_binary}"
 echo "Brave log: ${brave_log}"
 echo "Category mask: ${category_mask}; expires after ${duration_seconds} seconds"
 if [[ "${capture_canvas_images}" == 1 ]]; then

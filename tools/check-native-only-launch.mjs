@@ -12,6 +12,8 @@ const launch = await read('scripts/run-live-session.sh');
 assert.doesNotMatch(launch, /--remote-debugging-(?:port|pipe)|--devtools-active-port|--debugger-transport|--capture-network-content/);
 assert.match(launch, /vm_capture_mode="native-stealth"/);
 assert.match(launch, /--native-console-live-directory/);
+// The session summary names the resolved executable that was started.
+assert.match(launch, /^echo "Brave executable: \$\{brave_binary\}"$/m);
 for (const env of [{REB_CDP_NETWORK_CAPTURE:'1'}, {REB_DEBUGGER_TRANSPORT_BINARY:'/tmp/retired-cdp'}]) {
   const result = spawnSync(shell, [join(root, 'scripts/run-live-session.sh')], {env:{...process.env,...env}, encoding:'utf8'});
   assert.equal(result.status, 2, result.stderr);

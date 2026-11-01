@@ -12,7 +12,16 @@ struct StoredEventWindow {
   var sequenceGapsSaturated: Bool
   var queueDrops: UInt64
   var queueDropsSaturated: Bool
+  var namedGaps: [NamedGap]
   var coverage: [String: Any]
+}
+
+// Gap markers in one category whose payload names a producer reason, such as
+// native_wasm_dispatch_budget_incomplete, in first-seen order.
+struct NamedGap: Equatable {
+  var category: String
+  var reason: String
+  var count: UInt64
 }
 
 struct StoredEventWindowError: LocalizedError {
@@ -25,6 +34,9 @@ final class StoredEventWindowCache {
   static let scanBytes = 64 * 1024 * 1024
   static let maxRecordBytes = 4096
   static let maxEvents = 5000
+  // Browser reasons are fixed producer identifiers, so 64 distinct pairs covers
+  // every documented one. A further pair stays an unexplained queue-drop marker.
+  static let maxNamedGaps = 64
 
   private struct Record {
     var start: UInt64
@@ -34,6 +46,7 @@ final class StoredEventWindowCache {
     var process: UInt64
     var sequence: UInt64
     var drops: UInt64
+    var namedGap: (category: String, reason: String)?
     var network: Bool
     var event: [String: Any]?
   }
@@ -112,6 +125,7 @@ final class StoredEventWindowCache {
             throw StoredEventWindowError("The evidence store contains an oversized event")
           }
           let object = try parseEvent(Data(line))
+          let gap = (object["type"] as? String) == "gap"
           tail.records.append(Record(
             start: tail.start + UInt64(position),
             end: tail.start + UInt64(endIndex),
@@ -119,7 +133,8 @@ final class StoredEventWindowCache {
             session: try requiredUnsigned(object["session_id"]),
             process: try requiredUnsigned(object["process_id"]),
             sequence: try requiredUnsigned(object["sequence_number"]),
-            drops: (object["type"] as? String) == "gap" ? dropWeight(object) : 0,
+            drops: gap ? dropWeight(object) : 0,
+            namedGap: gap ? namedGap(object) : nil,
             network: isNetwork(object),
             event: nil
           ))
@@ -193,6 +208,7 @@ final class StoredEventWindowCache {
     var sequenceGapsSaturated = false
     var queueDrops: UInt64 = 0
     var queueDropsSaturated = false
+    var namedGaps: [NamedGap] = []
     var marks: [UInt64: [UInt64: Set<UInt64>]] = [:]
     var retained = Array(repeating: false, count: records.count)
     var events: [[String: Any]] = []
@@ -204,6 +220,14 @@ final class StoredEventWindowCache {
       var record = records[index]
       marks[record.session, default: [:]][record.process, default: []].insert(record.sequence)
       add(&queueDrops, &queueDropsSaturated, record.drops)
+      if let named = record.namedGap {
+        // At most 64 entries, and only gap markers reach this lookup.
+        if let existing = namedGaps.firstIndex(where: { $0.category == named.category && $0.reason == named.reason }) {
+          namedGaps[existing].count += 1
+        } else if namedGaps.count < Self.maxNamedGaps {
+          namedGaps.append(NamedGap(category: named.category, reason: named.reason, count: 1))
+        }
+      }
       let keepGeneral = index >= generalStart
       let keepNetwork: Bool
       if record.network && networkSkip > 0 {
@@ -251,6 +275,7 @@ final class StoredEventWindowCache {
         sequenceGapsSaturated: sequenceGapsSaturated,
         queueDrops: queueDrops,
         queueDropsSaturated: queueDropsSaturated,
+        namedGaps: namedGaps,
         coverage: coverage
       ),
       retained
@@ -288,6 +313,8 @@ private func unsignedText(_ text: String) -> UInt64? {
   return UInt64(text)
 }
 
+// The HTTP contract weighs every non-count marker as one queue drop, so a named
+// marker stays in queue_drops; named_gaps lets a reader take that weight back out.
 private func dropWeight(_ event: [String: Any]) -> UInt64 {
   guard let hex = event["payload"] as? String,
     let data = hexBytes(hex),
@@ -296,6 +323,27 @@ private func dropWeight(_ event: [String: Any]) -> UInt64 {
     count > 0
   else { return 1 }
   return count
+}
+
+// A lowercase letter, then lowercase letters, digits or underscores. A decimal
+// drop count never matches, nor does page-shaped or truncated text.
+private func isIdentifier<Bytes: Collection>(_ bytes: Bytes, maximum: Int) -> Bool where Bytes.Element == UInt8 {
+  guard let first = bytes.first, bytes.count <= maximum, first >= 0x61, first <= 0x7a else { return false }
+  return bytes.allSatisfy { ($0 >= 0x61 && $0 <= 0x7a) || ($0 >= 0x30 && $0 <= 0x39) || $0 == 0x5f }
+}
+
+// A browser stage that refuses or stops sampling an observation writes its
+// reason as the payload. That loss belongs to the marker's category.
+private func namedGap(_ event: [String: Any]) -> (category: String, reason: String)? {
+  guard (event["payload_truncated"] as? Bool) != true,
+    let category = event["category"] as? String,
+    isIdentifier(Array(category.utf8), maximum: 32),
+    let hex = event["payload"] as? String,
+    let data = hexBytes(hex),
+    isIdentifier(data, maximum: 128),
+    let reason = String(data: data, encoding: .utf8)
+  else { return nil }
+  return (category, reason)
 }
 
 private func hexBytes(_ text: String) -> Data? {

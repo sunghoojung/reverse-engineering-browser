@@ -20,7 +20,9 @@ The driver, [`check-origin-trace-rendered-ui.mjs`](../check-origin-trace-rendere
    events the Rust golden tests built from `build/reb-native-wasm-guest-golden`
    and `build/reb-native-wasm-dispatch-golden`, so nothing is mirrored by hand.
    `make vm-observed-evidence` adds the owned two-level interpreter store that
-   the observed-claims analyzer test builds under `build/vm-observed-evidence/`;
+   the observed-claims analyzer test builds under `build/vm-observed-evidence/`.
+   Two named `vm` gaps close the store, as a live page wrote them when its Wasm
+   `br_table` and `call_indirect` interpreters exhausted their sampling budgets;
 3. starts the bundled `OriginTraceBackend` on a loopback port chosen by the OS;
 4. builds this bundle with `xcodebuild build-for-testing`, then rewrites the
    generated `.xctestrun` so the bundle is hosted by the copied app
@@ -44,6 +46,10 @@ the DOM and computed layout and scrolls targets into view.
 No smoke flag or test hook exists in the product, and nothing here uses the
 Chrome DevTools Protocol. The evidence is synthetic; this suite does not
 establish live browser capture.
+
+At both window sizes, those budget gaps must leave the footer free of queue
+drops, Traffic without a loss notice and Fingerprinting at full coverage, while
+the VM notice names both reasons as inert text.
 
 The Runtime claims panel is opened on that store at all four sizes: the
 contradicting claim expands with native input, and the claims heading, the

@@ -24,13 +24,14 @@ const state = {
   requests: []
 };
 let notice;
+const elements = {networkNotice: {hidden: true, dataset: {}}};
 const api = runInNewContext(
-  `${failedNoticeHelpers}\n${models}\n${app.slice(start, end)};({isBrokerResponse,acceptEventWindow,captureWideTotal,countSequenceGaps,countReportedQueueDrops,requestsFromEvents,shownSequenceGaps,shownQueueDrops,eventGapLabel,fingerprintCoverageNotice,renderNetworkNotice})`,
+  `${failedNoticeHelpers}\n${models}\n${app.slice(start, end)};({isBrokerResponse,acceptEventWindow,captureWideTotal,countSequenceGaps,countReportedQueueDrops,requestsFromEvents,shownSequenceGaps,shownQueueDrops,shownNamedGaps,namedGapsFromEvents,namedGapsIn,namedGapNotice,eventGapLabel,fingerprintCoverageNotice,renderNetworkNotice,fingerprintSignalCategories,vmGapCategories})`,
   {
     state,
     TextEncoder,
     TextDecoder,
-    elements: {networkNotice: {hidden: true, dataset: {}}},
+    elements,
     setNetworkNotice(kind, text) { notice = {kind, text}; }
   }
 );
@@ -232,3 +233,89 @@ for (const sequences of [[3, 1, 2], [1, 4, 2, 3], [3, 1, 2, 2]]) {
 }
 assert.equal(api.countSequenceGaps([1, 5, 3].map(n => request(n, 'request_started'))), 2n);
 console.log('PASS delayed-ACK and duplicate-aware sequence gaps');
+
+// Live 2026-10-31 capture: two Wasm interpreters hit their 16-observation
+// budgets. The browser kept exact samples and wrote two named vm gaps; nothing
+// was dropped from a queue and no fingerprint or network evidence was lost.
+const budgetGap = (sequence, reason, category = 'vm') => ({
+  ...request(sequence, 'gap'), category, process_id: 11, payload_size: reason.length, payload: Buffer.from(reason).toString('hex')
+});
+const liveBudgets = [budgetGap(1, 'native_wasm_dispatch_budget_incomplete'), budgetGap(2, 'native_wasm_indirect_budget_incomplete')];
+const liveResponse = {count: 2, events: liveBudgets, network_events: [], sequence_gaps: '0', queue_drops: '2',
+  sequence_gaps_saturated: false, queue_drops_saturated: false, event_window: {...coverage, scope: 'store', scan_start: '0', network_events_limited: false},
+  named_gaps: [{category: 'vm', reason: 'native_wasm_dispatch_budget_incomplete', count: '1'},
+    {category: 'vm', reason: 'native_wasm_indirect_budget_incomplete', count: '1'}]};
+assert.equal(api.isBrokerResponse(liveResponse), true);
+Object.assign(state, {events: liveBudgets, requests: [], eventsLimited: false});
+api.acceptEventWindow(liveResponse);
+assert.equal(api.shownQueueDrops(), 0n, 'named budget markers are not queue drops');
+assert.equal(api.eventGapLabel(api.shownSequenceGaps(), api.shownQueueDrops(), api.shownNamedGaps()),
+  '0 sequence-gap IDs (the stored capture) · 2 sampling budgets reached (vm)');
+notice = null;
+elements.networkNotice.hidden = false;
+api.renderNetworkNotice();
+assert.equal(notice, null, 'Traffic has no network loss to report');
+assert.equal(elements.networkNotice.hidden, true);
+assert.equal(api.namedGapsIn(api.shownNamedGaps(), api.fingerprintSignalCategories).length, 0, 'a vm budget leaves Fingerprinting complete');
+const vmNotice = api.namedGapNotice(api.namedGapsIn(api.shownNamedGaps(), api.vmGapCategories), 'the stored capture');
+assert.equal(vmNotice, 'Sampling budget reached in the stored capture for Wasm br_table dispatch (native_wasm_dispatch_budget_incomplete); ' +
+  'Wasm call_indirect dispatch (native_wasm_indirect_budget_incomplete). Retained observations are exact; later ones were not sampled.');
+console.log('PASS named vm sampling budgets are scoped capture limits, not queue drops or Traffic/Fingerprinting loss');
+
+// Numeric gap payloads remain queue drops beside named markers in the same total.
+api.acceptEventWindow({...liveResponse, queue_drops: '7', named_gaps: [...liveResponse.named_gaps,
+  {category: 'vm', reason: 'native_wasm_dispatch_transport_unavailable', count: '2'}]});
+assert.equal(api.shownQueueDrops(), 3n);
+assert.equal(api.eventGapLabel(0n, api.shownQueueDrops(), api.shownNamedGaps()),
+  '0 sequence-gap IDs (the stored capture) · 3 reported queue drops (may overlap) · 2 sampling budgets reached (vm) · 2 reported capture losses (vm)');
+api.renderNetworkNotice();
+assert.equal(notice.text, 'The queue reports 3 dropped events; no sequence jump is visible in the stored capture.');
+assert.match(api.namedGapNotice(api.shownNamedGaps(), 'the stored capture'),
+  /^Capture reported lost vm evidence in the stored capture: native_wasm_dispatch_transport_unavailable ×2\. Sampling budget reached/);
+// Saturated totals stay lower bounds after the named weight is removed.
+api.acceptEventWindow({...liveResponse, queue_drops: '18446744073709551615', queue_drops_saturated: true});
+api.renderNetworkNotice();
+assert.match(notice.text, /reports at least 18446744073709551613 dropped events/);
+console.log('PASS numeric queue drops, named losses and saturation stay separate and visible');
+
+// A response without named_gaps still separates the named markers it can see.
+api.acceptEventWindow({count: 2, events: liveBudgets, sequence_gaps: '0', queue_drops: '2'});
+assert.equal(state.namedGaps, null);
+assert.equal(api.countReportedQueueDrops(liveBudgets), 0n);
+assert.equal(api.shownNamedGaps().length, 2);
+assert.equal(api.shownQueueDrops(), 0n);
+state.queueDrops = null;
+assert.equal(api.countReportedQueueDrops([...liveBudgets, gap]), 280n);
+assert.equal(api.namedGapsFromEvents([liveBudgets[0], liveBudgets[0], gap]).map(entry => `${entry.category}:${entry.reason}:${entry.count}`).join(),
+  'vm:native_wasm_dispatch_budget_incomplete:2');
+for (const payload of ['', '0', '7', 'Native_gap', 'native-gap', '1native', '_native', 'native gap', '<b>gap</b>']) {
+  assert.equal(api.namedGapsFromEvents([budgetGap(1, payload)]).length, 0, payload);
+}
+assert.equal(api.namedGapsFromEvents([{...liveBudgets[0], payload_truncated: true}]).length, 0, 'a truncated reason is not named');
+console.log('PASS legacy summaries separate visible named markers; counts and malformed text stay queue drops');
+
+// A limit belongs to the surface that shows its category.
+Object.assign(state, {events: [], namedGaps: [{category: 'network', reason: 'native_network_example_unavailable', count: 1n},
+  {category: 'canvas', reason: 'native_canvas_example_unavailable', count: 1n},
+  {category: 'vm', reason: 'native_js_dispatch_budget_incomplete', count: 1n}], queueDrops: 3n, queueDropsSaturated: false});
+api.renderNetworkNotice();
+assert.equal(notice.text, 'Capture reported lost network evidence in the stored capture: native_network_example_unavailable.');
+const canvasOnly = api.namedGapsIn(api.shownNamedGaps(), api.fingerprintSignalCategories);
+assert.equal(api.fingerprintCoverageNotice(false, false, 500, 0n, api.shownQueueDrops(), 'the stored capture', canvasOnly),
+  'Fingerprint activity is visible with partial coverage: capture reported lost evidence in the stored capture: canvas native_canvas_example_unavailable.');
+console.log('PASS named limits mark only Traffic, Fingerprinting or VM coverage for their own category');
+
+for (const named_gaps of [
+  [{category: 'vm', reason: 'native_wasm_dispatch_budget_incomplete', count: '0'}],
+  [{category: 'vm', reason: 'native_wasm_dispatch_budget_incomplete', count: '01'}],
+  [{category: 'vm', reason: 'Native_reason', count: '1'}],
+  [{category: 'VM', reason: 'native_reason', count: '1'}],
+  [{category: 'vm', reason: 'native_reason', count: '1', note: 'x'}],
+  [{category: 'vm', reason: 'native_reason', count: '1'}, {category: 'vm', reason: 'native_reason', count: '1'}],
+  [{category: 'vm', reason: 'native_reason', count: '3'}],
+  Array.from({length: 65}, (_, index) => ({category: 'vm', reason: `native_reason_${index}`, count: '1'})),
+  {category: 'vm', reason: 'native_reason', count: '1'}
+]) assert.equal(api.isBrokerResponse({...liveResponse, named_gaps}), false, JSON.stringify(named_gaps).slice(0, 80));
+assert.equal(api.isBrokerResponse({...liveResponse, queue_drops: '2', queue_drops_saturated: true,
+  named_gaps: [{category: 'vm', reason: 'native_reason', count: '3'}]}), true, 'a saturated total is a lower bound');
+console.log('PASS named gap summaries are strict, unique, bounded and covered by queue_drops');

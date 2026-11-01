@@ -225,6 +225,11 @@ const capturedExportPanel = installCapturedExportDialog({
           if (kind === 'empty') kind = 'gap';
           messages.push(`The queue reports ${state.queueDropsSaturated ? 'at least ' : ''}${reportedDrops} dropped ${reportedDrops === 1n ? 'event' : 'events'}${gapCount > 0n ? '; counts may overlap sequence gaps' : `; no sequence jump is visible in ${eventCountScopeLabel()}`}.`);
         }
+        const networkLimits = namedGapNotice(namedGapsIn(shownNamedGaps(), networkGapCategories), eventCountScopeLabel());
+        if (networkLimits) {
+          if (kind === 'empty') kind = 'gap';
+          messages.push(networkLimits);
+        }
 
         const failedNotice = trafficFailedRequestNotice(state.requests);
         if (failedNotice) messages.push(failedNotice);
@@ -1115,6 +1120,7 @@ const capturedExportPanel = installCapturedExportDialog({
 
         const gapCount = shownSequenceGaps();
         const reportedDrops = shownQueueDrops();
+        const signalLimits = namedGapsIn(shownNamedGaps(), fingerprintSignalCategories);
         if (state.eventFailureKind === 'malformed') {
           setSignalNotice('error', signalEvents.length
             ? 'The broker returned malformed event data. The last understandable fingerprint evidence remains visible.'
@@ -1133,9 +1139,9 @@ const capturedExportPanel = installCapturedExportDialog({
           setSignalNotice('empty', state.sessionMode === 'demo'
             ? 'Deterministic fingerprint evidence is not available in this build.'
             : 'No fingerprint-relevant browser activity has been captured yet.');
-        } else if (state.eventsLimited || state.eventCountScope === 'bounded_tail' || displayLimited || gapCount > 0n || reportedDrops > 0n) {
+        } else if (state.eventsLimited || state.eventCountScope === 'bounded_tail' || displayLimited || gapCount > 0n || reportedDrops > 0n || signalLimits.length) {
           setSignalNotice('partial', fingerprintCoverageNotice(
-            state.eventsLimited, displayLimited, signalEventDisplayLimit, gapCount, reportedDrops, eventCountScopeLabel()
+            state.eventsLimited, displayLimited, signalEventDisplayLimit, gapCount, reportedDrops, eventCountScopeLabel(), signalLimits
           ));
         } else if (state.sessionMode === 'demo') {
           setSignalNotice('demo', 'Demo mode: both Canvas images are reconstructed locally from the visible calls. They are not native-captured pixels.');
@@ -2535,6 +2541,7 @@ const capturedExportPanel = installCapturedExportDialog({
         }
         renderVmSessionStatus();
         const gapCount = shownSequenceGaps();
+        const vmLimits = namedGapNotice(namedGapsIn(shownNamedGaps(), vmGapCategories), eventCountScopeLabel());
         if (state.broker === 'connecting') {
           setVmNotice('loading', 'Waiting for VM findings from the local evidence broker.');
         } else if (state.vmAnalysisStatus === 'loading' && state.vmAnalysisSelection) {
@@ -2548,9 +2555,13 @@ const capturedExportPanel = installCapturedExportDialog({
         } else if (state.malformedVmFindings > 0) {
           setVmNotice('malformed', `${state.malformedVmFindings} malformed VM ${state.malformedVmFindings === 1 ? 'finding was' : 'findings were'} rejected.`);
         } else if (state.vmFindings.length === 0) {
-          setVmNotice('empty', state.vmAnalysisSelection ? 'No VM candidates are linked to this exact captured response body. Unlinked, legacy and session-wide findings are not shown.' : 'No VM findings yet. The lab waits for observed or explicitly inferred evidence.');
-        } else if (gapCount > 0n) {
-          setVmNotice('gap', `${gapCount} event ${gapCount === 1n ? 'gap may' : 'gaps may'} make VM coverage incomplete (observed sequence jumps in ${eventCountScopeLabel()}).`);
+          const empty = state.vmAnalysisSelection ? 'No VM candidates are linked to this exact captured response body. Unlinked, legacy and session-wide findings are not shown.' : 'No VM findings yet. The lab waits for observed or explicitly inferred evidence.';
+          setVmNotice(vmLimits ? 'gap' : 'empty', vmLimits ? `${empty} ${vmLimits}` : empty);
+        } else if (gapCount > 0n || vmLimits) {
+          setVmNotice('gap', [
+            gapCount > 0n ? `${gapCount} event ${gapCount === 1n ? 'gap may' : 'gaps may'} make VM coverage incomplete (observed sequence jumps in ${eventCountScopeLabel()}).` : '',
+            vmLimits
+          ].filter(Boolean).join(' '));
         } else if (state.vmAnalysisSelection) {
           const selection = state.vmAnalysisSelection;
           setVmNotice('ready', `Exact captured response body · request ${selection.request_id} · session ${selection.root_event.session_id} · process ${selection.root_event.process_id} · root ${selection.root_event.sequence_number}. This link does not establish execution or guest semantics.`);
@@ -7492,7 +7503,7 @@ const capturedExportPanel = installCapturedExportDialog({
               : state.sessionMode === 'demo' ? 'deterministic developer evidence loaded' : 'start a live capture'
             : (state.events.length > 0 ? 'last valid evidence retained' : 'no live evidence');
           renderShellStatus();
-          elements.gaps.textContent = eventGapLabel(shownSequenceGaps(), shownQueueDrops());
+          elements.gaps.textContent = eventGapLabel(shownSequenceGaps(), shownQueueDrops(), shownNamedGaps());
           renderNetworkNotice();
           renderRequests();
           renderInspector();
@@ -7531,6 +7542,7 @@ const capturedExportPanel = installCapturedExportDialog({
         state.eventsLimited = false;
         state.sequenceGaps = 0n;
         state.queueDrops = 0n;
+        state.namedGaps = [];
         state.eventCountScope = 'rendered_window';
         state.networkEventsAvailable = false;
         state.networkEventsLimited = false;

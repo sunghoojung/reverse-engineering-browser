@@ -44,7 +44,7 @@ async function checkTrafficActivation(root) {
     requestsFromEvents: rows => rows,
     rebuildTrafficRequests: () => {state.requests = state.nativeRequests;},
     resetRequestSelection: () => {state.selectedRequestId = null;},
-    shownSequenceGaps: () => 0n, shownQueueDrops: () => 0n, eventGapLabel: () => '',
+    shownSequenceGaps: () => 0n, shownQueueDrops: () => 0n, shownNamedGaps: () => [], eventGapLabel: () => '',
     renderRequests: () => {painted = state.requests.slice();},
     updateSelectionSummary: selected => {summary = selected ?? null;},
     renderInspector: () => {inspector = state.requests.find(row => row.id === state.selectedRequestId) ?? null;},

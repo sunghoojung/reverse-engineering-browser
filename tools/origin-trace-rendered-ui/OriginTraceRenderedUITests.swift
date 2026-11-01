@@ -297,6 +297,7 @@ struct Expectations: Decodable {
   let hostileBytecodeMarkup: String
   let requestCount: Int
   let sourceLines: Int
+  let namedGapReasons: [String]
 
   static func load() throws -> Expectations {
     let text = try Harness.required(ProcessInfo.processInfo.environment, "REB_RENDERED_UI_EXPECT")
@@ -910,6 +911,44 @@ final class OriginTraceRenderedUITests: XCTestCase {
     let notice = try await ui.value("document.querySelector('#vm-notice').hidden") as? Bool ?? false
     XCTAssertTrue(notice, "Recovered analysis clears the failure banner")
     try await ui.screenshot("vm-worker-recovered")
+  }
+
+  // A live Wasm page exhausted two 16-observation budgets. Those named vm gaps
+  // are sampling limits: the footer counts no queue drops, Traffic and
+  // Fingerprinting keep their coverage, and VM Lab names both reasons as text.
+  @MainActor
+  func test14NamedBudgetGapsStayInVmScope() async throws {
+    let expected = try Expectations.load()
+    for size in windowSizes {
+      let ui = try await prepare(size)
+      try await show(ui, "traffic")
+      let footer = try await ui.value("document.querySelector('#gap-status').textContent") as? String ?? ""
+      XCTAssertTrue(footer.contains("· \(expected.namedGapReasons.count) sampling budgets reached (vm)"), "\(size.name): footer names the vm budgets: \(footer)")
+      XCTAssertFalse(footer.contains("queue drop"), "\(size.name): budgets are not queue drops: \(footer)")
+      let traffic = try await ui.value("(notice => notice.hidden ? '' : notice.textContent)(document.querySelector('#network-notice'))") as? String ?? ""
+      XCTAssertFalse(traffic.contains("dropped"), "\(size.name): Traffic reports no queue loss: \(traffic)")
+      XCTAssertFalse(traffic.contains("native_"), "\(size.name): vm reasons stay out of Traffic: \(traffic)")
+
+      try await show(ui, "signals")
+      let signal = try await ui.json("({kind: document.querySelector('#signal-notice').dataset.kind, text: document.querySelector('#signal-notice').textContent})")
+      XCTAssertNotEqual(signal["kind"] as? String, "partial", "\(size.name): a vm budget leaves fingerprint coverage complete: \(signal)")
+      XCTAssertFalse((signal["text"] as? String ?? "").contains("queue drop"), "\(size.name): \(signal)")
+
+      try await show(ui, "vm")
+      try await ui.waitUntil("!document.querySelector('#vm-notice').hidden", "VM capture limits did not render")
+      let vm = try await ui.json("({kind: document.querySelector('#vm-notice').dataset.kind, text: document.querySelector('#vm-notice').textContent})")
+      let text = vm["text"] as? String ?? ""
+      XCTAssertEqual(vm["kind"] as? String, "gap", "\(size.name): budgets mark VM coverage incomplete: \(vm)")
+      XCTAssertTrue(text.contains("Sampling budget reached"), "\(size.name): \(text)")
+      XCTAssertFalse(text.contains("queue"), "\(size.name): \(text)")
+      for reason in expected.namedGapReasons {
+        XCTAssertTrue(text.contains(reason), "\(size.name): VM Lab names \(reason): \(text)")
+      }
+      try await assertFullyVisible(ui, "#vm-notice", "\(size.name) VM capture limits")
+      try await assertInert(ui, "\(size.name) VM capture limits")
+      try await assertLayout(ui, "#screen-vm", "\(size.name) VM capture limits")
+      try await ui.screenshot("vm-capture-limits-\(size.name)")
+    }
   }
 
   @MainActor

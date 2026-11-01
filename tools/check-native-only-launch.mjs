@@ -174,8 +174,10 @@ exec ${quote(systemGrep)} "$@"
     'reb_wasm_call_indirect_dispatch', 'reb_wasm_guest_capture', 'reb_js_dispatch_capture'];
   // V8's flag table keeps each name as a NUL-terminated string among unrelated
   // bytes. A component framework names its re-exported library near the start.
+  // As in a real Mach-O, a newline byte and more than a pipe buffer of other
+  // bytes follow, so a probe that stops reading at the marker breaks its pipe.
   const image = ({names = [], marker = null} = {}) => Buffer.concat([Buffer.alloc(64, 0xcf),
-    Buffer.from(marker ? `\0${marker}\0` : ''), Buffer.alloc(4096, 0xfa),
+    Buffer.from(marker ? `\0${marker}\0\n` : ''), Buffer.alloc(marker ? 1 << 20 : 4096, 0xfa),
     ...names.map(name => Buffer.from(`\0${name}\0`)), Buffer.alloc(4096, 0xfa)]);
   const appName = 'Brave Browser Development';
   const version = '151.1.95.0';

@@ -266,6 +266,8 @@ locate_brave_v8_image() {
   if [[ ! -f "${framework}" ]]; then
     return 1
   fi
+  # Keep -c: with -q, grep exits at the first match, head dies of SIGPIPE,
+  # and pipefail would report a component build as a release build.
   if head -c 1048576 "${framework}" |
      LC_ALL=C grep -a -c -F -e '@rpath/libchrome_dll.dylib' -e '@rpath/libv8.dylib' >/dev/null; then
     if [[ ! -f "${bundle%/*}/libv8.dylib" ]]; then

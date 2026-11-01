@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import {readFile, access, mkdir, mkdtemp, realpath, writeFile, rm, symlink} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
-import {execFileSync, spawnSync} from 'node:child_process';
+import {execFileSync, spawn, spawnSync} from 'node:child_process';
 import {fileURLToPath} from 'node:url';
 import {dirname, join} from 'node:path';
 const root = fileURLToPath(new URL('..', import.meta.url));
@@ -138,12 +138,12 @@ try {
   const scans = at('scans');
   const started = at('started');
   const finished = at('finished');
-  const mode = {fail: at('mode-fail')};
+  const mode = {fail: at('mode-fail'), hold: at('mode-hold'), slow: at('mode-slow')};
   const bin = at('bin');
   await mkdir(bin);
-  // Record every grep the launcher runs. A flag scan can be forced to fail
-  // with status 2. Scans drop the launcher's pipes so a leaked reader cannot
-  // hold this check's output open.
+  // Record every grep the launcher runs. A flag scan can be forced to fail with
+  // status 2, park until it is stopped, or finish late. Scans drop the
+  // launcher's pipes so a leaked reader cannot hold this check's output open.
   const systemGrep = execFileSync('sh', ['-c', 'command -v grep'], {encoding:'utf8'}).trim();
   await writeFile(join(bin, 'grep'), `#!/bin/sh
 printf '%s\\n' "$*" >> ${quote(scans)}
@@ -151,6 +151,8 @@ case "$*" in
   *' -e reb_'*)
     exec >/dev/null 2>&1
     if [ -f ${quote(mode.fail)} ]; then exit 2; fi
+    if [ -f ${quote(mode.hold)} ]; then printf '%s\\n' "$$" >> ${quote(started)}; exec sleep 30; fi
+    if [ -f ${quote(mode.slow)} ]; then case "$*" in *reb_ignore_debugger_statements*) ;; *) sleep 1 ;; esac; fi
     ${quote(systemGrep)} "$@"
     status=$?
     printf '%s\\n' "$*" >> ${quote(finished)}
@@ -327,4 +329,40 @@ exec ${quote(systemGrep)} "$@"
   }
   console.log('PASS no V8 flag preflight runs when no native V8 flag is requested');
 
+  // A refusal decided by the first scan still waits for every other reader.
+  await writeFile(mode.slow, '');
+  const slow = await launchWith(none.executable, switches.packaged);
+  refused(slow, undefinedCause(none.executable, none.framework, packaged));
+  assert.deepEqual([...slow.finished].sort(), packaged.map(flag => scanOf(flag, none.framework)).sort());
+  await rm(mode.slow);
+  // Stopping the launcher mid-scan stops and reaps every reader.
+  await writeFile(mode.hold, '');
+  const alive = pid => {
+    try { process.kill(pid, 0); return true; }
+    catch (error) { if (error.code === 'ESRCH') return false; throw error; }
+  };
+  for (const [signal, code] of [['SIGTERM', 143], ['SIGINT', 130]]) {
+    await clearReceipts();
+    const child = spawn(shell, [join(root, 'scripts/run-live-session.sh')], {env:launchEnvironment(release.executable, switches.packaged)});
+    let output = '';
+    for (const pipe of [child.stdout, child.stderr]) pipe.on('data', chunk => { output += chunk; });
+    const exited = new Promise(resolveExit => child.once('exit', (exitCode, exitSignal) => resolveExit({exitCode, exitSignal})));
+    let readers = [];
+    for (const deadline = Date.now() + 10000; readers.length < packaged.length;) {
+      assert(Date.now() < deadline && child.exitCode === null, `Readers did not start: ${output}`);
+      await new Promise(resolvePause => setTimeout(resolvePause, 20));
+      readers = (await lines(started)).map(Number);
+    }
+    child.kill(signal);
+    let timer;
+    const result = await Promise.race([exited, new Promise((_, reject) => {
+      timer = setTimeout(() => reject(new Error(`Launcher survived ${signal}: ${output}`)), 8000);
+    })]);
+    clearTimeout(timer);
+    assert.deepEqual(result, {exitCode: code, exitSignal: null}, output);
+    for (const pid of readers) assert.equal(alive(pid), false, `${signal} left reader ${pid} running`);
+    assert.deepEqual(await lines(receipts), []);
+  }
+  await rm(mode.hold);
+  console.log('PASS refusal waits for every scan, and SIGTERM or SIGINT mid-scan stops and reaps every reader');
 } finally {await rm(preflight,{recursive:true,force:true});}

@@ -270,7 +270,16 @@ locate_brave_v8_image() {
   fi
 }
 
+# A stopped launcher must not leave readers behind. Recorded readers are
+# stopped; the bare wait also reaps one started just before its PID was saved.
 brave_v8_scan_pids=()
+stop_brave_v8_scans() {
+  local pid
+  for pid in ${brave_v8_scan_pids[@]+"${brave_v8_scan_pids[@]}"}; do
+    kill -TERM "${pid}" 2>/dev/null || true
+  done
+  wait 2>/dev/null || true
+}
 
 # V8 stops parsing --js-flags at the first name it does not define and ignores
 # every later entry, so a stale Brave would run a healthy-looking session with
@@ -288,6 +297,10 @@ require_brave_v8_flags() {
   if ! image="$(locate_brave_v8_image "${brave_binary}")"; then
     fail_live_session 1 "Cannot locate the V8 library of Brave at ${brave_binary}, so its native V8 flags cannot be checked. Set REB_BRAVE_BINARY to <App>.app/Contents/MacOS/<executable> inside a complete Brave build, not a wrapper script or an app copied away from its build output."
   fi
+  # No TERM or INT trap exists before this point; the launcher's own traps
+  # are installed later, so the default disposition is restored below.
+  trap 'stop_brave_v8_scans; exit 143' TERM
+  trap 'stop_brave_v8_scans; exit 130' INT
   for flag in "${native_js_flags[@]}"; do
     flag="${flag#--}"
     LC_ALL=C grep -a -q -F -e "${flag//-/_}" "${image}" &
@@ -307,6 +320,7 @@ require_brave_v8_flags() {
     index=$((index + 1))
   done
   brave_v8_scan_pids=()
+  trap - TERM INT
   if (( uninspected )); then
     fail_live_session 1 "Could not inspect ${image}, the V8 library of Brave at ${brave_binary}, for the requested native V8 flags. Check that the file is readable."
   fi

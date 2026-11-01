@@ -111,7 +111,8 @@ class ReleasePair(unittest.TestCase):
                        f"{downloads}/SHA256SUMS-{TAG}.txt", CDHASH, "a" * 40,
                        "Brave v1.95.52 and Chromium 151.0.7922.108", "not an official Brave release",
                        "not Apple-notarized", "consumer services", "dormant", "since v0.3.2",
-                       "REB_NATIVE_WASM_CALL_INDIRECT", "researcher-supplied"]:
+                       "REB_NATIVE_WASM_CALL_INDIRECT", "researcher-supplied",
+                       "defines every native V8 flag", "`REB_NATIVE_QUIET_MODE=0`"]:
             self.assertIn(phrase, notes)
         self.assertNotIn("\u2014", notes)
 

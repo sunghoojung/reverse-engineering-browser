@@ -346,7 +346,12 @@ exec ${quote(systemGrep)} "$@"
   await writeFile(join(at('links'), 'libv8.dylib'), image());
   accepted(await launchWith(join(at('links'), `${appName}.app/Contents/MacOS`, appName), switches.packaged),
     packaged, componentDll.libv8);
-  console.log('PASS release framework, component libv8.dylib and symlinked builds that define every flag pass the preflight');
+  // A universal executable repeats the same literal once per architecture.
+  const universal = await braveApp({framework: allNames});
+  await writeFile(universal.executable, `${await readFile(universal.executable, 'utf8')}` +
+    `# ../Frameworks/${appName} Framework.framework/Versions/${version}/${appName} Framework\n`, {mode:0o755});
+  accepted(await launchWith(universal.executable, switches.packaged), packaged, universal.framework);
+  console.log('PASS release, component, universal and symlinked builds that define every flag pass the preflight');
 
   for (const fixture of [stale, none]) {
     const result = await launchWith(fixture.executable, switches.none);

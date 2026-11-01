@@ -257,9 +257,10 @@ locate_brave_v8_image() {
   if [[ "${bundle}" != *.app || "${executable}" != "${bundle}/Contents/MacOS/${executable##*/}" ]]; then
     return 1
   fi
+  # A universal executable repeats the literal once per architecture slice.
   if ! loader_path="$(LC_ALL=C grep -a -o -e \
        '\.\./Frameworks/[^[:cntrl:]/]* Framework\.framework/Versions/[^[:cntrl:]/]*/[^[:cntrl:]/]* Framework' \
-       "${executable}")" || [[ "${loader_path}" == *$'\n'* ]]; then
+       "${executable}" | LC_ALL=C sort -u)" || [[ "${loader_path}" == *$'\n'* ]]; then
     return 1
   fi
   framework="${bundle}/Contents/${loader_path#../}"

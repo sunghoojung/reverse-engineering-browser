@@ -324,7 +324,13 @@ and leaves the stored-evidence interface available offline.
 
 The live session starts with whichever Brave Browser Development build is found,
 with no pairing prompt; a build without a native capture path simply records no
-events from it. A paired release identifies its own browser by bytes and code
+events from it. Native V8 switches are the exception, here and in `make live`,
+which share one launcher. V8 ignores an unknown `--js-flags` entry and every
+later one, so the session refuses to start, naming the browser and the first
+missing flag, when the build does not define every V8 flag it requests. Under
+the app's default switches a build from before the Wasm dispatch patch fails
+this way; rebuild Brave, use the matching release, or set that switch to `0`.
+A paired release identifies its own browser by bytes and code
 signature instead; see the
 [paired release procedure](../../docs/development/paired-release.md).
 Pass an explicit evidence-store or demo argument, or set

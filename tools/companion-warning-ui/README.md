@@ -17,7 +17,9 @@ The driver requires macOS and `CI=true`, builds no browser, and owns an inert,
 unsigned `com.brave.Browser.development` application whose executable records
 one line and exits. The paired release workflow supplies the built app. This
 test proves the launch boundary and its decisions; it does **not** establish
-native browser compatibility or capture completeness.
+native browser compatibility or capture completeness. The runner turns off the
+native V8 switches, because the launcher refuses a browser that does not define
+a requested V8 flag and the inert fixture contains no V8.
 
 The driver passes these environment variables to the test runner through
 Xcode's `TEST_RUNNER_` prefix:

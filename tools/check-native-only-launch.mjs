@@ -255,10 +255,10 @@ exec ${quote(systemGrep)} "$@"
     REB_CAPTURE_CATEGORY_MASK:'4095', REB_NATIVE_QUIET_MODE:'0', REB_NATIVE_WASM_DISPATCH:'0',
     REB_NATIVE_WASM_CALL_INDIRECT:'0', REB_NATIVE_WASM_GUEST_ADAPTER:'', REB_NATIVE_JS_DISPATCH_SITES:'', ...requested});
   const clearReceipts = () => Promise.all([receipts, scans, started, finished].map(file => rm(file, {force:true})));
-  const launchWith = async (executable, requested) => {
+  const launchWith = async (executable, requested, cwd) => {
     await clearReceipts();
     const result = spawnSync(shell, [join(root, 'scripts/run-live-session.sh')],
-      {encoding:'utf8', env:launchEnvironment(executable, requested)});
+      {cwd, encoding:'utf8', env:launchEnvironment(executable, requested)});
     const allScans = await lines(scans);
     return {...result, receipts: await lines(receipts), finished: await lines(finished), allScans,
       scans: allScans.filter(line => line.includes(' -e reb_'))};
@@ -346,12 +346,15 @@ exec ${quote(systemGrep)} "$@"
   await writeFile(join(at('links'), 'libv8.dylib'), image());
   accepted(await launchWith(join(at('links'), `${appName}.app/Contents/MacOS`, appName), switches.packaged),
     packaged, componentDll.libv8);
+  // A relative path still resolves when an exported CDPATH makes cd print.
+  accepted(await launchWith(`${appName}.app/Contents/MacOS/${appName}`, {...switches.packaged, CDPATH:'.'},
+    release.output), packaged, release.framework);
   // A universal executable repeats the same literal once per architecture.
   const universal = await braveApp({framework: allNames});
   await writeFile(universal.executable, `${await readFile(universal.executable, 'utf8')}` +
     `# ../Frameworks/${appName} Framework.framework/Versions/${version}/${appName} Framework\n`, {mode:0o755});
   accepted(await launchWith(universal.executable, switches.packaged), packaged, universal.framework);
-  console.log('PASS release, component, universal and symlinked builds that define every flag pass the preflight');
+  console.log('PASS release, component, universal, relative and symlinked builds that define every flag pass the preflight');
 
   for (const fixture of [stale, none]) {
     const result = await launchWith(fixture.executable, switches.none);

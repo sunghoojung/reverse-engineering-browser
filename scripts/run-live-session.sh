@@ -197,7 +197,9 @@ resolve_physical_path() {
     fi
     path="${link}"
   done
-  printf '%s/%s\n' "$(cd -P "$(dirname "${path}")" && pwd -P)" "$(basename "${path}")"
+  # With an exported CDPATH, cd prints a directory it finds, which would land in
+  # this result.
+  printf '%s/%s\n' "$(CDPATH='' cd -P -- "$(dirname "${path}")" && pwd -P)" "$(basename "${path}")"
 }
 if ! brave_binary="$(resolve_physical_path "${brave_binary}")"; then
   fail_live_session 1 "Could not resolve the Brave executable path. Set REB_BRAVE_BINARY to the executable inside a complete Brave build."

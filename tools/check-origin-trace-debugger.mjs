@@ -86,8 +86,8 @@ function factsReferenceFixture(source) {
   const report = {schema:'reb-javascript-source-facts-v1',profile:'lexical-effects-v1',offset_unit:'utf-8-byte',source_bytes:bytes.length,source,ok:true,scopes,
     bindings:[binding(0,'雪','let',0),binding(1,'雪','parameter',1,text.indexOf('shadow')),binding(2,'duplicate','var',0),binding(3,'duplicate','var',0,text.indexOf('duplicate;')+10),binding(4,'spare','const',0)],callables:[],
     regions:scopes.map(({id,range})=>({id,parent_id:id?0:null,callable_id:null,range,kind:id?'conditional-then':'program',entry_order:id})),operations,
-    coverage:{status:'partial',truncated:false,diagnostics:[],frontiers:[{range:range('duplicate()'),reason:'unknown-call-mutation-or-throw'}]},
-    limits:{max_source_bytes:4194304,max_ast_nodes:32768,max_facts:16384,max_frontiers:256,max_binding_candidates:64,preflight_depth:128,preflight_nodes:500000}};
+    coverage:{status:'partial',truncated:false,diagnostics:[],frontiers:[{range:range('duplicate()'),reason:'unknown-call-mutation-or-throw'}],analyzed_range:full},
+    limits:{max_source_bytes:4194304,max_ast_nodes:262144,max_facts:16384,max_frontiers:256,max_binding_candidates:64,preflight_depth:128,preflight_nodes:500000}};
   return {text,bytes,report};
 }
 const references = factsReferenceFixture();
@@ -228,7 +228,7 @@ const factsArtifact = {source_type:'artifact', protocol_version:1, artifact_id:'
 const factsFixture = source => ({schema:'reb-javascript-source-facts-v1', profile:'lexical-effects-v1', offset_unit:'utf-8-byte', source_bytes:source.byte_size, ok:true,
   source:Object.fromEntries(Object.entries(source).filter(([key]) => key !== 'source_type')),
   scopes:[{id:0,parent_id:null,range:{start:0,end:source.byte_size},kind:'program'}], bindings:[], callables:[], regions:[{id:0,parent_id:null,callable_id:null,range:{start:0,end:source.byte_size},kind:'program',entry_order:0}], operations:[],
-  coverage:{status:'complete',truncated:false,frontiers:[],diagnostics:[]}, limits:{max_source_bytes:4194304,max_ast_nodes:32768,max_facts:16384,max_frontiers:256,max_binding_candidates:64,preflight_depth:128,preflight_nodes:500000}});
+  coverage:{status:'complete',truncated:false,frontiers:[],diagnostics:[],analyzed_range:{start:0,end:source.byte_size}}, limits:{max_source_bytes:4194304,max_ast_nodes:262144,max_facts:16384,max_frontiers:256,max_binding_candidates:64,preflight_depth:128,preflight_nodes:500000}});
 assert.equal(sourceFactsUI.sourceFactsUnavailable(factsArtifact, 'http:'), '');
 assert.match(sourceFactsUI.sourceFactsUnavailable(factsArtifact, 'reb:'), /stored-evidence native mode/);
 assert.match(sourceFactsUI.sourceFactsUnavailable({...factsArtifact,source_type:'script'}, 'http:'), /captured JavaScript/);
@@ -2341,8 +2341,8 @@ async function sourceFactsBrowserFixture() {
     regions:fixture.mode==='unavailable'?[]:[{id:0,parent_id:null,callable_id:null,range:{start:0,end:bytes.length},kind:'program',entry_order:0}],
     bindings:fixture.mode==='unavailable'?[]:[{id:0,scope_id:0,name:'雪',range:{start:snow,end:snow+3},kind:'const'}],callables:[],
     operations:fixture.mode==='unavailable'?[]:Array.from({length:205},(_,id)=>({id,region_id:0,order:id,range:{start:snow,end:snow+3},kind:'read',detail:{target:{kind:'binding',binding_ids:[0],resolution:'lexical-only',name:'雪'}}})),
-    coverage:{status:fixture.mode==='unavailable'?'unavailable':fixture.mode==='complete'?'complete':'partial',truncated:fixture.mode==='truncated',diagnostics:fixture.mode==='unavailable'?['Synthetic parse rejection']:[],frontiers:['unavailable','complete'].includes(fixture.mode)?[]:[{range:{start:snow,end:snow+3},reason:'abrupt-completion'}]},
-    limits:{max_source_bytes:4194304,max_ast_nodes:32768,max_facts:16384,max_frontiers:256,max_binding_candidates:64,preflight_depth:128,preflight_nodes:500000}});
+    coverage:{status:fixture.mode==='unavailable'?'unavailable':fixture.mode==='complete'?'complete':'partial',truncated:fixture.mode==='truncated',diagnostics:fixture.mode==='unavailable'?['Synthetic parse rejection']:[],frontiers:['unavailable','complete'].includes(fixture.mode)?[]:[{range:{start:snow,end:snow+3},reason:'abrupt-completion'}],analyzed_range:{start:0,end:bytes.length}},
+    limits:{max_source_bytes:4194304,max_ast_nodes:262144,max_facts:16384,max_frontiers:256,max_binding_candidates:64,preflight_depth:128,preflight_nodes:500000}});
   fixture.handle = async (request,response) => {
     const url = new URL(request.url,'http://127.0.0.1');
     const json = (status,value) => {if(!response.destroyed){response.writeHead(status,{'Content-Type':'application/json'});response.end(JSON.stringify(value));}};

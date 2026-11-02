@@ -89,7 +89,10 @@ fn valid_targets(value: &Value, bindings: &BTreeSet<u64>, callables: &BTreeSet<u
     }
 }
 
-pub fn validate(source: &str, response: &Value) -> Result<()> {
+/// `region` is the half-open original byte range the caller asked for, if any.
+/// It is passed in rather than recovered from the response so the declared
+/// coverage can be checked against the request instead of trusted.
+pub fn validate(source: &str, region: Option<(usize, usize)>, response: &Value) -> Result<()> {
     validation::schema("JavaScriptSourceFactsWorker", response, 502).map_err(|_| invalid())?;
     if response["source_bytes"].as_u64() != Some(source.len() as u64)
         || !valid_ranges(source, response)
@@ -97,6 +100,23 @@ pub fn validate(source: &str, response: &Value) -> Result<()> {
         || (response["coverage"]["truncated"] == true
             && response["coverage"]["status"] == "complete")
     {
+        return Err(invalid());
+    }
+    // An unscoped request must analyze the whole verified source, a scoped one
+    // must analyze a range that contains what was asked, and facts covering
+    // less than the whole source can never be reported as complete coverage.
+    let analyzed = &response["coverage"]["analyzed_range"];
+    let start = analyzed["start"].as_u64().ok_or_else(invalid)?;
+    let end = analyzed["end"].as_u64().ok_or_else(invalid)?;
+    let whole = start == 0 && end == source.len() as u64;
+    match region {
+        None if !whole => return Err(invalid()),
+        Some((first, last)) if start > first as u64 || end < last as u64 => {
+            return Err(invalid());
+        }
+        _ => {}
+    }
+    if !whole && response["coverage"]["status"] == "complete" {
         return Err(invalid());
     }
     let mut tables = Vec::new();

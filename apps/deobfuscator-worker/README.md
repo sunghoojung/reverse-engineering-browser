@@ -125,6 +125,12 @@ The `source_facts` operation reuses this worker's preflight and Oxc parser to
 return bounded lexical declarations, callable ranges and evaluation-region
 facts over the exact supplied bytes. The public API binds them to a verified
 immutable artifact; worker-local IDs alone are not cross-source identities.
+An optional `region` narrows the work to the innermost callable body containing
+that original byte range, which is how a bundle too large for the whole-program
+budgets still yields facts for one callable. The range is resolved inside the
+parse of the complete source; a byte slice is never parsed on its own, and
+scopes holding syntax the report skipped stop resolving names instead of
+guessing at them.
 See [JavaScript source facts v1](../../protocol/javascript-source-facts-v1.md)
 for the API/CLI, byte coordinates, budgets, unknown frontiers and deliberately
 limited meaning of ordering and binding resolution. The operation does not

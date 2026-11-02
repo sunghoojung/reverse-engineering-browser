@@ -388,23 +388,52 @@ impl App {
             "/api/local-analyst/runner" => self.analyst.state(),
             "/api/source-facts" => {
                 // Never infer identity from a URL, live script, or selected UI row.
-                if q.0
-                    .keys()
-                    .any(|key| !["session_id", "artifact_id"].contains(&key.as_str()))
-                {
+                if q.0.keys().any(|key| {
+                    ![
+                        "session_id",
+                        "artifact_id",
+                        "region_start_byte",
+                        "region_end_byte",
+                    ]
+                    .contains(&key.as_str())
+                }) {
                     return Err(Error::bad(
-                        "Source facts require only session_id and artifact_id",
+                        "Source facts require session_id and artifact_id with an optional region",
                     ));
                 }
                 q.number("session_id", None, 64, false)?;
                 q.number("artifact_id", None, 64, false)?;
+                // A region narrows analysis of the same verified bytes. Half a
+                // range is a caller mistake, not a default to invent.
+                let region = match (q.one("region_start_byte")?, q.one("region_end_byte")?) {
+                    (None, None) => None,
+                    (Some(_), Some(_)) => Some((
+                        q.number("region_start_byte", None, 32, false)? as usize,
+                        q.number("region_end_byte", None, 32, false)? as usize,
+                    )),
+                    _ => {
+                        return Err(Error::bad(
+                            "A source facts region requires region_start_byte and region_end_byte",
+                        ));
+                    }
+                };
                 let session = q.required("session_id")?.to_owned();
                 let id = q.required("artifact_id")?.to_owned();
                 let root = self.options.artifacts.clone();
                 let (source, identity) = self
                     .blocking(move || source_facts::load(&root, &session, &id))
                     .await?;
-                let mut result = self.deobfuscator.source_facts(&source).await?;
+                if let Some((start, end)) = region
+                    && (start > end
+                        || end > source.len()
+                        || !source.is_char_boundary(start)
+                        || !source.is_char_boundary(end))
+                {
+                    return Err(Error::bad(
+                        "A source facts region must be an original byte range in this artifact",
+                    ));
+                }
+                let mut result = self.deobfuscator.source_facts(&source, region).await?;
                 result["source"] = identity;
                 result
             }

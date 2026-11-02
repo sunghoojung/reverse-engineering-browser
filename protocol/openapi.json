@@ -3259,7 +3259,7 @@
       "get": {
         "operationId": "get_source_facts",
         "summary": "Get exact JavaScript source facts",
-        "description": "Requires exact session_id and artifact_id for an immutable JavaScript artifact. The complete blob must pass size and SHA256 verification and strict UTF-8 decoding. Rejects extra parameters, live scripts, ambiguous manifests, oversized source and identity mismatch without a fallback. Unavailable/partial lexical coverage is a successful structured result; inspect ok and coverage.",
+        "description": "Requires exact session_id and artifact_id for an immutable JavaScript artifact. The complete blob must pass size and SHA256 verification and strict UTF-8 decoding. Rejects extra parameters, live scripts, ambiguous manifests, oversized source and identity mismatch without a fallback. The optional region pair narrows analysis to the innermost callable body containing that original byte range, so a bundle whose whole-program analysis reaches a budget can still produce facts for one callable; coverage.analyzed_range reports what was analyzed and references leaving it stay explicitly unresolved. Unavailable/partial lexical coverage is a successful structured result; inspect ok and coverage.",
         "tags": [
           "source-facts"
         ],
@@ -3392,6 +3392,24 @@
             "schema": {
               "$ref": "#/components/schemas/Uint64String"
             }
+          },
+          {
+            "name": "region_start_byte",
+            "in": "query",
+            "required": false,
+            "description": "Optional inclusive start of an original UTF-8 byte range inside the verified source, at a Unicode scalar boundary. Requires region_end_byte. The analysis unit is the innermost callable body containing the range, never the byte slice itself.",
+            "schema": {
+              "$ref": "#/components/schemas/Uint64String"
+            }
+          },
+          {
+            "name": "region_end_byte",
+            "in": "query",
+            "required": false,
+            "description": "Optional exclusive end of the same original UTF-8 byte range, at a Unicode scalar boundary and at or after region_start_byte. Requires region_start_byte. Equal offsets address one cursor position.",
+            "schema": {
+              "$ref": "#/components/schemas/Uint64String"
+            }
           }
         ],
         "x-reb-execution": {
@@ -3408,7 +3426,10 @@
               "when": "The bounded local JavaScript worker process group is cleaned up on completion or failure."
             }
           ],
-          "uncertainties": [],
+          "uncertainties": [
+            "A reached budget returns empty fact tables rather than resolutions against an incomplete declaration table, so absent facts are never evidence that the syntax is absent.",
+            "Region-scoped coverage is partial by construction: names that leave the analyzed callable body are reported outside-analyzed-region, which does not distinguish a skipped sibling declaration from a genuine global."
+          ],
           "prerequisites": [
             {
               "id": "local-request",
@@ -3417,6 +3438,10 @@
             {
               "id": "exact-source",
               "condition": "Exact session_id and artifact_id select one verified immutable UTF-8 JavaScript artifact of at most 4 MiB."
+            },
+            {
+              "id": "region-in-source",
+              "condition": "A supplied region pair must be a complete half-open original byte range inside the verified source, at Unicode scalar boundaries."
             },
             {
               "id": "deobfuscator-ready",
@@ -17609,7 +17634,8 @@
               "template-substitution-coercion",
               "tagged-template-call-effects",
               "unsupported-expression-effects",
-              "resource-disposal-effects"
+              "resource-disposal-effects",
+              "outside-analyzed-region"
             ]
           }
         }
@@ -17621,7 +17647,8 @@
           "status",
           "truncated",
           "diagnostics",
-          "frontiers"
+          "frontiers",
+          "analyzed_range"
         ],
         "properties": {
           "status": {
@@ -17648,6 +17675,16 @@
             "items": {
               "$ref": "#/components/schemas/JavaScriptSourceFrontier"
             }
+          },
+          "analyzed_range": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/JavaScriptSourceRange"
+              },
+              {
+                "description": "Original bytes these facts cover. It is the whole program unless a requested region resolved to one enclosing callable body, it always contains the requested region, and a narrower range can never carry complete status."
+              }
+            ]
           }
         }
       },
@@ -17741,7 +17778,7 @@
                 "const": 4194304
               },
               "max_ast_nodes": {
-                "const": 32768
+                "const": 262144
               },
               "max_facts": {
                 "const": 16384
@@ -17925,7 +17962,7 @@
                 "const": 4194304
               },
               "max_ast_nodes": {
-                "const": 32768
+                "const": 262144
               },
               "max_facts": {
                 "const": 16384
@@ -18144,7 +18181,8 @@
                   "external-or-implicit",
                   "implicit-arguments-environment",
                   "this-environment",
-                  "binding-candidate-limit"
+                  "binding-candidate-limit",
+                  "outside-analyzed-region"
                 ]
               },
               "name": {

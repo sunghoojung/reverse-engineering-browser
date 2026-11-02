@@ -5007,12 +5007,13 @@ fn source_facts_document(source: &str) -> Value {
     json!({
         "schema":"reb-javascript-source-facts-v1", "ok":true,
         "source_bytes":source.len(), "offset_unit":"utf-8-byte", "profile":"lexical-effects-v1",
-        "coverage":{"status":"complete","truncated":false,"diagnostics":[],"frontiers":[]},
+        "coverage":{"status":"complete","truncated":false,"diagnostics":[],"frontiers":[],
+            "analyzed_range":{"start":0,"end":source.len()}},
         "scopes":[{"id":0,"parent_id":null,"range":{"start":0,"end":source.len()},"kind":"program"}],
         "bindings":[], "callables":[],
         "regions":[{"id":0,"parent_id":null,"callable_id":null,"range":{"start":0,"end":source.len()},"kind":"program","entry_order":0}],
         "operations":[],
-        "limits":{"max_source_bytes":4194304,"max_ast_nodes":32768,"max_facts":16384,"max_frontiers":256,"max_binding_candidates":64,"preflight_depth":128,"preflight_nodes":500000}
+        "limits":{"max_source_bytes":4194304,"max_ast_nodes":262144,"max_facts":16384,"max_frontiers":256,"max_binding_candidates":64,"preflight_depth":128,"preflight_nodes":500000}
     })
 }
 
@@ -5139,7 +5140,7 @@ async fn source_facts_http_and_cli_preserve_exact_identity_and_coverage() {
 
     for (status, ok, truncated) in [("partial", true, true), ("unavailable", false, false)] {
         let mut partial = source_facts_document(source);
-        partial["coverage"] = json!({"status":status,"truncated":truncated,"diagnostics":["Synthetic coverage limit"],"frontiers":[{"range":{"start":0,"end":source.len()},"reason":"unsupported-expression-effects"}]});
+        partial["coverage"] = json!({"status":status,"truncated":truncated,"diagnostics":["Synthetic coverage limit"],"frontiers":[{"range":{"start":0,"end":source.len()},"reason":"unsupported-expression-effects"}],"analyzed_range":{"start":0,"end":source.len()}});
         partial["ok"] = json!(ok);
         if status == "unavailable" {
             for table in ["scopes", "bindings", "callables", "regions", "operations"] {
@@ -5307,6 +5308,26 @@ async fn source_facts_reject_unavailable_or_invalid_worker_without_fallback() {
             v
         },
         {
+            // An unscoped request must analyze the whole verified source.
+            let mut v = valid.clone();
+            v["coverage"]["analyzed_range"] = json!({"start":1,"end":source.len()});
+            v["coverage"]["status"] = json!("partial");
+            v
+        },
+        {
+            let mut v = valid.clone();
+            v["coverage"]["analyzed_range"] = json!({"start":0,"end":source.len() + 1});
+            v
+        },
+        {
+            let mut v = valid.clone();
+            v["coverage"]
+                .as_object_mut()
+                .unwrap()
+                .remove("analyzed_range");
+            v
+        },
+        {
             let mut v = valid.clone();
             v["ok"] = json!(false);
             v
@@ -5328,6 +5349,177 @@ async fn source_facts_reject_unavailable_or_invalid_worker_without_fallback() {
     assert_eq!(server.get(path).await.status(), 502);
     std::fs::remove_file(&worker).unwrap();
     assert_contract_response(server.get(path).await, "get", "/api/source-facts", 503).await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn source_facts_region_narrows_analysis_without_weakening_coverage() {
+    let directory = tempfile::tempdir().unwrap();
+    let response_path = directory.path().join("response.json");
+    let request_path = directory.path().join("request.json");
+    let worker = source_facts_worker(
+        directory.path(),
+        &format!(
+            "printf '%s' \"$request\" > '{}'; /bin/cat '{}'",
+            request_path.display(),
+            response_path.display()
+        ),
+    );
+    let server =
+        Server::start_with_args(&["--deobfuscator".into(), worker.display().to_string()]).await;
+    let source = "var o=1; function f(a){ return a+o; }";
+    let declaration = source.find("function").unwrap();
+    let body = source.find('{').unwrap();
+    put_source_facts_artifact(&server, source.as_bytes(), "javascript");
+
+    // One callable body: the enclosing structure is retained, the skipped
+    // prefix is an explicit frontier, and `o` never resolves against the glue
+    // scope this report did not analyze.
+    let mut scoped = source_facts_document(source);
+    scoped["coverage"] = json!({"status":"partial","truncated":false,
+        "diagnostics":["analysis covered coverage.analyzed_range only; omitted syntax remains unknown"],
+        "frontiers":[{"range":{"start":0,"end":declaration},"reason":"outside-analyzed-region"}],
+        "analyzed_range":{"start":body,"end":source.len()}});
+    scoped["scopes"] = json!([
+        {"id":0,"parent_id":null,"range":{"start":0,"end":source.len()},"kind":"program"},
+        {"id":1,"parent_id":0,"range":{"start":declaration,"end":source.len()},"kind":"function"}]);
+    scoped["bindings"] = json!([
+        {"id":0,"scope_id":1,"name":"a","range":{"start":body - 2,"end":body - 1},"kind":"parameter"}]);
+    scoped["callables"] = json!([
+        {"id":0,"scope_id":1,"range":{"start":declaration,"end":source.len()},
+         "body_range":{"start":body,"end":source.len()},"kind":"function","async":false,"generator":false}]);
+    scoped["regions"] = json!([
+        {"id":0,"parent_id":null,"callable_id":null,"range":{"start":0,"end":source.len()},"kind":"program","entry_order":0},
+        {"id":1,"parent_id":0,"callable_id":0,"range":{"start":body,"end":source.len()},"kind":"callable-body","entry_order":0}]);
+    scoped["operations"] = json!([
+        {"id":0,"region_id":1,"order":0,"range":{"start":body + 9,"end":body + 10},"kind":"read",
+         "detail":{"target":{"kind":"binding","binding_ids":[0],"resolution":"lexical-only","name":"a"}}},
+        {"id":1,"region_id":1,"order":1,"range":{"start":body + 11,"end":body + 12},"kind":"read",
+         "detail":{"target":{"kind":"unresolved","binding_ids":[],"resolution":"outside-analyzed-region","name":"o"}}}]);
+    std::fs::write(&response_path, scoped.to_string()).unwrap();
+    let query = format!(
+        "?session_id=11&artifact_id=7&region_start_byte={}&region_end_byte={}",
+        body + 9,
+        body + 10
+    );
+    let bytes = assert_contract_response(
+        server.get(&format!("/api/source-facts{query}")).await,
+        "get",
+        "/api/source-facts",
+        200,
+    )
+    .await;
+    let result: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(result["coverage"], scoped["coverage"]);
+    assert_eq!(result["ok"], true);
+    // The requested range reaches the worker unchanged and selects nothing else.
+    let forwarded: Value = serde_json::from_slice(&std::fs::read(&request_path).unwrap()).unwrap();
+    assert_eq!(
+        forwarded["region"],
+        json!({"start":body + 9,"end":body + 10})
+    );
+    assert_eq!(forwarded["source"], source);
+
+    let output = Command::new(env!("CARGO_BIN_EXE_reb-api"))
+        .args([
+            "call",
+            "get_source_facts",
+            "--base-url",
+            &server.url,
+            "--param",
+            "session_id=11",
+            "--param",
+            "artifact_id=7",
+            "--param",
+            &format!("region_start_byte={}", body + 9),
+            "--param",
+            &format!("region_end_byte={}", body + 10),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        serde_json::from_slice::<Value>(&output.stdout).unwrap(),
+        result
+    );
+
+    // An unscoped request against the same worker response is refused: the
+    // narrower coverage claim does not answer what was asked.
+    assert_eq!(
+        server
+            .get("/api/source-facts?session_id=11&artifact_id=7")
+            .await
+            .status(),
+        502
+    );
+    for (start, end) in [(0, source.len()), (declaration, body + 1)] {
+        // A coverage claim must contain the requested range.
+        assert_eq!(
+            server
+                .get(&format!(
+                    "/api/source-facts?session_id=11&artifact_id=7&region_start_byte={start}&region_end_byte={end}"
+                ))
+                .await
+                .status(),
+            502
+        );
+    }
+    let mut complete = scoped.clone();
+    complete["coverage"]["status"] = json!("complete");
+    complete["coverage"]["diagnostics"] = json!([]);
+    complete["coverage"]["frontiers"] = json!([]);
+    std::fs::write(&response_path, complete.to_string()).unwrap();
+    assert_eq!(
+        server
+            .get(&format!("/api/source-facts{query}"))
+            .await
+            .status(),
+        502
+    );
+
+    // A region that no callable body contains legitimately analyzes everything.
+    let mut whole = source_facts_document(source);
+    whole["coverage"]["diagnostics"] = json!([]);
+    std::fs::write(&response_path, whole.to_string()).unwrap();
+    assert_contract_response(
+        server
+            .get("/api/source-facts?session_id=11&artifact_id=7&region_start_byte=0&region_end_byte=1")
+            .await,
+        "get",
+        "/api/source-facts",
+        200,
+    )
+    .await;
+
+    let multibyte = "const café = 1; café;";
+    put_source_facts_artifact(&server, multibyte.as_bytes(), "javascript");
+    std::fs::write(&response_path, source_facts_document(multibyte).to_string()).unwrap();
+    for query in [
+        "&region_start_byte=0",
+        "&region_end_byte=4",
+        "&region_start_byte=00&region_end_byte=4",
+        "&region_start_byte=4&region_end_byte=0",
+        "&region_start_byte=0&region_end_byte=99",
+        // Inside the two-byte é: not an original byte boundary.
+        "&region_start_byte=10&region_end_byte=11",
+        "&region_start_byte=0&region_end_byte=4&region_end_byte=5",
+    ] {
+        assert_contract_response(
+            server
+                .get(&format!(
+                    "/api/source-facts?session_id=11&artifact_id=7{query}"
+                ))
+                .await,
+            "get",
+            "/api/source-facts",
+            400,
+        )
+        .await;
+    }
 }
 
 #[cfg(unix)]
@@ -5424,6 +5616,58 @@ async fn source_facts_real_worker_http_and_cli() {
         serde_json::from_slice::<Value>(&output.stdout).unwrap(),
         value
     );
+    // The same verified bytes, scoped to the innermost callable body holding a
+    // cursor. The worker selects the analysis unit; the adapter checks the claim.
+    let cursor = source.find("return café").unwrap();
+    let bytes = assert_contract_response(
+        server
+            .get(&format!(
+                "{path}&region_start_byte={cursor}&region_end_byte={cursor}"
+            ))
+            .await,
+        "get",
+        "/api/source-facts",
+        200,
+    )
+    .await;
+    let scoped: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(scoped["ok"], true);
+    assert_eq!(scoped["coverage"]["status"], "partial");
+    assert_eq!(scoped["coverage"]["truncated"], false);
+    let analyzed = &scoped["coverage"]["analyzed_range"];
+    assert_eq!(
+        &source[analyzed["start"].as_u64().unwrap() as usize
+            ..analyzed["end"].as_u64().unwrap() as usize],
+        "{ if (value) return café; return; }"
+    );
+    assert_eq!(scoped["callables"].as_array().unwrap().len(), 1);
+    assert!(
+        scoped["bindings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|binding| binding["name"] == "value")
+    );
+    // The closed table of the selected body resolves its own parameter; the
+    // outer declaration this report skipped stays an explicit unknown.
+    let resolution = |name: &str| {
+        scoped["operations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|op| op["detail"]["target"]["name"] == name)
+            .map(|op| op["detail"]["target"]["resolution"].clone())
+            .collect::<Vec<_>>()
+    };
+    assert!(resolution("value").iter().all(|r| r == "lexical-only"));
+    assert!(!resolution("value").is_empty());
+    assert!(
+        resolution("café")
+            .iter()
+            .all(|r| r == "outside-analyzed-region")
+    );
+    assert!(!resolution("café").is_empty());
+
     put_source_facts_artifact(&server, b"function broken(", "javascript");
     let bytes =
         assert_contract_response(server.get(path).await, "get", "/api/source-facts", 200).await;

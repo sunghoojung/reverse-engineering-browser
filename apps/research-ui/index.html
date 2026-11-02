@@ -16,31 +16,30 @@
         <span id="session-mode" class="session-mode">Connecting</span>
       </header>
 
-      <div class="toolbar">
+      <aside class="sidebar" aria-label="Origin Trace">
         <div id="capture-state" class="capture-state" role="status"><span class="pulse" aria-hidden="true"></span><span>Connecting</span></div>
         <nav class="primary-nav" aria-label="Workspace">
-          <span class="nav-heading">Workspace</span>
-          <button class="nav-button" data-screen="traffic" aria-current="page"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M3 5h14M3 10h10M3 15h14"/></svg><span>Traffic</span></button>
-          <button class="nav-button" data-screen="api-collection"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M3 4h6l2 3h6v10H3z"/></svg><span>Collection</span></button>
-          <button class="nav-button" data-screen="sources"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="m7 5-5 5 5 5m6-10 5 5-5 5"/></svg><span>Sources</span></button>
-          <button id="nav-vm-workspace" class="nav-button" type="button" data-screen="vm" aria-controls="screen-vm" aria-label="VM workspace" title="VM workspace">VM</button>
-          <button id="native-console-toggle" class="nav-button" aria-controls="native-console-panel" aria-expanded="false" aria-pressed="false" title="Toggle console (⌘ / Ctrl + J)"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="m3 5 5 5-5 5m8 0h6"/></svg><span>Console</span></button>
-          <button class="nav-button" data-screen="signals"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M4 10a6 6 0 0 1 12 0m-9 0a3 3 0 0 1 6 0v4m-3-4v7M4 13v2m12-2v2"/></svg><span>Fingerprinting</span></button>
-          <details id="advanced-navigation" class="advanced-navigation">
-            <summary>Advanced</summary>
-            <div class="advanced-items">
-          <button class="nav-button" data-screen="backtrace"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M5 3v9a3 3 0 0 0 3 3h9m-4-4 4 4-4 4"/></svg><span>Backtraces</span></button>
-
-          <button class="nav-button" data-screen="analyst"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="m4 5 4 5-4 5m7 0h5"/></svg><span>Analyst</span></button>
-          <button class="nav-button" data-screen="tools"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M4 3v6m-2-3h4m7 5v6m-2-3h4M13 3v4M4 13v4"/></svg><span>Tools</span></button>
-            </div>
-          </details>
+          <div class="nav-group" role="group" aria-labelledby="nav-group-evidence">
+            <span id="nav-group-evidence" class="nav-heading">Evidence</span>
+            <button class="nav-button" type="button" data-screen="traffic" aria-current="page" aria-label="Traffic" aria-keyshortcuts="Meta+1 Control+1" title="Traffic (⌘ / Ctrl + 1)"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M3 5h14M3 10h10M3 15h14"/></svg><span class="nav-label">Traffic</span><kbd class="nav-shortcut" aria-hidden="true">1</kbd></button>
+            <button class="nav-button" type="button" data-screen="sources" aria-label="Sources" aria-keyshortcuts="Meta+2 Control+2" title="Sources (⌘ / Ctrl + 2)"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="m7 5-5 5 5 5m6-10 5 5-5 5"/></svg><span class="nav-label">Sources</span><kbd class="nav-shortcut" aria-hidden="true">2</kbd></button>
+            <button class="nav-button" type="button" data-screen="vm" id="nav-vm-workspace" aria-controls="screen-vm" aria-label="VM" aria-keyshortcuts="Meta+3 Control+3" title="VM (⌘ / Ctrl + 3)"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M6 6h8v8H6zM8 3v3m4-3v3M8 14v3m4-3v3M3 8h3m-3 4h3m8-4h3m-3 4h3"/></svg><span class="nav-label">VM</span><kbd class="nav-shortcut" aria-hidden="true">3</kbd></button>
+            <button class="nav-button" type="button" data-screen="signals" aria-label="Fingerprinting" aria-keyshortcuts="Meta+4 Control+4" title="Fingerprinting (⌘ / Ctrl + 4)"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M4 10a6 6 0 0 1 12 0m-9 0a3 3 0 0 1 6 0v4m-3-4v7M4 13v2m12-2v2"/></svg><span class="nav-label">Fingerprinting</span><kbd class="nav-shortcut" aria-hidden="true">4</kbd></button>
+            <button class="nav-button" type="button" data-screen="backtrace" aria-label="Backtraces" aria-keyshortcuts="Meta+5 Control+5" title="Backtraces (⌘ / Ctrl + 5)"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M5 3v9a3 3 0 0 0 3 3h9m-4-4 4 4-4 4"/></svg><span class="nav-label">Backtraces</span><kbd class="nav-shortcut" aria-hidden="true">5</kbd></button>
+          </div>
+          <div class="nav-group" role="group" aria-labelledby="nav-group-workbench">
+            <span id="nav-group-workbench" class="nav-heading">Workbench</span>
+            <button class="nav-button" type="button" data-screen="api-collection" aria-label="Collection" aria-keyshortcuts="Meta+6 Control+6" title="Collection (⌘ / Ctrl + 6)"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M3 4h6l2 3h6v10H3z"/></svg><span class="nav-label">Collection</span><kbd class="nav-shortcut" aria-hidden="true">6</kbd></button>
+            <button class="nav-button" type="button" data-screen="analyst" aria-label="Analyst" aria-keyshortcuts="Meta+7 Control+7" title="Analyst (⌘ / Ctrl + 7)"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M6 3h6l4 4v10H6zm6 0v4h4M8 11h5m-5 3h3"/></svg><span class="nav-label">Analyst</span><kbd class="nav-shortcut" aria-hidden="true">7</kbd></button>
+            <button class="nav-button" type="button" data-screen="tools" aria-label="Tools" aria-keyshortcuts="Meta+8 Control+8" title="Tools (⌘ / Ctrl + 8)"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M4 3v6m-2-3h4m7 5v6m-2-3h4M13 3v4M4 13v4"/></svg><span class="nav-label">Tools</span><kbd class="nav-shortcut" aria-hidden="true">8</kbd></button>
+          </div>
         </nav>
-        <div class="toolbar-actions">
-          <button id="open-investigation-notebook" class="secondary-button" type="button" aria-haspopup="dialog" aria-label="Open investigation notebook" title="Investigation notebook"><svg class="notebook-trigger-icon" viewBox="0 0 20 20" aria-hidden="true"><path d="M5 3h11v14H5zM3 6h4M3 10h4M3 14h4M9 7h4M9 10h4"/></svg><span class="notebook-trigger-label">Notebook</span></button>
-          <button id="theme-toggle" class="icon-button" type="button" aria-label="Switch color theme" title="Switch color theme">◐</button><span class="theme-label">Appearance</span>
+        <div class="sidebar-actions">
+          <button id="native-console-toggle" class="sidebar-action" type="button" aria-controls="native-console-panel" aria-expanded="false" aria-pressed="false" aria-label="Console" aria-keyshortcuts="Meta+J Control+J" title="Toggle console (⌘ / Ctrl + J)"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="m3 5 5 5-5 5m8 0h6"/></svg><span class="nav-label">Console</span><kbd class="nav-shortcut" aria-hidden="true">J</kbd></button>
+          <button id="open-investigation-notebook" class="sidebar-action" type="button" aria-haspopup="dialog" aria-label="Open investigation notebook" title="Investigation notebook"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M5 3h11v14H5zM3 6h4M3 10h4M3 14h4M9 7h4M9 10h4"/></svg><span class="nav-label">Notebook</span></button>
+          <button id="theme-toggle" class="sidebar-action" type="button" aria-label="Appearance" title="Switch color theme"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 3a7 7 0 1 0 0 14 7 7 0 0 0 0-14zm0 0v14"/></svg><span class="nav-label">Appearance</span></button>
         </div>
-      </div>
+      </aside>
 
       <div id="workspace" class="workspace">
         <main class="main">

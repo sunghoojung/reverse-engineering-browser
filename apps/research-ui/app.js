@@ -7413,11 +7413,6 @@ const capturedExportPanel = installCapturedExportDialog({
           if (active) button.setAttribute('aria-current', 'page');
           else button.removeAttribute('aria-current');
         });
-        // Advanced is a floating chooser at every width. Finish the choice
-        // without leaving focus on a menu item that is about to be hidden.
-        const navigation = document.querySelector('#advanced-navigation');
-        if (navigation.contains(document.activeElement)) navigation.querySelector('summary').focus({ preventScroll: true });
-        navigation.open = false;
         if (screenName === 'signals') renderFingerprintActivity();
         if (screenName === 'traffic') {
           // Hidden evidence refreshes update the model without painting Traffic.
@@ -7451,7 +7446,7 @@ const capturedExportPanel = installCapturedExportDialog({
 
         if (screenName === 'vm') {
           if (trigger === elements.requestVmCandidates && typeof vmExecutionWorkspace !== 'undefined') vmExecutionWorkspace?.showWorkspace('findings');
-          if (trigger?.id === 'nav-vm' && state.vmAnalysisRequestId !== null) refreshVmAnalysis(null);
+          if (trigger?.id === 'nav-vm-workspace' && state.vmAnalysisRequestId !== null) refreshVmAnalysis(null);
           renderVmLab();
         }
         if (!trigger?.classList.contains('nav-button')) {
@@ -7701,21 +7696,19 @@ const capturedExportPanel = installCapturedExportDialog({
         [...elements.signalRows.querySelectorAll('.signal-event-row')]
           .find(row => row.dataset.signalEventKey === targetKey)?.focus({preventScroll: true});
       });
+      // Cmd/Ctrl + 1-8 opens the sidebar workspace at that position, exactly as
+      // a click does. Digits follow the visible order, so the hints stay true.
+      // Physical digit keys keep the shortcut stable across keyboard layouts;
+      // a modal dialog keeps the keyboard.
       document.addEventListener('keydown', event => {
-        if (event.key !== 'Escape') return;
-        const disclosure = document.activeElement?.closest('#advanced-navigation');
-        if (!disclosure?.open) return;
-        disclosure.open = false;
-        disclosure.querySelector('summary').focus();
+        if (!(event.metaKey || event.ctrlKey) || event.altKey || event.shiftKey || event.repeat) return;
+        const digit = /^Digit([1-9])$/.exec(event.code)?.[1];
+        if (!digit || document.querySelector('dialog:modal')) return;
+        const button = document.querySelectorAll('.primary-nav .nav-button[data-screen]')[Number(digit) - 1];
+        if (!button || button.disabled) return;
         event.preventDefault();
-      });
-      // Keep an explicitly opened chooser from covering the workspace after
-      // resizing into the narrow layout.
-      window.matchMedia('(max-width: 800px)').addEventListener('change', event => {
-        if (!event.matches) return;
-        const navigation = document.querySelector('#advanced-navigation');
-        if (navigation.contains(document.activeElement)) navigation.querySelector('summary').focus();
-        navigation.open = false;
+        button.click();
+        button.focus({ preventScroll: true });
       });
       document.querySelectorAll('.type-filter').forEach(button => button.addEventListener('click', () => {
         state.requestType = button.dataset.filter;

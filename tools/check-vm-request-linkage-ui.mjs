@@ -117,13 +117,12 @@ async function loadHarness(root) {
     const elements = Object.fromEntries(['requestVmCandidates', 'vmDetail', 'vmNotice', 'vmList', 'vmCount', 'requestRows', 'requestFilter'].map(name => [name, new Element()]));
     elements.requestVmCandidates.id = 'request-vm-candidates';
     const screens = ['traffic', 'vm', 'sources'].map(name => Object.assign(new Element(), {id: `screen-${name}`, hidden: name !== 'traffic'}));
-    const nav = Object.assign(new Element('button'), {id: 'nav-vm', className: 'nav-button', dataset: {screen: 'vm'}});
-    const navigation = Object.assign(new Element(), {open: false});
+    const nav = Object.assign(new Element('button'), {id: 'nav-vm-workspace', className: 'nav-button', dataset: {screen: 'vm'}});
     const symbols = new Element();
     const document = {activeElement: null, createElement: tag => new Element(tag),
       getElementById: id => screens.find(screen => screen.id === id) ?? null,
       querySelectorAll: selector => selector === '.screen' ? screens : selector === '.nav-button' ? [nav] : [],
-      querySelector: selector => selector === '#advanced-navigation' ? navigation : selector === '#vm-symbol-list' ? symbols : null};
+      querySelector: selector => selector === '#vm-symbol-list' ? symbols : null};
     const fixture = {calls, notices, sourceSelections, elements, nav, document,
       reply: (url) => url.includes('/opcodes') ? response(opcodeDocument()) : url.includes('/host-links') ? response(null, 404) : response(analysisDocument()),
       get screen() { return screens.find(screen => !screen.hidden)?.id.replace('screen-', ''); },

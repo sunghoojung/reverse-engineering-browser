@@ -89,10 +89,10 @@ gate separately exercises actual row keyboard selection.
 
 ## Connected investigations
 
-**Advanced** is a manually opened workspace chooser. Completed workspace
-navigation closes it at every width; choosing an item returns keyboard focus
-to its summary. Linked Back/Forward keeps its existing destination-focus
-restoration. A refused link leaves the current workspace and chooser intact.
+Every workspace is a direct sidebar entry; none waits behind a menu. A
+sidebar choice keeps keyboard focus on that entry, while linked Back/Forward
+keeps its existing destination-focus restoration. A refused link leaves the
+current workspace intact.
 
 Cross-workspace navigation uses one in-memory Back/Forward trail (at most 24
 stops). Alt+Left and Alt+Right work outside editors; visible controls remain
@@ -457,10 +457,14 @@ source wiring only and does not claim native runtime coverage.
 
 ## Workspace layout
 
-Traffic, Collection, Sources, VM, Console and Fingerprinting are available in
-the toolbar. Expand **Advanced** for Backtraces, Analyst, and Tools.
-Navigation into an advanced tool reveals its group automatically on desktop. On
-narrow windows navigation moves above the workspace and closes after selection.
+The sidebar lists every workspace in two groups. **Evidence** holds Traffic,
+Sources, VM, Fingerprinting and Backtraces; **Workbench** holds Collection,
+Analyst and Tools. Console, the investigation notebook and the theme switch sit
+at its foot. ⌘ or Ctrl with 1-8 opens the workspace at that position, the same
+as a click, except while a modal dialog is open. In a browser on the development
+path use Ctrl, because the browser keeps ⌘ with a digit for its own tabs. Windows narrower than 1100px
+show the sidebar as an icon rail with the same entries, names and shortcuts, so
+evidence panes keep the widths their layouts were designed for.
 
 Returning to Traffic immediately redraws retained requests and the selection, even
 when the last capture arrived while another workspace was open and the backend
@@ -550,8 +554,8 @@ and summary focus survive evidence refreshes. Activity opens its details pane
 when an event is selected, or with **Details**. Decoder processing limits and
 result statistics are likewise available in expanders beside their controls.
 
-Advanced workspaces keep the primary task visible and secondary information in
-expandable sections. Backtraces groups correlation identifiers separately from
+Backtraces, Analyst and Tools keep the primary task visible and secondary
+information in expandable sections. Backtraces groups correlation identifiers separately from
 relationship facts. Origin traces expose the recorded location as text; they do
 not open a source using only a possibly reused script ID or URL, because the
 trace contract lacks the execution-context/source-hash identity needed for that

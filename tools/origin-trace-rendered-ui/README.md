@@ -51,10 +51,13 @@ contradiction and the nested guest row are each revealed and photographed.
 
 Backtraces is opened at both window sizes on one synthetic request whose
 renderer record no initiator edge reached, 113 µs before `request_started` in
-another process. The trace must list the selected request, its
-missing-predecessor gap, then the renderer record as a time-adjacent row with
-its own label and style, while the coverage line stays at 0% and counts the row
-separately. Arrow keys must reach that row with visible focus.
+another process. The harness opens the Advanced disclosure first so the
+Backtraces control is visible. The renderer event keeps its own per-process
+sequence stream so it does not invent a browser sequence-gap ID. The trace must
+list the selected request, its missing-predecessor gap, then the renderer
+record as a time-adjacent row with its own label and style, while the coverage
+line stays at 0% and counts the row separately. Arrow keys must reach that row
+with visible focus.
 
 VM layout assertions check full-width compact evidence, complete footer and
 tab-strip visibility, and an exact boundary between the analysis scroller and

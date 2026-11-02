@@ -63,15 +63,23 @@ export const TIME_ADJACENT_HOST = 'adjacent.trace.test';
 function timeAdjacentRequest(template, firstSequence, firstTime) {
   const requestId = '2000', renderer = 41, start = BigInt(firstTime) + 1_000_000n;
   assert.notEqual(template.process_id, renderer, 'the renderer record needs its own process');
+  // Sequence numbers are per process. The renderer row keeps its own stream at
+  // 1; browser rows continue firstSequence without a hole. Sharing one counter
+  // across both processes invented a fingerprint sequence-gap ID on the browser
+  // stream and made coverage look partial for an unrelated VM budget check.
   const browser = {initiator_process_id: renderer, initiator_request_id: Number(requestId)};
   const rows = [
-    [{process_id: renderer, initiator_process_id: 0, initiator_request_id: 0}, 'request_initiated', `GET ${TIME_ADJACENT_HOST}`, 0, 0n],
-    [browser, 'request_started', `GET ${TIME_ADJACENT_HOST}`, 0, 113_000n],
-    [browser, 'response_started', 'application/json', 200, 400_000n],
-    [browser, 'request_completed', 'completed', 200, 900_000n],
+    [{process_id: renderer, initiator_process_id: 0, initiator_request_id: 0, sequence_number: '1'},
+      'request_initiated', `GET ${TIME_ADJACENT_HOST}`, 0, 0n],
+    [{...browser, sequence_number: String(firstSequence)},
+      'request_started', `GET ${TIME_ADJACENT_HOST}`, 0, 113_000n],
+    [{...browser, sequence_number: String(firstSequence + 1)},
+      'response_started', 'application/json', 200, 400_000n],
+    [{...browser, sequence_number: String(firstSequence + 2)},
+      'request_completed', 'completed', 200, 900_000n],
   ];
-  return rows.map(([fields, type, text, status, offset], index) => ({...template, ...fields,
-    sequence_number: String(firstSequence + index), monotonic_time_ns: String(start + offset), request_id: requestId,
+  return rows.map(([fields, type, text, status, offset]) => ({...template, ...fields,
+    monotonic_time_ns: String(start + offset), request_id: requestId,
     parent_event_id: '0', type, status_code: status, payload_size: Buffer.byteLength(text), payload: hex(text)}));
 }
 

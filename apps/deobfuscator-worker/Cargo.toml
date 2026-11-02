@@ -15,3 +15,14 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 tree-sitter = "0.25"
 tree-sitter-javascript = "0.25"
+
+# The preflight's tree-sitter parse is generated C whose cost an unoptimized
+# build multiplies roughly fivefold. Its wall-clock backstop must never decide
+# admission, so the parser is built optimized in every profile: the debug
+# worker that tests and the development backend run then parses at release
+# speed while the Rust code keeps its debug assertions.
+[profile.dev.package.tree-sitter]
+opt-level = 3
+
+[profile.dev.package.tree-sitter-javascript]
+opt-level = 3

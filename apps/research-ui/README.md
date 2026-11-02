@@ -464,7 +464,10 @@ at its foot. ⌘ or Ctrl with 1-8 opens the workspace at that position, the same
 as a click, except while a modal dialog is open. In a browser on the development
 path use Ctrl, because the browser keeps ⌘ with a digit for its own tabs. Windows narrower than 1100px
 show the sidebar as an icon rail with the same entries, names and shortcuts, so
-evidence panes keep the widths their layouts were designed for.
+evidence panes keep the widths their layouts were designed for. Evidence sits in
+one rounded panel beside the sidebar, and an open Console is a second panel
+below it. Buttons share one style everywhere: a filled accent for the primary
+action, an outlined fill for the rest, and disabled controls drop their fill.
 
 Returning to Traffic immediately redraws retained requests and the selection, even
 when the last capture arrived while another workspace was open and the backend

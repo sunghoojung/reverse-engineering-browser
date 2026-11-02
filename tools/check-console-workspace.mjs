@@ -349,5 +349,16 @@ export async function checkConsoleDOM(root) {
   get('source').value='reconnect draft';const oldSession=fixture.session;await get('stop').click();await settle();await get('start').click();await settle();assert.notEqual(fixture.session,oldSession);assert.equal(get('source').value,'reconnect draft');assert.equal(get('target').value,'');
   const broken=createConsoleFixture();const request={url:'/api/native-console/actions',async *[Symbol.asyncIterator](){yield '{malformed';}},reply={destroyed:false,writeHead(status){this.status=status;},end(text){this.text=text;}};assert.equal(await broken.handle(request,reply),true);assert.equal(reply.status,500);assert.equal(broken.errors.length,1);
   const wrong={url:'/api/native-console/actions',async *[Symbol.asyncIterator](){yield JSON.stringify({action:'runtime',session_id:'wrong',target_id:'101',command:{operation:'poll'}});}};await broken.handle(wrong,reply);assert.equal(reply.status,500);assert.equal(broken.receipts.at(-1).phase,'failed');assert.equal(broken.errors.length,2);
+  // Opening without a usable Console focuses the unavailable state's own action
+  // and leaves Session settings closed, but only while that state is visible
+  // and no live document is offered; otherwise the settings stay reachable.
+  runInNewContext(source.replace(/\}\)\(\);\s*$/, 'globalThis.focusConsole = {focusPrompt, set: next => {({session, available, documentSource, liveAvailable, checking} = {session, available, documentSource, liveAvailable, checking, ...next});}};})();'),context);
+  const focusConsole=context.focusConsole;
+  const prompt=(state,emptyHidden)=>{focusConsole.set({session:null,available:false,documentSource:'disposable',liveAvailable:false,checking:false,...state});
+    get('empty').hidden=emptyHidden;get('connection').open=false;document.activeElement=null;focusConsole.focusPrompt();return {open:get('connection').open,focus:document.activeElement};};
+  let opened=prompt({},false);assert.equal(opened.open,false,'Unavailable empty state is not covered by settings');assert.equal(opened.focus,get('empty-action'));
+  opened=prompt({},true);assert.equal(opened.open,true,'Transcript rows hide the empty state, so settings carry Check availability');assert.equal(opened.focus,get('check'));
+  opened=prompt({liveAvailable:true},false);assert.equal(opened.open,true,'A live document is chosen in the settings');
+  opened=prompt({available:true},false);assert.equal(opened.open,true);assert.equal(opened.focus,get('url'));
   console.log('PASS Console serialized command/result identity, editable drafts, bounded property paging, shrink/regrowth and focus, held-poll Clear epochs, atomic malformed-poll/timestamp recovery without coercion, inert rendering, retry/reconnect, fixture error receipts, and transcript/filter/history bounds (DOM fixture; not rendered QA)');
 }

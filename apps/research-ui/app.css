@@ -2711,7 +2711,6 @@ body.resizing-panes-y, body.resizing-panes-y * { cursor: row-resize !important; 
 .investigation-notebook :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .investigation-notebook button:disabled { opacity: .5; }
 @media (max-width: 760px) {
-  .investigation-notebook { padding: 14px; width: calc(100vw - 24px); max-height: calc(100dvh - 24px); }
   .notebook-split { grid-template-columns: 1fr; }
   .notebook-list { max-height: 160px; }
   .notebook-editor { border-left: 0; padding-left: 0; border-top: 1px solid var(--line); padding-top: 12px; }
@@ -4563,3 +4562,38 @@ details.decoder-card > header p { margin-top: 0; }
 .workspace { gap: 6px; padding: 6px 6px 6px 0; background: var(--bg); }
 .main, .native-console-panel { border: 1px solid var(--line-soft); border-radius: var(--panel-radius); }
 .native-console-panel { border-top: 1px solid var(--line-soft); }
+
+/* Overlays share one raised surface: the panel color, a 10px radius and one
+   soft shadow, so the notebook, export dialog and console settings read as
+   the same kind of layer. */
+:root { --overlay-shadow: 0 16px 40px color-mix(in srgb, #000 42%, transparent), 0 2px 6px color-mix(in srgb, #000 24%, transparent); }
+.native-console-connection-body, .captured-export-dialog, .evidence-coverage-popover {
+  border: 1px solid var(--line);
+  border-radius: var(--panel-radius);
+  background: var(--panel);
+  box-shadow: var(--overlay-shadow);
+}
+
+/* The notebook opens as a side sheet. The evidence it pins stays visible
+   beside it, and its pins and editor stack in one readable column. */
+.investigation-notebook {
+  position: fixed;
+  inset: 8px 8px 8px auto;
+  width: min(460px, calc(100vw - 16px));
+  max-width: none;
+  height: auto;
+  max-height: none;
+  margin: 0;
+  padding: 18px 20px 20px;
+  border-radius: var(--panel-radius);
+  box-shadow: var(--overlay-shadow);
+}
+.investigation-notebook[open] { animation: notebook-sheet-in 160ms ease-out; }
+@keyframes notebook-sheet-in { from { opacity: 0; transform: translateX(12px); } to { opacity: 1; transform: none; } }
+@media (prefers-reduced-motion: reduce) { .investigation-notebook[open] { animation: none; } }
+.investigation-notebook::backdrop { background: color-mix(in srgb, var(--bg) 55%, transparent); }
+.notebook-scope { margin: 8px 0 14px; padding: 10px 12px; border: 1px solid var(--line-soft); border-radius: var(--control-radius); background: var(--bg); }
+.notebook-split { grid-template-columns: minmax(0, 1fr); gap: 14px; min-height: 0; }
+.notebook-list { max-height: 220px; }
+.notebook-editor { padding: 14px 0 0; border-left: 0; border-top: 1px solid var(--line-soft); }
+.investigation-notebook :is(#notebook-delete-book, #notebook-delete-pin):enabled { color: var(--red); }

@@ -19,6 +19,9 @@ use std::{
 pub const SCAN_BYTES: usize = 64 * 1024 * 1024;
 const MAX_RECORD_BYTES: usize = 4096;
 const MAX_EVENTS: usize = 5000;
+// Browser reasons are fixed producer identifiers, so 64 distinct pairs covers
+// every documented one. A further pair stays an unexplained queue-drop marker.
+const MAX_NAMED_GAPS: usize = 64;
 
 #[derive(Debug, PartialEq)]
 pub struct EventWindow {
@@ -28,7 +31,17 @@ pub struct EventWindow {
     pub sequence_gaps_saturated: bool,
     pub queue_drops: u64,
     pub queue_drops_saturated: bool,
+    pub named_gaps: Vec<NamedGap>,
     pub coverage: Value,
+}
+
+/// Gap markers in one category whose payload names a producer reason, such as
+/// `native_wasm_dispatch_budget_incomplete`, in first-seen order.
+#[derive(Debug, PartialEq)]
+pub struct NamedGap {
+    pub category: String,
+    pub reason: String,
+    pub count: u64,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -73,6 +86,8 @@ struct Record {
     stream: (u64, u64),
     sequence: u64,
     drops: u64,
+    // Category and reason; rare, so boxed to keep ordinary summaries small.
+    named_gap: Option<Box<(String, String)>>,
     network: bool,
     event: Option<Value>,
 }
@@ -183,10 +198,10 @@ impl EventWindowCache {
                 let session = unsigned(&event["session_id"]).ok_or_else(malformed)?;
                 let process = unsigned(&event["process_id"]).ok_or_else(malformed)?;
                 let sequence = unsigned(&event["sequence_number"]).ok_or_else(malformed)?;
-                let drops = if event["type"] == "gap" {
-                    drop_weight(&event)
+                let (drops, named_gap) = if event["type"] == "gap" {
+                    (drop_weight(&event), named_gap(&event))
                 } else {
-                    0
+                    (0, None)
                 };
                 snapshot.records.push(Record {
                     start: snapshot.start + position as u64,
@@ -195,6 +210,7 @@ impl EventWindowCache {
                     stream: (session, process),
                     sequence,
                     drops,
+                    named_gap,
                     network: is_network(&event),
                     event: None,
                 });
@@ -240,6 +256,8 @@ fn unsigned(value: &Value) -> Option<u64> {
         _ => None,
     }
 }
+// The HTTP contract weighs every non-count marker as one queue drop, so a named
+// marker stays in queue_drops; named_gaps lets a reader take that weight back out.
 fn drop_weight(event: &Value) -> u64 {
     event["payload"]
         .as_str()
@@ -248,6 +266,32 @@ fn drop_weight(event: &Value) -> u64 {
         .and_then(|text| unsigned(&Value::String(text)))
         .filter(|count| *count > 0)
         .unwrap_or(1)
+}
+// A lowercase letter, then lowercase letters, digits or underscores. A decimal
+// drop count never matches, nor does page-shaped or truncated text.
+fn identifier(bytes: &[u8], maximum: usize) -> bool {
+    (1..=maximum).contains(&bytes.len())
+        && bytes[0].is_ascii_lowercase()
+        && bytes
+            .iter()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || *byte == b'_')
+}
+// A browser stage that refuses or stops sampling an observation writes its
+// reason as the payload (protocol/native-wasm-dispatch-v1.md and the JS
+// dispatch and guest contracts). That loss belongs to the marker's category.
+fn named_gap(event: &Value) -> Option<Box<(String, String)>> {
+    let category = event["category"].as_str()?;
+    let reason = hex::decode(event["payload"].as_str()?).ok()?;
+    if event["payload_truncated"] == true
+        || !identifier(category.as_bytes(), 32)
+        || !identifier(&reason, 128)
+    {
+        return None;
+    }
+    Some(Box::new((
+        category.to_owned(),
+        String::from_utf8(reason).ok()?,
+    )))
 }
 fn is_network(event: &Value) -> bool {
     event["category"] == "network"
@@ -324,6 +368,7 @@ fn summarize(
         sequence_gaps_saturated: false,
         queue_drops: 0,
         queue_drops_saturated: false,
+        named_gaps: Vec::new(),
         coverage: Value::Null,
     };
     let mut marks: HashMap<(u64, u64), (u64, u64, HashSet<u64>)> = HashMap::new();
@@ -343,6 +388,23 @@ fn summarize(
             &mut window.queue_drops_saturated,
             record.drops,
         );
+        if let Some(named) = &record.named_gap {
+            let (category, reason) = named.as_ref();
+            // At most 64 entries, and only gap markers reach this lookup.
+            let gaps = &mut window.named_gaps;
+            if let Some(gap) = gaps
+                .iter_mut()
+                .find(|gap| gap.category == *category && gap.reason == *reason)
+            {
+                gap.count += 1;
+            } else if gaps.len() < MAX_NAMED_GAPS {
+                gaps.push(NamedGap {
+                    category: category.clone(),
+                    reason: reason.clone(),
+                    count: 1,
+                });
+            }
+        }
         let keep_general = index >= general_start;
         let keep_network = record.network
             && if network_skip > 0 {
@@ -631,6 +693,83 @@ mod tests {
     }
 
     #[test]
+    fn named_gap_reasons_are_listed_by_category_beside_unchanged_drop_weights() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("events");
+        // The live Wasm budgets from one capture, plus a real numeric queue gap.
+        let mut events = vec![
+            event(1, "vm", "gap", "native_wasm_dispatch_budget_incomplete"),
+            event(2, "vm", "gap", "native_wasm_indirect_budget_incomplete"),
+            event(3, "canvas", "gap", "5"),
+            event(4, "vm", "gap", "native_wasm_dispatch_budget_incomplete"),
+            event(5, "vm", "gap", "native_wasm_dispatch_transport_unavailable"),
+        ];
+        write(&path, &events);
+        let mut cache = EventWindowCache::default();
+        let window = poll(&mut cache, &path, 1);
+        // Every marker keeps its documented queue_drops weight.
+        assert_eq!(window.queue_drops, 5 + 4);
+        assert_eq!(window.sequence_gaps, 0);
+        let named: Vec<_> = window
+            .named_gaps
+            .iter()
+            .map(|gap| (gap.category.as_str(), gap.reason.as_str(), gap.count))
+            .collect();
+        assert_eq!(
+            named,
+            vec![
+                ("vm", "native_wasm_dispatch_budget_incomplete", 2),
+                ("vm", "native_wasm_indirect_budget_incomplete", 1),
+                ("vm", "native_wasm_dispatch_transport_unavailable", 1),
+            ]
+        );
+        // Counts, malformed counts and non-identifier text stay queue-drop markers.
+        for payload in [
+            "",
+            "0",
+            "01",
+            "-1",
+            "7",
+            " 2",
+            "Native_gap",
+            "native-gap",
+            "1native",
+            "_native",
+            "native gap",
+            "<b>gap</b>",
+        ] {
+            write(&path, &[event(1, "vm", "gap", payload)]);
+            let window = poll(&mut cache, &path, 1);
+            assert!(window.named_gaps.is_empty(), "{payload:?}");
+            assert_eq!(window.queue_drops, if payload == "7" { 7 } else { 1 });
+        }
+        let mut truncated = event(1, "vm", "gap", "native_wasm_dispatch_budget");
+        truncated["payload_truncated"] = json!(true);
+        let mut unnamed_category = event(2, "vm", "gap", "native_wasm_dispatch_budget_incomplete");
+        unnamed_category["category"] = json!("VM");
+        write(&path, &[truncated, unnamed_category]);
+        let window = poll(&mut cache, &path, 1);
+        assert!(window.named_gaps.is_empty());
+        assert_eq!(window.queue_drops, 2);
+        // A 65th distinct pair is not listed, so its weight stays a queue drop.
+        events = (0..=MAX_NAMED_GAPS as u64)
+            .map(|n| event(n + 1, "vm", "gap", &format!("native_reason_{n}")))
+            .collect();
+        write(&path, &events);
+        let window = poll(&mut cache, &path, 1);
+        assert_eq!(window.named_gaps.len(), MAX_NAMED_GAPS);
+        assert_eq!(window.named_gaps[0].reason, "native_reason_0");
+        assert_eq!(window.queue_drops, MAX_NAMED_GAPS as u64 + 1);
+        // Summaries follow the scanned scope: an older named marker leaves with it.
+        let first = line(&events[0]).len();
+        cache.maximum_bytes = fs::metadata(&path).unwrap().len() as usize - first;
+        let window = poll(&mut cache, &path, 1);
+        assert_eq!(window.coverage["scope"], "bounded_tail");
+        assert_eq!(window.named_gaps[0].reason, "native_reason_1");
+        assert_eq!(window.named_gaps.len(), MAX_NAMED_GAPS);
+    }
+
+    #[test]
     fn cached_and_fresh_windows_match_through_file_lifecycle_and_limit_changes() {
         fn compare(cache: &mut EventWindowCache, path: &Path, limit: usize) {
             let mut fresh = cache_with_budget(cache.maximum_bytes);
@@ -642,6 +781,8 @@ mod tests {
             .map(|n| {
                 if n % 10 == 0 {
                     event(n, "network", "request_failed", "fixture.local")
+                } else if n % 997 == 0 {
+                    event(n, "vm", "gap", "native_js_dispatch_budget_incomplete")
                 } else {
                     event(n, "canvas", "api_call", "draw")
                 }

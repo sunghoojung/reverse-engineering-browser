@@ -2544,6 +2544,9 @@ assert.deepEqual(Array.from(observationModel.rows.filter(row=>row.group==='reque
 assert.equal(observationModel.rows.find(row=>row.key==='7:42:100').group,'context');
 assert.equal(observationModel.rows.find(row=>row.key==='7:77:1').group,'unlinked');
 assert.equal(observationModel.missingParents,1); assert.equal(observationModel.queueMarkers,1);
+assert.equal(observationModel.namedMarkers,0);
+const namedObservationModel = observationUI.evidenceObservationModel({...observationContext, events:[...observationContext.events, observationEvent(107,'vm','gap','native_wasm_dispatch_budget_incomplete')]});
+assert.equal(namedObservationModel.queueMarkers,1,'a named vm budget is not a queue-drop marker'); assert.equal(namedObservationModel.namedMarkers,1);
 assert.equal(observationModel.rows.find(row=>row.key==='7:42:102').outcome,'Outcome not recorded');
 assert.equal(observationModel.rows.find(row=>row.key==='7:42:104').artifact.status,'missing');
 assert.equal(observationModel.linkedArtifacts,1);

@@ -1686,6 +1686,9 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
         "sequence_gaps_saturated": window.sequenceGapsSaturated,
         "queue_drops": String(window.queueDrops),
         "queue_drops_saturated": window.queueDropsSaturated,
+        "named_gaps": window.namedGaps.map {
+          ["category": $0.category, "reason": $0.reason, "count": String($0.count)]
+        },
         "event_window": window.coverage,
         "broker_connected": brokerConnected(),
         "capture_mode": captureMode(),

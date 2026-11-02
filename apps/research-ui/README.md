@@ -380,8 +380,8 @@ ETag cannot leave the connection warning stuck after recovery.
 Short windows keep at least one request row visible when status warnings wrap.
 
 A healthy live Traffic view leaves the status line hidden. The line appears for
-broker failures, malformed evidence, sequence gaps, queue drops, scanned-tail and
-window caps, evictions and failed requests.
+broker failures, malformed evidence, sequence gaps, queue drops, network-category
+capture limits, scanned-tail and window caps, evictions and failed requests.
 
 The live launcher disables Brave background networking, component updates, and
 sync for its isolated research profile. Browser diagnostics are retained in the
@@ -493,6 +493,21 @@ redirect, failed, and response-completed outcomes. Notices distinguish a capped
 window from the bounded tail and label summary counts by their actual scan scope.
 Sequence-gap counts are arrival-order high-water jumps, not a deduplicated count
 of still-missing IDs after late arrivals, and queue drops may overlap them.
+A gap whose payload is a producer reason identifier, such as
+`native_wasm_dispatch_budget_incomplete`, is a capture limit in its own category,
+not a queue drop. Both readers list up to 64 such category and reason pairs as
+`named_gaps` with their counts. `queue_drops` keeps its documented weight of one
+per marker, so the UI subtracts the listed markers and reports only numeric gap
+counts as queue drops. A limit marks only the surface for its category: `vm` and
+`wasm` limits appear in VM Lab, `network` limits in Traffic, and fingerprint
+categories in Fingerprinting. The configured sampling budgets
+(`native_wasm_dispatch_*budget_incomplete`, `native_wasm_indirect_*budget_incomplete`,
+`native_js_dispatch_budget_incomplete`, `native_js_dispatch_site_budget_incomplete`,
+`native_guest_sample_limit` and `native_guest_browser_sample_budget`) read as
+"Sampling budget reached": retained observations are exact and later ones were not
+sampled. Every other reason, including transport, input, document, module, expiry,
+compiled-before-arming, capacity and parent-link reasons and any reason this
+build does not know, reads as reported lost evidence with its raw reason as text.
 The Swift stored-evidence reader uses the same newest-general and
 newest-network windows, 64 MiB tail, and summary scope as the Rust endpoint.
 A response that omits those fields is still labeled visible-window-only, and
@@ -794,7 +809,9 @@ capture stops, requires confirmation, and truncates only this session's event,
 trace, and request-profile stores. Canvas artifact files and other saved files
 remain on disk. Detailed identifiers stay behind a disclosure. The
 captured-tab buttons are historical evidence, not an open-tab count. The footer separates missing per-process sequence IDs from
-reported queue drops, since a gap report can describe the same missing IDs.
+reported queue drops, since a gap report can describe the same missing IDs. It
+counts named sampling budgets and reported capture losses separately, with their
+categories, and never adds them to queue drops.
 The custom browser observes generated Web IDL callbacks for a selected native
 allowlist across all eight families, in addition to the lower-level Canvas,
 WebGL, and Web Audio hooks needed by internal Blink paths and selected V8 Math,

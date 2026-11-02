@@ -6,6 +6,9 @@
         'canvas', 'webgl', 'web_audio', 'navigator', 'permissions', 'storage', 'webrtc',
         'runtime'
       ]);
+      // A named gap limits only the surface that shows its own category.
+      const networkGapCategories = new Set(['network']);
+      const vmGapCategories = new Set(['vm', 'wasm']);
 
       function fingerprintEventsFromEvents(events) {
         return events.filter(event => fingerprintSignalCategories.has(event.category));
@@ -162,15 +165,100 @@
         return gaps;
       }
 
+      // A named gap is a browser stage's own reason, never a queue-drop count.
       function countReportedQueueDrops(events) {
         let drops = 0n;
         for (const event of events) {
-          if (event.type !== 'gap') continue;
+          if (event.type !== 'gap' || namedGapOf(event)) continue;
           const payload = decodePayload(event);
           const count = isCaptureTotal(payload) && payload !== '0' ? BigInt(payload) : 1n;
           drops += count <= 18446744073709551615n ? count : 1n;
         }
         return drops;
+      }
+
+      // Same identifier rule and 64-pair bound as both stored-window readers.
+      const namedGapCategoryPattern = /^[a-z][a-z0-9_]{0,31}$/;
+      const namedGapReasonPattern = /^[a-z][a-z0-9_]{0,127}$/;
+      const namedGapLimit = 64;
+      // Configured per-configuration sampling caps in the native dispatch and
+      // guest contracts: retained observations stay exact and later ones were
+      // not sampled. Every other reason, known or not, is reported as lost.
+      const samplingBudgetGapLabels = new Map([
+        ['native_wasm_dispatch_budget_incomplete', 'Wasm br_table dispatch'],
+        ['native_wasm_dispatch_browser_budget_incomplete', 'Wasm br_table dispatch (browser)'],
+        ['native_wasm_indirect_budget_incomplete', 'Wasm call_indirect dispatch'],
+        ['native_wasm_indirect_browser_budget_incomplete', 'Wasm call_indirect dispatch (browser)'],
+        ['native_js_dispatch_budget_incomplete', 'JavaScript dispatch'],
+        ['native_js_dispatch_site_budget_incomplete', 'JavaScript dispatch per site'],
+        ['native_guest_sample_limit', 'Wasm guest samples'],
+        ['native_guest_browser_sample_budget', 'Wasm guest samples (browser)']
+      ]);
+
+      function namedGapOf(event) {
+        if (event?.type !== 'gap' || event.payload_truncated === true || !namedGapCategoryPattern.test(event.category)) return null;
+        const reason = decodePayload(event);
+        return namedGapReasonPattern.test(reason) ? {category: event.category, reason} : null;
+      }
+
+      function namedGapsFromEvents(events) {
+        const gaps = [];
+        for (const event of events) {
+          const named = namedGapOf(event);
+          if (!named) continue;
+          const existing = gaps.find(gap => gap.category === named.category && gap.reason === named.reason);
+          if (existing) existing.count += 1n;
+          else if (gaps.length < namedGapLimit) gaps.push({...named, count: 1n});
+        }
+        return gaps;
+      }
+
+      function isNamedGapList(value) {
+        if (!Array.isArray(value) || value.length > namedGapLimit) return false;
+        const keys = new Set();
+        return value.every(gap => isPlainObject(gap) && Object.keys(gap).length === 3 &&
+          namedGapCategoryPattern.test(gap.category) && namedGapReasonPattern.test(gap.reason) &&
+          isCaptureTotal(gap.count) && gap.count !== '0' &&
+          !keys.has(`${gap.category}:${gap.reason}`) && keys.add(`${gap.category}:${gap.reason}`));
+      }
+
+      function namedGapTotal(gaps) {
+        return gaps.reduce((total, gap) => total + gap.count, 0n);
+      }
+
+      function namedGapsIn(gaps, categories) {
+        return gaps.filter(gap => categories.has(gap.category));
+      }
+
+      function namedGapItems(gaps, describe) {
+        const items = gaps.slice(0, 4).map(gap => `${describe(gap)}${gap.count > 1n ? ` ×${gap.count}` : ''}`);
+        if (gaps.length > 4) items.push(`${gaps.length - 4} more ${gaps.length === 5 ? 'reason' : 'reasons'}`);
+        return items.join('; ');
+      }
+
+      // Scoped coverage sentences; the raw reason is always shown as text.
+      function namedGapNotice(gaps, scope) {
+        const budgets = gaps.filter(gap => samplingBudgetGapLabels.has(gap.reason));
+        const losses = gaps.filter(gap => !samplingBudgetGapLabels.has(gap.reason));
+        const messages = [];
+        if (losses.length) {
+          const categories = [...new Set(losses.map(gap => gap.category))].join('/');
+          messages.push(`Capture reported lost ${categories} evidence in ${scope}: ${namedGapItems(losses, gap => gap.reason)}.`);
+        }
+        if (budgets.length) {
+          messages.push(`Sampling budget reached in ${scope} for ${namedGapItems(budgets, gap => `${samplingBudgetGapLabels.get(gap.reason)} (${gap.reason})`)}. Retained observations are exact; later ones were not sampled.`);
+        }
+        return messages.join(' ');
+      }
+
+      function namedGapStatusLabel(gaps) {
+        const parts = [];
+        for (const [budget, singular, plural] of [[true, 'sampling budget reached', 'sampling budgets reached'], [false, 'reported capture loss', 'reported capture losses']]) {
+          const matching = gaps.filter(gap => samplingBudgetGapLabels.has(gap.reason) === budget);
+          const total = namedGapTotal(matching);
+          if (total > 0n) parts.push(`${total} ${total === 1n ? singular : plural} (${[...new Set(matching.map(gap => gap.category))].join('/')})`);
+        }
+        return parts.map(part => ` · ${part}`).join('');
       }
 
       function isCaptureTotal(value) {
@@ -185,8 +273,16 @@
         return typeof state.sequenceGaps === 'bigint' ? state.sequenceGaps : countSequenceGaps(state.events);
       }
 
+      function shownNamedGaps() {
+        return Array.isArray(state.namedGaps) ? state.namedGaps : namedGapsFromEvents(state.events);
+      }
+
+      // queue_drops weighs each named marker as one (protocol/http-api.md). Those
+      // markers are capture limits in their own category, so take them back out.
       function shownQueueDrops() {
-        return typeof state.queueDrops === 'bigint' ? state.queueDrops : countReportedQueueDrops(state.events);
+        if (typeof state.queueDrops !== 'bigint') return countReportedQueueDrops(state.events);
+        const named = namedGapTotal(shownNamedGaps());
+        return state.queueDrops > named ? state.queueDrops - named : 0n;
       }
 
       function eventCountScopeLabel() {
@@ -200,6 +296,8 @@
         state.queueDrops = captureWideTotal(body.queue_drops);
         state.sequenceGapsSaturated = body.sequence_gaps_saturated === true;
         state.queueDropsSaturated = body.queue_drops_saturated === true;
+        state.namedGaps = Array.isArray(body.named_gaps)
+          ? body.named_gaps.map(gap => ({category: gap.category, reason: gap.reason, count: BigInt(gap.count)})) : null;
         state.eventCountScope = body.event_window?.scope ??
           (state.sequenceGaps !== null && state.queueDrops !== null ? 'store' : 'rendered_window');
         state.eventsLimited = body.event_window?.events_limited ?? body.count >= 5000;
@@ -207,20 +305,26 @@
         state.networkEventsLimited = body.event_window?.network_events_limited === true;
       }
 
-      function eventGapLabel(gapCount, reportedDrops) {
+      function eventGapLabel(gapCount, reportedDrops, namedGaps = []) {
         const gaps = `${state.sequenceGapsSaturated ? 'at least ' : ''}${gapCount}`;
         const drops = `${state.queueDropsSaturated ? 'at least ' : ''}${reportedDrops}`;
         return `${gaps} sequence-gap IDs (${eventCountScopeLabel()})` +
-          (reportedDrops > 0n ? ` · ${drops} reported queue ${reportedDrops === 1n ? 'drop' : 'drops'} (may overlap)` : '');
+          (reportedDrops > 0n ? ` · ${drops} reported queue ${reportedDrops === 1n ? 'drop' : 'drops'} (may overlap)` : '') +
+          namedGapStatusLabel(namedGaps);
       }
 
-      function fingerprintCoverageNotice(eventsLimited, displayLimited, displayLimit, gapCount, reportedDrops, scope = 'the stored capture') {
+      // namedGaps must already be limited to fingerprint categories.
+      function fingerprintCoverageNotice(eventsLimited, displayLimited, displayLimit, gapCount, reportedDrops, scope = 'the stored capture', namedGaps = []) {
         const limits = [];
         if (eventsLimited) limits.push('the event window is capped');
         if (displayLimited) limits.push(`only the newest ${displayLimit} matching events are rendered`);
         if (scope === 'the scanned tail') limits.push('only the newest 64 MiB is scanned');
         if (gapCount > 0n) limits.push(`${state.sequenceGapsSaturated ? 'at least ' : ''}${gapCount} sequence-gap IDs were observed in ${scope}`);
         if (reportedDrops > 0n) limits.push(`${state.queueDropsSaturated ? 'at least ' : ''}${reportedDrops} queue drops were reported in ${scope} (may overlap sequence gaps)`);
+        const losses = namedGaps.filter(gap => !samplingBudgetGapLabels.has(gap.reason));
+        const budgets = namedGaps.filter(gap => samplingBudgetGapLabels.has(gap.reason));
+        if (losses.length) limits.push(`capture reported lost evidence in ${scope}: ${namedGapItems(losses, gap => `${gap.category} ${gap.reason}`)}`);
+        if (budgets.length) limits.push(`a sampling budget was reached in ${scope}: ${namedGapItems(budgets, gap => gap.reason)}`);
         return `Fingerprint activity is visible with partial coverage: ${limits.join('; ')}.`;
       }
 
@@ -384,6 +488,10 @@
           (body.queue_drops === undefined || isCaptureTotal(body.queue_drops)) &&
           (body.sequence_gaps_saturated === undefined || typeof body.sequence_gaps_saturated === 'boolean') &&
           (body.queue_drops_saturated === undefined || typeof body.queue_drops_saturated === 'boolean') &&
+          (body.named_gaps === undefined || (isNamedGapList(body.named_gaps) &&
+            // Each listed marker is inside queue_drops, so an honest total covers them.
+            (body.queue_drops === undefined || body.queue_drops_saturated === true ||
+              BigInt(body.queue_drops) >= body.named_gaps.reduce((total, gap) => total + BigInt(gap.count), 0n)))) &&
           (body.canvas_render_captures === undefined ||
             (body.capture_mode === 'demo' &&
               Array.isArray(body.canvas_render_captures) &&

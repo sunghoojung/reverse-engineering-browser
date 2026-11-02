@@ -1129,8 +1129,8 @@ final class OriginTraceRenderedUITests: XCTestCase {
       let details = try await ui.value("document.querySelector('#trace-step-details').innerText") as? String ?? ""
       XCTAssertTrue(details.contains("Not a predecessor and not value flow"), "\(size.name): inspector names the class: \(details)")
       try await revealAndAssertFullyVisible(ui, "#backtrace-steps .trace-step:last-child .trace-row", "\(size.name) adjacency row")
-      // Coverage sits in the sticky list heading, so centering the last row
-      // must leave it fully visible in the list pane.
+      // Coverage lives above the steps scroller, so centering the last row
+      // cannot scroll it away or cover earlier rows.
       try await assertFullyVisible(ui, "#coverage-value", "\(size.name) coverage line")
       try await assertInert(ui, "\(size.name) backtrace")
       try await assertLayout(ui, "#screen-backtrace", "\(size.name) time-adjacent backtrace")

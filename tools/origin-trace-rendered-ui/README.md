@@ -63,8 +63,8 @@ sequence stream so it does not invent a browser sequence-gap ID. The trace must
 list the selected request, its missing-predecessor gap, then the renderer
 record as a time-adjacent row with its own label and style, while the coverage
 line stays at 0% and counts the row separately. Arrow keys must reach that row
-with visible `:focus-visible` focus. The coverage line lives in a sticky list
-heading so centering the adjacency row cannot scroll it out of the pane.
+with visible `:focus-visible` focus. The coverage line sits above the steps
+scroller so centering the adjacency row cannot scroll it away or cover rows.
 
 VM layout assertions check full-width compact evidence, complete footer and
 tab-strip visibility, and an exact boundary between the analysis scroller and

@@ -1751,8 +1751,7 @@ async function sourceHistoryFixture(kind = 'artifact') {
   }
   screens.sources.querySelectorAll=selector=>selector.includes(',')?[elements.sourceCodeWrap,elements.sourceTree]:Object.values(elements).filter(node=>node.matches(selector));
   screens.sources.querySelector=selector=>byId.get(selector)??null;
-  const navigation={open:false,contains:()=>false};
-  document.querySelector=selector=>selector==='.screen:not([hidden])'?Object.values(screens).find(node=>!node.hidden):selector==='#investigation-notice'?notice:selector==='#investigation-navigation'?bar:selector==='#advanced-navigation'?navigation:byId.get(selector)??null;
+  document.querySelector=selector=>selector==='.screen:not([hidden])'?Object.values(screens).find(node=>!node.hidden):selector==='#investigation-notice'?notice:selector==='#investigation-navigation'?bar:byId.get(selector)??null;
   document.querySelectorAll=selector=>selector==='.screen'?Object.values(screens):[];
   document.getElementById=id=>Object.values(screens).find(node=>node.id===id)??byId.get(`#${id}`)??null;
   bar.querySelector=()=>({open:false});

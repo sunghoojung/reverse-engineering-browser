@@ -621,7 +621,7 @@ final class OriginTraceRenderedUITests: XCTestCase {
       // A stored session is a fixed set; none of its requests is new.
       let latestHidden = try await ui.value("document.querySelector('#request-latest').hidden") as? Bool
       XCTAssertEqual(latestHidden, true, "\(size.name): a stored session must not claim new requests")
-      try await assertLayout(ui, ".toolbar", "\(size.name) toolbar")
+      try await assertLayout(ui, ".sidebar", "\(size.name) sidebar")
       try await assertLayout(ui, "#screen-traffic", "\(size.name) traffic list")
       try await ui.screenshot("traffic-list-\(size.name)")
 
@@ -966,7 +966,7 @@ final class OriginTraceRenderedUITests: XCTestCase {
     for size in windowSizes {
       let ui = try await prepare(size)
       try await show(ui, "traffic")
-      // Start from the first toolbar control so the order is deterministic.
+      // Start from the first sidebar entry so the order is deterministic.
       try await ui.click(".primary-nav .nav-button[data-screen='traffic']")
       var stops: [[String: Any]] = []
       for _ in 0..<30 {
@@ -975,7 +975,7 @@ final class OriginTraceRenderedUITests: XCTestCase {
       }
       let names = stops.map { $0["element"] as? String ?? "?" }
       print("RENDERED_UI_FOCUS \(size.name) \(names)")
-      XCTAssertTrue(names.first?.contains("Collection") == true, "\(size.name): Tab follows the toolbar order: \(names.prefix(6))")
+      XCTAssertTrue(names.first?.contains("Sources") == true, "\(size.name): Tab follows the sidebar order: \(names.prefix(6))")
       for (index, stop) in stops.enumerated() {
         let name = stop["element"] as? String ?? "?"
         XCTAssertNotEqual(name, "none", "\(size.name): Tab \(index + 1) lost focus")

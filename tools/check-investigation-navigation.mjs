@@ -73,7 +73,7 @@ export async function checkInvestigationCore(root) {
   assert.equal(model.investigationResolve(freshIdentity,await fixtureRequests('13'),model.investigationRequestIdentity).status,'stale');
   console.log('PASS investigation fixture counterexample: stale selection can coexist with a retained replacement; fresh exact request comes from normal event admission (not rendered QA)');
   await checkNativeRequestBacktrace(root);
-  await checkAdvancedNavigation(root);
+  await checkSidebarNavigation(root);
   await checkInvestigationReturns(root);
   await checkCollectionNavigation(root, source);
   console.log('PASS investigation exact identity, u64 boundaries, cross-process separation, stale/ambiguous resolution, bounded branching return history and packaged asset wiring (not rendered QA)');
@@ -190,79 +190,94 @@ export async function checkNativeRequestBacktrace(root) {
   console.log('PASS retained native Traffic row → Backtraces choice → exact session/process/sequence query; unrooted rows stay unavailable; monotonic_time_ns proximity reports as its own weaker class and stays out of coverage (production functions, not rendered QA)');
 }
 
-// Exercise the actual shared-shell switch, rather than a navigation stub. A
-// workspace under Advanced is still a destination, not a request to open its menu.
-export async function checkAdvancedNavigation(root) {
+// Exercise the actual shared-shell switch, rather than a navigation stub.
+// Every workspace is a direct sidebar entry: nothing waits behind a menu, and
+// Cmd/Ctrl + digit follows the visible order.
+export async function checkSidebarNavigation(root) {
   const app=await readFile(join(root,'apps/research-ui/app.js'),'utf8');
   const source=app.slice(app.indexOf('      function showScreen('),app.indexOf('      async function refresh()'));
   const html=await readFile(join(root,'apps/research-ui/index.html'),'utf8');
-  const vmEntry=html.match(/<button\b[^>]*id="nav-vm-workspace"[^>]*>/)?.[0];
+  const sidebar=html.slice(html.indexOf('<aside class="sidebar"'),html.indexOf('</aside>'));
+  const nav=sidebar.slice(sidebar.indexOf('<nav class="primary-nav"'),sidebar.indexOf('</nav>'));
+  assert(nav,'The sidebar must hold the workspace navigation');
+  assert.doesNotMatch(html+app,/advanced-navigation|advanced-items/,'No workspace may hide behind an Advanced menu');
+  assert.doesNotMatch(sidebar,/<details\b/,'Sidebar entries are always visible');
+  const entries=[...nav.matchAll(/<button\b[^>]*>/g)].map(match=>match[0]);
+  const order=['traffic','sources','vm','signals','backtrace','api-collection','analyst','tools'];
+  assert.deepEqual(entries.map(entry=>entry.match(/data-screen="([^"]+)"/)?.[1]),order,'Every workspace has one direct entry, in sidebar order');
+  entries.forEach((entry,index)=>{
+    assert.match(entry,/class="nav-button"/,'Workspace entries share navigation focus semantics');
+    assert.match(entry,/type="button"/);
+    assert.match(entry,/aria-label="[^"]+"/,'The icon rail keeps an accessible name when labels are hidden');
+    assert(entry.includes(`aria-keyshortcuts="Meta+${index+1} Control+${index+1}"`),`${order[index]} advertises its position shortcut`);
+  });
+  const vmEntry=entries.find(entry=>entry.includes('id="nav-vm-workspace"'));
   assert(vmEntry,'VM workspace must have a primary entry');
   assert.equal((html.match(/id="nav-vm-workspace"/g)||[]).length,1);
-  assert(html.indexOf('id="nav-vm-workspace"')<html.indexOf('id="advanced-navigation"'),'VM must precede and be outside Advanced');
-  assert.match(vmEntry,/class="[^"]*\bnav-button\b[^"]*"/,'VM entry must use shared navigation focus semantics');
-  const advanced=['backtrace','analyst','tools'];
-  const names=['traffic','api-collection','sources','vm','signals',...advanced,'evidence'];
-  for(const narrow of [false,true]) {
-    const focused=[],frames=[];let current='traffic';
-    const document={activeElement:null};
-    const summary={focus(){document.activeElement=this;focused.push('summary');}};
-    const group={open:false,contains:node=>node===summary||buttons.some(button=>advanced.includes(button.dataset.screen)&&node===button),querySelector:()=>summary};
-    const buttons=names.filter(name=>name!=='evidence').map(name=>({
-      dataset:{screen:name},classList:{contains:value=>value==='nav-button'},
-      closest:()=>advanced.includes(name)?group:null,
-      setAttribute(key,value){this[key]=value;},removeAttribute(key){delete this[key];},
-    }));
-    const screens=names.map(name=>({id:`screen-${name}`,hidden:name!=='traffic'}));
-    document.getElementById=id=>screens.find(screen=>screen.id===id)??null;
-    const destination={focus(){document.activeElement=this;focused.push('destination');}};
-    document.querySelectorAll=selector=>selector==='.screen'?screens:selector==='.nav-button'?buttons:[];
-    document.querySelector=selector=>selector==='#advanced-navigation'?group:selector.endsWith('.back-button')?destination:null;
-    const noop=()=>{};
-    const context={document,state:{requests:[],selectedRequestId:null,originTraceStatus:'idle'},investigationRevision:0,
-      investigationBeforeScreen:name=>{current=name;},investigationScreen:()=>current,
-      evidencePackagePanel:{setVisible:noop},sourceFactsPanel:{cancel:noop},float32Panel:{cancel:noop},
-      evidenceWorkspace:{setVisible:noop},retireCanvasPreviews:noop,
-      window:{matchMedia:()=>({matches:narrow})},requestAnimationFrame:callback=>frames.push(callback),selectedSource:()=>null,
-      elements:{requestRows:{querySelectorAll:()=>[]},requestFilter:destination}};
-    for(const name of ['renderRequests','updateSelectionSummary','renderInspector','renderFingerprintActivity','renderBacktrace','renderApiCollection','refreshApiCollection','renderLocalAnalyst','refreshLocalAnalyst','renderTools','refreshDecoderEngine','renderSources','renderVmLab'])context[name]=noop;
-    const showScreen=runInNewContext(source+';showScreen',context);
-    const flush=()=>{for(const callback of frames.splice(0))callback();};
-    for(const name of ['traffic','backtraces','sources','tools','sources','backtrace','traffic','evidence','vm']) {
-      showScreen(name);flush();
-      assert.equal(group.open,false,`${name}: linked navigation must not open or retain Advanced at ${narrow?'narrow':'wide'} widths`);
-      assert.equal(screens.filter(screen=>!screen.hidden).length,1);
-      const currentButtons=buttons.filter(button=>button['aria-current']==='page');
-      assert.equal(currentButtons.length,1,'Exactly one workspace tab is current');
-      assert.equal(currentButtons[0].dataset.screen,name==='backtraces'||name==='evidence'?'backtrace':name);
-    }
-    for(const name of advanced) {
-      const button=buttons.find(button=>button.dataset.screen===name);
-      group.open=true;document.activeElement=button;focused.length=0;
-      showScreen(name,button);flush();
-      assert.equal(group.open,false,`${name}: choosing a menu destination must dismiss Advanced`);
-      assert.equal(button['aria-current'],'page');
-      assert.equal(document.activeElement,summary,'A hidden menu item must not retain focus');
-      assert.deepEqual(focused,['summary']);
-      // Selecting the current workspace again is also a completed choice.
-      group.open=true;showScreen(name,button);assert.equal(group.open,false);
-    }
-    for(const name of ['sources','vm']){
-      const primary=buttons.find(button=>button.dataset.screen===name);
-      group.open=true;document.activeElement=primary;focused.length=0;
-      showScreen(name,primary);flush();
-      assert.equal(group.open,false);assert.equal(document.activeElement,primary);
-      assert.deepEqual(focused,[],'Primary navigation must keep its own focus');
-    }
-    group.open=true;document.activeElement=destination;focused.length=0;
-    showScreen('tools');
-    assert.equal(group.open,false);assert.deepEqual(focused,[],'Linked navigation must not redirect unrelated focus to the menu');
-    flush();assert.equal(document.activeElement,destination);
-    group.open=true;document.activeElement=buttons.find(button=>button.dataset.screen==='backtrace');focused.length=0;
-    showScreen('sources');assert.equal(document.activeElement,summary);flush();
-    assert.deepEqual(focused,['summary','destination'],'Existing destination focus must follow safe dismissal');
+  const names=[...order,'evidence'];
+  const focused=[],frames=[];let current='traffic';
+  const document={activeElement:null};
+  const buttons=order.map(name=>({
+    dataset:{screen:name},classList:{contains:value=>value==='nav-button'},
+    focus(){document.activeElement=this;},setAttribute(key,value){this[key]=value;},removeAttribute(key){delete this[key];},
+  }));
+  const screens=names.map(name=>({id:`screen-${name}`,hidden:name!=='traffic'}));
+  document.getElementById=id=>screens.find(screen=>screen.id===id)??null;
+  const destination={focus(){document.activeElement=this;focused.push('destination');}};
+  document.querySelectorAll=selector=>selector==='.screen'?screens:selector==='.nav-button'?buttons:[];
+  document.querySelector=selector=>selector.endsWith('.back-button')?destination:null;
+  const noop=()=>{};
+  const context={document,state:{requests:[],selectedRequestId:null,originTraceStatus:'idle'},investigationRevision:0,
+    investigationBeforeScreen:name=>{current=name;},investigationScreen:()=>current,
+    evidencePackagePanel:{setVisible:noop},sourceFactsPanel:{cancel:noop},float32Panel:{cancel:noop},
+    evidenceWorkspace:{setVisible:noop},retireCanvasPreviews:noop,
+    requestAnimationFrame:callback=>frames.push(callback),selectedSource:()=>null,
+    elements:{requestRows:{querySelectorAll:()=>[]},requestFilter:destination}};
+  for(const name of ['renderRequests','updateSelectionSummary','renderInspector','renderFingerprintActivity','renderBacktrace','renderApiCollection','refreshApiCollection','renderLocalAnalyst','refreshLocalAnalyst','renderTools','refreshDecoderEngine','renderSources','renderVmLab'])context[name]=noop;
+  const showScreen=runInNewContext(source+';showScreen',context);
+  const flush=()=>{for(const callback of frames.splice(0))callback();};
+  for(const name of ['traffic','backtraces','sources','tools','sources','backtrace','traffic','evidence','vm','analyst','api-collection','signals']) {
+    showScreen(name);flush();
+    assert.equal(screens.filter(screen=>!screen.hidden).length,1);
+    const currentButtons=buttons.filter(button=>button['aria-current']==='page');
+    assert.equal(currentButtons.length,1,'Exactly one workspace entry is current');
+    assert.equal(currentButtons[0].dataset.screen,name==='backtraces'||name==='evidence'?'backtrace':name);
   }
-  console.log('PASS shared Advanced chooser dismissal, repeated choices, primary focus and linked destination focus at wide/narrow widths (production functions, not rendered QA)');
+  for(const button of buttons){
+    document.activeElement=button;focused.length=0;
+    showScreen(button.dataset.screen,button);flush();
+    assert.equal(document.activeElement,button,`${button.dataset.screen}: a sidebar choice keeps its own focus`);
+    assert.deepEqual(focused,[]);
+  }
+  document.activeElement=null;focused.length=0;
+  showScreen('tools');flush();
+  assert.deepEqual(focused,['destination'],'Linked navigation still moves focus to the destination');
+
+  // The production shortcut listener, with only the event target faked.
+  const start=app.indexOf('      // Cmd/Ctrl + 1-8 opens the sidebar workspace');
+  const shortcut=app.slice(start,app.indexOf('\n      });\n',start)+'\n      });\n'.length);
+  assert(start>=0,'Missing workspace shortcut listener');
+  let listener=null,modal=false;const clicks=[];
+  const shortcutButtons=order.map(name=>({dataset:{screen:name},disabled:false,click(){clicks.push(name);},focus(){}}));
+  runInNewContext(shortcut,{document:{addEventListener:(type,callback)=>{assert.equal(type,'keydown');listener=callback;},
+    querySelector:selector=>selector==='dialog:modal'&&modal?{}:null,
+    querySelectorAll:selector=>{assert.equal(selector,'.primary-nav .nav-button[data-screen]');return shortcutButtons;}}});
+  const press=init=>{const event={metaKey:false,ctrlKey:false,altKey:false,shiftKey:false,repeat:false,prevented:false,
+    preventDefault(){this.prevented=true;},...init};listener(event);return event.prevented;};
+  order.forEach((name,index)=>{
+    clicks.length=0;
+    assert.equal(press({metaKey:true,code:`Digit${index+1}`}),true);assert.deepEqual(clicks,[name]);
+    clicks.length=0;
+    assert.equal(press({ctrlKey:true,code:`Digit${index+1}`}),true);assert.deepEqual(clicks,[name]);
+  });
+  clicks.length=0;
+  for(const init of [{metaKey:true,code:'Digit9'},{code:'Digit1'},{metaKey:true,shiftKey:true,code:'Digit1'},
+    {metaKey:true,altKey:true,code:'Digit1'},{metaKey:true,repeat:true,code:'Digit1'},{metaKey:true,code:'KeyJ'}])
+    assert.equal(press(init),false,`Ignored: ${JSON.stringify(init)}`);
+  modal=true;assert.equal(press({metaKey:true,code:'Digit2'}),false,'A modal dialog keeps the keyboard');modal=false;
+  shortcutButtons[1].disabled=true;assert.equal(press({metaKey:true,code:'Digit2'}),false);
+  assert.deepEqual(clicks,[]);
+  console.log('PASS sidebar lists every workspace directly in shortcut order, one current entry, focus kept on sidebar choices and moved for linked navigation, Cmd/Ctrl + digit guards (production functions, not rendered QA)');
 }
 
 export function investigationFixture(base) {

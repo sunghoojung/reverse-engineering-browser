@@ -28,10 +28,7 @@ async function checkTrafficActivation(root) {
     state, location: {protocol: 'http:'}, elements: {gaps: {}},
     document: {hidden: false, activeElement: null,
       getElementById: id => screens.find(screen => screen.id === id),
-      querySelector(selector) {
-        if (selector === '#advanced-navigation') return {contains: () => false};
-        return screens.find(screen => '#' + screen.id === selector);
-      },
+      querySelector: selector => screens.find(screen => '#' + screen.id === selector),
       querySelectorAll: selector => selector === '.screen' ? screens : []},
     fetch: async path => {
       assert.equal(path, '/api/events?limit=5000', 'Refresh must use native broker events, not a debugger endpoint');

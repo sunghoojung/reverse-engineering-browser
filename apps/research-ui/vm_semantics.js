@@ -535,7 +535,7 @@ const vmExecutionWorkspace=typeof document==='undefined'?null:(()=>{
     if(owned)owned.panes.hidden=mode!=='owned';
   };
   if(ownedRoot&&typeof mountOwnedVmDebugger==='function'){
-    owned=mountOwnedVmDebugger(ownedRoot,{onState:view=>{hasSession=!!view.session;if(navigationEntry){navigationEntry.textContent='VM';const label=view.session?'VM workspace · '+view.session.state:'VM workspace';navigationEntry.setAttribute('aria-label',label);navigationEntry.setAttribute('title',label);}sync();}});
+    owned=mountOwnedVmDebugger(ownedRoot,{onState:view=>{hasSession=!!view.session;if(navigationEntry){const label=view.session?'VM · '+view.session.state:'VM',key=navigationEntry.getAttribute('aria-keyshortcuts')?.match(/Meta\+(\d)/)?.[1];navigationEntry.setAttribute('aria-label',label);navigationEntry.setAttribute('title',key?`${label} (⌘ / Ctrl + ${key})`:label);}sync();}});
     if(controls)controls.append(owned.toolbar);
   }
   const showWorkspace=next=>{mode=['findings','execution','owned',...(staticAnalysis?['static']:[]),...(contextualAnalysis?['contextual']:[]),...(packAnalysis?['packs']:[]),...(opcodeLedger?['ledger']:[])].includes(next)?next:'findings';sync();};

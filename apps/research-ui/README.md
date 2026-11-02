@@ -469,7 +469,9 @@ path use Ctrl, because the browser keeps ⌘ with a digit for its own tabs. Wind
 show the sidebar as an icon rail with the same entries, names and shortcuts, so
 evidence panes keep the widths their layouts were designed for. The toggle at
 the top of the sidebar, or ⌘ / Ctrl + B outside text fields, collapses a wide
-window's sidebar to the same rail and remembers the choice. On a narrow window
+window's sidebar to the same rail. The choice lasts until the packaged app
+quits, because its web view keeps no website data between launches; the
+browser development path keeps it across reloads. On a narrow window
 it slides the full sidebar out over the evidence until a workspace is chosen,
 Escape is pressed or the pointer goes elsewhere. Evidence sits in
 one rounded panel beside the sidebar, and an open Console is a second panel

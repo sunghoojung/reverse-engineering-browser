@@ -1,0 +1,28 @@
+{
+  "schema": "reb.owned-cold-identity-input.v1",
+  "provenance": "owned-synthetic",
+  "programBytes": 498,
+  "programSha256": "c0debbf0e0746668337a8dba4b78d0629175bd893fd5f2bcdb332cb2c1a2fc1d",
+  "pins": {
+    "brave-core.rev": "v1.95.52",
+    "chromium.rev": "151.0.7922.108",
+    "v8.rev": "20ad8d002c17ccc7ccfbefc6c4dcf1242fe80921",
+    "depot_tools.rev": "a20039648c0de69d8156906b18052bd47e9bf230"
+  },
+  "pairs": [
+    {
+      "name": "deferred",
+      "wasmHex": "0061736d01000000010401600000021001056f776e6564066d7574617465000003020100070e010a696e697469616c697a6500010a0601040010000b",
+      "wasmBytes": 60,
+      "wasmSha256": "4f88f54d3b7a16ccdc2cbacee525683841522775917a2fc6737c51c11625f08f",
+      "wat": "(module (import \"owned\" \"mutate\" (func $mutate)) (func $initialize (export \"initialize\") call $mutate))"
+    },
+    {
+      "name": "wasm-start",
+      "wasmHex": "0061736d01000000010401600000021001056f776e6564066d7574617465000003020100070e010a696e697469616c697a6500010801010a0601040010000b",
+      "wasmBytes": 63,
+      "wasmSha256": "30ba727880ee3ef418f2ca6bdfc292437c992df3a9831bfa82bc614337367269",
+      "wat": "(module (import \"owned\" \"mutate\" (func $mutate)) (func $initialize (export \"initialize\") call $mutate) (start $initialize))"
+    }
+  ]
+}

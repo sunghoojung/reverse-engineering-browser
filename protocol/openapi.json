@@ -760,7 +760,7 @@
       "get": {
         "operationId": "get_origin_trace",
         "summary": "get origin trace",
-        "description": "Bounded recent evidence window: 10000 events, 30000 edges, 10000 artifacts. Optional session_id limits selection to that exact captured session. Supply it with root_process_id and root_sequence_number for an exact event. Omitted selectors remain backward-compatible only for unambiguous matches; cross-session or multiple-root matches return ambiguous without selecting a trace. A missing exact match is empty, with no fallback. An empty/ambiguous/partial document is a successful result, not a missing-resource error.",
+        "description": "Bounded recent evidence window: 10000 events, 30000 edges, 10000 artifacts. Optional session_id limits selection to that exact captured session. Supply it with root_process_id and root_sequence_number for an exact event. Omitted selectors remain backward-compatible only for unambiguous matches; cross-session or multiple-root matches return ambiguous without selecting a trace. A missing exact match is empty, with no fallback. An empty/ambiguous/partial document is a successful result, not a missing-resource error. Where the identity chain ends, monotonic_time_ns proximity is a separate declared correlation input: at most one cross-process record of the same request identity within 1 ms is reported as a terminal temporal_adjacency step with time_adjacent confidence. It is counted only in time_adjacent_links, never in observed_links or correlated_links, it never replaces the no_predecessor gap, and it moves neither linked_steps nor percent.",
         "tags": [
           "origin-trace"
         ],
@@ -2341,7 +2341,7 @@
       "get": {
         "operationId": "inspect_wasm",
         "summary": "Inspect a captured WebAssembly module",
-        "description": "Inert bounded decoding of a hash-verified core WASM artifact. Never executes the module. Partial results name unvisited coverage; decoded does not assert type validity or runtime behavior.",
+        "description": "Inert bounded decoding of a hash-verified core WASM artifact. Never executes the module. The optional sections filter decodes rows for only the named sections, so export, type, import, custom and data tables stay reachable when code-section instructions would otherwise exhaust the 8,192-row budget. Per-function declaration rows appear only when sections names function. coverage names what was analyzed, excluded and truncated, and a filtered document is never decoded. Partial results name unvisited coverage; decoded does not assert type validity or runtime behavior.",
         "tags": [
           "artifacts"
         ],
@@ -2354,6 +2354,17 @@
               "type": "string",
               "pattern": "^[1-9][0-9]*$",
               "description": "Canonical nonzero unsigned 64-bit artifact ID"
+            }
+          },
+          {
+            "name": "sections",
+            "in": "query",
+            "required": false,
+            "description": "Optional comma separated core section names to decode: custom, type, import, function, table, memory, global, export, start, element, code, data, data_count, tag. Omit it to request the whole module. An empty or unknown name is refused rather than widened, and the response echoes the scope it used in coverage.requested_sections.",
+            "schema": {
+              "type": "string",
+              "maxLength": 128,
+              "pattern": "^(custom|type|import|function|table|memory|global|export|start|element|code|data|data_count|tag)(,(custom|type|import|function|table|memory|global|export|start|element|code|data|data_count|tag))*$"
             }
           }
         ],
@@ -2434,10 +2445,14 @@
             {
               "id": "stored-wasm-artifact",
               "condition": "artifact_id must identify a captured WebAssembly artifact that passes content verification and size limits."
+            },
+            {
+              "id": "requested-sections",
+              "condition": "A supplied sections value must be a comma separated list of known core section names; an empty or unknown name is refused instead of widening to the whole module."
             }
           ],
           "confirmations": [],
-          "notes": "Verifies captured artifact bytes and performs bounded inert WebAssembly decoding without executing the module.",
+          "notes": "Verifies captured artifact bytes and performs bounded inert WebAssembly decoding without executing the module. An optional sections filter decodes rows for only the named sections; an excluded section is never read, so nothing is claimed about its entries or function bodies. coverage reports the scope the response used, and a filtered document is always partial. Compare coverage.requested_sections with the filter you sent before reading a document as scoped.",
           "sources": [
             {
               "path": "apps/origin-trace-backend/src/wasm.rs",
@@ -3259,7 +3274,7 @@
       "get": {
         "operationId": "get_source_facts",
         "summary": "Get exact JavaScript source facts",
-        "description": "Requires exact session_id and artifact_id for an immutable JavaScript artifact. The complete blob must pass size and SHA256 verification and strict UTF-8 decoding. Rejects extra parameters, live scripts, ambiguous manifests, oversized source and identity mismatch without a fallback. Unavailable/partial lexical coverage is a successful structured result; inspect ok and coverage.",
+        "description": "Requires exact session_id and artifact_id for an immutable JavaScript artifact. The complete blob must pass size and SHA256 verification and strict UTF-8 decoding. Rejects extra parameters, live scripts, ambiguous manifests, oversized source and identity mismatch without a fallback. The optional region pair narrows analysis to the innermost callable body containing that original byte range, so a bundle whose whole-program analysis reaches a budget can still produce facts for one callable; coverage.analyzed_range reports what was analyzed and references leaving it stay explicitly unresolved. Unavailable/partial lexical coverage is a successful structured result; inspect ok and coverage.",
         "tags": [
           "source-facts"
         ],
@@ -3392,6 +3407,24 @@
             "schema": {
               "$ref": "#/components/schemas/Uint64String"
             }
+          },
+          {
+            "name": "region_start_byte",
+            "in": "query",
+            "required": false,
+            "description": "Optional inclusive start of an original UTF-8 byte range inside the verified source, at a Unicode scalar boundary. Requires region_end_byte. The analysis unit is the innermost callable body containing the range, never the byte slice itself.",
+            "schema": {
+              "$ref": "#/components/schemas/Uint64String"
+            }
+          },
+          {
+            "name": "region_end_byte",
+            "in": "query",
+            "required": false,
+            "description": "Optional exclusive end of the same original UTF-8 byte range, at a Unicode scalar boundary and at or after region_start_byte. Requires region_start_byte. Equal offsets address one cursor position.",
+            "schema": {
+              "$ref": "#/components/schemas/Uint64String"
+            }
           }
         ],
         "x-reb-execution": {
@@ -3408,7 +3441,10 @@
               "when": "The bounded local JavaScript worker process group is cleaned up on completion or failure."
             }
           ],
-          "uncertainties": [],
+          "uncertainties": [
+            "A reached budget returns empty fact tables rather than resolutions against an incomplete declaration table, so absent facts are never evidence that the syntax is absent.",
+            "Region-scoped coverage is partial by construction: names that leave the analyzed callable body are reported outside-analyzed-region, which does not distinguish a skipped sibling declaration from a genuine global."
+          ],
           "prerequisites": [
             {
               "id": "local-request",
@@ -3417,6 +3453,10 @@
             {
               "id": "exact-source",
               "condition": "Exact session_id and artifact_id select one verified immutable UTF-8 JavaScript artifact of at most 4 MiB."
+            },
+            {
+              "id": "region-in-source",
+              "condition": "A supplied region pair must be a complete half-open original byte range inside the verified source, at Unicode scalar boundaries."
             },
             {
               "id": "deobfuscator-ready",
@@ -4992,6 +5032,46 @@
           "step": {
             "type": "object",
             "additionalProperties": false,
+            "allOf": [
+              {
+                "if": {
+                  "properties": {
+                    "confidence": {
+                      "const": "time_adjacent"
+                    }
+                  },
+                  "required": [
+                    "confidence"
+                  ]
+                },
+                "then": {
+                  "properties": {
+                    "relation": {
+                      "const": "temporal_adjacency"
+                    }
+                  }
+                }
+              },
+              {
+                "if": {
+                  "properties": {
+                    "relation": {
+                      "const": "temporal_adjacency"
+                    }
+                  },
+                  "required": [
+                    "relation"
+                  ]
+                },
+                "then": {
+                  "properties": {
+                    "confidence": {
+                      "const": "time_adjacent"
+                    }
+                  }
+                }
+              }
+            ],
             "required": [
               "event",
               "monotonic_time_ns",
@@ -5034,13 +5114,15 @@
                   "parent_event",
                   "request_initiator",
                   "request_lifecycle",
-                  "artifact_request"
+                  "artifact_request",
+                  "temporal_adjacency"
                 ]
               },
               "confidence": {
                 "enum": [
                   "observed",
-                  "correlated"
+                  "correlated",
+                  "time_adjacent"
                 ]
               },
               "value": {
@@ -5104,6 +5186,12 @@
                 "type": "integer",
                 "minimum": 0,
                 "maximum": 31
+              },
+              "time_adjacent_links": {
+                "description": "Time-adjacent rows in steps. Current producers always emit it. A contract version 1 document written before the field existed omits it, and a reader treats the absence as zero.",
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 1
               },
               "gap_count": {
                 "type": "integer",
@@ -13369,6 +13457,7 @@
           "instructions",
           "rows",
           "omissions",
+          "coverage",
           "notice",
           "limits"
         ],
@@ -13438,6 +13527,7 @@
                     "tag",
                     "export",
                     "start",
+                    "declaration",
                     "function",
                     "local",
                     "instruction",
@@ -13479,6 +13569,58 @@
               "maxLength": 512
             }
           },
+          "coverage": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "requested_sections",
+              "analyzed_sections",
+              "excluded_sections",
+              "truncated_sections",
+              "section_map_complete"
+            ],
+            "properties": {
+              "requested_sections": {
+                "description": "The section names this document is scoped to, or null when the whole module was requested. Never contains unknown, which no request can name.",
+                "oneOf": [
+                  {
+                    "$ref": "#/components/schemas/WasmSectionNames"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "analyzed_sections": {
+                "description": "Sections present in these bytes that were requested and decoded to their end.",
+                "allOf": [
+                  {
+                    "$ref": "#/components/schemas/WasmSectionNames"
+                  }
+                ]
+              },
+              "excluded_sections": {
+                "description": "Sections present in these bytes that the request did not select. Their contents were not read, so nothing here is claimed about them.",
+                "allOf": [
+                  {
+                    "$ref": "#/components/schemas/WasmSectionNames"
+                  }
+                ]
+              },
+              "truncated_sections": {
+                "description": "Sections present in these bytes that were requested but are not completely covered, because a limit stopped decoding or this version cannot decode them. omissions names which.",
+                "allOf": [
+                  {
+                    "$ref": "#/components/schemas/WasmSectionNames"
+                  }
+                ]
+              },
+              "section_map_complete": {
+                "description": "True when traversal reached the module end, so the three lists together name every section in these bytes and a requested section absent from all three is absent from the module.",
+                "type": "boolean"
+              }
+            }
+          },
           "notice": {
             "type": "string",
             "maxLength": 512
@@ -13511,6 +13653,30 @@
               }
             }
           }
+        }
+      },
+      "WasmSectionNames": {
+        "type": "array",
+        "maxItems": 15,
+        "uniqueItems": true,
+        "items": {
+          "enum": [
+            "custom",
+            "type",
+            "import",
+            "function",
+            "table",
+            "memory",
+            "global",
+            "export",
+            "start",
+            "element",
+            "code",
+            "data",
+            "data_count",
+            "tag",
+            "unknown"
+          ]
         }
       },
       "NativeConsoleState": {
@@ -17561,7 +17727,8 @@
               "template-substitution-coercion",
               "tagged-template-call-effects",
               "unsupported-expression-effects",
-              "resource-disposal-effects"
+              "resource-disposal-effects",
+              "outside-analyzed-region"
             ]
           }
         }
@@ -17573,7 +17740,8 @@
           "status",
           "truncated",
           "diagnostics",
-          "frontiers"
+          "frontiers",
+          "analyzed_range"
         ],
         "properties": {
           "status": {
@@ -17600,6 +17768,16 @@
             "items": {
               "$ref": "#/components/schemas/JavaScriptSourceFrontier"
             }
+          },
+          "analyzed_range": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/JavaScriptSourceRange"
+              },
+              {
+                "description": "Original bytes these facts cover. It is the whole program unless a requested region resolved to one enclosing callable body, it always contains the requested region, and a narrower range can never carry complete status."
+              }
+            ]
           }
         }
       },
@@ -17686,6 +17864,7 @@
               "max_frontiers",
               "preflight_depth",
               "preflight_nodes",
+              "preflight_parse_heap_bytes",
               "max_binding_candidates"
             ],
             "properties": {
@@ -17693,7 +17872,7 @@
                 "const": 4194304
               },
               "max_ast_nodes": {
-                "const": 32768
+                "const": 262144
               },
               "max_facts": {
                 "const": 16384
@@ -17705,7 +17884,10 @@
                 "const": 128
               },
               "preflight_nodes": {
-                "const": 500000
+                "const": 2097152
+              },
+              "preflight_parse_heap_bytes": {
+                "const": 402653184
               },
               "max_binding_candidates": {
                 "const": 64
@@ -17870,6 +18052,7 @@
               "max_frontiers",
               "preflight_depth",
               "preflight_nodes",
+              "preflight_parse_heap_bytes",
               "max_binding_candidates"
             ],
             "properties": {
@@ -17877,7 +18060,7 @@
                 "const": 4194304
               },
               "max_ast_nodes": {
-                "const": 32768
+                "const": 262144
               },
               "max_facts": {
                 "const": 16384
@@ -17889,7 +18072,10 @@
                 "const": 128
               },
               "preflight_nodes": {
-                "const": 500000
+                "const": 2097152
+              },
+              "preflight_parse_heap_bytes": {
+                "const": 402653184
               },
               "max_binding_candidates": {
                 "const": 64
@@ -18096,7 +18282,8 @@
                   "external-or-implicit",
                   "implicit-arguments-environment",
                   "this-environment",
-                  "binding-candidate-limit"
+                  "binding-candidate-limit",
+                  "outside-analyzed-region"
                 ]
               },
               "name": {

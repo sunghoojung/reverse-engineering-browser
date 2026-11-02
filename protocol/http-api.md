@@ -42,9 +42,12 @@ apps/origin-trace-backend/target/debug/reb-api call get_artifact_content \
 Immutable JavaScript lexical facts are available as `get_source_facts`:
 `reb-api call get_source_facts --endpoint-file /tmp/reb-api-endpoint
 --param session_id=1 --param artifact_id=2`. Both identifiers must match the
-stored artifact; no live/URL/derived-source fallback is supported. See
+stored artifact; no live/URL/derived-source fallback is supported. The optional
+`region_start_byte`/`region_end_byte` pair narrows analysis to the innermost
+callable body containing that original byte range, so a bundle that reaches a
+whole-program budget can still produce facts for one callable. See
 [JavaScript source facts v1](javascript-source-facts-v1.md) for exact-byte ranges,
-limits, and partial/unavailable coverage semantics.
+limits, `coverage.analyzed_range`, and partial/unavailable coverage semantics.
 
 `spec` prints the complete embedded OpenAPI document for validators and client
 generators without contacting a server. `describe` is an operation-detail

@@ -202,6 +202,44 @@ async fn origin_trace_gap_markers_preserve_addressable_events_over_http() {
                 "{name}"
             );
         }
+        for (field, key) in [
+            ("step_confidences", "confidence"),
+            ("step_relations", "relation"),
+        ] {
+            if let Some(expected) = case.get(field) {
+                assert_eq!(
+                    json!(steps.iter().map(|step| &step[key]).collect::<Vec<_>>()),
+                    *expected,
+                    "{name} {field}"
+                );
+            }
+        }
+        // `monotonic_time_ns` proximity is its own confidence class: it occupies
+        // a step without becoming an observed or correlated link, and it never
+        // moves the reported percentage.
+        if let Some(coverage) = case.get("coverage") {
+            assert_eq!(body["coverage"], *coverage, "{name} coverage");
+            let adjacent = steps
+                .iter()
+                .filter(|step| step["confidence"] == "time_adjacent")
+                .count();
+            assert_eq!(json!(adjacent), coverage["time_adjacent_links"], "{name}");
+            if adjacent > 0 {
+                assert_eq!(
+                    steps.last().unwrap()["confidence"],
+                    "time_adjacent",
+                    "{name}"
+                );
+                assert!(
+                    body["gaps"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .any(|gap| gap["reason"] == "no_predecessor"),
+                    "{name}: proximity must not replace the missing-predecessor gap"
+                );
+            }
+        }
         let gaps = body["gaps"].as_array().unwrap();
         assert_eq!(
             json!(gaps.iter().map(|gap| &gap["reason"]).collect::<Vec<_>>()),
@@ -468,6 +506,70 @@ async fn origin_trace_step_limit_keeps_capture_gap_bounded_over_http() {
     assert_eq!(body["gaps"][0]["reason"], "step_limit");
     assert_eq!(body["gaps"][0]["after_step"], 31);
     assert_eq!(body["gaps"][1]["reason"], "capture_gap");
+}
+
+// A time-adjacent row may fill the last step slot. That must not be reported as
+// the traversal having reached its limit, and must not be counted as a link.
+#[tokio::test]
+async fn origin_trace_time_adjacent_row_fills_the_step_budget_without_a_step_limit() {
+    let fixture: Value =
+        serde_json::from_str(include_str!("../assets/origin-trace-gap-cases.json")).unwrap();
+    let server = Server::start().await;
+    let mut sibling = fixture["events"]["root"].clone();
+    sibling["sequence_number"] = json!("9007199254740998");
+    sibling["process_id"] = json!(17);
+    sibling["type"] = json!("request_initiated");
+    let mut events = vec![sibling];
+    let mut edges = Vec::new();
+    for sequence in 1..=31 {
+        let mut event = fixture["events"]["root"].clone();
+        event["sequence_number"] = json!(sequence.to_string());
+        events.push(event);
+        if sequence > 1 {
+            let mut edge = fixture["edges"]["parent"].clone();
+            edge["from_sequence_number"] = json!(sequence.to_string());
+            edge["to_sequence_number"] = json!((sequence - 1).to_string());
+            edges.push(edge);
+        }
+    }
+    for (path, rows) in [("events.jsonl", events), ("trace.jsonl", edges)] {
+        server.file(
+            path,
+            rows.iter()
+                .map(Value::to_string)
+                .collect::<Vec<_>>()
+                .join("\n")
+                .as_bytes(),
+        );
+    }
+    let bytes = assert_contract_response(
+        server.get("/api/origin-trace?request_id=9007199254740995&root_process_id=42&root_sequence_number=31").await,
+        "get",
+        "/api/origin-trace",
+        200,
+    )
+    .await;
+    let body: Value = serde_json::from_slice(&bytes).unwrap();
+    let steps = body["steps"].as_array().unwrap();
+    assert_eq!(steps.len(), 32);
+    assert_eq!(steps[31]["relation"], "temporal_adjacency");
+    assert_eq!(steps[31]["confidence"], "time_adjacent");
+    assert_eq!(steps[31]["event"]["sequence_number"], "9007199254740998");
+    assert_eq!(
+        json!(
+            body["gaps"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|gap| &gap["reason"])
+                .collect::<Vec<_>>()
+        ),
+        json!(["no_predecessor"])
+    );
+    assert_eq!(
+        body["coverage"],
+        json!({"linked_steps":30,"observed_links":30,"correlated_links":0,"time_adjacent_links":1,"gap_count":1,"percent":97})
+    );
 }
 fn assert_schema(spec: &Value, schema: &Value, value: &Value, label: &str) {
     let document = json!({
@@ -959,6 +1061,7 @@ async fn openapi_responses_match_live_local_http_and_conditional_reads() {
             400,
         ),
         ("/api/wasm?artifact_id=missing", "/api/wasm", 400),
+        ("/api/wasm?artifact_id=1&sections=exports", "/api/wasm", 400),
     ] {
         assert_contract_response(server.get(path).await, "get", route, status).await;
     }
@@ -2794,11 +2897,16 @@ async fn wasm_inspection_preserves_offsets_identity_limits_and_original_bytes() 
     let response = server.get("/api/wasm?artifact_id=1").await;
     assert_eq!(response.status(), 200);
     let report: Value = response.json().await.unwrap();
-    let spec: Value = serde_json::from_str(include_str!("../../../protocol/openapi.json")).unwrap();
-    jsonschema::validator_for(&spec["components"]["schemas"]["WasmInspection"])
-        .unwrap()
-        .validate(&report)
-        .unwrap();
+    let spec = specification();
+    let contract = |document: &Value, label: &str| {
+        assert_schema(
+            &spec,
+            &spec["components"]["schemas"]["WasmInspection"],
+            document,
+            label,
+        )
+    };
+    contract(&report, "whole module");
     assert_eq!(report["status"], "decoded");
     assert_eq!(report["sha256"], hash);
     assert_eq!(report["imported_functions"], 1);
@@ -2948,6 +3056,265 @@ async fn wasm_inspection_preserves_offsets_identity_limits_and_original_bytes() 
     assert_eq!(server.get("/api/wasm?artifact_id=1").await.status(), 500);
 }
 
+#[tokio::test]
+async fn wasm_section_requests_reach_late_tables_and_declare_what_they_left_out() {
+    let server = Server::start().await;
+    fn leb(mut n: usize) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        loop {
+            let byte = (n & 127) as u8;
+            n >>= 7;
+            bytes.push(byte | if n > 0 { 128 } else { 0 });
+            if n == 0 {
+                break;
+            }
+        }
+        bytes
+    }
+    fn section(module: &mut Vec<u8>, id: u8, data: &[u8]) {
+        module.push(id);
+        module.extend(leb(data.len()));
+        module.extend(data);
+    }
+    // A module shaped like a captured one: a few types, one import, many
+    // declared functions, an export naming the last of them, bodies large
+    // enough to exhaust the row budget, and data and custom sections that the
+    // binary format places after the code section.
+    fn module(functions: usize, nops: usize) -> Vec<u8> {
+        assert!((1..128).contains(&functions), "single-byte LEB fixture");
+        let mut bytes = b"\0asm\x01\0\0\0".to_vec();
+        section(&mut bytes, 1, &[2, 0x60, 0, 0, 0x60, 0, 1, 0x7f]);
+        section(
+            &mut bytes,
+            2,
+            &[1, 3, b'e', b'n', b'v', 4, b's', b'e', b'e', b'd', 0, 0],
+        );
+        let mut declarations = vec![functions as u8];
+        declarations.extend(std::iter::repeat_n(1u8, functions));
+        section(&mut bytes, 3, &declarations);
+        section(
+            &mut bytes,
+            7,
+            &[1, 4, b'l', b'a', b's', b't', 0, functions as u8],
+        );
+        let mut body = vec![0];
+        body.extend(std::iter::repeat_n(1u8, nops));
+        body.push(0x0b);
+        let mut code = vec![functions as u8];
+        for _ in 0..functions {
+            code.extend(leb(body.len()));
+            code.extend(&body);
+        }
+        section(&mut bytes, 10, &code);
+        section(&mut bytes, 11, &[1, 0, 0x41, 0, 0x0b, 3, 1, 2, 3]);
+        section(&mut bytes, 0, &[4, b'n', b'a', b'm', b'e', 0xaa, 0xbb]);
+        bytes
+    }
+    let put = |bytes: &[u8]| {
+        let hash = hex::encode(Sha256::digest(bytes));
+        let artifact = json!({"protocol_version":1,"artifact_id":"1","session_id":"1","navigation_id":"1","frame_id":"1","parent_artifact_id":"0","creator_event_id":"0","kind":"wasm","url":"https://example.test/module.wasm","mime_type":"application/wasm","byte_size":bytes.len(),"sha256":hash,"sensitive":false,"content_path":format!("blobs/{hash}.bin")});
+        server.file(
+            "artifacts/manifest.jsonl",
+            format!("{artifact}\n").as_bytes(),
+        );
+        server.file(&format!("artifacts/blobs/{hash}.bin"), bytes);
+    };
+    let spec = specification();
+    let contract = |document: &Value, label: &str| {
+        assert_schema(
+            &spec,
+            &spec["components"]["schemas"]["WasmInspection"],
+            document,
+            label,
+        )
+    };
+    let inspect = async |query: &str| -> Value {
+        let response = server.get(&format!("/api/wasm?artifact_id=1{query}")).await;
+        assert_eq!(response.status(), 200, "{query}");
+        response.json().await.unwrap()
+    };
+    let kinds = |document: &Value, kind: &str| -> Vec<Value> {
+        document["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|row| row["kind"] == kind)
+            .cloned()
+            .collect()
+    };
+
+    // An unscoped request on a module whose bodies outrun the row budget never
+    // reaches the sections the format places after the code section.
+    put(&module(40, 250));
+    let whole = inspect("").await;
+    contract(&whole, "unscoped");
+    assert_eq!(whole["status"], "partial");
+    assert_eq!(whole["rows"].as_array().unwrap().len(), 8192);
+    assert_eq!(whole["coverage"]["requested_sections"], Value::Null);
+    assert_eq!(
+        whole["coverage"],
+        json!({"requested_sections":null,
+            "analyzed_sections":["type","import","function","export"],
+            "excluded_sections":[],"truncated_sections":["code"],"section_map_complete":false})
+    );
+    assert!(kinds(&whole, "data").is_empty() && kinds(&whole, "custom").is_empty());
+    // Declaration rows are paid for only by a request that names `function`,
+    // so the unscoped budget still reaches exports and every body it can.
+    assert!(kinds(&whole, "declaration").is_empty());
+    assert_eq!(kinds(&whole, "export").len(), 1);
+    assert!(
+        !whole["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|row| row["text"].as_str().unwrap().starts_with("data section")),
+        "A truncated traversal must not name a section it never reached"
+    );
+
+    // Scoping to the static tables resolves an export to its declared type
+    // without decoding one function body.
+    let tables = inspect("&sections=type,import,function,export").await;
+    contract(&tables, "static tables");
+    assert_eq!(tables["status"], "partial");
+    assert_eq!(
+        tables["coverage"],
+        json!({"requested_sections":["type","import","function","export"],
+            "analyzed_sections":["type","import","function","export"],
+            "excluded_sections":["custom","code","data"],
+            "truncated_sections":[],"section_map_complete":true})
+    );
+    assert!(
+        tables["omissions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|value| value
+                == "Only the requested sections were decoded: type, import, function, export.")
+    );
+    assert_eq!(tables["instructions"], 0);
+    assert_eq!(tables["defined_functions"], 40);
+    assert_eq!(tables["imported_functions"], 1);
+    assert!(kinds(&tables, "instruction").is_empty() && kinds(&tables, "local").is_empty());
+    assert!(tables["rows"].as_array().unwrap().len() < 128);
+    let exported = kinds(&tables, "export")
+        .into_iter()
+        .find(|row| row["text"].as_str().unwrap().contains("\"last\""))
+        .unwrap();
+    let index = exported["text"]
+        .as_str()
+        .unwrap()
+        .rsplit(' ')
+        .next()
+        .unwrap()
+        .parse::<u64>()
+        .unwrap();
+    assert_eq!(index, 40);
+    let declaration = kinds(&tables, "declaration")
+        .into_iter()
+        .find(|row| row["function_index"] == json!(index))
+        .expect("the exported function's declared type is reachable");
+    assert_eq!(declaration["text"], "func 40 declares type 1");
+    assert!(
+        kinds(&tables, "type")
+            .iter()
+            .any(|row| row["text"] == "type 1: () -> (i32)")
+    );
+
+    // Sections the code section would otherwise hide are reachable on request.
+    let late = inspect("&sections=data,custom").await;
+    contract(&late, "late sections");
+    assert_eq!(
+        late["coverage"],
+        json!({"requested_sections":["custom","data"],
+            "analyzed_sections":["custom","data"],
+            "excluded_sections":["type","import","function","export","code"],
+            "truncated_sections":[],"section_map_complete":true})
+    );
+    assert_eq!(late["instructions"], 0);
+    assert_eq!(kinds(&late, "data").len(), 1);
+    assert!(
+        kinds(&late, "custom")[0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("name")
+    );
+    assert_eq!(late["status"], "partial");
+
+    // The CLI reads the same filter through the same provider.
+    let cli = |args: &[&str]| -> Value {
+        let output = Command::new(env!("CARGO_BIN_EXE_origin-trace-wasm"))
+            .arg("--artifacts")
+            .arg(server.root.path().join("artifacts"))
+            .args(["--artifact-id", "1"])
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        serde_json::from_slice(&output.stdout).unwrap()
+    };
+    assert_eq!(cli(&["--sections", "data,custom"]), late);
+    assert_eq!(
+        cli(&["--sections", "exports"])["status"],
+        400,
+        "The CLI refuses an unknown section instead of inspecting the whole module"
+    );
+
+    // A complete unscoped traversal still claims the whole module.
+    put(&module(2, 1));
+    let small = inspect("").await;
+    contract(&small, "complete");
+    assert_eq!(small["status"], "decoded");
+    assert_eq!(small["omissions"], json!([]));
+    assert_eq!(
+        small["coverage"],
+        json!({"requested_sections":null,
+            "analyzed_sections":["custom","type","import","function","export","code","data"],
+            "excluded_sections":[],"truncated_sections":[],"section_map_complete":true})
+    );
+    // Requesting every section is still a request, so it cannot claim decoded.
+    let every = inspect("&sections=custom,type,import,function,export,code,data").await;
+    contract(&every, "every present section");
+    assert_eq!(every["status"], "partial");
+    assert_eq!(
+        every["coverage"]["analyzed_sections"],
+        small["coverage"]["analyzed_sections"]
+    );
+    assert_eq!(every["coverage"]["excluded_sections"], json!([]));
+
+    // A filter that cannot be read as written is refused, never widened.
+    for query in [
+        "&sections=",
+        "&sections=exports",
+        "&sections=export,",
+        "&sections=,export",
+        "&sections=Export",
+        "&sections=export%20",
+        "&sections=unknown",
+        "&sections=export&sections=type",
+        "&section=export",
+        "&sections=code&limit=1",
+    ] {
+        assert_eq!(
+            server
+                .get(&format!("/api/wasm?artifact_id=1{query}"))
+                .await
+                .status(),
+            400,
+            "{query}"
+        );
+    }
+    let repeated = std::iter::repeat_n("export", 32)
+        .collect::<Vec<_>>()
+        .join(",");
+    assert!(repeated.len() > 128);
+    assert_eq!(
+        server
+            .get(&format!("/api/wasm?artifact_id=1&sections={repeated}"))
+            .await
+            .status(),
+        400
+    );
+}
 #[tokio::test]
 async fn error_reasons_preserve_http_text_targets_limits_and_cli_contracts() {
     let missing = tempfile::tempdir().unwrap();
@@ -4941,12 +5308,13 @@ fn source_facts_document(source: &str) -> Value {
     json!({
         "schema":"reb-javascript-source-facts-v1", "ok":true,
         "source_bytes":source.len(), "offset_unit":"utf-8-byte", "profile":"lexical-effects-v1",
-        "coverage":{"status":"complete","truncated":false,"diagnostics":[],"frontiers":[]},
+        "coverage":{"status":"complete","truncated":false,"diagnostics":[],"frontiers":[],
+            "analyzed_range":{"start":0,"end":source.len()}},
         "scopes":[{"id":0,"parent_id":null,"range":{"start":0,"end":source.len()},"kind":"program"}],
         "bindings":[], "callables":[],
         "regions":[{"id":0,"parent_id":null,"callable_id":null,"range":{"start":0,"end":source.len()},"kind":"program","entry_order":0}],
         "operations":[],
-        "limits":{"max_source_bytes":4194304,"max_ast_nodes":32768,"max_facts":16384,"max_frontiers":256,"max_binding_candidates":64,"preflight_depth":128,"preflight_nodes":500000}
+        "limits":{"max_source_bytes":4194304,"max_ast_nodes":262144,"max_facts":16384,"max_frontiers":256,"max_binding_candidates":64,"preflight_depth":128,"preflight_nodes":2097152,"preflight_parse_heap_bytes":402653184}
     })
 }
 
@@ -5073,7 +5441,7 @@ async fn source_facts_http_and_cli_preserve_exact_identity_and_coverage() {
 
     for (status, ok, truncated) in [("partial", true, true), ("unavailable", false, false)] {
         let mut partial = source_facts_document(source);
-        partial["coverage"] = json!({"status":status,"truncated":truncated,"diagnostics":["Synthetic coverage limit"],"frontiers":[{"range":{"start":0,"end":source.len()},"reason":"unsupported-expression-effects"}]});
+        partial["coverage"] = json!({"status":status,"truncated":truncated,"diagnostics":["Synthetic coverage limit"],"frontiers":[{"range":{"start":0,"end":source.len()},"reason":"unsupported-expression-effects"}],"analyzed_range":{"start":0,"end":source.len()}});
         partial["ok"] = json!(ok);
         if status == "unavailable" {
             for table in ["scopes", "bindings", "callables", "regions", "operations"] {
@@ -5241,6 +5609,26 @@ async fn source_facts_reject_unavailable_or_invalid_worker_without_fallback() {
             v
         },
         {
+            // An unscoped request must analyze the whole verified source.
+            let mut v = valid.clone();
+            v["coverage"]["analyzed_range"] = json!({"start":1,"end":source.len()});
+            v["coverage"]["status"] = json!("partial");
+            v
+        },
+        {
+            let mut v = valid.clone();
+            v["coverage"]["analyzed_range"] = json!({"start":0,"end":source.len() + 1});
+            v
+        },
+        {
+            let mut v = valid.clone();
+            v["coverage"]
+                .as_object_mut()
+                .unwrap()
+                .remove("analyzed_range");
+            v
+        },
+        {
             let mut v = valid.clone();
             v["ok"] = json!(false);
             v
@@ -5262,6 +5650,179 @@ async fn source_facts_reject_unavailable_or_invalid_worker_without_fallback() {
     assert_eq!(server.get(path).await.status(), 502);
     std::fs::remove_file(&worker).unwrap();
     assert_contract_response(server.get(path).await, "get", "/api/source-facts", 503).await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn source_facts_region_narrows_analysis_without_weakening_coverage() {
+    let directory = tempfile::tempdir().unwrap();
+    let response_path = directory.path().join("response.json");
+    let request_path = directory.path().join("request.json");
+    let worker = source_facts_worker(
+        directory.path(),
+        &format!(
+            "printf '%s' \"$request\" > '{}'; /bin/cat '{}'",
+            request_path.display(),
+            response_path.display()
+        ),
+    );
+    let server =
+        Server::start_with_args(&["--deobfuscator".into(), worker.display().to_string()]).await;
+    let source = "var o=1; function f(a){ return a+o; }";
+    let declaration = source.find("function").unwrap();
+    let body = source.find('{').unwrap();
+    put_source_facts_artifact(&server, source.as_bytes(), "javascript");
+
+    // One callable body: the enclosing structure is retained, the skipped
+    // prefix is an explicit frontier, and `o` never resolves against the glue
+    // scope this report did not analyze.
+    let mut scoped = source_facts_document(source);
+    scoped["coverage"] = json!({"status":"partial","truncated":false,
+        "diagnostics":["analysis covered coverage.analyzed_range only; omitted syntax remains unknown"],
+        "frontiers":[{"range":{"start":0,"end":declaration},"reason":"outside-analyzed-region"}],
+        "analyzed_range":{"start":body,"end":source.len()}});
+    scoped["scopes"] = json!([
+        {"id":0,"parent_id":null,"range":{"start":0,"end":source.len()},"kind":"program"},
+        {"id":1,"parent_id":0,"range":{"start":declaration,"end":source.len()},"kind":"function"}]);
+    scoped["bindings"] = json!([
+        {"id":0,"scope_id":1,"name":"a","range":{"start":body - 2,"end":body - 1},"kind":"parameter"}]);
+    scoped["callables"] = json!([
+        {"id":0,"scope_id":1,"range":{"start":declaration,"end":source.len()},
+         "body_range":{"start":body,"end":source.len()},"kind":"function","async":false,"generator":false}]);
+    scoped["regions"] = json!([
+        {"id":0,"parent_id":null,"callable_id":null,"range":{"start":0,"end":source.len()},"kind":"program","entry_order":0},
+        {"id":1,"parent_id":0,"callable_id":0,"range":{"start":body,"end":source.len()},"kind":"callable-body","entry_order":0}]);
+    scoped["operations"] = json!([
+        {"id":0,"region_id":1,"order":0,"range":{"start":body + 9,"end":body + 10},"kind":"read",
+         "detail":{"target":{"kind":"binding","binding_ids":[0],"resolution":"lexical-only","name":"a"}}},
+        {"id":1,"region_id":1,"order":1,"range":{"start":body + 11,"end":body + 12},"kind":"read",
+         "detail":{"target":{"kind":"unresolved","binding_ids":[],"resolution":"outside-analyzed-region","name":"o"}}}]);
+    std::fs::write(&response_path, scoped.to_string()).unwrap();
+    let query = format!(
+        "?session_id=11&artifact_id=7&region_start_byte={}&region_end_byte={}",
+        body + 9,
+        body + 10
+    );
+    let bytes = assert_contract_response(
+        server.get(&format!("/api/source-facts{query}")).await,
+        "get",
+        "/api/source-facts",
+        200,
+    )
+    .await;
+    let result: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(result["coverage"], scoped["coverage"]);
+    assert_eq!(result["ok"], true);
+    // The requested range reaches the worker unchanged and selects nothing else.
+    let forwarded: Value = serde_json::from_slice(&std::fs::read(&request_path).unwrap()).unwrap();
+    assert_eq!(
+        forwarded["region"],
+        json!({"start":body + 9,"end":body + 10})
+    );
+    assert_eq!(forwarded["source"], source);
+
+    let output = Command::new(env!("CARGO_BIN_EXE_reb-api"))
+        .args([
+            "call",
+            "get_source_facts",
+            "--base-url",
+            &server.url,
+            "--param",
+            "session_id=11",
+            "--param",
+            "artifact_id=7",
+            "--param",
+            &format!("region_start_byte={}", body + 9),
+            "--param",
+            &format!("region_end_byte={}", body + 10),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        serde_json::from_slice::<Value>(&output.stdout).unwrap(),
+        result
+    );
+
+    // An unscoped request against the same worker response is refused: the
+    // narrower coverage claim does not answer what was asked.
+    assert_eq!(
+        server
+            .get("/api/source-facts?session_id=11&artifact_id=7")
+            .await
+            .status(),
+        502
+    );
+    for (start, end) in [(0, source.len()), (declaration, body + 1)] {
+        // A coverage claim must contain the requested range.
+        assert_eq!(
+            server
+                .get(&format!(
+                    "/api/source-facts?session_id=11&artifact_id=7&region_start_byte={start}&region_end_byte={end}"
+                ))
+                .await
+                .status(),
+            502
+        );
+    }
+    let mut complete = scoped.clone();
+    complete["coverage"]["status"] = json!("complete");
+    complete["coverage"]["diagnostics"] = json!([]);
+    complete["coverage"]["frontiers"] = json!([]);
+    std::fs::write(&response_path, complete.to_string()).unwrap();
+    assert_eq!(
+        server
+            .get(&format!("/api/source-facts{query}"))
+            .await
+            .status(),
+        502
+    );
+
+    // A region that no callable body contains legitimately analyzes everything.
+    let mut whole = source_facts_document(source);
+    whole["coverage"]["diagnostics"] = json!([]);
+    std::fs::write(&response_path, whole.to_string()).unwrap();
+    assert_contract_response(
+        server
+            .get("/api/source-facts?session_id=11&artifact_id=7&region_start_byte=0&region_end_byte=1")
+            .await,
+        "get",
+        "/api/source-facts",
+        200,
+    )
+    .await;
+
+    let multibyte = "const café = 1; café;";
+    put_source_facts_artifact(&server, multibyte.as_bytes(), "javascript");
+    std::fs::write(&response_path, source_facts_document(multibyte).to_string()).unwrap();
+    for query in [
+        "&region_start_byte=0",
+        "&region_end_byte=4",
+        "&region_start_byte=00&region_end_byte=4",
+        "&region_start_byte=4&region_end_byte=0",
+        "&region_start_byte=0&region_end_byte=99",
+        // A canonical 64-bit offset past the artifact is a range error too.
+        "&region_start_byte=0&region_end_byte=4294967296",
+        // Inside the two-byte é: not an original byte boundary.
+        "&region_start_byte=10&region_end_byte=11",
+        "&region_start_byte=0&region_end_byte=4&region_end_byte=5",
+    ] {
+        assert_contract_response(
+            server
+                .get(&format!(
+                    "/api/source-facts?session_id=11&artifact_id=7{query}"
+                ))
+                .await,
+            "get",
+            "/api/source-facts",
+            400,
+        )
+        .await;
+    }
 }
 
 #[cfg(unix)]
@@ -5358,6 +5919,58 @@ async fn source_facts_real_worker_http_and_cli() {
         serde_json::from_slice::<Value>(&output.stdout).unwrap(),
         value
     );
+    // The same verified bytes, scoped to the innermost callable body holding a
+    // cursor. The worker selects the analysis unit; the adapter checks the claim.
+    let cursor = source.find("return café").unwrap();
+    let bytes = assert_contract_response(
+        server
+            .get(&format!(
+                "{path}&region_start_byte={cursor}&region_end_byte={cursor}"
+            ))
+            .await,
+        "get",
+        "/api/source-facts",
+        200,
+    )
+    .await;
+    let scoped: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(scoped["ok"], true);
+    assert_eq!(scoped["coverage"]["status"], "partial");
+    assert_eq!(scoped["coverage"]["truncated"], false);
+    let analyzed = &scoped["coverage"]["analyzed_range"];
+    assert_eq!(
+        &source[analyzed["start"].as_u64().unwrap() as usize
+            ..analyzed["end"].as_u64().unwrap() as usize],
+        "{ if (value) return café; return; }"
+    );
+    assert_eq!(scoped["callables"].as_array().unwrap().len(), 1);
+    assert!(
+        scoped["bindings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|binding| binding["name"] == "value")
+    );
+    // The closed table of the selected body resolves its own parameter; the
+    // outer declaration this report skipped stays an explicit unknown.
+    let resolution = |name: &str| {
+        scoped["operations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|op| op["detail"]["target"]["name"] == name)
+            .map(|op| op["detail"]["target"]["resolution"].clone())
+            .collect::<Vec<_>>()
+    };
+    assert!(resolution("value").iter().all(|r| r == "lexical-only"));
+    assert!(!resolution("value").is_empty());
+    assert!(
+        resolution("café")
+            .iter()
+            .all(|r| r == "outside-analyzed-region")
+    );
+    assert!(!resolution("café").is_empty());
+
     put_source_facts_artifact(&server, b"function broken(", "javascript");
     let bytes =
         assert_contract_response(server.get(path).await, "get", "/api/source-facts", 200).await;

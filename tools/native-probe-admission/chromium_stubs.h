@@ -173,6 +173,9 @@ namespace blink {
 // Only test threads opt into a deterministic pause between sink claim and
 // transport admission. Production frame lookup is not replaced in the sources.
 inline thread_local void (*test_frame_hook)() = nullptr;
+// Default absence keeps every unrelated case at an unattributed frame. A test
+// opts in to model a caller that runs with an entered script context.
+inline thread_local bool test_frame_present = false;
 struct FrameToken {
   const base::UnguessableToken& value() const {
     static const base::UnguessableToken token;
@@ -184,7 +187,11 @@ struct WebLocalFrame {
     if (test_frame_hook) {
       test_frame_hook();
     }
-    return nullptr;
+    if (!test_frame_present) {
+      return nullptr;
+    }
+    static WebLocalFrame frame;
+    return &frame;
   }
   FrameToken GetLocalFrameToken() const { return {}; }
 };

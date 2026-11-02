@@ -13,16 +13,52 @@ use std::{
     collections::{BTreeMap, BTreeSet},
 };
 
-const MAX_AST_NODES: usize = 32_768;
+// The bounded preflight admits at most `preflight::MAX_TREE_NODES` tree-sitter
+// nodes, so this budget is no longer the first limit an admitted source meets.
+// It stays fixed rather than caller-supplied: a per-request budget would make
+// two reports of the same bytes disagree. Larger sources are addressed with a
+// region instead, which is now reachable for the dense minified bundles that
+// the preflight node bound used to refuse before this budget was consulted.
+const MAX_AST_NODES: usize = 262_144;
 const MAX_FACTS: usize = 16_384;
 const MAX_FRONTIERS: usize = 256;
 const MAX_BINDING_CANDIDATES: usize = 64;
+
+/// Half-open original-byte window carried from `region_start_byte` and
+/// `region_end_byte`. The worker never derives one from text, a name or a
+/// previous report.
+#[derive(Deserialize, Clone, Copy)]
+#[serde(deny_unknown_fields)]
+pub struct Region {
+    pub start: u32,
+    pub end: u32,
+}
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Request {
     pub operation: String,
     pub source: String,
+    #[serde(default)]
+    pub region: Option<Region>,
+}
+/// Facts outside `coverage.analyzed_range` are not produced; this is scoping,
+/// not budget loss, so it never sets `truncated`.
+const SCOPED: &str =
+    "analysis covered coverage.analyzed_range only; omitted syntax remains unknown";
+const WHOLE: &str =
+    "the requested region is not inside a callable body; the whole program was analyzed";
+const NARROW: &str =
+    "request region_start_byte and region_end_byte to analyze one callable body instead";
+
+/// A node is analyzed when it overlaps the analyzed window. Every enclosing
+/// node overlaps, so the real scope chain above a selected callable body is
+/// retained while its siblings are skipped.
+fn analyzing(window: Option<Span>, span: Span) -> bool {
+    window.is_none_or(|w| span.start < w.end && span.end > w.start)
+}
+fn contains(outer: Span, inner: Span) -> bool {
+    outer.start <= inner.start && outer.end >= inner.end
 }
 fn range(span: Span) -> Value {
     json!({"start":span.start,"end":span.end})
@@ -34,9 +70,15 @@ fn response(bytes: usize) -> Value {
     json!({"schema":"reb-javascript-source-facts-v1","profile":"lexical-effects-v1",
         "offset_unit":"utf-8-byte","source_bytes":bytes,"ok":true,
         "scopes":[],"bindings":[],"callables":[],"regions":[],"operations":[],
-        "coverage":{"status":"complete","truncated":false,"diagnostics":[],"frontiers":[]},
+        "coverage":{"status":"complete","truncated":false,"diagnostics":[],"frontiers":[],
+        "analyzed_range":{"start":0,"end":bytes}},
         "limits":{"max_source_bytes":crate::MAX_SOURCE_BYTES,"max_ast_nodes":MAX_AST_NODES,
-        "max_facts":MAX_FACTS,"max_frontiers":MAX_FRONTIERS,"max_binding_candidates":MAX_BINDING_CANDIDATES,"preflight_depth":128,"preflight_nodes":500000}})
+        "max_facts":MAX_FACTS,"max_frontiers":MAX_FRONTIERS,"max_binding_candidates":MAX_BINDING_CANDIDATES,
+        // Reported from the guard's own constants so a declared limit cannot
+        // drift from the bound that actually decided admission.
+        "preflight_depth":crate::preflight::MAX_TREE_DEPTH,
+        "preflight_nodes":crate::preflight::MAX_TREE_NODES,
+        "preflight_parse_heap_bytes":crate::preflight::MAX_PARSE_HEAP_BYTES}})
 }
 pub fn invalid(message: &str, bytes: usize) -> Value {
     let mut out = response(bytes);
@@ -53,6 +95,23 @@ pub fn analyze(request: Request) -> Value {
     if source.len() > crate::MAX_SOURCE_BYTES {
         return invalid("source byte limit exceeded", source.len());
     }
+    let requested = match request.region {
+        None => None,
+        Some(region) => {
+            let (start, end) = (region.start as usize, region.end as usize);
+            if start > end
+                || end > source.len()
+                || !source.is_char_boundary(start)
+                || !source.is_char_boundary(end)
+            {
+                return invalid(
+                    "requested region is not an original byte range",
+                    source.len(),
+                );
+            }
+            Some(Span::new(region.start, region.end))
+        }
+    };
     if let Err(error) = crate::preflight::check(source) {
         return invalid(error, source.len());
     }
@@ -66,22 +125,41 @@ pub fn analyze(request: Request) -> Value {
             source.len(),
         );
     }
+    // Select the analysis unit inside the real parse of the complete source. A
+    // requested byte range is never parsed on its own: its meaning depends on
+    // the scope chain, strictness and syntactic position of the bytes around it.
+    let window = requested.and_then(|want| {
+        let mut select = Select { want, body: None };
+        select.visit_program(&parsed.program);
+        select.body
+    });
+    let analyzed = window.unwrap_or(parsed.program.span);
     let mut out = response(source.len());
-    let mut count = Count(0);
+    out["coverage"]["analyzed_range"] = range(analyzed);
+    let mut count = Count { nodes: 0, window };
     count.visit_program(&parsed.program);
-    if count.0 > MAX_AST_NODES {
-        out["coverage"] = json!({"status":"partial","truncated":true,
-            "diagnostics":["AST node budget exceeded; no lexical resolutions produced"],"frontiers":[]});
-        return out;
+    if count.nodes > MAX_AST_NODES {
+        return exhausted(
+            out,
+            "AST node budget exceeded; no lexical resolutions produced",
+            requested,
+            window,
+        );
     }
-    let mut declarations = Declarations::default();
+    let mut declarations = Declarations {
+        window,
+        ..Default::default()
+    };
     declarations.visit_program(&parsed.program);
     let base =
         declarations.scopes.len() + declarations.bindings.len() + declarations.callables.len();
     if base >= MAX_FACTS {
-        out["coverage"] = json!({"status":"partial","truncated":true,
-            "diagnostics":["declaration budget exceeded; no lexical resolutions produced"],"frontiers":[]});
-        return out;
+        return exhausted(
+            out,
+            "declaration budget exceeded; no lexical resolutions produced",
+            requested,
+            window,
+        );
     }
     let mut effects = Effects::new(&declarations, base);
     effects.visit_program(&parsed.program);
@@ -96,24 +174,103 @@ pub fn analyze(request: Request) -> Value {
     out["callables"] = json!(declarations.callables);
     out["regions"] = json!(effects.regions);
     out["operations"] = json!(effects.operations);
-    out["coverage"] = json!({"status":if effects.frontiers.is_empty() && !effects.truncated {"complete"} else {"partial"},
-        "truncated":effects.truncated,"diagnostics":if effects.truncated {vec!["fact or frontier budget exceeded; omitted syntax remains unknown"]} else {vec![]},
-        "frontiers":effects.frontiers});
+    let mut diagnostics = Vec::new();
+    if effects.truncated {
+        diagnostics.push("fact or frontier budget exceeded; omitted syntax remains unknown");
+    }
+    if window.is_some() {
+        diagnostics.push(SCOPED);
+    }
+    out["coverage"] = json!({"status":if effects.frontiers.is_empty() && diagnostics.is_empty() {"complete"} else {"partial"},
+        "truncated":effects.truncated,"diagnostics":diagnostics,
+        "frontiers":effects.frontiers,"analyzed_range":range(analyzed)});
     out
 }
-struct Count(usize);
-impl<'a> Visit<'a> for Count {
-    fn enter_node(&mut self, _: AstKind<'a>) {
-        self.0 += 1;
+/// A reached budget keeps empty fact tables: resolving references against an
+/// incomplete declaration table would be a guess. The note says which narrower
+/// request can still produce facts, and `analyzed_range` says what was tried.
+fn exhausted(
+    mut out: Value,
+    message: &str,
+    requested: Option<Span>,
+    window: Option<Span>,
+) -> Value {
+    let note = match (requested, window) {
+        (_, Some(_)) => SCOPED,
+        (Some(_), None) => WHOLE,
+        (None, None) => NARROW,
+    };
+    out["coverage"]["status"] = json!("partial");
+    out["coverage"]["truncated"] = json!(true);
+    out["coverage"]["diagnostics"] = json!([message, note]);
+    out
+}
+/// Resolve the innermost callable body containing the requested window. A body
+/// is the analysis unit because its own declaration table stays closed: nothing
+/// inside it is skipped. A window no callable body contains analyzes the whole
+/// program rather than a syntactic fragment of one.
+struct Select {
+    want: Span,
+    body: Option<Span>,
+}
+impl<'a> Visit<'a> for Select {
+    fn visit_statement(&mut self, it: &Statement<'a>) {
+        if contains(it.span(), self.want) {
+            walk::walk_statement(self, it);
+        }
     }
     fn visit_expression(&mut self, it: &Expression<'a>) {
-        if self.0 <= MAX_AST_NODES {
+        if contains(it.span(), self.want) {
+            walk::walk_expression(self, it);
+        }
+    }
+    fn visit_function(&mut self, it: &Function<'a>, flags: ScopeFlags) {
+        if !contains(it.span, self.want) {
+            return;
+        }
+        if let Some(body) = &it.body
+            && contains(body.span, self.want)
+        {
+            self.body = Some(body.span);
+        }
+        walk::walk_function(self, it, flags);
+    }
+    fn visit_arrow_function_expression(&mut self, it: &ArrowFunctionExpression<'a>) {
+        if !contains(it.span, self.want) {
+            return;
+        }
+        if contains(it.body.span(), self.want) {
+            self.body = Some(it.body.span());
+        }
+        walk::walk_arrow_function_expression(self, it);
+    }
+}
+struct Count {
+    nodes: usize,
+    window: Option<Span>,
+}
+impl<'a> Visit<'a> for Count {
+    fn enter_node(&mut self, _: AstKind<'a>) {
+        self.nodes += 1;
+    }
+    fn visit_expression(&mut self, it: &Expression<'a>) {
+        if self.nodes <= MAX_AST_NODES && analyzing(self.window, it.span()) {
             walk::walk_expression(self, it);
         }
     }
     fn visit_statement(&mut self, it: &Statement<'a>) {
-        if self.0 <= MAX_AST_NODES {
+        if self.nodes <= MAX_AST_NODES && analyzing(self.window, it.span()) {
             walk::walk_statement(self, it);
+        }
+    }
+    fn visit_function(&mut self, it: &Function<'a>, flags: ScopeFlags) {
+        if self.nodes <= MAX_AST_NODES && analyzing(self.window, it.span) {
+            walk::walk_function(self, it, flags);
+        }
+    }
+    fn visit_arrow_function_expression(&mut self, it: &ArrowFunctionExpression<'a>) {
+        if self.nodes <= MAX_AST_NODES && analyzing(self.window, it.span) {
+            walk::walk_arrow_function_expression(self, it);
         }
     }
 }
@@ -136,6 +293,10 @@ struct Declarations {
     kind: &'static str,
     ignored: BTreeSet<(u32, u32)>,
     uncertain: BTreeSet<usize>,
+    /// Scopes that own syntax this report did not analyze. Their declaration
+    /// tables are open sets, so neither a hit nor a miss in one is a fact.
+    incomplete: BTreeSet<usize>,
+    window: Option<Span>,
     dynamic: bool,
 }
 impl Declarations {
@@ -149,6 +310,16 @@ impl Declarations {
             .rev()
             .find(|&&i| self.scopes[i].flags.is_var())
             .unwrap()
+    }
+    /// Syntax owned by the current scope chain was skipped. A lexical
+    /// declaration would have bound in the current scope and a `var` in the
+    /// nearest var scope, so exactly those two tables stop being closed.
+    /// Scopes inside the skipped syntax are not in this report at all.
+    fn skipped(&mut self) {
+        let current = self.current();
+        self.incomplete.insert(current);
+        let var = self.var_scope();
+        self.incomplete.insert(var);
     }
     fn add(&mut self, id: &BindingIdentifier<'_>, kind: &'static str, scope: usize) {
         let index = self.bindings.len();
@@ -190,6 +361,12 @@ impl Declarations {
         }
         let mut at = Some(scope);
         while let Some(index) = at {
+            if self.incomplete.contains(&index) {
+                // A pruned sibling could declare or duplicate this name here,
+                // so a candidate set from this scope would be a guess and a
+                // miss would wrongly look external.
+                return json!({"kind":"unresolved","binding_ids":[],"resolution":"outside-analyzed-region","name":name});
+            }
             if self.uncertain.contains(&index) {
                 return json!({"kind":"unresolved","binding_ids":[],"resolution":"unsupported-environment","name":name});
             }
@@ -216,6 +393,20 @@ impl Declarations {
     }
 }
 impl<'a> Visit<'a> for Declarations {
+    fn visit_statement(&mut self, it: &Statement<'a>) {
+        if analyzing(self.window, it.span()) {
+            walk::walk_statement(self, it);
+        } else {
+            self.skipped();
+        }
+    }
+    fn visit_expression(&mut self, it: &Expression<'a>) {
+        if analyzing(self.window, it.span()) {
+            walk::walk_expression(self, it);
+        } else {
+            self.skipped();
+        }
+    }
     fn enter_node(&mut self, it: AstKind<'a>) {
         self.node_stack.push(it.span());
     }
@@ -285,6 +476,10 @@ impl<'a> Visit<'a> for Declarations {
         self.kind = old;
     }
     fn visit_function(&mut self, it: &Function<'a>, flags: ScopeFlags) {
+        if !analyzing(self.window, it.span) {
+            self.skipped();
+            return;
+        }
         if it.r#type == FunctionType::FunctionDeclaration {
             if let Some(id) = &it.id {
                 self.add(id, "function", self.current());
@@ -308,6 +503,10 @@ impl<'a> Visit<'a> for Declarations {
         self.kind = old;
     }
     fn visit_arrow_function_expression(&mut self, it: &ArrowFunctionExpression<'a>) {
+        if !analyzing(self.window, it.span) {
+            self.skipped();
+            return;
+        }
         self.callable(
             it.span,
             it.body.span(),
@@ -371,6 +570,9 @@ impl<'d> Effects<'d> {
             base,
             truncated: false,
         }
+    }
+    fn analyzed(&self, span: Span) -> bool {
+        analyzing(self.declarations.window, span)
     }
     fn available(&mut self) -> bool {
         if self.base + self.regions.len() + self.operations.len() >= MAX_FACTS {
@@ -556,6 +758,16 @@ impl<'a> Visit<'a> for Effects<'_> {
     }
     fn visit_program(&mut self, it: &Program<'a>) {
         self.region(it.span, "program", |this| {
+            if let Some(window) = this.declarations.window {
+                for span in [
+                    Span::new(it.span.start, window.start),
+                    Span::new(window.end, it.span.end),
+                ] {
+                    if span.start < span.end {
+                        this.frontier(span, "outside-analyzed-region");
+                    }
+                }
+            }
             if this.declarations.dynamic {
                 this.frontier(it.span, "dynamic-scope");
             }
@@ -576,7 +788,7 @@ impl<'a> Visit<'a> for Effects<'_> {
         });
     }
     fn visit_function(&mut self, it: &Function<'a>, flags: ScopeFlags) {
-        if !self.available() {
+        if !self.available() || !self.analyzed(it.span) {
             return;
         }
         let old = self.callable;
@@ -600,7 +812,7 @@ impl<'a> Visit<'a> for Effects<'_> {
         );
     }
     fn visit_arrow_function_expression(&mut self, it: &ArrowFunctionExpression<'a>) {
-        if !self.available() {
+        if !self.available() || !self.analyzed(it.span) {
             return;
         }
         let old = self.callable;
@@ -657,7 +869,7 @@ impl<'a> Visit<'a> for Effects<'_> {
         }
     }
     fn visit_statement(&mut self, it: &Statement<'a>) {
-        if !self.available() {
+        if !self.available() || !self.analyzed(it.span()) {
             return;
         }
         match it {
@@ -758,7 +970,7 @@ impl<'a> Visit<'a> for Effects<'_> {
         }
     }
     fn visit_expression(&mut self, it: &Expression<'a>) {
-        if !self.available() {
+        if !self.available() || !self.analyzed(it.span()) {
             return;
         }
         match it {
@@ -938,6 +1150,14 @@ mod tests {
         analyze(Request {
             operation: "source_facts".into(),
             source: source.into(),
+            region: None,
+        })
+    }
+    fn region_facts(source: &str, start: u32, end: u32) -> Value {
+        analyze(Request {
+            operation: "source_facts".into(),
+            source: source.into(),
+            region: Some(Region { start, end }),
         })
     }
     fn ops(v: &Value, kind: &str) -> Vec<Value> {
@@ -1240,6 +1460,387 @@ mod tests {
             1
         );
     }
+    /// A minified bundle shape: one glue IIFE whose declarations alone exhaust
+    /// the fact budget, with one named callable to select inside it.
+    fn bundle() -> String {
+        let mut glue = String::new();
+        for i in 0..4200 {
+            glue.push_str(&format!("function pad{i}(){{var p{i}=1;return p{i};}}"));
+        }
+        format!(
+            "(function(){{var shared=1;{glue}function target(seed){{var local=seed+shared;return local;}}}})();"
+        )
+    }
+    #[test]
+    fn region_scope_produces_callable_facts_where_the_whole_bundle_produces_none() {
+        let source = bundle();
+        let whole = facts(&source);
+        assert_eq!(whole["coverage"]["status"], "partial");
+        assert_eq!(whole["coverage"]["truncated"], true);
+        assert_eq!(
+            whole["coverage"]["diagnostics"],
+            json!([
+                "declaration budget exceeded; no lexical resolutions produced",
+                NARROW
+            ])
+        );
+        assert_eq!(
+            whole["coverage"]["analyzed_range"],
+            json!({"start":0,"end":source.len()})
+        );
+        for table in ["scopes", "bindings", "callables", "regions", "operations"] {
+            assert!(whole[table].as_array().unwrap().is_empty());
+        }
+
+        let cursor = source.find("var local").unwrap() as u32;
+        let out = region_facts(&source, cursor, cursor);
+        assert_eq!(out["ok"], true);
+        assert_eq!(out["coverage"]["status"], "partial");
+        // Scoping is not budget loss.
+        assert_eq!(out["coverage"]["truncated"], false);
+        assert!(
+            out["coverage"]["diagnostics"]
+                .as_array()
+                .unwrap()
+                .contains(&json!(SCOPED))
+        );
+        let analyzed = slice(&source, &out["coverage"]["analyzed_range"]);
+        assert_eq!(analyzed, "{var local=seed+shared;return local;}");
+        assert!(reasons(&out).contains(&"outside-analyzed-region"));
+        let names = out["bindings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|b| b["name"].as_str().unwrap())
+            .collect::<Vec<_>>();
+        assert!(names.contains(&"local") && names.contains(&"seed"));
+        assert!(!names.iter().any(|name| name.starts_with("pad")));
+        let resolutions = |name: &str| {
+            ops(&out, "read")
+                .iter()
+                .filter(|o| o["detail"]["target"]["name"] == name)
+                .map(|o| {
+                    o["detail"]["target"]["resolution"]
+                        .as_str()
+                        .unwrap()
+                        .to_owned()
+                })
+                .collect::<Vec<_>>()
+        };
+        // The selected body owns a closed table, so its own names resolve.
+        assert_eq!(resolutions("seed"), vec!["lexical-only"]);
+        assert_eq!(resolutions("local"), vec!["lexical-only"]);
+        // `shared` is declared in the skipped part of the glue scope.
+        assert_eq!(resolutions("shared"), vec!["outside-analyzed-region"]);
+        // Every emitted region or operation nests with the analysis unit: it is
+        // either inside it or one of the enclosing nodes that reaches it. A
+        // skipped sibling can never contribute one.
+        let bounds = |row: &Value| (row["start"].as_u64().unwrap(), row["end"].as_u64().unwrap());
+        let unit = bounds(&out["coverage"]["analyzed_range"]);
+        let nested = |row: &Value| {
+            let range = bounds(&row["range"]);
+            (range.0 >= unit.0 && range.1 <= unit.1) || (range.0 <= unit.0 && range.1 >= unit.1)
+        };
+        assert!(
+            out["operations"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .chain(out["regions"].as_array().unwrap())
+                .all(nested)
+        );
+    }
+    /// Dense minified glue at real minifier density, large enough that the
+    /// preflight node bound refused it outright before that bound was derived
+    /// from the source byte cap. The point of this fixture is admission, not
+    /// the fact budget: `bundle()` above already covers the declaration budget.
+    fn dense_bundle() -> String {
+        let mut glue = String::new();
+        let mut index = 0usize;
+        while glue.len() < 600 * 1024 {
+            glue.push_str(&format!(
+                "function p{index}(a,b){{var c=(a|0)+(b>>>2),d=a?b:c;\
+                 return c>3?(a+b)*c-d:({{k:a,v:[b,c,a&b]}}).v[(c%3)|0];}}"
+            ));
+            index += 1;
+        }
+        format!(
+            "(function(){{var shared=1;{glue}\
+             function target(seed){{var local=seed+shared;return local;}}}})();"
+        )
+    }
+
+    #[test]
+    fn a_dense_minified_bundle_is_admitted_and_still_reports_what_it_covered() {
+        let source = dense_bundle();
+        let whole = facts(&source);
+        // Before the preflight node bound was derived from the byte cap this
+        // was `unavailable` with "JavaScript preflight exceeded its complexity
+        // budget": no analysis budget was ever consulted, and no region could
+        // be requested either, because admission is shared by both paths.
+        assert_eq!(whole["ok"], true);
+        assert_ne!(whole["coverage"]["status"], "unavailable");
+        // Admission is not coverage. A bundle this size still reaches a whole
+        // program budget and still refuses to resolve anything against the
+        // incomplete table, naming the narrower request that can answer.
+        assert_eq!(whole["coverage"]["status"], "partial");
+        assert_eq!(whole["coverage"]["truncated"], true);
+        assert_eq!(
+            whole["coverage"]["diagnostics"],
+            json!([
+                "AST node budget exceeded; no lexical resolutions produced",
+                NARROW
+            ])
+        );
+        for table in ["scopes", "bindings", "callables", "regions", "operations"] {
+            assert!(whole[table].as_array().unwrap().is_empty());
+        }
+        assert_eq!(
+            whole["limits"]["preflight_nodes"],
+            json!(crate::preflight::MAX_TREE_NODES)
+        );
+
+        // What admission buys: the region path now reaches these bytes.
+        let cursor = source.find("var local").unwrap() as u32;
+        let out = region_facts(&source, cursor, cursor);
+        assert_eq!(out["ok"], true);
+        assert_eq!(out["coverage"]["status"], "partial");
+        assert_eq!(out["coverage"]["truncated"], false);
+        assert_eq!(
+            slice(&source, &out["coverage"]["analyzed_range"]),
+            "{var local=seed+shared;return local;}"
+        );
+        let names = out["bindings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|b| b["name"].as_str().unwrap())
+            .collect::<Vec<_>>();
+        assert!(names.contains(&"local") && names.contains(&"seed"));
+        assert!(!names.iter().any(|name| name.starts_with('p')));
+        // The glue's own declarations stay unknown rather than guessed at.
+        assert!(reasons(&out).contains(&"outside-analyzed-region"));
+    }
+
+    #[test]
+    fn a_region_whose_callable_still_exceeds_a_budget_fails_closed() {
+        let source = bundle();
+        let cursor = source.find("var shared").unwrap() as u32;
+        let out = region_facts(&source, cursor, cursor);
+        assert_eq!(out["coverage"]["status"], "partial");
+        assert_eq!(out["coverage"]["truncated"], true);
+        assert_eq!(
+            out["coverage"]["diagnostics"],
+            json!([
+                "declaration budget exceeded; no lexical resolutions produced",
+                SCOPED
+            ])
+        );
+        // The analysis unit is reported even when it produced nothing.
+        assert!(slice(&source, &out["coverage"]["analyzed_range"]).starts_with("{var shared=1;"));
+        for table in ["scopes", "bindings", "callables", "regions", "operations"] {
+            assert!(out[table].as_array().unwrap().is_empty());
+        }
+    }
+    #[test]
+    fn an_open_declaration_table_never_resolves_or_looks_external() {
+        let source = "var outer=1; function target(p){ return p + outer + globalThis; }";
+        let cursor = source.find("outer +").unwrap() as u32;
+        let out = region_facts(source, cursor, cursor);
+        let target = |name: &str| {
+            ops(&out, "read")
+                .iter()
+                .find(|o| o["detail"]["target"]["name"] == name)
+                .unwrap()["detail"]["target"]
+                .clone()
+        };
+        assert_eq!(target("p")["kind"], "binding");
+        assert_eq!(target("p")["resolution"], "lexical-only");
+        assert_eq!(target("outer")["kind"], "unresolved");
+        assert_eq!(target("outer")["resolution"], "outside-analyzed-region");
+        // An unanalyzed sibling could declare any name, so a miss in an open
+        // scope is not reported as an external or implicit global either.
+        assert_eq!(
+            target("globalThis")["resolution"],
+            "outside-analyzed-region"
+        );
+        assert!(
+            out["bindings"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|b| b["name"] != "outer")
+        );
+        let frontiers = out["coverage"]["frontiers"].as_array().unwrap().clone();
+        let outside = frontiers
+            .iter()
+            .filter(|f| f["reason"] == "outside-analyzed-region")
+            .map(|f| slice(source, &f["range"]))
+            .collect::<Vec<_>>();
+        // The skipped prefix is one frontier; the selected body reaches the end
+        // of the source, so there is no suffix frontier to report.
+        assert_eq!(
+            outside,
+            vec!["var outer=1; function target(p)", "outer", "globalThis"]
+        );
+        // Unscoped, the same bytes keep the stronger distinction: a closed table
+        // resolves `outer` and names the remaining global as external.
+        let whole = facts(source);
+        let resolution = |out: &Value, name: &str| {
+            ops(out, "read")
+                .iter()
+                .find(|o| o["detail"]["target"]["name"] == name)
+                .unwrap()["detail"]["target"]["resolution"]
+                .clone()
+        };
+        assert_eq!(resolution(&whole, "outer"), "lexical-only");
+        assert_eq!(resolution(&whole, "globalThis"), "external-or-implicit");
+        assert_eq!(
+            whole["coverage"]["analyzed_range"],
+            json!({"start":0,"end":source.len()})
+        );
+    }
+    #[test]
+    fn selecting_one_method_skips_its_siblings_in_the_same_class() {
+        // A class body is not a statement or expression position, so callables
+        // are gated there too; otherwise an enclosing class would contribute
+        // every sibling method's declarations to a selected method's report.
+        let source = "class C { chosen(a){ return a; } other(b){ return b; } }";
+        let cursor = source.find("return a").unwrap() as u32;
+        let out = region_facts(source, cursor, cursor);
+        assert_eq!(
+            slice(source, &out["coverage"]["analyzed_range"]),
+            "{ return a; }"
+        );
+        assert_eq!(
+            out["bindings"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|b| b["name"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            vec!["C", "a"]
+        );
+        let callables = out["callables"].as_array().unwrap();
+        assert_eq!(callables.len(), 1);
+        assert_eq!(slice(source, &callables[0]["body_range"]), "{ return a; }");
+        // Class evaluation stays the frontier it already was.
+        assert!(reasons(&out).contains(&"class-initialization-effects"));
+    }
+    #[test]
+    fn a_region_outside_every_callable_analyzes_the_whole_program() {
+        let source = "var a=1; a;";
+        let out = region_facts(source, 0, 1);
+        assert_eq!(out["coverage"]["status"], "complete");
+        assert_eq!(out["coverage"]["diagnostics"], json!([]));
+        assert_eq!(
+            out["coverage"]["analyzed_range"],
+            json!({"start":0,"end":source.len()})
+        );
+        assert_eq!(
+            ops(&out, "read")[0]["detail"]["target"]["resolution"],
+            "lexical-only"
+        );
+        assert_eq!(out, facts(source));
+    }
+    #[test]
+    fn every_cursor_offset_keeps_one_consistent_report() {
+        // Region selection and the three pruned traversals index the same span
+        // maps. Sweeping every admissible cursor over awkward syntax proves they
+        // cannot disagree about which nodes a report contains.
+        for source in [
+            "class C { m(a){ try { return a; } catch (e) { return e; } } }",
+            "var a=1; function f(b){ return (c) => { for (var d of [b,c]) a+=d; return a; }; } f(a)(2);",
+            "const o={m(){return this.x;},get g(){return 1;}}; async function* h(){ yield o.m(); }",
+            "var x; with(obj) { x; } function g(){ eval(''); return x; } g();",
+            "let 雪 = () => { const t = `${雪}`; return t?.length; };",
+        ] {
+            for cursor in 0..=source.len() {
+                if !source.is_char_boundary(cursor) {
+                    continue;
+                }
+                let out = region_facts(source, cursor as u32, cursor as u32);
+                assert_eq!(out["ok"], true, "{source} at {cursor}");
+                let unit = &out["coverage"]["analyzed_range"];
+                let (start, end) = (
+                    unit["start"].as_u64().unwrap(),
+                    unit["end"].as_u64().unwrap(),
+                );
+                assert!(start <= cursor as u64 && end >= cursor as u64);
+                assert!(end <= source.len() as u64);
+                assert!(source.is_char_boundary(start as usize));
+                assert!(source.is_char_boundary(end as usize));
+                if (start, end) != (0, source.len() as u64) {
+                    assert_ne!(out["coverage"]["status"], "complete");
+                }
+                // Enclosing structure that reaches the unit keeps its own facts,
+                // so a fact range outside the unit is expected. Ownership is
+                // what must hold: a region is inside its parent and an
+                // operation is inside the region that owns it.
+                let regions = out["regions"].as_array().unwrap();
+                let bounds =
+                    |row: &Value| (row["start"].as_u64().unwrap(), row["end"].as_u64().unwrap());
+                for (index, region) in regions.iter().enumerate() {
+                    let range = bounds(&region["range"]);
+                    match region["parent_id"].as_u64() {
+                        None => assert_eq!(range, (0, source.len() as u64)),
+                        Some(parent) => {
+                            assert!((parent as usize) < index, "{source} at {cursor}");
+                            let outer = bounds(&regions[parent as usize]["range"]);
+                            assert!(
+                                outer.0 <= range.0 && outer.1 >= range.1,
+                                "{source} at {cursor}"
+                            );
+                        }
+                    }
+                }
+                for operation in out["operations"].as_array().unwrap() {
+                    let owner = operation["region_id"].as_u64().unwrap() as usize;
+                    let outer = bounds(&regions[owner]["range"]);
+                    let range = bounds(&operation["range"]);
+                    assert!(
+                        outer.0 <= range.0 && outer.1 >= range.1,
+                        "{source} at {cursor}"
+                    );
+                }
+                // A narrower unit is one real callable body in these facts. Its
+                // effect region can still be absent, because a class or an
+                // async body is a declared frontier in this profile.
+                if (start, end) != (0, source.len() as u64) {
+                    assert_eq!(
+                        out["callables"]
+                            .as_array()
+                            .unwrap()
+                            .iter()
+                            .filter(|callable| bounds(&callable["body_range"]) == (start, end))
+                            .count(),
+                        1,
+                        "{source} at {cursor}"
+                    );
+                }
+            }
+        }
+    }
+    #[test]
+    fn a_region_is_admitted_only_as_an_original_byte_range() {
+        let source = "let 雪=1; function f(){ return 雪; }";
+        for (start, end) in [(6, 2), (0, 99), (5, 6), (4, 5)] {
+            let out = region_facts(source, start, end);
+            assert_eq!(out["coverage"]["status"], "unavailable");
+            assert_eq!(out["ok"], false);
+            assert_eq!(
+                out["coverage"]["diagnostics"],
+                json!(["requested region is not an original byte range"])
+            );
+        }
+        let inside = source.find("return").unwrap() as u32;
+        let out = region_facts(source, inside, inside + 6);
+        assert_eq!(out["ok"], true);
+        assert_eq!(
+            slice(source, &out["coverage"]["analyzed_range"]),
+            "{ return 雪; }"
+        );
+    }
     #[test]
     fn parser_and_output_limits_fail_closed_and_are_deterministic() {
         assert_eq!(facts("let = ;")["coverage"]["status"], "unavailable");
@@ -1247,8 +1848,17 @@ mod tests {
         assert_eq!(oversized["source_bytes"], crate::MAX_SOURCE_BYTES + 1);
         assert_eq!(oversized["coverage"]["status"], "unavailable");
         assert_eq!(facts(&format!("{}0", "!".repeat(129)))["ok"], false);
-        let too_large = facts(&";".repeat(MAX_AST_NODES + 1));
+        // Two Oxc nodes per statement exceeds the node budget while staying
+        // inside the preflight's own tree-sitter node bound.
+        let too_large = facts(&"0;".repeat(MAX_AST_NODES / 2 + 16));
         assert_eq!(too_large["coverage"]["truncated"], true);
+        assert_eq!(
+            too_large["coverage"]["diagnostics"],
+            json!([
+                "AST node budget exceeded; no lexical resolutions produced",
+                NARROW
+            ])
+        );
         assert!(too_large["bindings"].as_array().unwrap().is_empty());
         let source = "let x=0; x++;".repeat(1500);
         let out = facts(&source);
@@ -1261,6 +1871,25 @@ mod tests {
         assert_eq!(out["coverage"]["truncated"], true);
         let small = "let a=1; function f(x){return x+a;} f(a);";
         assert_eq!(facts(small), facts(small));
+        // The parse heap ceiling is shared, so it reaches this operation too,
+        // and the limit it decided by is the one reported. Nested sequence
+        // expressions are the shape that used to be paid for in full and only
+        // then refused.
+        let mut nested = "(a,".repeat(196_608);
+        nested.push('a');
+        nested.push_str(&")".repeat(196_608));
+        nested.push(';');
+        let refused = facts(&nested);
+        assert_eq!(refused["ok"], false);
+        assert_eq!(refused["coverage"]["status"], "unavailable");
+        assert_eq!(
+            refused["coverage"]["diagnostics"],
+            json!(["JavaScript preflight exceeded its parse memory budget"])
+        );
+        assert_eq!(
+            refused["limits"]["preflight_parse_heap_bytes"],
+            json!(crate::preflight::MAX_PARSE_HEAP_BYTES)
+        );
     }
     #[test]
     fn rejected_source_facts_do_not_desynchronize_the_worker() {

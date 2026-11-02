@@ -49,14 +49,22 @@ impl Deobfuscator {
         }
         Ok(result)
     }
-    pub async fn source_facts(&self, source: &str) -> Result<Value> {
+    pub async fn source_facts(
+        &self,
+        source: &str,
+        region: Option<(usize, usize)>,
+    ) -> Result<Value> {
         if source.len() > SOURCE_MAX {
             return Err(Error::bad("Source exceeds the source facts byte limit"));
         }
-        let response = self
-            .request(json!({"operation":"source_facts","source":source}))
-            .await?;
-        crate::source_facts::validate(source, &response)?;
+        let mut request = json!({"operation":"source_facts","source":source});
+        if let Some((start, end)) = region {
+            // The worker resolves this range to one callable body inside its own
+            // parse of the complete source; a byte slice is never analyzed alone.
+            request["region"] = json!({"start":start,"end":end});
+        }
+        let response = self.request(request).await?;
+        crate::source_facts::validate(source, region, &response)?;
         Ok(response)
     }
 

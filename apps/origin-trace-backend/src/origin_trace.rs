@@ -64,6 +64,58 @@ fn step(value: &Value, relation: &str, confidence: &str) -> Result<Value> {
 fn gap(reason: &str, after: usize, detail: &str) -> Value {
     json!({"reason":reason,"after_step":after,"detail":detail})
 }
+// `monotonic_time_ns` proximity is a declared correlation input in its own
+// right, and a weaker one than the identity keys the edge index joins on. It is
+// consulted only where the identity chain has already ended, and only for a
+// cross-process record of the same retained request: the renderer-to-browser
+// hop that initiator resolution failed to close. One millisecond bounds that
+// hop with room to spare while staying far below navigation scale.
+const ADJACENCY_WINDOW_NS: u64 = 1_000_000;
+// Canonical decimal only, matching the step projection and the native builder,
+// so a non-canonical sibling cannot count toward the uniqueness test in one
+// implementation and be skipped in the other.
+fn monotonic(value: &Value) -> Option<u64> {
+    validation::canonical(&value["monotonic_time_ns"], 64, false, "monotonic_time_ns").ok()
+}
+// Exactly one surviving candidate, or none. Two adjacent records are a tie this
+// function must not break; reporting the nearer one would present a choice
+// between guesses as evidence. A candidate must also sit at or before the
+// current event, so cross-process clock skew can drop a real pair but can never
+// invent an order.
+fn adjacent_candidate<'a>(
+    retained: &BTreeMap<Reference, &'a Value>,
+    visited: &BTreeSet<Reference>,
+    current: &Value,
+) -> Option<&'a Value> {
+    let now = monotonic(current)?;
+    // Scoped to the network lifecycle record this class was measured on. An
+    // artifact, VM or Wasm head keeps the bare gap rather than a claim no lane
+    // has characterised.
+    if current["category"] != "network" || current["request_id"].as_str()? == "0" {
+        return None;
+    }
+    let mut found = None;
+    for (key, event) in retained {
+        if visited.contains(key)
+            || event["session_id"] != current["session_id"]
+            || event["category"] != "network"
+            || event["request_id"] != current["request_id"]
+            || event["process_id"] == current["process_id"]
+        {
+            continue;
+        }
+        let Some(then) = monotonic(event) else {
+            continue;
+        };
+        if then > now || now - then > ADJACENCY_WINDOW_NS {
+            continue;
+        }
+        if found.replace(*event).is_some() {
+            return None;
+        }
+    }
+    found
+}
 pub fn build(
     events: &[Value],
     edges: &[Value],
@@ -93,6 +145,13 @@ pub fn build(
         // reference. It must never replace that event or satisfy an edge.
         if event["type"] == "gap" {
             let marker = step(event, "trace_target", "observed")?;
+            // A named capture-limit gap carries its reason, not a drop count,
+            // in its own sequence slot. It is a sampling limit of its own
+            // category that Traffic already leaves out, so a request trace
+            // neither counts it as queue loss nor refuses the window over it.
+            if crate::event_window::named_gap(event).is_some() {
+                continue;
+            }
             validation::canonical(&marker["value"], 64, true, "Gap drop count")?;
             if event["payload_truncated"] != false {
                 return Err(Error::bad("Origin trace input contains a malformed gap"));
@@ -197,6 +256,7 @@ pub fn build(
     let mut gaps = Vec::new();
     let mut observed = 0;
     let mut correlated = 0;
+    let mut time_adjacent_links = 0;
     let status = if ambiguous_session || preferred.len() > 1 {
         gaps.push(gap(
             "ambiguous_request",
@@ -241,11 +301,27 @@ pub fn build(
             });
             let Some(edge) = candidates.first() else {
                 if !SOURCES.contains(&current["category"].as_str().unwrap_or("")) {
+                    // Proximity never closes the gap. The identity chain really
+                    // did end here, so the gap stays and the adjacency row is
+                    // reported beside it rather than in place of it.
+                    let adjacent = adjacent_candidate(&by_reference, &visited, current)
+                        .and_then(|event| step(event, "temporal_adjacency", "time_adjacent").ok());
                     gaps.push(gap(
                         "no_predecessor",
                         steps.len() - 1,
-                        "No earlier observed relationship reaches this event.",
+                        if adjacent.is_some() {
+                            "No earlier observed relationship reaches this event. The next row is time-adjacent only: it shares this request identity in another process within a bounded timestamp window, which is not a predecessor and not value flow."
+                        } else {
+                            "No earlier observed relationship reaches this event."
+                        },
                     ));
+                    // Adjacency is terminal. Walking on from a timestamp match
+                    // would hang identity edges off a guess and count them as
+                    // correlated links, so traversal always stops here.
+                    if let Some(row) = adjacent {
+                        steps.push(row);
+                        time_adjacent_links += 1;
+                    }
                 }
                 break;
             };
@@ -282,7 +358,10 @@ pub fn build(
             }
             current = event;
         }
-        if steps.len() == 32 {
+        // A time-adjacent row is only ever pushed where traversal broke, so it
+        // can fill the step budget without the limit being the reason the walk
+        // stopped. Only the identity steps decide whether the limit was hit.
+        if steps.len() - time_adjacent_links == 32 {
             gaps.push(gap(
                 "step_limit",
                 31,
@@ -313,7 +392,9 @@ pub fn build(
             "partial"
         }
     };
-    let linked = steps.len().saturating_sub(1);
+    // Coverage stays an identity measure. A time-adjacent row is a step but not
+    // a link, so it moves neither the denominator nor the reported percentage.
+    let linked = steps.len().saturating_sub(1 + time_adjacent_links);
     let denominator = linked + gaps.len();
     let percent = if denominator == 0 {
         0
@@ -343,6 +424,6 @@ pub fn build(
         })
         .collect();
     Ok(
-        json!({"contract_version":1,"document_kind":"origin-trace","request_id":request_id,"status":status,"steps":steps,"gaps":gaps,"coverage":{"linked_steps":linked,"observed_links":observed,"correlated_links":correlated,"gap_count":gaps.len(),"percent":percent},"artifacts":selected}),
+        json!({"contract_version":1,"document_kind":"origin-trace","request_id":request_id,"status":status,"steps":steps,"gaps":gaps,"coverage":{"linked_steps":linked,"observed_links":observed,"correlated_links":correlated,"time_adjacent_links":time_adjacent_links,"gap_count":gaps.len(),"percent":percent},"artifacts":selected}),
     )
 }

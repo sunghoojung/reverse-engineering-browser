@@ -1023,6 +1023,10 @@ explorer. Ambiguous targets offer an explicit candidate chooser and remain
 candidate links. Unresolved/dynamic names and property targets never become
 binding links. Counts describe static operations, which can share one source
 occurrence, not runtime uses or dataflow. Call targets remain unknown.
+This panel always analyzes the whole selected artifact; the API's
+`region_start_byte`/`region_end_byte` scope is not exposed here, so a bundle
+that reports a reached budget is narrowed through `reb-api call
+get_source_facts` instead.
 **Reveal declaration** and operation **Original bytes** actions use the same
 verified UTF-8 reader. Changing the explorer selection cancels its pending
 reveal. Source identity changes and successful reanalysis clear selected fact

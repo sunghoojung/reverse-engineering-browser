@@ -94,7 +94,7 @@ export async function checkNativeRequestBacktrace(root) {
     {...fixture.trace.steps[0],event:{session_id:'11',process_id:23,sequence_number:'52'},request_id:'200'},
     {...fixture.trace.steps[0],operation:'request_initiated',relation:'request_initiator'}
   ],gaps:[{...fixture.trace.gaps[0],after_step:1}],
-    coverage:{linked_steps:1,observed_links:1,correlated_links:0,gap_count:1,percent:50}};
+    coverage:{linked_steps:1,observed_links:1,correlated_links:0,time_adjacent_links:0,gap_count:1,percent:50}};
   const node=()=>({dataset:{},children:[],replaceChildren(...children){this.children=children;},
     querySelectorAll:()=>[],removeAttribute(name){delete this[name];}});
   const elements=Object.fromEntries(['traceRequest','traceLoad','backtraceSubtitle','traceContent','traceEmpty',
@@ -102,17 +102,17 @@ export async function checkNativeRequestBacktrace(root) {
     'traceStepDetails','coverageValue'].map(name=>[name,node()]));
   const state={requests:[],selectedRequestId:null,originTrace:null,originTraceKey:null,
     originTraceStatus:'idle',originTraceGeneration:0};
-  const reads=[];
+  const reads=[],rendered=[];
   const context={state,elements,TextDecoder,TextEncoder,URL,URLSearchParams,atob,Uint8Array,
     AbortController,setTimeout,clearTimeout,location:{protocol:'http:'},
-    document:{activeElement:null,createElement:node},traceStepElement:node,traceStepDetails(){},renderEvidence(){},
+    document:{activeElement:null,createElement:node},traceStepElement:model=>{rendered.push(model);return node();},traceStepDetails(){},renderEvidence(){},
     sourceFactsReadBytes:async response=>new TextEncoder().encode(JSON.stringify(await response.json())),
     fetch:async url=>{reads.push(new URL(url,'http://fixture.invalid'));return {ok:true,status:200,headers:{get:()=>null},json:async()=>trace};}};
   const api=runInNewContext(models+'\n'+navigation+'\n'+
     section('      function requestTraceRoot(', '      function requestSignalProfileSelection(')+
     section('      function originTraceSelection(', '      function traceStepDetails(')+
     section('      function renderBacktrace(', '      function collectionFolder(')+
-    ';({isBrokerEvent,isOriginTraceResponse,requestsFromEvents,requestTraceRoot,originTraceSelection,refreshOriginTrace,renderBacktrace})',context);
+    ';({isBrokerEvent,isOriginTraceResponse,requestsFromEvents,requestTraceRoot,originTraceSelection,refreshOriginTrace,renderBacktrace,traceLinkClass})',context);
   assert(api.isBrokerEvent(initiated));assert(api.isBrokerEvent(started));assert(api.isOriginTraceResponse(trace));
   const native=api.requestsFromEvents([initiated,started]);
   assert.equal(native.length,1,'Explicit initiator identifiers group the native observations');
@@ -143,7 +143,51 @@ export async function checkNativeRequestBacktrace(root) {
   await api.refreshOriginTrace();
   assert.equal(reads.length,1,'An unrooted selection must not query any native root');
   assert.equal(elements.traceContent.hidden,true,'Do not show the previous request trace for another row');
-  console.log('PASS retained native Traffic row → Backtraces choice → exact session/process/sequence query; unrooted rows stay unavailable (production functions, not rendered QA)');
+  // `monotonic_time_ns` proximity is a third, weaker confidence class. It must
+  // read as its own class everywhere, stay out of coverage, and never stand in
+  // for an identity predecessor.
+  const classes=['observed','correlated','time_adjacent'].map(confidence=>api.traceLinkClass({confidence}));
+  assert.equal(new Set(classes.map(entry=>entry.label)).size,3,'Each confidence class needs its own row label');
+  assert.equal(new Set(classes.map(entry=>entry.style)).size,3,'Each confidence class needs its own row style');
+  assert.doesNotMatch(classes[2].label,/recorded|link/i,'Timestamp proximity must not read as a recorded link');
+  assert.match(classes[2].detail,/[Nn]ot a predecessor/,'The inspector must say proximity is not a predecessor');
+  const adjacentStep={...trace.steps[1],operation:'request_initiated',
+    event:{session_id:'11',process_id:17,sequence_number:'41'},
+    relation:'temporal_adjacency',confidence:'time_adjacent'};
+  const adjacentTrace={...trace,steps:[trace.steps[0],adjacentStep],
+    gaps:[{reason:'no_predecessor',after_step:0,detail:'No earlier observed relationship reaches this event.'}],
+    coverage:{linked_steps:0,observed_links:0,correlated_links:0,time_adjacent_links:1,gap_count:1,percent:0}};
+  assert(api.isOriginTraceResponse(adjacentTrace),'A declared time-adjacent step must pass the production contract');
+  // A version 1 document written before the field existed omits it and holds
+  // no adjacent row, so it stays readable.
+  const {time_adjacent_links:_omitted,...legacyCoverage}=trace.coverage;
+  assert(api.isOriginTraceResponse({...trace,coverage:legacyCoverage}),'A version 1 document without time_adjacent_links must still pass');
+  const {time_adjacent_links:_dropped,...uncountedCoverage}=adjacentTrace.coverage;
+  const rejected={
+    'its count is omitted':{...adjacentTrace,coverage:uncountedCoverage},
+    'its count is not an integer':{...adjacentTrace,coverage:{...adjacentTrace.coverage,time_adjacent_links:null}},
+    'counted as an identity link':{...adjacentTrace,coverage:{...adjacentTrace.coverage,linked_steps:1,observed_links:1,time_adjacent_links:0}},
+    'relation without its confidence':{...adjacentTrace,steps:[adjacentTrace.steps[0],{...adjacentStep,confidence:'correlated'}]},
+    'confidence without its relation':{...adjacentTrace,steps:[adjacentTrace.steps[0],{...adjacentStep,relation:'request_initiator'}]},
+    'replacing the gap it failed to close':{...adjacentTrace,gaps:[],coverage:{...adjacentTrace.coverage,gap_count:0}},
+    'continuing past the adjacency row':{...adjacentTrace,steps:[adjacentTrace.steps[0],adjacentStep,trace.steps[1]],
+      coverage:{...adjacentTrace.coverage,linked_steps:1,correlated_links:1}}
+  };
+  for(const [reason,body] of Object.entries(rejected)) {
+    assert(!api.isOriginTraceResponse(body),`Proximity must be refused when ${reason}`);
+  }
+  state.requests=native;state.selectedRequestId=native[0].id;
+  state.originTrace=adjacentTrace;state.originTraceKey=api.originTraceSelection().key;
+  rendered.length=0;
+  api.renderBacktrace();
+  assert.deepEqual(rendered.map(model=>model.confidence),
+    [api.traceLinkClass({confidence:'observed'}).label,'Gap',classes[2].label],
+    'The adjacency row renders after the gap it did not close, in its own class');
+  assert.match(rendered[2].kind,/[Nn]o recorded link/,'The adjacency row must name itself as having no recorded link');
+  assert.match(elements.coverageValue.textContent,/0% trace coverage/,'Proximity must not move the coverage percentage');
+  assert.match(elements.coverageValue.textContent,/1 time-adjacent record, excluded from coverage/);
+  assert.match(elements.coverageValue.title,/weaker correlation class/);
+  console.log('PASS retained native Traffic row → Backtraces choice → exact session/process/sequence query; unrooted rows stay unavailable; monotonic_time_ns proximity reports as its own weaker class and stays out of coverage (production functions, not rendered QA)');
 }
 
 // Exercise the actual shared-shell switch, rather than a navigation stub. A
@@ -223,7 +267,7 @@ export async function checkAdvancedNavigation(root) {
 
 export function investigationFixture(base) {
   const event={protocol_version:2,session_id:'11',process_id:17,thread_id:1,sequence_number:'41',monotonic_time_ns:'1000000',navigation_id:'13',frame_id:'17',artifact_id:'7',parent_event_id:'0',request_id:'91',category:'network',type:'request_started',payload_size:Buffer.byteLength('POST fixture.invalid'),payload_encoding:'hex',payload:Buffer.from('POST fixture.invalid').toString('hex'),initiator_request_id:0,initiator_process_id:0,resource_type:13,flags:0,status_code:0,error_code:0,encoded_data_length:'0',decoded_body_length:'0',payload_truncated:false};
-  const trace={contract_version:1,document_kind:'origin-trace',request_id:'91',status:'partial',steps:[{event:{session_id:'11',process_id:17,sequence_number:'41'},monotonic_time_ns:'1000000',frame_id:'17',artifact_id:'7',request_id:'91',category:'network',operation:'request_started',relation:'trace_target',confidence:'observed',value:'POST fixture.invalid'}],gaps:[{reason:'no_predecessor',after_step:0,detail:'No earlier relationship was retained in this synthetic investigation.'}],artifacts:[],coverage:{linked_steps:0,observed_links:0,correlated_links:0,gap_count:1,percent:0}};
+  const trace={contract_version:1,document_kind:'origin-trace',request_id:'91',status:'partial',steps:[{event:{session_id:'11',process_id:17,sequence_number:'41'},monotonic_time_ns:'1000000',frame_id:'17',artifact_id:'7',request_id:'91',category:'network',operation:'request_started',relation:'trace_target',confidence:'observed',value:'POST fixture.invalid'}],gaps:[{reason:'no_predecessor',after_step:0,detail:'No earlier relationship was retained in this synthetic investigation.'}],artifacts:[],coverage:{linked_steps:0,observed_links:0,correlated_links:0,time_adjacent_links:0,gap_count:1,percent:0}};
   const fixture={...base,event,trace,traceMode:'ready',artifactMode:'ready',tracePending:[],calls:[],session:'11'};
   fixture.handle=async(request,response)=>{
     const url=new URL(request.url,'http://127.0.0.1');fixture.calls.push({path:url.pathname,method:request.method||'GET'});

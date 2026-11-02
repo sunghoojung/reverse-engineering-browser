@@ -279,7 +279,7 @@ fn identifier(bytes: &[u8], maximum: usize) -> bool {
 // A browser stage that refuses or stops sampling an observation writes its
 // reason as the payload (protocol/native-wasm-dispatch-v1.md and the JS
 // dispatch and guest contracts). That loss belongs to the marker's category.
-fn named_gap(event: &Value) -> Option<Box<(String, String)>> {
+pub(crate) fn named_gap(event: &Value) -> Option<Box<(String, String)>> {
     let category = event["category"].as_str()?;
     let reason = hex::decode(event["payload"].as_str()?).ok()?;
     if event["payload_truncated"] == true

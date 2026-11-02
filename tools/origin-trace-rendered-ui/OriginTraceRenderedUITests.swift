@@ -354,6 +354,16 @@ final class OriginTraceRenderedUITests: XCTestCase {
 
   @MainActor
   private func show(_ ui: Harness, _ screen: String) async throws {
+    // Backtraces, Analyst and Tools sit under the collapsed Advanced disclosure.
+    let needsAdvanced = try await ui.value(
+      "document.querySelector(`#advanced-navigation .nav-button[data-screen='\(screen)']`) != null && document.querySelector('#advanced-navigation')?.open !== true"
+    ) as? Bool ?? false
+    if needsAdvanced {
+      try await ui.click("#advanced-navigation > summary")
+      try await ui.waitUntil(
+        "document.querySelector('#advanced-navigation')?.open === true",
+        "Advanced navigation did not open for \(screen)")
+    }
     try await ui.click(".primary-nav .nav-button[data-screen='\(screen)']")
     try await ui.waitUntil("!document.querySelector('#screen-\(screen)').hidden", "\(screen) screen did not open")
   }
@@ -1066,6 +1076,66 @@ final class OriginTraceRenderedUITests: XCTestCase {
       XCTAssertEqual(icon["clipped"] as? Bool, false, "\(size.name): the two-letter kind icon is not clipped")
       try await assertLayout(ui, "#screen-sources", "\(size.name) sources bytecode")
       try await ui.screenshot("sources-bytecode-\(size.name)")
+    }
+  }
+
+  // A renderer record that no initiator edge reached reads as its own, weaker
+  // class: after the gap it did not close, named as having no recorded link,
+  // and reported beside coverage rather than inside it.
+  @MainActor
+  func test15BacktraceTimeAdjacentRow() async throws {
+    for size in windowSizes {
+      let ui = try await prepare(size)
+      try await show(ui, "traffic")
+      try await ui.click("#screen-traffic .request-row", containing: "adjacent.trace.test")
+      try await ui.waitUntil(
+        "(document.querySelector('#screen-traffic .request-row[aria-selected=\"true\"]')?.innerText ?? '').includes('adjacent.trace.test')",
+        "\(size.name): adjacent.trace.test was not selected")
+      try await show(ui, "backtrace")
+      try await ui.waitUntil("document.querySelectorAll('#backtrace-steps .trace-row').length === 3",
+        "\(size.name): the time-adjacent trace did not load")
+      let rows = try await ui.value("""
+        [...document.querySelectorAll('#backtrace-steps .trace-row')].map(row => ({
+          gap: row.parentElement.classList.contains('gap'),
+          title: row.querySelector('.step-title')?.textContent ?? '',
+          kind: row.querySelector('.step-kind')?.textContent ?? '',
+          label: row.querySelector('.trace-link-type')?.textContent ?? '',
+          style: row.querySelector('.trace-link-type')?.className ?? ''}))
+        """) as? [[String: Any]] ?? []
+      XCTAssertEqual(rows.count, 3, "\(size.name): target, gap and adjacency rows: \(rows)")
+      guard rows.count == 3 else { continue }
+      XCTAssertEqual(rows[0]["kind"] as? String, "Selected request", "\(size.name): \(rows[0])")
+      XCTAssertEqual(rows[1]["gap"] as? Bool, true, "\(size.name): the missing-predecessor gap stays in place: \(rows[1])")
+      XCTAssertEqual(rows[2]["title"] as? String, "network · request_initiated", "\(size.name): \(rows[2])")
+      XCTAssertEqual(rows[2]["kind"] as? String, "Time-adjacent record · no recorded link", "\(size.name): \(rows[2])")
+      XCTAssertEqual(rows[2]["label"] as? String, "Time-adjacent only", "\(size.name): \(rows[2])")
+      XCTAssertTrue((rows[2]["style"] as? String ?? "").contains("adjacency"), "\(size.name): weaker class styling: \(rows[2])")
+      let coverage = try await ui.value("document.querySelector('#coverage-value').textContent") as? String ?? ""
+      XCTAssertTrue(coverage.hasPrefix("0% trace coverage"), "\(size.name): proximity does not raise coverage: \(coverage)")
+      XCTAssertTrue(coverage.contains("1 time-adjacent record, excluded from coverage"), "\(size.name): \(coverage)")
+
+      // Arrow keys move from the selected request through the gap to the
+      // adjacency row, which then owns visible focus and the inspector. WebKit
+      // does not focus a button on click; enter the list the way a loaded
+      // trace focuses its selected row, with focusVisible so ArrowDown keeps
+      // the keyboard ring. Product focus scrolls the row into view.
+      _ = try await ui.value("document.querySelector('#backtrace-steps .trace-row').focus({focusVisible:true})")
+      for _ in 0..<2 { try await ui.key(125, "\u{F701}", modifiers: [.function, .numericPad]) }
+      try await assertFullyVisible(ui, "#backtrace-steps .trace-step:last-child .trace-row", "\(size.name) arrow-focused row")
+      let focus = try await ui.json("__rebUiProbe.focusState()")
+      let selected = try await ui.value("document.activeElement?.closest('.trace-row')?.getAttribute('aria-pressed') ?? ''") as? String
+      XCTAssertEqual(selected, "true", "\(size.name): ArrowDown selects the adjacency row: \(focus)")
+      XCTAssertEqual(focus["focusVisible"] as? Bool, true, "\(size.name): adjacency row shows keyboard focus: \(focus)")
+      XCTAssertNotEqual(focus["indicator"] as? String, "none", "\(size.name): \(focus)")
+      let details = try await ui.value("document.querySelector('#trace-step-details').innerText") as? String ?? ""
+      XCTAssertTrue(details.contains("Not a predecessor and not value flow"), "\(size.name): inspector names the class: \(details)")
+      try await revealAndAssertFullyVisible(ui, "#backtrace-steps .trace-step:last-child .trace-row", "\(size.name) adjacency row")
+      // Coverage lives above the steps scroller, so centering the last row
+      // cannot scroll it away or cover earlier rows.
+      try await assertFullyVisible(ui, "#coverage-value", "\(size.name) coverage line")
+      try await assertInert(ui, "\(size.name) backtrace")
+      try await assertLayout(ui, "#screen-backtrace", "\(size.name) time-adjacent backtrace")
+      try await ui.screenshot("backtrace-time-adjacent-\(size.name)")
     }
   }
 }

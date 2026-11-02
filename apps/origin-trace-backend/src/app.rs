@@ -358,9 +358,24 @@ impl App {
             "/api/analysis/vm/experiments" => self.vm_experiments.list()?,
             "/api/vm-debugger" => self.owned_vm_debugger.state().await?,
             "/api/wasm" => {
+                // A misspelled filter must fail rather than return a
+                // whole-module document the caller will read as scoped.
+                if q.0
+                    .keys()
+                    .any(|key| !["artifact_id", "sections"].contains(&key.as_str()))
+                {
+                    return Err(Error::bad(
+                        "WASM inspection takes artifact_id with an optional sections filter",
+                    ));
+                }
                 let id = q.required("artifact_id")?.to_owned();
+                let sections = q
+                    .one("sections")?
+                    .map(wasm::requested_sections)
+                    .transpose()?;
                 let root = self.options.artifacts.clone();
-                self.blocking(move || wasm::load(&root, &id)).await?
+                self.blocking(move || wasm::load(&root, &id, sections.as_ref()))
+                    .await?
             }
             "/api/api-collection" | "/api/local-analyst" => {
                 let store = if path.ends_with("api-collection") {
@@ -388,23 +403,57 @@ impl App {
             "/api/local-analyst/runner" => self.analyst.state(),
             "/api/source-facts" => {
                 // Never infer identity from a URL, live script, or selected UI row.
-                if q.0
-                    .keys()
-                    .any(|key| !["session_id", "artifact_id"].contains(&key.as_str()))
-                {
+                if q.0.keys().any(|key| {
+                    ![
+                        "session_id",
+                        "artifact_id",
+                        "region_start_byte",
+                        "region_end_byte",
+                    ]
+                    .contains(&key.as_str())
+                }) {
                     return Err(Error::bad(
-                        "Source facts require only session_id and artifact_id",
+                        "Source facts require session_id and artifact_id with an optional region",
                     ));
                 }
                 q.number("session_id", None, 64, false)?;
                 q.number("artifact_id", None, 64, false)?;
+                // A region narrows analysis of the same verified bytes. Half a
+                // range is a caller mistake, not a default to invent. Offsets
+                // admit the contract's full unsigned 64-bit form; one past the
+                // artifact is refused by the byte-range check below.
+                let offset = |key| {
+                    q.number(key, None, 64, false)
+                        .map(|value| usize::try_from(value).unwrap_or(usize::MAX))
+                };
+                let region = match (q.one("region_start_byte")?, q.one("region_end_byte")?) {
+                    (None, None) => None,
+                    (Some(_), Some(_)) => {
+                        Some((offset("region_start_byte")?, offset("region_end_byte")?))
+                    }
+                    _ => {
+                        return Err(Error::bad(
+                            "A source facts region requires region_start_byte and region_end_byte",
+                        ));
+                    }
+                };
                 let session = q.required("session_id")?.to_owned();
                 let id = q.required("artifact_id")?.to_owned();
                 let root = self.options.artifacts.clone();
                 let (source, identity) = self
                     .blocking(move || source_facts::load(&root, &session, &id))
                     .await?;
-                let mut result = self.deobfuscator.source_facts(&source).await?;
+                if let Some((start, end)) = region
+                    && (start > end
+                        || end > source.len()
+                        || !source.is_char_boundary(start)
+                        || !source.is_char_boundary(end))
+                {
+                    return Err(Error::bad(
+                        "A source facts region must be an original byte range in this artifact",
+                    ));
+                }
+                let mut result = self.deobfuscator.source_facts(&source, region).await?;
                 result["source"] = identity;
                 result
             }

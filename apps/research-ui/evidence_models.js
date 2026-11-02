@@ -688,11 +688,26 @@
             !Array.isArray(body.artifacts) ||
             !isPlainObject(body.coverage)) return false;
         const coverage = body.coverage;
+        // A version 1 document written before timestamp adjacency existed has
+        // no time_adjacent_links and no adjacent rows, so absence reads as zero;
+        // a present value must still be valid.
+        const timeAdjacentLinks = Object.hasOwn(coverage, 'time_adjacent_links') ? coverage.time_adjacent_links : 0;
+        // A time-adjacent row occupies a step without being a link, so
+        // linked_steps stays an identity measure and the two link classes still
+        // account for all of it.
         if (!['linked_steps', 'observed_links', 'correlated_links', 'gap_count', 'percent']
           .every(field => isSafeIntegerInRange(coverage[field], 0, field === 'percent' ? 100 : 32)) ||
-          coverage.linked_steps !== Math.max(0, body.steps.length - 1) ||
+          !isSafeIntegerInRange(timeAdjacentLinks, 0, 1) ||
+          coverage.linked_steps + timeAdjacentLinks !== Math.max(0, body.steps.length - 1) ||
           coverage.observed_links + coverage.correlated_links !== coverage.linked_steps ||
           coverage.gap_count !== body.gaps.length) return false;
+        // Timestamp proximity is terminal and never stands in for an identity
+        // predecessor, so it is always the last step and always accompanied by
+        // the gap it failed to close.
+        const adjacentSteps = body.steps.filter(step => step?.confidence === 'time_adjacent');
+        if (adjacentSteps.length !== timeAdjacentLinks ||
+          (adjacentSteps.length > 0 && (adjacentSteps[0] !== body.steps[body.steps.length - 1] ||
+            !body.gaps.some(gap => isPlainObject(gap) && gap.reason === 'no_predecessor')))) return false;
         const validStep = step => isPlainObject(step) && isPlainObject(step.event) &&
           isCanonicalInteger(step.event.session_id, 0n, uint64Max) &&
           BigInt(step.event.session_id) > 0n &&
@@ -706,8 +721,9 @@
           eventCategories.has(step.category) &&
           typeof step.operation === 'string' && step.operation.length > 0 &&
           typeof step.value === 'string' && step.value.length <= 256 &&
-          ['trace_target', 'parent_event', 'request_initiator', 'request_lifecycle', 'artifact_request'].includes(step.relation) &&
-          ['observed', 'correlated'].includes(step.confidence);
+          ['trace_target', 'parent_event', 'request_initiator', 'request_lifecycle', 'artifact_request', 'temporal_adjacency'].includes(step.relation) &&
+          ['observed', 'correlated', 'time_adjacent'].includes(step.confidence) &&
+          (step.relation === 'temporal_adjacency') === (step.confidence === 'time_adjacent');
         const validGap = gap => isPlainObject(gap) &&
           ['ambiguous_request', 'missing_event', 'no_predecessor', 'cycle', 'step_limit', 'capture_gap'].includes(gap.reason) &&
           isSafeIntegerInRange(gap.after_step, 0, 31) &&

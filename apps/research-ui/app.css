@@ -606,9 +606,11 @@
       .trace-empty p { margin: 0 0 20px; color: var(--muted); line-height: 1.6; }
       .trace-empty button { margin: 0; }
       .trace-layout { flex: 1; display: grid; grid-template-columns: minmax(0, 1fr) minmax(280px, 38%); min-height: 0; }
-      .trace-list-pane { min-width: 0; min-height: 0; overflow: auto; }
-      .trace-list-heading { display: flex; justify-content: space-between; gap: 12px; padding: 10px 12px; border-bottom: 1px solid var(--line); background: var(--panel-2); color: var(--muted); font-size: 11px; }
-      .backtrace { margin: 0; padding: 0; list-style: none; }
+      /* Heading stays above the steps scroller so coverage never leaves the
+         pane and never overlays the first rows (sticky would cover them). */
+      .trace-list-pane { min-width: 0; min-height: 0; display: flex; flex-direction: column; overflow: hidden; }
+      .trace-list-heading { flex: 0 0 auto; display: flex; justify-content: space-between; gap: 12px; padding: 10px 12px; border-bottom: 1px solid var(--line); background: var(--panel-2); color: var(--muted); font-size: 11px; }
+      .backtrace { flex: 1 1 auto; min-height: 0; overflow: auto; margin: 0; padding: 0; list-style: none; }
       .trace-row { width: 100%; display: grid; grid-template-columns: 24px minmax(0, 1fr) auto; align-items: center; gap: 12px; padding: 12px; border: 0; border-bottom: 1px solid var(--line-soft); background: transparent; text-align: left; }
       .trace-row:hover { background: var(--panel-2); }
       .trace-row[aria-pressed="true"] { background: var(--accent-soft); }
@@ -619,6 +621,10 @@
       .trace-link-type { font-size: 10px; }
       .exact { color: var(--green); }
       .correlation { color: var(--amber); }
+      /* Timestamp adjacency is weaker than either link class. Italic carries
+         that without depending on color discrimination, because the backtrace
+         screen already recolors .exact to the same muted tone. */
+      .adjacency { color: var(--muted); font-style: italic; }
       .unknown { color: var(--red); }
       .trace-inspector { min-width: 0; overflow: auto; border-left: 1px solid var(--line); padding: 16px; }
       .trace-inspector h2 { margin: 0 0 18px; color: var(--muted); font-size: 11px; font-weight: 500; }

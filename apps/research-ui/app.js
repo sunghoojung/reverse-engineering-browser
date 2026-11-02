@@ -3281,6 +3281,22 @@ const capturedExportPanel = installCapturedExportDialog({
         };
       }
 
+      // Recorded links, shared identifiers and timestamp adjacency are three
+      // different classes of evidence. Every row label comes from here so no
+      // call site can present the weaker ones as a recorded relationship.
+      const traceLinkClasses = {
+        observed: {label: 'Recorded link', style: 'exact', detail: 'Recorded event link',
+          relation: 'recorded link'},
+        correlated: {label: 'Shared identifiers', style: 'correlation', detail: 'Matched by shared identifiers',
+          relation: 'shared identifiers only'},
+        time_adjacent: {label: 'Time-adjacent only', style: 'adjacency',
+          detail: 'Same request identity in another process within a bounded timestamp window. Not a predecessor and not value flow.',
+          relation: 'timestamp proximity only'}
+      };
+      function traceLinkClass(step) {
+        return traceLinkClasses[step.confidence] ?? traceLinkClasses.correlated;
+      }
+
       async function refreshOriginTrace() {
         state.originTraceController?.abort();
         const generation = ++state.originTraceGeneration;
@@ -3380,7 +3396,7 @@ const capturedExportPanel = installCapturedExportDialog({
         };
         [
           ['Relationship', step.relation.replaceAll('_', ' ')],
-          ['Link type', step.confidence === 'observed' ? 'Recorded event link' : 'Matched by shared identifiers'],
+          ['Link type', traceLinkClass(step).detail],
           ['Time (monotonic ns)', step.monotonic_time_ns],
           ['Session', step.event.session_id], ['Process', step.event.process_id],
           ['Event', step.event.sequence_number], ['Frame', step.frame_id],
@@ -3397,7 +3413,7 @@ const capturedExportPanel = installCapturedExportDialog({
         const open = textElement('button', 'secondary-button', 'Open retained source'); open.type = 'button';
         open.dataset.investigationSource = 'true'; open.disabled = sourceLink.status !== 'ready';
         open.addEventListener('click', () => openInvestigation({kind: 'artifact', identity: sourceLink.identity,
-          relation: `Trace step S${step.event.session_id}:P${step.event.process_id}:E${step.event.sequence_number} records this artifact. Trace relationship: ${step.confidence === 'observed' ? 'recorded link' : 'shared identifiers only'}. No value flow is implied.`}));
+          relation: `Trace step S${step.event.session_id}:P${step.event.process_id}:E${step.event.sequence_number} records this artifact. Trace relationship: ${traceLinkClass(step).relation}. No value flow is implied.`}));
         panel.append(open);
         if (sourceLink.status !== 'ready') panel.append(textElement('p', 'trace-detail-message', sourceLink.message));
       }
@@ -3427,7 +3443,11 @@ const capturedExportPanel = installCapturedExportDialog({
           const current = rows.indexOf(row);
           const next = event.key === 'Home' ? 0 : event.key === 'End' ? rows.length - 1
             : (current + (event.key === 'ArrowDown' ? 1 : -1) + rows.length) % rows.length;
-          rows[next].click(); rows[next].focus();
+          // Arrow keys are keyboard navigation even when the list was entered
+          // by pointer, so the moved focus keeps its ring. Focus also scrolls
+          // its row into view: a long trace must not move focus off screen.
+          rows[next].click();
+          rows[next].focus({focusVisible: true});
         });
         item.append(row); return item;
       }
@@ -3473,7 +3493,7 @@ const capturedExportPanel = installCapturedExportDialog({
           : trace?.status === 'ambiguous' ? (trace.gaps[0]?.detail || 'Select the request row with the matching process and event identifiers.')
           : trace ? (trace.gaps[0]?.detail || 'The request was captured, but no earlier predecessor event was retained.') : 'Choose Load trace to inspect this request.';
         const models = [];
-        const labels = {trace_target: 'Selected request', parent_event: 'Previous event', request_initiator: 'Request initiator', request_lifecycle: 'Request lifecycle', artifact_request: 'Related artifact'};
+        const labels = {trace_target: 'Selected request', parent_event: 'Previous event', request_initiator: 'Request initiator', request_lifecycle: 'Request lifecycle', artifact_request: 'Related artifact', temporal_adjacency: 'Time-adjacent record · no recorded link'};
         const gapLabels = {
           ambiguous_request: 'Ambiguous request identifier',
           missing_event: 'Missing event · predecessor not retained',
@@ -3485,8 +3505,7 @@ const capturedExportPanel = installCapturedExportDialog({
         (trace?.steps ?? []).forEach((step, index) => {
           models.push({key: `${step.event.process_id}:${step.event.sequence_number}`, index: String(index + 1),
             title: `${step.category} · ${step.operation}`, kind: labels[step.relation] || step.relation,
-            confidence: step.confidence === 'observed' ? 'Recorded link' : 'Shared identifiers',
-            style: step.confidence === 'observed' ? 'exact' : 'correlation', step});
+            confidence: traceLinkClass(step).label, style: traceLinkClass(step).style, step});
           trace.gaps.filter(gap => gap.after_step === index).forEach((gap, gapIndex) => models.push({
             key: `gap:${index}:${gapIndex}`, index: '!', title: gapLabels[gap.reason] || gap.reason.replaceAll('_', ' '),
             kind: gap.reason === 'missing_event' ? 'Missing event · retained evidence gap' : 'Trace gap',
@@ -3506,8 +3525,11 @@ const capturedExportPanel = installCapturedExportDialog({
           const {linked_steps: linked, gap_count: gaps} = trace.coverage;
           const links = `${linked} recorded predecessor link${linked === 1 ? '' : 's'}`;
           const gapsText = `${gaps} reported gap${gaps === 1 ? '' : 's'}`;
-          elements.coverageValue.textContent = `${trace.coverage.percent}% trace coverage · ${links} · ${gapsText}`;
-          elements.coverageValue.title = 'Coverage counts recorded predecessor links against named gaps. Queue-drop markers describe retained streams and do not identify missing links or prove value flow.';
+          // Adjacency is reported beside coverage, never inside it.
+          const adjacent = trace.coverage.time_adjacent_links
+            ? ` · ${trace.coverage.time_adjacent_links} time-adjacent record, excluded from coverage` : '';
+          elements.coverageValue.textContent = `${trace.coverage.percent}% trace coverage · ${links} · ${gapsText}${adjacent}`;
+          elements.coverageValue.title = 'Coverage counts recorded predecessor links against named gaps. Time-adjacent records share a request identity in another process within a bounded timestamp window; they are a weaker correlation class and are excluded from coverage. Queue-drop markers describe retained streams and do not identify missing links or prove value flow.';
         } else {
           elements.coverageValue.textContent = '';
           elements.coverageValue.removeAttribute?.('title');

@@ -7446,7 +7446,7 @@ const capturedExportPanel = installCapturedExportDialog({
 
         if (screenName === 'vm') {
           if (trigger === elements.requestVmCandidates && typeof vmExecutionWorkspace !== 'undefined') vmExecutionWorkspace?.showWorkspace('findings');
-          if (trigger?.id === 'nav-vm' && state.vmAnalysisRequestId !== null) refreshVmAnalysis(null);
+          if (trigger?.id === 'nav-vm-workspace' && state.vmAnalysisRequestId !== null) refreshVmAnalysis(null);
           renderVmLab();
         }
         if (!trigger?.classList.contains('nav-button')) {

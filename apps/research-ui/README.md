@@ -461,7 +461,8 @@ The sidebar lists every workspace in two groups. **Evidence** holds Traffic,
 Sources, VM, Fingerprinting and Backtraces; **Workbench** holds Collection,
 Analyst and Tools. Console, the investigation notebook and the theme switch sit
 at its foot. ⌘ or Ctrl with 1-8 opens the workspace at that position, the same
-as a click, except while a modal dialog is open. Windows narrower than 1100px
+as a click, except while a modal dialog is open. In a browser on the development
+path use Ctrl, because the browser keeps ⌘ with a digit for its own tabs. Windows narrower than 1100px
 show the sidebar as an icon rail with the same entries, names and shortcuts, so
 evidence panes keep the widths their layouts were designed for.
 

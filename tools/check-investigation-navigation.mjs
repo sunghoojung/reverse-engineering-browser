@@ -257,26 +257,27 @@ export async function checkSidebarNavigation(root) {
   const start=app.indexOf('      // Cmd/Ctrl + 1-8 opens the sidebar workspace');
   const shortcut=app.slice(start,app.indexOf('\n      });\n',start)+'\n      });\n'.length);
   assert(start>=0,'Missing workspace shortcut listener');
-  let listener=null,modal=false;const clicks=[];
-  const shortcutButtons=order.map(name=>({dataset:{screen:name},disabled:false,click(){clicks.push(name);},focus(){}}));
+  let listener=null,modal=false,focusedEntry=null;const clicks=[];
+  const shortcutButtons=order.map(name=>({dataset:{screen:name},disabled:false,click(){clicks.push(name);},focus(){focusedEntry=name;}}));
   runInNewContext(shortcut,{document:{addEventListener:(type,callback)=>{assert.equal(type,'keydown');listener=callback;},
     querySelector:selector=>selector==='dialog:modal'&&modal?{}:null,
     querySelectorAll:selector=>{assert.equal(selector,'.primary-nav .nav-button[data-screen]');return shortcutButtons;}}});
   const press=init=>{const event={metaKey:false,ctrlKey:false,altKey:false,shiftKey:false,repeat:false,prevented:false,
     preventDefault(){this.prevented=true;},...init};listener(event);return event.prevented;};
   order.forEach((name,index)=>{
-    clicks.length=0;
+    clicks.length=0;focusedEntry=null;
     assert.equal(press({metaKey:true,code:`Digit${index+1}`}),true);assert.deepEqual(clicks,[name]);
+    assert.equal(focusedEntry,name,'The shortcut leaves focus on the chosen entry, not on a hidden screen');
     clicks.length=0;
     assert.equal(press({ctrlKey:true,code:`Digit${index+1}`}),true);assert.deepEqual(clicks,[name]);
   });
-  clicks.length=0;
+  clicks.length=0;focusedEntry=null;
   for(const init of [{metaKey:true,code:'Digit9'},{code:'Digit1'},{metaKey:true,shiftKey:true,code:'Digit1'},
     {metaKey:true,altKey:true,code:'Digit1'},{metaKey:true,repeat:true,code:'Digit1'},{metaKey:true,code:'KeyJ'}])
     assert.equal(press(init),false,`Ignored: ${JSON.stringify(init)}`);
   modal=true;assert.equal(press({metaKey:true,code:'Digit2'}),false,'A modal dialog keeps the keyboard');modal=false;
   shortcutButtons[1].disabled=true;assert.equal(press({metaKey:true,code:'Digit2'}),false);
-  assert.deepEqual(clicks,[]);
+  assert.deepEqual(clicks,[]);assert.equal(focusedEntry,null,'Ignored shortcuts never move focus');
   console.log('PASS sidebar lists every workspace directly in shortcut order, one current entry, focus kept on sidebar choices and moved for linked navigation, Cmd/Ctrl + digit guards (production functions, not rendered QA)');
 }
 
@@ -440,11 +441,10 @@ async function checkInvestigationReturns(root) {
     const screens=['traffic','backtrace'].map(name=>({id:`screen-${name}`,hidden:name!=='backtrace',dataset:{},
       contains:node=>name==='traffic'&&node===trigger,querySelector:s=>s==='#trace-origin'?trigger:null,querySelectorAll:()=>[]}));
     const notice={textContent:''},bar={dataset:{},querySelector:()=>({open:false})},consolePanel={dataset:{}};
-    const navigation={open:false,contains:()=>false};
     const request={id:'native',origin:'live',operation:'request_started',events:[{session_id:'11',process_id:17,sequence_number:'41',request_id:'91',type:'request_started'}]};
     const state={requests:[request],selectedRequestId:'native',inspectorTab:'evidence',fieldTab:'body',originTraceStatus:'ready',decoderSteps:[]};
     const noop=()=>{};
-    document.querySelector=s=>s==='.screen:not([hidden])'?screens.find(screen=>!screen.hidden):s==='#advanced-navigation'?navigation:s==='#investigation-back'?back:s==='#investigation-notice'?notice:s==='#investigation-navigation'?bar:s==='#console-experiment-traffic'?consolePanel:screens.find(screen=>'#'+screen.id===s)??null;
+    document.querySelector=s=>s==='.screen:not([hidden])'?screens.find(screen=>!screen.hidden):s==='#investigation-back'?back:s==='#investigation-notice'?notice:s==='#investigation-navigation'?bar:s==='#console-experiment-traffic'?consolePanel:screens.find(screen=>'#'+screen.id===s)??null;
     document.querySelectorAll=s=>s==='.screen'?screens:[];
     document.getElementById=id=>screens.find(screen=>screen.id===id)??null;
     const context=createContext({document,state,CSS:{escape:s=>s},Promise,requestAnimationFrame:fn=>frames.push(fn),integerText:(e,k)=>String(e[k]),

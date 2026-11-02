@@ -2718,14 +2718,6 @@ body.resizing-panes-y, body.resizing-panes-y * { cursor: row-resize !important; 
 /* Retained Traffic comparison shares the inspector's independently bounded pane. */
 
 
-/* Keep phone navigation at its existing two rows instead of consuming evidence space. */
-.notebook-trigger-icon { display: none; width: 17px; height: 17px; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
-@media (max-width: 480px) {
-  #open-investigation-notebook { width: 28px; height: 28px; min-width: 28px; padding: 3px; }
-  .notebook-trigger-label { display: none; }
-  .notebook-trigger-icon { display: block; }
-}
-
 /* Bounded retained-source excerpts. Notices are separate from evidence text. */
 .source-window { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; flex-basis: 100%; min-width: 0; font: 11px var(--mono); color: var(--muted); }
 .source-window[hidden] { display: none; }

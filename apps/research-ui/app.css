@@ -4637,6 +4637,12 @@ details.decoder-card > header p { margin-top: 0; }
 .app[data-sidebar="rail"] .sidebar-search { width: 40px; height: 32px; justify-content: center; padding: 0; border-color: transparent; background: transparent; }
 .app[data-sidebar="rail"] .sidebar-search:hover { background: var(--panel-2); }
 .app[data-sidebar="rail"] .sidebar-search-key { display: none; }
+/* With Search added the rail still fits a 560px window without scrolling: a
+   scrollbar would take its width and clip every 40px entry. Rail entries use
+   the expanded sidebar's 30px row height and the column gaps tighten to 8px. */
+.app[data-sidebar="rail"] .sidebar { gap: 8px; }
+.app[data-sidebar="rail"] :is(.nav-button, .sidebar-action) { min-height: 30px; }
+.app[data-sidebar="rail"] :is(.sidebar-toggle, .sidebar-search) { height: 30px; }
 
 .command-palette { position: fixed; inset: 72px 0 auto; width: min(640px, calc(100vw - 32px)); max-width: none; max-height: min(520px, calc(100dvh - 96px)); margin: 0 auto; padding: 0; border: 1px solid var(--line); border-radius: var(--panel-radius); background: var(--panel); color: var(--text); box-shadow: var(--overlay-shadow); overflow: hidden; }
 .command-palette[open] { display: flex; flex-direction: column; animation: command-palette-in 120ms ease-out; }

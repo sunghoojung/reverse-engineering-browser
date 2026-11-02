@@ -11,7 +11,8 @@ same-site callers, saturation, disable and same-/different-session
 reconfiguration with a producer paused after its claim, preservation of newer
 accepted/failed claims, masked/malformed/expired events, expiry immediately before
 transport admission, property/network callbacks, Canvas creator-event admission, notification
-coalescing, and allocation-free disabled calls. Looping/waiting in the fixture controls deterministic races; production
+coalescing, the frame attribution a network request record shares with its
+sibling collectors, and allocation-free disabled calls. Looping/waiting in the fixture controls deterministic races; production
 probe calls make one claim CAS and one TryPush call. The existing queue is
 lock-free, not wait-free; its internal contention retries are unchanged.
 

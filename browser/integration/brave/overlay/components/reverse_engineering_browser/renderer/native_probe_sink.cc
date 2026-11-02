@@ -1797,6 +1797,12 @@ void NativeProbeSink::RecordRequestInitiated(const std::int32_t request_id,
   event.header.session_id = session_id;
   event.header.process_id = static_cast<std::uint32_t>(base::GetCurrentProcId());
   event.header.thread_id = static_cast<std::uint32_t>(base::PlatformThread::CurrentId().raw());
+  // Same frame attribution the surface-operation path records, so the browser
+  // bridge can map this record onto a tab. A loading caller with no entered
+  // script context leaves the frame unknown, which stays an explicit zero.
+  const NativeProbeFrameIdProvider frame_id_provider =
+      frame_id_provider_.load(std::memory_order_relaxed);
+  event.header.frame_id = frame_id_provider ? frame_id_provider() : 0;
   event.header.request_id = static_cast<std::uint64_t>(static_cast<std::uint32_t>(request_id));
   SetPayload(event, method, " ");
   const std::size_t method_size = event.header.payload_size;

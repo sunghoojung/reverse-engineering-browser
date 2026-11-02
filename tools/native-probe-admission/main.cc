@@ -898,6 +898,35 @@ void DisabledExpiredAndMalformed() {
   transport.Disable();
   std::cout << "PASS disabled allocation-free, expired/masked/malformed and other emit paths\n";
 }
+
+// A renderer request record is the initiator endpoint of a request chain. The
+// browser bridge resolves its tab from frame_id alone, so an unset frame costs
+// both the frame join and the tab attribution of every later lifecycle event.
+void RequestInitiatedFrameAttribution() {
+  NativeProbeQueue queue;
+  Configure(queue);
+  blink::test_frame_present = true;
+  sink.RecordApiCall(reb::NativeProbeCategory::kCanvas, "canvas.getImageData");
+  const std::uint64_t sibling_frame_id = One(queue).header.frame_id;
+  assert(sibling_frame_id != 0);
+  sink.RecordRequestInitiated(7, "GET", "example.test");
+  const auto initiated = One(queue);
+  assert(initiated.header.type == reb::NativeProbeType::kRequestInitiated);
+  assert(initiated.header.category == reb::NativeProbeCategory::kNetwork);
+  assert(initiated.header.request_id == 7);
+  // The network path must agree with its sibling collectors, not zero the join.
+  assert(initiated.header.frame_id == sibling_frame_id);
+  // tab_id stays renderer-unknown; only the browser bridge may assign it.
+  assert(initiated.header.tab_id == 0);
+  blink::test_frame_present = false;
+  sink.RecordRequestInitiated(8, "GET", "example.test");
+  const auto unattributed = One(queue);
+  // No entered script context is an explicit unknown frame, never a guess.
+  assert(unattributed.header.request_id == 8 && unattributed.header.frame_id == 0);
+  transport.Disable();
+  std::cout << "PASS request_initiated carries its sibling frame attribution and an explicit "
+               "unknown frame without a script context\n";
+}
 }  // namespace
 
 void DispatchSampleAdmission() {
@@ -1501,6 +1530,7 @@ int main() {
   Run<&ConcurrentSameSite>();
   Run<&ConfigurationRaces>();
   Run<&DisabledExpiredAndMalformed>();
+  Run<&RequestInitiatedFrameAttribution>();
   Run<&CanvasCreatorAdmission>();
   Run<&RuntimeCreatorAdmission>();
   Run<&RuntimeScriptProvenance>();

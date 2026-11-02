@@ -8590,7 +8590,9 @@ const capturedExportPanel = installCapturedExportDialog({
           if (row && (row.dataset.requestId !== state.selectedRequestId || !state.trafficDetailOpen)) row.click();
           started = renameSelectedRequest();
         } else if (screen === 'sources') {
+          // A focused folder row has nothing to rename; it never falls back to the open file.
           const item = target?.closest?.('.source-tree-row[data-artifact-id], .source-editor-tab');
+          if (!item && target?.closest?.('.source-tree-row')) return;
           if (item && item.getAttribute('aria-selected') !== 'true') item.click();
           started = renameSelectedSource();
         } else if (screen === 'vm') {

@@ -520,7 +520,11 @@ export async function checkNamesApp(root) {
 
   // Demo rows, sources and handlers.
   state.selectedRequestId = 'demo-row'; assert(press()); await save(ids['request-name-host'], 'demo mint');
-  screen = 'sources'; assert(press()); await save(ids['source-name-host'], 'obfuscated loader');
+  screen = 'sources';
+  const folder = node('button'); folder.className = 'source-tree-row'; folder.click = () => assert.fail('A folder row is never opened by F2');
+  assert.equal(press({target: folder}), false, 'F2 on a folder row renames nothing');
+  assert.equal(ids['source-name-host'].children.length, 0);
+  assert(press()); await save(ids['source-name-host'], 'obfuscated loader');
   assert.equal(names.nameFor('artifact', state.artifacts[0]), 'obfuscated loader');
   screen = 'vm';
   const host = node('div', 'vm-handler-name-host'); vmDetail.append(host);

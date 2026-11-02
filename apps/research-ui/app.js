@@ -8165,6 +8165,56 @@ const capturedExportPanel = installCapturedExportDialog({
       try { savedTheme = localStorage.getItem('reb-theme'); } catch { /* Keep the system theme. */ }
       if (savedTheme === 'light' || savedTheme === 'dark') document.documentElement.dataset.theme = savedTheme;
 
+      // Sidebar mode. On wide windows the toggle (or Cmd/Ctrl+B) switches between
+      // the full sidebar and the icon rail, and the choice is remembered. Narrow
+      // windows always use the rail; there the toggle slides the full sidebar over
+      // the evidence until a choice, Escape or an outside click closes it.
+      const sidebarShell = (() => {
+        const app = document.querySelector('.app');
+        const sidebar = document.querySelector('#sidebar');
+        const toggle = document.querySelector('#sidebar-toggle');
+        const narrow = window.matchMedia('(max-width: 1099px)');
+        let collapsed = false, peek = false;
+        try { collapsed = localStorage.getItem('reb-sidebar') === 'collapsed'; } catch { /* Keep the full sidebar. */ }
+        const sync = () => {
+          if (!narrow.matches) peek = false;
+          const mode = narrow.matches ? (peek ? 'peek' : 'rail') : collapsed ? 'rail' : 'expanded';
+          app.dataset.sidebar = mode;
+          const label = mode === 'rail' ? 'Expand sidebar' : 'Collapse sidebar';
+          toggle.setAttribute('aria-expanded', String(mode !== 'rail'));
+          toggle.setAttribute('aria-label', label);
+          toggle.title = `${label} (⌘ / Ctrl + B)`;
+        };
+        const closePeek = (focusToggle = false) => {
+          if (!peek) return;
+          peek = false;
+          sync();
+          if (focusToggle) toggle.focus({ preventScroll: true });
+        };
+        const flip = () => {
+          if (narrow.matches) peek = !peek;
+          else {
+            collapsed = !collapsed;
+            try { localStorage.setItem('reb-sidebar', collapsed ? 'collapsed' : 'expanded'); } catch { /* Native private mode may not persist preferences. */ }
+          }
+          sync();
+        };
+        toggle.addEventListener('click', flip);
+        document.addEventListener('keydown', event => {
+          if (event.key === 'Escape' && peek) { event.preventDefault(); closePeek(true); return; }
+          if (!(event.metaKey || event.ctrlKey) || event.altKey || event.shiftKey || event.repeat || event.code !== 'KeyB') return;
+          // Text fields keep the key: Ctrl+B moves the caret in macOS editors.
+          if (event.target?.closest?.('input, textarea, select, [contenteditable="true"]') || document.querySelector('dialog:modal')) return;
+          event.preventDefault();
+          flip();
+        });
+        document.addEventListener('pointerdown', event => { if (peek && !sidebar.contains(event.target)) closePeek(); });
+        sidebar.addEventListener('click', event => { if (peek && event.target?.closest?.('.nav-button, .sidebar-action')) closePeek(); });
+        narrow.addEventListener('change', sync);
+        sync();
+        return { sync, flip };
+      })();
+
       renderRequests();
       renderInspector();
       renderEvidence();

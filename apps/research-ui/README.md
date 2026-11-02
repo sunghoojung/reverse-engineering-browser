@@ -467,7 +467,13 @@ at its foot. ⌘ or Ctrl with 1-8 opens the workspace at that position, the same
 as a click, except while a modal dialog is open. In a browser on the development
 path use Ctrl, because the browser keeps ⌘ with a digit for its own tabs. Windows narrower than 1100px
 show the sidebar as an icon rail with the same entries, names and shortcuts, so
-evidence panes keep the widths their layouts were designed for. Evidence sits in
+evidence panes keep the widths their layouts were designed for. The toggle at
+the top of the sidebar, or ⌘ / Ctrl + B outside text fields, collapses a wide
+window's sidebar to the same rail. The choice lasts until the packaged app
+quits, because its web view keeps no website data between launches; the
+browser development path keeps it across reloads. On a narrow window
+it slides the full sidebar out over the evidence until a workspace is chosen,
+Escape is pressed or the pointer goes elsewhere. Evidence sits in
 one rounded panel beside the sidebar, and an open Console is a second panel
 below it. Buttons share one style everywhere: a filled accent for the primary
 action, an outlined fill for the rest, and disabled controls drop their fill.

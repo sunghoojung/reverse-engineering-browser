@@ -66,6 +66,9 @@ produce an ambiguous result instead of an arbitrary trace.
   than one record qualifies, and is terminal: no traversal continues from it, so
   it can never add an observed or correlated link. It is counted only in
   `time_adjacent_links` and leaves `linked_steps` and `percent` unchanged.
+  Both builders always emit that field. It is additive within contract version
+  1, so a reader treats its absence in an older document as zero; an older
+  reader still rejects a document that contains a `time_adjacent` step.
 - Missing retained predecessors, cycles, ambiguous request identifiers, and
   events with no predecessor remain visible as named gaps.
 - Native queue-drop markers share their last retained event's reference. They

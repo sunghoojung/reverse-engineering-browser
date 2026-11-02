@@ -158,7 +158,14 @@ export async function checkNativeRequestBacktrace(root) {
     gaps:[{reason:'no_predecessor',after_step:0,detail:'No earlier observed relationship reaches this event.'}],
     coverage:{linked_steps:0,observed_links:0,correlated_links:0,time_adjacent_links:1,gap_count:1,percent:0}};
   assert(api.isOriginTraceResponse(adjacentTrace),'A declared time-adjacent step must pass the production contract');
+  // A version 1 document written before the field existed omits it and holds
+  // no adjacent row, so it stays readable.
+  const {time_adjacent_links:_omitted,...legacyCoverage}=trace.coverage;
+  assert(api.isOriginTraceResponse({...trace,coverage:legacyCoverage}),'A version 1 document without time_adjacent_links must still pass');
+  const {time_adjacent_links:_dropped,...uncountedCoverage}=adjacentTrace.coverage;
   const rejected={
+    'its count is omitted':{...adjacentTrace,coverage:uncountedCoverage},
+    'its count is not an integer':{...adjacentTrace,coverage:{...adjacentTrace.coverage,time_adjacent_links:null}},
     'counted as an identity link':{...adjacentTrace,coverage:{...adjacentTrace.coverage,linked_steps:1,observed_links:1,time_adjacent_links:0}},
     'relation without its confidence':{...adjacentTrace,steps:[adjacentTrace.steps[0],{...adjacentStep,confidence:'correlated'}]},
     'confidence without its relation':{...adjacentTrace,steps:[adjacentTrace.steps[0],{...adjacentStep,relation:'request_initiator'}]},

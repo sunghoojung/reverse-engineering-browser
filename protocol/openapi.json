@@ -5168,7 +5168,6 @@
               "linked_steps",
               "observed_links",
               "correlated_links",
-              "time_adjacent_links",
               "gap_count",
               "percent"
             ],
@@ -5189,6 +5188,7 @@
                 "maximum": 31
               },
               "time_adjacent_links": {
+                "description": "Time-adjacent rows in steps. Current producers always emit it. A contract version 1 document written before the field existed omits it, and a reader treats the absence as zero.",
                 "type": "integer",
                 "minimum": 0,
                 "maximum": 1

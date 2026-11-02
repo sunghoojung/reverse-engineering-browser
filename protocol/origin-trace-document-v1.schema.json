@@ -65,12 +65,13 @@
     "coverage": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["linked_steps", "observed_links", "correlated_links", "time_adjacent_links", "gap_count", "percent"],
+      "required": ["linked_steps", "observed_links", "correlated_links", "gap_count", "percent"],
       "properties": {
         "linked_steps": {"type": "integer", "minimum": 0, "maximum": 31},
         "observed_links": {"type": "integer", "minimum": 0, "maximum": 31},
         "correlated_links": {"type": "integer", "minimum": 0, "maximum": 31},
-        "time_adjacent_links": {"type": "integer", "minimum": 0, "maximum": 1},
+        "time_adjacent_links": {"type": "integer", "minimum": 0, "maximum": 1,
+          "description": "Always emitted by current producers. Absent only in version 1 documents written before it existed; read absence as zero."},
         "gap_count": {"type": "integer", "minimum": 0, "maximum": 32},
         "percent": {"type": "integer", "minimum": 0, "maximum": 100}
       }

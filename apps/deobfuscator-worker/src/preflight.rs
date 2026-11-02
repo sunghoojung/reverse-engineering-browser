@@ -123,19 +123,29 @@ mod heap {
         REQUESTED.set(REQUESTED.get().saturating_add(bytes));
     }
 
+    /// Tree-sitter's default allocator aborts when a request fails, and the
+    /// parser never checks for null. A replacement keeps that contract, so a
+    /// failed request aborts here instead of handing the parser a null pointer.
+    fn allocated(pointer: *mut c_void, bytes: usize) -> *mut c_void {
+        if pointer.is_null() && bytes > 0 {
+            std::process::abort();
+        }
+        pointer
+    }
+
     unsafe extern "C" fn counted_malloc(size: usize) -> *mut c_void {
         add(size);
-        unsafe { malloc(size) }
+        allocated(unsafe { malloc(size) }, size)
     }
 
     unsafe extern "C" fn counted_calloc(count: usize, size: usize) -> *mut c_void {
         add(count.saturating_mul(size));
-        unsafe { calloc(count, size) }
+        allocated(unsafe { calloc(count, size) }, count.saturating_mul(size))
     }
 
     unsafe extern "C" fn counted_realloc(ptr: *mut c_void, size: usize) -> *mut c_void {
         add(size);
-        unsafe { realloc(ptr, size) }
+        allocated(unsafe { realloc(ptr, size) }, size)
     }
 
     unsafe extern "C" fn counted_free(ptr: *mut c_void) {
@@ -143,8 +153,8 @@ mod heap {
     }
 
     /// Install the shims once per process, then start a fresh count. Called
-    /// before the parser is built so the parser's own fixed cost is outside the
-    /// ceiling, which measures one parse.
+    /// before the parser is built, so the count includes the parser's own small
+    /// fixed cost along with the one parse the ceiling measures.
     pub(super) fn begin() {
         static INSTALLED: Once = Once::new();
         INSTALLED.call_once(|| unsafe {

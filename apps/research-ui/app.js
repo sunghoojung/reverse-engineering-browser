@@ -1599,6 +1599,8 @@ const capturedExportPanel = installCapturedExportDialog({
       function renderVmHandlers(workspace, onSelection = null) {
         const section = document.createElement('section'); section.className = 'vm-workspace-card';
         const rows = vmOpcodeRows(workspace);
+        const names = globalThis.RebEvidenceNames?.controller?.() ?? null;
+        const nameOf = row => names?.nameFor('handler', row, workspace) ?? null;
         const heading = document.createElement('div'); heading.className = 'vm-workspace-heading';
         const listingCount = workspace.runtime !== 'webassembly'
           ? counted(workspace.handlers.length, 'candidate handler')
@@ -1637,7 +1639,11 @@ const capturedExportPanel = installCapturedExportDialog({
           row.setAttribute('aria-selected', String(rowData.key === state.selectedVmHandlerKey));
           row.tabIndex = rowData.key === state.selectedVmHandlerKey ? 0 : -1;
           const label = document.createElement('span'); label.className = 'vm-handler-label';
-          label.append(textElement('strong', '', rowData.label), textElement('small', '', `source ${rowData.source}`));
+          // A researcher name leads the cell; the analyzer label, opcode and
+          // source offsets stay visible beside it.
+          const researcher = textElement('span', 'researcher-name', nameOf(rowData) ?? '');
+          researcher.hidden = !researcher.textContent;
+          label.append(researcher, textElement('strong', '', rowData.label), textElement('small', '', `source ${rowData.source}`));
           for (const position of rowData.positions) label.append(textElement('small', '', position));
           if (!rowData.positions.length) label.append(textElement('small', '', 'PC unknown · sampled handler unknown · bytecode unknown'));
           if (rowData.samples > rowData.positions.length) label.append(textElement('small', '',
@@ -1686,7 +1692,7 @@ const capturedExportPanel = installCapturedExportDialog({
         search.addEventListener('input', () => {
           const query = search.value.trim().toLowerCase();
           const visible = [...list.children].filter((row, index) => {
-            row.hidden = !`${rows[index].source} ${rows[index].opcode} ${rows[index].label}`.toLowerCase().includes(query);
+            row.hidden = !`${rows[index].source} ${rows[index].opcode} ${rows[index].label} ${nameOf(rows[index]) ?? ''}`.toLowerCase().includes(query);
             return !row.hidden;
           });
           [...list.children].forEach(row => { row.tabIndex = -1; });
@@ -2243,12 +2249,23 @@ const capturedExportPanel = installCapturedExportDialog({
         selectedInspector.setAttribute('aria-label', 'Selected handler');
         const updateSelection = key => {
           const row = vmOpcodeRows(workspace).find(item => item.key === key);
-          const heading = textElement('div', 'vm-pane-label', 'Selected handler');
-          if (!row) { selectedInspector.replaceChildren(heading, textElement('p', 'vm-selection-empty', 'Select a retained handler to inspect its evidence.')); return; }
-          const title = textElement('h3', '', row.label);
-          const identity = document.createElement('div'); identity.className = 'vm-selection-fields';
+          const heading = document.createElement('div'); heading.className = 'vm-pane-label vm-selection-head';
+          const names = globalThis.RebEvidenceNames?.controller?.() ?? null;
+          const identity = row ? names?.identityFor('handler', row, workspace) ?? null : null;
+          const rename = textElement('button', 'secondary-button', 'Rename'); rename.type = 'button'; rename.id = 'vm-handler-rename';
+          rename.setAttribute('aria-keyshortcuts', 'F2');
+          rename.disabled = !identity;
+          rename.title = identity ? 'Rename this handler (F2)' : row ? 'This handler has no exact retained program identity to name.' : 'Select a handler to name it.';
+          heading.append(textElement('span', '', 'Selected handler'), rename);
+          const editorHost = document.createElement('div'); editorHost.className = 'evidence-name-host'; editorHost.id = 'vm-handler-name-host';
+          if (!row) { selectedInspector.replaceChildren(heading, editorHost, textElement('p', 'vm-selection-empty', 'Select a retained handler to inspect its evidence.')); return; }
+          const title = document.createElement('h3');
+          const researcherName = identity ? names.nameOf(identity) : null;
+          if (researcherName) title.append(textElement('span', 'researcher-name', researcherName), document.createTextNode(' '));
+          title.append(textElement('span', 'vm-selection-raw', row.label));
+          const fields = document.createElement('div'); fields.className = 'vm-selection-fields';
           for (const [label, value] of [['Opcode', row.opcode], ['Source byte range', row.source], ['Evidence', row.state], ['Samples', String(row.samples)], ['Operand width', row.operandWidth ? `${row.operandWidth} bytes (characterized)` : 'unknown']]) {
-            identity.append(textElement('span', '', label), textElement('strong', '', value));
+            fields.append(textElement('span', '', label), textElement('strong', '', value));
           }
           const observations = document.createElement('div'); observations.className = 'vm-selection-observations';
           observations.append(textElement('h4', '', 'Retained positions'));
@@ -2262,8 +2279,10 @@ const capturedExportPanel = installCapturedExportDialog({
           if (row.samples > row.retainedSamples.length) observations.append(textElement('p', 'vm-workspace-notice', `${row.samples - row.retainedSamples.length} accepted samples are not retained. Missing positions remain unknown.`));
           const notes = document.createElement('div'); notes.className = 'vm-selection-notes';
           notes.append(textElement('h4', '', 'Evidence notes'), textElement('p', '', row.notes));
-          selectedInspector.replaceChildren(heading, title, identity, observations, notes);
+          selectedInspector.replaceChildren(heading, editorHost, title, fields, observations, notes);
         };
+        // Names change without a new workspace; redraw only this inspector.
+        selectedInspector.addEventListener('evidence-names-changed', () => updateSelection(state.selectedVmHandlerKey));
         const handlers = renderVmHandlers(workspace, updateSelection); handlers.classList.add('vm-workbench-listing');
         updateSelection(state.selectedVmHandlerKey);
         const inspector = document.createElement('section'); inspector.className = 'vm-workbench-inspector';
@@ -2371,11 +2390,15 @@ const capturedExportPanel = installCapturedExportDialog({
           const workspace = selected && vmOpcodeWorkspaceForFinding(state.vmOpcodeWorkspace, selected);
           const rows = workspace ? vmOpcodeRows(workspace) : [];
           symbols.replaceChildren();
+          const names = globalThis.RebEvidenceNames?.controller?.() ?? null;
           for (const row of rows) {
-            const button = textElement('button', 'vm-symbol-row', row.label); button.type = 'button';
+            const button = textElement('button', 'vm-symbol-row', ''); button.type = 'button';
+            const researcherName = names?.nameFor('handler', row, workspace) ?? null;
+            if (researcherName) button.append(textElement('span', 'researcher-name', researcherName), document.createTextNode(' '));
+            button.append(textElement('span', 'vm-symbol-raw', row.label));
             button.dataset.vmSymbolKey = row.key;
             button.setAttribute('aria-pressed', String(row.key === state.selectedVmHandlerKey));
-            button.title = `Opcode ${row.opcode} · source ${row.source}`;
+            button.title = `${researcherName ? `${researcherName} (researcher name) · ` : ''}${row.label} · opcode ${row.opcode} · source ${row.source}`;
             button.addEventListener('click', () => {
               const target = [...host.querySelectorAll('.vm-handler-row')].find(item => item.dataset.handlerKey === row.key);
               if (!target) return;
@@ -2770,7 +2793,10 @@ const capturedExportPanel = installCapturedExportDialog({
           (state.requestDomain === 'all' || requestDomain(request) === state.requestDomain) &&
           (state.requestType === 'all' || request.type === state.requestType)
         );
-        const search = trafficSearchRequests(scoped, needle);
+        // Researcher names are searchable too; captured fields stay as recorded.
+        const names = globalThis.RebEvidenceNames?.controller?.() ?? null;
+        const nameOf = names?.has('captured-request') ? request => names.nameFor('request', request) : () => null;
+        const search = trafficSearchRequests(scoped, needle, nameOf);
         state.trafficSearchMatches = search.matches;
         const visible = trafficSortedRequests(scoped.filter(request => search.matches.has(request.id)), state.trafficSort, state.trafficSortDirection);
         const filterKey = trafficRequestFilterKey();
@@ -2828,7 +2854,7 @@ const capturedExportPanel = installCapturedExportDialog({
         }
         renderTrafficRows(elements.requestRows, window.rows, {
           selectedId: state.selectedRequestId, newIds,
-          onSelect: id => { selectRequest(id); focusRequestRow(id); }, onKey: moveRequestSelection
+          onSelect: id => { selectRequest(id); focusRequestRow(id); }, onKey: moveRequestSelection, nameOf
         });
         state.trafficPendingCount = state.trafficNewIds.size;
         elements.requestLatest.hidden = state.trafficPendingCount === 0;
@@ -2843,6 +2869,20 @@ const capturedExportPanel = installCapturedExportDialog({
       }
 
       function updateSelectionSummary(request) {
+        // A researcher name sits beside the raw URL and never replaces it.
+        const names = globalThis.RebEvidenceNames?.controller?.() ?? null;
+        const researcherName = names?.nameFor('request', request) ?? null;
+        const nameNode = document.querySelector('#selected-name'), rename = document.querySelector('#request-rename');
+        if (nameNode) {
+          nameNode.textContent = researcherName ?? '';
+          nameNode.hidden = !researcherName;
+          nameNode.title = researcherName ? `Researcher name: ${researcherName}. The captured URL beside it is unchanged.` : '';
+        }
+        if (rename) {
+          const exact = Boolean(names?.identityFor('request', request));
+          rename.disabled = !exact;
+          rename.title = exact ? 'Rename this request (F2)' : request ? 'This request has no exact retained identity to name.' : 'Select a request to name it.';
+        }
         if (!request) {
           elements.selectedMethod.textContent = '-';
           elements.selectedStatus.textContent = '-';
@@ -2935,8 +2975,14 @@ const capturedExportPanel = installCapturedExportDialog({
       }
 
       function requestTraceRoot(request) {
-        if (request?.origin !== 'live') return null;
-        const candidates = request.events ?? [];
+        return request?.origin === 'live' ? requestRootEvent(request) : null;
+      }
+
+      // The browser start, else the renderer initiation, else any event with a
+      // request ID. Backtraces need a live root; researcher names also accept
+      // demo rows, whose identity then records that origin.
+      function requestRootEvent(request) {
+        const candidates = request?.events ?? [];
         return candidates.find(event => event.type === 'request_started' && integerText(event, 'request_id') !== '0') ??
           candidates.find(event => event.type === 'request_initiated' && integerText(event, 'request_id') !== '0') ??
           candidates.find(event => integerText(event, 'request_id') !== '0') ?? null;
@@ -4421,6 +4467,8 @@ const capturedExportPanel = installCapturedExportDialog({
         if (savedFileDraft) state.analystDraftDirty = false;
         if (savedFolderDraft) state.analystFolderDirty = false;
         state.localAnalyst = body;
+        // Names live in this library; a newer admitted generation refreshes them.
+        globalThis.RebEvidenceNames?.observeLibrary(body);
         state.localAnalystLoaded = true;
         state.localAnalystNeedsReload = false;
         state.localAnalystEtag = `"local-analyst-${body.generation}"`;
@@ -5957,6 +6005,10 @@ const capturedExportPanel = installCapturedExportDialog({
         row.setAttribute('role', 'treeitem');
         const icon = document.createElement('span'); icon.setAttribute('aria-hidden', 'true');
         const name = document.createElement('span'); name.className = 'source-tree-name';
+        // A researcher name leads the cell; the captured file label stays beside it.
+        const researcher = document.createElement('span'); researcher.className = 'researcher-name'; researcher.hidden = true;
+        const raw = document.createElement('span'); raw.className = 'source-tree-raw';
+        name.append(researcher, raw);
         const detail = document.createElement('span'); detail.className = 'source-tree-meta';
         row.append(icon, name, detail);
         let group = null;
@@ -5984,7 +6036,7 @@ const capturedExportPanel = installCapturedExportDialog({
             renderSourceHealth();
           }
         });
-        return {row, icon, name, detail, group};
+        return {row, icon, name, raw, researcher, detail, group};
       }
 
       function renderSourceTree(refresh = true) {
@@ -6022,18 +6074,23 @@ const capturedExportPanel = installCapturedExportDialog({
           keys.has(selectedCandidates[0].key) && sourceIsCurrent(selectedCandidates[0].source) ? selectedCandidates[0] : null;
         scope.focus = nearest(hadFocus ? activeKey : scope.focus) ?? selected?.key ?? visible[0]?.key ?? null;
         const containers = new Map([[tree, []]]);
+        const names = globalThis.RebEvidenceNames?.controller?.() ?? null;
+        const namedSources = Boolean(names?.has('captured-artifact'));
         for (const node of visible) {
           let entry = nav.rows.get(node.key);
           if (!entry) {entry = sourceTreeRow(node, nav); nav.rows.set(node.key, entry);}
-          const {row, icon, name, detail, group} = entry;
+          const {row, icon, name, raw, researcher, detail, group} = entry;
           row.style.setProperty('--source-depth', String(Math.min(node.depth, 6)));
           row.setAttribute('aria-level', String(node.depth + 1));
           row.setAttribute('aria-posinset', String(node.position)); row.setAttribute('aria-setsize', String(node.size));
           row.tabIndex = scope.focus === node.key ? 0 : -1;
           const label = node.label.length > 512 ? node.label.slice(0, 509) + '…' : node.label;
-          if (name.textContent !== label) name.textContent = label;
-          name.title = node.source?.url || node.label;
-          row.setAttribute('aria-label', label);
+          if (raw.textContent !== label) raw.textContent = label;
+          const researcherName = namedSources && node.source ? names.nameFor('artifact', node.source) : null;
+          if (researcher.textContent !== (researcherName ?? '')) researcher.textContent = researcherName ?? '';
+          researcher.hidden = !researcherName;
+          name.title = researcherName ? `${researcherName} (researcher name) · ${node.source?.url || node.label}` : node.source?.url || node.label;
+          row.setAttribute('aria-label', researcherName ? `${researcherName} (researcher name), ${label}` : label);
           icon.className = node.source ? `source-file-icon ${node.source.kind}` : 'tree-glyph';
           icon.textContent = node.source ? sourceIcon(node.source) : scope.collapsed.has(node.key) ? '▸' : '▾';
           icon.title = node.source ? sourceKindLabel(node.source.kind)?.[1] ?? node.source.kind : '';
@@ -6105,6 +6162,14 @@ const capturedExportPanel = installCapturedExportDialog({
         };
         const captured = index(capturedSources(), 'artifact_id');
         const sources = state.openArtifactIds.map(id => captured.get(id)).filter(Boolean);
+        const names = globalThis.RebEvidenceNames?.controller?.() ?? null;
+        const rename = document.querySelector('#source-rename');
+        if (rename) {
+          const selected = sources.find(source => source.artifact_id === state.selectedArtifactId);
+          rename.disabled = !names?.identityFor('artifact', selected);
+          rename.title = !selected ? 'Open a captured source to name it.' : rename.disabled
+            ? 'This source has no exact retained identity to name, or its artifact ID is shared.' : 'Rename this source (F2)';
+        }
         if (sources.length === 0) {
           const placeholder = document.createElement('span');
           placeholder.className = 'source-tab-placeholder';
@@ -6135,7 +6200,15 @@ const capturedExportPanel = installCapturedExportDialog({
           close.className = 'source-tab-close';
           close.textContent = '×';
           close.setAttribute('aria-hidden', 'true');
-          tab.append(icon, name, close);
+          const researcherName = names?.nameFor('artifact', source) ?? null;
+          if (researcherName) {
+            const researcher = document.createElement('span');
+            researcher.className = 'researcher-name';
+            researcher.textContent = researcherName;
+            researcher.title = `Researcher name: ${researcherName}`;
+            tab.setAttribute('aria-label', `${researcherName} (researcher name), ${sourceDisplayName(source)}. Press Delete to close.`);
+            tab.append(icon, researcher, name, close);
+          } else tab.append(icon, name, close);
           tab.addEventListener('click', event => {
             if (event.target === close) {
               closeSource(source);
@@ -8418,6 +8491,173 @@ const capturedExportPanel = installCapturedExportDialog({
         return RebCommandPalette.mount({trigger: document.querySelector('#command-palette-open'),
           providers: [workspaces, actions, requests, files, findings, sourceText]});
       })();
+      // Researcher names (evidence_names.js). Each kind reuses the exact
+      // identity the investigation navigation uses; a name is only ever shown
+      // beside the raw evidence and never changes or hides it.
+      const vmNameArtifact = workspace => {
+        const candidates = state.artifacts.filter(artifact => artifact.artifact_id === workspace?.interpreter_artifact_id);
+        return candidates.length === 1 ? candidates[0] : null;
+      };
+      const evidenceNames = RebEvidenceNames.mount({
+        validateLibrary: isLocalAnalystWorkspace,
+        kinds: {
+          request: {records: () => state.requests, unique: request => request.id,
+            identity: request => RebEvidenceNames.requestIdentity(request, requestRootEvent(request))},
+          artifact: {records: () => state.artifacts, unique: artifact => artifact.artifact_id,
+            identity: artifact => artifact.kind === 'canvas_data_url' ? null : RebEvidenceNames.artifactIdentity(artifact)},
+          handler: {records: workspace => vmOpcodeRows(workspace), version: () => [state.artifacts],
+            identity: (row, workspace) => RebEvidenceNames.handlerIdentity({workspace, artifact: vmNameArtifact(workspace), row})}
+        },
+        onChange: renderEvidenceNames,
+        catalog: evidenceNameCatalog
+      });
+      const sameName = (left, right) => Boolean(left && right) && RebEvidenceNames.keyOf(left) === RebEvidenceNames.keyOf(right);
+      // Return focus to the control that started the rename while it remains in
+      // the document, otherwise to the surface's Rename button.
+      const nameRestore = (invoker, fallback) => () => (invoker?.isConnected && invoker !== document.body && !invoker.disabled ? invoker : null) ?? document.querySelector(fallback);
+
+      function renderEvidenceNames() {
+        renderRequests();
+        updateSelectionSummary(state.requests.find(request => request.id === state.selectedRequestId) ?? null);
+        renderSourceTree(false);
+        renderSourceTabs();
+        refreshVmHandlerNames();
+      }
+
+      // Names change without a new VM workspace. Patch the listing, Symbol Tree
+      // and Selected handler in place so filters, scroll and focus survive.
+      function refreshVmHandlerNames() {
+        const selected = state.vmFindings.find(finding => finding.findingId === state.selectedVmFindingId);
+        const workspace = selected && vmOpcodeWorkspaceForFinding(state.vmOpcodeWorkspace, selected);
+        if (!workspace) return;
+        const rows = new Map(vmOpcodeRows(workspace).map(row => [row.key, row]));
+        const nameOf = row => row ? evidenceNames.nameFor('handler', row, workspace) : null;
+        for (const node of elements.vmDetail.querySelectorAll('.vm-handler-row')) {
+          const slot = node.querySelector('.vm-handler-label > .researcher-name'), name = nameOf(rows.get(node.dataset.handlerKey));
+          if (slot) {slot.textContent = name ?? ''; slot.hidden = !name;}
+        }
+        for (const button of document.querySelectorAll('#vm-symbol-list [data-vm-symbol-key]')) {
+          const row = rows.get(button.dataset.vmSymbolKey), name = nameOf(row);
+          if (!row) continue;
+          button.replaceChildren(...(name ? [textElement('span', 'researcher-name', name), document.createTextNode(' ')] : []), textElement('span', 'vm-symbol-raw', row.label));
+          button.title = `${name ? `${name} (researcher name) · ` : ''}${row.label} · opcode ${row.opcode} · source ${row.source}`;
+        }
+        const filter = elements.vmDetail.querySelector('input[aria-label="Filter retained handlers"]');
+        if (filter?.value) filter.dispatchEvent(new Event('input'));
+        elements.vmDetail.querySelector('.vm-selection-inspector')?.dispatchEvent(new CustomEvent('evidence-names-changed'));
+      }
+
+      function renameSelectedRequest() {
+        const request = state.requests.find(item => item.id === state.selectedRequestId);
+        const identity = evidenceNames.identityFor('request', request);
+        if (!identity || !state.trafficDetailOpen) return false;
+        return evidenceNames.begin({identity, label: `${request.method} ${request.path}`, host: document.querySelector('#request-name-host'),
+          restore: nameRestore(document.activeElement, '#request-rename'),
+          isCurrent: () => sameName(identity, evidenceNames.identityFor('request', state.requests.find(item => item.id === state.selectedRequestId)))});
+      }
+      function renameSelectedSource() {
+        const source = selectedSource();
+        const identity = evidenceNames.identityFor('artifact', source);
+        if (!identity) return false;
+        return evidenceNames.begin({identity, label: sourceDisplayName(source), host: document.querySelector('#source-name-host'),
+          // Tabs are redrawn after a save; return to the selected tab then.
+          restore: nameRestore(document.activeElement, document.activeElement?.closest?.('.source-editor-tab') ? '#source-editor-tabs [aria-selected="true"]' : '#source-rename'),
+          isCurrent: () => sameName(identity, evidenceNames.identityFor('artifact', selectedSource()))});
+      }
+      function renameSelectedVmHandler() {
+        const selected = state.vmFindings.find(finding => finding.findingId === state.selectedVmFindingId);
+        const workspace = selected && vmOpcodeWorkspaceForFinding(state.vmOpcodeWorkspace, selected);
+        const row = workspace && vmOpcodeRows(workspace).find(item => item.key === state.selectedVmHandlerKey);
+        const identity = row ? evidenceNames.identityFor('handler', row, workspace) : null;
+        const host = elements.vmDetail.querySelector('#vm-handler-name-host');
+        if (!identity || !host) return false;
+        return evidenceNames.begin({identity, label: `${row.label}, opcode ${row.opcode}, source ${row.source}`, host,
+          restore: nameRestore(document.activeElement, '#vm-handler-rename'),
+          isCurrent: () => host.isConnected && sameName(identity, evidenceNames.identityFor('handler', row, workspace))});
+      }
+      document.querySelector('#request-rename').addEventListener('click', renameSelectedRequest);
+      document.querySelector('#source-rename').addEventListener('click', renameSelectedSource);
+      elements.vmDetail.addEventListener('click', event => {if (event.target?.closest?.('#vm-handler-rename')) renameSelectedVmHandler();});
+      // F2 renames the focused or selected evidence item, as in a disassembler.
+      // Text fields and modal dialogs keep the key.
+      document.addEventListener('keydown', event => {
+        if (event.key !== 'F2' || event.altKey || event.ctrlKey || event.metaKey || event.shiftKey || event.repeat || event.defaultPrevented) return;
+        if (event.target?.closest?.('input, textarea, select, [contenteditable="true"]') || document.querySelector('dialog:modal')) return;
+        const screen = investigationScreen(), target = event.target;
+        let started = false;
+        if (screen === 'traffic') {
+          const row = target?.closest?.('.request-row');
+          if (row && (row.dataset.requestId !== state.selectedRequestId || !state.trafficDetailOpen)) row.click();
+          started = renameSelectedRequest();
+        } else if (screen === 'sources') {
+          const item = target?.closest?.('.source-tree-row[data-artifact-id], .source-editor-tab');
+          if (item && item.getAttribute('aria-selected') !== 'true') item.click();
+          started = renameSelectedSource();
+        } else if (screen === 'vm') {
+          const row = target?.closest?.('.vm-handler-row, [data-vm-symbol-key]');
+          const key = row?.dataset.handlerKey ?? row?.dataset.vmSymbolKey;
+          if (row && key !== state.selectedVmHandlerKey) row.click();
+          started = renameSelectedVmHandler();
+        }
+        if (started) event.preventDefault();
+      });
+
+      // Palette entries open the exact retained item through the same selection
+      // paths as the UI. Items whose identity is missing or shared are omitted.
+      function evidenceNameCatalog() {
+        const items = [], seen = new Set();
+        const add = (kind, identity, detail, open) => {
+          const key = RebEvidenceNames.keyOf(identity);
+          if (key && !seen.has(key) && evidenceNames.nameOf(identity)) {seen.add(key); items.push({kind, identity, detail, open});}
+        };
+        if (evidenceNames.has('captured-request')) for (const request of state.requests) {
+          add('Request', evidenceNames.identityFor('request', request), `${request.method} ${request.path}`, () => openNamedRequest(evidenceNames.identityFor('request', request)));
+        }
+        if (evidenceNames.has('captured-artifact')) for (const source of capturedSources()) {
+          add('Source', evidenceNames.identityFor('artifact', source), sourceDisplayName(source), () => openNamedSource(evidenceNames.identityFor('artifact', source)));
+        }
+        if (evidenceNames.has('vm-handler')) for (const finding of state.vmFindings) {
+          const workspace = vmOpcodeWorkspaceForFinding(state.vmOpcodeWorkspace, finding);
+          if (!workspace) continue;
+          for (const row of vmOpcodeRows(workspace)) {
+            const identity = evidenceNames.identityFor('handler', row, workspace);
+            add('VM handler', identity, `${row.label} · opcode ${row.opcode} · source ${row.source} · artifact ${workspace.interpreter_artifact_id}`,
+              () => openNamedVmHandler(finding.findingId, identity));
+          }
+        }
+        return items;
+      }
+      const namedRelation = 'Opened by its researcher name. The name is your interpretation; the evidence is the exact retained record.';
+      function openNamedRequest(identity) {
+        const matches = state.requests.filter(request => sameName(identity, evidenceNames.identityFor('request', request)));
+        if (matches.length !== 1) {investigationNotice('This named request is no longer retained, or its identity is shared. Nothing was substituted.', 'stale'); return false;}
+        const navigation = investigationRequestIdentity(matches[0]);
+        if (navigation) return openInvestigation({kind: 'request', identity: navigation, relation: namedRelation});
+        // Demo rows have no navigation identity; open them as a row click does.
+        showScreen('traffic'); selectRequest(matches[0].id); focusRequestRow(matches[0].id);
+        return true;
+      }
+      function openNamedSource(identity) {
+        if (!identity) {investigationNotice('This named source is no longer retained, or its artifact ID is shared. Nothing was substituted.', 'stale'); return false;}
+        return openInvestigation({kind: 'artifact', identity: {type: 'captured-artifact', session: identity.session, artifact: identity.artifact,
+          sha256: identity.sha256, bytes: identity.bytes}, relation: namedRelation});
+      }
+      function openNamedVmHandler(findingId, identity) {
+        const finding = state.vmFindings.find(item => item.findingId === findingId);
+        const workspace = finding && vmOpcodeWorkspaceForFinding(state.vmOpcodeWorkspace, finding);
+        const row = workspace && vmOpcodeRows(workspace).find(item => sameName(identity, evidenceNames.identityFor('handler', item, workspace)));
+        if (!row) {investigationNotice('This named handler is no longer retained in its exact program. Nothing was substituted.', 'stale'); return false;}
+        showScreen('vm');
+        if (state.selectedVmFindingId !== findingId) {state.selectedVmFindingId = findingId; renderVmLab();}
+        // The Symbol Tree entry is the UI's own path: it clears an excluding
+        // filter, selects the row and reveals it. Retiring the screen's pending
+        // default focus keeps focus on the handler that was asked for.
+        const symbol = [...document.querySelectorAll('#vm-symbol-list [data-vm-symbol-key]')].find(button => button.dataset.vmSymbolKey === row.key);
+        if (!symbol) return false;
+        investigationBeforeSelection();
+        symbol.click();
+        return true;
+      }
 
       renderRequests();
       renderInspector();
@@ -8435,6 +8675,7 @@ const capturedExportPanel = installCapturedExportDialog({
         refreshApiCollection();
         refreshLocalAnalyst();
         refreshDecoderEngine();
+        evidenceNames.load();
 
         setInterval(refresh, 2000);
       }

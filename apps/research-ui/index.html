@@ -101,11 +101,13 @@
                   <button id="request-detail-close" class="secondary-button" type="button" aria-label="Close request details" title="Close request details (Escape)">×</button>
                   <span id="selected-method" class="method-pill">POST</span>
                   <span id="selected-status" class="status-pill">201</span>
-                  <span id="selected-url" class="selection-url">https://checkout.acme.test/cart</span>
+                  <span class="selection-target"><span id="selected-name" class="researcher-name selection-name" hidden></span><span id="selected-url" class="selection-url">https://checkout.acme.test/cart</span></span>
+                  <button id="request-rename" class="icon-button selection-rename" type="button" aria-label="Rename request" aria-keyshortcuts="F2" title="Select a request to name it." disabled><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M10.5 3.5l2 2M3 13l.6-2.6L11 3l2 2-7.4 7.4z"/></svg></button>
                   <button id="request-copy-url" class="secondary-button" type="button" title="Copy selected request URL">Copy URL</button>
                   <button id="request-evidence-toggle" class="secondary-button" type="button" aria-expanded="false">Evidence</button>
                   <button id="request-collection-pivot" class="secondary-button" type="button">Save to Collection</button>
                 </div>
+                <div id="request-name-host" class="evidence-name-host"></div>
                 <div class="inspector-tabs" role="tablist" aria-label="Request inspector">
                   <button id="inspector-tab-general" class="inspector-tab" type="button" role="tab" data-inspector-tab="general" aria-controls="exchange-inspector" aria-selected="true">General</button>
                   <button id="inspector-tab-initiator" class="inspector-tab" type="button" role="tab" data-inspector-tab="initiator" aria-controls="request-inspector" aria-selected="false" tabindex="-1">Initiator</button>
@@ -236,6 +238,7 @@
               <div id="source-editor-tabs" class="source-editor-tabs" role="tablist" aria-label="Open source files"></div>
               <div class="source-editor-toolbar">
                 <span id="source-location" class="source-location">Select a captured artifact</span>
+                <button id="source-rename" class="source-tool" type="button" aria-keyshortcuts="F2" title="Open a captured source to name it." disabled>Rename</button>
                 <button id="source-quick-open" class="source-tool" type="button">Open file</button>
                 <label><span class="sr-only" hidden>Find in source</span><input id="source-search" class="source-search" type="search" maxlength="512" placeholder="Find" aria-label="Find in source" title="Find retained text; Enter for next, Shift+Enter for previous (single-line literal, first 1000 matches)" /></label>
                 <button id="source-pretty" class="source-tool" type="button" aria-label="Pretty print source" title="Pretty print source" disabled>{ }</button>
@@ -255,6 +258,7 @@
                   <button class="source-tool" type="submit">Go</button>
                 </form>
                 <p id="source-search-status" class="source-search-status" role="status"></p>
+                <div id="source-name-host" class="evidence-name-host"></div>
               </div>
               <div id="source-code-wrap" class="source-code-wrap" tabindex="0">
                 <div id="source-code-empty" class="source-empty">Select a JavaScript file, WASM module, source map, or approved response body.</div>
@@ -785,6 +789,7 @@
     <script src="native_console.js"></script>
     <script src="investigation_navigation.js"></script>
     <script src="investigation_notebook.js"></script>
+    <script src="evidence_names.js"></script>
 
     <script src="app.js"></script>
     <script src="vm_program_workspace.js"></script>

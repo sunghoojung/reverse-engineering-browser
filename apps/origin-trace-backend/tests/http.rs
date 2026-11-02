@@ -1061,6 +1061,7 @@ async fn openapi_responses_match_live_local_http_and_conditional_reads() {
             400,
         ),
         ("/api/wasm?artifact_id=missing", "/api/wasm", 400),
+        ("/api/wasm?artifact_id=1&sections=exports", "/api/wasm", 400),
     ] {
         assert_contract_response(server.get(path).await, "get", route, status).await;
     }
@@ -2860,11 +2861,16 @@ async fn wasm_inspection_preserves_offsets_identity_limits_and_original_bytes() 
     let response = server.get("/api/wasm?artifact_id=1").await;
     assert_eq!(response.status(), 200);
     let report: Value = response.json().await.unwrap();
-    let spec: Value = serde_json::from_str(include_str!("../../../protocol/openapi.json")).unwrap();
-    jsonschema::validator_for(&spec["components"]["schemas"]["WasmInspection"])
-        .unwrap()
-        .validate(&report)
-        .unwrap();
+    let spec = specification();
+    let contract = |document: &Value, label: &str| {
+        assert_schema(
+            &spec,
+            &spec["components"]["schemas"]["WasmInspection"],
+            document,
+            label,
+        )
+    };
+    contract(&report, "whole module");
     assert_eq!(report["status"], "decoded");
     assert_eq!(report["sha256"], hash);
     assert_eq!(report["imported_functions"], 1);
@@ -3014,6 +3020,261 @@ async fn wasm_inspection_preserves_offsets_identity_limits_and_original_bytes() 
     assert_eq!(server.get("/api/wasm?artifact_id=1").await.status(), 500);
 }
 
+#[tokio::test]
+async fn wasm_section_requests_reach_late_tables_and_declare_what_they_left_out() {
+    let server = Server::start().await;
+    fn leb(mut n: usize) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        loop {
+            let byte = (n & 127) as u8;
+            n >>= 7;
+            bytes.push(byte | if n > 0 { 128 } else { 0 });
+            if n == 0 {
+                break;
+            }
+        }
+        bytes
+    }
+    fn section(module: &mut Vec<u8>, id: u8, data: &[u8]) {
+        module.push(id);
+        module.extend(leb(data.len()));
+        module.extend(data);
+    }
+    // A module shaped like a captured one: a few types, one import, many
+    // declared functions, an export naming the last of them, bodies large
+    // enough to exhaust the row budget, and data and custom sections that the
+    // binary format places after the code section.
+    fn module(functions: usize, nops: usize) -> Vec<u8> {
+        assert!((1..128).contains(&functions), "single-byte LEB fixture");
+        let mut bytes = b"\0asm\x01\0\0\0".to_vec();
+        section(&mut bytes, 1, &[2, 0x60, 0, 0, 0x60, 0, 1, 0x7f]);
+        section(
+            &mut bytes,
+            2,
+            &[1, 3, b'e', b'n', b'v', 4, b's', b'e', b'e', b'd', 0, 0],
+        );
+        let mut declarations = vec![functions as u8];
+        declarations.extend(std::iter::repeat_n(1u8, functions));
+        section(&mut bytes, 3, &declarations);
+        section(
+            &mut bytes,
+            7,
+            &[1, 4, b'l', b'a', b's', b't', 0, functions as u8],
+        );
+        let mut body = vec![0];
+        body.extend(std::iter::repeat_n(1u8, nops));
+        body.push(0x0b);
+        let mut code = vec![functions as u8];
+        for _ in 0..functions {
+            code.extend(leb(body.len()));
+            code.extend(&body);
+        }
+        section(&mut bytes, 10, &code);
+        section(&mut bytes, 11, &[1, 0, 0x41, 0, 0x0b, 3, 1, 2, 3]);
+        section(&mut bytes, 0, &[4, b'n', b'a', b'm', b'e', 0xaa, 0xbb]);
+        bytes
+    }
+    let put = |bytes: &[u8]| {
+        let hash = hex::encode(Sha256::digest(bytes));
+        let artifact = json!({"protocol_version":1,"artifact_id":"1","session_id":"1","navigation_id":"1","frame_id":"1","parent_artifact_id":"0","creator_event_id":"0","kind":"wasm","url":"https://example.test/module.wasm","mime_type":"application/wasm","byte_size":bytes.len(),"sha256":hash,"sensitive":false,"content_path":format!("blobs/{hash}.bin")});
+        server.file(
+            "artifacts/manifest.jsonl",
+            format!("{artifact}\n").as_bytes(),
+        );
+        server.file(&format!("artifacts/blobs/{hash}.bin"), bytes);
+    };
+    let spec = specification();
+    let contract = |document: &Value, label: &str| {
+        assert_schema(
+            &spec,
+            &spec["components"]["schemas"]["WasmInspection"],
+            document,
+            label,
+        )
+    };
+    let inspect = async |query: &str| -> Value {
+        let response = server.get(&format!("/api/wasm?artifact_id=1{query}")).await;
+        assert_eq!(response.status(), 200, "{query}");
+        response.json().await.unwrap()
+    };
+    let kinds = |document: &Value, kind: &str| -> Vec<Value> {
+        document["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|row| row["kind"] == kind)
+            .cloned()
+            .collect()
+    };
+
+    // An unscoped request on a module whose bodies outrun the row budget never
+    // reaches the sections the format places after the code section.
+    put(&module(40, 250));
+    let whole = inspect("").await;
+    contract(&whole, "unscoped");
+    assert_eq!(whole["status"], "partial");
+    assert_eq!(whole["rows"].as_array().unwrap().len(), 8192);
+    assert_eq!(whole["coverage"]["requested_sections"], Value::Null);
+    assert_eq!(
+        whole["coverage"],
+        json!({"requested_sections":null,
+            "analyzed_sections":["type","import","function","export"],
+            "excluded_sections":[],"truncated_sections":["code"],"section_map_complete":false})
+    );
+    assert!(kinds(&whole, "data").is_empty() && kinds(&whole, "custom").is_empty());
+    assert!(
+        !whole["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|row| row["text"].as_str().unwrap().starts_with("data section")),
+        "A truncated traversal must not name a section it never reached"
+    );
+
+    // Scoping to the static tables resolves an export to its declared type
+    // without decoding one function body.
+    let tables = inspect("&sections=type,import,function,export").await;
+    contract(&tables, "static tables");
+    assert_eq!(tables["status"], "partial");
+    assert_eq!(
+        tables["coverage"],
+        json!({"requested_sections":["type","import","function","export"],
+            "analyzed_sections":["type","import","function","export"],
+            "excluded_sections":["custom","code","data"],
+            "truncated_sections":[],"section_map_complete":true})
+    );
+    assert!(
+        tables["omissions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|value| value
+                == "Only the requested sections were decoded: type, import, function, export.")
+    );
+    assert_eq!(tables["instructions"], 0);
+    assert_eq!(tables["defined_functions"], 40);
+    assert_eq!(tables["imported_functions"], 1);
+    assert!(kinds(&tables, "instruction").is_empty() && kinds(&tables, "local").is_empty());
+    assert!(tables["rows"].as_array().unwrap().len() < 128);
+    let exported = kinds(&tables, "export")
+        .into_iter()
+        .find(|row| row["text"].as_str().unwrap().contains("\"last\""))
+        .unwrap();
+    let index = exported["text"]
+        .as_str()
+        .unwrap()
+        .rsplit(' ')
+        .next()
+        .unwrap()
+        .parse::<u64>()
+        .unwrap();
+    assert_eq!(index, 40);
+    let declaration = kinds(&tables, "declaration")
+        .into_iter()
+        .find(|row| row["function_index"] == json!(index))
+        .expect("the exported function's declared type is reachable");
+    assert_eq!(declaration["text"], "func 40 declares type 1");
+    assert!(
+        kinds(&tables, "type")
+            .iter()
+            .any(|row| row["text"] == "type 1: () -> (i32)")
+    );
+
+    // Sections the code section would otherwise hide are reachable on request.
+    let late = inspect("&sections=data,custom").await;
+    contract(&late, "late sections");
+    assert_eq!(
+        late["coverage"],
+        json!({"requested_sections":["custom","data"],
+            "analyzed_sections":["custom","data"],
+            "excluded_sections":["type","import","function","export","code"],
+            "truncated_sections":[],"section_map_complete":true})
+    );
+    assert_eq!(late["instructions"], 0);
+    assert_eq!(kinds(&late, "data").len(), 1);
+    assert!(
+        kinds(&late, "custom")[0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("name")
+    );
+    assert_eq!(late["status"], "partial");
+
+    // The CLI reads the same filter through the same provider.
+    let cli = |args: &[&str]| -> Value {
+        let output = Command::new(env!("CARGO_BIN_EXE_origin-trace-wasm"))
+            .arg("--artifacts")
+            .arg(server.root.path().join("artifacts"))
+            .args(["--artifact-id", "1"])
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        serde_json::from_slice(&output.stdout).unwrap()
+    };
+    assert_eq!(cli(&["--sections", "data,custom"]), late);
+    assert_eq!(
+        cli(&["--sections", "exports"])["status"],
+        400,
+        "The CLI refuses an unknown section instead of inspecting the whole module"
+    );
+
+    // A complete unscoped traversal still claims the whole module.
+    put(&module(2, 1));
+    let small = inspect("").await;
+    contract(&small, "complete");
+    assert_eq!(small["status"], "decoded");
+    assert_eq!(small["omissions"], json!([]));
+    assert_eq!(
+        small["coverage"],
+        json!({"requested_sections":null,
+            "analyzed_sections":["custom","type","import","function","export","code","data"],
+            "excluded_sections":[],"truncated_sections":[],"section_map_complete":true})
+    );
+    // Requesting every section is still a request, so it cannot claim decoded.
+    let every = inspect("&sections=custom,type,import,function,export,code,data").await;
+    contract(&every, "every present section");
+    assert_eq!(every["status"], "partial");
+    assert_eq!(
+        every["coverage"]["analyzed_sections"],
+        small["coverage"]["analyzed_sections"]
+    );
+    assert_eq!(every["coverage"]["excluded_sections"], json!([]));
+
+    // A filter that cannot be read as written is refused, never widened.
+    for query in [
+        "&sections=",
+        "&sections=exports",
+        "&sections=export,",
+        "&sections=,export",
+        "&sections=Export",
+        "&sections=export%20",
+        "&sections=unknown",
+        "&sections=export&sections=type",
+        "&section=export",
+        "&sections=code&limit=1",
+    ] {
+        assert_eq!(
+            server
+                .get(&format!("/api/wasm?artifact_id=1{query}"))
+                .await
+                .status(),
+            400,
+            "{query}"
+        );
+    }
+    let repeated = std::iter::repeat_n("export", 32)
+        .collect::<Vec<_>>()
+        .join(",");
+    assert!(repeated.len() > 128);
+    assert_eq!(
+        server
+            .get(&format!("/api/wasm?artifact_id=1&sections={repeated}"))
+            .await
+            .status(),
+        400
+    );
+}
 #[tokio::test]
 async fn error_reasons_preserve_http_text_targets_limits_and_cli_contracts() {
     let missing = tempfile::tempdir().unwrap();

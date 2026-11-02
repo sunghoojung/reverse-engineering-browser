@@ -9,10 +9,24 @@ struct Options {
     artifacts: PathBuf,
     #[arg(long)]
     artifact_id: String,
+    /// Comma separated section names to decode. Omit for the whole module.
+    #[arg(long)]
+    sections: Option<String>,
 }
 fn main() {
     let options = Options::parse();
-    let result = origin_trace_backend::wasm::load(&options.artifacts, &options.artifact_id)
+    let result = options
+        .sections
+        .as_deref()
+        .map(origin_trace_backend::wasm::requested_sections)
+        .transpose()
+        .and_then(|sections| {
+            origin_trace_backend::wasm::load(
+                &options.artifacts,
+                &options.artifact_id,
+                sections.as_ref(),
+            )
+        })
         .unwrap_or_else(|e| json!({"error":e.message,"status":e.status}));
     println!("{result}");
 }

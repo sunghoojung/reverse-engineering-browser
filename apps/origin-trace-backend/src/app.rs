@@ -358,9 +358,24 @@ impl App {
             "/api/analysis/vm/experiments" => self.vm_experiments.list()?,
             "/api/vm-debugger" => self.owned_vm_debugger.state().await?,
             "/api/wasm" => {
+                // A misspelled filter must fail rather than return a
+                // whole-module document the caller will read as scoped.
+                if q.0
+                    .keys()
+                    .any(|key| !["artifact_id", "sections"].contains(&key.as_str()))
+                {
+                    return Err(Error::bad(
+                        "WASM inspection takes artifact_id with an optional sections filter",
+                    ));
+                }
                 let id = q.required("artifact_id")?.to_owned();
+                let sections = q
+                    .one("sections")?
+                    .map(wasm::requested_sections)
+                    .transpose()?;
                 let root = self.options.artifacts.clone();
-                self.blocking(move || wasm::load(&root, &id)).await?
+                self.blocking(move || wasm::load(&root, &id, sections.as_ref()))
+                    .await?
             }
             "/api/api-collection" | "/api/local-analyst" => {
                 let store = if path.ends_with("api-collection") {

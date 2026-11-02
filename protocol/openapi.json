@@ -2341,7 +2341,7 @@
       "get": {
         "operationId": "inspect_wasm",
         "summary": "Inspect a captured WebAssembly module",
-        "description": "Inert bounded decoding of a hash-verified core WASM artifact. Never executes the module. Partial results name unvisited coverage; decoded does not assert type validity or runtime behavior.",
+        "description": "Inert bounded decoding of a hash-verified core WASM artifact. Never executes the module. The optional sections filter decodes rows for only the named sections, so export, type, import, custom and data tables stay reachable when code-section instructions would otherwise exhaust the 8,192-row budget. coverage names what was analyzed, excluded and truncated, and a filtered document is never decoded. Partial results name unvisited coverage; decoded does not assert type validity or runtime behavior.",
         "tags": [
           "artifacts"
         ],
@@ -2354,6 +2354,17 @@
               "type": "string",
               "pattern": "^[1-9][0-9]*$",
               "description": "Canonical nonzero unsigned 64-bit artifact ID"
+            }
+          },
+          {
+            "name": "sections",
+            "in": "query",
+            "required": false,
+            "description": "Optional comma separated core section names to decode: custom, type, import, function, table, memory, global, export, start, element, code, data, data_count, tag. Omit it to request the whole module. An empty or unknown name is refused rather than widened, and the response echoes the scope it used in coverage.requested_sections.",
+            "schema": {
+              "type": "string",
+              "maxLength": 128,
+              "pattern": "^(custom|type|import|function|table|memory|global|export|start|element|code|data|data_count|tag)(,(custom|type|import|function|table|memory|global|export|start|element|code|data|data_count|tag))*$"
             }
           }
         ],
@@ -2434,10 +2445,14 @@
             {
               "id": "stored-wasm-artifact",
               "condition": "artifact_id must identify a captured WebAssembly artifact that passes content verification and size limits."
+            },
+            {
+              "id": "requested-sections",
+              "condition": "A supplied sections value must be a comma separated list of known core section names; an empty or unknown name is refused instead of widening to the whole module."
             }
           ],
           "confirmations": [],
-          "notes": "Verifies captured artifact bytes and performs bounded inert WebAssembly decoding without executing the module.",
+          "notes": "Verifies captured artifact bytes and performs bounded inert WebAssembly decoding without executing the module. An optional sections filter decodes rows for only the named sections; an excluded section is never read, so nothing is claimed about its entries or function bodies. coverage reports the scope the response used, and a filtered document is always partial. Compare coverage.requested_sections with the filter you sent before reading a document as scoped.",
           "sources": [
             {
               "path": "apps/origin-trace-backend/src/wasm.rs",
@@ -13442,6 +13457,7 @@
           "instructions",
           "rows",
           "omissions",
+          "coverage",
           "notice",
           "limits"
         ],
@@ -13511,6 +13527,7 @@
                     "tag",
                     "export",
                     "start",
+                    "declaration",
                     "function",
                     "local",
                     "instruction",
@@ -13552,6 +13569,58 @@
               "maxLength": 512
             }
           },
+          "coverage": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "requested_sections",
+              "analyzed_sections",
+              "excluded_sections",
+              "truncated_sections",
+              "section_map_complete"
+            ],
+            "properties": {
+              "requested_sections": {
+                "description": "The section names this document is scoped to, or null when the whole module was requested. Never contains unknown, which no request can name.",
+                "oneOf": [
+                  {
+                    "$ref": "#/components/schemas/WasmSectionNames"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "analyzed_sections": {
+                "description": "Sections present in these bytes that were requested and decoded to their end.",
+                "allOf": [
+                  {
+                    "$ref": "#/components/schemas/WasmSectionNames"
+                  }
+                ]
+              },
+              "excluded_sections": {
+                "description": "Sections present in these bytes that the request did not select. Their contents were not read, so nothing here is claimed about them.",
+                "allOf": [
+                  {
+                    "$ref": "#/components/schemas/WasmSectionNames"
+                  }
+                ]
+              },
+              "truncated_sections": {
+                "description": "Sections present in these bytes that were requested but are not completely covered, because a limit stopped decoding or this version cannot decode them. omissions names which.",
+                "allOf": [
+                  {
+                    "$ref": "#/components/schemas/WasmSectionNames"
+                  }
+                ]
+              },
+              "section_map_complete": {
+                "description": "True when traversal reached the module end, so the three lists together name every section in these bytes and a requested section absent from all three is absent from the module.",
+                "type": "boolean"
+              }
+            }
+          },
           "notice": {
             "type": "string",
             "maxLength": 512
@@ -13584,6 +13653,30 @@
               }
             }
           }
+        }
+      },
+      "WasmSectionNames": {
+        "type": "array",
+        "maxItems": 15,
+        "uniqueItems": true,
+        "items": {
+          "enum": [
+            "custom",
+            "type",
+            "import",
+            "function",
+            "table",
+            "memory",
+            "global",
+            "export",
+            "start",
+            "element",
+            "code",
+            "data",
+            "data_count",
+            "tag",
+            "unknown"
+          ]
         }
       },
       "NativeConsoleState": {

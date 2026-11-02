@@ -259,6 +259,7 @@ javascript-check: capture-completeness-check
 	node tools/check-vm-compare-cli.mjs
 	node tools/check-python-client-project.mjs
 	node tools/check-origin-trace-debugger.mjs --field-provenance-only
+	node tools/check-evidence-names.mjs
 	node tools/check-origin-trace-launcher.mjs --cleanup-only
 	node tools/check-origin-trace-package.mjs --contract-only
 	node tools/check-origin-trace-native-close.mjs --contract-only

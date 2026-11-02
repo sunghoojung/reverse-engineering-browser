@@ -44,6 +44,7 @@ native-console-check: native-console-build origin-trace-backend
 e2e: native-request-identity-check origin-trace-backend native-vm-fixture producer broker artifact-producer artifact-receiver heap-snapshot decoder native-console-check
 	@mkdir -p $(BUILD_DIR)/sessions
 	python3 tools/check-native-request-identity.py --broker $(BROKER_BINARY) --backend $(ORIGIN_TRACE_BACKEND)
+	node tools/check-evidence-names.mjs --persistence $(ORIGIN_TRACE_BACKEND)
 	$(PRODUCER_BINARY) | $(BROKER_BINARY) \
 		--store $(BUILD_DIR)/sessions/demo.jsonl \
 		--trace-store $(BUILD_DIR)/sessions/origin-trace.jsonl \

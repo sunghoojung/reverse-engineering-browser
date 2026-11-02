@@ -244,7 +244,7 @@ mod tests {
         }
     }
 
-    /// The byte size of the hCaptcha-class glue bundle this bound used to
+    /// The byte size of the obfuscated glue bundle class this bound used to
     /// refuse before any analysis budget was consulted.
     const GLUE_BYTES: usize = 1_556_723;
 

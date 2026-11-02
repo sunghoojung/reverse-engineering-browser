@@ -154,7 +154,10 @@
         background: transparent;
         color: var(--muted);
       }
-      .icon-button:hover { border-color: var(--line); background: var(--panel-3); color: var(--text); }
+      /* The decoder's primary fill is !important in its screen rules; disabled
+   must still read as unavailable there. */
+.decoder-primary:disabled { border-color: var(--line-soft) !important; background: transparent !important; color: var(--faint) !important; }
+.icon-button:hover { border-color: var(--line); background: var(--panel-3); color: var(--text); }
 
       .workspace {
         display: grid;
@@ -4515,3 +4518,48 @@ details.decoder-card > header p { margin-top: 0; }
 #investigation-notice:empty { margin: 0; }
 #investigation-history-count { margin: 0 8px 0 4px; font: 11px var(--mono); }
 /* End console, tools and dialogs */
+
+/* Control system. Earlier screen rules set layout; these set the look of every
+   shared control, so a button reads the same in Traffic, VM and Tools. One
+   family in two heights (28px default, 24px inside dense strips), one radius,
+   150ms hover, press darkens rather than scales, and disabled controls drop
+   their fill instead of fading the whole box. */
+:root { --control-radius: 6px; --panel-radius: 10px; --control-hover: color-mix(in srgb, var(--panel-3) 82%, var(--text)); }
+.secondary-button, .trace-button, .primary-button, .native-console-button, .back-button, .icon-button {
+  border-radius: var(--control-radius);
+  transition: background-color 150ms ease, border-color 150ms ease, color 150ms ease;
+}
+.secondary-button, .native-console-button, .back-button {
+  border: 1px solid var(--line);
+  background: var(--panel-3);
+  color: var(--text);
+}
+:is(.secondary-button, .native-console-button):not(.decoder-primary, .captured-export-primary, .native-console-primary):hover:not(:disabled), .back-button:hover {
+  border-color: var(--line);
+  background: var(--control-hover);
+  color: var(--text);
+}
+.trace-button, .primary-button, .decoder-primary, .captured-export-primary, .native-console-primary:not(:disabled), #screen-vm .vm-tool-primary:not(:disabled) {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: var(--bg);
+  font-weight: 600;
+}
+/* Primary actions keep their fill on hover and only lighten. */
+:is(.trace-button, .primary-button, .decoder-primary, .captured-export-primary, .native-console-primary):hover:not(:disabled) { filter: brightness(1.06); }
+:is(.secondary-button, .trace-button, .primary-button, .native-console-button, .back-button, .icon-button):active:not(:disabled) { filter: brightness(.9); }
+:is(.secondary-button, .trace-button, .primary-button, .native-console-button):disabled {
+  opacity: 1;
+  filter: none;
+  border-color: var(--line-soft);
+  background: transparent;
+  color: var(--faint);
+}
+.icon-button:hover { border-color: var(--line); background: var(--panel-3); color: var(--text); }
+
+/* The sidebar sits on the window ground; evidence lives in one rounded panel
+   beside it, and an open Console is a second panel below. */
+.sidebar { border-right: 0; }
+.workspace { gap: 6px; padding: 6px 6px 6px 0; background: var(--bg); }
+.main, .native-console-panel { border: 1px solid var(--line-soft); border-radius: var(--panel-radius); }
+.native-console-panel { border-top: 1px solid var(--line-soft); }

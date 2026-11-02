@@ -284,7 +284,6 @@ cross-session ambiguities, unknown observer comparability, deterministic bounded
 pages and the local HTTP/CLI contract.
 
 - [Investigation notebook v1](investigation-notebook-v1.md): bounded local research notes and exact retained evidence pins in the existing Analyst library.
-- [Evidence names v1](evidence-names-v1.md): researcher names for exact retained requests, source artifacts and VM handlers, shown beside the raw evidence and kept in the existing Analyst library.
 
 [WebSocket capture v1](websocket-capture-v1.md) (retired with CDP) specified bounded CDP message identities, raw payload encoding, loss counters and Traffic inspection.
 

@@ -269,7 +269,7 @@ routes. Each save rereads the library first; a name changed elsewhere since you
 opened the editor is shown to you instead of being overwritten. When the command
 palette is available, its **Names** group finds named items and opens them
 through the normal selection paths. See the
-[names contract](../../protocol/evidence-names-v1.md) for identities, bounds and
+[names contract](../../docs/product/evidence-names-v1.md) for identities, bounds and
 concurrency.
 
 ## Native console

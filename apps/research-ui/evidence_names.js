@@ -2,7 +2,7 @@
  * never evidence: it is kept in one non-executable JSON scratchpad in the local
  * Analyst library and never replaces, hides or edits a captured value. Lookups
  * use exact identities only; a label, URL or file name never selects an item.
- * Contract: protocol/evidence-names-v1.md. */
+ * Contract: docs/product/evidence-names-v1.md. */
 (function () {
   'use strict';
   const KIND = 'reb-evidence-names', SUFFIX = '.reb-names.json', FILE_NAME = 'Evidence names.reb-names.json';

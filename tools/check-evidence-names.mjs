@@ -1,4 +1,4 @@
-// Researcher names (protocol/evidence-names-v1.md). Every case runs the shipped
+// Researcher names (docs/product/evidence-names-v1.md). Every case runs the shipped
 // evidence_names.js and app.js wiring with the real identity helpers; only the
 // DOM and HTTP transport are substituted. This is not rendered QA.
 import assert from 'node:assert/strict';

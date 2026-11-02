@@ -5,7 +5,7 @@ interpretation, the way a disassembler lets you rename `handler 0` to
 `push_const`. A name is not evidence. It never replaces, hides or edits a
 captured value: Origin Trace shows it beside the raw identifier, which stays
 visible. Names are not an evidence package, finding, replay recipe or capture
-setting. See [SAFETY.md](../SAFETY.md).
+setting. See [SAFETY.md](../../SAFETY.md).
 
 ## Scope
 
@@ -21,7 +21,7 @@ Three kinds of retained item can be named:
 Names live in one ordinary Local Analyst file in the Analyst root folder:
 `Evidence names.reb-names.json`, `kind: scratchpad`, `language: json`. This is
 the same permission-restricted, atomic, generation-checked library the
-[investigation notebook](investigation-notebook-v1.md) uses, read and written
+[investigation notebook](../../protocol/investigation-notebook-v1.md) uses, read and written
 through the existing `GET /api/local-analyst` and
 `POST /api/local-analyst/actions` (`replace_local_analyst_workspace`) routes. No
 backend route is added. Browser storage is not used, so names survive a relaunch
@@ -106,7 +106,7 @@ overwritten or repaired. Ordinary JSON files are not adopted by file name alone.
 ## Concurrency
 
 Every save starts from a fresh read of the library and replaces exactly one
-generation; the shared [writer lease](workspace-writer-lease-v1.md) and the
+generation; the shared [writer lease](../../protocol/workspace-writer-lease-v1.md) and the
 generation check refuse a stale replacement with HTTP 409. In addition, the
 editor remembers the name it opened with. If the saved name for that identity
 changed in the meantime, nothing is written: the editor shows the newer name and

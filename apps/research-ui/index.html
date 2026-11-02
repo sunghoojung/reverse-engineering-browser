@@ -16,8 +16,11 @@
         <span id="session-mode" class="session-mode">Connecting</span>
       </header>
 
-      <aside class="sidebar" aria-label="Origin Trace">
-        <div id="capture-state" class="capture-state" role="status"><span class="pulse" aria-hidden="true"></span><span>Connecting</span></div>
+      <aside id="sidebar" class="sidebar" aria-label="Origin Trace">
+        <div class="sidebar-head">
+          <div id="capture-state" class="capture-state" role="status"><span class="pulse" aria-hidden="true"></span><span>Connecting</span></div>
+          <button id="sidebar-toggle" class="sidebar-toggle" type="button" aria-controls="sidebar" aria-expanded="true" aria-label="Collapse sidebar" aria-keyshortcuts="Meta+B Control+B" title="Collapse sidebar (⌘ / Ctrl + B)"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M3 4h14v12H3zM8 4v12M5 7h1M5 10h1"/></svg></button>
+        </div>
         <nav class="primary-nav" aria-label="Workspace">
           <div class="nav-group" role="group" aria-labelledby="nav-group-evidence">
             <span id="nav-group-evidence" class="nav-heading">Evidence</span>

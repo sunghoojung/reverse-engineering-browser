@@ -1992,17 +1992,30 @@ var(--panel);
       .sidebar-actions { flex: none; display: flex; flex-direction: column; gap: 1px; margin-top: auto; padding-top: 8px; border-top: 1px solid var(--line-soft); }
       .workspace { grid-column: 2; grid-row: 2; }
       .statusbar { grid-column: 1 / -1; grid-row: 3; min-height: 24px; gap: 12px; font-size: 10px; background: var(--bg); border-color: var(--line-soft); font-family: var(--sans); }
-      @media (max-width: 1099px) {
-        .app { grid-template-columns: 52px minmax(0, 1fr); }
-        .sidebar { align-items: center; gap: 10px; padding: 8px 6px; }
-        .nav-label, .nav-heading, .nav-shortcut, .capture-state > span:last-child { display: none; }
-        .capture-state { width: 40px; min-height: 28px; justify-content: center; padding: 0; }
-        .primary-nav { gap: 8px; }
-        .nav-group { align-items: center; }
-        .nav-group + .nav-group { padding-top: 8px; border-top: 1px solid var(--line-soft); }
-        .nav-button, .sidebar-action { width: 40px; min-height: 32px; justify-content: center; padding: 0; }
-        .sidebar-actions { align-items: center; padding-top: 6px; }
-      }
+      /* The researcher's toggle (or Cmd/Ctrl+B) collapses the sidebar to the
+         rail on wide windows. Narrow windows always use the rail; there the
+         toggle slides the full sidebar over the evidence until a choice,
+         Escape or an outside click. app.js sets data-sidebar. */
+      .app { position: relative; }
+      .sidebar-head { flex: none; display: flex; align-items: center; gap: 6px; min-width: 0; }
+      .sidebar-head .capture-state { flex: 1 1 auto; min-width: 0; }
+      .sidebar-toggle { flex: none; display: grid; place-items: center; width: 30px; height: 30px; padding: 0; border: 1px solid transparent; border-radius: 8px; background: transparent; color: var(--faint); transition: background-color 150ms ease, color 150ms ease; }
+      .sidebar-toggle svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
+      .sidebar-toggle:hover { background: var(--panel-2); color: var(--text); }
+      .app[data-sidebar="rail"], .app[data-sidebar="peek"] { grid-template-columns: 52px minmax(0, 1fr); }
+      .app[data-sidebar="rail"] .sidebar { align-items: center; gap: 10px; padding: 8px 6px; }
+      .app[data-sidebar="rail"] :is(.nav-label, .nav-heading, .nav-shortcut, .capture-state > span:last-child) { display: none; }
+      .app[data-sidebar="rail"] .sidebar-head { flex-direction: column-reverse; gap: 8px; }
+      .app[data-sidebar="rail"] .capture-state { flex: none; width: 40px; min-height: 28px; justify-content: center; padding: 0; }
+      .app[data-sidebar="rail"] .sidebar-toggle { width: 40px; height: 32px; }
+      .app[data-sidebar="rail"] .primary-nav { gap: 8px; }
+      .app[data-sidebar="rail"] .nav-group { align-items: center; }
+      .app[data-sidebar="rail"] .nav-group + .nav-group { padding-top: 8px; border-top: 1px solid var(--line-soft); }
+      .app[data-sidebar="rail"] :is(.nav-button, .sidebar-action) { width: 40px; min-height: 32px; justify-content: center; padding: 0; }
+      .app[data-sidebar="rail"] .sidebar-actions { align-items: center; padding-top: 6px; }
+      /* An absolutely positioned grid item is placed within its own grid area; an
+         unstated end line would mean the container edge, so name both lines. */
+      .app[data-sidebar="peek"] .sidebar { position: absolute; z-index: 40; grid-row: 2 / 3; inset: 0 auto 0 0; width: 200px; border-right: 1px solid var(--line); box-shadow: 8px 0 24px color-mix(in srgb, #000 35%, transparent); }
       .network-tools { display: flex; gap: 8px; padding: 12px; background: var(--panel); border-color: var(--line-soft); }
       .filter-box { flex: 1; min-width: 100px; }
       .filter-box input { height: 32px; font-size: 12px; background: var(--bg); border-color: var(--line-soft); }

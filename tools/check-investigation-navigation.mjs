@@ -197,7 +197,7 @@ export async function checkSidebarNavigation(root) {
   const app=await readFile(join(root,'apps/research-ui/app.js'),'utf8');
   const source=app.slice(app.indexOf('      function showScreen('),app.indexOf('      async function refresh()'));
   const html=await readFile(join(root,'apps/research-ui/index.html'),'utf8');
-  const sidebar=html.slice(html.indexOf('<aside class="sidebar"'),html.indexOf('</aside>'));
+  const sidebar=html.slice(html.search(/<aside\b[^>]*class="sidebar"/),html.indexOf('</aside>'));
   const nav=sidebar.slice(sidebar.indexOf('<nav class="primary-nav"'),sidebar.indexOf('</nav>'));
   assert(nav,'The sidebar must hold the workspace navigation');
   assert.doesNotMatch(html+app,/advanced-navigation|advanced-items/,'No workspace may hide behind an Advanced menu');
@@ -278,7 +278,47 @@ export async function checkSidebarNavigation(root) {
   modal=true;assert.equal(press({metaKey:true,code:'Digit2'}),false,'A modal dialog keeps the keyboard');modal=false;
   shortcutButtons[1].disabled=true;assert.equal(press({metaKey:true,code:'Digit2'}),false);
   assert.deepEqual(clicks,[]);assert.equal(focusedEntry,null,'Ignored shortcuts never move focus');
-  console.log('PASS sidebar lists every workspace directly in shortcut order, one current entry, focus kept on sidebar choices and moved for linked navigation, Cmd/Ctrl + digit guards (production functions, not rendered QA)');
+  // The production sidebar controller: a remembered collapse on wide windows,
+  // a forced rail with a temporary slide-out on narrow ones.
+  const modeStart=app.indexOf('      // Sidebar mode.');
+  assert(modeStart>=0,'Missing sidebar mode controller');
+  const modeSource=app.slice(modeStart,app.indexOf('\n      })();\n',modeStart)+'\n      })();\n'.length);
+  assert.match(sidebar,/id="sidebar-toggle"[^>]*aria-controls="sidebar"/,'The toggle is a visible sidebar control');
+  const sidebarMode=(stored,narrowAtStart)=>{
+    const listeners={},store=new Map(stored?[['reb-sidebar',stored]]:[]);let media=null;
+    const element=()=>({dataset:{},attributes:{},listeners:{},setAttribute(key,value){this.attributes[key]=value;},addEventListener(type,fn){this.listeners[type]=fn;},focus(){focus.at=this;}});
+    const focus={at:null},app=element(),toggle=element(),aside=element();let modal=false;
+    const inside=new Set([aside,toggle]);aside.contains=node=>inside.has(node);
+    const doc={querySelector:selector=>({'.app':app,'#sidebar':aside,'#sidebar-toggle':toggle})[selector]??(selector==='dialog:modal'&&modal?{}:null),
+      addEventListener:(type,fn)=>{(listeners[type]??=[]).push(fn);}};
+    const win={matchMedia:query=>{assert.equal(query,'(max-width: 1099px)');media={matches:narrowAtStart,addEventListener:(type,fn)=>{media.change=fn;}};return media;}};
+    const fire=(type,init)=>{const event={target:init.target??{closest:()=>null},prevented:false,preventDefault(){this.prevented=true;},metaKey:false,ctrlKey:false,altKey:false,shiftKey:false,repeat:false,...init};for(const fn of listeners[type]??[])fn(event);return event.prevented;};
+    runInNewContext(modeSource,{document:doc,window:win,localStorage:{getItem:key=>store.get(key)??null,setItem:(key,value)=>store.set(key,value)}});
+    return {app,toggle,aside,store,focus,fire,setModal:value=>{modal=value;},resize:matches=>{media.matches=matches;media.change();},
+      click:target=>{toggle.listeners.click?.({target});}};
+  };
+  let shell=sidebarMode(null,false);
+  assert.equal(shell.app.dataset.sidebar,'expanded');assert.equal(shell.toggle.attributes['aria-expanded'],'true');assert.equal(shell.toggle.attributes['aria-label'],'Collapse sidebar');
+  shell.click();assert.equal(shell.app.dataset.sidebar,'rail');assert.equal(shell.store.get('reb-sidebar'),'collapsed');
+  assert.equal(shell.toggle.attributes['aria-expanded'],'false');assert.equal(shell.toggle.attributes['aria-label'],'Expand sidebar');
+  assert.equal(shell.fire('keydown',{metaKey:true,code:'KeyB'}),true);assert.equal(shell.app.dataset.sidebar,'expanded');assert.equal(shell.store.get('reb-sidebar'),'expanded');
+  const field={closest:selector=>selector.includes('textarea')?field:null};
+  for(const init of [{ctrlKey:true,code:'KeyB',target:field},{metaKey:true,shiftKey:true,code:'KeyB'},{metaKey:true,altKey:true,code:'KeyB'},{metaKey:true,repeat:true,code:'KeyB'},{code:'KeyB'},{metaKey:true,code:'KeyJ'}])
+    assert.equal(shell.fire('keydown',init),false,`Ignored: ${JSON.stringify(init)}`);
+  shell.setModal(true);assert.equal(shell.fire('keydown',{ctrlKey:true,code:'KeyB'}),false,'A modal dialog keeps the keyboard');shell.setModal(false);
+  assert.equal(shell.app.dataset.sidebar,'expanded');
+  assert.equal(sidebarMode('collapsed',false).app.dataset.sidebar,'rail','The collapse is remembered');
+  shell=sidebarMode('expanded',true);
+  assert.equal(shell.app.dataset.sidebar,'rail','Narrow windows always start on the rail');
+  shell.click();assert.equal(shell.app.dataset.sidebar,'peek');assert.equal(shell.store.get('reb-sidebar'),'expanded','A slide-out is not a saved preference');
+  shell.fire('pointerdown',{target:shell.aside});assert.equal(shell.app.dataset.sidebar,'peek','Pointers inside keep the slide-out');
+  shell.fire('pointerdown',{target:{}});assert.equal(shell.app.dataset.sidebar,'rail','An outside pointer closes it');
+  shell.click();assert.equal(shell.fire('keydown',{key:'Escape'}),true);assert.equal(shell.app.dataset.sidebar,'rail');assert.equal(shell.focus.at,shell.toggle,'Escape returns focus to the toggle');
+  shell.click();shell.aside.listeners.click({target:{closest:selector=>selector.includes('.nav-button')?{}:null}});assert.equal(shell.app.dataset.sidebar,'rail','Choosing a workspace closes it');
+  shell.click();shell.resize(false);assert.equal(shell.app.dataset.sidebar,'expanded','Widening drops the slide-out and restores the saved mode');
+  shell.resize(true);assert.equal(shell.app.dataset.sidebar,'rail');
+  assert.equal(shell.fire('keydown',{key:'Escape'}),false,'Escape is left alone without a slide-out');
+  console.log('PASS sidebar lists every workspace directly in shortcut order, one current entry, focus kept on sidebar choices and moved for linked navigation, Cmd/Ctrl + digit guards, remembered collapse and narrow slide-out (production functions, not rendered QA)');
 }
 
 export function investigationFixture(base) {

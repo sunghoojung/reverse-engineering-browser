@@ -2162,7 +2162,7 @@ var(--panel);
       .tool-detail-disclosure[open] > summary { color: var(--accent); }
       .tool-detail-disclosure .experiment-privacy { padding: 0 12px 10px; }
 
-      /* Advanced workspaces share a quiet hierarchy: task, input, result, optional detail. */
+      /* Backtraces, Analyst and Tools share a quiet hierarchy: task, input, result, optional detail. */
       .workspace-disclosure, details.analyst-storage, details.analyst-card,
       details.decoder-card { min-width: 0; }
       .workspace-disclosure > summary, .workspace-disclosure-title {

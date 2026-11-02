@@ -354,16 +354,7 @@ final class OriginTraceRenderedUITests: XCTestCase {
 
   @MainActor
   private func show(_ ui: Harness, _ screen: String) async throws {
-    // Backtraces, Analyst and Tools sit under the collapsed Advanced disclosure.
-    let needsAdvanced = try await ui.value(
-      "document.querySelector(`#advanced-navigation .nav-button[data-screen='\(screen)']`) != null && document.querySelector('#advanced-navigation')?.open !== true"
-    ) as? Bool ?? false
-    if needsAdvanced {
-      try await ui.click("#advanced-navigation > summary")
-      try await ui.waitUntil(
-        "document.querySelector('#advanced-navigation')?.open === true",
-        "Advanced navigation did not open for \(screen)")
-    }
+    // Every workspace, Backtraces, Analyst and Tools included, is a direct sidebar entry.
     try await ui.click(".primary-nav .nav-button[data-screen='\(screen)']")
     try await ui.waitUntil("!document.querySelector('#screen-\(screen)').hidden", "\(screen) screen did not open")
   }

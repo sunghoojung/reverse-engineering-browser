@@ -4704,3 +4704,57 @@ details.decoder-card > header p { margin-top: 0; }
   .source-search-all-url, .source-search-all-match { padding-left: 12px; }
   .source-search-all-snippet { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; white-space: pre-wrap; overflow-wrap: anywhere; }
 }
+
+/* Researcher names. A name is interpretation, so it reads differently from the
+   captured values beside it: proportional italic text in the rose role, bidi
+   isolated so it can never reorder the raw identifier that stays visible. */
+:root { --researcher-name: var(--syntax-regexp); }
+.researcher-name {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--researcher-name);
+  font: italic 500 12px/1.4 var(--sans);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  unicode-bidi: isolate;
+}
+.researcher-name[hidden] { display: none; }
+.request-name > .researcher-name { flex: 0 1 auto; max-width: 50%; font-size: 11px; }
+.request-name:has(> .researcher-name) > .request-host { flex-shrink: 3; }
+/* Traffic's strip stacks the name over the raw URL, so both share the width
+   the URL had; the rename control is an icon to keep the actions on one line. */
+#screen-traffic .selection-target { display: flex; flex: 1 1 160px; flex-direction: column; justify-content: center; min-width: 80px; }
+@container (min-width: 480px) { #screen-traffic .selection-target { flex: 1 1 0; } }
+#screen-traffic .selection-target > .selection-url { flex: none; min-width: 0; }
+#screen-traffic .selection-target:has(> .selection-name:not([hidden])) > .selection-url { -webkit-line-clamp: 1; color: var(--muted); }
+#screen-traffic .selection-name { line-height: 16px; }
+#screen-traffic .selection-rename { width: 24px; height: 24px; flex: 0 0 auto; border-color: var(--line); background: var(--panel-3); color: var(--text); }
+#screen-traffic .selection-rename:disabled { border-color: var(--line-soft); background: transparent; color: var(--faint); }
+.selection-rename svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 1.4; stroke-linecap: round; stroke-linejoin: round; }
+#screen-traffic .detail-pane:has(> #request-name-host:not(:empty)) { grid-template-rows: auto auto auto minmax(0, 1fr); }
+.source-tree-name { display: flex; align-items: baseline; gap: 6px; }
+.source-tree-name > .source-tree-raw { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.source-tree-name > .researcher-name { flex: 0 1 auto; max-width: 60%; }
+.source-editor-tab > .researcher-name { flex: 0 1 auto; max-width: 50%; }
+#screen-vm .vm-handler-label > .researcher-name { margin-right: 6px; font-size: 11px; }
+#screen-vm .vm-symbol-row .researcher-name { font-size: 11px; }
+#screen-vm .vm-selection-inspector h3 .researcher-name { white-space: normal; overflow-wrap: anywhere; font-size: 13px; }
+#screen-vm .vm-selection-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+#screen-vm .vm-selection-head .secondary-button { min-height: 22px; padding: 0 8px; font: 500 11px var(--sans); }
+
+/* The inline rename editor opens in place under the control that started it.
+   An empty host takes no space. */
+.evidence-name-host:empty { display: none; }
+.evidence-name-editor { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; padding: 8px 12px; border-bottom: 1px solid var(--line-soft); background: var(--panel-2); }
+.evidence-name-field { display: flex; flex: 1 1 200px; align-items: center; gap: 8px; min-width: 0; color: var(--muted); font: 500 11px var(--sans); }
+/* Screen-wide text input rules (VM) must not restyle the name being typed. */
+.evidence-name-field input, #screen-vm .evidence-name-field input[type="text"] { flex: 1; min-width: 0; height: 26px; min-height: 26px; padding: 0 8px; border: 1px solid var(--accent); border-radius: var(--control-radius); background: var(--bg); color: var(--researcher-name); font: italic 500 12px var(--sans); }
+.evidence-name-field input:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.evidence-name-field input:read-only { opacity: .7; }
+.evidence-name-hint { color: var(--faint); font: 11px var(--sans); white-space: nowrap; }
+.evidence-name-status { flex-basis: 100%; margin: 0; color: var(--muted); font: 11px/1.4 var(--sans); overflow-wrap: anywhere; }
+.evidence-name-status:empty { display: none; }
+.evidence-name-status[data-kind="error"] { color: var(--red); }
+.source-editor-toolbar > .evidence-name-host { flex: 1 0 100%; }
+.source-editor-toolbar .evidence-name-editor { padding: 4px 0; border: 0; background: transparent; }
+#screen-vm .vm-selection-inspector .evidence-name-editor { padding: 8px 10px; }

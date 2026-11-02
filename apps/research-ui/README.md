@@ -243,6 +243,35 @@ Cancellation cannot undo an already committed save: unconfirmed writes require
 an explicit reload before another save. See the [notebook contract](../../protocol/investigation-notebook-v1.md)
 for bounds, identity semantics and validation coverage.
 
+## Researcher names
+
+Name what you have understood, as in a disassembler: a request as "session token
+mint", a source as "obfuscated loader", a VM handler as `push_const`. Choose the
+pencil in the Traffic request header, **Rename** in the Sources toolbar or
+**Rename** in the VM Selected handler pane, or press F2 on the focused or selected
+request, source (tree row or tab) or handler (listing or Symbol Tree row). The
+inline editor saves on Enter, cancels on Escape or when focus leaves it, and an
+empty name clears the name.
+
+A name is your interpretation, not evidence. It appears in italic in the
+researcher-name color beside the raw value, which stays visible: first in the
+Traffic row's name cell and request header, in the Sources tree and file tab, and
+in the VM handler listing, Symbol Tree and Selected handler. Traffic search and
+the handler filter also match names. Names attach to exact identities only (the
+request's root event and request ID, the artifact's session, ID, SHA-256 and size,
+or the handler's finding, source artifact, listing key and source range), so an
+item that merely shares a URL, file name or handler label never inherits a name,
+and replaced or ambiguous evidence shows none.
+
+Names survive relaunch in one non-executable `Evidence names.reb-names.json`
+scratchpad in the Analyst library, written through the existing local Analyst
+routes. Each save rereads the library first; a name changed elsewhere since you
+opened the editor is shown to you instead of being overwritten. When the command
+palette is available, its **Names** group finds named items and opens them
+through the normal selection paths. See the
+[names contract](../../docs/product/evidence-names-v1.md) for identities, bounds and
+concurrency.
+
 ## Native console
 
 The **Console** bottom dock runs explicit mutable main-world JavaScript commands.
@@ -699,7 +728,8 @@ policy and trace assertions; it is not evidence of native lifecycle behavior.
 | `app_state.js`, `evidence_models.js`, `app.js` | Initial state and DOM bindings, evidence validation and projection, interaction and rendering |
 | `command_palette.js` | The ⌘ / Ctrl + K palette: provider registry, matching, ranking and caps, and its dialog controller; `app.js` supplies the built-in providers |
 | `pane_layout.js` | Shared pointer and keyboard pane resizing, responsive constraints, and local size preferences |
-| `traffic_view.js` | Native request ledger rows, ordering, paging and URL/method/status search, the General coverage view, and the saved-capture export document |
+| `traffic_view.js` | Native request ledger rows, ordering, paging and URL/method/status/name search, the General coverage view, and the saved-capture export document |
+| `evidence_names.js` | Researcher names: exact identities, the closed names document, its Analyst-library store, the inline rename editor and the command palette provider |
 | `captured_client.js`, `captured_export_formats.js` | Saved-capture identity, local export dialog, and the client-project/HAR/SDL generators shared with offline commands |
 | `source_search.js` | Search all files: the literal matcher on the Find index, the bounded and cancellable search, partial-result notes and the results panel; `app.js` supplies the artifact reader and the open path |
 | `source_syntax.js` | Source names, display formatting, the inert hex view for Wasm and guest bytecode artifacts, and bounded tokenization without DOM or application state |

@@ -83,6 +83,7 @@ current product path.
 - Retired: [Traffic Content Search v1](./product/traffic-content-search-v1.md)
 - [Live Object Experiment v1](./product/live-object-experiment-v1.md)
 - [Local Analyst Workspace v1](./product/local-analyst-workspace-v1.md)
+- [Evidence names v1](./product/evidence-names-v1.md)
 - [Memory Origin Trace v1](./product/memory-origin-trace-v1.md)
 - [Repeater v1](./product/repeater-v1.md)
 - [Request Interception v1](./product/request-interception-v1.md)

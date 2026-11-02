@@ -2452,7 +2452,8 @@
           positions: vmOpcodeSamplePositions(retainedSamples),
           retainedPositions: retainedSamples.length,
           notes: handler.notes || 'No handler notes recorded.',
-          source: `${handler.source.byte_offset} + ${handler.source.byte_size} bytes`
+          source: `${handler.source.byte_offset} + ${handler.source.byte_size} bytes`,
+          range: {start: handler.source.byte_offset, end: handler.source.byte_offset + handler.source.byte_size}
         };
       }
 
@@ -2483,7 +2484,8 @@
           positions: vmOpcodeSamplePositions(retainedSamples),
           retainedPositions: retainedSamples.length,
           notes: `${notes} ${countLabel} share this instruction and are not separate handler bodies.`,
-          source: `${offset} + ${size} bytes`
+          source: `${offset} + ${size} bytes`,
+          range: {start: offset, end: offset + size}
         };
       }
 

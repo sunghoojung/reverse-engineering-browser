@@ -95,7 +95,7 @@ function renderTrafficRowSelection(container, selectedId) {
   });
 }
 
-function renderTrafficRows(container, requests, {selectedId, newIds, onSelect, onKey}) {
+function renderTrafficRows(container, requests, {selectedId, newIds, onSelect, onKey, nameOf = () => null}) {
   requests = requests.slice(0, TRAFFIC_ROW_LIMIT);
   const previousRows = new Map([...container.querySelectorAll('.request-row')].map(row => [row.dataset.requestId, row]));
   const focused = document.activeElement;
@@ -115,8 +115,9 @@ function renderTrafficRows(container, requests, {selectedId, newIds, onSelect, o
       row.addEventListener('animationcancel', () => row.classList.remove('is-new'));
       if (newIds.has(request.id) && (typeof matchMedia !== 'function' || !matchMedia('(prefers-reduced-motion: reduce)').matches)) row.classList.add('is-new');
     }
+    const researcherName = nameOf(request);
     const key = JSON.stringify([request.path, request.method, request.status, request.time,
-      request.type, request.origin, request.hostOnly, request.failed, request.targetKind, request.operation]);
+      request.type, request.origin, request.hostOnly, request.failed, request.targetKind, request.operation, researcherName]);
     // Reuse the row itself on lifecycle changes, preserving focus and its single
     // arrival animation. Unchanged rows do not rebuild captured text children.
     if (row.dataset.renderKey !== key) {
@@ -127,6 +128,8 @@ function renderTrafficRows(container, requests, {selectedId, newIds, onSelect, o
       const target = trafficTargetParts(request);
       const name = trafficNode('span', 'request-name');
       name.title = `${trafficOriginLabel(request)} · ${request.method} ${request.path} · network · ${request.operation ?? 'network'} · request ${request.id}${request.hostOnly ? ' · URL path and query not captured' : ''}`;
+      // A researcher name leads the cell; the captured path and host stay visible.
+      if (researcherName) name.append(trafficNode('span', 'researcher-name', researcherName));
       name.append(trafficNode('span', 'request-resource', target.name),
         trafficNode('span', 'request-host', target.host));
       const numericStatus = Number(request.status);
@@ -141,7 +144,7 @@ function renderTrafficRows(container, requests, {selectedId, newIds, onSelect, o
       type.title = trafficTypeLabel(request.type);
       row.replaceChildren(name, status, type,
         trafficNode('span', 'request-method', request.method), trafficNode('span', 'request-time', trafficTimeLabel(request.time)));
-      row.setAttribute('aria-label', `${trafficOriginLabel(request)} ${request.hostOnly ? 'host-only metadata' : 'request'}: ${request.method} ${request.path}, ${status.textContent}, ${trafficTimeLabel(request.time)}, ${request.operation ?? 'network'}, request ${request.id}`);
+      row.setAttribute('aria-label', `${researcherName ? `${researcherName} (researcher name). ` : ''}${trafficOriginLabel(request)} ${request.hostOnly ? 'host-only metadata' : 'request'}: ${request.method} ${request.path}, ${status.textContent}, ${trafficTimeLabel(request.time)}, ${request.operation ?? 'network'}, request ${request.id}`);
     }
     row.setAttribute('aria-selected', String(request.id === selectedId));
     row.tabIndex = request.id === selectedId || !selectedVisible && index === 0 ? 0 : -1;
@@ -158,12 +161,15 @@ function renderTrafficRows(container, requests, {selectedId, newIds, onSelect, o
   container.tabIndex = rows.length ? -1 : 0;
 }
 
-// Native rows retain no headers or bodies; search covers what they carry.
-function trafficSearchRequests(requests, needle) {
+// Native rows retain no headers or bodies; search covers what they carry and
+// any researcher name shown beside them.
+function trafficSearchRequests(requests, needle, nameOf = () => null) {
   const matches = new Map();
   for (const request of requests) {
     if (!needle || `${request.method} ${request.path} ${request.status}`.toLowerCase().includes(needle)) {
       matches.set(request.id, {label: 'URL / method / status'});
+    } else if (nameOf(request)?.toLowerCase().includes(needle)) {
+      matches.set(request.id, {label: 'Researcher name'});
     }
   }
   return {matches};

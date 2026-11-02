@@ -21,6 +21,7 @@
           <div id="capture-state" class="capture-state" role="status"><span class="pulse" aria-hidden="true"></span><span>Connecting</span></div>
           <button id="sidebar-toggle" class="sidebar-toggle" type="button" aria-controls="sidebar" aria-expanded="true" aria-label="Collapse sidebar" aria-keyshortcuts="Meta+B Control+B" title="Collapse sidebar (⌘ / Ctrl + B)"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M3 4h14v12H3zM8 4v12M5 7h1M5 10h1"/></svg></button>
         </div>
+        <button id="command-palette-open" class="sidebar-search" type="button" aria-haspopup="dialog" aria-controls="command-palette" aria-expanded="false" aria-label="Search" aria-keyshortcuts="Meta+K Control+K" title="Search workspaces and evidence (⌘ / Ctrl + K)"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M8.5 3.5a5 5 0 1 0 0 10 5 5 0 0 0 0-10zm3.6 8.6 4.4 4.4"/></svg><span class="nav-label">Search</span><kbd class="sidebar-search-key" aria-hidden="true">⌘K</kbd></button>
         <nav class="primary-nav" aria-label="Workspace">
           <div class="nav-group" role="group" aria-labelledby="nav-group-evidence">
             <span id="nav-group-evidence" class="nav-heading">Evidence</span>
@@ -727,6 +728,16 @@
         <footer class="captured-export-footer"><span>On this device only</span><button class="secondary-button" type="button" data-export-cancel>Cancel</button><button class="secondary-button captured-export-primary" type="button" data-export-submit>Export</button></footer>
       </dialog>
 
+      <dialog id="command-palette" class="command-palette" aria-label="Search Origin Trace">
+        <div class="command-palette-field">
+          <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M8.5 3.5a5 5 0 1 0 0 10 5 5 0 0 0 0-10zm3.6 8.6 4.4 4.4"/></svg>
+          <input id="command-palette-input" type="text" maxlength="256" autocomplete="off" spellcheck="false" role="combobox" aria-expanded="true" aria-controls="command-palette-results" aria-autocomplete="list" aria-label="Search workspaces, actions and retained evidence" placeholder="Search workspaces, requests, files and findings" />
+          <kbd aria-hidden="true">Esc</kbd>
+        </div>
+        <div id="command-palette-results" class="command-palette-results" role="listbox" aria-label="Results"></div>
+        <footer class="command-palette-footer"><span aria-hidden="true"><kbd>↑</kbd><kbd>↓</kbd> move · <kbd>Enter</kbd> opens · <kbd>Esc</kbd> closes</span><span id="command-palette-status" role="status" aria-live="polite"></span></footer>
+      </dialog>
+
       <footer class="statusbar">
         <span id="broker-status" class="broker-status">connecting to evidence</span>
         <span id="request-summary"><span id="request-count">0</span> <span id="request-count-label">requests loaded</span></span>
@@ -737,6 +748,7 @@
       </footer>
     </div>
 
+    <script src="command_palette.js"></script>
     <script src="app_state.js"></script>
     <script src="evidence_models.js"></script>
     <script src="evidence_package.js"></script>

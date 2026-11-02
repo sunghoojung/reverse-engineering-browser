@@ -87,6 +87,68 @@ reproducible authored 5,000-record/500-row before-and-after Node benchmark. Thos
 timings are not rendered browser or native-app latency; the Requests browser
 gate separately exercises actual row keyboard selection.
 
+## Command palette
+
+⌘ K opens a search palette from anywhere, including text fields. Ctrl K opens
+it everywhere except text fields, where macOS keeps Ctrl K for deleting to the
+end of the line. **Search** at the top of the sidebar opens it too; the icon rail
+shows it as an icon named Search with the shortcut in its tooltip. A modal
+dialog keeps the keyboard, so the palette never opens over the notebook or the
+export dialog, and ⌘ / Ctrl with a digit is ignored while it is open.
+
+An empty query lists the eight workspaces and four actions: open or close the
+Console, open the notebook, switch the theme, and collapse or expand the
+sidebar. Typing also searches retained Traffic requests (method, host and path,
+status, type and exact request identity), captured source files (name, URL,
+kind and size) and the VM findings currently listed. Matching is a
+case-insensitive literal substring of a result's title or detail. A title that
+starts with the query ranks first, then a word inside the title, any title
+match, a detail that starts with it or has it at a word start, and any detail
+match; ties keep their source order. Each group lists at most 50 results and
+says how many more matched; the status line repeats it.
+
+Arrow Up and Down move through the results and wrap, Home and End jump to the
+first and last, and Enter or a click runs one. Escape, a click outside or ⌘ K
+closes the palette and returns focus to where it was. A result runs the same
+function as the control it stands for: workspaces and actions click their
+sidebar entries, requests and files open through the exact-identity link (so
+Back returns and a changed or ambiguous record is refused), rows without an
+exact identity are selected the way a click on the row or Quick Open does, and
+a VM finding is selected through its own list row. Captured titles and details
+are inserted as text. The palette reads only what the workspaces already hold;
+it never fetches, captures or runs anything.
+
+Other modules can add result groups through one registry:
+
+```js
+const remove = globalThis.RebCommandPalette?.addProvider({
+  id: 'names',        // unique; registering the same id replaces the provider
+  group: 'Names',     // group heading, at most 64 characters
+  search(query) {     // synchronous and bounded; never fetches
+    return [{title: 'checkoutSignature', detail: 'cart.js:42', run() { /* open it */ }}];
+  }
+});
+globalThis.RebCommandPalette?.open('checkout');   // optional initial query
+```
+
+`command_palette.js` loads before every other module, so `addProvider` is
+available while any later script evaluates, before or after the palette is
+mounted. `search` receives the trimmed query (1 to 256 characters) and is not
+called for an empty query. Return an array of `{title, detail?, run}` with a
+non-empty string title, an optional string detail and a function; the palette
+keeps only results whose title or detail contains the query, so a superset is
+fine, and ranks and caps them like the built-in groups. It scans at most 10,000
+candidates per provider and says so when a list is longer. Malformed results are
+skipped and counted in the group. A provider that throws or returns anything
+other than an array shows a note in its own group, and the other groups are
+unaffected. The palette closes and restores focus before `run` is called, and an
+exception from `run` is logged without breaking the page. External groups follow
+the built-in ones in registration order. `addProvider` throws a `TypeError` for
+a malformed provider and returns a function that removes exactly that
+registration. `node tools/check-command-palette.mjs` is run by
+`make javascript-check` through the debugger check and exercises the registry,
+key guards and the app's providers against the production code.
+
 ## Connected investigations
 
 Every workspace is a direct sidebar entry; none waits behind a menu. A
@@ -462,8 +524,8 @@ source wiring only and does not claim native runtime coverage.
 
 The sidebar lists every workspace in two groups. **Evidence** holds Traffic,
 Sources, VM, Fingerprinting and Backtraces; **Workbench** holds Collection,
-Analyst and Tools. Console, the investigation notebook and the theme switch sit
-at its foot. ⌘ or Ctrl with 1-8 opens the workspace at that position, the same
+Analyst and Tools. **Search** at its top opens the [command palette](#command-palette).
+Console, the investigation notebook and the theme switch sit at its foot. ⌘ or Ctrl with 1-8 opens the workspace at that position, the same
 as a click, except while a modal dialog is open. In a browser on the development
 path use Ctrl, because the browser keeps ⌘ with a digit for its own tabs. Windows narrower than 1100px
 show the sidebar as an icon rail with the same entries, names and shortcuts, so
@@ -633,6 +695,7 @@ policy and trace assertions; it is not evidence of native lifecycle behavior.
 | --- | --- |
 | `index.html`, `app.css` | Document structure and visual layout |
 | `app_state.js`, `evidence_models.js`, `app.js` | Initial state and DOM bindings, evidence validation and projection, interaction and rendering |
+| `command_palette.js` | The ⌘ / Ctrl + K palette: provider registry, matching, ranking and caps, and its dialog controller; `app.js` supplies the built-in providers |
 | `pane_layout.js` | Shared pointer and keyboard pane resizing, responsive constraints, and local size preferences |
 | `traffic_view.js` | Native request ledger rows, ordering, paging and URL/method/status search, the General coverage view, and the saved-capture export document |
 | `captured_client.js`, `captured_export_formats.js` | Saved-capture identity, local export dialog, and the client-project/HAR/SDL generators shared with offline commands |

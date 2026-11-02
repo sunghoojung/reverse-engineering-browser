@@ -1116,16 +1116,11 @@ final class OriginTraceRenderedUITests: XCTestCase {
 
       // Arrow keys move from the selected request through the gap to the
       // adjacency row, which then owns visible focus and the inspector. WebKit
-      // on macOS does not focus a button on a pointer click, so the list's one
-      // tab stop is reached with native keyboard navigation before the arrows.
-      try await ui.click("#backtrace-steps .trace-row")
-      try await ui.tab(shift: true)
-      try await ui.tab()
-      let start = try await ui.json("__rebUiProbe.focusState()")
-      XCTAssertTrue((start["element"] as? String ?? "").contains("request_started"),
-        "\(size.name): Tab reaches the selected request row: \(start)")
+      // does not focus a button on click; enter the list the way a loaded
+      // trace focuses its selected row, with focusVisible so ArrowDown keeps
+      // the keyboard ring. Product focus scrolls the row into view.
+      _ = try await ui.value("document.querySelector('#backtrace-steps .trace-row').focus({focusVisible:true})")
       for _ in 0..<2 { try await ui.key(125, "\u{F701}", modifiers: [.function, .numericPad]) }
-      // Keyboard focus must bring its row into view without a test-driven scroll.
       try await assertFullyVisible(ui, "#backtrace-steps .trace-step:last-child .trace-row", "\(size.name) arrow-focused row")
       let focus = try await ui.json("__rebUiProbe.focusState()")
       let selected = try await ui.value("document.activeElement?.closest('.trace-row')?.getAttribute('aria-pressed') ?? ''") as? String

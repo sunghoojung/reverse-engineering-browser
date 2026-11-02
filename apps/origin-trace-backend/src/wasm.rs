@@ -45,8 +45,10 @@ fn section_name(id: u8) -> &'static str {
     SECTION_NAMES.get(id as usize).copied().unwrap_or("unknown")
 }
 
-/// Section IDs sort into the binary's own section order. Repeated custom
-/// sections and IDs this version cannot name collapse to one name.
+/// Names in section ID order, which is not always the binary's order:
+/// `data_count` (12) precedes `code` (10) and `tag` (13) sits between `memory`
+/// and `global`. Repeated custom sections and IDs this version cannot name
+/// collapse to one name.
 fn section_list(ids: &BTreeSet<u8>) -> Vec<&'static str> {
     let mut names = ids.iter().map(|id| section_name(*id)).collect::<Vec<_>>();
     names.dedup();
@@ -221,6 +223,11 @@ pub fn inspect(bytes: &[u8], sections: Option<&BTreeSet<u8>>) -> Result<Value> {
     // An absent request selects every section, including an ID this version
     // cannot name. A present request selects exactly the IDs it names.
     let selected = |id: u8| sections.is_none_or(|ids| ids.contains(&id));
+    // Declaration rows cost one row per defined function ahead of the export
+    // and code sections, so only a request that names `function` pays for
+    // them. An unfiltered document keeps its budget for exports and bodies, as
+    // before, and each decoded body's header row still names its type.
+    let declare = sections.is_some_and(|ids| ids.contains(&3));
     let mut rows = Rows {
         values: Vec::new(),
         started: Instant::now(),
@@ -388,7 +395,7 @@ pub fn inspect(bytes: &[u8], sections: Option<&BTreeSet<u8>>) -> Result<Value> {
                     // this section. Keeping it as a row makes an export's type
                     // reachable without decoding any function body, which the
                     // row budget cannot afford for a large module.
-                    if selected(3) && rows.room() {
+                    if declare && rows.room() {
                         rows.push(
                             "declaration",
                             offset,

@@ -3122,6 +3122,10 @@ async fn wasm_section_requests_reach_late_tables_and_declare_what_they_left_out(
             "excluded_sections":[],"truncated_sections":["code"],"section_map_complete":false})
     );
     assert!(kinds(&whole, "data").is_empty() && kinds(&whole, "custom").is_empty());
+    // Declaration rows are paid for only by a request that names `function`,
+    // so the unscoped budget still reaches exports and every body it can.
+    assert!(kinds(&whole, "declaration").is_empty());
+    assert_eq!(kinds(&whole, "export").len(), 1);
     assert!(
         !whole["rows"]
             .as_array()

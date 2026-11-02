@@ -34,7 +34,11 @@ their declared type.
 A `declaration` row carries the function-section entry for one function: its
 index and the type index it declares. That mapping is static data in the
 function section, so an export can be resolved to its declared type without
-decoding a single function body. Section rows label a section with the same name
+decoding a single function body. Only a request whose `sections` names
+`function` emits these rows. They cost one row per defined function ahead of the
+export and code sections, so an unfiltered document leaves that budget to
+exports and bodies, where each decoded body's header row still identifies its
+type. Section rows label a section with the same name
 the `sections` filter uses, so a row label and the request that selects it
 cannot drift apart.
 

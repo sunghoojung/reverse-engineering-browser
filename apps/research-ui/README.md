@@ -100,7 +100,8 @@ An empty query lists the eight workspaces and four actions: open or close the
 Console, open the notebook, switch the theme, and collapse or expand the
 sidebar. Typing also searches retained Traffic requests (method, host and path,
 status, type and exact request identity), captured source files (name, URL,
-kind and size) and the VM findings currently listed. Matching is a
+kind and size) and the VM findings currently listed, and offers one **Search all
+sources** entry that runs the Sources text search for the query. Matching is a
 case-insensitive literal substring of a result's title or detail. A title that
 starts with the query ranks first, then a word inside the title, any title
 match, a detail that starts with it or has it at a word start, and any detail
@@ -115,8 +116,9 @@ sidebar entries, requests and files open through the exact-identity link (so
 Back returns and a changed or ambiguous record is refused), rows without an
 exact identity are selected the way a click on the row or Quick Open does, and
 a VM finding is selected through its own list row. Captured titles and details
-are inserted as text. The palette reads only what the workspaces already hold;
-it never fetches, captures or runs anything.
+are inserted as text. Typing in the palette reads only what the workspaces
+already hold and never fetches, captures or runs anything; only choosing **Search
+all sources** reads retained artifact text, through Sources.
 
 Other modules can add result groups through one registry:
 
@@ -699,6 +701,7 @@ policy and trace assertions; it is not evidence of native lifecycle behavior.
 | `pane_layout.js` | Shared pointer and keyboard pane resizing, responsive constraints, and local size preferences |
 | `traffic_view.js` | Native request ledger rows, ordering, paging and URL/method/status search, the General coverage view, and the saved-capture export document |
 | `captured_client.js`, `captured_export_formats.js` | Saved-capture identity, local export dialog, and the client-project/HAR/SDL generators shared with offline commands |
+| `source_search.js` | Search all files: the literal matcher on the Find index, the bounded and cancellable search, partial-result notes and the results panel; `app.js` supplies the artifact reader and the open path |
 | `source_syntax.js` | Source names, display formatting, the inert hex view for Wasm and guest bytecode artifacts, and bounded tokenization without DOM or application state |
 | `native_console.js`, `native_console_completion.js` | Disposable browser console controls and local built-in API completion |
 | `../origin-trace-backend/src/app.rs`, `evidence.rs` | Loopback HTTP routing and bounded evidence reads |
@@ -941,6 +944,42 @@ evicted previews have separate coverage labels; an incomplete negative is never
 reported as absence from the complete source. Loading/truncation notices are
 excluded. Pretty/Deob Find names the retained display representation, with
 transformation completeness separate from search coverage.
+
+**Search** beside **Captured** in the Sources navigator searches the text of
+every retained file at once, for the string constants, endpoint paths and magic
+numbers that are usually the first thread to pull. The query is a literal single
+line of at most 512 UTF-16 code units, case-insensitive unless **Match case** is
+on. No pattern syntax is offered, because captured scripts are adversarial and a
+regular expression could backtrack catastrophically on crafted input. Typing
+retires the running search at once and searches again after a short pause;
+Enter searches immediately. The command palette's **Search all sources** entry
+opens this view with its query and runs it; typing in the palette never reads
+artifact bytes.
+
+Each file is read once through `/api/artifacts/{artifact_id}/content` with the
+same 2 MiB limit, byte-size and SHA-256 checks as the Sources preview. A loaded
+preview is reused without a request, and other text is kept in a separate cache
+of at most 8 Mi UTF-16 code units, so the next query does not refetch it; files
+that leave the catalog leave that cache. One search reads at most 32 MiB and
+collects at most 100 matches per file and 1,000 overall. WebAssembly and guest
+bytecode are binary and are not searched. The status line counts files as they
+finish ("Searched 12 of 40 files"), and a note above the results names every
+file that was not searched completely: binary files, files that failed to load
+(with the reason), files over the 2 MiB size cap where only their first 2 MiB
+was searched, files that are not valid UTF-8 (a miss there is not proof of
+absence), files that stopped at the per-file match cap, and files left unsearched
+by the overall match cap or read budget. Nothing is dropped without a note.
+
+Results are grouped by file with its name, match count and URL. Each match shows
+`line:column` and its line with the match marked; captured text is inserted as
+text nodes. Arrow keys move through the matches (Arrow Down from the field enters
+them), and Enter or a click opens that file at the match: the same Sources
+selection as the tree, revealing the line and marking the match like Find. Opened
+from Sources, the previous view becomes a Back stop, so Back returns to the
+results with their scroll and focus. A file that changed or left the catalog
+after the search is refused rather than reopened. `node tools/check-source-search.mjs`
+(part of `make check`) exercises the matcher, caps, cancellation, partial-result
+notes, reader checks and this open-and-Back path in the shipped scripts.
 
 The editor mounts at most 1,000 lines. Previous/Next and explicit local Line /
 Column controls reach other retained locations. The target line retains at most

@@ -217,9 +217,19 @@
               <div class="source-side-tabs" role="tablist" aria-label="Source collections">
 
                 <button id="source-tab-captured" class="source-side-tab" type="button" role="tab" data-source-collection="captured" aria-selected="true" aria-controls="source-tree">Captured</button>
+                <button id="source-tab-search" class="source-side-tab" type="button" role="tab" aria-selected="false" aria-controls="source-search-all-panel" tabindex="-1">Search</button>
               </div>
               <div id="source-health" class="source-health" data-kind="warning" role="status" aria-live="polite" hidden></div>
               <div id="source-tree" class="source-tree" role="tree" aria-labelledby="source-tab-captured"></div>
+              <section id="source-search-all-panel" class="source-search-all" role="tabpanel" aria-labelledby="source-tab-search" hidden>
+                <div class="source-search-all-form" role="search">
+                  <input id="source-search-all-input" type="search" maxlength="512" autocomplete="off" spellcheck="false" placeholder="Search all files" aria-label="Search text in all retained files" aria-describedby="source-search-all-status" title="Literal text, single line; Enter searches now" />
+                  <label class="source-search-all-case"><input id="source-search-all-case" type="checkbox" /> Match case</label>
+                </div>
+                <p id="source-search-all-status" class="source-search-all-status" role="status" aria-live="polite">Literal text in every retained text file. Nothing is read until you search.</p>
+                <ul id="source-search-all-notes" class="source-search-all-notes" aria-label="Files not fully searched" hidden></ul>
+                <div id="source-search-all-results" class="source-search-all-results" aria-label="Matches by file"></div>
+              </section>
             </aside>
 
             <section class="sources-editor" aria-label="Source editor">
@@ -756,6 +766,7 @@
     <script src="evidence_comparison.js"></script>
     <script src="source_syntax.js"></script>
     <script src="source_facts.js"></script>
+    <script src="source_search.js"></script>
     <script src="traffic_view.js"></script>
     <script src="captured_client.js"></script>
     <script src="captured_export_formats.js"></script>

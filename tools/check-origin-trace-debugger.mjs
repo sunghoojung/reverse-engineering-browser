@@ -1762,7 +1762,7 @@ async function sourceHistoryFixture(kind = 'artifact') {
     state:{artifacts:[artifact],requests:[],decoderSteps:[],selectedArtifactId:'7',
       sourceCollection:'captured',sourceFactsOpen:false,openArtifactIds:['7']},
     sourceFactsPanel:{original:()=>undefined,sync:noop,cancel:noop},float32Panel:{cancel:noop},evidenceWorkspace:{setVisible:noop,sync:noop},
-    renderDebugger:noop,renderSourceTree:noop,renderSourceTabs:noop,renderSourceFacts:noop,renderDeobfuscationReport:noop,
+    renderDebugger:noop,renderSourceTree:noop,renderSourcePane:noop,renderSourceTabs:noop,renderSourceFacts:noop,renderDeobfuscationReport:noop,
     renderTools:noop,refreshDecoderEngine:noop,formatByteSize:String,applySourceSearch:noop,
     appendSourceSyntax(node,tokens){node.textContent=tokens.map(token=>token.text).join('');},
     fetch:async(url,options)=>{reads.push({url,signal:options.signal});if(url.startsWith('/api/artifacts?'))return Response.json({count:1,artifacts:[Object.fromEntries(sourceFactsUI.sourceFactsFields.filter(key=>Object.hasOwn(artifact,key)).map(key=>[key,artifact[key]]))]});return held.promise;},

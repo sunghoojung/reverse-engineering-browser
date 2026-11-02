@@ -7,13 +7,20 @@ import {join} from 'node:path';
 import {fileURLToPath, pathToFileURL} from 'node:url';
 import {runInNewContext} from 'node:vm';
 
-// Just enough DOM for the controller: a tree with text, attributes, focus,
-// bubbling events and modal dialogs. Text is never parsed as markup.
-function paletteDocument() {
+// Just enough DOM for the palette and Search all files: a tree with text,
+// attributes, focus, bubbling events and modal dialogs. Text is never parsed
+// as markup.
+export function fakeDocument() {
   const document = {listeners: {}, activeElement: null};
+  class FakeText {
+    constructor(text) { this.nodeType = 3; this._text = String(text); this.parentNode = null; this.children = []; this.listeners = {}; }
+    get textContent() { return this._text; }
+    get all() { return [this]; }
+    matches() { return false; }
+  }
   class FakeNode {
     constructor(tag) {
-      this.tagName = tag.toUpperCase(); this.children = []; this.parentNode = null; this.attributes = {}; this.listeners = {};
+      this.nodeType = 1; this.tagName = tag.toUpperCase(); this.children = []; this.parentNode = null; this.attributes = {}; this.listeners = {};
       this.dataset = {}; this._text = ''; this.id = ''; this.className = ''; this.value = ''; this.open = false; this.modal = false;
     }
     get isConnected() { for (let node = this; node; node = node.parentNode) if (node === document.body) return true; return false; }
@@ -39,6 +46,10 @@ function paletteDocument() {
         part === '[contenteditable="true"]' && this.attributes.contenteditable === 'true');
     }
     closest(selector) { for (let node = this; node; node = node.parentNode) if (node.matches(selector)) return node; return null; }
+    querySelectorAll(selector) {
+      assert.match(selector, /^\.[a-z-]+$/, 'The fake DOM resolves single class selectors only');
+      return this.all.slice(1).filter(node => node.className?.split?.(' ').includes(selector.slice(1)));
+    }
     showModal() { this.open = true; this.modal = true; }
     close() { this.open = false; this.modal = false; }
     get all() { return [this, ...this.children.flatMap(child => child.all)]; }
@@ -47,6 +58,7 @@ function paletteDocument() {
   Object.assign(document, {
     body: new FakeNode('body'),
     createElement: tag => new FakeNode(tag),
+    createTextNode: text => new FakeText(text),
     addEventListener(type, listener) { (this.listeners[type] ??= []).push(listener); },
     getElementById: id => document.body.all.find(node => node.id === id) ?? null,
     querySelector: selector => selector === 'dialog:modal' ? document.body.all.find(node => node.tagName === 'DIALOG' && node.modal) ?? null : null
@@ -63,7 +75,7 @@ function paletteDocument() {
 }
 
 function loadPalette(source) {
-  const {document, create, fire} = paletteDocument();
+  const {document, create, fire} = fakeDocument();
   const opener = create('button', 'opener'), field = create('input', 'field'), editor = create('div', 'editor');
   editor.setAttribute('contenteditable', 'true');
   const otherDialog = create('dialog', 'other-dialog');
@@ -283,7 +295,9 @@ async function checkPaletteProviders(root) {
       {artifact_id: '301', session_id: '0', sha256: 'b'.repeat(64), byte_size: 8, kind: 'wasm', url: '', mime_type: 'application/wasm'}],
     sourceDisplayName: source => `file ${source.artifact_id}`,
     sourceKindLabel: kind => ({javascript: ['JS', 'JavaScript'], wasm: ['W', 'WebAssembly']})[kind],
-    formatByteSize: bytes => `${bytes} B`
+    formatByteSize: bytes => `${bytes} B`,
+    sourceHexArtifact: source => source.kind === 'wasm',
+    openSourceSearch: query => calls.push(['openSourceSearch', query])
   };
   runInNewContext(`${traffic}\n${requestRoot}\n${navigation}\n${block}\n;investigationNavigation = {record: () => calls.push(['record'])};`, context);
   context.calls = calls;
@@ -293,7 +307,8 @@ async function checkPaletteProviders(root) {
   assert.equal(mounted.trigger, controls['#command-palette-open'], 'The sidebar Search button is the trigger');
   const provider = id => mounted.providers.find(value => value.id === id);
   assert.deepEqual(plain(mounted.providers.map(value => [value.id, value.group, value.empty === true])),
-    [['workspaces', 'Workspaces', true], ['actions', 'Actions', true], ['requests', 'Requests', false], ['files', 'Files', false], ['vm-findings', 'VM findings', false]]);
+    [['workspaces', 'Workspaces', true], ['actions', 'Actions', true], ['requests', 'Requests', false], ['files', 'Files', false], ['vm-findings', 'VM findings', false],
+      ['source-text', 'Search in sources', false]]);
 
   // Workspaces and actions click their real controls, like Cmd/Ctrl + digit.
   const spaces = provider('workspaces').search('');
@@ -356,7 +371,14 @@ async function checkPaletteProviders(root) {
   assert.deepEqual(calls.at(-1), ['row focus', '7'], 'The chosen finding keeps focus');
   calls.length = 0; found[1].run();
   assert.deepEqual(plain(calls.map(call => call.slice(0, 2))), [['showScreen', 'vm'], ['click', 'vm-show-findings'], ['notice', 'stale']], 'A finding that left the list is refused');
-  console.log('PASS command palette providers: workspaces and actions click their own controls, exact request/artifact identities use the linked opener, identity-less rows reuse row and Quick Open selection, VM findings select their own row, stale and ambiguous items refused (production app.js block, not rendered QA)');
+  // Searching every source is one entry; typing never reads artifact bytes
+  // (this context has no fetch at all).
+  const sourceText = provider('source-text').search('payload');
+  assert.deepEqual(plain(sourceText.map(value => [value.title, value.detail])), [['Search all sources for “payload”', 'Literal text in 1 retained text file · Sources']]);
+  calls.length = 0; sourceText[0].run(); assert.deepEqual(plain(calls), [['openSourceSearch', 'payload']]);
+  const sources = context.capturedSources; context.capturedSources = () => [];
+  assert.equal(provider('source-text').search('payload').length, 0, 'Nothing to search, no entry'); context.capturedSources = sources;
+  console.log('PASS command palette providers: workspaces and actions click their own controls, exact request/artifact identities use the linked opener, identity-less rows reuse row and Quick Open selection, VM findings select their own row, stale and ambiguous items refused, Search all sources entry without reads (production app.js block, not rendered QA)');
 }
 
 export async function checkCommandPalette(root) {

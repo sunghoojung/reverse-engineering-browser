@@ -61,13 +61,16 @@
         const end = newline < 0 ? index.length : Math.min(newline, index.length);
         return {start, end, length: end - start};
       }
-      function sourceDocumentMatches(index, query, limit = 1000, acceptLine = null) {
+      function sourceDocumentMatches(index, query, limit = 1000, acceptLine = null, matchCase = false) {
         const matches = [];
         if (!query) return {matches, truncated: false, error: ''};
         if (query.length > 512) return {matches, truncated: false, error: 'Find accepts at most 512 UTF-16 code units.'};
         if (/[\r\n\u2028\u2029]/u.test(query)) return {matches, truncated: false, error: 'Find uses a single-line literal; line separators are not supported.'};
         const escaped = query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-        const pattern = new RegExp(escaped, 'giu');
+        // Every syntax character is escaped, so the pattern is a literal with no
+        // quantifier to backtrack; Unicode case folding is applied unless the
+        // caller asks to match case.
+        const pattern = new RegExp(escaped, matchCase ? 'gu' : 'giu');
         // Accepted representation bounds normally make this a shared string;
         // an oversized defensive input is explicitly a searched prefix.
         const text = index.complete ? index.text : index.text.slice(0, index.length);

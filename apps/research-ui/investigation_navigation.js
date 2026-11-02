@@ -68,7 +68,7 @@ function investigationSelector(node, root = document, stableOnly = false) {
   if (stableOnly) {
     // Dynamic rows may reorder while a local read is pending. Never restore
     // focus by ordinal position into a different piece of evidence.
-    for (const key of ['requestId','traceKey','artifactId','scriptId','evidenceKey','localLine']) {
+    for (const key of ['requestId','traceKey','artifactId','scriptId','evidenceKey','localLine','sourceMatch']) {
       const value = node.dataset?.[key];
       if (!value || value.length > 256 || key === 'traceKey' && value.startsWith('gap:')) continue;
       const attribute = key.replace(/[A-Z]/g, letter => `-${letter.toLowerCase()}`);
@@ -98,7 +98,7 @@ function investigationSnapshot() {
   const requestIdentity = investigationRequestIdentity(request);
   const source = selectedSource();
   const scroll = [];
-  const panes = '.detail-pane, .sources-editor, .sources-navigator, .debug-panes, .trace-inspector, .trace-list-pane, .decoder-column, .tools-shell, #request-rows, #source-code-wrap, #source-tree, #backtrace-steps, #decoder-input, #decoder-output, #evidence-rows, #evidence-inspector, #evidence-package-mode';
+  const panes = '.detail-pane, .sources-editor, .sources-navigator, .debug-panes, .trace-inspector, .trace-list-pane, .decoder-column, .tools-shell, #request-rows, #source-code-wrap, #source-tree, #source-search-all-results, #backtrace-steps, #decoder-input, #decoder-output, #evidence-rows, #evidence-inspector, #evidence-package-mode';
   for (const node of new Set([root, ...root.querySelectorAll(panes)])) {
     if (scroll.length >= 32) break;
     const selector = investigationSelector(node, root);
@@ -111,7 +111,7 @@ function investigationSnapshot() {
     trafficDetailOpen: Boolean(state.trafficDetailOpen), inspectorTab: state.inspectorTab, fieldTab: state.fieldTab, fieldPath: String(state.selectedField?.path ?? '').slice(0,1024),
     sourceRange: investigationSame(investigationRange?.identity, investigationArtifactIdentity(source)) ? {start:investigationRange.start,end:investigationRange.end} : null,
     traceRow: state.selectedTraceRow, traceGap: investigationSelectedGap(), decoderStep: state.decoderSelectedStepId,
-    sourceFormatted: state.sourceFormatted, sourceDeobfuscated: state.sourceDeobfuscated, sourceWasm: state.sourceWasm,
+    sourceFormatted: state.sourceFormatted, sourceDeobfuscated: state.sourceDeobfuscated, sourceWasm: state.sourceWasm, sourcePane: state.sourcePane,
     sourceWindow: screen === 'sources' && state.sourceEditorView?.window ? {line:state.sourceEditorView.window.line, column:state.sourceEditorView.window.column,
       version:state.sourceEditorView.view.sourceVersion ?? null, assumption:Boolean(state.deobfuscationAssumeIntrinsics),
       kind:[Boolean(state.sourceEditorView.view.derived),Boolean(state.sourceEditorView.view.formatted),Boolean(state.sourceEditorView.view.wasmRows)].join(':'), length:state.sourceEditorView.content.length} : null,
@@ -159,6 +159,7 @@ function restoreInvestigation(entry) {
     if (entry.screen === 'sources') {
       investigationPassiveSource = true;
       state.sourceFormatted = entry.sourceFormatted; state.sourceDeobfuscated = entry.sourceDeobfuscated; state.sourceWasm = entry.sourceWasm;
+      if (['files', 'search'].includes(entry.sourcePane)) state.sourcePane = entry.sourcePane;
     }
     if (entry.screen === 'tools' && state.decoderSteps.some(step => step.id === entry.decoderStep)) state.decoderSelectedStepId = entry.decoderStep;
     showScreen(entry.screen, document.querySelector('#investigation-back'));

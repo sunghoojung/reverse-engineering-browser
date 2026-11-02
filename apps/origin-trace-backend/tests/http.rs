@@ -5769,6 +5769,8 @@ async fn source_facts_region_narrows_analysis_without_weakening_coverage() {
         "&region_start_byte=00&region_end_byte=4",
         "&region_start_byte=4&region_end_byte=0",
         "&region_start_byte=0&region_end_byte=99",
+        // A canonical 64-bit offset past the artifact is a range error too.
+        "&region_start_byte=0&region_end_byte=4294967296",
         // Inside the two-byte é: not an original byte boundary.
         "&region_start_byte=10&region_end_byte=11",
         "&region_start_byte=0&region_end_byte=4&region_end_byte=5",

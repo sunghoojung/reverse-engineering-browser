@@ -419,13 +419,18 @@ impl App {
                 q.number("session_id", None, 64, false)?;
                 q.number("artifact_id", None, 64, false)?;
                 // A region narrows analysis of the same verified bytes. Half a
-                // range is a caller mistake, not a default to invent.
+                // range is a caller mistake, not a default to invent. Offsets
+                // admit the contract's full unsigned 64-bit form; one past the
+                // artifact is refused by the byte-range check below.
+                let offset = |key| {
+                    q.number(key, None, 64, false)
+                        .map(|value| usize::try_from(value).unwrap_or(usize::MAX))
+                };
                 let region = match (q.one("region_start_byte")?, q.one("region_end_byte")?) {
                     (None, None) => None,
-                    (Some(_), Some(_)) => Some((
-                        q.number("region_start_byte", None, 32, false)? as usize,
-                        q.number("region_end_byte", None, 32, false)? as usize,
-                    )),
+                    (Some(_), Some(_)) => {
+                        Some((offset("region_start_byte")?, offset("region_end_byte")?))
+                    }
                     _ => {
                         return Err(Error::bad(
                             "A source facts region requires region_start_byte and region_end_byte",

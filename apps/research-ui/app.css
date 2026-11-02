@@ -4597,3 +4597,12 @@ details.decoder-card > header p { margin-top: 0; }
 .notebook-list { max-height: 220px; }
 .notebook-editor { padding: 14px 0 0; border-left: 0; border-top: 1px solid var(--line-soft); }
 .investigation-notebook :is(#notebook-delete-book, #notebook-delete-pin):enabled { color: var(--red); }
+
+/* Traffic keeps the selected request's actions on one line beside its URL.
+   The URL still clamps to two lines, so the actions never wrap below it. */
+#screen-traffic .selection-strip { flex-wrap: nowrap; }
+#screen-traffic .selection-url { flex: 1 1 0; }
+/* Resource types read as one segmented control. Every type stays visible; the
+   set wraps only when the pane is narrower than all eleven. */
+#screen-traffic .request-filters .type-filters { width: fit-content; max-width: 100%; gap: 1px; padding: 2px; border: 1px solid var(--line-soft); border-radius: var(--control-radius); background: var(--bg); }
+#screen-traffic .request-filters .type-filter { height: 22px; padding: 0 4px; border: 1px solid transparent; }

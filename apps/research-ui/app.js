@@ -6552,11 +6552,7 @@ const capturedExportPanel = installCapturedExportDialog({
         sourceFactsPanel.sync(source);
         syncInvestigationRange(source);
         const view = source?.content !== undefined ? sourceDisplayView(source) : null;
-        document.querySelectorAll('[data-source-collection]').forEach(tab => {
-          const selected = tab.dataset.sourceCollection === state.sourceCollection;
-          tab.setAttribute('aria-selected', String(selected));
-          tab.tabIndex = selected ? 0 : -1;
-        });
+        renderSourcePane();
         elements.sourceTree.setAttribute('aria-labelledby', `source-tab-${state.sourceCollection}`);
         renderSourceHealth();
         renderSourceTree();
@@ -6570,7 +6566,27 @@ const capturedExportPanel = installCapturedExportDialog({
         renderSourceContent(source, view);
         if (!investigationPassiveSource && state.sourceDeobfuscated && source?.kind === 'javascript' && !document.querySelector('#screen-sources').hidden) loadDeobfuscation(source);
         renderDeobfuscationReport(source);
+        const reveal = state.sourceReveal;
+        if (reveal && source?.content !== undefined && reveal.identity === sourceIdentity(source)) {
+          state.sourceReveal = null;
+          revealOriginalLine(source, reveal.line, reveal.column);
+          if (reveal.length && markSourceMatch(reveal.line, reveal.column, reveal.length)) {
+            elements.sourcePosition.textContent = `Line ${reveal.line + 1}, Column ${reveal.column + 1} · match from Search all files`;
+          }
+        }
         resumeInvestigationReturn();
+      }
+
+      // The navigator shows the file tree or Search all files; one tab each.
+      function renderSourcePane() {
+        const search = state.sourcePane === 'search';
+        elements.sourceTree.hidden = search;
+        document.querySelector('#source-search-all-panel').hidden = !search;
+        document.querySelectorAll('.source-side-tab').forEach(tab => {
+          const selected = search ? tab.id === 'source-tab-search' : tab.dataset.sourceCollection === state.sourceCollection;
+          tab.setAttribute('aria-selected', String(selected));
+          tab.tabIndex = selected ? 0 : -1;
+        });
       }
 
       function syncSourceDisplayControls(source, view) {
@@ -6636,6 +6652,20 @@ const capturedExportPanel = installCapturedExportDialog({
         } else {
           elements.sourcePosition.textContent = `Original line ${line + 1} is outside the displayed preview. Facts can read verified original-byte ranges.`;
         }
+      }
+
+      // Marks a match on its displayed original line as the current match, the
+      // same highlight Find and Facts ranges use. Columns outside the displayed
+      // excerpt are not marked.
+      function markSourceMatch(line, column, length) {
+        const row = elements.sourceCode.querySelector(`[data-line="${line + 1}"]`);
+        const text = row?.querySelector('.source-text');
+        const displayColumn = column - Number(row?.dataset.columnStart ?? 0);
+        if (!text || displayColumn < 0 || displayColumn >= text.textContent.length) return false;
+        const range = sourceOccurrenceRange(text, {column: displayColumn, length: Math.min(length, text.textContent.length - displayColumn)});
+        if (!range) return false;
+        if (globalThis.Highlight && globalThis.CSS?.highlights) CSS.highlights.set('source-search-match', new Highlight(range));
+        return true;
       }
 
       function revealSourceFactRange(source, range, position) {
@@ -7234,7 +7264,7 @@ const capturedExportPanel = installCapturedExportDialog({
           identity.bytes >= 0 && identity.bytes === source?.byte_size;
       }
 
-      function selectArtifact(artifactId, line = null, {identity: expectedIdentity = null, passive = false} = {}) {
+      function selectArtifact(artifactId, line = null, {identity: expectedIdentity = null, passive = false, column = 0, length = 0} = {}) {
         const matches = state.artifacts.filter(candidate => candidate.artifact_id === artifactId);
         if (matches.length !== 1 || (expectedIdentity && !sourceArtifactIdentityMatches(matches[0], expectedIdentity))) {
           state.sourceNoticeKind = 'warning';
@@ -7254,13 +7284,11 @@ const capturedExportPanel = installCapturedExportDialog({
         state.sourceFormatted = false;
         state.sourceWasm = false;
         if (!state.openArtifactIds.includes(artifactId)) state.openArtifactIds.push(artifactId);
+        // A requested location is revealed by renderSources once these bytes
+        // display, whether they are already loaded, loading or still to fetch.
+        state.sourceReveal = line === null ? null : {identity, line, column, length};
         renderSources();
-        loadArtifactContent(artifact).then(() => {
-          if (line !== null && state.sourceCollection === 'captured' && state.selectedArtifactId === artifactId && sourceIdentity(selectedSource()) === identity) {
-            const source = selectedSource();
-            if (source?.content !== undefined) revealOriginalLine(source, line, 0);
-          }
-        });
+        loadArtifactContent(artifact);
         return true;
       }
 
@@ -7863,6 +7891,7 @@ const capturedExportPanel = installCapturedExportDialog({
         applySourceSearch(false, event.shiftKey ? -1 : 1);
       });
       document.querySelectorAll('[data-source-collection]').forEach(button => button.addEventListener('click', () => {
+        state.sourcePane = 'files';
         state.sourceCollection = button.dataset.sourceCollection;
         const artifact = state.artifacts.find(candidate => candidate.artifact_id === state.selectedArtifactId) ?? state.artifacts[0];
         if (artifact) selectArtifact(artifact.artifact_id);
@@ -7895,6 +7924,94 @@ const capturedExportPanel = installCapturedExportDialog({
         state.sourceFormatted = !state.sourceFormatted;
         renderSources();
       });
+      // Search all files. Reads use the artifact content route with the Sources
+      // preview's 2 MiB limit and checks. A loaded preview is reused as is;
+      // other text stays in a small search-owned cache, so typing does not
+      // refetch every file and neither cache grows the other's bound.
+      const SOURCE_SEARCH_CACHE_UNITS = 8 * 1024 * 1024;
+      const sourceSearchCache = new Map();
+      function sourceSearchFiles() {
+        const sources = capturedSources(), retained = new Set(sources.map(sourceIdentity));
+        for (const key of sourceSearchCache.keys()) if (!retained.has(key)) sourceSearchCache.delete(key);
+        return sources.map(source => ({identity: sourceIdentity(source), artifactId: source.artifact_id, name: sourceDisplayName(source),
+          url: source.url ?? '', icon: sourceIcon(source), byteSize: source.byte_size, binary: sourceHexArtifact(source)}));
+      }
+      async function readSourceSearchText(entry, signal, limit) {
+        const matches = state.artifacts.filter(artifact => artifact.artifact_id === entry.artifactId);
+        const artifact = matches.length === 1 && sourceIdentity(matches[0]) === entry.identity ? matches[0] : null;
+        if (!artifact) throw new Error('changed or left the retained catalog');
+        if (artifact.content !== undefined && !artifact.loading) {
+          return {text: artifact.content.slice(0, artifact.sourceTextLength ?? artifact.content.length), bytes: Math.min(artifact.byte_size, limit),
+            partial: artifact.byte_size > limit || Boolean(artifact.contentTruncated), lossy: Boolean(artifact.contentLossy)};
+        }
+        const cached = sourceSearchCache.get(entry.identity);
+        if (cached) {sourceSearchCache.delete(entry.identity); sourceSearchCache.set(entry.identity, cached); return cached;}
+        const controller = new AbortController(), abort = () => controller.abort();
+        signal.addEventListener('abort', abort, {once: true});
+        let timedOut = false;
+        const timeout = setTimeout(() => {timedOut = true; abort();}, 10000);
+        try {
+          const response = await fetch(`/api/artifacts/${encodeURIComponent(artifact.artifact_id)}/content?limit=${limit}`, {cache: 'no-store', signal: controller.signal});
+          if (!response.ok) {response.body?.cancel().catch(() => {}); throw new Error(`artifact store returned ${response.status}`);}
+          const buffer = await sourceFactsReadBytes(response, limit, controller.signal);
+          const total = response.headers.get('X-Artifact-Total-Bytes');
+          if (buffer.length !== Math.min(artifact.byte_size, limit) || total !== null && Number(total) !== artifact.byte_size) throw new Error('its retained byte size changed');
+          if (artifact.byte_size <= limit && globalThis.crypto?.subtle) {
+            const hash = Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', buffer)), byte => byte.toString(16).padStart(2, '0')).join('');
+            if (hash !== artifact.sha256) throw new Error('its bytes do not match the retained SHA-256');
+          }
+          let lossy = false;
+          try {new TextDecoder('utf-8', {fatal: true}).decode(buffer);} catch {lossy = true;}
+          const result = {text: new TextDecoder('utf-8', {fatal: false, ignoreBOM: true}).decode(buffer), bytes: buffer.length, partial: artifact.byte_size > buffer.length, lossy};
+          if (signal.aborted) return result;
+          sourceSearchCache.set(entry.identity, result);
+          let units = 0;
+          for (const value of sourceSearchCache.values()) units += value.text.length;
+          for (const [key, value] of sourceSearchCache) {
+            if (units <= SOURCE_SEARCH_CACHE_UNITS) break;
+            units -= value.text.length; sourceSearchCache.delete(key);
+          }
+          return result;
+        } catch (error) {
+          throw new Error(timedOut ? 'timed out after 10 seconds' : String(error?.message ?? error).replace(/\.$/, ''));
+        } finally {
+          clearTimeout(timeout);
+          signal.removeEventListener('abort', abort);
+        }
+      }
+      // A result opens through the Sources selection with its location, so
+      // Back returns to these results with their scroll and focus.
+      function openSourceSearchMatch(file, match) {
+        const matches = state.artifacts.filter(artifact => artifact.artifact_id === file.artifactId);
+        if (matches.length !== 1 || sourceIdentity(matches[0]) !== file.identity) {
+          state.sourceNoticeKind = 'warning';
+          state.sourceNotice = 'This file changed or left the retained catalog after the search. Search again before opening it.';
+          renderSourceHealth();
+          return false;
+        }
+        if (investigationScreen() === 'sources') investigationNavigation?.record();
+        if (selectArtifact(file.artifactId, match.line, {passive: true, column: match.column, length: match.length}) === false) return false;
+        if (investigationScreen() !== 'sources') showScreen('sources');
+        return true;
+      }
+      const sourceSearchPanel = createSourceSearchPanel({
+        input: document.querySelector('#source-search-all-input'), matchCase: document.querySelector('#source-search-all-case'),
+        status: document.querySelector('#source-search-all-status'), notes: document.querySelector('#source-search-all-notes'),
+        results: document.querySelector('#source-search-all-results'),
+        list: sourceSearchFiles, read: readSourceSearchText, open: openSourceSearchMatch
+      });
+      function openSourceSearch(query) {
+        showScreen('sources');
+        state.sourcePane = 'search';
+        renderSourcePane();
+        return sourceSearchPanel.search(query);
+      }
+      document.querySelector('#source-tab-search').addEventListener('click', () => {
+        state.sourcePane = 'search';
+        renderSourcePane();
+        document.querySelector('#source-search-all-input').focus();
+      });
+
       document.querySelector('#source-quick-open').addEventListener('click', openQuickOpen);
       elements.quickOpenInput.addEventListener('input', renderQuickOpen);
       elements.quickOpenInput.addEventListener('keydown', event => {
@@ -8291,8 +8408,15 @@ const capturedExportPanel = installCapturedExportDialog({
             detail: `${finding.analysis ? 'Code analysis' : finding.kind} · finding ${id} · investigation ${finding.investigationId} · ${finding.hostRuntime} · ${finding.confidence}`,
             run: () => openPaletteFinding(id)};
         })};
+        // One entry that runs Search all files only when chosen; typing in
+        // the palette never reads artifact bytes.
+        const sourceText = {id: 'source-text', group: 'Search in sources', search: query => {
+          const count = capturedSources().filter(source => !sourceHexArtifact(source)).length;
+          return count ? [{title: `Search all sources for “${query}”`, detail: `Literal text in ${count} retained text ${count === 1 ? 'file' : 'files'} · Sources`,
+            run: () => openSourceSearch(query)}] : [];
+        }};
         return RebCommandPalette.mount({trigger: document.querySelector('#command-palette-open'),
-          providers: [workspaces, actions, requests, files, findings]});
+          providers: [workspaces, actions, requests, files, findings, sourceText]});
       })();
 
       renderRequests();

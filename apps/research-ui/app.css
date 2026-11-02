@@ -4671,3 +4671,36 @@ details.decoder-card > header p { margin-top: 0; }
   .command-palette-option { flex-wrap: wrap; row-gap: 0; }
   .command-palette-detail { flex-basis: 100%; text-align: left; }
 }
+
+/* Search all files sits in the Sources navigator beside the file tree. Each
+   match is one line: its location, then the literal in context with the match
+   marked. The notes above the results name every file that was not fully
+   searched, so a short result list is never mistaken for a complete one. */
+#screen-sources .source-search-all { min-width: 0; min-height: 0; display: flex; flex-direction: column; }
+.source-search-all-form { flex: none; display: flex; flex-direction: column; gap: 6px; padding: 8px 8px 6px; }
+.source-search-all-form input[type="search"] { width: 100%; min-width: 0; height: 28px; padding: 0 8px; border: 1px solid var(--line); border-radius: var(--control-radius); background: var(--bg); color: var(--text); font: 12px var(--mono); }
+.source-search-all-case { display: inline-flex; align-items: center; gap: 6px; width: fit-content; color: var(--muted); font: 11px/16px var(--sans); }
+.source-search-all-status { flex: none; margin: 0; padding: 0 8px 6px; color: var(--muted); font: 11px/16px var(--sans); }
+.source-search-all-notes { flex: none; display: flex; flex-direction: column; gap: 4px; max-height: 30%; margin: 0 8px 6px; padding: 6px 8px 6px 22px; overflow: auto; border: 1px solid var(--line-soft); border-radius: var(--control-radius); background: var(--panel); color: var(--muted); font: 11px/15px var(--sans); }
+.source-search-all-note { overflow-wrap: anywhere; }
+.source-search-all-note[data-note="failed"], .source-search-all-note[data-note="byte-limit"], .source-search-all-note[data-note="match-limit"] { color: var(--amber); }
+.source-search-all-results { flex: 1 1 auto; min-height: 0; padding: 0 0 24px; overflow: auto; }
+.source-search-all-file + .source-search-all-file { margin-top: 4px; }
+.source-search-all-heading { display: grid; grid-template-columns: 16px minmax(0, 1fr) auto; align-items: center; gap: 8px; min-height: 24px; padding: 0 8px; color: var(--text); font: 500 11px/16px var(--sans); }
+.source-search-all-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.source-search-all-count { min-width: 18px; padding: 0 5px; border-radius: 8px; background: var(--panel-3); color: var(--muted); font: 10px/14px var(--mono); text-align: center; }
+.source-search-all-url { padding: 0 8px 2px 32px; overflow: hidden; color: var(--faint); font: 10px/14px var(--mono); text-overflow: ellipsis; white-space: nowrap; }
+.source-search-all-match { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: baseline; gap: 8px; width: 100%; min-height: 22px; padding: 2px 8px 2px 32px; border: 0; background: transparent; color: var(--muted); text-align: left; font: 11px/16px var(--mono); }
+.source-search-all-match:hover { background: var(--panel-3); color: var(--text); }
+.source-search-all-match:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.source-search-all-location { color: var(--faint); font-variant-numeric: tabular-nums; }
+.source-search-all-snippet { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: pre; }
+.source-search-all-snippet mark { border-radius: 2px; background: color-mix(in srgb, var(--amber) 32%, transparent); color: var(--text); }
+.source-search-all-empty { margin: 8px; color: var(--muted); font: 11px/16px var(--sans); }
+/* In a narrow navigator a match keeps its context but wraps to at most two
+   lines, so twelve characters before it never push the match itself out. */
+#screen-sources .sources-navigator { container-type: inline-size; }
+@container (max-width: 280px) {
+  .source-search-all-url, .source-search-all-match { padding-left: 12px; }
+  .source-search-all-snippet { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; white-space: pre-wrap; overflow-wrap: anywhere; }
+}

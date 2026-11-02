@@ -87,6 +87,8 @@
         artifactReceiverConnected: false,
         artifactReceiverError: null,
         sourceCollection: 'captured',
+        sourcePane: 'files',
+        sourceReveal: null,
         sourceSidebarOpen: null,
         sourceNotice: null,
         sourceNoticeKind: 'warning',

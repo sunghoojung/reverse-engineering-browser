@@ -17864,6 +17864,7 @@
               "max_frontiers",
               "preflight_depth",
               "preflight_nodes",
+              "preflight_parse_heap_bytes",
               "max_binding_candidates"
             ],
             "properties": {
@@ -17884,6 +17885,9 @@
               },
               "preflight_nodes": {
                 "const": 2097152
+              },
+              "preflight_parse_heap_bytes": {
+                "const": 402653184
               },
               "max_binding_candidates": {
                 "const": 64
@@ -18048,6 +18052,7 @@
               "max_frontiers",
               "preflight_depth",
               "preflight_nodes",
+              "preflight_parse_heap_bytes",
               "max_binding_candidates"
             ],
             "properties": {
@@ -18068,6 +18073,9 @@
               },
               "preflight_nodes": {
                 "const": 2097152
+              },
+              "preflight_parse_heap_bytes": {
+                "const": 402653184
               },
               "max_binding_candidates": {
                 "const": 64

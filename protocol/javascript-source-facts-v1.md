@@ -96,8 +96,9 @@ explicit frontiers rather than invented effects.
 
 `limits` reports `max_source_bytes: 4194304`, `max_ast_nodes: 262144`,
 `max_facts: 16384`, `max_frontiers: 256`, `max_binding_candidates: 64`,
-`preflight_depth: 128` and
-`preflight_nodes: 2097152`. The fact limit is the total across all five arrays.
+`preflight_depth: 128`, `preflight_nodes: 2097152` and
+`preflight_parse_heap_bytes: 402653184`. The fact limit is the total across all
+five arrays.
 The node budget counts only the nodes inside the analyzed range, and it stays
 fixed rather than caller-supplied so two reports of the same bytes cannot
 disagree about what was admitted. It sits below the preflight node bound that
@@ -117,10 +118,28 @@ bytes alone: the traversal behind this bound is limited by node count and tree
 depth, never by elapsed time, so the same artifact is admitted or refused
 identically on a fast and a slow machine. Only the tree-sitter parse keeps a
 wall-clock backstop, and it is sized so that it cannot refuse a source this
-node bound admits. A refusal is reported as `coverage.status: "unavailable"`
-with the preflight diagnostic and no facts; being admitted says nothing about
-coverage, and a bundle large enough to need admission headroom normally still
-reaches a whole-program budget and needs a region.
+node bound admits.
+
+`preflight_parse_heap_bytes` is the one admission bound enforced *during* the
+parse rather than after it. The depth and node bounds read a finished tree, so
+on their own a source they refuse is built and paid for first: a 4 MiB source of
+nested sequence expressions reached 2,011.7 MiB of transient tree and was then
+refused for its depth. This limit caps the bytes tree-sitter asks its allocator
+for and stops the parse from inside the progress callback when the cap is
+crossed, which held the same source to 441.2 MiB. It is 192 bytes of parser heap
+per node `preflight_nodes` admits, measured against a densest admissible tree
+that needs 136 and real minifier output that needs 118. Like the node bound it
+is a function of the supplied bytes: allocation sizes and their order follow the
+grammar and the source, so an optimized and an unoptimized worker report the
+same verdict, the same diagnostic and the same peak. What it narrows is stated
+rather than hidden: shapes that hold several parser stack versions at once cost
+about 325 bytes of heap per node, so one larger than roughly 1.2 MB is now
+refused here instead of admitted by node count, and a deeply nested source above
+roughly 690 KB reports this limit rather than `preflight_depth`. A refusal is
+reported as `coverage.status: "unavailable"` with the preflight diagnostic and no
+facts; being admitted says nothing about coverage, and a bundle large enough to
+need admission headroom normally still reaches a whole-program budget and needs
+a region.
 
 ## Coverage and failures
 

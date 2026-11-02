@@ -5278,7 +5278,7 @@ fn source_facts_document(source: &str) -> Value {
         "bindings":[], "callables":[],
         "regions":[{"id":0,"parent_id":null,"callable_id":null,"range":{"start":0,"end":source.len()},"kind":"program","entry_order":0}],
         "operations":[],
-        "limits":{"max_source_bytes":4194304,"max_ast_nodes":262144,"max_facts":16384,"max_frontiers":256,"max_binding_candidates":64,"preflight_depth":128,"preflight_nodes":2097152}
+        "limits":{"max_source_bytes":4194304,"max_ast_nodes":262144,"max_facts":16384,"max_frontiers":256,"max_binding_candidates":64,"preflight_depth":128,"preflight_nodes":2097152,"preflight_parse_heap_bytes":402653184}
     })
 }
 

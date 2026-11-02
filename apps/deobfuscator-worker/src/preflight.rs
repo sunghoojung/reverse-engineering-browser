@@ -2,10 +2,16 @@
 //! This is a conservative admission check, not a second transformation engine.
 //!
 //! Admission is a function of the supplied bytes. Every bound below is either a
-//! byte count, a tree depth or a node count, so the same source is admitted or
-//! refused identically on a slow machine and on an unoptimized build. The one
-//! wall clock left in this module cannot decide the outcome for any source the
-//! node bound admits; see `PARSE_BUDGET`.
+//! byte count, a tree depth, a node count or a count of the bytes tree-sitter
+//! asked its allocator for, so the same source is admitted or refused
+//! identically on a slow machine and on an unoptimized build. The one wall
+//! clock left in this module cannot decide the outcome for any source the other
+//! bounds admit; see `PARSE_BUDGET`.
+//!
+//! The depth and node bounds read a finished tree, so they cannot bound what
+//! building that tree costs. `MAX_PARSE_HEAP_BYTES` is the bound that runs
+//! *inside* the parse, and it is the only one that keeps a refused source from
+//! being paid for in full first.
 use std::time::{Duration, Instant};
 
 pub(crate) const MAX_TREE_DEPTH: usize = 128;
@@ -41,25 +47,158 @@ pub(crate) const MAX_TREE_NODES: usize = crate::MAX_SOURCE_BYTES / 2;
 /// 1.5 MB glue bundle that an optimized worker admitted in 0.29 s was refused
 /// by an unoptimized one against a one-second budget.
 const PARSE_BUDGET: Duration = Duration::from_secs(4);
+/// Peak tree-sitter heap a single parse may request, refused from inside the
+/// parse rather than after it. Expressed against the node bound it completes:
+/// at most 192 bytes of parser heap per node that bound admits.
+///
+/// The depth and node bounds are read from a tree that already exists, so a
+/// source they refuse has been built and paid for first. Measured through the
+/// real release worker, a 4 MiB source of nested sequence expressions reached
+/// 2,011.7 MiB of transient tree and was then refused for its depth, and 4 MiB
+/// of empty statements reached 1,177.9 MiB and was then refused for its node
+/// count. Those become 441.2 MiB and 426.1 MiB. That is the exposure this
+/// ceiling closes; it is the whole reason the bound is here and not a second
+/// opinion about complexity.
+///
+/// 192 bytes per node is a measured margin, not a budget guess. The densest
+/// shape the grammar admits, 1,048,576 bytes of empty statements, is also
+/// exactly the node bound, and it requests 136 bytes of parser heap per node;
+/// real minifier output at 1.09 nodes per byte requests 118. So the ceiling
+/// clears the densest admissible tree by 1.41x and the obfuscated-glue class
+/// this harness exists to read by 2.06x.
+///
+/// What it does narrow is stated rather than hidden. Shapes that hold several
+/// GLR stack versions at once cost far more heap per node: a parenthesized
+/// sequence expression measures 325 bytes per node, so one larger than about
+/// 1.2 MB is now refused here instead of admitted by node count. Every shape
+/// measured above this ceiling at the 1,048,576-byte floor reaches a tree depth
+/// of at least 262,145 and was already refused by `MAX_TREE_DEPTH`; what
+/// changes for those is which bound answers, not whether they are refused.
+pub(crate) const MAX_PARSE_HEAP_BYTES: usize = MAX_TREE_NODES * 192;
+
+/// Tree-sitter's own heap, counted so a parse can be stopped from inside it.
+///
+/// `ts_set_allocator` is the only hook the C parser offers into its allocation
+/// and the progress callback is the only hook into its progress. Together they
+/// turn "how much has this parse asked for" into a value the callback can
+/// refuse on, which is what makes a memory bound enforceable before a tree
+/// exists instead of after one is complete.
+///
+/// The count is deterministic. Allocation sizes and their order are a function
+/// of the grammar and the supplied bytes, with no clock and no allocator state
+/// in them, and the totals below are identical between an optimized and an
+/// unoptimized build. That is the same property the node bound has and the
+/// reason this is a byte count rather than an elapsed time or a measured RSS.
+mod heap {
+    use std::cell::Cell;
+    use std::ffi::c_void;
+    use std::sync::Once;
+
+    // libc, not the Rust allocator: tree-sitter frees through whichever `free`
+    // is installed, so a pointer `malloc` returned before these shims existed
+    // must stay valid for the `free` they install. Every shim is the libc
+    // function plus a counter, so installing them is safe at any point and
+    // `begin` can do it lazily.
+    unsafe extern "C" {
+        fn malloc(size: usize) -> *mut c_void;
+        fn calloc(count: usize, size: usize) -> *mut c_void;
+        fn realloc(ptr: *mut c_void, size: usize) -> *mut c_void;
+        fn free(ptr: *mut c_void);
+    }
+
+    thread_local! {
+        /// Bytes requested on this thread since `begin`. Thread-local because
+        /// the test binary parses on several threads at once, and a shared
+        /// counter would make the bound depend on the thread schedule instead
+        /// of on the bytes.
+        static REQUESTED: Cell<usize> = const { Cell::new(0) };
+    }
+
+    /// Counts the request and never the release: `free` is not subtracted and a
+    /// `realloc` is counted at its new size rather than its growth, which
+    /// double-counts the geometric growth of the parser's own arrays. The total
+    /// is therefore an upper bound on live tree-sitter heap, so a ceiling on it
+    /// can refuse a parse early but never late.
+    fn add(bytes: usize) {
+        REQUESTED.set(REQUESTED.get().saturating_add(bytes));
+    }
+
+    unsafe extern "C" fn counted_malloc(size: usize) -> *mut c_void {
+        add(size);
+        unsafe { malloc(size) }
+    }
+
+    unsafe extern "C" fn counted_calloc(count: usize, size: usize) -> *mut c_void {
+        add(count.saturating_mul(size));
+        unsafe { calloc(count, size) }
+    }
+
+    unsafe extern "C" fn counted_realloc(ptr: *mut c_void, size: usize) -> *mut c_void {
+        add(size);
+        unsafe { realloc(ptr, size) }
+    }
+
+    unsafe extern "C" fn counted_free(ptr: *mut c_void) {
+        unsafe { free(ptr) }
+    }
+
+    /// Install the shims once per process, then start a fresh count. Called
+    /// before the parser is built so the parser's own fixed cost is outside the
+    /// ceiling, which measures one parse.
+    pub(super) fn begin() {
+        static INSTALLED: Once = Once::new();
+        INSTALLED.call_once(|| unsafe {
+            tree_sitter::set_allocator(
+                Some(counted_malloc),
+                Some(counted_calloc),
+                Some(counted_realloc),
+                Some(counted_free),
+            );
+        });
+        REQUESTED.set(0);
+    }
+
+    pub(super) fn requested() -> usize {
+        REQUESTED.get()
+    }
+}
 
 pub fn check(source: &str) -> Result<(), &'static str> {
     parse_checked(source).map(drop)
 }
 
 fn parse_checked(source: &str) -> Result<tree_sitter::Tree, &'static str> {
+    heap::begin();
     let mut parser = tree_sitter::Parser::new();
     parser
         .set_language(&tree_sitter_javascript::LANGUAGE.into())
         .map_err(|_| "JavaScript preflight grammar is unavailable")?;
     let deadline = Instant::now() + PARSE_BUDGET;
-    let mut cancelled = |_: &tree_sitter::ParseState| Instant::now() >= deadline;
-    let tree = parser
-        .parse_with_options(
-            &mut |offset, _| &source.as_bytes()[offset..],
-            None,
-            Some(tree_sitter::ParseOptions::new().progress_callback(&mut cancelled)),
-        )
-        .ok_or("JavaScript preflight exceeded its time budget")?;
+    let mut over_heap = false;
+    let mut cancelled = |_: &tree_sitter::ParseState| {
+        // The heap ceiling is asked first so a parse that is both large and
+        // slow reports the bound that is a function of the bytes rather than
+        // the one that is a function of the machine.
+        if heap::requested() > MAX_PARSE_HEAP_BYTES {
+            over_heap = true;
+            return true;
+        }
+        Instant::now() >= deadline
+    };
+    let parsed = parser.parse_with_options(
+        &mut |offset, _| &source.as_bytes()[offset..],
+        None,
+        Some(tree_sitter::ParseOptions::new().progress_callback(&mut cancelled)),
+    );
+    let tree = match parsed {
+        Some(tree) => tree,
+        // Cancellation discards the partial stack, so the refusal costs the
+        // heap measured at the ceiling and not a complete tree.
+        None if over_heap => {
+            return Err("JavaScript preflight exceeded its parse memory budget");
+        }
+        None => return Err("JavaScript preflight exceeded its time budget"),
+    };
     // Error recovery can flatten unsupported syntax. Never infer a depth bound
     // from such a tree and then send the unchecked syntax to the recursive parser.
     if tree.root_node().has_error() {
@@ -200,7 +339,7 @@ pub struct FunctionLocation {
 
 #[cfg(test)]
 mod tests {
-    use super::{MAX_TREE_NODES, check, function_at};
+    use super::{MAX_PARSE_HEAP_BYTES, MAX_TREE_NODES, check, function_at, heap};
 
     /// Real minifier output: one-character locals reused in every scope, bit
     /// operations, ternaries and object/array literals, with no whitespace.
@@ -263,6 +402,11 @@ mod tests {
         assert!(implied > 500_000.0, "{implied} nodes");
         assert!(implied < MAX_TREE_NODES as f64, "{implied} nodes");
         assert!(check(&dense_minified(GLUE_BYTES)).is_ok());
+        // The parse heap ceiling must not take this class back. Asserted on the
+        // parse above rather than on a second one, so the ceiling costs this
+        // suite no extra multi-megabyte parse.
+        let requested = heap::requested();
+        assert!(requested * 2 < MAX_PARSE_HEAP_BYTES, "{requested} bytes");
     }
 
     #[test]
@@ -280,6 +424,97 @@ mod tests {
         // so the verdict is a function of the bytes and not of how long the
         // traversal took to reach them.
         assert!(check(&";".repeat(MAX_TREE_NODES / 2 - 1)).is_ok());
+        // That source is also the densest tree the grammar can build at the
+        // node bound, so it is the parse heap ceiling's calibration case: the
+        // ceiling has to clear it, and here by 1.41x.
+        let requested = heap::requested();
+        assert!(requested < MAX_PARSE_HEAP_BYTES, "{requested} bytes");
+        assert!(requested * 3 > MAX_PARSE_HEAP_BYTES, "{requested} bytes");
+    }
+
+    /// Nested sequence expressions: the shape that costs the most parser heap
+    /// per source byte of any measured, which makes it both the cheapest way to
+    /// cross the ceiling and the shape that reached 2,011.7 MiB of transient
+    /// tree at the byte cap before being refused for its depth.
+    fn nested_sequences(byte_target: usize) -> String {
+        let depth = byte_target.saturating_sub(2) / 4;
+        let mut out = String::with_capacity(byte_target + 8);
+        for _ in 0..depth {
+            out.push_str("(a,");
+        }
+        out.push('a');
+        for _ in 0..depth {
+            out.push(')');
+        }
+        out.push(';');
+        out
+    }
+
+    /// A large source of long string literals: 4 MiB, a clean parse, few nodes
+    /// and little parser heap. The ceiling must not refuse this, which is what
+    /// separates it from a smaller byte cap for this operation.
+    fn sparse_string_table(byte_target: usize) -> String {
+        let mut out = String::from("var t=[");
+        while out.len() < byte_target {
+            out.push_str("'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',");
+        }
+        out.push_str("'z'];");
+        out
+    }
+
+    /// One test rather than several so these parses run in sequence. The four
+    /// seconds `PARSE_BUDGET` allows is measured against one parse at a time,
+    /// and this suite already runs several multi-megabyte parses concurrently;
+    /// the parser being built optimized in every profile is what keeps that
+    /// clock away from the verdict, not headroom in the budget.
+    #[test]
+    fn the_parse_memory_ceiling_refuses_from_inside_the_parse() {
+        assert_eq!(MAX_PARSE_HEAP_BYTES, MAX_TREE_NODES * 192);
+        // Under the crossover the parse still fits, so the depth bound answers
+        // from the finished tree exactly as it did before the ceiling existed.
+        assert_eq!(
+            check(&nested_sequences(256 * 1024)).unwrap_err(),
+            "JavaScript nesting exceeds the supported depth of 128"
+        );
+        let fitted = heap::requested();
+        assert!(fitted < MAX_PARSE_HEAP_BYTES, "{fitted} bytes");
+
+        // Over it the ceiling answers instead, from inside the parse. This is
+        // the honest narrowing: both are refusals, and which bound reports one
+        // now depends on whether building the tree fits.
+        let over = nested_sequences(768 * 1024);
+        assert_eq!(
+            check(&over).unwrap_err(),
+            "JavaScript preflight exceeded its parse memory budget"
+        );
+        // The structural proxy for the peak. The ceiling is read at a progress
+        // tick, so the count overshoots it by whatever the hundred operations
+        // since the last tick asked for. That is usually a few kilobytes, 3,296
+        // bytes for this source, but a geometric growth of one parser array can
+        // land in the same window and was measured at 4.0 MiB. The slack below
+        // is an eighth of the ceiling: loose enough for that growth, and
+        // nowhere near the 1,088.5 MiB a complete tree for the byte cap asks
+        // for.
+        let requested = heap::requested();
+        assert!(requested > MAX_PARSE_HEAP_BYTES, "{requested} bytes");
+        assert!(
+            requested < MAX_PARSE_HEAP_BYTES + MAX_PARSE_HEAP_BYTES / 8,
+            "{requested} bytes"
+        );
+        assert_eq!(
+            check(&over).unwrap_err(),
+            "JavaScript preflight exceeded its parse memory budget"
+        );
+        // Same bytes, same count. The ceiling decides on the source, not on
+        // allocator or machine state, which a measured RSS could not have kept.
+        assert_eq!(heap::requested(), requested);
+
+        // The declared byte cap is still admissible when the parse fits: 4 MiB
+        // of long string literals costs little parser heap, so the ceiling is
+        // not a smaller byte cap for this operation wearing another name.
+        assert!(check(&sparse_string_table(crate::MAX_SOURCE_BYTES - 64)).is_ok());
+        let requested = heap::requested();
+        assert!(requested * 4 < MAX_PARSE_HEAP_BYTES, "{requested} bytes");
     }
 
     #[test]

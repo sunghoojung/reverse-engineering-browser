@@ -77,7 +77,8 @@ fn response(bytes: usize) -> Value {
         // Reported from the guard's own constants so a declared limit cannot
         // drift from the bound that actually decided admission.
         "preflight_depth":crate::preflight::MAX_TREE_DEPTH,
-        "preflight_nodes":crate::preflight::MAX_TREE_NODES}})
+        "preflight_nodes":crate::preflight::MAX_TREE_NODES,
+        "preflight_parse_heap_bytes":crate::preflight::MAX_PARSE_HEAP_BYTES}})
 }
 pub fn invalid(message: &str, bytes: usize) -> Value {
     let mut out = response(bytes);
@@ -1870,6 +1871,25 @@ mod tests {
         assert_eq!(out["coverage"]["truncated"], true);
         let small = "let a=1; function f(x){return x+a;} f(a);";
         assert_eq!(facts(small), facts(small));
+        // The parse heap ceiling is shared, so it reaches this operation too,
+        // and the limit it decided by is the one reported. Nested sequence
+        // expressions are the shape that used to be paid for in full and only
+        // then refused.
+        let mut nested = "(a,".repeat(196_608);
+        nested.push('a');
+        nested.push_str(&")".repeat(196_608));
+        nested.push(';');
+        let refused = facts(&nested);
+        assert_eq!(refused["ok"], false);
+        assert_eq!(refused["coverage"]["status"], "unavailable");
+        assert_eq!(
+            refused["coverage"]["diagnostics"],
+            json!(["JavaScript preflight exceeded its parse memory budget"])
+        );
+        assert_eq!(
+            refused["limits"]["preflight_parse_heap_bytes"],
+            json!(crate::preflight::MAX_PARSE_HEAP_BYTES)
+        );
     }
     #[test]
     fn rejected_source_facts_do_not_desynchronize_the_worker() {

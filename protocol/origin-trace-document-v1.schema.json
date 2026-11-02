@@ -33,6 +33,12 @@
       "type": "object",
       "additionalProperties": false,
       "required": ["event", "monotonic_time_ns", "category", "operation", "frame_id", "artifact_id", "request_id", "relation", "confidence", "value"],
+      "allOf": [
+        {"if": {"properties": {"confidence": {"const": "time_adjacent"}}, "required": ["confidence"]},
+         "then": {"properties": {"relation": {"const": "temporal_adjacency"}}}},
+        {"if": {"properties": {"relation": {"const": "temporal_adjacency"}}, "required": ["relation"]},
+         "then": {"properties": {"confidence": {"const": "time_adjacent"}}}}
+      ],
       "properties": {
         "event": {"$ref": "#/$defs/eventReference"},
         "monotonic_time_ns": {"$ref": "#/$defs/uint64"},
@@ -41,8 +47,8 @@
         "frame_id": {"$ref": "#/$defs/uint64"},
         "artifact_id": {"$ref": "#/$defs/uint64"},
         "request_id": {"$ref": "#/$defs/uint64"},
-        "relation": {"enum": ["trace_target", "parent_event", "request_initiator", "request_lifecycle", "artifact_request"]},
-        "confidence": {"enum": ["observed", "correlated"]},
+        "relation": {"enum": ["trace_target", "parent_event", "request_initiator", "request_lifecycle", "artifact_request", "temporal_adjacency"]},
+        "confidence": {"enum": ["observed", "correlated", "time_adjacent"]},
         "value": {"type": "string", "maxLength": 256}
       }
     },
@@ -59,11 +65,12 @@
     "coverage": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["linked_steps", "observed_links", "correlated_links", "gap_count", "percent"],
+      "required": ["linked_steps", "observed_links", "correlated_links", "time_adjacent_links", "gap_count", "percent"],
       "properties": {
         "linked_steps": {"type": "integer", "minimum": 0, "maximum": 31},
         "observed_links": {"type": "integer", "minimum": 0, "maximum": 31},
         "correlated_links": {"type": "integer", "minimum": 0, "maximum": 31},
+        "time_adjacent_links": {"type": "integer", "minimum": 0, "maximum": 1},
         "gap_count": {"type": "integer", "minimum": 0, "maximum": 32},
         "percent": {"type": "integer", "minimum": 0, "maximum": 100}
       }

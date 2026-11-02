@@ -232,7 +232,12 @@ is only `observed` or `correlated`; the contract does not claim value causality.
 The research UI projects a selected request into the bounded version 1 document
 described by `origin-trace-document-v1.schema.json`. Missing predecessors,
 cycles, ambiguous reused request IDs, and the 32-step traversal limit become
-named gap records. The optional `session_id` query selector scopes the request
+named gap records. Where the identity chain ends, `monotonic_time_ns`
+proximity is a separate and weaker declared correlation input: at most one
+cross-process record of the same request identity inside a bounded timestamp
+window becomes a terminal `temporal_adjacency` step with `time_adjacent`
+confidence, counted only in `time_adjacent_links`. It never replaces the
+`no_predecessor` gap and never enters the coverage measure. The optional `session_id` query selector scopes the request
 before root selection; with the process/sequence pair it identifies one exact
 event. Omitting it remains supported only for unambiguous retained matches.
 Event and edge sidecars remain immutable inputs to this projection.

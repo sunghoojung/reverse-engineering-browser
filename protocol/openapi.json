@@ -760,7 +760,7 @@
       "get": {
         "operationId": "get_origin_trace",
         "summary": "get origin trace",
-        "description": "Bounded recent evidence window: 10000 events, 30000 edges, 10000 artifacts. Optional session_id limits selection to that exact captured session. Supply it with root_process_id and root_sequence_number for an exact event. Omitted selectors remain backward-compatible only for unambiguous matches; cross-session or multiple-root matches return ambiguous without selecting a trace. A missing exact match is empty, with no fallback. An empty/ambiguous/partial document is a successful result, not a missing-resource error.",
+        "description": "Bounded recent evidence window: 10000 events, 30000 edges, 10000 artifacts. Optional session_id limits selection to that exact captured session. Supply it with root_process_id and root_sequence_number for an exact event. Omitted selectors remain backward-compatible only for unambiguous matches; cross-session or multiple-root matches return ambiguous without selecting a trace. A missing exact match is empty, with no fallback. An empty/ambiguous/partial document is a successful result, not a missing-resource error. Where the identity chain ends, monotonic_time_ns proximity is a separate declared correlation input: at most one cross-process record of the same request identity within 1 ms is reported as a terminal temporal_adjacency step with time_adjacent confidence. It is counted only in time_adjacent_links, never in observed_links or correlated_links, it never replaces the no_predecessor gap, and it moves neither linked_steps nor percent.",
         "tags": [
           "origin-trace"
         ],
@@ -4992,6 +4992,46 @@
           "step": {
             "type": "object",
             "additionalProperties": false,
+            "allOf": [
+              {
+                "if": {
+                  "properties": {
+                    "confidence": {
+                      "const": "time_adjacent"
+                    }
+                  },
+                  "required": [
+                    "confidence"
+                  ]
+                },
+                "then": {
+                  "properties": {
+                    "relation": {
+                      "const": "temporal_adjacency"
+                    }
+                  }
+                }
+              },
+              {
+                "if": {
+                  "properties": {
+                    "relation": {
+                      "const": "temporal_adjacency"
+                    }
+                  },
+                  "required": [
+                    "relation"
+                  ]
+                },
+                "then": {
+                  "properties": {
+                    "confidence": {
+                      "const": "time_adjacent"
+                    }
+                  }
+                }
+              }
+            ],
             "required": [
               "event",
               "monotonic_time_ns",
@@ -5034,13 +5074,15 @@
                   "parent_event",
                   "request_initiator",
                   "request_lifecycle",
-                  "artifact_request"
+                  "artifact_request",
+                  "temporal_adjacency"
                 ]
               },
               "confidence": {
                 "enum": [
                   "observed",
-                  "correlated"
+                  "correlated",
+                  "time_adjacent"
                 ]
               },
               "value": {
@@ -5086,6 +5128,7 @@
               "linked_steps",
               "observed_links",
               "correlated_links",
+              "time_adjacent_links",
               "gap_count",
               "percent"
             ],
@@ -5104,6 +5147,11 @@
                 "type": "integer",
                 "minimum": 0,
                 "maximum": 31
+              },
+              "time_adjacent_links": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 1
               },
               "gap_count": {
                 "type": "integer",

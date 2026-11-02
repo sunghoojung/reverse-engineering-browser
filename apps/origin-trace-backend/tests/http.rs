@@ -202,6 +202,44 @@ async fn origin_trace_gap_markers_preserve_addressable_events_over_http() {
                 "{name}"
             );
         }
+        for (field, key) in [
+            ("step_confidences", "confidence"),
+            ("step_relations", "relation"),
+        ] {
+            if let Some(expected) = case.get(field) {
+                assert_eq!(
+                    json!(steps.iter().map(|step| &step[key]).collect::<Vec<_>>()),
+                    *expected,
+                    "{name} {field}"
+                );
+            }
+        }
+        // `monotonic_time_ns` proximity is its own confidence class: it occupies
+        // a step without becoming an observed or correlated link, and it never
+        // moves the reported percentage.
+        if let Some(coverage) = case.get("coverage") {
+            assert_eq!(body["coverage"], *coverage, "{name} coverage");
+            let adjacent = steps
+                .iter()
+                .filter(|step| step["confidence"] == "time_adjacent")
+                .count();
+            assert_eq!(json!(adjacent), coverage["time_adjacent_links"], "{name}");
+            if adjacent > 0 {
+                assert_eq!(
+                    steps.last().unwrap()["confidence"],
+                    "time_adjacent",
+                    "{name}"
+                );
+                assert!(
+                    body["gaps"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .any(|gap| gap["reason"] == "no_predecessor"),
+                    "{name}: proximity must not replace the missing-predecessor gap"
+                );
+            }
+        }
         let gaps = body["gaps"].as_array().unwrap();
         assert_eq!(
             json!(gaps.iter().map(|gap| &gap["reason"]).collect::<Vec<_>>()),
@@ -468,6 +506,70 @@ async fn origin_trace_step_limit_keeps_capture_gap_bounded_over_http() {
     assert_eq!(body["gaps"][0]["reason"], "step_limit");
     assert_eq!(body["gaps"][0]["after_step"], 31);
     assert_eq!(body["gaps"][1]["reason"], "capture_gap");
+}
+
+// A time-adjacent row may fill the last step slot. That must not be reported as
+// the traversal having reached its limit, and must not be counted as a link.
+#[tokio::test]
+async fn origin_trace_time_adjacent_row_fills_the_step_budget_without_a_step_limit() {
+    let fixture: Value =
+        serde_json::from_str(include_str!("../assets/origin-trace-gap-cases.json")).unwrap();
+    let server = Server::start().await;
+    let mut sibling = fixture["events"]["root"].clone();
+    sibling["sequence_number"] = json!("9007199254740998");
+    sibling["process_id"] = json!(17);
+    sibling["type"] = json!("request_initiated");
+    let mut events = vec![sibling];
+    let mut edges = Vec::new();
+    for sequence in 1..=31 {
+        let mut event = fixture["events"]["root"].clone();
+        event["sequence_number"] = json!(sequence.to_string());
+        events.push(event);
+        if sequence > 1 {
+            let mut edge = fixture["edges"]["parent"].clone();
+            edge["from_sequence_number"] = json!(sequence.to_string());
+            edge["to_sequence_number"] = json!((sequence - 1).to_string());
+            edges.push(edge);
+        }
+    }
+    for (path, rows) in [("events.jsonl", events), ("trace.jsonl", edges)] {
+        server.file(
+            path,
+            rows.iter()
+                .map(Value::to_string)
+                .collect::<Vec<_>>()
+                .join("\n")
+                .as_bytes(),
+        );
+    }
+    let bytes = assert_contract_response(
+        server.get("/api/origin-trace?request_id=9007199254740995&root_process_id=42&root_sequence_number=31").await,
+        "get",
+        "/api/origin-trace",
+        200,
+    )
+    .await;
+    let body: Value = serde_json::from_slice(&bytes).unwrap();
+    let steps = body["steps"].as_array().unwrap();
+    assert_eq!(steps.len(), 32);
+    assert_eq!(steps[31]["relation"], "temporal_adjacency");
+    assert_eq!(steps[31]["confidence"], "time_adjacent");
+    assert_eq!(steps[31]["event"]["sequence_number"], "9007199254740998");
+    assert_eq!(
+        json!(
+            body["gaps"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|gap| &gap["reason"])
+                .collect::<Vec<_>>()
+        ),
+        json!(["no_predecessor"])
+    );
+    assert_eq!(
+        body["coverage"],
+        json!({"linked_steps":30,"observed_links":30,"correlated_links":0,"time_adjacent_links":1,"gap_count":1,"percent":97})
+    );
 }
 fn assert_schema(spec: &Value, schema: &Value, value: &Value, label: &str) {
     let document = json!({

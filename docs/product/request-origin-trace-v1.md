@@ -38,6 +38,10 @@ The edge store is append-only JSONL. Its version 1 contract is
   identity matches.
 - `artifact_request` joins an artifact event to a matching request identity and
   is labeled `correlated`, not causal.
+- `temporal_adjacency` is not an edge. It is reported only where the identity
+  chain has already ended, for one cross-process record of the same request
+  identity within a bounded `monotonic_time_ns` window, and is labeled
+  `time_adjacent`: a third confidence class that is weaker than `correlated`.
 
 Observed edges preserve explicit identifiers. Correlated edges preserve shared
 context only. The index never claims that one event's value produced another
@@ -55,7 +59,13 @@ produce an ambiguous result instead of an arbitrary trace.
 - HTTP and native readers retain at most 10,000 events, 30,000 edges, and
   10,000 artifact records for one query. Event records are capped at 4 KiB,
   edge records at 2 KiB, and artifact records at 8 KiB.
-- Traversal stops after 32 steps and reports `step_limit`.
+- Traversal stops after 32 steps and reports `step_limit`. A time-adjacent row
+  may occupy the last step without the limit being the reason traversal stopped.
+- Timestamp proximity is bounded to one millisecond, requires a different
+  process and the same nonzero request identity, is refused outright when more
+  than one record qualifies, and is terminal: no traversal continues from it, so
+  it can never add an observed or correlated link. It is counted only in
+  `time_adjacent_links` and leaves `linked_steps` and `percent` unchanged.
 - Missing retained predecessors, cycles, ambiguous request identifiers, and
   events with no predecessor remain visible as named gaps.
 - Native queue-drop markers share their last retained event's reference. They

@@ -619,6 +619,10 @@
       .trace-link-type { font-size: 10px; }
       .exact { color: var(--green); }
       .correlation { color: var(--amber); }
+      /* Timestamp adjacency is weaker than either link class. Italic carries
+         that without depending on color discrimination, because the backtrace
+         screen already recolors .exact to the same muted tone. */
+      .adjacency { color: var(--muted); font-style: italic; }
       .unknown { color: var(--red); }
       .trace-inspector { min-width: 0; overflow: auto; border-left: 1px solid var(--line); padding: 16px; }
       .trace-inspector h2 { margin: 0 0 18px; color: var(--muted); font-size: 11px; font-weight: 500; }

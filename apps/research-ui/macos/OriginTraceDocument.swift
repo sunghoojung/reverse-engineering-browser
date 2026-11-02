@@ -17,6 +17,13 @@ enum OriginTraceDocumentBuilder {
     "artifact_id", "kind", "url", "sha256", "byte_size", "creator_event_id",
     "parent_artifact_id", "execution_context_id", "capture_origin",
   ])
+  // `monotonic_time_ns` proximity is a declared correlation input in its own
+  // right, and a weaker one than the identity keys the edge index joins on. It
+  // is consulted only where the identity chain has already ended, and only for
+  // a cross-process record of the same retained request: the renderer-to-browser
+  // hop that initiator resolution failed to close. Mirrors ADJACENCY_WINDOW_NS
+  // in apps/origin-trace-backend/src/origin_trace.rs.
+  private static let adjacencyWindowNanoseconds: UInt64 = 1_000_000
 
   static func build(
     events: [[String: Any]],
@@ -114,6 +121,7 @@ enum OriginTraceDocumentBuilder {
     var current = root
     var observedLinks = 0
     var correlatedLinks = 0
+    var timeAdjacentLinks = 0
 
     while steps.count < maxSteps {
       let currentReference = try eventReference(current)
@@ -127,11 +135,28 @@ enum OriginTraceDocumentBuilder {
       }
       guard let selectedEdge = candidates.first else {
         if !sourceBoundaries.contains(current["category"] as? String ?? "") {
+          // Proximity never closes the gap. The identity chain really did end
+          // here, so the gap stays and the adjacency row is reported beside it
+          // rather than in place of it.
+          let adjacent = adjacentCandidate(
+            retained: eventsByReference, visited: visited, current: current
+          ).flatMap {
+            try? eventStep($0, relation: "temporal_adjacency", confidence: "time_adjacent")
+          }
           gaps.append([
             "reason": "no_predecessor",
             "after_step": steps.count - 1,
-            "detail": "No earlier observed relationship reaches this event.",
+            "detail": adjacent == nil
+              ? "No earlier observed relationship reaches this event."
+              : "No earlier observed relationship reaches this event. The next row is time-adjacent only: it shares this request identity in another process within a bounded timestamp window, which is not a predecessor and not value flow.",
           ])
+          // Adjacency is terminal. Walking on from a timestamp match would hang
+          // identity edges off a guess and count them as correlated links, so
+          // traversal always stops here.
+          if let adjacent {
+            steps.append(adjacent)
+            timeAdjacentLinks += 1
+          }
         }
         break
       }
@@ -165,7 +190,9 @@ enum OriginTraceDocumentBuilder {
       if confidence == "observed" { observedLinks += 1 } else { correlatedLinks += 1 }
       current = selectedEvent
     }
-    if steps.count == maxSteps {
+    // A time-adjacent row is only ever appended where traversal broke, so it can
+    // fill the step budget without the limit being the reason the walk stopped.
+    if steps.count - timeAdjacentLinks == maxSteps {
       gaps.append([
         "reason": "step_limit",
         "after_step": steps.count - 1,
@@ -185,7 +212,9 @@ enum OriginTraceDocumentBuilder {
       ])
     }
 
-    let linkedSteps = max(0, steps.count - 1)
+    // Coverage stays an identity measure. A time-adjacent row is a step but not
+    // a link, so it moves neither the denominator nor the reported percentage.
+    let linkedSteps = max(0, steps.count - 1 - timeAdjacentLinks)
     let denominator = linkedSteps + gaps.count
     let percent = denominator == 0 ? 0 : Int((Double(linkedSteps) * 100 / Double(denominator)).rounded())
     let artifactIDs = Set(steps.compactMap { step -> String? in
@@ -209,6 +238,7 @@ enum OriginTraceDocumentBuilder {
         "linked_steps": linkedSteps,
         "observed_links": observedLinks,
         "correlated_links": correlatedLinks,
+        "time_adjacent_links": timeAdjacentLinks,
         "gap_count": gaps.count,
         "percent": percent,
       ],
@@ -230,6 +260,7 @@ enum OriginTraceDocumentBuilder {
         "linked_steps": 0,
         "observed_links": 0,
         "correlated_links": 0,
+        "time_adjacent_links": 0,
         "gap_count": gaps.count,
         "percent": 0,
       ],
@@ -273,6 +304,40 @@ enum OriginTraceDocumentBuilder {
       "confidence": confidence,
       "value": payload,
     ]
+  }
+
+  // Exactly one surviving candidate, or none. Two adjacent records are a tie
+  // this function must not break; reporting the nearer one would present a
+  // choice between guesses as evidence. A candidate must also sit at or before
+  // the current event, so cross-process clock skew can drop a real pair but can
+  // never invent an order.
+  private static func adjacentCandidate(
+    retained: [String: [String: Any]], visited: Set<String>, current: [String: Any]
+  ) -> [String: Any]? {
+    // Scoped to the network lifecycle record this class was measured on. An
+    // artifact, VM or Wasm head keeps the bare gap rather than a claim no lane
+    // has characterised.
+    guard current["category"] as? String == "network",
+      let nowText = canonicalUInt64(current["monotonic_time_ns"]), let now = UInt64(nowText),
+      let request = nonzeroUInt64(current["request_id"]),
+      let session = current["session_id"] as? String,
+      let process = processID(current["process_id"])
+    else { return nil }
+    var found: [String: Any]?
+    for (reference, event) in retained where !visited.contains(reference) {
+      guard event["session_id"] as? String == session,
+        event["category"] as? String == "network",
+        canonicalUInt64(event["request_id"]) == request,
+        processID(event["process_id"]) != process,
+        let thenText = canonicalUInt64(event["monotonic_time_ns"]),
+        let then = UInt64(thenText),
+        then <= now,
+        now - then <= adjacencyWindowNanoseconds
+      else { continue }
+      if found != nil { return nil }
+      found = event
+    }
+    return found
   }
 
   private static func eventReference(_ event: [String: Any]) throws -> String {

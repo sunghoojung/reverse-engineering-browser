@@ -40,9 +40,31 @@ enum OriginTraceGapChecks {
       if let sessions = item["step_sessions"] as? [String] {
         precondition(steps.map { ($0["event"] as! [String: Any])["session_id"] as! String } == sessions, name)
       }
+      if let confidences = item["step_confidences"] as? [String] {
+        precondition(steps.map { $0["confidence"] as! String } == confidences, name)
+      }
+      if let relations = item["step_relations"] as? [String] {
+        precondition(steps.map { $0["relation"] as! String } == relations, name)
+      }
       let gaps = result["gaps"] as! [[String: Any]]
       precondition(gaps.map { $0["reason"] as! String } == item["gap_reasons"] as! [String], name)
       precondition((result["coverage"] as! [String: Any])["gap_count"] as! Int == gaps.count, name)
+      // `monotonic_time_ns` proximity is its own confidence class: it occupies a
+      // step without becoming an observed or correlated link, it never replaces
+      // the missing-predecessor gap, and it never moves the reported percentage.
+      if let expected = item["coverage"] as? [String: Int] {
+        let coverage = result["coverage"] as! [String: Any]
+        precondition(Set(coverage.keys) == Set(expected.keys), name)
+        for (field, value) in expected {
+          precondition(coverage[field] as! Int == value, "\(name) \(field)")
+        }
+        let adjacent = steps.filter { $0["confidence"] as! String == "time_adjacent" }.count
+        precondition(adjacent == expected["time_adjacent_links"]!, name)
+        if adjacent > 0 {
+          precondition(steps.last!["confidence"] as! String == "time_adjacent", name)
+          precondition(gaps.contains { $0["reason"] as! String == "no_predecessor" }, name)
+        }
+      }
       if let gap = gaps.first(where: { $0["reason"] as? String == "capture_gap" }) {
         let count = item["marker_count"] as! Int
         let detail = gap["detail"] as! String
@@ -58,6 +80,16 @@ enum OriginTraceGapChecks {
     )
     let reasons = (bounded["gaps"] as! [[String: Any]]).map { $0["reason"] as! String }
     precondition(reasons == ["step_limit", "capture_gap"])
-    print("PASS native Origin Trace shared gap/session regressions and step-limit coverage")
+    // A time-adjacent row may fill the last step slot. That must not be
+    // reported as the traversal having reached its limit.
+    let budget = try OriginTraceDocumentBuilder.build(
+      events: [events["adjacent_root"]!, events["adjacent_initiated"]!], edges: [], artifacts: [],
+      requestID: "9007199254740995", rootProcessID: 42,
+      rootSequenceNumber: "9007199254740999", maxSteps: 2
+    )
+    precondition((budget["steps"] as! [[String: Any]]).count == 2)
+    precondition((budget["gaps"] as! [[String: Any]]).map { $0["reason"] as! String }
+      == ["no_predecessor"])
+    print("PASS native Origin Trace shared gap/session regressions, step-limit coverage and time-adjacent confidence class")
   }
 }

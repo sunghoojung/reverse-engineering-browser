@@ -3443,10 +3443,11 @@ const capturedExportPanel = installCapturedExportDialog({
           const current = rows.indexOf(row);
           const next = event.key === 'Home' ? 0 : event.key === 'End' ? rows.length - 1
             : (current + (event.key === 'ArrowDown' ? 1 : -1) + rows.length) % rows.length;
-          // Keep keyboard focus modality: a bare .focus() after click() drops
-          // :focus-visible in WebKit, so the adjacency row would look unfocused.
+          // Arrow keys are keyboard navigation even when the list was entered
+          // by pointer, so the moved focus keeps its ring. Focus also scrolls
+          // its row into view: a long trace must not move focus off screen.
           rows[next].click();
-          rows[next].focus({ preventScroll: true, focusVisible: true });
+          rows[next].focus({focusVisible: true});
         });
         item.append(row); return item;
       }

@@ -79,6 +79,12 @@ produce an ambiguous result instead of an arbitrary trace.
   coverage warning, not proof of a missing predecessor or value flow. Repeated
   markers remain counted as marker records, not a unique lost-event total.
   Coverage compares recorded links with named gaps, including this warning.
+- A named capture-limit gap, whose payload is a reason such as
+  `native_wasm_dispatch_budget_incomplete` rather than a drop count, takes its
+  own sequence slot and is a sampling limit of its own category. Like Traffic,
+  a request trace neither counts it as a `capture_gap` nor refuses the window
+  over it. A gap whose payload is neither a count nor a reason identifier is
+  still malformed.
 
 ## User workflow
 

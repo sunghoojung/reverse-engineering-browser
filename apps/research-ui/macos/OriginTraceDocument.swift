@@ -59,6 +59,11 @@ enum OriginTraceDocumentBuilder {
       // addressable event and cannot satisfy a retained predecessor edge.
       if event["type"] as? String == "gap" {
         let marker = try eventStep(event, relation: "trace_target", confidence: "observed")
+        // A named capture-limit gap carries its reason, not a drop count, in
+        // its own sequence slot. It is a sampling limit of its own category
+        // that Traffic already leaves out, so a request trace neither counts it
+        // as queue loss nor refuses the window over it.
+        if isNamedCaptureLimit(event, reason: marker["value"] as? String) { continue }
         guard nonzeroUInt64(marker["value"]) != nil,
           let truncated = event["payload_truncated"] as? NSNumber,
           CFGetTypeID(truncated) == CFBooleanGetTypeID(), !truncated.boolValue
@@ -427,6 +432,23 @@ enum OriginTraceDocumentBuilder {
       index = next
     }
     return String(decoding: bytes, as: UTF8.self)
+  }
+
+  // The rule namedGap in StoredEventWindow.swift and named_gap in
+  // event_window.rs apply: an untruncated lowercase identifier reason in a
+  // lowercase identifier category. A decimal drop count never matches. This
+  // file is compiled alone by the gap checker, so the rule is restated here.
+  private static func isNamedCaptureLimit(_ event: [String: Any], reason: String?) -> Bool {
+    guard (event["payload_truncated"] as? Bool) != true,
+      let category = event["category"] as? String, let reason
+    else { return false }
+    return isIdentifier(Array(category.utf8), maximum: 32) && isIdentifier(Array(reason.utf8), maximum: 128)
+  }
+
+  private static func isIdentifier(_ bytes: [UInt8], maximum: Int) -> Bool {
+    let lower = UInt8(ascii: "a")...UInt8(ascii: "z"), digit = UInt8(ascii: "0")...UInt8(ascii: "9")
+    guard (1...maximum).contains(bytes.count), let first = bytes.first, lower.contains(first) else { return false }
+    return bytes.allSatisfy { lower.contains($0) || digit.contains($0) || $0 == UInt8(ascii: "_") }
   }
 
   private static func traceError(_ message: String) -> NSError {

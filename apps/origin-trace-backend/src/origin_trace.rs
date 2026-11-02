@@ -145,6 +145,13 @@ pub fn build(
         // reference. It must never replace that event or satisfy an edge.
         if event["type"] == "gap" {
             let marker = step(event, "trace_target", "observed")?;
+            // A named capture-limit gap carries its reason, not a drop count,
+            // in its own sequence slot. It is a sampling limit of its own
+            // category that Traffic already leaves out, so a request trace
+            // neither counts it as queue loss nor refuses the window over it.
+            if crate::event_window::named_gap(event).is_some() {
+                continue;
+            }
             validation::canonical(&marker["value"], 64, true, "Gap drop count")?;
             if event["payload_truncated"] != false {
                 return Err(Error::bad("Origin trace input contains a malformed gap"));

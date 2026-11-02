@@ -1029,4 +1029,57 @@ final class OriginTraceRenderedUITests: XCTestCase {
       try await ui.screenshot("sources-bytecode-\(size.name)")
     }
   }
+
+  // A renderer record that no initiator edge reached reads as its own, weaker
+  // class: after the gap it did not close, named as having no recorded link,
+  // and reported beside coverage rather than inside it.
+  @MainActor
+  func test15BacktraceTimeAdjacentRow() async throws {
+    for size in windowSizes {
+      let ui = try await prepare(size)
+      try await show(ui, "traffic")
+      try await ui.click("#screen-traffic .request-row", containing: "adjacent.trace.test")
+      try await show(ui, "backtrace")
+      try await ui.waitUntil("document.querySelectorAll('#backtrace-steps .trace-row').length === 3",
+        "\(size.name): the time-adjacent trace did not load")
+      let rows = try await ui.value("""
+        [...document.querySelectorAll('#backtrace-steps .trace-row')].map(row => ({
+          gap: row.parentElement.classList.contains('gap'),
+          title: row.querySelector('.step-title')?.textContent ?? '',
+          kind: row.querySelector('.step-kind')?.textContent ?? '',
+          label: row.querySelector('.trace-link-type')?.textContent ?? '',
+          style: row.querySelector('.trace-link-type')?.className ?? ''}))
+        """) as? [[String: Any]] ?? []
+      XCTAssertEqual(rows.count, 3, "\(size.name): target, gap and adjacency rows: \(rows)")
+      guard rows.count == 3 else { continue }
+      XCTAssertEqual(rows[0]["kind"] as? String, "Selected request", "\(size.name): \(rows[0])")
+      XCTAssertEqual(rows[1]["gap"] as? Bool, true, "\(size.name): the missing-predecessor gap stays in place: \(rows[1])")
+      XCTAssertEqual(rows[2]["title"] as? String, "network · request_initiated", "\(size.name): \(rows[2])")
+      XCTAssertEqual(rows[2]["kind"] as? String, "Time-adjacent record · no recorded link", "\(size.name): \(rows[2])")
+      XCTAssertEqual(rows[2]["label"] as? String, "Time-adjacent only", "\(size.name): \(rows[2])")
+      XCTAssertTrue((rows[2]["style"] as? String ?? "").contains("adjacency"), "\(size.name): weaker class styling: \(rows[2])")
+      let coverage = try await ui.value("document.querySelector('#coverage-value').textContent") as? String ?? ""
+      XCTAssertTrue(coverage.hasPrefix("0% trace coverage"), "\(size.name): proximity does not raise coverage: \(coverage)")
+      XCTAssertTrue(coverage.contains("1 time-adjacent record, excluded from coverage"), "\(size.name): \(coverage)")
+
+      // Arrow keys move from the selected request through the gap to the
+      // adjacency row, which then owns visible focus and the inspector. WebKit
+      // does not focus a button on click, so the first row is focused the way
+      // "Trace a captured request" focuses it, and only keys move from there.
+      _ = try await ui.value("document.querySelector('#backtrace-steps .trace-row').focus()")
+      for _ in 0..<2 { try await ui.key(125, "\u{F701}", modifiers: [.function, .numericPad]) }
+      let focus = try await ui.json("__rebUiProbe.focusState()")
+      let selected = try await ui.value("document.activeElement?.closest('.trace-row')?.getAttribute('aria-pressed') ?? ''") as? String
+      XCTAssertEqual(selected, "true", "\(size.name): ArrowDown selects the adjacency row: \(focus)")
+      XCTAssertEqual(focus["focusVisible"] as? Bool, true, "\(size.name): adjacency row shows keyboard focus: \(focus)")
+      XCTAssertNotEqual(focus["indicator"] as? String, "none", "\(size.name): \(focus)")
+      let details = try await ui.value("document.querySelector('#trace-step-details').innerText") as? String ?? ""
+      XCTAssertTrue(details.contains("Not a predecessor and not value flow"), "\(size.name): inspector names the class: \(details)")
+      try await revealAndAssertFullyVisible(ui, "#backtrace-steps .trace-step:last-child .trace-row", "\(size.name) adjacency row")
+      try await assertFullyVisible(ui, "#coverage-value", "\(size.name) coverage line")
+      try await assertInert(ui, "\(size.name) backtrace")
+      try await assertLayout(ui, "#screen-backtrace", "\(size.name) time-adjacent backtrace")
+      try await ui.screenshot("backtrace-time-adjacent-\(size.name)")
+    }
+  }
 }

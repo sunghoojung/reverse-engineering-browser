@@ -55,6 +55,26 @@ async function goldenEvidence(root, store) {
   return {artifacts, events};
 }
 
+// A request whose renderer and browser records no initiator edge joined, as on a
+// live capture where initiator resolution did not close. The renderer record sits
+// 113 us before request_started in its own process, so Backtraces reports it as
+// a time-adjacent row after the missing-predecessor gap, outside coverage.
+export const TIME_ADJACENT_HOST = 'adjacent.trace.test';
+function timeAdjacentRequest(template, firstSequence, firstTime) {
+  const requestId = '2000', renderer = 41, start = BigInt(firstTime) + 1_000_000n;
+  assert.notEqual(template.process_id, renderer, 'the renderer record needs its own process');
+  const browser = {initiator_process_id: renderer, initiator_request_id: Number(requestId)};
+  const rows = [
+    [{process_id: renderer, initiator_process_id: 0, initiator_request_id: 0}, 'request_initiated', `GET ${TIME_ADJACENT_HOST}`, 0, 0n],
+    [browser, 'request_started', `GET ${TIME_ADJACENT_HOST}`, 0, 113_000n],
+    [browser, 'response_started', 'application/json', 200, 400_000n],
+    [browser, 'request_completed', 'completed', 200, 900_000n],
+  ];
+  return rows.map(([fields, type, text, status, offset], index) => ({...template, ...fields,
+    sequence_number: String(firstSequence + index), monotonic_time_ns: String(start + offset), request_id: requestId,
+    parent_event_id: '0', type, status_code: status, payload_size: Buffer.byteLength(text), payload: hex(text)}));
+}
+
 // Enough native network rows to require list scrolling, one with a hostile URL.
 function syntheticRequests(template, firstSequence, firstTime) {
   const events = [];
@@ -88,7 +108,8 @@ export async function buildEvidence({root, sessions, guestStore, dispatchStore, 
   const network = demoEvents.find(event => event.category === 'network');
   assert(network, 'demo store must contain a native network event');
   const last = demoEvents.at(-1);
-  const requests = syntheticRequests(network, Number(last.sequence_number) + 1, last.monotonic_time_ns);
+  const scrolled = syntheticRequests(network, Number(last.sequence_number) + 1, last.monotonic_time_ns);
+  const requests = [...scrolled, ...timeAdjacentRequest(network, Number(scrolled.at(-1).sequence_number) + 1, scrolled.at(-1).monotonic_time_ns)];
   const lines = Array.from({length: SOURCE_LINE_COUNT}, (_, index) => index === 2
     ? `// ${HOSTILE_SOURCE_MARKER}` : `const retainedLine${index} = ${index}; // long line ${'x'.repeat(index % 7 === 0 ? 180 : 12)}`);
   const source = await artifact(artifacts, {artifact_id: '303', session_id: '1', navigation_id: '100', frame_id: '200',

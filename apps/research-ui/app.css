@@ -607,7 +607,9 @@
       .trace-empty button { margin: 0; }
       .trace-layout { flex: 1; display: grid; grid-template-columns: minmax(0, 1fr) minmax(280px, 38%); min-height: 0; }
       .trace-list-pane { min-width: 0; min-height: 0; overflow: auto; }
-      .trace-list-heading { display: flex; justify-content: space-between; gap: 12px; padding: 10px 12px; border-bottom: 1px solid var(--line); background: var(--panel-2); color: var(--muted); font-size: 11px; }
+      /* Sticky so ArrowDown into a long trace cannot scroll the coverage line
+         out of the list pane; the harness asserts both stay fully visible. */
+      .trace-list-heading { position: sticky; top: 0; z-index: 1; display: flex; justify-content: space-between; gap: 12px; padding: 10px 12px; border-bottom: 1px solid var(--line); background: var(--panel-2); color: var(--muted); font-size: 11px; }
       .backtrace { margin: 0; padding: 0; list-style: none; }
       .trace-row { width: 100%; display: grid; grid-template-columns: 24px minmax(0, 1fr) auto; align-items: center; gap: 12px; padding: 12px; border: 0; border-bottom: 1px solid var(--line-soft); background: transparent; text-align: left; }
       .trace-row:hover { background: var(--panel-2); }

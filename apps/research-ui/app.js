@@ -3443,7 +3443,10 @@ const capturedExportPanel = installCapturedExportDialog({
           const current = rows.indexOf(row);
           const next = event.key === 'Home' ? 0 : event.key === 'End' ? rows.length - 1
             : (current + (event.key === 'ArrowDown' ? 1 : -1) + rows.length) % rows.length;
-          rows[next].click(); rows[next].focus();
+          // Keep keyboard focus modality: a bare .focus() after click() drops
+          // :focus-visible in WebKit, so the adjacency row would look unfocused.
+          rows[next].click();
+          rows[next].focus({ preventScroll: true, focusVisible: true });
         });
         item.append(row); return item;
       }

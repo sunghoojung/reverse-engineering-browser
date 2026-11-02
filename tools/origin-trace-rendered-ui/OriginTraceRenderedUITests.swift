@@ -1088,6 +1088,9 @@ final class OriginTraceRenderedUITests: XCTestCase {
       let ui = try await prepare(size)
       try await show(ui, "traffic")
       try await ui.click("#screen-traffic .request-row", containing: "adjacent.trace.test")
+      try await ui.waitUntil(
+        "(document.querySelector('#screen-traffic .request-row[aria-selected=\"true\"]')?.innerText ?? '').includes('adjacent.trace.test')",
+        "\(size.name): adjacent.trace.test was not selected")
       try await show(ui, "backtrace")
       try await ui.waitUntil("document.querySelectorAll('#backtrace-steps .trace-row').length === 3",
         "\(size.name): the time-adjacent trace did not load")
@@ -1115,7 +1118,8 @@ final class OriginTraceRenderedUITests: XCTestCase {
       // adjacency row, which then owns visible focus and the inspector. WebKit
       // does not focus a button on click, so the first row is focused the way
       // "Trace a captured request" focuses it, and only keys move from there.
-      _ = try await ui.value("document.querySelector('#backtrace-steps .trace-row').focus()")
+      // focusVisible keeps :focus-visible after the product's ArrowDown handler.
+      _ = try await ui.value("document.querySelector('#backtrace-steps .trace-row').focus({focusVisible:true})")
       for _ in 0..<2 { try await ui.key(125, "\u{F701}", modifiers: [.function, .numericPad]) }
       let focus = try await ui.json("__rebUiProbe.focusState()")
       let selected = try await ui.value("document.activeElement?.closest('.trace-row')?.getAttribute('aria-pressed') ?? ''") as? String
@@ -1125,6 +1129,8 @@ final class OriginTraceRenderedUITests: XCTestCase {
       let details = try await ui.value("document.querySelector('#trace-step-details').innerText") as? String ?? ""
       XCTAssertTrue(details.contains("Not a predecessor and not value flow"), "\(size.name): inspector names the class: \(details)")
       try await revealAndAssertFullyVisible(ui, "#backtrace-steps .trace-step:last-child .trace-row", "\(size.name) adjacency row")
+      // Coverage sits in the sticky list heading, so centering the last row
+      // must leave it fully visible in the list pane.
       try await assertFullyVisible(ui, "#coverage-value", "\(size.name) coverage line")
       try await assertInert(ui, "\(size.name) backtrace")
       try await assertLayout(ui, "#screen-backtrace", "\(size.name) time-adjacent backtrace")

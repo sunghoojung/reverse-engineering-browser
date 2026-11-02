@@ -13,10 +13,12 @@ use std::{
     collections::{BTreeMap, BTreeSet},
 };
 
-// The bounded preflight admits at most 500000 tree-sitter nodes, so this
-// budget is no longer the first limit an admitted source meets. It stays fixed
-// rather than caller-supplied: a per-request budget would make two reports of
-// the same bytes disagree. Larger sources are addressed with a region instead.
+// The bounded preflight admits at most `preflight::MAX_TREE_NODES` tree-sitter
+// nodes, so this budget is no longer the first limit an admitted source meets.
+// It stays fixed rather than caller-supplied: a per-request budget would make
+// two reports of the same bytes disagree. Larger sources are addressed with a
+// region instead, which is now reachable for the dense minified bundles that
+// the preflight node bound used to refuse before this budget was consulted.
 const MAX_AST_NODES: usize = 262_144;
 const MAX_FACTS: usize = 16_384;
 const MAX_FRONTIERS: usize = 256;
@@ -71,7 +73,11 @@ fn response(bytes: usize) -> Value {
         "coverage":{"status":"complete","truncated":false,"diagnostics":[],"frontiers":[],
         "analyzed_range":{"start":0,"end":bytes}},
         "limits":{"max_source_bytes":crate::MAX_SOURCE_BYTES,"max_ast_nodes":MAX_AST_NODES,
-        "max_facts":MAX_FACTS,"max_frontiers":MAX_FRONTIERS,"max_binding_candidates":MAX_BINDING_CANDIDATES,"preflight_depth":128,"preflight_nodes":500000}})
+        "max_facts":MAX_FACTS,"max_frontiers":MAX_FRONTIERS,"max_binding_candidates":MAX_BINDING_CANDIDATES,
+        // Reported from the guard's own constants so a declared limit cannot
+        // drift from the bound that actually decided admission.
+        "preflight_depth":crate::preflight::MAX_TREE_DEPTH,
+        "preflight_nodes":crate::preflight::MAX_TREE_NODES}})
 }
 pub fn invalid(message: &str, bytes: usize) -> Value {
     let mut out = response(bytes);
@@ -1543,6 +1549,78 @@ mod tests {
                 .all(nested)
         );
     }
+    /// Dense minified glue at real minifier density, large enough that the
+    /// preflight node bound refused it outright before that bound was derived
+    /// from the source byte cap. The point of this fixture is admission, not
+    /// the fact budget: `bundle()` above already covers the declaration budget.
+    fn dense_bundle() -> String {
+        let mut glue = String::new();
+        let mut index = 0usize;
+        while glue.len() < 600 * 1024 {
+            glue.push_str(&format!(
+                "function p{index}(a,b){{var c=(a|0)+(b>>>2),d=a?b:c;\
+                 return c>3?(a+b)*c-d:({{k:a,v:[b,c,a&b]}}).v[(c%3)|0];}}"
+            ));
+            index += 1;
+        }
+        format!(
+            "(function(){{var shared=1;{glue}\
+             function target(seed){{var local=seed+shared;return local;}}}})();"
+        )
+    }
+
+    #[test]
+    fn a_dense_minified_bundle_is_admitted_and_still_reports_what_it_covered() {
+        let source = dense_bundle();
+        let whole = facts(&source);
+        // Before the preflight node bound was derived from the byte cap this
+        // was `unavailable` with "JavaScript preflight exceeded its complexity
+        // budget": no analysis budget was ever consulted, and no region could
+        // be requested either, because admission is shared by both paths.
+        assert_eq!(whole["ok"], true);
+        assert_ne!(whole["coverage"]["status"], "unavailable");
+        // Admission is not coverage. A bundle this size still reaches a whole
+        // program budget and still refuses to resolve anything against the
+        // incomplete table, naming the narrower request that can answer.
+        assert_eq!(whole["coverage"]["status"], "partial");
+        assert_eq!(whole["coverage"]["truncated"], true);
+        assert_eq!(
+            whole["coverage"]["diagnostics"],
+            json!([
+                "AST node budget exceeded; no lexical resolutions produced",
+                NARROW
+            ])
+        );
+        for table in ["scopes", "bindings", "callables", "regions", "operations"] {
+            assert!(whole[table].as_array().unwrap().is_empty());
+        }
+        assert_eq!(
+            whole["limits"]["preflight_nodes"],
+            json!(crate::preflight::MAX_TREE_NODES)
+        );
+
+        // What admission buys: the region path now reaches these bytes.
+        let cursor = source.find("var local").unwrap() as u32;
+        let out = region_facts(&source, cursor, cursor);
+        assert_eq!(out["ok"], true);
+        assert_eq!(out["coverage"]["status"], "partial");
+        assert_eq!(out["coverage"]["truncated"], false);
+        assert_eq!(
+            slice(&source, &out["coverage"]["analyzed_range"]),
+            "{var local=seed+shared;return local;}"
+        );
+        let names = out["bindings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|b| b["name"].as_str().unwrap())
+            .collect::<Vec<_>>();
+        assert!(names.contains(&"local") && names.contains(&"seed"));
+        assert!(!names.iter().any(|name| name.starts_with('p')));
+        // The glue's own declarations stay unknown rather than guessed at.
+        assert!(reasons(&out).contains(&"outside-analyzed-region"));
+    }
+
     #[test]
     fn a_region_whose_callable_still_exceeds_a_budget_fails_closed() {
         let source = bundle();

@@ -53,12 +53,33 @@ request cap allows JSON escaping of a 4 MiB source. At most 4,096 rewrites and
 See [the response contract](../../protocol/deobfuscation-v1.md).
 
 Before recursive Oxc parsing, a heap-backed Tree-sitter preflight admits only
-error-free JavaScript trees with depth at most 128 and at most 500,000 nodes,
-within one second. Excessive nesting returns a recoverable diagnostic and leaves
-the next JSON-line request usable. Both grammars must support the input syntax.
+error-free JavaScript trees with depth at most 128 and at most 2,097,152 nodes.
+Excessive nesting returns a recoverable diagnostic and leaves the next JSON-line
+request usable. Both grammars must support the input syntax.
+
+That node bound is one tree-sitter node per two bytes of the 4 MiB source cap,
+and it is shared by every operation here: deobfuscation, derived-text
+validation, `source_facts`, and the `function_at_byte` and candidate queries.
+Nothing behind it runs until it passes, so it decides whether a large
+obfuscated bundle can be analyzed at all. The grammar cannot exceed two nodes
+per byte, so a source up to 1,048,576 bytes is admitted whatever its shape;
+above that, admission depends on density, and real minifier output measures
+about 1.09 nodes per byte, which puts the practical ceiling near 1.9 MB of
+minified code. The 4 MiB byte cap is still unreachable for the densest sources.
+
+Admission depends only on the supplied bytes. The traversal is bounded by node
+count and tree depth and never consults a clock, so the same source is admitted
+or refused identically on a slow machine and on an unoptimized build. Only the
+tree-sitter parse keeps a wall-clock backstop, four seconds, sized well above
+the measured parse cost at the node bound so it cannot decide admission for a
+source that bound admits; it exists for pathological grammar behavior and stays
+inside the five-second process deadline so the refusal is still a recoverable
+diagnostic rather than a killed worker.
+
 Before accepting rewrites, the complete derived text passes the same bounded
 preflight and Oxc parser with the original parse goal. Derived text is capped at
-4 MiB plus the 512 KiB replacement budget. A failed check returns
+4 MiB plus the 512 KiB replacement budget, so a rewrite that grows a source
+already near the node bound can be refused by it; that returns
 `error_kind: "derived-validation"`, preserves the original text, and discards
 all rewrite receipts. This establishes syntax acceptance, not semantic equivalence.
 Object shorthand properties retain their original spelling and are not folded.

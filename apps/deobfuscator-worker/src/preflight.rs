@@ -1,9 +1,46 @@
 //! Heap-backed parse plus iterative traversal bounds recursive Oxc work.
 //! This is a conservative admission check, not a second transformation engine.
+//!
+//! Admission is a function of the supplied bytes. Every bound below is either a
+//! byte count, a tree depth or a node count, so the same source is admitted or
+//! refused identically on a slow machine and on an unoptimized build. The one
+//! wall clock left in this module cannot decide the outcome for any source the
+//! node bound admits; see `PARSE_BUDGET`.
 use std::time::{Duration, Instant};
 
-const MAX_TREE_DEPTH: usize = 128;
-const MAX_TREE_NODES: usize = 500_000;
+pub(crate) const MAX_TREE_DEPTH: usize = 128;
+/// Bounds the traversal and every recursive stage behind it, expressed against
+/// the source byte cap it guards rather than as a free-standing number: at most
+/// one tree-sitter node per two declared source bytes.
+///
+/// The grammar cannot exceed two nodes per byte, which `;;;;` reaches, so this
+/// admits *any* shape up to 1,048,576 bytes without a density assumption. Above
+/// that it is a density bound, and the density that matters is real minifier
+/// output: one-character locals reused in every scope measure 1.09 nodes per
+/// byte, so minified code is admitted to roughly 1.9 MB, including the
+/// ~1.5 MB obfuscated-glue class this harness exists to read.
+///
+/// The bound stays below `MAX_SOURCE_BYTES`, so the declared byte cap is still
+/// unreachable for dense code. That gap is documented rather than closed: the
+/// parse of a 4 MiB minified source costs at least 2.4 s on an unoptimized
+/// build, which no budget can admit and still leave a recoverable diagnostic
+/// inside the five-second process deadline.
+pub(crate) const MAX_TREE_NODES: usize = crate::MAX_SOURCE_BYTES / 2;
+/// The parse is the only step with no deterministic proxy for its own work, so
+/// it keeps a wall clock. It is a pathological-grammar backstop and must never
+/// decide admission: a source of exactly `MAX_TREE_NODES` nodes parses in
+/// 0.35 s optimized and 1.80 s unoptimized, and 0.57 s optimized at the worst
+/// per-node parse rate measured, so this budget clears the slowest of those by
+/// more than twice. A single pathological parse still answers inside the
+/// five-second deadline `DeobfuscationService` applies to the process, which
+/// keeps the recoverable diagnostic and the next JSON-line request rather than
+/// losing the worker.
+///
+/// The traversal deliberately does not consult this clock. A clock inside the
+/// walk made admission depend on machine speed and build profile: the same
+/// 1.5 MB glue bundle that an optimized worker admitted in 0.29 s was refused
+/// by an unoptimized one against a one-second budget.
+const PARSE_BUDGET: Duration = Duration::from_secs(4);
 
 pub fn check(source: &str) -> Result<(), &'static str> {
     parse_checked(source).map(drop)
@@ -14,7 +51,7 @@ fn parse_checked(source: &str) -> Result<tree_sitter::Tree, &'static str> {
     parser
         .set_language(&tree_sitter_javascript::LANGUAGE.into())
         .map_err(|_| "JavaScript preflight grammar is unavailable")?;
-    let deadline = Instant::now() + Duration::from_secs(1);
+    let deadline = Instant::now() + PARSE_BUDGET;
     let mut cancelled = |_: &tree_sitter::ParseState| Instant::now() >= deadline;
     let tree = parser
         .parse_with_options(
@@ -36,7 +73,10 @@ fn parse_checked(source: &str) -> Result<tree_sitter::Tree, &'static str> {
         if depth > MAX_TREE_DEPTH {
             return Err("JavaScript nesting exceeds the supported depth of 128");
         }
-        if nodes > MAX_TREE_NODES || Instant::now() >= deadline {
+        // Bounded by node count alone. The walk visits at most MAX_TREE_NODES + 1
+        // nodes, which is already a deterministic bound on its cost, so adding
+        // the clock here would only make an admissible source refusable.
+        if nodes > MAX_TREE_NODES {
             return Err("JavaScript preflight exceeded its complexity budget");
         }
         if cursor.goto_first_child() {
@@ -160,7 +200,87 @@ pub struct FunctionLocation {
 
 #[cfg(test)]
 mod tests {
-    use super::{check, function_at};
+    use super::{MAX_TREE_NODES, check, function_at};
+
+    /// Real minifier output: one-character locals reused in every scope, bit
+    /// operations, ternaries and object/array literals, with no whitespace.
+    /// This is the densest realistic JavaScript shape, and density is what
+    /// decides whether an obfuscated glue bundle is admitted at all.
+    fn dense_minified(byte_target: usize) -> String {
+        let mut out = String::from("(function(g){'use strict';");
+        let mut index = 0usize;
+        while out.len() < byte_target {
+            out.push_str(&format!(
+                "function f{index}(a,b){{var c=(a|0)+(b>>>2),d=a?b:c;\
+                 return c>3?(a+b)*c-d:({{k:a,v:[b,c,a&b]}}).v[(c%3)|0];}}"
+            ));
+            index += 1;
+        }
+        out.push_str("g.f=f0;})(this);");
+        out
+    }
+
+    /// Counts what the admission walk counts, so a density claim about this
+    /// guard is checked here instead of asserted in prose.
+    fn node_count(source: &str) -> usize {
+        let mut parser = tree_sitter::Parser::new();
+        parser
+            .set_language(&tree_sitter_javascript::LANGUAGE.into())
+            .unwrap();
+        let tree = parser.parse(source, None).unwrap();
+        assert!(!tree.root_node().has_error(), "fixture must parse cleanly");
+        let mut cursor = tree.walk();
+        let mut nodes = 0;
+        loop {
+            nodes += 1;
+            if cursor.goto_first_child() {
+                continue;
+            }
+            while !cursor.goto_next_sibling() {
+                if !cursor.goto_parent() {
+                    return nodes;
+                }
+            }
+        }
+    }
+
+    /// The byte size of the hCaptcha-class glue bundle this bound used to
+    /// refuse before any analysis budget was consulted.
+    const GLUE_BYTES: usize = 1_556_723;
+
+    #[test]
+    fn the_node_bound_admits_the_dense_minified_glue_class() {
+        assert_eq!(MAX_TREE_NODES, crate::MAX_SOURCE_BYTES / 2);
+        // Measured on a cheap sample so the expensive case below is one parse.
+        let sample = dense_minified(128 * 1024);
+        let density = node_count(&sample) as f64 / sample.len() as f64;
+        assert!((1.0..1.2).contains(&density), "{density} nodes per byte");
+        let implied = density * GLUE_BYTES as f64;
+        // Fails before the bound moved, and not marginally: a glue bundle of
+        // this size carries more than three times the previous 500_000-node
+        // admission limit, so it was refused before `source_facts`, `fold` or a
+        // candidate query could report anything about it.
+        assert!(implied > 500_000.0, "{implied} nodes");
+        assert!(implied < MAX_TREE_NODES as f64, "{implied} nodes");
+        assert!(check(&dense_minified(GLUE_BYTES)).is_ok());
+    }
+
+    #[test]
+    fn a_source_over_the_node_bound_is_refused_by_the_bound_not_by_a_clock() {
+        // Empty statements are the densest shape the grammar admits, at two
+        // nodes per byte, so this crosses the bound with the least text and the
+        // cheapest parse. Pin the ratio on a sample rather than re-walking it.
+        assert_eq!(node_count(&";".repeat(8)), 17);
+        let over = ";".repeat(MAX_TREE_NODES / 2);
+        assert_eq!(
+            check(&over).unwrap_err(),
+            "JavaScript preflight exceeded its complexity budget"
+        );
+        // One node fewer is admitted. The walk is bounded by node count alone,
+        // so the verdict is a function of the bytes and not of how long the
+        // traversal took to reach them.
+        assert!(check(&";".repeat(MAX_TREE_NODES / 2 - 1)).is_ok());
+    }
 
     #[test]
     fn rejects_deep_structures_without_recursion() {

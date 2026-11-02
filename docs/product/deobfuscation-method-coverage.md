@@ -43,12 +43,18 @@ reparsing generated nodes or looping to a fixed point. Exhausted rewrite, work o
 the representation truncated and retain the remaining source.
 
 A heap-backed Tree-sitter preflight iteratively checks syntax-tree depth before
-Oxc parsing. Sources above depth 128 or 500,000 syntax nodes are rejected with a
-recoverable diagnostic; preflight also has a one-second deadline. Error-recovery
-trees are rejected rather than used to infer a depth bound. This adds a
-conservative grammar admission boundary: syntax accepted by Oxc but unsupported
-by the preflight grammar remains unavailable. Literal/comment punctuation does
-not count as nesting. The worker preserves the source and can process the next
+Oxc parsing. Sources above depth 128 or 2,097,152 syntax nodes are rejected with
+a recoverable diagnostic. The node bound is one node per two bytes of the 4 MiB
+source cap, which admits any source up to 1,048,576 bytes whatever its shape and
+dense minified bundles to roughly 1.9 MB; the byte cap stays unreachable for the
+densest code. The traversal is bounded by node count and depth and never by
+elapsed time, so admission is a function of the supplied bytes rather than of
+machine speed. Only the parse keeps a wall-clock backstop, four seconds, sized
+so it cannot refuse a source the node bound admits. Error-recovery trees are
+rejected rather than used to infer a depth bound. This adds a conservative
+grammar admission boundary: syntax accepted by Oxc but unsupported by the
+preflight grammar remains unavailable. Literal/comment punctuation does not
+count as nesting. The worker preserves the source and can process the next
 framed request after rejection. Adapter wall-clock deadlines remain five seconds.
 
 ## Validation and engines

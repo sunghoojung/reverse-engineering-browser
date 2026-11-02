@@ -97,7 +97,7 @@ explicit frontiers rather than invented effects.
 `limits` reports `max_source_bytes: 4194304`, `max_ast_nodes: 262144`,
 `max_facts: 16384`, `max_frontiers: 256`, `max_binding_candidates: 64`,
 `preflight_depth: 128` and
-`preflight_nodes: 500000`. The fact limit is the total across all five arrays.
+`preflight_nodes: 2097152`. The fact limit is the total across all five arrays.
 The node budget counts only the nodes inside the analyzed range, and it stays
 fixed rather than caller-supplied so two reports of the same bytes cannot
 disagree about what was admitted. It sits below the preflight node bound that
@@ -105,6 +105,22 @@ already admitted the source, so on a large bundle the fact budget, not the node
 budget, is normally reached first; a region is the answer to either. The bounded
 lexical preflight and Oxc parser use the same inert-source path as the existing
 worker. Frontier records and diagnostics are bounded separately.
+
+`preflight_nodes` is the shared admission bound in front of this operation, and
+it is one tree-sitter node per two bytes of `max_source_bytes`. The grammar
+cannot exceed two nodes per byte, so any source up to 1,048,576 bytes is
+admitted whatever its shape; above that, admission depends on density, and real
+minifier output measures about 1.09 nodes per byte. A dense bundle of roughly
+1.9 MB is therefore the practical admission ceiling, and `max_source_bytes`
+stays unreachable for the densest code. Admission is a function of the supplied
+bytes alone: the traversal behind this bound is limited by node count and tree
+depth, never by elapsed time, so the same artifact is admitted or refused
+identically on a fast and a slow machine. Only the tree-sitter parse keeps a
+wall-clock backstop, and it is sized so that it cannot refuse a source this
+node bound admits. A refusal is reported as `coverage.status: "unavailable"`
+with the preflight diagnostic and no facts; being admitted says nothing about
+coverage, and a bundle large enough to need admission headroom normally still
+reaches a whole-program budget and needs a region.
 
 ## Coverage and failures
 

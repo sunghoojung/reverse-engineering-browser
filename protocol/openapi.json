@@ -17883,7 +17883,7 @@
                 "const": 128
               },
               "preflight_nodes": {
-                "const": 500000
+                "const": 2097152
               },
               "max_binding_candidates": {
                 "const": 64
@@ -18067,7 +18067,7 @@
                 "const": 128
               },
               "preflight_nodes": {
-                "const": 500000
+                "const": 2097152
               },
               "max_binding_candidates": {
                 "const": 64

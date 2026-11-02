@@ -163,7 +163,7 @@ in-memory DOM; native Save-panel testing remains a macOS gate.
 
 ## Saved investigation notebook
 
-Use **Notebook** in the toolbar to create a named local notebook, then **Pin
+Use **Notebook** in the sidebar to create a named local notebook, then **Pin
 selected evidence** from a captured Source, native Request, or selected Evidence
 observation. Add a concise name and note and choose **Save pin**. Exact captured
 source ranges are preserved when they came from verified original-byte navigation.
@@ -171,8 +171,8 @@ Reopening resolves the same retained identity; changed, missing or ambiguous
 records remain explicit. Names can repeat without confusing their scoped IDs.
 
 Notebooks survive application reload as non-executable JSON scratchpads in the
-existing Analyst library. The dialog clearly discloses its library-wide scope
-across sessions. Existing scripts and notes stay unchanged. Pins store reference
+existing Analyst library. The notebook opens as a side sheet beside the evidence
+and clearly discloses its library-wide scope across sessions. Existing scripts and notes stay unchanged. Pins store reference
 metadata and event fingerprints, never copied source/request/console content or
 capture permissions. Typed notes may contain private information and remain local.
 Cancellation cannot undo an already committed save: unconfirmed writes require
@@ -196,7 +196,9 @@ Set `REB_BRAVE_BINARY` to the matching rebuilt custom browser and use the live
 backend. The [native contract](../../protocol/native-console-v2.md) specifies
 ownership, rebuild compatibility and the real-browser acceptance gates. No
 breakpoints, stepping or paused-frame inspection are supplied by this console.
-Workspace tabs sit across the top, with VM between Sources and Console. Commands are
+Console sits at the foot of the sidebar (⌘ / Ctrl + J). When no compatible
+Console is available, opening the dock shows the unavailable state and its
+**Check availability** action instead of opening Session settings over it. Commands are
 syntax colored while typing and in the transcript; primitive results use colors
 for their value types. Coloring uses inert text spans and a bounded tokenizer.
 Console keeps a persistent command composer below its independently scrolling

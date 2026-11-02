@@ -8209,10 +8209,90 @@ const capturedExportPanel = installCapturedExportDialog({
           flip();
         });
         document.addEventListener('pointerdown', event => { if (peek && !sidebar.contains(event.target)) closePeek(); });
-        sidebar.addEventListener('click', event => { if (peek && event.target?.closest?.('.nav-button, .sidebar-action')) closePeek(); });
+        sidebar.addEventListener('click', event => { if (peek && event.target?.closest?.('.nav-button, .sidebar-action, .sidebar-search')) closePeek(); });
         narrow.addEventListener('change', sync);
         sync();
         return { sync, flip };
+      })();
+
+      // Command palette (Cmd/Ctrl + K). Every result opens through the function
+      // its workspace already uses: sidebar entries and actions click their own
+      // controls, and evidence goes through the exact-identity link, so
+      // Back/Forward, refusals and focus match any other link. Items keep only
+      // identifiers, never captured payloads.
+      const commandPalette = (() => {
+        const control = selector => () => document.querySelector(selector)?.click();
+        const workspaces = {id: 'workspaces', group: 'Workspaces', empty: true, search: () =>
+          [...document.querySelectorAll('.primary-nav .nav-button[data-screen]')].map((button, index) => ({
+            title: button.getAttribute('aria-label'), detail: `Workspace · ⌘ / Ctrl + ${index + 1}`,
+            run() { button.click(); button.focus({preventScroll: true}); }
+          }))};
+        const actions = {id: 'actions', group: 'Actions', empty: true, search: () => {
+          const consoleOpen = document.querySelector('#native-console-toggle').getAttribute('aria-pressed') === 'true';
+          const theme = document.documentElement.dataset.theme === 'light' ? 'dark' : 'light';
+          return [
+            {title: consoleOpen ? 'Close Console' : 'Open Console', detail: 'Action · ⌘ / Ctrl + J', run: control('#native-console-toggle')},
+            {title: 'Open investigation notebook', detail: 'Action · Notebook', run: control('#open-investigation-notebook')},
+            {title: `Switch to ${theme} theme`, detail: 'Action · Appearance', run: control('#theme-toggle')},
+            {title: document.querySelector('#sidebar-toggle').getAttribute('aria-label'), detail: 'Action · ⌘ / Ctrl + B', run: control('#sidebar-toggle')}
+          ];
+        }};
+        // Request rows without an exact native identity (demo and legacy rows)
+        // open the way a row click does, after the same uniqueness check, and
+        // leave the same Back stop and row focus as the exact link.
+        function openPaletteRequest(id, identity) {
+          if (identity) return openInvestigation({kind: 'request', identity});
+          if (state.requests.filter(request => request.id === id).length !== 1) {
+            investigationNotice('This request is no longer retained, or its row identifier is ambiguous. Nothing was selected.', 'stale'); return false;
+          }
+          if (investigationScreen() === 'traffic') investigationNavigation?.record();
+          showScreen('traffic');
+          if (!document.querySelector('#console-experiment-traffic').hidden) document.querySelector('#console-traffic-back').click();
+          selectRequest(id);
+          const revision = investigationRevision;
+          requestAnimationFrame(() => {
+            if (revision !== investigationRevision || investigationScreen() !== 'traffic' || state.selectedRequestId !== id) return;
+            ([...elements.requestRows.querySelectorAll('.request-row')].find(row => row.dataset.requestId === id) ?? elements.requestFilter).focus({preventScroll: true});
+          });
+          return true;
+        }
+        let requestItems = {requests: null, items: []};
+        const requests = {id: 'requests', group: 'Requests', search: () => {
+          if (requestItems.requests !== state.requests) requestItems = {requests: state.requests, items: state.requests.map(request => {
+            const {name, host} = trafficTargetParts(request), id = request.id, identity = investigationRequestIdentity(request);
+            return {title: `${request.method} ${request.hostOnly ? name : `${host}${name}`}`,
+              detail: [request.status, trafficTypeLabel(request.type), request.hostOnly ? 'host only' : '',
+                identity ? `request ${identity.request} · session ${identity.session} · process ${identity.process} · sequence ${identity.sequence}` : 'no exact retained identity'].filter(Boolean).join(' · '),
+              run: () => openPaletteRequest(id, identity)};
+          })};
+          return requestItems.items;
+        }};
+        const files = {id: 'files', group: 'Files', search: () => capturedSources().map(source => {
+          const id = source.artifact_id, identity = investigationArtifactIdentity(source);
+          return {title: sourceDisplayName(source),
+            detail: [source.url || '(anonymous)', sourceKindLabel(source.kind)?.[1] ?? source.kind, formatByteSize(source.byte_size)].join(' · '),
+            run() { if (identity) openInvestigation({kind: 'artifact', identity}); else { showScreen('sources'); selectArtifact(id); } }};
+        })};
+        function openPaletteFinding(id) {
+          const row = () => [...elements.vmList.querySelectorAll('.vm-row')].find(candidate => candidate.dataset.findingId === id);
+          showScreen('vm');
+          document.querySelector('#vm-show-findings')?.click();
+          if (!row()) { investigationNotice('This VM finding is no longer listed. Nothing was selected.', 'stale'); return false; }
+          row().click();
+          // Linked navigation focuses the workspace's Back control on the next
+          // frame; keep focus on the chosen finding instead.
+          const revision = investigationRevision;
+          requestAnimationFrame(() => { if (revision === investigationRevision && investigationScreen() === 'vm') row()?.focus({preventScroll: true}); });
+          return true;
+        }
+        const findings = {id: 'vm-findings', group: 'VM findings', search: () => state.vmFindings.map(finding => {
+          const id = finding.findingId;
+          return {title: finding.analysis ? 'VM patterns in source' : finding.label,
+            detail: `${finding.analysis ? 'Code analysis' : finding.kind} · finding ${id} · investigation ${finding.investigationId} · ${finding.hostRuntime} · ${finding.confidence}`,
+            run: () => openPaletteFinding(id)};
+        })};
+        return RebCommandPalette.mount({trigger: document.querySelector('#command-palette-open'),
+          providers: [workspaces, actions, requests, files, findings]});
       })();
 
       renderRequests();

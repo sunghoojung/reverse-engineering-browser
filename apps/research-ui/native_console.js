@@ -649,9 +649,11 @@
   new ResizeObserver(positionConnection).observe(root);
   function focusPrompt() {
     if (checking) { controls.connection.querySelector('summary').focus(); return; }
-    // Without a usable Console the empty state already explains the gap and
-    // offers Check availability; covering it with the settings repeats both.
-    if (!session && !available && documentSource !== 'live_capture') { element('empty-action').focus(); return; }
+    // While the unavailable empty state is showing, it already explains the gap
+    // and offers Check availability; covering it with the settings repeats both.
+    // Transcript rows hide that state, and a live document needs the settings
+    // to pick it, so those cases still open them.
+    if (!session && !available && !liveAvailable && documentSource !== 'live_capture' && !element('empty').hidden) { element('empty-action').focus(); return; }
     if (!session || controls.target.disabled && controls.source.disabled) controls.connection.open = true;
     (session ? controls.source.disabled ? controls.target.disabled ? controls.refresh : controls.target : controls.source : documentSource === 'live_capture' ? (controls.target.value ? controls.start : controls.target) : available ? controls.url : element('check')).focus();
   }

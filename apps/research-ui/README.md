@@ -197,8 +197,9 @@ backend. The [native contract](../../protocol/native-console-v2.md) specifies
 ownership, rebuild compatibility and the real-browser acceptance gates. No
 breakpoints, stepping or paused-frame inspection are supplied by this console.
 Console sits at the foot of the sidebar (⌘ / Ctrl + J). When no compatible
-Console is available, opening the dock shows the unavailable state and its
-**Check availability** action instead of opening Session settings over it. Commands are
+Console or live document is available and the transcript is empty, opening the
+dock focuses the unavailable state's **Check availability** action instead of
+opening Session settings over it. Commands are
 syntax colored while typing and in the transcript; primitive results use colors
 for their value types. Coloring uses inert text spans and a bounded tokenizer.
 Console keeps a persistent command composer below its independently scrolling

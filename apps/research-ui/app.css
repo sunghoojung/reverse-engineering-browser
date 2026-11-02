@@ -2711,7 +2711,6 @@ body.resizing-panes-y, body.resizing-panes-y * { cursor: row-resize !important; 
 .investigation-notebook :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .investigation-notebook button:disabled { opacity: .5; }
 @media (max-width: 760px) {
-  .investigation-notebook { padding: 14px; width: calc(100vw - 24px); max-height: calc(100dvh - 24px); }
   .notebook-split { grid-template-columns: 1fr; }
   .notebook-list { max-height: 160px; }
   .notebook-editor { border-left: 0; padding-left: 0; border-top: 1px solid var(--line); padding-top: 12px; }

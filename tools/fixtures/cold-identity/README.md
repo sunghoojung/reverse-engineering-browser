@@ -133,3 +133,24 @@ complete eight-field identity, nine capabilities, bounded snapshots and terminal
 coverage remain separate BP follow-on work. No production contract, overlay,
 patch or operation is added here. Full Xcode and the initialized Brave/V8
 checkout are unavailable in BS; see the [lane handoff](../../../docs/origin-trace/LANE_BS_NOTES.md).
+
+## BV native cold-ID continuation
+
+[The native binding proposal](../../../docs/origin-trace/LANE_BV_NOTES.md#native-cold-instance-binding-proposal) specifies binding an
+already-existing engine instance, an independent pre-execution coldness witness,
+shared cold/warm native identity, exact-pair admission and lifetime ownership.
+It adds no V8 API or production patch. [native-exercise.js](native-exercise.js)
+is a future native test-host contract; its positive assertions are unrun.
+The original owned inputs and 13-case Node scaffold remain unchanged.
+
+```sh
+node --disallow-code-generation-from-strings tools/fixtures/cold-identity/run-native.mjs
+```
+
+This additional entrypoint deliberately exits **78 (unavailable)** after
+checking exact inputs and missing/malformed native-host refusal. It constructs
+a cold actual instance, performs zero fixture mutations, and binds no ID. It
+does not launch a shell or accept a JS adapter as native provenance. All native,
+pinned-engine, transport and production flags remain false; coverage stays null.
+See [BV's command/blocker record](../../../docs/origin-trace/LANE_BV_NOTES.md)
+before claiming any pinned-engine or native acceptance result.

@@ -106,8 +106,10 @@ const resolution = extra => ({format: 'reb-js-invocation-site-resolution-v1', st
     if (body.action === 'add' && body.name === 'o.dup') return {status: 200, body: {ok: true, added: false, set: current,
       resolution: resolution({candidates: [candidate(2, 10), candidate(4, 30, {supported: false, refusal: 'Generators and async generators are never armed.'})]})}};
     if (body.action === 'add') {
-      current = set([site(body.label ?? 'window.hsw')]);
-      return {status: 200, body: {ok: true, added: true, set: current, resolution: resolution({status: 'resolved', reason: null, label: body.label ?? 'window.hsw',
+      // The backend labels an unbound function by its position.
+      const label = body.label ?? (body.name ?? 'Function at line 1, column 5');
+      current = set([site(label)]);
+      return {status: 200, body: {ok: true, added: true, set: current, resolution: resolution({status: 'resolved', reason: null, label,
         function: candidate(1, body.byte_offset ?? 20), candidates: [], candidate_count: 0, message: 'Resolved.'})}};
     }
     if (body.action === 'remove') { current = set([]); return {status: 200, body: {ok: true, removed: true, set: current}}; }
@@ -148,6 +150,7 @@ const resolution = extra => ({format: 'reb-js-invocation-site-resolution-v1', st
   await settle(); await settle();
   assert.equal(view.shown.length, 1, 'The action opens the tracking pane');
   assert.equal(view.requests.at(-1).body.byte_offset, 42);
+  assert.match(view.text(), /Saved the function at line 1, column 5\. Tracking starts/, 'A position label is said once');
   // Remove is labeled per site; clear asks for a second, explicit choice.
   const remove = view.container.all.find(element => element.getAttribute?.('aria-label')?.startsWith('Remove '));
   assert(remove);
@@ -210,6 +213,11 @@ const resolution = extra => ({format: 'reb-js-invocation-site-resolution-v1', st
   const app = await read('apps/research-ui/app.js');
   const rule = app.slice(app.indexOf('function invocationSitePositionProblem()'), app.indexOf('function invocationSitePosition()'));
   assert.match(rule, /state\.sourceWasm \|\| state\.sourceDeobfuscated \|\| state\.sourceFormatted/);
+  // Track calls is refreshed after the editor holds the new text; refreshed
+  // earlier, it described the previous source and stayed disabled.
+  const renderSources = app.slice(app.indexOf('      function renderSources() {'), app.indexOf('      function renderSourcePane() {'));
+  assert(renderSources.lastIndexOf('invocationSitesPanel.render()') > renderSources.indexOf('renderSourceContent(source, view)'),
+    'renderSources refreshes Track calls after rendering the source');
   const html = await read('apps/research-ui/index.html');
   assert(html.indexOf('src="invocation_sites.js"') > 0 && html.indexOf('src="invocation_sites.js"') < html.indexOf('src="app.js"'));
   for (const id of ['invocation-tracking', 'source-track-calls', 'invocation-sites-details', 'invocation-sites-panel']) assert(html.includes(`id="${id}"`), id);

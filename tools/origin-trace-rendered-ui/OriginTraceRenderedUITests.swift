@@ -218,15 +218,22 @@ final class Harness {
   }
 
   // The window AppKit draws, for native dialogs WebKit snapshots cannot see.
+  // An on-screen alert draws its text with vibrancy in the window server, so
+  // cacheDisplay and layer rendering leave it blank. A process may capture its
+  // own window without screen recording permission; the window list API that
+  // does so is deprecated, so it is looked up rather than linked.
   func screenshot(window panel: NSWindow, _ name: String) throws {
-    guard let view = panel.contentView?.superview ?? panel.contentView,
-      let bitmap = view.bitmapImageRepForCachingDisplay(in: view.bounds)
+    typealias Capture = @convention(c) (CGRect, UInt32, UInt32, UInt32) -> Unmanaged<CGImage>?
+    let defaultHandle = UnsafeMutableRawPointer(bitPattern: -2)
+    guard let symbol = dlsym(defaultHandle, "CGWindowListCreateImage") else { throw HarnessError("Window capture is unavailable") }
+    let capture = unsafeBitCast(symbol, to: Capture.self)
+    // kCGWindowListOptionIncludingWindow; ignore framing, best resolution.
+    guard let image = capture(.null, 1 << 3, UInt32(panel.windowNumber), 1 | (1 << 3))?.takeRetainedValue(),
+      let png = NSBitmapImageRep(cgImage: image).representation(using: .png, properties: [:])
     else { throw HarnessError("Could not capture \(name)") }
-    view.cacheDisplay(in: view.bounds, to: bitmap)
-    guard let png = bitmap.representation(using: .png, properties: [:]) else { throw HarnessError("Could not encode \(name)") }
     try FileManager.default.createDirectory(at: output, withIntermediateDirectories: true)
     try png.write(to: output.appendingPathComponent("\(name).png"))
-    print("RENDERED_UI_SCREENSHOT \(name) \(Int(view.bounds.width))x\(Int(view.bounds.height))")
+    print("RENDERED_UI_SCREENSHOT \(name) \(image.width)x\(image.height)")
   }
 
   // macOS defaults to Tab moving only between text fields and lists; Option+Tab
@@ -1344,7 +1351,7 @@ final class OriginTraceRenderedUITests: XCTestCase {
         """, contentWorld: .page)
       try await ui.click("#source-window button[type=submit]")
       try await ui.click("#source-track-calls")
-      try await ui.waitUntil("(document.querySelector('#invocation-site-status')?.innerText ?? '').includes('Saved Function at line 2')",
+      try await ui.waitUntil("(document.querySelector('#invocation-site-status')?.innerText ?? '').includes('Saved the function at line 2')",
         "\(size.name): the function at the position was not saved")
       let savedCount = try await savedSiteCount(ui)
       XCTAssertEqual(savedCount, 2, "\(size.name): two sites saved")
@@ -1410,6 +1417,8 @@ final class OriginTraceRenderedUITests: XCTestCase {
       XCTAssertTrue(texts().contains("window.hsw"), "the dialog names each saved function")
       XCTAssertTrue(texts().contains { $0.contains("Content mode also records settled-value digests") }, "Content mode names its digests")
       XCTAssertTrue(texts().contains("https://hcaptcha.test/glue.js"), "each site names its script")
+      // An alert grows into place and resizes when a row is removed.
+      try await Task.sleep(nanoseconds: 1_500_000_000)
       try ui.screenshot(window: panel, "start-dialog-tracking")
       let popup = try XCTUnwrap(views(panel.contentView!).compactMap { $0 as? NSPopUpButton }.first)
       popup.selectItem(at: 1)
@@ -1422,6 +1431,7 @@ final class OriginTraceRenderedUITests: XCTestCase {
       let file = try String(contentsOfFile: expected.invocationSiteStore, encoding: .utf8)
       let sites = (try JSONSerialization.jsonObject(with: Data(file.utf8)) as? [String: Any])?["sites"] as? [Any]
       XCTAssertEqual(sites?.count, 1, "Remove rewrites the saved site file at once")
+      try await Task.sleep(nanoseconds: 1_500_000_000)
       try ui.screenshot(window: panel, "start-dialog-tracking-removed")
       popup.selectItem(at: 0)
       _ = popup.sendAction(popup.action, to: popup.target)

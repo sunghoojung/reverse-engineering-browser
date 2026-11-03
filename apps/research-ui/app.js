@@ -6744,7 +6744,6 @@ invocationSitesPanel.refresh();
 
       function renderSources() {
         const source = selectedSource();
-        invocationSitesPanel.render();
         sourceFactsPanel.sync(source);
         syncInvestigationRange(source);
         const view = source?.content !== undefined ? sourceDisplayView(source) : null;
@@ -6771,6 +6770,8 @@ invocationSitesPanel.refresh();
           }
         }
         resumeInvestigationReturn();
+        // After the editor holds this source's text, so Track calls reflects it.
+        if (typeof invocationSitesPanel !== 'undefined') invocationSitesPanel.render();
       }
 
       // The navigator shows the file tree or Search all files; one tab each.
@@ -7617,7 +7618,7 @@ invocationSitesPanel.refresh();
           }
           state.artifactCatalogSignature = catalogSignature;
           // A newly retained script can be another version of a saved one.
-          invocationSitesPanel.refresh();
+          if (typeof invocationSitesPanel !== 'undefined') invocationSitesPanel.refresh();
           if (body.artifacts.length === 0) {
             if (state.sessionMode === 'live') {
               retireCanvasPreviews('Canvas previews released because the artifact catalog is empty.');

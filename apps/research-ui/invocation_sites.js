@@ -180,9 +180,10 @@ function createInvocationSitesPanel({root, chip, trackButton, getSource, positio
     const value = await act({action: 'add', session_id: source.session_id, artifact_id: source.artifact_id, ...fields}, pending);
     if (!value) return;
     model.result = value.resolution ?? null;
-    model.status = value.added
-      ? `Saved ${value.resolution.label} (${describe(value.resolution)}). ${INVOCATION_SITE_NEXT_CAPTURE}`
-      : value.resolution?.message ?? 'Nothing was saved.';
+    const where = describe(value.resolution), label = value.resolution?.label ?? '';
+    // A function bound to no name is labeled by its position; say it once.
+    const saved = label === `Function at ${where}` ? `the function at ${where}` : `${label} (${where})`;
+    model.status = value.added ? `Saved ${saved}. ${INVOCATION_SITE_NEXT_CAPTURE}` : value.resolution?.message ?? 'Nothing was saved.';
     render();
   }
 

@@ -46,7 +46,9 @@ class NativeProbeTransport final : public mojom::NativeProbeClient {
                  base::UnsafeSharedMemoryRegion queue_region,
                  std::uint64_t wasm_capture_epoch = 0,
                  const std::string& guest_adapter_json = {},
-                 const std::vector<std::uint8_t>& js_dispatch_sites = {}) override;
+                 const std::vector<std::uint8_t>& js_dispatch_sites = {},
+                 const std::vector<std::uint8_t>& js_invocation_sites = {},
+                 bool js_invocation_digests = false) override;
   void Disable() override;
   void NativeGuestModuleStatus(std::uint64_t wasm_capture_epoch,
                                std::uint64_t module_token,

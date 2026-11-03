@@ -18,7 +18,12 @@ interface NativeProbeClient {
             string guest_adapter_json,
             // Fixed 44-byte native JavaScript dispatch site records (at most 8),
             // already validated by the browser; empty when not armed.
-            array<uint8> js_dispatch_sites);
+            array<uint8> js_dispatch_sites,
+            // Fixed 44-byte function-entry site records (shape 3, at most 8)
+            // for native JavaScript invocation identity; empty when not armed.
+            array<uint8> js_invocation_sites,
+            // The session's sensitive opt-in for settled-value digests.
+            bool js_invocation_digests);
   Disable();
   // Browser verdict on the module bytes carried by the guest capture whose
   // dispatch sequence number is module_token. The renderer keeps sending an

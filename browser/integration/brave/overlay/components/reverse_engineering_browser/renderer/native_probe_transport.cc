@@ -69,7 +69,9 @@ void NativeProbeTransport::Configure(const std::uint64_t session_id,
                                      base::UnsafeSharedMemoryRegion queue_region,
                                      const std::uint64_t wasm_capture_epoch,
                                      const std::string& guest_adapter_json,
-                                     const std::vector<std::uint8_t>& js_dispatch_sites) {
+                                     const std::vector<std::uint8_t>& js_dispatch_sites,
+                                     const std::vector<std::uint8_t>& js_invocation_sites,
+                                     const bool js_invocation_digests) {
   Disable();
   const std::uint64_t now =
       static_cast<std::uint64_t>(base::TimeTicks::Now().since_origin().InNanoseconds());
@@ -107,6 +109,14 @@ void NativeProbeTransport::Configure(const std::uint64_t session_id,
     const std::size_t count = DecodeNativeJsDispatchSites(js_dispatch_sites, sites);
     NativeProbeSink::Get().ConfigureNativeJsDispatch(
         std::span<const NativeJsDispatchSite>(sites.data(), count ? count : 1));
+  }
+  if (!js_invocation_sites.empty()) {
+    // As above: a malformed list is one input gap and arms nothing.
+    std::array<NativeJsInvocationSite, kNativeJsInvocationSiteLimit> sites{};
+    const std::size_t count = DecodeNativeJsInvocationSites(js_invocation_sites, sites);
+    NativeProbeSink::Get().ConfigureNativeJsInvocation(
+        std::span<const NativeJsInvocationSite>(sites.data(), count ? count : 1),
+        js_invocation_digests);
   }
 }
 

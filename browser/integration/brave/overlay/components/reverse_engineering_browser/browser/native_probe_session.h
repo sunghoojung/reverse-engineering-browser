@@ -47,6 +47,14 @@ class NativeProbeSession final {
   [[nodiscard]] const std::vector<std::uint8_t>& js_dispatch_sites() const noexcept {
     return js_dispatch_sites_;
   }
+  // Fixed 44-byte function-entry site records; empty unless a valid
+  // --reb-js-invocation-sites file was supplied.
+  [[nodiscard]] const std::vector<std::uint8_t>& js_invocation_sites() const noexcept {
+    return js_invocation_sites_;
+  }
+  // --reb-js-invocation-digests: the session's sensitive opt-in for
+  // settled-value digests. Only meaningful with invocation sites.
+  [[nodiscard]] bool js_invocation_digests() const noexcept { return js_invocation_digests_; }
   [[nodiscard]] bool IsActive() const noexcept;
   [[nodiscard]] std::uint64_t session_id() const noexcept;
   [[nodiscard]] std::uint64_t category_mask() const noexcept;
@@ -69,6 +77,9 @@ class NativeProbeSession final {
   std::string guest_adapter_json_, guest_startup_adapter_json_;
   std::string js_dispatch_startup_sites_json_;
   std::vector<std::uint8_t> js_dispatch_sites_;
+  std::string js_invocation_startup_sites_json_;
+  std::vector<std::uint8_t> js_invocation_sites_;
+  bool js_invocation_digests_ = false;
   std::vector<raw_ptr<NativeProbeHost>> hosts_;
   std::atomic<NativeProbeEmitter> downstream_{nullptr};
   std::atomic<std::uint64_t> session_id_{0};

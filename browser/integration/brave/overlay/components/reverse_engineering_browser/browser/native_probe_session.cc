@@ -17,6 +17,7 @@
 #include "brave/components/reverse_engineering_browser/browser/native_network_capture_sink.h"
 #include "brave/components/reverse_engineering_browser/browser/native_probe_host.h"
 #include "brave/components/reverse_engineering_browser/common/native_js_dispatch_sites.h"
+#include "brave/components/reverse_engineering_browser/common/native_js_invocation_sites.h"
 #include "brave/components/reverse_engineering_browser/common/native_wasm_guest_adapter.h"
 #include "content/public/browser/render_process_host.h"
 #include "mojo/public/cpp/bindings/self_owned_receiver.h"
@@ -97,6 +98,32 @@ bool NativeProbeSession::StartSession(const std::uint64_t session_id,
     }
     js_dispatch_startup_sites_json_ = std::move(json);
   }
+  js_invocation_sites_.clear();
+  js_invocation_digests_ = false;
+  if (command_line->HasSwitch("reb-js-invocation-sites")) {
+    // Same lifetime rule as dispatch sites: armed entries cannot be
+    // retargeted, so a changed or invalid file refuses the session.
+    const auto path = command_line->GetSwitchValuePath("reb-js-invocation-sites");
+    std::string json;
+    if (path.empty() ||
+        !base::ReadFileToStringWithMaxSize(path, &json, kNativeJsInvocationSitesFileLimit) ||
+        (!js_invocation_startup_sites_json_.empty() && js_invocation_startup_sites_json_ != json) ||
+        (category_mask & NativeProbeCategoryMask(NativeProbeCategory::kVm)) == 0) {
+      guest_adapter_json_.clear();
+      js_dispatch_sites_.clear();
+      return false;
+    }
+    js_invocation_sites_ = ParseNativeJsInvocationSites(json);
+    if (js_invocation_sites_.empty()) {
+      guest_adapter_json_.clear();
+      js_dispatch_sites_.clear();
+      return false;
+    }
+    js_invocation_startup_sites_json_ = std::move(json);
+    // Digests are a sensitive capture path; the launcher passes this switch
+    // only with a visible sensitive-capture label.
+    js_invocation_digests_ = command_line->HasSwitch("reb-js-invocation-digests");
+  }
   category_mask_.store(category_mask, std::memory_order_relaxed);
   expires_at_monotonic_ns_.store(expires_at_monotonic_ns, std::memory_order_relaxed);
   capture_canvas_images_.store(capture_canvas_images, std::memory_order_relaxed);
@@ -116,6 +143,8 @@ bool NativeProbeSession::StartSession(const std::uint64_t session_id,
 void NativeProbeSession::StopSession() noexcept {
   guest_adapter_json_.clear();
   js_dispatch_sites_.clear();
+  js_invocation_sites_.clear();
+  js_invocation_digests_ = false;
   NativeArtifactCaptureSink::Get().SetEmitter(nullptr, 0, 0, 0);
   NativeNetworkCaptureSink::Get().SetEmitter(nullptr, 0, 0, 0);
   session_id_.store(0, std::memory_order_release);

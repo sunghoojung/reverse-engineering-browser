@@ -20,6 +20,7 @@
 #include "base/no_destructor.h"
 #include "brave/components/reverse_engineering_browser/common/native_artifact_header.h"
 #include "brave/components/reverse_engineering_browser/common/native_js_dispatch.h"
+#include "brave/components/reverse_engineering_browser/common/native_js_invocation.h"
 #include "brave/components/reverse_engineering_browser/common/native_probe_event.h"
 #include "brave/components/reverse_engineering_browser/common/native_vm_dispatch_emit.h"
 #include "brave/components/reverse_engineering_browser/common/native_vm_finding.h"
@@ -244,6 +245,47 @@ class COMPONENT_EXPORT(REB_NATIVE_PROBE_SINK) NativeProbeSink final {
                                   std::uint32_t slot,
                                   NativeJsDispatchSiteStatus status) noexcept;
   void NoteNativeJsDispatchInputUnavailable(std::uint64_t epoch, std::uint64_t frame_id) noexcept;
+  // Native JavaScript invocation identity, protocol/native-js-invocation-v1.md.
+  // The site list follows the dispatch rules: immutable for the browser
+  // lifetime, configured after SetEmitters, disarmed by the next one.
+  // digests is the session's sensitive value-digest opt-in.
+  void ConfigureNativeJsInvocation(std::span<const NativeJsInvocationSite> sites,
+                                   bool digests) noexcept;
+  // V8 pulls these on the isolate thread; none of them calls back into V8,
+  // allocates or blocks.
+  [[nodiscard]] std::uint64_t NativeJsInvocationEpoch() const noexcept;
+  [[nodiscard]] std::size_t CopyNativeJsInvocationSites(
+      std::uint64_t epoch,
+      std::span<NativeJsInvocationSite> out) const noexcept;
+  // False once the configuration's 256 starts or the slot's 64 are spent.
+  [[nodiscard]] bool IsNativeJsInvocationEnabled(std::uint64_t epoch,
+                                                 std::uint32_t slot) const noexcept;
+  [[nodiscard]] bool NativeJsInvocationDigests(std::uint64_t epoch) const noexcept;
+  // Assign sample indices and emit through the ordinary ring. A start must
+  // name the configured site of its slot exactly; a settle carries a digest
+  // only when the configuration enables digests.
+  void RecordNativeJsInvocationStart(std::uint64_t epoch,
+                                     std::uint64_t frame_id,
+                                     NativeJsInvocationStartPayload payload) noexcept;
+  void RecordNativeJsInvocationSettle(std::uint64_t epoch,
+                                      std::uint64_t frame_id,
+                                      NativeJsInvocationSettlePayload payload) noexcept;
+  void NoteNativeJsInvocationStatus(std::uint64_t epoch,
+                                    std::uint32_t slot,
+                                    NativeJsInvocationSiteStatus status) noexcept;
+  void NoteNativeJsInvocationInputUnavailable(std::uint64_t epoch,
+                                              std::uint64_t frame_id) noexcept;
+  void NoteNativeJsInvocationSettleUnavailable(std::uint64_t epoch,
+                                               std::uint64_t frame_id) noexcept;
+  // Blink's reader of the current V8 invocation, set once per renderer.
+  void SetNativeJsInvocationContextProvider(NativeJsInvocationContextProvider provider) noexcept;
+  // The context for a Wasm or guest record: state 0 (not observed) unless
+  // invocation capture is active for the current configuration.
+  [[nodiscard]] NativeJsInvocationContext CurrentNativeJsInvocation() const noexcept;
+  // Called by the loader right after RecordRequestInitiated. Records only a
+  // request started inside an invocation, or one started outside script while
+  // an admitted invocation has not settled (unknown).
+  void RecordNativeJsInvocationRequest(std::int32_t request_id) noexcept;
   void RecordApiCall(NativeProbeCategory category, std::string_view operation) noexcept;
   void RecordPropertyRead(NativeProbeCategory category, std::string_view operation) noexcept;
   // Call-site state is an opaque, monotonically ordered configuration claim,
@@ -367,6 +409,43 @@ class COMPONENT_EXPORT(REB_NATIVE_PROBE_SINK) NativeProbeSink final {
   std::array<std::atomic<std::uint64_t>,
              kNativeJsCompiledBeforeArmingGap + kNativeJsDispatchSiteLimit>
       native_js_gap_generations_{};
+  // Coalesced invocation gaps: budget, site budget, request budget,
+  // transport, input, settle unavailable, then compiled-before-arming and
+  // unsupported-function reasons per site slot.
+  static constexpr std::size_t kInvocationBudgetGap = 0, kInvocationSiteBudgetGap = 1,
+                               kInvocationRequestBudgetGap = 2, kInvocationTransportGap = 3,
+                               kInvocationInputGap = 4, kInvocationSettleGap = 5,
+                               kInvocationCompiledGap = 6,
+                               kInvocationUnsupportedGap =
+                                   kInvocationCompiledGap + kNativeJsInvocationSiteLimit,
+                               kInvocationGapCount =
+                                   kInvocationUnsupportedGap + kNativeJsInvocationSiteLimit;
+  [[nodiscard]] bool NativeJsInvocationActive(std::uint64_t generation) const noexcept;
+  bool NoteNativeJsInvocationOmission(std::uint64_t generation,
+                                      std::uint64_t frame_id,
+                                      std::size_t gap) noexcept;
+  // Written once before native_invocation_site_count_ is release-published
+  // and never rewritten, as for dispatch sites.
+  std::array<NativeJsInvocationSite, kNativeJsInvocationSiteLimit> native_invocation_sites_{};
+  std::atomic<std::size_t> native_invocation_site_count_{0};
+  std::atomic<std::uint64_t> native_invocation_generation_{0};
+  std::atomic<std::uint64_t> native_invocation_digest_generation_{0};
+  std::array<std::atomic<std::uint64_t>, kNativeJsInvocationSampleBudget> native_invocation_slots_{};
+  std::array<std::array<std::atomic<std::uint64_t>, kNativeJsInvocationSiteSampleBudget>,
+             kNativeJsInvocationSiteLimit>
+      native_invocation_site_slots_{};
+  std::array<std::atomic<std::uint64_t>, kNativeJsInvocationRequestBudget>
+      native_invocation_request_slots_{};
+  std::atomic<std::uint64_t> native_invocation_capped_generation_{0};
+  std::array<std::atomic<std::uint64_t>, kNativeJsInvocationSiteLimit>
+      native_invocation_site_capped_generations_{};
+  std::atomic<std::uint64_t> native_invocation_request_capped_generation_{0};
+  std::array<std::atomic<std::uint64_t>, kInvocationGapCount> native_invocation_gap_generations_{};
+  // Admitted starts minus settles of the current configuration, so an
+  // unattributable loader start is reported only while one may be open.
+  std::atomic<std::uint64_t> native_invocation_open_generation_{0};
+  std::atomic<std::int64_t> native_invocation_open_{0};
+  std::atomic<NativeJsInvocationContextProvider> native_invocation_context_provider_{nullptr};
   std::atomic<NativeWasmDispatchEmitter> native_wasm_emitter_{nullptr};
   std::array<std::atomic<std::uint64_t>, kNativeWasmDispatchSampleBudget> native_wasm_slots_{};
   std::array<std::atomic<std::uint64_t>, 3> native_wasm_gap_generations_{};

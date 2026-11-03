@@ -94,6 +94,16 @@ inline constexpr std::uint64_t kNativeJsInvocationRollingBase = 0x100000001b3ULL
           (invocation_id != 0));
 }
 
+// The invocation the running code belongs to, as Blink reads it from V8, and
+// whether any script is on the stack (a loader start outside script cannot be
+// attributed).
+struct NativeJsInvocationContext final {
+  std::uint8_t state = 0;
+  std::uint32_t invocation_id = 0;
+  bool script_on_stack = false;
+};
+using NativeJsInvocationContextProvider = NativeJsInvocationContext (*)() noexcept;
+
 // One armed function-entry site, keyed exactly like a dispatch site: SHA-256
 // over the script text as UTF-16LE code units, its UTF-16 length, and the
 // UTF-16 offset of the function's V8 start position.

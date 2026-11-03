@@ -1,0 +1,235 @@
+// Native JavaScript invocation identity: the real sink, transport and ring
+// with the same narrow boundaries as main.cc. The sink retains one site list
+// for the process lifetime, so every case uses kInvocationSites and the
+// changed-list refusal runs last.
+#pragma once
+
+#include "brave/components/reverse_engineering_browser/common/native_js_invocation.h"
+
+namespace {
+using reb::NativeJsInvocationContext;
+using reb::NativeJsInvocationSettlePayload;
+using reb::NativeJsInvocationSite;
+using reb::NativeJsInvocationStartPayload;
+
+NativeJsInvocationSite InvocationSite(std::uint8_t seed, std::uint32_t anchor) {
+  NativeJsInvocationSite site;
+  for (std::size_t i = 0; i < site.source_sha256.size(); ++i)
+    site.source_sha256[i] = static_cast<std::uint8_t>(seed + i);
+  site.source_length = 900;
+  site.anchor_offset = anchor;
+  return site;
+}
+const std::array<NativeJsInvocationSite, 2> kInvocationSites{InvocationSite(9, 41),
+                                                             InvocationSite(9, 300)};
+std::vector<std::uint8_t> InvocationRecords(std::span<const NativeJsInvocationSite> sites) {
+  std::vector<std::uint8_t> records;
+  for (const auto& site : sites) {
+    const auto record = reb::EncodeNativeJsInvocationSite(site);
+    records.insert(records.end(), record.begin(), record.end());
+  }
+  return records;
+}
+NativeJsInvocationStartPayload StartFor(std::size_t slot, std::uint32_t id) {
+  const auto& site = kInvocationSites[slot];
+  NativeJsInvocationStartPayload payload;
+  payload.site_slot = static_cast<std::uint8_t>(slot);
+  payload.argument_count = 2;
+  payload.argument_kinds[0] = 1;
+  payload.argument_low32[0] = 2;
+  payload.argument_kinds[1] = 3;
+  payload.script_id = 12;
+  payload.anchor_offset = site.anchor_offset;
+  payload.source_length = site.source_length;
+  payload.invocation_id = id;
+  payload.source_sha256 = site.source_sha256;
+  payload.document_id = 99;
+  return payload;
+}
+NativeJsInvocationSettlePayload SettleFor(std::uint32_t id, bool digest) {
+  NativeJsInvocationSettlePayload payload;
+  payload.outcome = 1;
+  payload.via = 3;
+  payload.value_kind = 3;
+  payload.invocation_id = id;
+  payload.value_length = 3;
+  payload.document_id = 99;
+  if (digest) {
+    payload.digest_state = 1;
+    payload.digest_encoding = 1;
+    payload.digest_byte_length = 3;
+    const std::array<std::uint8_t, 3> token{'t', 'o', 'k'};
+    payload.rolling_hash = reb::NativeJsInvocationRollingHash(token);
+    payload.value_sha256.fill(0x44);
+  }
+  return payload;
+}
+std::string_view InvocationGap(const NativeProbeEvent& event) {
+  assert(event.header.type == reb::NativeProbeType::kGap &&
+         event.header.category == reb::NativeProbeCategory::kVm);
+  return {reinterpret_cast<const char*>(event.inline_payload.data()), event.header.payload_size};
+}
+void ConfigureInvocation(NativeProbeQueue& queue,
+                         bool digests = false,
+                         std::uint64_t mask = reb::kAllNativeProbeCategoryMask,
+                         std::uint64_t expires = kForever) {
+  transport.Configure(42, mask, expires, false, {&queue, sizeof(queue)}, 0, {}, {},
+                      InvocationRecords(kInvocationSites), digests);
+}
+struct InvocationProvider {
+  inline static NativeJsInvocationContext context{};
+  inline static unsigned reads = 0;
+};
+NativeJsInvocationContext ReadInvocation() noexcept {
+  ++InvocationProvider::reads;
+  return InvocationProvider::context;
+}
+
+[[gnu::noinline]] void NativeJsInvocationAdmission() {
+  NativeProbeQueue queue;
+  transport.Disable();
+  sink.SetNativeJsInvocationContextProvider(&ReadInvocation);
+  InvocationProvider::context = {2, 7, true};
+  const auto before = allocations.load();
+  // Disabled: nothing is armed, nothing allocates, nothing is recorded, and
+  // consumers see not_observed without even reading V8.
+  assert(sink.NativeJsInvocationEpoch() == 0 && !sink.IsNativeJsInvocationEnabled(2, 0));
+  sink.RecordNativeJsInvocationStart(2, 8, StartFor(0, 1));
+  sink.RecordNativeJsInvocationRequest(31);
+  assert(sink.CurrentNativeJsInvocation().state == 0 && InvocationProvider::reads == 0);
+  assert(allocations.load() == before && Drain(queue) == 0);
+
+  // Without the VM category nothing is armed; a configuration without sites
+  // arms nothing either.
+  ConfigureInvocation(queue, false, reb::NativeProbeCategoryMask(reb::NativeProbeCategory::kNetwork));
+  assert(sink.NativeJsInvocationEpoch() == 0 && sink.CurrentNativeJsInvocation().state == 0);
+  Configure(queue);
+  assert(sink.NativeJsInvocationEpoch() == 0);
+
+  // Armed but not called: an epoch and sites, and no record.
+  ConfigureInvocation(queue);
+  const auto epoch = sink.NativeJsInvocationEpoch();
+  assert(epoch != 0 && (epoch & 1U) == 0 && !sink.NativeJsInvocationDigests(epoch));
+  std::array<NativeJsInvocationSite, 8> copied{};
+  assert(sink.CopyNativeJsInvocationSites(epoch, copied) == 2 && copied[1] == kInvocationSites[1]);
+  assert(sink.CopyNativeJsInvocationSites(epoch - 2, copied) == 0);
+  assert(Drain(queue) == 0);
+
+  // A consumer reads the provider while active; an inconsistent read is not
+  // observed rather than guessed.
+  assert(sink.CurrentNativeJsInvocation().state == 2 &&
+         sink.CurrentNativeJsInvocation().invocation_id == 7);
+  InvocationProvider::context = {2, 0, true};
+  assert(sink.CurrentNativeJsInvocation().state == 0);
+  InvocationProvider::context = {1, 3, true};
+  assert(sink.CurrentNativeJsInvocation().state == 0);
+
+  // 64 starts per site, then one coalesced gap; the other site continues.
+  for (std::uint32_t n = 0; n < 64; ++n) {
+    sink.RecordNativeJsInvocationStart(epoch, 8, StartFor(0, n + 1));
+    const auto event = One(queue);
+    assert(reb::IsValidNativeJsInvocationStartHeader(event.header));
+    assert(std::to_integer<std::uint8_t>(event.inline_payload[28]) == n);
+  }
+  sink.RecordNativeJsInvocationStart(epoch, 8, StartFor(0, 65));
+  assert(InvocationGap(One(queue)) == "native_js_invocation_site_budget_incomplete");
+  assert(!sink.IsNativeJsInvocationEnabled(epoch, 0) && sink.IsNativeJsInvocationEnabled(epoch, 1));
+  // A start that does not name its configured site is an input gap.
+  auto wrong = StartFor(1, 70);
+  wrong.anchor_offset = 42;
+  sink.RecordNativeJsInvocationStart(epoch, 8, wrong);
+  assert(InvocationGap(One(queue)) == "native_js_invocation_input_unavailable");
+  sink.RecordNativeJsInvocationStart(epoch, 0, StartFor(1, 71));
+  assert(Drain(queue) == 0);  // no frame: the same coalesced input gap
+
+  // A settle without the digest opt-in may not carry a digest.
+  sink.RecordNativeJsInvocationSettle(epoch, 8, SettleFor(1, true));
+  assert(Drain(queue) == 0);  // refused; its input gap was already emitted
+  sink.RecordNativeJsInvocationSettle(epoch, 8, SettleFor(1, false));
+  assert(One(queue).header.type == reb::NativeProbeType::kJsInvocationSettle);
+
+  // Requests: inside an invocation, recorded; script outside any invocation,
+  // not recorded; a loader start outside script while one may be open,
+  // unknown. 63 starts remain open after one settle.
+  InvocationProvider::context = {2, 9, true};
+  sink.RecordNativeJsInvocationRequest(31);
+  auto request = One(queue);
+  assert(reb::IsValidNativeJsInvocationRequestHeader(request.header) &&
+         request.header.request_id == 31 && std::to_integer<std::uint8_t>(request.inline_payload[4]) == 2 &&
+         std::to_integer<std::uint8_t>(request.inline_payload[8]) == 9);
+  InvocationProvider::context = {1, 0, true};
+  sink.RecordNativeJsInvocationRequest(32);
+  assert(Drain(queue) == 0);
+  InvocationProvider::context = {1, 0, false};
+  sink.RecordNativeJsInvocationRequest(33);
+  request = One(queue);
+  assert(std::to_integer<std::uint8_t>(request.inline_payload[4]) == 3 &&
+         std::to_integer<std::uint8_t>(request.inline_payload[8]) == 0);
+  // A worker reads as not observed and is never made unknown.
+  InvocationProvider::context = {0, 0, false};
+  sink.RecordNativeJsInvocationRequest(36);
+  assert(Drain(queue) == 0);
+
+  // Status gaps per configuration and slot.
+  sink.NoteNativeJsInvocationStatus(epoch, 1, reb::NativeJsInvocationSiteStatus::kUnsupportedFunction);
+  assert(InvocationGap(One(queue)) == "native_js_invocation_site_1_unsupported_function");
+  sink.NoteNativeJsInvocationStatus(epoch, 1, reb::NativeJsInvocationSiteStatus::kUnsupportedFunction);
+  sink.NoteNativeJsInvocationStatus(epoch, 2, reb::NativeJsInvocationSiteStatus::kCompiledBeforeArming);
+  assert(Drain(queue) == 0);
+  sink.NoteNativeJsInvocationStatus(epoch, 0, reb::NativeJsInvocationSiteStatus::kCompiledBeforeArming);
+  assert(InvocationGap(One(queue)) == "native_js_invocation_site_0_compiled_before_arming");
+  sink.NoteNativeJsInvocationSettleUnavailable(epoch, 8);
+  assert(InvocationGap(One(queue)) == "native_js_invocation_settle_unavailable");
+
+  // A replacement configuration with the digest opt-in: fresh budgets, no
+  // open invocations, and digests accepted.
+  ConfigureInvocation(queue, true);
+  const auto second = sink.NativeJsInvocationEpoch();
+  assert(second > epoch && sink.NativeJsInvocationDigests(second));
+  sink.RecordNativeJsInvocationStart(epoch, 8, StartFor(0, 1));  // stale epoch
+  InvocationProvider::context = {1, 0, false};
+  sink.RecordNativeJsInvocationRequest(34);  // nothing open in this configuration
+  assert(Drain(queue) == 0);
+  sink.RecordNativeJsInvocationSettle(second, 8, SettleFor(2, true));
+  auto settle = One(queue);
+  assert(reb::IsValidNativeJsInvocationSettleHeader(settle.header) &&
+         std::to_integer<std::uint8_t>(settle.inline_payload[16]) == 1);
+  // 256 requests per configuration, then one coalesced gap.
+  InvocationProvider::context = {2, 4, true};
+  for (std::int32_t n = 0; n < 256; ++n)
+    sink.RecordNativeJsInvocationRequest(100 + n);
+  assert(Drain(queue) == 256);
+  sink.RecordNativeJsInvocationRequest(1000);
+  assert(InvocationGap(One(queue)) == "native_js_invocation_request_budget_incomplete");
+  sink.RecordNativeJsInvocationRequest(1001);
+  assert(Drain(queue) == 0);
+  // Without the Network category no request record is made.
+  ConfigureInvocation(queue, false, reb::NativeProbeCategoryMask(reb::NativeProbeCategory::kVm));
+  assert(sink.NativeJsInvocationEpoch() != 0);
+  sink.RecordNativeJsInvocationRequest(35);
+  assert(Drain(queue) == 0);
+  // Expiry disarms.
+  ConfigureInvocation(queue, false, reb::kAllNativeProbeCategoryMask, 1000);
+  assert(sink.NativeJsInvocationEpoch() != 0);
+  base::test_now_ns = 1000;
+  assert(sink.NativeJsInvocationEpoch() == 0 && sink.CurrentNativeJsInvocation().state == 0);
+  base::test_now_ns = 100;
+
+  // The browser keeps the list fixed; a different list arms nothing.
+  transport.Configure(42, reb::kAllNativeProbeCategoryMask, kForever, false,
+                      {&queue, sizeof(queue)}, 0, {}, {},
+                      InvocationRecords(std::span(kInvocationSites).first(1)), false);
+  assert(sink.NativeJsInvocationEpoch() == 0);
+  assert(InvocationGap(One(queue)) == "native_js_invocation_input_unavailable");
+  transport.Configure(42, reb::kAllNativeProbeCategoryMask, kForever, false,
+                      {&queue, sizeof(queue)}, 0, {}, {}, std::vector<std::uint8_t>(43, 1), false);
+  assert(sink.NativeJsInvocationEpoch() == 0);
+  assert(InvocationGap(One(queue)) == "native_js_invocation_input_unavailable");
+  transport.Disable();
+  sink.SetNativeJsInvocationContextProvider(nullptr);
+  std::cout << "PASS native JS invocation admission: disabled and allocation-free, category and "
+               "expiry refusal, armed-but-not-called, 64 per site with coalesced gaps, exact "
+               "site match, digest opt-in, inside/none/unknown requests with a 256 budget, "
+               "status gaps and a fixed site list\n";
+}
+}  // namespace

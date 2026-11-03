@@ -1,0 +1,207 @@
+diff --git a/third_party/blink/renderer/bindings/core/v8/v8_initializer.cc b/third_party/blink/renderer/bindings/core/v8/v8_initializer.cc
+index 80e13505a580cc9884ce7c7ec6b17c2f4df102af..3f975bfea63c785739b47cb7522b34ed8782f932 100644
+--- a/third_party/blink/renderer/bindings/core/v8/v8_initializer.cc
++++ b/third_party/blink/renderer/bindings/core/v8/v8_initializer.cc
+@@ -584,6 +584,168 @@ void NoteJsDispatchStatus(const std::uint64_t epoch,
+   }
+ }
+ 
++// Native JavaScript invocation identity. V8 pulls the epoch and armed
++// function-entry sites, then reports admitted calls and their settlement.
++// These run on the main isolate thread and only use the renderer sink; none
++// of them calls back into V8.
++std::uint64_t NativeJsInvocationEpoch() {
++  return reb::NativeProbeSink::Get().NativeJsInvocationEpoch();
++}
++
++std::size_t NativeJsInvocationSites(const std::uint64_t epoch,
++                                    v8::JsInvocationSite* const sites,
++                                    const std::size_t capacity) {
++  if (!sites || capacity == 0) {
++    return 0;
++  }
++  std::array<reb::NativeJsInvocationSite, reb::kNativeJsInvocationSiteLimit>
++      copied;
++  const std::size_t count = std::min(
++      reb::NativeProbeSink::Get().CopyNativeJsInvocationSites(epoch, copied),
++      capacity);
++  const auto out = UNSAFE_BUFFERS(base::span(sites, capacity));
++  for (std::size_t i = 0; i < count; ++i) {
++    base::span(out[i].source_sha256)
++        .copy_from(base::span(copied[i].source_sha256));
++    out[i].source_length = copied[i].source_length;
++    out[i].anchor_offset = copied[i].anchor_offset;
++  }
++  return count;
++}
++
++bool NativeJsInvocationEnabled(const std::uint64_t epoch,
++                               const std::uint32_t slot) {
++  // V8 calls this before allocating anything for the call.
++  return reb::NativeProbeSink::Get().IsNativeJsInvocationEnabled(epoch, slot);
++}
++
++bool NativeJsInvocationDigests(const std::uint64_t epoch) {
++  return reb::NativeProbeSink::Get().NativeJsInvocationDigests(epoch);
++}
++
++// The frame and document identity of a live local document context; zero
++// for workers, other realms and detached documents, which are never
++// retargeted.
++std::pair<std::uint64_t, std::uint64_t> NativeInvocationDocument(
++    v8::Local<v8::Context> context) {
++  ExecutionContext* execution_context =
++      context.IsEmpty() ? nullptr : ToExecutionContext(context);
++  auto* window = execution_context && !execution_context->IsContextDestroyed()
++                     ? DynamicTo<LocalDOMWindow>(execution_context)
++                     : nullptr;
++  if (!window || !window->GetFrame() || !window->document()) {
++    return {0, 0};
++  }
++  const base::UnguessableToken& token = window->document()->Token().value();
++  return {StableFrameId(*execution_context),
++          std::rotl(token.GetHighForSerialization(), 17) ^
++              token.GetLowForSerialization()};
++}
++
++void CaptureJsInvocationStart(v8::Local<v8::Context> context,
++                              const std::uint64_t epoch,
++                              const v8::JsInvocationStart& start) {
++  reb::NativeProbeSink& sink = reb::NativeProbeSink::Get();
++  const auto [frame_id, document_id] = NativeInvocationDocument(context);
++  if (frame_id == 0 || document_id == 0 || !start.source_sha256 ||
++      start.script_id <= 0) {
++    sink.NoteNativeJsInvocationInputUnavailable(epoch, frame_id);
++    return;
++  }
++  reb::NativeJsInvocationStartPayload payload;
++  payload.site_slot =
++      start.slot < reb::kNativeJsInvocationSiteLimit
++          ? static_cast<std::uint8_t>(start.slot)
++          : static_cast<std::uint8_t>(reb::kNativeJsInvocationSiteLimit);
++  payload.argument_count = static_cast<std::uint16_t>(
++      std::min<std::uint32_t>(start.argument_count, 0xFFFF));
++  payload.flags = static_cast<std::uint8_t>(
++      (start.parent_unknown ? reb::kNativeJsInvocationParentUnknown : 0) |
++      (start.argument_count > reb::kNativeJsInvocationArgumentLimit
++           ? reb::kNativeJsInvocationArgumentsTruncated
++           : 0));
++  payload.script_id = static_cast<std::uint32_t>(start.script_id);
++  payload.anchor_offset = start.anchor_offset;
++  payload.source_length = start.source_length;
++  payload.invocation_id = start.invocation_id;
++  payload.parent_invocation_id =
++      start.parent_unknown ? 0 : start.parent_invocation_id;
++  const std::size_t described = std::min<std::size_t>(
++      start.argument_count, reb::kNativeJsInvocationArgumentLimit);
++  for (std::size_t i = 0; i < described; ++i) {
++    payload.argument_kinds[i] =
++        static_cast<std::uint8_t>(start.argument_kinds[i]);
++    payload.argument_low32[i] = start.argument_low32[i];
++  }
++  base::span(payload.source_sha256)
++      .copy_from(UNSAFE_BUFFERS(
++          base::span<const std::uint8_t, 32>(start.source_sha256, 32u)));
++  payload.document_id = document_id;
++  // The sink validates every wire rule and the configured site of the slot.
++  sink.RecordNativeJsInvocationStart(epoch, frame_id, payload);
++}
++
++void CaptureJsInvocationSettle(v8::Local<v8::Context> context,
++                               const std::uint64_t epoch,
++                               const v8::JsInvocationSettle& settle) {
++  reb::NativeProbeSink& sink = reb::NativeProbeSink::Get();
++  const auto [frame_id, document_id] = NativeInvocationDocument(context);
++  if (frame_id == 0 || document_id == 0) {
++    // The settle job ran after its document went away.
++    sink.NoteNativeJsInvocationSettleUnavailable(epoch, frame_id);
++    return;
++  }
++  reb::NativeJsInvocationSettlePayload payload;
++  payload.site_slot =
++      settle.slot < reb::kNativeJsInvocationSiteLimit
++          ? static_cast<std::uint8_t>(settle.slot)
++          : static_cast<std::uint8_t>(reb::kNativeJsInvocationSiteLimit);
++  payload.outcome = static_cast<std::uint8_t>(settle.outcome);
++  payload.via = static_cast<std::uint8_t>(settle.via);
++  payload.value_kind = static_cast<std::uint8_t>(settle.value_kind);
++  payload.invocation_id = settle.invocation_id;
++  payload.value_length = settle.value_length;
++  payload.digest_state = static_cast<std::uint8_t>(settle.digest_state);
++  if (settle.digest_state == v8::JsInvocationDigestState::kPresent) {
++    payload.digest_encoding = static_cast<std::uint8_t>(settle.digest_encoding);
++    payload.flags = settle.lossy_utf8 ? reb::kNativeJsInvocationLossyUtf8 : 0;
++    payload.digest_byte_length = settle.digest_byte_length;
++    payload.rolling_hash = settle.rolling_hash;
++    base::span(payload.value_sha256).copy_from(base::span(settle.value_sha256));
++  }
++  payload.document_id = document_id;
++  sink.RecordNativeJsInvocationSettle(epoch, frame_id, payload);
++}
++
++void NoteJsInvocationStatus(const std::uint64_t epoch,
++                            const std::uint32_t slot,
++                            const v8::JsInvocationSiteStatus status,
++                            int /*script_id*/) {
++  reb::NativeProbeSink::Get().NoteNativeJsInvocationStatus(
++      epoch, slot,
++      status == v8::JsInvocationSiteStatus::kUnsupportedFunction
++          ? reb::NativeJsInvocationSiteStatus::kUnsupportedFunction
++          : reb::NativeJsInvocationSiteStatus::kCompiledBeforeArming);
++}
++
++// The invocation the running main-thread code belongs to, for Wasm, guest
++// and loader records. Workers are unsupported and read as not observed.
++reb::NativeJsInvocationContext CurrentJsInvocation() noexcept {
++  if (!IsMainThread()) {
++    return {};
++  }
++  v8::Isolate* const isolate = v8::Isolate::TryGetCurrent();
++  if (!isolate) {
++    return {};
++  }
++  const v8::JsInvocationContext context = isolate->GetCurrentJsInvocation();
++  reb::NativeJsInvocationContext result;
++  result.state = static_cast<std::uint8_t>(context.state);
++  result.invocation_id = context.invocation_id;
++  result.script_on_stack = isolate->InContext();
++  return result;
++}
++
+ void CaptureWasmModuleBytes(v8::Local<v8::Context> context,
+                             const v8::WasmModuleBytesOrigin origin,
+                             const std::uint8_t* bytes,
+@@ -1635,6 +1797,19 @@ void V8Initializer::InitializeV8Common(v8::Isolate* isolate) {
+     js_dispatch.observe = CaptureJsDispatch;
+     js_dispatch.status = NoteJsDispatchStatus;
+     isolate->SetJsDispatchCallbacks(js_dispatch);
++    // Document-only for the same reason; worker isolates never arm
++    // function-entry sites.
++    v8::JsInvocationCallbacks js_invocation;
++    js_invocation.epoch = NativeJsInvocationEpoch;
++    js_invocation.sites = NativeJsInvocationSites;
++    js_invocation.enabled = NativeJsInvocationEnabled;
++    js_invocation.digests = NativeJsInvocationDigests;
++    js_invocation.start = CaptureJsInvocationStart;
++    js_invocation.settle = CaptureJsInvocationSettle;
++    js_invocation.status = NoteJsInvocationStatus;
++    isolate->SetJsInvocationCallbacks(js_invocation);
++    reb::NativeProbeSink::Get().SetNativeJsInvocationContextProvider(
++        CurrentJsInvocation);
+   }
+   isolate->SetRuntimeBufferCallback(CaptureRuntimeBuffer);
+   isolate->SetWasmCustomDescriptorsEnabledCallback(
+diff --git a/third_party/blink/renderer/platform/loader/fetch/url_loader/resource_request_sender.cc b/third_party/blink/renderer/platform/loader/fetch/url_loader/resource_request_sender.cc
+index ce25decc15a5cf7fe1fa99fe6b08e912e1edd150..1c5faac9842bb370d409d52643c47f2a5e0acf96 100644
+--- a/third_party/blink/renderer/platform/loader/fetch/url_loader/resource_request_sender.cc
++++ b/third_party/blink/renderer/platform/loader/fetch/url_loader/resource_request_sender.cc
+@@ -280,6 +280,9 @@ int ResourceRequestSender::SendAsync(
+   int request_id = GenerateRequestId();
+   reb::NativeProbeSink::Get().RecordRequestInitiated(
+       request_id, request->method, request->url.host());
++  // The JavaScript invocation that started this request, when one is
++  // current; see protocol/native-js-invocation-v1.md.
++  reb::NativeProbeSink::Get().RecordNativeJsInvocationRequest(request_id);
+   request_info_ = std::make_unique<PendingRequestInfo>(
+       std::move(client), request->destination, KURL(request->url),
+       std::move(resource_load_info_notifier_wrapper));

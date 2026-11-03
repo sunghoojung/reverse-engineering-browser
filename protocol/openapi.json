@@ -271,6 +271,136 @@
         }
       }
     },
+    "/api/session/actions": {
+      "post": {
+        "operationId": "session_action",
+        "summary": "Open a URL in, or end, this live capture session",
+        "description": "Drives the live session this backend belongs to. open_url opens a page in a new tab of the session's capture browser, only while native capture is recording. end closes the capture browser and stops the session. Use wait_for_events after open_url.",
+        "tags": [
+          "capture"
+        ],
+        "requestBody": {
+          "required": true,
+          "description": "JSON object. Explicit decimal Content-Length required; 1..8192 encoded bytes.",
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SessionAction"
+              }
+            }
+          }
+        },
+        "x-max-body-bytes": 8192,
+        "x-source": "apps/origin-trace-backend/src/live_browser.rs",
+        "responses": {
+          "200": {
+            "description": "Successful response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionActionResult"
+                }
+              }
+            },
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request, including an unconfirmed end or a URL that is not HTTP(S).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Host/Origin/Sec-Fetch-Site rejected.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "408": {
+            "description": "The bounded request-body read deadline expired.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Not a live capture, capture not recording, capture browser not running, or launcher gone. Nothing was changed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Store, read, validation, or internal failure.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "The capture browser did not accept the URL.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "x-reb-execution": {
+          "kind": "action-dependent",
+          "effects": null,
+          "state_dependent_effects": [],
+          "uncertainties": [],
+          "prerequisites": [
+            {
+              "id": "local-request",
+              "condition": "Host must name the exact loopback listening port; cross-site Sec-Fetch-Site is rejected; an optional Origin must pass App::trusted."
+            },
+            {
+              "id": "bounded-json-object",
+              "condition": "POST requires one valid Content-Length, no Transfer-Encoding, and a JSON object within x-max-body-bytes and the body deadline."
+            }
+          ],
+          "confirmations": [],
+          "notes": "Resolve the exact request action and combine its prerequisites with these common operation guards. No action inherits a default effect classification.",
+          "sources": [
+            {
+              "path": "apps/origin-trace-backend/src/app.rs",
+              "symbol": "App::post"
+            }
+          ]
+        },
+        "x-reb-execution-schema": {
+          "$ref": "#/components/schemas/RebExecutionMetadata"
+        }
+      }
+    },
     "/api/health": {
       "get": {
         "operationId": "get_health",
@@ -23184,6 +23314,154 @@
             }
           }
         }
+      },
+      "SessionAction": {
+        "oneOf": [
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "action",
+              "url"
+            ],
+            "properties": {
+              "action": {
+                "const": "open_url",
+                "type": "string"
+              },
+              "url": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 4096,
+                "description": "HTTP or HTTPS URL without embedded credentials."
+              }
+            },
+            "x-reb-execution": {
+              "kind": "action",
+              "effects": [
+                "browser-control",
+                "network-access"
+              ],
+              "state_dependent_effects": [],
+              "uncertainties": [],
+              "prerequisites": [
+                {
+                  "id": "live-capture-session",
+                  "condition": "capture_mode is live. open_url also needs a connected broker, capture not stopped, and a backend started by the live-session launcher with --brave-binary and --brave-profile."
+                }
+              ],
+              "confirmations": [],
+              "notes": "Hands the URL to this session's running capture browser, which opens it in a new tab. Refused unless native capture is live and that browser holds the session profile. A launch that would start a separate, uncaptured browser is stopped. The page loads from the network under the session's capture.",
+              "sources": [
+                {
+                  "path": "apps/origin-trace-backend/src/live_browser.rs",
+                  "symbol": "LiveBrowser::open_url"
+                }
+              ]
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "action",
+              "confirm"
+            ],
+            "properties": {
+              "action": {
+                "const": "end",
+                "type": "string"
+              },
+              "confirm": {
+                "const": true,
+                "type": "boolean"
+              }
+            },
+            "x-reb-execution": {
+              "kind": "action",
+              "effects": [
+                "browser-control",
+                "process-stop"
+              ],
+              "state_dependent_effects": [],
+              "uncertainties": [],
+              "prerequisites": [
+                {
+                  "id": "live-capture-session",
+                  "condition": "capture_mode is live. open_url also needs a connected broker, capture not stopped, and a backend started by the live-session launcher with --brave-binary and --brave-profile."
+                },
+                {
+                  "id": "launcher-parent",
+                  "condition": "The backend was started with --launcher-pid naming its own parent launcher."
+                }
+              ],
+              "confirmations": [
+                {
+                  "field": "confirm",
+                  "value": true,
+                  "when": {}
+                }
+              ],
+              "notes": "About 300 ms after replying, asks this backend's launcher to stop the session. The launcher closes the capture browser and stops every helper, including this backend. Stored evidence stays on disk.",
+              "sources": [
+                {
+                  "path": "apps/origin-trace-backend/src/live_browser.rs",
+                  "symbol": "LiveBrowser::end"
+                }
+              ]
+            }
+          }
+        ]
+      },
+      "SessionActionResult": {
+        "oneOf": [
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "ok",
+              "action",
+              "opened"
+            ],
+            "properties": {
+              "ok": {
+                "const": true,
+                "type": "boolean"
+              },
+              "action": {
+                "const": "open_url",
+                "type": "string"
+              },
+              "opened": {
+                "const": "new_tab",
+                "type": "string"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "ok",
+              "action",
+              "ending"
+            ],
+            "properties": {
+              "ok": {
+                "const": true,
+                "type": "boolean"
+              },
+              "action": {
+                "const": "end",
+                "type": "string"
+              },
+              "ending": {
+                "const": true,
+                "type": "boolean"
+              }
+            }
+          }
+        ]
       }
     }
   },

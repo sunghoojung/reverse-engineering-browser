@@ -46,6 +46,7 @@ pub use endpoint::PublishedEndpoint;
 pub use durable::write_private_noclobber;
 
 mod js_worker_alloc;
+mod live_browser;
 #[doc(hidden)]
 pub use js_worker_alloc::JavaScriptWorkerAllocator;
 #[doc(hidden)]

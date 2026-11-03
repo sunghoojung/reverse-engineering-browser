@@ -32,6 +32,14 @@ pub struct Options {
     pub owned_vm_fixture: Option<PathBuf>,
     #[arg(long, env = "REB_BRAVE_BINARY")]
     pub brave_binary: Option<PathBuf>,
+    /// Profile directory of this live session's capture browser. With
+    /// `--brave-binary`, lets `session_action open_url` reach that browser.
+    #[arg(long, requires = "socket")]
+    pub brave_profile: Option<PathBuf>,
+    /// PID of the live-session launcher that started this backend. It must be
+    /// this process's parent; `session_action end` asks it to stop the session.
+    #[arg(long, requires = "socket")]
+    pub launcher_pid: Option<i32>,
     #[arg(long)]
     pub heap_snapshot: Option<PathBuf>,
     #[arg(long, env = "REB_DEOBFUSCATOR_WORKER")]
@@ -94,6 +102,7 @@ impl Options {
             &mut self.native_console,
             &mut self.owned_vm_fixture,
             &mut self.brave_binary,
+            &mut self.brave_profile,
             &mut self.heap_snapshot,
             &mut self.deobfuscator,
             &mut self.analyst_runner,

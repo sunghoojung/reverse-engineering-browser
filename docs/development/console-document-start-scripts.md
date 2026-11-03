@@ -57,9 +57,11 @@ python3 -m http.server 8080 --bind 127.0.0.1 \
   --directory tools/fixtures/console-document-start
 ```
 
-For a cross-origin child frame, serve the child from a second port and point
-the iframe at it; `127.0.0.1:8080` and `127.0.0.1:8081` are different origins,
-so the child gets its own renderer process.
+For a cross-origin child frame, serve the same directory from a second port and
+open
+`http://127.0.0.1:8080/synthetic-transform.html?child=http://127.0.0.1:8081/synthetic-transform-child.html`.
+`127.0.0.1:8080` and `127.0.0.1:8081` are different origins, so the child gets
+its own renderer process, and a `child` rule must name the child's own origin.
 
 ## Arm the example snippet
 

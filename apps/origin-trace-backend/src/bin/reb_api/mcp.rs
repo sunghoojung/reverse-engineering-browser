@@ -309,6 +309,40 @@ pub struct Admission {
 
 pub const START_TOOL: &str = "start_live_session";
 
+/// Operations that drive a session, listed only with `--allow-session-start`
+/// and accepted only for a session this connection started.
+fn session_operations(spec: &Value) -> Vec<String> {
+    spec["x-reb-mcp"]["session_start"]["operations"]
+        .as_array()
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_owned)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// The start tool's input: `LiveSessionStart` without the options an agent
+/// may not set for itself, such as sensitive Canvas capture.
+fn start_schema(spec: &Value) -> Result<Value, String> {
+    let policy = &spec["x-reb-mcp"]["session_start"];
+    let mut schema = client_schema(spec, &policy["input"])?;
+    for option in policy["mcp_excluded_options"]
+        .as_array()
+        .into_iter()
+        .flatten()
+    {
+        if let (Some(name), Some(properties)) =
+            (option.as_str(), schema["properties"].as_object_mut())
+        {
+            properties.remove(name);
+        }
+    }
+    Ok(schema)
+}
+
 /// The one tool that is not an HTTP operation: starting a session has to work
 /// before any backend exists. `x-reb-mcp.session_start` declares it.
 fn session_start_tool(spec: &Value) -> Result<Value, String> {
@@ -329,7 +363,7 @@ fn session_start_tool(spec: &Value) -> Result<Value, String> {
         "name": START_TOOL,
         "title": policy["title"],
         "description": bounded_text(&description, 2048),
-        "inputSchema": client_schema(spec, &policy["input"])?,
+        "inputSchema": start_schema(spec)?,
         "annotations": {"readOnlyHint": false, "destructiveHint": true, "openWorldHint": true}
     }))
 }
@@ -339,7 +373,13 @@ fn listed_tools(
     ops: &BTreeMap<String, Operation>,
     admission: Admission,
 ) -> Result<Vec<Value>, String> {
-    let mut listed = tools(spec, ops, admission.allow_effects)?;
+    let gated = session_operations(spec);
+    let mut listed = tools(spec, ops, admission.allow_effects)?
+        .into_iter()
+        .filter(|tool| {
+            admission.allow_session_start || !gated.iter().any(|name| tool["name"] == name.as_str())
+        })
+        .collect::<Vec<_>>();
     if admission.allow_effects && admission.allow_session_start {
         listed.push(session_start_tool(spec)?);
     }
@@ -1164,7 +1204,7 @@ async fn start_session(
             None,
         );
     }
-    let schema = match client_schema(spec, &spec["x-reb-mcp"]["session_start"]["input"]) {
+    let schema = match start_schema(spec) {
         Ok(schema) => schema,
         Err(error) => return (tool_message(error, true), None),
     };
@@ -1193,8 +1233,38 @@ async fn start_session(
             result["structuredContent"] = document;
             (result, Some(started))
         }
-        Err(error) => (tool_message(error, true), None),
+        // Launcher diagnostics can name local files; show the home folder as ~.
+        Err(error) => {
+            let error = match std::env::var("HOME") {
+                Ok(home) if home.len() > 1 => error.replace(&home, "~"),
+                _ => error,
+            };
+            (tool_message(error, true), None)
+        }
     }
+}
+
+/// Ends the session this connection started before it starts another, so a
+/// retry with new options does not leave the old browser running.
+async fn end_started(base: &str, instance: Option<&str>, timeout: f64) {
+    let Ok(client) = reqwest::Client::builder()
+        .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(std::time::Duration::from_secs_f64(timeout))
+        .build()
+    else {
+        return;
+    };
+    let mut request = client
+        .post(format!(
+            "{}/api/session/actions",
+            base.trim_end_matches('/')
+        ))
+        .json(&json!({"action": "end", "confirm": true}));
+    if let Some(instance) = instance {
+        request = request.header("x-reb-expected-instance", instance);
+    }
+    let _ = request.send().await;
 }
 
 #[cfg(not(unix))]
@@ -1204,6 +1274,8 @@ async fn start_session(_: &Value, _: &Value) -> (Value, Option<()>) {
         None,
     )
 }
+
+const NOT_STARTED_HERE: &str = "session_action acts only on a session this connection started with start_live_session. The researcher controls this session. No request was sent.";
 
 const UNBOUND: &str = "No live session is bound to this connection. Call start_live_session to start one for an authorized target, or reconnect after the researcher starts one. No request was sent.";
 
@@ -1221,6 +1293,9 @@ pub async fn serve(
     } = admission;
     let projection = projection(spec)?;
     let listed = listed_tools(spec, ops, admission)?;
+    let gated = session_operations(spec);
+    // True while the bound session is one this connection started.
+    let mut started_here = false;
     for tool in &listed {
         jsonschema::validator_for(&tool["inputSchema"]).map_err(|error| {
             format!(
@@ -1275,6 +1350,22 @@ pub async fn serve(
         let tool = (message["method"] == "tools/call")
             .then(|| message["params"]["name"].as_str())
             .flatten();
+        if let Some(name) = tool
+            && gated.iter().any(|gated| gated == name)
+        {
+            if !(allow_effects && allow_session_start) {
+                write_message(&rpc_error(
+                    id,
+                    -32602,
+                    "Operation is outside this connection's projection. No request was sent",
+                ))?;
+                continue;
+            }
+            if initialized && base.is_some() && !started_here {
+                write_message(&rpc_result(&id, tool_message(NOT_STARTED_HERE, true)))?;
+                continue;
+            }
+        }
         if allow_effects && allow_session_start && tool == Some(START_TOOL) {
             if !initialized {
                 write_message(&rpc_error(
@@ -1284,12 +1375,18 @@ pub async fn serve(
                 ))?;
                 continue;
             }
+            if started_here && let Some(previous) = base.take() {
+                end_started(&previous, endpoint_guard.instance_id.as_deref(), timeout).await;
+                started_here = false;
+                endpoint_guard.instance_id = None;
+            }
             let (result, started) = start_session(spec, &message["params"]).await;
             #[cfg(unix)]
             if let Some(started) = started {
                 // The only rebinding: to the exact instance this call started.
                 base = Some(started.endpoint.clone());
                 endpoint_guard.rebind(started.endpoint_file, started.instance_id);
+                started_here = true;
             }
             #[cfg(not(unix))]
             let _ = started;
@@ -1366,7 +1463,12 @@ pub async fn serve(
                     continue;
                 }
                 let tool_name = message["params"]["name"].as_str().unwrap_or("");
+                // Ending must stay possible after capture expires or stops,
+                // or an unrecorded browser would be left open.
+                let ending = tool_name == "session_action"
+                    && message["params"]["arguments"]["body"]["action"] == "end";
                 if tool_name != "get_session_context"
+                    && !ending
                     && let Some(refusal) = health.live_refusal
                 {
                     let mut payload = tool_message(refusal.message.clone(), true);
@@ -1409,6 +1511,7 @@ pub async fn serve(
             } else {
                 endpoint_guard.retired = true;
             }
+            started_here = false;
         }
         write_message(&response)?;
     }

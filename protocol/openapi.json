@@ -47,7 +47,7 @@
         "start"
       ],
       "title": "Start a live capture session",
-      "description": "Starts a new visibly labeled live capture session with named capture options: the capture browser, an Origin Trace window and every helper. When it is ready this connection moves to that session; other endpoint changes still retire the connection. Optionally opens url. Start only for an authorized target. End it with session_action end.",
+      "description": "Starts a new visibly labeled live capture session with named capture options: the capture browser, an Origin Trace window and every helper. When it is ready this connection moves to that session; other endpoint changes still retire the connection. Starting again first ends the session this connection started. With url, the result reports capture_observed; false means nothing was recorded, so end the session. Start only for an authorized target. session_action, listed with this tool, acts only on a session this connection started.",
       "input": {
         "$ref": "#/components/schemas/LiveSessionStart"
       },
@@ -103,7 +103,14 @@
             "symbol": "launch"
           }
         ]
-      }
+      },
+      "operations": [
+        "session_action"
+      ],
+      "mcp_excluded_options": [
+        "canvas_images",
+        "confirm_sensitive_capture"
+      ]
     }
   },
   "paths": {
@@ -343,7 +350,7 @@
       "post": {
         "operationId": "session_action",
         "summary": "Open a URL in, or end, this live capture session",
-        "description": "Drives the live session this backend belongs to. open_url opens a page in a new tab of the session's capture browser, only while native capture is recording. end closes the capture browser and stops the session. Use wait_for_events after open_url. Start a new session with start_live_session (reb-api mcp --allow-session-start) or reb-api session start.",
+        "description": "Drives the live session this backend belongs to. open_url opens a page in a new tab of the session's capture browser while its capture broker runs, and reports capture_observed. end closes the capture browser and stops the session; it stays available after capture expires. Use wait_for_events after open_url. Through MCP it is listed only with --allow-session-start and acts only on a session started by that connection with start_live_session.",
         "tags": [
           "capture"
         ],
@@ -23419,7 +23426,7 @@
                 }
               ],
               "confirmations": [],
-              "notes": "Hands the URL to this session's running capture browser, which opens it in a new tab. Refused unless native capture is live and that browser holds the session profile. A launch that would start a separate, uncaptured browser is stopped. The page loads from the network under the session's capture.",
+              "notes": "Hands the URL to this session's running capture browser, which opens it in a new tab, then waits up to 10 seconds for a new stored record and reports capture_observed. Refused unless the session's capture broker is running, capture is not stopped, and a live process holds the session profile. The broker check cannot prove the browser records; capture_observed does. The relay process carries switches that leave it no network if it ever starts a browser of its own, and it is stopped after 10 seconds. No page JavaScript runs.",
               "sources": [
                 {
                   "path": "apps/origin-trace-backend/src/live_browser.rs",
@@ -23489,7 +23496,8 @@
             "required": [
               "ok",
               "action",
-              "opened"
+              "opened",
+              "capture_observed"
             ],
             "properties": {
               "ok": {
@@ -23503,6 +23511,10 @@
               "opened": {
                 "const": "new_tab",
                 "type": "string"
+              },
+              "capture_observed": {
+                "type": "boolean",
+                "description": "True once a new record reached this session's store within 10 seconds of opening the page, which shows a connected capture browser. False means nothing was recorded: treat the page as unrecorded and end the session."
               }
             }
           },
@@ -23591,12 +23603,12 @@
           "canvas_images": {
             "type": "boolean",
             "default": false,
-            "description": "Store Canvas images, which can contain sensitive page content. Requires confirm_sensitive_capture and category bits 1 and 1024."
+            "description": "Store Canvas images, which can contain sensitive page content. Requires confirm_sensitive_capture and category bits 1 and 1024. CLI only: the MCP tool does not offer it."
           },
           "confirm_sensitive_capture": {
             "const": true,
             "type": "boolean",
-            "description": "The researcher authorized storing sensitive Canvas images for this target."
+            "description": "The researcher authorized storing sensitive Canvas images for this target. CLI only."
           },
           "publish_canonical_endpoint": {
             "type": "boolean",
@@ -23627,7 +23639,8 @@
           "instance_id",
           "canonical_endpoint",
           "options",
-          "url_opened"
+          "url_opened",
+          "capture_observed"
         ],
         "properties": {
           "session_id": {
@@ -23666,6 +23679,18 @@
           "log_file": {
             "type": "string",
             "description": "CLI only."
+          },
+          "url_error": {
+            "type": "string",
+            "maxLength": 600,
+            "description": "Why url did not open."
+          },
+          "capture_observed": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Whether a stored record followed the opened url. Null without url. False means the browser did not record: end the session."
           }
         }
       }

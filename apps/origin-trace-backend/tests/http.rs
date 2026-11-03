@@ -5574,15 +5574,6 @@ async fn session_actions_drive_only_this_sessions_capture_browser() {
     std::fs::create_dir_all(&profile).unwrap();
     let record = root.path().join("brave-args");
     let brave = root.path().join("brave.sh");
-    std::fs::write(
-        &brave,
-        format!(
-            "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\n",
-            record.display()
-        ),
-    )
-    .unwrap();
-    std::fs::set_permissions(&brave, std::fs::Permissions::from_mode(0o700)).unwrap();
     let server = Server::start_with_args(&[
         "--socket".into(),
         socket.display().to_string(),
@@ -5620,6 +5611,19 @@ async fn session_actions_drive_only_this_sessions_capture_browser() {
         let response = call(body.clone()).await;
         assert_contract_response(response, "post", "/api/session/actions", 400).await;
     }
+    // A stand-in capture browser: it records how it was invoked and, as a
+    // connected capture browser would, a native record lands in the store.
+    std::fs::write(
+        &brave,
+        format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\nprintf '%s\\n' '{}' >> '{}'\n",
+            record.display(),
+            metadata_event(1),
+            server.root.path().join("events.jsonl").display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&brave, std::fs::Permissions::from_mode(0o700)).unwrap();
     std::os::unix::fs::symlink(
         format!("test-host-{}", std::process::id()),
         profile.join("SingletonLock"),
@@ -5629,7 +5633,7 @@ async fn session_actions_drive_only_this_sessions_capture_browser() {
         assert_contract_response(call(open).await, "post", "/api/session/actions", 200).await;
     assert_eq!(
         serde_json::from_slice::<Value>(&opened).unwrap(),
-        json!({"ok":true,"action":"open_url","opened":"new_tab"})
+        json!({"ok":true,"action":"open_url","opened":"new_tab","capture_observed":true})
     );
     let arguments = std::fs::read_to_string(&record).unwrap();
     assert!(arguments.contains(&format!("--user-data-dir={}", profile.display())));
@@ -5638,6 +5642,16 @@ async fn session_actions_drive_only_this_sessions_capture_browser() {
             .lines()
             .any(|line| line == "https://example.test/")
     );
+    // If the relay ever became a browser of its own, it would have no network.
+    for isolation in [
+        "--proxy-server=http://127.0.0.1:9",
+        "--proxy-bypass-list=<-loopback>",
+    ] {
+        assert!(
+            arguments.lines().any(|line| line == isolation),
+            "{isolation}"
+        );
+    }
     let end = call(json!({"action":"end","confirm":true})).await;
     let refused = assert_contract_response(end, "post", "/api/session/actions", 409).await;
     assert_eq!(code(refused), "target_unavailable");

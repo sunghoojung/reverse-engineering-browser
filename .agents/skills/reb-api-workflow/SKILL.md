@@ -35,7 +35,7 @@ Tool names are OpenAPI operation IDs. The same names work with
 | How did a native request come about? | `get_origin_trace`, `get_request_signal_profile` |
 | VM analysis of retained samples | `get_vm_analysis`, `get_vm_opcode_workspace`, `get_vm_host_links` (need `--allow-effects`: they write a derived cache) |
 | Start a session with named capture options | `start_live_session` (needs `--allow-effects --allow-session-start`) or `reb-api session start` |
-| Open a page in the session, or end it | `session_action` with `open_url` or `end` (needs `--allow-effects`) |
+| Open a page in a session you started, or end it | `session_action` with `open_url` or `end` (listed with `--allow-session-start`; check `capture_observed`) |
 
 Filtered reads return a `query` object. Page with `query.next_before` (older)
 or `query.next_after` (newer). JSON over 128 KiB comes back as a structural

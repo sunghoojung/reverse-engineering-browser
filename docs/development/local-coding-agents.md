@@ -150,7 +150,9 @@ sending a request. `start_live_session` takes named capture options (`url`,
 off unless named), starts the same launcher as `make live` with an Origin
 Trace window, and moves this connection to that exact session.
 `session_action` then opens a URL in the session's capture browser or ends
-it. Agent sessions publish their endpoint privately unless
+it. It acts only on a session this connection started, never on the
+researcher's own session, and it is hidden without `--allow-session-start`.
+`open_url` reports `capture_observed`; false means the page was not recorded. Agent sessions publish their endpoint privately unless
 `publish_canonical_endpoint` is set, so concurrent agents do not replace each
 other's sessions, and they use the mock Keychain. The flags are not
 authorization: start sessions and open URLs only for the authorized target.

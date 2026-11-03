@@ -307,9 +307,14 @@ backend belongs to. Both actions refuse with 409 `idle_backend` unless
   `--brave-binary` with the session's `--brave-profile` and the URL. It
   refuses with 409 `native_capture_unavailable` when the broker is disconnected
   or capture was stopped, and with 409 `target_unavailable` when no live
-  process holds the profile's `SingletonLock`, so it never starts a separate,
-  uncaptured browser. A launch that is still running after 10 seconds started
-  one anyway; it is stopped and reported. It never runs page JavaScript.
+  process holds the profile's `SingletonLock`. The relay carries proxy and
+  resolver switches that the running browser ignores but that leave a relay
+  with no network if it ever starts a browser of its own; such a relay is
+  stopped after 10 seconds and reported. A broker socket proves only that the
+  broker listens, so the response reports `capture_observed`: true once a new
+  record reaches the session's store within 10 seconds. False means nothing
+  was recorded, for example because the configured browser is not a capture
+  build. It never runs page JavaScript.
 - `{"action":"end","confirm":true}` replies, then about 300 ms later sends
   SIGTERM to the backend's `--launcher-pid`, which must be its parent. The
   launcher closes the capture browser and stops every helper, including the
@@ -322,24 +327,37 @@ returns 409 `dependency_unavailable` for these actions.
 `reb-api session start` and the MCP tool `start_live_session` take the
 `LiveSessionStart` options: `url`, `wasm_dispatch`, `wasm_call_indirect`,
 `guest_adapter`, `js_dispatch_sites`, `quiet`, `category_mask`,
-`duration_seconds`, `localhost_only`, `canvas_images` (with
-`confirm_sensitive_capture`), `publish_canonical_endpoint`, `brave_binary`
-and `timeout_seconds`. Every capture switch is off unless named; an inherited
-`REB_*` switch is ignored. They run the launcher that belongs with the
+`duration_seconds`, `localhost_only`, `publish_canonical_endpoint`,
+`brave_binary` and `timeout_seconds`. The CLI also takes `canvas_images` with
+`confirm_sensitive_capture`; the MCP tool leaves both out
+(`mcp_excluded_options`), so an agent cannot turn on sensitive capture. Every
+capture switch is off unless named; an inherited capture switch, browser
+profile or embedded-session variable is ignored. Operator settings such as
+helper binary paths, `REB_ORIGIN_TRACE_APP` and `REB_OPEN_COMMAND` still apply. They run the launcher that belongs with the
 `reb-api` build (`Contents/Resources/run-live-session.sh` in the app,
 `scripts/run-live-session.sh` in a checkout, or `REB_LIVE_SESSION_SCRIPT`)
 detached in its own process group, wait for its ready line and a live health
-report, then optionally open `url`. The session keeps running after the caller
-exits until it is ended, Brave is closed, or capture expires. A launcher
-failure line is returned as the error; a timeout stops the launcher. By
+report, then optionally open `url`, retrying for up to 20 seconds while the
+browser is still taking its profile, and return `capture_observed`. The
+session keeps running after the caller exits until it is ended, Brave is
+closed, or capture expires; if the MCP server is stopped during a start, close
+that session's Brave window. A launcher failure line is returned as the error
+after the launcher's own cleanup; a timeout stops the launcher and then its
+process group. By
 default the session publishes its endpoint only to a private file, so it does
 not replace the canonical endpoint other connections use. The session uses the
 mock Keychain, since an agent cannot answer a Keychain prompt. The CLI prints
 the session directory, endpoint file and launch log; the MCP result omits
-local paths.
+them and shows the home folder in launcher errors as `~`.
 
 `reb-api mcp --allow-session-start` requires `--allow-effects`. It lists
-`start_live_session` and starts even when its endpoint is missing or not live.
+`start_live_session` and `session_action` (the operations named in
+`x-reb-mcp.session_start.operations`, hidden otherwise) and starts even when
+its endpoint is missing or not live. `session_action` is accepted only for a
+session this connection started; a connection bound to the researcher's
+session gets a refusal without a request. Starting again first ends the
+session this connection started. Under `--require-live`, `session_action`
+`end` stays available when capture has expired or stopped.
 Until a session is bound, every operation tool refuses without a request. A
 successful start rebinds the connection to that session's own
 `research-ui.endpoint` and exact `instance_id`; this is the only retargeting,

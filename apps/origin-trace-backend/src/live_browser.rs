@@ -5,7 +5,7 @@
 use crate::{
     config::Options,
     error::{Code, Error, Result},
-    validation,
+    event_query, validation,
 };
 use serde_json::{Value, json};
 use std::{
@@ -21,11 +21,28 @@ const RELAY_DEADLINE: Duration = Duration::from_secs(10);
 /// Time for the end response to reach the caller before the launcher stops
 /// this backend with the rest of the session.
 const END_GRACE: Duration = Duration::from_millis(300);
+/// How long an opened page has to produce its first stored record. Any new
+/// record shows the browser is a connected capture browser; none does not.
+const OBSERVE_DEADLINE: Duration = Duration::from_secs(10);
+/// Switches for the relay process. The running browser ignores them, since a
+/// relayed command line only names what to open. If the relay ever starts a
+/// browser of its own, they leave it with no network to reach.
+const RELAY_ISOLATION: [&str; 8] = [
+    "--no-first-run",
+    "--no-default-browser-check",
+    "--use-mock-keychain",
+    "--disable-background-networking",
+    "--disable-sync",
+    "--proxy-server=http://127.0.0.1:9",
+    "--proxy-bypass-list=<-loopback>",
+    "--host-resolver-rules=MAP * ~NOTFOUND",
+];
 
 pub struct LiveBrowser {
     binary: Option<PathBuf>,
     profile: Option<PathBuf>,
     launcher_pid: Option<i32>,
+    store: PathBuf,
 }
 
 impl LiveBrowser {
@@ -34,6 +51,7 @@ impl LiveBrowser {
             binary: options.brave_binary.clone(),
             profile: options.brave_profile.clone(),
             launcher_pid: options.launcher_pid,
+            store: options.store.clone(),
         }
     }
 
@@ -93,9 +111,10 @@ impl LiveBrowser {
             )
             .with_code(Code::TargetUnavailable));
         };
+        let before = event_query::current_boundary(&self.store).unwrap_or(0);
         let mut relay = tokio::process::Command::new(binary)
             .arg(format!("--user-data-dir={}", profile.display()))
-            .args(["--no-first-run", "--no-default-browser-check"])
+            .args(RELAY_ISOLATION)
             .arg(url.as_str())
             .stdin(Stdio::null())
             .stdout(Stdio::null())
@@ -125,7 +144,22 @@ impl LiveBrowser {
             )
             .with_code(Code::StateConflict));
         }
-        Ok(json!({"ok": true, "action": "open_url", "opened": "new_tab"}))
+        // The broker socket proves only that the broker is listening. A new
+        // stored record proves the browser is a connected capture browser.
+        let deadline = tokio::time::Instant::now() + OBSERVE_DEADLINE;
+        let observed = loop {
+            if event_query::current_boundary(&self.store).is_ok_and(|end| end > before) {
+                break true;
+            }
+            if tokio::time::Instant::now() >= deadline {
+                break false;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        };
+        Ok(
+            json!({"ok": true, "action": "open_url", "opened": "new_tab",
+            "capture_observed": observed}),
+        )
     }
 
     /// Asks the launcher that started this backend to stop the session. The

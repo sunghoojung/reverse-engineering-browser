@@ -159,6 +159,8 @@ pub struct Started {
     pub canonical_endpoint: bool,
     pub url_opened: Option<bool>,
     pub url_error: Option<String>,
+    /// Whether a stored record followed the opened page. Null without a url.
+    pub capture_observed: Option<bool>,
 }
 
 impl Started {
@@ -170,6 +172,7 @@ impl Started {
             "canonical_endpoint": self.canonical_endpoint,
             "options": options.effective(),
             "url_opened": self.url_opened,
+            "capture_observed": self.capture_observed,
         });
         if let Some(error) = &self.url_error {
             value["url_error"] = json!(error);
@@ -290,20 +293,32 @@ fn private_directory(path: &Path) -> Result<(), String> {
         .map_err(|error| format!("Cannot create {}: {error}", path.display()))
 }
 
+/// Waits for a launcher that is already exiting, such as after its failure
+/// line, so its own cleanup can finish.
+fn exited(child: &mut Child, within: Duration) -> bool {
+    let deadline = Instant::now() + within;
+    while Instant::now() < deadline {
+        if child.try_wait().ok().flatten().is_some() {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    false
+}
+
 /// Stops a launcher that has not reported a ready session. Its own trap stops
-/// the browser and every helper it started.
+/// the browser and every helper it started. If it does not exit, its whole
+/// process group, which holds those helpers, is killed.
 fn stop(child: &mut Child) {
     unsafe {
         libc::kill(child.id() as i32, libc::SIGTERM);
     }
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while Instant::now() < deadline {
-        if child.try_wait().ok().flatten().is_some() {
-            return;
-        }
-        std::thread::sleep(Duration::from_millis(50));
+    if exited(child, Duration::from_secs(10)) {
+        return;
     }
-    let _ = child.kill();
+    unsafe {
+        libc::killpg(child.id() as i32, libc::SIGKILL);
+    }
     let _ = child.wait();
 }
 
@@ -345,33 +360,44 @@ async fn live_instance(client: &reqwest::Client, endpoint: &str) -> Option<Strin
         })
 }
 
+/// Opens the first page. The ready line can come a moment before the browser
+/// holds its profile, so a not-yet-running browser is retried briefly.
+/// Returns whether capture recorded anything after the page opened.
 async fn open_url(
     client: &reqwest::Client,
     endpoint: &str,
     instance: &str,
     url: &str,
-) -> Result<(), String> {
-    let response = client
-        .post(format!("{endpoint}/api/session/actions"))
-        .header("x-reb-expected-instance", instance)
-        .json(&json!({"action": "open_url", "url": url}))
-        .send()
-        .await
-        .map_err(|error| error.to_string())?;
-    if response.status().is_success() {
-        return Ok(());
+) -> Result<bool, String> {
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        let response = client
+            .post(format!("{endpoint}/api/session/actions"))
+            .header("x-reb-expected-instance", instance)
+            .timeout(Duration::from_secs(30))
+            .json(&json!({"action": "open_url", "url": url}))
+            .send()
+            .await
+            .map_err(|error| error.to_string())?;
+        let status = response.status().as_u16();
+        let body: Value = response.json().await.unwrap_or(Value::Null);
+        if (200..300).contains(&status) {
+            return Ok(body["capture_observed"] == true);
+        }
+        if status == 409 && body["code"] == "target_unavailable" && Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(250)).await;
+            continue;
+        }
+        return Err(format!(
+            "HTTP {status}: {}",
+            body["error"]
+                .as_str()
+                .unwrap_or("the capture browser did not open the URL")
+                .chars()
+                .take(500)
+                .collect::<String>()
+        ));
     }
-    let status = response.status().as_u16();
-    let body: Value = response.json().await.unwrap_or(Value::Null);
-    Err(format!(
-        "HTTP {status}: {}",
-        body["error"]
-            .as_str()
-            .unwrap_or("the capture browser did not open the URL")
-            .chars()
-            .take(500)
-            .collect::<String>()
-    ))
 }
 
 pub async fn launch(options: &StartOptions) -> Result<Started, String> {
@@ -465,6 +491,15 @@ pub async fn launch(options: &StartOptions) -> Result<Started, String> {
     let output = log
         .try_clone()
         .map_err(|error| format!("Cannot share the launch log: {error}"))?;
+    // Everything that can fail is prepared before the launcher starts, so an
+    // early error never leaves an unwatched session running.
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(Duration::from_secs(5))
+        .build()
+        .map_err(|error| error.to_string())?;
+    let mut read = std::fs::File::open(&log_file).map_err(|error| error.to_string())?;
     {
         use std::os::unix::process::CommandExt;
         // Its own process group keeps the session alive when the caller's
@@ -477,21 +512,17 @@ pub async fn launch(options: &StartOptions) -> Result<Started, String> {
         .stderr(log)
         .spawn()
         .map_err(|error| format!("Cannot run {}: {error}", kit.script.display()))?;
-    let client = reqwest::Client::builder()
-        .no_proxy()
-        .redirect(reqwest::redirect::Policy::none())
-        .timeout(Duration::from_secs(5))
-        .build()
-        .map_err(|error| error.to_string())?;
     let deadline = Instant::now() + Duration::from_secs(options.timeout());
     let mut bytes = Vec::new();
-    let mut read = std::fs::File::open(&log_file).map_err(|error| error.to_string())?;
     let mut ready_id = None;
     let started = loop {
         let _ = read.read_to_end(&mut bytes);
         let text = String::from_utf8_lossy(&bytes);
         if let Some(cause) = failure(&text) {
-            stop(&mut child);
+            // The launcher is already exiting; let its cleanup finish first.
+            if !exited(&mut child, Duration::from_secs(15)) {
+                stop(&mut child);
+            }
             return Err(format!("The live session did not start: {cause}"));
         }
         if let Ok(Some(status)) = child.try_wait() {
@@ -518,6 +549,7 @@ pub async fn launch(options: &StartOptions) -> Result<Started, String> {
                         canonical_endpoint: options.publish_canonical_endpoint,
                         url_opened: None,
                         url_error: None,
+                        capture_observed: None,
                     };
                 }
             }
@@ -538,7 +570,10 @@ pub async fn launch(options: &StartOptions) -> Result<Started, String> {
     let mut started = started;
     if let Some(url) = &options.url {
         match open_url(&client, &started.endpoint, &started.instance_id, url).await {
-            Ok(()) => started.url_opened = Some(true),
+            Ok(observed) => {
+                started.url_opened = Some(true);
+                started.capture_observed = Some(observed);
+            }
             Err(error) => {
                 started.url_opened = Some(false);
                 started.url_error = Some(error);

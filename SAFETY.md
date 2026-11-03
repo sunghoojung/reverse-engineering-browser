@@ -90,12 +90,18 @@ it.
   still names the authorized target, and the agent opens only URLs inside it.
   An agent-started session is an ordinary visibly labeled capture session with
   its own fresh browser profile, every capture switch off unless named, and the
-  usual one-hour expiry. `open_url` reaches only that session's own capture
-  browser, only while native capture is recording, and never through page
-  JavaScript. Sensitive Canvas capture needs its own explicit confirmation.
-  Agent sessions do not use the macOS Keychain; do not sign in with real
-  credentials unless the authorization covers it. There is no synthetic input:
-  agents cannot click or type in pages through Origin Trace.
+  usual one-hour expiry. Through MCP, `session_action` acts only on a session
+  that connection started, never on the researcher's own session. `open_url`
+  reaches only that session's capture browser, only while its capture broker
+  runs, and never through page JavaScript. A running broker does not prove the
+  browser records, so `open_url` reports `capture_observed`; when it is false
+  the page was not recorded and the agent ends the session. Agents cannot turn
+  on sensitive Canvas capture; that stays a CLI option the researcher types.
+  An agent may supply guest adapter or dispatch-site files it wrote for the
+  authorized target; they only select what is sampled. Agent sessions do not
+  use the macOS Keychain; do not sign in with real credentials unless the
+  authorization covers it. There is no synthetic input: agents cannot click or
+  type in pages through Origin Trace.
 - Run mutable tools in a disposable experiment context by default. Experiments
   do not read or modify baseline tabs, production cookies, storage, or
   credentials. Never execute extracted code automatically.

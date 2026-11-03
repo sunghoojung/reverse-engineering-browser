@@ -363,8 +363,10 @@ authorization. Every
 capture switch is off unless named; an inherited capture switch, browser
 profile or embedded-session variable is ignored. Request content capture is
 not a named option, so these sessions record request body length, type and
-digest but no request path, query or body bytes. Operator settings such as
-helper binary paths, `REB_LIVE_SESSION_ROOT`, `REB_ORIGIN_TRACE_APP` and
+digest but no request path, query or body bytes. Document-start Console
+script permission (`REB_CONSOLE_DOCUMENT_START`) is not a named option
+either, so these sessions can never arm a document-start script. Operator
+settings such as helper binary paths, `REB_LIVE_SESSION_ROOT`, `REB_ORIGIN_TRACE_APP` and
 `REB_OPEN_COMMAND` still apply. They run the launcher that belongs with the
 `reb-api` build (`Contents/Resources/run-live-session.sh` in the app,
 `scripts/run-live-session.sh` in a checkout, or `REB_LIVE_SESSION_SCRIPT`)

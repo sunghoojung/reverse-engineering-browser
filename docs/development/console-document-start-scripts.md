@@ -35,7 +35,8 @@ nothing is relaunched to obtain one.
      `start` action, or check **Permit document-start scripts in the next
      disposable session** in the Console settings before connecting;
    - live capture: launch it with `REB_CONSOLE_DOCUMENT_START=1`. A capture
-     already running without it cannot be upgraded.
+     already running without it cannot be upgraded. An agent session started
+     with `reb-api session start` or `start_live_session` never has it.
 3. An explicit confirmed arm. Clearing the set, disconnecting, ending the
    session, or session expiry removes it.
 

@@ -37,6 +37,8 @@ Three independent gates must all be satisfied; none of them is implied.
    - Live capture mode: the capture launcher passes the switch only when the
      researcher sets `REB_CONSOLE_DOCUMENT_START=1`. A live capture that was
      started without it cannot arm, and nothing is relaunched to change that.
+     An agent session (`reb-api session start`, MCP `start_live_session`)
+     always launches without it, even when the switch is inherited.
 3. **Explicit arming.** A separate confirmed action registers the set. Clearing
    it, disconnecting, ending the session, or session expiry removes it.
 

@@ -273,8 +273,7 @@ class COMPONENT_EXPORT(REB_NATIVE_PROBE_SINK) NativeProbeSink final {
   void NoteNativeJsInvocationStatus(std::uint64_t epoch,
                                     std::uint32_t slot,
                                     NativeJsInvocationSiteStatus status) noexcept;
-  void NoteNativeJsInvocationInputUnavailable(std::uint64_t epoch,
-                                              std::uint64_t frame_id) noexcept;
+  void NoteNativeJsInvocationInputUnavailable(std::uint64_t epoch, std::uint64_t frame_id) noexcept;
   void NoteNativeJsInvocationSettleUnavailable(std::uint64_t epoch,
                                                std::uint64_t frame_id) noexcept;
   // Blink's reader of the current V8 invocation, set once per renderer.
@@ -430,7 +429,8 @@ class COMPONENT_EXPORT(REB_NATIVE_PROBE_SINK) NativeProbeSink final {
   std::atomic<std::size_t> native_invocation_site_count_{0};
   std::atomic<std::uint64_t> native_invocation_generation_{0};
   std::atomic<std::uint64_t> native_invocation_digest_generation_{0};
-  std::array<std::atomic<std::uint64_t>, kNativeJsInvocationSampleBudget> native_invocation_slots_{};
+  std::array<std::atomic<std::uint64_t>, kNativeJsInvocationSampleBudget>
+      native_invocation_slots_{};
   std::array<std::array<std::atomic<std::uint64_t>, kNativeJsInvocationSiteSampleBudget>,
              kNativeJsInvocationSiteLimit>
       native_invocation_site_slots_{};

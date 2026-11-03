@@ -166,8 +166,7 @@ void OriginTraceIndex::ResolvePendingInitiators(const EventRecord& event,
 
 OriginTraceEventReference OriginTraceIndex::FindInvocation(const InvocationKey& key) const {
   const auto found = invocations_.find(key);
-  if (found == invocations_.end() || found->second.ambiguous ||
-      !Contains(found->second.start)) {
+  if (found == invocations_.end() || found->second.ambiguous || !Contains(found->second.start)) {
     return {};
   }
   return found->second.start;
@@ -200,10 +199,10 @@ void OriginTraceIndex::IndexInvocation(const EventRecord& event, OriginTraceEdge
   if (type == EventType::kJsInvocationSettle) {
     JsInvocationSettlePayload payload;
     if (DecodeJsInvocationSettlePayload(event.inline_payload, payload)) {
-      AddEdge(batch, event,
-              FindInvocation({event.header.session_id, event.header.process_id,
-                              payload.invocation_id}),
-              OriginTraceRelation::kInvocationSettlement, OriginTraceConfidence::kObserved);
+      AddEdge(
+          batch, event,
+          FindInvocation({event.header.session_id, event.header.process_id, payload.invocation_id}),
+          OriginTraceRelation::kInvocationSettlement, OriginTraceConfidence::kObserved);
     }
     return;
   }
@@ -219,8 +218,8 @@ void OriginTraceIndex::IndexInvocation(const EventRecord& event, OriginTraceEdge
   // wrote immediately before this one in the same process stream.
   const OriginTraceEventReference request =
       FindInitiator({event.header.session_id, event.header.request_id, event.header.process_id});
-  const OriginTraceEventReference start = FindInvocation(
-      {event.header.session_id, event.header.process_id, payload.invocation_id});
+  const OriginTraceEventReference start =
+      FindInvocation({event.header.session_id, event.header.process_id, payload.invocation_id});
   if (request.session_id == 0 || start.session_id == 0 || request == start) {
     return;
   }

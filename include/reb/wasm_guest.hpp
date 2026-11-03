@@ -265,8 +265,8 @@ static_assert(offsetof(WasmGuestInvocationPayload, recipe_sha256) == 32);
   value.js_invocation_state = static_cast<std::uint8_t>(
       wasm_guest_detail::Get(bytes, 84, sizeof(value.js_invocation_state)));
   std::copy_n(bytes.begin() + 85, 3, value.js_invocation_reserved.begin());
-  value.js_invocation_id = static_cast<std::uint32_t>(
-      wasm_guest_detail::Get(bytes, 88, sizeof(value.js_invocation_id)));
+  value.js_invocation_id =
+      static_cast<std::uint32_t>(wasm_guest_detail::Get(bytes, 88, sizeof(value.js_invocation_id)));
   std::copy_n(bytes.begin() + 92, 36, value.reserved.begin());
   return true;
 }

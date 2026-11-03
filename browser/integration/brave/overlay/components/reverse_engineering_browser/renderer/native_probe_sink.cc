@@ -2750,8 +2750,7 @@ bool NativeProbeSink::IsNativeJsInvocationEnabled(const std::uint64_t epoch,
                                                   const std::uint32_t slot) const noexcept {
   return slot < native_invocation_site_count_.load(std::memory_order_acquire) &&
          native_invocation_capped_generation_.load(std::memory_order_acquire) < epoch &&
-         native_invocation_site_capped_generations_[slot].load(std::memory_order_acquire) <
-             epoch &&
+         native_invocation_site_capped_generations_[slot].load(std::memory_order_acquire) < epoch &&
          NativeJsInvocationActive(epoch);
 }
 
@@ -2763,8 +2762,7 @@ bool NativeProbeSink::NativeJsInvocationDigests(const std::uint64_t epoch) const
 bool NativeProbeSink::NoteNativeJsInvocationOmission(const std::uint64_t generation,
                                                      const std::uint64_t frame_id,
                                                      const std::size_t gap) noexcept {
-  if (generation == 0 || (generation & 1U) != 0 ||
-      gap >= native_invocation_gap_generations_.size())
+  if (generation == 0 || (generation & 1U) != 0 || gap >= native_invocation_gap_generations_.size())
     return false;
   static constexpr std::array<std::string_view, kInvocationGapCount> kReasons{
       "native_js_invocation_budget_incomplete",
@@ -2885,7 +2883,8 @@ void NativeProbeSink::RecordNativeJsInvocationSettle(
   if (config_generation_.load(std::memory_order_acquire) != epoch || session_id == 0)
     return;
   // A digest without the session's opt-in is refused, never stored.
-  const bool digests = native_invocation_digest_generation_.load(std::memory_order_acquire) == epoch;
+  const bool digests =
+      native_invocation_digest_generation_.load(std::memory_order_acquire) == epoch;
   if (frame_id == 0 ||
       payload.site_slot >= native_invocation_site_count_.load(std::memory_order_acquire) ||
       !IsValidNativeJsInvocationSettlePayload(payload) ||

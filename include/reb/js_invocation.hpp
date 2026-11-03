@@ -246,9 +246,8 @@ static_assert(offsetof(JsInvocationStartPayload, reserved) == 112);
       value.sample_index >= kJsInvocationSampleBudget || value.document_id == 0)
     return false;
   // A parent is an earlier allocation; an unknown parent records none.
-  if (value.parent_invocation_id != 0 &&
-      (value.parent_invocation_id >= value.invocation_id ||
-       (value.flags & kJsInvocationParentUnknown) != 0))
+  if (value.parent_invocation_id != 0 && (value.parent_invocation_id >= value.invocation_id ||
+                                          (value.flags & kJsInvocationParentUnknown) != 0))
     return false;
   if (((value.flags & kJsInvocationArgumentsTruncated) != 0) !=
       (value.argument_count > kJsInvocationArgumentLimit))
@@ -368,7 +367,8 @@ static_assert(offsetof(JsInvocationSettlePayload, reserved) == 72);
   using State = JsInvocationDigestState;
   using Encoding = JsInvocationDigestEncoding;
   const auto kind = static_cast<Kind>(value.value_kind);
-  const bool fulfilled = value.outcome == static_cast<std::uint8_t>(JsInvocationOutcome::kFulfilled);
+  const bool fulfilled =
+      value.outcome == static_cast<std::uint8_t>(JsInvocationOutcome::kFulfilled);
   const bool rejected = value.outcome == static_cast<std::uint8_t>(JsInvocationOutcome::kRejected);
   const auto via = static_cast<JsInvocationSettleVia>(value.via);
   if (value.protocol_version != 1 || value.payload_size != 128 ||
@@ -377,7 +377,7 @@ static_assert(offsetof(JsInvocationSettlePayload, reserved) == 72);
       value.document_id == 0 || value.reserved0 != 0 ||
       (value.flags & ~kJsInvocationLossyUtf8) != 0)
     return false;
-  if (via == JsInvocationSettleVia::kSyncReturn ? !fulfilled
+  if (via == JsInvocationSettleVia::kSyncReturn  ? !fulfilled
       : via == JsInvocationSettleVia::kSyncThrow ? !rejected
                                                  : via != JsInvocationSettleVia::kPromise)
     return false;
@@ -484,8 +484,7 @@ static_assert(offsetof(JsInvocationRequestPayload, reserved) == 16);
 [[nodiscard]] inline bool IsValidJsInvocationRequestPayload(
     const JsInvocationRequestPayload& value) noexcept {
   const bool inside = value.state == static_cast<std::uint8_t>(JsInvocationContextState::kInside);
-  const bool unknown =
-      value.state == static_cast<std::uint8_t>(JsInvocationContextState::kUnknown);
+  const bool unknown = value.state == static_cast<std::uint8_t>(JsInvocationContextState::kUnknown);
   return value.protocol_version == 1 && value.payload_size == 128 && (inside || unknown) &&
          IsValidJsInvocationContext(value.state, value.invocation_id) &&
          value.sample_index < kJsInvocationRequestBudget && value.reserved1 == 0 &&

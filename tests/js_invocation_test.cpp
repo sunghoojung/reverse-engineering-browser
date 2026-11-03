@@ -33,8 +33,12 @@ bool SameBytes(const std::array<std::byte, N>& a, const std::array<std::byte, N>
 // The renderer encoder (overlay) and the core decoder each own a copy of every
 // layout. Set one field at a time to a distinct value and require identical
 // bytes, so the copies cannot drift.
-template <class Overlay, class Core, class OverlayField, class CoreField, class Encode, class
-          CoreEncode>
+template <class Overlay,
+          class Core,
+          class OverlayField,
+          class CoreField,
+          class Encode,
+          class CoreEncode>
 void CheckField(OverlayField Overlay::*overlay_field,
                 CoreField Core::*core_field,
                 std::uint64_t value,
@@ -116,10 +120,11 @@ void CheckWireParity() {
     CT core;
     overlay.value_sha256[i] = static_cast<std::uint8_t>(0xb0 + i);
     core.value_sha256[i] = static_cast<std::byte>(0xb0 + i);
-    Check(SameBytes(reb::EncodeNativeJsInvocationSettlePayload(overlay),
-                    reb::EncodeJsInvocationSettlePayload(core)) &&
-              reb::EncodeJsInvocationSettlePayload(core)[32 + i] == static_cast<std::byte>(0xb0 + i),
-          "value_sha256 offset");
+    Check(
+        SameBytes(reb::EncodeNativeJsInvocationSettlePayload(overlay),
+                  reb::EncodeJsInvocationSettlePayload(core)) &&
+            reb::EncodeJsInvocationSettlePayload(core)[32 + i] == static_cast<std::byte>(0xb0 + i),
+        "value_sha256 offset");
   }
 
   using OR = reb::NativeJsInvocationRequestPayload;
@@ -243,7 +248,8 @@ void CheckStartRules() {
   rejects([](auto& p) { p.argument_kinds[1] = 15; }, "unknown argument kind");
   rejects([](auto& p) { p.argument_low32[0] = 1; }, "low bits on a string");
   rejects([](auto& p) { p.argument_count = 9; }, "truncation without its flag");
-  rejects([](auto& p) { p.flags = reb::kJsInvocationArgumentsTruncated; }, "flag without truncation");
+  rejects([](auto& p) { p.flags = reb::kJsInvocationArgumentsTruncated; },
+          "flag without truncation");
   rejects([](auto& p) { p.document_id = 0; }, "zero document");
   rejects([](auto& p) { p.reserved[3] = std::byte{1}; }, "nonzero start reserved");
   rejects([](auto& p) { p.site_sample_index = 64; }, "site sample index past its budget");

@@ -101,7 +101,8 @@ NativeJsInvocationContext ReadInvocation() noexcept {
 
   // Without the VM category nothing is armed; a configuration without sites
   // arms nothing either.
-  ConfigureInvocation(queue, false, reb::NativeProbeCategoryMask(reb::NativeProbeCategory::kNetwork));
+  ConfigureInvocation(queue, false,
+                      reb::NativeProbeCategoryMask(reb::NativeProbeCategory::kNetwork));
   assert(sink.NativeJsInvocationEpoch() == 0 && sink.CurrentNativeJsInvocation().state == 0);
   Configure(queue);
   assert(sink.NativeJsInvocationEpoch() == 0);
@@ -155,7 +156,8 @@ NativeJsInvocationContext ReadInvocation() noexcept {
   sink.RecordNativeJsInvocationRequest(31);
   auto request = One(queue);
   assert(reb::IsValidNativeJsInvocationRequestHeader(request.header) &&
-         request.header.request_id == 31 && std::to_integer<std::uint8_t>(request.inline_payload[4]) == 2 &&
+         request.header.request_id == 31 &&
+         std::to_integer<std::uint8_t>(request.inline_payload[4]) == 2 &&
          std::to_integer<std::uint8_t>(request.inline_payload[8]) == 9);
   InvocationProvider::context = {1, 0, true};
   sink.RecordNativeJsInvocationRequest(32);
@@ -171,12 +173,16 @@ NativeJsInvocationContext ReadInvocation() noexcept {
   assert(Drain(queue) == 0);
 
   // Status gaps per configuration and slot.
-  sink.NoteNativeJsInvocationStatus(epoch, 1, reb::NativeJsInvocationSiteStatus::kUnsupportedFunction);
+  sink.NoteNativeJsInvocationStatus(epoch, 1,
+                                    reb::NativeJsInvocationSiteStatus::kUnsupportedFunction);
   assert(InvocationGap(One(queue)) == "native_js_invocation_site_1_unsupported_function");
-  sink.NoteNativeJsInvocationStatus(epoch, 1, reb::NativeJsInvocationSiteStatus::kUnsupportedFunction);
-  sink.NoteNativeJsInvocationStatus(epoch, 2, reb::NativeJsInvocationSiteStatus::kCompiledBeforeArming);
+  sink.NoteNativeJsInvocationStatus(epoch, 1,
+                                    reb::NativeJsInvocationSiteStatus::kUnsupportedFunction);
+  sink.NoteNativeJsInvocationStatus(epoch, 2,
+                                    reb::NativeJsInvocationSiteStatus::kCompiledBeforeArming);
   assert(Drain(queue) == 0);
-  sink.NoteNativeJsInvocationStatus(epoch, 0, reb::NativeJsInvocationSiteStatus::kCompiledBeforeArming);
+  sink.NoteNativeJsInvocationStatus(epoch, 0,
+                                    reb::NativeJsInvocationSiteStatus::kCompiledBeforeArming);
   assert(InvocationGap(One(queue)) == "native_js_invocation_site_0_compiled_before_arming");
   sink.NoteNativeJsInvocationSettleUnavailable(epoch, 8);
   assert(InvocationGap(One(queue)) == "native_js_invocation_settle_unavailable");

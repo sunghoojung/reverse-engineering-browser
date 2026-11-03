@@ -149,7 +149,7 @@ template <std::size_t N>
 [[nodiscard]] constexpr bool ValidLowBits(std::uint8_t kind, std::uint32_t low32) noexcept {
   return kind == static_cast<std::uint8_t>(NativeJsInvocationValueKind::kInteger) ||
          (kind == static_cast<std::uint8_t>(NativeJsInvocationValueKind::kBoolean) ? low32 <= 1
-                                                                                     : low32 == 0);
+                                                                                   : low32 == 0);
 }
 [[nodiscard]] constexpr bool Envelope(const NativeProbeHeader& header,
                                       NativeProbeType type) noexcept {
@@ -207,9 +207,8 @@ static_assert(offsetof(NativeJsInvocationStartPayload, reserved) == 112);
       value.invocation_id == 0 || value.site_sample_index >= kNativeJsInvocationSiteSampleBudget ||
       value.sample_index >= kNativeJsInvocationSampleBudget || value.document_id == 0)
     return false;
-  if (value.parent_invocation_id != 0 &&
-      (value.parent_invocation_id >= value.invocation_id ||
-       (value.flags & kNativeJsInvocationParentUnknown) != 0))
+  if (value.parent_invocation_id != 0 && (value.parent_invocation_id >= value.invocation_id ||
+                                          (value.flags & kNativeJsInvocationParentUnknown) != 0))
     return false;
   if (((value.flags & kNativeJsInvocationArgumentsTruncated) != 0) !=
       (value.argument_count > kNativeJsInvocationArgumentLimit))
@@ -302,7 +301,7 @@ static_assert(offsetof(NativeJsInvocationSettlePayload, reserved) == 72);
       value.document_id == 0 || value.reserved0 != 0 ||
       (value.flags & ~kNativeJsInvocationLossyUtf8) != 0)
     return false;
-  if (via == Via::kSyncReturn ? !fulfilled
+  if (via == Via::kSyncReturn  ? !fulfilled
       : via == Via::kSyncThrow ? !rejected
                                : via != Via::kPromise)
     return false;

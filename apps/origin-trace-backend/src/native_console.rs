@@ -458,10 +458,12 @@ impl NativeConsole {
             .try_lock()
             .map_err(|_| Error::conflict("Another native console action is running"))?;
         let Some(session) = guard.as_mut() else {
-            return Ok(json!({"contract_version":3,"available":self.available(),"state":"idle","session_id":null,
+            return Ok(
+                json!({"contract_version":3,"available":self.available(),"state":"idle","session_id":null,
                 "document_start":{"status":"idle","permitted":false,"scripts":[],
                     "message":"Connect the Console with document-start scripts enabled, then arm a rule."},
-                "limits":document_start_limits()}));
+                "limits":document_start_limits()}),
+            );
         };
         let ended = if let Some(browser) = session.browser.as_mut() {
             browser.child.try_wait().ok().flatten().is_some()
@@ -469,10 +471,12 @@ impl NativeConsole {
             session.bridge.child.try_wait().ok().flatten().is_some()
         };
         if session.poisoned || session.started.elapsed() >= Duration::from_secs(3600) || ended {
-            return Ok(json!({"contract_version":3,"available":self.available(),"state":"ready","session_id":session.id,
+            return Ok(
+                json!({"contract_version":3,"available":self.available(),"state":"ready","session_id":session.id,
                 "document_start":{"status":"error","permitted":false,"scripts":[],
                     "message":"This Console session ended. Start another session; armed scripts and their output are gone."},
-                "limits":document_start_limits()}));
+                "limits":document_start_limits()}),
+            );
         }
         if !session.document_start {
             let mut result = document_start_unavailable(&session.id);
@@ -884,8 +888,7 @@ impl BridgeProcess {
     }
 }
 
-const DOCUMENT_START_UNAVAILABLE: &str =
-    "Document-start Console scripts are not available in this session. Rebuild the pinned browser, \
+const DOCUMENT_START_UNAVAILABLE: &str = "Document-start Console scripts are not available in this session. Rebuild the pinned browser, \
      then start a disposable Console session with document_start enabled, or relaunch the live \
      capture with REB_CONSOLE_DOCUMENT_START=1. Nothing is relaunched automatically.";
 
@@ -1243,7 +1246,8 @@ mod tests {
     #[test]
     fn document_start_rules_refuse_anything_that_could_widen_their_scope() {
         let rule = |extra: Value| {
-            let mut script = json!({"origin":"https://fixture.test","frame":"top","source":"report('x');"});
+            let mut script =
+                json!({"origin":"https://fixture.test","frame":"top","source":"report('x');"});
             for (key, value) in extra.as_object().unwrap() {
                 if value.is_null() {
                     script.as_object_mut().unwrap().remove(key);
@@ -1281,9 +1285,7 @@ mod tests {
         // Bounds: script count, per-snippet source and the whole set's source.
         let script = json!({"origin":"https://fixture.test","frame":"top","source":"report('x');"});
         assert!(validate_document_start(&json!([])).is_err());
-        assert!(
-            validate_document_start(&json!([script, script, script, script, script])).is_err()
-        );
+        assert!(validate_document_start(&json!([script, script, script, script, script])).is_err());
         assert!(validate_document_start(&json!(script)).is_err());
         let long = json!({"origin":"https://fixture.test","frame":"top","source":"a".repeat(DOCUMENT_START_SOURCE_LIMIT)});
         assert!(validate_document_start(&json!([long])).is_ok());

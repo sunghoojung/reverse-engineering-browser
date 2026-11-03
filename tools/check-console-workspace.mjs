@@ -11,6 +11,11 @@ export function createConsoleFixture() {
   const targets = () => [{id:fixture.target,origin:'https://fixture.invalid',label:'Console workbench fixture',url:'https://fixture.invalid/console',main_frame:true,truncated:false}];
   fixture.respond = async (path, action) => {
     if (path === '/api/native-console') return fixture.stateMode === 'error' ? {status:503,body:{error:'Synthetic unavailable backend'}} : {status:200,body:state()};
+    // This fixture's session never permits document-start scripts, so the panel
+    // must stay usable with the experiment reported as unavailable.
+    if (path.startsWith('/api/native-console/document-start')) return {status:200,body:{contract_version:3,available:true,state:fixture.session?'ready':'idle',session_id:fixture.session,
+      document_start:{status:'unavailable',permitted:false,scripts:[],message:'Synthetic session does not permit document-start scripts'},
+      limits:{scripts:4,source_bytes:4096,total_source_bytes:8192,rule_bytes:256,report_bytes:512,records_per_document:64,retained_records:128,records_per_read:32,execution_millis:50}}};
     fixture.calls.push(structuredClone(action));if(fixture.calls.length>512)throw new Error('Synthetic action limit exceeded');
     if (action.action === 'start') {fixture.session=String(++fixture.sequence);fixture.request=0;return {status:200,body:{...state(),targets:targets(),truncated:false}};}
     if (action.action === 'stop') {fixture.session=null;return {status:200,body:state()};}
@@ -53,7 +58,7 @@ export function createConsoleFixture() {
   fixture.handle=async (request,response)=>{
     try {
       const path=new URL(request.url,'http://127.0.0.1').pathname;
-      if(!['/api/native-console','/api/native-console/actions'].includes(path))return false;
+      if(!['/api/native-console','/api/native-console/document-start','/api/native-console/actions'].includes(path))return false;
       let text='';for await(const chunk of request){text+=chunk;if(text.length>65536)throw new Error('Synthetic request exceeds fixture bound');}
       const reply=await fixture.respond(path,text?JSON.parse(text):null);
       if(!response.destroyed){response.writeHead(reply.status,{'Content-Type':'application/json'});response.end(JSON.stringify(reply.body));}return true;

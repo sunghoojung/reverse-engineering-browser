@@ -3039,6 +3039,10 @@ void NativeProbeSink::RecordNativeJsInvocationRequest(const std::int32_t request
       (category_mask_.load(std::memory_order_relaxed) &
        NativeProbeCategoryMask(NativeProbeCategory::kNetwork)) == 0)
     return;
+  // After the request budget no loader start pays for the context read, which
+  // enters V8, or the frame lookup.
+  if (native_invocation_request_capped_generation_.load(std::memory_order_acquire) >= generation)
+    return;
   const auto provider = native_invocation_context_provider_.load(std::memory_order_acquire);
   if (!provider)
     return;
@@ -3063,8 +3067,6 @@ void NativeProbeSink::RecordNativeJsInvocationRequest(const std::int32_t request
   const std::uint64_t frame_id = frame_id_provider ? frame_id_provider() : 0;
   std::size_t index = 0;
   std::uint64_t previous = 0;
-  if (native_invocation_request_capped_generation_.load(std::memory_order_acquire) >= generation)
-    return;
   if (!ClaimNativeJsSlot(native_invocation_request_slots_, generation, index, previous)) {
     // Capped even when the ring cannot take the gap yet; the gap is held.
     CapNativeJsGeneration(native_invocation_request_capped_generation_, generation);

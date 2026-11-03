@@ -85,6 +85,10 @@ NativeJsInvocationContext ReadInvocation() noexcept {
   ++InvocationProvider::reads;
   return InvocationProvider::context;
 }
+unsigned invocation_frame_lookups = 0;
+void CountInvocationFrameLookup() {
+  ++invocation_frame_lookups;
+}
 
 [[gnu::noinline]] void NativeJsInvocationAdmission() {
   NativeProbeQueue queue;
@@ -208,15 +212,23 @@ NativeJsInvocationContext ReadInvocation() noexcept {
   auto settle = One(queue);
   assert(reb::IsValidNativeJsInvocationSettleHeader(settle.header) &&
          std::to_integer<std::uint8_t>(settle.inline_payload[16]) == 1);
-  // 256 requests per configuration, then one coalesced gap.
+  // 256 requests per configuration, then one coalesced gap. After the cap a
+  // loader start reads neither the invocation context nor the frame.
   InvocationProvider::context = {2, 4, true};
   for (std::int32_t n = 0; n < 256; ++n)
     sink.RecordNativeJsInvocationRequest(100 + n);
   assert(Drain(queue) == 256);
+  auto reads = InvocationProvider::reads;
+  invocation_frame_lookups = 0;
+  blink::test_frame_hook = &CountInvocationFrameLookup;
   sink.RecordNativeJsInvocationRequest(1000);
   assert(InvocationGap(One(queue)) == "native_js_invocation_request_budget_incomplete");
+  assert(InvocationProvider::reads == reads + 1 && invocation_frame_lookups == 1);
+  reads = InvocationProvider::reads;
   sink.RecordNativeJsInvocationRequest(1001);
+  blink::test_frame_hook = nullptr;
   assert(Drain(queue) == 0);
+  assert(InvocationProvider::reads == reads && invocation_frame_lookups == 1);
   // Without the Network category no request record is made.
   ConfigureInvocation(queue, false, reb::NativeProbeCategoryMask(reb::NativeProbeCategory::kVm));
   assert(sink.NativeJsInvocationEpoch() != 0);

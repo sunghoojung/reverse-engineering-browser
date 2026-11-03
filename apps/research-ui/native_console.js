@@ -453,6 +453,12 @@
         item.textContent = `#${script.script_id} ${script.rule.origin} · ${script.rule.frame} frame ·${prefix} · ${script.source_bytes} bytes · ${script.digest} · ${script.injected_documents} documents · ${script.records} records · ${script.refused} refused`;
         list.append(item);
       }
+      const unsupported = view?.unsupported;
+      if (Array.isArray(unsupported) && unsupported.every(entry => typeof entry?.context === 'string')) {
+        // Out of scope whatever a rule declares, so a rule that did not match
+        // reads differently from a context that is never reached.
+        ds('rule-help').textContent = `One exact origin and one frame kind. No pattern, wildcard or host suffix. Never reached: ${unsupported.map(entry => entry.context.replace(/_/g, ' ')).join(', ')}.`;
+      }
       const output = view?.document_start?.output;
       const pendingProcesses = view?.document_start?.pending_renderer_processes;
       ds('counters').textContent = !output ? '' :

@@ -85,9 +85,14 @@ work, no URL guessing beyond the declared rule, and no navigation blocking.
 
 Dedicated, shared and service workers; worklets; isolated worlds and any
 non-main world; non-`http(s)` documents, including `about:blank`, the initial
-empty document, and internal browser pages; documents outside the Console's
-bound profile; and every frame that no declared rule matches. These are listed
-in the `unsupported` field of the experiment state rather than silently skipped.
+empty document, data URLs and internal browser pages; documents outside the
+Console's bound profile; and documents that were already open when the set was
+armed.
+
+Every read states these contexts in an `unsupported` list with a reason, even
+when no session exists, so a rule that did not match reads differently from a
+context that is never reached whatever a rule declares. A frame that no declared
+rule matches is simply not injected and produces no record.
 
 ## Output
 
@@ -203,6 +208,28 @@ and response shapes. Responses from the document-start surfaces report
 
 These are transport and retained-state bounds. A snippet can still schedule page
 work that outlives its injection, and a snippet's own allocations are page work.
+
+## Audit
+
+What the experiment did is auditable inside its own session, and nothing about
+it is retained past that session.
+
+- The state reports the current `generation`, and every armed script's exact
+  rule, source byte count and labeling `digest`, so what is armed can be
+  confirmed without echoing the snippet's source.
+- Per script, `records`, `injected_documents` and `refused` state how much it
+  produced, how many documents ran it, and how often it was refused. The output
+  envelope adds `dropped`, `unattributed` and `stale`.
+- Every output record carries its own `sequence`, kind, provenance, script,
+  document and frame, so the stream is replayable in order up to the ring bound.
+- Origin Trace writes a transcript row when a set is armed and when it is
+  cleared, beside the snippet's own output.
+- The [OpenAPI contract](openapi.json) declares each surface's effects,
+  prerequisites, confirmations and uncertainties with source pointers, which is
+  how this repository audits an effectful operation.
+
+There is no durable audit log: the registry, counters and output end with the
+session, by design, because none of it is evidence.
 
 ## Privacy
 

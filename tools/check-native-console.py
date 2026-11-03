@@ -705,6 +705,9 @@ def check_backend(binary, backend):
             assert idle["document_start"]["permitted"] is False
             assert idle["document_start"]["scripts"] == []
             assert idle["limits"]["scripts"] == 4 and idle["limits"]["execution_millis"] == 50
+            # Out-of-scope contexts are stated rather than silently skipped.
+            contexts = {entry["context"] for entry in idle["unsupported"]}
+            assert {"service_worker", "dedicated_worker", "isolated_world", "already_open_document"} <= contexts
             assert call()["state"] == "idle", "A document-start read started a session"
             read_document_start(after="01", status=400)
             call(status=400, path="/api/native-console/document-start?unexpected=1")

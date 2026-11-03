@@ -120,7 +120,9 @@ export async function checkNativeConsoleDocumentStart(root) {
       return {ok: true, status: 200, json: async () => ({contract_version: 3, available: true,
         state: session ? 'ready' : 'idle', session_id: session, document_start: value,
         limits: {scripts: 4, source_bytes: 4096, total_source_bytes: 8192, rule_bytes: 256, report_bytes: 512,
-          records_per_document: 64, retained_records: 128, records_per_read: 32, execution_millis: 50}})};
+          records_per_document: 64, retained_records: 128, records_per_read: 32, execution_millis: 50},
+        unsupported: [{context: 'service_worker', reason: 'The injector observes documents only.'},
+          {context: 'already_open_document', reason: 'Reload a document that was open when the set was armed.'}]})};
     }
     if (path === '/api/native-console') {
       return {ok: true, status: 200, json: async () => ({contract_version: 2, state: session ? 'ready' : 'idle',
@@ -228,6 +230,7 @@ export async function checkNativeConsoleDocumentStart(root) {
   assert.match(ds('armed').textContent, /child frame/);
   assert.match(ds('armed').textContent, /path \/lab\/\*/);
   assert.match(ds('counters').textContent, /every renderer holds this set/);
+  assert.match(ds('rule-help').textContent, /Never reached: service worker, already open document/);
 
   // Output is labeled page JavaScript and stays inert text.
   const first = rows();

@@ -22575,6 +22575,9 @@
           "limits": {
             "$ref": "#/components/schemas/NativeConsoleDocumentStartLimits"
           },
+          "unsupported": {
+            "$ref": "#/components/schemas/NativeConsoleDocumentStartUnsupported"
+          },
           "code": {
             "$ref": "#/components/schemas/ErrorCode"
           },
@@ -22588,7 +22591,8 @@
           "state",
           "session_id",
           "document_start",
-          "limits"
+          "limits",
+          "unsupported"
         ]
       },
       "NativeConsoleDocumentStartResult": {
@@ -22627,6 +22631,38 @@
           "session_id",
           "document_start"
         ]
+      },
+      "NativeConsoleDocumentStartUnsupported": {
+        "type": "array",
+        "description": "Contexts an armed snippet never reaches, whatever a rule declares. Stated rather than silently skipped, so a rule that did not match is distinguishable from a context that is out of scope.",
+        "maxItems": 16,
+        "items": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "context": {
+              "type": "string",
+              "enum": [
+                "dedicated_worker",
+                "shared_worker",
+                "service_worker",
+                "worklet",
+                "isolated_world",
+                "non_http_document",
+                "other_profile",
+                "already_open_document"
+              ]
+            },
+            "reason": {
+              "type": "string",
+              "maxLength": 512
+            }
+          },
+          "required": [
+            "context",
+            "reason"
+          ]
+        }
       }
     }
   },

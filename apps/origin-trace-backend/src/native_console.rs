@@ -462,7 +462,7 @@ impl NativeConsole {
                 json!({"contract_version":3,"available":self.available(),"state":"idle","session_id":null,
                 "document_start":{"status":"idle","permitted":false,"scripts":[],
                     "message":"Connect the Console with document-start scripts enabled, then arm a rule."},
-                "limits":document_start_limits()}),
+                "limits":document_start_limits(),"unsupported":document_start_unsupported()}),
             );
         };
         let ended = if let Some(browser) = session.browser.as_mut() {
@@ -475,13 +475,14 @@ impl NativeConsole {
                 json!({"contract_version":3,"available":self.available(),"state":"ready","session_id":session.id,
                 "document_start":{"status":"error","permitted":false,"scripts":[],
                     "message":"This Console session ended. Start another session; armed scripts and their output are gone."},
-                "limits":document_start_limits()}),
+                "limits":document_start_limits(),"unsupported":document_start_unsupported()}),
             );
         }
         if !session.document_start {
             let mut result = document_start_unavailable(&session.id);
             result["available"] = json!(self.available());
             result["limits"] = document_start_limits();
+            result["unsupported"] = document_start_unsupported();
             return Ok(result);
         }
         let command = json!({"operation":"state","after":after.to_string()});
@@ -490,6 +491,7 @@ impl NativeConsole {
             .await?;
         result["available"] = json!(self.available());
         result["limits"] = document_start_limits();
+        result["unsupported"] = document_start_unsupported();
         Ok(result)
     }
     pub async fn stop(&self) {
@@ -891,6 +893,22 @@ impl BridgeProcess {
 const DOCUMENT_START_UNAVAILABLE: &str = "Document-start Console scripts are not available in this session. Rebuild the pinned browser, \
      then start a disposable Console session with document_start enabled, or relaunch the live \
      capture with REB_CONSOLE_DOCUMENT_START=1. Nothing is relaunched automatically.";
+
+// Stated rather than silently skipped. These contexts are never reached by an
+// armed snippet, whatever a rule declares, so a researcher or agent can tell
+// "my rule did not match" from "this context is out of scope entirely".
+fn document_start_unsupported() -> Value {
+    json!([
+        {"context":"dedicated_worker","reason":"The injector observes documents only; no worker scope is reached."},
+        {"context":"shared_worker","reason":"The injector observes documents only; no worker scope is reached."},
+        {"context":"service_worker","reason":"The injector observes documents only; no worker scope is reached."},
+        {"context":"worklet","reason":"The injector observes documents only; no worklet scope is reached."},
+        {"context":"isolated_world","reason":"Injection is page main world only; no isolated or extension world is used."},
+        {"context":"non_http_document","reason":"A rule names an exact http or https origin, so about:blank, the initial empty document, data URLs and internal browser pages never match."},
+        {"context":"other_profile","reason":"Only documents in the Console's own bound profile are eligible."},
+        {"context":"already_open_document","reason":"Injection happens at document creation. A document open when the set was armed is never retroactively injected; reload it."},
+    ])
+}
 
 fn document_start_limits() -> Value {
     json!({
@@ -1304,7 +1322,7 @@ mod tests {
     fn document_start_states_match_their_published_contract() {
         let armed = json!({
             "contract_version": 3, "available": true, "state": "ready", "session_id": "12",
-            "limits": document_start_limits(),
+            "limits": document_start_limits(), "unsupported": document_start_unsupported(),
             "document_start": {
                 "status": "ok", "permitted": true, "generation": "2", "renderer_processes": 2,
                 "pending_renderer_processes": 0,
@@ -1322,6 +1340,7 @@ mod tests {
         let mut unavailable = document_start_unavailable("12");
         unavailable["available"] = json!(false);
         unavailable["limits"] = document_start_limits();
+        unavailable["unsupported"] = document_start_unsupported();
         crate::validation::schema("NativeConsoleDocumentStart", &unavailable, 500).unwrap();
         crate::validation::schema(
             "NativeConsoleDocumentStartResult",
@@ -1344,6 +1363,14 @@ mod tests {
         assert_eq!(state["session_id"], Value::Null);
         assert_eq!(state["document_start"]["permitted"], json!(false));
         assert_eq!(state["document_start"]["scripts"], json!([]));
+        // Out-of-scope contexts are always stated, even with no session.
+        assert!(
+            state["unsupported"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|entry| entry["context"] == "service_worker")
+        );
         crate::validation::schema("NativeConsoleDocumentStart", &state, 500).unwrap();
         // Reading twice cannot launch a browser or change the reported state.
         assert_eq!(console.document_start(0).await.unwrap(), state);

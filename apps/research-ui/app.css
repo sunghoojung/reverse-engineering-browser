@@ -2331,7 +2331,11 @@ body.resizing-panes-y, body.resizing-panes-y * { cursor: row-resize !important; 
 .native-console-ds textarea { max-height: 120px; resize: vertical; }
 .native-console-ds .native-console-setting { align-items: flex-start; flex-direction: column; gap: 2px; }
 .native-console-ds .native-console-setting:has(input[type="checkbox"]) { flex-direction: row; align-items: flex-start; }
-.native-console-ds select { width: 100%; height: 24px; border: 1px solid var(--line); border-radius: 4px; background: var(--panel); color: var(--text); font: 11px var(--sans); }
+/* Two class names so the connection menu's shared `select { flex: 1 }` cannot
+   collapse a control stacked inside an auto-height column. */
+.native-console-ds .native-console-setting select, .native-console-ds .native-console-setting input, .native-console-ds .native-console-setting textarea { flex: none; width: 100%; min-width: 0; }
+.native-console-ds .native-console-setting select { height: 24px; border: 1px solid var(--line); border-radius: 4px; background: var(--panel); color: var(--text); font: 11px var(--sans); }
+.native-console-ds .native-console-setting input[type="checkbox"] { width: auto; }
 .native-console-ds-armed { margin: 6px 0 0; padding: 0; list-style: none; }
 .native-console-ds-armed li { color: var(--muted); font: 10px/16px var(--mono); overflow-wrap: anywhere; }
 #native-console-ds-state, #native-console-ds-counters, #native-console-ds-privacy, #native-console-ds-rule-help { margin: 6px 0 0; color: var(--faint); font: 10px/16px var(--sans); overflow-wrap: anywhere; }

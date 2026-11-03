@@ -529,7 +529,7 @@ new file mode 100644
 index 0000000000000000000000000000000000000000..f116cb133cd5999acb68eb59621fbabbca1ae753
 --- /dev/null
 +++ b/src/interpreter/reb-js-invocation.cc
-@@ -0,0 +1,739 @@
+@@ -0,0 +1,743 @@
 +// Copyright 2026 the V8 project authors. All rights reserved.
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -1026,7 +1026,9 @@ index 0000000000000000000000000000000000000000..f116cb133cd5999acb68eb59621fbabb
 +                                     DirectHandle<Object> value, int kind) {
 +  if (!IsFixedArray(*record_object)) return *value;
 +  DirectHandle<FixedArray> record = Cast<FixedArray>(record_object);
-+  if (record->length() != kRecordLength || !IsSmi(record->get(kRecordId)) ||
++  // length() is a SafeHeapObjectSize on this pin, not an int.
++  if (record->length().value() != static_cast<uint32_t>(kRecordLength) ||
++      !IsSmi(record->get(kRecordId)) ||
 +      !IsSmi(record->get(kRecordSlot)) ||
 +      !IsNativeContext(record->get(kRecordContext))) {
 +    return *value;
@@ -1041,8 +1043,9 @@ index 0000000000000000000000000000000000000000..f116cb133cd5999acb68eb59621fbabb
 +
 +  const uint32_t id = static_cast<uint32_t>(signed_id);
 +  const uint32_t slot = static_cast<uint32_t>(Smi::ToInt(record->get(kRecordSlot)));
-+  DirectHandle<Context> context(Cast<Context>(record->get(kRecordContext)),
-+                                isolate);
++  // ToLocal yields a Context only for a NativeContext handle.
++  DirectHandle<NativeContext> context(
++      Cast<NativeContext>(record->get(kRecordContext)), isolate);
 +  if (kind == kRebJsInvocationThrow) {
 +    Settle(isolate, context, id, slot, false,
 +           v8::JsInvocationSettleVia::kSyncThrow, value);
@@ -1070,7 +1073,7 @@ index 0000000000000000000000000000000000000000..f116cb133cd5999acb68eb59621fbabb
 +}
 +
 +void RebJsInvocation::Watch(Isolate* isolate, DirectHandle<JSPromise> promise,
-+                            DirectHandle<Context> context, uint32_t id,
++                            DirectHandle<NativeContext> context, uint32_t id,
 +                            uint32_t slot) {
 +  if (!Sync(isolate) || !IsCurrentId(id)) return;
 +  v8::Isolate* v8_isolate = reinterpret_cast<v8::Isolate*>(isolate);
@@ -1122,8 +1125,9 @@ index 0000000000000000000000000000000000000000..f116cb133cd5999acb68eb59621fbabb
 +         v8::JsInvocationSettleVia::kPromise, value);
 +}
 +
-+void RebJsInvocation::Settle(Isolate* isolate, DirectHandle<Context> context,
-+                             uint32_t id, uint32_t slot, bool fulfilled,
++void RebJsInvocation::Settle(Isolate* isolate,
++                             DirectHandle<NativeContext> context, uint32_t id,
++                             uint32_t slot, bool fulfilled,
 +                             v8::JsInvocationSettleVia via,
 +                             DirectHandle<Object> value) {
 +  // An invocation of an earlier configuration is never reported under the
@@ -1274,7 +1278,7 @@ new file mode 100644
 index 0000000000000000000000000000000000000000..00f8e8d6b51f26a5708c805134d41b54ca77f007
 --- /dev/null
 +++ b/src/interpreter/reb-js-invocation.h
-@@ -0,0 +1,147 @@
+@@ -0,0 +1,152 @@
 +// Copyright 2026 the V8 project authors. All rights reserved.
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -1290,6 +1294,11 @@ index 0000000000000000000000000000000000000000..00f8e8d6b51f26a5708c805134d41b54
 +#include "src/handles/handles.h"
 +#include "src/objects/function-kind.h"
 +#include "src/objects/tagged.h"
++
++namespace v8::internal {
++class JSPromise;
++class NativeContext;
++}  // namespace v8::internal
 +
 +namespace v8::internal::interpreter {
 +
@@ -1391,11 +1400,11 @@ index 0000000000000000000000000000000000000000..00f8e8d6b51f26a5708c805134d41b54
 +  void ReportStatus(uint32_t slot, v8::JsInvocationSiteStatus status,
 +                    int script_id);
 +  bool IsCurrentId(uint32_t id) const;
-+  void Settle(Isolate* isolate, DirectHandle<Context> context, uint32_t id,
-+              uint32_t slot, bool fulfilled, v8::JsInvocationSettleVia via,
-+              DirectHandle<Object> value);
++  void Settle(Isolate* isolate, DirectHandle<NativeContext> context,
++              uint32_t id, uint32_t slot, bool fulfilled,
++              v8::JsInvocationSettleVia via, DirectHandle<Object> value);
 +  void Watch(Isolate* isolate, DirectHandle<JSPromise> promise,
-+             DirectHandle<Context> context, uint32_t id, uint32_t slot);
++             DirectHandle<NativeContext> context, uint32_t id, uint32_t slot);
 +
 +  v8::JsInvocationCallbacks callbacks_;
 +  bool synced_ = false;

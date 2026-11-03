@@ -685,10 +685,11 @@ if (process.env.REB_NATIVE_WASM_WORKSPACE_INPUT) {
   console.log('PASS actual C++ → Rust → viewer workspace with wide identities');
 }
 if (process.env.REB_NATIVE_WASM_GOLDEN) {
-  for (const mode of ['default','arm','wide-identities','envelope-version','reserved','version','size','truncated','big-endian','sample-index','offset','function','count','flags','parent','identity']) {
+  for (const mode of ['default','arm','wide-identities','envelope-version','reserved','version','size','truncated','big-endian','sample-index','offset','function','count','flags','parent','identity',
+    'legacy-v1','invocation','invocation-legacy','invocation-mismatch','indirect-invocation','indirect-invocation-mismatch']) {
     const event=JSON.parse(execFileSync(process.env.REB_NATIVE_WASM_GOLDEN,['--case',mode],{encoding:'utf8'}));
     const valid=runInNewContext(`${model}\nisBrokerEvent(event)`,{event,TextEncoder});
-    assert.equal(valid,['default','arm','wide-identities','offset','function','count'].includes(mode),`actual native event ${mode}`);
+    assert.equal(valid,['default','arm','wide-identities','offset','function','count','legacy-v1','invocation','indirect-invocation'].includes(mode),`actual native event ${mode}`);
     const python = spawnSync('python3',['-c',"import runpy,json,sys; runpy.run_path('tools/validate-evidence-store.py')['validate_event'](json.load(sys.stdin),1)"],
       {cwd:root,input:JSON.stringify(event),encoding:'utf8'});
     assert.equal(python.status === 0,valid,`Python/native event ${mode}: ${python.stderr}`);

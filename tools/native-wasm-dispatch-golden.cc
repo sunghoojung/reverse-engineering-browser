@@ -53,7 +53,21 @@ int main(int argc, char** argv) {
     payload.reserved[0] = std::byte{1};
     syntactically_valid = false;
   } else if (mode == "version") {
-    payload.protocol_version = 2;
+    payload.protocol_version = 3;
+    syntactically_valid = false;
+  } else if (mode == "legacy-v1") {
+    // Version 1 reserved the invocation context bytes and still decodes.
+    payload.protocol_version = 1;
+  } else if (mode == "invocation") {
+    payload.js_invocation_state = 2;
+    payload.js_invocation_id = 7;
+  } else if (mode == "invocation-legacy") {
+    payload.protocol_version = 1;
+    payload.js_invocation_state = 2;
+    payload.js_invocation_id = 7;
+    syntactically_valid = false;
+  } else if (mode == "invocation-mismatch") {
+    payload.js_invocation_state = 2;
     syntactically_valid = false;
   } else if (mode == "size") {
     payload.payload_size = 127;
@@ -108,7 +122,13 @@ int main(int argc, char** argv) {
     else if (kind == "offset")
       indirect.module_byte_offset = 93;
     else if (kind == "reserved") {
-      indirect.reserved[95] = std::byte{1};
+      indirect.reserved[87] = std::byte{1};
+      syntactically_valid = false;
+    } else if (kind == "invocation") {
+      indirect.js_invocation_state = 3;
+    } else if (kind == "invocation-mismatch") {
+      indirect.js_invocation_state = 3;
+      indirect.js_invocation_id = 4;
       syntactically_valid = false;
     } else if (kind == "resolution") {
       indirect.resolution = 5;

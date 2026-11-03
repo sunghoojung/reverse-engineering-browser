@@ -480,6 +480,10 @@ pub(super) mod tests {
             "flags",
             "parent",
             "identity",
+            "legacy-v1",
+            "invocation",
+            "invocation-legacy",
+            "invocation-mismatch",
         ] {
             let process = std::process::Command::new(&exe)
                 .args(["--case", case])
@@ -492,11 +496,22 @@ pub(super) mod tests {
             );
             let event: Value = serde_json::from_slice(&process.stdout).expect("EventToJson output");
             let output = read(&artifact(&event), &module(), std::slice::from_ref(&event));
-            assert_eq!(
-                output.count,
-                u64::from(matches!(case, "default" | "arm" | "wide-identities")),
-                "C++ case {case}"
+            let accepted = matches!(
+                case,
+                "default" | "arm" | "wide-identities" | "legacy-v1" | "invocation"
             );
+            assert_eq!(output.count, u64::from(accepted), "C++ case {case}");
+            if accepted {
+                // Version 2 names the JavaScript invocation the instruction ran
+                // in; version 1 and not-observed records omit the field.
+                assert_eq!(
+                    output.rows[0].get("js_invocation"),
+                    (case == "invocation")
+                        .then(|| json!({"state":"inside","invocation_id":"7"}))
+                        .as_ref(),
+                    "C++ case {case}"
+                );
+            }
             if matches!(case, "default" | "arm" | "wide-identities") {
                 use sha2::{Digest, Sha256};
                 let root = tempfile::tempdir().unwrap();
@@ -559,6 +574,8 @@ pub(super) mod tests {
             ("indirect-resolution", false),
             ("indirect-callee", false),
             ("indirect-sample-index", false),
+            ("indirect-invocation", true),
+            ("indirect-invocation-mismatch", false),
         ] {
             let process = std::process::Command::new(&exe)
                 .args(["--case", case])

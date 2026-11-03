@@ -97,7 +97,9 @@ requirement. See [connection and restart behavior](../docs/development/local-cod
 
 `x-reb-mcp` in this specification is the only MCP contract. `reb-api mcp` reads
 that extension and serves operation IDs as stdio tools. It does not add an HTTP
-route. A client supplies the same loopback root as `call`, through `--base-url`
+route. The single tool that is not an operation, `start_live_session`, is
+declared in `x-reb-mcp.session_start`; see
+[live session control](#live-session-control). A client supplies the same loopback root as `call`, through `--base-url`
 or `--endpoint-file`.
 
 ```sh
@@ -292,6 +294,106 @@ are absent. Identifiers/origins remain potentially sensitive metadata. Direct
 HTTP reports `allow_effects: null`; MCP annotates its own flag without granting
 authorization. See the [agent context recipe](../docs/development/local-coding-agents.md#start-with-compact-session-context)
 for field omissions and coverage limits.
+
+## Live session control
+
+`POST /api/session/actions` (`session_action`) drives the live session this
+backend belongs to. Both actions refuse with 409 `idle_backend` unless
+`capture_mode` is `live`.
+
+- `{"action":"open_url","url":"https://..."}` hands an HTTP(S) URL without
+  credentials to the session's running capture browser, which opens it in a
+  new tab. It uses Chromium's same-profile relay: the backend runs its
+  `--brave-binary` with the session's `--brave-profile` and the URL. It
+  refuses with 409 `native_capture_unavailable` when the broker is disconnected
+  or capture was stopped, and with 409 `target_unavailable` when no live
+  process holds the profile's `SingletonLock`. The relay carries proxy and
+  resolver switches that the running browser ignores but that leave a relay
+  with no network if it ever starts a browser of its own; such a relay is
+  stopped after 10 seconds and reported. A broker socket proves only that the
+  broker listens, so the response reports `capture_observed`: true once a new
+  record reaches the session's store within 10 seconds. False means nothing
+  was recorded, for example because the configured browser is not a capture
+  build. It never runs page JavaScript.
+- `{"action":"end","confirm":true}` replies, then about 300 ms later sends
+  SIGTERM to the backend's `--launcher-pid`, which must be its parent. The
+  launcher closes the capture browser and stops every helper, including the
+  backend. Stored evidence stays on disk.
+
+- `list_inputs`, `click`, `type`, `press` and `scroll` send trusted input to
+  the session's page on macOS. The backend finds the capture browser by the
+  process holding its profile lock and reads the page through the browser's
+  accessibility tree, which it turns on with `AXManualAccessibility`; that
+  tree spans cross-origin frames. The page is the tab's largest HTTP(S) web
+  area, never DevTools, a side panel or a `chrome://` or `brave://` page.
+  `list_inputs` returns up to 200 controls with a short `role`, an accessible
+  `name` of at most 120 characters, a viewport rectangle in points, `visible`
+  (the center lies inside every enclosing frame), `frame_depth` and `checked`.
+  Names are page text; field values are not read directly, but a name can
+  include label text that embeds one. `click` takes `x` and `y` in viewport
+  points or a `role` and case-insensitive `name` matching exactly one visible
+  control (or `nth`), plus `count`; there is no right click, because a context
+  menu reaches browser features. `type` takes up to 200 characters without
+  line breaks, `press` one named key, and `scroll` `dx` and `dy`. Each input
+  action brings the capture browser to the front and moves the pointer along a
+  short eased path. Just before a click or scroll, a hit test must find this
+  browser's page under the point, and the named control for a named click.
+  Before every key, the keyboard focus must be inside the page, so keys never
+  reach the address bar, a browser dialog or a menu; only Escape is allowed
+  anywhere in the browser. The frameworks are loaded at run time, only in the
+  backend process, never in its sandboxed analysis workers. They
+  refuse with 409 `dependency_unavailable` when macOS has not granted
+  Accessibility to the app that started the session, or off macOS; with 409
+  `target_unavailable` when there is no window, page, focus or match; and
+  with 503 `resource_limit` when another session holds the machine-wide input
+  lock for 15 seconds. Like `open_url`, they require recording capture.
+
+`run-live-session.sh` passes `--brave-binary`, `--brave-profile` and
+`--launcher-pid` to the backend it starts. A backend started any other way
+returns 409 `dependency_unavailable` for these actions.
+
+`reb-api session start` and the MCP tool `start_live_session` take the
+`LiveSessionStart` options: `url`, `wasm_dispatch`, `wasm_call_indirect`,
+`guest_adapter`, `js_dispatch_sites`, `quiet`, `category_mask`,
+`duration_seconds`, `localhost_only`, `canvas_images` with
+`confirm_sensitive_capture`, `publish_canonical_endpoint`, `brave_binary` and
+`timeout_seconds`. Sensitive Canvas capture fails without the explicit
+confirmation field, which an agent sets only on the researcher's
+authorization. Every
+capture switch is off unless named; an inherited capture switch, browser
+profile or embedded-session variable is ignored. Operator settings such as
+helper binary paths, `REB_LIVE_SESSION_ROOT`, `REB_ORIGIN_TRACE_APP` and
+`REB_OPEN_COMMAND` still apply. They run the launcher that belongs with the
+`reb-api` build (`Contents/Resources/run-live-session.sh` in the app,
+`scripts/run-live-session.sh` in a checkout, or `REB_LIVE_SESSION_SCRIPT`)
+detached in its own process group, wait for its ready line and a live health
+report, then optionally open `url`, retrying for up to 20 seconds while the
+browser is still taking its profile, and return `capture_observed`. The
+session keeps running after the caller exits until it is ended, Brave is
+closed, or capture expires; if the MCP server is stopped during a start, close
+that session's Brave window. A launcher failure line is returned as the error
+after the launcher's own cleanup; a timeout stops the launcher and then its
+process group. By
+default the session publishes its endpoint only to a private file, so it does
+not replace the canonical endpoint other connections use. The session uses the
+mock Keychain, since an agent cannot answer a Keychain prompt. The CLI prints
+the session directory, endpoint file and launch log; the MCP result omits
+them and shows the home folder in launcher errors as `~`.
+
+`reb-api mcp --allow-session-start` requires `--allow-effects`. It lists
+`start_live_session` and `session_action` (the operations named in
+`x-reb-mcp.session_start.operations`, hidden otherwise) and starts even when
+its endpoint is missing or not live. `session_action` is accepted only for a
+session this connection started; a connection bound to the researcher's
+session gets a refusal without a request. Starting again first ends the
+session this connection started. Under `--require-live`, `session_action`
+`end` stays available when capture has expired or stopped.
+Until a session is bound, every operation tool refuses without a request. A
+successful start rebinds the connection to that session's own
+`research-ui.endpoint` and exact `instance_id`; this is the only retargeting,
+and any other endpoint or instance change still retires the connection. After
+a successful `session_action` `end`, the connection is unbound again (or, without
+`--allow-session-start`, retired).
 
 ## Session summary
 

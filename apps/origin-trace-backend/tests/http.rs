@@ -694,7 +694,7 @@ fn openapi_references_and_native_only_operations_are_consistent() {
             assert!(ids.insert(id), "Duplicate operation ID: {id}");
         }
     }
-    assert_eq!(ids.len(), 37, "Review route coverage when the API changes");
+    assert_eq!(ids.len(), 38, "Review route coverage when the API changes");
     assert!(ids.contains("vm_pack_apply") && ids.contains("vm_pack_compare"));
     assert!(!ids.contains("debugger_action"));
     assert!(
@@ -777,7 +777,7 @@ fn execution_metadata_covers_operations_actions_and_dispatch_without_safe_defaul
             operation_count += 1;
         }
     }
-    assert_eq!(operation_count, 37);
+    assert_eq!(operation_count, 38);
     let schemas = &spec["components"]["schemas"];
     let mut action_count = 0;
     for name in [
@@ -787,6 +787,7 @@ fn execution_metadata_covers_operations_actions_and_dispatch_without_safe_defaul
         "AnalystAction",
         "NativeConsoleAction",
         "OwnedVmDebuggerAction",
+        "SessionAction",
     ] {
         let variants = schemas[name]["oneOf"]
             .as_array()
@@ -828,7 +829,7 @@ fn execution_metadata_covers_operations_actions_and_dispatch_without_safe_defaul
         }
     }
     // Only retained native and offline actions are advertised after CDP removal.
-    assert_eq!(action_count, 23);
+    assert_eq!(action_count, 30);
     // Source checks intentionally follow the dispatch syntax. If it changes,
     // audit the new handler before updating this narrow test helper.
     fn arms<'a>(source: &'a str, start: &str, end: &str, indent: usize) -> BTreeSet<&'a str> {
@@ -893,6 +894,11 @@ fn execution_metadata_covers_operations_actions_and_dispatch_without_safe_defaul
             "CaptureAction",
             include_str!("../src/app.rs"),
             r#""action":"([a-z_]+)""#,
+        ),
+        (
+            "SessionAction",
+            include_str!("../src/live_browser.rs"),
+            r#"Some\("([a-z_]+)"\) =>"#,
         ),
     ] {
         let pattern = regex::Regex::new(pattern).unwrap();
@@ -5546,6 +5552,140 @@ async fn capture_clear_requires_stopped_guards_for_every_output_before_any_trunc
         assert!(fs::read(server.root.path().join(path)).unwrap().is_empty());
     }
     assert_eq!(clear().await.status(), 200);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn session_actions_drive_only_this_sessions_capture_browser() {
+    use std::os::unix::fs::PermissionsExt;
+    let idle = Server::start().await;
+    let open = json!({"action":"open_url","url":"https://example.test/"});
+    let response = idle.action("/api/session/actions", open.clone()).await;
+    let bytes = assert_contract_response(response, "post", "/api/session/actions", 409).await;
+    assert_eq!(
+        serde_json::from_slice::<Value>(&bytes).unwrap()["code"],
+        "idle_backend"
+    );
+
+    let root = tempfile::tempdir().unwrap();
+    let socket = root.path().join("broker.sock");
+    let _broker = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+    let profile = root.path().join("profile");
+    std::fs::create_dir_all(&profile).unwrap();
+    let record = root.path().join("brave-args");
+    let brave = root.path().join("brave.sh");
+    let server = Server::start_with_args(&[
+        "--socket".into(),
+        socket.display().to_string(),
+        "--brave-binary".into(),
+        brave.display().to_string(),
+        "--brave-profile".into(),
+        profile.display().to_string(),
+        // PID 1 is never this backend's parent, so end must refuse.
+        "--launcher-pid".into(),
+        "1".into(),
+    ])
+    .await;
+    let call = |body: Value| server.action("/api/session/actions", body);
+    let code = |bytes: Vec<u8>| serde_json::from_slice::<Value>(&bytes).unwrap()["code"].clone();
+
+    let stopped = assert_contract_response(
+        call(open.clone()).await,
+        "post",
+        "/api/session/actions",
+        409,
+    )
+    .await;
+    assert_eq!(code(stopped), "target_unavailable");
+    assert!(
+        !record.exists(),
+        "no browser may start without the capture browser"
+    );
+    for body in [
+        json!({"action":"open_url"}),
+        json!({"action":"open_url","url":"ftp://example.test/"}),
+        json!({"action":"open_url","url":"https://user:pw@example.test/"}),
+        json!({"action":"end"}),
+        json!({"action":"reload"}),
+    ] {
+        let response = call(body.clone()).await;
+        assert_contract_response(response, "post", "/api/session/actions", 400).await;
+    }
+    // A stand-in capture browser: it records how it was invoked and, as a
+    // connected capture browser would, a native record lands in the store.
+    std::fs::write(
+        &brave,
+        format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\nprintf '%s\\n' '{}' >> '{}'\n",
+            record.display(),
+            metadata_event(1),
+            server.root.path().join("events.jsonl").display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&brave, std::fs::Permissions::from_mode(0o700)).unwrap();
+    std::os::unix::fs::symlink(
+        format!("test-host-{}", std::process::id()),
+        profile.join("SingletonLock"),
+    )
+    .unwrap();
+    let opened =
+        assert_contract_response(call(open).await, "post", "/api/session/actions", 200).await;
+    assert_eq!(
+        serde_json::from_slice::<Value>(&opened).unwrap(),
+        json!({"ok":true,"action":"open_url","opened":"new_tab","capture_observed":true})
+    );
+    let arguments = std::fs::read_to_string(&record).unwrap();
+    assert!(arguments.contains(&format!("--user-data-dir={}", profile.display())));
+    assert!(
+        arguments
+            .lines()
+            .any(|line| line == "https://example.test/")
+    );
+    // If the relay ever became a browser of its own, it would have no network.
+    for isolation in [
+        "--proxy-server=http://127.0.0.1:9",
+        "--proxy-bypass-list=<-loopback>",
+    ] {
+        assert!(
+            arguments.lines().any(|line| line == isolation),
+            "{isolation}"
+        );
+    }
+    // Input never reaches the screen from a test: CI and agent shells lack
+    // macOS Accessibility, other platforms have no input path, and a trusted
+    // developer shell finds no window for this test process.
+    for body in [
+        json!({"action":"list_inputs"}),
+        json!({"action":"click","x":5,"y":5}),
+        json!({"action":"click","role":"checkbox","name":"hCaptcha"}),
+        json!({"action":"type","text":"hello"}),
+        json!({"action":"press","key":"Enter"}),
+        json!({"action":"scroll","dy":200}),
+    ] {
+        let response = call(body.clone()).await;
+        let bytes = assert_contract_response(response, "post", "/api/session/actions", 409).await;
+        let reason = code(bytes);
+        assert!(
+            reason == "dependency_unavailable" || reason == "target_unavailable",
+            "{body}: {reason}"
+        );
+    }
+    for body in [
+        json!({"action":"click"}),
+        json!({"action":"click","x":5}),
+        json!({"action":"click","role":"AXButton"}),
+        json!({"action":"press","key":"F13"}),
+        json!({"action":"scroll","dy":0}),
+        json!({"action":"type","text":""}),
+    ] {
+        let response = call(body.clone()).await;
+        assert_contract_response(response, "post", "/api/session/actions", 400).await;
+    }
+    let end = call(json!({"action":"end","confirm":true})).await;
+    let refused = assert_contract_response(end, "post", "/api/session/actions", 409).await;
+    assert_eq!(code(refused), "target_unavailable");
+    assert_eq!(server.get("/api/health").await.status(), 200);
 }
 
 fn source_facts_document(source: &str) -> Value {

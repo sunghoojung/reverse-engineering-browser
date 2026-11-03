@@ -36,7 +36,78 @@
       "2025-06-18"
     ],
     "batching": false,
-    "message_limit_bytes": 33554432
+    "message_limit_bytes": 33554432,
+    "session_start": {
+      "tool": "start_live_session",
+      "flag": "--allow-session-start",
+      "requires": "--allow-effects",
+      "cli": [
+        "reb-api",
+        "session",
+        "start"
+      ],
+      "title": "Start a live capture session",
+      "description": "Starts a new visibly labeled live capture session with named capture options: the capture browser, an Origin Trace window and every helper. When it is ready this connection moves to that session; other endpoint changes still retire the connection. Starting again first ends the session this connection started. With url, the result reports capture_observed; false means nothing was recorded, so end the session. Start only for an authorized target. session_action, listed with this tool, acts only on a session this connection started.",
+      "input": {
+        "$ref": "#/components/schemas/LiveSessionStart"
+      },
+      "result": {
+        "$ref": "#/components/schemas/LiveSessionStarted"
+      },
+      "execution": {
+        "kind": "operation",
+        "effects": [
+          "process-launch",
+          "browser-control",
+          "network-access",
+          "local-state-write",
+          "filesystem-write"
+        ],
+        "state_dependent_effects": [
+          {
+            "effects": [
+              "sensitive-capture"
+            ],
+            "when": "canvas_images is true."
+          }
+        ],
+        "uncertainties": [
+          "A timeout stops the launcher, but a browser window may already have opened before it closes."
+        ],
+        "prerequisites": [
+          {
+            "id": "session-launcher",
+            "condition": "run-live-session.sh beside this reb-api build, or REB_LIVE_SESSION_SCRIPT, and a Brave build that defines the requested native V8 flags."
+          }
+        ],
+        "confirmations": [
+          {
+            "field": "confirm_sensitive_capture",
+            "value": true,
+            "when": {
+              "properties": {
+                "canvas_images": {
+                  "const": true
+                }
+              },
+              "required": [
+                "canvas_images"
+              ]
+            }
+          }
+        ],
+        "notes": "Runs the same launcher as make live, detached from this process, so the session outlives the MCP connection until it is ended, Brave is closed, or capture expires.",
+        "sources": [
+          {
+            "path": "apps/origin-trace-backend/src/session_launch.rs",
+            "symbol": "launch"
+          }
+        ]
+      },
+      "operations": [
+        "session_action"
+      ]
+    }
   },
   "paths": {
     "/api/session/context": {
@@ -263,6 +334,146 @@
             {
               "path": "apps/origin-trace-backend/src/session_summary.rs",
               "symbol": "build"
+            }
+          ]
+        },
+        "x-reb-execution-schema": {
+          "$ref": "#/components/schemas/RebExecutionMetadata"
+        }
+      }
+    },
+    "/api/session/actions": {
+      "post": {
+        "operationId": "session_action",
+        "summary": "Open a URL in, send input to, or end this live capture session",
+        "description": "Drives the live session this backend belongs to. open_url opens a page in a new tab of the session's capture browser while its capture broker runs, and reports capture_observed. list_inputs, click, type, press and scroll send trusted macOS input to the capture browser's page; they need Accessibility for the app that started the session. end closes the capture browser and stops the session; it stays available after capture expires. Use wait_for_events after open_url. Through MCP it is listed only with --allow-session-start and acts only on a session started by that connection with start_live_session.",
+        "tags": [
+          "capture"
+        ],
+        "requestBody": {
+          "required": true,
+          "description": "JSON object. Explicit decimal Content-Length required; 1..8192 encoded bytes.",
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SessionAction"
+              }
+            }
+          }
+        },
+        "x-max-body-bytes": 8192,
+        "x-source": "apps/origin-trace-backend/src/live_browser.rs",
+        "responses": {
+          "200": {
+            "description": "Successful response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionActionResult"
+                }
+              }
+            },
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request, including an unconfirmed end or a URL that is not HTTP(S).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Host/Origin/Sec-Fetch-Site rejected.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "408": {
+            "description": "The bounded request-body read deadline expired.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Not a live capture, capture not recording, capture browser not running or not frontmost, no matching control, Accessibility not granted, or launcher gone. Nothing was changed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Store, read, validation, or internal failure.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "The capture browser did not accept the URL.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Another session is sending input. Retry explicitly.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "x-reb-execution": {
+          "kind": "action-dependent",
+          "effects": null,
+          "state_dependent_effects": [],
+          "uncertainties": [],
+          "prerequisites": [
+            {
+              "id": "local-request",
+              "condition": "Host must name the exact loopback listening port; cross-site Sec-Fetch-Site is rejected; an optional Origin must pass App::trusted."
+            },
+            {
+              "id": "bounded-json-object",
+              "condition": "POST requires one valid Content-Length, no Transfer-Encoding, and a JSON object within x-max-body-bytes and the body deadline."
+            }
+          ],
+          "confirmations": [],
+          "notes": "Resolve the exact request action and combine its prerequisites with these common operation guards. No action inherits a default effect classification.",
+          "sources": [
+            {
+              "path": "apps/origin-trace-backend/src/app.rs",
+              "symbol": "App::post"
             }
           ]
         },
@@ -23182,6 +23393,853 @@
                 }
               }
             }
+          }
+        }
+      },
+      "SessionAction": {
+        "oneOf": [
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "action",
+              "url"
+            ],
+            "properties": {
+              "action": {
+                "const": "open_url",
+                "type": "string"
+              },
+              "url": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 4096,
+                "description": "HTTP or HTTPS URL without embedded credentials."
+              }
+            },
+            "x-reb-execution": {
+              "kind": "action",
+              "effects": [
+                "browser-control",
+                "network-access"
+              ],
+              "state_dependent_effects": [],
+              "uncertainties": [],
+              "prerequisites": [
+                {
+                  "id": "live-capture-session",
+                  "condition": "capture_mode is live. open_url also needs a connected broker, capture not stopped, and a backend started by the live-session launcher with --brave-binary and --brave-profile."
+                }
+              ],
+              "confirmations": [],
+              "notes": "Hands the URL to this session's running capture browser, which opens it in a new tab, then waits up to 10 seconds for a new stored record and reports capture_observed. Refused unless the session's capture broker is running, capture is not stopped, and a live process holds the session profile. The broker check cannot prove the browser records; capture_observed does. The relay process carries switches that leave it no network if it ever starts a browser of its own, and it is stopped after 10 seconds. No page JavaScript runs.",
+              "sources": [
+                {
+                  "path": "apps/origin-trace-backend/src/live_browser.rs",
+                  "symbol": "LiveBrowser::open_url"
+                }
+              ]
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "action",
+              "confirm"
+            ],
+            "properties": {
+              "action": {
+                "const": "end",
+                "type": "string"
+              },
+              "confirm": {
+                "const": true,
+                "type": "boolean"
+              }
+            },
+            "x-reb-execution": {
+              "kind": "action",
+              "effects": [
+                "browser-control",
+                "process-stop"
+              ],
+              "state_dependent_effects": [],
+              "uncertainties": [],
+              "prerequisites": [
+                {
+                  "id": "live-capture-session",
+                  "condition": "capture_mode is live. open_url also needs a connected broker, capture not stopped, and a backend started by the live-session launcher with --brave-binary and --brave-profile."
+                },
+                {
+                  "id": "launcher-parent",
+                  "condition": "The backend was started with --launcher-pid naming its own parent launcher."
+                }
+              ],
+              "confirmations": [
+                {
+                  "field": "confirm",
+                  "value": true,
+                  "when": {}
+                }
+              ],
+              "notes": "About 300 ms after replying, asks this backend's launcher to stop the session. The launcher closes the capture browser and stops every helper, including this backend. Stored evidence stays on disk.",
+              "sources": [
+                {
+                  "path": "apps/origin-trace-backend/src/live_browser.rs",
+                  "symbol": "LiveBrowser::end"
+                }
+              ]
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "action"
+            ],
+            "properties": {
+              "action": {
+                "const": "list_inputs",
+                "type": "string"
+              }
+            },
+            "x-reb-execution": {
+              "kind": "action",
+              "effects": [
+                "browser-control"
+              ],
+              "state_dependent_effects": [],
+              "uncertainties": [],
+              "prerequisites": [
+                {
+                  "id": "live-capture-session",
+                  "condition": "capture_mode is live, the broker is connected, capture is not stopped, and a live process holds the session's --brave-profile."
+                },
+                {
+                  "id": "macos-accessibility",
+                  "condition": "macOS grants Accessibility to the app that started the session: Origin Trace for app sessions, or the terminal or T3 Code app for sessions started from reb-api. Other platforms refuse."
+                }
+              ],
+              "confirmations": [],
+              "notes": "Lists up to 200 controls of the tab's HTTP(S) page, including inside cross-origin frames, with role, accessible name, viewport rectangle, visibility clipped by enclosing frames, frame depth and checked state. Names are page text bounded to 120 characters. Field values are not read directly, but an accessible name can include label text that embeds one. It turns on the browser's accessibility tree but sends no input and does not change focus.",
+              "sources": [
+                {
+                  "path": "apps/origin-trace-backend/src/native_input.rs",
+                  "symbol": "act"
+                }
+              ]
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "action"
+            ],
+            "properties": {
+              "action": {
+                "const": "click",
+                "type": "string"
+              },
+              "x": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 100000,
+                "description": "Viewport points from the page's left edge, at 100% zoom."
+              },
+              "y": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 100000,
+                "description": "Viewport points from the page's top edge."
+              },
+              "role": {
+                "type": "string",
+                "enum": [
+                  "switch",
+                  "checkbox",
+                  "tab",
+                  "radio",
+                  "password",
+                  "searchfield",
+                  "textfield",
+                  "button",
+                  "link",
+                  "textarea",
+                  "popup",
+                  "combobox",
+                  "menuitem",
+                  "menubutton",
+                  "slider",
+                  "disclosure"
+                ],
+                "description": "A control role from list_inputs."
+              },
+              "name": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 200,
+                "description": "Case-insensitive part of the control's accessible name."
+              },
+              "nth": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 199,
+                "description": "Which match, when several visible controls match."
+              },
+              "count": {
+                "type": "integer",
+                "enum": [
+                  1,
+                  2
+                ],
+                "default": 1
+              }
+            },
+            "x-reb-execution": {
+              "kind": "action",
+              "effects": [
+                "browser-control",
+                "live-target-mutation",
+                "network-access"
+              ],
+              "state_dependent_effects": [],
+              "uncertainties": [],
+              "prerequisites": [
+                {
+                  "id": "live-capture-session",
+                  "condition": "capture_mode is live, the broker is connected, capture is not stopped, and a live process holds the session's --brave-profile."
+                },
+                {
+                  "id": "macos-accessibility",
+                  "condition": "macOS grants Accessibility to the app that started the session: Origin Trace for app sessions, or the terminal or T3 Code app for sessions started from reb-api. Other platforms refuse."
+                }
+              ],
+              "confirmations": [],
+              "notes": "Clicks a point (x and y) or the center of one visible control matched by role and name. Sends real macOS mouse or keyboard events, the way a person does, so pages see trusted input. It brings the capture browser to the front and moves the real pointer. The page is the tab's largest HTTP(S) web area, never DevTools, side panels or browser pages. A click is sent only when a hit test just before it finds this browser's page, and the named control, under the point; only left clicks exist. A key is sent only while the keyboard focus is inside the page (Escape only needs the browser in front). One lock serializes input across every session on the machine. Nothing is sent without Accessibility; no DevTools protocol or page JavaScript is used.",
+              "sources": [
+                {
+                  "path": "apps/origin-trace-backend/src/native_input.rs",
+                  "symbol": "act"
+                }
+              ]
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "action",
+              "text"
+            ],
+            "properties": {
+              "action": {
+                "const": "type",
+                "type": "string"
+              },
+              "text": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 200,
+                "description": "Up to 200 characters without line breaks or control characters, typed into the focused control in the page. Click a field first; use press for Enter or Tab."
+              }
+            },
+            "x-reb-execution": {
+              "kind": "action",
+              "effects": [
+                "browser-control",
+                "live-target-mutation",
+                "network-access"
+              ],
+              "state_dependent_effects": [],
+              "uncertainties": [],
+              "prerequisites": [
+                {
+                  "id": "live-capture-session",
+                  "condition": "capture_mode is live, the broker is connected, capture is not stopped, and a live process holds the session's --brave-profile."
+                },
+                {
+                  "id": "macos-accessibility",
+                  "condition": "macOS grants Accessibility to the app that started the session: Origin Trace for app sessions, or the terminal or T3 Code app for sessions started from reb-api. Other platforms refuse."
+                }
+              ],
+              "confirmations": [],
+              "notes": "Types text as key events, rechecking before each character that the focus is still in the page. Sends real macOS mouse or keyboard events, the way a person does, so pages see trusted input. It brings the capture browser to the front and moves the real pointer. The page is the tab's largest HTTP(S) web area, never DevTools, side panels or browser pages. A click is sent only when a hit test just before it finds this browser's page, and the named control, under the point; only left clicks exist. A key is sent only while the keyboard focus is inside the page (Escape only needs the browser in front). One lock serializes input across every session on the machine. Nothing is sent without Accessibility; no DevTools protocol or page JavaScript is used.",
+              "sources": [
+                {
+                  "path": "apps/origin-trace-backend/src/native_input.rs",
+                  "symbol": "act"
+                }
+              ]
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "action",
+              "key"
+            ],
+            "properties": {
+              "action": {
+                "const": "press",
+                "type": "string"
+              },
+              "key": {
+                "type": "string",
+                "enum": [
+                  "Enter",
+                  "Tab",
+                  "Escape",
+                  "Backspace",
+                  "Space",
+                  "ArrowLeft",
+                  "ArrowRight",
+                  "ArrowDown",
+                  "ArrowUp",
+                  "PageDown",
+                  "PageUp",
+                  "Home",
+                  "End"
+                ]
+              }
+            },
+            "x-reb-execution": {
+              "kind": "action",
+              "effects": [
+                "browser-control",
+                "live-target-mutation",
+                "network-access"
+              ],
+              "state_dependent_effects": [],
+              "uncertainties": [],
+              "prerequisites": [
+                {
+                  "id": "live-capture-session",
+                  "condition": "capture_mode is live, the broker is connected, capture is not stopped, and a live process holds the session's --brave-profile."
+                },
+                {
+                  "id": "macos-accessibility",
+                  "condition": "macOS grants Accessibility to the app that started the session: Origin Trace for app sessions, or the terminal or T3 Code app for sessions started from reb-api. Other platforms refuse."
+                }
+              ],
+              "confirmations": [],
+              "notes": "Presses one named key. Sends real macOS mouse or keyboard events, the way a person does, so pages see trusted input. It brings the capture browser to the front and moves the real pointer. The page is the tab's largest HTTP(S) web area, never DevTools, side panels or browser pages. A click is sent only when a hit test just before it finds this browser's page, and the named control, under the point; only left clicks exist. A key is sent only while the keyboard focus is inside the page (Escape only needs the browser in front). One lock serializes input across every session on the machine. Nothing is sent without Accessibility; no DevTools protocol or page JavaScript is used.",
+              "sources": [
+                {
+                  "path": "apps/origin-trace-backend/src/native_input.rs",
+                  "symbol": "act"
+                }
+              ]
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "action"
+            ],
+            "properties": {
+              "action": {
+                "const": "scroll",
+                "type": "string"
+              },
+              "dx": {
+                "type": "integer",
+                "minimum": -10000,
+                "maximum": 10000
+              },
+              "dy": {
+                "type": "integer",
+                "minimum": -10000,
+                "maximum": 10000,
+                "description": "Positive scrolls down."
+              }
+            },
+            "x-reb-execution": {
+              "kind": "action",
+              "effects": [
+                "browser-control",
+                "live-target-mutation",
+                "network-access"
+              ],
+              "state_dependent_effects": [],
+              "uncertainties": [],
+              "prerequisites": [
+                {
+                  "id": "live-capture-session",
+                  "condition": "capture_mode is live, the broker is connected, capture is not stopped, and a live process holds the session's --brave-profile."
+                },
+                {
+                  "id": "macos-accessibility",
+                  "condition": "macOS grants Accessibility to the app that started the session: Origin Trace for app sessions, or the terminal or T3 Code app for sessions started from reb-api. Other platforms refuse."
+                }
+              ],
+              "confirmations": [],
+              "notes": "Scrolls the page by points, with the pointer over the page center after a hit test there. Sends real macOS mouse or keyboard events, the way a person does, so pages see trusted input. It brings the capture browser to the front and moves the real pointer. The page is the tab's largest HTTP(S) web area, never DevTools, side panels or browser pages. A click is sent only when a hit test just before it finds this browser's page, and the named control, under the point; only left clicks exist. A key is sent only while the keyboard focus is inside the page (Escape only needs the browser in front). One lock serializes input across every session on the machine. Nothing is sent without Accessibility; no DevTools protocol or page JavaScript is used.",
+              "sources": [
+                {
+                  "path": "apps/origin-trace-backend/src/native_input.rs",
+                  "symbol": "act"
+                }
+              ]
+            }
+          }
+        ]
+      },
+      "SessionActionResult": {
+        "oneOf": [
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "ok",
+              "action",
+              "opened",
+              "capture_observed"
+            ],
+            "properties": {
+              "ok": {
+                "const": true,
+                "type": "boolean"
+              },
+              "action": {
+                "const": "open_url",
+                "type": "string"
+              },
+              "opened": {
+                "const": "new_tab",
+                "type": "string"
+              },
+              "capture_observed": {
+                "type": "boolean",
+                "description": "True once a new record reached this session's store within 10 seconds of opening the page, which shows a connected capture browser. False means nothing was recorded: treat the page as unrecorded and end the session."
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "ok",
+              "action",
+              "ending"
+            ],
+            "properties": {
+              "ok": {
+                "const": true,
+                "type": "boolean"
+              },
+              "action": {
+                "const": "end",
+                "type": "string"
+              },
+              "ending": {
+                "const": true,
+                "type": "boolean"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "ok",
+              "action",
+              "viewport",
+              "elements",
+              "truncated"
+            ],
+            "properties": {
+              "ok": {
+                "const": true,
+                "type": "boolean"
+              },
+              "action": {
+                "const": "list_inputs",
+                "type": "string"
+              },
+              "viewport": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "width",
+                  "height"
+                ],
+                "properties": {
+                  "width": {
+                    "type": "number"
+                  },
+                  "height": {
+                    "type": "number"
+                  }
+                }
+              },
+              "elements": {
+                "type": "array",
+                "maxItems": 200,
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "index",
+                    "role",
+                    "name",
+                    "x",
+                    "y",
+                    "width",
+                    "height",
+                    "visible",
+                    "frame_depth"
+                  ],
+                  "properties": {
+                    "index": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "role": {
+                      "type": "string",
+                      "enum": [
+                        "switch",
+                        "checkbox",
+                        "tab",
+                        "radio",
+                        "password",
+                        "searchfield",
+                        "textfield",
+                        "button",
+                        "link",
+                        "textarea",
+                        "popup",
+                        "combobox",
+                        "menuitem",
+                        "menubutton",
+                        "slider",
+                        "disclosure"
+                      ]
+                    },
+                    "name": {
+                      "type": "string",
+                      "maxLength": 480
+                    },
+                    "x": {
+                      "type": "number"
+                    },
+                    "y": {
+                      "type": "number"
+                    },
+                    "width": {
+                      "type": "number"
+                    },
+                    "height": {
+                      "type": "number"
+                    },
+                    "visible": {
+                      "type": "boolean"
+                    },
+                    "frame_depth": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "checked": {
+                      "type": "boolean"
+                    }
+                  }
+                }
+              },
+              "truncated": {
+                "type": "boolean"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "ok",
+              "action",
+              "x",
+              "y",
+              "target"
+            ],
+            "properties": {
+              "ok": {
+                "const": true,
+                "type": "boolean"
+              },
+              "action": {
+                "const": "click",
+                "type": "string"
+              },
+              "x": {
+                "type": "number"
+              },
+              "y": {
+                "type": "number"
+              },
+              "target": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "role",
+                      "name"
+                    ],
+                    "properties": {
+                      "role": {
+                        "type": "string"
+                      },
+                      "name": {
+                        "type": "string"
+                      }
+                    }
+                  }
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "ok",
+              "action",
+              "characters"
+            ],
+            "properties": {
+              "ok": {
+                "const": true,
+                "type": "boolean"
+              },
+              "action": {
+                "const": "type",
+                "type": "string"
+              },
+              "characters": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 200
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "ok",
+              "action",
+              "key"
+            ],
+            "properties": {
+              "ok": {
+                "const": true,
+                "type": "boolean"
+              },
+              "action": {
+                "const": "press",
+                "type": "string"
+              },
+              "key": {
+                "type": "string",
+                "enum": [
+                  "Enter",
+                  "Tab",
+                  "Escape",
+                  "Backspace",
+                  "Space",
+                  "ArrowLeft",
+                  "ArrowRight",
+                  "ArrowDown",
+                  "ArrowUp",
+                  "PageDown",
+                  "PageUp",
+                  "Home",
+                  "End"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "ok",
+              "action",
+              "dx",
+              "dy"
+            ],
+            "properties": {
+              "ok": {
+                "const": true,
+                "type": "boolean"
+              },
+              "action": {
+                "const": "scroll",
+                "type": "string"
+              },
+              "dx": {
+                "type": "integer"
+              },
+              "dy": {
+                "type": "integer"
+              }
+            }
+          }
+        ]
+      },
+      "LiveSessionStart": {
+        "type": "object",
+        "additionalProperties": false,
+        "description": "Named capture options for a new live session. Every switch is off unless set.",
+        "properties": {
+          "url": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096,
+            "description": "HTTP or HTTPS page to open once capture is ready."
+          },
+          "wasm_dispatch": {
+            "type": "boolean",
+            "default": false,
+            "description": "Sample Wasm br_table dispatch, at most 16 observations per configuration. Needs category bits 512 and 1024."
+          },
+          "wasm_call_indirect": {
+            "type": "boolean",
+            "default": false,
+            "description": "Sample Wasm call_indirect targets. Needs category bits 512 and 1024."
+          },
+          "guest_adapter": {
+            "type": "string",
+            "minLength": 2,
+            "maxLength": 4096,
+            "description": "Absolute path of a native Wasm guest adapter recipe, 1 to 8192 bytes. Requires wasm_dispatch."
+          },
+          "js_dispatch_sites": {
+            "type": "string",
+            "minLength": 2,
+            "maxLength": 4096,
+            "description": "Absolute path of a JavaScript dispatch-site file, 1 to 4096 bytes. Turns off code caching browser-wide for the session."
+          },
+          "quiet": {
+            "type": "boolean",
+            "default": false,
+            "description": "Ignore page debugger statements."
+          },
+          "category_mask": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 4095,
+            "default": 4095,
+            "description": "Native capture categories. 512 is VM, 1024 is Artifact, 1 is Canvas."
+          },
+          "duration_seconds": {
+            "type": "integer",
+            "minimum": 60,
+            "maximum": 3600,
+            "default": 3600,
+            "description": "Capture expires after this many seconds."
+          },
+          "localhost_only": {
+            "type": "boolean",
+            "default": false,
+            "description": "Route the capture browser's traffic to loopback only, for local fixtures."
+          },
+          "canvas_images": {
+            "type": "boolean",
+            "default": false,
+            "description": "Store Canvas images, which can contain sensitive page content. Requires confirm_sensitive_capture and category bits 1 and 1024."
+          },
+          "confirm_sensitive_capture": {
+            "const": true,
+            "type": "boolean",
+            "description": "The researcher authorized storing sensitive Canvas images for this target. Required with canvas_images; never set it by inference."
+          },
+          "publish_canonical_endpoint": {
+            "type": "boolean",
+            "default": false,
+            "description": "Also make this the canonical endpoint that new MCP connections use. Off by default, so concurrent agent sessions do not replace each other's."
+          },
+          "brave_binary": {
+            "type": "string",
+            "minLength": 2,
+            "maxLength": 4096,
+            "description": "Absolute path of the Brave executable. Default: REB_BRAVE_BINARY, then Brave Browser Development next to the Origin Trace app, then the checkout build."
+          },
+          "timeout_seconds": {
+            "type": "integer",
+            "minimum": 10,
+            "maximum": 600,
+            "default": 180,
+            "description": "How long to wait for the browser and capture to be ready."
+          }
+        }
+      },
+      "LiveSessionStarted": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "session_id",
+          "endpoint",
+          "instance_id",
+          "canonical_endpoint",
+          "options",
+          "url_opened",
+          "capture_observed"
+        ],
+        "properties": {
+          "session_id": {
+            "$ref": "#/components/schemas/Uint64String"
+          },
+          "endpoint": {
+            "type": "string",
+            "maxLength": 256,
+            "description": "Loopback root of the new session's backend."
+          },
+          "instance_id": {
+            "type": "string",
+            "maxLength": 128
+          },
+          "canonical_endpoint": {
+            "type": "boolean"
+          },
+          "options": {
+            "$ref": "#/components/schemas/LiveSessionStart"
+          },
+          "url_opened": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Null when no url was given."
+          },
+          "session_dir": {
+            "type": "string",
+            "description": "CLI only. The MCP tool omits local paths."
+          },
+          "endpoint_file": {
+            "type": "string",
+            "description": "CLI only."
+          },
+          "log_file": {
+            "type": "string",
+            "description": "CLI only."
+          },
+          "url_error": {
+            "type": "string",
+            "maxLength": 600,
+            "description": "Why url did not open."
+          },
+          "capture_observed": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Whether a stored record followed the opened url. Null without url. False means the browser did not record: end the session."
           }
         }
       }

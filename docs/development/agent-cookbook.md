@@ -228,6 +228,89 @@ dispatch samples were retained, not an empty program. Large documents come
 back as structural summaries; the Origin Trace VM Lab view shows the full
 workspace.
 
+## 14. Start a session with capture options
+
+Needs `reb-api mcp --allow-effects --allow-session-start` and an authorized
+target. Name every switch you need; all are off otherwise.
+
+```text
+start_live_session {"url": "https://authorized.example/", "wasm_dispatch": true}
+```
+
+Good: `session_id`, `endpoint`, `instance_id`, `url_opened: true` and
+`capture_observed: true`. `capture_observed: false` means nothing was
+recorded, for example because the Brave build is not a capture build: end the
+session and tell the researcher. This connection now reads that session, so
+continue with recipe 2. Starting again ends this connection's previous
+session first. Sensitive Canvas images need `"canvas_images": true` with
+`"confirm_sensitive_capture": true`, only when the researcher authorized
+Canvas content for this target. A guest adapter
+needs `"guest_adapter": "/absolute/path/recipe.json"` with `wasm_dispatch`.
+An error names the launcher's reason, for example a Brave build that lacks a
+requested V8 flag; nothing is left running. From a shell, `reb-api session
+start --wasm-dispatch --url ...` does the same and prints the session
+directory.
+
+## 15. Open a page and wait for what it loads
+
+Take a cursor first, so records written while the page opens are not missed:
+
+```text
+wait_for_events {"timeout_ms": 1}
+session_action {"body": {"action": "open_url", "url": "https://authorized.example/next"}}
+wait_for_events {"type": "artifact_captured", "after": "<query.next_after from the first call>",
+                 "timeout_ms": 30000}
+```
+
+`open_url` opens a new tab in this session's capture browser, refuses when
+the session's capture broker is not running, and reports `capture_observed`.
+It works only on a session this connection started. To interact with the
+page, see recipe 17.
+
+## 16. End a session
+
+```text
+session_action {"body": {"action": "end", "confirm": true}}
+```
+
+Good: `ending: true`. The browser and every helper stop and the evidence stays
+on disk. Ending works even after capture expired. With `--allow-session-start` the connection is then unbound until the
+next `start_live_session`; without it, reconnect.
+
+## 17. Click, type and scroll in the page
+
+Find the control first. `list_inputs` reads the page's accessibility tree,
+including cross-origin frames such as a challenge widget:
+
+```text
+session_action {"body": {"action": "list_inputs"}}
+session_action {"body": {"action": "click", "role": "checkbox", "name": "hcaptcha"}}
+wait_for_events {"category": "network", "after": "<cursor taken before the click>"}
+```
+
+Good: `list_inputs` returns `elements` with `role`, `name`, viewport `x`, `y`,
+`width`, `height`, `visible`, `frame_depth` (1 inside one frame) and `checked`.
+A click by `role` and `name` hits the center of exactly one visible match;
+pass `nth` when several match, or `x` and `y` in viewport points. Type into a
+field after clicking it, and press named keys:
+
+```text
+session_action {"body": {"action": "click", "role": "textfield", "name": "email"}}
+session_action {"body": {"action": "type", "text": "researcher@example.test"}}
+session_action {"body": {"action": "press", "key": "Enter"}}
+session_action {"body": {"action": "scroll", "dy": 600}}
+```
+
+These are real macOS input events: the capture browser comes to the front and
+the real pointer moves. `type` takes up to 200 characters without line breaks
+and needs the focus in a page field; keys never go to the address bar. A refusal with `dependency_unavailable` means macOS has
+not granted Accessibility to the app that started the session (Origin Trace,
+or the terminal or T3 Code app for sessions started from reb-api); ask the
+researcher to grant it in System Settings > Privacy & Security >
+Accessibility. `target_unavailable` means no window, page or matching control.
+A 503 means another session is sending input; retry. Input only lands inside
+the page, never on browser controls.
+
 ## Response shapes at a glance
 
 | Tool | Look at |
@@ -237,3 +320,5 @@ workspace.
 | `get_artifacts` | `artifacts`, `query` |
 | `wait_for_events` | `wait.timed_out`, `events`, `query.next_after` |
 | `inspect_wasm` | `coverage`, then the requested section rows |
+| `start_live_session` | `session_id`, `url_opened`, `capture_observed`, `options` |
+| `session_action` `list_inputs` | `elements` with `role`, `name`, `visible`, `x`, `y` |

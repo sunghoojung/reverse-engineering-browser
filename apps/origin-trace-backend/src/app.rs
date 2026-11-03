@@ -8,6 +8,7 @@ use crate::{
     deobfuscation::Deobfuscator,
     error::{Code, Error, Phase, Reason, Result},
     event_query, event_window, evidence, evidence_comparison, evidence_package, float32,
+    live_browser::LiveBrowser,
     native_console::NativeConsole,
     origin_trace,
     owned_vm_debugger::OwnedVmDebugger,
@@ -103,6 +104,7 @@ pub struct App {
     artifact_lookup: Arc<Mutex<ArtifactLookupCache>>,
     /// Bounds concurrent `/api/events/wait` callers; a full pool refuses.
     event_waiters: Arc<Semaphore>,
+    live_browser: LiveBrowser,
 }
 fn cached_artifact_lookup(
     mut cache: OwnedMutexGuard<ArtifactLookupCache>,
@@ -169,6 +171,7 @@ impl App {
                     "build/reb-native-vm-fixture",
                 ),
             ),
+            live_browser: LiveBrowser::new(&options),
             options,
             capture_stopped: AtomicBool::new(false),
             capture: Mutex::new(()),
@@ -1077,6 +1080,18 @@ impl App {
                 _ => Err(Error::bad("Analyst workspace action is invalid")),
             },
             "/api/native-console/actions" => self.native_console.action(value).await,
+            "/api/session/actions" => {
+                validation::schema("SessionAction", value, 400)?;
+                if self.options.capture_mode() != "live" {
+                    return Err(Error::conflict(
+                        "This backend is not a live capture session. No browser was changed.",
+                    )
+                    .with_code(Code::IdleBackend));
+                }
+                let recording =
+                    self.broker_connected().await && !self.capture_stopped.load(Ordering::Acquire);
+                self.live_browser.action(value, recording).await
+            }
             "/api/capture/actions" => {
                 validation::schema("CaptureAction", value, 400)?;
                 if self.options.capture_mode() == "idle" {

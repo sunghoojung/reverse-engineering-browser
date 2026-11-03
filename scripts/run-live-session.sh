@@ -530,6 +530,11 @@ ui_arguments=(
   --socket "${socket_path}" --artifact-socket "${artifact_socket_path}" \
   --capture-session-id "${session_id}"
   --broker-pid "${broker_pid}"
+  # session_action open_url hands a URL to this browser through its profile,
+  # and end asks this launcher, the backend's parent, to stop the session.
+  --brave-binary "${brave_binary}"
+  --brave-profile "${profile_path}"
+  --launcher-pid "$$"
 )
 
 ui_arguments+=(--native-console-live-directory "${native_console_directory}")

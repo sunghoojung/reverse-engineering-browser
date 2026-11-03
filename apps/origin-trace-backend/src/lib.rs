@@ -21,6 +21,8 @@ mod native_guest_binding;
 mod origin_trace;
 mod owned_vm_debugger;
 mod session_context;
+#[cfg(unix)]
+pub mod session_launch;
 mod session_summary;
 mod source_facts;
 mod validation;
@@ -46,6 +48,8 @@ pub use endpoint::PublishedEndpoint;
 pub use durable::write_private_noclobber;
 
 mod js_worker_alloc;
+mod live_browser;
+mod native_input;
 #[doc(hidden)]
 pub use js_worker_alloc::JavaScriptWorkerAllocator;
 #[doc(hidden)]

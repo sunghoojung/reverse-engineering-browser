@@ -82,6 +82,39 @@ it.
   it and were removed with it; their retired contracts remain only as history.
   Wasm evidence comes from native capture and stored artifacts. The owned VM
   debugger controls only the project's own native fixture helper.
+- An agent starts, drives and ends a live capture session only through the
+  session tools: `start_live_session` or `reb-api session start`, and
+  `session_action` with `open_url` or `end`. They stay hidden until the
+  researcher runs the MCP server with `--allow-effects` and
+  `--allow-session-start`. Those flags are not authorization. The researcher
+  still names the authorized target, and the agent opens only URLs inside it.
+  An agent-started session is an ordinary visibly labeled capture session with
+  its own fresh browser profile, every capture switch off unless named, and the
+  usual one-hour expiry. Through MCP, `session_action` acts only on a session
+  that connection started, never on the researcher's own session. `open_url`
+  reaches only that session's capture browser, only while its capture broker
+  runs, and never through page JavaScript. A running broker does not prove the
+  browser records, so `open_url` reports `capture_observed`; when it is false
+  the page was not recorded and the agent ends the session. An agent may turn
+  on sensitive Canvas capture only with `confirm_sensitive_capture`, and only
+  when the researcher's authorization for that session covers Canvas content.
+  An agent may supply guest adapter or dispatch-site files it wrote for the
+  authorized target; they only select what is sampled. Agent sessions do not
+  use the macOS Keychain; do not sign in with real credentials unless the
+  authorization covers it.
+- Agents can click, type, press keys and scroll in their own session's page
+  with `session_action` input actions. These send real macOS input events,
+  which pages cannot tell from a person's, so use them only where the
+  authorization covers interacting with the target. They need Accessibility
+  granted to the app that started the session, bring the capture browser to
+  the front and move the real pointer; do not use the Mac while an agent sends
+  input. A click or scroll is sent only when a hit test finds the capture
+  browser's page (and the named control) under the point, keys only while the
+  keyboard focus is inside the page, and there is no right click, so input
+  never reaches the address bar, browser dialogs, DevTools or another
+  application. `list_inputs` reads control names, which are page text; it
+  does not read field values, though a name can include label text that
+  embeds one. No DevTools protocol or page JavaScript is involved.
 - Run mutable tools in a disposable experiment context by default. Experiments
   do not read or modify baseline tabs, production cookies, storage, or
   credentials. Never execute extracted code automatically.

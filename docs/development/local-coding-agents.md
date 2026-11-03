@@ -132,6 +132,45 @@ the explicit selection, or the canonical live default. It includes `--allow-effe
 was passed. The examples below are the write-capable form. Delete
 `--allow-effects` for the read-only list.
 
+### Let an agent start and drive sessions
+
+Add `--allow-session-start` (it requires `--allow-effects`) when the
+researcher wants the agent to run capture sessions itself, for example to
+retry a page with Wasm dispatch sampling or a guest adapter:
+
+```sh
+scripts/reb-api-mcp.sh --allow-effects --allow-session-start
+```
+
+The server then lists `start_live_session` and starts even when no live
+endpoint exists yet. Until a session is bound, other tools refuse without
+sending a request. `start_live_session` takes named capture options (`url`,
+`wasm_dispatch`, `wasm_call_indirect`, `guest_adapter`, `js_dispatch_sites`,
+`quiet`, `category_mask`, `duration_seconds`, `localhost_only` and others; all
+off unless named), starts the same launcher as `make live` with an Origin
+Trace window, and moves this connection to that exact session.
+`session_action` then opens a URL in the session's capture browser or ends
+it. It acts only on a session this connection started, never on the
+researcher's own session, and it is hidden without `--allow-session-start`.
+`open_url` reports `capture_observed`; false means the page was not recorded.
+The input actions (`list_inputs`, `click`, `type`, `press`, `scroll`) send
+real macOS input and need Accessibility for the app that started the
+session: Origin Trace for app sessions, or the terminal or T3 Code app when an
+agent starts the session through `reb-api`. Grant it once in System Settings >
+Privacy & Security > Accessibility. Input moves the real pointer. Agent sessions publish their endpoint privately unless
+`publish_canonical_endpoint` is set, so concurrent agents do not replace each
+other's sessions, and they use the mock Keychain. The flags are not
+authorization: start sessions and open URLs only for the authorized target.
+See [SAFETY.md](../../SAFETY.md) and
+[live session control](../../protocol/http-api.md#live-session-control).
+
+Agents with a shell can do the same without MCP. This prints the session
+directory to pass to `--session-dir` or `reb-api call`:
+
+```sh
+"$REB_API" session start --wasm-dispatch --url https://authorized.example/
+```
+
 ### Cursor
 
 Put this in `~/.cursor/mcp.json` or the project `.cursor/mcp.json` on the

@@ -305,7 +305,23 @@ export async function checkNativeConsoleDocumentStart(root) {
   // One accepted arm and one refused arm; a disconnected panel adds neither.
   assert.equal(calls.filter(call => call.action === 'arm_document_start').length, 2);
 
-  console.log('PASS Console document-start panel: disabled control, launch-time permission, explicit consent, exact rule, inert page-JavaScript output, non-draining cursor, preserved state on failure, and a cleared set');
+  // The shipped example snippet, wrapped exactly as the browser wraps it and
+  // driven against a synthetic window. It must observe the definition it was
+  // installed before, and report only kinds, lengths and a digest.
+  const example = await readFile(join(root, 'tools/fixtures/console-document-start/observe-synthetic-transform.js'), 'utf8');
+  assert.ok(new TextEncoder().encode(example).length <= 4096, 'the example snippet fits the per-script limit');
+  const reports = [];
+  const sandbox = {window: {}, report: value => reports.push(value)};
+  runInNewContext(`(function(report){"use strict";\n${example}\n})(report)`, sandbox);
+  sandbox.window.syntheticTransform = (text, rounds) => String(text).repeat(rounds);
+  const produced = sandbox.window.syntheticTransform('authored-secret', 2);
+  assert.equal(produced, 'authored-secretauthored-secret', 'the observer must not change the result');
+  assert.deepEqual(reports.slice(0, 2), ['observer=installed', 'defined=function']);
+  assert.match(reports[2], /^call=1 args=string:15,number return=string:30 digest=[0-9a-f]{8}$/);
+  assert.ok(reports.every(entry => !String(entry).includes('authored-secret')),
+    'the example snippet must never log a raw observed value');
+
+  console.log('PASS Console document-start panel: disabled control, launch-time permission, explicit consent, exact rule, inert page-JavaScript output, non-draining cursor, preserved state on failure, a cleared set, and an example snippet that logs no observed value');
 }
 
 if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) {

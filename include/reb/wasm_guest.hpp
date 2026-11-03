@@ -9,6 +9,7 @@
 #include <span>
 #include <type_traits>
 #include "reb/event.hpp"
+#include "reb/js_invocation.hpp"
 namespace reb {
 // Dispatch sites one adapter recipe may configure.
 inline constexpr std::uint32_t kWasmGuestSiteLimit = 8;
@@ -169,7 +170,7 @@ static_assert(offsetof(WasmGuestDispatchPayload, recipe_sha256) == 96);
 // configured adapter site at bytes 80..84. Earlier versions reserved those
 // bytes and still decode, with a zero parent dispatch and site 0.
 struct WasmGuestInvocationPayload final {
-  std::uint16_t protocol_version = 3;
+  std::uint16_t protocol_version = 4;
   std::uint16_t payload_size = 128;
   std::uint32_t function_index = 0;
   std::uint64_t instance_id = 0;
@@ -184,7 +185,13 @@ struct WasmGuestInvocationPayload final {
   // The adapter site this activation dispatches at: its index in the recipe's
   // sorted site list. Every dispatch of the activation is at that site.
   std::uint32_t site_index = 0;
-  std::array<std::byte, 44> reserved{};
+  // Version 4: the JavaScript invocation context this activation began in
+  // (protocol/native-js-invocation-v1.md). Every dispatch of the activation
+  // names this record as its parent, so dispatch records stay version 1.
+  std::uint8_t js_invocation_state = 0;
+  std::array<std::byte, 3> js_invocation_reserved{};
+  std::uint32_t js_invocation_id = 0;
+  std::array<std::byte, 36> reserved{};
 };
 static_assert(sizeof(WasmGuestInvocationPayload) == 128);
 static_assert(std::is_trivially_copyable_v<WasmGuestInvocationPayload>);
@@ -198,6 +205,9 @@ static_assert(offsetof(WasmGuestInvocationPayload, adapter_artifact_id) == 24);
 static_assert(offsetof(WasmGuestInvocationPayload, parent_invocation_id) == 64);
 static_assert(offsetof(WasmGuestInvocationPayload, parent_dispatch_sequence_number) == 72);
 static_assert(offsetof(WasmGuestInvocationPayload, site_index) == 80);
+static_assert(offsetof(WasmGuestInvocationPayload, js_invocation_state) == 84);
+static_assert(offsetof(WasmGuestInvocationPayload, js_invocation_id) == 88);
+static_assert(offsetof(WasmGuestInvocationPayload, reserved) == 92);
 static_assert(offsetof(WasmGuestInvocationPayload, recipe_sha256) == 32);
 [[nodiscard]] inline std::array<std::byte, 128> EncodeWasmGuestInvocationPayload(
     const WasmGuestInvocationPayload& value) noexcept {
@@ -221,7 +231,11 @@ static_assert(offsetof(WasmGuestInvocationPayload, recipe_sha256) == 32);
   std::copy(value.recipe_sha256.begin(), value.recipe_sha256.end(), out.begin() + 32);
   wasm_guest_detail::Put(out, 80, static_cast<std::uint64_t>(value.site_index),
                          sizeof(value.site_index));
-  std::copy(value.reserved.begin(), value.reserved.end(), out.begin() + 84);
+  wasm_guest_detail::Put(out, 84, value.js_invocation_state, sizeof(value.js_invocation_state));
+  std::copy(value.js_invocation_reserved.begin(), value.js_invocation_reserved.end(),
+            out.begin() + 85);
+  wasm_guest_detail::Put(out, 88, value.js_invocation_id, sizeof(value.js_invocation_id));
+  std::copy(value.reserved.begin(), value.reserved.end(), out.begin() + 92);
   return out;
 }
 [[nodiscard]] inline bool DecodeWasmGuestInvocationPayload(
@@ -248,7 +262,12 @@ static_assert(offsetof(WasmGuestInvocationPayload, recipe_sha256) == 32);
   std::copy_n(bytes.begin() + 32, 32, value.recipe_sha256.begin());
   value.site_index =
       static_cast<std::uint32_t>(wasm_guest_detail::Get(bytes, 80, sizeof(value.site_index)));
-  std::copy_n(bytes.begin() + 84, 44, value.reserved.begin());
+  value.js_invocation_state = static_cast<std::uint8_t>(
+      wasm_guest_detail::Get(bytes, 84, sizeof(value.js_invocation_state)));
+  std::copy_n(bytes.begin() + 85, 3, value.js_invocation_reserved.begin());
+  value.js_invocation_id =
+      static_cast<std::uint32_t>(wasm_guest_detail::Get(bytes, 88, sizeof(value.js_invocation_id)));
+  std::copy_n(bytes.begin() + 92, 36, value.reserved.begin());
   return true;
 }
 [[nodiscard]] inline bool IsValidWasmGuestDispatch(const EventRecord& event) noexcept {
@@ -273,7 +292,7 @@ static_assert(offsetof(WasmGuestInvocationPayload, recipe_sha256) == 32);
   return wasm_guest_detail::Envelope(event) &&
          event.header.type == EventType::kWasmGuestInvocation && !event.header.parent_event_id &&
          DecodeWasmGuestInvocationPayload(event.inline_payload, value) &&
-         value.protocol_version >= 1 && value.protocol_version <= 3 && value.payload_size == 128 &&
+         value.protocol_version >= 1 && value.protocol_version <= 4 && value.payload_size == 128 &&
          value.function_index < 16U * 1024U * 1024U && value.instance_id && value.invocation_id &&
          value.parent_invocation_id != value.invocation_id &&
          // Version 1 reserved the parent dispatch bytes. An exact parent
@@ -281,7 +300,12 @@ static_assert(offsetof(WasmGuestInvocationPayload, recipe_sha256) == 32);
          (value.protocol_version >= 2 || !value.parent_dispatch_sequence_number) &&
          // Version 3 names one of at most eight adapter sites; earlier
          // versions reserved those bytes.
-         (value.protocol_version == 3 || !value.site_index) &&
+         (value.protocol_version >= 3 || !value.site_index) &&
+         // Versions 1 to 3 reserved the invocation context bytes.
+         (value.protocol_version == 4 || (!value.js_invocation_state && !value.js_invocation_id)) &&
+         IsValidJsInvocationContext(value.js_invocation_state, value.js_invocation_id) &&
+         std::all_of(value.js_invocation_reserved.begin(), value.js_invocation_reserved.end(),
+                     [](std::byte b) { return b == std::byte{0}; }) &&
          value.site_index < kWasmGuestSiteLimit &&
          (!value.parent_dispatch_sequence_number ||
           (value.parent_invocation_id &&

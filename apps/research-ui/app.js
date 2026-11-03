@@ -3539,14 +3539,18 @@ const capturedExportPanel = installCapturedExportDialog({
           : trace?.status === 'ambiguous' ? (trace.gaps[0]?.detail || 'Select the request row with the matching process and event identifiers.')
           : trace ? (trace.gaps[0]?.detail || 'The request was captured, but no earlier predecessor event was retained.') : 'Choose Load trace to inspect this request.';
         const models = [];
-        const labels = {trace_target: 'Selected request', parent_event: 'Previous event', request_initiator: 'Request initiator', request_lifecycle: 'Request lifecycle', artifact_request: 'Related artifact', temporal_adjacency: 'Time-adjacent record · no recorded link'};
+        const labels = {trace_target: 'Selected request', parent_event: 'Previous event', request_initiator: 'Request initiator', request_lifecycle: 'Request lifecycle', artifact_request: 'Related artifact', temporal_adjacency: 'Time-adjacent record · no recorded link',
+          issued_during_invocation: 'Started inside JS invocation · identity, not value flow', invocation_settlement: 'Invocation start',
+          invocation_value_flow: 'Returned value found in request body · exact bytes'};
         const gapLabels = {
           ambiguous_request: 'Ambiguous request identifier',
           missing_event: 'Missing event · predecessor not retained',
           no_predecessor: 'Missing predecessor · no recorded link',
           cycle: 'Trace stopped · correlation cycle',
           step_limit: 'Trace stopped · step limit reached',
-          capture_gap: 'Capture incomplete · native queue drops'
+          capture_gap: 'Capture incomplete · native queue drops',
+          value_flow_ambiguous: 'Value flow not chosen · several returned values match',
+          value_flow_unsearched: 'Value flow not searched · bounded search exceeded'
         };
         (trace?.steps ?? []).forEach((step, index) => {
           models.push({key: `${step.event.process_id}:${step.event.sequence_number}`, index: String(index + 1),

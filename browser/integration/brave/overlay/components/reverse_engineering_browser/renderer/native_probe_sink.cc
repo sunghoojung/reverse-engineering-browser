@@ -1178,9 +1178,11 @@ void NativeProbeSink::SetEmitters(const NativeRendererProbeEmitter emitter,
                                   const std::uint64_t expires_at_monotonic_ns,
                                   const bool capture_canvas_images,
                                   const NativeProbeFrameIdProvider frame_id_provider) noexcept {
-  // Flush dispatch losses into the configuration that observed them before
-  // the emitter and generation change. A replacement session must opt in again.
+  // Flush dispatch losses and held invocation gaps into the configuration
+  // that observed them before the emitter and generation change. A
+  // replacement session must opt in again.
   PublishVmDispatchBudgetGap();
+  PublishNativeJsInvocationGaps(config_generation_.load(std::memory_order_acquire));
   DisableOwnedRegisterSampling();
   DisablePageGuestSampling();
   // SetEmitters is serialized by NativeProbeTransport's bound sequence. Stop
@@ -1207,6 +1209,8 @@ void NativeProbeSink::SetEmitters(const NativeRendererProbeEmitter emitter,
   native_guest_host_.store(nullptr, std::memory_order_release);
   // Disarm JavaScript dispatch until the replacement configuration opts in.
   native_js_generation_.store(0, std::memory_order_release);
+  native_invocation_generation_.store(0, std::memory_order_release);
+  native_invocation_digest_generation_.store(0, std::memory_order_release);
   if (const auto reset = native_guest_reset_.load(std::memory_order_acquire))
     reset();
   const bool active = emitter && artifact_emitter;
@@ -2339,6 +2343,10 @@ void NativeProbeSink::RecordNativeWasmDispatch(std::uint64_t execution_context_i
   observation.table_count = table_count;
   observation.source_url = source_url;
   observation.module_bytes = module_bytes;
+  // The JavaScript invocation this instruction ran in, or not observed.
+  const NativeJsInvocationContext invocation = CurrentNativeJsInvocation();
+  observation.js_invocation_state = invocation.state;
+  observation.js_invocation_id = invocation.invocation_id;
   if (!IsValidNativeWasmDispatchInput(observation)) {
     NoteNativeWasmDispatchOmission(admission, NativeWasmOmission::kInput);
     return;
@@ -2431,6 +2439,9 @@ void NativeProbeSink::RecordNativeWasmIndirect(NativeWasmIndirectObservation obs
   observation.header.thread_id = admission.thread_id;
   observation.header.frame_id = frame_id;
   observation.sample_index = 0;
+  const NativeJsInvocationContext invocation = CurrentNativeJsInvocation();
+  observation.js_invocation_state = invocation.state;
+  observation.js_invocation_id = invocation.invocation_id;
   if (!IsValidNativeWasmIndirectInput(observation)) {
     NoteNativeWasmIndirectOmission(admission, NativeWasmOmission::kInput);
     return;
@@ -2675,6 +2686,418 @@ void NativeProbeSink::NoteNativeJsDispatchInputUnavailable(const std::uint64_t e
                                                            const std::uint64_t frame_id) noexcept {
   if (NativeJsDispatchActive(epoch))
     NoteNativeJsDispatchOmission(epoch, frame_id, kNativeJsInputGap);
+}
+
+void NativeProbeSink::ConfigureNativeJsInvocation(
+    const std::span<const NativeJsInvocationSite> sites,
+    const bool digests) noexcept {
+  const auto generation = config_generation_.load(std::memory_order_acquire);
+  if (sites.empty() || generation == 0 || (generation & 1U) != 0)
+    return;
+  if (sites.size() > kNativeJsInvocationSiteLimit ||
+      !std::all_of(sites.begin(), sites.end(), IsValidNativeJsInvocationSite)) {
+    NoteNativeJsInvocationOmission(generation, 0, kInvocationInputGap);
+    return;
+  }
+  const auto retained = native_invocation_site_count_.load(std::memory_order_acquire);
+  if (retained == 0) {
+    std::copy(sites.begin(), sites.end(), native_invocation_sites_.begin());
+    native_invocation_site_count_.store(sites.size(), std::memory_order_release);
+  } else if (retained != sites.size() ||
+             !std::equal(sites.begin(), sites.end(), native_invocation_sites_.begin())) {
+    // A changed list needs a browser restart; never retarget armed bytecode.
+    NoteNativeJsInvocationOmission(generation, 0, kInvocationInputGap);
+    return;
+  }
+  native_invocation_open_.store(0, std::memory_order_relaxed);
+  native_invocation_open_generation_.store(generation, std::memory_order_release);
+  native_invocation_digest_generation_.store(digests ? generation : 0, std::memory_order_release);
+  native_invocation_generation_.store(generation, std::memory_order_release);
+}
+
+bool NativeProbeSink::NativeJsInvocationActive(const std::uint64_t generation) const noexcept {
+  // Called by V8 before any allocation; never invokes the frame-id provider,
+  // whose Blink implementation re-enters V8.
+  if (generation == 0 || (generation & 1U) != 0 ||
+      config_generation_.load(std::memory_order_acquire) != generation ||
+      native_invocation_generation_.load(std::memory_order_acquire) != generation ||
+      native_invocation_site_count_.load(std::memory_order_acquire) == 0)
+    return false;
+  const auto categories = category_mask_.load(std::memory_order_relaxed);
+  const bool active = (categories & NativeProbeCategoryMask(NativeProbeCategory::kVm)) != 0 &&
+                      session_id_.load(std::memory_order_relaxed) != 0 &&
+                      emitter_.load(std::memory_order_relaxed) != nullptr &&
+                      MonotonicTimeNs() < expires_at_monotonic_ns_.load(std::memory_order_relaxed);
+  std::atomic_thread_fence(std::memory_order_acquire);
+  return active && config_generation_.load(std::memory_order_acquire) == generation;
+}
+
+std::uint64_t NativeProbeSink::NativeJsInvocationEpoch() const noexcept {
+  const auto generation = config_generation_.load(std::memory_order_acquire);
+  return NativeJsInvocationActive(generation) ? generation : 0;
+}
+
+std::size_t NativeProbeSink::CopyNativeJsInvocationSites(
+    const std::uint64_t epoch,
+    const std::span<NativeJsInvocationSite> out) const noexcept {
+  if (!NativeJsInvocationActive(epoch))
+    return 0;
+  const auto count =
+      std::min(native_invocation_site_count_.load(std::memory_order_acquire), out.size());
+  std::copy_n(native_invocation_sites_.begin(), count, out.begin());
+  return count;
+}
+
+bool NativeProbeSink::IsNativeJsInvocationEnabled(const std::uint64_t epoch,
+                                                  const std::uint32_t slot) const noexcept {
+  return slot < native_invocation_site_count_.load(std::memory_order_acquire) &&
+         native_invocation_capped_generation_.load(std::memory_order_acquire) < epoch &&
+         native_invocation_site_capped_generations_[slot].load(std::memory_order_acquire) < epoch &&
+         NativeJsInvocationActive(epoch);
+}
+
+bool NativeProbeSink::NativeJsInvocationDigests(const std::uint64_t epoch) const noexcept {
+  return native_invocation_digest_generation_.load(std::memory_order_acquire) == epoch &&
+         NativeJsInvocationActive(epoch);
+}
+
+bool NativeProbeSink::NoteNativeJsInvocationOmission(const std::uint64_t generation,
+                                                     const std::uint64_t frame_id,
+                                                     const std::size_t gap) noexcept {
+  if (generation == 0 || (generation & 1U) != 0 || gap >= native_invocation_gap_generations_.size())
+    return false;
+  static constexpr std::array<std::string_view, kInvocationGapCount> kReasons{
+      "native_js_invocation_budget_incomplete",
+      "native_js_invocation_site_budget_incomplete",
+      "native_js_invocation_request_budget_incomplete",
+      "native_js_invocation_transport_unavailable",
+      "native_js_invocation_input_unavailable",
+      "native_js_invocation_settle_unavailable",
+      "native_js_invocation_site_0_compiled_before_arming",
+      "native_js_invocation_site_1_compiled_before_arming",
+      "native_js_invocation_site_2_compiled_before_arming",
+      "native_js_invocation_site_3_compiled_before_arming",
+      "native_js_invocation_site_4_compiled_before_arming",
+      "native_js_invocation_site_5_compiled_before_arming",
+      "native_js_invocation_site_6_compiled_before_arming",
+      "native_js_invocation_site_7_compiled_before_arming",
+      "native_js_invocation_site_0_unsupported_function",
+      "native_js_invocation_site_1_unsupported_function",
+      "native_js_invocation_site_2_unsupported_function",
+      "native_js_invocation_site_3_unsupported_function",
+      "native_js_invocation_site_4_unsupported_function",
+      "native_js_invocation_site_5_unsupported_function",
+      "native_js_invocation_site_6_unsupported_function",
+      "native_js_invocation_site_7_unsupported_function"};
+  auto& slot = native_invocation_gap_generations_[gap];
+  auto previous = slot.load(std::memory_order_acquire);
+  // Odd generation is an in-flight claim; never overwrite a newer configuration.
+  while (previous < generation - 1) {
+    if (slot.compare_exchange_weak(previous, generation - 1, std::memory_order_acq_rel)) {
+      const bool retained =
+          RecordRuntimeBufferEvent(NativeProbeType::kGap, frame_id, kReasons[gap], generation) != 0;
+      auto claimed = generation - 1;
+      slot.compare_exchange_strong(claimed, retained ? generation : previous,
+                                   std::memory_order_acq_rel);
+      if (!retained) {
+        // The ring counted this record's drop; the reason is written once
+        // the ring has room.
+        CapNativeJsGeneration(native_invocation_gap_wanted_[gap], generation);
+        CapNativeJsGeneration(native_invocation_gap_held_, generation);
+      }
+      return retained;
+    }
+  }
+  return previous == generation;
+}
+
+void NativeProbeSink::PublishNativeJsInvocationGaps(const std::uint64_t generation) noexcept {
+  if (generation == 0 || (generation & 1U) != 0)
+    return;
+  auto held = native_invocation_gap_held_.load(std::memory_order_acquire);
+  if (held != generation || !native_invocation_gap_held_.compare_exchange_strong(
+                                held, generation - 1, std::memory_order_acq_rel))
+    return;
+  // A gap that fails again is held again by NoteNativeJsInvocationOmission.
+  for (std::size_t gap = 0; gap < kInvocationGapCount; ++gap) {
+    if (native_invocation_gap_wanted_[gap].load(std::memory_order_acquire) == generation &&
+        native_invocation_gap_generations_[gap].load(std::memory_order_acquire) != generation)
+      NoteNativeJsInvocationOmission(generation, 0, gap);
+  }
+}
+
+void NativeProbeSink::RecordNativeJsInvocationStart(
+    const std::uint64_t epoch,
+    const std::uint64_t frame_id,
+    NativeJsInvocationStartPayload payload) noexcept {
+  // No frame-id provider: Blink supplies the frame, and the provider would
+  // re-enter V8 inside its runtime call.
+  if (!NativeJsInvocationActive(epoch))
+    return;
+  const std::uint64_t session_id = session_id_.load(std::memory_order_relaxed);
+  const std::uint64_t monotonic_time_ns = MonotonicTimeNs();
+  std::atomic_thread_fence(std::memory_order_acquire);
+  if (config_generation_.load(std::memory_order_acquire) != epoch || session_id == 0)
+    return;
+  PublishNativeJsInvocationGaps(epoch);
+  payload.site_sample_index = 0;
+  payload.sample_index = 0;
+  // V8 has already given this call an ID, a wrapper and a coming settle, so
+  // every reported start spends its claims whether or not it is retained, and
+  // a spent budget stops admission at once even when the ring cannot take its
+  // gap yet. Refused calls therefore never keep V8 wrapping past the budget.
+  const std::size_t site_slot = payload.site_slot;
+  const bool known_site = site_slot < native_invocation_site_count_.load(std::memory_order_acquire);
+  std::size_t site_index = 0, index = 0;
+  std::uint64_t site_previous = 0, previous = 0;
+  if (known_site && !ClaimNativeJsSlot(native_invocation_site_slots_[site_slot], epoch, site_index,
+                                       site_previous)) {
+    CapNativeJsGeneration(native_invocation_site_capped_generations_[site_slot], epoch);
+    NoteNativeJsInvocationOmission(epoch, frame_id, kInvocationSiteBudgetGap);
+    return;
+  }
+  if (!ClaimNativeJsSlot(native_invocation_slots_, epoch, index, previous)) {
+    if (known_site)
+      ReleaseNativeJsSlot(native_invocation_site_slots_[site_slot][site_index], epoch,
+                          site_previous);
+    CapNativeJsGeneration(native_invocation_capped_generation_, epoch);
+    NoteNativeJsInvocationOmission(epoch, frame_id, kInvocationBudgetGap);
+    return;
+  }
+  native_invocation_open_starts_[index].store(0, std::memory_order_release);
+  bool matches = known_site && frame_id != 0;
+  if (matches) {
+    const auto& site = native_invocation_sites_[site_slot];
+    matches = payload.source_length == site.source_length &&
+              payload.anchor_offset == site.anchor_offset &&
+              payload.source_sha256 == site.source_sha256;
+  }
+  if (!matches || !IsValidNativeJsInvocationStartPayload(payload)) {
+    NoteNativeJsInvocationOmission(epoch, frame_id, kInvocationInputGap);
+    return;
+  }
+  payload.site_sample_index = static_cast<std::uint16_t>(site_index);
+  payload.sample_index = static_cast<std::uint16_t>(index);
+  NativeProbeEvent event;
+  event.header.category = NativeProbeCategory::kVm;
+  event.header.type = NativeProbeType::kJsInvocationStart;
+  event.header.payload_size = static_cast<std::uint32_t>(kNativeJsInvocationPayloadSize);
+  event.header.session_id = session_id;
+  event.header.monotonic_time_ns = monotonic_time_ns;
+  event.header.process_id = static_cast<std::uint32_t>(base::GetCurrentProcId());
+  event.header.thread_id = static_cast<std::uint32_t>(base::PlatformThread::CurrentId().raw());
+  event.header.frame_id = frame_id;
+  event.header.sequence_number = next_sequence_.fetch_add(1, std::memory_order_relaxed);
+  event.inline_payload = EncodeNativeJsInvocationStartPayload(payload);
+  const auto status = EmitStatus(event, epoch);
+  if (status == NativeProbeEmitStatus::kAdmitted) {
+    native_invocation_open_starts_[index].store(
+        (static_cast<std::uint64_t>(payload.invocation_id) << 8) | site_slot,
+        std::memory_order_release);
+    if (native_invocation_open_generation_.load(std::memory_order_acquire) == epoch)
+      native_invocation_open_.fetch_add(1, std::memory_order_relaxed);
+    return;
+  }
+  // A full ring counts its own drop and drains, so it returns both claims for
+  // a later call. Any other refusal keeps them and is a transport gap.
+  if (status == NativeProbeEmitStatus::kQueueFull) {
+    ReleaseNativeJsSlot(native_invocation_slots_[index], epoch, previous);
+    ReleaseNativeJsSlot(native_invocation_site_slots_[site_slot][site_index], epoch, site_previous);
+    return;
+  }
+  NoteNativeJsInvocationOmission(epoch, frame_id, kInvocationTransportGap);
+}
+
+void NativeProbeSink::RecordNativeJsInvocationSettle(
+    const std::uint64_t epoch,
+    const std::uint64_t frame_id,
+    NativeJsInvocationSettlePayload payload) noexcept {
+  if (!NativeJsInvocationActive(epoch))
+    return;
+  const std::uint64_t session_id = session_id_.load(std::memory_order_relaxed);
+  const std::uint64_t monotonic_time_ns = MonotonicTimeNs();
+  std::atomic_thread_fence(std::memory_order_acquire);
+  if (config_generation_.load(std::memory_order_acquire) != epoch || session_id == 0)
+    return;
+  PublishNativeJsInvocationGaps(epoch);
+  // Each admitted call settles once. The settle closes its start before its
+  // own record is attempted, so a refused or dropped settle record never
+  // leaves the start open. A settle whose start was refused or dropped is not
+  // recorded: that start's loss is already a gap or a ring drop.
+  std::uint8_t site_slot = 0;
+  if (!CloseNativeJsInvocation(epoch, payload.invocation_id, site_slot))
+    return;
+  // A digest without the session's opt-in is refused, never stored.
+  const bool digests =
+      native_invocation_digest_generation_.load(std::memory_order_acquire) == epoch;
+  if (frame_id == 0 || payload.site_slot != site_slot ||
+      !IsValidNativeJsInvocationSettlePayload(payload) ||
+      (!digests && payload.digest_state !=
+                       static_cast<std::uint8_t>(NativeJsInvocationDigestState::kNotRequested))) {
+    NoteNativeJsInvocationOmission(epoch, frame_id, kInvocationInputGap);
+    return;
+  }
+  NativeProbeEvent event;
+  event.header.category = NativeProbeCategory::kVm;
+  event.header.type = NativeProbeType::kJsInvocationSettle;
+  event.header.payload_size = static_cast<std::uint32_t>(kNativeJsInvocationPayloadSize);
+  event.header.session_id = session_id;
+  event.header.monotonic_time_ns = monotonic_time_ns;
+  event.header.process_id = static_cast<std::uint32_t>(base::GetCurrentProcId());
+  event.header.thread_id = static_cast<std::uint32_t>(base::PlatformThread::CurrentId().raw());
+  event.header.frame_id = frame_id;
+  event.header.sequence_number = next_sequence_.fetch_add(1, std::memory_order_relaxed);
+  event.inline_payload = EncodeNativeJsInvocationSettlePayload(payload);
+  if (EmitStatus(event, epoch) == NativeProbeEmitStatus::kRejected)
+    NoteNativeJsInvocationOmission(epoch, frame_id, kInvocationTransportGap);
+}
+
+bool NativeProbeSink::CloseNativeJsInvocation(const std::uint64_t generation,
+                                              const std::uint32_t invocation_id,
+                                              std::uint8_t& site_slot) noexcept {
+  if (invocation_id == 0)
+    return false;
+  for (std::size_t i = 0; i < native_invocation_open_starts_.size(); ++i) {
+    auto open = native_invocation_open_starts_[i].load(std::memory_order_acquire);
+    if ((open >> 8) != invocation_id ||
+        native_invocation_slots_[i].load(std::memory_order_acquire) != generation)
+      continue;
+    // IDs are unique per isolate, so a lost exchange is the same call's
+    // second settle and closes nothing.
+    if (!native_invocation_open_starts_[i].compare_exchange_strong(open, 0,
+                                                                   std::memory_order_acq_rel))
+      return false;
+    site_slot = static_cast<std::uint8_t>(open & 0xFF);
+    if (native_invocation_open_generation_.load(std::memory_order_acquire) == generation)
+      native_invocation_open_.fetch_sub(1, std::memory_order_relaxed);
+    return true;
+  }
+  return false;
+}
+
+void NativeProbeSink::NoteNativeJsInvocationStatus(
+    const std::uint64_t epoch,
+    const std::uint32_t slot,
+    const NativeJsInvocationSiteStatus status) noexcept {
+  if (slot >= native_invocation_site_count_.load(std::memory_order_acquire) ||
+      !NativeJsInvocationActive(epoch))
+    return;
+  if (status == NativeJsInvocationSiteStatus::kCompiledBeforeArming)
+    NoteNativeJsInvocationOmission(epoch, 0, kInvocationCompiledGap + slot);
+  else if (status == NativeJsInvocationSiteStatus::kUnsupportedFunction)
+    NoteNativeJsInvocationOmission(epoch, 0, kInvocationUnsupportedGap + slot);
+}
+
+void NativeProbeSink::NoteNativeJsInvocationInputUnavailable(
+    const std::uint64_t epoch,
+    const std::uint64_t frame_id) noexcept {
+  if (!NativeJsInvocationActive(epoch))
+    return;
+  PublishNativeJsInvocationGaps(epoch);
+  // V8 already wrapped this call, so its refusal spends a start like any
+  // other; calls from a detached document stop at the budget.
+  std::size_t index = 0;
+  std::uint64_t previous = 0;
+  if (!ClaimNativeJsSlot(native_invocation_slots_, epoch, index, previous)) {
+    CapNativeJsGeneration(native_invocation_capped_generation_, epoch);
+    NoteNativeJsInvocationOmission(epoch, frame_id, kInvocationBudgetGap);
+    return;
+  }
+  native_invocation_open_starts_[index].store(0, std::memory_order_release);
+  NoteNativeJsInvocationOmission(epoch, frame_id, kInvocationInputGap);
+}
+
+void NativeProbeSink::NoteNativeJsInvocationSettleUnavailable(
+    const std::uint64_t epoch,
+    const std::uint64_t frame_id,
+    const std::uint32_t invocation_id) noexcept {
+  std::uint8_t site_slot = 0;
+  if (NativeJsInvocationActive(epoch) && CloseNativeJsInvocation(epoch, invocation_id, site_slot))
+    NoteNativeJsInvocationOmission(epoch, frame_id, kInvocationSettleGap);
+}
+
+void NativeProbeSink::SetNativeJsInvocationContextProvider(
+    const NativeJsInvocationContextProvider provider) noexcept {
+  native_invocation_context_provider_.store(provider, std::memory_order_release);
+}
+
+NativeJsInvocationContext NativeProbeSink::CurrentNativeJsInvocation() const noexcept {
+  const auto provider = native_invocation_context_provider_.load(std::memory_order_acquire);
+  const auto generation = config_generation_.load(std::memory_order_acquire);
+  if (!provider || !NativeJsInvocationActive(generation))
+    return {};
+  NativeJsInvocationContext context = provider();
+  // Anything inconsistent is not observed rather than guessed.
+  if (!IsValidNativeJsInvocationContext(context.state, context.invocation_id))
+    return {};
+  return context;
+}
+
+void NativeProbeSink::RecordNativeJsInvocationRequest(const std::int32_t request_id) noexcept {
+  const auto generation = config_generation_.load(std::memory_order_acquire);
+  if (request_id == 0 || !NativeJsInvocationActive(generation) ||
+      (category_mask_.load(std::memory_order_relaxed) &
+       NativeProbeCategoryMask(NativeProbeCategory::kNetwork)) == 0)
+    return;
+  // After the request budget no loader start pays for the context read, which
+  // enters V8, or the frame lookup.
+  if (native_invocation_request_capped_generation_.load(std::memory_order_acquire) >= generation)
+    return;
+  const auto provider = native_invocation_context_provider_.load(std::memory_order_acquire);
+  if (!provider)
+    return;
+  const NativeJsInvocationContext context = provider();
+  NativeJsInvocationRequestPayload payload;
+  if (context.state == static_cast<std::uint8_t>(NativeJsInvocationContextState::kInside) &&
+      context.invocation_id != 0) {
+    payload.state = context.state;
+    payload.invocation_id = context.invocation_id;
+  } else if (context.state == static_cast<std::uint8_t>(NativeJsInvocationContextState::kNone) &&
+             !context.script_on_stack &&
+             native_invocation_open_generation_.load(std::memory_order_acquire) == generation &&
+             native_invocation_open_.load(std::memory_order_relaxed) > 0) {
+    // A deferred loader start while an invocation may be open: recorded as
+    // unknown, never assigned to it.
+    payload.state = static_cast<std::uint8_t>(NativeJsInvocationContextState::kUnknown);
+  } else {
+    return;
+  }
+  const NativeProbeFrameIdProvider frame_id_provider =
+      frame_id_provider_.load(std::memory_order_relaxed);
+  const std::uint64_t frame_id = frame_id_provider ? frame_id_provider() : 0;
+  std::size_t index = 0;
+  std::uint64_t previous = 0;
+  if (!ClaimNativeJsSlot(native_invocation_request_slots_, generation, index, previous)) {
+    // Capped even when the ring cannot take the gap yet; the gap is held.
+    CapNativeJsGeneration(native_invocation_request_capped_generation_, generation);
+    NoteNativeJsInvocationOmission(generation, frame_id, kInvocationRequestBudgetGap);
+    return;
+  }
+  payload.sample_index = static_cast<std::uint16_t>(index);
+  if (!IsValidNativeJsInvocationRequestPayload(payload)) {
+    ReleaseNativeJsSlot(native_invocation_request_slots_[index], generation, previous);
+    NoteNativeJsInvocationOmission(generation, frame_id, kInvocationInputGap);
+    return;
+  }
+  const std::uint64_t session_id = session_id_.load(std::memory_order_relaxed);
+  NativeProbeEvent event;
+  event.header.category = NativeProbeCategory::kVm;
+  event.header.type = NativeProbeType::kJsInvocationRequest;
+  event.header.payload_size = static_cast<std::uint32_t>(kNativeJsInvocationPayloadSize);
+  event.header.session_id = session_id;
+  event.header.monotonic_time_ns = MonotonicTimeNs();
+  event.header.process_id = static_cast<std::uint32_t>(base::GetCurrentProcId());
+  event.header.thread_id = static_cast<std::uint32_t>(base::PlatformThread::CurrentId().raw());
+  event.header.frame_id = frame_id;
+  event.header.request_id = static_cast<std::uint64_t>(static_cast<std::uint32_t>(request_id));
+  event.header.sequence_number = next_sequence_.fetch_add(1, std::memory_order_relaxed);
+  event.inline_payload = EncodeNativeJsInvocationRequestPayload(payload);
+  const auto status = EmitStatus(event, generation);
+  if (status == NativeProbeEmitStatus::kAdmitted)
+    return;
+  ReleaseNativeJsSlot(native_invocation_request_slots_[index], generation, previous);
+  if (status == NativeProbeEmitStatus::kRejected)
+    NoteNativeJsInvocationOmission(generation, frame_id, kInvocationTransportGap);
 }
 
 namespace {
@@ -3045,6 +3468,10 @@ void NativeProbeSink::RecordNativeWasmGuest(std::uint64_t execution_context_id,
     if (parent.unresolved)
       NoteNativeGuestOmission(generation, frame_id, 10, "native_guest_parent_unresolved");
     payload.site_index = site_index;
+    // The JavaScript invocation this guest activation began in.
+    const NativeJsInvocationContext js_invocation = CurrentNativeJsInvocation();
+    payload.js_invocation_state = js_invocation.state;
+    payload.js_invocation_id = js_invocation.invocation_id;
     for (std::size_t i = 0; i < 32; ++i)
       payload.recipe_sha256[i] = static_cast<std::byte>(adapter->recipe_sha256[i]);
     invocation.inline_payload = EncodeNativeWasmGuestInvocationPayload(payload);

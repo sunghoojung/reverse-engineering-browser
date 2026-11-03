@@ -66,6 +66,10 @@ not fallbacks for the removed debugger. Physical Wasm observations use the
 [typed native contract](../../protocol/native-wasm-dispatch-v1.md). JavaScript
 dispatch at armed static interpreter-candidate sites uses the
 [native JavaScript dispatch contract](../../protocol/native-js-dispatch-v1.md).
+Calls of armed functions get an invocation identity that V8 carries across
+their continuations; Wasm records and loader requests carry it, and Origin
+Trace relates requests to it by identity or by exact returned bytes. See the
+[native JavaScript invocation contract](../../protocol/native-js-invocation-v1.md).
 
 Decoder Lab uses a separate native transform helper. API Collection and Local
 Analyst Workspace persist user-authored templates and scripts separately from

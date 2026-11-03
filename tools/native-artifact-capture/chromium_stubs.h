@@ -250,6 +250,8 @@ class NativeProbeSession {
   bool capture_canvas_images() const { return false; }
   const std::string& guest_adapter_json() const { return adapter_json; }
   const std::vector<std::uint8_t>& js_dispatch_sites() const { return js_sites; }
+  const std::vector<std::uint8_t>& js_invocation_sites() const { return invocation_sites; }
+  bool js_invocation_digests() const { return invocation_digests; }
   void Emit(const NativeProbeEvent& event) const {
     if (emitted)
       emitted(event);
@@ -260,6 +262,8 @@ class NativeProbeSession {
   std::uint64_t id = 0, mask = 0, expires = 0;
   std::string adapter_json;
   std::vector<std::uint8_t> js_sites;
+  std::vector<std::uint8_t> invocation_sites;
+  bool invocation_digests = false;
   std::function<void(const NativeProbeEvent&)> emitted;
 
  private:
@@ -368,7 +372,9 @@ class NativeProbeClient {
                          base::UnsafeSharedMemoryRegion,
                          std::uint64_t,
                          const std::string&,
-                         const std::vector<std::uint8_t>&) = 0;
+                         const std::vector<std::uint8_t>&,
+                         const std::vector<std::uint8_t>&,
+                         bool) = 0;
   virtual void Disable() = 0;
   virtual void NativeGuestModuleStatus(std::uint64_t, std::uint64_t, bool) = 0;
 };
@@ -392,6 +398,8 @@ class NativeProbeHost {
                                    std::uint32_t,
                                    std::uint32_t,
                                    std::uint32_t,
+                                   std::uint8_t,
+                                   std::uint32_t,
                                    const std::string&,
                                    mojo_base::BigBuffer) = 0;
   virtual void CaptureWasmIndirect(std::uint64_t,
@@ -410,6 +418,8 @@ class NativeProbeHost {
                                    std::uint32_t,
                                    std::uint32_t,
                                    std::uint32_t,
+                                   std::uint32_t,
+                                   std::uint8_t,
                                    std::uint32_t,
                                    const std::string&,
                                    mojo_base::BigBuffer) = 0;

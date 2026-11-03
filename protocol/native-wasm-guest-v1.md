@@ -52,8 +52,12 @@ keys mixed in) and the native session does not start.
 
 Event 18 (`wasm_guest_dispatch`) has a 128-byte version-1 little-endian payload
 and event 19 (`wasm_guest_invocation`) a 128-byte version-3 payload. Readers
-still accept version-1 invocations, which reserved bytes 72..128, and
-version-2 invocations, which reserved bytes 80..128. The
+still accept version-1 invocations, which reserved bytes 72..128,
+version-2 invocations, which reserved bytes 80..128, and version-3
+invocations, which reserved bytes 84..128. Version 4 adds the JavaScript
+invocation context the activation began in at bytes 84..92; see
+[invocation context of Wasm records](native-js-invocation-v1.md#invocation-context-of-wasm-records).
+The
 authoritative offsets and encoders are `include/reb/wasm_guest.hpp` and overlay
 `common/native_wasm_guest_wire.h`; no native structure padding is serialized.
 The event header retains the original renderer process/sequence identity.

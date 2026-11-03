@@ -61,6 +61,13 @@ TEST_NAMES = [
     "test-api/RebNativeJsDispatchSparkplugAndNoOptimization",
     "test-api/RebNativeJsDispatchParentActivation",
     "test-api/RebNativeJsDispatchAdmissionAndSiteCap",
+    "test-api/RebNativeJsInvocationDisabledAndUnarmedBytecodeIdentity",
+    "test-api/RebNativeJsInvocationArgumentsAndSynchronousSettlement",
+    "test-api/RebNativeJsInvocationPromiseJobsAndDigest",
+    "test-api/RebNativeJsInvocationInterleavedAsyncCallsKeepTheirIds",
+    "test-api/RebNativeJsInvocationPreservesEmbedderData",
+    "test-api/RebNativeJsInvocationLeavesUnhandledRejectionVisible",
+    "test-api/RebNativeJsInvocationAdmissionAndUnsupportedKinds",
 ]
 
 

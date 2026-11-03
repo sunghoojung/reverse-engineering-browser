@@ -24,6 +24,11 @@ enum class OriginTraceRelation : std::uint16_t {
   kRequestInitiator = 2,
   kRequestLifecycle = 3,
   kArtifactRequest = 4,
+  // The renderer request record was started by script while this JavaScript
+  // invocation was current. Identity only; never value flow.
+  kIssuedDuringInvocation = 5,
+  // A settle record belongs to the start record of the same invocation.
+  kInvocationSettlement = 6,
 };
 
 enum class OriginTraceConfidence : std::uint16_t {
@@ -120,6 +125,25 @@ class OriginTraceIndex final {
     [[nodiscard]] std::size_t operator()(const LegacyRequestKey& value) const noexcept;
   };
 
+  struct InvocationKey final {
+    std::uint64_t session_id = 0;
+    std::uint32_t process_id = 0;
+    std::uint32_t invocation_id = 0;
+
+    bool operator==(const InvocationKey&) const = default;
+  };
+
+  struct InvocationKeyHash final {
+    [[nodiscard]] std::size_t operator()(const InvocationKey& value) const noexcept;
+  };
+
+  struct InvocationState final {
+    OriginTraceEventReference start{};
+    // A second start with the same key (a reused renderer process ID) makes
+    // the key ambiguous; no edge is ever drawn to either start.
+    bool ambiguous = false;
+  };
+
   struct LegacyRequestState final {
     OriginTraceEventReference event{};
     std::uint64_t browser_context_id_high = 0;
@@ -133,6 +157,8 @@ class OriginTraceIndex final {
   [[nodiscard]] OriginTraceEventReference FindLegacyRequest(const LegacyRequestKey& key) const;
   [[nodiscard]] OriginTraceEventReference FindInitiator(const LegacyRequestKey& key) const;
   void RememberPendingInitiator(const EventRecord& event, const LegacyRequestKey& key);
+  [[nodiscard]] OriginTraceEventReference FindInvocation(const InvocationKey& key) const;
+  void IndexInvocation(const EventRecord& event, OriginTraceEdgeBatch& batch);
   void ResolvePendingInitiators(const EventRecord& event, OriginTraceEdgeBatch& batch);
   void RememberEvent(const OriginTraceEventReference& event);
   void RememberRequest(const EventRecord& event, const OriginTraceEventReference& reference);
@@ -152,6 +178,8 @@ class OriginTraceIndex final {
   std::unordered_multimap<LegacyRequestKey, OriginTraceEdge, LegacyRequestKeyHash>
       pending_initiators_;
   std::deque<std::pair<LegacyRequestKey, OriginTraceEventReference>> pending_initiator_order_;
+  std::unordered_map<InvocationKey, InvocationState, InvocationKeyHash> invocations_;
+  std::deque<InvocationKey> invocation_order_;
   OriginTraceIndexStats stats_;
 };
 

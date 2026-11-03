@@ -13,18 +13,24 @@
 #include <string_view>
 #include <type_traits>
 #include "native_artifact_header.h"
+#include "native_js_invocation.h"
 #include "native_probe_event.h"
 namespace reb {
 // Physical Wasm br_table execution, not an interpreter guest program counter.
+// Version 2 adds the JavaScript invocation context the instruction ran in
+// (protocol/native-js-invocation-v1.md); version 1 reserved those bytes.
 struct NativeWasmDispatchObservationPayload final {
-  std::uint16_t protocol_version = 1;
+  std::uint16_t protocol_version = 2;
   std::uint16_t payload_size = 128;
   std::uint32_t function_index = 0;
   std::uint32_t module_byte_offset = 0;
   std::uint32_t selector = 0;
   std::uint32_t table_count = 0;
   std::uint32_t sample_index = 0;
-  std::array<std::byte, 104> reserved{};
+  std::uint8_t js_invocation_state = 0;
+  std::array<std::byte, 3> js_invocation_reserved{};
+  std::uint32_t js_invocation_id = 0;
+  std::array<std::byte, 96> reserved{};
 };
 static_assert(sizeof(NativeWasmDispatchObservationPayload) == 128);
 static_assert(std::is_standard_layout_v<NativeWasmDispatchObservationPayload>);
@@ -36,7 +42,9 @@ static_assert(offsetof(NativeWasmDispatchObservationPayload, module_byte_offset)
 static_assert(offsetof(NativeWasmDispatchObservationPayload, selector) == 12);
 static_assert(offsetof(NativeWasmDispatchObservationPayload, table_count) == 16);
 static_assert(offsetof(NativeWasmDispatchObservationPayload, sample_index) == 20);
-static_assert(offsetof(NativeWasmDispatchObservationPayload, reserved) == 24);
+static_assert(offsetof(NativeWasmDispatchObservationPayload, js_invocation_state) == 24);
+static_assert(offsetof(NativeWasmDispatchObservationPayload, js_invocation_id) == 28);
+static_assert(offsetof(NativeWasmDispatchObservationPayload, reserved) == 32);
 [[nodiscard]] inline std::array<std::byte, 128> EncodeNativeWasmDispatchObservationPayload(
     const NativeWasmDispatchObservationPayload& value) noexcept {
   std::array<std::byte, 128> out{};
@@ -51,7 +59,11 @@ static_assert(offsetof(NativeWasmDispatchObservationPayload, reserved) == 24);
   put(12, value.selector, 4);
   put(16, value.table_count, 4);
   put(20, value.sample_index, 4);
-  std::copy(value.reserved.begin(), value.reserved.end(), out.begin() + 24);
+  put(24, value.js_invocation_state, 1);
+  std::copy(value.js_invocation_reserved.begin(), value.js_invocation_reserved.end(),
+            out.begin() + 25);
+  put(28, value.js_invocation_id, 4);
+  std::copy(value.reserved.begin(), value.reserved.end(), out.begin() + 32);
   return out;
 }
 inline constexpr std::size_t kNativeWasmDispatchSampleBudget = 16;
@@ -65,6 +77,9 @@ struct NativeWasmDispatchObservation final {
   std::uint32_t selector = 0;
   std::uint32_t table_count = 0;
   std::uint32_t sample_index = 0;
+  // The current JavaScript invocation, read by the renderer sink.
+  std::uint8_t js_invocation_state = 0;
+  std::uint32_t js_invocation_id = 0;
   std::string_view source_url;
   std::span<const std::uint8_t> module_bytes;
 };
@@ -81,7 +96,8 @@ using NativeWasmDispatchEmitter = bool (*)(const NativeWasmDispatchObservation&,
       bytes.size() > kNativeArtifactMaxContentBytes ||
       !std::equal(magic.begin(), magic.end(), bytes.begin()) || value.module_byte_offset < 8 ||
       value.module_byte_offset >= bytes.size() || bytes[value.module_byte_offset] != 0x0e ||
-      value.sample_index >= kNativeWasmDispatchSampleBudget)
+      value.sample_index >= kNativeWasmDispatchSampleBudget ||
+      !IsValidNativeJsInvocationContext(value.js_invocation_state, value.js_invocation_id))
     return false;
   // Match V8's immediate, including overflow rejection. This is not a Wasm interpreter.
   std::size_t offset = static_cast<std::size_t>(value.module_byte_offset) + 1;
@@ -110,7 +126,7 @@ enum class NativeWasmIndirectResolution : std::uint32_t {
 };
 inline constexpr std::uint32_t kNativeWasmIndirectResolutionCount = 5;
 struct NativeWasmIndirectObservationPayload final {
-  std::uint16_t protocol_version = 1;
+  std::uint16_t protocol_version = 2;
   std::uint16_t payload_size = 128;
   std::uint32_t function_index = 0;
   std::uint32_t module_byte_offset = 0;
@@ -119,7 +135,10 @@ struct NativeWasmIndirectObservationPayload final {
   std::uint32_t callee_function_index = 0;
   std::uint32_t resolution = 0;
   std::uint32_t sample_index = 0;
-  std::array<std::byte, 96> reserved{};
+  std::uint8_t js_invocation_state = 0;
+  std::array<std::byte, 3> js_invocation_reserved{};
+  std::uint32_t js_invocation_id = 0;
+  std::array<std::byte, 88> reserved{};
 };
 static_assert(sizeof(NativeWasmIndirectObservationPayload) == 128);
 static_assert(std::is_standard_layout_v<NativeWasmIndirectObservationPayload>);
@@ -133,7 +152,9 @@ static_assert(offsetof(NativeWasmIndirectObservationPayload, slot) == 16);
 static_assert(offsetof(NativeWasmIndirectObservationPayload, callee_function_index) == 20);
 static_assert(offsetof(NativeWasmIndirectObservationPayload, resolution) == 24);
 static_assert(offsetof(NativeWasmIndirectObservationPayload, sample_index) == 28);
-static_assert(offsetof(NativeWasmIndirectObservationPayload, reserved) == 32);
+static_assert(offsetof(NativeWasmIndirectObservationPayload, js_invocation_state) == 32);
+static_assert(offsetof(NativeWasmIndirectObservationPayload, js_invocation_id) == 36);
+static_assert(offsetof(NativeWasmIndirectObservationPayload, reserved) == 40);
 [[nodiscard]] inline std::array<std::byte, 128> EncodeNativeWasmIndirectObservationPayload(
     const NativeWasmIndirectObservationPayload& value) noexcept {
   std::array<std::byte, 128> out{};
@@ -150,7 +171,11 @@ static_assert(offsetof(NativeWasmIndirectObservationPayload, reserved) == 32);
   put(20, value.callee_function_index, 4);
   put(24, value.resolution, 4);
   put(28, value.sample_index, 4);
-  std::copy(value.reserved.begin(), value.reserved.end(), out.begin() + 32);
+  put(32, value.js_invocation_state, 1);
+  std::copy(value.js_invocation_reserved.begin(), value.js_invocation_reserved.end(),
+            out.begin() + 33);
+  put(36, value.js_invocation_id, 4);
+  std::copy(value.reserved.begin(), value.reserved.end(), out.begin() + 40);
   return out;
 }
 // Separate from the br_table budget so neither stream can starve the other.
@@ -167,6 +192,9 @@ struct NativeWasmIndirectObservation final {
   std::uint32_t callee_function_index = 0;
   NativeWasmIndirectResolution resolution = NativeWasmIndirectResolution::kUnresolved;
   std::uint32_t sample_index = 0;
+  // The current JavaScript invocation, read by the renderer sink.
+  std::uint8_t js_invocation_state = 0;
+  std::uint32_t js_invocation_id = 0;
   std::string_view source_url;
   std::span<const std::uint8_t> module_bytes;
 };
@@ -207,7 +235,8 @@ using NativeWasmIndirectEmitter = bool (*)(const NativeWasmIndirectObservation&,
       resolution >= kNativeWasmIndirectResolutionCount || value.callee_function_index >= kLimit ||
       (value.resolution != NativeWasmIndirectResolution::kResolved &&
        value.callee_function_index != 0) ||
-      value.sample_index >= kNativeWasmIndirectSampleBudget)
+      value.sample_index >= kNativeWasmIndirectSampleBudget ||
+      !IsValidNativeJsInvocationContext(value.js_invocation_state, value.js_invocation_id))
     return false;
   // Type index, then table index; the observed table must be the immediate's.
   std::size_t offset = static_cast<std::size_t>(value.module_byte_offset) + 1;

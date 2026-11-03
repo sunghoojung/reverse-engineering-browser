@@ -18,7 +18,12 @@ interface NativeProbeClient {
             string guest_adapter_json,
             // Fixed 44-byte native JavaScript dispatch site records (at most 8),
             // already validated by the browser; empty when not armed.
-            array<uint8> js_dispatch_sites);
+            array<uint8> js_dispatch_sites,
+            // Fixed 44-byte function-entry site records (shape 3, at most 8)
+            // for native JavaScript invocation identity; empty when not armed.
+            array<uint8> js_invocation_sites,
+            // The session's sensitive opt-in for settled-value digests.
+            bool js_invocation_digests);
   Disable();
   // Browser verdict on the module bytes carried by the guest capture whose
   // dispatch sequence number is module_token. The renderer keeps sending an
@@ -48,6 +53,11 @@ interface NativeProbeHost {
                       uint32 selector,
                       uint32 table_count,
                       uint32 sample_index,
+                      // JavaScript invocation context (state 0 to 3, ID
+                      // nonzero only for state 2), see
+                      // protocol/native-js-invocation-v1.md.
+                      uint8 js_invocation_state,
+                      uint32 js_invocation_id,
                       string source_url,
                       mojo_base.mojom.BigBuffer content);
   // Physical call_indirect observation; same admission and module transfer as
@@ -69,6 +79,8 @@ interface NativeProbeHost {
                       uint32 callee_function_index,
                       uint32 resolution,
                       uint32 sample_index,
+                      uint8 js_invocation_state,
+                      uint32 js_invocation_id,
                       string source_url,
                       mojo_base.mojom.BigBuffer content);
   CaptureNativeGuest(uint64 capture_epoch,

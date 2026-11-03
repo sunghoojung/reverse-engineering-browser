@@ -91,5 +91,85 @@ enum OriginTraceGapChecks {
     precondition((budget["gaps"] as! [[String: Any]]).map { $0["reason"] as! String }
       == ["no_predecessor"])
     print("PASS native Origin Trace shared gap/session regressions, step-limit coverage and time-adjacent confidence class")
+    if CommandLine.arguments.count > 2 {
+      try checkInvocationCases(CommandLine.arguments[2])
+    }
+  }
+
+  // The fixture origin_trace.rs runs too: invocation identity relations and the
+  // exact value-flow join must produce the same rows, gaps and coverage.
+  static func checkInvocationCases(_ path: String) throws {
+    let bytes = try Data(contentsOf: URL(fileURLWithPath: path))
+    let fixture = try JSONSerialization.jsonObject(with: bytes) as! [String: Any]
+    let events = fixture["events"] as! [String: [String: Any]]
+    let edges = fixture["edges"] as! [String: [String: Any]]
+    let bodies = fixture["bodies"] as! [String: [String: String]]
+    for item in fixture["cases"] as! [[String: Any]] {
+      let name = item["name"] as! String
+      let query = item["query"] as! [String: Any]
+      var requestBodies: [String: [UInt8]] = [:]
+      for key in item["bodies"] as! [String] {
+        let body = bodies[key]!
+        let hex = Array(body["hex"]!.utf8)
+        requestBodies[body["event"]!] = stride(from: 0, to: hex.count, by: 2).map {
+          UInt8(String(decoding: hex[$0..<$0 + 2], as: UTF8.self), radix: 16)!
+        }
+      }
+      let result = try OriginTraceDocumentBuilder.build(
+        events: (item["events"] as! [String]).map { events[$0]! },
+        edges: (item["edges"] as! [String]).map { edges[$0]! },
+        artifacts: [],
+        requestID: query["request_id"] as! String,
+        sessionID: query["session_id"] as? String,
+        rootProcessID: (query["root_process_id"] as? Int).map { UInt32($0) },
+        rootSequenceNumber: query["root_sequence_number"] as? String,
+        requestBodies: requestBodies
+      )
+      let steps = result["steps"] as! [[String: Any]]
+      precondition(
+        steps.map { ($0["event"] as! [String: Any])["sequence_number"] as! String }
+          == item["step_sequences"] as! [String], name)
+      precondition(steps.map { $0["relation"] as! String } == item["step_relations"] as! [String], name)
+      precondition(
+        steps.map { $0["confidence"] as! String } == item["step_confidences"] as! [String], name)
+      let gaps = result["gaps"] as! [[String: Any]]
+      precondition(gaps.map { $0["reason"] as! String } == item["gap_reasons"] as! [String], name)
+      let coverage = result["coverage"] as! [String: Any]
+      for (field, value) in item["coverage"] as! [String: Int] {
+        precondition(coverage[field] as! Int == value, "\(name) \(field)")
+      }
+      if let values = item["step_values"] as? [Any] {
+        for (expected, step) in zip(values, steps) {
+          if let expected = expected as? String {
+            precondition(step["value"] as! String == expected, name)
+          }
+        }
+      }
+    }
+    // The request-body pairing: the traced request's request_body child record
+    // and its one matching sensitive artifact.
+    let record: [String: Any] = [
+      "type": "request_body", "category": "network", "request_id": "900", "artifact_id": "31",
+      "parent_event_id": "1", "session_id": "7", "process_id": 84, "sequence_number": "2",
+    ]
+    let artifact: [String: Any] = [
+      "artifact_id": "31", "kind": "request_body", "capture_origin": "network_request",
+      "creator_event_id": "2", "session_id": "7",
+    ]
+    let body: [UInt8] = Array("n=token".utf8)
+    let found = OriginTraceDocumentBuilder.retainedRequestBodies(
+      events: [record], artifacts: [artifact], requestID: "900", read: { _ in body })
+    precondition(found == ["7:84:1": body])
+    for (field, value) in [("creator_event_id", "3"), ("kind", "response_body"), ("capture_origin", "unknown")] {
+      var wrong = artifact
+      wrong[field] = value
+      precondition(OriginTraceDocumentBuilder.retainedRequestBodies(
+        events: [record], artifacts: [wrong], requestID: "900", read: { _ in body }).isEmpty, field)
+    }
+    precondition(OriginTraceDocumentBuilder.retainedRequestBodies(
+      events: [record], artifacts: [artifact, artifact], requestID: "900", read: { _ in body }).isEmpty)
+    precondition(OriginTraceDocumentBuilder.retainedRequestBodies(
+      events: [record], artifacts: [artifact], requestID: "900", read: { _ in nil }).isEmpty)
+    print("PASS native Origin Trace invocation identity and exact value-flow cases match the Rust builder")
   }
 }

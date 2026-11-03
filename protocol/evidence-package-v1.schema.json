@@ -568,7 +568,10 @@
             "wasm_guest_dispatch",
             "wasm_guest_invocation",
             "wasm_indirect_observation",
-            "js_dispatch_observation"
+            "js_dispatch_observation",
+            "js_invocation_start",
+            "js_invocation_settle",
+            "js_invocation_request"
           ]
         },
         "status_code": {

@@ -146,6 +146,8 @@ void NativeProbeHost::CaptureWasmDispatch(const std::uint64_t capture_epoch,
                                           const std::uint32_t selector,
                                           const std::uint32_t table_count,
                                           const std::uint32_t sample_index,
+                                          const std::uint8_t js_invocation_state,
+                                          const std::uint32_t js_invocation_id,
                                           const std::string& source_url,
                                           mojo_base::BigBuffer content) {
   constexpr auto mask = NativeProbeCategoryMask(NativeProbeCategory::kVm) |
@@ -201,6 +203,9 @@ void NativeProbeHost::CaptureWasmDispatch(const std::uint64_t capture_epoch,
   observation.selector = selector;
   observation.table_count = table_count;
   observation.sample_index = sample_index;
+  // The artifact sink refuses an inconsistent context as invalid input.
+  observation.js_invocation_state = js_invocation_state;
+  observation.js_invocation_id = js_invocation_id;
   observation.source_url = source_url;
   const auto document = owner->GetWeakDocumentPtr();
   const std::weak_ptr<const std::uint64_t> lifetime = wasm_epoch_lifetime_;
@@ -227,6 +232,8 @@ void NativeProbeHost::CaptureWasmIndirect(const std::uint64_t capture_epoch,
                                           const std::uint32_t callee_function_index,
                                           const std::uint32_t resolution,
                                           const std::uint32_t sample_index,
+                                          const std::uint8_t js_invocation_state,
+                                          const std::uint32_t js_invocation_id,
                                           const std::string& source_url,
                                           mojo_base::BigBuffer content) {
   constexpr auto mask = NativeProbeCategoryMask(NativeProbeCategory::kVm) |
@@ -280,6 +287,9 @@ void NativeProbeHost::CaptureWasmIndirect(const std::uint64_t capture_epoch,
   observation.callee_function_index = callee_function_index;
   observation.resolution = static_cast<NativeWasmIndirectResolution>(resolution);
   observation.sample_index = sample_index;
+  // The artifact sink refuses an inconsistent context as invalid input.
+  observation.js_invocation_state = js_invocation_state;
+  observation.js_invocation_id = js_invocation_id;
   observation.source_url = source_url;
   const auto document = owner->GetWeakDocumentPtr();
   const std::weak_ptr<const std::uint64_t> lifetime = wasm_epoch_lifetime_;
@@ -547,7 +557,8 @@ void NativeProbeHost::Configure(const std::uint64_t session_id,
   wasm_epoch_lifetime_ = std::make_shared<const std::uint64_t>(wasm_capture_epoch_);
   client_->Configure(session_id, category_mask, expires_at_monotonic_ns, capture_canvas_images,
                      std::move(renderer_region), wasm_capture_epoch_,
-                     session_->guest_adapter_json(), session_->js_dispatch_sites());
+                     session_->guest_adapter_json(), session_->js_dispatch_sites(),
+                     session_->js_invocation_sites(), session_->js_invocation_digests());
 }
 
 void NativeProbeHost::Disable() {

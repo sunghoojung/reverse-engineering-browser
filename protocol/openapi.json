@@ -5858,6 +5858,47 @@
                     }
                   }
                 }
+              },
+              {
+                "if": {
+                  "properties": {
+                    "relation": {
+                      "const": "invocation_value_flow"
+                    }
+                  },
+                  "required": [
+                    "relation"
+                  ]
+                },
+                "then": {
+                  "properties": {
+                    "confidence": {
+                      "const": "correlated"
+                    }
+                  }
+                }
+              },
+              {
+                "if": {
+                  "properties": {
+                    "relation": {
+                      "enum": [
+                        "issued_during_invocation",
+                        "invocation_settlement"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "relation"
+                  ]
+                },
+                "then": {
+                  "properties": {
+                    "confidence": {
+                      "const": "observed"
+                    }
+                  }
+                }
               }
             ],
             "required": [
@@ -5903,7 +5944,10 @@
                   "request_initiator",
                   "request_lifecycle",
                   "artifact_request",
-                  "temporal_adjacency"
+                  "temporal_adjacency",
+                  "issued_during_invocation",
+                  "invocation_settlement",
+                  "invocation_value_flow"
                 ]
               },
               "confidence": {
@@ -5935,7 +5979,9 @@
                   "no_predecessor",
                   "cycle",
                   "step_limit",
-                  "capture_gap"
+                  "capture_gap",
+                  "value_flow_ambiguous",
+                  "value_flow_unsearched"
                 ]
               },
               "after_step": {
@@ -8261,6 +8307,54 @@
               },
               "is_default": {
                 "type": "boolean"
+              },
+              "js_invocation": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "state",
+                  "invocation_id"
+                ],
+                "description": "The JavaScript invocation context the record was produced in (protocol/native-js-invocation-v1.md). Absent when the record did not observe one. A state of none or unknown is a coverage limit, not evidence that the work is unrelated to an invocation.",
+                "properties": {
+                  "state": {
+                    "enum": [
+                      "none",
+                      "inside",
+                      "unknown"
+                    ]
+                  },
+                  "invocation_id": {
+                    "type": "string",
+                    "pattern": "^(?:0|[1-9][0-9]*)$",
+                    "maxLength": 10
+                  }
+                },
+                "allOf": [
+                  {
+                    "if": {
+                      "properties": {
+                        "state": {
+                          "const": "inside"
+                        }
+                      }
+                    },
+                    "then": {
+                      "properties": {
+                        "invocation_id": {
+                          "pattern": "^[1-9][0-9]*$"
+                        }
+                      }
+                    },
+                    "else": {
+                      "properties": {
+                        "invocation_id": {
+                          "const": "0"
+                        }
+                      }
+                    }
+                  }
+                ]
               }
             }
           },
@@ -8342,6 +8436,54 @@
                   }
                 ],
                 "description": "Monotonic time of the accepted observation event, copied from the native event."
+              },
+              "js_invocation": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "state",
+                  "invocation_id"
+                ],
+                "description": "The JavaScript invocation context the record was produced in (protocol/native-js-invocation-v1.md). Absent when the record did not observe one. A state of none or unknown is a coverage limit, not evidence that the work is unrelated to an invocation.",
+                "properties": {
+                  "state": {
+                    "enum": [
+                      "none",
+                      "inside",
+                      "unknown"
+                    ]
+                  },
+                  "invocation_id": {
+                    "type": "string",
+                    "pattern": "^(?:0|[1-9][0-9]*)$",
+                    "maxLength": 10
+                  }
+                },
+                "allOf": [
+                  {
+                    "if": {
+                      "properties": {
+                        "state": {
+                          "const": "inside"
+                        }
+                      }
+                    },
+                    "then": {
+                      "properties": {
+                        "invocation_id": {
+                          "pattern": "^[1-9][0-9]*$"
+                        }
+                      }
+                    },
+                    "else": {
+                      "properties": {
+                        "invocation_id": {
+                          "const": "0"
+                        }
+                      }
+                    }
+                  }
+                ]
               }
             },
             "allOf": [
@@ -8597,6 +8739,54 @@
                   "minimum": 8,
                   "maximum": 16777215
                 }
+              },
+              "js_invocation": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "state",
+                  "invocation_id"
+                ],
+                "description": "The JavaScript invocation context the record was produced in (protocol/native-js-invocation-v1.md). Absent when the record did not observe one. A state of none or unknown is a coverage limit, not evidence that the work is unrelated to an invocation.",
+                "properties": {
+                  "state": {
+                    "enum": [
+                      "none",
+                      "inside",
+                      "unknown"
+                    ]
+                  },
+                  "invocation_id": {
+                    "type": "string",
+                    "pattern": "^(?:0|[1-9][0-9]*)$",
+                    "maxLength": 10
+                  }
+                },
+                "allOf": [
+                  {
+                    "if": {
+                      "properties": {
+                        "state": {
+                          "const": "inside"
+                        }
+                      }
+                    },
+                    "then": {
+                      "properties": {
+                        "invocation_id": {
+                          "pattern": "^[1-9][0-9]*$"
+                        }
+                      }
+                    },
+                    "else": {
+                      "properties": {
+                        "invocation_id": {
+                          "const": "0"
+                        }
+                      }
+                    }
+                  }
+                ]
               }
             },
             "description": "Native observation with explicit artifact and invocation bindings. Consumers additionally verify exact sites, artifact digests, PC arithmetic, snapshot bounds, default-arm selection and causal identities; schema validation alone is not evidence of guest semantics.",
@@ -17171,7 +17361,10 @@
               "wasm_guest_dispatch",
               "wasm_guest_invocation",
               "wasm_indirect_observation",
-              "js_dispatch_observation"
+              "js_dispatch_observation",
+              "js_invocation_start",
+              "js_invocation_settle",
+              "js_invocation_request"
             ]
           },
           "status_code": {

@@ -1,0 +1,49 @@
+<!doctype html>
+<!--
+  Repository-authored synthetic page for the document-start Console script
+  experiment. It defines one plain function on `window` and calls it with
+  authored values. Nothing here is captured evidence, and no third-party site,
+  service or vendor code is involved. Serve it from a local HTTP server and use
+  that server's exact origin in the document-start rule.
+-->
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Synthetic document-start fixture</title>
+  </head>
+  <body>
+    <h1>Synthetic document-start fixture</h1>
+    <p id="result">Not run.</p>
+    <p>
+      This page defines <code>window.syntheticTransform(text, rounds)</code> in
+      an inline script, then calls it. A document-start Console script runs
+      before this inline script, so it can observe the definition as it happens.
+    </p>
+    <iframe
+      id="child"
+      title="Synthetic child frame"
+      src="synthetic-transform-child.html"
+      width="320"
+      height="90"
+    ></iframe>
+    <script>
+      // A plain, deterministic function. It is not a vendor API and does not
+      // resemble one: the experiment is being demonstrated, not a target.
+      window.syntheticTransform = function syntheticTransform(text, rounds) {
+        let value = String(text);
+        for (let round = 0; round < rounds; round += 1) {
+          let out = '';
+          for (let index = 0; index < value.length; index += 1) {
+            out += String.fromCharCode((value.charCodeAt(index) + round + 1) % 0x4000);
+          }
+          value = out;
+        }
+        return value;
+      };
+      const first = window.syntheticTransform('authored-sample', 3);
+      const second = window.syntheticTransform('authored-sample-two', 1);
+      document.querySelector('#result').textContent =
+        `Produced ${first.length} and ${second.length} characters.`;
+    </script>
+  </body>
+</html>

@@ -31,6 +31,9 @@ skills under `.agents/skills/`.
   explicit session selection, same-machine MCP client configuration, guarded
   CLI inspection, exact evidence correlation, and offline client authoring
   with synthetic tests
+- [Document-start Console scripts](development/console-document-start-scripts.md):
+  enabling the separately armed experiment, writing a rule that cannot widen,
+  and the example snippet for the local synthetic page
 - [Fast local Brave builds](development/fast-browser-builds.md)
 - [Origin Trace + Brave paired release](development/paired-release.md):
   browser build, provenance, pinned hosting, pairing pin and publication for v0.5.0

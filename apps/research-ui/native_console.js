@@ -412,7 +412,7 @@
     const ds = name => element(`ds-${name}`);
     const sequence = value => typeof value === 'string' && /^(0|[1-9][0-9]{0,19})$/.test(value);
     let view = null, cursor = '0', refreshing = false, tick = 0, failed = false, lastGeneration = null;
-    function requested() { return ds('enable').checked; }
+    function requested() { return ds('enable').checked === true; }
     function armedCount() { return view?.document_start?.scripts?.length || 0; }
     function permitted() { return view?.document_start?.permitted === true; }
     function message(text, error = false) {

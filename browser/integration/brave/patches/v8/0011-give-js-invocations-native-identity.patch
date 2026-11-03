@@ -1481,7 +1481,7 @@ diff --git a/test/cctest/test-api.cc b/test/cctest/test-api.cc
 index e9addc26f28685ad74d07a09347dbbaa347e5ceb..5fadada03863578a9703476414c76fced20cdc5a 100644
 --- a/test/cctest/test-api.cc
 +++ b/test/cctest/test-api.cc
-@@ -32665,3 +32665,492 @@ TEST(RebNativeJsDispatchAdmissionAndSiteCap) {
+@@ -32665,3 +32665,493 @@ TEST(RebNativeJsDispatchAdmissionAndSiteCap) {
             records[0].observation.slot);
    CHECK(records[0].observation.new_activation);
  }
@@ -1942,13 +1942,14 @@ index e9addc26f28685ad74d07a09347dbbaa347e5ceb..5fadada03863578a9703476414c76fce
 +  RebJsInvocationScope capture(env);
 +  const std::string source =
 +      "function rebAdmitted(a) { observe(1); return a; }"
-+      "function* rebGenerator(a) { yield a; }"
-+      "function rebEarly(a) { return a; } rebEarly(1);";
-+  // rebEarly already has bytecode when arming begins.
-+  CompileRun(source.c_str());
++      "function* rebGenerator(a) { yield a; }";
++  // rebEarly has bytecode when arming begins, and its own script keeps it
++  // that way: arming never recompiles it, so its one copy stays unarmed.
++  const std::string early = "function rebEarly(a) { return a; } rebEarly(1);";
++  CompileRun(early.c_str());
 +  capture.Arm(6, {RebInvocationSite(source, RebAnchor(source, "rebAdmitted(", 11)),
 +                  RebInvocationSite(source, RebAnchor(source, "rebGenerator(", 12)),
-+                  RebInvocationSite(source, RebAnchor(source, "rebEarly(", 8))});
++                  RebInvocationSite(early, RebAnchor(early, "rebEarly(", 8))});
 +  CompileRun(source.c_str());
 +  CompileRun("rebGenerator(1).next(); rebEarly(2);");
 +  bool unsupported = false;

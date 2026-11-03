@@ -14714,11 +14714,8 @@
                 }
               ],
               "uncertainties": [
-                {
-                  "phase": "command_exchange",
-                  "cause": "timeout",
-                  "condition": "A native transport timeout leaves it unknown whether the browser applied the set. Read the state before arming again; nothing is retried automatically."
-                }
+                "A native transport timeout leaves it unknown whether the browser applied the set. Read the state before arming again; nothing is retried automatically.",
+                "An armed snippet's effects depend on the supplied source. It runs in the page main world of every new matching document with that page's full authority, and work it schedules can outlive its injection."
               ],
               "prerequisites": [
                 {
@@ -14745,17 +14742,8 @@
               "confirmations": [
                 {
                   "field": "confirm_document_start",
-                  "when": {
-                    "properties": {
-                      "action": {
-                        "const": "arm_document_start"
-                      }
-                    },
-                    "required": [
-                      "action"
-                    ]
-                  },
-                  "condition": "Arming runs the snippet automatically in every new matching document without a further researcher action."
+                  "value": true,
+                  "when": {}
                 }
               ],
               "notes": "Declares the authorization boundary: one exact origin, exactly one frame kind, an optional literal path prefix. There is no pattern, wildcard, URL guessing, or retroactive injection into documents that are already open. Snippet output is bounded page JavaScript, never evidence.",
@@ -14798,11 +14786,7 @@
               ],
               "state_dependent_effects": [],
               "uncertainties": [
-                {
-                  "phase": "command_exchange",
-                  "cause": "timeout",
-                  "condition": "A native transport timeout leaves it unknown whether the browser removed the set. Read the state before relying on it; nothing is retried automatically."
-                }
+                "A native transport timeout leaves it unknown whether the browser removed the set. Read the state before relying on it; nothing is retried automatically."
               ],
               "prerequisites": [
                 {

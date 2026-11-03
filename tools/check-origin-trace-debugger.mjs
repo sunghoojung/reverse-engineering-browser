@@ -1322,7 +1322,7 @@ function sourceProductionFunction(name) {
   assert(end, name);
   return appSource.slice(start, start + end.index + end[0].length);
 }
-const ownershipFunctionNames = ['sourceIdentity', 'sourceIsCurrent', 'sourceReference',
+const ownershipFunctionNames = ['sourceIdentity', 'isSourceArtifact', 'sourceIsCurrent', 'sourceReference',
   'retireSourceAnalysis', 'releaseSourcePreview', 'canvasGalleryVisible', 'releaseCanvasPreview', 'retireCanvasPreviews', 'syncCanvasPreviews', 'pumpCanvasPreviews', 'retryCanvasPreview', 'boundSourcePreviews', 'boundSourceAnalysis',
   'capturedSources', 'selectedSource', 'deobfuscationKey', 'validateSourceAnalysis', 'loadDeobfuscation',
   'sourceDisplayView', 'sourceViewLabel', 'sourceDerivedView', 'loadArtifactContent', 'refreshArtifacts',
@@ -1374,6 +1374,27 @@ const ownedDeferred = () => {let resolve; const promise = new Promise(done=>{res
   held.resolve(new Response('const a = 1;')); await pending;
   assert.equal(state.artifacts[0].content,'const a = 1;'); assert.equal(artifact.loading,false); assert.equal(reads,1);
   sourceOwnershipReceipt.push({test:'pending_refresh_owner',status:'passed',contentReads:reads});
+}
+{
+  // A request body first in the catalog is not a source. Refresh selects the
+  // first source instead, and no Sources path reads the body's bytes.
+  const text='{"answers":"secret"}', script=await ownedArtifact('2');
+  const body={...await ownedArtifact('1',text),kind:'request_body',capture_origin:'network_request',execution_context_id:'0',
+    creator_event_id:'14',url:'https://api.example/getcaptcha?s=1',mime_type:'application/json',sensitive:true};
+  const reads=[];
+  const {state,api}=ownedContext({fetch:async url=>{
+    if(url.startsWith('/api/artifacts?')) return Response.json({count:2,artifacts:[body,script]});
+    reads.push(url); return new Response('const a = 1;');
+  }});
+  await api.refreshArtifacts();
+  for(let i=0;i<50 && state.artifacts[1].loading;i++) await new Promise(resolve=>setTimeout(resolve,1));
+  assert.equal(state.selectedArtifactId,'2'); assert.deepEqual([...state.openArtifactIds],['2']);
+  assert.deepEqual([...api.capturedSources().map(source=>source.artifact_id)],['2']);
+  assert.equal(api.selectArtifact('1'),false); assert.equal(state.selectedArtifactId,'2');
+  assert.match(state.sourceNotice,/Request bodies are shown with their request in Traffic/);
+  await api.loadArtifactContent(state.artifacts[0]); assert.equal(state.artifacts[0].content,undefined);
+  assert.deepEqual(reads.filter(url=>url.includes('/api/artifacts/1/')),[],'Sources never reads a request body');
+  sourceOwnershipReceipt.push({test:'request_body_is_not_a_source',status:'passed'});
 }
 {
   const old=await ownedArtifact('1'), newer=await ownedArtifact('1','const newer = 2;','2');

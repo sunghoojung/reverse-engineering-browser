@@ -651,6 +651,10 @@ final class OriginTraceRenderedUITests: XCTestCase {
         let detail = try await ui.value("\(find)?.textContent ?? ''") as? String ?? ""
         XCTAssertTrue(detail.contains(kind), "\(size.name): \(artifact) names its kind: \(detail)")
       }
+      // The retained request body (artifact 320) is Traffic evidence, never a source file.
+      let tree = try await ui.value("document.querySelector('#source-tree')?.textContent ?? ''") as? String ?? ""
+      XCTAssertFalse(tree.contains(expected.requestBodyHost), "\(size.name): Sources lists no request body origin: \(tree)")
+      XCTAssertFalse(tree.contains("artifact 320"), "\(size.name): Sources lists no request body file")
       try await ui.click("#source-tree [role=treeitem]", containing: "artifact 303")
       try await ui.waitUntil("(document.querySelector('#source-code')?.innerText ?? '').includes('retainedLine')", "retained source did not render")
       let source = try await ui.value("document.querySelector('#source-code').innerText") as? String ?? ""

@@ -39,7 +39,7 @@ export async function checkSourceTreeModel(root) {
     part(app,'      function sourceIdentity(','      function retireSourceAnalysis(')+
     part(app,'      function sourceDisplayName(','      function selectedSource(')+
     part(app,'      const SOURCE_TREE_LIMITS','      function renderSourceHealth(')+
-    ';({sourceTreeModel,sourceTreeVisible,renderSourceTree,toggleSourceTree,sourceTreeFocus,sourceTreeState,sourceTreeKeydown,SOURCE_TREE_LIMITS})';
+    ';({sourceTreeModel,sourceTreeVisible,renderSourceTree,toggleSourceTree,sourceTreeFocus,sourceTreeState,sourceTreeKeydown,isSourceArtifact,SOURCE_TREE_LIMITS})';
   const artifact=(id,url=`https://a.invalid/shared/nested/${id}.js`)=>({source_type:'artifact',artifact_id:String(id),url,
     protocol_version:1,session_id:'1',navigation_id:'2',frame_id:'3',parent_artifact_id:'0',creator_event_id:'0',execution_context_id:'4',
     capture_origin:'dynamic_javascript',kind:'javascript',mime_type:'text/javascript',byte_size:8,sha256:'a'.repeat(64),sensitive:false});
@@ -105,6 +105,16 @@ export async function checkSourceTreeModel(root) {
     t.state.artifacts=[];t.api.renderSourceTree();assert.equal(rows(t).length,0);checkTabStop(t);assert.match(t.tree.children[0].textContent,/No source artifacts/);
     t.tree.focus();t.state.artifacts=[artifact(8)];t.api.renderSourceTree();assert(t.tree.contains(t.document.activeElement));checkTabStop(t);
     t.state.artifacts=[{...artifact(9),kind:'canvas_data_url'}];t.api.renderSourceTree();assert.equal(rows(t).length,0);assert.match(t.tree.children[0].textContent,/Canvas images/);
+    // A retained request body is network evidence shown with its Traffic row
+    // (native-network-v2.md). It never becomes a source file or origin branch.
+    const body={...artifact(10,'https://api.example/getcaptcha?s=1'),kind:'request_body',capture_origin:'network_request',
+      execution_context_id:'0',creator_event_id:'14',mime_type:'application/json',sensitive:true};
+    t.state.artifacts=[body];t.api.renderSourceTree();assert.equal(rows(t).length,0);
+    t.state.artifacts=[body,artifact(11)];t.api.renderSourceTree();
+    const labels=[...t.api.sourceTreeState().model.nodes.values()].map(node=>node.label).join('\n');
+    assert.doesNotMatch(labels,/api\.example|getcaptcha|artifact 10/);
+    assert.deepEqual([...t.api.sourceTreeState().visible.filter(node=>node.source).map(node=>node.source.artifact_id)],['11']);
+    assert.equal(t.api.isSourceArtifact(body),false);assert.equal(t.api.isSourceArtifact(artifact(12)),true);
   }
   {
     const t=fixture();t.api.renderSourceTree();const nav=t.api.sourceTreeState(),root=nav.rows.get(nav.model.rootKey).row;root.focus();

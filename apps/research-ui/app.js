@@ -5823,6 +5823,14 @@ const capturedExportPanel = installCapturedExportDialog({
         return source ? sourceFactsIdentity({...source, source_type: 'artifact'}) : null;
       }
 
+      // The one Sources exclusion rule. Canvas images belong to Fingerprinting;
+      // request bodies are sensitive network evidence shown with their Traffic
+      // row (protocol/native-network-v2.md). Neither is listed, opened or loaded
+      // as a source file.
+      function isSourceArtifact(artifact) {
+        return Boolean(artifact) && artifact.kind !== 'canvas_data_url' && artifact.kind !== 'request_body';
+      }
+
       function sourceIsCurrent(source) {
         const candidates = state.artifacts.filter(value => value.artifact_id === source.artifact_id);
         return candidates.length === 1 && sourceIdentity(candidates[0]) === sourceIdentity(source);
@@ -5866,7 +5874,7 @@ const capturedExportPanel = installCapturedExportDialog({
 
       function boundSourcePreviews(protectedSource = null) {
         const protectedIdentity = sourceIdentity(selectedSource() ?? protectedSource);
-        const entries = (state.artifacts ?? []).filter(source => source.kind !== 'canvas_data_url').map(source => ({source, preview: source}))
+        const entries = (state.artifacts ?? []).filter(isSourceArtifact).map(source => ({source, preview: source}))
           .filter(({preview}) => preview && (preview.loading || preview.content !== undefined));
         entries.sort((a, b) => (a.preview.previewUsed ?? 0) - (b.preview.previewUsed ?? 0));
         let characters = entries.reduce((sum, {preview}) => sum + (preview.content?.length ?? 0), 0);
@@ -5900,8 +5908,7 @@ const capturedExportPanel = installCapturedExportDialog({
 
       function capturedSources() {
         return state.artifacts
-          // Request bodies are network evidence, shown with their Traffic row.
-          .filter(artifact => artifact.kind !== 'canvas_data_url' && artifact.kind !== 'request_body')
+          .filter(isSourceArtifact)
           .map(artifact => {
             const key = `artifact:${artifact.artifact_id}`;
             return { ...artifact, source_type: 'artifact', key, deobfuscation: state.deobfuscationCache?.get(deobfuscationKey({...artifact, key})) ?? null };
@@ -5962,7 +5969,7 @@ const capturedExportPanel = installCapturedExportDialog({
         };
         for (let index = 0; index < Math.min(catalog.length, SOURCE_TREE_LIMITS.catalog); index++) {
           const raw = catalog[index];
-          if (raw.kind === 'canvas_data_url') continue;
+          if (!isSourceArtifact(raw)) continue;
           // Refuse an overlong path before URL parsing or identity serialization.
           if (typeof raw.url !== 'string' || raw.url.length > SOURCE_TREE_LIMITS.url) {limits.omitted++; continue;}
           const source = {...sourceReference(raw), source_type: 'artifact'};
@@ -7291,6 +7298,8 @@ const capturedExportPanel = installCapturedExportDialog({
       async function loadArtifactContent(artifact, {retry = false, canvasOwner = null} = {}) {
         if (artifact?.kind === 'canvas_data_url' && (!canvasOwner ||
             state.canvasPreviewOwners?.get(sourceIdentity(artifact)) !== canvasOwner || !canvasGalleryVisible() || state.artifactReceiverError)) return;
+        // Request body bytes are read only by the Traffic body view.
+        if (artifact?.kind === 'request_body') return;
         if (!sourceIsCurrent(artifact) || artifact.content !== undefined || artifact.loading || (artifact.loadError && !retry)) return;
         const identity = sourceIdentity(artifact);
         const controller = new AbortController();
@@ -7426,6 +7435,14 @@ const capturedExportPanel = installCapturedExportDialog({
           return false;
         }
         const artifact = matches[0];
+        if (!isSourceArtifact(artifact)) {
+          state.sourceNoticeKind = 'warning';
+          state.sourceNotice = artifact.kind === 'request_body'
+            ? 'Request bodies are shown with their request in Traffic. No source was opened.'
+            : 'Canvas images are shown in Fingerprinting. No source was opened.';
+          renderSourceHealth();
+          return false;
+        }
         investigationPassiveSource = passive;
         state.sourceNotice = null;
         const identity = sourceIdentity(artifact);
@@ -7542,12 +7559,12 @@ const capturedExportPanel = installCapturedExportDialog({
           });
           if (!canvasGalleryVisible()) retireCanvasPreviews();
           state.openArtifactIds = state.openArtifactIds.filter(id => state.artifacts.some(artifact => artifact.artifact_id === id));
-          if (!state.artifacts.some(artifact => artifact.artifact_id === state.selectedArtifactId)) {
-            state.selectedArtifactId = state.artifacts[0].artifact_id;
-            state.openArtifactIds = [state.selectedArtifactId];
+          if (!state.artifacts.some(artifact => artifact.artifact_id === state.selectedArtifactId && isSourceArtifact(artifact))) {
+            state.selectedArtifactId = state.artifacts.find(isSourceArtifact)?.artifact_id ?? null;
+            state.openArtifactIds = state.selectedArtifactId === null ? [] : [state.selectedArtifactId];
           }
           renderSources();
-          const selected = state.artifacts.find(artifact => artifact.artifact_id === state.selectedArtifactId);
+          const selected = state.artifacts.find(artifact => artifact.artifact_id === state.selectedArtifactId && isSourceArtifact(artifact));
           if (selected) {
             loadArtifactContent(selected);
             if (!investigationPassiveSource && state.sourceWasm && selected.kind === 'wasm') loadWasmInspection(selected);
@@ -8048,7 +8065,8 @@ const capturedExportPanel = installCapturedExportDialog({
       document.querySelectorAll('[data-source-collection]').forEach(button => button.addEventListener('click', () => {
         state.sourcePane = 'files';
         state.sourceCollection = button.dataset.sourceCollection;
-        const artifact = state.artifacts.find(candidate => candidate.artifact_id === state.selectedArtifactId) ?? state.artifacts[0];
+        const artifact = state.artifacts.find(candidate => candidate.artifact_id === state.selectedArtifactId && isSourceArtifact(candidate)) ??
+          state.artifacts.find(isSourceArtifact);
         if (artifact) selectArtifact(artifact.artifact_id);
         else renderSources();
       }));

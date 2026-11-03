@@ -11748,7 +11748,8 @@
               "response_body",
               "canvas_data_url",
               "bytecode_buffer",
-              "wasm_guest_adapter"
+              "wasm_guest_adapter",
+              "request_body"
             ]
           },
           "url": {
@@ -16373,7 +16374,9 @@
               "wasm_guest_dispatch",
               "wasm_guest_invocation",
               "wasm_indirect_observation",
-              "js_dispatch_observation"
+              "js_dispatch_observation",
+              "request_body",
+              "request_target"
             ]
           },
           "status_code": {
@@ -16572,7 +16575,8 @@
               "webassembly_module",
               "webassembly_instantiate",
               "canvas_to_data_url",
-              "native_wasm_guest"
+              "native_wasm_guest",
+              "network_request"
             ]
           },
           "kind": {
@@ -16584,7 +16588,8 @@
               "response_body",
               "canvas_data_url",
               "bytecode_buffer",
-              "wasm_guest_adapter"
+              "wasm_guest_adapter",
+              "request_body"
             ]
           },
           "byte_size": {

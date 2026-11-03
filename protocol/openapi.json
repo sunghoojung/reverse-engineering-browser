@@ -23070,7 +23070,12 @@
           "pending_renderer_processes": {
             "type": "integer",
             "minimum": 0,
-            "description": "Live renderers that have not acknowledged this exact generation. Zero means a document created now runs the set. Positive is a readiness gap, not a record loss."
+            "description": "Live renderers that do not hold this exact generation. Zero means a document created now runs the set. Positive is a readiness gap, not a record loss. While a set is armed it includes refused_renderer_processes, which never become ready."
+          },
+          "refused_renderer_processes": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Live renderer processes refused beyond the 64-renderer bound. They never receive a set, so documents in them never run a snippet until those processes exit."
           },
           "scripts": {
             "type": "array",

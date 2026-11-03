@@ -143,7 +143,10 @@ wildcard, no host suffix, and no URL guessing.
   retroactively injected. Reload it.
 - **Renderer readiness.** `pending_renderer_processes` is zero once every live
   renderer holds the current generation. Reload after it reaches zero; a
-  positive value is a readiness gap, not a lost record.
+  positive value is a readiness gap, not a lost record. A positive
+  `refused_renderer_processes` means more than 64 renderer processes are
+  running: those never receive a set and keep the pending count above zero
+  while one is armed. Close tabs until they exit.
 - **Reads do not drain.** Pass the last `sequence` you saw as
   `after_sequence`. A failed or slow read cannot lose a record; the bounded
   ring reports `dropped` when it evicts one.

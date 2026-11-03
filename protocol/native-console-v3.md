@@ -143,13 +143,22 @@ normally holds the set well before its first document commits. That delivery is
 still asynchronous, so it is not assumed: each renderer acknowledges the exact
 number of scripts it decoded, and the browser marks that renderer ready only on
 an exact match. A renderer that refused, partially decoded, or has not yet
-applied the set keeps counting as pending.
+applied the set keeps counting as pending. A renderer that connects after the
+set was cleared receives the empty set too, so it is marked ready once it
+acknowledges holding nothing.
+
+The browser holds at most 64 renderer connections. A renderer process beyond
+that is refused: it never receives a set, and `refused_renderer_processes`
+reports it for as long as that process lives. While a set is armed, a refused
+renderer also counts as pending, and it never becomes ready.
 
 `pending_renderer_processes` is therefore a precise readiness signal. Zero means
 every live renderer holds the current generation, so a document created now runs
-it. A positive value is a readiness gap, not a record loss. Documents that were
-already open when the set was armed are never retroactively injected; reload
-them once the count reaches zero.
+it. A positive value is a readiness gap, not a record loss; when
+`refused_renderer_processes` is positive, documents in those processes never
+run the set until the processes exit. Documents that were already open when the
+set was armed are never retroactively injected; reload them once the count
+reaches zero.
 
 Per script, `injected_documents` counts the documents that actually ran it,
 `records` counts everything it produced, and `refused` counts its budget and
@@ -215,6 +224,7 @@ and response shapes. Responses from the document-start surfaces report
 | Report value | 512 UTF-8 bytes, primitives only |
 | Records per document | 64, then one `refused` notice, then nothing |
 | Tracked document budgets per renderer | 32, oldest recycled |
+| Renderer processes holding a set | 64; later ones are refused and counted |
 | Browser output ring | 128 records; visible saturating drop count |
 | Output page | 32 records per read |
 | Injection watchdog | 50 ms, synchronous, no microtask checkpoint |

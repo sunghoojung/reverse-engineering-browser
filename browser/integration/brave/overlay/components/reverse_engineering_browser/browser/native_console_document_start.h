@@ -85,6 +85,9 @@ class NativeConsoleDocumentStartRegistry final {
   void Push();
 
   std::vector<std::unique_ptr<NativeConsoleDocumentStartHost>> hosts_;
+  // Live renderer processes refused at the host limit. They never receive a
+  // set, so readiness counts them while one is armed.
+  std::vector<int> refused_;
   std::vector<Armed> scripts_;
   std::deque<base::DictValue> output_;
   std::uint64_t generation_ = 0;

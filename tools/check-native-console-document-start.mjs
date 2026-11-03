@@ -92,7 +92,7 @@ export async function checkNativeConsoleDocumentStart(root) {
   const calls = [];
   const reads = [];
   let session = null, permitted = false, generation = 0, armed = [], output = [], nextSequence = 1;
-  let readFails = false, malformed = false, armRefused = false, stopUnconfirmed = false, unconfirmed = false;
+  let readFails = false, malformed = false, armRefused = false, stopUnconfirmed = false, unconfirmed = false, refusedProcesses = 0;
   const record = (sequence, kind, text, script = '1') => ({
     sequence: String(sequence), record: kind, provenance: 'console-document-start-script',
     script_id: script, document_id: '7', frame_id: '99', top_frame: true,
@@ -100,7 +100,8 @@ export async function checkNativeConsoleDocumentStart(root) {
   });
   const documentStartState = after => ({
     status: permitted ? 'ok' : 'unavailable', permitted, generation: String(generation),
-    renderer_processes: permitted ? 1 : 0, pending_renderer_processes: 0,
+    renderer_processes: permitted ? 1 : 0, pending_renderer_processes: armed.length ? refusedProcesses : 0,
+    refused_renderer_processes: refusedProcesses,
     scripts: armed,
     message: permitted ? undefined : 'Rebuild the pinned browser, then start a session with document_start enabled, or relaunch the live capture with REB_CONSOLE_DOCUMENT_START=1.',
     output: {
@@ -256,6 +257,15 @@ export async function checkNativeConsoleDocumentStart(root) {
   assert.match(first[1].textContent, /<img src=x onerror=alert\(1\)>/);
   assert.equal(first[1].querySelector('img'), null, 'captured text is never parsed as markup');
   assert.equal(first[0].dataset.level, 'info');
+
+  // A renderer refused at the process limit is never reported as ready.
+  refusedProcesses = 1;
+  await context.testConsole.documentStart.refresh(true); await settle();
+  assert.match(ds('counters').textContent, /1 renderer processes not ready yet/);
+  assert.match(ds('counters').textContent, /1 renderer processes over the 64-process limit never receive a set/);
+  assert.doesNotMatch(ds('counters').textContent, /every renderer holds this set/);
+  refusedProcesses = 0;
+  await context.testConsole.documentStart.refresh(true); await settle();
 
   // Reads are non-draining and cursor-based: no record is replayed or lost.
   await context.testConsole.documentStart.refresh(true); await settle();

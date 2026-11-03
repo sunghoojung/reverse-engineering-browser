@@ -1411,7 +1411,7 @@ mod tests {
             "limits": document_start_limits(), "unsupported": document_start_unsupported(),
             "document_start": {
                 "status": "ok", "permitted": true, "generation": "2", "renderer_processes": 2,
-                "pending_renderer_processes": 0,
+                "pending_renderer_processes": 1, "refused_renderer_processes": 1,
                 "scripts": [{"script_id":"1","rule":{"origin":"https://fixture.test","frame":"top","path_prefix":"/lab/"},
                     "source_bytes": 24, "digest": "0123456789abcdef", "records": 3,
                     "injected_documents": 1, "refused": 0}],
@@ -1545,7 +1545,8 @@ while True:
                 scripts = []
         armed.write_text(json.dumps(scripts))
         payload, kind = json.dumps({'status':status,'contract_version':3,'permitted':True,'generation':'1',
-            'scripts':scripts,'renderer_processes':1,'pending_renderer_processes':0}).encode(), 12
+            'scripts':scripts,'renderer_processes':1,'pending_renderer_processes':0,
+            'refused_renderer_processes':0}).encode(), 12
     else:
         payload = json.dumps({'status':'ok','value':{'type':'object','text':str(target),'handle':'7','truncated':False}}).encode()
     sys.stdout.buffer.write(response.pack(magic,version,0,sequence,kind,flags,count,len(payload),0) + payload)

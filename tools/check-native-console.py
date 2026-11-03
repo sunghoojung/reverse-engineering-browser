@@ -160,7 +160,7 @@ class DocumentStart:
         return {
             "status": "ok", "contract_version": 3, "permitted": self.permitted,
             "generation": str(self.generation), "renderer_processes": 1,
-            "pending_renderer_processes": 0,
+            "pending_renderer_processes": 0, "refused_renderer_processes": 0,
             "scripts": [{key: value for key, value in script.items() if key != "source"}
                         for script in self.scripts],
             "output": {

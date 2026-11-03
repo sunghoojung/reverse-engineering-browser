@@ -467,8 +467,11 @@
       }
       const output = view?.document_start?.output;
       const pendingProcesses = view?.document_start?.pending_renderer_processes;
+      // A refused renderer never receives a set, so it is named on its own
+      // rather than folded into a count that reads as "not ready yet".
+      const refusedProcesses = view?.document_start?.refused_renderer_processes;
       ds('counters').textContent = !output ? '' :
-        `${output.retained} retained · ${output.dropped} dropped · ${output.unattributed} unattributed · ${output.stale} stale · ${pendingProcesses ? `${pendingProcesses} renderer processes not ready yet` : 'every renderer holds this set'}`;
+        `${output.retained} retained · ${output.dropped} dropped · ${output.unattributed} unattributed · ${output.stale} stale · ${pendingProcesses ? `${pendingProcesses} renderer processes not ready yet` : 'every renderer holds this set'}${refusedProcesses ? ` · ${refusedProcesses} renderer processes over the 64-process limit never receive a set` : ''}`;
     }
     function reset() {
       view = null; cursor = '0'; failed = false; lastGeneration = null;

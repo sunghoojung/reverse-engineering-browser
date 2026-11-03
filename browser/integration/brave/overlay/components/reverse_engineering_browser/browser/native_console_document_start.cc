@@ -35,6 +35,11 @@ void Saturate(std::uint32_t& counter, std::uint32_t amount = 1) noexcept {
   counter += amount > kCounterLimit - counter ? kCounterLimit - counter : amount;
 }
 
+bool IsLiveRenderer(int render_process_id) {
+  auto* process = content::RenderProcessHost::FromID(render_process_id);
+  return process && process->IsInitializedAndNotDead();
+}
+
 std::string Hex(std::uint64_t value) {
   std::string text(16, '0');
   for (int index = 15; index >= 0; --index) {
@@ -133,19 +138,32 @@ void NativeConsoleDocumentStartRegistry::BindHost(
     int render_process_id,
     mojo::PendingReceiver<mojom::NativeConsoleScriptHost> receiver) {
   DCHECK_CURRENTLY_ON(content::BrowserThread::UI);
-  if (!IsPermitted() || hosts_.size() >= kNativeConsoleTargetLimit)
+  if (!IsPermitted())
     return;
+  // Forget refused processes that have exited, so this list is bounded by the
+  // browser's own live renderers rather than growing for the whole session.
+  std::erase_if(refused_, [render_process_id](int id) {
+    return id == render_process_id || !IsLiveRenderer(id);
+  });
+  if (hosts_.size() >= kNativeConsoleTargetLimit) {
+    // A refused renderer never receives a set, so State must keep counting it
+    // instead of reporting that every renderer holds the armed set.
+    refused_.push_back(render_process_id);
+    return;
+  }
   hosts_.push_back(
       std::make_unique<NativeConsoleDocumentStartHost>(render_process_id, std::move(receiver)));
 }
 
 void NativeConsoleDocumentStartRegistry::BindHostReady(NativeConsoleDocumentStartHost* host) {
-  // A renderer that connects after arming still receives the current set.
-  if (!generation_ || scripts_.empty())
+  // A renderer that connects after arming still receives the current set. A
+  // cleared set is sent as well, so its acknowledgement marks the renderer
+  // ready instead of leaving it pending while nothing is armed.
+  if (!generation_)
     return;
   std::array<std::uint8_t, kNativeConsoleDocumentStartSetBytes> encoded{};
-  const auto bytes = Encode(encoded);
-  if (bytes)
+  const auto bytes = scripts_.empty() ? std::size_t{0} : Encode(encoded);
+  if (bytes || scripts_.empty())
     host->Arm(generation_, std::span(encoded).first(bytes), scripts_.size());
 }
 
@@ -363,6 +381,12 @@ base::DictValue NativeConsoleDocumentStartRegistry::State(std::uint64_t after) c
     if (!host->delivered(generation_))
       ++pending;
   }
+  // A refused renderer holds no set. That equals an empty set, but it never
+  // holds an armed one, so it counts as pending for as long as one is armed.
+  const auto refused = static_cast<std::size_t>(
+      std::count_if(refused_.begin(), refused_.end(), [](int id) { return IsLiveRenderer(id); }));
+  if (!scripts_.empty())
+    pending += refused;
   std::uint64_t oldest = 0;
   if (!output_.empty()) {
     const auto* text = output_.front().FindString("sequence");
@@ -378,8 +402,10 @@ base::DictValue NativeConsoleDocumentStartRegistry::State(std::uint64_t after) c
       .Set("renderer_processes", static_cast<int>(hosts_.size()))
       // Zero means every live renderer holds this exact generation, so a
       // document created now runs it. A positive value is a readiness gap, not
-      // a record loss: reload the document after it reaches zero.
+      // a record loss: reload the document after it reaches zero. It includes
+      // refused renderers while a set is armed; those never become ready.
       .Set("pending_renderer_processes", static_cast<int>(pending))
+      .Set("refused_renderer_processes", static_cast<int>(refused))
       .Set("output", base::DictValue()
                          .Set("records", std::move(page))
                          .Set("next_sequence", base::NumberToString(next_sequence_))

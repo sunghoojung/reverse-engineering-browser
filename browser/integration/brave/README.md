@@ -118,7 +118,9 @@ The browser process owns the armed set and the bounded output ring. It pushes
 the set over a process-wide Mojo interface bound in
 `BindHostReceiverForRenderer`, so a renderer created after arming holds the set
 before its first document commits, and it only counts a renderer as ready once
-that renderer acknowledges the exact generation it can run.
+that renderer acknowledges the exact generation it can run. It binds at most 64
+renderers; a renderer refused beyond that is reported, never silently counted
+as ready.
 
 The renderer injects at main-world script-context creation, which Blink performs
 before any script can run in that context. Matching is the dependency-free

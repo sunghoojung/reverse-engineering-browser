@@ -46,8 +46,9 @@ NativeJsInvocationStartPayload StartFor(std::size_t slot, std::uint32_t id) {
   payload.document_id = 99;
   return payload;
 }
-NativeJsInvocationSettlePayload SettleFor(std::uint32_t id, bool digest) {
+NativeJsInvocationSettlePayload SettleFor(std::uint32_t id, bool digest, std::uint8_t slot = 0) {
   NativeJsInvocationSettlePayload payload;
+  payload.site_slot = slot;
   payload.outcome = 1;
   payload.via = 3;
   payload.value_kind = 3;
@@ -143,15 +144,18 @@ NativeJsInvocationContext ReadInvocation() noexcept {
   sink.RecordNativeJsInvocationStart(epoch, 0, StartFor(1, 71));
   assert(Drain(queue) == 0);  // no frame: the same coalesced input gap
 
-  // A settle without the digest opt-in may not carry a digest.
+  // A settle without the digest opt-in may not carry a digest. The refused
+  // settle still closes its start, so a second settle of it is not recorded.
   sink.RecordNativeJsInvocationSettle(epoch, 8, SettleFor(1, true));
   assert(Drain(queue) == 0);  // refused; its input gap was already emitted
   sink.RecordNativeJsInvocationSettle(epoch, 8, SettleFor(1, false));
+  assert(Drain(queue) == 0);
+  sink.RecordNativeJsInvocationSettle(epoch, 8, SettleFor(2, false));
   assert(One(queue).header.type == reb::NativeProbeType::kJsInvocationSettle);
 
   // Requests: inside an invocation, recorded; script outside any invocation,
   // not recorded; a loader start outside script while one may be open,
-  // unknown. 63 starts remain open after one settle.
+  // unknown. 62 starts remain open after two settles.
   InvocationProvider::context = {2, 9, true};
   sink.RecordNativeJsInvocationRequest(31);
   auto request = One(queue);
@@ -184,7 +188,7 @@ NativeJsInvocationContext ReadInvocation() noexcept {
   sink.NoteNativeJsInvocationStatus(epoch, 0,
                                     reb::NativeJsInvocationSiteStatus::kCompiledBeforeArming);
   assert(InvocationGap(One(queue)) == "native_js_invocation_site_0_compiled_before_arming");
-  sink.NoteNativeJsInvocationSettleUnavailable(epoch, 8);
+  sink.NoteNativeJsInvocationSettleUnavailable(epoch, 8, 3);
   assert(InvocationGap(One(queue)) == "native_js_invocation_settle_unavailable");
 
   // A replacement configuration with the digest opt-in: fresh budgets, no
@@ -195,8 +199,12 @@ NativeJsInvocationContext ReadInvocation() noexcept {
   sink.RecordNativeJsInvocationStart(epoch, 8, StartFor(0, 1));  // stale epoch
   InvocationProvider::context = {1, 0, false};
   sink.RecordNativeJsInvocationRequest(34);  // nothing open in this configuration
+  // An ID admitted by the earlier configuration is not open in this one.
+  sink.RecordNativeJsInvocationSettle(second, 8, SettleFor(4, false));
   assert(Drain(queue) == 0);
-  sink.RecordNativeJsInvocationSettle(second, 8, SettleFor(2, true));
+  sink.RecordNativeJsInvocationStart(second, 8, StartFor(0, 80));
+  assert(One(queue).header.type == reb::NativeProbeType::kJsInvocationStart);
+  sink.RecordNativeJsInvocationSettle(second, 8, SettleFor(80, true));
   auto settle = One(queue);
   assert(reb::IsValidNativeJsInvocationSettleHeader(settle.header) &&
          std::to_integer<std::uint8_t>(settle.inline_payload[16]) == 1);
@@ -237,5 +245,70 @@ NativeJsInvocationContext ReadInvocation() noexcept {
                "expiry refusal, armed-but-not-called, 64 per site with coalesced gaps, exact "
                "site match, digest opt-in, inside/none/unknown requests with a 256 budget, "
                "status gaps and a fixed site list\n";
+}
+
+// The open count behind an unknown request follows admitted starts exactly:
+// a settle closes its own start whether or not its record is retained, and
+// the settle of a start that was never admitted closes nothing.
+[[gnu::noinline]] void NativeJsInvocationOpenStarts() {
+  NativeProbeQueue queue;
+  sink.SetNativeJsInvocationContextProvider(&ReadInvocation);
+  ConfigureInvocation(queue);
+  const auto epoch = sink.NativeJsInvocationEpoch();
+  const auto unknown_requests = [&](std::int32_t request_id) {
+    InvocationProvider::context = {1, 0, false};
+    sink.RecordNativeJsInvocationRequest(request_id);
+    return Drain(queue);
+  };
+  // A stays pending on site 1 while site 0 spends its 64 starts.
+  sink.RecordNativeJsInvocationStart(epoch, 8, StartFor(1, 1));
+  assert(One(queue).header.type == reb::NativeProbeType::kJsInvocationStart);
+  for (std::uint32_t n = 0; n < 64; ++n) {
+    sink.RecordNativeJsInvocationStart(epoch, 8, StartFor(0, n + 2));
+    sink.RecordNativeJsInvocationSettle(epoch, 8, SettleFor(n + 2, false));
+    assert(Drain(queue) == 2);
+  }
+  // B is refused by the site budget, yet V8 settles it. That settle is not
+  // recorded and leaves A open.
+  sink.RecordNativeJsInvocationStart(epoch, 8, StartFor(0, 66));
+  assert(InvocationGap(One(queue)) == "native_js_invocation_site_budget_incomplete");
+  sink.RecordNativeJsInvocationSettle(epoch, 8, SettleFor(66, false));
+  assert(Drain(queue) == 0);
+  assert(unknown_requests(40) == 1);
+  // The full ring drops A's settle, which the ring counts; A closes anyway.
+  Fill(queue);
+  const auto dropped = queue.DroppedCount();
+  sink.RecordNativeJsInvocationSettle(epoch, 8, SettleFor(1, false, 1));
+  assert(queue.DroppedCount() == dropped + 1);
+  Drain(queue);
+  assert(unknown_requests(41) == 0);
+  // C's settle names another slot than its start: refused as input, closed.
+  sink.RecordNativeJsInvocationStart(epoch, 8, StartFor(1, 67));
+  assert(One(queue).header.type == reb::NativeProbeType::kJsInvocationStart);
+  sink.RecordNativeJsInvocationSettle(epoch, 8, SettleFor(67, false, 0));
+  assert(InvocationGap(One(queue)) == "native_js_invocation_input_unavailable");
+  assert(unknown_requests(42) == 0);
+  // D's settle job ran after its document went away: a gap, and D closes
+  // once. The same report for a start that is not open says nothing.
+  sink.RecordNativeJsInvocationStart(epoch, 8, StartFor(1, 68));
+  assert(One(queue).header.type == reb::NativeProbeType::kJsInvocationStart);
+  assert(unknown_requests(43) == 1);
+  sink.NoteNativeJsInvocationSettleUnavailable(epoch, 8, 68);
+  assert(InvocationGap(One(queue)) == "native_js_invocation_settle_unavailable");
+  sink.NoteNativeJsInvocationSettleUnavailable(epoch, 8, 68);
+  sink.NoteNativeJsInvocationSettleUnavailable(epoch, 8, 66);
+  assert(Drain(queue) == 0);
+  assert(unknown_requests(44) == 0);
+  // E settles once; a repeated settle of the same ID is not recorded.
+  sink.RecordNativeJsInvocationStart(epoch, 8, StartFor(1, 69));
+  sink.RecordNativeJsInvocationSettle(epoch, 8, SettleFor(69, false, 1));
+  assert(Drain(queue) == 2);
+  sink.RecordNativeJsInvocationSettle(epoch, 8, SettleFor(69, false, 1));
+  assert(Drain(queue) == 0);
+  transport.Disable();
+  sink.SetNativeJsInvocationContextProvider(nullptr);
+  std::cout << "PASS native JS invocation open starts: a settle closes only its admitted start, "
+               "including when its record is dropped, refused or unavailable, and never a "
+               "refused start\n";
 }
 }  // namespace

@@ -1523,6 +1523,7 @@ int main() {
   Run<&NativeJsDispatchWire>();
   Run<&NativeJsDispatchAdmission>();
   Run<&NativeJsInvocationAdmission>();
+  Run<&NativeJsInvocationOpenStarts>();
   Run<&DispatchSampleAdmission>();
   Run<&DispatchEmitFailureReleasesBudget>();
   Run<&OwnedRegisterSamplerAdmission>();

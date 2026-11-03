@@ -86,6 +86,10 @@ renderer sink rechecks the configuration generation, session, VM category and
 expiry, requires the start to name its slot's configured site exactly, and
 claims one of 256 starts for the configuration and one of 64 for the site.
 Settles have no separate budget: each admitted call settles at most once.
+The renderer records a settle only for a start it admitted, and that settle
+closes the start even when the settle record itself is refused, dropped or
+unavailable. The settle of a start that was refused or dropped is not
+recorded; that start's loss is already a gap or a ring drop.
 Request records claim one of 256 per configuration. Records travel through
 the existing 8,192-slot renderer ring and browser bridge.
 

@@ -2845,6 +2845,7 @@ void NativeProbeSink::RecordNativeJsInvocationStart(
       CapNativeJsGeneration(native_invocation_capped_generation_, epoch);
     return;
   }
+  native_invocation_open_starts_[index].store(0, std::memory_order_release);
   payload.site_sample_index = static_cast<std::uint16_t>(site_index);
   payload.sample_index = static_cast<std::uint16_t>(index);
   NativeProbeEvent event;
@@ -2860,6 +2861,9 @@ void NativeProbeSink::RecordNativeJsInvocationStart(
   event.inline_payload = EncodeNativeJsInvocationStartPayload(payload);
   const auto status = EmitStatus(event, epoch);
   if (status == NativeProbeEmitStatus::kAdmitted) {
+    native_invocation_open_starts_[index].store(
+        (static_cast<std::uint64_t>(payload.invocation_id) << 8) | site_slot,
+        std::memory_order_release);
     if (native_invocation_open_generation_.load(std::memory_order_acquire) == epoch)
       native_invocation_open_.fetch_add(1, std::memory_order_relaxed);
     return;
@@ -2882,11 +2886,17 @@ void NativeProbeSink::RecordNativeJsInvocationSettle(
   std::atomic_thread_fence(std::memory_order_acquire);
   if (config_generation_.load(std::memory_order_acquire) != epoch || session_id == 0)
     return;
+  // Each admitted call settles once. The settle closes its start before its
+  // own record is attempted, so a refused or dropped settle record never
+  // leaves the start open. A settle whose start was refused or dropped is not
+  // recorded: that start's loss is already a gap or a ring drop.
+  std::uint8_t site_slot = 0;
+  if (!CloseNativeJsInvocation(epoch, payload.invocation_id, site_slot))
+    return;
   // A digest without the session's opt-in is refused, never stored.
   const bool digests =
       native_invocation_digest_generation_.load(std::memory_order_acquire) == epoch;
-  if (frame_id == 0 ||
-      payload.site_slot >= native_invocation_site_count_.load(std::memory_order_acquire) ||
+  if (frame_id == 0 || payload.site_slot != site_slot ||
       !IsValidNativeJsInvocationSettlePayload(payload) ||
       (!digests && payload.digest_state !=
                        static_cast<std::uint8_t>(NativeJsInvocationDigestState::kNotRequested))) {
@@ -2904,15 +2914,31 @@ void NativeProbeSink::RecordNativeJsInvocationSettle(
   event.header.frame_id = frame_id;
   event.header.sequence_number = next_sequence_.fetch_add(1, std::memory_order_relaxed);
   event.inline_payload = EncodeNativeJsInvocationSettlePayload(payload);
-  const auto status = EmitStatus(event, epoch);
-  if (status == NativeProbeEmitStatus::kAdmitted) {
-    if (native_invocation_open_generation_.load(std::memory_order_acquire) == epoch &&
-        native_invocation_open_.load(std::memory_order_relaxed) > 0)
-      native_invocation_open_.fetch_sub(1, std::memory_order_relaxed);
-    return;
-  }
-  if (status == NativeProbeEmitStatus::kRejected)
+  if (EmitStatus(event, epoch) == NativeProbeEmitStatus::kRejected)
     NoteNativeJsInvocationOmission(epoch, frame_id, kInvocationTransportGap);
+}
+
+bool NativeProbeSink::CloseNativeJsInvocation(const std::uint64_t generation,
+                                              const std::uint32_t invocation_id,
+                                              std::uint8_t& site_slot) noexcept {
+  if (invocation_id == 0)
+    return false;
+  for (std::size_t i = 0; i < native_invocation_open_starts_.size(); ++i) {
+    auto open = native_invocation_open_starts_[i].load(std::memory_order_acquire);
+    if ((open >> 8) != invocation_id ||
+        native_invocation_slots_[i].load(std::memory_order_acquire) != generation)
+      continue;
+    // IDs are unique per isolate, so a lost exchange is the same call's
+    // second settle and closes nothing.
+    if (!native_invocation_open_starts_[i].compare_exchange_strong(open, 0,
+                                                                   std::memory_order_acq_rel))
+      return false;
+    site_slot = static_cast<std::uint8_t>(open & 0xFF);
+    if (native_invocation_open_generation_.load(std::memory_order_acquire) == generation)
+      native_invocation_open_.fetch_sub(1, std::memory_order_relaxed);
+    return true;
+  }
+  return false;
 }
 
 void NativeProbeSink::NoteNativeJsInvocationStatus(
@@ -2937,8 +2963,10 @@ void NativeProbeSink::NoteNativeJsInvocationInputUnavailable(
 
 void NativeProbeSink::NoteNativeJsInvocationSettleUnavailable(
     const std::uint64_t epoch,
-    const std::uint64_t frame_id) noexcept {
-  if (NativeJsInvocationActive(epoch))
+    const std::uint64_t frame_id,
+    const std::uint32_t invocation_id) noexcept {
+  std::uint8_t site_slot = 0;
+  if (NativeJsInvocationActive(epoch) && CloseNativeJsInvocation(epoch, invocation_id, site_slot))
     NoteNativeJsInvocationOmission(epoch, frame_id, kInvocationSettleGap);
 }
 

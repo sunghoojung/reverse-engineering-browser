@@ -27,7 +27,11 @@ Native JavaScript invocation cases check the disabled, allocation-free path,
 category and expiry refusal, an armed configuration with no call, the
 64-per-site start budget with its coalesced gap, the exact site match, the
 digest opt-in, inside, none, unknown and worker request reads with the
-256-record request budget, status gaps per slot and the fixed site list.
+256-record request budget, status gaps per slot and the fixed site list. The
+open-start cases check that a settle closes only its own admitted start,
+including when the ring drops its record, its input is refused or its document
+went away, and that the settle of a start the site budget refused is not
+recorded and closes nothing.
 
 For ASan/UBSan, run:
 

@@ -323,8 +323,12 @@ state, never an inferred one.
   when invocation capture is active and either an invocation is current
   (`inside`), or no script is on the stack while at least one admitted
   invocation has not settled (`unknown`: a deferred load start that cannot be
-  attributed). A request started by script outside any invocation produces no
-  record. Requests from workers are unsupported.
+  attributed). The renderer keeps the ID of each admitted start in a fixed
+  256-entry table, one entry per sample index, and a settle closes its own
+  entry even when its record is lost, so a lost settle never leaves an
+  invocation open and the settle of a refused start never closes another. A
+  request started by script outside any invocation produces no record.
+  Requests from workers are unsupported.
 
 ## Ownership versus metadata
 

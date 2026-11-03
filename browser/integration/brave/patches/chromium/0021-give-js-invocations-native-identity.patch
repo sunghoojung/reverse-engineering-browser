@@ -1,8 +1,8 @@
 diff --git a/third_party/blink/renderer/bindings/core/v8/v8_initializer.cc b/third_party/blink/renderer/bindings/core/v8/v8_initializer.cc
-index 80e13505a580cc9884ce7c7ec6b17c2f4df102af..3f975bfea63c785739b47cb7522b34ed8782f932 100644
+index 80e13505a580cc9884ce7c7ec6b17c2f4df102af..ec7cf542bfa3c33911fca06e1fadc1452a166240 100644
 --- a/third_party/blink/renderer/bindings/core/v8/v8_initializer.cc
 +++ b/third_party/blink/renderer/bindings/core/v8/v8_initializer.cc
-@@ -584,6 +584,168 @@ void NoteJsDispatchStatus(const std::uint64_t epoch,
+@@ -584,6 +584,170 @@ void NoteJsDispatchStatus(const std::uint64_t epoch,
    }
  }
  
@@ -113,8 +113,10 @@ index 80e13505a580cc9884ce7c7ec6b17c2f4df102af..3f975bfea63c785739b47cb7522b34ed
 +  reb::NativeProbeSink& sink = reb::NativeProbeSink::Get();
 +  const auto [frame_id, document_id] = NativeInvocationDocument(context);
 +  if (frame_id == 0 || document_id == 0) {
-+    // The settle job ran after its document went away.
-+    sink.NoteNativeJsInvocationSettleUnavailable(epoch, frame_id);
++    // The settle job ran after its document went away. The ID still closes
++    // the admitted start.
++    sink.NoteNativeJsInvocationSettleUnavailable(epoch, frame_id,
++                                                 settle.invocation_id);
 +    return;
 +  }
 +  reb::NativeJsInvocationSettlePayload payload;
@@ -171,7 +173,7 @@ index 80e13505a580cc9884ce7c7ec6b17c2f4df102af..3f975bfea63c785739b47cb7522b34ed
  void CaptureWasmModuleBytes(v8::Local<v8::Context> context,
                              const v8::WasmModuleBytesOrigin origin,
                              const std::uint8_t* bytes,
-@@ -1635,6 +1797,19 @@ void V8Initializer::InitializeV8Common(v8::Isolate* isolate) {
+@@ -1635,6 +1799,19 @@ void V8Initializer::InitializeV8Common(v8::Isolate* isolate) {
      js_dispatch.observe = CaptureJsDispatch;
      js_dispatch.status = NoteJsDispatchStatus;
      isolate->SetJsDispatchCallbacks(js_dispatch);

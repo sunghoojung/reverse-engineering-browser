@@ -47,6 +47,9 @@ readonly native_wasm_call_indirect="${REB_NATIVE_WASM_CALL_INDIRECT:-0}"
 readonly native_guest_adapter="${REB_NATIVE_WASM_GUEST_ADAPTER:-}"
 readonly native_js_dispatch_sites="${REB_NATIVE_JS_DISPATCH_SITES:-}"
 readonly capture_canvas_images="${REB_CAPTURE_CANVAS_IMAGES:-0}"
+# Raw request paths, queries and bounded request bodies (native-network-v2.md).
+# Body length, type and digest are recorded whenever Network capture is on.
+readonly capture_request_content="${REB_CAPTURE_REQUEST_CONTENT:-0}"
 readonly use_system_keychain="${REB_USE_SYSTEM_KEYCHAIN:-1}"
 readonly localhost_only="${REB_LOCALHOST_ONLY:-0}"
 readonly embedded_session="${REB_EMBEDDED_SESSION:-0}"
@@ -104,6 +107,9 @@ fi
 if [[ "${capture_canvas_images}" != 0 && "${capture_canvas_images}" != 1 ]]; then
   fail_live_session 2 "REB_CAPTURE_CANVAS_IMAGES must be 0 or 1."
 fi
+if [[ "${capture_request_content}" != 0 && "${capture_request_content}" != 1 ]]; then
+  fail_live_session 2 "REB_CAPTURE_REQUEST_CONTENT must be 0 or 1."
+fi
 if [[ "${use_system_keychain}" != 0 && "${use_system_keychain}" != 1 ]]; then
   fail_live_session 2 "REB_USE_SYSTEM_KEYCHAIN must be 0 or 1."
 fi
@@ -122,6 +128,10 @@ fi
 if [[ "${capture_canvas_images}" == 1 ]] &&
    (( (category_mask & 1) == 0 || (category_mask & 1024) == 0 )); then
   fail_live_session 2 "REB_CAPTURE_CANVAS_IMAGES requires Canvas and Artifact category bits (mask 1025)."
+fi
+if [[ "${capture_request_content}" == 1 ]] &&
+   (( (category_mask & 256) == 0 || (category_mask & 1024) == 0 )); then
+  fail_live_session 2 "REB_CAPTURE_REQUEST_CONTENT requires Network and Artifact category bits (mask 1280)."
 fi
 
 mkdir -p "${session_directory}" "${artifact_store_path}" "${profile_path}" "${native_console_directory}"
@@ -457,7 +467,9 @@ if ((category_mask & (512 | 1024))); then
     --token-file "${token_path}"
     --session-id "${session_id}"
   )
-  if [[ "${capture_canvas_images}" == 1 ]]; then
+  # Canvas images and request bodies are sensitive artifact kinds; the default
+  # receiver refuses both.
+  if [[ "${capture_canvas_images}" == 1 || "${capture_request_content}" == 1 ]]; then
     artifact_receiver_arguments+=(--allow-sensitive)
   fi
   "${artifact_receiver_binary}" "${artifact_receiver_arguments[@]}" \
@@ -601,6 +613,9 @@ fi
 if [[ "${capture_canvas_images}" == 1 ]]; then
   brave_arguments+=(--reb-capture-canvas-images)
 fi
+if [[ "${capture_request_content}" == 1 ]]; then
+  brave_arguments+=(--reb-capture-request-content)
+fi
 if [[ "${use_system_keychain}" == 0 ]]; then
   brave_arguments+=(--use-mock-keychain)
 fi
@@ -667,6 +682,11 @@ if [[ "${capture_canvas_images}" == 1 ]]; then
   echo "Canvas image capture: enabled for this session; outputs may contain sensitive page content"
 else
   echo "Canvas image capture: disabled; set REB_CAPTURE_CANVAS_IMAGES=1 to enable it for one session"
+fi
+if [[ "${capture_request_content}" == 1 ]]; then
+  echo "Request content capture: enabled for this session; request paths, queries and bodies are retained locally"
+else
+  echo "Request content capture: disabled; hosts and body length, type and digest only. Set REB_CAPTURE_REQUEST_CONTENT=1 to retain paths and bodies"
 fi
 echo "Native switches: quiet=${native_quiet_mode} wasm_br_table=${native_wasm_dispatch} wasm_call_indirect=${native_wasm_call_indirect} wasm_guest=$([[ -n "${native_guest_adapter}" ]] && echo 1 || echo 0) js_dispatch=$([[ -n "${native_js_dispatch_sites}" ]] && echo 1 || echo 0)"
 echo "Capture transport: native only"

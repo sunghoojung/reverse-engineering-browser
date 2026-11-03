@@ -53,7 +53,7 @@ class NativeNetworkCaptureSink final {
   [[nodiscard]] bool IsOwnedContext(content::BrowserContext* context) const;
   [[nodiscard]] std::uint64_t generation() const noexcept;
   // capture_content admits raw request targets and body bytes for this
-  // configuration (--reb-capture-network-content). Metadata-only sessions keep
+  // configuration (--reb-capture-request-content). Metadata-only sessions keep
   // host-only targets and record body length, type and digest without bytes.
   void SetEmitter(NativeProbeEmitter emitter,
                   std::uint64_t session_id,

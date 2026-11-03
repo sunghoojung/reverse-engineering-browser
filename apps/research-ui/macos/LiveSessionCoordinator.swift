@@ -192,6 +192,12 @@ final class LiveSessionCoordinator {
     environment["REB_BRAVE_BINARY"] = braveExecutableURL.path
     environment["REB_CAPTURE_CANVAS_IMAGES"] =
       environment["REB_CAPTURE_CANVAS_IMAGES"] ?? (captureNetworkContent ? "1" : "0")
+    // The content mode's request paths, queries and bounded bodies need both
+    // Network and Artifact categories; a narrower mask keeps hosts only.
+    let contentCategoryMask = environment["REB_CAPTURE_CATEGORY_MASK"].flatMap { UInt32($0) } ?? 4095
+    environment["REB_CAPTURE_REQUEST_CONTENT"] =
+      environment["REB_CAPTURE_REQUEST_CONTENT"]
+      ?? (captureNetworkContent && (contentCategoryMask & 1280) == 1280 ? "1" : "0")
     // The packaged app turns on every native switch that needs no per-target input
     // file. Guest-state and JavaScript dispatch-site capture stay off because they
     // need a researcher-supplied adapter or site file. An explicit "0" still opts

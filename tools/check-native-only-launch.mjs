@@ -305,6 +305,24 @@ exec ${quote(systemGrep)} "$@"
     mixed.framework, ['--reb-wasm-br-table-dispatch', '--reb-wasm-call-indirect-dispatch']));
   console.log('PASS a Brave whose loaded V8 lacks requested flags is refused before any helper or browser, listing each flag and its setting');
 
+  // Request content capture is a Chromium switch, not a V8 flag. Invalid values
+  // and masks without Network and Artifact refuse before any helper starts.
+  const content = await braveApp({framework: allNames});
+  const misconfigured = (result, cause) => {
+    assert.equal(result.status, 2, result.stderr);
+    assert.deepEqual(result.stderr.trimEnd().split('\n'), [cause]);
+    assert.deepEqual(result.receipts, [], 'A configuration refusal starts no helper and no browser');
+  };
+  misconfigured(await launchWith(content.executable, {REB_CAPTURE_REQUEST_CONTENT:'yes'}),
+    `${prefix}REB_CAPTURE_REQUEST_CONTENT must be 0 or 1.`);
+  for (const mask of ['256', '1024', '3839']) {
+    misconfigured(await launchWith(content.executable, {REB_CAPTURE_REQUEST_CONTENT:'1', REB_CAPTURE_CATEGORY_MASK:mask}),
+      `${prefix}REB_CAPTURE_REQUEST_CONTENT requires Network and Artifact category bits (mask 1280).`);
+  }
+  const contentAccepted = await launchWith(content.executable, {REB_CAPTURE_REQUEST_CONTENT:'1'});
+  accepted(contentAccepted, [], content.framework);
+  console.log('PASS request content capture validates its value and categories before any helper or browser');
+
   // A wrapper's own text is not capability evidence. An executable that names
   // no framework, or names a version that is absent, and an app away from its
   // framework or component libraries cannot be checked.

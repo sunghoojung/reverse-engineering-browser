@@ -2619,7 +2619,7 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
     let modeLabel = NSTextField(labelWithString: "Capture mode")
     modeLabel.font = NSFont.systemFont(ofSize: NSFont.smallSystemFontSize, weight: .semibold)
     let privacyLabel = NSTextField(wrappingLabelWithString:
-      "Traffic metadata has hosts only, without headers or bodies. Content mode retains only content supported by native browser capture. Artifacts keep raw source URLs in local storage. Only an explicitly exported redacted copy is altered."
+      "Metadata mode keeps request hosts and each request body's length, type and SHA-256. Content mode also retains request paths, queries and request bodies up to 256 KiB. Headers are not captured. Artifacts keep raw source URLs locally; only an explicitly exported redacted copy is altered."
     )
     privacyLabel.textColor = .secondaryLabelColor
     privacyLabel.maximumNumberOfLines = 0
@@ -2643,7 +2643,7 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
     stack.alignment = .leading
     stack.spacing = 8
     stack.distribution = .fill
-    stack.frame = NSRect(x: 0, y: 0, width: 420, height: 240)
+    stack.frame = NSRect(x: 0, y: 0, width: 420, height: 260)
 
     let alert = NSAlert()
     alert.alertStyle = .informational

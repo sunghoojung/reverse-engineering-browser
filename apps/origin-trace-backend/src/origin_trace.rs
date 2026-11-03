@@ -301,6 +301,7 @@ fn value_flow<'a>(
         )),
     }
 }
+#[allow(clippy::too_many_arguments)]
 pub fn build(
     events: &[Value],
     edges: &[Value],

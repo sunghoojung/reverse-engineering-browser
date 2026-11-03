@@ -16,6 +16,7 @@
 #include "base/no_destructor.h"
 #include "base/strings/string_number_conversions.h"
 #include "base/strings/string_util.h"
+#include "base/task/single_thread_task_runner.h"
 #include "base/time/time.h"
 #include "brave/components/reverse_engineering_browser/browser/native_console_session.h"
 #include "brave/components/reverse_engineering_browser/common/native_console_protocol.h"
@@ -99,7 +100,14 @@ class NativeConsoleDocumentStartHost final : public mojom::NativeConsoleScriptHo
       delivered_generation_ = generation;
   }
 
-  void Disconnected() { NativeConsoleDocumentStartRegistry::Get().RemoveHost(this); }
+  // Remove this host after the disconnect dispatch unwinds, so its receiver is
+  // never destroyed while it is still delivering.
+  void Disconnected() {
+    base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(
+        FROM_HERE,
+        base::BindOnce(&NativeConsoleDocumentStartRegistry::RemoveHost,
+                       base::Unretained(&NativeConsoleDocumentStartRegistry::Get()), this));
+  }
 
   const int render_process_id_;
   std::uint64_t delivered_generation_ = 0;

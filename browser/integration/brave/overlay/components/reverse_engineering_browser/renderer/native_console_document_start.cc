@@ -207,10 +207,16 @@ class DocumentStart final : public mojom::NativeConsoleScriptClient {
 
   void Run(blink::WebLocalFrame* frame, v8::Local<v8::Context> context, std::size_t index) {
     auto* const isolate = context->GetIsolate();
+    // Release this injection's temporaries instead of leaving them in Blink's
+    // enclosing scope for the rest of document creation.
+    v8::HandleScope handles(isolate);
     v8::Context::Scope entered(context);
     if (isolate->IsExecutionTerminating())
       return;
     auto& deadline = NativeConsoleDeadline::Get();
+    // A snippet that synchronously creates a frame reenters this path. The
+    // single watchdog slot refuses the nested injection and records it, rather
+    // than running page JavaScript that nothing could interrupt.
     if (!deadline.Begin(isolate, kNativeConsoleDocumentStartExecutionMillis)) {
       Emit(frame, index, NativeConsoleDocumentStartRecord::kScriptError, false,
            "Execution watchdog unavailable; the snippet did not run");
@@ -246,11 +252,15 @@ class DocumentStart final : public mojom::NativeConsoleScriptClient {
                                   static_cast<int>(name.size()))
               .ToLocal(&resource)) {
         v8::ScriptOrigin script_origin(resource);
-        ran = v8::Script::Compile(context, source, &script_origin).ToLocal(&script) &&
-              script->Run(context).ToLocal(&wrapper) && wrapper->IsFunction() &&
-              v8::Function::New(context, &DocumentStart::Dispatch, v8::Integer::New(isolate, data))
-                  .ToLocal(&report);
-        if (ran) {
+        const bool compiled =
+            v8::Script::Compile(context, source, &script_origin).ToLocal(&script) &&
+            script->Run(context).ToLocal(&wrapper) && wrapper->IsFunction() &&
+            v8::Function::New(context, &DocumentStart::Dispatch, v8::Integer::New(isolate, data))
+                .ToLocal(&report);
+        if (compiled) {
+          // Announce before calling, so this document's own records follow the
+          // marker that says a snippet reached it.
+          Announce(frame, index);
           v8::Local<v8::Value> argv[] = {report};
           ran = wrapper.As<v8::Function>()
                     ->Call(context, v8::Undefined(isolate), 1, argv)
@@ -272,17 +282,20 @@ class DocumentStart final : public mojom::NativeConsoleScriptClient {
         text = PrimitiveText(isolate, context, message->Get(), truncated);
       }
       Emit(frame, index, NativeConsoleDocumentStartRecord::kScriptError, truncated, text);
-      return;
     }
-    // Visible in the browser's own console for this document, and forwarded to
-    // the Origin Trace transcript by the console agent's message observer.
+  }
+
+  // The in-browser indicator. Blink's console sink is not the page's `console`
+  // object, so a page cannot read or suppress this, and it reaches a researcher
+  // who opens devtools in the browser the experiment is running in.
+  void Announce(blink::WebLocalFrame* frame, std::size_t index) {
     frame->AddMessageToConsole(blink::WebConsoleMessage(
         blink::mojom::ConsoleMessageLevel::kWarning,
         blink::WebString::FromUTF8("Reverse Engineering Browser: document-start Console script " +
                                    base::NumberToString(scripts_[index].script_id) +
-                                   " ran in this document's main world before its own scripts")));
+                                   " runs in this document's main world before its own scripts")));
     Emit(frame, index, NativeConsoleDocumentStartRecord::kInjected, false,
-         "Snippet ran before this document's own scripts");
+         "Snippet injected before this document's own scripts");
   }
 
   static void Dispatch(const v8::FunctionCallbackInfo<v8::Value>& info) { Get().Report(info); }

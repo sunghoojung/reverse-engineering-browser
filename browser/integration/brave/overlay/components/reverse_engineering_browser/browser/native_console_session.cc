@@ -33,6 +33,7 @@
 #include "base/task/thread_pool.h"
 #include "base/threading/platform_thread.h"
 #include "base/time/time.h"
+#include "base/unguessable_token.h"
 #include "base/values.h"
 #include "brave/components/reverse_engineering_browser/browser/native_console_document_start.h"
 #include "brave/components/reverse_engineering_browser/browser/native_local_ipc_client.h"

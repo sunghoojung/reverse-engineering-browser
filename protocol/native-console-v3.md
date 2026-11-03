@@ -107,7 +107,7 @@ the capture path already publishes.
 
 | Kind | Meaning |
 | --- | --- |
-| `injected` | The snippet compiled and returned in a matching document. |
+| `injected` | The snippet compiled in a matching document and was about to run. It precedes that document's own records. |
 | `report` | The snippet called `report(value)`. |
 | `script_error` | The snippet failed to compile, threw, or exceeded its budget. |
 | `refused` | A report argument, a per-document budget, or a stale generation. |

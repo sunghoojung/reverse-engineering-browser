@@ -76,7 +76,7 @@ inline constexpr int kNativeConsoleDocumentStartExecutionMillis = 50;
 // Why a record exists. The agent needs the gap kinds, not only the snippet's
 // own output, to tell "the snippet said nothing" from "nothing ran".
 enum class NativeConsoleDocumentStartRecord : std::uint32_t {
-  kInjected = 1,     // The snippet compiled and returned in a matching document.
+  kInjected = 1,     // The snippet compiled in a matching document and was about to run.
   kReport = 2,       // The snippet called report(value).
   kScriptError = 3,  // The snippet failed to compile, threw, or exceeded its budget.
   kRefused = 4,      // A report argument, per-document budget or stale generation.

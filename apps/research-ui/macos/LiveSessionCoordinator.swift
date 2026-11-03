@@ -190,25 +190,8 @@ final class LiveSessionCoordinator {
     environment["REB_LIVE_SESSION_ROOT"] = sessionRootURL.path
     environment["REB_BRAVE_CACHE_ROOT"] = browserCacheRootURL.path
     environment["REB_BRAVE_BINARY"] = braveExecutableURL.path
-    environment["REB_CAPTURE_CANVAS_IMAGES"] =
-      environment["REB_CAPTURE_CANVAS_IMAGES"] ?? (captureNetworkContent ? "1" : "0")
-    // The content mode's request paths, queries and bounded bodies need both
-    // Network and Artifact categories; a narrower mask keeps hosts only.
-    let contentCategoryMask = environment["REB_CAPTURE_CATEGORY_MASK"].flatMap { UInt32($0) } ?? 4095
-    environment["REB_CAPTURE_REQUEST_CONTENT"] =
-      environment["REB_CAPTURE_REQUEST_CONTENT"]
-      ?? (captureNetworkContent && (contentCategoryMask & 1280) == 1280 ? "1" : "0")
-    // The packaged app turns on every native switch that needs no per-target input
-    // file. Guest-state and JavaScript dispatch-site capture stay off because they
-    // need a researcher-supplied adapter or site file. An explicit "0" still opts
-    // out: Wasm dispatch forces Liftoff-only compilation. Both Wasm switches need
-    // the VM (512) and Artifact (1024) categories, so a narrower mask leaves them off.
-    let categoryMask = environment["REB_CAPTURE_CATEGORY_MASK"].flatMap { UInt32($0) } ?? 4095
-    let wasmDispatchCategories = (categoryMask & 1536) == 1536
-    environment["REB_NATIVE_QUIET_MODE"] = environment["REB_NATIVE_QUIET_MODE"] ?? "1"
-    for name in ["REB_NATIVE_WASM_DISPATCH", "REB_NATIVE_WASM_CALL_INDIRECT"] {
-      environment[name] = environment[name] ?? (wasmDispatchCategories ? "1" : "0")
-    }
+    environment = Self.captureDefaults(
+      environment: environment, captureNetworkContent: captureNetworkContent)
     environment["REB_USE_SYSTEM_KEYCHAIN"] = useSystemKeychain ? "1" : "0"
     environment["REB_BROKER_BINARY"] =
       macOSURL.appendingPathComponent(
@@ -356,6 +339,61 @@ final class LiveSessionCoordinator {
       components.fragment == nil
     else { return nil }
     return url
+  }
+
+  // The launcher's REB_CAPTURE_CATEGORY_MASK grammar (scripts/run-live-session.sh):
+  // up to 10 decimal digits, or 0x and up to 8 hex digits, naming a mask from 1
+  // to 4095. Unset or empty is the launcher default, 4095. Anything else is nil;
+  // the launcher refuses it, and it must never read as every category.
+  static func categoryMask(_ value: String?) -> UInt32? {
+    guard let value, !value.isEmpty else { return 4095 }
+    let bytes = Array(value.utf8)
+    let hex = bytes.count > 2 && bytes[0] == UInt8(ascii: "0")
+      && (bytes[1] == UInt8(ascii: "x") || bytes[1] == UInt8(ascii: "X"))
+    let digits = hex ? bytes[2...] : bytes[...]
+    // Explicit ASCII: Swift's integer parser also takes a sign, Character
+    // digit tests take non-ASCII digits, and Bash takes neither.
+    let isDigit: (UInt8) -> Bool = { byte in
+      (UInt8(ascii: "0")...UInt8(ascii: "9")).contains(byte)
+        || (hex && ((UInt8(ascii: "a")...UInt8(ascii: "f")).contains(byte)
+          || (UInt8(ascii: "A")...UInt8(ascii: "F")).contains(byte)))
+    }
+    guard (1...(hex ? 8 : 10)).contains(digits.count), digits.allSatisfy(isDigit),
+      let mask = UInt64(String(decoding: digits, as: UTF8.self), radix: hex ? 16 : 10),
+      (1...4095).contains(mask)
+    else { return nil }
+    return UInt32(mask)
+  }
+
+  // Defaults the packaged app adds for a live session. An explicit environment
+  // value always wins. Each default capture also needs its categories in the
+  // mask, read with the launcher's grammar, so a narrower mask leaves it off
+  // rather than failing the launch, and an unreadable mask turns nothing on.
+  static func captureDefaults(
+    environment: [String: String], captureNetworkContent: Bool
+  ) -> [String: String] {
+    var environment = environment
+    let mask = categoryMask(environment["REB_CAPTURE_CATEGORY_MASK"]) ?? 0
+    let allows = { (required: UInt32) in mask & required == required }
+    // Canvas images need Canvas (1) and Artifact (1024).
+    environment["REB_CAPTURE_CANVAS_IMAGES"] =
+      environment["REB_CAPTURE_CANVAS_IMAGES"]
+      ?? (captureNetworkContent && allows(1025) ? "1" : "0")
+    // The content mode's request paths, queries and bounded bodies need both
+    // Network (256) and Artifact (1024); a narrower mask keeps hosts only.
+    environment["REB_CAPTURE_REQUEST_CONTENT"] =
+      environment["REB_CAPTURE_REQUEST_CONTENT"]
+      ?? (captureNetworkContent && allows(1280) ? "1" : "0")
+    // The packaged app turns on every native switch that needs no per-target input
+    // file. Guest-state and JavaScript dispatch-site capture stay off because they
+    // need a researcher-supplied adapter or site file. An explicit "0" still opts
+    // out: Wasm dispatch forces Liftoff-only compilation. Both Wasm switches need
+    // the VM (512) and Artifact (1024) categories, so a narrower mask leaves them off.
+    environment["REB_NATIVE_QUIET_MODE"] = environment["REB_NATIVE_QUIET_MODE"] ?? "1"
+    for name in ["REB_NATIVE_WASM_DISPATCH", "REB_NATIVE_WASM_CALL_INDIRECT"] {
+      environment[name] = environment[name] ?? (allows(1536) ? "1" : "0")
+    }
+    return environment
   }
 
   static func failureCause(in data: Data?) -> String {

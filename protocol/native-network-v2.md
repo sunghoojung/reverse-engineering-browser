@@ -37,7 +37,9 @@ Request content is the session's sensitive content gate for requests:
   artifact receiver with `--allow-sensitive`. `make live` leaves it off.
 - The packaged app's "Full request and response content" mode, its default
   research profile, sets `REB_CAPTURE_REQUEST_CONTENT=1` when the category mask
-  allows it. "Metadata only" sets 0. An explicit environment value wins.
+  allows it, reading the mask with the launcher's grammar (decimal or `0x`
+  hexadecimal). A mask it cannot read turns nothing on, and the launcher
+  reports it. "Metadata only" sets 0. An explicit environment value wins.
 - The receiver still refuses the sensitive kind unless it was started with
   `--allow-sensitive`; that refusal is reported as an `artifact_capture_failed`
   event joined to the body record.

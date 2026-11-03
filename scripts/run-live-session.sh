@@ -38,7 +38,7 @@ readonly token_path="${session_directory}/broker.token"
 readonly profile_path="${REB_BRAVE_PROFILE:-${session_directory}/brave-profile}"
 readonly native_console_directory="${session_directory}/native-console"
 readonly brave_cache_root="${REB_BRAVE_CACHE_ROOT:-}"
-readonly category_mask="${REB_CAPTURE_CATEGORY_MASK:-4095}"
+readonly category_mask_setting="${REB_CAPTURE_CATEGORY_MASK:-4095}"
 readonly duration_seconds="${REB_CAPTURE_DURATION_SECONDS:-3600}"
 readonly open_command="${REB_OPEN_COMMAND:-open}"
 readonly native_quiet_mode="${REB_NATIVE_QUIET_MODE:-0}"
@@ -58,6 +58,23 @@ readonly session_owner_pid="${REB_SESSION_OWNER_PID:-}"
 readonly api_collection_store="${REB_API_COLLECTION_STORE:-${live_session_root}/../api-collection-v1.json}"
 readonly local_analyst_store="${REB_LOCAL_ANALYST_STORE:-${live_session_root}/../local-analyst-workspace-v1.json}"
 readonly active_endpoint_file="${REB_ACTIVE_ENDPOINT_FILE:-${HOME:?HOME is required}/.config/origin-trace/reb-api.endpoint}"
+
+# One category mask grammar, shared with LiveSessionCoordinator.categoryMask in
+# the packaged app: 1 to 10 decimal digits, or 0x and 1 to 8 hex digits, naming
+# only known categories (1 to 4095). It is parsed here once, never by Bash
+# arithmetic on the raw text, and the broker and Brave, which read decimal
+# only, receive the normalized value.
+if [[ "${category_mask_setting}" =~ ^[0-9]{1,10}$ ]]; then
+  category_mask=$((10#${category_mask_setting}))
+elif [[ "${category_mask_setting}" =~ ^0[xX][0-9a-fA-F]{1,8}$ ]]; then
+  category_mask=$((16#${category_mask_setting:2}))
+else
+  category_mask=0
+fi
+if (( category_mask < 1 || category_mask > 4095 )); then
+  fail_live_session 2 "REB_CAPTURE_CATEGORY_MASK must be a category mask from 1 to 4095, written as up to 10 decimal digits or 0x and up to 8 hex digits."
+fi
+readonly category_mask
 
 if [[ "${native_quiet_mode}" != 0 && "${native_quiet_mode}" != 1 ]]; then
   fail_live_session 2 "REB_NATIVE_QUIET_MODE must be 0 or 1."

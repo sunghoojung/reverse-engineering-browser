@@ -188,7 +188,9 @@ async fn origin_trace_gap_markers_preserve_addressable_events_over_http() {
                 "{name}"
             );
             assert_eq!(root["request_id"], "9007199254740995", "{name}");
-            assert_eq!(root["value"], "synthetic request", "{name}");
+            if case.get("step_values").is_none() {
+                assert_eq!(root["value"], "synthetic request", "{name}");
+            }
         }
         if let Some(sessions) = case.get("step_sessions") {
             assert_eq!(
@@ -205,6 +207,7 @@ async fn origin_trace_gap_markers_preserve_addressable_events_over_http() {
         for (field, key) in [
             ("step_confidences", "confidence"),
             ("step_relations", "relation"),
+            ("step_values", "value"),
         ] {
             if let Some(expected) = case.get(field) {
                 assert_eq!(

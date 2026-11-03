@@ -57,8 +57,20 @@ fn step(value: &Value, relation: &str, confidence: &str) -> Result<Value> {
             "Origin trace input contains a malformed event payload",
         ));
     }
+    let text = binary_record_summary(value, decoded.len())
+        .unwrap_or_else(|| String::from_utf8_lossy(&decoded).into_owned());
     Ok(
-        json!({"event":{"session_id":session,"process_id":pid,"sequence_number":sequence},"monotonic_time_ns":value["monotonic_time_ns"],"category":value["category"],"operation":value["type"],"frame_id":value["frame_id"],"artifact_id":value["artifact_id"],"request_id":value["request_id"],"relation":relation,"confidence":confidence,"value":String::from_utf8_lossy(&decoded)}),
+        json!({"event":{"session_id":session,"process_id":pid,"sequence_number":sequence},"monotonic_time_ns":value["monotonic_time_ns"],"category":value["category"],"operation":value["type"],"frame_id":value["frame_id"],"artifact_id":value["artifact_id"],"request_id":value["request_id"],"relation":relation,"confidence":confidence,"value":text}),
+    )
+}
+// Request target and body records are fixed binary layouts
+// (protocol/native-network-v2.md), not text. A step names the record instead
+// of decoding it, so no NUL or control byte reads as captured text; Traffic
+// decodes their fields. The Swift builder writes the same summary.
+fn binary_record_summary(value: &Value, size: usize) -> Option<String> {
+    let operation = value["type"].as_str()?;
+    (value["category"] == "network" && matches!(operation, "request_target" | "request_body")).then(
+        || format!("Binary {operation} record, {size} bytes, not shown as text; Traffic shows its fields"),
     )
 }
 fn gap(reason: &str, after: usize, detail: &str) -> Value {

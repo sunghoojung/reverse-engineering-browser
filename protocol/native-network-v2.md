@@ -182,6 +182,11 @@ them with their request.
 - The backend's bounded network window keeps both types with the lifecycle
   records, so busy fingerprint traffic cannot evict them. Metadata-only
   evidence packages carry neither payload, exactly as for other events.
+- The broker's trace index links each child to its parent through
+  `parent_event` only. A child never becomes its request's latest lifecycle
+  record, so `request_lifecycle` edges run from one lifecycle record to the
+  previous one. A trace step for a child names the record and its payload
+  size instead of decoding the binary payload as text.
 - Origin Trace joins children to their exact parent. A row with a target shows
   the captured path and query as text, with a marker when truncated. The
   request detail shows the body capture state, content type, length, digest,

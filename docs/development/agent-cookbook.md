@@ -228,6 +228,48 @@ dispatch samples were retained, not an empty program. Large documents come
 back as structural summaries; the Origin Trace VM Lab view shows the full
 workspace.
 
+## 14. Start a session with capture options
+
+Needs `reb-api mcp --allow-effects --allow-session-start` and an authorized
+target. Name every switch you need; all are off otherwise.
+
+```text
+start_live_session {"url": "https://authorized.example/", "wasm_dispatch": true}
+```
+
+Good: `session_id`, `endpoint`, `instance_id` and `url_opened: true`. This
+connection now reads that session, so continue with recipe 2. A guest adapter
+needs `"guest_adapter": "/absolute/path/recipe.json"` with `wasm_dispatch`.
+An error names the launcher's reason, for example a Brave build that lacks a
+requested V8 flag; nothing is left running. From a shell, `reb-api session
+start --wasm-dispatch --url ...` does the same and prints the session
+directory.
+
+## 15. Open a page and wait for what it loads
+
+Take a cursor first, so records written while the page opens are not missed:
+
+```text
+wait_for_events {"timeout_ms": 1}
+session_action {"body": {"action": "open_url", "url": "https://authorized.example/next"}}
+wait_for_events {"type": "artifact_captured", "after": "<query.next_after from the first call>",
+                 "timeout_ms": 30000}
+```
+
+`open_url` opens a new tab in this session's capture browser and refuses when
+capture is not recording, so a page never loads unrecorded. There is no click
+or typing tool; a page that needs a human gesture needs the researcher.
+
+## 16. End a session
+
+```text
+session_action {"body": {"action": "end", "confirm": true}}
+```
+
+Good: `ending: true`. The browser and every helper stop and the evidence stays
+on disk. With `--allow-session-start` the connection is then unbound until the
+next `start_live_session`; without it, reconnect.
+
 ## Response shapes at a glance
 
 | Tool | Look at |
@@ -237,3 +279,4 @@ workspace.
 | `get_artifacts` | `artifacts`, `query` |
 | `wait_for_events` | `wait.timed_out`, `events`, `query.next_after` |
 | `inspect_wasm` | `coverage`, then the requested section rows |
+| `start_live_session` | `session_id`, `url_opened`, `options` |

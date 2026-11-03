@@ -34,6 +34,8 @@ Tool names are OpenAPI operation IDs. The same names work with
 | Wait until the browser produces something | `wait_for_events` |
 | How did a native request come about? | `get_origin_trace`, `get_request_signal_profile` |
 | VM analysis of retained samples | `get_vm_analysis`, `get_vm_opcode_workspace`, `get_vm_host_links` (need `--allow-effects`: they write a derived cache) |
+| Start a session with named capture options | `start_live_session` (needs `--allow-effects --allow-session-start`) or `reb-api session start` |
+| Open a page in the session, or end it | `session_action` with `open_url` or `end` (needs `--allow-effects`) |
 
 Filtered reads return a `query` object. Page with `query.next_before` (older)
 or `query.next_after` (newer). JSON over 128 KiB comes back as a structural
@@ -111,6 +113,11 @@ data to a provider. Binary bodies are not inlined.
   Review raw input before sharing; `--mode redacted_copy` is best effort.
 
 ## Stop before effects or broader sharing
+
+Starting a session, opening a URL and ending a session change the browser and
+reach the network. Do them only for the target and session the researcher
+authorized, even when the tools are listed. There is no click or typing tool;
+ask the researcher when a page needs a human gesture.
 
 Changing requests, creating or replacing drafts, enabling capture, running
 hooks or scripts, replaying, or publishing data needs the researcher's approval

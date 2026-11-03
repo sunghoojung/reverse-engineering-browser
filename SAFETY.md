@@ -82,6 +82,20 @@ it.
   it and were removed with it; their retired contracts remain only as history.
   Wasm evidence comes from native capture and stored artifacts. The owned VM
   debugger controls only the project's own native fixture helper.
+- An agent starts, drives and ends a live capture session only through the
+  session tools: `start_live_session` or `reb-api session start`, and
+  `session_action` with `open_url` or `end`. They stay hidden until the
+  researcher runs the MCP server with `--allow-effects` and
+  `--allow-session-start`. Those flags are not authorization. The researcher
+  still names the authorized target, and the agent opens only URLs inside it.
+  An agent-started session is an ordinary visibly labeled capture session with
+  its own fresh browser profile, every capture switch off unless named, and the
+  usual one-hour expiry. `open_url` reaches only that session's own capture
+  browser, only while native capture is recording, and never through page
+  JavaScript. Sensitive Canvas capture needs its own explicit confirmation.
+  Agent sessions do not use the macOS Keychain; do not sign in with real
+  credentials unless the authorization covers it. There is no synthetic input:
+  agents cannot click or type in pages through Origin Trace.
 - Run mutable tools in a disposable experiment context by default. Experiments
   do not read or modify baseline tabs, production cookies, storage, or
   credentials. Never execute extracted code automatically.

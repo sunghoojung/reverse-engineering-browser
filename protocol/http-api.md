@@ -97,7 +97,9 @@ requirement. See [connection and restart behavior](../docs/development/local-cod
 
 `x-reb-mcp` in this specification is the only MCP contract. `reb-api mcp` reads
 that extension and serves operation IDs as stdio tools. It does not add an HTTP
-route. A client supplies the same loopback root as `call`, through `--base-url`
+route. The single tool that is not an operation, `start_live_session`, is
+declared in `x-reb-mcp.session_start`; see
+[live session control](#live-session-control). A client supplies the same loopback root as `call`, through `--base-url`
 or `--endpoint-file`.
 
 ```sh
@@ -292,6 +294,58 @@ are absent. Identifiers/origins remain potentially sensitive metadata. Direct
 HTTP reports `allow_effects: null`; MCP annotates its own flag without granting
 authorization. See the [agent context recipe](../docs/development/local-coding-agents.md#start-with-compact-session-context)
 for field omissions and coverage limits.
+
+## Live session control
+
+`POST /api/session/actions` (`session_action`) drives the live session this
+backend belongs to. Both actions refuse with 409 `idle_backend` unless
+`capture_mode` is `live`.
+
+- `{"action":"open_url","url":"https://..."}` hands an HTTP(S) URL without
+  credentials to the session's running capture browser, which opens it in a
+  new tab. It uses Chromium's same-profile relay: the backend runs its
+  `--brave-binary` with the session's `--brave-profile` and the URL. It
+  refuses with 409 `native_capture_unavailable` when the broker is disconnected
+  or capture was stopped, and with 409 `target_unavailable` when no live
+  process holds the profile's `SingletonLock`, so it never starts a separate,
+  uncaptured browser. A launch that is still running after 10 seconds started
+  one anyway; it is stopped and reported. It never runs page JavaScript.
+- `{"action":"end","confirm":true}` replies, then about 300 ms later sends
+  SIGTERM to the backend's `--launcher-pid`, which must be its parent. The
+  launcher closes the capture browser and stops every helper, including the
+  backend. Stored evidence stays on disk.
+
+`run-live-session.sh` passes `--brave-binary`, `--brave-profile` and
+`--launcher-pid` to the backend it starts. A backend started any other way
+returns 409 `dependency_unavailable` for these actions.
+
+`reb-api session start` and the MCP tool `start_live_session` take the
+`LiveSessionStart` options: `url`, `wasm_dispatch`, `wasm_call_indirect`,
+`guest_adapter`, `js_dispatch_sites`, `quiet`, `category_mask`,
+`duration_seconds`, `localhost_only`, `canvas_images` (with
+`confirm_sensitive_capture`), `publish_canonical_endpoint`, `brave_binary`
+and `timeout_seconds`. Every capture switch is off unless named; an inherited
+`REB_*` switch is ignored. They run the launcher that belongs with the
+`reb-api` build (`Contents/Resources/run-live-session.sh` in the app,
+`scripts/run-live-session.sh` in a checkout, or `REB_LIVE_SESSION_SCRIPT`)
+detached in its own process group, wait for its ready line and a live health
+report, then optionally open `url`. The session keeps running after the caller
+exits until it is ended, Brave is closed, or capture expires. A launcher
+failure line is returned as the error; a timeout stops the launcher. By
+default the session publishes its endpoint only to a private file, so it does
+not replace the canonical endpoint other connections use. The session uses the
+mock Keychain, since an agent cannot answer a Keychain prompt. The CLI prints
+the session directory, endpoint file and launch log; the MCP result omits
+local paths.
+
+`reb-api mcp --allow-session-start` requires `--allow-effects`. It lists
+`start_live_session` and starts even when its endpoint is missing or not live.
+Until a session is bound, every operation tool refuses without a request. A
+successful start rebinds the connection to that session's own
+`research-ui.endpoint` and exact `instance_id`; this is the only retargeting,
+and any other endpoint or instance change still retires the connection. After
+a successful `session_action` `end`, the connection is unbound again (or, without
+`--allow-session-start`, retired).
 
 ## Session summary
 

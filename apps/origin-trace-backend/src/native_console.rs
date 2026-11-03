@@ -1045,24 +1045,11 @@ fn validate_document_start(scripts: &Value) -> Result<Value> {
             false,
             false,
         )?;
-        // One exact serialized origin: no pattern, wildcard, host suffix, path,
-        // credentials, trailing slash, or uppercase host.
-        let host = origin
-            .strip_prefix("https://")
-            .or_else(|| origin.strip_prefix("http://"))
-            .filter(|host| !host.is_empty())
-            .ok_or_else(|| {
-                Error::bad("Document-start origin must be an exact http:// or https:// origin")
-            })?;
-        if host.contains('/')
-            || host.contains('@')
-            || host.contains('?')
-            || host.contains('#')
-            || host.contains('*')
-            || host != host.to_lowercase()
-        {
+        if !document_start_origin(origin) {
             return Err(Error::bad(
-                "Document-start origin takes no path, credentials, wildcard or uppercase host",
+                "A document-start origin is one exact http:// or https:// origin as the browser serializes it: \
+                 a lowercase host name, an IPv4 address or a canonical bracketed IPv6 address, and a port only \
+                 when it is not the scheme's default. No path, credentials, wildcard or trailing slash.",
             ));
         }
         let frame = script["frame"].as_str().unwrap_or("");
@@ -1082,10 +1069,10 @@ fn validate_document_start(scripts: &Value) -> Result<Value> {
             None => None,
         };
         if let Some(prefix) = prefix
-            && (!prefix.starts_with('/') || prefix.contains('?') || prefix.contains('#'))
+            && !document_start_path(prefix)
         {
             return Err(Error::bad(
-                "A document-start path prefix is a literal path starting with / and carries no query or fragment",
+                "A document-start path prefix is a literal printable-ASCII path starting with / and carries no query or fragment",
             ));
         }
         let source = validation::text(
@@ -1114,6 +1101,197 @@ fn validate_document_start(scripts: &Value) -> Result<Value> {
         normalized.push(entry);
     }
     Ok(Value::Array(normalized))
+}
+
+// The browser's rule, IsValidNativeConsoleDocumentStartOrigin in
+// common/native_console_document_start.h, ported line for line. Both test
+// suites run tools/fixtures/console-document-start/rule-origins.txt, so an
+// origin the backend admits is one the browser admits and one a document's
+// url::Origin serialization can equal.
+fn document_start_origin(origin: &str) -> bool {
+    let (host, default_port) = if let Some(host) = origin.strip_prefix("http://") {
+        (host, 80)
+    } else if let Some(host) = origin.strip_prefix("https://") {
+        (host, 443)
+    } else {
+        return false;
+    };
+    if host.is_empty() || host.len() > 255 {
+        return false;
+    }
+    let port = if let Some(literal) = host.strip_prefix('[') {
+        let Some(close) = literal.find(']') else {
+            return false;
+        };
+        if !canonical_ipv6(&literal[..close]) {
+            return false;
+        }
+        match &literal[close + 1..] {
+            "" => None,
+            rest => match rest.strip_prefix(':') {
+                Some(port) => Some(port),
+                None => return false,
+            },
+        }
+    } else {
+        let (name, port) = match host.split_once(':') {
+            Some((name, port)) => (name, Some(port)),
+            None => (host, None),
+        };
+        if name.is_empty()
+            || name.starts_with(['.', '-'])
+            || name.ends_with(['.', '-'])
+            || name.contains("..")
+            || !name.bytes().all(|byte| {
+                byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'.' || byte == b'-'
+            })
+            || !canonical_host_name(name)
+        {
+            return false;
+        }
+        port
+    };
+    let Some(port) = port else {
+        return true;
+    };
+    if port.is_empty()
+        || port.len() > 5
+        || port.starts_with('0')
+        || !port.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return false;
+    }
+    // Serialize omits the scheme's default port, so spelling it never matches.
+    port.parse::<u32>()
+        .is_ok_and(|value| value <= 65535 && value != default_port)
+}
+
+// url::CanonicalizeIPv6Address output: lowercase hex groups without leading
+// zeros, "::" for the first longest run of two or more zero groups, and no
+// embedded IPv4. Any other spelling of the same address is refused.
+fn canonical_ipv6(text: &str) -> bool {
+    let bytes = text.as_bytes();
+    let mut pieces = [0u16; 8];
+    let mut count = 0;
+    let mut compress = None;
+    let mut index = 0;
+    if text.starts_with("::") {
+        compress = Some(0);
+        index = 2;
+    }
+    while index < bytes.len() {
+        if count == pieces.len() {
+            return false;
+        }
+        let (mut value, mut digits) = (0u32, 0);
+        while index < bytes.len() && digits < 5 {
+            let digit = match bytes[index] {
+                byte @ b'0'..=b'9' => byte - b'0',
+                byte @ b'a'..=b'f' => byte - b'a' + 10,
+                _ => break,
+            };
+            value = value * 16 + u32::from(digit);
+            index += 1;
+            digits += 1;
+        }
+        if digits == 0 || digits > 4 {
+            return false;
+        }
+        pieces[count] = value as u16;
+        count += 1;
+        if index == bytes.len() {
+            break;
+        }
+        if bytes[index] != b':' {
+            return false;
+        }
+        index += 1;
+        if index == bytes.len() {
+            return false;
+        }
+        if bytes[index] == b':' {
+            if compress.is_some() {
+                return false;
+            }
+            compress = Some(count);
+            index += 1;
+        }
+    }
+    match compress {
+        None if count != pieces.len() => return false,
+        Some(_) if count >= pieces.len() => return false,
+        Some(at) => {
+            let gap = 8 - (count - at);
+            pieces.copy_within(at..count, gap);
+            pieces[at..gap].fill(0);
+        }
+        None => {}
+    }
+    let (mut best, mut best_length) = (pieces.len(), 1);
+    let mut start = 0;
+    while start < pieces.len() {
+        if pieces[start] != 0 {
+            start += 1;
+            continue;
+        }
+        let mut end = start;
+        while end < pieces.len() && pieces[end] == 0 {
+            end += 1;
+        }
+        if end - start > best_length {
+            (best, best_length) = (start, end - start);
+        }
+        start = end;
+    }
+    let mut canonical = String::with_capacity(39);
+    let mut piece = 0;
+    while piece < pieces.len() {
+        if piece == best {
+            canonical.push_str(if piece == 0 { "::" } else { ":" });
+            piece += best_length;
+            continue;
+        }
+        canonical.push_str(&format!("{:x}", pieces[piece]));
+        piece += 1;
+        if piece < pieces.len() {
+            canonical.push(':');
+        }
+    }
+    canonical == text
+}
+
+// A host whose last label is a number serializes as four decimal octets.
+fn canonical_host_name(host: &str) -> bool {
+    let last = host.rsplit('.').next().unwrap_or(host);
+    let numeric = !last.is_empty()
+        && match last.strip_prefix("0x") {
+            Some(hex) => hex
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase()),
+            None => last.bytes().all(|byte| byte.is_ascii_digit()),
+        };
+    if !numeric {
+        return true;
+    }
+    let octets: Vec<&str> = host.split('.').collect();
+    octets.len() == 4
+        && octets.iter().all(|octet| {
+            !octet.is_empty()
+                && octet.len() <= 3
+                && !(octet.len() > 1 && octet.starts_with('0'))
+                && octet.bytes().all(|byte| byte.is_ascii_digit())
+                && octet.parse::<u16>().is_ok_and(|value| value <= 255)
+        })
+}
+
+// IsValidNativeConsoleDocumentStartPath for a declared prefix. An explicit
+// empty prefix is refused before this, so a rule never shows a prefix it lacks.
+fn document_start_path(path: &str) -> bool {
+    path.starts_with('/')
+        && path.len() <= DOCUMENT_START_RULE_LIMIT
+        && path
+            .bytes()
+            .all(|byte| (0x21..0x7f).contains(&byte) && byte != b'?' && byte != b'#')
 }
 
 const LIVE_CAPTURE_MESSAGE: &str =
@@ -1402,6 +1580,57 @@ mod tests {
             armed,
             json!([{"origin":"http://127.0.0.1:8080","frame":"child","path_prefix":"/lab/","source":"report(1);"}])
         );
+    }
+
+    #[test]
+    fn document_start_origins_match_the_browser_rule_case_for_case() {
+        // The browser's offline check runs these same lines, so the backend
+        // accepts and refuses exactly the origins the browser does.
+        let cases = include_str!("../../../tools/fixtures/console-document-start/rule-origins.txt");
+        let (mut accepted, mut refused) = (0, 0);
+        for line in cases
+            .lines()
+            .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        {
+            let (verdict, origin) = line.split_once(' ').unwrap();
+            let rule = json!([{"origin":origin,"frame":"top","source":"report(1);"}]);
+            match verdict {
+                "accept" => {
+                    assert!(document_start_origin(origin), "accepted: {origin}");
+                    assert!(validate_document_start(&rule).is_ok(), "accepted: {origin}");
+                    accepted += 1;
+                }
+                "refuse" => {
+                    assert!(!document_start_origin(origin), "refused: {origin}");
+                    assert!(validate_document_start(&rule).is_err(), "refused: {origin}");
+                    refused += 1;
+                }
+                _ => panic!("unknown verdict: {line}"),
+            }
+        }
+        assert!(
+            accepted >= 20 && refused >= 60,
+            "every shared origin case was read"
+        );
+        assert!(!document_start_origin(""));
+        for path in ["/a/b-c_1.html", "/"] {
+            assert!(document_start_path(path), "{path}");
+        }
+        for path in [
+            "a",
+            "../a",
+            "/a?b",
+            "/a#b",
+            "/a b",
+            "/a\u{7f}",
+            "/a\n",
+            "/caf\u{e9}",
+        ] {
+            assert!(!document_start_path(path), "{path:?}");
+        }
+        let long = format!("/{}", "a".repeat(DOCUMENT_START_RULE_LIMIT - 1));
+        assert!(document_start_path(&long));
+        assert!(!document_start_path(&format!("{long}a")));
     }
 
     #[test]

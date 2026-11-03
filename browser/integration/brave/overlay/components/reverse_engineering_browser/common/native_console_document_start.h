@@ -12,6 +12,7 @@
 // browser matches one exact serialized origin, one frame kind and an optional
 // literal path prefix, so a declared rule can never widen to another origin.
 
+#include <algorithm>
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -153,48 +154,209 @@ namespace native_console_document_start_detail {
 
 }  // namespace native_console_document_start_detail
 
-// `scheme://host[:port]` exactly as url::Origin::Serialize writes it: lowercase
-// ASCII, no path, no credentials, no trailing slash, no default port.
-[[nodiscard]] inline bool IsValidNativeConsoleDocumentStartOrigin(
-    std::string_view origin) noexcept {
-  std::string_view host = origin;
-  if (host.starts_with("http://"))
-    host.remove_prefix(7);
-  else if (host.starts_with("https://"))
-    host.remove_prefix(8);
-  else
+namespace native_console_document_start_detail {
+
+// The bracketed IPv6 literal exactly as url::CanonicalizeIPv6Address writes it:
+// eight 16-bit groups in lowercase hex without leading zeros, with "::"
+// replacing the first longest run of two or more zero groups, and never an
+// embedded IPv4 form. Parse, then require the text to equal that serialization,
+// so any other spelling of the same address is refused rather than armed as a
+// rule no document can ever match.
+[[nodiscard]] inline bool CanonicalIPv6(std::string_view text) noexcept {
+  std::array<std::uint16_t, 8> pieces{};
+  std::size_t count = 0;
+  std::size_t compress = pieces.size();
+  std::size_t index = 0;
+  if (text.starts_with("::")) {
+    compress = 0;
+    index = 2;
+  }
+  while (index < text.size()) {
+    if (count == pieces.size())
+      return false;
+    std::uint32_t value = 0;
+    std::size_t digits = 0;
+    for (; index < text.size() && digits < 5; ++index, ++digits) {
+      const char character = text[index];
+      if (character >= '0' && character <= '9')
+        value = value * 16 + static_cast<std::uint32_t>(character - '0');
+      else if (character >= 'a' && character <= 'f')
+        value = value * 16 + static_cast<std::uint32_t>(character - 'a' + 10);
+      else
+        break;
+    }
+    if (digits == 0 || digits > 4)
+      return false;
+    pieces[count++] = static_cast<std::uint16_t>(value);
+    if (index == text.size())
+      break;
+    if (text[index] != ':' || ++index == text.size())
+      return false;
+    if (text[index] == ':') {
+      if (compress != pieces.size())
+        return false;
+      compress = count;
+      ++index;
+    }
+  }
+  if (compress == pieces.size() ? count != pieces.size() : count >= pieces.size())
     return false;
-  if (host.empty() || host.size() > 255)
-    return false;
-  const auto colon = host.rfind(':');
-  if (colon != std::string_view::npos) {
-    const auto port = host.substr(colon + 1);
-    if (port.empty() || port.size() > 5 || port.front() == '0')
+  if (compress != pieces.size()) {
+    const auto tail = count - compress;
+    for (std::size_t moved = 0; moved < tail; ++moved) {
+      pieces[pieces.size() - 1 - moved] = pieces[count - 1 - moved];
+      pieces[count - 1 - moved] = 0;
+    }
+  }
+  // url::ChooseIPv6ContractionRange: the first longest run of at least two.
+  std::size_t best = pieces.size();
+  std::size_t best_length = 1;
+  for (std::size_t start = 0; start < pieces.size();) {
+    if (pieces[start]) {
+      ++start;
+      continue;
+    }
+    std::size_t end = start;
+    while (end < pieces.size() && !pieces[end])
+      ++end;
+    if (end - start > best_length) {
+      best = start;
+      best_length = end - start;
+    }
+    start = end;
+  }
+  std::array<char, 40> canonical{};
+  std::size_t size = 0;
+  for (std::size_t piece = 0; piece < pieces.size();) {
+    if (piece == best) {
+      if (piece == 0)
+        canonical[size++] = ':';
+      canonical[size++] = ':';
+      piece += best_length;
+      continue;
+    }
+    bool leading = true;
+    for (int shift = 12; shift >= 0; shift -= 4) {
+      const auto digit = (pieces[piece] >> shift) & 0xf;
+      if (leading && digit == 0 && shift != 0)
+        continue;
+      leading = false;
+      canonical[size++] = "0123456789abcdef"[digit];
+    }
+    if (++piece < pieces.size())
+      canonical[size++] = ':';
+  }
+  return text == std::string_view(canonical.data(), size);
+}
+
+// url::Origin serializes a host whose last label is a number as a dotted IPv4
+// address, so such a host must already be four decimal octets without leading
+// zeros. "127.1" or "a.1" would never equal a document's origin.
+[[nodiscard]] inline bool CanonicalHostName(std::string_view host) noexcept {
+  const auto dot = host.rfind('.');
+  const auto last = dot == std::string_view::npos ? host : host.substr(dot + 1);
+  bool numeric = !last.empty();
+  for (std::size_t index = last.starts_with("0x") ? 2 : 0; index < last.size(); ++index) {
+    const char character = last[index];
+    const bool hex = last.starts_with("0x") && character >= 'a' && character <= 'f';
+    if (!hex && (character < '0' || character > '9'))
+      numeric = false;
+  }
+  if (!numeric)
+    return true;
+  std::size_t octets = 0;
+  for (std::size_t start = 0; start <= host.size(); ++octets) {
+    const auto end = std::min(host.find('.', start), host.size());
+    const auto octet = host.substr(start, end - start);
+    if (octets == 4 || octet.empty() || octet.size() > 3 || (octet.size() > 1 && octet[0] == '0'))
       return false;
     unsigned value = 0;
-    for (char digit : port) {
+    for (char digit : octet) {
       if (digit < '0' || digit > '9')
         return false;
       value = value * 10 + static_cast<unsigned>(digit - '0');
     }
-    if (value == 0 || value > 65535)
+    if (value > 255)
       return false;
-    host = host.substr(0, colon);
+    start = end + 1;
   }
-  if (host.empty() || host.front() == '.' || host.front() == '-' || host.back() == '-')
+  return octets == 4;
+}
+
+}  // namespace native_console_document_start_detail
+
+// `scheme://host[:port]` exactly as url::Origin::Serialize writes it: lowercase
+// ASCII, no path, no credentials, no trailing slash, no default port, and an
+// IPv6 host only as its canonical bracketed literal. Hostnames are deliberately
+// narrower than what a URL can carry: letters, digits, dots and hyphens only,
+// so a rule never contains a character that reads like a pattern. Anything
+// else is refused visibly at arming instead of armed as a rule that cannot
+// match. The backend applies the same rule (`native_console.rs`), and both
+// suites run the shared cases in tools/fixtures/console-document-start/.
+[[nodiscard]] inline bool IsValidNativeConsoleDocumentStartOrigin(
+    std::string_view origin) noexcept {
+  std::string_view host = origin;
+  unsigned default_port = 0;
+  if (host.starts_with("http://")) {
+    host.remove_prefix(7);
+    default_port = 80;
+  } else if (host.starts_with("https://")) {
+    host.remove_prefix(8);
+    default_port = 443;
+  } else {
     return false;
-  bool previous_dot = false;
-  for (char character : host) {
-    const bool letter = character >= 'a' && character <= 'z';
-    const bool digit = character >= '0' && character <= '9';
-    if (!letter && !digit && character != '.' && character != '-' && character != '[' &&
-        character != ']' && character != ':')
-      return false;
-    if (character == '.' && previous_dot)
-      return false;
-    previous_dot = character == '.';
   }
-  return !previous_dot;
+  if (host.empty() || host.size() > 255)
+    return false;
+  std::string_view port;
+  bool has_port = false;
+  if (host.front() == '[') {
+    const auto close = host.find(']');
+    if (close == std::string_view::npos ||
+        !native_console_document_start_detail::CanonicalIPv6(host.substr(1, close - 1)))
+      return false;
+    const auto rest = host.substr(close + 1);
+    if (!rest.empty()) {
+      if (rest.front() != ':')
+        return false;
+      port = rest.substr(1);
+      has_port = true;
+    }
+  } else {
+    const auto colon = host.find(':');
+    if (colon != std::string_view::npos) {
+      port = host.substr(colon + 1);
+      has_port = true;
+      host = host.substr(0, colon);
+    }
+    if (host.empty() || host.front() == '.' || host.front() == '-' || host.back() == '-' ||
+        host.back() == '.')
+      return false;
+    bool previous_dot = false;
+    for (char character : host) {
+      const bool letter = character >= 'a' && character <= 'z';
+      const bool digit = character >= '0' && character <= '9';
+      if (!letter && !digit && character != '.' && character != '-')
+        return false;
+      if (character == '.' && previous_dot)
+        return false;
+      previous_dot = character == '.';
+    }
+    if (!native_console_document_start_detail::CanonicalHostName(host))
+      return false;
+  }
+  if (!has_port)
+    return true;
+  if (port.empty() || port.size() > 5 || port.front() == '0')
+    return false;
+  unsigned value = 0;
+  for (char digit : port) {
+    if (digit < '0' || digit > '9')
+      return false;
+    value = value * 10 + static_cast<unsigned>(digit - '0');
+  }
+  // Serialize omits the scheme's default port, so spelling it never matches.
+  return value != 0 && value <= 65535 && value != default_port;
 }
 
 // A literal prefix of the committed path. Query and fragment are deliberately

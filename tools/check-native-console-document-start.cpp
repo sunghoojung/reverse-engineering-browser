@@ -10,6 +10,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <fstream>
 #include <iostream>
 #include <span>
 #include <string>
@@ -55,34 +56,30 @@ NativeConsoleDocumentStartScript MakeScript(std::uint64_t id,
 }
 
 void CheckOrigins() {
-  for (const auto* origin : {"http://127.0.0.1:8080", "https://example.test", "http://localhost:1",
-                             "https://a.b.c.test:65535"}) {
-    Check(IsValidNativeConsoleDocumentStartOrigin(origin), origin);
+  // The backend's Rust validator runs these same lines, so the two accept and
+  // refuse exactly the same origins. `make native-tests` runs from the root.
+  std::ifstream cases("tools/fixtures/console-document-start/rule-origins.txt");
+  Check(cases.good(), "the shared origin cases are readable from the repository root");
+  std::size_t accepted = 0;
+  std::size_t refused = 0;
+  for (std::string line; std::getline(cases, line);) {
+    if (line.empty() || line.front() == '#')
+      continue;
+    const auto space = line.find(' ');
+    Check(space != std::string::npos, "a case is a verdict and an origin");
+    const std::string_view verdict(line.data(), space);
+    const auto origin = line.substr(space + 1);
+    if (verdict == "accept") {
+      Check(IsValidNativeConsoleDocumentStartOrigin(origin), "accepted: " + origin);
+      ++accepted;
+    } else {
+      Check(verdict == "refuse", "a verdict is accept or refuse");
+      Check(!IsValidNativeConsoleDocumentStartOrigin(origin), "refused: " + origin);
+      ++refused;
+    }
   }
-  // A rule may not carry a pattern, a path, credentials, a trailing slash, an
-  // uppercase host, a default-port spelling artifact, or a non-web scheme.
-  for (const auto* origin : {"",
-                             "example.test",
-                             "ftp://example.test",
-                             "file://",
-                             "https://example.test/",
-                             "https://Example.test",
-                             "https://*.example.test",
-                             "https://user:pass@example.test",
-                             "https://example.test:0",
-                             "https://example.test:065",
-                             "https://example.test:70000",
-                             "https://example.test:",
-                             "https://.example.test",
-                             "https://example..test",
-                             "https://example.test.",
-                             "https://-example.test",
-                             "https://example.test-",
-                             "chrome://settings",
-                             "about:blank",
-                             "null"}) {
-    Check(!IsValidNativeConsoleDocumentStartOrigin(origin), std::string("refused: ") + origin);
-  }
+  Check(accepted >= 20 && refused >= 60, "every shared origin case was read");
+  Check(!IsValidNativeConsoleDocumentStartOrigin(""), "refused: an empty origin");
   Check(IsValidNativeConsoleDocumentStartPath(""), "absent prefix");
   Check(IsValidNativeConsoleDocumentStartPath("/a/b-c_1.html"), "literal prefix");
   for (const auto* path : {"a", "../a", "/a?b", "/a#b", "/a b", "/a\x7f", "/a\n"}) {

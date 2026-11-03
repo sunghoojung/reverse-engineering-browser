@@ -15451,7 +15451,7 @@
                     "origin": {
                       "type": "string",
                       "maxLength": 256,
-                      "description": "One exact serialized http(s) origin, lowercase, with no path, credentials, wildcard, host suffix or trailing slash."
+                      "description": "One exact http(s) origin spelled as url::Origin::Serialize writes it: lowercase, with no path, credentials, wildcard, host suffix, trailing slash or default port, an IPv6 host as its canonical bracketed literal, and a numeric host as four decimal octets. Any other spelling is refused, because no document's origin could equal it."
                     },
                     "frame": {
                       "type": "string",

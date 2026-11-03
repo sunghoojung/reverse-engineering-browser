@@ -130,7 +130,7 @@ A rule names exactly one target:
 
 | Field | Rule |
 | --- | --- |
-| `origin` | One exact serialized origin, lowercase, no path, credentials, wildcard, host suffix or trailing slash. `http://127.0.0.1:8080` does not cover `127.0.0.1:8081`, `localhost:8080`, or `https://`. |
+| `origin` | One exact serialized origin, lowercase, no path, credentials, wildcard, host suffix or trailing slash. `http://127.0.0.1:8080` does not cover `127.0.0.1:8081`, `localhost:8080`, or `https://`. Leave out a default port (`https://example.test`, not `https://example.test:443`), and write IPv6 as the browser does (`http://[::1]`); other spellings are refused because no document would match them. |
 | `frame` | Exactly `top` or `child`. Arm two rules if you need both. |
 | `path_prefix` | Optional literal prefix of the committed path. Absent matches every path in that origin. |
 

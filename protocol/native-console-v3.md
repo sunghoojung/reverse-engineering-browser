@@ -59,7 +59,7 @@ A rule names exactly one target and cannot widen:
 
 | Field | Meaning |
 | --- | --- |
-| `origin` | One exact serialized `http`/`https` origin, byte-for-byte as `url::Origin::Serialize` writes it. No pattern, wildcard, host suffix, path, credentials, trailing slash, or default-port spelling. |
+| `origin` | One exact serialized `http`/`https` origin, byte-for-byte as `url::Origin::Serialize` writes it. No pattern, wildcard, host suffix, path, credentials, trailing slash, or default port (`:80` for `http`, `:443` for `https`). An IPv6 host is its canonical bracketed literal, such as `http://[::1]`; a host ending in a number is four decimal octets. Host names are limited to lowercase letters, digits, dots and hyphens. Any other spelling is refused at arming, because no document's origin could ever equal it. |
 | `frame` | Exactly `top` or `child`. "Any frame" must be requested as two rules so the armed set always states which frames it reaches. |
 | `path_prefix` | Optional literal prefix of the committed path. Absent matches every path in that origin. Query and fragment are not part of a rule. |
 
@@ -270,7 +270,9 @@ governs arming this experiment at all.
 `make native-tests` runs `tools/check-native-console-document-start.cpp`, which
 compiles and executes the exact production matcher, validators and fixed-record
 codec: origin, path, frame-kind and prefix refusals, duplicate and over-budget
-sets, invalid UTF-8, and operation 4 and response-flag admission.
+sets, invalid UTF-8, and operation 4 and response-flag admission. Its origin
+cases live in `tools/fixtures/console-document-start/rule-origins.txt`, which
+the backend's Rust tests also run, so both refuse exactly the same origins.
 
 `make native-console-check` drives the real C++ transport and the HTTP API,
 including the armed-set round trip, the non-draining cursor, drop counting, and

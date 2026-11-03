@@ -1481,7 +1481,7 @@ diff --git a/test/cctest/test-api.cc b/test/cctest/test-api.cc
 index e9addc26f28685ad74d07a09347dbbaa347e5ceb..5fadada03863578a9703476414c76fced20cdc5a 100644
 --- a/test/cctest/test-api.cc
 +++ b/test/cctest/test-api.cc
-@@ -32665,3 +32665,485 @@ TEST(RebNativeJsDispatchAdmissionAndSiteCap) {
+@@ -32665,3 +32665,492 @@ TEST(RebNativeJsDispatchAdmissionAndSiteCap) {
             records[0].observation.slot);
    CHECK(records[0].observation.new_activation);
  }
@@ -1595,7 +1595,12 @@ index e9addc26f28685ad74d07a09347dbbaa347e5ceb..5fadada03863578a9703476414c76fce
 +        invocation_(&i::v8_flags.reb_js_invocation_capture, true),
 +        dispatch_(&i::v8_flags.reb_js_dispatch_capture, true),
 +        compilation_cache_(&i::v8_flags.compilation_cache, false),
-+        lazy_positions_(&i::v8_flags.enable_lazy_source_positions, false) {
++        lazy_positions_(&i::v8_flags.enable_lazy_source_positions, false),
++        microtasks_(isolate_->GetMicrotasksPolicy()) {
++    // cctest's default policy runs queued jobs before CompileRun returns, which
++    // would settle a promise returned by the call before the test can see it
++    // pending. These tests drain the queue themselves.
++    isolate_->SetMicrotasksPolicy(v8::MicrotasksPolicy::kExplicit);
 +    reb_js_invocation_embedder = &embedder_;
 +    v8::JsInvocationCallbacks callbacks;
 +    callbacks.epoch = &RebJsInvocationEpoch;
@@ -1619,6 +1624,7 @@ index e9addc26f28685ad74d07a09347dbbaa347e5ceb..5fadada03863578a9703476414c76fce
 +    }
 +  }
 +  ~RebJsInvocationScope() {
++    isolate_->SetMicrotasksPolicy(microtasks_);
 +    isolate_->SetJsInvocationCallbacks({});
 +    reb_js_invocation_embedder = nullptr;
 +  }
@@ -1637,6 +1643,7 @@ index e9addc26f28685ad74d07a09347dbbaa347e5ceb..5fadada03863578a9703476414c76fce
 +  i::FlagScope<bool> dispatch_;
 +  i::FlagScope<bool> compilation_cache_;
 +  i::FlagScope<bool> lazy_positions_;
++  v8::MicrotasksPolicy microtasks_;
 +  RebJsInvocationEmbedder embedder_;
 +};
 +

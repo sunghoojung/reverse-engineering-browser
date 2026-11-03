@@ -1352,7 +1352,7 @@ set -euo pipefail
 mkdir -p "$REB_LIVE_SESSION_ROOT"
 dir="$REB_LIVE_SESSION_ROOT/$((4242 + $(ls "$REB_LIVE_SESSION_ROOT" | wc -l)))"
 mkdir -p "$dir/profile" "$dir/artifacts"
-printf '%s\n' "$REB_NATIVE_WASM_DISPATCH $REB_CAPTURE_CATEGORY_MASK $REB_USE_SYSTEM_KEYCHAIN $REB_CONSOLE_DOCUMENT_START" > "$dir/options"
+printf '%s\n' "$REB_NATIVE_WASM_DISPATCH $REB_CAPTURE_CATEGORY_MASK $REB_USE_SYSTEM_KEYCHAIN $REB_CONSOLE_DOCUMENT_START ${{REB_NATIVE_JS_INVOCATION_SITES-unset}} ${{REB_NATIVE_JS_INVOCATION_DIGESTS-unset}}" > "$dir/options"
 ln -s "test-host-$$" "$dir/profile/SingletonLock"
 "{backend}" --port 0 --endpoint-file "$dir/research-ui.endpoint" \
   --active-endpoint-file "$REB_ACTIVE_ENDPOINT_FILE" \
@@ -1390,6 +1390,9 @@ wait "$backend"
         .env("REB_BRAVE_BINARY", &brave)
         // An inherited document-start permission must not reach the session.
         .env("REB_CONSOLE_DOCUMENT_START", "1")
+        // Nor may the researcher's invocation sites or value digests.
+        .env("REB_NATIVE_JS_INVOCATION_SITES", root.path().join("sites.json"))
+        .env("REB_NATIVE_JS_INVOCATION_DIGESTS", "1")
         .env("TEST_BROKER_SOCKET", &socket)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -1462,7 +1465,7 @@ wait "$backend"
     );
     assert_eq!(
         std::fs::read_to_string(sessions.join("4242/options")).unwrap(),
-        "1 4095 0 0\n"
+        "1 4095 0 0 unset 0\n"
     );
 
     let context = mcp.request("tools/call", json!({"name": "get_session_context"}));

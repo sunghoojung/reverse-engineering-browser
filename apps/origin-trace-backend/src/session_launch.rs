@@ -455,6 +455,9 @@ pub async fn launch(options: &StartOptions) -> Result<Started, String> {
         "REB_BRAVE_PROFILE",
         "REB_NATIVE_WASM_GUEST_ADAPTER",
         "REB_NATIVE_JS_DISPATCH_SITES",
+        // Invocation sites are not a named option: an agent session never
+        // arms the researcher's functions or settles their values.
+        "REB_NATIVE_JS_INVOCATION_SITES",
         "REB_BRAVE_BINARY",
     ] {
         command.env_remove(name);
@@ -480,6 +483,9 @@ pub async fn launch(options: &StartOptions) -> Result<Started, String> {
         // documents. The browser-session permission is not a named option, so
         // an inherited switch never grants it to an agent-started capture.
         .env("REB_CONSOLE_DOCUMENT_START", "0")
+        // Settled-value digests are sensitive capture and need invocation
+        // sites, which agent sessions never arm.
+        .env("REB_NATIVE_JS_INVOCATION_DIGESTS", "0")
         .env("REB_LOCALHOST_ONLY", switch(options.localhost_only))
         // An agent cannot answer a macOS Keychain prompt, so agent sessions use
         // a prompt-free isolated profile. Do not save passwords in it.

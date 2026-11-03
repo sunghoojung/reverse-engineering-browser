@@ -365,7 +365,11 @@ profile or embedded-session variable is ignored. Request content capture is
 not a named option, so these sessions record request body length, type and
 digest but no request path, query or body bytes. Document-start Console
 script permission (`REB_CONSOLE_DOCUMENT_START`) is not a named option
-either, so these sessions can never arm a document-start script. Operator
+either, so these sessions can never arm a document-start script. Native
+JavaScript invocation sites (`REB_NATIVE_JS_INVOCATION_SITES`) and their
+settled-value digests (`REB_NATIVE_JS_INVOCATION_DIGESTS`) are not named
+options, so these sessions never arm an invocation site or record a digest,
+whatever the caller's environment says. Operator
 settings such as helper binary paths, `REB_LIVE_SESSION_ROOT`, `REB_ORIGIN_TRACE_APP` and
 `REB_OPEN_COMMAND` still apply. They run the launcher that belongs with the
 `reb-api` build (`Contents/Resources/run-live-session.sh` in the app,

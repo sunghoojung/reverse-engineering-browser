@@ -621,6 +621,52 @@ async fn read_capped_body(
     }
     Ok(bytes)
 }
+/// Extra client time for an operation that deliberately waits on the server,
+/// named by `x-reb-wait-parameter` in milliseconds, so the configured timeout
+/// stays a bound on transport time rather than on the requested wait.
+fn wait_allowance(definition: &Value, params: &BTreeMap<String, String>) -> f64 {
+    let Some(name) = definition["x-reb-wait-parameter"].as_str() else {
+        return 0.0;
+    };
+    let default = definition["parameters"]
+        .as_array()
+        .and_then(|items| items.iter().find(|item| item["name"] == name))
+        .and_then(|item| item["schema"]["default"].as_u64());
+    let milliseconds = params
+        .get(name)
+        .and_then(|value| value.parse::<u64>().ok())
+        .or(default)
+        .unwrap_or(0)
+        .min(60_000);
+    milliseconds as f64 / 1000.0
+}
+
+/// A backend that predates filtered reads ignores the filter parameters and
+/// returns the unfiltered tail. Operations that echo their filters declare the
+/// echo key; its absence after a filtered call means the filters were ignored.
+fn ignored_filters(
+    definition: &Value,
+    params: &BTreeMap<String, String>,
+    completed: &CompletedExchange,
+) -> Option<String> {
+    let key = definition["x-reb-filter-echo"].as_str()?;
+    let filtered = params
+        .keys()
+        .any(|name| !matches!(name.as_str(), "limit" | "If-None-Match"));
+    if !filtered || completed.status != 200 || completed.unreadable {
+        return None;
+    }
+    let value: Value = serde_json::from_slice(&completed.bytes).ok()?;
+    if value.get(key).is_some() {
+        return None;
+    }
+    Some(format!(
+        "The backend ignored the filters for {} and returned unfiltered records, so it predates filtered reads. Rebuild or update Origin Trace. The unfiltered result was discarded.",
+        definition["operationId"]
+            .as_str()
+            .unwrap_or("this operation")
+    ))
+}
 fn check_timeout(timeout: f64) -> Result<(), Box<dyn std::error::Error>> {
     if !timeout.is_finite() || timeout <= 0.0 || timeout > 3600.0 {
         return Err("Timeout must be finite and between 0 and 3600 seconds".into());
@@ -960,7 +1006,7 @@ async fn run() -> Result<i32, Box<dyn std::error::Error>> {
                 base: &base,
                 params: &values,
                 body,
-                timeout,
+                timeout: timeout + wait_allowance(definition, &values),
                 json_errors,
                 missing_body: "Operation requires --body-file PATH or --body-file -",
                 expected_instance: None,
@@ -998,6 +1044,10 @@ async fn run() -> Result<i32, Box<dyn std::error::Error>> {
                             .collect::<String>()
                     );
                 }
+                return Ok(1);
+            }
+            if let Some(error) = ignored_filters(definition, &values, &completed) {
+                eprintln!("{error}");
                 return Ok(1);
             }
             if let Some(path) = output {
@@ -1061,6 +1111,41 @@ async fn run_main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn waits_extend_the_client_timeout_and_ignored_filters_are_refused() {
+        let spec = specification().unwrap();
+        let ops = operations(&spec).unwrap();
+        let wait = &ops["wait_for_events"].2;
+        let events = &ops["get_events"].2;
+        let params = |pairs: &[(&str, &str)]| {
+            pairs
+                .iter()
+                .map(|(name, value)| ((*name).to_owned(), (*value).to_owned()))
+                .collect::<BTreeMap<_, _>>()
+        };
+        assert_eq!(wait_allowance(wait, &params(&[])), 10.0);
+        assert_eq!(
+            wait_allowance(wait, &params(&[("timeout_ms", "2500")])),
+            2.5
+        );
+        assert_eq!(
+            wait_allowance(events, &params(&[("timeout_ms", "2500")])),
+            0.0
+        );
+        let completed = |body: &str| CompletedExchange {
+            status: 200,
+            headers: BTreeMap::new(),
+            bytes: body.as_bytes().to_vec(),
+            unreadable: false,
+        };
+        let filtered = params(&[("type", "gap"), ("limit", "5")]);
+        let error = ignored_filters(events, &filtered, &completed(r#"{"events":[]}"#)).unwrap();
+        assert!(error.contains("ignored the filters"), "{error}");
+        assert!(ignored_filters(events, &filtered, &completed(r#"{"query":{}}"#)).is_none());
+        assert!(ignored_filters(events, &params(&[("limit", "5")]), &completed("{}")).is_none());
+        assert!(ignored_filters(wait, &filtered, &completed("{}")).is_none());
+    }
 
     #[test]
     fn read_only_classification_uses_effects_not_the_http_verb() {

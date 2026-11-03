@@ -21,7 +21,7 @@ const MAX_RECORD_BYTES: usize = 4096;
 const MAX_EVENTS: usize = 5000;
 // Browser reasons are fixed producer identifiers, so 64 distinct pairs covers
 // every documented one. A further pair stays an unexplained queue-drop marker.
-const MAX_NAMED_GAPS: usize = 64;
+pub(crate) const MAX_NAMED_GAPS: usize = 64;
 
 #[derive(Debug, PartialEq)]
 pub struct EventWindow {
@@ -239,10 +239,10 @@ impl EventWindowCache {
     }
 }
 
-fn malformed() -> Error {
+pub(crate) fn malformed() -> Error {
     Error::new(500, "The evidence store contains a malformed event")
 }
-fn unsigned(value: &Value) -> Option<u64> {
+pub(crate) fn unsigned(value: &Value) -> Option<u64> {
     match value {
         Value::Number(number) => number.as_u64(),
         Value::String(text)
@@ -258,7 +258,7 @@ fn unsigned(value: &Value) -> Option<u64> {
 }
 // The HTTP contract weighs every non-count marker as one queue drop, so a named
 // marker stays in queue_drops; named_gaps lets a reader take that weight back out.
-fn drop_weight(event: &Value) -> u64 {
+pub(crate) fn drop_weight(event: &Value) -> u64 {
     event["payload"]
         .as_str()
         .and_then(|text| hex::decode(text).ok())
@@ -308,7 +308,7 @@ fn is_network(event: &Value) -> bool {
             )
         )
 }
-fn add(total: &mut u64, saturated: &mut bool, count: u64) {
+pub(crate) fn add(total: &mut u64, saturated: &mut bool, count: u64) {
     match total.checked_add(count) {
         Some(sum) => *total = sum,
         None => {

@@ -38,7 +38,7 @@ pub fn live_admission(capture_mode: &str, broker_connected: bool) -> &'static st
         _ => "not_live_capture",
     }
 }
-fn url_label(value: &Value) -> Value {
+pub(crate) fn url_label(value: &Value) -> Value {
     let Some(text) = value.as_str().filter(|text| text.len() <= 65536) else {
         return Value::Null;
     };

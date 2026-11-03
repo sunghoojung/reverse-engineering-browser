@@ -97,11 +97,13 @@ EVENT_TYPES = {
     "module_compiled",
     "module_instantiated",
     "property_read",
+    "request_body",
     "request_completed",
     "request_failed",
     "request_initiated",
     "request_redirected",
     "request_started",
+    "request_target",
     "response_completed",
     "response_started",
     "vm_finding",
@@ -159,6 +161,80 @@ def valid_js_dispatch(event: dict, payload: bytes) -> bool:
     elif any(handler):
         return False
     return parent == 0 or (parent < activation and not flags & 0x06)
+
+
+TOKEN_CHARACTERS = frozenset(b"abcdefghijklmnopqrstuvwxyz0123456789!#$%&'*+-.^_`|~")
+REQUEST_DIGEST_LIMIT = 4 * 1024 * 1024
+
+
+def valid_request_child(event: dict, payload: bytes) -> bool:
+    """Envelope shared by request_body and request_target (native-network-v2.md)."""
+    return (event["protocol_version"] == 3 and event["category"] == "network"
+            and event["flags"] == 0 and not event["payload_truncated"] and len(payload) == 128
+            and payload[:4] == bytes((1, 0, 128, 0))
+            and all(event[key] != "0" for key in ("session_id", "sequence_number",
+                                                  "parent_event_id"))
+            and int(event["parent_event_id"]) < int(event["sequence_number"])
+            and 1 <= event["process_id"] <= 0xFFFFFFFF and event["navigation_id"] == "0"
+            and event["status_code"] == 0 and event["error_code"] == 0
+            and event["encoded_data_length"] == "0" and event["decoded_body_length"] == "0"
+            and event["resource_type"] == 0)
+
+
+def valid_request_target(event: dict, payload: bytes) -> bool:
+    length = int.from_bytes(payload[4:8], "little")
+    prefix = min(length, 116)
+    return (valid_request_child(event, payload) and event["artifact_id"] == "0"
+            and payload[8] <= 4 and payload[9] == 0 and 0 not in payload[12:12 + prefix]
+            and not any(payload[12 + prefix:]))
+
+
+def valid_request_body(event: dict, payload: bytes) -> bool:
+    """Every state rule of the request_body payload, mirrored from the C++ core."""
+    if not valid_request_child(event, payload):
+        return False
+    kind, state, flags, type_length = payload[4], payload[5], payload[6], payload[7]
+    body_length = int.from_bytes(payload[8:16], "little")
+    captured = int.from_bytes(payload[16:24], "little")
+    elements = int.from_bytes(payload[24:28], "little")
+    digest, content_type = payload[32:64], payload[64:128]
+    content, has_digest, size_limit = bool(flags & 1), bool(flags & 2), bool(flags & 4)
+    partial, type_present, type_omitted = bool(flags & 8), bool(flags & 16), bool(flags & 32)
+    media = content_type[:type_length]
+    if (kind > 6 or not 1 <= state <= 11 or flags & ~0x3F or any(payload[28:32])
+            or type_length > 64 or (type_present and type_omitted)
+            or type_present != (type_length != 0) or any(content_type[type_length:])
+            or (type_present and (media.count(b"/") != 1 or media.startswith(b"/")
+                                  or media.endswith(b"/")
+                                  or any(b not in TOKEN_CHARACTERS and b != 0x2F for b in media)))
+            or captured > body_length):
+        return False
+    is_bytes, is_none = kind == 1, kind == 0
+    if ((has_digest and (not is_bytes or size_limit or body_length > REQUEST_DIGEST_LIMIT))
+            or (not has_digest and any(digest))
+            or (size_limit and (not is_bytes or body_length <= REQUEST_DIGEST_LIMIT))
+            or (is_bytes and state != 11 and has_digest == size_limit)
+            or (state == 11 and (has_digest or size_limit))
+            or partial != (not is_none and not is_bytes) or is_none != (state == 1)
+            or (is_none and (elements or body_length)) or (not is_none and not elements)
+            or (kind == 5 and elements < 2)):
+        return False
+    retained = state in (4, 5)
+    if (event["artifact_id"] != "0") != retained or (not retained and captured):
+        return False
+    return {
+        1: True,
+        2: is_bytes and body_length == 0,
+        3: not content and (not is_bytes or body_length != 0),
+        4: content and is_bytes and body_length != 0 and captured == body_length,
+        5: content and is_bytes and 0 < captured < body_length,
+        6: content and not is_none and not is_bytes,
+        7: content and is_bytes and body_length != 0,
+        8: content and is_bytes and body_length != 0,
+        9: content and is_bytes and body_length != 0,
+        10: content and is_bytes and body_length != 0,
+        11: True,
+    }[state]
 
 
 def validate_event(event: object, line_number: int) -> None:
@@ -275,6 +351,10 @@ def validate_event(event: object, line_number: int) -> None:
         raise ValueError(f"line {line_number}: native Wasm call_indirect observation is invalid")
     if event["type"] == "js_dispatch_observation" and not valid_js_dispatch(event, payload):
         raise ValueError(f"line {line_number}: native JavaScript dispatch observation is invalid")
+    if event["type"] == "request_body" and not valid_request_body(event, payload):
+        raise ValueError(f"line {line_number}: native request body record is invalid")
+    if event["type"] == "request_target" and not valid_request_target(event, payload):
+        raise ValueError(f"line {line_number}: native request target record is invalid")
     if event["type"] in ("wasm_guest_dispatch", "wasm_guest_invocation"):
         # Invocation version 2 adds the exact parent dispatch at bytes 72..80
         # and version 3 the adapter site (at most 8) at bytes 80..84.

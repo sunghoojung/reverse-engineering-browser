@@ -1,6 +1,7 @@
 // Platform/Mojo/socket scheduling adapters only. Capture sinks and receiver are real.
 #pragma once
 
+#include <algorithm>
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -19,6 +20,7 @@
 #include "brave/components/reverse_engineering_browser/common/native_artifact_header.h"
 #include "brave/components/reverse_engineering_browser/common/native_probe_event.h"
 #include "brave/components/reverse_engineering_browser/common/native_wasm_guest.h"
+#include "network_request_body_stub.h"
 
 namespace base {
 template <class T>
@@ -113,15 +115,41 @@ class BrowserContext {
   bool otr_;
 };
 }  // namespace content
+// Splits an absolute spec into the components the sinks read. The pinned GURL
+// returns views; owned copies keep this stub's default copy and move safe.
 class GURL {
  public:
-  GURL() : value_("https://fixture.test/stack.js") {}
-  explicit GURL(std::string value) : value_(std::move(value)) {}
+  GURL() : GURL("https://fixture.test/stack.js") {}
+  explicit GURL(std::string value) : value_(std::move(value)) {
+    const std::string_view spec(value_);
+    const auto scheme_end = spec.find("://");
+    if (scheme_end == std::string_view::npos) {
+      return;
+    }
+    scheme_ = spec.substr(0, scheme_end);
+    const auto rest = spec.substr(scheme_end + 3);
+    const auto path_start = std::min(rest.find('/'), rest.size());
+    host_ = rest.substr(0, path_start);
+    const auto target = rest.substr(path_start);
+    const auto query = target.find('?');
+    path_ = target.substr(0, query);
+    if (query != std::string_view::npos) {
+      query_ = target.substr(query + 1);
+      has_query_ = true;
+    }
+  }
   const std::string& spec() const { return value_; }
-  std::string host() const { return "fixture.test"; }
+  bool is_valid() const { return !scheme_.empty(); }
+  bool SchemeIs(std::string_view scheme) const { return scheme_ == scheme; }
+  std::string_view host() const { return host_; }
+  std::string_view path() const { return path_; }
+  bool has_query() const { return has_query_; }
+  std::string_view query() const { return query_; }
+  int IntPort() const { return -1; }
 
  private:
-  std::string value_;
+  std::string value_, scheme_, host_, path_, query_;
+  bool has_query_ = false;
 };
 namespace net {
 struct HttpResponseHeaders {
@@ -138,6 +166,8 @@ struct ResourceRequest {
   bool originated_from_service_worker = false;
   std::string method = "GET";
   GURL url;
+  net::HttpRequestHeaders headers;
+  std::shared_ptr<ResourceRequestBody> request_body;
 };
 struct URLLoaderCompletionStatus {
   int error_code = 0;

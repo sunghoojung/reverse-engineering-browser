@@ -12,6 +12,8 @@
 #include <string>
 #include <string_view>
 #include <system_error>
+#include <utility>
+#include <vector>
 
 #include <unistd.h>
 
@@ -25,6 +27,8 @@
 namespace {
 
 int failures = 0;
+// Every record checked here, for the cross-language golden (--golden).
+std::vector<std::pair<std::string, reb::EventRecord>> golden;
 
 void Check(const bool condition, const std::string& message) {
   if (!condition) {
@@ -228,8 +232,8 @@ void CheckBodyStates() {
       {"credential form, content", Summary(K::kBytes, S::kNotCapturedCredentialForm, true, 40), 0},
   };
   for (const Valid& item : valid) {
-    Check(reb::IsValidEvent(BodyEvent(item.summary, item.artifact_id)),
-          std::string("valid body state: ") + item.name);
+    golden.emplace_back(item.name, BodyEvent(item.summary, item.artifact_id));
+    Check(reb::IsValidEvent(golden.back().second), std::string("valid body state: ") + item.name);
   }
 
   using Mutation = std::function<void(reb::NativeRequestBodySummary&, reb::EventRecord&)>;
@@ -335,6 +339,7 @@ void CheckBodyStates() {
     if (item.mutate) {
       item.mutate(ignored, event);
     }
+    golden.emplace_back(item.name, event);
     Check(!reb::IsValidEvent(event), std::string("malformed body rejected: ") + item.name);
   }
 }
@@ -347,6 +352,7 @@ void CheckTargets() {
   target.target_length = static_cast<std::uint32_t>(path.size());
   std::copy_n(path.begin(), target.prefix.size(), target.prefix.begin());
   auto event = Event(reb::EventType::kRequestTarget, reb::EncodeNativeRequestTargetPayload(target));
+  golden.emplace_back("truncated target", event);
   Check(reb::IsValidEvent(event), "truncated target with original length is valid");
   reb::RequestTargetPayload decoded;
   Check(reb::DecodeRequestTargetPayload(event.inline_payload, decoded) &&
@@ -363,6 +369,7 @@ void CheckTargets() {
   const auto mutate = [&](const char* name, const std::function<void(reb::EventRecord&)>& change) {
     auto copy = event;
     change(copy);
+    golden.emplace_back(name, copy);
     Check(!reb::IsValidEvent(copy), std::string("malformed target rejected: ") + name);
   };
   mutate("NUL inside prefix", [](auto& e) { e.inline_payload[20] = std::byte{0}; });
@@ -377,8 +384,10 @@ void CheckTargets() {
   std::copy_n("/ab", 3, short_target.prefix.begin());
   auto dirty =
       Event(reb::EventType::kRequestTarget, reb::EncodeNativeRequestTargetPayload(short_target));
+  golden.emplace_back("short target", dirty);
   Check(reb::IsValidEvent(dirty), "short target valid");
   dirty.inline_payload[12 + 3] = std::byte{'x'};
+  golden.emplace_back("target dirty tail", dirty);
   Check(!reb::IsValidEvent(dirty), "bytes after the recorded target are rejected");
 }
 
@@ -462,11 +471,27 @@ void CheckArtifacts() {
 
 }  // namespace
 
-int main() {
+int main(int argc, char** argv) {
   CheckParity();
   CheckContentTypes();
   CheckBodyStates();
   CheckTargets();
+  if (failures != 0) {
+    return 1;
+  }
+  if (argc == 2 && std::string_view(argv[1]) == "--golden") {
+    // The C++ verdict is the reference the Python and UI decoders must match.
+    std::string json;
+    std::cout << "[";
+    for (std::size_t index = 0; index < golden.size(); ++index) {
+      reb::WriteEventJson(golden[index].second, json);
+      std::cout << (index ? ",\n" : "\n") << "{\"name\":\"" << golden[index].first
+                << "\",\"valid\":" << (reb::IsValidEvent(golden[index].second) ? "true" : "false")
+                << ",\"event\":" << json << "}";
+    }
+    std::cout << "\n]\n";
+    return 0;
+  }
   CheckArtifacts();
   if (failures != 0) {
     return 1;

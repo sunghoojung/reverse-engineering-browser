@@ -24,6 +24,7 @@
 #include "content/public/renderer/render_frame.h"
 #include "mojo/public/cpp/bindings/receiver.h"
 #include "mojo/public/cpp/bindings/remote.h"
+#include "third_party/blink/public/platform/scheduler/web_agent_group_scheduler.h"
 #include "third_party/blink/public/platform/web_security_origin.h"
 #include "third_party/blink/public/platform/web_string.h"
 #include "third_party/blink/public/web/web_console_message.h"
@@ -116,10 +117,15 @@ class DocumentStart final : public mojom::NativeConsoleScriptClient {
     host_->BindClient(receiver_.BindNewPipeAndPassRemote());
   }
 
-  void Inject(content::RenderFrame* render_frame, v8::Local<v8::Context> context) {
+  void Inject(content::RenderFrame* render_frame,
+              v8::Local<v8::Context> context,
+              NativeConsoleDocumentStartFrame& state) {
     auto* frame = render_frame ? render_frame->GetWebFrame() : nullptr;
     if (!frame || frame->IsProvisional() || context.IsEmpty())
       return;
+    // Decided for this document whether or not a rule matches, so the window
+    // clear that follows in the same commit never injects it a second time.
+    state.document = frame->GetDocument().Token().value();
     // The browser serializes the rule's origin with url::Origin, so compare the
     // document's own url::Origin serialization: an opaque origin becomes "null"
     // and can never equal a valid rule.
@@ -134,6 +140,15 @@ class DocumentStart final : public mojom::NativeConsoleScriptClient {
       if (NativeConsoleDocumentStartMatches(scripts_[index].rule, serialized, path, top))
         Run(frame, context, index);
     }
+  }
+
+  void InjectReused(content::RenderFrame* render_frame, NativeConsoleDocumentStartFrame& state) {
+    auto* frame = render_frame ? render_frame->GetWebFrame() : nullptr;
+    if (!frame || frame->IsProvisional() || frame->GetDocument().Token().value() == state.document)
+      return;
+    v8::HandleScope handles(frame->GetAgentGroupScheduler()->Isolate());
+    // The context already exists, so this reads it and never creates one.
+    Inject(render_frame, frame->MainWorldScriptContext(), state);
   }
 
   // Called from the `report` function the injected snippet received. A function
@@ -372,10 +387,24 @@ void ConnectNativeConsoleDocumentStart(mojo::PendingRemote<mojom::NativeConsoleS
   DocumentStart::Get().Connect(std::move(host));
 }
 
-void InjectNativeConsoleDocumentStart(content::RenderFrame* frame, v8::Local<v8::Context> context) {
-  if (!g_armed)
+void InjectNativeConsoleDocumentStart(content::RenderFrame* frame,
+                                      v8::Local<v8::Context> context,
+                                      NativeConsoleDocumentStartFrame& state) {
+  state.context = true;
+  if (!g_armed) {
+    // Nothing was decided for this document, so a later commit that keeps
+    // this context is matched as the new document it is.
+    state.document = base::UnguessableToken();
     return;
-  DocumentStart::Get().Inject(frame, context);
+  }
+  DocumentStart::Get().Inject(frame, context, state);
+}
+
+void InjectNativeConsoleDocumentStartIntoReusedWindow(content::RenderFrame* frame,
+                                                      NativeConsoleDocumentStartFrame& state) {
+  if (!g_armed || !state.context)
+    return;
+  DocumentStart::Get().InjectReused(frame, state);
 }
 
 }  // namespace reb

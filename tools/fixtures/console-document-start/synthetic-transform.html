@@ -26,6 +26,12 @@
       renderer process. Only an explicit <code>http</code> or
       <code>https</code> value is honored.
     </p>
+    <p>
+      Append <code>?reuse=1</code> to add a second, script-created child frame.
+      The page touches its initial empty document before pointing it at the
+      same-origin child page, so Blink keeps that window and its script context
+      for the child's new document.
+    </p>
     <iframe
       id="child"
       title="Synthetic child frame"
@@ -56,6 +62,17 @@
         if (child.protocol === 'http:' || child.protocol === 'https:') {
           document.querySelector('#child').src = child.href;
         }
+      }
+      // Authored convenience for the reused-window acceptance step.
+      if (new URLSearchParams(location.search).get('reuse') === '1') {
+        const reused = document.createElement('iframe');
+        reused.title = 'Synthetic reused-window child frame';
+        reused.width = '320';
+        reused.height = '90';
+        document.body.append(reused);
+        // Creates the initial empty document's script context first.
+        reused.contentWindow.document.title = 'initial';
+        reused.src = 'synthetic-transform-child.html';
       }
       const first = window.syntheticTransform('authored-sample', 3);
       const second = window.syntheticTransform('authored-sample-two', 1);

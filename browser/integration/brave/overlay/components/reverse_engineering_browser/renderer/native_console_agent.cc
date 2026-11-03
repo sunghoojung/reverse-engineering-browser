@@ -139,12 +139,23 @@ void NativeConsoleAgent::Describe(DescribeCallback callback) {
 // here unless the separate document-start experiment is armed.
 void NativeConsoleAgent::DidCreateScriptContext(v8::Local<v8::Context> context, int world_id) {
   if (world_id == 0)
-    InjectNativeConsoleDocumentStart(render_frame(), context);
+    InjectNativeConsoleDocumentStart(render_frame(), context, document_start_);
+}
+
+// A same-origin commit from the initial empty document keeps that window and
+// its existing main-world context (DocumentLoader::InitializeWindow and
+// LocalWindowProxy::UpdateDocument), so DidCreateScriptContext never fires for
+// the new document. Blink still clears the window object for every commit
+// before its parser runs, which is where that document is matched instead.
+void NativeConsoleAgent::DidClearWindowObject() {
+  InjectNativeConsoleDocumentStartIntoReusedWindow(render_frame(), document_start_);
 }
 
 void NativeConsoleAgent::WillReleaseScriptContext(v8::Local<v8::Context> context, int world_id) {
-  if (world_id == 0)
+  if (world_id == 0) {
     runtime_.Reset();
+    document_start_.context = false;
+  }
 }
 void NativeConsoleAgent::DetailedConsoleMessageAdded(const std::u16string& message,
                                                      const std::u16string& source,

@@ -123,7 +123,9 @@ renderers; a renderer refused beyond that is reported, never silently counted
 as ready.
 
 The renderer injects at main-world script-context creation, which Blink performs
-before any script can run in that context. Matching is the dependency-free
+before any script can run in that context. A same-origin commit from an initial
+empty document keeps an existing context, so for that document it injects when
+Blink clears the window object for the commit instead. Matching is the dependency-free
 `common/native_console_document_start.h` decision shared with the browser and
 the offline check: one exact serialized origin, exactly one frame kind, and an
 optional literal path prefix. Workers, non-main worlds and non-HTTP(S)

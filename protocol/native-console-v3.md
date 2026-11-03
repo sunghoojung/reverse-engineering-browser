@@ -77,6 +77,13 @@ work, no URL guessing beyond the declared rule, and no navigation blocking.
 - Main world only, at main-world script-context creation, which Blink performs
   before any script can run in that context. A snippet therefore observes the
   document before its own scripts, including inline scripts.
+- A same-origin commit from a frame's initial empty document keeps that window,
+  and a main-world context that already exists, so no context is created for
+  the new document. That happens when a page creates a frame, touches its
+  `contentWindow`, then points it at a same-origin URL. The injector matches
+  such a document when Blink clears the window object for the commit, which is
+  also before any of its scripts run, so it is injected exactly once, never
+  silently skipped.
 - Matching frames include cross-origin child frames in their own renderer
   processes, as long as the declared rule names that child origin.
 - The snippet is compiled as `(function(report){ … })` with resource name
@@ -297,6 +304,11 @@ matching browser, backend and packaged assets, the following remain required.
    child frame at the declared child origin. Only the declared frame kind runs
    the snippet. Confirm the child's separate renderer process still receives the
    set, and that a top-frame rule does not reach the child.
+   Then open the page with `?reuse=1` and a `child` rule for the page's own
+   origin and `/synthetic-transform-child.html`. Its script-created child frame
+   touches its initial empty document before navigating, so Blink keeps that
+   window and context; the child's new document must still produce exactly one
+   `injected` record.
 4. **Refresh and new document.** Reload the matching document and navigate it
    away and back. Each new document must run the snippet exactly once, with a
    new `document_id` and `injected` record. A document that was already open

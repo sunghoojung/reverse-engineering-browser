@@ -10,6 +10,7 @@
 #include <string>
 
 #include "brave/components/reverse_engineering_browser/common/native_console.mojom.h"
+#include "brave/components/reverse_engineering_browser/renderer/native_console_document_start.h"
 #include "brave/components/reverse_engineering_browser/renderer/native_console_runtime.h"
 #include "content/public/renderer/render_frame_observer.h"
 #include "mojo/public/cpp/bindings/associated_receiver.h"
@@ -30,6 +31,7 @@ class NativeConsoleAgent final : public content::RenderFrameObserver,
   void Bind(mojo::PendingAssociatedReceiver<mojom::NativeConsoleAgent> receiver);
   void Describe(DescribeCallback callback) override;
   void DidCreateScriptContext(v8::Local<v8::Context> context, int world_id) override;
+  void DidClearWindowObject() override;
   void WillReleaseScriptContext(v8::Local<v8::Context> context, int world_id) override;
   void DetailedConsoleMessageAdded(const std::u16string& message,
                                    const std::u16string& source,
@@ -45,6 +47,7 @@ class NativeConsoleAgent final : public content::RenderFrameObserver,
                 const std::string& source,
                 EvaluateCallback callback) override;
   NativeConsoleRuntime runtime_;
+  NativeConsoleDocumentStartFrame document_start_;
   mojo::AssociatedReceiver<mojom::NativeConsoleAgent> receiver_{this};
 };
 

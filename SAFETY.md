@@ -48,6 +48,13 @@ it.
   receiver or string contents.
 - Standalone probes remain inactive without an enabled session. Enabled artifact
   capture retains raw source URLs locally; metadata is not necessarily secret-free.
+- With Network capture on, every native request records its body's length,
+  normalized content type and SHA-256. A digest of a short or predictable body
+  can be confirmed by guessing; password form posts keep no digest. Request
+  paths, queries and body bytes are sensitive capture: they are retained only
+  with `REB_CAPTURE_REQUEST_CONTENT=1`, which the packaged app's content mode
+  sets, at most 256 KiB per body and 1,024 bodies or 64 MiB per session. See
+  [Native network v2](protocol/native-network-v2.md).
 - Historical captures can include sensitive URLs, headers, bodies and source.
   Removal of CDP does not sanitize previously saved evidence. Only collect and
   disclose data covered by authorization.
@@ -126,6 +133,7 @@ of the data-handling policy:
 | Sensitive artifact rejection without an enabled session | `src/evidence/artifact.cpp` |
 | Loopback-only research API trust check | [`config.rs`](apps/origin-trace-backend/src/config.rs) and [`app.rs`](apps/origin-trace-backend/src/app.rs) |
 | Artifact receiver `--allow-sensitive` gate | `services/artifact-receiver/main.cpp` |
+| Request path and body gate (`--reb-capture-request-content`) | Brave overlay `native_probe_socket_client.cc` and `native_network_capture_sink.cc`; receiver `--allow-sensitive` |
 | Capture category mask and session expiration | `protocol/README.md`, native probes |
 | Origin allowlisting | Not implemented; the native event envelope lacks trustworthy origin identity |
 

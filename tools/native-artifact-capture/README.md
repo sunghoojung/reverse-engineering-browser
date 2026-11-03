@@ -28,7 +28,9 @@ and executed; omitted stages are explicitly reported as skipped.
   `LastArtifactId`, not a canned success callback. Its ACK is serialized through
   the matching production/native wire structures before delivery to the sink.
 - Optional production artifact-receiver and event-broker executables read those
-  unchanged bytes over their supported stdin boundary. Metadata and immutable
+  unchanged bytes over their supported stdin boundary. The receiver runs with
+  `--allow-sensitive`, as a request-content session does, because the corpus
+  carries `request_body` artifacts. Metadata and immutable
   bytes are compared with the in-process receiver's store. Corpus wire hashes
   must remain unchanged after every downstream stage.
 - Optional `origin-trace-vm` analyzes the retained repository-authored
@@ -69,6 +71,17 @@ are native output, not hand-written golden evidence. `cases.json` is expectation
 metadata, never substituted into production evidence. `in-process-artifacts`
 also contains independent lifecycle-test artifacts that are deliberately excluded
 from the corpus sent to the optional production services.
+
+Request bodies (protocol/native-network-v2.md): the unchanged network sink in a
+content session emits `request_target` and `request_body` children of
+`request_started` and hands an 816-byte JSON body and a truncated 300 KiB body to
+the unchanged artifact sink. The production receiver retains both as sensitive
+`request_body` artifacts with the full URL; the broker stores both children.
+`request-bodies.json` names the expected joins, and the stage checks blob bytes,
+digests, target prefixes, `creator_event_id` and the capture event's parent,
+then runs `tools/validate-evidence-store.py` over the broker output. Component
+cases cover a metadata-only session, a receiver started without
+`--allow-sensitive` and a session without the Artifact category.
 
 ## Deliberate limits
 

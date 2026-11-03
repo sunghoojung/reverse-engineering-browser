@@ -258,8 +258,8 @@ session. Captured evidence is stored under `build/sessions/live/`.
 
 Capture is native-only. Do not set `REB_CDP_NETWORK_CAPTURE` or configure a
 debugger transport: the launcher rejects those removed paths. Native network
-metadata is not a complete HTTP recorder; missing headers and bodies remain
-unavailable. Retained artifacts and historical captures can still be sensitive.
+metadata is not a complete HTTP recorder; missing headers and response bodies
+remain unavailable. Retained artifacts and historical captures can still be sensitive.
 An explicitly selected best-effort redacted copy does not modify the raw capture
 and is not a guarantee that the copy contains no secrets; see the
 [Traffic copy contract](protocol/traffic-capture-copy-v1.md).
@@ -269,6 +269,12 @@ image returned by `HTMLCanvasElement.toDataURL()` for this one session, add
 `REB_CAPTURE_CANVAS_IMAGES=1`. Canvas image output can contain page content, so
 it is disabled by default, kept only in the local session store, and limited to
 2 MiB per image.
+
+Every native request row records its request body's length, normalized content
+type and SHA-256. To also retain request paths, queries and request bodies (at
+most 256 KiB each) for one session, add `REB_CAPTURE_REQUEST_CONTENT=1`; the
+packaged app's default content mode does this. See
+[Native network v2](protocol/native-network-v2.md).
 
 ### Build the custom Brave browser for the first time
 

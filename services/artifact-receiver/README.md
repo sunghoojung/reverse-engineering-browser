@@ -51,9 +51,11 @@ authenticated connection, so a browser-side reconnect does not silently end
 artifact capture. The live launcher stops the listener explicitly when the
 browser session ends.
 
-Response bodies are rejected by default. Add `--allow-sensitive` only under the
-sensitive-capture rules in [`SAFETY.md`](../../SAFETY.md), for a session whose
-visible authorization scope permits bounded response body capture.
+Response bodies, request bodies and Canvas data URLs are rejected by default.
+Add `--allow-sensitive` only under the sensitive-capture rules in
+[`SAFETY.md`](../../SAFETY.md), for a session whose visible authorization scope
+permits that bounded content. The live launcher adds it for
+`REB_CAPTURE_CANVAS_IMAGES=1` or `REB_CAPTURE_REQUEST_CONTENT=1`.
 
 The store contains immutable SHA-256-named blobs plus `manifest.jsonl`.
 Manifest records preserve execution-context and capture-origin provenance for

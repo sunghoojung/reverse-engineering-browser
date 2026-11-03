@@ -200,6 +200,15 @@ by `HTMLCanvasElement.toDataURL()`. That output is marked sensitive, linked to
 the exact readback event, limited to 2 MiB, and sent through the separate
 artifact channel. It is disabled by default and never enters the renderer event
 ring.
+
+Native network records keep the v1 host-only start payload. Each admitted
+request also gets a `request_body` summary record (length, normalized content
+type, SHA-256, kind and capture state). When `--reb-capture-request-content` is
+explicitly present, the browser also records the raw path and query as
+`request_target` children and retains at most 256 KiB of in-memory body bytes
+per request through the artifact channel. The change lives entirely in the
+overlay sink; the existing proxy hooks already pass the full `ResourceRequest`.
+See [Native network v2](../../../protocol/native-network-v2.md).
 Renderer events use a bounded shared-memory queue with Mojo lifecycle control
 and coalesced wake-ups. The browser process
 authenticates to the event broker with a session identifier and a mode-0600

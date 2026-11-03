@@ -396,6 +396,9 @@ when teardown writes later shell messages; the full session log path stays visib
 **New Live Session…** in the application menu offers metadata-only capture and
 Keychain controls. `REB_AUTOMATIC_CAPTURE_MODE=metadata` selects metadata-only
 automatic launch, and `REB_CAPTURE_CANVAS_IMAGES=0` disables image retention.
+Content mode also sets `REB_CAPTURE_REQUEST_CONTENT=1`, which retains request
+paths, queries and request bodies up to 256 KiB; set it to `0` to keep Traffic
+host-only. Every mode records each request body's length, type and SHA-256.
 Every app session also enables quiet mode and native Wasm `br_table` and
 `call_indirect` dispatch capture; Wasm dispatch forces Liftoff-only compilation,
 so Wasm-heavy pages run slower. Set `REB_NATIVE_QUIET_MODE=0`,
@@ -491,6 +494,14 @@ authorized session, run:
 ```sh
 REB_CAPTURE_CANVAS_IMAGES=1 make live
 ```
+
+To retain request paths, queries and bounded request bodies with `make live`,
+run `REB_CAPTURE_REQUEST_CONTENT=1 make live`. Traffic then shows each request's
+captured path and query, and its General view shows the request body: capture
+state, content type, length, SHA-256, kind and the retained bytes as text.
+Without it, the General view still shows the body's length, type and digest and
+says that content capture was off. File, blob and stream bodies are named, not
+read; password form bodies keep neither bytes nor a digest.
 
 Canvas image capture is disabled by default because rendered output can contain
 page content. Enabled output stays in the local session artifact store, is

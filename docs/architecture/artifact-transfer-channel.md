@@ -3,7 +3,7 @@
 ## Purpose
 
 JavaScript files, WebAssembly modules, source maps, and explicitly approved
-response bodies can be much larger than a probe event. They use a dedicated
+response and request bodies can be much larger than a probe event. They use a dedicated
 browser-process transfer channel and never enter the renderer event ring, event
 broker queue, or inline event payload.
 
@@ -77,8 +77,8 @@ size. Native tests assert that the two definitions remain ABI-identical.
 | 0 | 4 | `magic` | `0x41424552` |
 | 4 | 2 | `protocol_version` | `1` |
 | 6 | 2 | `header_size` | `128` |
-| 8 | 2 | `kind` | JavaScript, WASM, source map, response body |
-| 10 | 2 | `flags` | bit 0 marks sensitive response content |
+| 8 | 2 | `kind` | JavaScript, WASM, source map, response body, Canvas data URL, bytecode buffer, guest adapter, request body |
+| 10 | 2 | `flags` | bit 0 marks sensitive content |
 | 12 | 4 | `reserved0` | zero |
 | 16 | 48 | correlation IDs | six unsigned 64-bit values |
 | 64 | 8 | `content_size` | checked before content is read |
@@ -86,7 +86,7 @@ size. Native tests assert that the two definitions remain ABI-identical.
 | 76 | 4 | `mime_type_size` | 1 to 255 bytes |
 | 80 | 32 | expected SHA-256 | all zero if the sender omits preverification |
 | 112 | 8 | `execution_context_id` | stable renderer context ID, or zero when unavailable |
-| 120 | 2 | `capture_origin` | unknown, network response, dynamic JavaScript, WASM compile/module/instantiate |
+| 120 | 2 | `capture_origin` | unknown, network response, dynamic JavaScript, WASM compile/module/instantiate, Canvas, runtime typed array or allocating script, native Wasm guest, network request |
 | 122 | 2 | `reserved1` | zero |
 | 124 | 4 | `reserved2` | zero |
 
@@ -171,15 +171,18 @@ Project-wide authorization, capture, and privacy rules are in
 [`SAFETY.md`](../../SAFETY.md). This section describes the artifact channel's
 specific enforcement contract.
 
-Response bodies and Canvas data URLs require both controls:
+Response bodies, request bodies and Canvas data URLs require both controls:
 
-1. the frame kind is `response_body` or `canvas_data_url` and its sensitive flag
-   is set;
+1. the frame kind is `response_body`, `request_body` or `canvas_data_url` and
+   its sensitive flag is set;
 2. the receiver was started with `--allow-sensitive` for that authorized
    session.
 
-The default receiver rejects both kinds. The live launcher enables the receiver
-policy for Canvas only when `REB_CAPTURE_CANVAS_IMAGES=1` is set. JavaScript,
+The default receiver rejects all three kinds. The live launcher enables the
+receiver policy only when `REB_CAPTURE_CANVAS_IMAGES=1` or
+`REB_CAPTURE_REQUEST_CONTENT=1` is set. A `request_body` artifact must use the
+`network_request` origin, name its `request_body` event as creator and carry no
+execution context; see [Native network v2](../../protocol/native-network-v2.md). JavaScript,
 WASM, and source maps cannot be mislabeled as sensitive content. Credentials,
 cookies, and authorization headers are not artifact kinds and remain outside
 this channel.

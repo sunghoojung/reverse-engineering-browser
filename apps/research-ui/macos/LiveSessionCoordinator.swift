@@ -28,10 +28,179 @@ enum LiveCaptureMode: String {
   }
 }
 
+// The app's saved native JavaScript invocation sites, which every capture it
+// starts arms (protocol/native-js-invocation-v1.md#site-file). The site file
+// is exactly the browser's native-js-invocation-sites-v1 form with 1 to 8
+// sites; a sidecar the browser never reads keeps each label, source URL and
+// session. The backend's routes add sites from Sources, the start dialog lists
+// and removes them, and each capture arms a private copy, because the browser
+// rereads the file it was given and refuses a session whose file changed.
+struct InvocationSiteSet: Equatable {
+  struct Site: Equatable {
+    let anchorOffset: UInt32
+    let artifactID: String
+    let artifactSHA256: String
+    let byteOffset: UInt32
+    let sourceLength: UInt32
+    let sourceSHA256: String
+    var label = "Unlabeled function"
+    var sourceURL: String?
+    var sessionID: String?
+
+    // Sorted keys, compact. Every string is ASCII digits or lowercase hex.
+    var canonical: String {
+      "{\"anchor_offset\":\(anchorOffset),\"artifact_id\":\"\(artifactID)\",\"artifact_sha256\":\"\(artifactSHA256)\","
+        + "\"byte_offset\":\(byteOffset),\"shape\":\"function-entry\",\"source_length\":\(sourceLength),"
+        + "\"source_sha256\":\"\(sourceSHA256)\"}"
+    }
+
+    func sameFunction(_ other: Site) -> Bool {
+      sourceSHA256 == other.sourceSHA256 && anchorOffset == other.anchorOffset
+    }
+  }
+
+  enum State: Equatable {
+    case empty
+    case saved([Site])
+    // A file the browser would refuse is never armed; the dialog offers Clear.
+    case unreadable
+  }
+
+  static let limit = 8
+  static let fileLimit = 4096
+  static let fileName = "js-invocation-sites-v1.json"
+
+  // An explicit REB_JS_INVOCATION_SITE_STORE wins, as for the other app stores.
+  static func storeURL(environment: [String: String], applicationSupport: URL) -> URL {
+    if let path = environment["REB_JS_INVOCATION_SITE_STORE"], !path.isEmpty {
+      return URL(fileURLWithPath: path).standardizedFileURL
+    }
+    return applicationSupport.appendingPathComponent(fileName)
+  }
+
+  static func labelsURL(_ url: URL) -> URL {
+    url.deletingLastPathComponent().appendingPathComponent(
+      url.deletingPathExtension().lastPathComponent + ".labels.json")
+  }
+
+  static func file(_ sites: [Site]) -> String? {
+    guard (1...limit).contains(sites.count) else { return nil }
+    for (index, site) in sites.enumerated() where sites[..<index].contains(where: { $0.sameFunction(site) }) {
+      return nil
+    }
+    let text = "{\"sites\":[" + sites.map(\.canonical).joined(separator: ",") + "],\"version\":1}"
+    return text.utf8.count <= fileLimit ? text : nil
+  }
+
+  // Accepts exactly what the browser accepts: the canonical text of 1 to 8
+  // distinct valid sites. Rebuilding the text rejects every other spelling.
+  static func parse(_ text: String) -> [Site]? {
+    guard !text.isEmpty, text.utf8.count <= fileLimit,
+      let object = try? JSONSerialization.jsonObject(with: Data(text.utf8)) as? [String: Any],
+      Set(object.keys) == ["sites", "version"], let entries = object["sites"] as? [[String: Any]]
+    else { return nil }
+    let keys: Set<String> = ["anchor_offset", "artifact_id", "artifact_sha256", "byte_offset", "shape", "source_length", "source_sha256"]
+    let number = { (value: Any?) in (value as? NSNumber).flatMap { UInt32(exactly: $0.int64Value) } }
+    let hex = { (value: Any?) -> String? in
+      guard let text = value as? String, text.utf8.count == 64,
+        text.utf8.allSatisfy({ (48...57).contains($0) || (97...102).contains($0) })
+      else { return nil }
+      return text
+    }
+    var sites: [Site] = []
+    for entry in entries {
+      guard Set(entry.keys) == keys, entry["shape"] as? String == "function-entry",
+        let anchor = number(entry["anchor_offset"]), let byteOffset = number(entry["byte_offset"]),
+        let length = number(entry["source_length"]), length > 0, anchor < length,
+        let artifactID = entry["artifact_id"] as? String, canonicalID(artifactID),
+        let artifactSHA256 = hex(entry["artifact_sha256"]), let sourceSHA256 = hex(entry["source_sha256"])
+      else { return nil }
+      sites.append(Site(anchorOffset: anchor, artifactID: artifactID, artifactSHA256: artifactSHA256,
+        byteOffset: byteOffset, sourceLength: length, sourceSHA256: sourceSHA256))
+    }
+    return file(sites) == text ? sites : nil
+  }
+
+  static func canonicalID(_ value: String) -> Bool {
+    let bytes = Array(value.utf8)
+    return (1...20).contains(bytes.count) && bytes.allSatisfy({ (48...57).contains($0) })
+      && (bytes.count == 1 || bytes[0] != 48) && UInt64(value) != nil
+  }
+
+  static func load(_ url: URL) -> State {
+    guard let data = try? Data(contentsOf: url) else {
+      return FileManager.default.fileExists(atPath: url.path) ? .unreadable : .empty
+    }
+    guard let text = String(data: data, encoding: .utf8), var sites = parse(text) else { return .unreadable }
+    let labels = (try? Data(contentsOf: labelsURL(url)))
+      .flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
+      .flatMap { ($0["version"] as? NSNumber)?.intValue == 1 ? $0["sites"] as? [[String: Any]] : nil } ?? []
+    for index in sites.indices {
+      let site = sites[index]
+      guard let entry = labels.first(where: {
+        $0["source_sha256"] as? String == site.sourceSHA256
+          && ($0["anchor_offset"] as? NSNumber)?.int64Value == Int64(site.anchorOffset)
+      }) else { continue }
+      if let label = entry["label"] as? String, !label.isEmpty, label.count <= 128,
+        !label.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) })
+      {
+        sites[index].label = label
+      }
+      sites[index].sourceURL = (entry["source_url"] as? String).flatMap { $0.isEmpty || $0.utf8.count > 8192 ? nil : $0 }
+      sites[index].sessionID = (entry["session_id"] as? String).flatMap { canonicalID($0) ? $0 : nil }
+    }
+    return .saved(sites)
+  }
+
+  // Labels first, then the site file, as the backend writes them, so the site
+  // file never names a site whose label was lost. An empty set has no file.
+  static func write(_ sites: [Site], to url: URL) throws {
+    if sites.isEmpty {
+      for path in [url, labelsURL(url)] where FileManager.default.fileExists(atPath: path.path) {
+        try FileManager.default.removeItem(at: path)
+      }
+      return
+    }
+    guard let text = file(sites) else { throw siteError("The saved invocation sites cannot be written") }
+    let labels: [String: Any] = ["version": 1, "sites": sites.map { site -> [String: Any] in
+      ["anchor_offset": site.anchorOffset, "label": site.label, "source_sha256": site.sourceSHA256,
+       "source_url": site.sourceURL ?? NSNull(), "session_id": site.sessionID ?? NSNull()]
+    }]
+    try writePrivate(try JSONSerialization.data(withJSONObject: labels, options: [.sortedKeys]), to: labelsURL(url))
+    try writePrivate(Data(text.utf8), to: url)
+  }
+
+  // Atomic and user-only from the first byte: a 0600 temporary in the same
+  // folder, synced, then renamed over the destination.
+  static func writePrivate(_ data: Data, to url: URL) throws {
+    let folder = url.deletingLastPathComponent()
+    if !FileManager.default.fileExists(atPath: folder.path) {
+      try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true,
+        attributes: [.posixPermissions: 0o700])
+    }
+    let temporary = folder.appendingPathComponent(".\(url.lastPathComponent).\(UUID().uuidString)")
+    let descriptor = open(temporary.path, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0o600)
+    guard descriptor >= 0 else { throw siteError("Cannot create \(temporary.path)") }
+    let written = data.withUnsafeBytes { Darwin.write(descriptor, $0.baseAddress, $0.count) }
+    let synced = fsync(descriptor) == 0
+    close(descriptor)
+    guard written == data.count, synced, rename(temporary.path, url.path) == 0 else {
+      unlink(temporary.path)
+      throw siteError("Cannot write \(url.path)")
+    }
+  }
+
+  private static func siteError(_ message: String) -> NSError {
+    NSError(domain: "OriginTrace.InvocationSites", code: 1, userInfo: [NSLocalizedDescriptionKey: message])
+  }
+}
+
 final class LiveSessionCoordinator {
   private let lock = NSLock()
   private var process: Process?
   private var logHandle: FileHandle?
+  // This launch's copy of the saved invocation sites, removed when it ends.
+  private var invocationSitesCopy: URL?
   private var generation = UUID()
   private var failureReported = false
 
@@ -83,6 +252,7 @@ final class LiveSessionCoordinator {
       lock.lock()
       process = child
       logHandle = configuration.logHandle
+      invocationSitesCopy = configuration.invocationSitesURL
       lock.unlock()
       try child.run()
 
@@ -110,6 +280,8 @@ final class LiveSessionCoordinator {
     process = nil
     let handle = logHandle
     logHandle = nil
+    let copy = invocationSitesCopy
+    invocationSitesCopy = nil
     generation = UUID()
     lock.unlock()
 
@@ -117,6 +289,7 @@ final class LiveSessionCoordinator {
       child?.terminate()
     }
     try? handle?.close()
+    if let copy { try? FileManager.default.removeItem(at: copy) }
   }
 
   deinit {
@@ -130,6 +303,7 @@ final class LiveSessionCoordinator {
     let logURL: URL
     let logHandle: FileHandle
     let environment: [String: String]
+    let invocationSitesURL: URL?
   }
 
   private func makeConfiguration(
@@ -218,8 +392,27 @@ final class LiveSessionCoordinator {
     environment["REB_LIVE_SESSION_ROOT"] = sessionRootURL.path
     environment["REB_BRAVE_CACHE_ROOT"] = browserCacheRootURL.path
     environment["REB_BRAVE_BINARY"] = braveExecutableURL.path
+    // Sources can save sites while this capture runs; the browser keeps
+    // reading the copy it was given, which nothing changes.
+    let siteStoreURL = InvocationSiteSet.storeURL(environment: environment, applicationSupport: originTraceURL)
+    environment["REB_JS_INVOCATION_SITE_STORE"] = siteStoreURL.path
+    var invocationSitesURL: URL?
+    if environment["REB_NATIVE_JS_INVOCATION_SITES"] == nil,
+      case .saved(let sites) = InvocationSiteSet.load(siteStoreURL), let text = InvocationSiteSet.file(sites)
+    {
+      let copy = FileManager.default.temporaryDirectory.appendingPathComponent(
+        "origin-trace-live-\(identifier)-js-invocation-sites.json")
+      try InvocationSiteSet.writePrivate(Data(text.utf8), to: copy)
+      invocationSitesURL = copy
+    }
     environment = Self.captureDefaults(
-      environment: environment, captureNetworkContent: captureNetworkContent)
+      environment: environment, captureNetworkContent: captureNetworkContent,
+      savedInvocationSites: invocationSitesURL)
+    // A mask without VM leaves the copy unused.
+    if let copy = invocationSitesURL, environment["REB_NATIVE_JS_INVOCATION_SITES"] != copy.path {
+      try? FileManager.default.removeItem(at: copy)
+      invocationSitesURL = nil
+    }
     environment["REB_USE_SYSTEM_KEYCHAIN"] = useSystemKeychain ? "1" : "0"
     environment["REB_BROKER_BINARY"] =
       macOSURL.appendingPathComponent(
@@ -258,7 +451,8 @@ final class LiveSessionCoordinator {
       handshakeURL: handshakeURL,
       logURL: logURL,
       logHandle: logHandle,
-      environment: environment
+      environment: environment,
+      invocationSitesURL: invocationSitesURL
     )
   }
 
@@ -318,12 +512,16 @@ final class LiveSessionCoordinator {
   ) {
     lock.lock()
     let shouldReport = generation == currentGeneration && !failureReported
+    var copy: URL?
     if process === child {
       process = nil
       try? logHandle?.close()
       logHandle = nil
+      copy = invocationSitesCopy
+      invocationSitesCopy = nil
     }
     lock.unlock()
+    if let copy { try? FileManager.default.removeItem(at: copy) }
     if shouldReport {
       reportFailureOnce(
         generation: currentGeneration,
@@ -397,8 +595,14 @@ final class LiveSessionCoordinator {
   // value always wins. Each default capture also needs its categories in the
   // mask, read with the launcher's grammar, so a narrower mask leaves it off
   // rather than failing the launch, and an unreadable mask turns nothing on.
+  //
+  // `savedInvocationSites` is this launch's private copy of the app's saved
+  // site set, or nil when the set is empty. The sites need the VM category
+  // (512). The launcher arms them only if this Brave defines invocation
+  // capture, and otherwise starts without them and says so. Their settled-value
+  // digests are sensitive capture: on in Content mode, off in Metadata mode.
   static func captureDefaults(
-    environment: [String: String], captureNetworkContent: Bool
+    environment: [String: String], captureNetworkContent: Bool, savedInvocationSites: URL? = nil
   ) -> [String: String] {
     var environment = environment
     let mask = categoryMask(environment["REB_CAPTURE_CATEGORY_MASK"]) ?? 0
@@ -427,6 +631,14 @@ final class LiveSessionCoordinator {
     // without the v3 overlay ignores the switch and the Console reports it
     // unavailable. An explicit "0" opts out.
     environment["REB_CONSOLE_DOCUMENT_START"] = environment["REB_CONSOLE_DOCUMENT_START"] ?? "1"
+    // An explicit REB_NATIVE_JS_INVOCATION_SITES, even an empty one, wins, and
+    // then the environment alone decides digests, as for make live.
+    if environment["REB_NATIVE_JS_INVOCATION_SITES"] == nil, let saved = savedInvocationSites, allows(512) {
+      environment["REB_NATIVE_JS_INVOCATION_SITES"] = saved.path
+      environment["REB_NATIVE_JS_INVOCATION_IF_SUPPORTED"] = environment["REB_NATIVE_JS_INVOCATION_IF_SUPPORTED"] ?? "1"
+      environment["REB_NATIVE_JS_INVOCATION_DIGESTS"] =
+        environment["REB_NATIVE_JS_INVOCATION_DIGESTS"] ?? (captureNetworkContent ? "1" : "0")
+    }
     return environment
   }
 

@@ -119,6 +119,71 @@ the renderer only fixed 44-byte records (shape byte 3), and the renderer never
 parses JSON. The file is immutable for the browser lifetime, like the other
 site files.
 
+### Saving sites from Origin Trace
+
+A researcher names a function, such as `window.hsw`, or points at it in
+Sources, instead of finding the byte offset of its `(` and running the site
+tool. **Track calls** in the Sources toolbar resolves the function at the
+current position; the **Track function calls** pane takes a name. Both call
+`js_invocation_site_action` `add`, which resolves the exact retained artifact
+on the server and saves the site. `resolve_js_invocation_site` does the same
+without saving. The rules ([HTTP API](../../protocol/http-api.md#saved-javascript-invocation-sites)):
+
+- **Never guess.** Exactly one supported function resolves. Zero or several
+  are refused with at most 32 candidates, each with its line, column, binding
+  and a context line, so the researcher picks one by position. Zero matches
+  list definitions whose name ends in the same segment.
+- **Syntax, not text.** The analysis worker walks its bounded tree-sitter
+  preflight tree, so a name in a string, template or comment never matches. A
+  name matches an assignment to that identifier or member chain, a
+  `var`/`let`/`const` initializer, a function declaration and an
+  object-literal property or method, including chained assignments and
+  properties of a bound object. `window.`, `self.` and `globalThis.` are one
+  prefix: in a document's main world they are the same global object, and
+  invocation capture never arms a worker. A prefixed name also matches a
+  top-level `var` or function declaration of a classic script, which becomes a
+  global property, but never a local or module declaration. A local variable
+  named `window` is not told apart from the global object, which is why every
+  refusal lists candidates.
+- **The anchor this tool accepts.** A position selects the innermost function
+  whose definition contains it, with the binding head (`window.hsw=`) counted
+  as part of the function. Bare-parameter and `async` arrows, whose anchor is
+  not a `(`, generators, class constructors and class field initializers or
+  static blocks are refused with a reason; V8 would not arm them at a `(`.
+- **One computation.** The backend computes the key exactly as
+  `tools/native-js-invocation-site.py` does; both check the cases in
+  `tools/fixtures/native-js-invocation/site-cases.json`.
+
+The saved set is the exact `native-js-invocation-sites-v1` file, so the
+browser reads it unchanged, at
+`~/Library/Application Support/Origin Trace/js-invocation-sites-v1.json`
+beside the app's other per-user stores, plus a
+`js-invocation-sites-v1.labels.json` sidecar with each site's label, source URL
+and session, which the browser never reads. Both are written atomically with
+user-only permissions; an empty set has no site file. At most 8 sites, and a
+duplicate `(source_sha256, anchor_offset)` is refused.
+
+Every capture the app starts arms the saved set from a private copy made at
+launch: the browser rereads the file it was given and refuses a session whose
+file changed, and Sources can save more sites while the capture runs. Tracking
+therefore starts with the **next** capture, never the open page, and a
+function compiled before arming could not gain tracking anyway. The start
+dialog shows "Tracking N functions" with each label and Remove and Clear All;
+the titlebar names what the running capture tracks.
+
+Digests follow the capture mode: on in Content mode when sites are saved, off
+in Metadata mode. An explicit `REB_NATIVE_JS_INVOCATION_SITES` or
+`REB_NATIVE_JS_INVOCATION_DIGESTS` wins. Agent-started sessions never arm
+sites or digests and keep a private saved set, so an agent cannot change the
+researcher's next capture.
+
+A Brave built before invocation capture would refuse a session that asks for
+`--reb-js-invocation-capture`. For the app's saved sites only, the launcher
+checks the flag first and starts without them, saying so in the log and the
+titlebar. When a later session retains a script with a saved site's URL but
+other script text, the pane and titlebar say that the saved site will not
+match the new version.
+
 ### Compilation paths and late arming
 
 Arming is decided at bytecode generation, so the compilation-path review of the
@@ -451,7 +516,8 @@ Live (needs a rebuilt Brave, on the build machine):
 | Chromium | patch `chromium/0021`: install the callbacks, admit live documents, read the current invocation for Wasm records and `SendAsync` |
 | Overlay | wire header, site-file parsing for `function-entry`, renderer budgets and gaps, Mojo configuration, browser forwarding of Wasm context |
 | Protocol and backend | events 24 to 26, Wasm payload versions, C++/Python/Rust/JavaScript validators, origin-trace relations in the broker index, the value-flow join in both the Rust and the native app's Swift trace builders, viewer labels |
-| Tooling | `tools/native-js-invocation-site.py` writes the site file; the launcher's `REB_NATIVE_JS_INVOCATION_SITES` and `REB_NATIVE_JS_INVOCATION_DIGESTS` |
+| Tooling | `tools/native-js-invocation-site.py` writes the site file; the launcher's `REB_NATIVE_JS_INVOCATION_SITES`, `REB_NATIVE_JS_INVOCATION_DIGESTS` and `REB_NATIVE_JS_INVOCATION_IF_SUPPORTED` |
+| Saved sites | the worker's `invocation_site` query, the backend's site key, saved set and routes (`js_invocation_sites.rs`), Sources **Track calls**, the titlebar, and the app's start dialog and `captureDefaults` |
 
 What runs in this repository's gate: the C++ parity and rule test, the Python
 validator, the Rust readers and value search, the shared Rust and Swift trace

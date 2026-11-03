@@ -449,9 +449,13 @@ so Wasm-heavy pages run slower. Set `REB_NATIVE_QUIET_MODE=0`,
 `REB_NATIVE_WASM_DISPATCH=0` or `REB_NATIVE_WASM_CALL_INDIRECT=0` to opt out.
 It also permits [document-start Console scripts](#document-start-scripts),
 which arms nothing; `REB_CONSOLE_DOCUMENT_START=0` opts out.
-Guest-state, JavaScript dispatch-site and JavaScript invocation capture still
-need an adapter or site file and stay off until one is supplied; invocation
-value digests additionally need `REB_NATIVE_JS_INVOCATION_DIGESTS=1`. A request
+Guest-state and JavaScript dispatch-site capture still need an adapter or site
+file and stay off until one is supplied. JavaScript invocation capture arms the
+functions saved with [Track calls](#track-calls-to-a-function); an explicit
+`REB_NATIVE_JS_INVOCATION_SITES` replaces that set, and an empty value turns it
+off. With saved sites, Content mode also records their settled-value digests
+(sensitive capture) and Metadata mode does not; an explicit
+`REB_NATIVE_JS_INVOCATION_DIGESTS` wins. A request
 trace shows `issued_during_invocation`, `invocation_settlement` and
 `invocation_value_flow` steps, and VM Lab rows name the JavaScript invocation a
 Wasm record ran in; see the
@@ -793,6 +797,7 @@ policy and trace assertions; it is not evidence of native lifecycle behavior.
 | --- | --- |
 | `index.html`, `app.css` | Document structure and visual layout |
 | `app_state.js`, `evidence_models.js`, `app.js` | Initial state and DOM bindings, evidence validation and projection, interaction and rendering |
+| `invocation_sites.js` | Track calls: the saved invocation site pane, byte offsets of Sources positions and the titlebar tracking chip |
 | `command_palette.js` | The ⌘ / Ctrl + K palette: provider registry, matching, ranking and caps, and its dialog controller; `app.js` supplies the built-in providers |
 | `pane_layout.js` | Shared pointer and keyboard pane resizing, responsive constraints, and local size preferences |
 | `traffic_view.js` | Native request ledger rows, ordering, paging and URL/method/status/name search, the General coverage view, and the saved-capture export document |
@@ -1221,6 +1226,36 @@ The production Rust AST passes and their ReverseJS comparison are documented in
 server uses a built worker when available (debug before release), or the explicit
 `REB_DEOBFUSCATOR_WORKER` executable. Worker failures remain errors; a missing
 worker makes AST operations unavailable with an explicit error. Deob stays inside Sources.
+
+## Track calls to a function
+
+To follow calls of a page function such as `window.hsw` in the next capture,
+open its captured script in **Sources** and either type the name in the
+**Track function calls** pane of **Details** and press Return, or put the
+cursor in the function (click it, or use **Line**, **Column** and **Go**) and
+choose **Track calls** in the toolbar. The position must be in the original
+view, not a pretty-printed, derived or Wasm view. The backend resolves the
+exact artifact and saves one site; it never guesses. A name bound by several
+definitions, or by none, lists the candidates with their line, column and a
+context line: **Show** reveals one and **Track this one** saves it. A
+bare-parameter or `async` arrow, a generator, a class constructor or a class
+initializer is refused with its reason, as is top-level code. Context lines
+and labels are captured text, inserted as text.
+
+Saving changes nothing in the open page or the running capture. The pane says
+tracking starts with the next capture: **New Live Session…** shows "Tracking N
+functions" with each label, a Remove for each and Clear All, and the
+capture it starts arms a private copy of the set. Content mode also records
+the calls' settled-value digests; Metadata mode does not. The titlebar names
+what the running capture tracks, says when its Brave predates invocation
+capture and started without the sites, and warns when this session retained
+another version of a saved script, which the saved site will not match. At
+most 8 functions are saved, in
+`~/Library/Application Support/Origin Trace/js-invocation-sites-v1.json` with a
+label sidecar; `REB_JS_INVOCATION_SITE_STORE` names another file. Stored-evidence
+native mode has no backend for these routes and says so. The routes and
+matching rules are in the
+[HTTP API](../../protocol/http-api.md#saved-javascript-invocation-sites).
 
 ## Captured JavaScript facts
 

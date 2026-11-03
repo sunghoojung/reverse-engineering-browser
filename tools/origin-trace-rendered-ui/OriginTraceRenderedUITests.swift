@@ -210,6 +210,25 @@ final class Harness {
     try await settle()
   }
 
+  // Types into the focused field with native key events, one character each.
+  func type(_ text: String) async throws {
+    for character in text {
+      try await key(0, String(character))
+    }
+  }
+
+  // The window AppKit draws, for native dialogs WebKit snapshots cannot see.
+  func screenshot(window panel: NSWindow, _ name: String) throws {
+    guard let view = panel.contentView?.superview ?? panel.contentView,
+      let bitmap = view.bitmapImageRepForCachingDisplay(in: view.bounds)
+    else { throw HarnessError("Could not capture \(name)") }
+    view.cacheDisplay(in: view.bounds, to: bitmap)
+    guard let png = bitmap.representation(using: .png, properties: [:]) else { throw HarnessError("Could not encode \(name)") }
+    try FileManager.default.createDirectory(at: output, withIntermediateDirectories: true)
+    try png.write(to: output.appendingPathComponent("\(name).png"))
+    print("RENDERED_UI_SCREENSHOT \(name) \(Int(view.bounds.width))x\(Int(view.bounds.height))")
+  }
+
   // macOS defaults to Tab moving only between text fields and lists; Option+Tab
   // then reaches every control, as in Safari. With Full Keyboard Access on,
   // plain Tab already does. Either way every control must be reachable.
@@ -302,6 +321,8 @@ struct Expectations: Decodable {
   let requestBodyTarget: String
   let requestBodyMarker: String
   let metadataBodyHost: String
+  let invocationArtifactId: String
+  let invocationSiteStore: String
 
   static func load() throws -> Expectations {
     let text = try Harness.required(ProcessInfo.processInfo.environment, "REB_RENDERED_UI_EXPECT")
@@ -1263,4 +1284,160 @@ final class OriginTraceRenderedUITests: XCTestCase {
       try await ui.screenshot("live-capture-defaults-\(size.name)")
     }
   }
+  @MainActor
+  private func savedSiteCount(_ ui: Harness) async throws -> Int {
+    try await ui.value("fetch('/api/js-invocation-sites', {cache: 'no-store'}).then(response => response.json()).then(set => set.count)") as? Int ?? -1
+  }
+
+  @MainActor
+  private func clearSavedSites(_ ui: Harness) async throws {
+    let status = try await ui.value(
+      "fetch('/api/js-invocation-sites/actions', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({action: 'clear', confirm: true})}).then(response => response.status)")
+    XCTAssertEqual(status as? Int, 200, "the saved set could not be cleared")
+  }
+
+  // Sources saves functions for the next capture by position and by name,
+  // refuses what it cannot name exactly, and the titlebar says what is saved.
+  @MainActor
+  func test18TrackCallsFromSources() async throws {
+    let expected = try Expectations.load()
+    for size in windowSizes {
+      let ui = try await prepare(size)
+      try await clearSavedSites(ui)
+      try await show(ui, "sources")
+      try await ui.click("#source-tree [role=treeitem]", containing: "artifact \(expected.invocationArtifactId)")
+      try await ui.waitUntil("(document.querySelector('#source-code')?.innerText ?? '').includes('Mk().then')", "\(size.name): glue.js did not render")
+      try await ui.waitUntil("!document.querySelector('#source-track-calls').disabled", "\(size.name): Track calls stayed disabled on an original JavaScript artifact")
+      // The default position is top-level code, which is refused with its reason.
+      try await ui.click("#source-track-calls")
+      try await ui.waitUntil("(document.querySelector('#invocation-site-status')?.innerText ?? '').includes('top-level script code')",
+        "\(size.name): top-level code was not refused")
+      // A name typed and submitted with the keyboard; two definitions are refused.
+      try await ui.click("#invocation-site-name")
+      try await ui.type("o.dup")
+      try await ui.key(36, "\r")
+      try await ui.waitUntil("(document.querySelector('#invocation-site-status')?.innerText ?? '').includes('2 function definitions bind o.dup')",
+        "\(size.name): an ambiguous name was not refused")
+      let candidates = try await ui.json(
+        "({count: document.querySelectorAll('.invocation-site-candidate').length, contexts: [...document.querySelectorAll('.invocation-site-context')].map(node => node.innerText)})")
+      XCTAssertEqual(candidates["count"] as? Int, 2, "\(size.name): both definitions listed: \(candidates)")
+      XCTAssertTrue((candidates["contexts"] as? [String] ?? []).contains { $0.contains("<img src=x onerror") }, "\(size.name): captured markup is a context line")
+      try await assertInert(ui, "\(size.name) track calls candidates")
+      try await assertLayout(ui, "#source-sidebar", "\(size.name) track calls candidates")
+      try await revealAndAssertFullyVisible(ui, ".invocation-sites-candidates", "\(size.name) candidate list")
+      try await ui.screenshot("sources-track-calls-candidates-\(size.name)")
+      // The real binder is saved; the decoys in a string and a comment are not candidates.
+      try await ui.click("#invocation-site-name")
+      try await ui.key(0, "a", modifiers: [.command])
+      try await ui.type("window.hsw")
+      try await ui.key(36, "\r")
+      try await ui.waitUntil("(document.querySelector('#invocation-site-status')?.innerText ?? '').includes('Saved window.hsw')",
+        "\(size.name): window.hsw was not saved")
+      XCTAssertTrue((try await ui.value("document.querySelector('#invocation-site-status').innerText") as? String ?? "").contains("not the open page"),
+        "\(size.name): saving says tracking starts with the next capture")
+      // Line 2 at the awb( call names the then-callback around it.
+      _ = try await ui.webView.callAsyncJavaScript(
+        """
+        const line = document.querySelector('#source-window-line'), column = document.querySelector('#source-window-column');
+        line.value = '2'; column.value = String(document.querySelector('.source-line[data-line="2"] .source-text').textContent.indexOf('awb') + 1);
+        return true;
+        """, contentWorld: .page)
+      try await ui.click("#source-window button[type=submit]")
+      try await ui.click("#source-track-calls")
+      try await ui.waitUntil("(document.querySelector('#invocation-site-status')?.innerText ?? '').includes('Saved Function at line 2')",
+        "\(size.name): the function at the position was not saved")
+      XCTAssertEqual(try await savedSiteCount(ui), 2, "\(size.name): two sites saved")
+      try await ui.waitUntil("!document.querySelector('#invocation-tracking').hidden", "\(size.name): the titlebar did not show the saved functions")
+      let chip = try await ui.json(
+        """
+        (() => {
+          const chip = document.querySelector('#invocation-tracking'), rect = chip.getBoundingClientRect(), bar = document.querySelector('.titlebar').getBoundingClientRect();
+          const others = ['#session-mode', '#session-content', '.brand-name'].map(selector => document.querySelector(selector)).filter(node => node && node.getBoundingClientRect().width > 0);
+          const overlaps = others.filter(node => { const other = node.getBoundingClientRect();
+            return rect.left < other.right - 1 && other.left < rect.right - 1 && rect.top < other.bottom - 1 && other.top < rect.bottom - 1; }).map(node => __rebUiProbe.describe(node));
+          return {text: chip.innerText, inside: rect.left >= bar.left && rect.right <= bar.right && rect.top >= bar.top && rect.bottom <= bar.bottom,
+            complete: chip.scrollWidth <= chip.clientWidth + 1, overlaps};
+        })()
+        """)
+      XCTAssertEqual(chip["text"] as? String, "2 functions saved for the next capture", "\(size.name): chip text: \(chip)")
+      XCTAssertEqual(chip["inside"] as? Bool, true, "\(size.name): the chip leaves the titlebar: \(chip)")
+      XCTAssertEqual(chip["complete"] as? Bool, true, "\(size.name): the chip text is truncated: \(chip)")
+      XCTAssertEqual(chip["overlaps"] as? [String], [], "\(size.name): the chip overlaps the titlebar")
+      try await assertInert(ui, "\(size.name) track calls saved")
+      try await assertLayout(ui, "#source-sidebar", "\(size.name) track calls saved")
+      try await revealAndAssertFullyVisible(ui, ".invocation-sites-list", "\(size.name) saved list")
+      try await ui.screenshot("sources-track-calls-saved-\(size.name)")
+    }
+  }
+
+  // The start dialog lists what the capture about to start will track, says
+  // digests follow the mode, and removes a site. It is opened from the New
+  // Live Session menu item, as a researcher opens it, and left offline.
+  @MainActor
+  func test19StartDialogListsSavedFunctions() async throws {
+    let ui = try await prepare(windowSizes[0])
+    let harnessURL = try XCTUnwrap(ui.webView.url)
+    let expected = try Expectations.load()
+    try await clearSavedSites(ui)
+    // window.hsw by name and the then-callback around awb( by its byte offset.
+    _ = try await ui.value(
+      "fetch('/api/js-invocation-sites/actions', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({action: 'add', session_id: '1', artifact_id: '\(expected.invocationArtifactId)', name: 'window.hsw'})}).then(response => response.status)")
+    _ = try await ui.value(
+      """
+      fetch('/api/artifacts/\(expected.invocationArtifactId)/content', {cache: 'no-store'}).then(response => response.text()).then(text =>
+        fetch('/api/js-invocation-sites/actions', {method: 'POST', headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({action: 'add', session_id: '1', artifact_id: '\(expected.invocationArtifactId)', byte_offset: new TextEncoder().encode(text.slice(0, text.indexOf('awb'))).length})}))
+        .then(response => response.status)
+      """)
+    XCTAssertEqual(try await savedSiteCount(ui), 2, "two sites are saved before the dialog opens")
+    let item = NSApp.mainMenu?.items.compactMap(\.submenu).flatMap(\.items).first { $0.action == Selector(("newLiveSession:")) }
+    let menu = try XCTUnwrap(item?.menu, "the New Live Session menu item")
+    let index = menu.index(of: try XCTUnwrap(item))
+    // The menu action runs its modal from the run loop, outside this task.
+    RunLoop.main.add(Timer(timeInterval: 0, repeats: false) { _ in menu.performActionForItem(at: index) }, forMode: .default)
+    let backstop = Timer(timeInterval: 60, repeats: false) { _ in if NSApp.modalWindow != nil { NSApp.abortModal() } }
+    RunLoop.main.add(backstop, forMode: .modalPanel)
+    defer { backstop.invalidate() }
+    func views(_ root: NSView) -> [NSView] { [root] + root.subviews.flatMap(views) }
+    let deadline = Date().addingTimeInterval(20)
+    while NSApp.modalWindow == nil, Date() < deadline { try await Task.sleep(nanoseconds: 100_000_000) }
+    do {
+      let panel = try XCTUnwrap(NSApp.modalWindow, "the start dialog did not open")
+      let texts = { views(panel.contentView!).compactMap { ($0 as? NSTextField)?.stringValue } }
+      XCTAssertTrue(texts().contains("Tracking 2 functions"), "the dialog counts the saved functions: \(texts())")
+      XCTAssertTrue(texts().contains("window.hsw"), "the dialog names each saved function")
+      XCTAssertTrue(texts().contains { $0.contains("Content mode also records settled-value digests") }, "Content mode names its digests")
+      XCTAssertTrue(texts().contains("https://hcaptcha.test/glue.js"), "each site names its script")
+      try ui.screenshot(window: panel, "start-dialog-tracking")
+      let popup = try XCTUnwrap(views(panel.contentView!).compactMap { $0 as? NSPopUpButton }.first)
+      popup.selectItem(at: 1)
+      _ = popup.sendAction(popup.action, to: popup.target)
+      XCTAssertTrue(texts().contains { $0.contains("Metadata mode records no settled-value digests") }, "Metadata mode records no digests: \(texts())")
+      let remove = try XCTUnwrap(views(panel.contentView!).compactMap { $0 as? NSButton }.first { $0.accessibilityLabel() == "Remove window.hsw" })
+      remove.performClick(nil)
+      XCTAssertTrue(texts().contains("Tracking 1 function"), "Remove updates the count: \(texts())")
+      XCTAssertFalse(texts().contains("window.hsw"), "the removed site is gone")
+      let file = try String(contentsOfFile: expected.invocationSiteStore, encoding: .utf8)
+      let sites = (try JSONSerialization.jsonObject(with: Data(file.utf8)) as? [String: Any])?["sites"] as? [Any]
+      XCTAssertEqual(sites?.count, 1, "Remove rewrites the saved site file at once")
+      try ui.screenshot(window: panel, "start-dialog-tracking-removed")
+      popup.selectItem(at: 0)
+      _ = popup.sendAction(popup.action, to: popup.target)
+      let offline = try XCTUnwrap(views(panel.contentView!).compactMap { $0 as? NSButton }.first { $0.title == "Continue Offline" })
+      offline.performClick(nil)
+      let closed = Date().addingTimeInterval(10)
+      while NSApp.modalWindow != nil, Date() < closed { try await Task.sleep(nanoseconds: 100_000_000) }
+      XCTAssertNil(NSApp.modalWindow, "Continue Offline closed the dialog")
+    } catch {
+      if NSApp.modalWindow != nil { NSApp.abortModal() }
+      throw error
+    }
+    // New Live Session loaded the offline workspace; return to the harness.
+    ui.webView.load(URLRequest(url: harnessURL))
+    try await ui.waitForInitialLoad()
+    try await ui.reload()
+    XCTAssertEqual(try await savedSiteCount(ui), 1, "the backend reads the set the dialog wrote")
+    try await clearSavedSites(ui)
+  }
 }
+

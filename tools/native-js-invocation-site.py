@@ -13,6 +13,14 @@ parameter or an `async` head has another anchor and must be authored by hand.
 The file is written to stdout as exact compact canonical JSON. Writing it arms
 nothing until a new browser launch reads it through
 REB_NATIVE_JS_INVOCATION_SITES.
+
+Which tool to use: in the Origin Trace app, choose Track calls in Sources or
+type a name such as window.hsw; the app saves the site and arms it in its next
+capture, and `reb-api call resolve_js_invocation_site` gives the same site to an
+agent or script. Use this tool for `make live`, for an artifact outside a
+running Origin Trace backend, or to write a site file by hand from an exact `(`.
+Both compute the same key and check
+tools/fixtures/native-js-invocation/site-cases.json (--self-test).
 """
 
 import argparse

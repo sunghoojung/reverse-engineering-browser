@@ -578,11 +578,16 @@
     ds('clear').addEventListener('click', () => {
       if (ds('clear').disabled) return;
       enqueue('clear_document_start', {}, value => {
-        if (value?.document_start?.status === 'ok') { cursor = '0'; lastGeneration = null; }
+        const cleared = value?.document_start?.status === 'ok';
+        if (cleared) { cursor = '0'; lastGeneration = null; }
         ds('consent').checked = false;
         apply(value);
-        message('Document-start scripts cleared. New documents run nothing and a retained report function is inert.');
-        boundary('Document-start scripts cleared. Work a snippet already scheduled in a page is not rolled back.');
+        message(cleared
+          ? 'Document-start scripts cleared. New documents run nothing and a retained report function is inert.'
+          : (value?.document_start?.message || value?.document_start?.text || 'Nothing was armed in this session.'), !cleared);
+        boundary(cleared
+          ? 'Document-start scripts cleared. Work a snippet already scheduled in a page is not rolled back.'
+          : 'Document-start scripts were not armed in this session; nothing was cleared.');
         render();
       });
     });

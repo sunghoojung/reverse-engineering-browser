@@ -2901,9 +2901,11 @@ const capturedExportPanel = installCapturedExportDialog({
         elements.selectedStatus.classList.toggle('status-neutral', !failed && (!Number.isFinite(numericStatus) || request.status === 'pending'));
         elements.selectedUrl.textContent = request.origin === 'sample'
           ? `https://checkout.acme.test${request.path}`
-          : request.hostOnly ? `${request.path} (host only metadata)` : request.path;
+          : request.hostOnly ? `${request.path} (host only metadata)`
+            : request.urlTruncated ? `${request.path}… (truncated)` : request.path;
         elements.selectedUrl.title = elements.selectedUrl.textContent;
-        elements.requestCopyUrl.disabled = request.hostOnly;
+        // A truncated or scheme-less target is not a URL to copy.
+        elements.requestCopyUrl.disabled = request.hostOnly || Boolean(request.urlTruncated) || request.targetKind === 'path';
       }
 
       function selectRequest(id, expectedIdentity = null) {
@@ -3139,6 +3141,94 @@ const capturedExportPanel = installCapturedExportDialog({
         elements.requestDecoderPivot.disabled = !selected;
       }
 
+      // Retained request bodies (protocol/native-network-v2.md) load only for the
+      // selected request: at most 256 KiB, checked against the catalog's size and
+      // SHA-256, and decoded to text that is only ever assigned to textContent.
+      const REQUEST_BODY_READ_LIMIT = 256 * 1024;
+      // A transient read failure (timeout, HTTP status, transport) stays shown
+      // and is retried by the next refresh or selection at least this long
+      // after it, so a failing backend sees one read per poll, not a loop. A size
+      // or SHA-256 mismatch stays cached with its reason.
+      const REQUEST_BODY_RETRY_MS = 2000;
+      const requestBodyViews = new Map();
+      function requestBodyArtifact(body) {
+        const matches = (state.artifacts ?? []).filter(artifact => artifact.artifact_id === body.artifactId &&
+          artifact.kind === 'request_body' && artifact.session_id === body.sessionId &&
+          artifact.creator_event_id === body.sequenceNumber);
+        return matches.length === 1 ? matches[0] : null;
+      }
+      function requestBodyView(request) {
+        const body = request?.body;
+        if (!body || body.malformed || !['captured', 'captured_truncated'].includes(body.state)) return null;
+        if (location.protocol === 'file:') return {status: 'unavailable'};
+        // The receiver's refusal joins the body record exactly, as its parent.
+        const refusal = state.events.find(event => event.type === 'artifact_capture_failed' &&
+          event.artifact_id === body.artifactId && event.parent_event_id === body.sequenceNumber &&
+          event.session_id === body.sessionId && event.process_id === body.processId);
+        if (refusal) return {status: 'refused', reason: decodePayload(refusal)};
+        const artifact = requestBodyArtifact(body);
+        if (!artifact) return {status: 'missing'};
+        const key = `${artifact.session_id}:${artifact.artifact_id}:${artifact.sha256}`;
+        const view = requestBodyViews.get(key);
+        if (view?.retryable && Date.now() - view.failedAt >= REQUEST_BODY_RETRY_MS) {
+          // The failed view stays visible until the retry settles.
+          requestBodyViews.set(key, {status: 'loading', previous: view});
+          void loadRequestBody(artifact, key);
+          return {...view, url: artifact.url};
+        }
+        if (view) return {...(view.previous ?? view), url: artifact.url};
+        requestBodyViews.set(key, {status: 'loading'});
+        void loadRequestBody(artifact, key);
+        return {status: 'loading', url: artifact.url};
+      }
+      async function loadRequestBody(artifact, key) {
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 10000);
+        const mismatch = message => Object.assign(new Error(message), {integrity: true});
+        let view;
+        try {
+          const limit = Math.min(artifact.byte_size, REQUEST_BODY_READ_LIMIT);
+          const response = await fetch(`/api/artifacts/${encodeURIComponent(artifact.artifact_id)}/content?limit=${limit}`,
+            {cache: 'no-store', signal: controller.signal});
+          if (!response.ok) {response.body?.cancel().catch(() => {}); throw new Error(`the artifact store returned ${response.status}`);}
+          const bytes = await sourceFactsReadBytes(response, limit, controller.signal);
+          if (bytes.length !== artifact.byte_size) throw mismatch('its retained byte size changed');
+          let verified = false;
+          if (globalThis.crypto?.subtle) {
+            const digest = Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', bytes)),
+              byte => byte.toString(16).padStart(2, '0')).join('');
+            if (digest !== artifact.sha256) throw mismatch('its bytes do not match the retained SHA-256');
+            verified = true;
+          }
+          let lossy = false;
+          try {new TextDecoder('utf-8', {fatal: true}).decode(bytes);} catch {lossy = true;}
+          view = {status: 'ready', text: new TextDecoder('utf-8', {fatal: false, ignoreBOM: true}).decode(bytes), lossy, verified};
+        } catch (error) {
+          view = {status: 'error', error: controller.signal.aborted ? 'timed out after 10 seconds'
+            : String(error?.message ?? error).replace(/\.$/, ''), retryable: error?.integrity !== true, failedAt: Date.now()};
+        } finally {
+          clearTimeout(timeout);
+        }
+        // Bounded: a few recently selected bodies, never the session's bodies.
+        requestBodyViews.delete(key);
+        requestBodyViews.set(key, view);
+        while (requestBodyViews.size > 8) requestBodyViews.delete(requestBodyViews.keys().next().value);
+        const selected = state.requests.find(request => request.id === state.selectedRequestId);
+        if (selected?.body?.artifactId === artifact.artifact_id &&
+            requestBodyViewKey(requestBodyView(selected)) !== state.requestBodyViewKey) renderInspector();
+      }
+      function requestBodyViewKey(view) {
+        return view ? `${view.status}|${view.reason ?? view.error ?? ''}|${view.url ?? ''}` : '';
+      }
+      // A body whose acknowledgment arrives after selection becomes readable on
+      // the next catalog refresh without reselecting the request. Unchanged
+      // views do not re-render the inspector on every poll.
+      function refreshSelectedRequestBody() {
+        const selected = state.requests.find(request => request.id === state.selectedRequestId);
+        if (state.inspectorTab !== 'general' || !['captured', 'captured_truncated'].includes(selected?.body?.state)) return;
+        if (requestBodyViewKey(requestBodyView(selected)) !== state.requestBodyViewKey) renderInspector();
+      }
+
       function renderInspectorMessage(message) {
         const empty = document.createElement('div');
         empty.className = 'field-empty';
@@ -3185,7 +3275,9 @@ const capturedExportPanel = installCapturedExportDialog({
         elements.requestInspector.hidden = showingGeneral;
         document.querySelector('.detail-pane').classList.toggle('showing-exchange', showingGeneral);
         if (showingGeneral) {
-          renderTrafficDetails(exchangeInspector, request, state.trafficSelectionNotice);
+          const bodyView = requestBodyView(request);
+          state.requestBodyViewKey = requestBodyViewKey(bodyView);
+          renderTrafficDetails(exchangeInspector, request, state.trafficSelectionNotice, bodyView);
           return;
         }
         elements.requestInspector.setAttribute('aria-labelledby', `inspector-tab-${state.inspectorTab}`);
@@ -3539,14 +3631,18 @@ const capturedExportPanel = installCapturedExportDialog({
           : trace?.status === 'ambiguous' ? (trace.gaps[0]?.detail || 'Select the request row with the matching process and event identifiers.')
           : trace ? (trace.gaps[0]?.detail || 'The request was captured, but no earlier predecessor event was retained.') : 'Choose Load trace to inspect this request.';
         const models = [];
-        const labels = {trace_target: 'Selected request', parent_event: 'Previous event', request_initiator: 'Request initiator', request_lifecycle: 'Request lifecycle', artifact_request: 'Related artifact', temporal_adjacency: 'Time-adjacent record · no recorded link'};
+        const labels = {trace_target: 'Selected request', parent_event: 'Previous event', request_initiator: 'Request initiator', request_lifecycle: 'Request lifecycle', artifact_request: 'Related artifact', temporal_adjacency: 'Time-adjacent record · no recorded link',
+          issued_during_invocation: 'Started inside JS invocation · identity, not value flow', invocation_settlement: 'Invocation start',
+          invocation_value_flow: 'Returned value found in request body · exact bytes'};
         const gapLabels = {
           ambiguous_request: 'Ambiguous request identifier',
           missing_event: 'Missing event · predecessor not retained',
           no_predecessor: 'Missing predecessor · no recorded link',
           cycle: 'Trace stopped · correlation cycle',
           step_limit: 'Trace stopped · step limit reached',
-          capture_gap: 'Capture incomplete · native queue drops'
+          capture_gap: 'Capture incomplete · native queue drops',
+          value_flow_ambiguous: 'Value flow not chosen · several returned values match',
+          value_flow_unsearched: 'Value flow not searched · bounded search exceeded'
         };
         (trace?.steps ?? []).forEach((step, index) => {
           models.push({key: `${step.event.process_id}:${step.event.sequence_number}`, index: String(index + 1),
@@ -5744,6 +5840,14 @@ const capturedExportPanel = installCapturedExportDialog({
         return source ? sourceFactsIdentity({...source, source_type: 'artifact'}) : null;
       }
 
+      // The one Sources exclusion rule. Canvas images belong to Fingerprinting;
+      // request bodies are sensitive network evidence shown with their Traffic
+      // row (protocol/native-network-v2.md). Neither is listed, opened or loaded
+      // as a source file.
+      function isSourceArtifact(artifact) {
+        return Boolean(artifact) && artifact.kind !== 'canvas_data_url' && artifact.kind !== 'request_body';
+      }
+
       function sourceIsCurrent(source) {
         const candidates = state.artifacts.filter(value => value.artifact_id === source.artifact_id);
         return candidates.length === 1 && sourceIdentity(candidates[0]) === sourceIdentity(source);
@@ -5787,7 +5891,7 @@ const capturedExportPanel = installCapturedExportDialog({
 
       function boundSourcePreviews(protectedSource = null) {
         const protectedIdentity = sourceIdentity(selectedSource() ?? protectedSource);
-        const entries = (state.artifacts ?? []).filter(source => source.kind !== 'canvas_data_url').map(source => ({source, preview: source}))
+        const entries = (state.artifacts ?? []).filter(isSourceArtifact).map(source => ({source, preview: source}))
           .filter(({preview}) => preview && (preview.loading || preview.content !== undefined));
         entries.sort((a, b) => (a.preview.previewUsed ?? 0) - (b.preview.previewUsed ?? 0));
         let characters = entries.reduce((sum, {preview}) => sum + (preview.content?.length ?? 0), 0);
@@ -5821,7 +5925,7 @@ const capturedExportPanel = installCapturedExportDialog({
 
       function capturedSources() {
         return state.artifacts
-          .filter(artifact => artifact.kind !== 'canvas_data_url')
+          .filter(isSourceArtifact)
           .map(artifact => {
             const key = `artifact:${artifact.artifact_id}`;
             return { ...artifact, source_type: 'artifact', key, deobfuscation: state.deobfuscationCache?.get(deobfuscationKey({...artifact, key})) ?? null };
@@ -5882,7 +5986,7 @@ const capturedExportPanel = installCapturedExportDialog({
         };
         for (let index = 0; index < Math.min(catalog.length, SOURCE_TREE_LIMITS.catalog); index++) {
           const raw = catalog[index];
-          if (raw.kind === 'canvas_data_url') continue;
+          if (!isSourceArtifact(raw)) continue;
           // Refuse an overlong path before URL parsing or identity serialization.
           if (typeof raw.url !== 'string' || raw.url.length > SOURCE_TREE_LIMITS.url) {limits.omitted++; continue;}
           const source = {...sourceReference(raw), source_type: 'artifact'};
@@ -7211,6 +7315,8 @@ const capturedExportPanel = installCapturedExportDialog({
       async function loadArtifactContent(artifact, {retry = false, canvasOwner = null} = {}) {
         if (artifact?.kind === 'canvas_data_url' && (!canvasOwner ||
             state.canvasPreviewOwners?.get(sourceIdentity(artifact)) !== canvasOwner || !canvasGalleryVisible() || state.artifactReceiverError)) return;
+        // Request body bytes are read only by the Traffic body view.
+        if (artifact?.kind === 'request_body') return;
         if (!sourceIsCurrent(artifact) || artifact.content !== undefined || artifact.loading || (artifact.loadError && !retry)) return;
         const identity = sourceIdentity(artifact);
         const controller = new AbortController();
@@ -7346,6 +7452,14 @@ const capturedExportPanel = installCapturedExportDialog({
           return false;
         }
         const artifact = matches[0];
+        if (!isSourceArtifact(artifact)) {
+          state.sourceNoticeKind = 'warning';
+          state.sourceNotice = artifact.kind === 'request_body'
+            ? 'Request bodies are shown with their request in Traffic. No source was opened.'
+            : 'Canvas images are shown in Fingerprinting. No source was opened.';
+          renderSourceHealth();
+          return false;
+        }
         investigationPassiveSource = passive;
         state.sourceNotice = null;
         const identity = sourceIdentity(artifact);
@@ -7462,12 +7576,12 @@ const capturedExportPanel = installCapturedExportDialog({
           });
           if (!canvasGalleryVisible()) retireCanvasPreviews();
           state.openArtifactIds = state.openArtifactIds.filter(id => state.artifacts.some(artifact => artifact.artifact_id === id));
-          if (!state.artifacts.some(artifact => artifact.artifact_id === state.selectedArtifactId)) {
-            state.selectedArtifactId = state.artifacts[0].artifact_id;
-            state.openArtifactIds = [state.selectedArtifactId];
+          if (!state.artifacts.some(artifact => artifact.artifact_id === state.selectedArtifactId && isSourceArtifact(artifact))) {
+            state.selectedArtifactId = state.artifacts.find(isSourceArtifact)?.artifact_id ?? null;
+            state.openArtifactIds = state.selectedArtifactId === null ? [] : [state.selectedArtifactId];
           }
           renderSources();
-          const selected = state.artifacts.find(artifact => artifact.artifact_id === state.selectedArtifactId);
+          const selected = state.artifacts.find(artifact => artifact.artifact_id === state.selectedArtifactId && isSourceArtifact(artifact));
           if (selected) {
             loadArtifactContent(selected);
             if (!investigationPassiveSource && state.sourceWasm && selected.kind === 'wasm') loadWasmInspection(selected);
@@ -7574,6 +7688,7 @@ const capturedExportPanel = installCapturedExportDialog({
           if (response.status === 304) {
             await refreshRequestSignalProfile();
             await refreshArtifacts();
+            refreshSelectedRequestBody();
             await refreshVmAnalysis();
             return;
           }
@@ -7629,6 +7744,7 @@ const capturedExportPanel = installCapturedExportDialog({
           if (!document.querySelector('#screen-signals').hidden) renderFingerprintActivity();
           await refreshRequestSignalProfile();
           await refreshArtifacts();
+          refreshSelectedRequestBody();
           await refreshVmAnalysis();
           renderVmLab();
         } catch (error) {
@@ -7894,7 +8010,7 @@ const capturedExportPanel = installCapturedExportDialog({
       });
       elements.requestCopyUrl.addEventListener('click', async () => {
         const selected = state.requests.find(request => request.id === state.selectedRequestId);
-        if (!selected || selected.hostOnly) return;
+        if (!selected || selected.hostOnly || selected.urlTruncated || selected.targetKind === 'path') return;
         try {
           const url = selected.origin === 'sample' ? `https://checkout.acme.test${selected.path}` : selected.path;
           await navigator.clipboard.writeText(url);
@@ -7966,7 +8082,8 @@ const capturedExportPanel = installCapturedExportDialog({
       document.querySelectorAll('[data-source-collection]').forEach(button => button.addEventListener('click', () => {
         state.sourcePane = 'files';
         state.sourceCollection = button.dataset.sourceCollection;
-        const artifact = state.artifacts.find(candidate => candidate.artifact_id === state.selectedArtifactId) ?? state.artifacts[0];
+        const artifact = state.artifacts.find(candidate => candidate.artifact_id === state.selectedArtifactId && isSourceArtifact(candidate)) ??
+          state.artifacts.find(isSourceArtifact);
         if (artifact) selectArtifact(artifact.artifact_id);
         else renderSources();
       }));

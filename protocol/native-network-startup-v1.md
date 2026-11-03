@@ -95,12 +95,17 @@ queue drop prevents the terminal observation, completeness remains unknown.
 | Service-worker synthetic responses / CacheStorage interception | Not covered when Chromium uses a separate single-request/intercepting loader |
 | Renderer memory-cache reuse | Not covered when no browser URL loader is created |
 | WebSocket, WebTransport, other non-URLLoader traffic | Not added by this change |
-| Headers, full URLs and arbitrary response bodies | Not retained by native metadata; existing separately authorized artifact/CDP paths only |
+| Headers and arbitrary response bodies | Not retained by native metadata; existing separately authorized artifact paths only |
+| URL path and query, request bodies | [Native network v2](native-network-v2.md): body summary always; path, query and body bytes only with request content capture |
 
 Request payloads remain bounded method + host; response payloads remain bounded
-MIME/protocol or synthetic provenance. No query, fragment, credentials, headers or
-request body is added. Existing explicitly authorized JS/Wasm artifact capture
-has its own sensitive-data limits and receiver acknowledgment.
+MIME/protocol or synthetic provenance. Version 1 adds no query, fragment,
+credentials, headers or request body. [Native network v2](native-network-v2.md)
+adds separate child records: a request body summary (length, normalized content
+type, SHA-256, kind and capture state) in every Network session, and, only with
+request content capture, the raw path and query and a bounded request body
+artifact. Existing explicitly authorized JS/Wasm artifact capture has its own
+sensitive-data limits and receiver acknowledgment.
 
 The browser queue holds 8,192 records. That capacity is the source fix for a
 single page overflowing the previous 1,024-slot canvas and WebGL queue. A live

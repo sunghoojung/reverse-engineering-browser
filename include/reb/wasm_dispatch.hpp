@@ -8,17 +8,24 @@
 #include <string_view>
 #include <type_traits>
 #include "reb/event.hpp"
+#include "reb/js_invocation.hpp"
 namespace reb {
 // Physical Wasm br_table execution, not an interpreter guest program counter.
+// Version 2 records the JavaScript invocation context the instruction ran in
+// (protocol/native-js-invocation-v1.md); version 1 reserved those bytes and
+// still decodes, as state not_observed.
 struct WasmDispatchObservationPayload final {
-  std::uint16_t protocol_version = 1;
+  std::uint16_t protocol_version = 2;
   std::uint16_t payload_size = 128;
   std::uint32_t function_index = 0;
   std::uint32_t module_byte_offset = 0;
   std::uint32_t selector = 0;
   std::uint32_t table_count = 0;
   std::uint32_t sample_index = 0;
-  std::array<std::byte, 104> reserved{};
+  std::uint8_t js_invocation_state = 0;
+  std::array<std::byte, 3> js_invocation_reserved{};
+  std::uint32_t js_invocation_id = 0;
+  std::array<std::byte, 96> reserved{};
 };
 static_assert(sizeof(WasmDispatchObservationPayload) == 128);
 static_assert(std::is_standard_layout_v<WasmDispatchObservationPayload>);
@@ -30,7 +37,9 @@ static_assert(offsetof(WasmDispatchObservationPayload, module_byte_offset) == 8)
 static_assert(offsetof(WasmDispatchObservationPayload, selector) == 12);
 static_assert(offsetof(WasmDispatchObservationPayload, table_count) == 16);
 static_assert(offsetof(WasmDispatchObservationPayload, sample_index) == 20);
-static_assert(offsetof(WasmDispatchObservationPayload, reserved) == 24);
+static_assert(offsetof(WasmDispatchObservationPayload, js_invocation_state) == 24);
+static_assert(offsetof(WasmDispatchObservationPayload, js_invocation_id) == 28);
+static_assert(offsetof(WasmDispatchObservationPayload, reserved) == 32);
 [[nodiscard]] inline std::array<std::byte, 128> EncodeWasmDispatchObservationPayload(
     const WasmDispatchObservationPayload& value) noexcept {
   std::array<std::byte, 128> out{};
@@ -45,7 +54,11 @@ static_assert(offsetof(WasmDispatchObservationPayload, reserved) == 24);
   put(12, value.selector, 4);
   put(16, value.table_count, 4);
   put(20, value.sample_index, 4);
-  std::copy(value.reserved.begin(), value.reserved.end(), out.begin() + 24);
+  put(24, value.js_invocation_state, 1);
+  std::copy(value.js_invocation_reserved.begin(), value.js_invocation_reserved.end(),
+            out.begin() + 25);
+  put(28, value.js_invocation_id, 4);
+  std::copy(value.reserved.begin(), value.reserved.end(), out.begin() + 32);
   return out;
 }
 [[nodiscard]] inline bool DecodeWasmDispatchObservationPayload(
@@ -66,7 +79,10 @@ static_assert(offsetof(WasmDispatchObservationPayload, reserved) == 24);
   value.selector = get(12, 4);
   value.table_count = get(16, 4);
   value.sample_index = get(20, 4);
-  std::copy(bytes.begin() + 24, bytes.end(), value.reserved.begin());
+  value.js_invocation_state = static_cast<std::uint8_t>(get(24, 1));
+  std::copy(bytes.begin() + 25, bytes.begin() + 28, value.js_invocation_reserved.begin());
+  value.js_invocation_id = get(28, 4);
+  std::copy(bytes.begin() + 32, bytes.end(), value.reserved.begin());
   return true;
 }
 [[nodiscard]] inline bool IsValidWasmDispatchObservation(const EventRecord& event) noexcept {
@@ -80,10 +96,16 @@ static_assert(offsetof(WasmDispatchObservationPayload, reserved) == 24);
          event.header.monotonic_time_ns != 0 && event.header.frame_id != 0 &&
          event.header.artifact_id != 0 && event.header.parent_event_id == 0 &&
          DecodeWasmDispatchObservationPayload(event.inline_payload, value) &&
-         value.protocol_version == 1 && value.payload_size == 128 &&
-         value.function_index < 16U * 1024U * 1024U && value.table_count < 16U * 1024U * 1024U &&
-         value.module_byte_offset >= 8 && value.module_byte_offset < 16U * 1024U * 1024U &&
-         value.sample_index < 16 &&
+         (value.protocol_version == 1 || value.protocol_version == 2) &&
+         value.payload_size == 128 && value.function_index < 16U * 1024U * 1024U &&
+         value.table_count < 16U * 1024U * 1024U && value.module_byte_offset >= 8 &&
+         value.module_byte_offset < 16U * 1024U * 1024U && value.sample_index < 16 &&
+         // Version 1 reserved the context bytes, so it can only be not_observed.
+         (value.protocol_version == 2 ||
+          (value.js_invocation_state == 0 && value.js_invocation_id == 0)) &&
+         IsValidJsInvocationContext(value.js_invocation_state, value.js_invocation_id) &&
+         std::all_of(value.js_invocation_reserved.begin(), value.js_invocation_reserved.end(),
+                     [](std::byte b) { return b == std::byte{0}; }) &&
          std::all_of(value.reserved.begin(), value.reserved.end(),
                      [](std::byte b) { return b == std::byte{0}; });
 }
@@ -97,8 +119,9 @@ enum class WasmIndirectResolution : std::uint32_t {
   kUnresolved = 4,
 };
 inline constexpr std::uint32_t kWasmIndirectResolutionCount = 5;
+// Version 2 adds the JavaScript invocation context, as for br_table.
 struct WasmIndirectObservationPayload final {
-  std::uint16_t protocol_version = 1;
+  std::uint16_t protocol_version = 2;
   std::uint16_t payload_size = 128;
   std::uint32_t function_index = 0;
   std::uint32_t module_byte_offset = 0;
@@ -107,7 +130,10 @@ struct WasmIndirectObservationPayload final {
   std::uint32_t callee_function_index = 0;
   std::uint32_t resolution = 0;
   std::uint32_t sample_index = 0;
-  std::array<std::byte, 96> reserved{};
+  std::uint8_t js_invocation_state = 0;
+  std::array<std::byte, 3> js_invocation_reserved{};
+  std::uint32_t js_invocation_id = 0;
+  std::array<std::byte, 88> reserved{};
 };
 static_assert(sizeof(WasmIndirectObservationPayload) == 128);
 static_assert(std::is_standard_layout_v<WasmIndirectObservationPayload>);
@@ -121,7 +147,9 @@ static_assert(offsetof(WasmIndirectObservationPayload, slot) == 16);
 static_assert(offsetof(WasmIndirectObservationPayload, callee_function_index) == 20);
 static_assert(offsetof(WasmIndirectObservationPayload, resolution) == 24);
 static_assert(offsetof(WasmIndirectObservationPayload, sample_index) == 28);
-static_assert(offsetof(WasmIndirectObservationPayload, reserved) == 32);
+static_assert(offsetof(WasmIndirectObservationPayload, js_invocation_state) == 32);
+static_assert(offsetof(WasmIndirectObservationPayload, js_invocation_id) == 36);
+static_assert(offsetof(WasmIndirectObservationPayload, reserved) == 40);
 [[nodiscard]] inline std::array<std::byte, 128> EncodeWasmIndirectObservationPayload(
     const WasmIndirectObservationPayload& value) noexcept {
   std::array<std::byte, 128> out{};
@@ -138,7 +166,11 @@ static_assert(offsetof(WasmIndirectObservationPayload, reserved) == 32);
   put(20, value.callee_function_index, 4);
   put(24, value.resolution, 4);
   put(28, value.sample_index, 4);
-  std::copy(value.reserved.begin(), value.reserved.end(), out.begin() + 32);
+  put(32, value.js_invocation_state, 1);
+  std::copy(value.js_invocation_reserved.begin(), value.js_invocation_reserved.end(),
+            out.begin() + 33);
+  put(36, value.js_invocation_id, 4);
+  std::copy(value.reserved.begin(), value.reserved.end(), out.begin() + 40);
   return out;
 }
 [[nodiscard]] inline bool DecodeWasmIndirectObservationPayload(
@@ -161,7 +193,10 @@ static_assert(offsetof(WasmIndirectObservationPayload, reserved) == 32);
   value.callee_function_index = get(20, 4);
   value.resolution = get(24, 4);
   value.sample_index = get(28, 4);
-  std::copy(bytes.begin() + 32, bytes.end(), value.reserved.begin());
+  value.js_invocation_state = static_cast<std::uint8_t>(get(32, 1));
+  std::copy(bytes.begin() + 33, bytes.begin() + 36, value.js_invocation_reserved.begin());
+  value.js_invocation_id = get(36, 4);
+  std::copy(bytes.begin() + 40, bytes.end(), value.reserved.begin());
   return true;
 }
 [[nodiscard]] inline bool IsValidWasmIndirectObservation(const EventRecord& event) noexcept {
@@ -176,7 +211,13 @@ static_assert(offsetof(WasmIndirectObservationPayload, reserved) == 32);
          event.header.monotonic_time_ns != 0 && event.header.frame_id != 0 &&
          event.header.artifact_id != 0 && event.header.parent_event_id == 0 &&
          DecodeWasmIndirectObservationPayload(event.inline_payload, value) &&
-         value.protocol_version == 1 && value.payload_size == 128 &&
+         (value.protocol_version == 1 || value.protocol_version == 2) &&
+         value.payload_size == 128 &&
+         (value.protocol_version == 2 ||
+          (value.js_invocation_state == 0 && value.js_invocation_id == 0)) &&
+         IsValidJsInvocationContext(value.js_invocation_state, value.js_invocation_id) &&
+         std::all_of(value.js_invocation_reserved.begin(), value.js_invocation_reserved.end(),
+                     [](std::byte b) { return b == std::byte{0}; }) &&
          value.function_index < kLimit && value.table_index < kLimit &&
          value.callee_function_index < kLimit && value.module_byte_offset >= 8 &&
          value.module_byte_offset < kLimit && value.resolution < kWasmIndirectResolutionCount &&

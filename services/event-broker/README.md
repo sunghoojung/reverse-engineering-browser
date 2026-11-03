@@ -69,11 +69,14 @@ resolves them when the initiation arrives, emitting up to that capacity of
 additional edges in deterministic reference order. Both endpoints must remain
 retained, and observed duplicate initiation identities fail closed for later
 joins. Missing, zero, ambiguous or evicted identities remain unjoined; host,
-URL and timestamp similarity never supply a link. Event and edge wire formats
+URL and timestamp similarity never supply a link. A `request_target` or
+`request_body` record joins its lifecycle parent only through `parent_event`
+and never becomes the request's latest lifecycle record, so the next
+`request_lifecycle` edge skips it. Event and edge wire formats
 are unchanged, and the original request IDs stay intact. Existing sidecars are
 not rewritten. `make native-request-identity-check` exercises the actual broker
-with synthetic disjoint IDs, both process arrival orders, reuse ambiguity and
-retention limits. `make e2e` additionally reads those same broker stores through
+with synthetic disjoint IDs, both process arrival orders, reuse ambiguity,
+retention limits and request target and body records across a redirect. `make e2e` additionally reads those same broker stores through
 the Rust HTTP API and verifies the repaired edges survive readback. Request signal profiles remain arrival-order snapshots; this
 repair does not backfill their separate sidecar.
 

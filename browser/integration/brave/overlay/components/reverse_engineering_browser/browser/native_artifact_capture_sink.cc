@@ -229,6 +229,46 @@ mojo::ScopedDataPipeConsumerHandle NativeArtifactCaptureSink::MaybeCaptureRespon
   return body;
 }
 
+std::uint64_t NativeArtifactCaptureSink::CaptureRequestBody(const std::uint64_t request_id,
+                                                            const std::uint64_t frame_id,
+                                                            const std::uint64_t creator_event_id,
+                                                            std::string url,
+                                                            std::string mime_type,
+                                                            std::vector<std::uint8_t> content) {
+  if (!IsEnabled() || creator_event_id == 0 || content.empty() ||
+      content.size() > kMaxArtifactBytes || url.empty() ||
+      url.size() > kNativeArtifactMaxUrlBytes || mime_type.empty() ||
+      mime_type.size() > kNativeArtifactMaxMimeTypeBytes) {
+    return 0;
+  }
+  const std::uint64_t session_id = session_id_.load(std::memory_order_relaxed);
+  const std::uint64_t artifact_id = next_artifact_id_.fetch_add(1, std::memory_order_relaxed);
+  auto transfer = std::make_unique<NativeArtifactTransfer>();
+  transfer->header.kind = NativeArtifactKind::kRequestBody;
+  transfer->header.flags |= kNativeArtifactFlagSensitive;
+  transfer->header.session_id = session_id;
+  transfer->header.frame_id = frame_id;
+  transfer->header.artifact_id = artifact_id;
+  transfer->header.creator_event_id = creator_event_id;
+  transfer->header.capture_origin = NativeArtifactCaptureOrigin::kNetworkRequest;
+  transfer->header.content_size = content.size();
+  transfer->header.url_size = static_cast<std::uint32_t>(url.size());
+  transfer->header.mime_type_size = static_cast<std::uint32_t>(mime_type.size());
+  transfer->url = std::move(url);
+  transfer->mime_type = std::move(mime_type);
+  transfer->content = std::move(content);
+  if (!NativeArtifactSocketClient::Get().Enqueue(std::move(transfer))) {
+    return 0;
+  }
+  pending_.emplace(artifact_id,
+                   PendingContext{.request_id = request_id,
+                                  .frame_id = frame_id,
+                                  .session_id = session_id,
+                                  .generation = generation_.load(std::memory_order_acquire),
+                                  .parent_event_id = creator_event_id});
+  return artifact_id;
+}
+
 void NativeArtifactCaptureSink::CaptureRuntimeTypedArray(const int renderer_process_id,
                                                          const std::uint64_t capture_session_id,
                                                          const std::uint64_t script_id,
@@ -765,7 +805,9 @@ void NativeArtifactCaptureSink::CaptureWasmDispatch(
       .module_byte_offset = observation.module_byte_offset,
       .selector = observation.selector,
       .table_count = observation.table_count,
-      .sample_index = observation.sample_index};
+      .sample_index = observation.sample_index,
+      .js_invocation_state = observation.js_invocation_state,
+      .js_invocation_id = observation.js_invocation_id};
   event.inline_payload = EncodeNativeWasmDispatchObservationPayload(sample);
   PublishAfterWasmModule(event, bytes, observation.execution_context_id,
                          observation.document_token_high, observation.document_token_low,
@@ -820,7 +862,9 @@ void NativeArtifactCaptureSink::CaptureWasmIndirect(
       .slot = observation.slot,
       .callee_function_index = observation.callee_function_index,
       .resolution = static_cast<std::uint32_t>(observation.resolution),
-      .sample_index = observation.sample_index};
+      .sample_index = observation.sample_index,
+      .js_invocation_state = observation.js_invocation_state,
+      .js_invocation_id = observation.js_invocation_id};
   event.inline_payload = EncodeNativeWasmIndirectObservationPayload(sample);
   PublishAfterWasmModule(event, bytes, observation.execution_context_id,
                          observation.document_token_high, observation.document_token_low,

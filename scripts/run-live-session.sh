@@ -38,7 +38,7 @@ readonly token_path="${session_directory}/broker.token"
 readonly profile_path="${REB_BRAVE_PROFILE:-${session_directory}/brave-profile}"
 readonly native_console_directory="${session_directory}/native-console"
 readonly brave_cache_root="${REB_BRAVE_CACHE_ROOT:-}"
-readonly category_mask="${REB_CAPTURE_CATEGORY_MASK:-4095}"
+readonly category_mask_setting="${REB_CAPTURE_CATEGORY_MASK:-4095}"
 readonly duration_seconds="${REB_CAPTURE_DURATION_SECONDS:-3600}"
 readonly open_command="${REB_OPEN_COMMAND:-open}"
 readonly native_quiet_mode="${REB_NATIVE_QUIET_MODE:-0}"
@@ -46,8 +46,13 @@ readonly native_wasm_dispatch="${REB_NATIVE_WASM_DISPATCH:-0}"
 readonly native_wasm_call_indirect="${REB_NATIVE_WASM_CALL_INDIRECT:-0}"
 readonly native_guest_adapter="${REB_NATIVE_WASM_GUEST_ADAPTER:-}"
 readonly native_js_dispatch_sites="${REB_NATIVE_JS_DISPATCH_SITES:-}"
+readonly native_js_invocation_sites="${REB_NATIVE_JS_INVOCATION_SITES:-}"
+readonly native_js_invocation_digests="${REB_NATIVE_JS_INVOCATION_DIGESTS:-0}"
 readonly console_document_start="${REB_CONSOLE_DOCUMENT_START:-0}"
 readonly capture_canvas_images="${REB_CAPTURE_CANVAS_IMAGES:-0}"
+# Raw request paths, queries and bounded request bodies (native-network-v2.md).
+# Body length, type and digest are recorded whenever Network capture is on.
+readonly capture_request_content="${REB_CAPTURE_REQUEST_CONTENT:-0}"
 readonly use_system_keychain="${REB_USE_SYSTEM_KEYCHAIN:-1}"
 readonly localhost_only="${REB_LOCALHOST_ONLY:-0}"
 readonly embedded_session="${REB_EMBEDDED_SESSION:-0}"
@@ -56,6 +61,23 @@ readonly session_owner_pid="${REB_SESSION_OWNER_PID:-}"
 readonly api_collection_store="${REB_API_COLLECTION_STORE:-${live_session_root}/../api-collection-v1.json}"
 readonly local_analyst_store="${REB_LOCAL_ANALYST_STORE:-${live_session_root}/../local-analyst-workspace-v1.json}"
 readonly active_endpoint_file="${REB_ACTIVE_ENDPOINT_FILE:-${HOME:?HOME is required}/.config/origin-trace/reb-api.endpoint}"
+
+# One category mask grammar, shared with LiveSessionCoordinator.categoryMask in
+# the packaged app: 1 to 10 decimal digits, or 0x and 1 to 8 hex digits, naming
+# only known categories (1 to 4095). It is parsed here once, never by Bash
+# arithmetic on the raw text, and the broker and Brave, which read decimal
+# only, receive the normalized value.
+if [[ "${category_mask_setting}" =~ ^[0-9]{1,10}$ ]]; then
+  category_mask=$((10#${category_mask_setting}))
+elif [[ "${category_mask_setting}" =~ ^0[xX][0-9a-fA-F]{1,8}$ ]]; then
+  category_mask=$((16#${category_mask_setting:2}))
+else
+  category_mask=0
+fi
+if (( category_mask < 1 || category_mask > 4095 )); then
+  fail_live_session 2 "REB_CAPTURE_CATEGORY_MASK must be a category mask from 1 to 4095, written as up to 10 decimal digits or 0x and up to 8 hex digits."
+fi
+readonly category_mask
 
 if [[ "${native_quiet_mode}" != 0 && "${native_quiet_mode}" != 1 ]]; then
   fail_live_session 2 "REB_NATIVE_QUIET_MODE must be 0 or 1."
@@ -102,11 +124,35 @@ if [[ -n "${native_js_dispatch_sites}" ]]; then
     fail_live_session 2 "REB_NATIVE_JS_DISPATCH_SITES must contain between 1 and 4096 bytes."
   fi
 fi
+if [[ -n "${native_js_invocation_sites}" ]]; then
+  if (( (category_mask & 512) == 0 )); then
+    fail_live_session 2 "REB_NATIVE_JS_INVOCATION_SITES requires the VM capture category."
+  fi
+  if [[ "${native_js_invocation_sites}" != /* || ! -f "${native_js_invocation_sites}" ||
+        ! -r "${native_js_invocation_sites}" ]]; then
+    fail_live_session 2 "REB_NATIVE_JS_INVOCATION_SITES must name a readable absolute regular file."
+  fi
+  invocation_sites_bytes="$(wc -c < "${native_js_invocation_sites}")"
+  if (( invocation_sites_bytes == 0 || invocation_sites_bytes > 4096 )); then
+    fail_live_session 2 "REB_NATIVE_JS_INVOCATION_SITES must contain between 1 and 4096 bytes."
+  fi
+fi
+if [[ "${native_js_invocation_digests}" != 0 && "${native_js_invocation_digests}" != 1 ]]; then
+  fail_live_session 2 "REB_NATIVE_JS_INVOCATION_DIGESTS must be 0 or 1."
+fi
+# Settled-value digests are a sensitive capture path: they exist only for an
+# armed invocation session and are labeled when the session starts.
+if [[ "${native_js_invocation_digests}" == 1 && -z "${native_js_invocation_sites}" ]]; then
+  fail_live_session 2 "REB_NATIVE_JS_INVOCATION_DIGESTS=1 requires REB_NATIVE_JS_INVOCATION_SITES."
+fi
 if [[ "${REB_CDP_NETWORK_CAPTURE:-0}" != 0 || -n "${REB_DEBUGGER_TRANSPORT_BINARY:-}" ]]; then
   fail_live_session 2 "CDP capture and debugger transport were removed; use native Brave capture."
 fi
 if [[ "${capture_canvas_images}" != 0 && "${capture_canvas_images}" != 1 ]]; then
   fail_live_session 2 "REB_CAPTURE_CANVAS_IMAGES must be 0 or 1."
+fi
+if [[ "${capture_request_content}" != 0 && "${capture_request_content}" != 1 ]]; then
+  fail_live_session 2 "REB_CAPTURE_REQUEST_CONTENT must be 0 or 1."
 fi
 if [[ "${use_system_keychain}" != 0 && "${use_system_keychain}" != 1 ]]; then
   fail_live_session 2 "REB_USE_SYSTEM_KEYCHAIN must be 0 or 1."
@@ -126,6 +172,10 @@ fi
 if [[ "${capture_canvas_images}" == 1 ]] &&
    (( (category_mask & 1) == 0 || (category_mask & 1024) == 0 )); then
   fail_live_session 2 "REB_CAPTURE_CANVAS_IMAGES requires Canvas and Artifact category bits (mask 1025)."
+fi
+if [[ "${capture_request_content}" == 1 ]] &&
+   (( (category_mask & 256) == 0 || (category_mask & 1024) == 0 )); then
+  fail_live_session 2 "REB_CAPTURE_REQUEST_CONTENT requires Network and Artifact category bits (mask 1280)."
 fi
 
 mkdir -p "${session_directory}" "${artifact_store_path}" "${profile_path}" "${native_console_directory}"
@@ -244,6 +294,12 @@ fi
 if [[ -n "${native_js_dispatch_sites:-}" ]]; then
   add_native_js_flag --reb-js-dispatch-capture \
     REB_NATIVE_JS_DISPATCH_SITES "unset REB_NATIVE_JS_DISPATCH_SITES"
+fi
+# Invocation identity arms function entries at bytecode generation and takes
+# the dispatch flag's compile-path settings by implication.
+if [[ -n "${native_js_invocation_sites:-}" ]]; then
+  add_native_js_flag --reb-js-invocation-capture \
+    REB_NATIVE_JS_INVOCATION_SITES "unset REB_NATIVE_JS_INVOCATION_SITES"
 fi
 
 # Print the one file that holds the V8 flag table Brave will load.
@@ -461,7 +517,9 @@ if ((category_mask & (512 | 1024))); then
     --token-file "${token_path}"
     --session-id "${session_id}"
   )
-  if [[ "${capture_canvas_images}" == 1 ]]; then
+  # Canvas images and request bodies are sensitive artifact kinds; the default
+  # receiver refuses both.
+  if [[ "${capture_canvas_images}" == 1 || "${capture_request_content}" == 1 ]]; then
     artifact_receiver_arguments+=(--allow-sensitive)
   fi
   "${artifact_receiver_binary}" "${artifact_receiver_arguments[@]}" \
@@ -607,8 +665,17 @@ fi
 if [[ -n "${native_js_dispatch_sites:-}" ]]; then
   brave_arguments+=("--reb-js-dispatch-sites=${native_js_dispatch_sites}")
 fi
+if [[ -n "${native_js_invocation_sites:-}" ]]; then
+  brave_arguments+=("--reb-js-invocation-sites=${native_js_invocation_sites}")
+  if [[ "${native_js_invocation_digests:-0}" == 1 ]]; then
+    brave_arguments+=(--reb-js-invocation-digests)
+  fi
+fi
 if [[ "${capture_canvas_images}" == 1 ]]; then
   brave_arguments+=(--reb-capture-canvas-images)
+fi
+if [[ "${capture_request_content}" == 1 ]]; then
+  brave_arguments+=(--reb-capture-request-content)
 fi
 if [[ "${use_system_keychain}" == 0 ]]; then
   brave_arguments+=(--use-mock-keychain)
@@ -683,7 +750,15 @@ if [[ "${capture_canvas_images}" == 1 ]]; then
 else
   echo "Canvas image capture: disabled; set REB_CAPTURE_CANVAS_IMAGES=1 to enable it for one session"
 fi
-echo "Native switches: quiet=${native_quiet_mode} wasm_br_table=${native_wasm_dispatch} wasm_call_indirect=${native_wasm_call_indirect} wasm_guest=$([[ -n "${native_guest_adapter}" ]] && echo 1 || echo 0) js_dispatch=$([[ -n "${native_js_dispatch_sites}" ]] && echo 1 || echo 0)"
+if [[ "${capture_request_content}" == 1 ]]; then
+  echo "Request content capture: enabled for this session; request paths, queries and bodies are retained locally"
+else
+  echo "Request content capture: disabled; hosts and body length, type and digest only. Set REB_CAPTURE_REQUEST_CONTENT=1 to retain paths and bodies"
+fi
+echo "Native switches: quiet=${native_quiet_mode} wasm_br_table=${native_wasm_dispatch} wasm_call_indirect=${native_wasm_call_indirect} wasm_guest=$([[ -n "${native_guest_adapter}" ]] && echo 1 || echo 0) js_dispatch=$([[ -n "${native_js_dispatch_sites}" ]] && echo 1 || echo 0) js_invocation=$([[ -n "${native_js_invocation_sites}" ]] && echo 1 || echo 0)"
+if [[ "${native_js_invocation_digests}" == 1 ]]; then
+  echo "JavaScript invocation value digests: enabled for this session; settled values of armed calls are hashed (sensitive capture)"
+fi
 echo "Capture transport: native only"
 echo "Close Brave to stop this capture session."
 

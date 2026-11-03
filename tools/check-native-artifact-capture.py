@@ -35,6 +35,9 @@ HEADERS = (
     "mojo/public/cpp/base/big_buffer.h",
     "mojo/public/cpp/system/data_pipe.h",
     "url/gurl.h",
+    "net/http/http_request_headers.h",
+    "services/network/public/cpp/data_element.h",
+    "services/network/public/cpp/resource_request_body.h",
     "brave/components/reverse_engineering_browser/browser/native_artifact_socket_client.h",
     "brave/components/reverse_engineering_browser/browser/native_artifact_body_tee.h",
     "brave/components/reverse_engineering_browser/browser/native_probe_session.h",
@@ -98,6 +101,7 @@ def compile_driver(build: Path) -> Path:
         str(sources / "browser/native_probe_host.cc"),
         str(sources / "common/native_probe_queue.cc"),
         str(ROOT / "src/evidence/artifact.cpp"),
+        str(ROOT / "src/capture/event.cpp"),
         "-o",
         str(binary),
     )
@@ -151,8 +155,58 @@ def check_stores(output: Path, cases: list[dict]) -> None:
                 and item["artifact_id"] == artifact_id
             )
             assert capture["parent_event_id"] == item["creator_event_id"] != "0"
+    check_request_bodies(output, artifacts, events)
     print(
         "PASS production receiver/broker consumed exact native bytes, preserved metadata/hash/uint64 identity"
+    )
+
+
+def check_request_bodies(output: Path, artifacts: list[dict], events: list[dict]) -> None:
+    """Content-mode request bodies survive the production receiver and broker."""
+    expected = json.loads((output / "request-bodies.json").read_text())
+    assert expected, "The corpus must contain request bodies"
+    by_sequence = {item["sequence_number"]: item for item in events}
+    for body in expected:
+        item = next(a for a in artifacts if a["artifact_id"] == body["artifact_id"])
+        assert item["kind"] == "request_body" and item["capture_origin"] == "network_request"
+        assert item["sensitive"] is True and item["execution_context_id"] == "0"
+        assert item["url"] == body["url"] and item["mime_type"] == "application/json"
+        assert item["creator_event_id"] == body["body_sequence"]
+        data = (output / "artifacts" / item["content_path"]).read_bytes()
+        assert len(data) == body["captured_length"] == item["byte_size"]
+        truncated = body["captured_length"] < body["body_length"]
+        assert body["state"] == (5 if truncated else 4)
+        if not truncated:
+            assert hashlib.sha256(data).hexdigest() == body["sha256"]
+        record = by_sequence[body["body_sequence"]]
+        assert record["type"] == "request_body" and record["category"] == "network"
+        assert record["artifact_id"] == body["artifact_id"]
+        assert record["parent_event_id"] == body["start_sequence"]
+        payload = bytes.fromhex(record["payload"])
+        assert payload[32:64].hex() == body["sha256"]
+        assert int.from_bytes(payload[8:16], "little") == body["body_length"]
+        target = next(
+            e
+            for e in events
+            if e["type"] == "request_target"
+            and e["parent_event_id"] == body["start_sequence"]
+        )
+        prefix = bytes.fromhex(target["payload"])[12:].rstrip(b"\0").decode()
+        assert body["url"].removeprefix("https://api.hcaptcha.test").startswith(prefix)
+        captured = next(
+            e
+            for e in events
+            if e["type"] == "artifact_captured" and e["artifact_id"] == body["artifact_id"]
+        )
+        assert captured["parent_event_id"] == body["body_sequence"]
+    # The independent Python mirror of the record rules accepts the broker output.
+    run(
+        "python3",
+        str(ROOT / "tools/validate-evidence-store.py"),
+        str(output / "events.jsonl"),
+    )
+    print(
+        "PASS production receiver/broker retained sensitive request bodies, targets and exact body-record joins"
     )
 
 
@@ -235,8 +289,16 @@ def main() -> None:
         }
         (output / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
         if args.receiver:
+            # The corpus carries content-mode request bodies, which the
+            # receiver retains only when started for sensitive capture.
             with (output / "artifacts.bin").open("rb") as stream:
-                run(args.receiver, "--store", str(output / "artifacts"), stdin=stream)
+                run(
+                    args.receiver,
+                    "--store",
+                    str(output / "artifacts"),
+                    "--allow-sensitive",
+                    stdin=stream,
+                )
             with (output / "events.bin").open("rb") as stream:
                 run(
                     args.broker,

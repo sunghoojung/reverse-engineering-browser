@@ -349,7 +349,9 @@ async function checkInvestigationReturns(root) {
   const nav=await readFile(join(root,'apps/research-ui/investigation_navigation.js'),'utf8');
   const section=(a,b)=>{const start=app.indexOf(a),end=app.indexOf(b,start+1);assert(start>=0&&end>start,`Missing retained app boundary: ${a} → ${b}`);return app.slice(start,end);};
   const selection=section('      function selectRequest(', '      function moveRequestSelection(');
-  const artifactSelection=section('      function sourceArtifactIdentityMatches(', '      function closeSource(');
+  // The production Sources exclusion rule runs with selectArtifact.
+  const artifactSelection=section('      function isSourceArtifact(', '      function sourceIsCurrent(')+
+    section('      function sourceArtifactIdentityMatches(', '      function closeSource(');
   const rootFunction=section('      function requestTraceRoot(', '      function requestSignalProfileSelection(');
   const traceSelection=section('      function originTraceSelection(', '      async function refreshOriginTrace(');
   const traceReader=section('      async function refreshOriginTrace(', '      function traceStepDetails(');

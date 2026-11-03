@@ -71,7 +71,14 @@ browser records stay on the Brave-to-broker socket; the UI reads the broker's
 normalized store. Live sessions enable all eight fingerprint families plus
 Network and Artifact for one hour by default with category mask `4095`;
 `REB_CAPTURE_CATEGORY_MASK` and `REB_CAPTURE_DURATION_SECONDS` change those
-low-level startup limits.
+low-level startup limits. The mask is decimal or `0x` hexadecimal, from 1 to
+4095; the launcher refuses any other text before starting a helper, and the
+packaged app reads the same grammar when it chooses its content defaults.
+
+`REB_CAPTURE_REQUEST_CONTENT=1 make live` retains request paths, queries and
+request bodies up to 256 KiB for that one session; without it Traffic rows stay
+host-only while still recording each body's length, type and SHA-256 (see
+[Native network v2](../../protocol/native-network-v2.md)).
 
 `REB_CAPTURE_CANVAS_IMAGES=1 make live` additionally authorizes complete Canvas
 data URLs for that one session. The output is sensitive local evidence, limited

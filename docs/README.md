@@ -81,6 +81,7 @@ current product path.
 - [Anti-bot VM detection v1](./product/anti-bot-vm-detection-v1.md)
 - [VM Dynamic Debug v1](./product/vm-dynamic-debug-v1.md)
 - [Native JavaScript dispatch-site probe v1](./product/native-js-dispatch-v1.md)
+- [Native JavaScript invocation identity v1](./product/native-js-invocation-v1.md)
 - [API Collection v1](./product/api-collection-v1.md)
 - [Automation Recipes v1](./product/automation-recipes-v1.md)
 - [Decoder Tools v1](./product/decoder-tools-v1.md)

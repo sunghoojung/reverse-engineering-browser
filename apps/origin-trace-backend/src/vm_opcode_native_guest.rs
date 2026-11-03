@@ -75,18 +75,22 @@ fn payload(event: &Value, kind: &str, versions: &[u8]) -> Option<Vec<u8>> {
     super::event_payload_versions(event, kind, versions)
 }
 /// An invocation marker's payload. Version 2 names the exact parent dispatch
-/// at bytes 72..80 and version 3 the adapter site at bytes 80..84; earlier
-/// versions reserved those bytes, so their parent dispatch is zero and their
-/// site is 0. A parent dispatch names its activation and precedes the marker.
+/// at bytes 72..80, version 3 the adapter site at bytes 80..84 and version 4
+/// the JavaScript invocation context at bytes 84..92; earlier versions
+/// reserved those bytes, so their parent dispatch is zero, their site is 0 and
+/// their context is not observed. A parent dispatch names its activation and
+/// precedes the marker.
 fn invocation_payload(marker: &Value) -> Option<Vec<u8>> {
-    let m = payload(marker, "wasm_guest_invocation", &[1, 2, 3])?;
+    let m = payload(marker, "wasm_guest_invocation", &[1, 2, 3, 4])?;
     let dispatch = le64(&m, 72);
     let reserved = match m[0] {
         1 => 72,
         2 => 80,
-        _ => 84,
+        3 => 84,
+        _ => 92,
     };
     (m[reserved..].iter().all(|b| *b == 0)
+        && (m[0] < 4 || crate::js_invocation::wasm_context(&m, 4, 84).is_some())
         && (le32(&m, 80) as usize) < MAX_SITES
         && (dispatch == 0
             || (le64(&m, 64) != 0 && dispatch < decimal(&marker["sequence_number"])?)))
@@ -467,9 +471,15 @@ fn resolve(
     if interpretation == "verified-dataflow" && selector != opcode {
         return None;
     }
-    Some(
-        json!({"event":super::event_reference(event),"monotonic_time_ns":event["monotonic_time_ns"],"invocation_event":super::event_reference(marker),"invocation_id":invocation.to_string(),"instance_id":instance.to_string(),"parent_invocation_id":le64(&m,64).to_string(),"function_index":function,"module_byte_offset":site,"selector":selector,"table_count":count,"selected_arm":selector.min(count),"is_default":selector>=count,"sample_index":index,"instruction_pointer":pc,"instruction_pointer_units":"byte-offset","raw_pc_bits":raw.to_string(),"pc_local_index":local,"pc_adjustment":adjustment.to_string(),"pc_value_type":pc_recipe["value_type"],"pc_subtract_memory_base":pc_recipe["subtract_memory_base"],"memory_index":memory,"memory_base":base.to_string(),"memory_length":length,"opcode":opcode,"opcode_width":width,"opcode_endian":op_recipe["endian"],"adapter_artifact_id":adapter["artifact_id"],"adapter_sha256":recipe_sha,"bytecode_artifact_id":snapshot["artifact_id"],"bytecode_sha256":snapshot["sha256"],"interpretation":interpretation,"host_import_call_offsets":import_sites}),
-    )
+    let mut row = json!({"event":super::event_reference(event),"monotonic_time_ns":event["monotonic_time_ns"],"invocation_event":super::event_reference(marker),"invocation_id":invocation.to_string(),"instance_id":instance.to_string(),"parent_invocation_id":le64(&m,64).to_string(),"function_index":function,"module_byte_offset":site,"selector":selector,"table_count":count,"selected_arm":selector.min(count),"is_default":selector>=count,"sample_index":index,"instruction_pointer":pc,"instruction_pointer_units":"byte-offset","raw_pc_bits":raw.to_string(),"pc_local_index":local,"pc_adjustment":adjustment.to_string(),"pc_value_type":pc_recipe["value_type"],"pc_subtract_memory_base":pc_recipe["subtract_memory_base"],"memory_index":memory,"memory_base":base.to_string(),"memory_length":length,"opcode":opcode,"opcode_width":width,"opcode_endian":op_recipe["endian"],"adapter_artifact_id":adapter["artifact_id"],"adapter_sha256":recipe_sha,"bytecode_artifact_id":snapshot["artifact_id"],"bytecode_sha256":snapshot["sha256"],"interpretation":interpretation,"host_import_call_offsets":import_sites});
+    // The JavaScript invocation the guest activation began in (marker v4).
+    if m[0] >= 4 {
+        let (state, id) = crate::js_invocation::wasm_context(&m, 4, 84)?;
+        if let Some(context) = crate::js_invocation::context_row(state, id) {
+            row["js_invocation"] = context;
+        }
+    }
+    Some(row)
 }
 pub(super) fn collect(
     root: &Path,

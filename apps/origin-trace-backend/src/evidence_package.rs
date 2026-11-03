@@ -468,7 +468,11 @@ fn identities<'a>(
                 let origin = value["capture_origin"].as_str().unwrap_or("");
                 let context = unsigned(&value["execution_context_id"], false);
                 if value["sensitive"].as_bool()
-                    != Some(matches!(kind, "response_body" | "canvas_data_url"))
+                    != Some(matches!(
+                        kind,
+                        "response_body" | "canvas_data_url" | "request_body"
+                    ))
+                    || ((kind == "request_body") != (origin == "network_request"))
                     || (value["execution_context_id"].is_null() && origin != "unknown")
                     || (origin == "dynamic_javascript"
                         && (kind != "javascript" || context.is_none_or(|id| id == 0)))
@@ -1728,7 +1732,15 @@ mod tests {
     fn native_dispatch_observations_export_as_physical_metadata() {
         let source = include_bytes!("../assets/evidence-packages/source-v1/events.jsonl");
         let first = source.split(|b| *b == b'\n').next().unwrap();
-        for kind in ["wasm_dispatch_observation", "js_dispatch_observation"] {
+        // Invocation records join them: a package never carries argument
+        // low bits, lengths or value digests.
+        for kind in [
+            "wasm_dispatch_observation",
+            "js_dispatch_observation",
+            "js_invocation_start",
+            "js_invocation_settle",
+            "js_invocation_request",
+        ] {
             let mut event: Value = serde_json::from_slice(first).unwrap();
             event["type"] = json!(kind);
             event["category"] = json!("vm");

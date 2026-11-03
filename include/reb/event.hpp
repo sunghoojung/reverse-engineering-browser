@@ -58,6 +58,14 @@ enum class EventType : std::uint16_t {
   kWasmIndirectObservation = 20,
   // The only definition of this number; see protocol/native-js-dispatch-v1.md.
   kJsDispatchObservation = 21,
+  // Request body summary and content-mode request target, see
+  // protocol/native-network-v2.md.
+  kRequestBody = 22,
+  kRequestTarget = 23,
+  // The only definitions of these numbers; see protocol/native-js-invocation-v1.md.
+  kJsInvocationStart = 24,
+  kJsInvocationSettle = 25,
+  kJsInvocationRequest = 26,
 };
 
 enum class EventFlag : std::uint16_t {

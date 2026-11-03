@@ -32,7 +32,8 @@
           'request_initiated', 'request_redirected', 'response_started',
           'request_completed', 'request_failed', 'vm_finding',
           'vm_dispatch_sample', 'wasm_dispatch_observation', 'wasm_guest_dispatch', 'wasm_guest_invocation',
-          'wasm_indirect_observation', 'js_dispatch_observation', 'artifact_captured', 'artifact_capture_failed'
+          'wasm_indirect_observation', 'js_dispatch_observation', 'js_invocation_start', 'js_invocation_settle',
+          'js_invocation_request', 'artifact_captured', 'artifact_capture_failed', 'request_body', 'request_target'
         ])
       };
       const uint64Fields = [
@@ -56,15 +57,18 @@
         ['request_failed', 5]
       ]);
       const networkLifecycleTypes = new Set(lifecycleRanks.keys());
+      // Children of a lifecycle record (protocol/native-network-v2.md). They
+      // describe a request; they never advance its lifecycle rank.
+      const networkRequestDetailTypes = new Set(['request_target', 'request_body']);
       const artifactKinds = new Set([
         'javascript', 'wasm', 'source_map', 'response_body', 'canvas_data_url',
-        'bytecode_buffer', 'wasm_guest_adapter'
+        'bytecode_buffer', 'wasm_guest_adapter', 'request_body'
       ]);
       const artifactCaptureOrigins = new Set([
         'unknown', 'network_response', 'dynamic_javascript', 'webassembly_compile',
         'webassembly_module', 'webassembly_instantiate', 'canvas_to_data_url',
         'runtime_typed_array',
-        'runtime_allocating_script', 'native_wasm_guest'
+        'runtime_allocating_script', 'native_wasm_guest', 'network_request'
       ]);
       const canvasReplayProperties = new Set([
         'fillStyle', 'strokeStyle', 'font', 'textBaseline', 'textAlign',
@@ -337,6 +341,24 @@
           typeof value.events_limited === 'boolean' && typeof value.network_events_limited === 'boolean';
       }
 
+      // The JavaScript invocation context of a Wasm consumer record,
+      // protocol/native-js-invocation-v1.md: newVersion stores it at offset,
+      // earlier versions reserved those bytes (not observed). State 2 (inside)
+      // alone carries a nonzero ID.
+      function nativeInvocationContext(bytes, version, newVersion, offset) {
+        const view = new DataView(bytes.buffer);
+        const state = bytes[offset];
+        const id = view.getUint32(offset + 4, true);
+        if (bytes.slice(offset + 1, offset + 4).some(byte => byte !== 0) || state > 3 ||
+          (state === 2) !== (id !== 0) || (version < newVersion && (state !== 0 || id !== 0))) return null;
+        return {state, id};
+      }
+
+      function nativeInvocationRow(context) {
+        const state = ['', 'none', 'inside', 'unknown'][context.state];
+        return state ? {js_invocation: {state, invocation_id: String(context.id)}} : {};
+      }
+
       function decodeNativeWasmObservation(event) {
         if (event?.type !== 'wasm_dispatch_observation' || event.protocol_version !== 3 || event.category !== 'vm' ||
           event.payload_size !== 128 || event.payload_encoding !== 'hex' || event.payload_truncated !== false ||
@@ -346,9 +368,13 @@
           typeof event.payload !== 'string' || !/^[0-9a-f]{256}$/i.test(event.payload)) return null;
         const bytes = Uint8Array.from(event.payload.match(/../g), byte => Number.parseInt(byte, 16));
         const view = new DataView(bytes.buffer);
-        if (view.getUint16(0,true) !== 1 || view.getUint16(2,true) !== 128 || bytes.slice(24).some(byte => byte !== 0)) return null;
+        const version = view.getUint16(0,true);
+        const context = nativeInvocationContext(bytes, version, 2, 24);
+        if (![1, 2].includes(version) || view.getUint16(2,true) !== 128 || context === null ||
+          bytes.slice(32).some(byte => byte !== 0)) return null;
         const row = {function_index:view.getUint32(4,true),module_byte_offset:view.getUint32(8,true),
-          selector:view.getUint32(12,true),table_count:view.getUint32(16,true),sample_index:view.getUint32(20,true)};
+          selector:view.getUint32(12,true),table_count:view.getUint32(16,true),sample_index:view.getUint32(20,true),
+          ...nativeInvocationRow(context)};
         return row.function_index < 16777216 && row.module_byte_offset >= 8 && row.module_byte_offset < 16777216 &&
           row.table_count < 16777216 && row.sample_index < 16 ? row : null;
       }
@@ -363,10 +389,13 @@
           typeof event.payload !== 'string' || !/^[0-9a-f]{256}$/i.test(event.payload)) return null;
         const bytes = Uint8Array.from(event.payload.match(/../g), byte => Number.parseInt(byte, 16));
         const view = new DataView(bytes.buffer);
-        if (view.getUint16(0,true) !== 1 || view.getUint16(2,true) !== 128 || bytes.slice(32).some(byte => byte !== 0)) return null;
+        const version = view.getUint16(0,true);
+        const context = nativeInvocationContext(bytes, version, 2, 32);
+        if (![1, 2].includes(version) || view.getUint16(2,true) !== 128 || context === null ||
+          bytes.slice(40).some(byte => byte !== 0)) return null;
         const row = {function_index:view.getUint32(4,true),module_byte_offset:view.getUint32(8,true),
           table_index:view.getUint32(12,true),slot:view.getUint32(16,true),callee_function_index:view.getUint32(20,true),
-          resolution:view.getUint32(24,true),sample_index:view.getUint32(28,true)};
+          resolution:view.getUint32(24,true),sample_index:view.getUint32(28,true),...nativeInvocationRow(context)};
         return row.function_index < 16777216 && row.module_byte_offset >= 8 && row.module_byte_offset < 16777216 &&
           row.table_index < 16777216 && row.callee_function_index < 16777216 && row.resolution < 5 &&
           (row.resolution === 0 || row.callee_function_index === 0) && row.sample_index < 16 ? row : null;
@@ -399,6 +428,192 @@
         return row;
       }
 
+      // Shared envelope of request_target and request_body. isBrokerEvent keeps
+      // only the generic checks for these types, so one malformed child is
+      // shown as malformed in its request instead of failing the whole poll.
+      function isRequestChildEnvelope(event, type) {
+        return event?.type === type && event.protocol_version === 3 && event.category === 'network' &&
+          event.flags === 0 && event.payload_truncated === false && event.payload_size === 128 &&
+          event.payload_encoding === 'hex' && typeof event.payload === 'string' && /^[0-9a-f]{256}$/i.test(event.payload) &&
+          ['session_id', 'sequence_number', 'parent_event_id'].every(key => isCanonicalInteger(event[key], 1n, uint64Max)) &&
+          BigInt(event.parent_event_id) < BigInt(event.sequence_number) &&
+          isSafeIntegerInRange(event.process_id, 1, 0xffffffff) && event.navigation_id === '0' &&
+          event.status_code === 0 && event.error_code === 0 && event.encoded_data_length === '0' &&
+          event.decoded_body_length === '0' && event.resource_type === 0;
+      }
+
+      const requestSchemes = new Map([[0, null], [1, 'http'], [2, 'https'], [3, 'ws'], [4, 'wss']]);
+
+      function decodeRequestTargetRecord(event) {
+        if (!isRequestChildEnvelope(event, 'request_target') || event.artifact_id !== '0') return null;
+        const bytes = bytesFromHex(event.payload);
+        const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+        const length = view.getUint32(4, true);
+        const prefix = Math.min(length, 116);
+        if (view.getUint16(0, true) !== 1 || view.getUint16(2, true) !== 128 || !requestSchemes.has(bytes[8]) ||
+            bytes[9] !== 0 || bytes.slice(12, 12 + prefix).some(byte => byte === 0) ||
+            bytes.slice(12 + prefix).some(byte => byte !== 0)) return null;
+        return {scheme: requestSchemes.get(bytes[8]), port: view.getUint16(10, true), targetLength: length,
+          // Decoded as text and only ever assigned to textContent.
+          target: new TextDecoder().decode(bytes.slice(12, 12 + prefix)), truncated: length > prefix};
+      }
+
+      const requestBodyKinds = ['none', 'bytes', 'file', 'data_pipe', 'chunked_data_pipe', 'mixed', 'unknown'];
+      const requestBodyStates = [null, 'no_body', 'empty', 'metadata_only', 'captured', 'captured_truncated',
+        'not_captured_body_kind', 'not_captured_artifact_unavailable', 'not_captured_transfer_refused',
+        'not_captured_url', 'not_captured_session_budget', 'not_captured_credential_form'];
+      const requestTokenCharacters = /^[a-z0-9!#$%&'*+.^_`|~-]+\/[a-z0-9!#$%&'*+.^_`|~-]+$/;
+
+      // Every rule of the request_body payload, shared with the C++ core and the
+      // Python evidence validator through tools/check-network-request-wire.mjs.
+      function decodeRequestBodyRecord(event) {
+        if (!isRequestChildEnvelope(event, 'request_body') ||
+            !isCanonicalInteger(event.artifact_id, 0n, uint64Max)) return null;
+        const bytes = bytesFromHex(event.payload);
+        const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+        const [kindCode, stateCode, flags, typeLength] = [bytes[4], bytes[5], bytes[6], bytes[7]];
+        const bodyLength = view.getBigUint64(8, true);
+        const captured = view.getBigUint64(16, true);
+        const elements = view.getUint32(24, true);
+        const digest = bytes.slice(32, 64);
+        const typeBytes = bytes.slice(64, 128);
+        const contentType = String.fromCharCode(...typeBytes.slice(0, Math.min(typeLength, 64)));
+        const has = bit => (flags & bit) !== 0;
+        const [content, hasDigest, sizeLimit, partial, typePresent, typeOmitted] = [1, 2, 4, 8, 16, 32].map(has);
+        const digestLimit = 4n * 1024n * 1024n;
+        if (view.getUint16(0, true) !== 1 || view.getUint16(2, true) !== 128 || view.getUint32(28, true) !== 0 ||
+            kindCode > 6 || stateCode < 1 || stateCode > 11 || (flags & ~0x3f) !== 0 || typeLength > 64 ||
+            (typePresent && typeOmitted) || typePresent !== (typeLength !== 0) ||
+            typeBytes.slice(typeLength).some(byte => byte !== 0) ||
+            (typePresent && !requestTokenCharacters.test(contentType)) || captured > bodyLength) return null;
+        const isBytes = kindCode === 1, isNone = kindCode === 0, state = requestBodyStates[stateCode];
+        if ((hasDigest && (!isBytes || sizeLimit || bodyLength > digestLimit)) ||
+            (!hasDigest && digest.some(byte => byte !== 0)) ||
+            (sizeLimit && (!isBytes || bodyLength <= digestLimit)) ||
+            (isBytes && stateCode !== 11 && hasDigest === sizeLimit) ||
+            (stateCode === 11 && (hasDigest || sizeLimit)) ||
+            partial !== (!isNone && !isBytes) || isNone !== (stateCode === 1) ||
+            (isNone && (elements !== 0 || bodyLength !== 0n)) || (!isNone && elements === 0) ||
+            (kindCode === 5 && elements < 2)) return null;
+        const retained = stateCode === 4 || stateCode === 5;
+        if ((event.artifact_id !== '0') !== retained || (!retained && captured !== 0n)) return null;
+        const stateValid = {
+          no_body: true, not_captured_credential_form: true,
+          empty: isBytes && bodyLength === 0n,
+          metadata_only: !content && (!isBytes || bodyLength !== 0n),
+          captured: content && isBytes && bodyLength !== 0n && captured === bodyLength,
+          captured_truncated: content && isBytes && captured !== 0n && captured < bodyLength,
+          not_captured_body_kind: content && !isNone && !isBytes
+        }[state] ?? (content && isBytes && bodyLength !== 0n);
+        if (!stateValid) return null;
+        return {
+          kind: requestBodyKinds[kindCode], state, contentCapture: content, lengthPartial: partial,
+          contentType: typePresent ? contentType : null, contentTypeOmitted: typeOmitted,
+          bodyLength: String(bodyLength), capturedLength: String(captured), elementCount: elements,
+          sha256: hasDigest ? Array.from(digest, byte => byte.toString(16).padStart(2, '0')).join('') : null,
+          digestSizeLimit: sizeLimit, artifactId: event.artifact_id,
+          sequenceNumber: event.sequence_number, sessionId: event.session_id, processId: event.process_id
+        };
+      }
+
+      // A child record joins its exact parent lifecycle record, never by URL.
+      function requestChildOf(details, parent, type) {
+        return parent ? details.find(event => event.type === type && event.parent_event_id === parent.sequence_number &&
+          event.session_id === parent.session_id && event.process_id === parent.process_id) ?? null : null;
+      }
+
+      function attachRequestDetails(requests, events, browserRequestKeys) {
+        const byId = new Map(requests.map(request => [request.id, request]));
+        for (const event of events) {
+          if (event.category !== 'network' || !networkRequestDetailTypes.has(event.type)) continue;
+          // A child whose lifecycle record left the retained window stays unattached.
+          byId.get(requestIdentity(event, browserRequestKeys))?.details.push(event);
+        }
+        for (const request of requests) {
+          const start = request.events.find(event => event.type === 'request_started') ?? null;
+          const bodyEvent = requestChildOf(request.details, start, 'request_body');
+          request.body = bodyEvent ? decodeRequestBodyRecord(bodyEvent) ?? {malformed: true} : null;
+          const targetEvent = requestChildOf(request.details, request.targetEvent, 'request_target');
+          const target = targetEvent ? decodeRequestTargetRecord(targetEvent) : null;
+          request.targetMalformed = Boolean(targetEvent) && !target;
+          if (!target || request.targetKind !== 'host') continue;
+          const host = request.path;
+          // Rows show these exact captured bytes; the composed URL is for copying.
+          request.host = target.port ? `${host}:${target.port}` : host;
+          request.target = target.target;
+          request.urlTruncated = target.truncated;
+          request.targetLength = target.targetLength;
+          request.path = target.scheme
+            ? `${target.scheme}://${host}${target.port ? `:${target.port}` : ''}${target.target}`
+            : `${host}${target.target}`;
+          request.targetKind = target.scheme ? 'url' : 'path';
+          request.hostOnly = false;
+        }
+      }
+
+      // Native JavaScript invocation records, protocol/native-js-invocation-v1.md:
+      // the same rules as the C++, Python, Rust and Swift readers. A row keeps
+      // kinds, IDs and lengths; digests are only marked as retained.
+      function decodeNativeJsInvocation(event) {
+        if (!['js_invocation_start', 'js_invocation_settle', 'js_invocation_request'].includes(event?.type) ||
+          event.protocol_version !== 3 || event.category !== 'vm' || event.payload_size !== 128 ||
+          event.payload_encoding !== 'hex' || event.payload_truncated !== false || event.flags !== 0 ||
+          ['artifact_id', 'navigation_id', 'parent_event_id'].some(key => event[key] !== '0') ||
+          !['session_id', 'sequence_number', 'monotonic_time_ns'].every(key => isCanonicalInteger(event[key], 1n, uint64Max)) ||
+          !isCanonicalInteger(event.frame_id, 0n, uint64Max) || !isCanonicalInteger(event.request_id, 0n, uint64Max) ||
+          !['process_id', 'thread_id'].every(key => isSafeIntegerInRange(event[key], 1, 0xffffffff)) ||
+          typeof event.payload !== 'string' || !/^[0-9a-f]{256}$/i.test(event.payload)) return null;
+        const bytes = Uint8Array.from(event.payload.match(/../g), byte => Number.parseInt(byte, 16));
+        const view = new DataView(bytes.buffer);
+        const u16 = at => view.getUint16(at, true);
+        const u32 = at => view.getUint32(at, true);
+        const u64 = at => view.getBigUint64(at, true);
+        if (u16(0) !== 1 || u16(2) !== 128) return null;
+        if (event.type === 'js_invocation_request') {
+          const [state, id] = [bytes[4], u32(8)];
+          return event.request_id !== '0' && BigInt(event.request_id) <= 0xffffffffn && [2, 3].includes(state) &&
+            (state === 2) === (id !== 0) && u16(12) < 256 && u16(14) === 0 &&
+            bytes.slice(5, 8).every(byte => byte === 0) && bytes.slice(16).every(byte => byte === 0)
+            ? {state: state === 2 ? 'inside' : 'unknown', invocation_id: id} : null;
+        }
+        if (event.frame_id === '0' || event.request_id !== '0') return null;
+        const validKind = (kind, low) => kind >= 1 && kind <= 14 && (kind === 1 || (kind === 7 ? low <= 1 : low === 0));
+        if (event.type === 'js_invocation_start') {
+          const [slot, flags, argc, id, parent] = [bytes[4], bytes[5], u16(6), u32(20), u32(24)];
+          if (slot > 7 || (flags & ~0x03) !== 0 || u32(8) === 0 || u32(16) === 0 || u32(12) >= u32(16) || id === 0 ||
+            u16(28) >= 64 || u16(30) >= 256 || u64(104) === 0n || bytes.slice(112).some(byte => byte !== 0) ||
+            (parent !== 0 && (parent >= id || (flags & 1) !== 0)) || ((flags & 2) !== 0) !== (argc > 8)) return null;
+          const kinds = [];
+          for (let index = 0; index < 8; index += 1) {
+            const [kind, low] = [bytes[32 + index], u32(40 + 4 * index)];
+            if (index < argc ? !validKind(kind, low) : kind !== 0 || low !== 0) return null;
+            if (index < argc) kinds.push(kind);
+          }
+          return {slot, invocation_id: id, parent_invocation_id: parent, parent_unknown: (flags & 1) !== 0,
+            argument_count: argc, argument_kinds: kinds};
+        }
+        const [slot, outcome, via, kind] = [bytes[4], bytes[5], bytes[6], bytes[7]];
+        const [length, state, encoding, flags, byteLength, rolling] =
+          [u32(12), bytes[16], bytes[17], bytes[18], u32(20), u64(24)];
+        const [fulfilled, rejected] = [outcome === 1, outcome === 2];
+        const [string, raw] = [kind === 3, kind === 12 || kind === 13];
+        if (slot > 7 || !(fulfilled || rejected) || kind < 1 || kind > 14 || u32(8) === 0 || u64(64) === 0n ||
+          bytes[19] !== 0 || (flags & ~1) !== 0 || bytes.slice(72).some(byte => byte !== 0) ||
+          !((via === 1 && fulfilled) || (via === 2 && rejected) || via === 3) ||
+          (length !== 0 && !(string || raw || kind === 11))) return null;
+        if (state === 1) {
+          if (!fulfilled || byteLength > 1048576 || !((string && encoding === 1) || (raw && encoding === 2)) ||
+            (!string && (flags & 1) !== 0) || (string && byteLength < length) || (raw && byteLength !== length) ||
+            (byteLength === 0 && rolling !== 0n)) return null;
+        } else if (encoding !== 0 || byteLength !== 0 || rolling !== 0n || flags !== 0 ||
+          bytes.slice(32, 64).some(byte => byte !== 0) ||
+          !(state === 0 || (state === 2 && !(fulfilled && (string || raw))) ||
+            (state === 3 && fulfilled && (string || raw)) || (state === 4 && fulfilled && raw))) return null;
+        return {slot, invocation_id: u32(8), outcome: fulfilled ? 'fulfilled' : 'rejected',
+          via: ['', 'sync_return', 'sync_throw', 'promise'][via], value_kind: kind, value_length: length,
+          digest: ['not_requested', 'present', 'not_digestible', 'too_large', 'unavailable'][state]};
+      }
+
       function decodeNativeGuestRecord(event) {
         if (!['wasm_guest_dispatch','wasm_guest_invocation'].includes(event?.type) || event.protocol_version !== 3 ||
           event.category !== 'vm' || event.flags !== 0 || event.payload_size !== 128 || event.payload_encoding !== 'hex' ||
@@ -410,18 +625,20 @@
         const view = new DataView(bytes.buffer);
         const u64 = n => view.getBigUint64(n,true);
         const version = view.getUint16(0,true);
-        if (!(version === 1 || ((version === 2 || version === 3) && event.type === 'wasm_guest_invocation')) ||
+        if (!(version === 1 || (version >= 2 && version <= 4 && event.type === 'wasm_guest_invocation')) ||
           view.getUint16(2,true) !== 128 || view.getUint32(4,true) >= 16777216) return null;
         if (event.type === 'wasm_guest_invocation') {
-          // Version 2 names the exact parent dispatch at bytes 72..80 and version 3
-          // the adapter site (at most 8) at bytes 80..84; earlier versions reserved them.
+          // Version 2 names the exact parent dispatch at bytes 72..80, version 3
+          // the adapter site (at most 8) at bytes 80..84 and version 4 the
+          // JavaScript invocation context at bytes 84..92; earlier versions reserved them.
           const parentDispatch = u64(72);
           const site = view.getUint32(80,true);
+          const context = nativeInvocationContext(bytes, version, 4, 84);
           return event.parent_event_id === '0' && u64(8) > 0n && u64(16) > 0n && u64(24) > 0n &&
             u64(24) !== BigInt(event.artifact_id) && u64(64) !== u64(16) &&
             (parentDispatch === 0n || (version >= 2 && u64(64) > 0n && parentDispatch < BigInt(event.sequence_number))) &&
-            (version === 3 || site === 0) && site < 8 &&
-            bytes.slice(32,64).some(b => b !== 0) && bytes.slice(84).every(b => b === 0) ? {} : null;
+            (version >= 3 || site === 0) && site < 8 && context !== null &&
+            bytes.slice(32,64).some(b => b !== 0) && bytes.slice(92).every(b => b === 0) ? nativeInvocationRow(context) : null;
         }
         const length = view.getUint32(72,true);
         return isCanonicalInteger(event.parent_event_id,1n,uint64Max) && BigInt(event.parent_event_id) < BigInt(event.sequence_number) &&
@@ -469,6 +686,7 @@
           (event.type !== 'wasm_dispatch_observation' || decodeNativeWasmObservation(event) !== null) &&
           (event.type !== 'wasm_indirect_observation' || decodeNativeWasmIndirectObservation(event) !== null) &&
           (event.type !== 'js_dispatch_observation' || decodeNativeJsObservation(event) !== null) &&
+          (!event.type.startsWith('js_invocation_') || decodeNativeJsInvocation(event) !== null) &&
           (!['wasm_guest_dispatch','wasm_guest_invocation'].includes(event.type) || decodeNativeGuestRecord(event) !== null);
       }
 
@@ -499,7 +717,8 @@
               body.canvas_render_captures.every(isCanvasRenderCapture))) &&
           (body.event_window === undefined || isEventWindow(body.event_window)) &&
           (body.network_events === undefined || (Array.isArray(body.network_events) && body.network_events.length <= 5000 &&
-            body.network_events.every(event => isBrokerEvent(event) && event.category === 'network' && networkLifecycleTypes.has(event.type)))) &&
+            body.network_events.every(event => isBrokerEvent(event) && event.category === 'network' &&
+              (networkLifecycleTypes.has(event.type) || networkRequestDetailTypes.has(event.type))))) &&
           body.events.every(isBrokerEvent);
       }
 
@@ -535,6 +754,10 @@
           return false;
         }
         if (artifact.kind === 'wasm_guest_adapter' && artifact.capture_origin !== 'native_wasm_guest') return false;
+        // A request body is created by its browser request_body record only.
+        if ((artifact.kind === 'request_body') !== (artifact.capture_origin === 'network_request') ||
+          (artifact.kind === 'request_body' && (artifact.execution_context_id !== '0' ||
+            !isCanonicalInteger(artifact.creator_event_id, 1n, uint64Max)))) return false;
         if (artifact.capture_origin === 'native_wasm_guest' && (!['bytecode_buffer','wasm_guest_adapter'].includes(artifact.kind) ||
           !['frame_id','parent_artifact_id','creator_event_id','execution_context_id'].every(k => isCanonicalInteger(artifact[k],1n,uint64Max)))) return false;
         if (Object.hasOwn(artifact, 'execution_context_id')) {
@@ -557,8 +780,7 @@
           isSafeIntegerInRange(artifact.byte_size, 0, Number.MAX_SAFE_INTEGER) &&
           typeof artifact.sha256 === 'string' && /^[0-9a-f]{64}$/.test(artifact.sha256) &&
           typeof artifact.sensitive === 'boolean' &&
-          (!artifact.sensitive || artifact.kind === 'response_body' || artifact.kind === 'canvas_data_url') &&
-          (artifact.kind !== 'canvas_data_url' || artifact.sensitive);
+          artifact.sensitive === ['response_body', 'canvas_data_url', 'request_body'].includes(artifact.kind);
       }
 
       function isArtifactResponse(body) {
@@ -721,11 +943,17 @@
           eventCategories.has(step.category) &&
           typeof step.operation === 'string' && step.operation.length > 0 &&
           typeof step.value === 'string' && step.value.length <= 256 &&
-          ['trace_target', 'parent_event', 'request_initiator', 'request_lifecycle', 'artifact_request', 'temporal_adjacency'].includes(step.relation) &&
+          ['trace_target', 'parent_event', 'request_initiator', 'request_lifecycle', 'artifact_request', 'temporal_adjacency',
+            'issued_during_invocation', 'invocation_settlement', 'invocation_value_flow'].includes(step.relation) &&
           ['observed', 'correlated', 'time_adjacent'].includes(step.confidence) &&
-          (step.relation === 'temporal_adjacency') === (step.confidence === 'time_adjacent');
+          (step.relation === 'temporal_adjacency') === (step.confidence === 'time_adjacent') &&
+          // Invocation identity is observed; exact value flow is the only
+          // correlated invocation link, and time never stands in for either.
+          (step.relation !== 'invocation_value_flow' || step.confidence === 'correlated') &&
+          (!['issued_during_invocation', 'invocation_settlement'].includes(step.relation) || step.confidence === 'observed');
         const validGap = gap => isPlainObject(gap) &&
-          ['ambiguous_request', 'missing_event', 'no_predecessor', 'cycle', 'step_limit', 'capture_gap'].includes(gap.reason) &&
+          ['ambiguous_request', 'missing_event', 'no_predecessor', 'cycle', 'step_limit', 'capture_gap',
+            'value_flow_ambiguous', 'value_flow_unsearched'].includes(gap.reason) &&
           isSafeIntegerInRange(gap.after_step, 0, 31) &&
           typeof gap.detail === 'string' && gap.detail.length > 0;
         return body.steps.every(validStep) && body.gaps.every(validGap);
@@ -919,6 +1147,8 @@
             end: Math.min(94, 30 + rank * 12),
             event: incomingRank >= (previous?.rank ?? 0) ? event : previous.event,
             events: [...(previous?.events ?? []), event],
+            details: [],
+            targetEvent: updatesTarget ? event : previous?.targetEvent ?? null,
             failed,
             interrupted,
             rank,
@@ -931,7 +1161,9 @@
             lastTimestamp
           });
         });
-        return [...requests.values()];
+        const rows = [...requests.values()];
+        attachRequestDetails(rows, events, browserRequestKeys);
+        return rows;
       }
 
       function decodeVmFinding(event) {
@@ -2420,7 +2652,15 @@
         // Prefer the producer-recorded time; older documents only have it while
         // the event is still in the retained window.
         const time = typeof row.monotonic_time_ns === 'string' ? row.monotonic_time_ns : retained?.monotonic_time_ns;
-        return `${time === undefined ? 'time outside retained event window' : `time ${time} ns`} · session ${key[0]} · process ${key[1]} · seq ${key[2]} · native probe · vm/${operation}`;
+        return `${time === undefined ? 'time outside retained event window' : `time ${time} ns`} · session ${key[0]} · process ${key[1]} · seq ${key[2]} · native probe · vm/${operation}${vmNativeInvocationText(row)}`;
+      }
+      // The JavaScript invocation a Wasm record ran in, when it observed one.
+      // None or unknown is a coverage limit, never evidence of unrelated work.
+      function vmNativeInvocationText(row) {
+        const context = row?.js_invocation;
+        if (!isPlainObject(context)) return '';
+        return context.state === 'inside' ? ` · inside JS invocation ${context.invocation_id}`
+          : context.state === 'unknown' ? ' · JS invocation unknown' : ' · outside any armed JS invocation';
       }
       // Older documents may omit a per-kind count; never subtract a malformed one.
       function vmNativeAcceptedCount(value, retained) {

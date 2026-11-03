@@ -88,9 +88,17 @@ synthetic checks do not launch a browser, enable capture, or prove performance
 inside a built Brave application.
 
 Payload capture is limited to a bounded metadata prefix. Network request
-prefixes contain only the method and destination host. URL paths, queries,
-fragments, bodies, credentials, authorization headers, and cookies are not
-captured.
+prefixes contain only the method and destination host. Fragments, credentials,
+authorization headers, and cookies are never captured. Every admitted request
+also gets a `request_body` child record from `browser/native_network_capture_sink.cc`
+with the body's kind, length, normalized content type and a SHA-256 of
+in-memory bytes up to 4 MiB. Only with `--reb-capture-request-content` does the
+sink also emit `request_target` children (path and query, 116-byte prefix plus
+original length) for starts and redirects and hand at most 256 KiB of in-memory
+body bytes to `NativeArtifactCaptureSink::CaptureRequestBody` as a sensitive
+`request_body` artifact. File, blob and stream elements are never read, and
+password form posts keep neither bytes nor a digest. The wire and limits are in
+[Native network v2](../../../../../../protocol/native-network-v2.md).
 
 Large artifact bytes use the separate 128-byte framed contract and 32-byte
 acknowledgment in `common/native_artifact_header.h`. Only the browser-process
@@ -152,6 +160,17 @@ keeps its drop count; budget, emitter, invalid-input and compiled-before-arming
 refusals are coalesced gaps. See the
 [contract](../../../../../../protocol/native-js-dispatch-v1.md).
 
+Native JavaScript invocation records (`js_invocation_start`,
+`js_invocation_settle` and `js_invocation_request`, events 24 to 26) use
+`common/native_js_invocation.h` for the payloads and the 44-byte
+function-entry site records (shape 3), and `common/native_js_invocation_sites.h`
+for the browser-side site file. The sink claims one of 256 starts per
+configuration and one of 64 per site, and one of 256 request records; settles
+carry a digest only under the session's opt-in. It reads the current
+invocation through a provider Blink installs, for Wasm `br_table` and
+`call_indirect` observations, guest invocation markers and loader requests.
+See the [contract](../../../../../../protocol/native-js-invocation-v1.md).
+
 Renderer code never writes files or sockets directly.
 
 The dedicated-worker source foundation uses a separate, dormant process-wide
@@ -169,7 +188,8 @@ so origin allowlisting is intentionally not inferred from bounded payload text.
 
 Accepted network-body artifacts emit `artifact_captured.parent_event_id` naming
 the browser's actual `response_started` sequence, identical to the manifest's
-`creator_event_id`. The artifact sink keeps its admission session and generation
+`creator_event_id`. Request-body artifacts name their `request_body` record the
+same way, and that record names its `request_started` parent. The artifact sink keeps its admission session and generation
 across body completion and transfer acknowledgement. Reconfiguration, including
 reactivation with the same numeric session ID, retires old callbacks; they cannot
 enqueue late bodies or report an old ACK under the new session. Bytes already

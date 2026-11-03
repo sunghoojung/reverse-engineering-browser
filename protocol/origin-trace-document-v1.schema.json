@@ -37,7 +37,11 @@
         {"if": {"properties": {"confidence": {"const": "time_adjacent"}}, "required": ["confidence"]},
          "then": {"properties": {"relation": {"const": "temporal_adjacency"}}}},
         {"if": {"properties": {"relation": {"const": "temporal_adjacency"}}, "required": ["relation"]},
-         "then": {"properties": {"confidence": {"const": "time_adjacent"}}}}
+         "then": {"properties": {"confidence": {"const": "time_adjacent"}}}},
+        {"if": {"properties": {"relation": {"const": "invocation_value_flow"}}, "required": ["relation"]},
+         "then": {"properties": {"confidence": {"const": "correlated"}}}},
+        {"if": {"properties": {"relation": {"enum": ["issued_during_invocation", "invocation_settlement"]}}, "required": ["relation"]},
+         "then": {"properties": {"confidence": {"const": "observed"}}}}
       ],
       "properties": {
         "event": {"$ref": "#/$defs/eventReference"},
@@ -47,7 +51,7 @@
         "frame_id": {"$ref": "#/$defs/uint64"},
         "artifact_id": {"$ref": "#/$defs/uint64"},
         "request_id": {"$ref": "#/$defs/uint64"},
-        "relation": {"enum": ["trace_target", "parent_event", "request_initiator", "request_lifecycle", "artifact_request", "temporal_adjacency"]},
+        "relation": {"enum": ["trace_target", "parent_event", "request_initiator", "request_lifecycle", "artifact_request", "temporal_adjacency", "issued_during_invocation", "invocation_settlement", "invocation_value_flow"]},
         "confidence": {"enum": ["observed", "correlated", "time_adjacent"]},
         "value": {"type": "string", "maxLength": 256}
       }
@@ -57,7 +61,7 @@
       "additionalProperties": false,
       "required": ["reason", "after_step", "detail"],
       "properties": {
-        "reason": {"enum": ["ambiguous_request", "missing_event", "no_predecessor", "cycle", "step_limit", "capture_gap"]},
+        "reason": {"enum": ["ambiguous_request", "missing_event", "no_predecessor", "cycle", "step_limit", "capture_gap", "value_flow_ambiguous", "value_flow_unsearched"]},
         "after_step": {"type": "integer", "minimum": 0, "maximum": 31},
         "detail": {"type": "string", "minLength": 1}
       }

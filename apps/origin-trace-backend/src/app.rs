@@ -711,6 +711,7 @@ impl App {
                         session.as_deref(),
                         process,
                         sequence.as_deref(),
+                        Some(&options.artifacts),
                     )
                 })
                 .await?

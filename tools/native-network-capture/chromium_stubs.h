@@ -7,8 +7,11 @@
 #include <new>
 #include <span>
 #include <string>
+#include <string_view>
 #include <utility>
+#include <vector>
 #include "brave/components/reverse_engineering_browser/common/native_probe_event.h"
+#include "network_request_body_stub.h"
 #define BUILDFLAG(flag) (flag)
 #define IS_POSIX 1
 namespace base {
@@ -72,9 +75,38 @@ class BrowserContext {
   bool otr_;
 };
 }  // namespace content
-struct TestURL {
-  std::string hostname = "fixture.test";
-  const std::string& host() const { return hostname; }
+// Views into owned strings, like the pinned GURL accessors.
+class GURL {
+ public:
+  GURL() = default;
+  GURL(std::string scheme,
+       std::string host,
+       std::string path,
+       std::string query = {},
+       int port = -1,
+       bool has_query = false)
+      : scheme_(std::move(scheme)),
+        host_(std::move(host)),
+        path_(std::move(path)),
+        query_(std::move(query)),
+        port_(port),
+        has_query_(has_query || !query_.empty()) {}
+  bool is_valid() const { return valid_; }
+  bool SchemeIs(std::string_view scheme) const { return scheme_ == scheme; }
+  std::string_view host() const { return host_; }
+  std::string_view path() const { return path_; }
+  bool has_query() const { return has_query_; }
+  std::string_view query() const { return query_; }
+  int IntPort() const { return port_; }
+  bool valid_ = true;
+
+ private:
+  std::string scheme_ = "https";
+  std::string host_ = "fixture.test";
+  std::string path_ = "/";
+  std::string query_;
+  int port_ = -1;
+  bool has_query_ = false;
 };
 namespace net {
 struct HttpResponseHeaders {
@@ -83,7 +115,7 @@ struct HttpResponseHeaders {
 };
 struct RedirectInfo {
   std::string new_method = "GET";
-  TestURL new_url;
+  GURL new_url;
 };
 }  // namespace net
 namespace network {
@@ -91,7 +123,9 @@ struct ResourceRequest {
   int resource_type = 1;
   bool originated_from_service_worker = false;
   std::string method = "GET";
-  TestURL url;
+  GURL url;
+  net::HttpRequestHeaders headers;
+  std::shared_ptr<ResourceRequestBody> request_body;
 };
 struct URLLoaderCompletionStatus {
   int error_code = 0;
@@ -111,6 +145,37 @@ class URLResponseHead {
 }  // namespace mojom
 }  // namespace network
 namespace reb {
+// Records what the network sink hands to the artifact channel; the real
+// artifact sink and receiver run in tools/check-native-artifact-capture.py.
+class NativeArtifactCaptureSink {
+ public:
+  struct Call {
+    std::uint64_t request_id = 0, frame_id = 0, creator_event_id = 0;
+    std::string url, mime_type;
+    std::vector<std::uint8_t> content;
+  };
+  static NativeArtifactCaptureSink& Get() {
+    static NativeArtifactCaptureSink sink;
+    return sink;
+  }
+  bool IsEnabled() const { return enabled; }
+  std::uint64_t CaptureRequestBody(std::uint64_t request_id,
+                                   std::uint64_t frame_id,
+                                   std::uint64_t creator_event_id,
+                                   std::string url,
+                                   std::string mime_type,
+                                   std::vector<std::uint8_t> content) {
+    if (refuse)
+      return 0;
+    calls.push_back({request_id, frame_id, creator_event_id, std::move(url), std::move(mime_type),
+                     std::move(content)});
+    return next_artifact_id++;
+  }
+  bool enabled = true;
+  bool refuse = false;
+  std::uint64_t next_artifact_id = 900;
+  std::vector<Call> calls;
+};
 class NativeProbeSession {
  public:
   static NativeProbeSession& Get() {

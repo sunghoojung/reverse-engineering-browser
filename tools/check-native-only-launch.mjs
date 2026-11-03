@@ -128,6 +128,45 @@ try {
 } finally {await rm(sitesDirectory,{recursive:true,force:true});}
 console.log('PASS native JS dispatch sites opt-in, VM-category gate, bounded file preflight and single js-flags merge');
 
+const invocationDirectory = await mkdtemp(join(tmpdir(), 'reb-native-js-invocation-'));
+try {
+  const invocationPath = join(invocationDirectory, 'invocation sites.json');
+  await writeFile(invocationPath, '{}');
+  for (const [extra, message] of [
+    [{REB_NATIVE_JS_INVOCATION_SITES:invocationPath, REB_CAPTURE_CATEGORY_MASK:'1'}, /REB_NATIVE_JS_INVOCATION_SITES requires the VM/],
+    [{REB_NATIVE_JS_INVOCATION_SITES:'relative.json'}, /REB_NATIVE_JS_INVOCATION_SITES must name/],
+    [{REB_NATIVE_JS_INVOCATION_SITES:invocationDirectory}, /REB_NATIVE_JS_INVOCATION_SITES must name/],
+    // Digests are sensitive and exist only for an armed invocation session.
+    [{REB_NATIVE_JS_INVOCATION_DIGESTS:'1'}, /REB_NATIVE_JS_INVOCATION_DIGESTS=1 requires REB_NATIVE_JS_INVOCATION_SITES/],
+    [{REB_NATIVE_JS_INVOCATION_SITES:invocationPath, REB_NATIVE_JS_INVOCATION_DIGESTS:'yes'}, /REB_NATIVE_JS_INVOCATION_DIGESTS must be 0 or 1/],
+  ]) {
+    const result = spawnSync(shell, [join(root,'scripts/run-live-session.sh')], {env:{...process.env,REB_NATIVE_WASM_DISPATCH:'0',...extra}, encoding:'utf8'});
+    assert.equal(result.status, 2, result.stderr);
+    assert.match(result.stderr, message);
+  }
+  for (const size of [0, 4097]) {
+    await writeFile(invocationPath, Buffer.alloc(size, 32));
+    const result = spawnSync(shell, [join(root,'scripts/run-live-session.sh')], {env:{...process.env,REB_NATIVE_WASM_DISPATCH:'0',REB_NATIVE_JS_INVOCATION_SITES:invocationPath},encoding:'utf8'});
+    assert.equal(result.status, 2, result.stderr);
+    assert.match(result.stderr, /between 1 and 4096/);
+  }
+  await writeFile(invocationPath, '{}');
+  for (const [digests, tail] of [[0, []], [1, ['--reb-js-invocation-digests']]]) {
+    const result = spawnSync(shell,['-c',`set -eu; brave_arguments=(); native_quiet_mode=0; native_wasm_dispatch=0; native_wasm_call_indirect=0; native_guest_adapter=""; native_js_invocation_sites="$TEST_SITES"; native_js_invocation_digests=${digests}; ${flagsCode}
+      printf '%s\\n' "${'${brave_arguments[@]-}'}"`],{env:{...process.env,TEST_SITES:invocationPath},encoding:'utf8'});
+    assert.equal(result.status, 0, result.stderr);
+    assert.deepEqual(result.stdout.trimEnd().split('\n'),
+      ['--js-flags=--reb-js-invocation-capture', '--reb-js-invocation-sites=' + invocationPath, ...tail]);
+  }
+  const both = spawnSync(shell,['-c',`set -eu; brave_arguments=(); native_quiet_mode=1; native_wasm_dispatch=1; native_wasm_call_indirect=0; native_guest_adapter=""; native_js_dispatch_sites="$TEST_SITES"; native_js_invocation_sites="$TEST_SITES"; ${flagsCode}
+    printf '%s\\n' "${'${brave_arguments[@]-}'}"`],{env:{...process.env,TEST_SITES:invocationPath},encoding:'utf8'});
+  assert.equal(both.status, 0, both.stderr);
+  assert.deepEqual(both.stdout.trimEnd().split('\n'), [
+    '--js-flags=--reb-ignore-debugger-statements --reb-wasm-br-table-dispatch --reb-js-dispatch-capture --reb-js-invocation-capture',
+    '--reb-js-dispatch-sites=' + invocationPath, '--reb-js-invocation-sites=' + invocationPath]);
+} finally {await rm(invocationDirectory,{recursive:true,force:true});}
+console.log('PASS native JS invocation sites opt-in, VM-category gate, sensitive digest dependency, bounded file preflight and single js-flags merge');
+
 // V8 ignores an unknown --js-flags entry and every later one, so the real
 // launcher must refuse a Brave build whose loaded V8 lacks a requested flag
 // before any helper or browser starts. Synthetic bundles and recording helpers
@@ -230,6 +269,7 @@ exec ${quote(systemGrep)} "$@"
     '--reb-wasm-call-indirect-dispatch': ['REB_NATIVE_WASM_CALL_INDIRECT=1', 'REB_NATIVE_WASM_CALL_INDIRECT=0'],
     '--reb-wasm-guest-capture': ['REB_NATIVE_WASM_GUEST_ADAPTER', 'unset REB_NATIVE_WASM_GUEST_ADAPTER'],
     '--reb-js-dispatch-capture': ['REB_NATIVE_JS_DISPATCH_SITES', 'unset REB_NATIVE_JS_DISPATCH_SITES'],
+    '--reb-js-invocation-capture': ['REB_NATIVE_JS_INVOCATION_SITES', 'unset REB_NATIVE_JS_INVOCATION_SITES'],
   };
   const prefix = 'REB_LIVE_SESSION_FAILURE: ';
   const optOuts = flags => flags.map(flag => settings[flag][1]).join(', ');
@@ -253,7 +293,8 @@ exec ${quote(systemGrep)} "$@"
     REB_LIVE_SESSION_ROOT:at('sessions'), REB_API_COLLECTION_STORE:at('collection.json'),
     REB_LOCAL_ANALYST_STORE:at('analyst.json'), REB_ACTIVE_ENDPOINT_FILE:at('active.endpoint'),
     REB_CAPTURE_CATEGORY_MASK:'4095', REB_NATIVE_QUIET_MODE:'0', REB_NATIVE_WASM_DISPATCH:'0',
-    REB_NATIVE_WASM_CALL_INDIRECT:'0', REB_NATIVE_WASM_GUEST_ADAPTER:'', REB_NATIVE_JS_DISPATCH_SITES:'', ...requested});
+    REB_NATIVE_WASM_CALL_INDIRECT:'0', REB_NATIVE_WASM_GUEST_ADAPTER:'', REB_NATIVE_JS_DISPATCH_SITES:'',
+    REB_NATIVE_JS_INVOCATION_SITES:'', REB_NATIVE_JS_INVOCATION_DIGESTS:'0', ...requested});
   const clearReceipts = () => Promise.all([receipts, scans, started, finished].map(file => rm(file, {force:true})));
   const launchWith = async (executable, requested, cwd) => {
     await clearReceipts();
@@ -304,6 +345,57 @@ exec ${quote(systemGrep)} "$@"
   refused(await launchWith(mixed.executable, switches.packaged), undefinedCause(mixed.executable,
     mixed.framework, ['--reb-wasm-br-table-dispatch', '--reb-wasm-call-indirect-dispatch']));
   console.log('PASS a Brave whose loaded V8 lacks requested flags is refused before any helper or browser, listing each flag and its setting');
+
+  // Request content capture is a Chromium switch, not a V8 flag. Invalid values
+  // and masks without Network and Artifact refuse before any helper starts.
+  const content = await braveApp({framework: allNames});
+  const misconfigured = (result, cause) => {
+    assert.equal(result.status, 2, result.stderr);
+    assert.deepEqual(result.stderr.trimEnd().split('\n'), [cause]);
+    assert.deepEqual(result.receipts, [], 'A configuration refusal starts no helper and no browser');
+  };
+  misconfigured(await launchWith(content.executable, {REB_CAPTURE_REQUEST_CONTENT:'yes'}),
+    `${prefix}REB_CAPTURE_REQUEST_CONTENT must be 0 or 1.`);
+  for (const mask of ['256', '1024', '3839']) {
+    misconfigured(await launchWith(content.executable, {REB_CAPTURE_REQUEST_CONTENT:'1', REB_CAPTURE_CATEGORY_MASK:mask}),
+      `${prefix}REB_CAPTURE_REQUEST_CONTENT requires Network and Artifact category bits (mask 1280).`);
+  }
+  const contentAccepted = await launchWith(content.executable, {REB_CAPTURE_REQUEST_CONTENT:'1'});
+  accepted(contentAccepted, [], content.framework);
+  console.log('PASS request content capture validates its value and categories before any helper or browser');
+
+  // One mask grammar with the packaged app: tools/check-live-session-failure.swift
+  // runs these vectors through LiveSessionCoordinator.categoryMask. The launcher
+  // parses the text itself, never as Bash arithmetic, and passes the broker and
+  // Brave the normalized decimal value, the only form they read.
+  const injected = at('mask-injection');
+  const maskVectors = [['', 4095], ['1', 1], ['1280', 1280], ['4095', 4095], ['0400', 400],
+    ['0x500', 1280], ['0X500', 1280], ['0x300', 768], ['0x0fff', 4095], ['0000001280', 1280],
+    ['0', null], ['4096', null], ['0x', null], ['0x0', null], ['0x1000', null], ['+1280', null],
+    ['-1', null], [' 1280', null], ['1280 ', null], ['1+1', null], ['abc', null], ['1e3', null],
+    ['0b11', null], ['12345678901', null], ['0x123456789', null], ['１２', null],
+    [`a[$(touch ${injected})]`, null]];
+  const maskCode = section('# One category mask grammar', 'if [[ "${native_quiet_mode}"');
+  for (const [value, expected] of maskVectors) {
+    const result = spawnSync(shell, ['-c', `set -eu; fail_live_session() { shift; printf '%s' "$*"; exit 2; }
+category_mask_setting="\${1:-4095}"; ${maskCode}printf '%s' "\${category_mask}"`, 'mask', value], {encoding:'utf8'});
+    if (expected === null) {
+      assert.equal(result.status, 2, `${JSON.stringify(value)}: ${result.stdout}`);
+      assert.match(result.stdout, /^REB_CAPTURE_CATEGORY_MASK must be a category mask from 1 to 4095/);
+    } else {
+      assert.equal(result.status, 0, `${JSON.stringify(value)}: ${result.stderr}`);
+      assert.equal(result.stdout, String(expected), JSON.stringify(value));
+    }
+  }
+  await assert.rejects(access(injected), {code:'ENOENT'}, 'Mask text is never evaluated');
+  const maskCause = `${prefix}REB_CAPTURE_CATEGORY_MASK must be a category mask from 1 to 4095, written as up to 10 decimal digits or 0x and up to 8 hex digits.`;
+  for (const mask of ['0x', 'all', '8191']) {
+    misconfigured(await launchWith(content.executable, {REB_CAPTURE_CATEGORY_MASK:mask}), maskCause);
+  }
+  misconfigured(await launchWith(content.executable, {REB_CAPTURE_REQUEST_CONTENT:'1', REB_CAPTURE_CATEGORY_MASK:'0x300'}),
+    `${prefix}REB_CAPTURE_REQUEST_CONTENT requires Network and Artifact category bits (mask 1280).`);
+  accepted(await launchWith(content.executable, {REB_CAPTURE_REQUEST_CONTENT:'1', REB_CAPTURE_CATEGORY_MASK:'0x500'}), [], content.framework);
+  console.log('PASS category masks share the packaged app grammar, refuse other text before any helper, and reach helpers as decimal');
 
   // A wrapper's own text is not capability evidence. An executable that names
   // no framework, or names a version that is absent, and an app away from its

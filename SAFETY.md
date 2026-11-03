@@ -46,8 +46,22 @@ it.
   sites, and records only selector kinds and integer low bits, V8 script IDs,
   source positions and the armed site's source digest, never argument,
   receiver or string contents.
+  Native JavaScript invocation identity is a separate opt-in with the same
+  rebuilt-browser and site-file requirements (`REB_NATIVE_JS_INVOCATION_SITES`,
+  at most 8 functions). It records, per admitted call (at most 256 per
+  configuration), argument kinds and integer low bits, the result's kind and
+  length, the frame and a digest of the document token, and which Wasm
+  records and loader requests ran inside the call. It never records argument,
+  receiver, return or exception contents.
 - Standalone probes remain inactive without an enabled session. Enabled artifact
   capture retains raw source URLs locally; metadata is not necessarily secret-free.
+- With Network capture on, every native request records its body's length,
+  normalized content type and SHA-256. A digest of a short or predictable body
+  can be confirmed by guessing; password form posts keep no digest. Request
+  paths, queries and body bytes are sensitive capture: they are retained only
+  with `REB_CAPTURE_REQUEST_CONTENT=1`, which the packaged app's content mode
+  sets, at most 256 KiB per body and 1,024 bodies or 64 MiB per session. See
+  [Native network v2](protocol/native-network-v2.md).
 - Historical captures can include sensitive URLs, headers, bodies and source.
   Removal of CDP does not sanitize previously saved evidence. Only collect and
   disclose data covered by authorization.
@@ -65,6 +79,14 @@ it.
 - Sensitive capture requires an enabled, visibly labeled session. The packaged
   app's automatic research profile enables it for its bounded session;
   standalone and metadata-only sessions leave it disabled.
+- Settled-value digests of armed JavaScript invocations are a sensitive
+  capture path: `REB_NATIVE_JS_INVOCATION_DIGESTS=1`, accepted only with an
+  invocation site file and labeled when the session starts. Each fulfilled
+  string (UTF-8) or byte value of at most 1 MiB gets a SHA-256 and a 64-bit
+  rolling hash, retained in the local event store so Origin Trace can find the
+  exact value in a retained request body. Both are content-derived; evidence
+  package exports never include them. A digest is not redaction: a short or
+  guessable value can be confirmed from it.
 - Enable sensitive capture only when the authorization for that session
   specifically covers the data being collected. Keep the capture bounded, audit
   the action, and document new capture paths, their limits and explicit export-copy checks.
@@ -178,7 +200,9 @@ of the data-handling policy:
 | Sensitive artifact rejection without an enabled session | `src/evidence/artifact.cpp` |
 | Loopback-only research API trust check | [`config.rs`](apps/origin-trace-backend/src/config.rs) and [`app.rs`](apps/origin-trace-backend/src/app.rs) |
 | Artifact receiver `--allow-sensitive` gate | `services/artifact-receiver/main.cpp` |
+| Request path and body gate (`--reb-capture-request-content`) | Brave overlay `native_probe_socket_client.cc` and `native_network_capture_sink.cc`; receiver `--allow-sensitive` |
 | Capture category mask and session expiration | `protocol/README.md`, native probes |
+| JavaScript invocation value digests opt-in | `scripts/run-live-session.sh`, the overlay's `native_probe_session.cc`, and the renderer sink, which refuses a digest without it |
 | Origin allowlisting | Not implemented; the native event envelope lacks trustworthy origin identity |
 
 ## Related documents

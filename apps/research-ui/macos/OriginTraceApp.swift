@@ -1,5 +1,6 @@
 import Cocoa
 import CoreFoundation
+import CryptoKit
 import Darwin
 import Foundation
 import WebKit
@@ -1725,7 +1726,8 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
       CFGetTypeID(protocolVersion) != CFBooleanGetTypeID(),
       protocolVersion.stringValue == "1",
       let kind = artifact["kind"] as? String,
-      Set(["javascript", "wasm", "source_map", "response_body", "canvas_data_url"]).contains(kind),
+      Set(["javascript", "wasm", "source_map", "response_body", "canvas_data_url", "request_body"])
+        .contains(kind),
       let url = artifact["url"] as? String,
       !url.isEmpty,
       let mimeType = artifact["mime_type"] as? String,
@@ -1737,7 +1739,7 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
       let sha256 = artifact["sha256"] as? String,
       sha256.range(of: #"^[0-9a-f]{64}$"#, options: .regularExpression) != nil,
       let sensitive = artifact["sensitive"] as? Bool,
-      sensitive == (kind == "response_body" || kind == "canvas_data_url"),
+      sensitive == ["response_body", "canvas_data_url", "request_body"].contains(kind),
       artifact["content_path"] as? String == "blobs/\(sha256).bin"
     else {
       return false
@@ -1756,7 +1758,12 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
     guard identifiersValid else { return false }
     let hasExecutionContext = artifact["execution_context_id"] != nil
     let hasCaptureOrigin = artifact["capture_origin"] != nil
-    guard hasExecutionContext == hasCaptureOrigin else { return false }
+    // A request body exists only as the native network v2 artifact that its
+    // browser request_body record created; validate_artifact in evidence.rs
+    // applies the same rules.
+    guard hasExecutionContext == hasCaptureOrigin, hasCaptureOrigin || kind != "request_body" else {
+      return false
+    }
     if hasExecutionContext {
       guard let executionContextID = artifact["execution_context_id"] as? String,
         executionContextID.range(
@@ -1766,8 +1773,11 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
         Set([
           "unknown", "network_response", "dynamic_javascript", "webassembly_compile",
           "webassembly_module", "webassembly_instantiate",
-          "canvas_to_data_url",
+          "canvas_to_data_url", "network_request",
         ]).contains(captureOrigin),
+        (kind == "request_body") == (captureOrigin == "network_request"),
+        captureOrigin != "network_request"
+          || (executionContextID == "0" && artifact["creator_event_id"] as? String != "0"),
         captureOrigin != "dynamic_javascript" || (kind == "javascript" && executionContextID != "0"),
         !captureOrigin.hasPrefix("webassembly_") || (kind == "wasm" && executionContextID != "0")
       else {
@@ -2077,14 +2087,18 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
       maxRecordBytes: 2 * 1024,
       recordName: "origin trace edge"
     )
+    let artifacts = try recentArtifactEntries()
     let document = try OriginTraceDocumentBuilder.build(
       events: events,
       edges: edges,
-      artifacts: recentArtifactEntries(),
+      artifacts: artifacts,
       requestID: requestID,
       sessionID: sessionID,
       rootProcessID: rootProcessID,
-      rootSequenceNumber: rootSequence
+      rootSequenceNumber: rootSequence,
+      requestBodies: OriginTraceDocumentBuilder.retainedRequestBodies(
+        events: events, artifacts: artifacts, requestID: requestID,
+        read: verifiedRequestBodyBytes)
     )
     return try JSONSerialization.data(withJSONObject: document, options: [])
   }
@@ -2272,6 +2286,23 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
       !parentDepthLimited || parsedParentDepth == 32
     else { return false }
     return true
+  }
+
+  // The verified bytes of a retained request-body artifact, at most 1 MiB, or
+  // nil: the manifest's size and SHA-256 must both match the stored file.
+  private func verifiedRequestBodyBytes(_ artifact: [String: Any]) -> [UInt8]? {
+    guard let relativePath = artifact["content_path"] as? String,
+      let byteSize = artifact["byte_size"] as? Int, byteSize >= 0, byteSize <= 1 << 20,
+      let sha256 = artifact["sha256"] as? String
+    else { return nil }
+    let root = artifactStoreURL.resolvingSymlinksInPath().standardizedFileURL
+    let contentURL = root.appendingPathComponent(relativePath).resolvingSymlinksInPath()
+      .standardizedFileURL
+    guard contentURL.path.hasPrefix(root.path + "/"),
+      let data = try? Data(contentsOf: contentURL), data.count == byteSize,
+      SHA256.hash(data: data).map({ String(format: "%02x", $0) }).joined() == sha256
+    else { return nil }
+    return [UInt8](data)
   }
 
   private func recentArtifactEntries() throws -> [[String: Any]] {
@@ -2619,7 +2650,7 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
     let modeLabel = NSTextField(labelWithString: "Capture mode")
     modeLabel.font = NSFont.systemFont(ofSize: NSFont.smallSystemFontSize, weight: .semibold)
     let privacyLabel = NSTextField(wrappingLabelWithString:
-      "Traffic metadata has hosts only, without headers or bodies. Content mode retains only content supported by native browser capture. Artifacts keep raw source URLs in local storage. Only an explicitly exported redacted copy is altered."
+      "Metadata mode keeps request hosts and each request body's length, type and SHA-256. Content mode also retains request paths, queries and request bodies up to 256 KiB. Headers are not captured. Artifacts keep raw source URLs locally; only an explicitly exported redacted copy is altered."
     )
     privacyLabel.textColor = .secondaryLabelColor
     privacyLabel.maximumNumberOfLines = 0
@@ -2643,7 +2674,7 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
     stack.alignment = .leading
     stack.spacing = 8
     stack.distribution = .fill
-    stack.frame = NSRect(x: 0, y: 0, width: 420, height: 240)
+    stack.frame = NSRect(x: 0, y: 0, width: 420, height: 260)
 
     let alert = NSAlert()
     alert.alertStyle = .informational

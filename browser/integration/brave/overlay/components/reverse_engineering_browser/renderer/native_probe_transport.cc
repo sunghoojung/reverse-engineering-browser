@@ -69,7 +69,9 @@ void NativeProbeTransport::Configure(const std::uint64_t session_id,
                                      base::UnsafeSharedMemoryRegion queue_region,
                                      const std::uint64_t wasm_capture_epoch,
                                      const std::string& guest_adapter_json,
-                                     const std::vector<std::uint8_t>& js_dispatch_sites) {
+                                     const std::vector<std::uint8_t>& js_dispatch_sites,
+                                     const std::vector<std::uint8_t>& js_invocation_sites,
+                                     const bool js_invocation_digests) {
   Disable();
   const std::uint64_t now =
       static_cast<std::uint64_t>(base::TimeTicks::Now().since_origin().InNanoseconds());
@@ -107,6 +109,14 @@ void NativeProbeTransport::Configure(const std::uint64_t session_id,
     const std::size_t count = DecodeNativeJsDispatchSites(js_dispatch_sites, sites);
     NativeProbeSink::Get().ConfigureNativeJsDispatch(
         std::span<const NativeJsDispatchSite>(sites.data(), count ? count : 1));
+  }
+  if (!js_invocation_sites.empty()) {
+    // As above: a malformed list is one input gap and arms nothing.
+    std::array<NativeJsInvocationSite, kNativeJsInvocationSiteLimit> sites{};
+    const std::size_t count = DecodeNativeJsInvocationSites(js_invocation_sites, sites);
+    NativeProbeSink::Get().ConfigureNativeJsInvocation(
+        std::span<const NativeJsInvocationSite>(sites.data(), count ? count : 1),
+        js_invocation_digests);
   }
 }
 
@@ -150,6 +160,7 @@ bool NativeProbeTransport::EmitWasmDispatch(const NativeWasmDispatchObservation&
       observation.execution_context_id, observation.document_token_high,
       observation.document_token_low, observation.function_index, observation.module_byte_offset,
       observation.selector, observation.table_count, observation.sample_index,
+      observation.js_invocation_state, observation.js_invocation_id,
       std::string(observation.source_url), mojo_base::BigBuffer(observation.module_bytes));
   return true;
 }
@@ -173,6 +184,7 @@ bool NativeProbeTransport::EmitWasmIndirect(const NativeWasmIndirectObservation&
       observation.document_token_low, observation.function_index, observation.module_byte_offset,
       observation.table_index, observation.slot, observation.callee_function_index,
       static_cast<std::uint32_t>(observation.resolution), observation.sample_index,
+      observation.js_invocation_state, observation.js_invocation_id,
       std::string(observation.source_url), mojo_base::BigBuffer(observation.module_bytes));
   return true;
 }

@@ -2118,6 +2118,14 @@ var(--panel);
       .traffic-general-row { display: grid; grid-template-columns: 110px minmax(0, 1fr); gap: 10px; padding: 3px 0; font: 11px/1.5 var(--mono); }
       .traffic-general-row > :first-child { color: var(--muted); font-family: var(--sans); }
       .traffic-general-value { overflow-wrap: anywhere; }
+      /* Request body: record facts first, then any retained bytes as inert text.
+         The text box scrolls inside the inspector instead of growing the page. */
+      .traffic-body { padding: 8px 12px; }
+      .traffic-body h2 { margin: 0 0 8px; font: 600 11px var(--sans); }
+      .traffic-body-note { margin: 8px 0 0; color: var(--muted); font: 12px/1.5 var(--sans); }
+      .traffic-body-text { max-height: 320px; margin: 8px 0 0; padding: 8px; overflow: auto; border: 1px solid var(--line); border-radius: 4px;
+        background: var(--panel-2); font: 11px/1.5 var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; }
+      .traffic-body-text:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
       @media (max-width: 1100px) {
         #screen-traffic .traffic-grid { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, 50%) minmax(0, 1fr); overflow: hidden; }
         .request-pane { border-right: 0; border-bottom: 1px solid var(--line); }
@@ -3829,6 +3837,8 @@ input[type="file"]:hover::file-selector-button { background: var(--panel-3); }
 #screen-traffic .inspector-tabs { gap: 16px; padding: 0 12px; }
 #screen-traffic .field-tabs { gap: 16px; }
 #screen-traffic .traffic-general { padding: 12px; border-bottom: 0; }
+#screen-traffic .traffic-body { padding: 0 12px 12px; }
+#screen-traffic .traffic-body h2 { margin: 4px 0 8px; font: 500 12px/16px var(--sans); }
 #screen-traffic .request-inspector { padding: 12px; }
 #screen-traffic .traffic-general h2,
 #screen-traffic .request-inspector > h1 { margin: 0 0 8px; font: 500 12px/16px var(--sans); }

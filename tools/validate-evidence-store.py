@@ -94,14 +94,19 @@ EVENT_TYPES = {
     "artifact_captured",
     "gap",
     "js_dispatch_observation",
+    "js_invocation_request",
+    "js_invocation_settle",
+    "js_invocation_start",
     "module_compiled",
     "module_instantiated",
     "property_read",
+    "request_body",
     "request_completed",
     "request_failed",
     "request_initiated",
     "request_redirected",
     "request_started",
+    "request_target",
     "response_completed",
     "response_started",
     "vm_finding",
@@ -159,6 +164,181 @@ def valid_js_dispatch(event: dict, payload: bytes) -> bool:
     elif any(handler):
         return False
     return parent == 0 or (parent < activation and not flags & 0x06)
+
+
+TOKEN_CHARACTERS = frozenset(b"abcdefghijklmnopqrstuvwxyz0123456789!#$%&'*+-.^_`|~")
+REQUEST_DIGEST_LIMIT = 4 * 1024 * 1024
+
+
+def valid_request_child(event: dict, payload: bytes) -> bool:
+    """Envelope shared by request_body and request_target (native-network-v2.md)."""
+    return (event["protocol_version"] == 3 and event["category"] == "network"
+            and event["flags"] == 0 and not event["payload_truncated"] and len(payload) == 128
+            and payload[:4] == bytes((1, 0, 128, 0))
+            and all(event[key] != "0" for key in ("session_id", "sequence_number",
+                                                  "parent_event_id"))
+            and int(event["parent_event_id"]) < int(event["sequence_number"])
+            and 1 <= event["process_id"] <= 0xFFFFFFFF and event["navigation_id"] == "0"
+            and event["status_code"] == 0 and event["error_code"] == 0
+            and event["encoded_data_length"] == "0" and event["decoded_body_length"] == "0"
+            and event["resource_type"] == 0)
+
+
+def valid_request_target(event: dict, payload: bytes) -> bool:
+    length = int.from_bytes(payload[4:8], "little")
+    prefix = min(length, 116)
+    return (valid_request_child(event, payload) and event["artifact_id"] == "0"
+            and payload[8] <= 4 and payload[9] == 0 and 0 not in payload[12:12 + prefix]
+            and not any(payload[12 + prefix:]))
+
+
+def valid_request_body(event: dict, payload: bytes) -> bool:
+    """Every state rule of the request_body payload, mirrored from the C++ core."""
+    if not valid_request_child(event, payload):
+        return False
+    kind, state, flags, type_length = payload[4], payload[5], payload[6], payload[7]
+    body_length = int.from_bytes(payload[8:16], "little")
+    captured = int.from_bytes(payload[16:24], "little")
+    elements = int.from_bytes(payload[24:28], "little")
+    digest, content_type = payload[32:64], payload[64:128]
+    content, has_digest, size_limit = bool(flags & 1), bool(flags & 2), bool(flags & 4)
+    partial, type_present, type_omitted = bool(flags & 8), bool(flags & 16), bool(flags & 32)
+    media = content_type[:type_length]
+    if (kind > 6 or not 1 <= state <= 11 or flags & ~0x3F or any(payload[28:32])
+            or type_length > 64 or (type_present and type_omitted)
+            or type_present != (type_length != 0) or any(content_type[type_length:])
+            or (type_present and (media.count(b"/") != 1 or media.startswith(b"/")
+                                  or media.endswith(b"/")
+                                  or any(b not in TOKEN_CHARACTERS and b != 0x2F for b in media)))
+            or captured > body_length):
+        return False
+    is_bytes, is_none = kind == 1, kind == 0
+    if ((has_digest and (not is_bytes or size_limit or body_length > REQUEST_DIGEST_LIMIT))
+            or (not has_digest and any(digest))
+            or (size_limit and (not is_bytes or body_length <= REQUEST_DIGEST_LIMIT))
+            or (is_bytes and state != 11 and has_digest == size_limit)
+            or (state == 11 and (has_digest or size_limit))
+            or partial != (not is_none and not is_bytes) or is_none != (state == 1)
+            or (is_none and (elements or body_length)) or (not is_none and not elements)
+            or (kind == 5 and elements < 2)):
+        return False
+    retained = state in (4, 5)
+    if (event["artifact_id"] != "0") != retained or (not retained and captured):
+        return False
+    return {
+        1: True,
+        2: is_bytes and body_length == 0,
+        3: not content and (not is_bytes or body_length != 0),
+        4: content and is_bytes and body_length != 0 and captured == body_length,
+        5: content and is_bytes and 0 < captured < body_length,
+        6: content and not is_none and not is_bytes,
+        7: content and is_bytes and body_length != 0,
+        8: content and is_bytes and body_length != 0,
+        9: content and is_bytes and body_length != 0,
+        10: content and is_bytes and body_length != 0,
+        11: True,
+    }[state]
+
+
+def valid_invocation_context(state: int, invocation_id: int) -> bool:
+    """A consumer record's JavaScript invocation context: protocol/native-js-invocation-v1.md."""
+    return state <= 3 and (state == 2) == (invocation_id != 0)
+
+
+def invocation_envelope(event: dict, payload: bytes) -> bool:
+    return not (event["protocol_version"] != 3 or event["category"] != "vm" or event["flags"] != 0
+                or event["payload_truncated"] or len(payload) != 128
+                or any(event[key] == "0" for key in (
+                    "session_id", "sequence_number", "monotonic_time_ns"))
+                or any(event[key] != "0" for key in (
+                    "artifact_id", "parent_event_id", "navigation_id"))
+                or not 1 <= event["process_id"] <= 0xFFFFFFFF
+                or not 1 <= event["thread_id"] <= 0xFFFFFFFF)
+
+
+def valid_value_kind(kind: int, low32: int) -> bool:
+    return 1 <= kind <= 14 and (kind == 1 or (low32 <= 1 if kind == 7 else low32 == 0))
+
+
+def valid_js_invocation(event: dict, payload: bytes) -> bool:
+    """Rules of protocol/native-js-invocation-v1.md, shared with C++, Rust and JS."""
+    if not invocation_envelope(event, payload):
+        return False
+
+    def at(offset: int, size: int) -> int:
+        return int.from_bytes(payload[offset:offset + size], "little")
+
+    if at(0, 2) != 1 or at(2, 2) != 128:
+        return False
+    kind = event["type"]
+    if kind == "js_invocation_request":
+        state = payload[4]
+        return (event["request_id"] != "0" and int(event["request_id"]) <= 0xFFFFFFFF
+                and state in (2, 3) and valid_invocation_context(state, at(8, 4))
+                and at(12, 2) < 256 and not any(payload[5:8]) and at(14, 2) == 0
+                and not any(payload[16:]))
+    if event["frame_id"] == "0" or event["request_id"] != "0":
+        return False
+    if kind == "js_invocation_start":
+        slot, flags, argc = payload[4], payload[5], at(6, 2)
+        invocation, parent = at(20, 4), at(24, 4)
+        if (slot >= 8 or flags & ~0x03 or at(8, 4) == 0 or at(16, 4) == 0
+                or at(12, 4) >= at(16, 4) or invocation == 0 or at(28, 2) >= 64
+                or at(30, 2) >= 256 or at(104, 8) == 0 or any(payload[112:])):
+            return False
+        if parent != 0 and (parent >= invocation or flags & 0x01):
+            return False
+        if bool(flags & 0x02) != (argc > 8):
+            return False
+        for index in range(8):
+            arg_kind, low32 = payload[32 + index], at(40 + 4 * index, 4)
+            if index < argc:
+                if not valid_value_kind(arg_kind, low32):
+                    return False
+            elif arg_kind or low32:
+                return False
+        return True
+    # js_invocation_settle
+    slot, outcome, via, value_kind = payload[4], payload[5], payload[6], payload[7]
+    length, state, encoding, flags = at(12, 4), payload[16], payload[17], payload[18]
+    byte_length, rolling = at(20, 4), at(24, 8)
+    fulfilled, rejected = outcome == 1, outcome == 2
+    if (slot >= 8 or not (fulfilled or rejected) or not 1 <= value_kind <= 14
+            or at(8, 4) == 0 or at(64, 8) == 0 or payload[19] != 0 or flags & ~0x01
+            or any(payload[72:])):
+        return False
+    if not ((via == 1 and fulfilled) or (via == 2 and rejected) or via == 3):
+        return False
+    is_string, is_bytes = value_kind == 3, value_kind in (12, 13)
+    if length and not (is_string or is_bytes or value_kind == 11):
+        return False
+    if state == 1:
+        return (fulfilled and byte_length <= 1 << 20
+                and ((is_string and encoding == 1) or (is_bytes and encoding == 2))
+                and (is_string or not flags & 0x01)
+                and (not is_string or byte_length >= length)
+                and (not is_bytes or byte_length == length)
+                and (byte_length != 0 or rolling == 0))
+    if encoding or byte_length or rolling or flags or any(payload[32:64]):
+        return False
+    if state == 0:
+        return True
+    if state == 2:
+        return not (fulfilled and (is_string or is_bytes))
+    if state == 3:
+        return fulfilled and (is_string or is_bytes)
+    if state == 4:
+        return fulfilled and is_bytes
+    return False
+
+
+def wasm_context_invalid(payload: bytes, version: int, new_version: int, offset: int) -> bool:
+    """Version new_version stores the invocation context at offset; older ones reserve it."""
+    state = payload[offset]
+    invocation = int.from_bytes(payload[offset + 4:offset + 8], "little")
+    return (any(payload[offset + 1:offset + 4])
+            or (version < new_version and (state or invocation))
+            or not valid_invocation_context(state, invocation))
 
 
 def validate_event(event: object, line_number: int) -> None:
@@ -242,12 +422,14 @@ def validate_event(event: object, line_number: int) -> None:
         or not 1 <= event["process_id"] <= 0xFFFFFFFF
         or not 1 <= event["thread_id"] <= 0xFFFFFFFF
         or len(payload) != 128
-        or payload[:4] != bytes((1, 0, 128, 0))
+        or payload[0] not in (1, 2)
+        or payload[1:4] != bytes((0, 128, 0))
         or int.from_bytes(payload[4:8], "little") >= 16777216
         or not 8 <= int.from_bytes(payload[8:12], "little") < 16777216
         or int.from_bytes(payload[16:20], "little") >= 16777216
         or int.from_bytes(payload[20:24], "little") >= 16
-        or any(payload[24:])
+        or wasm_context_invalid(payload, payload[0], 2, 24)
+        or any(payload[32:])
     ):
         raise ValueError(f"line {line_number}: native Wasm dispatch observation is invalid")
     if event["type"] == "wasm_indirect_observation" and (
@@ -262,7 +444,8 @@ def validate_event(event: object, line_number: int) -> None:
         or not 1 <= event["process_id"] <= 0xFFFFFFFF
         or not 1 <= event["thread_id"] <= 0xFFFFFFFF
         or len(payload) != 128
-        or payload[:4] != bytes((1, 0, 128, 0))
+        or payload[0] not in (1, 2)
+        or payload[1:4] != bytes((0, 128, 0))
         or int.from_bytes(payload[4:8], "little") >= 16777216
         or not 8 <= int.from_bytes(payload[8:12], "little") < 16777216
         or int.from_bytes(payload[12:16], "little") >= 16777216
@@ -270,15 +453,23 @@ def validate_event(event: object, line_number: int) -> None:
         or int.from_bytes(payload[24:28], "little") >= 5
         or (int.from_bytes(payload[24:28], "little") != 0 and any(payload[20:24]))
         or int.from_bytes(payload[28:32], "little") >= 16
-        or any(payload[32:])
+        or wasm_context_invalid(payload, payload[0], 2, 32)
+        or any(payload[40:])
     ):
         raise ValueError(f"line {line_number}: native Wasm call_indirect observation is invalid")
     if event["type"] == "js_dispatch_observation" and not valid_js_dispatch(event, payload):
         raise ValueError(f"line {line_number}: native JavaScript dispatch observation is invalid")
+    if event["type"] == "request_body" and not valid_request_body(event, payload):
+        raise ValueError(f"line {line_number}: native request body record is invalid")
+    if event["type"] == "request_target" and not valid_request_target(event, payload):
+        raise ValueError(f"line {line_number}: native request target record is invalid")
+    if event["type"].startswith("js_invocation_") and not valid_js_invocation(event, payload):
+        raise ValueError(f"line {line_number}: native JavaScript invocation record is invalid")
     if event["type"] in ("wasm_guest_dispatch", "wasm_guest_invocation"):
-        # Invocation version 2 adds the exact parent dispatch at bytes 72..80
-        # and version 3 the adapter site (at most 8) at bytes 80..84.
-        versions = (1, 2, 3) if event["type"] == "wasm_guest_invocation" else (1,)
+        # Invocation version 2 adds the exact parent dispatch at bytes 72..80,
+        # version 3 the adapter site (at most 8) at bytes 80..84 and version 4
+        # the JavaScript invocation context at bytes 84..92.
+        versions = (1, 2, 3, 4) if event["type"] == "wasm_guest_invocation" else (1,)
         if (protocol_version != 3 or event["category"] != "vm" or event["flags"] != 0
                 or event["payload_truncated"] or len(payload) != 128
                 or payload[0] not in versions or payload[1:4] != bytes((0, 128, 0))
@@ -295,8 +486,9 @@ def validate_event(event: object, line_number: int) -> None:
             parent_dispatch = at(72, 8)
             invalid |= (event["parent_event_id"] != "0" or at(8, 8) == 0 or at(16, 8) == 0
                         or at(24, 8) == 0 or at(24, 8) == int(event["artifact_id"])
-                        or at(64, 8) == at(16, 8) or not any(payload[32:64]) or any(payload[84:])
-                        or (payload[0] != 3 and at(80, 4) != 0) or at(80, 4) >= 8
+                        or at(64, 8) == at(16, 8) or not any(payload[32:64]) or any(payload[92:])
+                        or wasm_context_invalid(payload, payload[0], 4, 84)
+                        or (payload[0] < 3 and at(80, 4) != 0) or at(80, 4) >= 8
                         or (parent_dispatch != 0
                             and (payload[0] == 1 or at(64, 8) == 0
                                  or parent_dispatch >= int(event["sequence_number"]))))

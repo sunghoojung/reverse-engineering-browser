@@ -417,12 +417,20 @@ when teardown writes later shell messages; the full session log path stays visib
 **New Live Session…** in the application menu offers metadata-only capture and
 Keychain controls. `REB_AUTOMATIC_CAPTURE_MODE=metadata` selects metadata-only
 automatic launch, and `REB_CAPTURE_CANVAS_IMAGES=0` disables image retention.
+Content mode also sets `REB_CAPTURE_REQUEST_CONTENT=1`, which retains request
+paths, queries and request bodies up to 256 KiB; set it to `0` to keep Traffic
+host-only. Every mode records each request body's length, type and SHA-256.
 Every app session also enables quiet mode and native Wasm `br_table` and
 `call_indirect` dispatch capture; Wasm dispatch forces Liftoff-only compilation,
 so Wasm-heavy pages run slower. Set `REB_NATIVE_QUIET_MODE=0`,
 `REB_NATIVE_WASM_DISPATCH=0` or `REB_NATIVE_WASM_CALL_INDIRECT=0` to opt out.
-Guest-state and JavaScript dispatch-site capture still need an adapter or site
-file and stay off until one is supplied. The launcher log's `Native switches:`
+Guest-state, JavaScript dispatch-site and JavaScript invocation capture still
+need an adapter or site file and stay off until one is supplied; invocation
+value digests additionally need `REB_NATIVE_JS_INVOCATION_DIGESTS=1`. A request
+trace shows `issued_during_invocation`, `invocation_settlement` and
+`invocation_value_flow` steps, and VM Lab rows name the JavaScript invocation a
+Wasm record ran in; see the
+[invocation contract](../../protocol/native-js-invocation-v1.md). The launcher log's `Native switches:`
 line records the effective state.
 
 The app creates a private evidence directory and isolated browser
@@ -513,6 +521,17 @@ authorized session, run:
 REB_CAPTURE_CANVAS_IMAGES=1 make live
 ```
 
+To retain request paths, queries and bounded request bodies with `make live`,
+run `REB_CAPTURE_REQUEST_CONTENT=1 make live`. Traffic then shows each request's
+captured path and query, and its General view shows the request body: capture
+state, content type, length, SHA-256, kind and the retained bytes as text.
+Without it, the General view still shows the body's length, type and digest and
+says that content capture was off. File, blob and stream bodies are named, not
+read; password form bodies keep neither bytes nor a digest. A body read that
+times out or gets an error status stays shown with its reason and is read again
+on the next refresh; a size or SHA-256 mismatch is kept with its reason and is
+not reread. Sources never lists or opens request bodies.
+
 Canvas image capture is disabled by default because rendered output can contain
 page content. Enabled output stays in the local session artifact store, is
 limited to 2 MiB per image, and is joined to its exact `toDataURL` event. The UI
@@ -602,11 +621,13 @@ the evidence order. The selected request opens General, Initiator, Timing,
 Signals and Evidence beside the ledger above 1100 px, or below it in narrow
 windows. Both panes stay within the available workspace height; the request
 ledger and inspector body scroll independently. Captured-tab and domain filters
-share a compact row at narrow widths. Native capture records the method, URL or
-host, status and lifecycle timing of each request. Request and response headers
-and bodies are not captured, so Traffic has no header, body, preview, comparison
-or content-search views; General states that coverage. Missing initiators and
-timing phases stay explicitly unavailable.
+share a compact row at narrow widths. Native capture records the method, host,
+status and lifecycle timing of each request, and the request body's length,
+type and SHA-256. Content capture sessions add the path and query and bounded
+request body bytes, which General shows as text. Request and response headers
+and response bodies are not captured, so Traffic has no header, response,
+preview, comparison or content-search views; General states that coverage.
+Missing initiators and timing phases stay explicitly unavailable.
 Request signal profiles are owned by the exact selected session, request and root
 event. Late responses cannot replace a newer selection or refresh. Malformed or
 failed refreshes preserve only the last validated profile for that same identity

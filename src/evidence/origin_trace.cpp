@@ -1,5 +1,7 @@
 #include "reb/origin_trace.hpp"
 
+#include "reb/js_invocation.hpp"
+
 #include <algorithm>
 #include <array>
 #include <charconv>
@@ -46,6 +48,16 @@ bool IsRequestEvidence(const EventRecord& event) noexcept {
                                           event.header.category == EventCategory::kArtifact);
 }
 
+// Request target and body records (protocol/native-network-v2.md) are children
+// of one lifecycle record and join it only through their explicit parent. They
+// never become the request's latest lifecycle record, so the next lifecycle
+// record links to the previous lifecycle record, not to a child.
+bool IsRequestChildRecord(const EventRecord& event) noexcept {
+  return event.header.category == EventCategory::kNetwork &&
+         (event.header.type == EventType::kRequestTarget ||
+          event.header.type == EventType::kRequestBody);
+}
+
 }  // namespace
 
 OriginTraceIndex::OriginTraceIndex(const std::size_t capacity) : capacity_(capacity) {
@@ -78,6 +90,13 @@ std::size_t OriginTraceIndex::LegacyRequestKeyHash::operator()(
   std::size_t result = std::hash<std::uint64_t>{}(value.session_id);
   result = HashCombine(result, std::hash<std::uint32_t>{}(value.process_id));
   return HashCombine(result, std::hash<std::uint64_t>{}(value.request_id));
+}
+
+std::size_t OriginTraceIndex::InvocationKeyHash::operator()(
+    const InvocationKey& value) const noexcept {
+  std::size_t result = std::hash<std::uint64_t>{}(value.session_id);
+  result = HashCombine(result, std::hash<std::uint32_t>{}(value.process_id));
+  return HashCombine(result, std::hash<std::uint32_t>{}(value.invocation_id));
 }
 
 bool OriginTraceIndex::Contains(const OriginTraceEventReference& event) const {
@@ -153,6 +172,75 @@ void OriginTraceIndex::ResolvePendingInitiators(const EventRecord& event,
               return std::tie(left.from.process_id, left.from.sequence_number) <
                      std::tie(right.from.process_id, right.from.sequence_number);
             });
+}
+
+OriginTraceEventReference OriginTraceIndex::FindInvocation(const InvocationKey& key) const {
+  const auto found = invocations_.find(key);
+  if (found == invocations_.end() || found->second.ambiguous || !Contains(found->second.start)) {
+    return {};
+  }
+  return found->second.start;
+}
+
+// Invocation identity edges come only from exact (session, process, ID) keys
+// carried by the records themselves. Time never selects a start or a request.
+void OriginTraceIndex::IndexInvocation(const EventRecord& event, OriginTraceEdgeBatch& batch) {
+  const auto type = event.header.type;
+  if (type == EventType::kJsInvocationStart) {
+    JsInvocationStartPayload payload;
+    if (!DecodeJsInvocationStartPayload(event.inline_payload, payload)) {
+      return;
+    }
+    const InvocationKey key{event.header.session_id, event.header.process_id,
+                            payload.invocation_id};
+    const auto found = invocations_.find(key);
+    if (found != invocations_.end()) {
+      found->second.ambiguous = true;
+      return;
+    }
+    if (invocations_.size() == capacity_) {
+      invocations_.erase(invocation_order_.front());
+      invocation_order_.pop_front();
+    }
+    invocations_.emplace(key, InvocationState{Reference(event), false});
+    invocation_order_.push_back(key);
+    return;
+  }
+  if (type == EventType::kJsInvocationSettle) {
+    JsInvocationSettlePayload payload;
+    if (DecodeJsInvocationSettlePayload(event.inline_payload, payload)) {
+      AddEdge(
+          batch, event,
+          FindInvocation({event.header.session_id, event.header.process_id, payload.invocation_id}),
+          OriginTraceRelation::kInvocationSettlement, OriginTraceConfidence::kObserved);
+    }
+    return;
+  }
+  if (type != EventType::kJsInvocationRequest) {
+    return;
+  }
+  JsInvocationRequestPayload payload;
+  if (!DecodeJsInvocationRequestPayload(event.inline_payload, payload) ||
+      payload.state != static_cast<std::uint8_t>(JsInvocationContextState::kInside)) {
+    return;
+  }
+  // The edge runs from the renderer's own request record, which SendAsync
+  // wrote immediately before this one in the same process stream.
+  const OriginTraceEventReference request =
+      FindInitiator({event.header.session_id, event.header.request_id, event.header.process_id});
+  const OriginTraceEventReference start =
+      FindInvocation({event.header.session_id, event.header.process_id, payload.invocation_id});
+  if (request.session_id == 0 || start.session_id == 0 || request == start) {
+    return;
+  }
+  batch.edges.push_back({
+      .relation = OriginTraceRelation::kIssuedDuringInvocation,
+      .confidence = OriginTraceConfidence::kObserved,
+      .from = request,
+      .to = start,
+      .request_id = event.header.request_id,
+      .artifact_id = 0,
+  });
 }
 
 OriginTraceEventReference OriginTraceIndex::FindRequest(const EventRecord& event) const {
@@ -310,17 +398,23 @@ OriginTraceEdgeBatch OriginTraceIndex::Ingest(const EventRecord& event) {
     }
   }
 
-  const OriginTraceEventReference previous_request_event = FindRequest(event);
-  AddEdge(batch, event, previous_request_event,
-          event.header.category == EventCategory::kArtifact
-              ? OriginTraceRelation::kArtifactRequest
-              : OriginTraceRelation::kRequestLifecycle,
-          event.header.category == EventCategory::kArtifact ? OriginTraceConfidence::kCorrelated
-                                                            : OriginTraceConfidence::kObserved);
+  const bool request_child = IsRequestChildRecord(event);
+  if (!request_child) {
+    const OriginTraceEventReference previous_request_event = FindRequest(event);
+    AddEdge(batch, event, previous_request_event,
+            event.header.category == EventCategory::kArtifact
+                ? OriginTraceRelation::kArtifactRequest
+                : OriginTraceRelation::kRequestLifecycle,
+            event.header.category == EventCategory::kArtifact ? OriginTraceConfidence::kCorrelated
+                                                              : OriginTraceConfidence::kObserved);
+  }
 
   RememberEvent(source);
-  RememberRequest(event, source);
+  if (!request_child) {
+    RememberRequest(event, source);
+  }
   ResolvePendingInitiators(event, batch);
+  IndexInvocation(event, batch);
   ++stats_.indexed_events;
   stats_.emitted_edges += batch.edges.size();
   return batch;
@@ -338,7 +432,9 @@ bool IsValidOriginTraceEdge(const OriginTraceEdge& edge) noexcept {
   const bool known_relation = edge.relation == OriginTraceRelation::kParentEvent ||
                               edge.relation == OriginTraceRelation::kRequestInitiator ||
                               edge.relation == OriginTraceRelation::kRequestLifecycle ||
-                              edge.relation == OriginTraceRelation::kArtifactRequest;
+                              edge.relation == OriginTraceRelation::kArtifactRequest ||
+                              edge.relation == OriginTraceRelation::kIssuedDuringInvocation ||
+                              edge.relation == OriginTraceRelation::kInvocationSettlement;
   const bool known_confidence = edge.confidence == OriginTraceConfidence::kObserved ||
                                 edge.confidence == OriginTraceConfidence::kCorrelated;
   return edge.protocol_version == kOriginTraceProtocolVersion && known_relation &&
@@ -385,6 +481,10 @@ std::string_view OriginTraceRelationName(const OriginTraceRelation relation) noe
       return "request_lifecycle";
     case OriginTraceRelation::kArtifactRequest:
       return "artifact_request";
+    case OriginTraceRelation::kIssuedDuringInvocation:
+      return "issued_during_invocation";
+    case OriginTraceRelation::kInvocationSettlement:
+      return "invocation_settlement";
     case OriginTraceRelation::kUnknown:
       return "unknown";
   }

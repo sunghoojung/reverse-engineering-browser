@@ -96,6 +96,12 @@ for XMLHttpRequest.
 Default network payload prefixes contain only the request method and
 destination host. URL paths, queries, fragments, credentials, headers,
 cookies, and bodies require a separate visibly enabled sensitive-capture mode.
+[Native network v2](native-network-v2.md) defines that mode for requests: event
+types 22 `request_body` (always, with Network: body length, normalized content
+type, SHA-256, kind and capture state) and 23 `request_target` (only with
+request content capture: path and query), both exact children of a lifecycle
+record, plus the sensitive `request_body` artifact kind for at most 256 KiB of
+body bytes. Fragments, credentials, headers and cookies are still not recorded.
 
 Renderer-to-browser delivery uses exact 320-byte `EventRecord` objects in a
 bounded shared-memory queue. Mojo carries session lifecycle and coalesced
@@ -118,7 +124,7 @@ does not hide the missing sequence range from broker accounting.
 ## Large artifact transfer
 
 Large JavaScript files, WASM modules, source maps, explicitly approved response
-bodies, and explicitly approved Canvas data URLs never use `EventRecord`, the
+and request bodies, and explicitly approved Canvas data URLs never use `EventRecord`, the
 renderer ring, or the broker event queue. They use the separate version 1
 artifact stream defined by
 `include/reb/artifact.hpp`. Its fixed 128-byte header carries kind, byte count,
@@ -138,8 +144,8 @@ stream, so a missing artifact is explicit evidence rather than silent loss.
 The receiver defaults to 16 MiB per artifact and 256 MiB per session store. It
 streams and hashes content into immutable content-addressed storage. Canvas
 data URL production has a stricter 2 MiB limit so the UI can retrieve the image
-whole. Response bodies and Canvas data URLs fail closed unless the session
-receiver is explicitly started with sensitive capture enabled. See
+whole. Response bodies, request bodies and Canvas data URLs fail closed unless
+the session receiver is explicitly started with sensitive capture enabled. See
 `docs/architecture/artifact-transfer-channel.md` for the low-level design.
 
 ## VM finding payload
@@ -231,8 +237,11 @@ Protocol changes must remain backward-readable for stored research sessions.
 The optional broker cold-path correlation index writes version 1 edge records
 described by `origin-trace-edge-v1.schema.json`. Each edge connects two exact
 event references and names one relationship: explicit parent, explicit request
-initiator, request lifecycle, or artifact/request correlation. Edge confidence
+initiator, request lifecycle, artifact/request correlation, a request issued
+during a JavaScript invocation, or a settle record's invocation. Edge confidence
 is only `observed` or `correlated`; the contract does not claim value causality.
+The invocation relations come only from exact (session, process, invocation)
+identities; see [native JavaScript invocation](native-js-invocation-v1.md#identity-and-relations).
 
 The research UI projects a selected request into the bounded version 1 document
 described by `origin-trace-document-v1.schema.json`. Missing predecessors,
@@ -242,7 +251,11 @@ proximity is a separate and weaker declared correlation input: at most one
 cross-process record of the same request identity inside a bounded timestamp
 window becomes a terminal `temporal_adjacency` step with `time_adjacent`
 confidence, counted only in `time_adjacent_links`. It never replaces the
-`no_predecessor` gap and never enters the coverage measure. The optional `session_id` query selector scopes the request
+`no_predecessor` gap and never enters the coverage measure. Where identity ends
+at the renderer's request record, an `invocation_value_flow` step is a
+correlated link only when exactly one settled value's exact digested bytes
+occur in a retained body of that request; two matches are the gap
+`value_flow_ambiguous` and an over-bound search `value_flow_unsearched`. The optional `session_id` query selector scopes the request
 before root selection; with the process/sequence pair it identifies one exact
 event. Omitting it remains supported only for unambiguous retained matches.
 Event and edge sidecars remain immutable inputs to this projection.
@@ -348,3 +361,12 @@ use the names.
 | 19 | `wasm_guest_invocation` | `include/reb/wasm_guest.hpp` | [native Wasm guest](native-wasm-guest-v1.md) |
 | 20 | `wasm_indirect_observation` | `include/reb/wasm_dispatch.hpp` | [native Wasm call_indirect](native-wasm-dispatch-v1.md#call_indirect-observations) |
 | 21 | `js_dispatch_observation` | `include/reb/js_dispatch.hpp` | [native JavaScript dispatch](native-js-dispatch-v1.md) |
+| 24 | `js_invocation_start` | `include/reb/js_invocation.hpp` | [native JavaScript invocation](native-js-invocation-v1.md) |
+| 25 | `js_invocation_settle` | `include/reb/js_invocation.hpp` | [native JavaScript invocation](native-js-invocation-v1.md) |
+| 26 | `js_invocation_request` | `include/reb/js_invocation.hpp` | [native JavaScript invocation](native-js-invocation-v1.md) |
+
+`wasm_dispatch_observation` and `wasm_indirect_observation` payloads are
+version 2 and `wasm_guest_invocation` version 4: each adds the JavaScript
+invocation context in previously reserved bytes, and older versions remain
+readable as not observed. See
+[invocation context of Wasm records](native-js-invocation-v1.md#invocation-context-of-wasm-records).

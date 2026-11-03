@@ -12,7 +12,7 @@
     "from_sequence_number": {"$ref": "#/$defs/nonzeroUint64"},
     "to_process_id": {"$ref": "#/$defs/uint32"},
     "to_sequence_number": {"$ref": "#/$defs/nonzeroUint64"},
-    "relation": {"enum": ["parent_event", "request_initiator", "request_lifecycle", "artifact_request"]},
+    "relation": {"enum": ["parent_event", "request_initiator", "request_lifecycle", "artifact_request", "issued_during_invocation", "invocation_settlement"]},
     "confidence": {"enum": ["observed", "correlated"]},
     "request_id": {"$ref": "#/$defs/uint64"},
     "artifact_id": {"$ref": "#/$defs/uint64"}

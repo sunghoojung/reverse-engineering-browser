@@ -114,7 +114,9 @@ try {
   for (const stream of [backend.stdout, backend.stderr]) stream.on('data', chunk => { backendLog = (backendLog + chunk).slice(-256 * 1024); });
   const endpoint = await waitForFile(endpointFile, backend);
   assert.match(endpoint, /^http:\/\/127\.0\.0\.1:\d+$/, 'The packaged backend must bind loopback only');
-  const uiURL = `${endpoint}/?native=1&canvas_images=0`;
+  // The packaged app's default content mode retains request content, so the
+  // titlebar carries its session label in every screenshot.
+  const uiURL = `${endpoint}/?native=1&canvas_images=0&request_content=1`;
 
   // A separate, real backend has no cached analysis. Removing execution
   // permission from its copied binary makes self-reexecution fail at spawn.

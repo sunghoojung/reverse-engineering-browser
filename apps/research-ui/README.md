@@ -414,12 +414,25 @@ Startup allows up to 60 seconds for the bounded broker, receiver, backend and
 browser readiness stages; individual helper failures are reported sooner.
 The failure dialog preserves the launcher's explicit browser/helper diagnosis
 when teardown writes later shell messages; the full session log path stays visible.
-**New Live Session…** in the application menu offers metadata-only capture and
-Keychain controls. `REB_AUTOMATIC_CAPTURE_MODE=metadata` selects metadata-only
-automatic launch, and `REB_CAPTURE_CANVAS_IMAGES=0` disables image retention.
-Content mode also sets `REB_CAPTURE_REQUEST_CONTENT=1`, which retains request
-paths, queries and request bodies up to 256 KiB; set it to `0` to keep Traffic
-host-only. Every mode records each request body's length, type and SHA-256.
+**New Live Session…** in the application menu chooses the capture mode and
+Keychain storage. **Content (default)** sets `REB_CAPTURE_REQUEST_CONTENT=1`,
+which retains request paths, queries and request bodies up to 256 KiB each, and
+retains Canvas images. While a live session has either turned on, the titlebar
+shows **Content capture** and its tooltip names which; a browser built before
+that capture ignores the switch, and each Traffic row and body still shows what
+was actually captured. **Metadata only** is the
+opt-out: Traffic stays host-only and no Canvas image is kept. Every mode records
+each request body's length, type and SHA-256. In Content mode,
+`REB_CAPTURE_REQUEST_CONTENT=0` or `REB_CAPTURE_CANVAS_IMAGES=0` turns either
+off.
+
+The app saves no capture choice between launches. `REB_AUTOMATIC_CAPTURE_MODE=metadata`
+selects Metadata for the automatic launch and preselects it in the dialog. Any
+value other than `content` does the same, so a misspelled opt-out never turns
+content capture on. A choice made in the dialog, including the Keychain
+checkbox, holds for later sessions in the same app run, including one a Dock
+reopen starts.
+
 Every app session also enables quiet mode and native Wasm `br_table` and
 `call_indirect` dispatch capture; Wasm dispatch forces Liftoff-only compilation,
 so Wasm-heavy pages run slower. Set `REB_NATIVE_QUIET_MODE=0`,

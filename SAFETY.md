@@ -59,8 +59,8 @@ it.
   normalized content type and SHA-256. A digest of a short or predictable body
   can be confirmed by guessing; password form posts keep no digest. Request
   paths, queries and body bytes are sensitive capture: they are retained only
-  with `REB_CAPTURE_REQUEST_CONTENT=1`, which the packaged app's content mode
-  sets, at most 256 KiB per body and 1,024 bodies or 64 MiB per session. See
+  with `REB_CAPTURE_REQUEST_CONTENT=1`, which the packaged app's default content
+  mode sets, at most 256 KiB per body and 1,024 bodies or 64 MiB per session. See
   [Native network v2](protocol/native-network-v2.md).
 - Historical captures can include sensitive URLs, headers, bodies and source.
   Removal of CDP does not sanitize previously saved evidence. Only collect and
@@ -76,9 +76,19 @@ it.
 
 ## Sensitive capture
 
-- Sensitive capture requires an enabled, visibly labeled session. The packaged
-  app's automatic research profile enables it for its bounded session;
-  standalone and metadata-only sessions leave it disabled.
+- Sensitive capture requires an enabled, visibly labeled session. Content mode
+  is the default for captures the packaged app starts: for its bounded session
+  it turns on retention of request paths, queries and bodies up to 256 KiB each
+  and of Canvas images, and the titlebar labels that session "Content
+  capture". **Metadata
+  only** is the opt-out, chosen in **New Live Session…** or with
+  `REB_AUTOMATIC_CAPTURE_MODE=metadata`; any other value but `content` also
+  selects it. The app saves no choice between launches, and a choice made in the
+  dialog holds for the rest of that app run. The standalone `make live` launcher
+  leaves request content and Canvas images off unless set to `1`. Agent-started
+  sessions (`reb-api session start`, MCP `start_live_session`) always leave
+  request content off, even when the switch is inherited, and turn Canvas images
+  on only with explicit confirmation.
 - Settled-value digests of armed JavaScript invocations are a sensitive
   capture path: `REB_NATIVE_JS_INVOCATION_DIGESTS=1`, accepted only with an
   invocation site file and labeled when the session starts. Each fulfilled

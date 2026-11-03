@@ -3145,6 +3145,11 @@ const capturedExportPanel = installCapturedExportDialog({
       // selected request: at most 256 KiB, checked against the catalog's size and
       // SHA-256, and decoded to text that is only ever assigned to textContent.
       const REQUEST_BODY_READ_LIMIT = 256 * 1024;
+      // A transient read failure (timeout, HTTP status, transport) stays shown
+      // and is retried by the next refresh or selection at least this long
+      // after it, so a failing backend sees one read per poll, not a loop. A size
+      // or SHA-256 mismatch stays cached with its reason.
+      const REQUEST_BODY_RETRY_MS = 2000;
       const requestBodyViews = new Map();
       function requestBodyArtifact(body) {
         const matches = (state.artifacts ?? []).filter(artifact => artifact.artifact_id === body.artifactId &&
@@ -3165,7 +3170,13 @@ const capturedExportPanel = installCapturedExportDialog({
         if (!artifact) return {status: 'missing'};
         const key = `${artifact.session_id}:${artifact.artifact_id}:${artifact.sha256}`;
         const view = requestBodyViews.get(key);
-        if (view) return {...view, url: artifact.url};
+        if (view?.retryable && Date.now() - view.failedAt >= REQUEST_BODY_RETRY_MS) {
+          // The failed view stays visible until the retry settles.
+          requestBodyViews.set(key, {status: 'loading', previous: view});
+          void loadRequestBody(artifact, key);
+          return {...view, url: artifact.url};
+        }
+        if (view) return {...(view.previous ?? view), url: artifact.url};
         requestBodyViews.set(key, {status: 'loading'});
         void loadRequestBody(artifact, key);
         return {status: 'loading', url: artifact.url};
@@ -3173,6 +3184,7 @@ const capturedExportPanel = installCapturedExportDialog({
       async function loadRequestBody(artifact, key) {
         const controller = new AbortController();
         const timeout = setTimeout(() => controller.abort(), 10000);
+        const mismatch = message => Object.assign(new Error(message), {integrity: true});
         let view;
         try {
           const limit = Math.min(artifact.byte_size, REQUEST_BODY_READ_LIMIT);
@@ -3180,12 +3192,12 @@ const capturedExportPanel = installCapturedExportDialog({
             {cache: 'no-store', signal: controller.signal});
           if (!response.ok) {response.body?.cancel().catch(() => {}); throw new Error(`the artifact store returned ${response.status}`);}
           const bytes = await sourceFactsReadBytes(response, limit, controller.signal);
-          if (bytes.length !== artifact.byte_size) throw new Error('its retained byte size changed');
+          if (bytes.length !== artifact.byte_size) throw mismatch('its retained byte size changed');
           let verified = false;
           if (globalThis.crypto?.subtle) {
             const digest = Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', bytes)),
               byte => byte.toString(16).padStart(2, '0')).join('');
-            if (digest !== artifact.sha256) throw new Error('its bytes do not match the retained SHA-256');
+            if (digest !== artifact.sha256) throw mismatch('its bytes do not match the retained SHA-256');
             verified = true;
           }
           let lossy = false;
@@ -3193,7 +3205,7 @@ const capturedExportPanel = installCapturedExportDialog({
           view = {status: 'ready', text: new TextDecoder('utf-8', {fatal: false, ignoreBOM: true}).decode(bytes), lossy, verified};
         } catch (error) {
           view = {status: 'error', error: controller.signal.aborted ? 'timed out after 10 seconds'
-            : String(error?.message ?? error).replace(/\.$/, '')};
+            : String(error?.message ?? error).replace(/\.$/, ''), retryable: error?.integrity !== true, failedAt: Date.now()};
         } finally {
           clearTimeout(timeout);
         }
@@ -3202,10 +3214,11 @@ const capturedExportPanel = installCapturedExportDialog({
         requestBodyViews.set(key, view);
         while (requestBodyViews.size > 8) requestBodyViews.delete(requestBodyViews.keys().next().value);
         const selected = state.requests.find(request => request.id === state.selectedRequestId);
-        if (selected?.body?.artifactId === artifact.artifact_id) renderInspector();
+        if (selected?.body?.artifactId === artifact.artifact_id &&
+            requestBodyViewKey(requestBodyView(selected)) !== state.requestBodyViewKey) renderInspector();
       }
       function requestBodyViewKey(view) {
-        return view ? `${view.status}|${view.reason ?? ''}|${view.url ?? ''}` : '';
+        return view ? `${view.status}|${view.reason ?? view.error ?? ''}|${view.url ?? ''}` : '';
       }
       // A body whose acknowledgment arrives after selection becomes readable on
       // the next catalog refresh without reselecting the request. Unchanged

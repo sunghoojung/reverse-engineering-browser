@@ -985,6 +985,14 @@ assert.match(details.textContent, /host only; path and query not captured/);
   assert.match(section().textContent, /not started for sensitive capture/);
   trafficUI.renderTrafficDetails(bodyDetails, live(body("captured", {capturedLength: "816", artifactId: "901"})), "", {status: "missing"});
   assert.match(section().textContent, /not in the current catalog/);
+  trafficUI.renderTrafficDetails(bodyDetails, live(body("captured", {capturedLength: "816", artifactId: "901"})), "",
+    {status: "error", error: "timed out after 10 seconds", retryable: true});
+  assert.match(section().textContent, /could not be read: timed out after 10 seconds\. It is read again on the next refresh\./);
+  trafficUI.renderTrafficDetails(bodyDetails, live(body("captured", {capturedLength: "816", artifactId: "901"})), "",
+    {status: "error", error: "its bytes do not match the retained SHA-256", retryable: false});
+  assert.match(section().textContent, /do not match the retained SHA-256\./);
+  assert.doesNotMatch(section().textContent, /read again/, "An integrity failure is not retried");
+  assert.equal(section().querySelector("pre"), null, "A failed read shows no body text");
   trafficUI.renderTrafficDetails(bodyDetails, live({malformed: true}));
   assert.equal(section().dataset.state, "malformed");
   assert.match(section().textContent, /malformed and was not interpreted/);
@@ -1267,6 +1275,67 @@ summaryInspector();
 assert.equal(summaryElements.selectedStatus.textContent, "-");
 assert.equal(summaryElements.requestCopyUrl.disabled, true);
 console.log("PASS selected strip and inspector share current pending/response/failed/empty request metadata");
+
+{
+  // Production request body loading: a transient failure stays visible and is
+  // retried by a later refresh or selection; an integrity failure stays cached
+  // with its reason. A failed retry with the same result does not re-render.
+  const text = '{"sitekey":"s"}', bytes = new TextEncoder().encode(text);
+  const sha256 = Array.from(new Uint8Array(await crypto.subtle.digest("SHA-256", bytes)), b => b.toString(16).padStart(2, "0")).join("");
+  const artifact = {artifact_id: "901", kind: "request_body", session_id: "7", creator_event_id: "12", sha256,
+    byte_size: bytes.length, url: "https://api.example/getcaptcha?s=1"};
+  const request = {id: "r", body: {state: "captured", artifactId: "901", sessionId: "7", sequenceNumber: "12", processId: 42}};
+  const bodyState = {artifacts: [artifact], events: [], requests: [request], selectedRequestId: "r", inspectorTab: "general", requestBodyViewKey: ""};
+  let clock = 1000, renders = 0;
+  const timers = [], fetches = [];
+  const respond = [];
+  const context = {state: bodyState, location: {protocol: "http:"}, AbortController, TextDecoder, Uint8Array, crypto,
+    Date: {now: () => clock}, sourceFactsReadBytes: sourceFactsUI.sourceFactsReadBytes, decodePayload: () => "",
+    setTimeout: (fn) => {timers.push(fn); return timers.length;}, clearTimeout: () => {},
+    fetch: (url, {signal}) => {fetches.push(url); return respond.shift()(signal);},
+    renderInspector: () => {renders++; bodyState.requestBodyViewKey = body.requestBodyViewKey(body.requestBodyView(request));}};
+  const body = runInNewContext(appSection("      const REQUEST_BODY_READ_LIMIT", "      function renderInspectorMessage(") +
+    ";({requestBodyView,requestBodyViewKey,refreshSelectedRequestBody})", context);
+  const settle = () => new Promise(resolve => setTimeout(resolve, 20));
+  // The first read times out.
+  respond.push(signal => new Promise((_, reject) => signal.addEventListener("abort", () => reject(new Error("aborted")))));
+  assert.equal(body.requestBodyView(request).status, "loading");
+  timers.shift()(); await settle();
+  let view = body.requestBodyView(request);
+  assert.equal(view.status, "error"); assert.match(view.error, /timed out after 10 seconds/); assert.equal(view.retryable, true);
+  assert.equal(fetches.length, 1, "A failure is not refetched by the render that reports it");
+  // A later refresh retries while the failure stays visible, then shows the bytes.
+  clock += 2000;
+  respond.push(async () => new Response(bytes));
+  const beforeRetry = renders;
+  body.refreshSelectedRequestBody();
+  assert.equal(fetches.length, 2, "A transient failure is retried by the next refresh");
+  assert.equal(body.requestBodyView(request).status, "error", "The last understandable view stays while the retry runs");
+  await settle();
+  view = body.requestBodyView(request);
+  assert.equal(view.status, "ready"); assert.equal(view.text, text); assert.equal(view.verified, true);
+  assert(renders > beforeRetry, "A successful retry re-renders the selected body");
+  // A non-2xx status is transient too; the same failure again does not re-render.
+  const failing = {...artifact, artifact_id: "902", sha256: "ab".repeat(32)};
+  const failingRequest = {id: "f", body: {...request.body, artifactId: "902"}};
+  bodyState.artifacts.push(failing); bodyState.requests.push(failingRequest); bodyState.selectedRequestId = "f";
+  respond.push(async () => new Response("busy", {status: 503}));
+  body.requestBodyView(failingRequest); await settle();
+  assert.match(body.requestBodyView(failingRequest).error, /returned 503/);
+  bodyState.requestBodyViewKey = body.requestBodyViewKey(body.requestBodyView(failingRequest));
+  const quiet = renders;
+  clock += 2000; respond.push(async () => new Response("busy", {status: 503}));
+  body.requestBodyView(failingRequest); await settle();
+  assert.equal(fetches.length, 4); assert.equal(renders, quiet, "An unchanged failure does not re-render the inspector");
+  // A digest mismatch stays cached with its reason and is never refetched.
+  clock += 2000; respond.push(async () => new Response(bytes));
+  body.requestBodyView(failingRequest); await settle();
+  view = body.requestBodyView(failingRequest);
+  assert.match(view.error, /do not match the retained SHA-256/); assert.equal(view.retryable, false);
+  clock += 60000; body.requestBodyView(failingRequest); body.refreshSelectedRequestBody(); await settle();
+  assert.equal(fetches.length, 5, "An integrity failure is not retried");
+  console.log("PASS request body loading retries transient failures after the visible error, keeps integrity failures with their reason, and re-renders only on change (production app.js block)");
+}
 
 // Exercise the actual production listeners: selecting a tab is idempotent,
 // whereas the shortcut deliberately toggles Evidence back to General.

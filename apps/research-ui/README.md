@@ -501,7 +501,10 @@ captured path and query, and its General view shows the request body: capture
 state, content type, length, SHA-256, kind and the retained bytes as text.
 Without it, the General view still shows the body's length, type and digest and
 says that content capture was off. File, blob and stream bodies are named, not
-read; password form bodies keep neither bytes nor a digest.
+read; password form bodies keep neither bytes nor a digest. A body read that
+times out or gets an error status stays shown with its reason and is read again
+on the next refresh; a size or SHA-256 mismatch is kept with its reason and is
+not reread. Sources never lists or opens request bodies.
 
 Canvas image capture is disabled by default because rendered output can contain
 page content. Enabled output stays in the local session artifact store, is

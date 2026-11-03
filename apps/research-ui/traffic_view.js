@@ -84,7 +84,9 @@ function trafficBodyContent(body, view) {
     return {note: 'The body artifact is not in the current catalog: its acknowledgment is pending, or it is outside the 500 newest artifacts.'};
   }
   if (view.status === 'unavailable') return {note: 'Retained bodies are read from the local backend, which this view does not have.'};
-  if (view.status === 'error') return {note: `The retained body could not be read: ${view.error}.`};
+  if (view.status === 'error') {
+    return {note: `The retained body could not be read: ${view.error}.${view.retryable ? ' It is read again on the next refresh.' : ''}`};
+  }
   const notes = [];
   if (body.state === 'captured_truncated') notes.push(`Prefix only: ${trafficByteCount(body.capturedLength)} of ${trafficByteCount(body.bodyLength)}.`);
   if (view.lossy) notes.push('Not valid UTF-8; shown with replacement characters.');

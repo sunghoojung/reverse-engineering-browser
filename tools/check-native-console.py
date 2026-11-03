@@ -721,6 +721,10 @@ def check_backend(binary, backend):
             state = call()
             assert state["available"] and state["state"] == "idle"
             assert state["live_available"] and state["targets"], "Live bridge did not authenticate"
+            # The packaged app launches its captures with the permission. Before
+            # any Console connection, the listing carries the browser's own report
+            # of it, which the Console header shows.
+            assert state.get("document_start_supported") is True, state
             # A read with no session reports which gate is missing and starts
             # nothing: no process, profile or armed set may appear.
             idle = read_document_start()

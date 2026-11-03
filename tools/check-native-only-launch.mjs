@@ -364,6 +364,40 @@ exec ${quote(systemGrep)} "$@"
   accepted(contentAccepted, [], content.framework);
   console.log('PASS request content capture validates its value and categories before any helper or browser');
 
+  // The packaged app now sets REB_CONSOLE_DOCUMENT_START=1 and, in Content
+  // mode, REB_CAPTURE_REQUEST_CONTENT=1 by default. Both are Chromium switches,
+  // not V8 flags: the preflight never looks for them, so a Brave built before
+  // the document-start overlay (the v0.5.0 build, which defines exactly the
+  // packaged V8 flags) still starts with them, and only a bad value refuses.
+  misconfigured(await launchWith(content.executable, {REB_CONSOLE_DOCUMENT_START:'yes'}),
+    `${prefix}REB_CONSOLE_DOCUMENT_START must be 0 or 1.`);
+  const beforeDocumentStart = await braveApp({framework: allNames.slice(0, 3)});
+  accepted(await launchWith(beforeDocumentStart.executable, {...switches.packaged, REB_CONSOLE_DOCUMENT_START:'1',
+    REB_CAPTURE_REQUEST_CONTENT:'1'}), packaged, beforeDocumentStart.framework);
+  // The permission reaches Brave only beside a live Console binding, and only
+  // when asked for. A launch without a binding passes no Console switch at all.
+  const bindingDirectory = await realpath(await mkdtemp(join(tmpdir(), 'reb-console-binding-')));
+  const bindingSocket = join(bindingDirectory, 'console.sock');
+  const listener = (await import('node:net')).createServer();
+  await new Promise(done => listener.listen(bindingSocket, done));
+  try {
+    await writeFile(join(bindingDirectory, 'token'), 'synthetic');
+    const consoleCode = section('if [[ "${native_console_session_id}" =~', '"${brave_binary}" "${brave_arguments[@]}"');
+    for (const [binding, permission, expected] of [
+      ['7', 1, true], ['7', 0, false], ['', 1, false], ['0', 1, false]]) {
+      const result = spawnSync(shell, ['-c', `set -eu; brave_arguments=(); console_document_start=${permission}; native_console_session_id='${binding}'; native_console_socket="$TEST_SOCKET"; native_console_token="$TEST_TOKEN"; ${consoleCode}
+printf '%s\\n' "${'${brave_arguments[@]-}'}"`], {env:{...process.env, TEST_SOCKET:bindingSocket, TEST_TOKEN:join(bindingDirectory, 'token')}, encoding:'utf8'});
+      assert.equal(result.status, 0, result.stderr);
+      const passed = result.stdout.trimEnd().split('\n');
+      assert.equal(passed.includes('--reb-native-console-document-start'), expected, `binding ${binding || 'absent'} permission ${permission}`);
+      assert.equal(passed.includes('--reb-native-console-live-binding'), /^[1-9]/.test(binding));
+    }
+  } finally {
+    await new Promise(done => listener.close(done));
+    await rm(bindingDirectory, {recursive:true, force:true});
+  }
+  console.log('PASS document-start permission is a Chromium switch outside the V8 preflight, starts a pre-overlay Brave, and reaches Brave only with a live Console binding');
+
   // One mask grammar with the packaged app: tools/check-live-session-failure.swift
   // runs these vectors through LiveSessionCoordinator.categoryMask. The launcher
   // parses the text itself, never as Bash arithmetic, and passes the broker and

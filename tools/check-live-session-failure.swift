@@ -90,5 +90,17 @@ enum LiveSessionFailureChecks {
     let metadataMode = byMode(LiveCaptureMode.configured(["REB_AUTOMATIC_CAPTURE_MODE": "metadata"]))
     precondition(metadataMode["REB_CAPTURE_REQUEST_CONTENT"] == "0" && metadataMode["REB_CAPTURE_CANVAS_IMAGES"] == "0", "metadata mode")
     print("PASS native live capture mode: Content by default, an explicit or misspelled Metadata choice keeps hosts only")
+
+    // Every app-started capture permits document-start Console scripts, in
+    // either mode and whatever the mask, unless the environment says otherwise.
+    for (mask, content) in [(nil, true), (nil, false), ("1", true), ("0xzz", false)] {
+      precondition(defaults(mask, content)["REB_CONSOLE_DOCUMENT_START"] == "1", "document-start default \(String(describing: mask))")
+    }
+    for value in ["0", "1"] {
+      let explicitStart = LiveSessionCoordinator.captureDefaults(
+        environment: ["REB_CONSOLE_DOCUMENT_START": value], captureNetworkContent: true)
+      precondition(explicitStart["REB_CONSOLE_DOCUMENT_START"] == value, "explicit document-start \(value)")
+    }
+    print("PASS native live document-start permission: on by default for app captures, an explicit 0 survives")
   }
 }

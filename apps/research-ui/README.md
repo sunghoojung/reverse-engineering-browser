@@ -295,8 +295,18 @@ exact rule plus its own confirmation. A rule is one exact origin, exactly one
 frame kind, and an optional literal path prefix; there is no pattern, wildcard
 or host suffix, and a document already open is never retroactively injected.
 
+The packaged app launches every live capture with that permission; set
+`REB_CONSOLE_DOCUMENT_START=0` before opening it to opt out. The permission
+arms nothing, and a live snippet still needs a connection to a selected
+document and the arming confirmation. Agent-started sessions never have it.
+
 A header chip shows the experiment's state without opening the settings, so an
-armed experiment is always visible. Snippet output appears in the transcript
+armed experiment is always visible. Before any connection it reads
+`Doc-start: permitted` when the live capture browser reports the permission;
+a browser built without the experiment reports none, so the chip stays hidden
+and the settings name the missing rebuild or the explicit opt-out. In a narrow header
+the chip becomes a colored marker whose tooltip and accessible name keep the
+state. Snippet output appears in the transcript
 labeled `page JavaScript · console-document-start-script`, inserted as text and
 filterable by level like any other row. It is never evidence, never joined into
 correlated links, and never exported automatically. Clearing the set, or
@@ -437,6 +447,8 @@ Every app session also enables quiet mode and native Wasm `br_table` and
 `call_indirect` dispatch capture; Wasm dispatch forces Liftoff-only compilation,
 so Wasm-heavy pages run slower. Set `REB_NATIVE_QUIET_MODE=0`,
 `REB_NATIVE_WASM_DISPATCH=0` or `REB_NATIVE_WASM_CALL_INDIRECT=0` to opt out.
+It also permits [document-start Console scripts](#document-start-scripts),
+which arms nothing; `REB_CONSOLE_DOCUMENT_START=0` opts out.
 Guest-state, JavaScript dispatch-site and JavaScript invocation capture still
 need an adapter or site file and stay off until one is supplied; invocation
 value digests additionally need `REB_NATIVE_JS_INVOCATION_DIGESTS=1`. A request

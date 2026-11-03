@@ -176,7 +176,17 @@ it.
   open. Arming requires a rebuilt browser, an explicit browser-session switch,
   and a separate confirmed action; a live capture additionally requires the
   existing selected-document live opt-in, and nothing is relaunched to obtain any
-  of them. Clearing the set, disconnecting, ending the session, or session expiry
+  of them. The packaged app grants that browser-session permission to every live
+  capture it starts, and the Console header shows it, reading "Doc-start:
+  permitted" before any Console connection; an explicit
+  `REB_CONSOLE_DOCUMENT_START=0` opts out. The permission arms
+  nothing: the declared rule, armed by that separate confirmed action, remains
+  the authorization boundary, and nothing runs until a rule is armed. A browser
+  built without the experiment ignores the switch and the Console reports it
+  unavailable. The standalone `make live` launcher and the disposable Console
+  grant it only when asked, and agent-started sessions (`reb-api session start`,
+  MCP `start_live_session`) never receive it, even when the switch is
+  inherited. Clearing the set, disconnecting, ending the session, or session expiry
   removes the scripts and their output; when the browser cannot confirm a removal,
   the Console reports it unconfirmed instead of idle. Snippet output is bounded, ephemeral
   page-JavaScript observation with provenance `console-document-start-script`: it
@@ -212,6 +222,7 @@ of the data-handling policy:
 | Artifact receiver `--allow-sensitive` gate | `services/artifact-receiver/main.cpp` |
 | Request path and body gate (`--reb-capture-request-content`) | Brave overlay `native_probe_socket_client.cc` and `native_network_capture_sink.cc`; receiver `--allow-sensitive` |
 | Capture category mask and session expiration | `protocol/README.md`, native probes |
+| Agent-started sessions get neither request content nor document-start permission | [`session_launch.rs`](apps/origin-trace-backend/src/session_launch.rs) |
 | JavaScript invocation value digests opt-in | `scripts/run-live-session.sh`, the overlay's `native_probe_session.cc`, and the renderer sink, which refuses a digest without it |
 | Origin allowlisting | Not implemented; the native event envelope lacks trustworthy origin identity |
 

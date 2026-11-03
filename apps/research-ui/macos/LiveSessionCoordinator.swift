@@ -421,6 +421,12 @@ final class LiveSessionCoordinator {
     for name in ["REB_NATIVE_WASM_DISPATCH", "REB_NATIVE_WASM_CALL_INDIRECT"] {
       environment[name] = environment[name] ?? (allows(1536) ? "1" : "0")
     }
+    // Permission only: the capture browser may later arm a document-start
+    // Console script, which still needs a live Console connection to a selected
+    // document and a separate confirmed arm. Nothing runs until then. A browser
+    // without the v3 overlay ignores the switch and the Console reports it
+    // unavailable. An explicit "0" opts out.
+    environment["REB_CONSOLE_DOCUMENT_START"] = environment["REB_CONSOLE_DOCUMENT_START"] ?? "1"
     return environment
   }
 

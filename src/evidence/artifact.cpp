@@ -328,7 +328,8 @@ bool ParseManifestRecord(const std::string_view line,
         capture_origin != "dynamic_javascript" && capture_origin != "webassembly_compile" &&
         capture_origin != "webassembly_module" && capture_origin != "webassembly_instantiate" &&
         capture_origin != "canvas_to_data_url" && capture_origin != "runtime_typed_array" &&
-        capture_origin != "runtime_allocating_script" && capture_origin != "native_wasm_guest") {
+        capture_origin != "runtime_allocating_script" && capture_origin != "native_wasm_guest" &&
+        capture_origin != "network_request") {
       return false;
     }
     position = origin_end + std::string_view("\",\"kind\":\"").size();
@@ -342,11 +343,19 @@ bool ParseManifestRecord(const std::string_view line,
   }
   const std::string_view kind = line.substr(position, kind_end - position);
   if (kind != "javascript" && kind != "wasm" && kind != "source_map" && kind != "response_body" &&
-      kind != "canvas_data_url" && kind != "bytecode_buffer" && kind != "wasm_guest_adapter") {
+      kind != "canvas_data_url" && kind != "bytecode_buffer" && kind != "wasm_guest_adapter" &&
+      kind != "request_body") {
+    return false;
+  }
+  // A request body is created by its browser request_body record and has no
+  // renderer execution context.
+  if ((kind == "request_body") != (capture_origin == "network_request") ||
+      (capture_origin == "network_request" && (execution_context_id != 0 || !creator_event_id))) {
     return false;
   }
   if ((!capture_origin.empty() && capture_origin != "unknown" &&
-       capture_origin != "network_response" && execution_context_id == 0) ||
+       capture_origin != "network_response" && capture_origin != "network_request" &&
+       execution_context_id == 0) ||
       ((capture_origin == "dynamic_javascript" || capture_origin == "runtime_allocating_script") &&
        kind != "javascript") ||
       (capture_origin.starts_with("webassembly_") && kind != "wasm") ||
@@ -389,7 +398,8 @@ bool ParseManifestRecord(const std::string_view line,
   } else {
     return false;
   }
-  if (sensitive != (kind == "response_body" || kind == "canvas_data_url") ||
+  if (sensitive !=
+          (kind == "response_body" || kind == "canvas_data_url" || kind == "request_body") ||
       !ConsumePrefix(line, position, ",\"content_path\":\"blobs/") ||
       line.substr(position, digest.size()) != digest) {
     return false;
@@ -421,15 +431,21 @@ bool IsValidArtifactHeader(const ArtifactHeader& header) noexcept {
        (!header.frame_id || !header.parent_artifact_id || !header.creator_event_id)))
     return false;
   const bool sensitive = (header.flags & kArtifactFlagSensitive) != 0;
-  if ((header.kind == ArtifactKind::kResponseBody || header.kind == ArtifactKind::kCanvasDataUrl) !=
-      sensitive) {
+  if ((header.kind == ArtifactKind::kResponseBody || header.kind == ArtifactKind::kCanvasDataUrl ||
+       header.kind == ArtifactKind::kRequestBody) != sensitive) {
+    return false;
+  }
+  if ((header.kind == ArtifactKind::kRequestBody) !=
+          (header.capture_origin == ArtifactCaptureOrigin::kNetworkRequest) ||
+      (header.capture_origin == ArtifactCaptureOrigin::kNetworkRequest &&
+       (header.execution_context_id != 0 || header.creator_event_id == 0))) {
     return false;
   }
   const bool valid_kind =
       header.kind == ArtifactKind::kJavaScript || header.kind == ArtifactKind::kWasm ||
       header.kind == ArtifactKind::kSourceMap || header.kind == ArtifactKind::kResponseBody ||
       header.kind == ArtifactKind::kCanvasDataUrl || header.kind == ArtifactKind::kBytecodeBuffer ||
-      header.kind == ArtifactKind::kWasmGuestAdapter;
+      header.kind == ArtifactKind::kWasmGuestAdapter || header.kind == ArtifactKind::kRequestBody;
   const bool valid_origin =
       header.capture_origin == ArtifactCaptureOrigin::kUnknown ||
       header.capture_origin == ArtifactCaptureOrigin::kNetworkResponse ||
@@ -440,8 +456,10 @@ bool IsValidArtifactHeader(const ArtifactHeader& header) noexcept {
       header.capture_origin == ArtifactCaptureOrigin::kCanvasToDataUrl ||
       header.capture_origin == ArtifactCaptureOrigin::kRuntimeTypedArray ||
       header.capture_origin == ArtifactCaptureOrigin::kRuntimeAllocatingScript ||
-      header.capture_origin == ArtifactCaptureOrigin::kNativeWasmGuest;
+      header.capture_origin == ArtifactCaptureOrigin::kNativeWasmGuest ||
+      header.capture_origin == ArtifactCaptureOrigin::kNetworkRequest;
   const bool compatible_origin =
+      header.capture_origin == ArtifactCaptureOrigin::kNetworkRequest ||
       header.capture_origin == ArtifactCaptureOrigin::kUnknown ||
       header.capture_origin == ArtifactCaptureOrigin::kNetworkResponse ||
       (header.kind == ArtifactKind::kJavaScript &&
@@ -462,6 +480,7 @@ bool IsValidArtifactHeader(const ArtifactHeader& header) noexcept {
       header.capture_origin == ArtifactCaptureOrigin::kUnknown ||
       header.capture_origin == ArtifactCaptureOrigin::kNetworkResponse ||
       header.capture_origin == ArtifactCaptureOrigin::kCanvasToDataUrl ||
+      header.capture_origin == ArtifactCaptureOrigin::kNetworkRequest ||
       header.execution_context_id != 0;
   return valid_kind && valid_origin && compatible_origin && runtime_has_context;
 }
@@ -482,6 +501,8 @@ const char* ArtifactKindName(const ArtifactKind kind) noexcept {
       return "bytecode_buffer";
     case ArtifactKind::kWasmGuestAdapter:
       return "wasm_guest_adapter";
+    case ArtifactKind::kRequestBody:
+      return "request_body";
     case ArtifactKind::kUnknown:
       return "unknown";
   }
@@ -508,6 +529,8 @@ const char* ArtifactCaptureOriginName(const ArtifactCaptureOrigin origin) noexce
       return "runtime_allocating_script";
     case ArtifactCaptureOrigin::kNativeWasmGuest:
       return "native_wasm_guest";
+    case ArtifactCaptureOrigin::kNetworkRequest:
+      return "network_request";
     case ArtifactCaptureOrigin::kUnknown:
       return "unknown";
   }
@@ -646,7 +669,7 @@ ArtifactReceiveStatus ArtifactReceiver::ReceiveOne(std::istream& stream) {
   }
   if ((header.flags & kArtifactFlagSensitive) != 0 && !limits_.allow_sensitive) {
     return Reject(ArtifactReceiveStatus::kSensitiveCaptureDisabled,
-                  "Sensitive response body capture is disabled");
+                  "Sensitive content capture is disabled");
   }
   if (artifact_ids_.contains(header.artifact_id)) {
     return Reject(ArtifactReceiveStatus::kConflict, "Artifact identifier already exists");

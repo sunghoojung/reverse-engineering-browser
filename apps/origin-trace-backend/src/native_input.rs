@@ -18,6 +18,9 @@
 //! The macOS frameworks are loaded at run time, only when input is used. The
 //! backend binary also runs as the sandboxed JavaScript analysis worker, and
 //! that process must not load window-server frameworks.
+// The platform-independent parts below are used by the macOS layer and the
+// tests; other platforms only validate requests and refuse.
+#![cfg_attr(not(target_os = "macos"), allow(dead_code))]
 use crate::error::{Code, Error, Result};
 use serde_json::{Value, json};
 
@@ -514,7 +517,6 @@ pub fn path(from: (f64, f64), to: (f64, f64), steps: usize) -> Vec<(f64, f64)> {
         .collect()
 }
 
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 fn untrusted() -> Error {
     Error::conflict(
         "macOS has not granted Accessibility to the app that started this session, so no input was sent. Grant it in System Settings > Privacy & Security > Accessibility: Origin Trace for app sessions, or the terminal or T3 Code app for sessions started from reb-api. Then retry.",
@@ -522,7 +524,6 @@ fn untrusted() -> Error {
     .with_code(Code::DependencyUnavailable)
 }
 
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 fn lost(message: impl Into<String>) -> Error {
     Error::conflict(message).with_code(Code::TargetUnavailable)
 }

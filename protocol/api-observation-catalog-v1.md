@@ -151,6 +151,7 @@ separate sharing review; the read-only guard is not a privacy filter. See the
 
 This first slice supplies observations for a human-reviewed API consumer. It
 does not generate an authenticated SDK, infer credentials, validate replay, or
-make authorization decisions. The source-pinned adaptation and MIT notice are
-in [third_party/rea](../third_party/rea/README.md). Project policy remains in
-[SAFETY.md](../SAFETY.md).
+make authorization decisions. Its structural shape accumulation was adapted
+from MIT-licensed [REA](https://github.com/morluto/rea/tree/bb540826d65316c164d2de8ba4ef10f81a8ad073);
+that code was removed with this route, so no REA-derived code remains. Project
+policy remains in [SAFETY.md](../SAFETY.md).

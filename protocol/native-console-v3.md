@@ -180,10 +180,13 @@ helpers, backend, packaged assets and browser are rebuilt together.
 | `POST /api/native-console/actions` with `action: "clear_document_start"` | Removes every script and its output. |
 | `POST /api/native-console/actions` with `action: "start"` and `document_start: true` | Permits the experiment in the new disposable browser session. |
 
-The read operation is the only document-start surface in the default read-only
-MCP projection. Arming, clearing and starting are effectful and stay hidden
-unless `--allow-effects` is set. That flag is not authorization, redaction, or
-permission to send captured data to a model.
+Every document-start surface exchanges a request with the browser process, so
+all of them are classified as effectful and stay hidden in the MCP projection
+unless `--allow-effects` is set, exactly like the existing console state read.
+The read's declared effects are conditional and narrow: it arms, clears, drains,
+launches, evaluates and retires nothing, and a transport failure leaves the
+session unusable until an explicit action retires it. That flag is not
+authorization, redaction, or permission to send captured data to a model.
 
 The [OpenAPI contract](openapi.json) owns the exact HTTP fields, requiredness
 and response shapes. Responses from the document-start surfaces report

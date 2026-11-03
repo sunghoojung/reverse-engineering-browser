@@ -68,6 +68,18 @@ impl Deobfuscator {
         Ok(response)
     }
 
+    /// Finds the function an invocation site names, in the BOM-free script
+    /// text that `request` carries. The reply is checked by the caller.
+    pub async fn invocation_site(&self, request: Value) -> Result<Value> {
+        if request["source"]
+            .as_str()
+            .is_none_or(|s| s.len() > SOURCE_MAX)
+        {
+            return Err(Error::bad("Source exceeds the invocation site byte limit"));
+        }
+        self.request(request).await
+    }
+
     async fn request(&self, request: Value) -> Result<Value> {
         if !worker::executable(&self.path) {
             return Err(

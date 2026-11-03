@@ -5804,6 +5804,468 @@
           ]
         }
       }
+    },
+    "/api/js-invocation-sites": {
+      "get": {
+        "operationId": "get_js_invocation_sites",
+        "summary": "Get the saved JavaScript invocation sites",
+        "description": "The app's saved native-js-invocation-sites-v1 set (at most 8), each with its label, source URL and whether this session retained the saved script version or another version the site will not match, plus what this session's launcher armed. Saved sites are armed by the next capture the Origin Trace app starts, never the open page.",
+        "tags": [
+          "js-invocation-sites"
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsInvocationSiteSet"
+                }
+              }
+            },
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Host/Origin/Sec-Fetch-Site rejected.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The saved site file is unreadable, or local I/O failed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "x-source": "apps/origin-trace-backend/src/app.rs",
+        "x-reb-execution": {
+          "kind": "operation",
+          "effects": [
+            "analysis"
+          ],
+          "state_dependent_effects": [],
+          "uncertainties": [],
+          "prerequisites": [
+            {
+              "id": "local-request",
+              "condition": "Host must name the exact loopback listening port; cross-site Sec-Fetch-Site is rejected; an optional Origin must pass App::trusted."
+            }
+          ],
+          "confirmations": [],
+          "notes": "Reads the saved set and this session's artifact manifest. Up to four same-URL artifacts per read are hashed to compare script versions.",
+          "sources": [
+            {
+              "path": "apps/origin-trace-backend/src/app.rs",
+              "symbol": "App::invocation_site_set"
+            },
+            {
+              "path": "apps/origin-trace-backend/src/js_invocation_sites.rs",
+              "symbol": "set_document"
+            }
+          ]
+        },
+        "x-reb-execution-schema": {
+          "$ref": "#/components/schemas/RebExecutionMetadata"
+        }
+      }
+    },
+    "/api/js-invocation-sites/resolve": {
+      "get": {
+        "operationId": "resolve_js_invocation_site",
+        "summary": "Resolve one JavaScript function to an invocation site",
+        "description": "Finds the function definitions in one exact retained JavaScript artifact that bind a dotted name (assignments, var/let/const initializers, function declarations and object-literal properties; window., self. and globalThis. name the same global object), or the function at or around a byte offset. Strings, templates and comments never match. Exactly one supported function resolves to its site; zero or several are refused with a bounded candidate list. Bare-parameter and async arrows, generators, class constructors and class initializers are refused with a reason. Saves nothing.",
+        "tags": [
+          "js-invocation-sites"
+        ],
+        "parameters": [
+          {
+            "name": "session_id",
+            "in": "query",
+            "required": true,
+            "description": "Exact captured artifact identity; no fallback selection.",
+            "schema": {
+              "$ref": "#/components/schemas/Uint64String"
+            }
+          },
+          {
+            "name": "artifact_id",
+            "in": "query",
+            "required": true,
+            "description": "Exact captured artifact identity; no fallback selection.",
+            "schema": {
+              "$ref": "#/components/schemas/Uint64String"
+            }
+          },
+          {
+            "name": "name",
+            "in": "query",
+            "required": false,
+            "description": "A dotted name such as window.hsw, hsw or a.b.c. Give exactly one of name and byte_offset.",
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256
+            }
+          },
+          {
+            "name": "byte_offset",
+            "in": "query",
+            "required": false,
+            "description": "UTF-8 offset in the artifact bytes, BOM included, at or inside the function. Give exactly one of name and byte_offset.",
+            "schema": {
+              "$ref": "#/components/schemas/Uint64String"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "A resolved site or a structured refusal.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsInvocationSiteResolution"
+                }
+              }
+            },
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Host/Origin/Sec-Fetch-Site rejected.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Requested record not found.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "408": {
+            "description": "Bounded worker timed out or busy.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The analysis worker is busy.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Worker/protocol response or input processing failure.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Local artifact or worker I/O failure.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "The analysis worker terminated or returned an invalid response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Required worker unavailable.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "x-source": "apps/origin-trace-backend/src/app.rs",
+        "x-reb-execution": {
+          "kind": "operation",
+          "effects": [
+            "analysis",
+            "process-launch"
+          ],
+          "state_dependent_effects": [
+            {
+              "effects": [
+                "process-stop"
+              ],
+              "when": "The bounded local JavaScript worker process group is cleaned up on completion or failure."
+            }
+          ],
+          "uncertainties": [
+            "A name is matched syntactically: a local variable named window, self or globalThis is not told apart from the global object, so a candidate list is always shown with its context."
+          ],
+          "prerequisites": [
+            {
+              "id": "local-request",
+              "condition": "Host must name the exact loopback listening port; cross-site Sec-Fetch-Site is rejected; an optional Origin must pass App::trusted."
+            },
+            {
+              "id": "exact-source",
+              "condition": "Exact session_id and artifact_id select one verified immutable strict UTF-8 JavaScript artifact of at most 4 MiB."
+            },
+            {
+              "id": "deobfuscator-ready",
+              "condition": "The local Rust analysis worker must be executable and idle; it shares the existing analysis worker lock."
+            }
+          ],
+          "confirmations": [],
+          "notes": "Read-only syntax analysis of retained local evidence with the bounded tree-sitter preflight parse. No runtime execution, browser control or network request.",
+          "sources": [
+            {
+              "path": "apps/origin-trace-backend/src/app.rs",
+              "symbol": "App::resolve_invocation_site"
+            },
+            {
+              "path": "apps/origin-trace-backend/src/js_invocation_sites.rs",
+              "symbol": "resolution"
+            },
+            {
+              "path": "apps/origin-trace-backend/src/deobfuscation.rs",
+              "symbol": "Deobfuscator::invocation_site"
+            }
+          ]
+        },
+        "x-reb-execution-schema": {
+          "$ref": "#/components/schemas/RebExecutionMetadata"
+        }
+      }
+    },
+    "/api/js-invocation-sites/actions": {
+      "post": {
+        "operationId": "js_invocation_site_action",
+        "summary": "Add, remove or clear saved JavaScript invocation sites",
+        "description": "add resolves a name or byte offset in one exact artifact on the server and saves the site (refusals save nothing and return the reason and candidates); remove deletes one site by source_sha256 and anchor_offset; clear deletes the set. At most 8 sites; a duplicate function is refused. The app's next capture arms the set; in Content mode it also records settled-value digests.",
+        "tags": [
+          "js-invocation-sites"
+        ],
+        "requestBody": {
+          "required": true,
+          "description": "JSON object. Explicit decimal Content-Length required; 1..4096 encoded bytes. Chunked request bodies are not supported.",
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/JsInvocationSiteAction"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsInvocationSiteActionResult"
+                }
+              }
+            },
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Host/Origin/Sec-Fetch-Site rejected.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Artifact or saved site not found.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "408": {
+            "description": "The bounded request-body read or worker deadline expired.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Duplicate site, full set, or busy worker.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Worker/protocol response or input processing failure.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Store or local I/O failure.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "The analysis worker terminated or returned an invalid response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Required worker unavailable.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "x-source": "apps/origin-trace-backend/src/app.rs",
+        "x-max-body-bytes": 4096,
+        "x-reb-execution": {
+          "kind": "action-dependent",
+          "effects": null,
+          "state_dependent_effects": [],
+          "uncertainties": [],
+          "prerequisites": [
+            {
+              "id": "local-request",
+              "condition": "Host must name the exact loopback listening port; cross-site Sec-Fetch-Site is rejected; an optional Origin must pass App::trusted."
+            },
+            {
+              "id": "bounded-json-object",
+              "condition": "POST requires one valid Content-Length, no Transfer-Encoding, and a JSON object within x-max-body-bytes and the body deadline."
+            }
+          ],
+          "confirmations": [],
+          "notes": "Resolve the exact request action and combine its prerequisites with these common operation guards. No action inherits a default effect classification.",
+          "sources": [
+            {
+              "path": "apps/origin-trace-backend/src/app.rs",
+              "symbol": "App::post"
+            }
+          ]
+        },
+        "x-reb-execution-schema": {
+          "$ref": "#/components/schemas/RebExecutionMetadata"
+        }
+      }
     }
   },
   "components": {
@@ -25197,6 +25659,660 @@
             "description": "Whether a stored record followed the opened url. Null without url. False means the browser did not record: end the session."
           }
         }
+      },
+      "JsInvocationSite": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "anchor_offset",
+          "artifact_id",
+          "artifact_sha256",
+          "byte_offset",
+          "shape",
+          "source_length",
+          "source_sha256"
+        ],
+        "properties": {
+          "anchor_offset": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 4294967295,
+            "description": "UTF-16 offset of the `(` V8 starts the function at."
+          },
+          "artifact_id": {
+            "$ref": "#/components/schemas/Uint64String"
+          },
+          "artifact_sha256": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "byte_offset": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 4294967295,
+            "description": "UTF-8 offset of that `(` in the artifact bytes, BOM included."
+          },
+          "shape": {
+            "const": "function-entry"
+          },
+          "source_length": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 4294967295
+          },
+          "source_sha256": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          }
+        },
+        "description": "One native-js-invocation-sites-v1 entry, exactly as the browser reads it (protocol/native-js-invocation-v1.md#site-file)."
+      },
+      "JsInvocationSiteCandidate": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "byte_offset",
+          "start_byte",
+          "line",
+          "column",
+          "kind",
+          "binding",
+          "context",
+          "supported",
+          "refusal"
+        ],
+        "properties": {
+          "byte_offset": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0,
+            "description": "UTF-8 artifact offset of the parameter-list `(`; null for a bare-parameter arrow."
+          },
+          "start_byte": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "line": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "column": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "UTF-16 code units from the line start, BOM kept, as Sources shows the text."
+          },
+          "kind": {
+            "enum": [
+              "function",
+              "arrow",
+              "method",
+              "getter",
+              "setter",
+              "generator",
+              "constructor"
+            ]
+          },
+          "binding": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "maxLength": 512,
+            "description": "The name the definition binds, as written."
+          },
+          "context": {
+            "type": "string",
+            "maxLength": 512,
+            "description": "Captured source text around the anchor on its line. Untrusted display text."
+          },
+          "supported": {
+            "type": "boolean"
+          },
+          "refusal": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why this function cannot be tracked from a `(`, when it cannot."
+          }
+        }
+      },
+      "JsInvocationSiteResolution": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "format",
+          "status",
+          "reason",
+          "message",
+          "query",
+          "artifact",
+          "function",
+          "candidates",
+          "candidate_relation",
+          "candidate_count",
+          "candidates_truncated",
+          "site",
+          "label",
+          "saved",
+          "next_capture"
+        ],
+        "properties": {
+          "format": {
+            "const": "reb-js-invocation-site-resolution-v1"
+          },
+          "status": {
+            "enum": [
+              "resolved",
+              "refused"
+            ]
+          },
+          "reason": {
+            "enum": [
+              null,
+              "no_match",
+              "ambiguous",
+              "unsupported_function",
+              "no_function",
+              "class_initializer",
+              "source_unavailable"
+            ]
+          },
+          "message": {
+            "type": "string"
+          },
+          "query": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "byte_offset": {
+                "type": "integer",
+                "minimum": 0
+              }
+            }
+          },
+          "artifact": {
+            "type": "object",
+            "description": "Public manifest fields of the exact artifact."
+          },
+          "function": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/JsInvocationSiteCandidate"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "candidates": {
+            "type": "array",
+            "maxItems": 32,
+            "items": {
+              "$ref": "#/components/schemas/JsInvocationSiteCandidate"
+            }
+          },
+          "candidate_relation": {
+            "enum": [
+              null,
+              "matches",
+              "same_final_name"
+            ]
+          },
+          "candidate_count": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "candidates_truncated": {
+            "type": "boolean"
+          },
+          "site": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/JsInvocationSite"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "label": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "maxLength": 512
+          },
+          "saved": {
+            "type": "boolean",
+            "description": "The saved set already names this function."
+          },
+          "next_capture": {
+            "type": "string"
+          }
+        },
+        "description": "Exactly one site with status resolved, or a refusal with its reason and at most 32 candidates. Zero or several matching definitions are always refused; nothing is guessed."
+      },
+      "JsInvocationSiteSet": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "format",
+          "limit",
+          "count",
+          "sites",
+          "next_capture",
+          "session"
+        ],
+        "properties": {
+          "format": {
+            "const": "reb-js-invocation-site-set-v1"
+          },
+          "limit": {
+            "const": 8
+          },
+          "count": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 8
+          },
+          "sites": {
+            "type": "array",
+            "maxItems": 8,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "site",
+                "label",
+                "source_url",
+                "session_id",
+                "retained"
+              ],
+              "properties": {
+                "site": {
+                  "$ref": "#/components/schemas/JsInvocationSite"
+                },
+                "label": {
+                  "type": "string",
+                  "maxLength": 512
+                },
+                "source_url": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "session_id": {
+                  "oneOf": [
+                    {
+                      "$ref": "#/components/schemas/Uint64String"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "retained": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "state",
+                    "matching_artifact_id",
+                    "other_version_artifact_id"
+                  ],
+                  "properties": {
+                    "state": {
+                      "enum": [
+                        "matches",
+                        "other_version",
+                        "not_retained"
+                      ],
+                      "description": "other_version: this session retained the saved URL with other script text, which the saved site will not match."
+                    },
+                    "matching_artifact_id": {
+                      "oneOf": [
+                        {
+                          "$ref": "#/components/schemas/Uint64String"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "other_version_artifact_id": {
+                      "oneOf": [
+                        {
+                          "$ref": "#/components/schemas/Uint64String"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "next_capture": {
+            "type": "string"
+          },
+          "session": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "state",
+              "count",
+              "digests",
+              "sites"
+            ],
+            "properties": {
+              "state": {
+                "enum": [
+                  "not_armed",
+                  "armed",
+                  "browser_unsupported",
+                  "unreadable"
+                ],
+                "description": "What this session's launcher armed. browser_unsupported: this Brave does not define invocation capture, so the session started without the saved sites."
+              },
+              "count": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 8
+              },
+              "digests": {
+                "type": "boolean",
+                "description": "This session records settled-value digests (sensitive capture)."
+              },
+              "sites": {
+                "type": "array",
+                "maxItems": 8,
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "source_sha256",
+                    "anchor_offset",
+                    "label",
+                    "source_url"
+                  ],
+                  "properties": {
+                    "source_sha256": {
+                      "type": "string",
+                      "pattern": "^[0-9a-f]{64}$"
+                    },
+                    "anchor_offset": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "label": {
+                      "type": "string"
+                    },
+                    "source_url": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "JsInvocationSiteActionResult": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "ok",
+          "set"
+        ],
+        "properties": {
+          "ok": {
+            "const": true
+          },
+          "added": {
+            "type": "boolean"
+          },
+          "resolution": {
+            "$ref": "#/components/schemas/JsInvocationSiteResolution"
+          },
+          "removed": {
+            "const": true
+          },
+          "cleared": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "set": {
+            "$ref": "#/components/schemas/JsInvocationSiteSet"
+          }
+        }
+      },
+      "JsInvocationSiteAction": {
+        "oneOf": [
+          {
+            "type": "object",
+            "properties": {
+              "action": {
+                "const": "add",
+                "type": "string"
+              },
+              "session_id": {
+                "$ref": "#/components/schemas/Uint64String"
+              },
+              "artifact_id": {
+                "$ref": "#/components/schemas/Uint64String"
+              },
+              "name": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 256,
+                "description": "A dotted name such as window.hsw, hsw or a.b.c."
+              },
+              "byte_offset": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 4194303,
+                "description": "UTF-8 offset in the artifact bytes, BOM included, at or inside the function."
+              },
+              "label": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 512
+              }
+            },
+            "required": [
+              "action",
+              "session_id",
+              "artifact_id"
+            ],
+            "oneOf": [
+              {
+                "required": [
+                  "name"
+                ],
+                "not": {
+                  "required": [
+                    "byte_offset"
+                  ]
+                }
+              },
+              {
+                "required": [
+                  "byte_offset"
+                ],
+                "not": {
+                  "required": [
+                    "name"
+                  ]
+                }
+              }
+            ],
+            "additionalProperties": false,
+            "x-reb-execution": {
+              "kind": "action",
+              "effects": [
+                "analysis",
+                "process-launch",
+                "filesystem-write",
+                "local-state-write"
+              ],
+              "state_dependent_effects": [
+                {
+                  "effects": [
+                    "process-stop"
+                  ],
+                  "when": "The bounded local JavaScript worker process group is cleaned up on completion or failure."
+                },
+                {
+                  "effects": [
+                    "sensitive-capture"
+                  ],
+                  "when": "The next capture the Origin Trace app starts runs in Content mode: it arms the saved sites and records settled-value digests of their calls unless REB_NATIVE_JS_INVOCATION_DIGESTS=0 is set."
+                }
+              ],
+              "uncertainties": [],
+              "prerequisites": [
+                {
+                  "id": "exact-source",
+                  "condition": "Exact session_id and artifact_id select one verified immutable strict UTF-8 JavaScript artifact of at most 4 MiB."
+                },
+                {
+                  "id": "deobfuscator-ready",
+                  "condition": "The local Rust analysis worker must be executable and idle; it shares the existing analysis worker lock."
+                },
+                {
+                  "id": "one-function",
+                  "condition": "The name or byte offset must resolve to exactly one supported function; a refusal returns added false and saves nothing."
+                },
+                {
+                  "id": "set-capacity",
+                  "condition": "The saved set holds at most 8 sites and refuses a duplicate source_sha256 and anchor_offset."
+                }
+              ],
+              "confirmations": [],
+              "notes": "Resolves the exact artifact again on the server and appends the computed site to the app's saved set. Nothing is armed until the next app-started capture launches a new browser; the open page is never changed.",
+              "sources": [
+                {
+                  "path": "apps/origin-trace-backend/src/app.rs",
+                  "symbol": "App::invocation_site_action"
+                },
+                {
+                  "path": "apps/origin-trace-backend/src/js_invocation_sites.rs",
+                  "symbol": "Store::add"
+                }
+              ]
+            }
+          },
+          {
+            "type": "object",
+            "properties": {
+              "action": {
+                "const": "remove",
+                "type": "string"
+              },
+              "source_sha256": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              },
+              "anchor_offset": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 4294967295
+              }
+            },
+            "required": [
+              "action",
+              "source_sha256",
+              "anchor_offset"
+            ],
+            "additionalProperties": false,
+            "x-reb-execution": {
+              "kind": "action",
+              "effects": [
+                "filesystem-write",
+                "local-state-write",
+                "data-discard"
+              ],
+              "state_dependent_effects": [],
+              "uncertainties": [],
+              "prerequisites": [
+                {
+                  "id": "saved-site",
+                  "condition": "A saved site with this source_sha256 and anchor_offset must exist."
+                }
+              ],
+              "confirmations": [],
+              "notes": "Removes one saved site and its label. A running capture keeps what it armed.",
+              "sources": [
+                {
+                  "path": "apps/origin-trace-backend/src/app.rs",
+                  "symbol": "App::invocation_site_action"
+                },
+                {
+                  "path": "apps/origin-trace-backend/src/js_invocation_sites.rs",
+                  "symbol": "Store::remove"
+                }
+              ]
+            }
+          },
+          {
+            "type": "object",
+            "properties": {
+              "action": {
+                "const": "clear",
+                "type": "string"
+              },
+              "confirm": {
+                "const": true,
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "action",
+              "confirm"
+            ],
+            "additionalProperties": false,
+            "x-reb-execution": {
+              "kind": "action",
+              "effects": [
+                "filesystem-write",
+                "local-state-write",
+                "data-discard"
+              ],
+              "state_dependent_effects": [],
+              "uncertainties": [],
+              "prerequisites": [],
+              "confirmations": [
+                {
+                  "field": "confirm",
+                  "value": true,
+                  "when": {}
+                }
+              ],
+              "notes": "Deletes the saved site file and its label sidecar, including an unreadable one. A running capture keeps what it armed.",
+              "sources": [
+                {
+                  "path": "apps/origin-trace-backend/src/app.rs",
+                  "symbol": "App::invocation_site_action"
+                },
+                {
+                  "path": "apps/origin-trace-backend/src/js_invocation_sites.rs",
+                  "symbol": "Store::clear"
+                }
+              ]
+            }
+          }
+        ]
       }
     }
   },

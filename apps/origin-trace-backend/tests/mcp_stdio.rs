@@ -278,6 +278,15 @@ async fn openapi_mcp_matches_the_live_loopback_api() {
     assert_eq!(names, eligible);
     assert!(!names.iter().any(|name| name == "debugger_action"));
     assert!(!names.iter().any(|name| name == "native_console_action"));
+    // The saved invocation sites are readable. Resolving runs the analysis
+    // worker and changing the set changes the app's next capture, so both
+    // stay hidden until --allow-effects.
+    assert!(names.iter().any(|name| name == "get_js_invocation_sites"));
+    assert!(
+        !names
+            .iter()
+            .any(|name| name == "resolve_js_invocation_site" || name == "js_invocation_site_action")
+    );
 
     let client = reqwest::Client::builder()
         .no_proxy()
@@ -1391,7 +1400,10 @@ wait "$backend"
         // An inherited document-start permission must not reach the session.
         .env("REB_CONSOLE_DOCUMENT_START", "1")
         // Nor may the researcher's invocation sites or value digests.
-        .env("REB_NATIVE_JS_INVOCATION_SITES", root.path().join("sites.json"))
+        .env(
+            "REB_NATIVE_JS_INVOCATION_SITES",
+            root.path().join("sites.json"),
+        )
         .env("REB_NATIVE_JS_INVOCATION_DIGESTS", "1")
         .env("TEST_BROKER_SOCKET", &socket)
         .stdin(Stdio::piped())

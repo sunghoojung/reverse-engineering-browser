@@ -1,0 +1,411 @@
+{
+  "format": "reb-native-js-invocation-site-cases-v1",
+  "description": "Shared native-js-invocation-sites-v1 site computations. tools/native-js-invocation-site.py --self-test and the Origin Trace backend's js_invocation_sites tests both compute every case from its bytes and must produce exactly these sites, file texts and refusal kinds. source is UTF-8 text; source_hex is raw bytes. byte_offset is the UTF-8 offset in the artifact bytes, BOM included.",
+  "cases": [
+    {
+      "name": "bom-and-utf16-anchor",
+      "note": "One leading BOM is removed before hashing; \u00e9 is two UTF-8 bytes and one UTF-16 unit.",
+      "source": "\ufeffvar a='\u00e9';window.hsw=function(aGh,jR,qN){return aGh};",
+      "artifact_id": "12",
+      "byte_offset": 33,
+      "site": {
+        "anchor_offset": 29,
+        "artifact_id": "12",
+        "artifact_sha256": "ae232d3d73065a2290189326804ce5edb7a06b5a4039e6f74f10e5ce2e2e2dff",
+        "byte_offset": 33,
+        "shape": "function-entry",
+        "source_length": 53,
+        "source_sha256": "401db27941b255fa1794af8a018af07322aef422d5e758e34b1efe0009d68b8d"
+      }
+    },
+    {
+      "name": "astral-before-anchor",
+      "note": "A character outside the BMP is four UTF-8 bytes and two UTF-16 units.",
+      "source": "var s='\ud83d\ude00';f=function(a){}",
+      "artifact_id": "0",
+      "byte_offset": 23,
+      "site": {
+        "anchor_offset": 21,
+        "artifact_id": "0",
+        "artifact_sha256": "dae251d55d8431c9fd298aa02b7e8a5acee2984f44041ed1989f66d72a2e39cd",
+        "byte_offset": 23,
+        "shape": "function-entry",
+        "source_length": 26,
+        "source_sha256": "7663568fcc47c5a76c6c9ef9826d7a1331f6d165c8533283887cb67e35cc8e54"
+      }
+    },
+    {
+      "name": "largest-artifact-id",
+      "note": "The browser accepts any unsigned 64-bit decimal.",
+      "source": "f=function(a){}",
+      "artifact_id": "18446744073709551615",
+      "byte_offset": 10,
+      "site": {
+        "anchor_offset": 10,
+        "artifact_id": "18446744073709551615",
+        "artifact_sha256": "6074e08fea6534e8cc571aeffc5848bb582b5654ebf4027d1470a9d434b6f483",
+        "byte_offset": 10,
+        "shape": "function-entry",
+        "source_length": 15,
+        "source_sha256": "82f920f98be0e04a04769428a7cc4209dddfce42bf308672a601faf74881967f"
+      }
+    },
+    {
+      "name": "only-one-bom-removed",
+      "note": "A second U+FEFF is script text and counts toward the anchor.",
+      "source": "\ufeff\ufefff=function(a){}",
+      "artifact_id": "7",
+      "byte_offset": 16,
+      "site": {
+        "anchor_offset": 11,
+        "artifact_id": "7",
+        "artifact_sha256": "2872cf814d91d538549e2b1b6274d28a8110ef2f4ac9c7bb216cb2ce926b3f8a",
+        "byte_offset": 16,
+        "shape": "function-entry",
+        "source_length": 16,
+        "source_sha256": "dd3df283cf7d43478203bafac442717b79488f968c3f2fe9699636510ed8a9cb"
+      }
+    },
+    {
+      "name": "line-separators-are-text",
+      "note": "CR, LF and U+2028 are ordinary UTF-16 units; nothing is normalized.",
+      "source": "a=1;\r\n\u2028b=function(x){}",
+      "artifact_id": "8",
+      "byte_offset": 19,
+      "site": {
+        "anchor_offset": 17,
+        "artifact_id": "8",
+        "artifact_sha256": "2e314f47fd6dda27970be8a2eb6e02f30b4a2b495963b3ebcecd58256b4def28",
+        "byte_offset": 19,
+        "shape": "function-entry",
+        "source_length": 22,
+        "source_sha256": "db94b1d6c63d1acfea303271b704d1d7fdc5bf177b99c9ea781b8b8a4f360398"
+      }
+    },
+    {
+      "name": "arrow-head-paren",
+      "note": "A parenthesized arrow head starts at its `(`.",
+      "source": "g=(a,b)=>a",
+      "artifact_id": "9",
+      "byte_offset": 2,
+      "site": {
+        "anchor_offset": 2,
+        "artifact_id": "9",
+        "artifact_sha256": "ce7dd53e310fdf2fc05ed9a4327bf8322067c0f587282920a2ce13960c8e2fb6",
+        "byte_offset": 2,
+        "shape": "function-entry",
+        "source_length": 10,
+        "source_sha256": "168807268deb2b44477140d902b582af4caa5ec0e1bf93eeaa87d90f00a3e734"
+      }
+    },
+    {
+      "name": "not-a-paren",
+      "note": "Any character other than `(` is refused, never moved to a nearby one.",
+      "source": "\ufeffvar a='\u00e9';window.hsw=function(aGh,jR,qN){return aGh};",
+      "artifact_id": "12",
+      "byte_offset": 25,
+      "error": "not_paren"
+    },
+    {
+      "name": "inside-the-bom",
+      "note": "Offsets inside the removed BOM are outside the script text.",
+      "source": "\ufefff=function(a){}",
+      "artifact_id": "12",
+      "byte_offset": 1,
+      "error": "outside"
+    },
+    {
+      "name": "past-the-end",
+      "note": "The offset must name a character.",
+      "source": "f=function(a){}",
+      "artifact_id": "12",
+      "byte_offset": 15,
+      "error": "outside"
+    },
+    {
+      "name": "inside-a-character",
+      "note": "An offset inside a multibyte character is refused.",
+      "source": "var \u00e9=function(a){}",
+      "artifact_id": "12",
+      "byte_offset": 5,
+      "error": "boundary"
+    },
+    {
+      "name": "invalid-utf8",
+      "note": "Invalid UTF-8 anywhere refuses the artifact.",
+      "source_hex": "28ff29",
+      "artifact_id": "12",
+      "byte_offset": 0,
+      "error": "utf8"
+    },
+    {
+      "name": "encoded-surrogate",
+      "note": "An encoded UTF-16 surrogate is not strict UTF-8.",
+      "source_hex": "eda08028",
+      "artifact_id": "12",
+      "byte_offset": 3,
+      "error": "utf8"
+    },
+    {
+      "name": "overlong-encoding",
+      "note": "An overlong encoding is not strict UTF-8.",
+      "source_hex": "c0af28",
+      "artifact_id": "12",
+      "byte_offset": 2,
+      "error": "utf8"
+    },
+    {
+      "name": "leading-zero-id",
+      "note": "Artifact IDs are canonical decimals.",
+      "source": "f=function(a){}",
+      "artifact_id": "012",
+      "byte_offset": 10,
+      "error": "artifact_id"
+    },
+    {
+      "name": "non-ascii-digit-id",
+      "note": "Only ASCII digits form an artifact ID, as the browser reads it.",
+      "source": "f=function(a){}",
+      "artifact_id": "\u0661\u0662",
+      "byte_offset": 10,
+      "error": "artifact_id"
+    },
+    {
+      "name": "id-above-u64",
+      "note": "Artifact IDs fit in an unsigned 64-bit integer.",
+      "source": "f=function(a){}",
+      "artifact_id": "18446744073709551616",
+      "byte_offset": 10,
+      "error": "artifact_id"
+    },
+    {
+      "name": "empty-id",
+      "note": "An artifact ID is required.",
+      "source": "f=function(a){}",
+      "artifact_id": "",
+      "byte_offset": 10,
+      "error": "artifact_id"
+    },
+    {
+      "name": "signed-id",
+      "note": "A sign is not a digit.",
+      "source": "f=function(a){}",
+      "artifact_id": "+1",
+      "byte_offset": 10,
+      "error": "artifact_id"
+    },
+    {
+      "name": "many-0",
+      "note": "One of nine functions in one script.",
+      "source": "f0=function(a){};f1=function(a){};f2=function(a){};f3=function(a){};f4=function(a){};f5=function(a){};f6=function(a){};f7=function(a){};f8=function(a){};",
+      "artifact_id": "100",
+      "byte_offset": 11,
+      "site": {
+        "anchor_offset": 11,
+        "artifact_id": "100",
+        "artifact_sha256": "f9d40fc813b5a24202f444a9eb9391a73ad7aaf9f21c63c5ca4cde8c926396e3",
+        "byte_offset": 11,
+        "shape": "function-entry",
+        "source_length": 153,
+        "source_sha256": "f5588e9affba4a2d6ea365da4d8f17c4b68d5091f9da82528211449df9bf07ab"
+      }
+    },
+    {
+      "name": "many-1",
+      "note": "One of nine functions in one script.",
+      "source": "f0=function(a){};f1=function(a){};f2=function(a){};f3=function(a){};f4=function(a){};f5=function(a){};f6=function(a){};f7=function(a){};f8=function(a){};",
+      "artifact_id": "101",
+      "byte_offset": 28,
+      "site": {
+        "anchor_offset": 28,
+        "artifact_id": "101",
+        "artifact_sha256": "f9d40fc813b5a24202f444a9eb9391a73ad7aaf9f21c63c5ca4cde8c926396e3",
+        "byte_offset": 28,
+        "shape": "function-entry",
+        "source_length": 153,
+        "source_sha256": "f5588e9affba4a2d6ea365da4d8f17c4b68d5091f9da82528211449df9bf07ab"
+      }
+    },
+    {
+      "name": "many-2",
+      "note": "One of nine functions in one script.",
+      "source": "f0=function(a){};f1=function(a){};f2=function(a){};f3=function(a){};f4=function(a){};f5=function(a){};f6=function(a){};f7=function(a){};f8=function(a){};",
+      "artifact_id": "102",
+      "byte_offset": 45,
+      "site": {
+        "anchor_offset": 45,
+        "artifact_id": "102",
+        "artifact_sha256": "f9d40fc813b5a24202f444a9eb9391a73ad7aaf9f21c63c5ca4cde8c926396e3",
+        "byte_offset": 45,
+        "shape": "function-entry",
+        "source_length": 153,
+        "source_sha256": "f5588e9affba4a2d6ea365da4d8f17c4b68d5091f9da82528211449df9bf07ab"
+      }
+    },
+    {
+      "name": "many-3",
+      "note": "One of nine functions in one script.",
+      "source": "f0=function(a){};f1=function(a){};f2=function(a){};f3=function(a){};f4=function(a){};f5=function(a){};f6=function(a){};f7=function(a){};f8=function(a){};",
+      "artifact_id": "103",
+      "byte_offset": 62,
+      "site": {
+        "anchor_offset": 62,
+        "artifact_id": "103",
+        "artifact_sha256": "f9d40fc813b5a24202f444a9eb9391a73ad7aaf9f21c63c5ca4cde8c926396e3",
+        "byte_offset": 62,
+        "shape": "function-entry",
+        "source_length": 153,
+        "source_sha256": "f5588e9affba4a2d6ea365da4d8f17c4b68d5091f9da82528211449df9bf07ab"
+      }
+    },
+    {
+      "name": "many-4",
+      "note": "One of nine functions in one script.",
+      "source": "f0=function(a){};f1=function(a){};f2=function(a){};f3=function(a){};f4=function(a){};f5=function(a){};f6=function(a){};f7=function(a){};f8=function(a){};",
+      "artifact_id": "104",
+      "byte_offset": 79,
+      "site": {
+        "anchor_offset": 79,
+        "artifact_id": "104",
+        "artifact_sha256": "f9d40fc813b5a24202f444a9eb9391a73ad7aaf9f21c63c5ca4cde8c926396e3",
+        "byte_offset": 79,
+        "shape": "function-entry",
+        "source_length": 153,
+        "source_sha256": "f5588e9affba4a2d6ea365da4d8f17c4b68d5091f9da82528211449df9bf07ab"
+      }
+    },
+    {
+      "name": "many-5",
+      "note": "One of nine functions in one script.",
+      "source": "f0=function(a){};f1=function(a){};f2=function(a){};f3=function(a){};f4=function(a){};f5=function(a){};f6=function(a){};f7=function(a){};f8=function(a){};",
+      "artifact_id": "105",
+      "byte_offset": 96,
+      "site": {
+        "anchor_offset": 96,
+        "artifact_id": "105",
+        "artifact_sha256": "f9d40fc813b5a24202f444a9eb9391a73ad7aaf9f21c63c5ca4cde8c926396e3",
+        "byte_offset": 96,
+        "shape": "function-entry",
+        "source_length": 153,
+        "source_sha256": "f5588e9affba4a2d6ea365da4d8f17c4b68d5091f9da82528211449df9bf07ab"
+      }
+    },
+    {
+      "name": "many-6",
+      "note": "One of nine functions in one script.",
+      "source": "f0=function(a){};f1=function(a){};f2=function(a){};f3=function(a){};f4=function(a){};f5=function(a){};f6=function(a){};f7=function(a){};f8=function(a){};",
+      "artifact_id": "106",
+      "byte_offset": 113,
+      "site": {
+        "anchor_offset": 113,
+        "artifact_id": "106",
+        "artifact_sha256": "f9d40fc813b5a24202f444a9eb9391a73ad7aaf9f21c63c5ca4cde8c926396e3",
+        "byte_offset": 113,
+        "shape": "function-entry",
+        "source_length": 153,
+        "source_sha256": "f5588e9affba4a2d6ea365da4d8f17c4b68d5091f9da82528211449df9bf07ab"
+      }
+    },
+    {
+      "name": "many-7",
+      "note": "One of nine functions in one script.",
+      "source": "f0=function(a){};f1=function(a){};f2=function(a){};f3=function(a){};f4=function(a){};f5=function(a){};f6=function(a){};f7=function(a){};f8=function(a){};",
+      "artifact_id": "107",
+      "byte_offset": 130,
+      "site": {
+        "anchor_offset": 130,
+        "artifact_id": "107",
+        "artifact_sha256": "f9d40fc813b5a24202f444a9eb9391a73ad7aaf9f21c63c5ca4cde8c926396e3",
+        "byte_offset": 130,
+        "shape": "function-entry",
+        "source_length": 153,
+        "source_sha256": "f5588e9affba4a2d6ea365da4d8f17c4b68d5091f9da82528211449df9bf07ab"
+      }
+    },
+    {
+      "name": "many-8",
+      "note": "One of nine functions in one script.",
+      "source": "f0=function(a){};f1=function(a){};f2=function(a){};f3=function(a){};f4=function(a){};f5=function(a){};f6=function(a){};f7=function(a){};f8=function(a){};",
+      "artifact_id": "108",
+      "byte_offset": 147,
+      "site": {
+        "anchor_offset": 147,
+        "artifact_id": "108",
+        "artifact_sha256": "f9d40fc813b5a24202f444a9eb9391a73ad7aaf9f21c63c5ca4cde8c926396e3",
+        "byte_offset": 147,
+        "shape": "function-entry",
+        "source_length": 153,
+        "source_sha256": "f5588e9affba4a2d6ea365da4d8f17c4b68d5091f9da82528211449df9bf07ab"
+      }
+    },
+    {
+      "name": "same-function-other-artifact",
+      "note": "The same function retained twice is one site.",
+      "source": "\ufeffvar a='\u00e9';window.hsw=function(aGh,jR,qN){return aGh};",
+      "artifact_id": "13",
+      "byte_offset": 33,
+      "site": {
+        "anchor_offset": 29,
+        "artifact_id": "13",
+        "artifact_sha256": "ae232d3d73065a2290189326804ce5edb7a06b5a4039e6f74f10e5ce2e2e2dff",
+        "byte_offset": 33,
+        "shape": "function-entry",
+        "source_length": 53,
+        "source_sha256": "401db27941b255fa1794af8a018af07322aef422d5e758e34b1efe0009d68b8d"
+      }
+    }
+  ],
+  "files": [
+    {
+      "name": "three-sites",
+      "cases": [
+        "bom-and-utf16-anchor",
+        "astral-before-anchor",
+        "largest-artifact-id"
+      ],
+      "file": "{\"sites\":[{\"anchor_offset\":29,\"artifact_id\":\"12\",\"artifact_sha256\":\"ae232d3d73065a2290189326804ce5edb7a06b5a4039e6f74f10e5ce2e2e2dff\",\"byte_offset\":33,\"shape\":\"function-entry\",\"source_length\":53,\"source_sha256\":\"401db27941b255fa1794af8a018af07322aef422d5e758e34b1efe0009d68b8d\"},{\"anchor_offset\":21,\"artifact_id\":\"0\",\"artifact_sha256\":\"dae251d55d8431c9fd298aa02b7e8a5acee2984f44041ed1989f66d72a2e39cd\",\"byte_offset\":23,\"shape\":\"function-entry\",\"source_length\":26,\"source_sha256\":\"7663568fcc47c5a76c6c9ef9826d7a1331f6d165c8533283887cb67e35cc8e54\"},{\"anchor_offset\":10,\"artifact_id\":\"18446744073709551615\",\"artifact_sha256\":\"6074e08fea6534e8cc571aeffc5848bb582b5654ebf4027d1470a9d434b6f483\",\"byte_offset\":10,\"shape\":\"function-entry\",\"source_length\":15,\"source_sha256\":\"82f920f98be0e04a04769428a7cc4209dddfce42bf308672a601faf74881967f\"}],\"version\":1}"
+    },
+    {
+      "name": "eight-sites",
+      "cases": [
+        "many-0",
+        "many-1",
+        "many-2",
+        "many-3",
+        "many-4",
+        "many-5",
+        "many-6",
+        "many-7"
+      ],
+      "file": "{\"sites\":[{\"anchor_offset\":11,\"artifact_id\":\"100\",\"artifact_sha256\":\"f9d40fc813b5a24202f444a9eb9391a73ad7aaf9f21c63c5ca4cde8c926396e3\",\"byte_offset\":11,\"shape\":\"function-entry\",\"source_length\":153,\"source_sha256\":\"f5588e9affba4a2d6ea365da4d8f17c4b68d5091f9da82528211449df9bf07ab\"},{\"anchor_offset\":28,\"artifact_id\":\"101\",\"artifact_sha256\":\"f9d40fc813b5a24202f444a9eb9391a73ad7aaf9f21c63c5ca4cde8c926396e3\",\"byte_offset\":28,\"shape\":\"function-entry\",\"source_length\":153,\"source_sha256\":\"f5588e9affba4a2d6ea365da4d8f17c4b68d5091f9da82528211449df9bf07ab\"},{\"anchor_offset\":45,\"artifact_id\":\"102\",\"artifact_sha256\":\"f9d40fc813b5a24202f444a9eb9391a73ad7aaf9f21c63c5ca4cde8c926396e3\",\"byte_offset\":45,\"shape\":\"function-entry\",\"source_length\":153,\"source_sha256\":\"f5588e9affba4a2d6ea365da4d8f17c4b68d5091f9da82528211449df9bf07ab\"},{\"anchor_offset\":62,\"artifact_id\":\"103\",\"artifact_sha256\":\"f9d40fc813b5a24202f444a9eb9391a73ad7aaf9f21c63c5ca4cde8c926396e3\",\"byte_offset\":62,\"shape\":\"function-entry\",\"source_length\":153,\"source_sha256\":\"f5588e9affba4a2d6ea365da4d8f17c4b68d5091f9da82528211449df9bf07ab\"},{\"anchor_offset\":79,\"artifact_id\":\"104\",\"artifact_sha256\":\"f9d40fc813b5a24202f444a9eb9391a73ad7aaf9f21c63c5ca4cde8c926396e3\",\"byte_offset\":79,\"shape\":\"function-entry\",\"source_length\":153,\"source_sha256\":\"f5588e9affba4a2d6ea365da4d8f17c4b68d5091f9da82528211449df9bf07ab\"},{\"anchor_offset\":96,\"artifact_id\":\"105\",\"artifact_sha256\":\"f9d40fc813b5a24202f444a9eb9391a73ad7aaf9f21c63c5ca4cde8c926396e3\",\"byte_offset\":96,\"shape\":\"function-entry\",\"source_length\":153,\"source_sha256\":\"f5588e9affba4a2d6ea365da4d8f17c4b68d5091f9da82528211449df9bf07ab\"},{\"anchor_offset\":113,\"artifact_id\":\"106\",\"artifact_sha256\":\"f9d40fc813b5a24202f444a9eb9391a73ad7aaf9f21c63c5ca4cde8c926396e3\",\"byte_offset\":113,\"shape\":\"function-entry\",\"source_length\":153,\"source_sha256\":\"f5588e9affba4a2d6ea365da4d8f17c4b68d5091f9da82528211449df9bf07ab\"},{\"anchor_offset\":130,\"artifact_id\":\"107\",\"artifact_sha256\":\"f9d40fc813b5a24202f444a9eb9391a73ad7aaf9f21c63c5ca4cde8c926396e3\",\"byte_offset\":130,\"shape\":\"function-entry\",\"source_length\":153,\"source_sha256\":\"f5588e9affba4a2d6ea365da4d8f17c4b68d5091f9da82528211449df9bf07ab\"}],\"version\":1}"
+    },
+    {
+      "name": "nine-sites",
+      "cases": [
+        "many-0",
+        "many-1",
+        "many-2",
+        "many-3",
+        "many-4",
+        "many-5",
+        "many-6",
+        "many-7",
+        "many-8"
+      ],
+      "error": "count"
+    },
+    {
+      "name": "duplicate-function",
+      "cases": [
+        "bom-and-utf16-anchor",
+        "same-function-other-artifact"
+      ],
+      "error": "duplicate"
+    },
+    {
+      "name": "empty",
+      "cases": [],
+      "error": "count"
+    }
+  ]
+}

@@ -24,6 +24,20 @@ pub struct Options {
     pub api_collection: PathBuf,
     #[arg(long, default_value = "build/sessions/local-analyst-workspace-v1.json")]
     pub local_analyst: PathBuf,
+    /// The app's saved native JavaScript invocation sites, which the next
+    /// app-started capture arms. A label sidecar is kept beside it.
+    #[arg(long, default_value = "build/sessions/js-invocation-sites-v1.json")]
+    pub js_invocation_site_store: PathBuf,
+    /// The site file this session's launcher was asked to arm, read once.
+    #[arg(long)]
+    pub js_invocation_session_sites: Option<PathBuf>,
+    /// `armed`, or `browser_unsupported` when the launcher started without
+    /// the sites because this Brave does not define invocation capture.
+    #[arg(long, requires = "js_invocation_session_sites", value_parser = ["armed", "browser_unsupported"])]
+    pub js_invocation_session_state: Option<String>,
+    /// This session records settled-value digests of armed calls.
+    #[arg(long, requires = "js_invocation_session_sites")]
+    pub js_invocation_session_digests: bool,
     #[arg(long)]
     pub decoder: Option<PathBuf>,
     #[arg(long)]
@@ -92,6 +106,7 @@ impl Options {
             &mut self.artifacts,
             &mut self.api_collection,
             &mut self.local_analyst,
+            &mut self.js_invocation_site_store,
         ] {
             if !path.is_absolute() {
                 *path = current.join(&*path);
@@ -112,6 +127,7 @@ impl Options {
             &mut self.native_console_live_directory,
             &mut self.endpoint_file,
             &mut self.active_endpoint_file,
+            &mut self.js_invocation_session_sites,
         ]
         .into_iter()
         .flatten()

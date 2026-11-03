@@ -476,6 +476,10 @@ pub async fn launch(options: &StartOptions) -> Result<Started, String> {
         // Request paths, queries and bodies are sensitive and not a named
         // option, so an inherited switch never turns them on here.
         .env("REB_CAPTURE_REQUEST_CONTENT", "0")
+        // Document-start Console scripts run researcher code in new matching
+        // documents. The browser-session permission is not a named option, so
+        // an inherited switch never grants it to an agent-started capture.
+        .env("REB_CONSOLE_DOCUMENT_START", "0")
         .env("REB_LOCALHOST_ONLY", switch(options.localhost_only))
         // An agent cannot answer a macOS Keychain prompt, so agent sessions use
         // a prompt-free isolated profile. Do not save passwords in it.

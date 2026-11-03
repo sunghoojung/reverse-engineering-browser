@@ -93,6 +93,13 @@ export async function checkNativeConsoleLiveDocuments(root) {
     if (path === '/api/native-console') {
       return {ok: true, status: 200, json: async () => ({...listing(), message: liveAvailable ? 'These documents come from the live capture.' : 'Live capture binding unavailable. Restart the capture.'})};
     }
+    // This capture never permitted document-start scripts, so live selection
+    // and consent must stay unaffected by the experiment being unavailable.
+    if (path.startsWith('/api/native-console/document-start')) {
+      return {ok: true, status: 200, json: async () => ({contract_version: 3, available: true, state: session ? 'ready' : 'idle', session_id: session,
+        document_start: {status: 'unavailable', permitted: false, scripts: [], message: 'This live capture does not permit document-start scripts'},
+        limits: {scripts: 4, source_bytes: 4096, total_source_bytes: 8192, rule_bytes: 256, report_bytes: 512, records_per_document: 64, retained_records: 128, records_per_read: 32, execution_millis: 50}})};
+    }
     calls.push(action);
     assert.notEqual(action.action, 'start', 'live selection must never silently launch a disposable browser');
     if (action.action === 'connect_live') {

@@ -2324,6 +2324,36 @@ body.resizing-panes-y, body.resizing-panes-y * { cursor: row-resize !important; 
 
 .native-console-value { font: 12px/18px var(--mono); overflow-wrap: anywhere; }
 .native-console-result[data-status="rejected"] .native-console-primitive { color: var(--red); }
+
+/* The document-start experiment states its own provenance on every row and
+   keeps its indicator in the header, outside the settings menu. */
+.native-console-ds-badge { height: 20px; flex-shrink: 0; max-width: 140px; overflow: hidden; padding: 0 6px; border: 1px solid var(--line); border-radius: 10px; background: transparent; color: var(--faint); font: 10px/18px var(--sans); white-space: nowrap; text-overflow: ellipsis; cursor: pointer; }
+.native-console-ds-badge[hidden] { display: none; }
+.native-console-ds-badge:hover { color: var(--text); background: var(--panel-3); }
+.native-console-ds-badge[data-state="armed"] { color: var(--amber); border-color: color-mix(in srgb, var(--amber) 45%, var(--line)); background: color-mix(in srgb, var(--amber) 10%, transparent); }
+.native-console-ds-badge[data-state="ready"] { color: var(--muted); }
+/* A removal the browser never confirmed is louder than an armed set: the
+   researcher believes nothing runs, and it still might. */
+.native-console-ds-badge[data-state="unconfirmed"] { color: var(--red); border-color: color-mix(in srgb, var(--red) 45%, var(--line)); background: color-mix(in srgb, var(--red) 10%, transparent); }
+.native-console-ds { font: 11px/18px var(--sans); padding-top: 6px; }
+.native-console-ds > summary { color: var(--muted); cursor: pointer; }
+.native-console-panel[data-document-start="armed"] .native-console-ds > summary { color: var(--amber); }
+.native-console-ds input[type="text"], .native-console-ds textarea { width: 100%; min-width: 0; border: 1px solid var(--line); border-radius: 4px; background: var(--panel); color: var(--text); padding: 2px 6px; font: 11px var(--mono); }
+.native-console-ds textarea { max-height: 120px; resize: vertical; }
+.native-console-ds .native-console-setting { align-items: flex-start; flex-direction: column; gap: 2px; }
+.native-console-ds .native-console-setting:has(input[type="checkbox"]) { flex-direction: row; align-items: flex-start; }
+/* Two class names so the connection menu's shared `select { flex: 1 }` cannot
+   collapse a control stacked inside an auto-height column. */
+.native-console-ds .native-console-setting select, .native-console-ds .native-console-setting input, .native-console-ds .native-console-setting textarea { flex: none; width: 100%; min-width: 0; }
+.native-console-ds .native-console-setting select { height: 24px; border: 1px solid var(--line); border-radius: 4px; background: var(--panel); color: var(--text); font: 11px var(--sans); }
+.native-console-ds .native-console-setting input[type="checkbox"] { width: auto; }
+.native-console-ds-armed { margin: 6px 0 0; padding: 0; list-style: none; }
+.native-console-ds-armed li { color: var(--muted); font: 10px/16px var(--mono); overflow-wrap: anywhere; }
+#native-console-ds-state, #native-console-ds-counters, #native-console-ds-privacy, #native-console-ds-rule-help { margin: 6px 0 0; color: var(--faint); font: 10px/16px var(--sans); overflow-wrap: anywhere; }
+.native-console-ds-record { border-left: 2px solid color-mix(in srgb, var(--amber) 55%, transparent); }
+.native-console-ds-record[data-record="script_error"] { border-left-color: var(--red); }
+.native-console-ds-provenance { display: block; padding: 0 0 2px; color: var(--faint); font: 10px/16px var(--mono); overflow-wrap: anywhere; }
+.native-console-ds-record pre { padding-left: 16px; font: 12px/18px var(--mono); overflow-wrap: anywhere; white-space: pre-wrap; }
 #screen-traffic[data-console-traffic="true"] > :not(#console-experiment-traffic) { display: none; }
 .console-experiment-traffic { min-width: 0; min-height: 0; padding: 12px; overflow: auto; flex: 1; }
 .console-experiment-traffic[hidden] { display: none; }
@@ -2455,6 +2485,15 @@ body.resizing-panes-y, body.resizing-panes-y * { cursor: row-resize !important; 
   .native-console-panel[data-session="idle"]:not([data-document-source="live_capture"]) .native-console-context { display: none; }
   .native-console-context select { width: 100%; flex: 1; }
   .native-console-head-spacer, .native-console-extended-help, .native-console-private { display: none; }
+  /* Keep the experiment indicator reachable in a narrow header as a marker
+     rather than a label that squeezes the other controls out. Its title and
+     accessible name still carry the full state, and an armed experiment stays
+     the only amber marker in the header. */
+  .native-console-ds-badge { display: flex; align-items: center; justify-content: center; width: 22px; max-width: 22px; padding: 0; font-size: 0; }
+  .native-console-ds-badge::before { content: ''; width: 6px; height: 6px; border-radius: 50%; background: var(--faint); }
+  .native-console-ds-badge[data-state="ready"]::before { background: var(--muted); }
+  .native-console-ds-badge[data-state="armed"]::before { background: var(--amber); }
+  .native-console-ds-badge[data-state="unconfirmed"]::before { background: var(--red); }
   .native-console-composer-footer { font-size: 10px; }
   .native-console-composer-footer #native-console-input-help { display: none; }
 }

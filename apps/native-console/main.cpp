@@ -189,7 +189,10 @@ class Console final {
       std::cout << "  " << target.id << ','
                 << Quote(std::string_view(target.origin.data(), target.origin_bytes)) << '\n';
     }
-    std::cout << "truncated: " << (response_.flags ? "true" : "false") << '\n';
+    // Only the truncation bit changes the listing's meaning here; the
+    // document-start capability bit is the owner's concern.
+    std::cout << "truncated: "
+              << ((response_.flags & reb::kNativeConsoleTruncated) ? "true" : "false") << '\n';
     if (target_count_ == 0)
       std::cout << "state: no eligible HTTP or HTTPS frames\n";
     std::cout << "help: \"Use :use <id> to select a document; :targets refreshes and clears "
@@ -234,7 +237,8 @@ class Console final {
     std::cout << "result:\n  type: " << TypeName(response_.type) << "\n  value: "
               << Quote(std::string_view(reinterpret_cast<const char*>(payload_.data()),
                                         response_.payload_bytes))
-              << "\n  truncated: " << (response_.flags ? "true" : "false") << '\n';
+              << "\n  truncated: "
+              << ((response_.flags & reb::kNativeConsoleTruncated) ? "true" : "false") << '\n';
     std::cout.flush();
     return true;
   }

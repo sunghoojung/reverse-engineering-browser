@@ -285,6 +285,27 @@ retains an unavailable selection rather than silently choosing another tab or
 falling back to disposable execution. Disconnect before selecting and authorizing
 another document. Disconnect does not undo page effects or kill capture.
 
+### Document-start scripts
+
+**Document-start scripts (experiment)** in Session settings arms a snippet that
+runs in the page main world of every new matching document, before that
+document's own scripts. It is a separate opt-in from live execution: the
+browser session must have been launched with permission, and arming needs an
+exact rule plus its own confirmation. A rule is one exact origin, exactly one
+frame kind, and an optional literal path prefix; there is no pattern, wildcard
+or host suffix, and a document already open is never retroactively injected.
+
+A header chip shows the experiment's state without opening the settings, so an
+armed experiment is always visible. Snippet output appears in the transcript
+labeled `page JavaScript · console-document-start-script`, inserted as text and
+filterable by level like any other row. It is never evidence, never joined into
+correlated links, and never exported automatically. Clearing the set, or
+disconnecting, removes the scripts and their output. When a live capture cannot
+confirm that removal, Disconnect fails and the chip turns red and reads
+`Doc-start: unconfirmed` instead of switching off. See
+[Native Console v3](../../protocol/native-console-v3.md) and the
+[workflow guide](../../docs/development/console-document-start-scripts.md).
+
 Set `REB_BRAVE_BINARY` to the matching rebuilt custom browser and use the live
 backend. The [native contract](../../protocol/native-console-v2.md) specifies
 ownership, rebuild compatibility and the real-browser acceptance gates. No

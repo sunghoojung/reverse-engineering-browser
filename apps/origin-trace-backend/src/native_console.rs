@@ -11,6 +11,7 @@ use std::{
     os::unix::fs::{FileTypeExt, OpenOptionsExt, PermissionsExt},
     path::{Path, PathBuf},
     process::Stdio,
+    sync::atomic::{AtomicBool, Ordering},
     time::{Duration, Instant},
 };
 use tempfile::TempDir;
@@ -26,6 +27,10 @@ const TEXT_LIMIT: usize = 8192;
 const TARGET_LIMIT: usize = 64;
 const TARGET_SIZE: usize = 920;
 const RUNTIME_LIMIT: usize = 65536;
+const DOCUMENT_START_SCRIPT_LIMIT: usize = 4;
+const DOCUMENT_START_SOURCE_LIMIT: usize = 4096;
+const DOCUMENT_START_TOTAL_SOURCE_LIMIT: usize = 8192;
+const DOCUMENT_START_RULE_LIMIT: usize = 256;
 
 // Own both process groups, including Chromium descendants. kill_on_drop alone
 // stops only the immediate process and can leave renderer/profile owners alive.
@@ -96,6 +101,15 @@ struct Session {
     live_target: Option<u64>,
     native_targets: BTreeSet<u64>,
     accessed_targets: BTreeSet<u64>,
+    // The browser advertises document-start support on its target listing. An
+    // older browser leaves it clear, so operation 4 is never sent to a browser
+    // that would reject it and retire this working session.
+    document_start: bool,
+    // The browser may hold an armed set. Raised before an arm is sent, because
+    // an ambiguous failure can still have armed it, and lowered only by a
+    // browser reply that lists no script. A live binding outlives each Console
+    // connection, so Stop must not hand it back while this is set.
+    document_start_armed: bool,
 }
 impl Session {
     async fn stop(mut self) {
@@ -150,6 +164,23 @@ impl Session {
         self.accessed_targets.clear();
         Ok(())
     }
+    // The browser clears its registry only when it is told to or when this wire
+    // connection ends. A live Stop keeps the connection for the next Console
+    // connection, so it clears explicitly and requires the browser to confirm
+    // that nothing is armed.
+    async fn clear_document_start(&mut self) -> Result<()> {
+        match self.exchange(4, 0, r#"{"operation":"clear"}"#).await {
+            Ok(result)
+                if result["document_start"]["status"] == "ok" && !self.document_start_armed =>
+            {
+                Ok(())
+            }
+            Ok(_) => Err(Error::conflict(DOCUMENT_START_UNCONFIRMED)),
+            Err(error) => {
+                Err(Error::conflict(DOCUMENT_START_UNCONFIRMED).with_reason(error.reason))
+            }
+        }
+    }
     async fn exchange(&mut self, operation: u16, target: u64, source: &str) -> Result<Value> {
         // If the HTTP future is cancelled mid-exchange, the session stays
         // poisoned. Never retry an expression or reuse an ambiguous pipe.
@@ -188,6 +219,15 @@ impl Session {
               e
           })?;
         self.poisoned = false;
+        if operation == 1 {
+            self.document_start = result["document_start_supported"] == json!(true);
+        }
+        // Every document-start reply, including a refusal, lists what is armed.
+        if operation == 4
+            && let Some(scripts) = result["document_start"]["scripts"].as_array()
+        {
+            self.document_start_armed = !scripts.is_empty();
+        }
         Ok(result)
     }
 }
@@ -196,6 +236,7 @@ struct ResponseHeader {
     status: u16,
     kind: u16,
     truncated: bool,
+    document_start: bool,
     count: usize,
     bytes: usize,
 }
@@ -203,10 +244,12 @@ impl ResponseHeader {
     fn parse(bytes: &[u8; 32], request: u64, operation: u16) -> Result<Self> {
         let u16_at = |i| u16::from_le_bytes(bytes[i..i + 2].try_into().unwrap());
         let u32_at = |i| u32::from_le_bytes(bytes[i..i + 4].try_into().unwrap());
+        let flags = u16_at(18);
         let parsed = Self {
             status: u16_at(6),
             kind: u16_at(16),
-            truncated: u16_at(18) != 0,
+            truncated: flags & 1 != 0,
+            document_start: flags & 2 != 0,
             count: u32_at(20) as usize,
             bytes: u32_at(24) as usize,
         };
@@ -215,10 +258,15 @@ impl ResponseHeader {
             || u64::from_le_bytes(bytes[8..16].try_into().unwrap()) != request
             || u32_at(28) != 0
             || parsed.status > 6
-            || parsed.kind > 11
+            || parsed.kind > 12
             || (parsed.kind == 11 && operation != 3)
+            || (parsed.kind == 12 && operation != 4)
             || (operation == 3 && parsed.status == 0 && parsed.kind != 11)
-            || u16_at(18) > 1
+            || (operation == 4 && parsed.status == 0 && parsed.kind != 12)
+            || flags > 3
+            // The capability bit is listing-only, so a command reply can never
+            // smuggle in a claim that this browser supports the experiment.
+            || (parsed.document_start && parsed.kind != 10)
             || (parsed.kind == 10
                 && (operation != 1
                     || parsed.status != 0
@@ -227,7 +275,7 @@ impl ResponseHeader {
             || (parsed.kind != 10
                 && (parsed.count != 0
                     || parsed.bytes
-                        > if parsed.kind == 11 {
+                        > if parsed.kind == 11 || parsed.kind == 12 {
                             RUNTIME_LIMIT
                         } else {
                             TEXT_LIMIT
@@ -286,7 +334,8 @@ impl ResponseHeader {
                 targets.push(json!({"id":id.to_string(),"origin":origin,"label":label,"url":url,"main_frame":flags & 2 != 0,"truncated":flags & 1 != 0}));
             }
             return Ok(
-                json!({"contract_version":2,"session_id":session,"state":"ready","targets":targets,"truncated":self.truncated}),
+                json!({"contract_version":2,"session_id":session,"state":"ready","targets":targets,"truncated":self.truncated,
+                    "document_start_supported":self.document_start}),
             );
         }
         if self.kind == 11 {
@@ -300,6 +349,19 @@ impl ResponseHeader {
                 Some("error" | "exception" | "rejected")
             );
             let mut result = json!({"contract_version":2,"session_id":session,"state":"ready","runtime":runtime});
+            if failed {
+                Reason::new(Code::ApplicationFailed).annotate(&mut result);
+            }
+            return Ok(result);
+        }
+        if self.kind == 12 {
+            let document_start: Value = serde_json::from_slice(payload)
+                .map_err(|_| Error::protocol("Native document-start result is not JSON"))?;
+            if !document_start.is_object() || self.status != 0 {
+                return Err(Error::protocol("Invalid document-start envelope"));
+            }
+            let failed = document_start["status"] != json!("ok");
+            let mut result = json!({"contract_version":3,"session_id":session,"state":"ready","document_start":document_start});
             if failed {
                 Reason::new(Code::ApplicationFailed).annotate(&mut result);
             }
@@ -353,6 +415,10 @@ pub struct NativeConsole {
     session: Mutex<Option<Session>>,
     live_bridge: Mutex<Option<Session>>,
     live_directory: Option<PathBuf>,
+    // A live binding that may have held an armed set ended without the browser
+    // confirming the set was cleared. Reads report that instead of an idle
+    // experiment until the capture, and with it this backend, is restarted.
+    document_start_unconfirmed: AtomicBool,
 }
 impl NativeConsole {
     pub fn new(options: &Options) -> Self {
@@ -366,7 +432,18 @@ impl NativeConsole {
             session: Mutex::new(None),
             live_bridge: Mutex::new(None),
             live_directory: options.native_console_live_directory.clone(),
+            document_start_unconfirmed: AtomicBool::new(false),
         }
+    }
+    // Ending a live binding closes its wire connection, and the browser drops
+    // the armed set once it notices. That is not a confirmed clear, so it is
+    // recorded rather than reported as an idle experiment.
+    async fn retire(&self, session: Session) {
+        if session.live && session.document_start_armed {
+            self.document_start_unconfirmed
+                .store(true, Ordering::Relaxed);
+        }
+        session.stop().await;
     }
     fn available(&self) -> bool {
         worker::executable(&self.helper)
@@ -383,7 +460,7 @@ impl NativeConsole {
                     .is_some_and(|browser| browser.child.try_wait().ok().flatten().is_some())
                 || session.bridge.child.try_wait().ok().flatten().is_some())
         {
-            guard.take().unwrap().stop().await;
+            self.retire(guard.take().unwrap()).await;
         }
         if guard.as_ref().is_some_and(|session| !session.live) || self.live_directory.is_none() {
             let id = guard.as_ref().map(|session| session.id.as_str());
@@ -408,13 +485,78 @@ impl NativeConsole {
                 }
                 return listing;
             }
-            owner.take().unwrap().stop().await;
+            self.retire(owner.take().unwrap()).await;
         }
         // A vanished or unavailable binding never changes the execution mode.
         // Recover by restarting the capture, not by launching another browser.
         json!({"contract_version":2,"available":self.available(),"live_available":false,"state":"idle","session_id":null,
             "document_source":"live_capture","targets":[],"truncated":false,
             "message":"Live capture console binding unavailable. Rebuild the matching browser and backend, then restart the capture. No second browser profile was launched."})
+    }
+    // Read-only. It never arms, clears, drains, launches, evaluates, or retires
+    // a session, including an expired or poisoned one: retirement stays with
+    // the explicit actions so a read can never destroy a researcher's context.
+    pub async fn document_start(&self, after: u64) -> Result<Value> {
+        let mut guard = self
+            .session
+            .try_lock()
+            .map_err(|_| Error::conflict("Another native console action is running"))?;
+        let Some(session) = guard.as_mut() else {
+            if self.document_start_unconfirmed.load(Ordering::Relaxed) {
+                return Ok(
+                    json!({"contract_version":3,"available":self.available(),"state":"idle","session_id":null,
+                    "document_start":{"status":"unconfirmed","permitted":false,"scripts":[],
+                        "message":DOCUMENT_START_UNCONFIRMED},
+                    "limits":document_start_limits(),"unsupported":document_start_unsupported()}),
+                );
+            }
+            return Ok(
+                json!({"contract_version":3,"available":self.available(),"state":"idle","session_id":null,
+                "document_start":{"status":"idle","permitted":false,"scripts":[],
+                    "message":"Connect the Console with document-start scripts enabled, then arm a rule."},
+                "limits":document_start_limits(),"unsupported":document_start_unsupported()}),
+            );
+        };
+        let ended = if let Some(browser) = session.browser.as_mut() {
+            browser.child.try_wait().ok().flatten().is_some()
+        } else {
+            session.bridge.child.try_wait().ok().flatten().is_some()
+        };
+        if session.poisoned || session.started.elapsed() >= Duration::from_secs(3600) || ended {
+            // A live binding's armed set lives in the capture browser, which
+            // keeps it while the connection is open and confirms nothing when
+            // the connection ends, so neither case may read as gone.
+            let (status, message) = if !session.live || !session.document_start_armed {
+                (
+                    "error",
+                    "This Console session ended. Start another session; armed scripts and their output are gone.",
+                )
+            } else if ended {
+                ("unconfirmed", DOCUMENT_START_UNCONFIRMED)
+            } else {
+                ("unconfirmed", DOCUMENT_START_LIVE_RETIRE)
+            };
+            return Ok(
+                json!({"contract_version":3,"available":self.available(),"state":"ready","session_id":session.id,
+                "document_start":{"status":status,"permitted":false,"scripts":[],"message":message},
+                "limits":document_start_limits(),"unsupported":document_start_unsupported()}),
+            );
+        }
+        if !session.document_start {
+            let mut result = document_start_unavailable(&session.id);
+            result["available"] = json!(self.available());
+            result["limits"] = document_start_limits();
+            result["unsupported"] = document_start_unsupported();
+            return Ok(result);
+        }
+        let command = json!({"operation":"state","after":after.to_string()});
+        let mut result = session
+            .exchange(4, 0, &serde_json::to_string(&command)?)
+            .await?;
+        result["available"] = json!(self.available());
+        result["limits"] = document_start_limits();
+        result["unsupported"] = document_start_unsupported();
+        Ok(result)
     }
     pub async fn stop(&self) {
         if let Some(session) = self.session.lock().await.take() {
@@ -431,7 +573,14 @@ impl NativeConsole {
             .map_err(|_| Error::conflict("Another native console action is running"))?;
         let action = request["action"].as_str().unwrap_or("");
         if action == "start" {
-            validation::fields(request, &["action", "url"], "Native console start")?;
+            // The experiment opt-in is optional so an existing caller that never
+            // asks for it keeps working unchanged.
+            let allowed: &[&str] = if request.get("document_start").is_some() {
+                &["action", "url", "document_start"]
+            } else {
+                &["action", "url"]
+            };
+            validation::fields(request, allowed, "Native console start")?;
             if guard.is_some() {
                 return Err(Error::conflict(
                     "Stop the current native session before starting another",
@@ -454,12 +603,24 @@ impl NativeConsole {
                     "Console URL must use HTTP or HTTPS without embedded credentials",
                 ));
             }
-            let mut session = self.launch(url.as_str()).await?;
+            // Permitting document-start scripts is a launch-time decision for
+            // this disposable browser. The switch alone arms nothing, and a
+            // session started without it can never arm.
+            let document_start = match request.get("document_start") {
+                None => false,
+                Some(Value::Bool(value)) => *value,
+                Some(_) => {
+                    return Err(Error::bad(
+                        "document_start must be true or false on a native console start",
+                    ));
+                }
+            };
+            let mut session = self.launch(url.as_str(), document_start).await?;
             let result = session.exchange(1, 0, "").await;
             if result.is_ok() {
                 *guard = Some(session);
             } else {
-                session.stop().await;
+                self.retire(session).await;
             }
             return result;
         }
@@ -501,7 +662,16 @@ impl NativeConsole {
                 let bridge_alive = session.bridge.child.try_wait().ok().flatten().is_none();
                 if session.live && !session.poisoned && bridge_alive {
                     if let Err(error) = session.release_live_values().await {
-                        session.stop().await;
+                        self.retire(session).await;
+                        return Err(error);
+                    }
+                    // The capture browser keeps an armed set for as long as this
+                    // wire connection stays open, so the binding is handed back
+                    // only after the browser confirms it holds no script.
+                    if session.document_start_armed
+                        && let Err(error) = session.clear_document_start().await
+                    {
+                        self.retire(session).await;
                         return Err(error);
                     }
                     session.live_target = None;
@@ -510,7 +680,11 @@ impl NativeConsole {
                         previous.stop().await;
                     }
                 } else {
-                    session.stop().await;
+                    let unconfirmed = session.live && session.document_start_armed;
+                    self.retire(session).await;
+                    if unconfirmed {
+                        return Err(Error::conflict(DOCUMENT_START_UNCONFIRMED));
+                    }
                 }
             }
             return Ok(json!({"contract_version":2,"state":"idle","session_id":null}));
@@ -521,6 +695,10 @@ impl NativeConsole {
             vec!["action", "session_id", "target_id", "command"]
         } else if action == "evaluate" {
             vec!["action", "session_id", "target_id", "source"]
+        } else if action == "arm_document_start" {
+            vec!["action", "session_id", "scripts", "confirm_document_start"]
+        } else if action == "clear_document_start" {
+            vec!["action", "session_id"]
         } else {
             return Err(Error::bad("Native console action is invalid"));
         };
@@ -537,7 +715,7 @@ impl NativeConsole {
             session.bridge.child.try_wait()?.is_some()
         };
         if session.poisoned || session.started.elapsed() >= Duration::from_secs(3600) || ended {
-            guard.take().unwrap().stop().await;
+            self.retire(guard.take().unwrap()).await;
             return Err(Error::conflict(
                 "Native console session ended; start another session",
             ));
@@ -545,13 +723,41 @@ impl NativeConsole {
         if action == "targets" && session.live {
             let result = session.list_live().await;
             if result.is_err() {
-                guard.take().unwrap().stop().await;
+                self.retire(guard.take().unwrap()).await;
             }
             return result;
         }
         let runtime_source;
+        let document_start_source;
         let (operation, target, source) = if action == "targets" {
             (1, 0, "")
+        } else if action == "arm_document_start" || action == "clear_document_start" {
+            if !session.document_start {
+                if action == "clear_document_start" {
+                    // Nothing can be armed in a session that never permitted
+                    // the experiment, so report that instead of sending an
+                    // operation this browser would reject.
+                    return Ok(document_start_unavailable(&session.id));
+                }
+                return Err(Error::new(503, DOCUMENT_START_UNAVAILABLE)
+                    .with_code(Code::DependencyUnavailable));
+            }
+            document_start_source = if action == "clear_document_start" {
+                r#"{"operation":"clear"}"#.to_owned()
+            } else {
+                if request["confirm_document_start"] != true {
+                    return Err(Error::bad(
+                        "Confirm that armed snippets run automatically in every new matching document",
+                    ));
+                }
+                let scripts = validate_document_start(&request["scripts"])?;
+                session.document_start_armed = true;
+                serde_json::to_string(&json!({"operation":"arm","scripts":scripts}))?
+            };
+            if document_start_source.len() > RUNTIME_LIMIT {
+                return Err(Error::bad("Document-start command exceeds 65536 bytes"));
+            }
+            (4, 0, document_start_source.as_str())
         } else if action == "runtime" {
             validate_command(&request["command"])?;
             runtime_source = serde_json::to_string(&request["command"])?;
@@ -574,14 +780,14 @@ impl NativeConsole {
             let target = validation::canonical(&request["target_id"], 64, true, "Console target")?;
             (2, target, source)
         };
-        if session.live && operation != 1 {
+        if session.live && operation != 1 && operation != 4 {
             // Reject unknown ownership before any request. Refreshing may remove
             // the exact ID but must never translate it to a replacement document.
             if session.live_target != Some(target) || !session.native_targets.contains(&target) {
                 return Ok(stale_document(&session.id));
             }
             if let Err(error) = session.list_live().await {
-                guard.take().unwrap().stop().await;
+                self.retire(guard.take().unwrap()).await;
                 return Err(error);
             }
             if !session.native_targets.contains(&target) {
@@ -598,7 +804,7 @@ impl NativeConsole {
             session.live_target = None;
         }
         if result.is_err() {
-            guard.take().unwrap().stop().await;
+            self.retire(guard.take().unwrap()).await;
         }
         result
     }
@@ -641,7 +847,7 @@ impl NativeConsole {
         }
         *self.live_bridge.lock().await = Some(bridge.session(ConsoleDir::Live(transport), true));
     }
-    async fn launch(&self, address: &str) -> Result<Session> {
+    async fn launch(&self, address: &str, document_start: bool) -> Result<Session> {
         let directory = tempfile::Builder::new()
             .prefix("reb-console.")
             .permissions(std::fs::Permissions::from_mode(0o700))
@@ -668,7 +874,11 @@ impl NativeConsole {
                 "--reb-native-console-token-file={}",
                 bridge.token.display()
             ))
-            .arg(format!("--reb-native-console-session-id={}", bridge.id))
+            .arg(format!("--reb-native-console-session-id={}", bridge.id));
+        if document_start {
+            browser.arg("--reb-native-console-document-start");
+        }
+        browser
             .arg(address)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
@@ -750,11 +960,338 @@ impl BridgeProcess {
             live_target: None,
             native_targets: BTreeSet::new(),
             accessed_targets: BTreeSet::new(),
+            document_start: false,
+            document_start_armed: false,
         }
     }
     async fn stop(mut self) {
         self.bridge.stop().await;
     }
+}
+
+const DOCUMENT_START_UNCONFIRMED: &str = "The capture browser did not confirm that it cleared the armed document-start scripts. \
+     The Console binding was ended, so the browser drops them once it notices; until then new matching \
+     documents can still run them. Restart the capture before relying on documents running nothing.";
+
+const DOCUMENT_START_LIVE_RETIRE: &str = "This Console connection failed while document-start scripts may be armed. \
+     They stay in the capture browser until the connection ends; Stop ends it.";
+
+const DOCUMENT_START_UNAVAILABLE: &str = "Document-start Console scripts are not available in this session. Rebuild the pinned browser, \
+     then start a disposable Console session with document_start enabled, or relaunch the live \
+     capture with REB_CONSOLE_DOCUMENT_START=1. Nothing is relaunched automatically.";
+
+// Stated rather than silently skipped. These contexts are never reached by an
+// armed snippet, whatever a rule declares, so a researcher or agent can tell
+// "my rule did not match" from "this context is out of scope entirely".
+fn document_start_unsupported() -> Value {
+    json!([
+        {"context":"dedicated_worker","reason":"The injector observes documents only; no worker scope is reached."},
+        {"context":"shared_worker","reason":"The injector observes documents only; no worker scope is reached."},
+        {"context":"service_worker","reason":"The injector observes documents only; no worker scope is reached."},
+        {"context":"worklet","reason":"The injector observes documents only; no worklet scope is reached."},
+        {"context":"isolated_world","reason":"Injection is page main world only; no isolated or extension world is used."},
+        {"context":"non_http_document","reason":"A rule names an exact http or https origin, so about:blank, the initial empty document, data URLs and internal browser pages never match."},
+        {"context":"other_profile","reason":"Only documents in the Console's own bound profile are eligible."},
+        {"context":"already_open_document","reason":"Injection happens at document creation. A document open when the set was armed is never retroactively injected; reload it."},
+    ])
+}
+
+fn document_start_limits() -> Value {
+    json!({
+        "scripts": DOCUMENT_START_SCRIPT_LIMIT,
+        "source_bytes": DOCUMENT_START_SOURCE_LIMIT,
+        "total_source_bytes": DOCUMENT_START_TOTAL_SOURCE_LIMIT,
+        "rule_bytes": DOCUMENT_START_RULE_LIMIT,
+        "report_bytes": 512,
+        "records_per_document": 64,
+        "retained_records": 128,
+        "records_per_read": 32,
+        "execution_millis": 50,
+    })
+}
+
+fn document_start_unavailable(session: &str) -> Value {
+    json!({"contract_version":3,"state":"ready","session_id":session,
+        "document_start":{"status":"unavailable","permitted":false,"scripts":[],
+            "message":DOCUMENT_START_UNAVAILABLE}})
+}
+
+// The browser revalidates every field and owns the rule grammar. These checks
+// refuse an obviously wrong declaration before it reaches the wire, so a
+// researcher sees which field is wrong instead of one opaque refusal.
+fn validate_document_start(scripts: &Value) -> Result<Value> {
+    let list = scripts
+        .as_array()
+        .ok_or_else(|| Error::bad("Document-start scripts must be an array"))?;
+    if list.is_empty() || list.len() > DOCUMENT_START_SCRIPT_LIMIT {
+        return Err(Error::bad(format!(
+            "Arm 1 to {DOCUMENT_START_SCRIPT_LIMIT} document-start scripts"
+        ))
+        .with_code(Code::ResourceLimit));
+    }
+    let mut normalized = Vec::with_capacity(list.len());
+    let mut total = 0usize;
+    for script in list {
+        let fields: Vec<&str> = if script.get("path_prefix").is_some() {
+            vec!["frame", "origin", "path_prefix", "source"]
+        } else {
+            vec!["frame", "origin", "source"]
+        };
+        validation::fields(script, &fields, "Document-start script")?;
+        let origin = validation::text(
+            &script["origin"],
+            "Document-start origin",
+            DOCUMENT_START_RULE_LIMIT,
+            false,
+            false,
+        )?;
+        if !document_start_origin(origin) {
+            return Err(Error::bad(
+                "A document-start origin is one exact http:// or https:// origin as the browser serializes it: \
+                 a lowercase host name, an IPv4 address or a canonical bracketed IPv6 address, and a port only \
+                 when it is not the scheme's default. No path, credentials, wildcard or trailing slash.",
+            ));
+        }
+        let frame = script["frame"].as_str().unwrap_or("");
+        if frame != "top" && frame != "child" {
+            return Err(Error::bad(
+                "A document-start rule matches frame \"top\" or \"child\"; request both as two rules",
+            ));
+        }
+        let prefix = match script.get("path_prefix") {
+            Some(value) => Some(validation::text(
+                value,
+                "Document-start path prefix",
+                DOCUMENT_START_RULE_LIMIT,
+                false,
+                false,
+            )?),
+            None => None,
+        };
+        if let Some(prefix) = prefix
+            && !document_start_path(prefix)
+        {
+            return Err(Error::bad(
+                "A document-start path prefix is a literal printable-ASCII path starting with / and carries no query or fragment",
+            ));
+        }
+        let source = validation::text(
+            &script["source"],
+            "Document-start snippet",
+            DOCUMENT_START_SOURCE_LIMIT,
+            false,
+            true,
+        )?;
+        if source.is_empty() || source.contains('\0') {
+            return Err(Error::bad(
+                "A document-start snippet must be nonempty and contain no NUL bytes",
+            ));
+        }
+        total += source.len();
+        if total > DOCUMENT_START_TOTAL_SOURCE_LIMIT {
+            return Err(Error::bad(format!(
+                "Document-start snippets exceed {DOCUMENT_START_TOTAL_SOURCE_LIMIT} total source bytes"
+            ))
+            .with_code(Code::ResourceLimit));
+        }
+        let mut entry = json!({"origin":origin,"frame":frame,"source":source});
+        if let Some(prefix) = prefix {
+            entry["path_prefix"] = json!(prefix);
+        }
+        normalized.push(entry);
+    }
+    Ok(Value::Array(normalized))
+}
+
+// The browser's rule, IsValidNativeConsoleDocumentStartOrigin in
+// common/native_console_document_start.h, ported line for line. Both test
+// suites run tools/fixtures/console-document-start/rule-origins.txt, so an
+// origin the backend admits is one the browser admits and one a document's
+// url::Origin serialization can equal.
+fn document_start_origin(origin: &str) -> bool {
+    let (host, default_port) = if let Some(host) = origin.strip_prefix("http://") {
+        (host, 80)
+    } else if let Some(host) = origin.strip_prefix("https://") {
+        (host, 443)
+    } else {
+        return false;
+    };
+    if host.is_empty() || host.len() > 255 {
+        return false;
+    }
+    let port = if let Some(literal) = host.strip_prefix('[') {
+        let Some(close) = literal.find(']') else {
+            return false;
+        };
+        if !canonical_ipv6(&literal[..close]) {
+            return false;
+        }
+        match &literal[close + 1..] {
+            "" => None,
+            rest => match rest.strip_prefix(':') {
+                Some(port) => Some(port),
+                None => return false,
+            },
+        }
+    } else {
+        let (name, port) = match host.split_once(':') {
+            Some((name, port)) => (name, Some(port)),
+            None => (host, None),
+        };
+        if name.is_empty()
+            || name.starts_with(['.', '-'])
+            || name.ends_with(['.', '-'])
+            || name.contains("..")
+            || !name.bytes().all(|byte| {
+                byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'.' || byte == b'-'
+            })
+            || !canonical_host_name(name)
+        {
+            return false;
+        }
+        port
+    };
+    let Some(port) = port else {
+        return true;
+    };
+    if port.is_empty()
+        || port.len() > 5
+        || port.starts_with('0')
+        || !port.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return false;
+    }
+    // Serialize omits the scheme's default port, so spelling it never matches.
+    port.parse::<u32>()
+        .is_ok_and(|value| value <= 65535 && value != default_port)
+}
+
+// url::CanonicalizeIPv6Address output: lowercase hex groups without leading
+// zeros, "::" for the first longest run of two or more zero groups, and no
+// embedded IPv4. Any other spelling of the same address is refused.
+fn canonical_ipv6(text: &str) -> bool {
+    let bytes = text.as_bytes();
+    let mut pieces = [0u16; 8];
+    let mut count = 0;
+    let mut compress = None;
+    let mut index = 0;
+    if text.starts_with("::") {
+        compress = Some(0);
+        index = 2;
+    }
+    while index < bytes.len() {
+        if count == pieces.len() {
+            return false;
+        }
+        let (mut value, mut digits) = (0u32, 0);
+        while index < bytes.len() && digits < 5 {
+            let digit = match bytes[index] {
+                byte @ b'0'..=b'9' => byte - b'0',
+                byte @ b'a'..=b'f' => byte - b'a' + 10,
+                _ => break,
+            };
+            value = value * 16 + u32::from(digit);
+            index += 1;
+            digits += 1;
+        }
+        if digits == 0 || digits > 4 {
+            return false;
+        }
+        pieces[count] = value as u16;
+        count += 1;
+        if index == bytes.len() {
+            break;
+        }
+        if bytes[index] != b':' {
+            return false;
+        }
+        index += 1;
+        if index == bytes.len() {
+            return false;
+        }
+        if bytes[index] == b':' {
+            if compress.is_some() {
+                return false;
+            }
+            compress = Some(count);
+            index += 1;
+        }
+    }
+    match compress {
+        None if count != pieces.len() => return false,
+        Some(_) if count >= pieces.len() => return false,
+        Some(at) => {
+            let gap = 8 - (count - at);
+            pieces.copy_within(at..count, gap);
+            pieces[at..gap].fill(0);
+        }
+        None => {}
+    }
+    let (mut best, mut best_length) = (pieces.len(), 1);
+    let mut start = 0;
+    while start < pieces.len() {
+        if pieces[start] != 0 {
+            start += 1;
+            continue;
+        }
+        let mut end = start;
+        while end < pieces.len() && pieces[end] == 0 {
+            end += 1;
+        }
+        if end - start > best_length {
+            (best, best_length) = (start, end - start);
+        }
+        start = end;
+    }
+    let mut canonical = String::with_capacity(39);
+    let mut piece = 0;
+    while piece < pieces.len() {
+        if piece == best {
+            canonical.push_str(if piece == 0 { "::" } else { ":" });
+            piece += best_length;
+            continue;
+        }
+        canonical.push_str(&format!("{:x}", pieces[piece]));
+        piece += 1;
+        if piece < pieces.len() {
+            canonical.push(':');
+        }
+    }
+    canonical == text
+}
+
+// A host whose last label is a number serializes as four decimal octets.
+fn canonical_host_name(host: &str) -> bool {
+    let last = host.rsplit('.').next().unwrap_or(host);
+    let numeric = !last.is_empty()
+        && match last.strip_prefix("0x") {
+            Some(hex) => hex
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase()),
+            None => last.bytes().all(|byte| byte.is_ascii_digit()),
+        };
+    if !numeric {
+        return true;
+    }
+    let octets: Vec<&str> = host.split('.').collect();
+    octets.len() == 4
+        && octets.iter().all(|octet| {
+            !octet.is_empty()
+                && octet.len() <= 3
+                && !(octet.len() > 1 && octet.starts_with('0'))
+                && octet.bytes().all(|byte| byte.is_ascii_digit())
+                && octet.parse::<u16>().is_ok_and(|value| value <= 255)
+        })
+}
+
+// IsValidNativeConsoleDocumentStartPath for a declared prefix. An explicit
+// empty prefix is refused before this, so a rule never shows a prefix it lacks.
+fn document_start_path(path: &str) -> bool {
+    path.starts_with('/')
+        && path.len() <= DOCUMENT_START_RULE_LIMIT
+        && path
+            .bytes()
+            .all(|byte| (0x21..0x7f).contains(&byte) && byte != b'?' && byte != b'#')
 }
 
 const LIVE_CAPTURE_MESSAGE: &str =
@@ -942,6 +1479,7 @@ mod tests {
                 status,
                 kind: 0,
                 truncated: false,
+                document_start: false,
                 count: 0,
                 bytes: 0,
             };
@@ -960,6 +1498,7 @@ mod tests {
             status: 0,
             kind: 0,
             truncated: false,
+            document_start: false,
             count: 0,
             bytes: 0,
         };
@@ -973,6 +1512,7 @@ mod tests {
             status: 0,
             kind: 11,
             truncated: false,
+            document_start: false,
             count: 0,
             bytes: 0,
         };
@@ -985,6 +1525,173 @@ mod tests {
         assert_eq!(result["code"], "application_failed");
         assert_eq!(result["details"], json!({}));
     }
+    #[test]
+    fn document_start_rules_refuse_anything_that_could_widen_their_scope() {
+        let rule = |extra: Value| {
+            let mut script =
+                json!({"origin":"https://fixture.test","frame":"top","source":"report('x');"});
+            for (key, value) in extra.as_object().unwrap() {
+                if value.is_null() {
+                    script.as_object_mut().unwrap().remove(key);
+                } else {
+                    script[key] = value.clone();
+                }
+            }
+            validate_document_start(&json!([script]))
+        };
+        assert!(rule(json!({})).is_ok());
+        assert!(rule(json!({"path_prefix":"/lab/"})).is_ok());
+        assert!(rule(json!({"frame":"child"})).is_ok());
+        for refused in [
+            json!({"origin":"fixture.test"}),
+            json!({"origin":"ftp://fixture.test"}),
+            json!({"origin":"https://fixture.test/"}),
+            json!({"origin":"https://Fixture.test"}),
+            json!({"origin":"https://*.fixture.test"}),
+            json!({"origin":"https://user:secret@fixture.test"}),
+            json!({"origin":"https://fixture.test/path"}),
+            json!({"origin":"https://fixture.test?a=b"}),
+            json!({"origin":"https://"}),
+            json!({"frame":"any"}),
+            json!({"frame":Value::Null}),
+            json!({"path_prefix":"lab"}),
+            json!({"path_prefix":"/lab?a=b"}),
+            json!({"path_prefix":"/lab#a"}),
+            json!({"source":""}),
+            json!({"source":Value::Null}),
+            json!({"origin":Value::Null}),
+            json!({"unexpected":"field"}),
+        ] {
+            assert!(rule(refused.clone()).is_err(), "{refused}");
+        }
+        // Bounds: script count, per-snippet source and the whole set's source.
+        let script = json!({"origin":"https://fixture.test","frame":"top","source":"report('x');"});
+        assert!(validate_document_start(&json!([])).is_err());
+        assert!(validate_document_start(&json!([script, script, script, script, script])).is_err());
+        assert!(validate_document_start(&json!(script)).is_err());
+        let long = json!({"origin":"https://fixture.test","frame":"top","source":"a".repeat(DOCUMENT_START_SOURCE_LIMIT)});
+        assert!(validate_document_start(&json!([long])).is_ok());
+        assert!(validate_document_start(&json!([long, long, long])).is_err());
+        let oversized = json!({"origin":"https://fixture.test","frame":"top","source":"a".repeat(DOCUMENT_START_SOURCE_LIMIT + 1)});
+        assert!(validate_document_start(&json!([oversized])).is_err());
+        // The normalized command keeps exactly the declared rule.
+        let armed = validate_document_start(&json!([{"origin":"http://127.0.0.1:8080","frame":"child","path_prefix":"/lab/","source":"report(1);"}])).unwrap();
+        assert_eq!(
+            armed,
+            json!([{"origin":"http://127.0.0.1:8080","frame":"child","path_prefix":"/lab/","source":"report(1);"}])
+        );
+    }
+
+    #[test]
+    fn document_start_origins_match_the_browser_rule_case_for_case() {
+        // The browser's offline check runs these same lines, so the backend
+        // accepts and refuses exactly the origins the browser does.
+        let cases = include_str!("../../../tools/fixtures/console-document-start/rule-origins.txt");
+        let (mut accepted, mut refused) = (0, 0);
+        for line in cases
+            .lines()
+            .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        {
+            let (verdict, origin) = line.split_once(' ').unwrap();
+            let rule = json!([{"origin":origin,"frame":"top","source":"report(1);"}]);
+            match verdict {
+                "accept" => {
+                    assert!(document_start_origin(origin), "accepted: {origin}");
+                    assert!(validate_document_start(&rule).is_ok(), "accepted: {origin}");
+                    accepted += 1;
+                }
+                "refuse" => {
+                    assert!(!document_start_origin(origin), "refused: {origin}");
+                    assert!(validate_document_start(&rule).is_err(), "refused: {origin}");
+                    refused += 1;
+                }
+                _ => panic!("unknown verdict: {line}"),
+            }
+        }
+        assert!(
+            accepted >= 20 && refused >= 60,
+            "every shared origin case was read"
+        );
+        assert!(!document_start_origin(""));
+        for path in ["/a/b-c_1.html", "/"] {
+            assert!(document_start_path(path), "{path}");
+        }
+        for path in [
+            "a",
+            "../a",
+            "/a?b",
+            "/a#b",
+            "/a b",
+            "/a\u{7f}",
+            "/a\n",
+            "/caf\u{e9}",
+        ] {
+            assert!(!document_start_path(path), "{path:?}");
+        }
+        let long = format!("/{}", "a".repeat(DOCUMENT_START_RULE_LIMIT - 1));
+        assert!(document_start_path(&long));
+        assert!(!document_start_path(&format!("{long}a")));
+    }
+
+    #[test]
+    fn document_start_states_match_their_published_contract() {
+        let armed = json!({
+            "contract_version": 3, "available": true, "state": "ready", "session_id": "12",
+            "limits": document_start_limits(), "unsupported": document_start_unsupported(),
+            "document_start": {
+                "status": "ok", "permitted": true, "generation": "2", "renderer_processes": 2,
+                "pending_renderer_processes": 1, "refused_renderer_processes": 1,
+                "scripts": [{"script_id":"1","rule":{"origin":"https://fixture.test","frame":"top","path_prefix":"/lab/"},
+                    "source_bytes": 24, "digest": "0123456789abcdef", "records": 3,
+                    "injected_documents": 1, "refused": 0}],
+                "output": {"records":[{"sequence":"3","record":"report","provenance":"console-document-start-script",
+                    "script_id":"1","document_id":"7","frame_id":"99","top_frame":true,"time":1.0,
+                    "truncated":false,"text":"kinds=string:12"}],
+                    "next_sequence":"4","oldest_sequence":"1","retained":3,"dropped":0,
+                    "unattributed":0,"stale":0},
+            },
+        });
+        crate::validation::schema("NativeConsoleDocumentStart", &armed, 500).unwrap();
+        let mut unavailable = document_start_unavailable("12");
+        unavailable["available"] = json!(false);
+        unavailable["limits"] = document_start_limits();
+        unavailable["unsupported"] = document_start_unsupported();
+        crate::validation::schema("NativeConsoleDocumentStart", &unavailable, 500).unwrap();
+        crate::validation::schema(
+            "NativeConsoleDocumentStartResult",
+            &document_start_unavailable("12"),
+            500,
+        )
+        .unwrap();
+        // Provenance is fixed: output can never be labeled as capture evidence.
+        let mut forged = armed.clone();
+        forged["document_start"]["output"]["records"][0]["provenance"] = json!("native-capture");
+        assert!(crate::validation::schema("NativeConsoleDocumentStart", &forged, 500).is_err());
+    }
+
+    #[tokio::test]
+    async fn document_start_reads_never_start_or_retire_a_session() {
+        let options = Options::try_parse_from(["origin-trace-backend"]).unwrap();
+        let console = NativeConsole::new(&options);
+        let state = console.document_start(0).await.unwrap();
+        assert_eq!(state["state"], "idle");
+        assert_eq!(state["session_id"], Value::Null);
+        assert_eq!(state["document_start"]["permitted"], json!(false));
+        assert_eq!(state["document_start"]["scripts"], json!([]));
+        // Out-of-scope contexts are always stated, even with no session.
+        assert!(
+            state["unsupported"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|entry| entry["context"] == "service_worker")
+        );
+        crate::validation::schema("NativeConsoleDocumentStart", &state, 500).unwrap();
+        // Reading twice cannot launch a browser or change the reported state.
+        assert_eq!(console.document_start(0).await.unwrap(), state);
+        assert!(console.session.lock().await.is_none());
+    }
+
     #[tokio::test]
     async fn connect_live_does_not_launch_a_browser_when_the_capture_has_no_binding() {
         let directory = tempfile::tempdir().unwrap();
@@ -1037,7 +1744,7 @@ while True:
     source = sys.stdin.buffer.read(size).decode()
     with (root / 'requests.jsonl').open('a') as log:
         log.write(json.dumps({'operation':operation,'target':target,'source':source}) + '\n')
-    count, kind = 0, 11
+    count, kind, flags = 0, 11, 0
     if operation == 1:
         documents = json.loads((root / 'targets.json').read_text())
         records = []
@@ -1047,9 +1754,31 @@ while True:
             url = item['url'].encode()[:512]
             records.append(target_record.pack(item['id'],len(origin),2,0,origin,len(label),len(url),label,url,0))
         payload, count, kind = b''.join(records), len(records), 10
+        # The capture browser advertises the experiment only when launched with it.
+        flags = 2 if (root / 'document-start').exists() else 0
+    elif operation == 4:
+        # A synthetic registry that outlives Console connections, like the
+        # capture browser's. clear-refused keeps the set, as a failed clear would.
+        command = json.loads(source)
+        armed = root / 'armed.json'
+        scripts = json.loads(armed.read_text()) if armed.exists() else []
+        status = 'ok'
+        if command['operation'] == 'arm':
+            scripts = [{'script_id':str(index + 1),'rule':{'origin':script['origin'],'frame':script['frame']},
+                        'source_bytes':len(script['source']),'digest':'0123456789abcdef','records':0,
+                        'injected_documents':0,'refused':0} for index, script in enumerate(command['scripts'])]
+        elif command['operation'] == 'clear':
+            if (root / 'clear-refused').exists():
+                status = 'error'
+            else:
+                scripts = []
+        armed.write_text(json.dumps(scripts))
+        payload, kind = json.dumps({'status':status,'contract_version':3,'permitted':True,'generation':'1',
+            'scripts':scripts,'renderer_processes':1,'pending_renderer_processes':0,
+            'refused_renderer_processes':0}).encode(), 12
     else:
         payload = json.dumps({'status':'ok','value':{'type':'object','text':str(target),'handle':'7','truncated':False}}).encode()
-    sys.stdout.buffer.write(response.pack(magic,version,0,sequence,kind,0,count,len(payload),0) + payload)
+    sys.stdout.buffer.write(response.pack(magic,version,0,sequence,kind,flags,count,len(payload),0) + payload)
     sys.stdout.buffer.flush()
 "#;
         let mut command = Command::new("python3");
@@ -1077,6 +1806,8 @@ while True:
             live_target: None,
             native_targets: BTreeSet::new(),
             accessed_targets: BTreeSet::new(),
+            document_start: false,
+            document_start_armed: false,
         };
         let mut options = Options::try_parse_from(["origin-trace-backend"]).unwrap();
         options.native_console_live_directory = Some(directory.path().into());
@@ -1260,6 +1991,103 @@ while True:
                 .is_err()
         );
         assert_eq!(requests(&directory).len(), before);
+        console.stop().await;
+    }
+    async fn arm_fixture(console: &NativeConsole, directory: &TempDir) -> String {
+        std::fs::write(directory.path().join("document-start"), "").unwrap();
+        let identity = connect_fixture(console, "22").await;
+        let armed = console
+            .action(&json!({"action":"arm_document_start","session_id":identity,"confirm_document_start":true,
+                "scripts":[{"origin":"https://same.test","frame":"top","source":"report(1);"}]}))
+            .await
+            .unwrap();
+        assert_eq!(armed["document_start"]["scripts"][0]["script_id"], "1");
+        identity
+    }
+    #[tokio::test]
+    async fn live_stop_clears_armed_document_start_scripts_before_reporting_idle() {
+        let (console, directory) = live_fixture().await;
+        let identity = arm_fixture(&console, &directory).await;
+        let stopped = console
+            .action(&json!({"action":"stop","session_id":identity}))
+            .await
+            .unwrap();
+        assert_eq!(stopped["state"], "idle");
+        // The capture browser keeps its registry across Console connections,
+        // so Stop itself must have cleared it before reporting idle.
+        let last = requests(&directory).pop().unwrap();
+        assert_eq!(last["operation"], 4);
+        assert_eq!(last["source"], r#"{"operation":"clear"}"#);
+        let idle = console.document_start(0).await.unwrap();
+        assert_eq!(idle["document_start"]["status"], "idle");
+        crate::validation::schema("NativeConsoleDocumentStart", &idle, 500).unwrap();
+        let second = connect_fixture(&console, "22").await;
+        let state = console.document_start(0).await.unwrap();
+        assert_eq!(state["session_id"], second);
+        assert_eq!(state["document_start"]["scripts"], json!([]));
+        // Nothing armed means nothing to clear: Stop sends no extra request.
+        let before = requests(&directory).len();
+        console
+            .action(&json!({"action":"stop","session_id":second}))
+            .await
+            .unwrap();
+        assert!(
+            requests(&directory)[before..]
+                .iter()
+                .all(|request| request["operation"] != 4)
+        );
+        console.stop().await;
+    }
+    #[tokio::test]
+    async fn live_stop_reports_an_unconfirmed_clear_instead_of_idle() {
+        let (console, directory) = live_fixture().await;
+        let identity = arm_fixture(&console, &directory).await;
+        std::fs::write(directory.path().join("clear-refused"), "").unwrap();
+        let error = console
+            .action(&json!({"action":"stop","session_id":identity}))
+            .await
+            .unwrap_err();
+        assert_eq!(error.status, 409);
+        assert!(
+            error.message.contains("did not confirm"),
+            "{}",
+            error.message
+        );
+        // The binding is ended rather than handed back with a set still armed.
+        assert!(console.live_bridge.lock().await.is_none());
+        let state = console.document_start(0).await.unwrap();
+        assert_eq!(state["state"], "idle");
+        assert_eq!(state["document_start"]["status"], "unconfirmed");
+        assert!(
+            state["document_start"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("Restart the capture")
+        );
+        crate::validation::schema("NativeConsoleDocumentStart", &state, 500).unwrap();
+        assert_eq!(console.state().await["live_available"], false);
+        console.stop().await;
+    }
+    #[tokio::test]
+    async fn live_stop_of_a_failed_connection_never_reports_an_armed_set_gone() {
+        let (console, directory) = live_fixture().await;
+        let identity = arm_fixture(&console, &directory).await;
+        console.session.lock().await.as_mut().unwrap().poisoned = true;
+        let state = console.document_start(0).await.unwrap();
+        assert_eq!(state["document_start"]["status"], "unconfirmed");
+        crate::validation::schema("NativeConsoleDocumentStart", &state, 500).unwrap();
+        let before = requests(&directory).len();
+        let error = console
+            .action(&json!({"action":"stop","session_id":identity}))
+            .await
+            .unwrap_err();
+        assert_eq!(error.status, 409);
+        // A failed connection is never reused to send the clear.
+        assert_eq!(requests(&directory).len(), before);
+        assert_eq!(
+            console.document_start(0).await.unwrap()["document_start"]["status"],
+            "unconfirmed"
+        );
         console.stop().await;
     }
     #[test]

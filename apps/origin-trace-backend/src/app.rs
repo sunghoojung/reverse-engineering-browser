@@ -365,6 +365,25 @@ impl App {
             "/api/analysis/catalog" => analysis_catalog::catalog()?,
             "/api/decoder" => self.decoder.state(),
             "/api/native-console" => self.native_console.state().await,
+            "/api/native-console/document-start" => {
+                if q.0.keys().any(|key| key != "after_sequence") {
+                    return Err(Error::bad(
+                        "Document-start reads take only an optional after_sequence cursor",
+                    ));
+                }
+                // A misspelled cursor must fail rather than silently replay the
+                // whole retained page as if it were new output.
+                let after = match q.one("after_sequence")? {
+                    Some(value) => validation::canonical(
+                        &json!(value),
+                        64,
+                        false,
+                        "Document-start output cursor",
+                    )?,
+                    None => 0,
+                };
+                self.native_console.document_start(after).await?
+            }
             "/api/analysis/vm/experiments" => self.vm_experiments.list()?,
             "/api/vm-debugger" => self.owned_vm_debugger.state().await?,
             "/api/wasm" => {

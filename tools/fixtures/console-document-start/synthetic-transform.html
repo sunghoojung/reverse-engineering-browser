@@ -1,0 +1,83 @@
+<!doctype html>
+<!--
+  Repository-authored synthetic page for the document-start Console script
+  experiment. It defines one plain function on `window` and calls it with
+  authored values. Nothing here is captured evidence, and no third-party site,
+  service or vendor code is involved. Serve it from a local HTTP server and use
+  that server's exact origin in the document-start rule.
+-->
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Synthetic document-start fixture</title>
+  </head>
+  <body>
+    <h1>Synthetic document-start fixture</h1>
+    <p id="result">Not run.</p>
+    <p>
+      This page defines <code>window.syntheticTransform(text, rounds)</code> in
+      an inline script, then calls it. A document-start Console script runs
+      before this inline script, so it can observe the definition as it happens.
+    </p>
+    <p>
+      The child frame is same-origin by default. Append
+      <code>?child=http://127.0.0.1:8081/synthetic-transform-child.html</code>
+      to point it at a second local origin, which gives the child its own
+      renderer process. Only an explicit <code>http</code> or
+      <code>https</code> value is honored.
+    </p>
+    <p>
+      Append <code>?reuse=1</code> to add a second, script-created child frame.
+      The page touches its initial empty document before pointing it at the
+      same-origin child page, so Blink keeps that window and its script context
+      for the child's new document.
+    </p>
+    <iframe
+      id="child"
+      title="Synthetic child frame"
+      src="synthetic-transform-child.html"
+      width="320"
+      height="90"
+    ></iframe>
+    <script>
+      // A plain, deterministic function. It is not a vendor API and does not
+      // resemble one: the experiment is being demonstrated, not a target.
+      window.syntheticTransform = function syntheticTransform(text, rounds) {
+        let value = String(text);
+        for (let round = 0; round < rounds; round += 1) {
+          let out = '';
+          for (let index = 0; index < value.length; index += 1) {
+            out += String.fromCharCode((value.charCodeAt(index) + round + 1) % 0x4000);
+          }
+          value = out;
+        }
+        return value;
+      };
+      // Authored convenience for the cross-origin child-frame acceptance step.
+      // The value is only used as a frame source, and only when it is an
+      // explicit HTTP(S) URL.
+      const requested = new URLSearchParams(location.search).get('child');
+      if (requested) {
+        const child = new URL(requested, location.href);
+        if (child.protocol === 'http:' || child.protocol === 'https:') {
+          document.querySelector('#child').src = child.href;
+        }
+      }
+      // Authored convenience for the reused-window acceptance step.
+      if (new URLSearchParams(location.search).get('reuse') === '1') {
+        const reused = document.createElement('iframe');
+        reused.title = 'Synthetic reused-window child frame';
+        reused.width = '320';
+        reused.height = '90';
+        document.body.append(reused);
+        // Creates the initial empty document's script context first.
+        reused.contentWindow.document.title = 'initial';
+        reused.src = 'synthetic-transform-child.html';
+      }
+      const first = window.syntheticTransform('authored-sample', 3);
+      const second = window.syntheticTransform('authored-sample-two', 1);
+      document.querySelector('#result').textContent =
+        `Produced ${first.length} and ${second.length} characters.`;
+    </script>
+  </body>
+</html>

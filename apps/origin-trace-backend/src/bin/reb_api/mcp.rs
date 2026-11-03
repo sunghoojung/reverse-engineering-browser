@@ -1604,7 +1604,12 @@ mod tests {
         let find = |name: &str| all.iter().find(|tool| tool["name"] == name).unwrap();
         let text = |name: &str| find(name)["description"].as_str().unwrap().to_owned();
         let console = text("native_console_action");
-        assert!(console.contains("start(url)"), "{console}");
+        assert!(console.contains("start(document_start?, url)"), "{console}");
+        assert!(
+            console
+                .contains("arm_document_start(confirm_document_start=true, scripts, session_id)"),
+            "{console}"
+        );
         assert!(
             console.contains("connect_live(binding_id, confirm_live=true, target_id)"),
             "{console}"

@@ -1,0 +1,22 @@
+<!doctype html>
+<!--
+  Child frame for the document-start Console script experiment. Serve it from a
+  second local origin to exercise a cross-origin child frame in its own renderer
+  process; served from the same origin it exercises the frame-kind rule only.
+-->
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Synthetic document-start child frame</title>
+  </head>
+  <body>
+    <p id="result">Child not run.</p>
+    <script>
+      window.syntheticTransform = function syntheticTransform(text, rounds) {
+        return String(text).repeat(Math.max(1, rounds));
+      };
+      document.querySelector('#result').textContent =
+        `Child produced ${window.syntheticTransform('child', 2).length} characters.`;
+    </script>
+  </body>
+</html>

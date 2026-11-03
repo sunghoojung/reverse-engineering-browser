@@ -34,6 +34,9 @@ skills under `.agents/skills/`.
 - [Agent cookbook](development/agent-cookbook.md): exact MCP tool calls for
   checking a capture, finding Wasm modules and samples, waiting for activity,
   and following native requests
+- [Document-start Console scripts](development/console-document-start-scripts.md):
+  enabling the separately armed experiment, writing a rule that cannot widen,
+  and the example snippet for the local synthetic page
 - [Fast local Brave builds](development/fast-browser-builds.md)
 - [Origin Trace + Brave paired release](development/paired-release.md):
   browser build, provenance, pinned hosting, pairing pin and publication for v0.5.0

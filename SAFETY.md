@@ -156,6 +156,25 @@ it.
   Commands require an explicit document selection and are never automatically
   retried. See [Native Console v2](protocol/native-console-v2.md) for these limits.
 
+- Document-start Console scripts are a separate, separately armed experiment and
+  a deliberate exception to the explicit-document rule above, not a loophole in
+  it. An armed snippet runs automatically in every **new** document that matches
+  a declared rule, so the declaration itself is the authorization boundary. A
+  rule names one exact serialized origin, exactly one frame kind, and an optional
+  literal path prefix. There is no pattern, wildcard, host suffix, URL guessing,
+  automatic remapping, or retroactive injection into documents that were already
+  open. Arming requires a rebuilt browser, an explicit browser-session switch,
+  and a separate confirmed action; a live capture additionally requires the
+  existing selected-document live opt-in, and nothing is relaunched to obtain any
+  of them. Clearing the set, disconnecting, ending the session, or session expiry
+  removes the scripts and their output; when the browser cannot confirm a removal,
+  the Console reports it unconfirmed instead of idle. Snippet output is bounded, ephemeral
+  page-JavaScript observation with provenance `console-document-start-script`: it
+  is never native evidence, never correlated, and never exported automatically. A
+  snippet runs in the page main world, so log only argument kinds, lengths,
+  counts and digests, never raw strings, tokens, cookies, credentials or bodies.
+  See [Native Console v3](protocol/native-console-v3.md) for these limits.
+
 ## Local operation and evidence
 
 - Keep control and evidence traffic on `localhost` or another user-only local

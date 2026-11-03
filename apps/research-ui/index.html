@@ -685,6 +685,7 @@
             <strong class="native-console-title">Console</strong>
             <label class="native-console-context"><span>Document</span><select id="native-console-target" aria-label="Console document" disabled><option value="">Select a document</option></select></label>
             <span class="native-console-head-spacer"></span>
+            <button id="native-console-ds-badge" type="button" class="native-console-ds-badge" aria-controls="native-console-ds" title="Document-start script experiment" hidden></button>
             <button id="native-console-search" type="button" class="native-console-button" title="Find in console (⌘ / Ctrl + F)" aria-controls="native-console-filter-row" aria-expanded="false">Find</button>
             <button id="native-console-clear" type="button" class="native-console-button" aria-label="Clear console" title="Clear output and retained values; keep command history">Clear</button>
             <details id="native-console-connection" class="native-console-connection">
@@ -704,6 +705,25 @@
                 </div>
                 <label class="native-console-setting"><input id="native-console-timestamps" type="checkbox" /> Show timestamps</label>
                 <details class="native-console-utilities"><summary>History &amp; utilities</summary><p><code>$_</code> reads the last result. Expand a value to copy it, store it as <code>temp1</code>, or inspect its source. <code>await</code> accepts an async expression. Up/Down recalls history at the first/last line. Clearing output keeps command history.</p><select id="native-console-snippets" aria-label="Console snippets" disabled><option>No snippets saved</option></select><button id="native-console-load-snippet" type="button" class="native-console-button">Load snippet</button><button id="native-console-forget" type="button" class="native-console-button">Forget command history</button></details>
+                <details id="native-console-ds" class="native-console-ds">
+                  <summary>Document-start scripts (experiment)</summary>
+                  <p id="native-console-ds-state" role="status">Checking document-start availability.</p>
+                  <label class="native-console-setting"><input id="native-console-ds-enable" type="checkbox" /> Permit document-start scripts in the next disposable session</label>
+                  <label class="native-console-setting">Origin <input id="native-console-ds-origin" type="text" maxlength="256" placeholder="http://127.0.0.1:8080" autocomplete="off" spellcheck="false" aria-describedby="native-console-ds-rule-help" /></label>
+                  <label class="native-console-setting">Frame <select id="native-console-ds-frame" aria-label="Matching frame kind"><option value="top">Top frame</option><option value="child">Child frame</option></select></label>
+                  <label class="native-console-setting">Path prefix <input id="native-console-ds-path" type="text" maxlength="256" placeholder="/ (optional)" autocomplete="off" spellcheck="false" /></label>
+                  <p id="native-console-ds-rule-help">One exact origin and one frame kind. No pattern, wildcard or host suffix. Documents already open are never injected; reload them.</p>
+                  <label class="native-console-setting">Snippet <textarea id="native-console-ds-source" maxlength="4096" rows="4" spellcheck="false" autocomplete="off" autocapitalize="off" autocorrect="off" aria-describedby="native-console-ds-privacy"></textarea></label>
+                  <label class="native-console-setting"><input id="native-console-ds-consent" type="checkbox" /> I authorize this snippet to run automatically in every new matching document, before that document&rsquo;s own scripts.</label>
+                  <div class="native-console-session-actions">
+                    <button id="native-console-ds-arm" type="button" class="native-console-button native-console-primary" disabled>Arm script</button>
+                    <button id="native-console-ds-clear" type="button" class="native-console-button" disabled>Clear scripts</button>
+                  </div>
+                  <ul id="native-console-ds-armed" class="native-console-ds-armed"></ul>
+                  <p id="native-console-ds-counters"></p>
+                  <p id="native-console-ds-notice" class="native-console-notice" role="status" hidden></p>
+                  <p id="native-console-ds-privacy">A snippet runs in the page main world with the page&rsquo;s full authority. Call <code>report(value)</code> with a string, number, boolean or bigint. Log argument kinds, lengths, counts and digests, never raw strings, tokens, cookies, credentials or bodies. Output is page JavaScript, never evidence, and stays in memory only.</p>
+                </details>
                 <p id="native-console-mode-description">Commands can change the selected page. Disconnect removes this disposable browser and profile. Output and history stay in memory only; clear output before sharing.</p>
               </div>
             </details>

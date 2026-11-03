@@ -316,16 +316,27 @@ async fn openapi_mcp_matches_the_live_loopback_api() {
         }
         assert_eq!(method, "get", "{name}");
         assert!(!path.contains('{'), "{name} has an unsubstituted path");
-        let response = mcp.request("tools/call", json!({"name": name, "arguments": {}}));
+        // A waiting read takes its shortest wait here; only its own elapsed
+        // time can differ between the two calls.
+        let (arguments, query) = if name == "wait_for_events" {
+            (json!({"timeout_ms": 1}), "?timeout_ms=1")
+        } else {
+            (json!({}), "")
+        };
+        let response = mcp.request("tools/call", json!({"name": name, "arguments": arguments}));
         assert_eq!(
             response["result"]["isError"],
             false,
             "{name}: {}",
             tool_text(&response)
         );
-        let body: Value = serde_json::from_str(tool_text(&response)).unwrap();
+        let mut body: Value = serde_json::from_str(tool_text(&response)).unwrap();
         let mut direct: Value = client
-            .get(format!("{}{}", server.url.trim_end_matches('/'), path))
+            .get(format!(
+                "{}{}{query}",
+                server.url.trim_end_matches('/'),
+                path
+            ))
             .send()
             .await
             .unwrap()
@@ -339,8 +350,12 @@ async fn openapi_mcp_matches_the_live_loopback_api() {
             direct["allow_effects"] = json!(false);
             direct["effects_admission"] = json!("read_only_projection");
         }
+        if name == "wait_for_events" {
+            assert_eq!(body["wait"]["timed_out"], true);
+            body["wait"]["waited_ms"] = direct["wait"]["waited_ms"].clone();
+        }
         assert_eq!(body, direct, "{name} MCP body differs from HTTP");
-        if body.is_object() {
+        if body.is_object() && name != "wait_for_events" {
             assert_eq!(response["result"]["structuredContent"], body, "{name}");
         }
         let schema = response_schema(&spec, definition);

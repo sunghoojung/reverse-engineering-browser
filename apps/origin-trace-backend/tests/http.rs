@@ -694,7 +694,7 @@ fn openapi_references_and_native_only_operations_are_consistent() {
             assert!(ids.insert(id), "Duplicate operation ID: {id}");
         }
     }
-    assert_eq!(ids.len(), 35, "Review route coverage when the API changes");
+    assert_eq!(ids.len(), 37, "Review route coverage when the API changes");
     assert!(ids.contains("vm_pack_apply") && ids.contains("vm_pack_compare"));
     assert!(!ids.contains("debugger_action"));
     assert!(
@@ -777,7 +777,7 @@ fn execution_metadata_covers_operations_actions_and_dispatch_without_safe_defaul
             operation_count += 1;
         }
     }
-    assert_eq!(operation_count, 35);
+    assert_eq!(operation_count, 37);
     let schemas = &spec["components"]["schemas"];
     let mut action_count = 0;
     for name in [
@@ -1291,6 +1291,250 @@ fn window_event(sequence: u64, category: &str, kind: &str, payload: &str) -> Val
     event["payload_size"] = json!(payload.len());
     event
 }
+#[tokio::test]
+async fn filtered_event_pages_select_exact_records_and_reject_unknown_filters() {
+    let server = Server::start().await;
+    let mut events = Vec::new();
+    for sequence in 1..=30u64 {
+        let mut event = window_event(sequence, "vm", "wasm_dispatch_observation", "");
+        if sequence % 3 == 0 {
+            event = window_event(sequence, "wasm", "module_compiled", "");
+        }
+        event["frame_id"] = json!((sequence % 2).to_string());
+        events.push(event);
+    }
+    let bytes = jsonl(&events);
+    server.file("events.jsonl", &bytes);
+    let server = &server;
+    let read = |path: String| async move {
+        let response = server.get(&path).await;
+        let status = response.status().as_u16();
+        let bytes = assert_contract_response(response, "get", "/api/events", status).await;
+        (status, serde_json::from_slice::<Value>(&bytes).unwrap())
+    };
+    let sequences = |page: &Value| {
+        page["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|event| {
+                event["sequence_number"]
+                    .as_str()
+                    .unwrap()
+                    .parse::<u64>()
+                    .unwrap()
+            })
+            .collect::<Vec<_>>()
+    };
+    let (status, newest) =
+        read("/api/events?type=wasm_dispatch_observation&frame_id=1&limit=3".into()).await;
+    assert_eq!(status, 200);
+    // Odd sequences are frame 1; multiples of three are module_compiled.
+    assert_eq!(sequences(&newest), vec![23, 25, 29]);
+    assert_eq!(
+        newest["query"]["filters"],
+        json!({"type":["wasm_dispatch_observation"],"frame_id":"1"})
+    );
+    assert_eq!(newest["query"]["direction"], "backward");
+    assert_eq!(newest["query"]["limited"], true);
+    assert_eq!(newest["network_events"], json!([]));
+    assert_eq!(newest["event_window"]["scope"], "bounded_range");
+    let before = newest["query"]["next_before"].as_str().unwrap().to_owned();
+    let (_, older) = read(format!(
+        "/api/events?type=wasm_dispatch_observation&frame_id=1&limit=3&before={before}"
+    ))
+    .await;
+    assert_eq!(sequences(&older), vec![13, 17, 19]);
+    let (_, forward) = read("/api/events?category=wasm&after=0&limit=4".into()).await;
+    assert_eq!(sequences(&forward), vec![3, 6, 9, 12]);
+    let after = forward["query"]["next_after"].as_str().unwrap().to_owned();
+    let (_, rest) = read(format!("/api/events?category=wasm&after={after}&limit=100")).await;
+    assert_eq!(sequences(&rest), vec![15, 18, 21, 24, 27, 30]);
+    assert_eq!(rest["query"]["next_after"], bytes.len().to_string());
+    assert_eq!(rest["query"]["limited"], false);
+    let (_, timed) = read("/api/events?since_ns=5000&until_ns=8000".into()).await;
+    assert_eq!(sequences(&timed), vec![5, 6, 7]);
+    for bad in [
+        "/api/events?types=gap",
+        "/api/events?type=Gap",
+        "/api/events?frame_id=01",
+        "/api/events?after=1",
+        "/api/events?after=0&before=0",
+        &format!("/api/events?before={}", bytes.len() + 1),
+    ] {
+        let (status, error) = read(bad.to_owned()).await;
+        assert_eq!(status, 400, "{bad}");
+        assert_eq!(error["code"], "invalid_request", "{bad}");
+    }
+    // The unfiltered polling window is unchanged by the filtered path.
+    let (_, window) = read("/api/events?limit=2".into()).await;
+    assert!(window.get("query").is_none());
+    assert_eq!(sequences(&window), vec![29, 30]);
+}
+
+#[tokio::test]
+async fn filtered_artifacts_select_by_kind_frame_host_and_digest() {
+    let server = Server::start().await;
+    let hash = |n: u64| format!("{:064x}", n);
+    let records: Vec<_> = (1..=6u64)
+        .map(|id| {
+            json!({"protocol_version":1,"artifact_id":id.to_string(),"session_id":"1","navigation_id":"1",
+                "frame_id":(id % 2).to_string(),"parent_artifact_id":"0","creator_event_id":"0",
+                "kind":if id % 3 == 0 {"wasm"} else {"javascript"},
+                "url":if id % 3 == 0 {format!("wasm://wasm/{id:08x}")} else {format!("https://Challenge.Example/s{id}.js")},
+                "mime_type":"application/octet-stream","byte_size":id,"sha256":hash(id),"sensitive":false,
+                "content_path":format!("blobs/{}.bin", hash(id))})
+        })
+        .collect();
+    server.file("artifacts/manifest.jsonl", &jsonl(&records));
+    let server = &server;
+    let read = |path: &'static str| async move {
+        let response = server.get(path).await;
+        let status = response.status().as_u16();
+        let bytes = assert_contract_response(response, "get", "/api/artifacts", status).await;
+        (status, serde_json::from_slice::<Value>(&bytes).unwrap())
+    };
+    let ids = |page: &Value| {
+        page["artifacts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|artifact| artifact["artifact_id"].as_str().unwrap().to_owned())
+            .collect::<Vec<_>>()
+    };
+    let (_, wasm) = read("/api/artifacts?kind=wasm").await;
+    assert_eq!(ids(&wasm), vec!["3", "6"]);
+    assert!(wasm["artifacts"][0].get("content_path").is_none());
+    assert_eq!(wasm["query"]["filters"], json!({"kind":["wasm"]}));
+    let (_, host) = read("/api/artifacts?host=challenge.example&frame_id=1").await;
+    assert_eq!(ids(&host), vec!["1", "5"]);
+    let (_, digest) = read(
+        "/api/artifacts?sha256=0000000000000000000000000000000000000000000000000000000000000004",
+    )
+    .await;
+    assert_eq!(ids(&digest), vec!["4"]);
+    let (_, page) = read("/api/artifacts?kind=javascript&limit=2").await;
+    assert_eq!(ids(&page), vec!["4", "5"]);
+    assert!(page["query"]["next_before"].is_string());
+    for bad in [
+        "/api/artifacts?kinds=wasm",
+        "/api/artifacts?sha256=ABC",
+        "/api/artifacts?host=a/b",
+    ] {
+        assert_eq!(read(bad).await.0, 400, "{bad}");
+    }
+    let (_, unfiltered) = read("/api/artifacts?limit=1").await;
+    assert!(unfiltered.get("query").is_none());
+}
+
+#[tokio::test]
+async fn session_summary_counts_frames_and_explains_gaps() {
+    let server = Server::start().await;
+    let mut gap = window_event(4, "vm", "gap", "native_guest_sample_limit");
+    gap["frame_id"] = json!("7");
+    let mut events = vec![
+        window_event(1, "wasm", "module_compiled", ""),
+        window_event(2, "vm", "wasm_guest_dispatch", ""),
+        gap,
+    ];
+    events[1]["frame_id"] = json!("7");
+    server.file("events.jsonl", &jsonl(&events));
+    let response = server.get("/api/session/summary").await;
+    let etag = response.headers()["etag"].to_str().unwrap().to_owned();
+    let bytes = assert_contract_response(response, "get", "/api/session/summary", 200).await;
+    let summary: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(summary["events"]["total"], "3");
+    assert_eq!(summary["events"]["frames"][0]["frame_id"], "7");
+    assert_eq!(summary["events"]["frames"][0]["count"], "2");
+    assert_eq!(summary["events"]["sequence_gaps"], "1");
+    let codes = summary["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|check| check["code"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        codes,
+        vec![
+            "capture_not_live",
+            "wasm_without_artifacts",
+            "sequence_gaps",
+            "named_gap"
+        ]
+    );
+    assert_eq!(summary["checks"][3]["reason"], "native_guest_sample_limit");
+    assert!(!String::from_utf8(bytes).unwrap().contains("fixture.local"));
+    let unchanged = server
+        .client
+        .get(format!("{}/api/session/summary", server.url))
+        .header("If-None-Match", etag)
+        .send()
+        .await
+        .unwrap();
+    assert_contract_response(unchanged, "get", "/api/session/summary", 304).await;
+    let bad = server.get("/api/session/summary?limit=1").await;
+    assert_contract_response(bad, "get", "/api/session/summary", 400).await;
+}
+
+#[tokio::test]
+async fn event_waits_return_new_matches_or_time_out() {
+    let server = Server::start().await;
+    let events = vec![window_event(1, "wasm", "module_compiled", "")];
+    server.file("events.jsonl", &jsonl(&events));
+    let started = Instant::now();
+    let response = server
+        .get("/api/events/wait?type=module_compiled&timeout_ms=300")
+        .await;
+    let bytes = assert_contract_response(response, "get", "/api/events/wait", 200).await;
+    let timed_out: Value = serde_json::from_slice(&bytes).unwrap();
+    assert!(started.elapsed() >= Duration::from_millis(300));
+    assert_eq!(timed_out["wait"]["timed_out"], true);
+    assert_eq!(timed_out["count"], 0);
+    let cursor = timed_out["query"]["next_after"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert_eq!(cursor, jsonl(&events).len().to_string());
+    let path = server.root.path().join("events.jsonl");
+    let writer = tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        let mut more = jsonl(&[
+            window_event(2, "canvas", "api_call", ""),
+            window_event(3, "wasm", "module_compiled", ""),
+        ]);
+        let mut bytes = std::fs::read(&path).unwrap();
+        bytes.append(&mut more);
+        std::fs::write(&path, bytes).unwrap();
+    });
+    let response = server
+        .get(&format!(
+            "/api/events/wait?type=module_compiled&after={cursor}&timeout_ms=10000"
+        ))
+        .await;
+    let bytes = assert_contract_response(response, "get", "/api/events/wait", 200).await;
+    writer.await.unwrap();
+    let found: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(found["wait"]["timed_out"], false);
+    assert_eq!(found["events"][0]["sequence_number"], "3");
+    assert_eq!(found["event_window"]["scan_start"], cursor);
+    let replay: Value = server
+        .get("/api/events/wait?type=module_compiled&after=0&timeout_ms=1")
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(replay["count"], 2);
+    for bad in [
+        "/api/events/wait?timeout_ms=0",
+        "/api/events/wait?timeout_ms=60001",
+        "/api/events/wait?before=0",
+        "/api/events/wait?wait=1",
+    ] {
+        let response = server.get(bad).await;
+        assert_contract_response(response, "get", "/api/events/wait", 400).await;
+    }
+}
+
 #[tokio::test]
 async fn evidence_polling_preserves_bytes_windows_and_file_changes() {
     let server = Server::start().await;

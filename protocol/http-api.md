@@ -155,6 +155,20 @@ receive a response, because this server does not send requests. Logs stay on
 stderr. Captured content returned by a tool is untrusted data, not
 instructions.
 
+Each tool description is the operation summary, its description, its
+execution notes and, for a multiplexed body, every `action` with its fields,
+for example `connect_live(binding_id, confirm_live=true, target_id)`. A field
+fixed to `true` is a confirmation the researcher gives, not a default. An
+unknown argument is named in the refusal; its value is not echoed.
+
+An operation with `x-reb-wait-parameter` waits on the server for up to that
+many milliseconds. The client adds that wait to its own `--timeout`, so the
+timeout still bounds transport time. An operation with `x-reb-filter-echo`
+returns that key whenever it applied a filter. If a filtered call comes back
+without it, the backend predates filtered reads and returned unfiltered
+records; the tool reports an error and discards that result rather than let an
+agent read it as filtered. `reb-api call` applies both rules.
+
 `readOnlyHint` follows the read-only projection. `destructiveHint` is true when
 the operation is not `kind: operation`, when `effects` is not an array, or when
 any direct or state-dependent effect is something other than `analysis`.
@@ -184,8 +198,9 @@ remain and `false` at the end. An offset equal to the total returns an empty
 chunk; a negative, malformed, or beyond-end offset returns 400.
 Artifact lookup or full-content verification can return a JSON 408 when its
 five-second manifest or thirty-second verification deadline expires.
-This is not HTTP Range/206 pagination. Events and artifacts expose a bounded
-recent tail, not a cursor or stable exhaustive export.
+This is not HTTP Range/206 pagination. Unfiltered events and artifacts are a
+bounded recent tail. [Filtered reads](#filtered-and-paged-reads) add byte
+cursors for paging. Neither is a stable exhaustive export.
 
 ## Local coding-agent discovery and observational calls
 
@@ -277,6 +292,34 @@ are absent. Identifiers/origins remain potentially sensitive metadata. Direct
 HTTP reports `allow_effects: null`; MCP annotates its own flag without granting
 authorization. See the [agent context recipe](../docs/development/local-coding-agents.md#start-with-compact-session-context)
 for field omissions and coverage limits.
+
+## Session summary
+
+`GET /api/session/summary` (`get_session_summary`) answers "did this capture
+work?" in one read. It reports capture state, event counts by category and
+type, first and last event time, up to 16 sessions, the 32 busiest frames with
+their top event types, gap counts with named gap reasons, artifact counts by
+kind with the 32 newest artifact identities and digests, and `checks`. Each
+check has a `code`, a `severity` of `info` or `warning`, and a plain message:
+
+| Code | Meaning |
+| --- | --- |
+| `capture_not_live` | Idle or demo backend; stored evidence only. |
+| `capture_stopped` | Native capture was stopped in this session. |
+| `broker_disconnected` | Live capture whose broker is gone; nothing new arrives. |
+| `artifact_receiver_disconnected` | New scripts and Wasm modules are not stored. |
+| `no_events` | The store is empty. |
+| `wasm_without_artifacts` | Wasm compiled, but no Wasm module was stored. |
+| `artifact_capture_failed` | Some artifact bodies were not stored. |
+| `queue_drops` | Records lost to a full queue, beyond named gap markers. |
+| `sequence_gaps` | Sequence numbers missing inside the scanned events. |
+| `named_gap` | A producer named why it stopped, with `category`, `reason` and `count`. A reason containing `budget` or `limit` means a sampling budget filled. |
+| `bounded_scope` | Only the newest 64 MiB of events were summarized. |
+
+The summary scans the same newest 64 MiB as the polling window and the newest
+64 MiB of the manifest. It contains counts, identifiers and origin or
+`wasm://wasm/<hex>` labels only: no payloads, URL paths or queries, source or
+bodies. Identifiers and origins can still be sensitive. It has its own ETag.
 
 ## Error reasons and uncertain outcomes
 
@@ -607,6 +650,58 @@ contract, including the separate network window, scan coverage, and saturated
 gap and drop totals. A response that omits the fields is still accepted, and
 the UI then resets old summaries and labels fallback counts as
 visible-window-only.
+
+### Filtered and paged reads
+
+Any filter or cursor parameter turns `GET /api/events` into a filtered read
+that bypasses the polling cache. The unfiltered window above is unchanged.
+Filters combine with AND and compare stored fields exactly:
+
+- `type` and `category`: comma-separated lowercase names, at most 16;
+- `session_id`, `navigation_id`, `frame_id`, `tab_id`, `process_id`,
+  `artifact_id`, `request_id`, `parent_event_id`: canonical decimal integers;
+- `since_ns` (inclusive) and `until_ns` (exclusive) on `monotonic_time_ns`.
+
+Without a cursor the read starts at the last complete record and returns the
+newest `limit` matches in file order. `before=OFFSET` continues backward and
+`after=OFFSET` reads forward from a record boundary. Each response adds `query`
+with the applied `filters`, `direction`, `returned`, `store_end`, `limited`,
+`budget_exhausted`, `next_before` (null at the start of the store) and
+`next_after`. A page stops at `limit` matches or after 64 MiB of records, so
+pass the cursor on to continue. A record without its newline is still being
+written and is not returned until it is complete. `event_window.scope` is
+`bounded_range` unless the read covered the whole store. Gap fields describe
+only the scanned range. `network_events` is empty: select network records with
+`category=network`.
+
+Cursors are byte offsets of record boundaries in this backend's store. An offset
+past the end or inside a record returns 400. They do not survive a clear or a
+different store. An unknown query parameter returns 400 on the filtered and the
+unfiltered route, so a misspelled filter cannot return unfiltered records.
+
+`GET /api/artifacts` takes `kind`, `artifact_id`, `session_id`,
+`navigation_id`, `frame_id`, `execution_context_id`, `sha256` and `host`
+(case-insensitive URL host), with the same `after` and `before` cursors over
+`manifest.jsonl`. Records keep the public fields of the unfiltered route, and
+a duplicate artifact ID inside the scanned range still fails the read. Wasm
+modules usually have a `wasm://wasm/<hex>` URL, so select them with `kind=wasm`
+or `frame_id`, not `host`.
+
+The Rust backend serves these reads. The native stored-evidence `reb://` reader
+serves only the unfiltered window.
+
+### Waiting for events
+
+`GET /api/events/wait` (`wait_for_events`) takes the same filters, `after`,
+`limit` (default 100) and `timeout_ms` (1 to 60,000, default 10,000). It
+returns as soon as a complete record after the cursor matches, in the filtered
+`get_events` shape plus `wait` with `timed_out`, `timeout_ms` and `waited_ms`.
+Without `after` it waits only for records written after the call starts. On a
+timeout it returns no events and `query.next_after`, which is the `after` for
+the next wait. `event_window` covers every byte read while waiting. The server
+checks the store length every 200 ms and holds no reader between checks. At
+most eight waits run at once; a ninth returns 503 `resource_limit`. Waiting
+changes nothing in the browser or the stores.
 
 ## Exact native Traffic to VM selection
 

@@ -1,0 +1,820 @@
+{
+ "description": "Shared Rust and Swift origin-trace regressions for native JavaScript invocation relations (protocol/native-js-invocation-v1.md). Authored records, not a capture. Bodies stand in for retained request bodies.",
+ "events": {
+  "start5": {
+   "protocol_version": 3,
+   "session_id": "7",
+   "sequence_number": "1",
+   "monotonic_time_ns": "1001",
+   "process_id": 42,
+   "thread_id": 1,
+   "tab_id": 0,
+   "navigation_id": "0",
+   "frame_id": "6",
+   "artifact_id": "0",
+   "parent_event_id": "0",
+   "request_id": "0",
+   "browser_context_id_high": "0",
+   "browser_context_id_low": "0",
+   "encoded_data_length": "0",
+   "decoded_body_length": "0",
+   "status_code": 0,
+   "error_code": 0,
+   "resource_type": 0,
+   "flags": 0,
+   "initiator_request_id": 0,
+   "initiator_process_id": 0,
+   "payload_truncated": false,
+   "category": "vm",
+   "type": "js_invocation_start",
+   "payload_size": 128,
+   "payload_encoding": "hex",
+   "payload": "0100800000000200110000002900000084030000050000000000000000000000030900000000000000000000000000000000000000000000000000000000000000000000000000005a00000000000000000000000000000000000000000000000000000000000000070000000000000000000000000000000000000000000000"
+  },
+  "start6": {
+   "protocol_version": 3,
+   "session_id": "7",
+   "sequence_number": "2",
+   "monotonic_time_ns": "1002",
+   "process_id": 42,
+   "thread_id": 1,
+   "tab_id": 0,
+   "navigation_id": "0",
+   "frame_id": "6",
+   "artifact_id": "0",
+   "parent_event_id": "0",
+   "request_id": "0",
+   "browser_context_id_high": "0",
+   "browser_context_id_low": "0",
+   "encoded_data_length": "0",
+   "decoded_body_length": "0",
+   "status_code": 0,
+   "error_code": 0,
+   "resource_type": 0,
+   "flags": 0,
+   "initiator_request_id": 0,
+   "initiator_process_id": 0,
+   "payload_truncated": false,
+   "category": "vm",
+   "type": "js_invocation_start",
+   "payload_size": 128,
+   "payload_encoding": "hex",
+   "payload": "0100800000000200110000002900000084030000060000000000000000000000030900000000000000000000000000000000000000000000000000000000000000000000000000005a00000000000000000000000000000000000000000000000000000000000000070000000000000000000000000000000000000000000000"
+  },
+  "settle6": {
+   "protocol_version": 3,
+   "session_id": "7",
+   "sequence_number": "3",
+   "monotonic_time_ns": "1003",
+   "process_id": 42,
+   "thread_id": 1,
+   "tab_id": 0,
+   "navigation_id": "0",
+   "frame_id": "6",
+   "artifact_id": "0",
+   "parent_event_id": "0",
+   "request_id": "0",
+   "browser_context_id_high": "0",
+   "browser_context_id_low": "0",
+   "encoded_data_length": "0",
+   "decoded_body_length": "0",
+   "status_code": 0,
+   "error_code": 0,
+   "resource_type": 0,
+   "flags": 0,
+   "initiator_request_id": 0,
+   "initiator_process_id": 0,
+   "payload_truncated": false,
+   "category": "vm",
+   "type": "js_invocation_settle",
+   "payload_size": 128,
+   "payload_encoding": "hex",
+   "payload": "0100800000010303060000002900000001010000290000003578d135bf49b8866d1fdf105add444adf9268c16f3ae6322a95e331ca5606b7c03ac79a86ed63ae07000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+  },
+  "settle5": {
+   "protocol_version": 3,
+   "session_id": "7",
+   "sequence_number": "4",
+   "monotonic_time_ns": "1004",
+   "process_id": 42,
+   "thread_id": 1,
+   "tab_id": 0,
+   "navigation_id": "0",
+   "frame_id": "6",
+   "artifact_id": "0",
+   "parent_event_id": "0",
+   "request_id": "0",
+   "browser_context_id_high": "0",
+   "browser_context_id_low": "0",
+   "encoded_data_length": "0",
+   "decoded_body_length": "0",
+   "status_code": 0,
+   "error_code": 0,
+   "resource_type": 0,
+   "flags": 0,
+   "initiator_request_id": 0,
+   "initiator_process_id": 0,
+   "payload_truncated": false,
+   "category": "vm",
+   "type": "js_invocation_settle",
+   "payload_size": 128,
+   "payload_encoding": "hex",
+   "payload": "0100800000010303050000002900000001010000290000003478d135bf49b886fc667529516d4d3f0180e1d0ffce18fa1a8c9360d7f7afb58eaf4a25b8c1d02807000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+  },
+  "settle6_same": {
+   "protocol_version": 3,
+   "session_id": "7",
+   "sequence_number": "3",
+   "monotonic_time_ns": "1003",
+   "process_id": 42,
+   "thread_id": 1,
+   "tab_id": 0,
+   "navigation_id": "0",
+   "frame_id": "6",
+   "artifact_id": "0",
+   "parent_event_id": "0",
+   "request_id": "0",
+   "browser_context_id_high": "0",
+   "browser_context_id_low": "0",
+   "encoded_data_length": "0",
+   "decoded_body_length": "0",
+   "status_code": 0,
+   "error_code": 0,
+   "resource_type": 0,
+   "flags": 0,
+   "initiator_request_id": 0,
+   "initiator_process_id": 0,
+   "payload_truncated": false,
+   "category": "vm",
+   "type": "js_invocation_settle",
+   "payload_size": 128,
+   "payload_encoding": "hex",
+   "payload": "0100800000010303060000002900000001010000290000003478d135bf49b886fc667529516d4d3f0180e1d0ffce18fa1a8c9360d7f7afb58eaf4a25b8c1d02807000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+  },
+  "settle5_late": {
+   "protocol_version": 3,
+   "session_id": "7",
+   "sequence_number": "8",
+   "monotonic_time_ns": "1008",
+   "process_id": 42,
+   "thread_id": 1,
+   "tab_id": 0,
+   "navigation_id": "0",
+   "frame_id": "6",
+   "artifact_id": "0",
+   "parent_event_id": "0",
+   "request_id": "0",
+   "browser_context_id_high": "0",
+   "browser_context_id_low": "0",
+   "encoded_data_length": "0",
+   "decoded_body_length": "0",
+   "status_code": 0,
+   "error_code": 0,
+   "resource_type": 0,
+   "flags": 0,
+   "initiator_request_id": 0,
+   "initiator_process_id": 0,
+   "payload_truncated": false,
+   "category": "vm",
+   "type": "js_invocation_settle",
+   "payload_size": 128,
+   "payload_encoding": "hex",
+   "payload": "0100800000010303050000002900000001010000290000003478d135bf49b886fc667529516d4d3f0180e1d0ffce18fa1a8c9360d7f7afb58eaf4a25b8c1d02807000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+  },
+  "settle5_plain": {
+   "protocol_version": 3,
+   "session_id": "7",
+   "sequence_number": "4",
+   "monotonic_time_ns": "1004",
+   "process_id": 42,
+   "thread_id": 1,
+   "tab_id": 0,
+   "navigation_id": "0",
+   "frame_id": "6",
+   "artifact_id": "0",
+   "parent_event_id": "0",
+   "request_id": "0",
+   "browser_context_id_high": "0",
+   "browser_context_id_low": "0",
+   "encoded_data_length": "0",
+   "decoded_body_length": "0",
+   "status_code": 0,
+   "error_code": 0,
+   "resource_type": 0,
+   "flags": 0,
+   "initiator_request_id": 0,
+   "initiator_process_id": 0,
+   "payload_truncated": false,
+   "category": "vm",
+   "type": "js_invocation_settle",
+   "payload_size": 128,
+   "payload_encoding": "hex",
+   "payload": "0100800000010303050000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000007000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+  },
+  "initiated": {
+   "protocol_version": 3,
+   "session_id": "7",
+   "sequence_number": "6",
+   "monotonic_time_ns": "1006",
+   "process_id": 42,
+   "thread_id": 1,
+   "tab_id": 0,
+   "navigation_id": "0",
+   "frame_id": "6",
+   "artifact_id": "0",
+   "parent_event_id": "0",
+   "request_id": "9",
+   "browser_context_id_high": "0",
+   "browser_context_id_low": "0",
+   "encoded_data_length": "0",
+   "decoded_body_length": "0",
+   "status_code": 0,
+   "error_code": 0,
+   "resource_type": 0,
+   "flags": 0,
+   "initiator_request_id": 0,
+   "initiator_process_id": 0,
+   "payload_truncated": false,
+   "category": "network",
+   "type": "request_initiated",
+   "payload_size": 4,
+   "payload_encoding": "hex",
+   "payload": "504f5354"
+  },
+  "inside5": {
+   "protocol_version": 3,
+   "session_id": "7",
+   "sequence_number": "7",
+   "monotonic_time_ns": "1007",
+   "process_id": 42,
+   "thread_id": 1,
+   "tab_id": 0,
+   "navigation_id": "0",
+   "frame_id": "0",
+   "artifact_id": "0",
+   "parent_event_id": "0",
+   "request_id": "9",
+   "browser_context_id_high": "0",
+   "browser_context_id_low": "0",
+   "encoded_data_length": "0",
+   "decoded_body_length": "0",
+   "status_code": 0,
+   "error_code": 0,
+   "resource_type": 0,
+   "flags": 0,
+   "initiator_request_id": 0,
+   "initiator_process_id": 0,
+   "payload_truncated": false,
+   "category": "vm",
+   "type": "js_invocation_request",
+   "payload_size": 128,
+   "payload_encoding": "hex",
+   "payload": "0100800002000000050000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+  },
+  "root": {
+   "protocol_version": 3,
+   "session_id": "7",
+   "sequence_number": "1",
+   "monotonic_time_ns": "1001",
+   "process_id": 84,
+   "thread_id": 1,
+   "tab_id": 0,
+   "navigation_id": "0",
+   "frame_id": "6",
+   "artifact_id": "0",
+   "parent_event_id": "0",
+   "request_id": "900",
+   "browser_context_id_high": "0",
+   "browser_context_id_low": "0",
+   "encoded_data_length": "0",
+   "decoded_body_length": "0",
+   "status_code": 0,
+   "error_code": 0,
+   "resource_type": 0,
+   "flags": 0,
+   "initiator_request_id": 9,
+   "initiator_process_id": 42,
+   "payload_truncated": false,
+   "category": "network",
+   "type": "request_started",
+   "payload_size": 4,
+   "payload_encoding": "hex",
+   "payload": "504f5354"
+  }
+ },
+ "edges": {
+  "initiator": {
+   "protocol_version": 1,
+   "session_id": "7",
+   "from_process_id": 84,
+   "from_sequence_number": "1",
+   "to_process_id": 42,
+   "to_sequence_number": "6",
+   "relation": "request_initiator",
+   "confidence": "observed",
+   "request_id": "0",
+   "artifact_id": "0"
+  },
+  "issued": {
+   "protocol_version": 1,
+   "session_id": "7",
+   "from_process_id": 42,
+   "from_sequence_number": "6",
+   "to_process_id": 42,
+   "to_sequence_number": "1",
+   "relation": "issued_during_invocation",
+   "confidence": "observed",
+   "request_id": "0",
+   "artifact_id": "0"
+  },
+  "settled5": {
+   "protocol_version": 1,
+   "session_id": "7",
+   "from_process_id": 42,
+   "from_sequence_number": "4",
+   "to_process_id": 42,
+   "to_sequence_number": "1",
+   "relation": "invocation_settlement",
+   "confidence": "observed",
+   "request_id": "0",
+   "artifact_id": "0"
+  },
+  "settled6": {
+   "protocol_version": 1,
+   "session_id": "7",
+   "from_process_id": 42,
+   "from_sequence_number": "3",
+   "to_process_id": 42,
+   "to_sequence_number": "2",
+   "relation": "invocation_settlement",
+   "confidence": "observed",
+   "request_id": "0",
+   "artifact_id": "0"
+  }
+ },
+ "bodies": {
+  "exact": {
+   "event": "7:84:1",
+   "hex": "763d31266e3d50315f65794a30655841694f694a4b563151694c434a68624763694f694a49557a49314e694a392e6126633d78"
+  },
+  "other": {
+   "event": "7:84:1",
+   "hex": "6e3d50315f65794a30655841694f694a4b563151694c434a68624763694f694a49557a49314e694a392e62"
+  },
+  "escaped": {
+   "event": "7:84:1",
+   "hex": "6e3d503125354665794a30655841694f694a4b563151694c434a68624763694f694a49557a49314e694a392e61"
+  }
+ },
+ "cases": [
+  {
+   "name": "issued_during_invocation_is_observed_identity",
+   "events": [
+    "start5",
+    "initiated",
+    "inside5",
+    "root"
+   ],
+   "edges": [
+    "initiator",
+    "issued"
+   ],
+   "bodies": [],
+   "step_sequences": [
+    "1",
+    "6",
+    "1"
+   ],
+   "step_relations": [
+    "trace_target",
+    "request_initiator",
+    "issued_during_invocation"
+   ],
+   "step_confidences": [
+    "observed",
+    "observed",
+    "observed"
+   ],
+   "gap_reasons": [
+    "no_predecessor"
+   ],
+   "step_values": [
+    null,
+    null,
+    "invocation 5 started at site 0 with 2 argument(s)"
+   ],
+   "coverage": {
+    "linked_steps": 2,
+    "observed_links": 2,
+    "correlated_links": 0,
+    "time_adjacent_links": 0,
+    "gap_count": 1,
+    "percent": 67
+   },
+   "query": {
+    "request_id": "900",
+    "session_id": "7",
+    "root_process_id": 84,
+    "root_sequence_number": "1"
+   }
+  },
+  {
+   "name": "value_flow_links_the_exact_returned_bytes",
+   "events": [
+    "start5",
+    "start6",
+    "settle6",
+    "settle5",
+    "initiated",
+    "root"
+   ],
+   "edges": [
+    "initiator",
+    "settled5",
+    "settled6"
+   ],
+   "bodies": [
+    "exact"
+   ],
+   "step_sequences": [
+    "1",
+    "6",
+    "4",
+    "1"
+   ],
+   "step_relations": [
+    "trace_target",
+    "request_initiator",
+    "invocation_value_flow",
+    "invocation_settlement"
+   ],
+   "step_confidences": [
+    "observed",
+    "observed",
+    "correlated",
+    "observed"
+   ],
+   "gap_reasons": [
+    "no_predecessor"
+   ],
+   "step_values": [
+    null,
+    null,
+    "invocation 5 fulfilled: string, length 41, digest retained",
+    "invocation 5 started at site 0 with 2 argument(s)"
+   ],
+   "coverage": {
+    "linked_steps": 3,
+    "observed_links": 2,
+    "correlated_links": 1,
+    "time_adjacent_links": 0,
+    "gap_count": 1,
+    "percent": 75
+   },
+   "query": {
+    "request_id": "900",
+    "session_id": "7",
+    "root_process_id": 84,
+    "root_sequence_number": "1"
+   }
+  },
+  {
+   "name": "value_flow_keeps_interleaved_invocations_apart",
+   "events": [
+    "start5",
+    "start6",
+    "settle6",
+    "settle5",
+    "initiated",
+    "root"
+   ],
+   "edges": [
+    "initiator",
+    "settled5",
+    "settled6"
+   ],
+   "bodies": [
+    "other"
+   ],
+   "step_sequences": [
+    "1",
+    "6",
+    "3",
+    "2"
+   ],
+   "step_relations": [
+    "trace_target",
+    "request_initiator",
+    "invocation_value_flow",
+    "invocation_settlement"
+   ],
+   "step_confidences": [
+    "observed",
+    "observed",
+    "correlated",
+    "observed"
+   ],
+   "gap_reasons": [
+    "no_predecessor"
+   ],
+   "coverage": {
+    "linked_steps": 3,
+    "observed_links": 2,
+    "correlated_links": 1,
+    "time_adjacent_links": 0,
+    "gap_count": 1,
+    "percent": 75
+   },
+   "query": {
+    "request_id": "900",
+    "session_id": "7",
+    "root_process_id": 84,
+    "root_sequence_number": "1"
+   }
+  },
+  {
+   "name": "value_flow_needs_a_retained_body",
+   "events": [
+    "start5",
+    "start6",
+    "settle6",
+    "settle5",
+    "initiated",
+    "root"
+   ],
+   "edges": [
+    "initiator",
+    "settled5",
+    "settled6"
+   ],
+   "bodies": [],
+   "step_sequences": [
+    "1",
+    "6"
+   ],
+   "step_relations": [
+    "trace_target",
+    "request_initiator"
+   ],
+   "step_confidences": [
+    "observed",
+    "observed"
+   ],
+   "gap_reasons": [
+    "no_predecessor"
+   ],
+   "coverage": {
+    "linked_steps": 1,
+    "observed_links": 1,
+    "correlated_links": 0,
+    "time_adjacent_links": 0,
+    "gap_count": 1,
+    "percent": 50
+   },
+   "query": {
+    "request_id": "900",
+    "session_id": "7",
+    "root_process_id": 84,
+    "root_sequence_number": "1"
+   }
+  },
+  {
+   "name": "value_flow_never_matches_a_transformed_value",
+   "events": [
+    "start5",
+    "start6",
+    "settle6",
+    "settle5",
+    "initiated",
+    "root"
+   ],
+   "edges": [
+    "initiator",
+    "settled5",
+    "settled6"
+   ],
+   "bodies": [
+    "escaped"
+   ],
+   "step_sequences": [
+    "1",
+    "6"
+   ],
+   "step_relations": [
+    "trace_target",
+    "request_initiator"
+   ],
+   "step_confidences": [
+    "observed",
+    "observed"
+   ],
+   "gap_reasons": [
+    "no_predecessor"
+   ],
+   "coverage": {
+    "linked_steps": 1,
+    "observed_links": 1,
+    "correlated_links": 0,
+    "time_adjacent_links": 0,
+    "gap_count": 1,
+    "percent": 50
+   },
+   "query": {
+    "request_id": "900",
+    "session_id": "7",
+    "root_process_id": 84,
+    "root_sequence_number": "1"
+   }
+  },
+  {
+   "name": "value_flow_refuses_two_equal_values",
+   "events": [
+    "start5",
+    "start6",
+    "settle6_same",
+    "settle5",
+    "initiated",
+    "root"
+   ],
+   "edges": [
+    "initiator",
+    "settled5",
+    "settled6"
+   ],
+   "bodies": [
+    "exact"
+   ],
+   "step_sequences": [
+    "1",
+    "6"
+   ],
+   "step_relations": [
+    "trace_target",
+    "request_initiator"
+   ],
+   "step_confidences": [
+    "observed",
+    "observed"
+   ],
+   "gap_reasons": [
+    "value_flow_ambiguous"
+   ],
+   "coverage": {
+    "linked_steps": 1,
+    "observed_links": 1,
+    "correlated_links": 0,
+    "time_adjacent_links": 0,
+    "gap_count": 1,
+    "percent": 50
+   },
+   "query": {
+    "request_id": "900",
+    "session_id": "7",
+    "root_process_id": 84,
+    "root_sequence_number": "1"
+   }
+  },
+  {
+   "name": "value_flow_refuses_a_value_settled_after_the_request",
+   "events": [
+    "start5",
+    "settle5_late",
+    "initiated",
+    "root"
+   ],
+   "edges": [
+    "initiator"
+   ],
+   "bodies": [
+    "exact"
+   ],
+   "step_sequences": [
+    "1",
+    "6"
+   ],
+   "step_relations": [
+    "trace_target",
+    "request_initiator"
+   ],
+   "step_confidences": [
+    "observed",
+    "observed"
+   ],
+   "gap_reasons": [
+    "no_predecessor"
+   ],
+   "coverage": {
+    "linked_steps": 1,
+    "observed_links": 1,
+    "correlated_links": 0,
+    "time_adjacent_links": 0,
+    "gap_count": 1,
+    "percent": 50
+   },
+   "query": {
+    "request_id": "900",
+    "session_id": "7",
+    "root_process_id": 84,
+    "root_sequence_number": "1"
+   }
+  },
+  {
+   "name": "value_flow_needs_a_digest",
+   "events": [
+    "start5",
+    "settle5_plain",
+    "initiated",
+    "root"
+   ],
+   "edges": [
+    "initiator",
+    "settled5"
+   ],
+   "bodies": [
+    "exact"
+   ],
+   "step_sequences": [
+    "1",
+    "6"
+   ],
+   "step_relations": [
+    "trace_target",
+    "request_initiator"
+   ],
+   "step_confidences": [
+    "observed",
+    "observed"
+   ],
+   "gap_reasons": [
+    "no_predecessor"
+   ],
+   "coverage": {
+    "linked_steps": 1,
+    "observed_links": 1,
+    "correlated_links": 0,
+    "time_adjacent_links": 0,
+    "gap_count": 1,
+    "percent": 50
+   },
+   "query": {
+    "request_id": "900",
+    "session_id": "7",
+    "root_process_id": 84,
+    "root_sequence_number": "1"
+   }
+  },
+  {
+   "name": "identity_preempts_value_flow",
+   "events": [
+    "start5",
+    "start6",
+    "settle6",
+    "settle5",
+    "initiated",
+    "inside5",
+    "root"
+   ],
+   "edges": [
+    "initiator",
+    "issued",
+    "settled5",
+    "settled6"
+   ],
+   "bodies": [
+    "exact"
+   ],
+   "step_sequences": [
+    "1",
+    "6",
+    "1"
+   ],
+   "step_relations": [
+    "trace_target",
+    "request_initiator",
+    "issued_during_invocation"
+   ],
+   "step_confidences": [
+    "observed",
+    "observed",
+    "observed"
+   ],
+   "gap_reasons": [
+    "no_predecessor"
+   ],
+   "coverage": {
+    "linked_steps": 2,
+    "observed_links": 2,
+    "correlated_links": 0,
+    "time_adjacent_links": 0,
+    "gap_count": 1,
+    "percent": 67
+   },
+   "query": {
+    "request_id": "900",
+    "session_id": "7",
+    "root_process_id": 84,
+    "root_sequence_number": "1"
+   }
+  }
+ ]
+}

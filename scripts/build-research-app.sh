@@ -126,7 +126,8 @@ xcrun swiftc -parse-as-library \
   "${trace_document_source}" "${repo_root}/tools/check-origin-trace-gaps.swift" \
   -o "${repo_root}/build/check-origin-trace-gaps"
 "${repo_root}/build/check-origin-trace-gaps" \
-  "${repo_root}/apps/origin-trace-backend/assets/origin-trace-gap-cases.json"
+  "${repo_root}/apps/origin-trace-backend/assets/origin-trace-gap-cases.json" \
+  "${repo_root}/apps/origin-trace-backend/assets/origin-trace-invocation-cases.json"
 
 xcrun swiftc -parse-as-library \
   "${live_session_source}" "${repo_root}/tools/check-live-session-failure.swift" \

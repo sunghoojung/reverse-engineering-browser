@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 
 enum OriginTraceDocumentBuilder {
@@ -6,6 +7,10 @@ enum OriginTraceDocumentBuilder {
     "request_initiator": 1,
     "request_lifecycle": 2,
     "artifact_request": 3,
+    // Exact invocation identities drawn by the broker's index; see
+    // protocol/native-js-invocation-v1.md.
+    "issued_during_invocation": 4,
+    "invocation_settlement": 5,
   ]
   private static let sourceBoundaries = Set([
     "canvas", "webgl", "web_audio", "navigator", "permissions", "storage", "webrtc", "runtime",
@@ -33,7 +38,12 @@ enum OriginTraceDocumentBuilder {
     sessionID: String? = nil,
     rootProcessID: UInt32?,
     rootSequenceNumber: String?,
-    maxSteps: Int = 32
+    maxSteps: Int = 32,
+    // Raw request bodies retained under sensitive capture, keyed by
+    // "session:process:sequence" of the event carrying each. Integration point:
+    // the request path and body capture contract supplies them; until it is
+    // merged callers pass none and invocation_value_flow is never reported.
+    requestBodies: [String: [UInt8]] = [:]
   ) throws -> [String: Any] {
     guard canonicalUInt64(requestID) != nil else {
       throw traceError("Request ID must be a canonical unsigned 64-bit integer")
@@ -139,6 +149,35 @@ enum OriginTraceDocumentBuilder {
         return leftSequence > rightSequence
       }
       guard let selectedEdge = candidates.first else {
+        // Where identity ends at the renderer's own request record, an exact
+        // returned value found in a retained body of this request is a
+        // correlated link. It is never a time window.
+        if current["category"] as? String == "network",
+          current["type"] as? String == "request_initiated",
+          let body = steps.reversed().lazy.compactMap({ step -> [UInt8]? in
+            guard let event = step["event"] as? [String: Any] else { return nil }
+            return requestBodies[
+              "\(event["session_id"] as? String ?? ""):\(event["process_id"] as? Int ?? -1):\(event["sequence_number"] as? String ?? "")"
+            ]
+          }).first
+        {
+          var refused = false
+          switch valueFlow(retained: eventsByReference, visited: visited, request: current, body: body) {
+          case .linked(let settle):
+            visited.insert(try eventReference(settle))
+            steps.append(
+              try eventStep(settle, relation: "invocation_value_flow", confidence: "correlated"))
+            correlatedLinks += 1
+            current = settle
+            continue
+          case .refused(let reason, let detail):
+            gaps.append(["reason": reason, "after_step": steps.count - 1, "detail": detail])
+            refused = true
+          case .none:
+            refused = false
+          }
+          if refused { break }
+        }
         if !sourceBoundaries.contains(current["category"] as? String ?? "") {
           // Proximity never closes the gap. The identity chain really did end
           // here, so the gap stays and the adjacency row is reported beside it
@@ -282,7 +321,7 @@ enum OriginTraceDocumentBuilder {
       eventCategories.contains(category),
       let operation = event["type"] as? String,
       !operation.isEmpty,
-      let payload = decodedPayload(event),
+      let payload = stepValue(event),
       let sessionID = canonicalUInt64(event["session_id"]),
       let processID = processID(event["process_id"]),
       let sequenceNumber = canonicalUInt64(event["sequence_number"]),
@@ -413,6 +452,224 @@ enum OriginTraceDocumentBuilder {
       CFGetTypeID(number) != CFBooleanGetTypeID()
     else { return false }
     return number.stringValue == String(expected)
+  }
+
+  // A JavaScript invocation record reads as text, never as its binary payload:
+  // the same wording as invocation_value in origin_trace.rs.
+  private static func stepValue(_ event: [String: Any]) -> String? {
+    guard let operation = event["type"] as? String, operation.hasPrefix("js_invocation_") else {
+      return decodedPayload(event)
+    }
+    let kinds = [
+      "integer", "number", "string", "symbol", "undefined", "null", "boolean", "BigInt",
+      "object", "function", "array", "ArrayBuffer", "view", "promise",
+    ]
+    switch operation {
+    case "js_invocation_start":
+      guard let start = invocationStart(event) else { return nil }
+      let parent =
+        start.parent != 0
+        ? ", inside invocation \(start.parent)" : (start.parentUnknown ? ", parent unknown" : "")
+      return "invocation \(start.id) started at site \(start.slot) with \(start.arguments) argument(s)\(parent)"
+    case "js_invocation_settle":
+      guard let settle = invocationSettle(event), (1...14).contains(Int(settle.kind)) else {
+        return nil
+      }
+      return "invocation \(settle.id) \(settle.fulfilled ? "fulfilled" : "rejected"): \(kinds[Int(settle.kind) - 1])"
+        + (settle.length != 0 ? ", length \(settle.length)" : "")
+        + (settle.digest != nil ? ", digest retained" : "")
+    case "js_invocation_request":
+      guard let request = invocationRequest(event) else { return nil }
+      return request.inside
+        ? "request started inside invocation \(request.id)"
+        : "request started outside script while an invocation was open"
+    default:
+      return nil
+    }
+  }
+
+  private struct InvocationDigest {
+    let sha256: [UInt8]
+    let rolling: UInt64
+    let byteLength: Int
+  }
+
+  private enum ValueFlow {
+    case none
+    case linked([String: Any])
+    case refused(String, String)
+  }
+
+  private static let rollingBase: UInt64 = 0x100_0000_01b3
+  private static let searchByteLimit = 16 << 20
+
+  private static func payloadBytes(_ event: [String: Any]) -> [UInt8]? {
+    guard let text = event["payload"] as? String, text.count == 256 else { return nil }
+    var bytes: [UInt8] = []
+    var index = text.startIndex
+    while index < text.endIndex {
+      let next = text.index(index, offsetBy: 2)
+      guard let byte = UInt8(text[index..<next], radix: 16) else { return nil }
+      bytes.append(byte)
+      index = next
+    }
+    return bytes
+  }
+
+  private static func le(_ p: [UInt8], _ at: Int, _ width: Int) -> UInt64 {
+    (0..<width).reduce(UInt64(0)) { $0 | (UInt64(p[at + $1]) << (8 * UInt64($1))) }
+  }
+
+  // The checks of payload() in js_invocation.rs: a version 1 invocation record
+  // in a valid vm envelope.
+  private static func invocationPayload(_ event: [String: Any], _ kind: String) -> [UInt8]? {
+    guard event["type"] as? String == kind, event["category"] as? String == "vm",
+      exactInteger(event["protocol_version"], equals: 3), exactInteger(event["flags"], equals: 0),
+      (event["payload_truncated"] as? Bool) == false, exactInteger(event["payload_size"], equals: 128),
+      event["payload_encoding"] as? String == "hex",
+      ["session_id", "sequence_number", "monotonic_time_ns"].allSatisfy({ nonzeroUInt64(event[$0]) != nil }),
+      ["artifact_id", "parent_event_id", "navigation_id"].allSatisfy({ event[$0] as? String == "0" }),
+      canonicalUInt64(event["frame_id"]) != nil, canonicalUInt64(event["request_id"]) != nil,
+      let process = processID(event["process_id"]), process != 0,
+      let thread = processID(event["thread_id"]), thread != 0,
+      let p = payloadBytes(event), le(p, 0, 2) == 1, le(p, 2, 2) == 128
+    else { return nil }
+    return p
+  }
+
+  private static func validKind(_ kind: UInt8, _ low: UInt64) -> Bool {
+    (1...14).contains(kind) && (kind == 1 || (kind == 7 ? low <= 1 : low == 0))
+  }
+
+  private static func invocationStart(_ event: [String: Any])
+    -> (slot: UInt8, id: UInt64, parent: UInt64, parentUnknown: Bool, arguments: UInt64)?
+  {
+    guard let p = invocationPayload(event, "js_invocation_start"),
+      event["frame_id"] as? String != "0", event["request_id"] as? String == "0"
+    else { return nil }
+    let (slot, flags, argc, id, parent) = (p[4], p[5], le(p, 6, 2), le(p, 20, 4), le(p, 24, 4))
+    guard slot < 8, flags & ~0x03 == 0, le(p, 8, 4) != 0, le(p, 16, 4) != 0,
+      le(p, 12, 4) < le(p, 16, 4), id != 0, le(p, 28, 2) < 64, le(p, 30, 2) < 256,
+      le(p, 104, 8) != 0, p[112...].allSatisfy({ $0 == 0 }),
+      parent == 0 || (parent < id && flags & 0x01 == 0), (flags & 0x02 != 0) == (argc > 8)
+    else { return nil }
+    for index in 0..<8 {
+      let (kind, low) = (p[32 + index], le(p, 40 + 4 * index, 4))
+      guard UInt64(index) < argc ? validKind(kind, low) : (kind == 0 && low == 0) else { return nil }
+    }
+    return (slot, id, parent, flags & 0x01 != 0, argc)
+  }
+
+  private static func invocationSettle(_ event: [String: Any])
+    -> (id: UInt64, fulfilled: Bool, kind: UInt8, length: UInt64, digest: InvocationDigest?)?
+  {
+    guard let p = invocationPayload(event, "js_invocation_settle"),
+      event["frame_id"] as? String != "0", event["request_id"] as? String == "0"
+    else { return nil }
+    let (slot, outcome, via, kind) = (p[4], p[5], p[6], p[7])
+    let (length, state, encoding, flags) = (le(p, 12, 4), p[16], p[17], p[18])
+    let (byteLength, rolling) = (le(p, 20, 4), le(p, 24, 8))
+    let (fulfilled, rejected) = (outcome == 1, outcome == 2)
+    let (string, bytes) = (kind == 3, kind == 12 || kind == 13)
+    guard slot < 8, fulfilled || rejected, (1...14).contains(kind), le(p, 8, 4) != 0,
+      le(p, 64, 8) != 0, p[19] == 0, flags & ~0x01 == 0, p[72...].allSatisfy({ $0 == 0 }),
+      (via == 1 && fulfilled) || (via == 2 && rejected) || via == 3,
+      length == 0 || string || bytes || kind == 11
+    else { return nil }
+    var digest: InvocationDigest?
+    if state == 1 {
+      guard fulfilled, byteLength <= 1 << 20, (string && encoding == 1) || (bytes && encoding == 2),
+        string || flags & 0x01 == 0, !string || byteLength >= length, !bytes || byteLength == length,
+        byteLength != 0 || rolling == 0
+      else { return nil }
+      digest = InvocationDigest(sha256: Array(p[32..<64]), rolling: rolling, byteLength: Int(byteLength))
+    } else {
+      let consistent: Bool
+      switch state {
+      case 0: consistent = true
+      case 2: consistent = !(fulfilled && (string || bytes))
+      case 3: consistent = fulfilled && (string || bytes)
+      case 4: consistent = fulfilled && bytes
+      default: consistent = false
+      }
+      guard consistent, encoding == 0, byteLength == 0, rolling == 0, flags == 0,
+        p[32..<64].allSatisfy({ $0 == 0 })
+      else { return nil }
+    }
+    return (le(p, 8, 4), fulfilled, kind, length, digest)
+  }
+
+  private static func invocationRequest(_ event: [String: Any]) -> (inside: Bool, id: UInt64)? {
+    guard let p = invocationPayload(event, "js_invocation_request"),
+      let request = nonzeroUInt64(event["request_id"]), let requestID = UInt64(request),
+      requestID <= UInt64(UInt32.max)
+    else { return nil }
+    let (state, id) = (p[4], le(p, 8, 4))
+    guard state == 2 || state == 3, (state == 2) == (id != 0), le(p, 12, 2) < 256,
+      p[5..<8].allSatisfy({ $0 == 0 }), le(p, 14, 2) == 0, p[16...].allSatisfy({ $0 == 0 })
+    else { return nil }
+    return (state == 2, id)
+  }
+
+  // body_contains in js_invocation.rs: the rolling hash selects candidate
+  // windows of exactly the stated length, and SHA-256 alone confirms one.
+  private static func bodyContains(_ body: [UInt8], _ digest: InvocationDigest) -> Bool? {
+    let length = digest.byteLength
+    guard length > 0, length <= body.count else { return false }
+    var power: UInt64 = 1
+    for _ in 1..<max(length, 1) { power = power &* rollingBase }
+    var hash = body[0..<length].reduce(UInt64(0)) { $0 &* rollingBase &+ UInt64($1) }
+    var hashed = 0
+    for start in 0...(body.count - length) {
+      if start > 0 {
+        hash = (hash &- UInt64(body[start - 1]) &* power) &* rollingBase
+          &+ UInt64(body[start + length - 1])
+      }
+      if hash == digest.rolling {
+        hashed += length
+        if hashed > searchByteLimit { return nil }
+        if Array(SHA256.hash(data: Data(body[start..<(start + length)]))) == digest.sha256 {
+          return true
+        }
+      }
+    }
+    return false
+  }
+
+  // value_flow in origin_trace.rs: the one settle record of the request's
+  // session and renderer process, earlier in that process's sequence, whose
+  // exact digested value occurs in the body.
+  private static func valueFlow(
+    retained: [String: [String: Any]], visited: Set<String>, request: [String: Any], body: [UInt8]
+  ) -> ValueFlow {
+    guard let limitText = request["sequence_number"] as? String, let limit = UInt64(limitText) else {
+      return .none
+    }
+    var found: [[String: Any]] = []
+    for (key, event) in retained.sorted(by: { $0.key < $1.key }) {
+      guard !visited.contains(key), event["type"] as? String == "js_invocation_settle",
+        event["session_id"] as? String == request["session_id"] as? String,
+        processID(event["process_id"]) == processID(request["process_id"]),
+        let sequence = UInt64(event["sequence_number"] as? String ?? ""), sequence < limit,
+        let digest = invocationSettle(event)?.digest
+      else { continue }
+      switch bodyContains(body, digest) {
+      case .some(true): found.append(event)
+      case .some(false): break
+      case .none:
+        return .refused(
+          "value_flow_unsearched",
+          "A retained returned value could not be searched in this request body within the bounded search, so no value-flow link is reported.")
+      }
+    }
+    switch found.count {
+    case 0: return .none
+    case 1: return .linked(found[0])
+    default:
+      return .refused(
+        "value_flow_ambiguous",
+        "\(found.count) returned values with retained digests occur in this request body. None is chosen.")
+    }
   }
 
   private static func decodedPayload(_ event: [String: Any]) -> String? {

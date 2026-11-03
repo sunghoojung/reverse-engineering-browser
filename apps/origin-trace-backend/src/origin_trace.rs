@@ -4,13 +4,20 @@ use crate::{
 };
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
+use std::path::Path;
 
 type Reference = (String, u32, String);
-const RELATIONS: [&str; 4] = [
+/// Raw request body bytes keyed by the retained event that carries them.
+pub type RequestBodies = BTreeMap<Reference, Vec<u8>>;
+// Stored edge relations in priority order. The two invocation relations are
+// exact identities drawn by the broker's index (protocol/native-js-invocation-v1.md).
+const RELATIONS: [&str; 6] = [
     "parent_event",
     "request_initiator",
     "request_lifecycle",
     "artifact_request",
+    "issued_during_invocation",
+    "invocation_settlement",
 ];
 const SOURCES: [&str; 8] = [
     "canvas",
@@ -32,6 +39,78 @@ fn reference(value: &Value) -> Result<Reference> {
         pid,
         value["sequence_number"].as_str().unwrap().into(),
     ))
+}
+/// What a JavaScript invocation record says, without its binary payload: an
+/// invocation ID, a state, a kind and a length. Digests are never shown here.
+fn invocation_value(value: &Value) -> Option<String> {
+    const KINDS: [&str; 14] = [
+        "integer",
+        "number",
+        "string",
+        "symbol",
+        "undefined",
+        "null",
+        "boolean",
+        "BigInt",
+        "object",
+        "function",
+        "array",
+        "ArrayBuffer",
+        "view",
+        "promise",
+    ];
+    let kind = |k: u8| KINDS.get(usize::from(k).wrapping_sub(1)).copied();
+    match value["type"].as_str()? {
+        "js_invocation_start" => {
+            let start = crate::js_invocation::start(value)?;
+            Some(format!(
+                "invocation {} started at site {} with {} argument(s){}",
+                start.invocation_id,
+                start.site_slot,
+                start.argument_count,
+                match (start.parent_invocation_id, start.parent_unknown) {
+                    (0, true) => ", parent unknown".to_owned(),
+                    (0, false) => String::new(),
+                    (parent, _) => format!(", inside invocation {parent}"),
+                }
+            ))
+        }
+        "js_invocation_settle" => {
+            let settle = crate::js_invocation::settle(value)?;
+            Some(format!(
+                "invocation {} {}: {}{}{}",
+                settle.invocation_id,
+                if settle.fulfilled {
+                    "fulfilled"
+                } else {
+                    "rejected"
+                },
+                kind(settle.value_kind)?,
+                if settle.value_length != 0 {
+                    format!(", length {}", settle.value_length)
+                } else {
+                    String::new()
+                },
+                if settle.digest.is_some() {
+                    ", digest retained"
+                } else {
+                    ""
+                }
+            ))
+        }
+        "js_invocation_request" => {
+            let request = crate::js_invocation::request(value)?;
+            Some(if request.inside {
+                format!(
+                    "request started inside invocation {}",
+                    request.invocation_id
+                )
+            } else {
+                "request started outside script while an invocation was open".to_owned()
+            })
+        }
+        _ => None,
+    }
 }
 fn step(value: &Value, relation: &str, confidence: &str) -> Result<Value> {
     let (session, pid, sequence) = reference(value)?;
@@ -57,8 +136,12 @@ fn step(value: &Value, relation: &str, confidence: &str) -> Result<Value> {
             "Origin trace input contains a malformed event payload",
         ));
     }
-    let text = binary_record_summary(value, decoded.len())
-        .unwrap_or_else(|| String::from_utf8_lossy(&decoded).into_owned());
+    let text = match value["type"].as_str() {
+        Some(kind) if kind.starts_with("js_invocation_") => invocation_value(value)
+            .ok_or_else(|| Error::bad("Origin trace input contains a malformed event payload"))?,
+        _ => binary_record_summary(value, decoded.len())
+            .unwrap_or_else(|| String::from_utf8_lossy(&decoded).into_owned()),
+    };
     Ok(
         json!({"event":{"session_id":session,"process_id":pid,"sequence_number":sequence},"monotonic_time_ns":value["monotonic_time_ns"],"category":value["category"],"operation":value["type"],"frame_id":value["frame_id"],"artifact_id":value["artifact_id"],"request_id":value["request_id"],"relation":relation,"confidence":confidence,"value":text}),
     )
@@ -128,10 +211,138 @@ fn adjacent_candidate<'a>(
     }
     found
 }
+/// A request body is searched only as retained raw bytes, at most this many.
+const REQUEST_BODY_LIMIT: usize = 1 << 20;
+/// Raw request bodies retained under sensitive capture for `request_id`, keyed
+/// by the browser request record each belongs to. Native network v2
+/// (protocol/native-network-v2.md) writes a `request_body` record as a child
+/// of that request record; for a captured body its `artifact_id` names a
+/// sensitive `request_body` artifact, capture origin `network_request`, whose
+/// creator is that record. Only that exact pairing and verified bytes count;
+/// anything else is no body, never a guess. Without request content capture
+/// no body is retained and this is empty.
+pub fn retained_request_bodies(
+    events: &[Value],
+    artifacts: &[Value],
+    request_id: &str,
+    root: &Path,
+) -> RequestBodies {
+    let mut bodies = RequestBodies::new();
+    for event in events {
+        if event["type"] != "request_body"
+            || event["category"] != "network"
+            || event["request_id"] != request_id
+            || event["artifact_id"] == "0"
+            || event["parent_event_id"] == "0"
+        {
+            continue;
+        }
+        let mut matching = artifacts.iter().filter(|artifact| {
+            artifact["artifact_id"] == event["artifact_id"]
+                && artifact["kind"] == "request_body"
+                && artifact["capture_origin"] == "network_request"
+                && artifact["creator_event_id"] == event["sequence_number"]
+                && artifact["session_id"] == event["session_id"]
+        });
+        let (Some(artifact), None) = (matching.next(), matching.next()) else {
+            continue;
+        };
+        let (Some(session), Some(process), Some(parent)) = (
+            event["session_id"].as_str(),
+            event["process_id"].as_u64(),
+            event["parent_event_id"].as_str(),
+        ) else {
+            continue;
+        };
+        if let Ok(bytes) = evidence::content(root, artifact, REQUEST_BODY_LIMIT) {
+            bodies.insert((session.into(), process as u32, parent.into()), bytes);
+        }
+    }
+    bodies
+}
+/// The single settle record whose exact digested value occurs in `body`.
+/// Candidates share the session and the renderer process of `request`, and
+/// precede it in that process's sequence: causal order inside one stream, not
+/// a time window. `Err` names why no link is drawn when more than one matches
+/// or the search was not run.
+fn value_flow<'a>(
+    retained: &BTreeMap<Reference, &'a Value>,
+    visited: &BTreeSet<Reference>,
+    request: &Value,
+    body: &[u8],
+) -> std::result::Result<Option<&'a Value>, (&'static str, String)> {
+    let Some(limit) = request["sequence_number"]
+        .as_str()
+        .and_then(|s| s.parse::<u64>().ok())
+    else {
+        return Ok(None);
+    };
+    let mut found: Vec<&Value> = Vec::new();
+    for (key, event) in retained {
+        if visited.contains(key)
+            || event["type"] != "js_invocation_settle"
+            || event["session_id"] != request["session_id"]
+            || event["process_id"] != request["process_id"]
+            || key.2.parse::<u64>().is_ok_and(|n| n >= limit)
+        {
+            continue;
+        }
+        let Some(digest) = crate::js_invocation::settle(event).and_then(|s| s.digest) else {
+            continue;
+        };
+        match crate::js_invocation::body_contains(body, &digest) {
+            Some(true) => found.push(event),
+            Some(false) => {}
+            None => {
+                return Err((
+                    "value_flow_unsearched",
+                    "A retained returned value could not be searched in this request body within the bounded search, so no value-flow link is reported.".to_owned(),
+                ));
+            }
+        }
+    }
+    match found.len() {
+        0 => Ok(None),
+        1 => Ok(Some(found[0])),
+        count => Err((
+            "value_flow_ambiguous",
+            format!(
+                "{count} returned values with retained digests occur in this request body. None is chosen."
+            ),
+        )),
+    }
+}
+#[allow(clippy::too_many_arguments)]
 pub fn build(
     events: &[Value],
     edges: &[Value],
     artifacts: &[Value],
+    request_id: &str,
+    session_id: Option<&str>,
+    root_process: Option<u32>,
+    root_sequence: Option<&str>,
+    artifact_root: Option<&Path>,
+) -> Result<Value> {
+    let bodies = artifact_root
+        .map(|root| retained_request_bodies(events, artifacts, request_id, root))
+        .unwrap_or_default();
+    build_with_bodies(
+        events,
+        edges,
+        artifacts,
+        &bodies,
+        request_id,
+        session_id,
+        root_process,
+        root_sequence,
+    )
+}
+#[allow(clippy::too_many_arguments)]
+pub fn build_with_bodies(
+    events: &[Value],
+    edges: &[Value],
+    artifacts: &[Value],
+    bodies: &RequestBodies,
     request_id: &str,
     session_id: Option<&str>,
     root_process: Option<u32>,
@@ -312,6 +523,35 @@ pub fn build(
                     })
             });
             let Some(edge) = candidates.first() else {
+                // Where identity ends at the renderer's own request record, an
+                // exact returned value found in a retained body of this request
+                // is a correlated link. It is never a time window.
+                if current["category"] == "network" && current["type"] == "request_initiated" {
+                    let body = steps.iter().rev().find_map(|row| {
+                        let event = &row["event"];
+                        bodies.get(&(
+                            event["session_id"].as_str()?.to_owned(),
+                            event["process_id"].as_u64()? as u32,
+                            event["sequence_number"].as_str()?.to_owned(),
+                        ))
+                    });
+                    if let Some(body) = body {
+                        match value_flow(&by_reference, &visited, current, body) {
+                            Ok(Some(settle)) => {
+                                visited.insert(reference(settle)?);
+                                steps.push(step(settle, "invocation_value_flow", "correlated")?);
+                                correlated += 1;
+                                current = settle;
+                                continue;
+                            }
+                            Ok(None) => {}
+                            Err((reason, detail)) => {
+                                gaps.push(gap(reason, steps.len() - 1, &detail));
+                                break;
+                            }
+                        }
+                    }
+                }
                 if !SOURCES.contains(&current["category"].as_str().unwrap_or("")) {
                     // Proximity never closes the gap. The identity chain really
                     // did end here, so the gap stays and the adjacency row is
@@ -438,4 +678,317 @@ pub fn build(
     Ok(
         json!({"contract_version":1,"document_kind":"origin-trace","request_id":request_id,"status":status,"steps":steps,"gaps":gaps,"coverage":{"linked_steps":linked,"observed_links":observed,"correlated_links":correlated,"time_adjacent_links":time_adjacent_links,"gap_count":gaps.len(),"percent":percent},"artifacts":selected}),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::js_invocation::tests::{
+        event as record, request_payload, settle_payload, start_payload,
+    };
+
+    fn network(kind: &str, seq: u64, process: u32, request: u64, initiator: (u32, u32)) -> Value {
+        json!({"protocol_version":3,"session_id":"9","sequence_number":seq.to_string(),
+            "monotonic_time_ns":seq.to_string(),"process_id":process,"thread_id":1,"tab_id":0,
+            "navigation_id":"0","frame_id":"6","artifact_id":"0","parent_event_id":"0",
+            "request_id":request.to_string(),"browser_context_id_high":"0","browser_context_id_low":"0",
+            "encoded_data_length":"0","decoded_body_length":"0","status_code":0,"error_code":0,
+            "resource_type":0,"flags":0,"initiator_request_id":initiator.1,
+            "initiator_process_id":initiator.0,"category":"network","type":kind,"payload_size":4,
+            "payload_encoding":"hex","payload_truncated":false,"payload":hex::encode("POST")})
+    }
+    fn edge(relation: &str, from: (u32, u64), to: (u32, u64)) -> Value {
+        json!({"protocol_version":1,"session_id":"9","from_process_id":from.0,
+            "from_sequence_number":from.1.to_string(),"to_process_id":to.0,
+            "to_sequence_number":to.1.to_string(),"relation":relation,"confidence":"observed",
+            "request_id":"0","artifact_id":"0"})
+    }
+    fn key(process: u32, seq: u64) -> Reference {
+        ("9".to_owned(), process, seq.to_string())
+    }
+    fn renderer(seq: u64, kind: &str, payload: &[u8; 128], request: u64) -> Value {
+        let mut event = record(kind, seq, request, payload);
+        event["process_id"] = json!(42);
+        event
+    }
+    /// Renderer 42 runs invocation 5 (start 1, settle 4) and starts request 9
+    /// (seq 6); browser 84 records it as request 900 (seq 1).
+    fn session(token: &[u8], other: &[u8]) -> (Vec<Value>, Vec<Value>) {
+        let events = vec![
+            renderer(1, "js_invocation_start", &start_payload(5, 0), 0),
+            renderer(2, "js_invocation_start", &start_payload(6, 0), 0),
+            renderer(
+                3,
+                "js_invocation_settle",
+                &settle_payload(6, Some(other)),
+                0,
+            ),
+            renderer(
+                4,
+                "js_invocation_settle",
+                &settle_payload(5, Some(token)),
+                0,
+            ),
+            network("request_initiated", 6, 42, 9, (0, 0)),
+            network("request_started", 1, 84, 900, (42, 9)),
+        ];
+        let edges = vec![
+            edge("request_initiator", (84, 1), (42, 6)),
+            edge("invocation_settlement", (42, 3), (42, 2)),
+            edge("invocation_settlement", (42, 4), (42, 1)),
+        ];
+        (events, edges)
+    }
+    fn trace(events: &[Value], edges: &[Value], bodies: &RequestBodies) -> Value {
+        build_with_bodies(
+            events,
+            edges,
+            &[],
+            bodies,
+            "900",
+            Some("9"),
+            Some(84),
+            Some("1"),
+        )
+        .unwrap()
+    }
+    fn relations(document: &Value) -> Vec<&str> {
+        document["steps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|s| s["relation"].as_str().unwrap())
+            .collect()
+    }
+
+    #[test]
+    fn issued_during_invocation_is_an_observed_identity_step() {
+        let (mut events, mut edges) = session(b"token-a", b"token-b");
+        events.push(renderer(
+            7,
+            "js_invocation_request",
+            &request_payload(2, 5),
+            9,
+        ));
+        edges.push(edge("issued_during_invocation", (42, 6), (42, 1)));
+        let document = trace(&events, &edges, &RequestBodies::new());
+        assert_eq!(
+            relations(&document),
+            [
+                "trace_target",
+                "request_initiator",
+                "issued_during_invocation"
+            ]
+        );
+        assert_eq!(
+            document["steps"][2]["value"],
+            "invocation 5 started at site 0 with 2 argument(s)"
+        );
+        assert_eq!(document["coverage"]["observed_links"], 2);
+        assert_eq!(document["coverage"]["correlated_links"], 0);
+    }
+
+    #[test]
+    fn value_flow_links_only_the_exact_returned_bytes() {
+        let (events, edges) = session(b"P1_token-a", b"P1_token-b");
+        // No body: identity ends at the renderer request, with no link.
+        let document = trace(&events, &edges, &RequestBodies::new());
+        assert_eq!(relations(&document), ["trace_target", "request_initiator"]);
+        assert_eq!(document["coverage"]["correlated_links"], 0);
+
+        let mut bodies = RequestBodies::new();
+        bodies.insert(key(84, 1), b"v=1&n=P1_token-a&c=x".to_vec());
+        let document = trace(&events, &edges, &bodies);
+        assert_eq!(
+            relations(&document),
+            [
+                "trace_target",
+                "request_initiator",
+                "invocation_value_flow",
+                "invocation_settlement"
+            ]
+        );
+        assert_eq!(document["steps"][2]["confidence"], "correlated");
+        assert_eq!(
+            document["steps"][2]["value"],
+            "invocation 5 fulfilled: string, length 10, digest retained"
+        );
+        assert_eq!(document["steps"][3]["event"]["sequence_number"], "1");
+        assert_eq!(document["coverage"]["correlated_links"], 1);
+        assert_eq!(document["coverage"]["observed_links"], 2);
+
+        // The interleaved call's value is a different invocation.
+        bodies.insert(key(84, 1), b"n=P1_token-b".to_vec());
+        let document = trace(&events, &edges, &bodies);
+        assert_eq!(document["steps"][3]["event"]["sequence_number"], "2");
+
+        // Transformed, truncated or absent bytes never link.
+        for body in [&b"n=P1%5Ftoken-a"[..], b"n=P1_token-", b"n=unrelated"] {
+            bodies.insert(key(84, 1), body.to_vec());
+            let document = trace(&events, &edges, &bodies);
+            assert_eq!(relations(&document), ["trace_target", "request_initiator"]);
+            assert_eq!(document["gaps"][0]["reason"], "no_predecessor");
+        }
+    }
+
+    #[test]
+    fn value_flow_refuses_ambiguity_later_values_and_other_processes() {
+        let (mut events, edges) = session(b"same-token", b"same-token");
+        let mut bodies = RequestBodies::new();
+        bodies.insert(key(84, 1), b"n=same-token".to_vec());
+        let document = trace(&events, &edges, &bodies);
+        assert_eq!(relations(&document), ["trace_target", "request_initiator"]);
+        assert_eq!(document["gaps"][0]["reason"], "value_flow_ambiguous");
+        assert_eq!(document["coverage"]["correlated_links"], 0);
+
+        // A value settled after the request was started cannot be in it.
+        let (mut later, edges) = session(b"late-token", b"other");
+        later[3]["sequence_number"] = json!("8");
+        later[3]["monotonic_time_ns"] = json!("8");
+        bodies.insert(key(84, 1), b"n=late-token".to_vec());
+        assert_eq!(
+            relations(&trace(&later, &edges, &bodies)),
+            ["trace_target", "request_initiator"]
+        );
+
+        // Another renderer's equal value is not a candidate, so the one left
+        // in the request's own process is no longer ambiguous.
+        events[3]["process_id"] = json!(43);
+        bodies.insert(key(84, 1), b"n=same-token".to_vec());
+        let document = trace(&events, &edges, &bodies);
+        assert_eq!(document["steps"][2]["event"]["process_id"], 42);
+        assert_eq!(document["steps"][2]["event"]["sequence_number"], "3");
+    }
+
+    /// The cases tools/check-origin-trace-gaps.swift runs through the native
+    /// app's builder: both builders must produce the same rows and gaps.
+    #[test]
+    fn shared_invocation_cases_match_the_swift_builder() {
+        let fixture: Value =
+            serde_json::from_str(include_str!("../assets/origin-trace-invocation-cases.json"))
+                .unwrap();
+        for case in fixture["cases"].as_array().unwrap() {
+            let name = case["name"].as_str().unwrap();
+            let pick = |kind: &str| -> Vec<Value> {
+                case[kind]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|n| fixture[kind][n.as_str().unwrap()].clone())
+                    .collect()
+            };
+            let mut bodies = RequestBodies::new();
+            for name in case["bodies"].as_array().unwrap() {
+                let body = &fixture["bodies"][name.as_str().unwrap()];
+                let parts: Vec<&str> = body["event"].as_str().unwrap().split(':').collect();
+                bodies.insert(
+                    (parts[0].into(), parts[1].parse().unwrap(), parts[2].into()),
+                    hex::decode(body["hex"].as_str().unwrap()).unwrap(),
+                );
+            }
+            let query = &case["query"];
+            let document = build_with_bodies(
+                &pick("events"),
+                &pick("edges"),
+                &[],
+                &bodies,
+                query["request_id"].as_str().unwrap(),
+                query["session_id"].as_str(),
+                query["root_process_id"].as_u64().map(|n| n as u32),
+                query["root_sequence_number"].as_str(),
+            )
+            .unwrap();
+            let steps = document["steps"].as_array().unwrap();
+            let column = |field: &str| -> Vec<Value> {
+                steps
+                    .iter()
+                    .map(|s| match field {
+                        "sequence_number" => s["event"]["sequence_number"].clone(),
+                        _ => s[field].clone(),
+                    })
+                    .collect()
+            };
+            assert_eq!(
+                json!(column("sequence_number")),
+                case["step_sequences"],
+                "{name}"
+            );
+            assert_eq!(json!(column("relation")), case["step_relations"], "{name}");
+            assert_eq!(
+                json!(column("confidence")),
+                case["step_confidences"],
+                "{name}"
+            );
+            let reasons: Vec<&Value> = document["gaps"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|g| &g["reason"])
+                .collect();
+            assert_eq!(json!(reasons), case["gap_reasons"], "{name}");
+            assert_eq!(document["coverage"], case["coverage"], "{name}");
+            if let Some(values) = case["step_values"].as_array() {
+                for (expected, step) in values.iter().zip(steps) {
+                    if !expected.is_null() {
+                        assert_eq!(&step["value"], expected, "{name}");
+                    }
+                }
+            }
+        }
+    }
+
+    /// The request-body capture contract's pairing: a `request_body` child
+    /// record of the request and its own sensitive artifact, verified bytes.
+    #[test]
+    fn retained_bodies_need_the_exact_record_and_verified_artifact() {
+        use sha2::{Digest, Sha256};
+        let root = tempfile::tempdir().unwrap();
+        let body = b"n=P1_token-a".to_vec();
+        let hash = hex::encode(Sha256::digest(&body));
+        std::fs::create_dir_all(root.path().join("blobs")).unwrap();
+        std::fs::write(root.path().join(format!("blobs/{hash}.bin")), &body).unwrap();
+        let mut record = network("request_body", 2, 84, 900, (42, 9));
+        record["artifact_id"] = json!("31");
+        record["parent_event_id"] = json!("1");
+        let artifact = json!({"artifact_id":"31","session_id":"9","kind":"request_body",
+            "capture_origin":"network_request","creator_event_id":"2","byte_size":body.len(),
+            "sha256":hash,"content_path":format!("blobs/{hash}.bin")});
+        let bodies =
+            retained_request_bodies(&[record.clone()], &[artifact.clone()], "900", root.path());
+        assert_eq!(bodies.get(&key(84, 1)), Some(&body));
+        assert!(
+            retained_request_bodies(&[record.clone()], &[artifact.clone()], "901", root.path())
+                .is_empty()
+        );
+        for (field, value) in [
+            ("creator_event_id", json!("3")),
+            ("kind", json!("response_body")),
+            ("capture_origin", json!("unknown")),
+            ("sha256", json!("00".repeat(32))),
+        ] {
+            let mut wrong = artifact.clone();
+            wrong[field] = value;
+            assert!(
+                retained_request_bodies(&[record.clone()], &[wrong], "900", root.path()).is_empty(),
+                "{field}"
+            );
+        }
+        // Two artifacts claiming the same record are ambiguous: no body.
+        assert!(
+            retained_request_bodies(&[record], &[artifact.clone(), artifact], "900", root.path())
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn digest_free_settles_never_link() {
+        let (mut events, edges) = session(b"token-a", b"token-b");
+        events[3] = renderer(4, "js_invocation_settle", &settle_payload(5, None), 0);
+        let mut bodies = RequestBodies::new();
+        bodies.insert(key(84, 1), b"n=token-a".to_vec());
+        assert_eq!(
+            relations(&trace(&events, &edges, &bodies)),
+            ["trace_target", "request_initiator"]
+        );
+    }
 }

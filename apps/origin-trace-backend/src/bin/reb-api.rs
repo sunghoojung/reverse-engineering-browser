@@ -67,7 +67,7 @@ enum Action {
     Mcp {
         #[arg(
             long,
-            required_unless_present_any = ["endpoint_file", "session_dir"],
+            required_unless_present_any = ["endpoint_file", "session_dir", "allow_session_start"],
             conflicts_with_all = ["endpoint_file", "session_dir"]
         )]
         base_url: Option<String>,
@@ -85,12 +85,77 @@ enum Action {
         /// capture redaction, or permission to send results to a model provider.
         #[arg(long)]
         allow_effects: bool,
+        /// Also list start_live_session, and start without a reachable live
+        /// endpoint. A started session becomes this connection's endpoint.
+        /// Requires --allow-effects. Not authorization.
+        #[arg(long, requires = "allow_effects")]
+        allow_session_start: bool,
         /// Require live capture and a running or paused debugger at startup
         /// and before every tool call. Does not authorize capture or effects.
         #[arg(long)]
         require_live: bool,
         #[arg(long, default_value_t = 30.0)]
         timeout: f64,
+    },
+    /// Start or inspect agent-driven live capture sessions.
+    Session {
+        #[command(subcommand)]
+        command: SessionCommand,
+    },
+}
+#[derive(Subcommand)]
+enum SessionCommand {
+    /// Start a visibly labeled live capture session with named options, the
+    /// same launcher as `make live`, detached from this command. Prints JSON
+    /// with the session directory and endpoint once capture is ready. Start
+    /// only for an authorized target; every switch is off unless named.
+    Start {
+        /// Open this HTTP or HTTPS page once capture is ready.
+        #[arg(long)]
+        url: Option<String>,
+        /// Sample Wasm br_table dispatch (at most 16 observations per configuration).
+        #[arg(long)]
+        wasm_dispatch: bool,
+        /// Sample Wasm call_indirect targets.
+        #[arg(long)]
+        wasm_call_indirect: bool,
+        /// Absolute path of a native Wasm guest adapter recipe. Needs --wasm-dispatch.
+        #[arg(long, value_name = "FILE")]
+        guest_adapter: Option<PathBuf>,
+        /// Absolute path of a JavaScript dispatch-site file.
+        #[arg(long, value_name = "FILE")]
+        js_dispatch_sites: Option<PathBuf>,
+        /// Ignore page debugger statements.
+        #[arg(long)]
+        quiet: bool,
+        /// Native capture category mask, 1..4095 (default 4095).
+        #[arg(long)]
+        category_mask: Option<u32>,
+        /// Capture lifetime in seconds, 60..3600 (default 3600).
+        #[arg(long)]
+        duration_seconds: Option<u32>,
+        /// Route the capture browser's traffic to loopback only.
+        #[arg(long)]
+        localhost_only: bool,
+        /// Store Canvas images, which can contain sensitive page content.
+        #[arg(long, requires = "confirm_sensitive_capture")]
+        canvas_images: bool,
+        /// Confirm the researcher authorized sensitive Canvas capture.
+        #[arg(long)]
+        confirm_sensitive_capture: bool,
+        /// Also publish the canonical endpoint used by default MCP configs.
+        #[arg(long)]
+        publish_canonical_endpoint: bool,
+        /// Absolute path of the Brave executable.
+        #[arg(long, value_name = "FILE")]
+        brave_binary: Option<PathBuf>,
+        /// Directory for session directories (default: REB_LIVE_SESSION_ROOT,
+        /// then the build's own root).
+        #[arg(long, value_name = "DIR")]
+        sessions_root: Option<PathBuf>,
+        /// Seconds to wait for capture to be ready, 10..600 (default 180).
+        #[arg(long)]
+        timeout_seconds: Option<u64>,
     },
 }
 #[path = "reb_api/mcp.rs"]
@@ -576,6 +641,14 @@ struct McpEndpointGuard {
 }
 
 impl McpEndpointGuard {
+    /// Moves the connection to a session it started itself. Only the exact
+    /// instance the launch reported is accepted; any other change still
+    /// retires the connection.
+    fn rebind(&mut self, endpoint_file: PathBuf, instance_id: String) {
+        self.endpoint_file = Some(endpoint_file);
+        self.instance_id = Some(instance_id);
+        self.retired = false;
+    }
     fn verify_instance(&mut self, base: &str, current: Option<String>) -> Result<(), String> {
         if self.instance_id != current {
             self.retired = true;
@@ -620,6 +693,52 @@ async fn read_capped_body(
         bytes.extend_from_slice(&chunk);
     }
     Ok(bytes)
+}
+/// Extra client time for an operation that deliberately waits on the server,
+/// named by `x-reb-wait-parameter` in milliseconds, so the configured timeout
+/// stays a bound on transport time rather than on the requested wait.
+fn wait_allowance(definition: &Value, params: &BTreeMap<String, String>) -> f64 {
+    let Some(name) = definition["x-reb-wait-parameter"].as_str() else {
+        return 0.0;
+    };
+    let default = definition["parameters"]
+        .as_array()
+        .and_then(|items| items.iter().find(|item| item["name"] == name))
+        .and_then(|item| item["schema"]["default"].as_u64());
+    let milliseconds = params
+        .get(name)
+        .and_then(|value| value.parse::<u64>().ok())
+        .or(default)
+        .unwrap_or(0)
+        .min(60_000);
+    milliseconds as f64 / 1000.0
+}
+
+/// A backend that predates filtered reads ignores the filter parameters and
+/// returns the unfiltered tail. Operations that echo their filters declare the
+/// echo key; its absence after a filtered call means the filters were ignored.
+fn ignored_filters(
+    definition: &Value,
+    params: &BTreeMap<String, String>,
+    completed: &CompletedExchange,
+) -> Option<String> {
+    let key = definition["x-reb-filter-echo"].as_str()?;
+    let filtered = params
+        .keys()
+        .any(|name| !matches!(name.as_str(), "limit" | "If-None-Match"));
+    if !filtered || completed.status != 200 || completed.unreadable {
+        return None;
+    }
+    let value: Value = serde_json::from_slice(&completed.bytes).ok()?;
+    if value.get(key).is_some() {
+        return None;
+    }
+    Some(format!(
+        "The backend ignored the filters for {} and returned unfiltered records, so it predates filtered reads. Rebuild or update Origin Trace. The unfiltered result was discarded.",
+        definition["operationId"]
+            .as_str()
+            .unwrap_or("this operation")
+    ))
 }
 fn check_timeout(timeout: f64) -> Result<(), Box<dyn std::error::Error>> {
     if !timeout.is_finite() || timeout <= 0.0 || timeout > 3600.0 {
@@ -857,6 +976,7 @@ async fn run() -> Result<i32, Box<dyn std::error::Error>> {
             endpoint_file,
             session_dir,
             allow_effects,
+            allow_session_start,
             require_live,
             timeout,
         } => {
@@ -871,11 +991,47 @@ async fn run() -> Result<i32, Box<dyn std::error::Error>> {
                 retired: false,
                 instance_id: None,
             };
-            let base = resolve_mcp_endpoint(base_url, endpoint_file, session_dir)?;
-            guard.instance_id = confirm_mcp_health(&base, timeout, require_live).await?;
-            guard.verify_endpoint(&base)?;
-            mcp::serve(&spec, &ops, &base, allow_effects, timeout, guard).await
+            let selected = base_url.is_some() || endpoint_file.is_some() || session_dir.is_some();
+            let connected = async {
+                let base = resolve_mcp_endpoint(base_url, endpoint_file, session_dir)?;
+                guard.instance_id = confirm_mcp_health(&base, timeout, require_live).await?;
+                guard.verify_endpoint(&base)?;
+                Ok::<_, Box<dyn std::error::Error>>(base)
+            }
+            .await;
+            // With session start allowed, a missing or idle endpoint is the
+            // normal state before the first session: serve unbound until
+            // start_live_session binds one.
+            let base = match connected {
+                Ok(base) => Some(base),
+                Err(error) if allow_session_start => {
+                    if selected {
+                        // Tools are advertised in this mode, so drop that clause.
+                        let error = error.to_string().replace(" No tools were advertised.", "");
+                        eprintln!(
+                            "No live session is bound yet ({error}). start_live_session can start one."
+                        );
+                    }
+                    guard.retired = false;
+                    guard.instance_id = None;
+                    None
+                }
+                Err(error) => return Err(error),
+            };
+            mcp::serve(
+                &spec,
+                &ops,
+                base,
+                mcp::Admission {
+                    allow_effects,
+                    allow_session_start,
+                },
+                timeout,
+                guard,
+            )
+            .await
         }
+        Action::Session { command } => run_session(command).await,
         Action::Describe {
             operation_id,
             action,
@@ -960,7 +1116,7 @@ async fn run() -> Result<i32, Box<dyn std::error::Error>> {
                 base: &base,
                 params: &values,
                 body,
-                timeout,
+                timeout: timeout + wait_allowance(definition, &values),
                 json_errors,
                 missing_body: "Operation requires --body-file PATH or --body-file -",
                 expected_instance: None,
@@ -1000,6 +1156,10 @@ async fn run() -> Result<i32, Box<dyn std::error::Error>> {
                 }
                 return Ok(1);
             }
+            if let Some(error) = ignored_filters(definition, &values, &completed) {
+                eprintln!("{error}");
+                return Ok(1);
+            }
             if let Some(path) = output {
                 if path == "-" {
                     std::io::stdout().write_all(&completed.bytes)?;
@@ -1019,6 +1179,61 @@ async fn run() -> Result<i32, Box<dyn std::error::Error>> {
 }
 // This mode projects known fields only. A legacy or non-JSON response must
 // never turn into a raw body/header dump or a prose-derived reason.
+#[cfg(unix)]
+async fn run_session(command: SessionCommand) -> Result<i32, Box<dyn std::error::Error>> {
+    let SessionCommand::Start {
+        url,
+        wasm_dispatch,
+        wasm_call_indirect,
+        guest_adapter,
+        js_dispatch_sites,
+        quiet,
+        category_mask,
+        duration_seconds,
+        localhost_only,
+        canvas_images,
+        confirm_sensitive_capture,
+        publish_canonical_endpoint,
+        brave_binary,
+        sessions_root,
+        timeout_seconds,
+    } = command;
+    let options = origin_trace_backend::session_launch::StartOptions {
+        url,
+        wasm_dispatch,
+        wasm_call_indirect,
+        guest_adapter,
+        js_dispatch_sites,
+        quiet,
+        category_mask,
+        duration_seconds,
+        localhost_only,
+        canvas_images,
+        confirm_sensitive_capture,
+        publish_canonical_endpoint,
+        brave_binary,
+        timeout_seconds,
+        sessions_root,
+    };
+    match origin_trace_backend::session_launch::launch(&options).await {
+        Ok(started) => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&started.document(&options, true))?
+            );
+            Ok(0)
+        }
+        Err(error) => {
+            eprintln!("{error}");
+            Ok(1)
+        }
+    }
+}
+#[cfg(not(unix))]
+async fn run_session(_: SessionCommand) -> Result<i32, Box<dyn std::error::Error>> {
+    Err("Live sessions start only on macOS and Linux".into())
+}
+
 fn bounded_http_error(spec: &Value, status: u16, bytes: &[u8]) -> Value {
     let value = serde_json::from_slice::<Value>(bytes).unwrap_or(Value::Null);
     let message = value["error"]
@@ -1061,6 +1276,41 @@ async fn run_main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn waits_extend_the_client_timeout_and_ignored_filters_are_refused() {
+        let spec = specification().unwrap();
+        let ops = operations(&spec).unwrap();
+        let wait = &ops["wait_for_events"].2;
+        let events = &ops["get_events"].2;
+        let params = |pairs: &[(&str, &str)]| {
+            pairs
+                .iter()
+                .map(|(name, value)| ((*name).to_owned(), (*value).to_owned()))
+                .collect::<BTreeMap<_, _>>()
+        };
+        assert_eq!(wait_allowance(wait, &params(&[])), 10.0);
+        assert_eq!(
+            wait_allowance(wait, &params(&[("timeout_ms", "2500")])),
+            2.5
+        );
+        assert_eq!(
+            wait_allowance(events, &params(&[("timeout_ms", "2500")])),
+            0.0
+        );
+        let completed = |body: &str| CompletedExchange {
+            status: 200,
+            headers: BTreeMap::new(),
+            bytes: body.as_bytes().to_vec(),
+            unreadable: false,
+        };
+        let filtered = params(&[("type", "gap"), ("limit", "5")]);
+        let error = ignored_filters(events, &filtered, &completed(r#"{"events":[]}"#)).unwrap();
+        assert!(error.contains("ignored the filters"), "{error}");
+        assert!(ignored_filters(events, &filtered, &completed(r#"{"query":{}}"#)).is_none());
+        assert!(ignored_filters(events, &params(&[("limit", "5")]), &completed("{}")).is_none());
+        assert!(ignored_filters(wait, &filtered, &completed("{}")).is_none());
+    }
 
     #[test]
     fn read_only_classification_uses_effects_not_the_http_verb() {

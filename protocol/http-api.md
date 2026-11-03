@@ -97,7 +97,9 @@ requirement. See [connection and restart behavior](../docs/development/local-cod
 
 `x-reb-mcp` in this specification is the only MCP contract. `reb-api mcp` reads
 that extension and serves operation IDs as stdio tools. It does not add an HTTP
-route. A client supplies the same loopback root as `call`, through `--base-url`
+route. The single tool that is not an operation, `start_live_session`, is
+declared in `x-reb-mcp.session_start`; see
+[live session control](#live-session-control). A client supplies the same loopback root as `call`, through `--base-url`
 or `--endpoint-file`.
 
 ```sh
@@ -155,6 +157,20 @@ receive a response, because this server does not send requests. Logs stay on
 stderr. Captured content returned by a tool is untrusted data, not
 instructions.
 
+Each tool description is the operation summary, its description, its
+execution notes and, for a multiplexed body, every `action` with its fields,
+for example `connect_live(binding_id, confirm_live=true, target_id)`. A field
+fixed to `true` is a confirmation the researcher gives, not a default. An
+unknown argument is named in the refusal; its value is not echoed.
+
+An operation with `x-reb-wait-parameter` waits on the server for up to that
+many milliseconds. The client adds that wait to its own `--timeout`, so the
+timeout still bounds transport time. An operation with `x-reb-filter-echo`
+returns that key whenever it applied a filter. If a filtered call comes back
+without it, the backend predates filtered reads and returned unfiltered
+records; the tool reports an error and discards that result rather than let an
+agent read it as filtered. `reb-api call` applies both rules.
+
 `readOnlyHint` follows the read-only projection. `destructiveHint` is true when
 the operation is not `kind: operation`, when `effects` is not an array, or when
 any direct or state-dependent effect is something other than `analysis`.
@@ -184,8 +200,9 @@ remain and `false` at the end. An offset equal to the total returns an empty
 chunk; a negative, malformed, or beyond-end offset returns 400.
 Artifact lookup or full-content verification can return a JSON 408 when its
 five-second manifest or thirty-second verification deadline expires.
-This is not HTTP Range/206 pagination. Events and artifacts expose a bounded
-recent tail, not a cursor or stable exhaustive export.
+This is not HTTP Range/206 pagination. Unfiltered events and artifacts are a
+bounded recent tail. [Filtered reads](#filtered-and-paged-reads) add byte
+cursors for paging. Neither is a stable exhaustive export.
 
 ## Local coding-agent discovery and observational calls
 
@@ -277,6 +294,134 @@ are absent. Identifiers/origins remain potentially sensitive metadata. Direct
 HTTP reports `allow_effects: null`; MCP annotates its own flag without granting
 authorization. See the [agent context recipe](../docs/development/local-coding-agents.md#start-with-compact-session-context)
 for field omissions and coverage limits.
+
+## Live session control
+
+`POST /api/session/actions` (`session_action`) drives the live session this
+backend belongs to. Both actions refuse with 409 `idle_backend` unless
+`capture_mode` is `live`.
+
+- `{"action":"open_url","url":"https://..."}` hands an HTTP(S) URL without
+  credentials to the session's running capture browser, which opens it in a
+  new tab. It uses Chromium's same-profile relay: the backend runs its
+  `--brave-binary` with the session's `--brave-profile` and the URL. It
+  refuses with 409 `native_capture_unavailable` when the broker is disconnected
+  or capture was stopped, and with 409 `target_unavailable` when no live
+  process holds the profile's `SingletonLock`. The relay carries proxy and
+  resolver switches that the running browser ignores but that leave a relay
+  with no network if it ever starts a browser of its own; such a relay is
+  stopped after 10 seconds and reported. A broker socket proves only that the
+  broker listens, so the response reports `capture_observed`: true once a new
+  record reaches the session's store within 10 seconds. False means nothing
+  was recorded, for example because the configured browser is not a capture
+  build. It never runs page JavaScript.
+- `{"action":"end","confirm":true}` replies, then about 300 ms later sends
+  SIGTERM to the backend's `--launcher-pid`, which must be its parent. The
+  launcher closes the capture browser and stops every helper, including the
+  backend. Stored evidence stays on disk.
+
+- `list_inputs`, `click`, `type`, `press` and `scroll` send trusted input to
+  the session's page on macOS. The backend finds the capture browser by the
+  process holding its profile lock and reads the page through the browser's
+  accessibility tree, which it turns on with `AXManualAccessibility`; that
+  tree spans cross-origin frames. The page is the tab's largest HTTP(S) web
+  area, never DevTools, a side panel or a `chrome://` or `brave://` page.
+  `list_inputs` returns up to 200 controls with a short `role`, an accessible
+  `name` of at most 120 characters, a viewport rectangle in points, `visible`
+  (the center lies inside every enclosing frame), `frame_depth` and `checked`.
+  Names are page text; field values are not read directly, but a name can
+  include label text that embeds one. `click` takes `x` and `y` in viewport
+  points or a `role` and case-insensitive `name` matching exactly one visible
+  control (or `nth`), plus `count`; there is no right click, because a context
+  menu reaches browser features. `type` takes up to 200 characters without
+  line breaks, `press` one named key, and `scroll` `dx` and `dy`. Each input
+  action brings the capture browser to the front and moves the pointer along a
+  short eased path. Just before a click or scroll, a hit test must find this
+  browser's page under the point, and the named control for a named click.
+  Before every key, the keyboard focus must be inside the page, so keys never
+  reach the address bar, a browser dialog or a menu; only Escape is allowed
+  anywhere in the browser. The frameworks are loaded at run time, only in the
+  backend process, never in its sandboxed analysis workers. They
+  refuse with 409 `dependency_unavailable` when macOS has not granted
+  Accessibility to the app that started the session, or off macOS; with 409
+  `target_unavailable` when there is no window, page, focus or match; and
+  with 503 `resource_limit` when another session holds the machine-wide input
+  lock for 15 seconds. Like `open_url`, they require recording capture.
+
+`run-live-session.sh` passes `--brave-binary`, `--brave-profile` and
+`--launcher-pid` to the backend it starts. A backend started any other way
+returns 409 `dependency_unavailable` for these actions.
+
+`reb-api session start` and the MCP tool `start_live_session` take the
+`LiveSessionStart` options: `url`, `wasm_dispatch`, `wasm_call_indirect`,
+`guest_adapter`, `js_dispatch_sites`, `quiet`, `category_mask`,
+`duration_seconds`, `localhost_only`, `canvas_images` with
+`confirm_sensitive_capture`, `publish_canonical_endpoint`, `brave_binary` and
+`timeout_seconds`. Sensitive Canvas capture fails without the explicit
+confirmation field, which an agent sets only on the researcher's
+authorization. Every
+capture switch is off unless named; an inherited capture switch, browser
+profile or embedded-session variable is ignored. Operator settings such as
+helper binary paths, `REB_LIVE_SESSION_ROOT`, `REB_ORIGIN_TRACE_APP` and
+`REB_OPEN_COMMAND` still apply. They run the launcher that belongs with the
+`reb-api` build (`Contents/Resources/run-live-session.sh` in the app,
+`scripts/run-live-session.sh` in a checkout, or `REB_LIVE_SESSION_SCRIPT`)
+detached in its own process group, wait for its ready line and a live health
+report, then optionally open `url`, retrying for up to 20 seconds while the
+browser is still taking its profile, and return `capture_observed`. The
+session keeps running after the caller exits until it is ended, Brave is
+closed, or capture expires; if the MCP server is stopped during a start, close
+that session's Brave window. A launcher failure line is returned as the error
+after the launcher's own cleanup; a timeout stops the launcher and then its
+process group. By
+default the session publishes its endpoint only to a private file, so it does
+not replace the canonical endpoint other connections use. The session uses the
+mock Keychain, since an agent cannot answer a Keychain prompt. The CLI prints
+the session directory, endpoint file and launch log; the MCP result omits
+them and shows the home folder in launcher errors as `~`.
+
+`reb-api mcp --allow-session-start` requires `--allow-effects`. It lists
+`start_live_session` and `session_action` (the operations named in
+`x-reb-mcp.session_start.operations`, hidden otherwise) and starts even when
+its endpoint is missing or not live. `session_action` is accepted only for a
+session this connection started; a connection bound to the researcher's
+session gets a refusal without a request. Starting again first ends the
+session this connection started. Under `--require-live`, `session_action`
+`end` stays available when capture has expired or stopped.
+Until a session is bound, every operation tool refuses without a request. A
+successful start rebinds the connection to that session's own
+`research-ui.endpoint` and exact `instance_id`; this is the only retargeting,
+and any other endpoint or instance change still retires the connection. After
+a successful `session_action` `end`, the connection is unbound again (or, without
+`--allow-session-start`, retired).
+
+## Session summary
+
+`GET /api/session/summary` (`get_session_summary`) answers "did this capture
+work?" in one read. It reports capture state, event counts by category and
+type, first and last event time, up to 16 sessions, the 32 busiest frames with
+their top event types, gap counts with named gap reasons, artifact counts by
+kind with the 32 newest artifact identities and digests, and `checks`. Each
+check has a `code`, a `severity` of `info` or `warning`, and a plain message:
+
+| Code | Meaning |
+| --- | --- |
+| `capture_not_live` | Idle or demo backend; stored evidence only. |
+| `capture_stopped` | Native capture was stopped in this session. |
+| `broker_disconnected` | Live capture whose broker is gone; nothing new arrives. |
+| `artifact_receiver_disconnected` | New scripts and Wasm modules are not stored. |
+| `no_events` | The store is empty. |
+| `wasm_without_artifacts` | Wasm compiled, but no Wasm module was stored. |
+| `artifact_capture_failed` | Some artifact bodies were not stored. |
+| `queue_drops` | Records lost to a full queue, beyond named gap markers. |
+| `sequence_gaps` | Sequence numbers missing inside the scanned events. |
+| `named_gap` | A producer named why it stopped, with `category`, `reason` and `count`. A reason containing `budget` or `limit` means a sampling budget filled. |
+| `bounded_scope` | Only the newest 64 MiB of events were summarized. |
+
+The summary scans the same newest 64 MiB as the polling window and the newest
+64 MiB of the manifest. It contains counts, identifiers and origin or
+`wasm://wasm/<hex>` labels only: no payloads, URL paths or queries, source or
+bodies. Identifiers and origins can still be sensitive. It has its own ETag.
 
 ## Error reasons and uncertain outcomes
 
@@ -607,6 +752,58 @@ contract, including the separate network window, scan coverage, and saturated
 gap and drop totals. A response that omits the fields is still accepted, and
 the UI then resets old summaries and labels fallback counts as
 visible-window-only.
+
+### Filtered and paged reads
+
+Any filter or cursor parameter turns `GET /api/events` into a filtered read
+that bypasses the polling cache. The unfiltered window above is unchanged.
+Filters combine with AND and compare stored fields exactly:
+
+- `type` and `category`: comma-separated lowercase names, at most 16;
+- `session_id`, `navigation_id`, `frame_id`, `tab_id`, `process_id`,
+  `artifact_id`, `request_id`, `parent_event_id`: canonical decimal integers;
+- `since_ns` (inclusive) and `until_ns` (exclusive) on `monotonic_time_ns`.
+
+Without a cursor the read starts at the last complete record and returns the
+newest `limit` matches in file order. `before=OFFSET` continues backward and
+`after=OFFSET` reads forward from a record boundary. Each response adds `query`
+with the applied `filters`, `direction`, `returned`, `store_end`, `limited`,
+`budget_exhausted`, `next_before` (null at the start of the store) and
+`next_after`. A page stops at `limit` matches or after 64 MiB of records, so
+pass the cursor on to continue. A record without its newline is still being
+written and is not returned until it is complete. `event_window.scope` is
+`bounded_range` unless the read covered the whole store. Gap fields describe
+only the scanned range. `network_events` is empty: select network records with
+`category=network`.
+
+Cursors are byte offsets of record boundaries in this backend's store. An offset
+past the end or inside a record returns 400. They do not survive a clear or a
+different store. An unknown query parameter returns 400 on the filtered and the
+unfiltered route, so a misspelled filter cannot return unfiltered records.
+
+`GET /api/artifacts` takes `kind`, `artifact_id`, `session_id`,
+`navigation_id`, `frame_id`, `execution_context_id`, `sha256` and `host`
+(case-insensitive URL host), with the same `after` and `before` cursors over
+`manifest.jsonl`. Records keep the public fields of the unfiltered route, and
+a duplicate artifact ID inside the scanned range still fails the read. Wasm
+modules usually have a `wasm://wasm/<hex>` URL, so select them with `kind=wasm`
+or `frame_id`, not `host`.
+
+The Rust backend serves these reads. The native stored-evidence `reb://` reader
+serves only the unfiltered window.
+
+### Waiting for events
+
+`GET /api/events/wait` (`wait_for_events`) takes the same filters, `after`,
+`limit` (default 100) and `timeout_ms` (1 to 60,000, default 10,000). It
+returns as soon as a complete record after the cursor matches, in the filtered
+`get_events` shape plus `wait` with `timed_out`, `timeout_ms` and `waited_ms`.
+Without `after` it waits only for records written after the call starts. On a
+timeout it returns no events and `query.next_after`, which is the `after` for
+the next wait. `event_window` covers every byte read while waiting. The server
+checks the store length every 200 ms and holds no reader between checks. At
+most eight waits run at once; a ninth returns 503 `resource_limit`. Waiting
+changes nothing in the browser or the stores.
 
 ## Exact native Traffic to VM selection
 

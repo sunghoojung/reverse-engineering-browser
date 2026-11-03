@@ -79,6 +79,9 @@ enum class NativeProbeType : std::uint16_t {
   // protocol/native-network-v2.md.
   kRequestBody = 22,
   kRequestTarget = 23,
+  kJsInvocationStart = 24,
+  kJsInvocationSettle = 25,
+  kJsInvocationRequest = 26,
 };
 
 enum class NativeProbeFlag : std::uint16_t {

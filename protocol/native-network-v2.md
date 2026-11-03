@@ -196,6 +196,11 @@ them with their request.
   and SHA-256 check, read at most 256 KiB at a time. A malformed child is shown
   as malformed in its own request instead of failing the whole refresh.
   Missing records read "no body record". Captured text is never parsed as HTML.
+- A request trace's `invocation_value_flow` join searches a retained body,
+  after the same size and SHA-256 check, for the exact digested value of a
+  settled JavaScript invocation; see
+  [native JavaScript invocation](native-js-invocation-v1.md#identity-and-relations).
+  Without request content no body is retained and the join reports nothing.
 
 ## Validation
 

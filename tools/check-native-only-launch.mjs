@@ -128,6 +128,45 @@ try {
 } finally {await rm(sitesDirectory,{recursive:true,force:true});}
 console.log('PASS native JS dispatch sites opt-in, VM-category gate, bounded file preflight and single js-flags merge');
 
+const invocationDirectory = await mkdtemp(join(tmpdir(), 'reb-native-js-invocation-'));
+try {
+  const invocationPath = join(invocationDirectory, 'invocation sites.json');
+  await writeFile(invocationPath, '{}');
+  for (const [extra, message] of [
+    [{REB_NATIVE_JS_INVOCATION_SITES:invocationPath, REB_CAPTURE_CATEGORY_MASK:'1'}, /REB_NATIVE_JS_INVOCATION_SITES requires the VM/],
+    [{REB_NATIVE_JS_INVOCATION_SITES:'relative.json'}, /REB_NATIVE_JS_INVOCATION_SITES must name/],
+    [{REB_NATIVE_JS_INVOCATION_SITES:invocationDirectory}, /REB_NATIVE_JS_INVOCATION_SITES must name/],
+    // Digests are sensitive and exist only for an armed invocation session.
+    [{REB_NATIVE_JS_INVOCATION_DIGESTS:'1'}, /REB_NATIVE_JS_INVOCATION_DIGESTS=1 requires REB_NATIVE_JS_INVOCATION_SITES/],
+    [{REB_NATIVE_JS_INVOCATION_SITES:invocationPath, REB_NATIVE_JS_INVOCATION_DIGESTS:'yes'}, /REB_NATIVE_JS_INVOCATION_DIGESTS must be 0 or 1/],
+  ]) {
+    const result = spawnSync(shell, [join(root,'scripts/run-live-session.sh')], {env:{...process.env,REB_NATIVE_WASM_DISPATCH:'0',...extra}, encoding:'utf8'});
+    assert.equal(result.status, 2, result.stderr);
+    assert.match(result.stderr, message);
+  }
+  for (const size of [0, 4097]) {
+    await writeFile(invocationPath, Buffer.alloc(size, 32));
+    const result = spawnSync(shell, [join(root,'scripts/run-live-session.sh')], {env:{...process.env,REB_NATIVE_WASM_DISPATCH:'0',REB_NATIVE_JS_INVOCATION_SITES:invocationPath},encoding:'utf8'});
+    assert.equal(result.status, 2, result.stderr);
+    assert.match(result.stderr, /between 1 and 4096/);
+  }
+  await writeFile(invocationPath, '{}');
+  for (const [digests, tail] of [[0, []], [1, ['--reb-js-invocation-digests']]]) {
+    const result = spawnSync(shell,['-c',`set -eu; brave_arguments=(); native_quiet_mode=0; native_wasm_dispatch=0; native_wasm_call_indirect=0; native_guest_adapter=""; native_js_invocation_sites="$TEST_SITES"; native_js_invocation_digests=${digests}; ${flagsCode}
+      printf '%s\\n' "${'${brave_arguments[@]-}'}"`],{env:{...process.env,TEST_SITES:invocationPath},encoding:'utf8'});
+    assert.equal(result.status, 0, result.stderr);
+    assert.deepEqual(result.stdout.trimEnd().split('\n'),
+      ['--js-flags=--reb-js-invocation-capture', '--reb-js-invocation-sites=' + invocationPath, ...tail]);
+  }
+  const both = spawnSync(shell,['-c',`set -eu; brave_arguments=(); native_quiet_mode=1; native_wasm_dispatch=1; native_wasm_call_indirect=0; native_guest_adapter=""; native_js_dispatch_sites="$TEST_SITES"; native_js_invocation_sites="$TEST_SITES"; ${flagsCode}
+    printf '%s\\n' "${'${brave_arguments[@]-}'}"`],{env:{...process.env,TEST_SITES:invocationPath},encoding:'utf8'});
+  assert.equal(both.status, 0, both.stderr);
+  assert.deepEqual(both.stdout.trimEnd().split('\n'), [
+    '--js-flags=--reb-ignore-debugger-statements --reb-wasm-br-table-dispatch --reb-js-dispatch-capture --reb-js-invocation-capture',
+    '--reb-js-dispatch-sites=' + invocationPath, '--reb-js-invocation-sites=' + invocationPath]);
+} finally {await rm(invocationDirectory,{recursive:true,force:true});}
+console.log('PASS native JS invocation sites opt-in, VM-category gate, sensitive digest dependency, bounded file preflight and single js-flags merge');
+
 // V8 ignores an unknown --js-flags entry and every later one, so the real
 // launcher must refuse a Brave build whose loaded V8 lacks a requested flag
 // before any helper or browser starts. Synthetic bundles and recording helpers
@@ -230,6 +269,7 @@ exec ${quote(systemGrep)} "$@"
     '--reb-wasm-call-indirect-dispatch': ['REB_NATIVE_WASM_CALL_INDIRECT=1', 'REB_NATIVE_WASM_CALL_INDIRECT=0'],
     '--reb-wasm-guest-capture': ['REB_NATIVE_WASM_GUEST_ADAPTER', 'unset REB_NATIVE_WASM_GUEST_ADAPTER'],
     '--reb-js-dispatch-capture': ['REB_NATIVE_JS_DISPATCH_SITES', 'unset REB_NATIVE_JS_DISPATCH_SITES'],
+    '--reb-js-invocation-capture': ['REB_NATIVE_JS_INVOCATION_SITES', 'unset REB_NATIVE_JS_INVOCATION_SITES'],
   };
   const prefix = 'REB_LIVE_SESSION_FAILURE: ';
   const optOuts = flags => flags.map(flag => settings[flag][1]).join(', ');
@@ -253,7 +293,8 @@ exec ${quote(systemGrep)} "$@"
     REB_LIVE_SESSION_ROOT:at('sessions'), REB_API_COLLECTION_STORE:at('collection.json'),
     REB_LOCAL_ANALYST_STORE:at('analyst.json'), REB_ACTIVE_ENDPOINT_FILE:at('active.endpoint'),
     REB_CAPTURE_CATEGORY_MASK:'4095', REB_NATIVE_QUIET_MODE:'0', REB_NATIVE_WASM_DISPATCH:'0',
-    REB_NATIVE_WASM_CALL_INDIRECT:'0', REB_NATIVE_WASM_GUEST_ADAPTER:'', REB_NATIVE_JS_DISPATCH_SITES:'', ...requested});
+    REB_NATIVE_WASM_CALL_INDIRECT:'0', REB_NATIVE_WASM_GUEST_ADAPTER:'', REB_NATIVE_JS_DISPATCH_SITES:'',
+    REB_NATIVE_JS_INVOCATION_SITES:'', REB_NATIVE_JS_INVOCATION_DIGESTS:'0', ...requested});
   const clearReceipts = () => Promise.all([receipts, scans, started, finished].map(file => rm(file, {force:true})));
   const launchWith = async (executable, requested, cwd) => {
     await clearReceipts();

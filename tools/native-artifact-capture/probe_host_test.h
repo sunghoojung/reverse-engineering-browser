@@ -8,10 +8,14 @@ struct RecordingProbeClient final : reb::mojom::NativeProbeClient {
                  base::UnsafeSharedMemoryRegion queue_region,
                  std::uint64_t epoch,
                  const std::string&,
-                 const std::vector<std::uint8_t>& js_dispatch_sites) override {
+                 const std::vector<std::uint8_t>& js_dispatch_sites,
+                 const std::vector<std::uint8_t>& js_invocation_sites,
+                 bool js_invocation_digests) override {
     configured_epoch = epoch;
     region = std::move(queue_region);
     js_sites = js_dispatch_sites;
+    invocation_sites = js_invocation_sites;
+    invocation_digests = js_invocation_digests;
   }
   void Disable() override {}
   void NativeGuestModuleStatus(std::uint64_t epoch, std::uint64_t token, bool accepted) override {
@@ -25,6 +29,8 @@ struct RecordingProbeClient final : reb::mojom::NativeProbeClient {
   std::vector<Verdict> verdicts;
   base::UnsafeSharedMemoryRegion region;
   std::vector<std::uint8_t> js_sites;
+  std::vector<std::uint8_t> invocation_sites;
+  bool invocation_digests = false;
 };
 
 void NativeProbeHostGuestBoundary(reb::ArtifactReceiver& receiver) {
@@ -213,7 +219,7 @@ void NativeProbeHostGuestBoundary(reb::ArtifactReceiver& receiver) {
   const auto indirect = [&](std::uint64_t capture_epoch, std::uint64_t sequence,
                             std::uint32_t resolution, std::uint32_t callee) {
     host.CaptureWasmIndirect(capture_epoch, kSession, sequence, 100, 123, 7, frame_id, 10, 11, 12,
-                             1, 8, 0, 4, callee, resolution, 0, "fixture://host-indirect",
+                             1, 8, 0, 4, callee, resolution, 0, 0, 0, "fixture://host-indirect",
                              mojo_base::BigBuffer(indirect_module));
   };
   const auto before_indirect = events.size();
@@ -263,6 +269,13 @@ void NativeProbeHostJsDispatchForwarding() {
   site.shape = reb::NativeJsDispatchShape::kIndexedCall;
   const auto site_record = reb::EncodeNativeJsDispatchSite(site);
   session.js_sites.assign(site_record.begin(), site_record.end());
+  reb::NativeJsInvocationSite invocation_site;
+  invocation_site.source_sha256.fill(8);
+  invocation_site.source_length = 900;
+  invocation_site.anchor_offset = 41;
+  const auto invocation_record = reb::EncodeNativeJsInvocationSite(invocation_site);
+  session.invocation_sites.assign(invocation_record.begin(), invocation_record.end());
+  session.invocation_digests = true;
   session.emitted = [](const NativeProbeEvent& event) { Emit(event); };
   Configure(kSession, kMask);
   events.clear();
@@ -277,6 +290,8 @@ void NativeProbeHostJsDispatchForwarding() {
   host.BindClient({&client});
   Check(client.js_sites == session.js_sites && client.region.IsValid(),
         "Renderer configuration carries the session's JS dispatch site records");
+  Check(client.invocation_sites == session.invocation_sites && client.invocation_digests,
+        "Renderer configuration carries the invocation sites and the digest opt-in");
 
   reb::NativeJsDispatchObservationPayload payload;
   payload.shape = 2;
@@ -308,9 +323,32 @@ void NativeProbeHostJsDispatchForwarding() {
             reb::IsValidNativeJsDispatchHeader(events[0].header) &&
             std::equal(bytes.begin(), bytes.end(), events[0].inline_payload.begin()),
         "Host forwards the JS dispatch record unchanged with its tab");
+  // An invocation start rides the same ring and is forwarded unchanged.
+  reb::NativeJsInvocationStartPayload start;
+  start.argument_count = 1;
+  start.argument_kinds[0] = 3;
+  start.script_id = 9;
+  start.anchor_offset = 41;
+  start.source_length = 900;
+  start.invocation_id = 4;
+  start.source_sha256 = invocation_site.source_sha256;
+  start.document_id = 77;
+  NativeProbeEvent start_record = record;
+  start_record.header.type = NativeProbeType::kJsInvocationStart;
+  start_record.header.sequence_number = 602;
+  start_record.inline_payload = reb::EncodeNativeJsInvocationStartPayload(start);
+  Check(queue->TryPush(start_record), "Renderer ring admits the invocation start");
+  host.EventsAvailable();
+  Check(events.size() == 2 && events[1].header.type == NativeProbeType::kJsInvocationStart &&
+            events[1].header.tab_id == 1 &&
+            reb::IsValidNativeJsInvocationStartHeader(events[1].header) &&
+            events[1].inline_payload == start_record.inline_payload,
+        "Host forwards the invocation start unchanged with its tab");
   host.Disable();
   session.active = false;
   session.js_sites.clear();
+  session.invocation_sites.clear();
+  session.invocation_digests = false;
   session.emitted = {};
   process.frames.clear();
   std::cout << "PASS production NativeProbeHost forwards JS dispatch site records and type 21 "

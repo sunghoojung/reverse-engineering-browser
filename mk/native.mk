@@ -29,8 +29,9 @@ PAGE_GUEST_SAMPLER_TEST := $(BUILD_DIR)/tests/page-guest-sampler-test
 NATIVE_GUEST_TEST := $(BUILD_DIR)/tests/native-wasm-guest-test
 JS_DISPATCH_TEST := $(BUILD_DIR)/tests/js-dispatch-test
 NETWORK_REQUEST_TEST := $(BUILD_DIR)/tests/network-request-test
+JS_INVOCATION_TEST := $(BUILD_DIR)/tests/js-invocation-test
 ARTIFACT_TEST_BINARY := $(BUILD_DIR)/tests/artifact-test
-NATIVE_TEST_BINARIES := $(ARTIFACT_TEST_BINARY) $(EVENT_TEST_BINARY) $(EVENT_BROKER_TEST_BINARY) $(VM_DISPATCH_TEST_BINARY) $(OWNED_REGISTER_SAMPLER_TEST) $(PAGE_GUEST_SAMPLER_TEST) $(NATIVE_GUEST_TEST) $(JS_DISPATCH_TEST) $(NETWORK_REQUEST_TEST)
+NATIVE_TEST_BINARIES := $(ARTIFACT_TEST_BINARY) $(EVENT_TEST_BINARY) $(EVENT_BROKER_TEST_BINARY) $(VM_DISPATCH_TEST_BINARY) $(OWNED_REGISTER_SAMPLER_TEST) $(PAGE_GUEST_SAMPLER_TEST) $(NATIVE_GUEST_TEST) $(JS_DISPATCH_TEST) $(NETWORK_REQUEST_TEST) $(JS_INVOCATION_TEST)
 ORIGIN_TRACE_BACKEND := apps/origin-trace-backend/target/debug/origin-trace-backend
 VM_ANALYZER := apps/origin-trace-backend/target/debug/origin-trace-vm
 
@@ -160,6 +161,9 @@ $(NATIVE_GUEST_TEST): $(BUILD_DIR)/tests/native_wasm_guest_test.o
 # dispatch field; the same producer emits the cross-language golden cases.
 $(BUILD_DIR)/tests/js_dispatch_test.o: CPPFLAGS += -Ibrowser/integration/brave/overlay
 $(JS_DISPATCH_TEST): $(BUILD_DIR)/tests/js_dispatch_test.o $(BUILD_DIR)/src/capture/event.o
+# The same parity rule for invocation records and the Wasm context versions.
+$(BUILD_DIR)/tests/js_invocation_test.o: CPPFLAGS += -Ibrowser/integration/brave/overlay
+$(JS_INVOCATION_TEST): $(BUILD_DIR)/tests/js_invocation_test.o $(BUILD_DIR)/src/capture/event.o
 
 # Overlay producer and core consumer of the network request target/body records
 # and the request_body artifact policy of the production receiver.

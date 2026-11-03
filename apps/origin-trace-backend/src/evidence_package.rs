@@ -1732,7 +1732,15 @@ mod tests {
     fn native_dispatch_observations_export_as_physical_metadata() {
         let source = include_bytes!("../assets/evidence-packages/source-v1/events.jsonl");
         let first = source.split(|b| *b == b'\n').next().unwrap();
-        for kind in ["wasm_dispatch_observation", "js_dispatch_observation"] {
+        // Invocation records join them: a package never carries argument
+        // low bits, lengths or value digests.
+        for kind in [
+            "wasm_dispatch_observation",
+            "js_dispatch_observation",
+            "js_invocation_start",
+            "js_invocation_settle",
+            "js_invocation_request",
+        ] {
             let mut event: Value = serde_json::from_slice(first).unwrap();
             event["type"] = json!(kind);
             event["category"] = json!("vm");

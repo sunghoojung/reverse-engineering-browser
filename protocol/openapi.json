@@ -36,7 +36,78 @@
       "2025-06-18"
     ],
     "batching": false,
-    "message_limit_bytes": 33554432
+    "message_limit_bytes": 33554432,
+    "session_start": {
+      "tool": "start_live_session",
+      "flag": "--allow-session-start",
+      "requires": "--allow-effects",
+      "cli": [
+        "reb-api",
+        "session",
+        "start"
+      ],
+      "title": "Start a live capture session",
+      "description": "Starts a new visibly labeled live capture session with named capture options: the capture browser, an Origin Trace window and every helper. When it is ready this connection moves to that session; other endpoint changes still retire the connection. Starting again first ends the session this connection started. With url, the result reports capture_observed; false means nothing was recorded, so end the session. Start only for an authorized target. session_action, listed with this tool, acts only on a session this connection started.",
+      "input": {
+        "$ref": "#/components/schemas/LiveSessionStart"
+      },
+      "result": {
+        "$ref": "#/components/schemas/LiveSessionStarted"
+      },
+      "execution": {
+        "kind": "operation",
+        "effects": [
+          "process-launch",
+          "browser-control",
+          "network-access",
+          "local-state-write",
+          "filesystem-write"
+        ],
+        "state_dependent_effects": [
+          {
+            "effects": [
+              "sensitive-capture"
+            ],
+            "when": "canvas_images is true."
+          }
+        ],
+        "uncertainties": [
+          "A timeout stops the launcher, but a browser window may already have opened before it closes."
+        ],
+        "prerequisites": [
+          {
+            "id": "session-launcher",
+            "condition": "run-live-session.sh beside this reb-api build, or REB_LIVE_SESSION_SCRIPT, and a Brave build that defines the requested native V8 flags."
+          }
+        ],
+        "confirmations": [
+          {
+            "field": "confirm_sensitive_capture",
+            "value": true,
+            "when": {
+              "properties": {
+                "canvas_images": {
+                  "const": true
+                }
+              },
+              "required": [
+                "canvas_images"
+              ]
+            }
+          }
+        ],
+        "notes": "Runs the same launcher as make live, detached from this process, so the session outlives the MCP connection until it is ended, Brave is closed, or capture expires.",
+        "sources": [
+          {
+            "path": "apps/origin-trace-backend/src/session_launch.rs",
+            "symbol": "launch"
+          }
+        ]
+      },
+      "operations": [
+        "session_action"
+      ]
+    }
   },
   "paths": {
     "/api/session/context": {
@@ -153,6 +224,262 @@
             }
           }
         ]
+      }
+    },
+    "/api/session/summary": {
+      "get": {
+        "operationId": "get_session_summary",
+        "summary": "Summarize what this capture recorded",
+        "description": "One call that answers whether a capture worked: capture state, event counts by type, the busiest frames with their event types, session IDs, gap counts and named gap reasons, artifact counts by kind with the newest digests, and checks that name what looks wrong, such as a full sampling budget or Wasm compiled without a stored module. Counts, identifiers and origin labels only: no payloads, source, URLs paths or bodies. Covers the newest 64 MiB of events. Use get_events filters to read the records behind a count.",
+        "tags": [
+          "health"
+        ],
+        "x-source": "apps/origin-trace-backend/src/app.rs",
+        "parameters": [
+          {
+            "name": "If-None-Match",
+            "in": "header",
+            "required": false,
+            "description": "Exact server ETag from a previous response.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionSummary"
+                }
+              }
+            },
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store",
+                  "type": "string"
+                }
+              },
+              "ETag": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid, duplicate or unknown query parameter.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Host/Origin/Sec-Fetch-Site rejected.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Store, read, validation, or internal failure.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "304": {
+            "description": "ETag unchanged; no response body.",
+            "headers": {
+              "ETag": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store",
+                  "type": "string"
+                }
+              }
+            }
+          }
+        },
+        "x-reb-execution": {
+          "kind": "operation",
+          "effects": [],
+          "state_dependent_effects": [],
+          "uncertainties": [],
+          "prerequisites": [
+            {
+              "id": "local-request",
+              "condition": "Host must name the exact loopback listening port; cross-site Sec-Fetch-Site is rejected; an optional Origin must pass App::trusted."
+            }
+          ],
+          "confirmations": [],
+          "notes": "Reads stored events and the artifact manifest and probes the local capture sockets. No browser mutation is requested. Not one atomic snapshot.",
+          "sources": [
+            {
+              "path": "apps/origin-trace-backend/src/session_summary.rs",
+              "symbol": "build"
+            }
+          ]
+        },
+        "x-reb-execution-schema": {
+          "$ref": "#/components/schemas/RebExecutionMetadata"
+        }
+      }
+    },
+    "/api/session/actions": {
+      "post": {
+        "operationId": "session_action",
+        "summary": "Open a URL in, send input to, or end this live capture session",
+        "description": "Drives the live session this backend belongs to. open_url opens a page in a new tab of the session's capture browser while its capture broker runs, and reports capture_observed. list_inputs, click, type, press and scroll send trusted macOS input to the capture browser's page; they need Accessibility for the app that started the session. end closes the capture browser and stops the session; it stays available after capture expires. Use wait_for_events after open_url. Through MCP it is listed only with --allow-session-start and acts only on a session started by that connection with start_live_session.",
+        "tags": [
+          "capture"
+        ],
+        "requestBody": {
+          "required": true,
+          "description": "JSON object. Explicit decimal Content-Length required; 1..8192 encoded bytes.",
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SessionAction"
+              }
+            }
+          }
+        },
+        "x-max-body-bytes": 8192,
+        "x-source": "apps/origin-trace-backend/src/live_browser.rs",
+        "responses": {
+          "200": {
+            "description": "Successful response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionActionResult"
+                }
+              }
+            },
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request, including an unconfirmed end or a URL that is not HTTP(S).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Host/Origin/Sec-Fetch-Site rejected.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "408": {
+            "description": "The bounded request-body read deadline expired.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Not a live capture, capture not recording, capture browser not running or not frontmost, no matching control, Accessibility not granted, or launcher gone. Nothing was changed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Store, read, validation, or internal failure.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "The capture browser did not accept the URL.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Another session is sending input. Retry explicitly.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "x-reb-execution": {
+          "kind": "action-dependent",
+          "effects": null,
+          "state_dependent_effects": [],
+          "uncertainties": [],
+          "prerequisites": [
+            {
+              "id": "local-request",
+              "condition": "Host must name the exact loopback listening port; cross-site Sec-Fetch-Site is rejected; an optional Origin must pass App::trusted."
+            },
+            {
+              "id": "bounded-json-object",
+              "condition": "POST requires one valid Content-Length, no Transfer-Encoding, and a JSON object within x-max-body-bytes and the body deadline."
+            }
+          ],
+          "confirmations": [],
+          "notes": "Resolve the exact request action and combine its prerequisites with these common operation guards. No action inherits a default effect classification.",
+          "sources": [
+            {
+              "path": "apps/origin-trace-backend/src/app.rs",
+              "symbol": "App::post"
+            }
+          ]
+        },
+        "x-reb-execution-schema": {
+          "$ref": "#/components/schemas/RebExecutionMetadata"
+        }
       }
     },
     "/api/health": {
@@ -1079,8 +1406,8 @@
     "/api/events": {
       "get": {
         "operationId": "get_events",
-        "summary": "get events",
-        "description": "Existing local research UI operation.",
+        "summary": "Read native events, optionally filtered and paged",
+        "description": "Without filters this is the Origin Trace UI polling window: the newest events of the last 64 MiB plus an independent network window. With any filter or cursor it scans complete records from the cursor (default: newest first), returns up to limit matches unchanged, and adds a query object with next_before and next_after cursors. Filters combine with AND. Gap fields then describe only the scanned byte range, and network_events is empty: select network records with category=network. Payloads are hex. Unknown parameters are rejected.",
         "tags": [
           "events"
         ],
@@ -1145,7 +1472,7 @@
             }
           },
           "400": {
-            "description": "Invalid or duplicate limit query parameter.",
+            "description": "Invalid, duplicate or unknown query parameter, or a cursor that is not a record boundary of this store.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1156,15 +1483,144 @@
           }
         },
         "x-source": "apps/origin-trace-backend/src/app.rs",
+        "x-reb-filter-echo": "query",
         "parameters": [
           {
             "name": "limit",
             "in": "query",
             "required": false,
-            "description": "Clamped to 1..5000. Noninteger, out-of-range signed integer, blank, or duplicate values return 400.",
+            "description": "Maximum events to return, clamped to 1..5000. Noninteger, blank, or duplicate values return 400. Keep it small, such as 50, when reading through MCP.",
             "schema": {
               "type": "integer",
               "default": 500
+            }
+          },
+          {
+            "name": "type",
+            "in": "query",
+            "required": false,
+            "description": "Comma-separated event types to keep, for example wasm_dispatch_observation,module_compiled. Exact names, at most 16.",
+            "schema": {
+              "type": "string",
+              "maxLength": 1040
+            }
+          },
+          {
+            "name": "category",
+            "in": "query",
+            "required": false,
+            "description": "Comma-separated event categories to keep, for example wasm,vm,network. Exact names, at most 16.",
+            "schema": {
+              "type": "string",
+              "maxLength": 1040
+            }
+          },
+          {
+            "name": "session_id",
+            "in": "query",
+            "required": false,
+            "description": "Keep events of this capture session.",
+            "schema": {
+              "$ref": "#/components/schemas/Uint64String"
+            }
+          },
+          {
+            "name": "navigation_id",
+            "in": "query",
+            "required": false,
+            "description": "Keep events of this navigation.",
+            "schema": {
+              "$ref": "#/components/schemas/Uint64String"
+            }
+          },
+          {
+            "name": "frame_id",
+            "in": "query",
+            "required": false,
+            "description": "Keep events of this frame. get_session_summary lists frames with their event counts.",
+            "schema": {
+              "$ref": "#/components/schemas/Uint64String"
+            }
+          },
+          {
+            "name": "tab_id",
+            "in": "query",
+            "required": false,
+            "description": "Keep events of this tab.",
+            "schema": {
+              "$ref": "#/components/schemas/Uint64String"
+            }
+          },
+          {
+            "name": "process_id",
+            "in": "query",
+            "required": false,
+            "description": "Keep events from this process ID.",
+            "schema": {
+              "$ref": "#/components/schemas/Uint64String"
+            }
+          },
+          {
+            "name": "artifact_id",
+            "in": "query",
+            "required": false,
+            "description": "Keep events that name this artifact, such as artifact_captured or Wasm observations of one module.",
+            "schema": {
+              "$ref": "#/components/schemas/Uint64String"
+            }
+          },
+          {
+            "name": "request_id",
+            "in": "query",
+            "required": false,
+            "description": "Keep events of this native network request.",
+            "schema": {
+              "$ref": "#/components/schemas/Uint64String"
+            }
+          },
+          {
+            "name": "parent_event_id",
+            "in": "query",
+            "required": false,
+            "description": "Keep events whose parent_event_id is this value.",
+            "schema": {
+              "$ref": "#/components/schemas/Uint64String"
+            }
+          },
+          {
+            "name": "since_ns",
+            "in": "query",
+            "required": false,
+            "description": "Keep events with monotonic_time_ns at or after this value.",
+            "schema": {
+              "$ref": "#/components/schemas/Uint64String"
+            }
+          },
+          {
+            "name": "until_ns",
+            "in": "query",
+            "required": false,
+            "description": "Keep events with monotonic_time_ns before this value.",
+            "schema": {
+              "$ref": "#/components/schemas/Uint64String"
+            }
+          },
+          {
+            "name": "after",
+            "in": "query",
+            "required": false,
+            "description": "Byte cursor. Read forward: return the oldest matches that start at or after this record boundary. Use query.next_after from a previous page. Not with before.",
+            "schema": {
+              "$ref": "#/components/schemas/Uint64String"
+            }
+          },
+          {
+            "name": "before",
+            "in": "query",
+            "required": false,
+            "description": "Byte cursor. Read backward: return the newest matches that end at or before this record boundary. Use query.next_before from a previous page. Not with after.",
+            "schema": {
+              "$ref": "#/components/schemas/Uint64String"
             }
           },
           {
@@ -1189,7 +1645,7 @@
             }
           ],
           "confirmations": [],
-          "notes": "Reads local state or stored evidence. No browser mutation is requested by this handler; health/events/artifacts can probe local service sockets. Evidence tails and current state are not stable snapshots.",
+          "notes": "Reads stored events. No browser mutation is requested. Filtered reads scan at most 64 MiB of complete records per call and are not a stable snapshot; a cursor is a byte offset in this backend's store and is invalid after a clear.",
           "sources": [
             {
               "path": "apps/origin-trace-backend/src/app.rs",
@@ -1202,11 +1658,249 @@
         }
       }
     },
+    "/api/events/wait": {
+      "get": {
+        "operationId": "wait_for_events",
+        "summary": "Wait for matching events",
+        "description": "Waits up to timeout_ms for the first events after a cursor that match the same filters as get_events, then returns them in the filtered get_events shape plus a wait object. Without after, only events written after the call count, so call it right after the action you expect to cause them. On timeout it returns no events, wait.timed_out true and query.next_after for the next wait. Waiting does not change the browser or the stores.",
+        "tags": [
+          "events"
+        ],
+        "x-source": "apps/origin-trace-backend/src/app.rs",
+        "x-reb-wait-parameter": "timeout_ms",
+        "parameters": [
+          {
+            "name": "timeout_ms",
+            "in": "query",
+            "required": false,
+            "description": "Milliseconds to wait, 1..60000. Default 10000.",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 60000,
+              "default": 10000
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "description": "Maximum events to return once something matches, clamped to 1..5000. Default 100.",
+            "schema": {
+              "type": "integer",
+              "default": 100
+            }
+          },
+          {
+            "name": "type",
+            "in": "query",
+            "required": false,
+            "description": "Comma-separated event types to keep, for example wasm_dispatch_observation,module_compiled. Exact names, at most 16.",
+            "schema": {
+              "type": "string",
+              "maxLength": 1040
+            }
+          },
+          {
+            "name": "category",
+            "in": "query",
+            "required": false,
+            "description": "Comma-separated event categories to keep, for example wasm,vm,network. Exact names, at most 16.",
+            "schema": {
+              "type": "string",
+              "maxLength": 1040
+            }
+          },
+          {
+            "name": "session_id",
+            "in": "query",
+            "required": false,
+            "description": "Keep events of this capture session.",
+            "schema": {
+              "$ref": "#/components/schemas/Uint64String"
+            }
+          },
+          {
+            "name": "navigation_id",
+            "in": "query",
+            "required": false,
+            "description": "Keep events of this navigation.",
+            "schema": {
+              "$ref": "#/components/schemas/Uint64String"
+            }
+          },
+          {
+            "name": "frame_id",
+            "in": "query",
+            "required": false,
+            "description": "Keep events of this frame. get_session_summary lists frames with their event counts.",
+            "schema": {
+              "$ref": "#/components/schemas/Uint64String"
+            }
+          },
+          {
+            "name": "tab_id",
+            "in": "query",
+            "required": false,
+            "description": "Keep events of this tab.",
+            "schema": {
+              "$ref": "#/components/schemas/Uint64String"
+            }
+          },
+          {
+            "name": "process_id",
+            "in": "query",
+            "required": false,
+            "description": "Keep events from this process ID.",
+            "schema": {
+              "$ref": "#/components/schemas/Uint64String"
+            }
+          },
+          {
+            "name": "artifact_id",
+            "in": "query",
+            "required": false,
+            "description": "Keep events that name this artifact, such as artifact_captured or Wasm observations of one module.",
+            "schema": {
+              "$ref": "#/components/schemas/Uint64String"
+            }
+          },
+          {
+            "name": "request_id",
+            "in": "query",
+            "required": false,
+            "description": "Keep events of this native network request.",
+            "schema": {
+              "$ref": "#/components/schemas/Uint64String"
+            }
+          },
+          {
+            "name": "parent_event_id",
+            "in": "query",
+            "required": false,
+            "description": "Keep events whose parent_event_id is this value.",
+            "schema": {
+              "$ref": "#/components/schemas/Uint64String"
+            }
+          },
+          {
+            "name": "since_ns",
+            "in": "query",
+            "required": false,
+            "description": "Keep events with monotonic_time_ns at or after this value.",
+            "schema": {
+              "$ref": "#/components/schemas/Uint64String"
+            }
+          },
+          {
+            "name": "until_ns",
+            "in": "query",
+            "required": false,
+            "description": "Keep events with monotonic_time_ns before this value.",
+            "schema": {
+              "$ref": "#/components/schemas/Uint64String"
+            }
+          },
+          {
+            "name": "after",
+            "in": "query",
+            "required": false,
+            "description": "Byte cursor to wait after, usually query.next_after from a previous read. Default: the end of the store when the call starts.",
+            "schema": {
+              "$ref": "#/components/schemas/Uint64String"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EventWait"
+                }
+              }
+            },
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid, duplicate or unknown query parameter.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Host/Origin/Sec-Fetch-Site rejected.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Store, read, validation, or internal failure.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Eight waits are already running. Retry explicitly.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "x-reb-execution": {
+          "kind": "operation",
+          "effects": [],
+          "state_dependent_effects": [],
+          "uncertainties": [],
+          "prerequisites": [
+            {
+              "id": "local-request",
+              "condition": "Host must name the exact loopback listening port; cross-site Sec-Fetch-Site is rejected; an optional Origin must pass App::trusted."
+            }
+          ],
+          "confirmations": [],
+          "notes": "Polls the stored events every 200 ms without holding a reader between polls. At most eight concurrent waits; a further one is refused. No browser mutation is requested.",
+          "sources": [
+            {
+              "path": "apps/origin-trace-backend/src/app.rs",
+              "symbol": "App::wait_for_events"
+            }
+          ]
+        },
+        "x-reb-execution-schema": {
+          "$ref": "#/components/schemas/RebExecutionMetadata"
+        }
+      }
+    },
     "/api/artifacts": {
       "get": {
         "operationId": "get_artifacts",
-        "summary": "get artifacts",
-        "description": "Existing local research UI operation.",
+        "summary": "List stored artifacts, optionally filtered and paged",
+        "description": "Lists retained script, Wasm and other artifact records with their sha256, size, frame and session. Without filters it returns the newest records. With any filter or cursor it scans the manifest from the cursor and adds a query object with next_before and next_after cursors. Filters combine with AND. Bytes come from get_artifact_content, which the MCP projection does not inline; inspect_wasm describes a Wasm module. Unknown parameters are rejected.",
         "tags": [
           "artifacts"
         ],
@@ -1271,7 +1965,7 @@
             }
           },
           "400": {
-            "description": "Invalid or duplicate limit query parameter.",
+            "description": "Invalid, duplicate or unknown query parameter, or a cursor that is not a record boundary of the manifest.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1282,15 +1976,109 @@
           }
         },
         "x-source": "apps/origin-trace-backend/src/app.rs",
+        "x-reb-filter-echo": "query",
         "parameters": [
           {
             "name": "limit",
             "in": "query",
             "required": false,
-            "description": "Clamped to 1..5000. Noninteger, out-of-range signed integer, blank, or duplicate values return 400.",
+            "description": "Maximum artifacts to return, clamped to 1..5000. Noninteger, blank, or duplicate values return 400.",
             "schema": {
               "type": "integer",
               "default": 500
+            }
+          },
+          {
+            "name": "kind",
+            "in": "query",
+            "required": false,
+            "description": "Comma-separated artifact kinds: javascript, wasm, source_map, response_body, canvas_data_url, bytecode_buffer, wasm_guest_adapter.",
+            "schema": {
+              "type": "string",
+              "maxLength": 1040
+            }
+          },
+          {
+            "name": "artifact_id",
+            "in": "query",
+            "required": false,
+            "description": "Keep this artifact.",
+            "schema": {
+              "$ref": "#/components/schemas/Uint64String"
+            }
+          },
+          {
+            "name": "session_id",
+            "in": "query",
+            "required": false,
+            "description": "Keep artifacts of this capture session.",
+            "schema": {
+              "$ref": "#/components/schemas/Uint64String"
+            }
+          },
+          {
+            "name": "navigation_id",
+            "in": "query",
+            "required": false,
+            "description": "Keep artifacts of this navigation.",
+            "schema": {
+              "$ref": "#/components/schemas/Uint64String"
+            }
+          },
+          {
+            "name": "frame_id",
+            "in": "query",
+            "required": false,
+            "description": "Keep artifacts of this frame.",
+            "schema": {
+              "$ref": "#/components/schemas/Uint64String"
+            }
+          },
+          {
+            "name": "execution_context_id",
+            "in": "query",
+            "required": false,
+            "description": "Keep artifacts of this execution context.",
+            "schema": {
+              "$ref": "#/components/schemas/Uint64String"
+            }
+          },
+          {
+            "name": "sha256",
+            "in": "query",
+            "required": false,
+            "description": "Keep artifacts with this exact lowercase SHA-256.",
+            "schema": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            }
+          },
+          {
+            "name": "host",
+            "in": "query",
+            "required": false,
+            "description": "Keep artifacts whose URL host is this name, case-insensitive. Wasm modules often have a wasm://wasm/ URL; select them by frame_id or kind instead.",
+            "schema": {
+              "type": "string",
+              "maxLength": 253
+            }
+          },
+          {
+            "name": "after",
+            "in": "query",
+            "required": false,
+            "description": "Byte cursor. Read forward: return the oldest matches that start at or after this record boundary. Use query.next_after from a previous page. Not with before.",
+            "schema": {
+              "$ref": "#/components/schemas/Uint64String"
+            }
+          },
+          {
+            "name": "before",
+            "in": "query",
+            "required": false,
+            "description": "Byte cursor. Read backward: return the newest matches that end at or before this record boundary. Use query.next_before from a previous page. Not with after.",
+            "schema": {
+              "$ref": "#/components/schemas/Uint64String"
             }
           },
           {
@@ -1315,7 +2103,7 @@
             }
           ],
           "confirmations": [],
-          "notes": "Reads local state or stored evidence. No browser mutation is requested by this handler; health/events/artifacts can probe local service sockets. Evidence tails and current state are not stable snapshots.",
+          "notes": "Reads the stored artifact manifest. No browser mutation is requested; it can probe the artifact receiver socket. Filtered reads scan at most 64 MiB of manifest records per call and are not a stable snapshot.",
           "sources": [
             {
               "path": "apps/origin-trace-backend/src/app.rs",
@@ -5070,6 +5858,47 @@
                     }
                   }
                 }
+              },
+              {
+                "if": {
+                  "properties": {
+                    "relation": {
+                      "const": "invocation_value_flow"
+                    }
+                  },
+                  "required": [
+                    "relation"
+                  ]
+                },
+                "then": {
+                  "properties": {
+                    "confidence": {
+                      "const": "correlated"
+                    }
+                  }
+                }
+              },
+              {
+                "if": {
+                  "properties": {
+                    "relation": {
+                      "enum": [
+                        "issued_during_invocation",
+                        "invocation_settlement"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "relation"
+                  ]
+                },
+                "then": {
+                  "properties": {
+                    "confidence": {
+                      "const": "observed"
+                    }
+                  }
+                }
               }
             ],
             "required": [
@@ -5115,7 +5944,10 @@
                   "request_initiator",
                   "request_lifecycle",
                   "artifact_request",
-                  "temporal_adjacency"
+                  "temporal_adjacency",
+                  "issued_during_invocation",
+                  "invocation_settlement",
+                  "invocation_value_flow"
                 ]
               },
               "confidence": {
@@ -5147,7 +5979,9 @@
                   "no_predecessor",
                   "cycle",
                   "step_limit",
-                  "capture_gap"
+                  "capture_gap",
+                  "value_flow_ambiguous",
+                  "value_flow_unsearched"
                 ]
               },
               "after_step": {
@@ -7473,6 +8307,54 @@
               },
               "is_default": {
                 "type": "boolean"
+              },
+              "js_invocation": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "state",
+                  "invocation_id"
+                ],
+                "description": "The JavaScript invocation context the record was produced in (protocol/native-js-invocation-v1.md). Absent when the record did not observe one. A state of none or unknown is a coverage limit, not evidence that the work is unrelated to an invocation.",
+                "properties": {
+                  "state": {
+                    "enum": [
+                      "none",
+                      "inside",
+                      "unknown"
+                    ]
+                  },
+                  "invocation_id": {
+                    "type": "string",
+                    "pattern": "^(?:0|[1-9][0-9]*)$",
+                    "maxLength": 10
+                  }
+                },
+                "allOf": [
+                  {
+                    "if": {
+                      "properties": {
+                        "state": {
+                          "const": "inside"
+                        }
+                      }
+                    },
+                    "then": {
+                      "properties": {
+                        "invocation_id": {
+                          "pattern": "^[1-9][0-9]*$"
+                        }
+                      }
+                    },
+                    "else": {
+                      "properties": {
+                        "invocation_id": {
+                          "const": "0"
+                        }
+                      }
+                    }
+                  }
+                ]
               }
             }
           },
@@ -7554,6 +8436,54 @@
                   }
                 ],
                 "description": "Monotonic time of the accepted observation event, copied from the native event."
+              },
+              "js_invocation": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "state",
+                  "invocation_id"
+                ],
+                "description": "The JavaScript invocation context the record was produced in (protocol/native-js-invocation-v1.md). Absent when the record did not observe one. A state of none or unknown is a coverage limit, not evidence that the work is unrelated to an invocation.",
+                "properties": {
+                  "state": {
+                    "enum": [
+                      "none",
+                      "inside",
+                      "unknown"
+                    ]
+                  },
+                  "invocation_id": {
+                    "type": "string",
+                    "pattern": "^(?:0|[1-9][0-9]*)$",
+                    "maxLength": 10
+                  }
+                },
+                "allOf": [
+                  {
+                    "if": {
+                      "properties": {
+                        "state": {
+                          "const": "inside"
+                        }
+                      }
+                    },
+                    "then": {
+                      "properties": {
+                        "invocation_id": {
+                          "pattern": "^[1-9][0-9]*$"
+                        }
+                      }
+                    },
+                    "else": {
+                      "properties": {
+                        "invocation_id": {
+                          "const": "0"
+                        }
+                      }
+                    }
+                  }
+                ]
               }
             },
             "allOf": [
@@ -7809,6 +8739,54 @@
                   "minimum": 8,
                   "maximum": 16777215
                 }
+              },
+              "js_invocation": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "state",
+                  "invocation_id"
+                ],
+                "description": "The JavaScript invocation context the record was produced in (protocol/native-js-invocation-v1.md). Absent when the record did not observe one. A state of none or unknown is a coverage limit, not evidence that the work is unrelated to an invocation.",
+                "properties": {
+                  "state": {
+                    "enum": [
+                      "none",
+                      "inside",
+                      "unknown"
+                    ]
+                  },
+                  "invocation_id": {
+                    "type": "string",
+                    "pattern": "^(?:0|[1-9][0-9]*)$",
+                    "maxLength": 10
+                  }
+                },
+                "allOf": [
+                  {
+                    "if": {
+                      "properties": {
+                        "state": {
+                          "const": "inside"
+                        }
+                      }
+                    },
+                    "then": {
+                      "properties": {
+                        "invocation_id": {
+                          "pattern": "^[1-9][0-9]*$"
+                        }
+                      }
+                    },
+                    "else": {
+                      "properties": {
+                        "invocation_id": {
+                          "const": "0"
+                        }
+                      }
+                    }
+                  }
+                ]
               }
             },
             "description": "Native observation with explicit artifact and invocation bindings. Consumers additionally verify exact sites, artifact digests, PC arithmetic, snapshot bounds, default-arm selection and causal identities; schema validation alone is not evidence of guest semantics.",
@@ -11660,7 +12638,8 @@
                 "type": "string",
                 "enum": [
                   "store",
-                  "bounded_tail"
+                  "bounded_tail",
+                  "bounded_range"
                 ]
               },
               "scan_start": {
@@ -11690,7 +12669,13 @@
               "events_limited",
               "network_events_limited"
             ],
-            "description": "Half-open complete-record byte scope of both windows and summaries. A bounded tail excludes the older prefix and is not a session-total claim."
+            "description": "Half-open complete-record byte scope of both windows and summaries. A bounded tail excludes the older prefix and is not a session-total claim. bounded_range is a filtered read's scanned range, which can start or end inside the store."
+          },
+          "named_gaps": {
+            "$ref": "#/components/schemas/NamedGaps"
+          },
+          "query": {
+            "$ref": "#/components/schemas/EventQueryPage"
           }
         },
         "required": [
@@ -11807,6 +12792,9 @@
           },
           "artifact_receiver_connected": {
             "type": "boolean"
+          },
+          "query": {
+            "$ref": "#/components/schemas/ArtifactQueryPage"
           }
         },
         "required": [
@@ -16376,7 +17364,10 @@
               "wasm_indirect_observation",
               "js_dispatch_observation",
               "request_body",
-              "request_target"
+              "request_target",
+              "js_invocation_start",
+              "js_invocation_settle",
+              "js_invocation_request"
             ]
           },
           "status_code": {
@@ -21904,6 +22895,1551 @@
           }
         },
         "x-source": "protocol/vm-host-links-v1.schema.json"
+      },
+      "NamedGaps": {
+        "type": "array",
+        "maxItems": 64,
+        "description": "Gap markers whose payload names a producer reason, such as native_guest_sample_limit, in first-seen order. They also count in queue_drops.",
+        "items": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "category",
+            "reason",
+            "count"
+          ],
+          "properties": {
+            "category": {
+              "type": "string"
+            },
+            "reason": {
+              "type": "string"
+            },
+            "count": {
+              "$ref": "#/components/schemas/Uint64String"
+            }
+          }
+        }
+      },
+      "EventQueryPage": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "direction",
+          "limit",
+          "returned",
+          "store_end",
+          "next_after",
+          "next_before",
+          "limited",
+          "budget_exhausted",
+          "filters"
+        ],
+        "properties": {
+          "direction": {
+            "type": "string",
+            "enum": [
+              "forward",
+              "backward"
+            ]
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 5000
+          },
+          "returned": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "store_end": {
+            "$ref": "#/components/schemas/Uint64String",
+            "description": "Store length in bytes when the read started."
+          },
+          "next_after": {
+            "$ref": "#/components/schemas/Uint64String",
+            "description": "Pass as after to continue forward, including to see records written later."
+          },
+          "next_before": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/Uint64String"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Pass as before to read older matches. Null when the read reached the start of the store."
+          },
+          "limited": {
+            "type": "boolean",
+            "description": "The page stopped because limit records matched. More may match beyond it."
+          },
+          "budget_exhausted": {
+            "type": "boolean",
+            "description": "The page stopped at the 64 MiB scan budget. Continue with a cursor."
+          },
+          "filters": {
+            "type": "object",
+            "additionalProperties": false,
+            "description": "The filters this response applied, in canonical form.",
+            "properties": {
+              "type": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "maxItems": 16
+              },
+              "category": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "maxItems": 16
+              },
+              "session_id": {
+                "$ref": "#/components/schemas/Uint64String"
+              },
+              "navigation_id": {
+                "$ref": "#/components/schemas/Uint64String"
+              },
+              "frame_id": {
+                "$ref": "#/components/schemas/Uint64String"
+              },
+              "tab_id": {
+                "$ref": "#/components/schemas/Uint64String"
+              },
+              "process_id": {
+                "$ref": "#/components/schemas/Uint64String"
+              },
+              "artifact_id": {
+                "$ref": "#/components/schemas/Uint64String"
+              },
+              "request_id": {
+                "$ref": "#/components/schemas/Uint64String"
+              },
+              "parent_event_id": {
+                "$ref": "#/components/schemas/Uint64String"
+              },
+              "since_ns": {
+                "$ref": "#/components/schemas/Uint64String"
+              },
+              "until_ns": {
+                "$ref": "#/components/schemas/Uint64String"
+              }
+            }
+          }
+        },
+        "description": "Present only on filtered or cursor-paged reads."
+      },
+      "ArtifactQueryPage": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "direction",
+          "limit",
+          "returned",
+          "store_end",
+          "next_after",
+          "next_before",
+          "limited",
+          "budget_exhausted",
+          "filters",
+          "scope",
+          "scan_start",
+          "scan_end"
+        ],
+        "properties": {
+          "direction": {
+            "type": "string",
+            "enum": [
+              "forward",
+              "backward"
+            ]
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 5000
+          },
+          "returned": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "store_end": {
+            "$ref": "#/components/schemas/Uint64String",
+            "description": "Store length in bytes when the read started."
+          },
+          "next_after": {
+            "$ref": "#/components/schemas/Uint64String",
+            "description": "Pass as after to continue forward, including to see records written later."
+          },
+          "next_before": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/Uint64String"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Pass as before to read older matches. Null when the read reached the start of the store."
+          },
+          "limited": {
+            "type": "boolean",
+            "description": "The page stopped because limit records matched. More may match beyond it."
+          },
+          "budget_exhausted": {
+            "type": "boolean",
+            "description": "The page stopped at the 64 MiB scan budget. Continue with a cursor."
+          },
+          "filters": {
+            "type": "object",
+            "additionalProperties": false,
+            "description": "The filters this response applied, in canonical form.",
+            "properties": {
+              "kind": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "maxItems": 16
+              },
+              "artifact_id": {
+                "$ref": "#/components/schemas/Uint64String"
+              },
+              "session_id": {
+                "$ref": "#/components/schemas/Uint64String"
+              },
+              "navigation_id": {
+                "$ref": "#/components/schemas/Uint64String"
+              },
+              "frame_id": {
+                "$ref": "#/components/schemas/Uint64String"
+              },
+              "execution_context_id": {
+                "$ref": "#/components/schemas/Uint64String"
+              },
+              "sha256": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              },
+              "host": {
+                "type": "string",
+                "maxLength": 253
+              }
+            }
+          },
+          "scope": {
+            "type": "string",
+            "enum": [
+              "store",
+              "bounded_range"
+            ]
+          },
+          "scan_start": {
+            "$ref": "#/components/schemas/Uint64String"
+          },
+          "scan_end": {
+            "$ref": "#/components/schemas/Uint64String"
+          }
+        },
+        "description": "Present only on filtered or cursor-paged reads. Offsets are in the artifact manifest."
+      },
+      "EventWait": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/Events"
+          },
+          {
+            "type": "object",
+            "required": [
+              "query",
+              "wait"
+            ],
+            "properties": {
+              "wait": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "timed_out",
+                  "timeout_ms",
+                  "waited_ms"
+                ],
+                "properties": {
+                  "timed_out": {
+                    "type": "boolean"
+                  },
+                  "timeout_ms": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 60000
+                  },
+                  "waited_ms": {
+                    "type": "integer",
+                    "minimum": 0
+                  }
+                }
+              }
+            }
+          }
+        ],
+        "description": "A filtered get_events document. event_window covers every byte read while waiting."
+      },
+      "SessionSummary": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "protocol_version",
+          "instance_id",
+          "capture_mode",
+          "live_admission",
+          "broker_connected",
+          "capture_stopped",
+          "artifact_receiver_configured",
+          "artifact_receiver_connected",
+          "events",
+          "artifacts",
+          "checks"
+        ],
+        "properties": {
+          "protocol_version": {
+            "const": 1,
+            "type": "integer"
+          },
+          "instance_id": {
+            "type": "string",
+            "maxLength": 128
+          },
+          "capture_mode": {
+            "type": "string",
+            "enum": [
+              "live",
+              "demo",
+              "idle"
+            ]
+          },
+          "live_admission": {
+            "type": "string",
+            "enum": [
+              "ready",
+              "idle",
+              "native_capture_unavailable",
+              "not_live_capture"
+            ]
+          },
+          "broker_connected": {
+            "type": "boolean"
+          },
+          "capture_stopped": {
+            "type": "boolean"
+          },
+          "artifact_receiver_configured": {
+            "type": "boolean"
+          },
+          "artifact_receiver_connected": {
+            "type": "boolean"
+          },
+          "events": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "scope",
+              "scan_start",
+              "scan_end",
+              "scan_limit",
+              "budget_exhausted",
+              "total",
+              "first_time_ns",
+              "last_time_ns",
+              "by_type",
+              "sessions",
+              "sessions_omitted",
+              "frames",
+              "frames_omitted",
+              "untracked_frame_events",
+              "sequence_gaps",
+              "sequence_gaps_saturated",
+              "queue_drops",
+              "queue_drops_saturated",
+              "named_gaps"
+            ],
+            "properties": {
+              "scope": {
+                "type": "string",
+                "enum": [
+                  "store",
+                  "bounded_range"
+                ]
+              },
+              "scan_start": {
+                "$ref": "#/components/schemas/Uint64String"
+              },
+              "scan_end": {
+                "$ref": "#/components/schemas/Uint64String"
+              },
+              "scan_limit": {
+                "type": "integer",
+                "enum": [
+                  67108864
+                ]
+              },
+              "budget_exhausted": {
+                "type": "boolean"
+              },
+              "total": {
+                "$ref": "#/components/schemas/Uint64String"
+              },
+              "first_time_ns": {
+                "oneOf": [
+                  {
+                    "$ref": "#/components/schemas/Uint64String"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "last_time_ns": {
+                "oneOf": [
+                  {
+                    "$ref": "#/components/schemas/Uint64String"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "by_type": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "category",
+                    "type",
+                    "count"
+                  ],
+                  "properties": {
+                    "category": {
+                      "type": "string"
+                    },
+                    "type": {
+                      "type": "string"
+                    },
+                    "count": {
+                      "$ref": "#/components/schemas/Uint64String"
+                    }
+                  }
+                }
+              },
+              "sessions": {
+                "type": "array",
+                "maxItems": 16,
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "session_id",
+                    "count"
+                  ],
+                  "properties": {
+                    "session_id": {
+                      "$ref": "#/components/schemas/Uint64String"
+                    },
+                    "count": {
+                      "$ref": "#/components/schemas/Uint64String"
+                    }
+                  }
+                }
+              },
+              "sessions_omitted": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "frames": {
+                "type": "array",
+                "maxItems": 32,
+                "description": "Busiest frames first.",
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "session_id",
+                    "tab_id",
+                    "navigation_id",
+                    "frame_id",
+                    "count",
+                    "first_time_ns",
+                    "last_time_ns",
+                    "types",
+                    "types_omitted"
+                  ],
+                  "properties": {
+                    "session_id": {
+                      "$ref": "#/components/schemas/Uint64String"
+                    },
+                    "tab_id": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "navigation_id": {
+                      "$ref": "#/components/schemas/Uint64String"
+                    },
+                    "frame_id": {
+                      "$ref": "#/components/schemas/Uint64String"
+                    },
+                    "count": {
+                      "$ref": "#/components/schemas/Uint64String"
+                    },
+                    "first_time_ns": {
+                      "$ref": "#/components/schemas/Uint64String"
+                    },
+                    "last_time_ns": {
+                      "$ref": "#/components/schemas/Uint64String"
+                    },
+                    "types": {
+                      "type": "array",
+                      "maxItems": 8,
+                      "items": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "required": [
+                          "type",
+                          "count"
+                        ],
+                        "properties": {
+                          "type": {
+                            "type": "string"
+                          },
+                          "count": {
+                            "$ref": "#/components/schemas/Uint64String"
+                          }
+                        }
+                      }
+                    },
+                    "types_omitted": {
+                      "type": "integer",
+                      "minimum": 0
+                    }
+                  }
+                }
+              },
+              "frames_omitted": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "untracked_frame_events": {
+                "$ref": "#/components/schemas/Uint64String"
+              },
+              "sequence_gaps": {
+                "$ref": "#/components/schemas/Uint64String"
+              },
+              "sequence_gaps_saturated": {
+                "type": "boolean"
+              },
+              "queue_drops": {
+                "$ref": "#/components/schemas/Uint64String"
+              },
+              "queue_drops_saturated": {
+                "type": "boolean"
+              },
+              "named_gaps": {
+                "$ref": "#/components/schemas/NamedGaps"
+              }
+            }
+          },
+          "artifacts": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "scope",
+              "budget_exhausted",
+              "total",
+              "by_kind",
+              "items",
+              "items_omitted"
+            ],
+            "properties": {
+              "scope": {
+                "type": "string",
+                "enum": [
+                  "store",
+                  "bounded_range"
+                ]
+              },
+              "budget_exhausted": {
+                "type": "boolean"
+              },
+              "total": {
+                "$ref": "#/components/schemas/Uint64String"
+              },
+              "by_kind": {
+                "type": "object",
+                "additionalProperties": {
+                  "$ref": "#/components/schemas/Uint64String"
+                }
+              },
+              "items": {
+                "type": "array",
+                "maxItems": 32,
+                "description": "Newest first.",
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "artifact_id",
+                    "kind",
+                    "session_id",
+                    "navigation_id",
+                    "frame_id",
+                    "capture_origin",
+                    "byte_size",
+                    "sha256",
+                    "url_label"
+                  ],
+                  "properties": {
+                    "artifact_id": {
+                      "$ref": "#/components/schemas/Uint64String"
+                    },
+                    "kind": {
+                      "type": "string"
+                    },
+                    "session_id": {
+                      "$ref": "#/components/schemas/Uint64String"
+                    },
+                    "navigation_id": {
+                      "$ref": "#/components/schemas/Uint64String"
+                    },
+                    "frame_id": {
+                      "$ref": "#/components/schemas/Uint64String"
+                    },
+                    "capture_origin": {
+                      "type": "string"
+                    },
+                    "byte_size": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "sha256": {
+                      "type": "string",
+                      "pattern": "^[0-9a-f]{64}$"
+                    },
+                    "url_label": {
+                      "type": [
+                        "string",
+                        "null"
+                      ],
+                      "maxLength": 256,
+                      "description": "HTTP(S) origin or wasm://wasm/<hex> label; null otherwise."
+                    }
+                  }
+                }
+              },
+              "items_omitted": {
+                "$ref": "#/components/schemas/Uint64String"
+              }
+            }
+          },
+          "checks": {
+            "type": "array",
+            "description": "What looks wrong or notable, most important first. Empty when nothing was found.",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "code",
+                "severity",
+                "message"
+              ],
+              "properties": {
+                "code": {
+                  "type": "string",
+                  "enum": [
+                    "capture_not_live",
+                    "capture_stopped",
+                    "broker_disconnected",
+                    "artifact_receiver_disconnected",
+                    "no_events",
+                    "wasm_without_artifacts",
+                    "artifact_capture_failed",
+                    "queue_drops",
+                    "sequence_gaps",
+                    "named_gap",
+                    "bounded_scope"
+                  ]
+                },
+                "severity": {
+                  "type": "string",
+                  "enum": [
+                    "info",
+                    "warning"
+                  ]
+                },
+                "message": {
+                  "type": "string"
+                },
+                "category": {
+                  "type": "string"
+                },
+                "reason": {
+                  "type": "string"
+                },
+                "count": {
+                  "$ref": "#/components/schemas/Uint64String"
+                }
+              }
+            }
+          }
+        }
+      },
+      "SessionAction": {
+        "oneOf": [
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "action",
+              "url"
+            ],
+            "properties": {
+              "action": {
+                "const": "open_url",
+                "type": "string"
+              },
+              "url": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 4096,
+                "description": "HTTP or HTTPS URL without embedded credentials."
+              }
+            },
+            "x-reb-execution": {
+              "kind": "action",
+              "effects": [
+                "browser-control",
+                "network-access"
+              ],
+              "state_dependent_effects": [],
+              "uncertainties": [],
+              "prerequisites": [
+                {
+                  "id": "live-capture-session",
+                  "condition": "capture_mode is live. open_url also needs a connected broker, capture not stopped, and a backend started by the live-session launcher with --brave-binary and --brave-profile."
+                }
+              ],
+              "confirmations": [],
+              "notes": "Hands the URL to this session's running capture browser, which opens it in a new tab, then waits up to 10 seconds for a new stored record and reports capture_observed. Refused unless the session's capture broker is running, capture is not stopped, and a live process holds the session profile. The broker check cannot prove the browser records; capture_observed does. The relay process carries switches that leave it no network if it ever starts a browser of its own, and it is stopped after 10 seconds. No page JavaScript runs.",
+              "sources": [
+                {
+                  "path": "apps/origin-trace-backend/src/live_browser.rs",
+                  "symbol": "LiveBrowser::open_url"
+                }
+              ]
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "action",
+              "confirm"
+            ],
+            "properties": {
+              "action": {
+                "const": "end",
+                "type": "string"
+              },
+              "confirm": {
+                "const": true,
+                "type": "boolean"
+              }
+            },
+            "x-reb-execution": {
+              "kind": "action",
+              "effects": [
+                "browser-control",
+                "process-stop"
+              ],
+              "state_dependent_effects": [],
+              "uncertainties": [],
+              "prerequisites": [
+                {
+                  "id": "live-capture-session",
+                  "condition": "capture_mode is live. open_url also needs a connected broker, capture not stopped, and a backend started by the live-session launcher with --brave-binary and --brave-profile."
+                },
+                {
+                  "id": "launcher-parent",
+                  "condition": "The backend was started with --launcher-pid naming its own parent launcher."
+                }
+              ],
+              "confirmations": [
+                {
+                  "field": "confirm",
+                  "value": true,
+                  "when": {}
+                }
+              ],
+              "notes": "About 300 ms after replying, asks this backend's launcher to stop the session. The launcher closes the capture browser and stops every helper, including this backend. Stored evidence stays on disk.",
+              "sources": [
+                {
+                  "path": "apps/origin-trace-backend/src/live_browser.rs",
+                  "symbol": "LiveBrowser::end"
+                }
+              ]
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "action"
+            ],
+            "properties": {
+              "action": {
+                "const": "list_inputs",
+                "type": "string"
+              }
+            },
+            "x-reb-execution": {
+              "kind": "action",
+              "effects": [
+                "browser-control"
+              ],
+              "state_dependent_effects": [],
+              "uncertainties": [],
+              "prerequisites": [
+                {
+                  "id": "live-capture-session",
+                  "condition": "capture_mode is live, the broker is connected, capture is not stopped, and a live process holds the session's --brave-profile."
+                },
+                {
+                  "id": "macos-accessibility",
+                  "condition": "macOS grants Accessibility to the app that started the session: Origin Trace for app sessions, or the terminal or T3 Code app for sessions started from reb-api. Other platforms refuse."
+                }
+              ],
+              "confirmations": [],
+              "notes": "Lists up to 200 controls of the tab's HTTP(S) page, including inside cross-origin frames, with role, accessible name, viewport rectangle, visibility clipped by enclosing frames, frame depth and checked state. Names are page text bounded to 120 characters. Field values are not read directly, but an accessible name can include label text that embeds one. It turns on the browser's accessibility tree but sends no input and does not change focus.",
+              "sources": [
+                {
+                  "path": "apps/origin-trace-backend/src/native_input.rs",
+                  "symbol": "act"
+                }
+              ]
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "action"
+            ],
+            "properties": {
+              "action": {
+                "const": "click",
+                "type": "string"
+              },
+              "x": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 100000,
+                "description": "Viewport points from the page's left edge, at 100% zoom."
+              },
+              "y": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 100000,
+                "description": "Viewport points from the page's top edge."
+              },
+              "role": {
+                "type": "string",
+                "enum": [
+                  "switch",
+                  "checkbox",
+                  "tab",
+                  "radio",
+                  "password",
+                  "searchfield",
+                  "textfield",
+                  "button",
+                  "link",
+                  "textarea",
+                  "popup",
+                  "combobox",
+                  "menuitem",
+                  "menubutton",
+                  "slider",
+                  "disclosure"
+                ],
+                "description": "A control role from list_inputs."
+              },
+              "name": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 200,
+                "description": "Case-insensitive part of the control's accessible name."
+              },
+              "nth": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 199,
+                "description": "Which match, when several visible controls match."
+              },
+              "count": {
+                "type": "integer",
+                "enum": [
+                  1,
+                  2
+                ],
+                "default": 1
+              }
+            },
+            "x-reb-execution": {
+              "kind": "action",
+              "effects": [
+                "browser-control",
+                "live-target-mutation",
+                "network-access"
+              ],
+              "state_dependent_effects": [],
+              "uncertainties": [],
+              "prerequisites": [
+                {
+                  "id": "live-capture-session",
+                  "condition": "capture_mode is live, the broker is connected, capture is not stopped, and a live process holds the session's --brave-profile."
+                },
+                {
+                  "id": "macos-accessibility",
+                  "condition": "macOS grants Accessibility to the app that started the session: Origin Trace for app sessions, or the terminal or T3 Code app for sessions started from reb-api. Other platforms refuse."
+                }
+              ],
+              "confirmations": [],
+              "notes": "Clicks a point (x and y) or the center of one visible control matched by role and name. Sends real macOS mouse or keyboard events, the way a person does, so pages see trusted input. It brings the capture browser to the front and moves the real pointer. The page is the tab's largest HTTP(S) web area, never DevTools, side panels or browser pages. A click is sent only when a hit test just before it finds this browser's page, and the named control, under the point; only left clicks exist. A key is sent only while the keyboard focus is inside the page (Escape only needs the browser in front). One lock serializes input across every session on the machine. Nothing is sent without Accessibility; no DevTools protocol or page JavaScript is used.",
+              "sources": [
+                {
+                  "path": "apps/origin-trace-backend/src/native_input.rs",
+                  "symbol": "act"
+                }
+              ]
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "action",
+              "text"
+            ],
+            "properties": {
+              "action": {
+                "const": "type",
+                "type": "string"
+              },
+              "text": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 200,
+                "description": "Up to 200 characters without line breaks or control characters, typed into the focused control in the page. Click a field first; use press for Enter or Tab."
+              }
+            },
+            "x-reb-execution": {
+              "kind": "action",
+              "effects": [
+                "browser-control",
+                "live-target-mutation",
+                "network-access"
+              ],
+              "state_dependent_effects": [],
+              "uncertainties": [],
+              "prerequisites": [
+                {
+                  "id": "live-capture-session",
+                  "condition": "capture_mode is live, the broker is connected, capture is not stopped, and a live process holds the session's --brave-profile."
+                },
+                {
+                  "id": "macos-accessibility",
+                  "condition": "macOS grants Accessibility to the app that started the session: Origin Trace for app sessions, or the terminal or T3 Code app for sessions started from reb-api. Other platforms refuse."
+                }
+              ],
+              "confirmations": [],
+              "notes": "Types text as key events, rechecking before each character that the focus is still in the page. Sends real macOS mouse or keyboard events, the way a person does, so pages see trusted input. It brings the capture browser to the front and moves the real pointer. The page is the tab's largest HTTP(S) web area, never DevTools, side panels or browser pages. A click is sent only when a hit test just before it finds this browser's page, and the named control, under the point; only left clicks exist. A key is sent only while the keyboard focus is inside the page (Escape only needs the browser in front). One lock serializes input across every session on the machine. Nothing is sent without Accessibility; no DevTools protocol or page JavaScript is used.",
+              "sources": [
+                {
+                  "path": "apps/origin-trace-backend/src/native_input.rs",
+                  "symbol": "act"
+                }
+              ]
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "action",
+              "key"
+            ],
+            "properties": {
+              "action": {
+                "const": "press",
+                "type": "string"
+              },
+              "key": {
+                "type": "string",
+                "enum": [
+                  "Enter",
+                  "Tab",
+                  "Escape",
+                  "Backspace",
+                  "Space",
+                  "ArrowLeft",
+                  "ArrowRight",
+                  "ArrowDown",
+                  "ArrowUp",
+                  "PageDown",
+                  "PageUp",
+                  "Home",
+                  "End"
+                ]
+              }
+            },
+            "x-reb-execution": {
+              "kind": "action",
+              "effects": [
+                "browser-control",
+                "live-target-mutation",
+                "network-access"
+              ],
+              "state_dependent_effects": [],
+              "uncertainties": [],
+              "prerequisites": [
+                {
+                  "id": "live-capture-session",
+                  "condition": "capture_mode is live, the broker is connected, capture is not stopped, and a live process holds the session's --brave-profile."
+                },
+                {
+                  "id": "macos-accessibility",
+                  "condition": "macOS grants Accessibility to the app that started the session: Origin Trace for app sessions, or the terminal or T3 Code app for sessions started from reb-api. Other platforms refuse."
+                }
+              ],
+              "confirmations": [],
+              "notes": "Presses one named key. Sends real macOS mouse or keyboard events, the way a person does, so pages see trusted input. It brings the capture browser to the front and moves the real pointer. The page is the tab's largest HTTP(S) web area, never DevTools, side panels or browser pages. A click is sent only when a hit test just before it finds this browser's page, and the named control, under the point; only left clicks exist. A key is sent only while the keyboard focus is inside the page (Escape only needs the browser in front). One lock serializes input across every session on the machine. Nothing is sent without Accessibility; no DevTools protocol or page JavaScript is used.",
+              "sources": [
+                {
+                  "path": "apps/origin-trace-backend/src/native_input.rs",
+                  "symbol": "act"
+                }
+              ]
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "action"
+            ],
+            "properties": {
+              "action": {
+                "const": "scroll",
+                "type": "string"
+              },
+              "dx": {
+                "type": "integer",
+                "minimum": -10000,
+                "maximum": 10000
+              },
+              "dy": {
+                "type": "integer",
+                "minimum": -10000,
+                "maximum": 10000,
+                "description": "Positive scrolls down."
+              }
+            },
+            "x-reb-execution": {
+              "kind": "action",
+              "effects": [
+                "browser-control",
+                "live-target-mutation",
+                "network-access"
+              ],
+              "state_dependent_effects": [],
+              "uncertainties": [],
+              "prerequisites": [
+                {
+                  "id": "live-capture-session",
+                  "condition": "capture_mode is live, the broker is connected, capture is not stopped, and a live process holds the session's --brave-profile."
+                },
+                {
+                  "id": "macos-accessibility",
+                  "condition": "macOS grants Accessibility to the app that started the session: Origin Trace for app sessions, or the terminal or T3 Code app for sessions started from reb-api. Other platforms refuse."
+                }
+              ],
+              "confirmations": [],
+              "notes": "Scrolls the page by points, with the pointer over the page center after a hit test there. Sends real macOS mouse or keyboard events, the way a person does, so pages see trusted input. It brings the capture browser to the front and moves the real pointer. The page is the tab's largest HTTP(S) web area, never DevTools, side panels or browser pages. A click is sent only when a hit test just before it finds this browser's page, and the named control, under the point; only left clicks exist. A key is sent only while the keyboard focus is inside the page (Escape only needs the browser in front). One lock serializes input across every session on the machine. Nothing is sent without Accessibility; no DevTools protocol or page JavaScript is used.",
+              "sources": [
+                {
+                  "path": "apps/origin-trace-backend/src/native_input.rs",
+                  "symbol": "act"
+                }
+              ]
+            }
+          }
+        ]
+      },
+      "SessionActionResult": {
+        "oneOf": [
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "ok",
+              "action",
+              "opened",
+              "capture_observed"
+            ],
+            "properties": {
+              "ok": {
+                "const": true,
+                "type": "boolean"
+              },
+              "action": {
+                "const": "open_url",
+                "type": "string"
+              },
+              "opened": {
+                "const": "new_tab",
+                "type": "string"
+              },
+              "capture_observed": {
+                "type": "boolean",
+                "description": "True once a new record reached this session's store within 10 seconds of opening the page, which shows a connected capture browser. False means nothing was recorded: treat the page as unrecorded and end the session."
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "ok",
+              "action",
+              "ending"
+            ],
+            "properties": {
+              "ok": {
+                "const": true,
+                "type": "boolean"
+              },
+              "action": {
+                "const": "end",
+                "type": "string"
+              },
+              "ending": {
+                "const": true,
+                "type": "boolean"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "ok",
+              "action",
+              "viewport",
+              "elements",
+              "truncated"
+            ],
+            "properties": {
+              "ok": {
+                "const": true,
+                "type": "boolean"
+              },
+              "action": {
+                "const": "list_inputs",
+                "type": "string"
+              },
+              "viewport": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "width",
+                  "height"
+                ],
+                "properties": {
+                  "width": {
+                    "type": "number"
+                  },
+                  "height": {
+                    "type": "number"
+                  }
+                }
+              },
+              "elements": {
+                "type": "array",
+                "maxItems": 200,
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "index",
+                    "role",
+                    "name",
+                    "x",
+                    "y",
+                    "width",
+                    "height",
+                    "visible",
+                    "frame_depth"
+                  ],
+                  "properties": {
+                    "index": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "role": {
+                      "type": "string",
+                      "enum": [
+                        "switch",
+                        "checkbox",
+                        "tab",
+                        "radio",
+                        "password",
+                        "searchfield",
+                        "textfield",
+                        "button",
+                        "link",
+                        "textarea",
+                        "popup",
+                        "combobox",
+                        "menuitem",
+                        "menubutton",
+                        "slider",
+                        "disclosure"
+                      ]
+                    },
+                    "name": {
+                      "type": "string",
+                      "maxLength": 480
+                    },
+                    "x": {
+                      "type": "number"
+                    },
+                    "y": {
+                      "type": "number"
+                    },
+                    "width": {
+                      "type": "number"
+                    },
+                    "height": {
+                      "type": "number"
+                    },
+                    "visible": {
+                      "type": "boolean"
+                    },
+                    "frame_depth": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "checked": {
+                      "type": "boolean"
+                    }
+                  }
+                }
+              },
+              "truncated": {
+                "type": "boolean"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "ok",
+              "action",
+              "x",
+              "y",
+              "target"
+            ],
+            "properties": {
+              "ok": {
+                "const": true,
+                "type": "boolean"
+              },
+              "action": {
+                "const": "click",
+                "type": "string"
+              },
+              "x": {
+                "type": "number"
+              },
+              "y": {
+                "type": "number"
+              },
+              "target": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "role",
+                      "name"
+                    ],
+                    "properties": {
+                      "role": {
+                        "type": "string"
+                      },
+                      "name": {
+                        "type": "string"
+                      }
+                    }
+                  }
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "ok",
+              "action",
+              "characters"
+            ],
+            "properties": {
+              "ok": {
+                "const": true,
+                "type": "boolean"
+              },
+              "action": {
+                "const": "type",
+                "type": "string"
+              },
+              "characters": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 200
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "ok",
+              "action",
+              "key"
+            ],
+            "properties": {
+              "ok": {
+                "const": true,
+                "type": "boolean"
+              },
+              "action": {
+                "const": "press",
+                "type": "string"
+              },
+              "key": {
+                "type": "string",
+                "enum": [
+                  "Enter",
+                  "Tab",
+                  "Escape",
+                  "Backspace",
+                  "Space",
+                  "ArrowLeft",
+                  "ArrowRight",
+                  "ArrowDown",
+                  "ArrowUp",
+                  "PageDown",
+                  "PageUp",
+                  "Home",
+                  "End"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "ok",
+              "action",
+              "dx",
+              "dy"
+            ],
+            "properties": {
+              "ok": {
+                "const": true,
+                "type": "boolean"
+              },
+              "action": {
+                "const": "scroll",
+                "type": "string"
+              },
+              "dx": {
+                "type": "integer"
+              },
+              "dy": {
+                "type": "integer"
+              }
+            }
+          }
+        ]
+      },
+      "LiveSessionStart": {
+        "type": "object",
+        "additionalProperties": false,
+        "description": "Named capture options for a new live session. Every switch is off unless set.",
+        "properties": {
+          "url": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096,
+            "description": "HTTP or HTTPS page to open once capture is ready."
+          },
+          "wasm_dispatch": {
+            "type": "boolean",
+            "default": false,
+            "description": "Sample Wasm br_table dispatch, at most 16 observations per configuration. Needs category bits 512 and 1024."
+          },
+          "wasm_call_indirect": {
+            "type": "boolean",
+            "default": false,
+            "description": "Sample Wasm call_indirect targets. Needs category bits 512 and 1024."
+          },
+          "guest_adapter": {
+            "type": "string",
+            "minLength": 2,
+            "maxLength": 4096,
+            "description": "Absolute path of a native Wasm guest adapter recipe, 1 to 8192 bytes. Requires wasm_dispatch."
+          },
+          "js_dispatch_sites": {
+            "type": "string",
+            "minLength": 2,
+            "maxLength": 4096,
+            "description": "Absolute path of a JavaScript dispatch-site file, 1 to 4096 bytes. Turns off code caching browser-wide for the session."
+          },
+          "quiet": {
+            "type": "boolean",
+            "default": false,
+            "description": "Ignore page debugger statements."
+          },
+          "category_mask": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 4095,
+            "default": 4095,
+            "description": "Native capture categories. 512 is VM, 1024 is Artifact, 1 is Canvas."
+          },
+          "duration_seconds": {
+            "type": "integer",
+            "minimum": 60,
+            "maximum": 3600,
+            "default": 3600,
+            "description": "Capture expires after this many seconds."
+          },
+          "localhost_only": {
+            "type": "boolean",
+            "default": false,
+            "description": "Route the capture browser's traffic to loopback only, for local fixtures."
+          },
+          "canvas_images": {
+            "type": "boolean",
+            "default": false,
+            "description": "Store Canvas images, which can contain sensitive page content. Requires confirm_sensitive_capture and category bits 1 and 1024."
+          },
+          "confirm_sensitive_capture": {
+            "const": true,
+            "type": "boolean",
+            "description": "The researcher authorized storing sensitive Canvas images for this target. Required with canvas_images; never set it by inference."
+          },
+          "publish_canonical_endpoint": {
+            "type": "boolean",
+            "default": false,
+            "description": "Also make this the canonical endpoint that new MCP connections use. Off by default, so concurrent agent sessions do not replace each other's."
+          },
+          "brave_binary": {
+            "type": "string",
+            "minLength": 2,
+            "maxLength": 4096,
+            "description": "Absolute path of the Brave executable. Default: REB_BRAVE_BINARY, then Brave Browser Development next to the Origin Trace app, then the checkout build."
+          },
+          "timeout_seconds": {
+            "type": "integer",
+            "minimum": 10,
+            "maximum": 600,
+            "default": 180,
+            "description": "How long to wait for the browser and capture to be ready."
+          }
+        }
+      },
+      "LiveSessionStarted": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "session_id",
+          "endpoint",
+          "instance_id",
+          "canonical_endpoint",
+          "options",
+          "url_opened",
+          "capture_observed"
+        ],
+        "properties": {
+          "session_id": {
+            "$ref": "#/components/schemas/Uint64String"
+          },
+          "endpoint": {
+            "type": "string",
+            "maxLength": 256,
+            "description": "Loopback root of the new session's backend."
+          },
+          "instance_id": {
+            "type": "string",
+            "maxLength": 128
+          },
+          "canonical_endpoint": {
+            "type": "boolean"
+          },
+          "options": {
+            "$ref": "#/components/schemas/LiveSessionStart"
+          },
+          "url_opened": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Null when no url was given."
+          },
+          "session_dir": {
+            "type": "string",
+            "description": "CLI only. The MCP tool omits local paths."
+          },
+          "endpoint_file": {
+            "type": "string",
+            "description": "CLI only."
+          },
+          "log_file": {
+            "type": "string",
+            "description": "CLI only."
+          },
+          "url_error": {
+            "type": "string",
+            "maxLength": 600,
+            "description": "Why url did not open."
+          },
+          "capture_observed": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Whether a stored record followed the opened url. Null without url. False means the browser did not record: end the session."
+          }
+        }
       }
     }
   },

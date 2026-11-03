@@ -162,11 +162,13 @@ static_assert(offsetof(NativeWasmGuestDispatchPayload, recipe_sha256) == 96);
   std::copy_n(bytes.begin() + 96, 32, value.recipe_sha256.begin());
   return true;
 }
-// Version 2 adds the exact outer dispatch at bytes 72..80 and version 3 the
-// configured adapter site at bytes 80..84. Earlier versions reserved those
-// bytes and still decode, with a zero parent dispatch and site 0.
+// Version 2 adds the exact outer dispatch at bytes 72..80, version 3 the
+// configured adapter site at bytes 80..84 and version 4 the JavaScript
+// invocation context at bytes 84..92 (protocol/native-js-invocation-v1.md).
+// Earlier versions reserved those bytes and still decode, with a zero parent
+// dispatch, site 0 and context not_observed.
 struct NativeWasmGuestInvocationPayload final {
-  std::uint16_t protocol_version = 3;
+  std::uint16_t protocol_version = 4;
   std::uint16_t payload_size = 128;
   std::uint32_t function_index = 0;
   std::uint64_t instance_id = 0;
@@ -181,7 +183,10 @@ struct NativeWasmGuestInvocationPayload final {
   // The adapter site this activation dispatches at: its index in the recipe's
   // sorted site list. Every dispatch of the activation is at that site.
   std::uint32_t site_index = 0;
-  std::array<std::byte, 44> reserved{};
+  std::uint8_t js_invocation_state = 0;
+  std::array<std::byte, 3> js_invocation_reserved{};
+  std::uint32_t js_invocation_id = 0;
+  std::array<std::byte, 36> reserved{};
 };
 static_assert(sizeof(NativeWasmGuestInvocationPayload) == 128);
 static_assert(std::is_trivially_copyable_v<NativeWasmGuestInvocationPayload>);
@@ -195,6 +200,9 @@ static_assert(offsetof(NativeWasmGuestInvocationPayload, adapter_artifact_id) ==
 static_assert(offsetof(NativeWasmGuestInvocationPayload, parent_invocation_id) == 64);
 static_assert(offsetof(NativeWasmGuestInvocationPayload, parent_dispatch_sequence_number) == 72);
 static_assert(offsetof(NativeWasmGuestInvocationPayload, site_index) == 80);
+static_assert(offsetof(NativeWasmGuestInvocationPayload, js_invocation_state) == 84);
+static_assert(offsetof(NativeWasmGuestInvocationPayload, js_invocation_id) == 88);
+static_assert(offsetof(NativeWasmGuestInvocationPayload, reserved) == 92);
 static_assert(offsetof(NativeWasmGuestInvocationPayload, recipe_sha256) == 32);
 [[nodiscard]] inline std::array<std::byte, 128> EncodeNativeWasmGuestInvocationPayload(
     const NativeWasmGuestInvocationPayload& value) noexcept {
@@ -218,7 +226,12 @@ static_assert(offsetof(NativeWasmGuestInvocationPayload, recipe_sha256) == 32);
   std::copy(value.recipe_sha256.begin(), value.recipe_sha256.end(), out.begin() + 32);
   native_guest_wire_detail::Put(out, 80, static_cast<std::uint64_t>(value.site_index),
                                 sizeof(value.site_index));
-  std::copy(value.reserved.begin(), value.reserved.end(), out.begin() + 84);
+  native_guest_wire_detail::Put(out, 84, value.js_invocation_state,
+                                sizeof(value.js_invocation_state));
+  std::copy(value.js_invocation_reserved.begin(), value.js_invocation_reserved.end(),
+            out.begin() + 85);
+  native_guest_wire_detail::Put(out, 88, value.js_invocation_id, sizeof(value.js_invocation_id));
+  std::copy(value.reserved.begin(), value.reserved.end(), out.begin() + 92);
   return out;
 }
 [[nodiscard]] inline bool DecodeNativeWasmGuestInvocationPayload(
@@ -245,7 +258,12 @@ static_assert(offsetof(NativeWasmGuestInvocationPayload, recipe_sha256) == 32);
   std::copy_n(bytes.begin() + 32, 32, value.recipe_sha256.begin());
   value.site_index = static_cast<std::uint32_t>(
       native_guest_wire_detail::Get(bytes, 80, sizeof(value.site_index)));
-  std::copy_n(bytes.begin() + 84, 44, value.reserved.begin());
+  value.js_invocation_state = static_cast<std::uint8_t>(
+      native_guest_wire_detail::Get(bytes, 84, sizeof(value.js_invocation_state)));
+  std::copy_n(bytes.begin() + 85, 3, value.js_invocation_reserved.begin());
+  value.js_invocation_id = static_cast<std::uint32_t>(
+      native_guest_wire_detail::Get(bytes, 88, sizeof(value.js_invocation_id)));
+  std::copy_n(bytes.begin() + 92, 36, value.reserved.begin());
   return true;
 }
 }  // namespace reb

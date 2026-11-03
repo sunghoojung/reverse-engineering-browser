@@ -39,8 +39,10 @@ fn observation(event: &Value, artifact: &Value, module: &mut Module<'_>) -> Opti
     if !envelope(event, artifact) {
         return None;
     }
-    let bytes = super::event_payload(event, "wasm_dispatch_observation")?;
-    if bytes[24..].iter().any(|v| *v != 0) {
+    // Version 2 adds the JavaScript invocation context at bytes 24..32.
+    let bytes = super::event_payload_versions(event, "wasm_dispatch_observation", &[1, 2])?;
+    let (state, invocation) = crate::js_invocation::wasm_context(&bytes, 2, 24)?;
+    if bytes[32..].iter().any(|v| *v != 0) {
         return None;
     }
     let at =
@@ -60,10 +62,12 @@ fn observation(event: &Value, artifact: &Value, module: &mut Module<'_>) -> Opti
     {
         return None;
     }
-    Some(
-        json!({"event":super::event_reference(event),"monotonic_time_ns":event["monotonic_time_ns"],"function_index":function,"module_byte_offset":offset,
-        "selector":selector,"table_count":count,"sample_index":index,"selected_arm":selector.min(count),"is_default":selector >= count}),
-    )
+    let mut row = json!({"event":super::event_reference(event),"monotonic_time_ns":event["monotonic_time_ns"],"function_index":function,"module_byte_offset":offset,
+        "selector":selector,"table_count":count,"sample_index":index,"selected_arm":selector.min(count),"is_default":selector >= count});
+    if let Some(context) = crate::js_invocation::context_row(state, invocation) {
+        row["js_invocation"] = context;
+    }
+    Some(row)
 }
 
 pub(super) fn collect(
@@ -115,8 +119,10 @@ fn indirect_observation(event: &Value, artifact: &Value, module: &mut Module<'_>
     if !envelope(event, artifact) {
         return None;
     }
-    let bytes = super::event_payload(event, "wasm_indirect_observation")?;
-    if bytes[32..].iter().any(|v| *v != 0) {
+    // Version 2 adds the JavaScript invocation context at bytes 32..40.
+    let bytes = super::event_payload_versions(event, "wasm_indirect_observation", &[1, 2])?;
+    let (state, invocation) = crate::js_invocation::wasm_context(&bytes, 2, 32)?;
+    if bytes[40..].iter().any(|v| *v != 0) {
         return None;
     }
     let at =
@@ -138,12 +144,14 @@ fn indirect_observation(event: &Value, artifact: &Value, module: &mut Module<'_>
     if site_table != table {
         return None;
     }
-    Some(
-        json!({"event":super::event_reference(event),"monotonic_time_ns":event["monotonic_time_ns"],
+    let mut row = json!({"event":super::event_reference(event),"monotonic_time_ns":event["monotonic_time_ns"],
         "function_index":function,"module_byte_offset":offset,
         "instruction":if tail {"return_call_indirect"} else {"call_indirect"},"table_index":table,"slot":slot,
-        "resolution":resolution,"callee_function_index":resolved.then_some(callee),"sample_index":index}),
-    )
+        "resolution":resolution,"callee_function_index":resolved.then_some(callee),"sample_index":index});
+    if let Some(context) = crate::js_invocation::context_row(state, invocation) {
+        row["js_invocation"] = context;
+    }
+    Some(row)
 }
 
 pub(super) fn collect_indirect(
@@ -472,6 +480,10 @@ pub(super) mod tests {
             "flags",
             "parent",
             "identity",
+            "legacy-v1",
+            "invocation",
+            "invocation-legacy",
+            "invocation-mismatch",
         ] {
             let process = std::process::Command::new(&exe)
                 .args(["--case", case])
@@ -484,11 +496,22 @@ pub(super) mod tests {
             );
             let event: Value = serde_json::from_slice(&process.stdout).expect("EventToJson output");
             let output = read(&artifact(&event), &module(), std::slice::from_ref(&event));
-            assert_eq!(
-                output.count,
-                u64::from(matches!(case, "default" | "arm" | "wide-identities")),
-                "C++ case {case}"
+            let accepted = matches!(
+                case,
+                "default" | "arm" | "wide-identities" | "legacy-v1" | "invocation"
             );
+            assert_eq!(output.count, u64::from(accepted), "C++ case {case}");
+            if accepted {
+                // Version 2 names the JavaScript invocation the instruction ran
+                // in; version 1 and not-observed records omit the field.
+                assert_eq!(
+                    output.rows[0].get("js_invocation"),
+                    (case == "invocation")
+                        .then(|| json!({"state":"inside","invocation_id":"7"}))
+                        .as_ref(),
+                    "C++ case {case}"
+                );
+            }
             if matches!(case, "default" | "arm" | "wide-identities") {
                 use sha2::{Digest, Sha256};
                 let root = tempfile::tempdir().unwrap();
@@ -551,6 +574,8 @@ pub(super) mod tests {
             ("indirect-resolution", false),
             ("indirect-callee", false),
             ("indirect-sample-index", false),
+            ("indirect-invocation", true),
+            ("indirect-invocation-mismatch", false),
         ] {
             let process = std::process::Command::new(&exe)
                 .args(["--case", case])

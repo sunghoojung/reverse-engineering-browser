@@ -443,3 +443,26 @@ mode is not performance-neutral. See the
 `./tools/check-native-probe-admission.sh` covers the renderer budgets, expiry
 and gaps; `native_js_dispatch_sites_unittests` covers the site-file parser and
 needs the pinned Chromium build.
+
+## Native JavaScript invocation identity (opt-in)
+
+Rebuilt browsers can give each call of up to 8 armed functions (for example
+the hCaptcha challenge frame's `window.hsw`) an invocation identity that V8
+carries across the call's awaits and promise jobs. Write the site file with
+`tools/native-js-invocation-site.py` and launch with
+`REB_NATIVE_JS_INVOCATION_SITES=/absolute/path/sites.json`; the launcher adds
+`--js-flags=--reb-js-invocation-capture` (which implies the dispatch flag's
+compile-path settings) and `--reb-js-invocation-sites=<path>`, and the session
+requires the VM category. `REB_NATIVE_JS_INVOCATION_DIGESTS=1` adds
+`--reb-js-invocation-digests`, the sensitive opt-in for settled-value digests.
+V8 patch `0011` assigns and propagates the identity through the
+continuation-preserved embedder data slot without changing what Blink's task
+attribution reads; Chromium patch `0021` installs the callbacks for the
+main-thread isolate only and records `js_invocation_request` beside
+`request_initiated`. Wasm `br_table`, `call_indirect` and guest invocation
+records carry the current context. Workers are unsupported. See the
+[wire contract](../../../protocol/native-js-invocation-v1.md) and the
+[design](../../../docs/product/native-js-invocation-v1.md).
+`./tools/check-native-probe-admission.sh` covers the renderer budgets, digest
+gating and request states; the `RebNativeJsInvocation*` cctests run in the
+native V8 runtime workflow.

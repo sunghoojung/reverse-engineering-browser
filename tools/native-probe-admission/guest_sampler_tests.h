@@ -350,7 +350,7 @@ void NativeGuestParentDispatch() {
     reb::NativeWasmGuestInvocationPayload payload;
     return reb::DecodeNativeWasmGuestInvocationPayload(guest_invocations.back().inline_payload,
                                                        payload) &&
-           payload.protocol_version == 3 && payload.site_index == 0 &&
+           payload.protocol_version == 4 && payload.site_index == 0 &&
            payload.parent_invocation_id == parent &&
            payload.parent_dispatch_sequence_number == dispatch;
   };
@@ -458,7 +458,7 @@ void NativeGuestTwoSiteNesting() {
     reb::NativeWasmGuestInvocationPayload payload;
     assert(reb::DecodeNativeWasmGuestInvocationPayload(guest_invocations.back().inline_payload,
                                                        payload) &&
-           payload.protocol_version == 3);
+           payload.protocol_version == 4);
     return payload;
   };
   const auto unresolved = [] { return GuestQueueHasGap("native_guest_parent_unresolved"); };

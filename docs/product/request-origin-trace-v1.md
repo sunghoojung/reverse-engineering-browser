@@ -42,6 +42,16 @@ The edge store is append-only JSONL. Its version 1 contract is
   decoded as text.
 - `artifact_request` joins an artifact event to a matching request identity and
   is labeled `correlated`, not causal.
+- `issued_during_invocation` joins the renderer's request record to the start
+  record of the JavaScript invocation that was current when script started the
+  request. It is observed identity, not value flow.
+- `invocation_settlement` joins a settle record to its invocation's start
+  record by the same identity.
+- `invocation_value_flow` is not an edge. It is a trace step, labeled
+  `correlated`, only where identity ends at the renderer's request record and
+  exactly one settled value's exact digested bytes occur in a retained body of
+  that request. See
+  [native JavaScript invocation](../../protocol/native-js-invocation-v1.md#identity-and-relations).
 - `temporal_adjacency` is not an edge. It is reported only where the identity
   chain has already ended, for one cross-process record of the same request
   identity within a bounded `monotonic_time_ns` window, and is labeled

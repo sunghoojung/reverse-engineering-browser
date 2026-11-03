@@ -59,6 +59,12 @@ The payload is exactly128bytes, explicitly little-endian:
 |20|sample index (0–15)|u32|
 |24|reserved, all zero|104bytes|
 
+Version 2 replaces the first 8 reserved bytes with the JavaScript invocation
+context: `js_invocation_state` (u8 at 24), 3 zero bytes and
+`js_invocation_id` (u32 at 28), leaving 96 reserved bytes. Version 1 still
+decodes, as not observed. See
+[invocation context of Wasm records](native-js-invocation-v1.md#invocation-context-of-wasm-records).
+
 Offsets start at8 and are below16MiB. Function index and count are below16MiB.
 Any u32 selector is legal; selector>=count denotes the default arm. Scope IDs,
 sequence and monotonic time are required; wide identities remain decimal strings.
@@ -175,6 +181,9 @@ The artifact ID, scope and identity rules are those of
 | 24 | resolution (0 to 4) | u32 |
 | 28 | sample index (0 to 15) | u32 |
 | 32 | reserved, all zero | 96 bytes |
+
+Version 2 adds the JavaScript invocation context at bytes 32..40, as for
+`br_table`, leaving 88 reserved bytes; version 1 still decodes.
 
 Function, table and callee indexes are below 16 Mi and the offset is at least 8
 and below 16 Mi. Any u32 slot is legal. C++, Python, Rust and JavaScript reject

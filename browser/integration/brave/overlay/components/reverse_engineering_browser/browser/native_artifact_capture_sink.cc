@@ -805,7 +805,9 @@ void NativeArtifactCaptureSink::CaptureWasmDispatch(
       .module_byte_offset = observation.module_byte_offset,
       .selector = observation.selector,
       .table_count = observation.table_count,
-      .sample_index = observation.sample_index};
+      .sample_index = observation.sample_index,
+      .js_invocation_state = observation.js_invocation_state,
+      .js_invocation_id = observation.js_invocation_id};
   event.inline_payload = EncodeNativeWasmDispatchObservationPayload(sample);
   PublishAfterWasmModule(event, bytes, observation.execution_context_id,
                          observation.document_token_high, observation.document_token_low,
@@ -860,7 +862,9 @@ void NativeArtifactCaptureSink::CaptureWasmIndirect(
       .slot = observation.slot,
       .callee_function_index = observation.callee_function_index,
       .resolution = static_cast<std::uint32_t>(observation.resolution),
-      .sample_index = observation.sample_index};
+      .sample_index = observation.sample_index,
+      .js_invocation_state = observation.js_invocation_state,
+      .js_invocation_id = observation.js_invocation_id};
   event.inline_payload = EncodeNativeWasmIndirectObservationPayload(sample);
   PublishAfterWasmModule(event, bytes, observation.execution_context_id,
                          observation.document_token_high, observation.document_token_low,

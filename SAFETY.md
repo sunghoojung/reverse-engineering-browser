@@ -46,6 +46,13 @@ it.
   sites, and records only selector kinds and integer low bits, V8 script IDs,
   source positions and the armed site's source digest, never argument,
   receiver or string contents.
+  Native JavaScript invocation identity is a separate opt-in with the same
+  rebuilt-browser and site-file requirements (`REB_NATIVE_JS_INVOCATION_SITES`,
+  at most 8 functions). It records, per admitted call (at most 256 per
+  configuration), argument kinds and integer low bits, the result's kind and
+  length, the frame and a digest of the document token, and which Wasm
+  records and loader requests ran inside the call. It never records argument,
+  receiver, return or exception contents.
 - Standalone probes remain inactive without an enabled session. Enabled artifact
   capture retains raw source URLs locally; metadata is not necessarily secret-free.
 - With Network capture on, every native request records its body's length,
@@ -72,6 +79,14 @@ it.
 - Sensitive capture requires an enabled, visibly labeled session. The packaged
   app's automatic research profile enables it for its bounded session;
   standalone and metadata-only sessions leave it disabled.
+- Settled-value digests of armed JavaScript invocations are a sensitive
+  capture path: `REB_NATIVE_JS_INVOCATION_DIGESTS=1`, accepted only with an
+  invocation site file and labeled when the session starts. Each fulfilled
+  string (UTF-8) or byte value of at most 1 MiB gets a SHA-256 and a 64-bit
+  rolling hash, retained in the local event store so Origin Trace can find the
+  exact value in a retained request body. Both are content-derived; evidence
+  package exports never include them. A digest is not redaction: a short or
+  guessable value can be confirmed from it.
 - Enable sensitive capture only when the authorization for that session
   specifically covers the data being collected. Keep the capture bounded, audit
   the action, and document new capture paths, their limits and explicit export-copy checks.
@@ -89,6 +104,39 @@ it.
   it and were removed with it; their retired contracts remain only as history.
   Wasm evidence comes from native capture and stored artifacts. The owned VM
   debugger controls only the project's own native fixture helper.
+- An agent starts, drives and ends a live capture session only through the
+  session tools: `start_live_session` or `reb-api session start`, and
+  `session_action` with `open_url` or `end`. They stay hidden until the
+  researcher runs the MCP server with `--allow-effects` and
+  `--allow-session-start`. Those flags are not authorization. The researcher
+  still names the authorized target, and the agent opens only URLs inside it.
+  An agent-started session is an ordinary visibly labeled capture session with
+  its own fresh browser profile, every capture switch off unless named, and the
+  usual one-hour expiry. Through MCP, `session_action` acts only on a session
+  that connection started, never on the researcher's own session. `open_url`
+  reaches only that session's capture browser, only while its capture broker
+  runs, and never through page JavaScript. A running broker does not prove the
+  browser records, so `open_url` reports `capture_observed`; when it is false
+  the page was not recorded and the agent ends the session. An agent may turn
+  on sensitive Canvas capture only with `confirm_sensitive_capture`, and only
+  when the researcher's authorization for that session covers Canvas content.
+  An agent may supply guest adapter or dispatch-site files it wrote for the
+  authorized target; they only select what is sampled. Agent sessions do not
+  use the macOS Keychain; do not sign in with real credentials unless the
+  authorization covers it.
+- Agents can click, type, press keys and scroll in their own session's page
+  with `session_action` input actions. These send real macOS input events,
+  which pages cannot tell from a person's, so use them only where the
+  authorization covers interacting with the target. They need Accessibility
+  granted to the app that started the session, bring the capture browser to
+  the front and move the real pointer; do not use the Mac while an agent sends
+  input. A click or scroll is sent only when a hit test finds the capture
+  browser's page (and the named control) under the point, keys only while the
+  keyboard focus is inside the page, and there is no right click, so input
+  never reaches the address bar, browser dialogs, DevTools or another
+  application. `list_inputs` reads control names, which are page text; it
+  does not read field values, though a name can include label text that
+  embeds one. No DevTools protocol or page JavaScript is involved.
 - Run mutable tools in a disposable experiment context by default. Experiments
   do not read or modify baseline tabs, production cookies, storage, or
   credentials. Never execute extracted code automatically.
@@ -135,6 +183,7 @@ of the data-handling policy:
 | Artifact receiver `--allow-sensitive` gate | `services/artifact-receiver/main.cpp` |
 | Request path and body gate (`--reb-capture-request-content`) | Brave overlay `native_probe_socket_client.cc` and `native_network_capture_sink.cc`; receiver `--allow-sensitive` |
 | Capture category mask and session expiration | `protocol/README.md`, native probes |
+| JavaScript invocation value digests opt-in | `scripts/run-live-session.sh`, the overlay's `native_probe_session.cc`, and the renderer sink, which refuses a digest without it |
 | Origin allowlisting | Not implemented; the native event envelope lacks trustworthy origin identity |
 
 ## Related documents

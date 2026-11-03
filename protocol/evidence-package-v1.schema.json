@@ -570,7 +570,10 @@
             "wasm_indirect_observation",
             "js_dispatch_observation",
             "request_body",
-            "request_target"
+            "request_target",
+            "js_invocation_start",
+            "js_invocation_settle",
+            "js_invocation_request"
           ]
         },
         "status_code": {

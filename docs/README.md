@@ -31,6 +31,9 @@ skills under `.agents/skills/`.
   explicit session selection, same-machine MCP client configuration, guarded
   CLI inspection, exact evidence correlation, and offline client authoring
   with synthetic tests
+- [Agent cookbook](development/agent-cookbook.md): exact MCP tool calls for
+  checking a capture, finding Wasm modules and samples, waiting for activity,
+  and following native requests
 - [Fast local Brave builds](development/fast-browser-builds.md)
 - [Origin Trace + Brave paired release](development/paired-release.md):
   browser build, provenance, pinned hosting, pairing pin and publication for v0.5.0
@@ -75,6 +78,7 @@ current product path.
 - [Anti-bot VM detection v1](./product/anti-bot-vm-detection-v1.md)
 - [VM Dynamic Debug v1](./product/vm-dynamic-debug-v1.md)
 - [Native JavaScript dispatch-site probe v1](./product/native-js-dispatch-v1.md)
+- [Native JavaScript invocation identity v1](./product/native-js-invocation-v1.md)
 - [API Collection v1](./product/api-collection-v1.md)
 - [Automation Recipes v1](./product/automation-recipes-v1.md)
 - [Decoder Tools v1](./product/decoder-tools-v1.md)

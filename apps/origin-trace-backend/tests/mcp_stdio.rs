@@ -316,16 +316,27 @@ async fn openapi_mcp_matches_the_live_loopback_api() {
         }
         assert_eq!(method, "get", "{name}");
         assert!(!path.contains('{'), "{name} has an unsubstituted path");
-        let response = mcp.request("tools/call", json!({"name": name, "arguments": {}}));
+        // A waiting read takes its shortest wait here; only its own elapsed
+        // time can differ between the two calls.
+        let (arguments, query) = if name == "wait_for_events" {
+            (json!({"timeout_ms": 1}), "?timeout_ms=1")
+        } else {
+            (json!({}), "")
+        };
+        let response = mcp.request("tools/call", json!({"name": name, "arguments": arguments}));
         assert_eq!(
             response["result"]["isError"],
             false,
             "{name}: {}",
             tool_text(&response)
         );
-        let body: Value = serde_json::from_str(tool_text(&response)).unwrap();
+        let mut body: Value = serde_json::from_str(tool_text(&response)).unwrap();
         let mut direct: Value = client
-            .get(format!("{}{}", server.url.trim_end_matches('/'), path))
+            .get(format!(
+                "{}{}{query}",
+                server.url.trim_end_matches('/'),
+                path
+            ))
             .send()
             .await
             .unwrap()
@@ -339,8 +350,12 @@ async fn openapi_mcp_matches_the_live_loopback_api() {
             direct["allow_effects"] = json!(false);
             direct["effects_admission"] = json!("read_only_projection");
         }
+        if name == "wait_for_events" {
+            assert_eq!(body["wait"]["timed_out"], true);
+            body["wait"]["waited_ms"] = direct["wait"]["waited_ms"].clone();
+        }
         assert_eq!(body, direct, "{name} MCP body differs from HTTP");
-        if body.is_object() {
+        if body.is_object() && name != "wait_for_events" {
             assert_eq!(response["result"]["structuredContent"], body, "{name}");
         }
         let schema = response_schema(&spec, definition);
@@ -1290,3 +1305,243 @@ fn session_context_reports_actual_mcp_admission_and_action_guidance() {
 }
 
 origin_trace_backend::javascript_worker_test_entry!();
+
+fn tool_names(response: &Value) -> Vec<String> {
+    response["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|tool| tool["name"].as_str().unwrap().to_owned())
+        .collect()
+}
+
+/// The agent path end to end: an unbound connection starts a session with
+/// named options, is moved to that exact backend, opens a URL in its capture
+/// browser, ends it, and is unbound again. A stand-in launcher runs the real
+/// backend in live mode with the same ready line and TERM cleanup as
+/// run-live-session.sh, and a stand-in browser records how it was invoked.
+#[cfg(unix)]
+#[test]
+fn an_agent_starts_drives_and_ends_its_own_live_session() {
+    use std::os::unix::fs::PermissionsExt;
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path().join("home");
+    let sessions = root.path().join("sessions");
+    std::fs::create_dir_all(&home).unwrap();
+    let socket = root.path().join("broker.sock");
+    let _broker = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+    let record = root.path().join("brave-args");
+    let brave = root.path().join("brave.sh");
+    // The stand-in browser records its arguments and, like a connected
+    // capture browser, adds a native record to the session's store.
+    let event = r#"{"protocol_version":3,"session_id":"1","sequence_number":"1","monotonic_time_ns":"1","navigation_id":"1","frame_id":"1","artifact_id":"0","request_id":"1","process_id":7,"category":"network","type":"request_started","payload_encoding":"hex","payload":"","payload_size":0}"#;
+    std::fs::write(
+        &brave,
+        format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{record}'\nfor arg; do case $arg in --user-data-dir=*) profile=${{arg#--user-data-dir=}};; esac; done\nprintf '%s\\n' '{event}' >> \"$(dirname \"$profile\")/events.jsonl\"\n",
+            record = record.display()
+        ),
+    )
+    .unwrap();
+    let launcher = root.path().join("launcher.sh");
+    std::fs::write(
+        &launcher,
+        format!(
+            r#"#!/bin/bash
+set -euo pipefail
+mkdir -p "$REB_LIVE_SESSION_ROOT"
+dir="$REB_LIVE_SESSION_ROOT/$((4242 + $(ls "$REB_LIVE_SESSION_ROOT" | wc -l)))"
+mkdir -p "$dir/profile" "$dir/artifacts"
+printf '%s\n' "$REB_NATIVE_WASM_DISPATCH $REB_CAPTURE_CATEGORY_MASK $REB_USE_SYSTEM_KEYCHAIN" > "$dir/options"
+ln -s "test-host-$$" "$dir/profile/SingletonLock"
+"{backend}" --port 0 --endpoint-file "$dir/research-ui.endpoint" \
+  --active-endpoint-file "$REB_ACTIVE_ENDPOINT_FILE" \
+  --store "$dir/events.jsonl" --trace-store "$dir/trace.jsonl" \
+  --signal-store "$dir/signals.jsonl" --artifacts "$dir/artifacts" \
+  --api-collection "$dir/c.json" --local-analyst "$dir/a.json" \
+  --socket "$TEST_BROKER_SOCKET" --brave-binary "$REB_BRAVE_BINARY" \
+  --brave-profile "$dir/profile" --launcher-pid "$$" >/dev/null 2>&1 &
+backend=$!
+trap 'kill "$backend" 2>/dev/null; wait "$backend" 2>/dev/null; echo ended > "$dir/ended"; exit 0' TERM
+for _ in $(seq 1 400); do [[ -s "$dir/research-ui.endpoint" ]] && break; sleep 0.05; done
+echo "Origin Trace live session $(basename "$dir")"
+wait "$backend"
+"#,
+            backend = env!("CARGO_BIN_EXE_origin-trace-backend")
+        ),
+    )
+    .unwrap();
+    for script in [&brave, &launcher] {
+        std::fs::set_permissions(script, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let mut command = Command::new(env!("CARGO_BIN_EXE_reb-api"));
+    command
+        .args([
+            "mcp",
+            "--allow-effects",
+            "--allow-session-start",
+            "--require-live",
+            "--timeout",
+            "15",
+        ])
+        .env("HOME", &home)
+        .env("REB_LIVE_SESSION_SCRIPT", &launcher)
+        .env("REB_LIVE_SESSION_ROOT", &sessions)
+        .env("REB_BRAVE_BINARY", &brave)
+        .env("TEST_BROKER_SOCKET", &socket)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    let mut mcp = Mcp::from_command(&mut command);
+    let listed = mcp.request("tools/list", json!({}));
+    let names = tool_names(&listed);
+    assert!(names.iter().any(|name| name == "start_live_session"));
+    assert!(names.iter().any(|name| name == "session_action"));
+    let start = listed["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|tool| tool["name"] == "start_live_session")
+        .unwrap();
+    assert_eq!(start["annotations"]["openWorldHint"], true);
+    assert_eq!(start["inputSchema"]["additionalProperties"], false);
+    // Sensitive Canvas capture is offered, behind its explicit confirmation.
+    assert!(
+        start["inputSchema"]["properties"]
+            .get("canvas_images")
+            .is_some()
+    );
+
+    let unbound = mcp.request("tools/call", json!({"name": "get_events"}));
+    assert_eq!(unbound["result"]["isError"], true);
+    assert!(tool_text(&unbound).contains("No live session is bound"));
+
+    let refused = mcp.request(
+        "tools/call",
+        json!({"name": "start_live_session", "arguments": {"guest_adapter": "/tmp/recipe.json"}}),
+    );
+    assert_eq!(refused["result"]["isError"], true);
+    assert!(tool_text(&refused).contains("requires wasm_dispatch"));
+    let sensitive = mcp.request(
+        "tools/call",
+        json!({"name": "start_live_session", "arguments": {"canvas_images": true}}),
+    );
+    assert_eq!(sensitive["result"]["isError"], true);
+    assert!(tool_text(&sensitive).contains("requires confirm_sensitive_capture"));
+    assert!(!sessions.exists() || std::fs::read_dir(&sessions).unwrap().next().is_none());
+
+    let started = mcp.request(
+        "tools/call",
+        json!({"name": "start_live_session", "arguments": {
+            "url": "https://example.test/page", "wasm_dispatch": true, "timeout_seconds": 30
+        }}),
+    );
+    assert_eq!(
+        started["result"]["isError"],
+        false,
+        "{}",
+        tool_text(&started)
+    );
+    let session = &started["result"]["structuredContent"];
+    assert_eq!(session["session_id"], "4242");
+    assert_eq!(session["url_opened"], true);
+    assert_eq!(session["capture_observed"], true);
+    assert_eq!(session["canonical_endpoint"], false);
+    assert_eq!(session["options"]["wasm_dispatch"], true);
+    assert!(session.get("session_dir").is_none());
+    assert!(!tool_text(&started).contains(root.path().to_str().unwrap()));
+    let profile = sessions.join("4242/profile");
+    let arguments = std::fs::read_to_string(&record).unwrap();
+    assert!(arguments.contains(&format!("--user-data-dir={}", profile.display())));
+    assert!(
+        arguments
+            .lines()
+            .any(|line| line == "https://example.test/page")
+    );
+    assert_eq!(
+        std::fs::read_to_string(sessions.join("4242/options")).unwrap(),
+        "1 4095 0\n"
+    );
+
+    let context = mcp.request("tools/call", json!({"name": "get_session_context"}));
+    assert_eq!(context["result"]["isError"], false);
+    let context: Value = serde_json::from_str(tool_text(&context)).unwrap();
+    assert_eq!(context["instance_id"], session["instance_id"]);
+    assert_eq!(context["live_admission"], "ready");
+    let summary = mcp.request("tools/call", json!({"name": "get_session_summary"}));
+    assert_eq!(summary["result"]["isError"], false);
+
+    let bad = mcp.request(
+        "tools/call",
+        json!({"name": "session_action", "arguments": {"body": {"action": "open_url", "url": "ftp://example.test/"}}}),
+    );
+    assert_eq!(bad["result"]["isError"], true);
+    let wait_for = |path: std::path::PathBuf| {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !path.exists() {
+            assert!(
+                Instant::now() < deadline,
+                "the launcher was not asked to stop"
+            );
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    };
+    // Starting again replaces the session this connection started.
+    let again = mcp.request(
+        "tools/call",
+        json!({"name": "start_live_session", "arguments": {"timeout_seconds": 30}}),
+    );
+    assert_eq!(again["result"]["isError"], false, "{}", tool_text(&again));
+    assert_eq!(again["result"]["structuredContent"]["session_id"], "4243");
+    assert_eq!(
+        again["result"]["structuredContent"]["capture_observed"],
+        Value::Null
+    );
+    wait_for(sessions.join("4242/ended"));
+    // Capture expiry removes the broker socket. Under --require-live other
+    // tools are then refused, but ending must still work.
+    std::fs::remove_file(&socket).unwrap();
+    let expired = mcp.request("tools/call", json!({"name": "get_events"}));
+    assert_eq!(expired["result"]["isError"], true);
+    let ended = mcp.request(
+        "tools/call",
+        json!({"name": "session_action", "arguments": {"body": {"action": "end", "confirm": true}}}),
+    );
+    assert_eq!(ended["result"]["isError"], false, "{}", tool_text(&ended));
+    wait_for(sessions.join("4243/ended"));
+    let after = mcp.request("tools/call", json!({"name": "get_events"}));
+    assert_eq!(after["result"]["isError"], true);
+    assert!(tool_text(&after).contains("No live session is bound"));
+}
+
+#[test]
+fn session_tools_need_their_flag_and_a_session_started_here() {
+    let output = Command::new(env!("CARGO_BIN_EXE_reb-api"))
+        .args(["mcp", "--allow-session-start"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("--allow-effects"));
+    let server = Server::start();
+    let mut mcp = Mcp::start(&server.url, true);
+    let names = tool_names(&mcp.request("tools/list", json!({})));
+    assert!(!names.iter().any(|name| name == "session_action"));
+    assert!(!names.iter().any(|name| name == "start_live_session"));
+    let hidden = mcp.request("tools/call", json!({"name": "start_live_session"}));
+    assert_eq!(hidden["error"]["code"], -32602);
+    let end = json!({"name": "session_action", "arguments": {"body": {"action": "end", "confirm": true}}});
+    let gated = mcp.request("tools/call", end.clone());
+    assert_eq!(gated["error"]["code"], -32602);
+    // With session start allowed, a connection bound to a session it did not
+    // start still cannot drive or end that session.
+    let mut starter = Mcp::start_with(vec![
+        "mcp".into(),
+        "--base-url".into(),
+        server.url.clone(),
+        "--allow-effects".into(),
+        "--allow-session-start".into(),
+    ]);
+    let refused = starter.request("tools/call", end);
+    assert_eq!(refused["result"]["isError"], true);
+    assert!(tool_text(&refused).contains("acts only on a session this connection started"));
+}

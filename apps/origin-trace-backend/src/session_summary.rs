@@ -1,0 +1,433 @@
+//! One bounded read that answers "did this capture work?": event counts by
+//! type and frame, artifact digests, gap reasons and capture state, with a
+//! short list of checks that name what looks wrong. It is counts, identifiers
+//! and origin labels only; it never includes payloads, source or bodies.
+use crate::{
+    app::validate_event,
+    artifact_query::{self, MANIFEST_RECORD_BYTES},
+    error::Result,
+    event_query::{self, Cursor, EVENT_RECORD_BYTES, SCAN_BYTES, Tally},
+    event_window, session_context,
+};
+use serde_json::{Value, json};
+use std::{
+    collections::{BTreeMap, HashMap, HashSet},
+    path::Path,
+};
+
+const FRAMES: usize = 32;
+const TRACKED_FRAMES: usize = 4096;
+const FRAME_TYPES: usize = 8;
+const SESSIONS: usize = 16;
+const ARTIFACTS: usize = 32;
+
+/// Live state the backend knows outside the stores.
+pub struct CaptureState<'a> {
+    pub instance_id: &'a str,
+    pub capture_mode: &'a str,
+    pub broker_connected: bool,
+    pub capture_stopped: bool,
+    pub artifact_receiver_configured: bool,
+    pub artifact_receiver_connected: bool,
+}
+
+#[derive(Default)]
+struct Frame {
+    count: u64,
+    first: u64,
+    last: u64,
+    types: BTreeMap<String, u64>,
+}
+
+#[derive(Default)]
+struct EventCounts {
+    total: u64,
+    first: Option<u64>,
+    last: Option<u64>,
+    by_type: BTreeMap<(String, String), u64>,
+    sessions: BTreeMap<u64, u64>,
+    frames: HashMap<(u64, u64, u64, u64), Frame>,
+    untracked_frame_events: u64,
+}
+impl EventCounts {
+    fn record(&mut self, event: &Value) {
+        let number = |key: &str| event_window::unsigned(&event[key]).unwrap_or(0);
+        let time = number("monotonic_time_ns");
+        let kind = event["type"].as_str().unwrap_or("").to_owned();
+        self.total += 1;
+        self.first = Some(self.first.map_or(time, |first| first.min(time)));
+        self.last = Some(self.last.map_or(time, |last| last.max(time)));
+        *self
+            .by_type
+            .entry((
+                event["category"].as_str().unwrap_or("").to_owned(),
+                kind.clone(),
+            ))
+            .or_default() += 1;
+        *self.sessions.entry(number("session_id")).or_default() += 1;
+        let key = (
+            number("session_id"),
+            number("tab_id"),
+            number("navigation_id"),
+            number("frame_id"),
+        );
+        if !self.frames.contains_key(&key) && self.frames.len() >= TRACKED_FRAMES {
+            self.untracked_frame_events += 1;
+            return;
+        }
+        let frame = self.frames.entry(key).or_insert_with(|| Frame {
+            first: time,
+            last: time,
+            ..Default::default()
+        });
+        frame.count += 1;
+        frame.first = frame.first.min(time);
+        frame.last = frame.last.max(time);
+        *frame.types.entry(kind).or_default() += 1;
+    }
+    fn count(&self, kind: &str) -> u64 {
+        self.by_type
+            .iter()
+            .filter(|((_, name), _)| name == kind)
+            .map(|(_, count)| count)
+            .sum()
+    }
+    fn document(&self, page: &event_query::Page, tally: &Tally) -> Value {
+        let mut by_type = self
+            .by_type
+            .iter()
+            .map(|((category, kind), count)| (category, kind, *count))
+            .collect::<Vec<_>>();
+        by_type.sort_by(|a, b| b.2.cmp(&a.2).then_with(|| (a.0, a.1).cmp(&(b.0, b.1))));
+        let mut frames = self.frames.iter().collect::<Vec<_>>();
+        frames.sort_by(|a, b| b.1.count.cmp(&a.1.count).then_with(|| a.0.cmp(b.0)));
+        let mut sessions = self.sessions.iter().collect::<Vec<_>>();
+        sessions.sort_by(|a, b| b.1.cmp(a.1).then_with(|| a.0.cmp(b.0)));
+        let mut document = json!({
+            "scope": page.scope(),
+            "scan_start": page.scan_start.to_string(),
+            "scan_end": page.scan_end.to_string(),
+            "scan_limit": SCAN_BYTES,
+            "budget_exhausted": page.exhausted,
+            "total": self.total.to_string(),
+            "first_time_ns": self.first.map(|time| time.to_string()),
+            "last_time_ns": self.last.map(|time| time.to_string()),
+            "by_type": by_type.iter().map(|(category, kind, count)| json!({
+                "category": category, "type": kind, "count": count.to_string()
+            })).collect::<Vec<_>>(),
+            "sessions": sessions.iter().take(SESSIONS).map(|(session, count)| json!({
+                "session_id": session.to_string(), "count": count.to_string()
+            })).collect::<Vec<_>>(),
+            "sessions_omitted": sessions.len().saturating_sub(SESSIONS),
+            "frames": frames.iter().take(FRAMES).map(|((session, tab, navigation, frame), stats)| {
+                let mut types = stats.types.iter().collect::<Vec<_>>();
+                types.sort_by(|a, b| b.1.cmp(a.1).then_with(|| a.0.cmp(b.0)));
+                json!({
+                    "session_id": session.to_string(),
+                    "tab_id": tab,
+                    "navigation_id": navigation.to_string(),
+                    "frame_id": frame.to_string(),
+                    "count": stats.count.to_string(),
+                    "first_time_ns": stats.first.to_string(),
+                    "last_time_ns": stats.last.to_string(),
+                    "types": types.iter().take(FRAME_TYPES).map(|(kind, count)| json!({
+                        "type": kind, "count": count.to_string()
+                    })).collect::<Vec<_>>(),
+                    "types_omitted": types.len().saturating_sub(FRAME_TYPES),
+                })
+            }).collect::<Vec<_>>(),
+            "frames_omitted": frames.len().saturating_sub(FRAMES),
+            "untracked_frame_events": self.untracked_frame_events.to_string(),
+        });
+        tally.write(&mut document);
+        document
+    }
+}
+
+#[derive(Default)]
+struct ArtifactCounts {
+    total: u64,
+    by_kind: BTreeMap<String, u64>,
+    items: Vec<Value>,
+}
+impl ArtifactCounts {
+    fn record(&mut self, artifact: &Value) {
+        self.total += 1;
+        *self
+            .by_kind
+            .entry(artifact["kind"].as_str().unwrap_or("").to_owned())
+            .or_default() += 1;
+        // The manifest is read newest first.
+        if self.items.len() < ARTIFACTS {
+            let mut item = json!({});
+            for key in [
+                "artifact_id",
+                "kind",
+                "session_id",
+                "navigation_id",
+                "frame_id",
+                "capture_origin",
+                "byte_size",
+                "sha256",
+            ] {
+                item[key] = artifact[key].clone();
+            }
+            item["url_label"] = session_context::url_label(&artifact["url"]);
+            self.items.push(item);
+        }
+    }
+}
+
+fn check(code: &str, severity: &str, message: impl Into<String>) -> Value {
+    json!({"code": code, "severity": severity, "message": message.into()})
+}
+
+/// Plain-language meaning of a producer gap reason, from its shape. The reason
+/// itself stays in the check, so an unfamiliar one is never hidden.
+fn gap_meaning(reason: &str) -> &'static str {
+    if reason.contains("budget") || reason.contains("limit") || reason.contains("capped") {
+        "A sampling budget or limit was reached, so later occurrences were not sampled. Sample fewer sites, or start a new session for a fresh budget."
+    } else if reason.contains("unavailable") || reason.contains("lost") {
+        "A capture stage was unavailable, so these observations were not recorded."
+    } else if reason.contains("unresolved")
+        || reason.contains("mismatch")
+        || reason.contains("omitted")
+        || reason.contains("unbound")
+    {
+        "Linkage for these observations could not be established, so they are recorded without it."
+    } else {
+        "The capture refused or dropped these observations for this reason."
+    }
+}
+
+pub fn build(store: &Path, artifacts: &Path, state: &CaptureState<'_>) -> Result<Value> {
+    let mut events = EventCounts::default();
+    let mut tally = Tally::default();
+    let event_page = event_query::read_page(
+        store,
+        Cursor::Tail,
+        usize::MAX,
+        SCAN_BYTES,
+        EVENT_RECORD_BYTES,
+        |line| {
+            let event: Value =
+                serde_json::from_slice(line).map_err(|_| event_window::malformed())?;
+            validate_event(&event)?;
+            tally.record(&event)?;
+            events.record(&event);
+            Ok(None)
+        },
+    )?;
+    let mut stored = ArtifactCounts::default();
+    let mut seen = HashSet::new();
+    let artifact_page = event_query::read_page(
+        &artifacts.join("manifest.jsonl"),
+        Cursor::Tail,
+        usize::MAX,
+        SCAN_BYTES,
+        MANIFEST_RECORD_BYTES,
+        artifact_query::visitor(&mut seen, |artifact| {
+            stored.record(artifact);
+            false
+        }),
+    )?;
+    let mut checks = Vec::new();
+    let live = state.capture_mode == "live";
+    if !live {
+        checks.push(check(
+            "capture_not_live",
+            "info",
+            format!(
+                "This backend is not a live capture (capture_mode={}). It reports stored evidence only.",
+                state.capture_mode
+            ),
+        ));
+    } else if state.capture_stopped {
+        checks.push(check(
+            "capture_stopped",
+            "info",
+            "Native capture was stopped; no new events will arrive in this session.",
+        ));
+    } else if !state.broker_connected {
+        checks.push(check(
+            "broker_disconnected",
+            "warning",
+            "The native capture broker is not connected; no new events will arrive.",
+        ));
+    }
+    if state.artifact_receiver_configured && !state.artifact_receiver_connected && live {
+        checks.push(check(
+            "artifact_receiver_disconnected",
+            "warning",
+            "The artifact receiver is not connected; new scripts and Wasm modules are not being stored.",
+        ));
+    }
+    if events.total == 0 {
+        checks.push(check(
+            "no_events",
+            "warning",
+            "No events are stored yet. Open a page in the capture browser, then wait for events.",
+        ));
+    }
+    let compiled = events.count("module_compiled");
+    if compiled > 0 && !stored.by_kind.contains_key("wasm") {
+        checks.push(check(
+            "wasm_without_artifacts",
+            "warning",
+            format!(
+                "{compiled} Wasm module_compiled events but no stored Wasm artifact. Check the artifact receiver and that the capture category mask includes Artifact (1024)."
+            ),
+        ));
+    }
+    let failed = events.count("artifact_capture_failed");
+    if failed > 0 {
+        checks.push(check(
+            "artifact_capture_failed",
+            "warning",
+            format!("{failed} artifact captures failed; those bodies are not stored."),
+        ));
+    }
+    let (drops, _) = tally.queue_drops();
+    let named: u64 = tally.named_gaps().iter().map(|gap| gap.count).sum();
+    if drops > named {
+        checks.push(check(
+            "queue_drops",
+            "warning",
+            format!(
+                "{} events were dropped by a full queue and are missing from this store.",
+                drops - named
+            ),
+        ));
+    }
+    let (holes, _) = tally.sequence_gaps();
+    if holes > 0 {
+        checks.push(check(
+            "sequence_gaps",
+            "warning",
+            format!("{holes} sequence numbers are absent inside the scanned events."),
+        ));
+    }
+    for gap in tally.named_gaps() {
+        let mut item = check("named_gap", "warning", gap_meaning(&gap.reason));
+        item["category"] = json!(gap.category);
+        item["reason"] = json!(gap.reason);
+        item["count"] = json!(gap.count.to_string());
+        checks.push(item);
+    }
+    if event_page.exhausted {
+        checks.push(check(
+            "bounded_scope",
+            "info",
+            "Only the newest 64 MiB of events were summarized. Page older events with get_events before.",
+        ));
+    }
+    Ok(json!({
+        "protocol_version": 1,
+        "instance_id": state.instance_id,
+        "capture_mode": state.capture_mode,
+        "live_admission": session_context::live_admission(state.capture_mode, state.broker_connected),
+        "broker_connected": state.broker_connected,
+        "capture_stopped": state.capture_stopped,
+        "artifact_receiver_configured": state.artifact_receiver_configured,
+        "artifact_receiver_connected": state.artifact_receiver_connected,
+        "events": events.document(&event_page, &tally),
+        "artifacts": {
+            "scope": artifact_page.scope(),
+            "budget_exhausted": artifact_page.exhausted,
+            "total": stored.total.to_string(),
+            "by_kind": stored.by_kind.iter().map(|(kind, count)| (kind.clone(), json!(count.to_string()))).collect::<serde_json::Map<_, _>>(),
+            "items": stored.items,
+            "items_omitted": stored.total.saturating_sub(stored.items.len() as u64).to_string(),
+        },
+        "checks": checks,
+    }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn event(sequence: u64, category: &str, kind: &str, frame: u64, payload: &str) -> Value {
+        json!({"protocol_version":3,"session_id":"9","sequence_number":sequence.to_string(),
+            "monotonic_time_ns":(sequence * 10).to_string(),"navigation_id":"2",
+            "frame_id":frame.to_string(),"artifact_id":"0","request_id":"0","process_id":7,
+            "tab_id":4,"category":category,"type":kind,"payload_encoding":"hex",
+            "payload":hex::encode(payload),"payload_size":payload.len()})
+    }
+
+    #[test]
+    fn summary_counts_frames_gaps_and_names_what_went_wrong() {
+        let root = tempfile::tempdir().unwrap();
+        let store = root.path().join("events.jsonl");
+        let artifacts = root.path().join("artifacts");
+        std::fs::create_dir_all(&artifacts).unwrap();
+        let mut lines = Vec::new();
+        for (sequence, category, kind, frame, payload) in [
+            (1, "wasm", "module_compiled", 5, ""),
+            (2, "vm", "wasm_dispatch_observation", 5, ""),
+            (3, "vm", "wasm_dispatch_observation", 5, ""),
+            (5, "vm", "gap", 5, "native_wasm_dispatch_budget_incomplete"),
+            (6, "canvas", "api_call", 6, ""),
+        ] {
+            lines.push(event(sequence, category, kind, frame, payload).to_string());
+        }
+        std::fs::write(&store, lines.join("\n") + "\n").unwrap();
+        let state = CaptureState {
+            instance_id: "1:2",
+            capture_mode: "live",
+            broker_connected: true,
+            capture_stopped: false,
+            artifact_receiver_configured: true,
+            artifact_receiver_connected: true,
+        };
+        let summary = build(&store, &artifacts, &state).unwrap();
+        let events = &summary["events"];
+        assert_eq!(events["total"], "5");
+        assert_eq!(events["by_type"][0]["type"], "wasm_dispatch_observation");
+        assert_eq!(events["by_type"][0]["count"], "2");
+        assert_eq!(events["frames"][0]["frame_id"], "5");
+        assert_eq!(events["frames"][0]["count"], "4");
+        assert_eq!(events["frames"][0]["tab_id"], 4);
+        assert_eq!(events["sequence_gaps"], "1");
+        assert_eq!(summary["live_admission"], "ready");
+        let codes = summary["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|check| check["code"].as_str().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            codes,
+            vec!["wasm_without_artifacts", "sequence_gaps", "named_gap"]
+        );
+        let gap = &summary["checks"][2];
+        assert_eq!(gap["reason"], "native_wasm_dispatch_budget_incomplete");
+        assert!(gap["message"].as_str().unwrap().contains("budget"));
+        assert_eq!(summary["artifacts"]["total"], "0");
+        let text = summary.to_string();
+        assert!(!text.contains(&hex::encode("native_wasm")));
+    }
+
+    #[test]
+    fn an_empty_idle_store_explains_itself() {
+        let root = tempfile::tempdir().unwrap();
+        let state = CaptureState {
+            instance_id: "1:2",
+            capture_mode: "idle",
+            broker_connected: false,
+            capture_stopped: false,
+            artifact_receiver_configured: false,
+            artifact_receiver_connected: false,
+        };
+        let summary = build(
+            &root.path().join("events.jsonl"),
+            &root.path().join("artifacts"),
+            &state,
+        )
+        .unwrap();
+        assert_eq!(summary["events"]["total"], "0");
+        assert_eq!(summary["events"]["scope"], "store");
+        assert_eq!(summary["checks"][0]["code"], "capture_not_live");
+        assert_eq!(summary["checks"][1]["code"], "no_events");
+    }
+}

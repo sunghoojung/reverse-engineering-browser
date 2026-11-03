@@ -2,15 +2,17 @@ use crate::{
     analysis_catalog,
     analyst::Analyst,
     artifact_lookup::ArtifactLookupCache,
+    artifact_query,
     config::Options,
     decoder::Decoder,
     deobfuscation::Deobfuscator,
     error::{Code, Error, Phase, Reason, Result},
-    event_window, evidence, evidence_comparison, evidence_package, float32,
+    event_query, event_window, evidence, evidence_comparison, evidence_package, float32,
+    live_browser::LiveBrowser,
     native_console::NativeConsole,
     origin_trace,
     owned_vm_debugger::OwnedVmDebugger,
-    session_context, source_facts, validation, vm, wasm,
+    session_context, session_summary, source_facts, validation, vm, wasm,
     workspace::{Kind, Store},
 };
 use axum::{
@@ -100,6 +102,9 @@ pub struct App {
     analysis: Mutex<Option<VmDocumentsCache>>,
     events: Arc<Mutex<event_window::EventWindowCache>>,
     artifact_lookup: Arc<Mutex<ArtifactLookupCache>>,
+    /// Bounds concurrent `/api/events/wait` callers; a full pool refuses.
+    event_waiters: Arc<Semaphore>,
+    live_browser: LiveBrowser,
 }
 fn cached_artifact_lookup(
     mut cache: OwnedMutexGuard<ArtifactLookupCache>,
@@ -166,6 +171,7 @@ impl App {
                     "build/reb-native-vm-fixture",
                 ),
             ),
+            live_browser: LiveBrowser::new(&options),
             options,
             capture_stopped: AtomicBool::new(false),
             capture: Mutex::new(()),
@@ -174,6 +180,7 @@ impl App {
             analysis: Mutex::new(None),
             events: Arc::new(Mutex::new(event_window::EventWindowCache::default())),
             artifact_lookup: Arc::new(Mutex::new(ArtifactLookupCache::default())),
+            event_waiters: Arc::new(Semaphore::new(event_query::MAX_WAITERS)),
         });
         app.native_console.arm_live_bridge().await;
         app
@@ -492,7 +499,13 @@ impl App {
                 result
             }
             "/api/events" => {
+                // An unknown or misspelled filter must fail rather than return
+                // the unfiltered tail that a caller would read as filtered.
+                q.only(&event_query::EVENT_QUERY_KEYS, &["limit"])?;
                 let limit = q.limit(500, 5000)?;
+                if q.any(&event_query::EVENT_QUERY_KEYS) {
+                    return self.filtered_events(&q, limit, headers).await;
+                }
                 let connected = self.broker_connected().await;
                 let stopped = self.capture_stopped.load(Ordering::Acquire);
                 etag = Some(event_window::etag(
@@ -537,29 +550,102 @@ impl App {
                 result
             }
             "/api/artifacts" => {
+                q.only(&artifact_query::ARTIFACT_QUERY_KEYS, &["limit"])?;
                 let limit = q.limit(500, 5000)?;
                 let configured = self.options.artifact_socket.is_some();
                 let connected = self.receiver_connected().await;
+                let filtered = q.any(&artifact_query::ARTIFACT_QUERY_KEYS);
                 etag = Some(evidence::resource_etag(
                     &self.options.artifacts.join("manifest.jsonl"),
-                    &format!("{limit}-{}-{}", u8::from(configured), u8::from(connected)),
+                    &format!(
+                        "{limit}-{}-{}{}",
+                        u8::from(configured),
+                        u8::from(connected),
+                        if filtered {
+                            format!("-query:{raw_query}")
+                        } else {
+                            String::new()
+                        }
+                    ),
                 ));
                 if matches_etag(headers, etag.as_deref()) {
                     return Ok(not_modified(etag.as_deref().unwrap()));
                 }
-                let root = self.options.artifacts.clone();
-                let mut artifacts = self
-                    .blocking(move || evidence::artifacts(&root, limit))
-                    .await?;
-                for artifact in &mut artifacts {
-                    artifact
-                        .as_object_mut()
-                        .expect("Validated artifact object")
-                        .retain(|key, _| evidence::PUBLIC_ARTIFACT_FIELDS.contains(&key.as_str()));
+                if filtered {
+                    let filter = artifact_query::ArtifactFilter::parse(&q)?;
+                    let cursor = event_query::cursor(&q)?;
+                    let root = self.options.artifacts.clone();
+                    let (page, filter) = self
+                        .blocking(move || {
+                            artifact_query::read(&root, &filter, cursor, limit)
+                                .map(|page| (page, filter))
+                        })
+                        .await?;
+                    let mut result = json!({"count":page.records.len(),"artifact_receiver_configured":configured,"artifact_receiver_connected":connected});
+                    result["query"] = artifact_query::query_document(&page, &filter, cursor, limit);
+                    result["artifacts"] = Value::Array(page.records);
+                    result
+                } else {
+                    let root = self.options.artifacts.clone();
+                    let mut artifacts = self
+                        .blocking(move || evidence::artifacts(&root, limit))
+                        .await?;
+                    for artifact in &mut artifacts {
+                        artifact
+                            .as_object_mut()
+                            .expect("Validated artifact object")
+                            .retain(|key, _| {
+                                evidence::PUBLIC_ARTIFACT_FIELDS.contains(&key.as_str())
+                            });
+                    }
+                    let mut result = json!({"count":artifacts.len(),"artifact_receiver_configured":configured,"artifact_receiver_connected":connected});
+                    result["artifacts"] = Value::Array(artifacts);
+                    result
                 }
-                let mut result = json!({"count":artifacts.len(),"artifact_receiver_configured":configured,"artifact_receiver_connected":connected});
-                result["artifacts"] = Value::Array(artifacts);
-                result
+            }
+            "/api/events/wait" => {
+                q.only(&event_query::EVENT_QUERY_KEYS, &["limit", "timeout_ms"])?;
+                return self.wait_for_events(&q).await;
+            }
+            "/api/session/summary" => {
+                if !q.0.is_empty() {
+                    return Err(Error::bad("Session summary takes no query parameters"));
+                }
+                let state = (
+                    self.options.capture_mode(),
+                    self.options.socket.is_some() && self.broker_connected().await,
+                    self.capture_stopped.load(Ordering::Acquire),
+                    self.options.artifact_socket.is_some(),
+                    self.receiver_connected().await,
+                );
+                etag = Some(event_window::etag(
+                    &self.options.store,
+                    &format!(
+                        "summary:{state:?}:{}",
+                        evidence::resource_etag(&self.options.artifacts.join("manifest.jsonl"), "")
+                    ),
+                ));
+                if matches_etag(headers, etag.as_deref()) {
+                    return Ok(not_modified(etag.as_deref().unwrap()));
+                }
+                let store = self.options.store.clone();
+                let artifacts = self.options.artifacts.clone();
+                let instance = self.instance_id.clone();
+                self.blocking(move || {
+                    session_summary::build(
+                        &store,
+                        &artifacts,
+                        &session_summary::CaptureState {
+                            instance_id: &instance,
+                            capture_mode: state.0,
+                            broker_connected: state.1,
+                            capture_stopped: state.2,
+                            artifact_receiver_configured: state.3,
+                            artifact_receiver_connected: state.4,
+                        },
+                    )
+                })
+                .await?
             }
             "/api/origin-trace" => {
                 let request = q.required("request_id")?.to_owned();
@@ -606,6 +692,7 @@ impl App {
                         session.as_deref(),
                         process,
                         sequence.as_deref(),
+                        Some(&options.artifacts),
                     )
                 })
                 .await?
@@ -801,6 +888,157 @@ impl App {
         }
         Ok(response)
     }
+    fn event_state(&self, document: &mut Value, connected: bool, stopped: bool) {
+        document["broker_connected"] = json!(connected);
+        document["capture_mode"] = json!(self.options.capture_mode());
+        document["capture_stopped"] = json!(stopped);
+        document["capture_controls_available"] = json!(self.options.broker_pid.is_some());
+    }
+    /// A filtered or cursor-paged event read. It bypasses the polling cache:
+    /// the UI window stays exactly as it was for callers without filters.
+    async fn filtered_events(
+        &self,
+        q: &Query,
+        limit: usize,
+        headers: &HeaderMap,
+    ) -> Result<Response> {
+        let filter = event_query::event_filter(q)?;
+        let cursor = event_query::cursor(q)?;
+        let connected = self.broker_connected().await;
+        let stopped = self.capture_stopped.load(Ordering::Acquire);
+        let etag = event_window::etag(
+            &self.options.store,
+            &format!(
+                "query:{}-{}-{}-{limit}:{cursor:?}:{}",
+                u8::from(connected),
+                self.options.capture_mode(),
+                u8::from(stopped),
+                filter.echo()
+            ),
+        );
+        if matches_etag(headers, Some(&etag)) {
+            return Ok(not_modified(&etag));
+        }
+        let path = self.options.store.clone();
+        let (page, tally, filter) = self
+            .blocking(move || {
+                let mut tally = event_query::Tally::default();
+                let page = event_query::read_page(
+                    &path,
+                    cursor,
+                    limit,
+                    event_query::SCAN_BYTES,
+                    event_query::EVENT_RECORD_BYTES,
+                    event_query::event_visitor(&filter, &mut tally),
+                )?;
+                Ok((page, tally, filter))
+            })
+            .await?;
+        let mut document = event_query::events_document(&page, &tally, &filter, cursor, limit);
+        self.event_state(&mut document, connected, stopped);
+        let mut response = axum::Json(document).into_response();
+        response
+            .headers_mut()
+            .insert("etag", HeaderValue::from_str(&etag).unwrap());
+        Ok(response)
+    }
+    /// Returns as soon as a record after the cursor matches, or when the
+    /// timeout passes. Without `after`, only records written after the call
+    /// count. No reader permit is held between polls.
+    async fn wait_for_events(&self, q: &Query) -> Result<Response> {
+        let mut filter = event_query::event_filter(q)?;
+        let timeout = event_query::wait_timeout(q)?;
+        let limit = q.limit(100, 5000)?;
+        let start = match event_query::cursor(q)? {
+            event_query::Cursor::Before(_) => {
+                return Err(Error::bad("A wait reads forward; pass after, not before"));
+            }
+            event_query::Cursor::After(offset) => Some(offset),
+            event_query::Cursor::Tail => None,
+        };
+        let _waiter = self
+            .event_waiters
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| event_query::waiters_full())?;
+        let began = tokio::time::Instant::now();
+        let deadline = began + Duration::from_millis(timeout);
+        let path = self.options.store.clone();
+        let origin = match start {
+            Some(offset) => offset,
+            None => {
+                let path = path.clone();
+                self.blocking(move || event_query::current_boundary(&path))
+                    .await?
+            }
+        };
+        let mut cursor = origin;
+        let mut tally = event_query::Tally::default();
+        let mut seen_length = None;
+        let mut last = None;
+        loop {
+            let length = tokio::fs::metadata(&path).await.map(|m| m.len()).ok();
+            if length != seen_length {
+                seen_length = length;
+                let read_path = path.clone();
+                let (page, counted, kept) = self
+                    .blocking(move || {
+                        let page = event_query::read_page(
+                            &read_path,
+                            event_query::Cursor::After(cursor),
+                            limit,
+                            event_query::SCAN_BYTES,
+                            event_query::EVENT_RECORD_BYTES,
+                            event_query::event_visitor(&filter, &mut tally),
+                        )?;
+                        Ok((page, tally, filter))
+                    })
+                    .await?;
+                tally = counted;
+                filter = kept;
+                cursor = page.scan_end;
+                if page.exhausted {
+                    // Unread bytes remain; read them on the next poll even if
+                    // the file length has not changed.
+                    seen_length = None;
+                }
+                let found = !page.records.is_empty();
+                last = Some(page);
+                if found {
+                    break;
+                }
+            }
+            let now = tokio::time::Instant::now();
+            if now >= deadline {
+                break;
+            }
+            tokio::time::sleep((deadline - now).min(Duration::from_millis(200))).await;
+        }
+        let last = last.unwrap_or_else(|| event_query::Page {
+            records: Vec::new(),
+            scan_start: origin,
+            scan_end: origin,
+            store_end: seen_length.unwrap_or(0),
+            limited: false,
+            exhausted: false,
+        });
+        let timed_out = last.records.is_empty();
+        let page = event_query::Page {
+            scan_start: origin,
+            ..last
+        };
+        let cursor = event_query::Cursor::After(origin);
+        let mut document = event_query::events_document(&page, &tally, &filter, cursor, limit);
+        let connected = self.broker_connected().await;
+        let stopped = self.capture_stopped.load(Ordering::Acquire);
+        self.event_state(&mut document, connected, stopped);
+        document["wait"] = json!({
+            "timed_out": timed_out,
+            "timeout_ms": timeout,
+            "waited_ms": began.elapsed().as_millis().min(u128::from(u64::MAX)) as u64,
+        });
+        Ok(axum::Json(document).into_response())
+    }
     async fn find_artifact(&self, id: &str) -> Result<Value> {
         if validation::canonical(&json!(id), 64, false, "Artifact ID").is_err() {
             return Err(Error::new(404, "Artifact not found"));
@@ -843,6 +1081,18 @@ impl App {
                 _ => Err(Error::bad("Analyst workspace action is invalid")),
             },
             "/api/native-console/actions" => self.native_console.action(value).await,
+            "/api/session/actions" => {
+                validation::schema("SessionAction", value, 400)?;
+                if self.options.capture_mode() != "live" {
+                    return Err(Error::conflict(
+                        "This backend is not a live capture session. No browser was changed.",
+                    )
+                    .with_code(Code::IdleBackend));
+                }
+                let recording =
+                    self.broker_connected().await && !self.capture_stopped.load(Ordering::Acquire);
+                self.live_browser.action(value, recording).await
+            }
             "/api/capture/actions" => {
                 validation::schema("CaptureAction", value, 400)?;
                 if self.options.capture_mode() == "idle" {
@@ -1126,9 +1376,9 @@ async fn handle(State(app): State<Arc<App>>, request: Request<Body>) -> Response
     );
     response
 }
-struct Query(BTreeMap<String, Vec<String>>);
+pub(crate) struct Query(BTreeMap<String, Vec<String>>);
 impl Query {
-    fn new(raw: &str) -> Self {
+    pub(crate) fn new(raw: &str) -> Self {
         let mut values = BTreeMap::<String, Vec<String>>::new();
         for (key, value) in url::form_urlencoded::parse(raw.as_bytes()) {
             values
@@ -1138,7 +1388,7 @@ impl Query {
         }
         Self(values)
     }
-    fn one(&self, key: &str) -> Result<Option<&str>> {
+    pub(crate) fn one(&self, key: &str) -> Result<Option<&str>> {
         match self.0.get(key) {
             None => Ok(None),
             Some(values) if values.len() == 1 => Ok(Some(&values[0])),
@@ -1150,7 +1400,13 @@ impl Query {
             .filter(|s| !s.is_empty())
             .ok_or_else(|| Error::bad(format!("{key} is required")))
     }
-    fn number(&self, key: &str, default: Option<&str>, bits: u32, nonzero: bool) -> Result<u64> {
+    pub(crate) fn number(
+        &self,
+        key: &str,
+        default: Option<&str>,
+        bits: u32,
+        nonzero: bool,
+    ) -> Result<u64> {
         validation::canonical(
             &json!(
                 self.one(key)?
@@ -1161,6 +1417,27 @@ impl Query {
             nonzero,
             key,
         )
+    }
+    /// Rejects any key outside the listed ones.
+    fn only(&self, keys: &[&str], extra: &[&str]) -> Result<()> {
+        match self
+            .0
+            .keys()
+            .find(|key| !keys.contains(&key.as_str()) && !extra.contains(&key.as_str()))
+        {
+            Some(key) => Err(Error::bad(format!(
+                "Unknown query parameter {key}. Accepted: {}",
+                keys.iter()
+                    .chain(extra)
+                    .copied()
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ))),
+            None => Ok(()),
+        }
+    }
+    fn any(&self, keys: &[&str]) -> bool {
+        keys.iter().any(|key| self.0.contains_key(*key))
     }
     fn limit(&self, default: usize, max: usize) -> Result<usize> {
         self.one("limit")?.map_or(Ok(default), |s| {

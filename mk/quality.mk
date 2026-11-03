@@ -119,6 +119,7 @@ native-only-check: $(UI_STARTUP_DEPS)
 	node tools/check-source-search.mjs
 	node tools/check-native-only-startup.cjs
 	node tools/check-native-only-launch.mjs
+	python3 tools/native-js-invocation-site.py --self-test
 
 owned-vm-helper-check: $(NATIVE_VM_FIXTURE_BINARY) $(OWNED_VM_FIXTURE_TEST)
 	$(OWNED_VM_FIXTURE_TEST)

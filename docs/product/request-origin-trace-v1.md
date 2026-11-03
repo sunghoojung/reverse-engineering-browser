@@ -35,7 +35,11 @@ The edge store is append-only JSONL. Its version 1 contract is
 - `parent_event` is an explicit same-process parent identifier.
 - `request_initiator` is an explicit renderer-to-browser initiator identifier.
 - `request_lifecycle` joins events only when their full retained request
-  identity matches.
+  identity matches. Request target and body records
+  ([native network v2](../../protocol/native-network-v2.md)) join their
+  lifecycle parent only through `parent_event`; lifecycle edges skip them.
+  Their binary payloads appear in a step as a fixed record summary, never
+  decoded as text.
 - `artifact_request` joins an artifact event to a matching request identity and
   is labeled `correlated`, not causal.
 - `issued_during_invocation` joins the renderer's request record to the start

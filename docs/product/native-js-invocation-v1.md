@@ -347,11 +347,12 @@ state, never an inferred one.
 The value-flow join counts as a correlated link only when all hold:
 
 1. The settle record has a present digest and the request has retained raw
-   body bytes, which only exist under sensitive capture: the request-body
-   capture contract's `request_body` artifact created by the traced request's
-   `request_body` child record, with verified size and SHA-256. That contract
-   is developed in parallel; until it is merged the join has no input and
-   reports nothing.
+   body bytes, which only exist under sensitive capture: the
+   `request_body` artifact of
+   [native network v2](../../protocol/native-network-v2.md), created by the
+   traced request's `request_body` child record, with verified size and
+   SHA-256. Without request content capture, or for a body that was not
+   retained, the join has no input and reports nothing.
 2. A window of the body equal in length to the digested encoding has the same
    rolling hash and the same SHA-256. Only the stated encoding counts: a
    percent-encoded, JSON-escaped, base64 or encrypted embedding is not matched
@@ -411,8 +412,8 @@ the last known invocation.
 | `js_invocation_settle` | 25 | `vm` | 128 bytes, version 1 |
 | `js_invocation_request` | 26 | `vm` | 128 bytes, version 1 |
 
-Numbers 24 to 26 follow 22 and 23, which the request-body capture contract
-(developed in parallel) takes. Renumbering is a mechanical change to the C++
+Numbers 24 to 26 follow 22 `request_body` and 23 `request_target` of
+[native network v2](../../protocol/native-network-v2.md). Renumbering is a mechanical change to the C++
 enum tables only; readers use names, and no layout changes. Relation names are added to the Origin Trace edge and document schemas.
 
 ## Acceptance and live verification
@@ -435,8 +436,8 @@ Live (needs a rebuilt Brave, on the build machine):
 
 1. the hCaptcha demo: `hsw(jwt)` produces one start, Wasm records `inside`
    that ID across its resume, one settle with a digest under sensitive capture,
-   and the checkcaptcha request trace shows `invocation_value_flow` once the
-   request-body contract lands;
+   and, with request content capture, the checkcaptcha request trace shows
+   `invocation_value_flow`;
 2. two overlapping `hsw` calls keep distinct IDs on every record;
 3. a disabled control (no site file, and a site file without the flag)
    produces no record and byte-identical behavior;

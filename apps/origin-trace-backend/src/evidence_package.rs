@@ -468,7 +468,11 @@ fn identities<'a>(
                 let origin = value["capture_origin"].as_str().unwrap_or("");
                 let context = unsigned(&value["execution_context_id"], false);
                 if value["sensitive"].as_bool()
-                    != Some(matches!(kind, "response_body" | "canvas_data_url"))
+                    != Some(matches!(
+                        kind,
+                        "response_body" | "canvas_data_url" | "request_body"
+                    ))
+                    || ((kind == "request_body") != (origin == "network_request"))
                     || (value["execution_context_id"].is_null() && origin != "unknown")
                     || (origin == "dynamic_javascript"
                         && (kind != "javascript" || context.is_none_or(|id| id == 0)))

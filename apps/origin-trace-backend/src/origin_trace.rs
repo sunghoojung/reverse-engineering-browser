@@ -139,10 +139,21 @@ fn step(value: &Value, relation: &str, confidence: &str) -> Result<Value> {
     let text = match value["type"].as_str() {
         Some(kind) if kind.starts_with("js_invocation_") => invocation_value(value)
             .ok_or_else(|| Error::bad("Origin trace input contains a malformed event payload"))?,
-        _ => String::from_utf8_lossy(&decoded).into_owned(),
+        _ => binary_record_summary(value, decoded.len())
+            .unwrap_or_else(|| String::from_utf8_lossy(&decoded).into_owned()),
     };
     Ok(
         json!({"event":{"session_id":session,"process_id":pid,"sequence_number":sequence},"monotonic_time_ns":value["monotonic_time_ns"],"category":value["category"],"operation":value["type"],"frame_id":value["frame_id"],"artifact_id":value["artifact_id"],"request_id":value["request_id"],"relation":relation,"confidence":confidence,"value":text}),
+    )
+}
+// Request target and body records are fixed binary layouts
+// (protocol/native-network-v2.md), not text. A step names the record instead
+// of decoding it, so no NUL or control byte reads as captured text; Traffic
+// decodes their fields. The Swift builder writes the same summary.
+fn binary_record_summary(value: &Value, size: usize) -> Option<String> {
+    let operation = value["type"].as_str()?;
+    (value["category"] == "network" && matches!(operation, "request_target" | "request_body")).then(
+        || format!("Binary {operation} record, {size} bytes, not shown as text; Traffic shows its fields"),
     )
 }
 fn gap(reason: &str, after: usize, detail: &str) -> Value {
@@ -203,13 +214,13 @@ fn adjacent_candidate<'a>(
 /// A request body is searched only as retained raw bytes, at most this many.
 const REQUEST_BODY_LIMIT: usize = 1 << 20;
 /// Raw request bodies retained under sensitive capture for `request_id`, keyed
-/// by the browser request record each belongs to. The request-body capture
-/// contract (protocol/native-network-v2.md, merged separately) writes a
-/// `request_body` record as a child of that request record; for a captured
-/// body its `artifact_id` names a sensitive `request_body` artifact, capture
-/// origin `network_request`, whose creator is that record. Only that exact
-/// pairing and verified bytes count; anything else is no body, never a guess.
-/// Before that contract is merged no such record exists and this is empty.
+/// by the browser request record each belongs to. Native network v2
+/// (protocol/native-network-v2.md) writes a `request_body` record as a child
+/// of that request record; for a captured body its `artifact_id` names a
+/// sensitive `request_body` artifact, capture origin `network_request`, whose
+/// creator is that record. Only that exact pairing and verified bytes count;
+/// anything else is no body, never a guess. Without request content capture
+/// no body is retained and this is empty.
 pub fn retained_request_bodies(
     events: &[Value],
     artifacts: &[Value],

@@ -124,8 +124,9 @@ little-endian version-1 payload. `session_id`, `sequence_number`,
 `artifact_id`, `parent_event_id`, `navigation_id` and `flags` are zero. The
 renderer does not know the browser's numeric navigation ID; the document a
 call ran in is the payload's `document_id`. Wide identities are decimal
-strings in JSON. Event numbers 24 to 26 follow 22 and 23, which the
-request-body capture contract takes; renumbering never changes a layout.
+strings in JSON. Event numbers 24 to 26 follow 22 `request_body` and 23
+`request_target` of [native network v2](native-network-v2.md); renumbering
+never changes a layout.
 
 ### `js_invocation_start` (24)
 
@@ -246,11 +247,12 @@ exactly its digested length whose rolling hash and SHA-256 both match. Two
 matches are the gap `value_flow_ambiguous`; a search past 16 MiB of hashed
 windows is `value_flow_unsearched`. Only the stated encoding is matched: a
 percent-encoded, escaped or encrypted copy is not found and is not reported as
-a negative. The body is the request-body capture contract's sensitive
-`request_body` artifact (capture origin `network_request`) whose creator is
-the traced request's `request_body` child record, read only when its size and
-SHA-256 match the manifest. Until that contract is merged no such record
-exists, so the join has no input and reports nothing.
+a negative. The body is the sensitive `request_body` artifact of
+[native network v2](native-network-v2.md) (capture origin `network_request`)
+whose creator is the traced request's `request_body` child record, read only
+when its size and SHA-256 match the manifest. It exists only under request
+content capture (`REB_CAPTURE_REQUEST_CONTENT=1`) and holds at most the first
+256 KiB of the body; without it the join has no input and reports nothing.
 
 ## Validation boundary
 

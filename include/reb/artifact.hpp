@@ -34,6 +34,7 @@ enum class ArtifactKind : std::uint16_t {
   kCanvasDataUrl = 5,
   kBytecodeBuffer = 6,
   kWasmGuestAdapter = 7,
+  kRequestBody = 8,
 };
 
 enum class ArtifactCaptureOrigin : std::uint16_t {
@@ -47,6 +48,7 @@ enum class ArtifactCaptureOrigin : std::uint16_t {
   kRuntimeTypedArray = 7,
   kRuntimeAllocatingScript = 8,
   kNativeWasmGuest = 9,
+  kNetworkRequest = 10,
 };
 
 struct ArtifactHeader final {

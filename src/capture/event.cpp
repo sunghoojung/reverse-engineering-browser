@@ -1,6 +1,7 @@
 #include "reb/event.hpp"
 #include "reb/js_dispatch.hpp"
 #include "reb/js_invocation.hpp"
+#include "reb/network_request.hpp"
 #include "reb/wasm_dispatch.hpp"
 #include "reb/wasm_guest.hpp"
 
@@ -68,6 +69,8 @@ bool IsKnownType(const EventType type) noexcept {
     case EventType::kWasmGuestInvocation:
     case EventType::kWasmIndirectObservation:
     case EventType::kJsDispatchObservation:
+    case EventType::kRequestBody:
+    case EventType::kRequestTarget:
     case EventType::kJsInvocationStart:
     case EventType::kJsInvocationSettle:
     case EventType::kJsInvocationRequest:
@@ -147,6 +150,10 @@ bool IsValidEvent(const EventRecord& event) noexcept {
     return false;
   if (event.header.type == EventType::kJsDispatchObservation &&
       !IsValidJsDispatchObservation(event))
+    return false;
+  if (event.header.type == EventType::kRequestBody && !IsValidRequestBodyEvent(event))
+    return false;
+  if (event.header.type == EventType::kRequestTarget && !IsValidRequestTargetEvent(event))
     return false;
   if (event.header.type == EventType::kJsInvocationStart && !IsValidJsInvocationStart(event))
     return false;
@@ -318,6 +325,10 @@ std::string_view EventTypeName(const EventType type) noexcept {
       return "wasm_indirect_observation";
     case EventType::kJsDispatchObservation:
       return "js_dispatch_observation";
+    case EventType::kRequestBody:
+      return "request_body";
+    case EventType::kRequestTarget:
+      return "request_target";
     case EventType::kJsInvocationStart:
       return "js_invocation_start";
     case EventType::kJsInvocationSettle:

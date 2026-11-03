@@ -759,7 +759,7 @@ assert.match(panel.nodes.selection.textContent,/1024 \/ 1,024/);assert.equal(pan
 console.log('PASS package panel explicit actions, exact download bytes, native fallback, clipboard ownership, keyed refresh focus, eviction, caps, paging, Escape/navigation and stale selection (DOM fixture; not rendered QA)');
 
 const trafficSource = await readFile(join(root, "apps/research-ui/traffic_view.js"), "utf8");
-const trafficUI = runInNewContext(trafficSource + ";({trafficSortedRequests,trafficWindow,renderTrafficRows,renderTrafficDetails,trafficSearchRequests,trafficTableTypeLabel,TRAFFIC_ROW_LIMIT})", {
+const trafficUI = runInNewContext(trafficSource + ";({trafficSortedRequests,trafficWindow,renderTrafficRows,renderTrafficDetails,trafficSearchRequests,trafficTableTypeLabel,trafficTargetParts,TRAFFIC_ROW_LIMIT})", {
   document: trafficDocument, URL, TextEncoder, TextDecoder, Uint8Array, queueMicrotask,
   navigator: {clipboard: {writeText: async () => {}}}, setTimeout: () => 0,
   createSourceTokenizer: () => ({}), sourceSyntaxTokens: text => [{type: "plain", text}],
@@ -931,13 +931,82 @@ trafficUI.renderTrafficRows(ledger, retainedTraffic.slice(4, 504), rowOptions);
 assert.equal(trafficDocument.activeElement, ledger.children[0]);
 assert.equal(ledger.children.length, 500);
 const details = new TrafficFixtureNode();
-// Native rows carry no headers or bodies: the inspector shows General only and
-// says so, and search never reads anything beyond URL, method and status.
+// Native rows carry no headers or response bodies: the inspector shows General
+// and the request body record, and search never reads beyond URL, method and status.
 let selectedTraffic = uiRequest("inspect", {status: 200, hostOnly: true, path: "fixture.invalid"});
 trafficUI.renderTrafficDetails(details, selectedTraffic);
 const generalSection = details.querySelector(".traffic-general");
-assert.match(details.textContent, /Request and response headers and bodies are not captured/);
+assert.match(details.textContent, /Request and response headers and response bodies are not captured/);
 assert.match(details.textContent, /host only; path and query not captured/);
+{
+  // Request body section: every record state reads as its own sentence and the
+  // retained bytes are assigned as text, never parsed.
+  const bodyDetails = new TrafficFixtureNode();
+  const body = (state, extra = {}) => ({kind: "bytes", state, contentCapture: true, lengthPartial: false,
+    contentType: "application/json", contentTypeOmitted: false, bodyLength: "816", capturedLength: "0", elementCount: 1,
+    sha256: "ab".repeat(32), digestSizeLimit: false, artifactId: "0", sequenceNumber: "12", sessionId: "7", processId: 42, ...extra});
+  const live = (requestBody, extra = {}) => ({...uiRequest("body", {status: 200, origin: "live",
+    path: "https://api.hcaptcha.test/checksiteconfig?v=1", hostOnly: false, targetKind: "url"}), body: requestBody, ...extra});
+  const section = () => bodyDetails.querySelector(".traffic-body");
+  const markup = "<img src=x onerror=alert(1)>{\"sitekey\":\"s\"}";
+  trafficUI.renderTrafficDetails(bodyDetails, live(body("captured", {capturedLength: "816", artifactId: "901"})), "",
+    {status: "ready", text: markup, lossy: false, verified: true, url: "https://api.hcaptcha.test/checksiteconfig?v=1&host=x"});
+  assert.equal(section().dataset.state, "captured");
+  assert.match(section().textContent, /Retained in full/);
+  assert.match(section().textContent, /application\/json/);
+  assert.match(section().textContent, /816 bytes/);
+  assert.match(section().textContent, /SHA-256(ab){32}Body kind/);
+  const pre = section().querySelector("pre");
+  assert.equal(pre.textContent, markup, "captured bytes are text content");
+  assert.equal(pre.children.length, 0, "captured markup creates no element");
+  assert.match(section().textContent, /Body artifact URL.*host=x/);
+  trafficUI.renderTrafficDetails(bodyDetails, live(body("captured_truncated", {bodyLength: "300000", capturedLength: "262144", artifactId: "902"})),
+    "", {status: "ready", text: "m", lossy: true, verified: false});
+  assert.match(section().textContent, /Retained prefix: 262,144 bytes of 300,000 bytes/);
+  assert.match(section().textContent, /Not valid UTF-8/);
+  assert.match(section().textContent, /could not be rechecked/);
+  for (const [state, extra, pattern] of [
+    ["metadata_only", {contentCapture: false}, /content capture was off for this session/],
+    ["no_body", {kind: "none", elementCount: 0, bodyLength: "0", sha256: null, contentType: null}, /No request body/],
+    ["empty", {bodyLength: "0"}, /Empty body/],
+    ["not_captured_body_kind", {kind: "file", lengthPartial: true, sha256: null, bodyLength: "0"}, /file upload bodies are never read/],
+    ["not_captured_body_kind", {kind: "chunked_data_pipe", lengthPartial: true, sha256: null, bodyLength: "0"}, /streaming upload bodies are never read/],
+    ["not_captured_artifact_unavailable", {}, /artifact channel was unavailable/],
+    ["not_captured_session_budget", {}, /request body budget/],
+    ["not_captured_credential_form", {sha256: null}, /Withheld for a password form/],
+    ["metadata_only", {sha256: null, digestSizeLimit: true, bodyLength: "5242881", contentCapture: false}, /exceeds the 4 MiB digest bound/],
+  ]) {
+    trafficUI.renderTrafficDetails(bodyDetails, live(body(state, extra)));
+    assert.match(section().textContent, pattern, state);
+    assert.equal(section().querySelector("pre"), null, `${state} has no body text`);
+  }
+  trafficUI.renderTrafficDetails(bodyDetails, live(body("captured", {capturedLength: "816", artifactId: "901"})), "",
+    {status: "refused", reason: "sensitive_capture_disabled"});
+  assert.match(section().textContent, /not started for sensitive capture/);
+  trafficUI.renderTrafficDetails(bodyDetails, live(body("captured", {capturedLength: "816", artifactId: "901"})), "", {status: "missing"});
+  assert.match(section().textContent, /not in the current catalog/);
+  trafficUI.renderTrafficDetails(bodyDetails, live(body("captured", {capturedLength: "816", artifactId: "901"})), "",
+    {status: "error", error: "timed out after 10 seconds", retryable: true});
+  assert.match(section().textContent, /could not be read: timed out after 10 seconds\. It is read again on the next refresh\./);
+  trafficUI.renderTrafficDetails(bodyDetails, live(body("captured", {capturedLength: "816", artifactId: "901"})), "",
+    {status: "error", error: "its bytes do not match the retained SHA-256", retryable: false});
+  assert.match(section().textContent, /do not match the retained SHA-256\./);
+  assert.doesNotMatch(section().textContent, /read again/, "An integrity failure is not retried");
+  assert.equal(section().querySelector("pre"), null, "A failed read shows no body text");
+  trafficUI.renderTrafficDetails(bodyDetails, live({malformed: true}));
+  assert.equal(section().dataset.state, "malformed");
+  assert.match(section().textContent, /malformed and was not interpreted/);
+  trafficUI.renderTrafficDetails(bodyDetails, live(null));
+  assert.equal(section().dataset.state, "missing");
+  assert.match(section().textContent, /No body record for this request/);
+  trafficUI.renderTrafficDetails(bodyDetails, live(null, {urlTruncated: true, targetLength: 412}));
+  assert.match(bodyDetails.textContent, /truncated; the original path and query are 412 bytes/);
+  // Spread copies the other realm's object so prototypes compare equal.
+  assert.deepEqual({...trafficUI.trafficTargetParts(live(null, {urlTruncated: true}))},
+    {name: "/checksiteconfig?v=1…", host: "api.hcaptcha.test"});
+  assert.deepEqual({...trafficUI.trafficTargetParts({path: "api.test/opaque", targetKind: "path", hostOnly: false})},
+    {name: "/opaque", host: "api.test"});
+}
 assert.equal(details.querySelector(".exchange-pane"), null, "No request/response panes for native rows");
 selectedTraffic = {...selectedTraffic, status: 404};
 trafficUI.renderTrafficDetails(details, selectedTraffic);
@@ -1187,6 +1256,8 @@ const summaryInspector = runInNewContext(
     state: summaryState, elements: summaryElements, evidencePackagePanel: {sync() {}}, trafficCaptureExport: {sync() {}}, passiveSecurityPanel: {sync() {}}, capturedClientWorkflow: {sync() {}},
     document: {querySelectorAll: () => [], querySelector: selector => summaryNodes.get(selector)},
     renderTrafficDetails: (_container, request) => {renderedSummaryRequest = request;},
+    // Body loading is outside this slice; its states are checked with traffic_view.js.
+    requestBodyView: () => null, requestBodyViewKey: () => '',
   });
 for (const [status, failed] of [["pending", false], [200, false], ["failed", true]]) {
   summaryState.requests = [{...summaryState.requests[0], status, failed}];
@@ -1204,6 +1275,67 @@ summaryInspector();
 assert.equal(summaryElements.selectedStatus.textContent, "-");
 assert.equal(summaryElements.requestCopyUrl.disabled, true);
 console.log("PASS selected strip and inspector share current pending/response/failed/empty request metadata");
+
+{
+  // Production request body loading: a transient failure stays visible and is
+  // retried by a later refresh or selection; an integrity failure stays cached
+  // with its reason. A failed retry with the same result does not re-render.
+  const text = '{"sitekey":"s"}', bytes = new TextEncoder().encode(text);
+  const sha256 = Array.from(new Uint8Array(await crypto.subtle.digest("SHA-256", bytes)), b => b.toString(16).padStart(2, "0")).join("");
+  const artifact = {artifact_id: "901", kind: "request_body", session_id: "7", creator_event_id: "12", sha256,
+    byte_size: bytes.length, url: "https://api.example/getcaptcha?s=1"};
+  const request = {id: "r", body: {state: "captured", artifactId: "901", sessionId: "7", sequenceNumber: "12", processId: 42}};
+  const bodyState = {artifacts: [artifact], events: [], requests: [request], selectedRequestId: "r", inspectorTab: "general", requestBodyViewKey: ""};
+  let clock = 1000, renders = 0;
+  const timers = [], fetches = [];
+  const respond = [];
+  const context = {state: bodyState, location: {protocol: "http:"}, AbortController, TextDecoder, Uint8Array, crypto,
+    Date: {now: () => clock}, sourceFactsReadBytes: sourceFactsUI.sourceFactsReadBytes, decodePayload: () => "",
+    setTimeout: (fn) => {timers.push(fn); return timers.length;}, clearTimeout: () => {},
+    fetch: (url, {signal}) => {fetches.push(url); return respond.shift()(signal);},
+    renderInspector: () => {renders++; bodyState.requestBodyViewKey = body.requestBodyViewKey(body.requestBodyView(request));}};
+  const body = runInNewContext(appSection("      const REQUEST_BODY_READ_LIMIT", "      function renderInspectorMessage(") +
+    ";({requestBodyView,requestBodyViewKey,refreshSelectedRequestBody})", context);
+  const settle = () => new Promise(resolve => setTimeout(resolve, 20));
+  // The first read times out.
+  respond.push(signal => new Promise((_, reject) => signal.addEventListener("abort", () => reject(new Error("aborted")))));
+  assert.equal(body.requestBodyView(request).status, "loading");
+  timers.shift()(); await settle();
+  let view = body.requestBodyView(request);
+  assert.equal(view.status, "error"); assert.match(view.error, /timed out after 10 seconds/); assert.equal(view.retryable, true);
+  assert.equal(fetches.length, 1, "A failure is not refetched by the render that reports it");
+  // A later refresh retries while the failure stays visible, then shows the bytes.
+  clock += 2000;
+  respond.push(async () => new Response(bytes));
+  const beforeRetry = renders;
+  body.refreshSelectedRequestBody();
+  assert.equal(fetches.length, 2, "A transient failure is retried by the next refresh");
+  assert.equal(body.requestBodyView(request).status, "error", "The last understandable view stays while the retry runs");
+  await settle();
+  view = body.requestBodyView(request);
+  assert.equal(view.status, "ready"); assert.equal(view.text, text); assert.equal(view.verified, true);
+  assert(renders > beforeRetry, "A successful retry re-renders the selected body");
+  // A non-2xx status is transient too; the same failure again does not re-render.
+  const failing = {...artifact, artifact_id: "902", sha256: "ab".repeat(32)};
+  const failingRequest = {id: "f", body: {...request.body, artifactId: "902"}};
+  bodyState.artifacts.push(failing); bodyState.requests.push(failingRequest); bodyState.selectedRequestId = "f";
+  respond.push(async () => new Response("busy", {status: 503}));
+  body.requestBodyView(failingRequest); await settle();
+  assert.match(body.requestBodyView(failingRequest).error, /returned 503/);
+  bodyState.requestBodyViewKey = body.requestBodyViewKey(body.requestBodyView(failingRequest));
+  const quiet = renders;
+  clock += 2000; respond.push(async () => new Response("busy", {status: 503}));
+  body.requestBodyView(failingRequest); await settle();
+  assert.equal(fetches.length, 4); assert.equal(renders, quiet, "An unchanged failure does not re-render the inspector");
+  // A digest mismatch stays cached with its reason and is never refetched.
+  clock += 2000; respond.push(async () => new Response(bytes));
+  body.requestBodyView(failingRequest); await settle();
+  view = body.requestBodyView(failingRequest);
+  assert.match(view.error, /do not match the retained SHA-256/); assert.equal(view.retryable, false);
+  clock += 60000; body.requestBodyView(failingRequest); body.refreshSelectedRequestBody(); await settle();
+  assert.equal(fetches.length, 5, "An integrity failure is not retried");
+  console.log("PASS request body loading retries transient failures after the visible error, keeps integrity failures with their reason, and re-renders only on change (production app.js block)");
+}
 
 // Exercise the actual production listeners: selecting a tab is idempotent,
 // whereas the shortcut deliberately toggles Evidence back to General.
@@ -1259,7 +1391,7 @@ function sourceProductionFunction(name) {
   assert(end, name);
   return appSource.slice(start, start + end.index + end[0].length);
 }
-const ownershipFunctionNames = ['sourceIdentity', 'sourceIsCurrent', 'sourceReference',
+const ownershipFunctionNames = ['sourceIdentity', 'isSourceArtifact', 'sourceIsCurrent', 'sourceReference',
   'retireSourceAnalysis', 'releaseSourcePreview', 'canvasGalleryVisible', 'releaseCanvasPreview', 'retireCanvasPreviews', 'syncCanvasPreviews', 'pumpCanvasPreviews', 'retryCanvasPreview', 'boundSourcePreviews', 'boundSourceAnalysis',
   'capturedSources', 'selectedSource', 'deobfuscationKey', 'validateSourceAnalysis', 'loadDeobfuscation',
   'sourceDisplayView', 'sourceViewLabel', 'sourceDerivedView', 'loadArtifactContent', 'refreshArtifacts',
@@ -1311,6 +1443,27 @@ const ownedDeferred = () => {let resolve; const promise = new Promise(done=>{res
   held.resolve(new Response('const a = 1;')); await pending;
   assert.equal(state.artifacts[0].content,'const a = 1;'); assert.equal(artifact.loading,false); assert.equal(reads,1);
   sourceOwnershipReceipt.push({test:'pending_refresh_owner',status:'passed',contentReads:reads});
+}
+{
+  // A request body first in the catalog is not a source. Refresh selects the
+  // first source instead, and no Sources path reads the body's bytes.
+  const text='{"answers":"secret"}', script=await ownedArtifact('2');
+  const body={...await ownedArtifact('1',text),kind:'request_body',capture_origin:'network_request',execution_context_id:'0',
+    creator_event_id:'14',url:'https://api.example/getcaptcha?s=1',mime_type:'application/json',sensitive:true};
+  const reads=[];
+  const {state,api}=ownedContext({fetch:async url=>{
+    if(url.startsWith('/api/artifacts?')) return Response.json({count:2,artifacts:[body,script]});
+    reads.push(url); return new Response('const a = 1;');
+  }});
+  await api.refreshArtifacts();
+  for(let i=0;i<50 && state.artifacts[1].loading;i++) await new Promise(resolve=>setTimeout(resolve,1));
+  assert.equal(state.selectedArtifactId,'2'); assert.deepEqual([...state.openArtifactIds],['2']);
+  assert.deepEqual([...api.capturedSources().map(source=>source.artifact_id)],['2']);
+  assert.equal(api.selectArtifact('1'),false); assert.equal(state.selectedArtifactId,'2');
+  assert.match(state.sourceNotice,/Request bodies are shown with their request in Traffic/);
+  await api.loadArtifactContent(state.artifacts[0]); assert.equal(state.artifacts[0].content,undefined);
+  assert.deepEqual(reads.filter(url=>url.includes('/api/artifacts/1/')),[],'Sources never reads a request body');
+  sourceOwnershipReceipt.push({test:'request_body_is_not_a_source',status:'passed'});
 }
 {
   const old=await ownedArtifact('1'), newer=await ownedArtifact('1','const newer = 2;','2');

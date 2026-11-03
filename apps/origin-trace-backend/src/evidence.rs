@@ -352,6 +352,7 @@ pub fn validate_artifact(artifact: &mut Value) -> Result<()> {
             "canvas_data_url",
             "bytecode_buffer",
             "wasm_guest_adapter",
+            "request_body",
         ]
         .contains(&artifact["kind"].as_str().unwrap_or(""))
         && artifact["url"].as_str().is_some_and(|s| !s.is_empty())
@@ -370,7 +371,7 @@ pub fn validate_artifact(artifact: &mut Value) -> Result<()> {
         || artifact["sensitive"]
             != matches!(
                 artifact["kind"].as_str(),
-                Some("response_body" | "canvas_data_url")
+                Some("response_body" | "canvas_data_url" | "request_body")
             )
     {
         return Err(Error::new(
@@ -392,6 +393,7 @@ pub fn validate_artifact(artifact: &mut Value) -> Result<()> {
                 "runtime_typed_array",
                 "runtime_allocating_script",
                 "native_wasm_guest",
+                "network_request",
             ]
             .contains(&origin)
             || (artifact["kind"] == "wasm_guest_adapter" && origin != "native_wasm_guest")
@@ -417,6 +419,11 @@ pub fn validate_artifact(artifact: &mut Value) -> Result<()> {
             || (origin == "runtime_typed_array"
                 && (artifact["kind"] != "bytecode_buffer"
                     || artifact["execution_context_id"] == "0"))
+            // A request body is created by its browser request_body record.
+            || ((artifact["kind"] == "request_body") != (origin == "network_request"))
+            || (origin == "network_request"
+                && (artifact["execution_context_id"] != "0"
+                    || artifact["creator_event_id"] == "0"))
         {
             return Err(Error::new(
                 500,
@@ -424,8 +431,8 @@ pub fn validate_artifact(artifact: &mut Value) -> Result<()> {
             ));
         }
     } else {
-        if artifact["kind"] == "wasm_guest_adapter" {
-            return Err(Error::new(500, "Native guest adapter origin is missing"));
+        if artifact["kind"] == "wasm_guest_adapter" || artifact["kind"] == "request_body" {
+            return Err(Error::new(500, "Native artifact origin is missing"));
         }
         artifact["execution_context_id"] = json!("0");
         artifact["capture_origin"] = json!("unknown");
@@ -1210,6 +1217,50 @@ mod frozen_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn request_body_artifact_is_sensitive_and_created_by_its_body_record() {
+        let valid = json!({
+            "protocol_version": 1,
+            "artifact_id": "9",
+            "session_id": "2",
+            "navigation_id": "0",
+            "frame_id": "3",
+            "parent_artifact_id": "0",
+            "creator_event_id": "14",
+            "execution_context_id": "0",
+            "capture_origin": "network_request",
+            "kind": "request_body",
+            "url": "https://api.example.test/getcaptcha/site?s=1",
+            "mime_type": "application/json",
+            "byte_size": 816,
+            "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+            "sensitive": true,
+            "content_path": "blobs/0000000000000000000000000000000000000000000000000000000000000000.bin"
+        });
+        assert!(validate_artifact(&mut valid.clone()).is_ok());
+        for (field, value) in [
+            ("sensitive", json!(false)),
+            ("capture_origin", json!("network_response")),
+            ("execution_context_id", json!("4")),
+            ("creator_event_id", json!("0")),
+        ] {
+            let mut artifact = valid.clone();
+            artifact[field] = value;
+            assert!(validate_artifact(&mut artifact).is_err(), "{field}");
+        }
+        let mut other = valid.clone();
+        other["kind"] = json!("javascript");
+        other["sensitive"] = json!(false);
+        assert!(validate_artifact(&mut other).is_err());
+        let mut legacy = valid;
+        legacy.as_object_mut().unwrap().remove("capture_origin");
+        legacy
+            .as_object_mut()
+            .unwrap()
+            .remove("execution_context_id");
+        assert!(validate_artifact(&mut legacy).is_err());
+    }
 
     #[test]
     fn runtime_typed_array_artifact_requires_bytecode_and_context() {

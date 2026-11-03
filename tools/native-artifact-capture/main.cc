@@ -18,10 +18,13 @@
 #include "brave/components/reverse_engineering_browser/browser/native_probe_host.h"
 #include "brave/components/reverse_engineering_browser/common/native_js_dispatch.h"
 #include "brave/components/reverse_engineering_browser/common/native_js_invocation.h"
+#include "brave/components/reverse_engineering_browser/common/native_network_request.h"
 #include "brave/components/reverse_engineering_browser/common/native_probe_queue.h"
 #include "chromium_stubs.h"
+#include "crypto/hash.h"
 #include "reb/artifact.hpp"
 #include "reb/event.hpp"
+#include "reb/network_request.hpp"
 #include "reb/wasm_dispatch.hpp"
 #include "reb/wasm_guest.hpp"
 
@@ -80,7 +83,10 @@ Request Start(std::uint64_t id, std::uint64_t context = 11) {
   network::mojom::URLResponseHead head;
   auto& sink = reb::NativeNetworkCaptureSink::Get();
   sink.RecordRequestStarted(id, 0, 0, 1, kFrame, context, context + 1, request);
-  const auto root = events.back().header.sequence_number;
+  // The start record is followed by its request_body child.
+  const auto root = std::find_if(events.rbegin(), events.rend(), [](const auto& event) {
+                      return event.header.type == NativeProbeType::kRequestStarted;
+                    })->header.sequence_number;
   const auto response = sink.RecordResponseStarted(id, 0, 0, 1, kFrame, context, context + 1, head);
   Check(response == events.back().header.sequence_number, "Response returns its emitted sequence");
   return {id, root, response};
@@ -176,6 +182,145 @@ void WriteCases(const std::filesystem::path& output, const std::vector<Case>& ca
   }
   stream << "\n]\n";
 }
+const NativeProbeEvent& LastOf(NativeProbeType type) {
+  const auto found = std::find_if(events.rbegin(), events.rend(),
+                                  [type](const auto& event) { return event.header.type == type; });
+  Check(found != events.rend(), "Expected event type was emitted");
+  return *found;
+}
+reb::RequestBodyPayload BodyPayload(const NativeProbeEvent& event) {
+  reb::RequestBodyPayload value;
+  Check(reb::DecodeRequestBodyPayload(event.inline_payload, value) &&
+            reb::IsValidEvent(std::bit_cast<reb::EventRecord>(event)),
+        "Produced request_body record passes the core validator");
+  return value;
+}
+std::string Hex(std::span<const std::uint8_t> bytes) {
+  static constexpr char kDigits[] = "0123456789abcdef";
+  std::string text;
+  for (const auto byte : bytes) {
+    text.push_back(kDigits[byte >> 4U]);
+    text.push_back(kDigits[byte & 15U]);
+  }
+  return text;
+}
+std::shared_ptr<network::ResourceRequestBody> BodyOf(const std::string& text) {
+  auto body = std::make_shared<network::ResourceRequestBody>();
+  body->elements_mutable()->emplace_back(
+      network::DataElementBytes(std::vector<std::uint8_t>(text.begin(), text.end())));
+  return body;
+}
+
+// Content-mode request bodies through the real network and artifact sinks to
+// the production receiver; the Python stage replays them through the broker.
+void RequestBodies(reb::ArtifactReceiver& receiver, const std::filesystem::path& output) {
+  base::test_now_ns = 100;
+  NativeArtifactSocketClient::Get().connected = true;
+  NativeArtifactCaptureSink::Get().SetEmitter(Emit, kSession, kMask, 200);
+  auto& network = reb::NativeNetworkCaptureSink::Get();
+  network.SetEmitter(Emit, kSession, kMask, 200, true);
+  struct Body {
+    std::uint64_t request_id;
+    std::string url;
+    std::string content;
+  };
+  const std::string json = "{\"v\":\"1\",\"host\":\"accounts.hcaptcha.test\",\"sitekey\":\"" +
+                           std::string(740, 's') + "\"}";
+  const Body bodies[] = {
+      {401, "https://api.hcaptcha.test/checksiteconfig?v=1&host=accounts.hcaptcha.test", json},
+      {402, "https://api.hcaptcha.test/getcaptcha/site", std::string(300 * 1024, 'm')},
+  };
+  std::ofstream expected(output / "request-bodies.json");
+  expected << "[";
+  for (std::size_t index = 0; index < std::size(bodies); ++index) {
+    const auto& body = bodies[index];
+    network::ResourceRequest request;
+    request.method = "POST";
+    request.resource_type = 13;
+    request.url = GURL(body.url);
+    request.headers.SetHeader("Content-Type", "application/json;charset=UTF-8");
+    request.request_body = BodyOf(body.content);
+    network.RecordRequestStarted(body.request_id, 0, 0, 1, kFrame, 11, 12, request);
+    const auto& started = LastOf(NativeProbeType::kRequestStarted);
+    const auto& target = LastOf(NativeProbeType::kRequestTarget);
+    const auto& record = LastOf(NativeProbeType::kRequestBody);
+    const auto payload = BodyPayload(record);
+    Check(target.header.parent_event_id == started.header.sequence_number &&
+              record.header.parent_event_id == started.header.sequence_number &&
+              reb::IsValidEvent(std::bit_cast<reb::EventRecord>(target)),
+          "Target and body are exact children of the start record");
+    const auto artifact_id = record.header.artifact_id;
+    const auto& transfer = *NativeArtifactSocketClient::Get().transfers.at(artifact_id);
+    Check(transfer.header.kind == reb::NativeArtifactKind::kRequestBody &&
+              transfer.header.capture_origin == reb::NativeArtifactCaptureOrigin::kNetworkRequest &&
+              (transfer.header.flags & reb::kNativeArtifactFlagSensitive) != 0 &&
+              transfer.header.creator_event_id == record.header.sequence_number &&
+              transfer.url == body.url && transfer.mime_type == "application/json",
+          "Request body artifact header names its body record, full URL and type");
+    Receive(receiver, artifact_id);
+    CheckCapture(artifact_id, record.header.sequence_number, body.request_id);
+    const auto digest = crypto::hash::Sha256(body.content);
+    Check(payload.sha256 == digest && payload.body_length == body.content.size(),
+          "Body record digest and length describe the whole body");
+    expected << (index ? ",\n" : "\n") << "{\"request_id\":\"" << body.request_id
+             << "\",\"start_sequence\":\"" << started.header.sequence_number
+             << "\",\"body_sequence\":\"" << record.header.sequence_number
+             << "\",\"artifact_id\":\"" << artifact_id << "\",\"url\":\"" << body.url
+             << "\",\"body_length\":" << payload.body_length
+             << ",\"captured_length\":" << payload.captured_length
+             << ",\"state\":" << static_cast<unsigned>(payload.state) << ",\"sha256\":\""
+             << Hex(digest) << "\"}";
+  }
+  expected << "\n]\n";
+  std::cout << "PASS request bodies: content-mode target/body children, sensitive request_body "
+               "artifacts with full URL, receiver ACK joined to the body record\n";
+}
+
+void RequestBodyPolicy(const std::filesystem::path& output) {
+  record_corpus = false;
+  Configure();
+  auto& network = reb::NativeNetworkCaptureSink::Get();
+  auto& transfers = NativeArtifactSocketClient::Get().transfers;
+  network::ResourceRequest request;
+  request.method = "POST";
+  request.url = GURL("https://api.hcaptcha.test/checkcaptcha/site/key");
+  request.request_body = BodyOf("answers=1");
+  // Metadata-only configuration: no target record and no bytes leave the browser.
+  const auto before = events.size();
+  network.RecordRequestStarted(501, 0, 0, 1, kFrame, 11, 12, request);
+  Check(transfers.empty() && events.size() == before + 2 &&
+            BodyPayload(events.back()).state ==
+                static_cast<std::uint8_t>(reb::RequestBodyState::kMetadataOnly),
+        "Metadata-only session records digest, length and type but no body or target");
+  // A receiver without --allow-sensitive refuses the bytes; the refusal is an event.
+  network.SetEmitter(Emit, kSession, kMask, 200, true);
+  network.RecordRequestStarted(502, 0, 0, 1, kFrame, 11, 12, request);
+  const auto& record = LastOf(NativeProbeType::kRequestBody);
+  const auto body_sequence = record.header.sequence_number;
+  reb::ArtifactReceiver refusing(
+      output / "refusing-request-body-receiver",
+      {.max_artifact_bytes = 1024 * 1024, .max_store_bytes = 1024 * 1024});
+  Receive(refusing, record.header.artifact_id, true,
+          reb::ArtifactReceiveStatus::kSensitiveCaptureDisabled);
+  Check(events.back().header.type == NativeProbeType::kArtifactCaptureFailed &&
+            Payload(events.back()) == "sensitive_capture_disabled" &&
+            events.back().header.parent_event_id == body_sequence &&
+            events.back().header.request_id == 502,
+        "Receiver refusal of request content is explicit and joined to the body record");
+  // Artifact category off: the body record says the channel was unavailable.
+  Configure(kSession, reb::NativeProbeCategoryMask(reb::NativeProbeCategory::kNetwork));
+  network.SetEmitter(Emit, kSession,
+                     reb::NativeProbeCategoryMask(reb::NativeProbeCategory::kNetwork), 200, true);
+  network.RecordRequestStarted(503, 0, 0, 1, kFrame, 11, 12, request);
+  Check(transfers.empty() &&
+            BodyPayload(LastOf(NativeProbeType::kRequestBody)).state ==
+                static_cast<std::uint8_t>(reb::RequestBodyState::kNotCapturedArtifactUnavailable),
+        "Content session without the artifact category names the missing channel");
+  Configure();
+  std::cout << "PASS request body policy: metadata-only, receiver sensitive refusal and missing "
+               "artifact channel are explicit\n";
+}
+
 void Corpus(reb::ArtifactReceiver& receiver, const std::filesystem::path& output) {
   Configure();
   std::vector<Case> cases;
@@ -249,6 +394,7 @@ void Corpus(reb::ArtifactReceiver& receiver, const std::filesystem::path& output
   cases.push_back({"out_of_order_a", first, {first_id}});
   cases.push_back({"out_of_order_b", second, {second_id}});
   WriteCases(output, cases);
+  RequestBodies(receiver, output);
   record_corpus = false;
   std::cout << "PASS actual sinks/receiver ACK: exact, missing ACK/creator, generated/runtime, "
                "BrowserContext request reuse, out-of-order body and ACK; uint64 roots > 2^53\n";
@@ -644,9 +790,12 @@ int main(int argc, char** argv) {
     event_wire.open(output / "events.bin", std::ios::binary);
     artifact_wire.open(output / "artifacts.bin", std::ios::binary);
     ack_wire.open(output / "acks.bin", std::ios::binary);
+    // Mirrors the production receiver replay, which runs with --allow-sensitive
+    // so content-mode request bodies are retained.
     reb::ArtifactReceiver receiver(output / "in-process-artifacts",
                                    {.max_artifact_bytes = reb::kNativeArtifactMaxContentBytes,
-                                    .max_store_bytes = 256U * 1024U * 1024U});
+                                    .max_store_bytes = 256U * 1024U * 1024U,
+                                    .allow_sensitive = true});
     Corpus(receiver, output);
     Lifecycle(receiver);
     Admission(output);
@@ -655,6 +804,7 @@ int main(int argc, char** argv) {
     NativeGuestDependencies(receiver);
     NativeProbeHostGuestBoundary(receiver);
     NativeProbeHostJsDispatchForwarding();
+    RequestBodyPolicy(output);
     event_wire.flush();
     artifact_wire.flush();
     ack_wire.flush();

@@ -1,16 +1,97 @@
-/* Native Traffic rows carry method, URL or host, status, type and lifecycle
- * timing. Request and response headers and bodies are not part of native
+/* Native Traffic rows carry method, host, status, type and lifecycle timing.
+ * Content capture sessions add the URL path and query and a bounded request
+ * body (protocol/native-network-v2.md); every session records the body's
+ * length, type and digest. Headers and response bodies are not part of native
  * capture, so this view never implies or searches them. */
 function trafficTargetParts(request) {
   const target = String(request?.path ?? '').trim();
   if (request?.hostOnly) return {name: target || 'Unknown host', host: 'Host-only metadata'};
+  const more = request?.urlTruncated ? '…' : '';
+  // A native target is shown exactly as captured; reparsing would re-escape it.
+  if (typeof request?.target === 'string') return {name: `${request.target}${more}`, host: request.host ?? ''};
+  if (request?.targetKind === 'path') {
+    const slash = target.indexOf('/');
+    return slash > 0 ? {name: `${target.slice(slash)}${more}`, host: target.slice(0, slash)} : {name: target, host: ''};
+  }
   try {
     const url = new URL(target);
     if (!['http:', 'https:', 'ws:', 'wss:'].includes(url.protocol)) throw new TypeError('Not a network URL');
-    return {name: `${url.pathname || '/'}${url.search}`, host: url.host};
+    return {name: `${url.pathname || '/'}${url.search}${more}`, host: url.host};
   } catch {
     return {name: target || 'Unidentified request', host: ''};
   }
+}
+
+const TRAFFIC_BODY_KIND_LABELS = Object.freeze({none: 'None', bytes: 'In-memory bytes', file: 'File upload',
+  data_pipe: 'Blob or data pipe', chunked_data_pipe: 'Streaming upload', mixed: 'Mixed parts',
+  unknown: 'Unrecognized part'});
+
+function trafficByteCount(value) {
+  const count = BigInt(value);
+  return `${count.toLocaleString('en-US')} ${count === 1n ? 'byte' : 'bytes'}`;
+}
+
+// What happened to the bytes, in the record's own terms.
+function trafficBodyCapture(body) {
+  if (body === null || body === undefined) {
+    return 'No body record for this request. The capture may predate request body recording, or the record left the retained window.';
+  }
+  if (body.malformed) return 'The body record is malformed and was not interpreted.';
+  const kind = TRAFFIC_BODY_KIND_LABELS[body.kind] ?? 'Unrecognized part';
+  return {
+    no_body: 'No request body.',
+    empty: 'Empty body (0 bytes).',
+    metadata_only: 'Not retained: content capture was off for this session. Length, type and digest are recorded.',
+    captured: 'Retained in full.',
+    captured_truncated: `Retained prefix: ${trafficByteCount(body.capturedLength)} of ${trafficByteCount(body.bodyLength)}, truncated at the 256 KiB capture limit.`,
+    not_captured_body_kind: `Not captured: ${kind.toLowerCase()} bodies are never read by native capture.`,
+    not_captured_artifact_unavailable: 'Not captured: the artifact channel was unavailable.',
+    not_captured_transfer_refused: 'Not captured: the artifact transfer queue refused it.',
+    not_captured_url: 'Not captured: the URL is not HTTP(S) or is longer than 8 KiB.',
+    not_captured_session_budget: 'Not captured: this session reached its request body budget (1,024 bodies or 64 MiB).',
+    not_captured_credential_form: 'Not captured: password form submission. Bytes and digest are withheld.'
+  }[body.state] ?? 'Unknown capture state.';
+}
+
+function trafficBodyRows(body) {
+  if (!body || body.malformed) return [];
+  const digest = body.sha256 ?? (body.state === 'no_body' ? 'No body'
+    : body.state === 'not_captured_credential_form' ? 'Withheld for a password form'
+      : body.digestSizeLimit ? 'Not computed: the body exceeds the 4 MiB digest bound'
+        : 'Not computed: file, blob or stream parts are not read');
+  return [
+    ['Content type', body.contentType ?? (body.contentTypeOmitted ? 'Sent, but not a bounded media type; not recorded' : 'Not sent'),
+      body.contentType ? 'value' : 'prose'],
+    ['Body length', body.state === 'no_body' ? 'No body'
+      : `${trafficByteCount(body.bodyLength)}${body.lengthPartial ? ' in memory; file, blob and stream parts are not counted' : ''}`,
+    body.state === 'no_body' ? 'prose' : 'value'],
+    ['SHA-256', digest, body.sha256 ? 'value' : 'prose'],
+    ['Body kind', `${TRAFFIC_BODY_KIND_LABELS[body.kind] ?? 'Unrecognized part'} · ${body.elementCount} ${body.elementCount === 1 ? 'part' : 'parts'}`, 'value']
+  ];
+}
+
+// The retained bytes, when there are any. Captured text is only ever assigned
+// to textContent, never parsed as markup.
+function trafficBodyContent(body, view) {
+  if (!body || body.malformed || !['captured', 'captured_truncated'].includes(body.state)) return null;
+  if (!view || view.status === 'loading') return {note: 'Loading the retained body…'};
+  if (view.status === 'refused') {
+    return {note: view.reason === 'sensitive_capture_disabled'
+      ? 'The artifact receiver refused it: the session receiver was not started for sensitive capture.'
+      : `The artifact receiver did not retain it (${view.reason || 'unknown reason'}).`};
+  }
+  if (view.status === 'missing') {
+    return {note: 'The body artifact is not in the current catalog: its acknowledgment is pending, or it is outside the 500 newest artifacts.'};
+  }
+  if (view.status === 'unavailable') return {note: 'Retained bodies are read from the local backend, which this view does not have.'};
+  if (view.status === 'error') {
+    return {note: `The retained body could not be read: ${view.error}.${view.retryable ? ' It is read again on the next refresh.' : ''}`};
+  }
+  const notes = [];
+  if (body.state === 'captured_truncated') notes.push(`Prefix only: ${trafficByteCount(body.capturedLength)} of ${trafficByteCount(body.bodyLength)}.`);
+  if (view.lossy) notes.push('Not valid UTF-8; shown with replacement characters.');
+  if (!view.verified) notes.push('The retained digest could not be rechecked in this view.');
+  return {text: view.text, note: notes.join(' '), url: view.url};
 }
 
 const TRAFFIC_TYPE_LABELS = Object.freeze({xhr: 'Fetch/XHR', doc: 'Document', css: 'CSS', js: 'Script',
@@ -127,7 +208,7 @@ function renderTrafficRows(container, requests, {selectedId, newIds, onSelect, o
       row.dataset.pending = String(request.status === 'pending' && !request.failed);
       const target = trafficTargetParts(request);
       const name = trafficNode('span', 'request-name');
-      name.title = `${trafficOriginLabel(request)} · ${request.method} ${request.path} · network · ${request.operation ?? 'network'} · request ${request.id}${request.hostOnly ? ' · URL path and query not captured' : ''}`;
+      name.title = `${trafficOriginLabel(request)} · ${request.method} ${request.path}${request.urlTruncated ? '…' : ''} · network · ${request.operation ?? 'network'} · request ${request.id}${request.hostOnly ? ' · URL path and query not captured' : request.urlTruncated ? ` · path and query truncated from ${request.targetLength} bytes` : ''}`;
       // A researcher name leads the cell; the captured path and host stay visible.
       if (researcherName) name.append(trafficNode('span', 'researcher-name', researcherName));
       name.append(trafficNode('span', 'request-resource', target.name),
@@ -161,8 +242,8 @@ function renderTrafficRows(container, requests, {selectedId, newIds, onSelect, o
   container.tabIndex = rows.length ? -1 : 0;
 }
 
-// Native rows retain no headers or bodies; search covers what they carry and
-// any researcher name shown beside them.
+// Native rows retain no headers; search covers the method, host or URL and
+// status they carry and any researcher name shown beside them.
 function trafficSearchRequests(requests, needle, nameOf = () => null) {
   const matches = new Map();
   for (const request of requests) {
@@ -187,9 +268,9 @@ function trafficOriginLabel(request) {
     : request?.origin === 'live' ? 'Live metadata' : 'Local evidence';
 }
 
-// Native capture has no header or body record to show. Make that coverage
-// explicit instead of rendering request/response panes that stay empty.
-function renderTrafficDetails(container, request, notice = '') {
+// Native capture has no header or response body record to show. Make that
+// coverage explicit instead of rendering request/response panes that stay empty.
+function renderTrafficDetails(container, request, notice = '', bodyView = null) {
   const key = JSON.stringify([request?.origin, request?.id, notice]);
   if (container.dataset.selection !== key) {
     container.dataset.selection = key;
@@ -205,23 +286,62 @@ function renderTrafficDetails(container, request, notice = '') {
       row.append(trafficNode('span', '', label), trafficNode('span', 'traffic-general-value'));
       general.append(row);
     }
-    container.append(general);
+    const body = trafficNode('section', 'traffic-body');
+    body.append(trafficNode('h2', '', 'Request body'));
+    container.append(general, body);
   }
   if (!request) return;
-  const values = [request.hostOnly ? `${request.path} (host only; path and query not captured)` : request.path,
+  renderTrafficBody(container.querySelector('.traffic-body'), request, bodyView);
+  const values = [request.hostOnly ? `${request.path} (host only; path and query not captured)`
+    : request.urlTruncated ? `${request.path}… (truncated; the original path and query are ${request.targetLength} bytes)` : request.path,
     request.documentUrl ?? 'Not captured', request.method, request.failed ? 'Failed' : request.status === 'pending'
       ? (Number.isInteger(request.provisionalStatus) ? `Pending · provisional HTTP ${request.provisionalStatus}` : 'Pending')
       : request.status, trafficOriginLabel(request), request.id,
     request.tabId && request.tabId !== '0' ? request.tabId : 'Unattributed',
-    `Native capture records method, URL or host, status and lifecycle timing. Request and response headers and bodies are not captured.${request.urlTruncated ? ' Request URL truncated.' : ''}${request.documentUrlTruncated ? ' Document URL truncated.' : ''}${request.methodTruncated ? ' Method truncated.' : ''}`];
+    `${request.hostOnly
+      ? 'Native capture recorded method, host, status and lifecycle timing. URL path, query and body bytes are recorded only in content capture sessions.'
+      : 'Native capture recorded method, URL path and query, status and lifecycle timing.'} Request and response headers and response bodies are not captured.${request.targetMalformed ? ' The URL target record is malformed and was not interpreted.' : ''}${request.urlTruncated ? ' Request URL truncated.' : ''}${request.documentUrlTruncated ? ' Document URL truncated.' : ''}${request.methodTruncated ? ' Method truncated.' : ''}`];
   // Captured values stay mono; coverage notes read as prose; Source is provenance.
   const kinds = ['value', request.documentUrl ? 'value' : 'prose', 'value', /^\d+$/.test(String(values[3])) ? 'value' : 'prose',
     'provenance', 'value', request.tabId && request.tabId !== '0' ? 'value' : 'prose', 'prose'];
-  container.querySelectorAll('.traffic-general-value').forEach((node, index) => {
+  container.querySelector('.traffic-general').querySelectorAll('.traffic-general-value').forEach((node, index) => {
     if (node.textContent !== String(values[index])) node.textContent = String(values[index]);
     node.dataset.kind = kinds[index];
     if (kinds[index] === 'provenance') node.dataset.origin = request.origin ?? 'local';
   });
+}
+
+function renderTrafficBody(section, request, view) {
+  const body = request.origin === 'live' || request.origin === 'demo' ? request.body ?? null : undefined;
+  const content = body === undefined ? null : trafficBodyContent(body, view);
+  const key = JSON.stringify([body, content]);
+  if (section.dataset.renderKey === key) return;
+  section.dataset.renderKey = key;
+  const rows = body === undefined ? [['Capture', 'This row has no native body record.', 'prose']]
+    : [['Capture', trafficBodyCapture(body), 'prose'], ...trafficBodyRows(body)];
+  const nodes = rows.map(([label, value, kind]) => {
+    const row = trafficNode('div', 'traffic-general-row');
+    const valueNode = trafficNode('span', 'traffic-general-value', String(value));
+    valueNode.dataset.kind = kind;
+    row.append(trafficNode('span', '', label), valueNode);
+    return row;
+  });
+  if (content?.url) {
+    const row = trafficNode('div', 'traffic-general-row');
+    const valueNode = trafficNode('span', 'traffic-general-value', content.url);
+    valueNode.dataset.kind = 'value';
+    row.append(trafficNode('span', '', 'Body artifact URL'), valueNode);
+    nodes.push(row);
+  }
+  if (content?.note) nodes.push(trafficNode('p', 'traffic-body-note', content.note));
+  if (content?.text !== undefined) {
+    const text = trafficNode('pre', 'traffic-body-text', content.text);
+    text.tabIndex = 0;
+    text.setAttribute('aria-label', 'Retained request body text');
+    nodes.push(text);
+  }
+  section.replaceChildren(trafficNode('h2', '', 'Request body'), ...nodes);
+  section.dataset.state = body === undefined ? 'none' : body === null ? 'missing' : body.malformed ? 'malformed' : body.state;
 }
 
 // Saved-capture record export for the offline generators. Native Traffic rows

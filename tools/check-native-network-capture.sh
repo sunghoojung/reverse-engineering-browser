@@ -18,6 +18,9 @@ headers=(
   services/network/public/cpp/url_loader_completion_status.h
   services/network/public/mojom/url_response_head.mojom.h
   brave/components/reverse_engineering_browser/browser/native_probe_session.h
+  brave/components/reverse_engineering_browser/browser/native_artifact_capture_sink.h
+  net/http/http_request_headers.h services/network/public/cpp/data_element.h
+  services/network/public/cpp/resource_request_body.h url/gurl.h
 )
 for header in "${headers[@]}"; do
   mkdir -p "$build/stubs/$(dirname "$header")"
@@ -29,11 +32,12 @@ if [[ -n "${REB_PROBE_TEST_SANITIZERS:-}" ]]; then
 fi
 sources="$root/browser/integration/brave/overlay/components/reverse_engineering_browser"
 readonly sources
-"${CXX:-c++}" "${flags[@]}" -I"$fixture" -I"$build/stubs" -I"$build/include" \
-  "$fixture/main.cc" "$sources/browser/native_network_capture_sink.cc" \
-  "$sources/common/native_probe_queue.cc" -o "$build/native-network-capture"
+"${CXX:-c++}" "${flags[@]}" -I"$fixture" -I"$build/stubs" -I"$root/tools/native-test-support" \
+  -I"$build/include" -I"$root/include" "$fixture/main.cc" "$sources/browser/native_network_capture_sink.cc" \
+  "$sources/common/native_probe_queue.cc" "$root/src/capture/event.cpp" -o "$build/native-network-capture"
 "$build/native-network-capture"
 
-"${CXX:-c++}" "${flags[@]}" -I"$fixture" -I"$build/stubs" -I"$build/include" \
-  "$fixture/ipc.cc" "$sources/browser/native_local_ipc_client.cc" -o "$build/native-network-ipc"
+"${CXX:-c++}" "${flags[@]}" -I"$fixture" -I"$build/stubs" -I"$root/tools/native-test-support" \
+  -I"$build/include" "$fixture/ipc.cc" "$sources/browser/native_local_ipc_client.cc" \
+  -o "$build/native-network-ipc"
 "$build/native-network-ipc" "$build"

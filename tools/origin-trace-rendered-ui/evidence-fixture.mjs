@@ -21,6 +21,12 @@ export const SYNTHETIC_REQUEST_COUNT = 72;
 // vm category, never queue drops or Traffic and Fingerprinting loss.
 export const NAMED_GAP_REASONS = ['native_wasm_dispatch_budget_incomplete', 'native_wasm_indirect_budget_incomplete'];
 export const SOURCE_LINE_COUNT = 400;
+// A content-capture POST whose target and retained body carry markup that would
+// execute if rendered as HTML, and a metadata-only POST (native-network-v2.md).
+export const REQUEST_BODY_HOST = 'api.body.test';
+export const REQUEST_BODY_TARGET = '/getcaptcha/site-key?s=<svg/onload=window.__rebInjected=5>';
+export const REQUEST_BODY_MARKER = '<img src=x onerror="window.__rebInjected=4">';
+export const METADATA_BODY_HOST = 'api.metadata.test';
 
 const sha256 = bytes => createHash('sha256').update(bytes).digest('hex');
 const hex = text => Buffer.from(text, 'utf8').toString('hex');
@@ -110,6 +116,73 @@ function syntheticRequests(template, firstSequence, firstTime) {
   return events;
 }
 
+function requestBodyPayload({state, content, bytes, contentType = 'application/json', captured = 0}) {
+  const payload = Buffer.alloc(128);
+  payload.writeUInt16LE(1, 0);
+  payload.writeUInt16LE(128, 2);
+  payload[4] = 1;
+  payload[5] = state;
+  payload[6] = (content ? 1 : 0) | 2 | 16;
+  payload[7] = contentType.length;
+  payload.writeBigUInt64LE(BigInt(bytes.length), 8);
+  payload.writeBigUInt64LE(BigInt(captured), 16);
+  payload.writeUInt32LE(1, 24);
+  createHash('sha256').update(bytes).digest().copy(payload, 32);
+  payload.write(contentType, 64, 'ascii');
+  return payload.toString('hex');
+}
+
+function requestTargetPayload(target) {
+  const payload = Buffer.alloc(128);
+  payload.writeUInt16LE(1, 0);
+  payload.writeUInt16LE(128, 2);
+  payload.writeUInt32LE(Buffer.byteLength(target), 4);
+  payload[8] = 2;
+  payload.write(target.slice(0, 116), 12, 'utf8');
+  return payload.toString('hex');
+}
+
+// Two POSTs from the browser stream: one retained by a content session with its
+// target, body record, body artifact and receiver acknowledgment as exact
+// children, and one from a metadata-only session with only its body summary.
+async function requestBodyRequests(template, firstSequence, firstTime, artifactsRoot) {
+  const body = Buffer.from(`{"sitekey":"site-key","note":"${REQUEST_BODY_MARKER}","motionData":"${'m'.repeat(600)}"}`);
+  const metadataBody = Buffer.from('v=1&answers=redacted-by-session');
+  let sequence = firstSequence, time = BigInt(firstTime);
+  const events = [];
+  const row = (fields, type, payload, extra = {}) => {
+    time += 1000n;
+    // Browser network records carry no navigation, transfer sizes or error.
+    const event = {...template, ...fields, sequence_number: String(sequence), monotonic_time_ns: String(time),
+      type, navigation_id: '0', artifact_id: '0', parent_event_id: '0', status_code: 0, error_code: 0,
+      encoded_data_length: '0', decoded_body_length: '0', resource_type: 0, flags: 0, payload_truncated: false,
+      payload_size: payload.length / 2, payload, ...extra};
+    sequence += 1;
+    events.push(event);
+    return event;
+  };
+  const retained = {request_id: '3000'};
+  const start = row(retained, 'request_started', hex(`POST ${REQUEST_BODY_HOST}`), {resource_type: 13});
+  row(retained, 'request_target', requestTargetPayload(REQUEST_BODY_TARGET), {parent_event_id: start.sequence_number});
+  const record = row(retained, 'request_body', requestBodyPayload({state: 4, content: true, bytes: body, captured: body.length}),
+    {parent_event_id: start.sequence_number, artifact_id: '320'});
+  row(retained, 'response_started', hex('application/json'), {status_code: 200});
+  row(retained, 'request_completed', hex('completed'), {status_code: 200});
+  row({...retained, category: 'artifact'}, 'artifact_captured', hex('accepted'),
+    {artifact_id: '320', parent_event_id: record.sequence_number});
+  const metadata = {request_id: '3001'};
+  const metadataStart = row(metadata, 'request_started', hex(`POST ${METADATA_BODY_HOST}`), {resource_type: 13});
+  row(metadata, 'request_body', requestBodyPayload({state: 3, content: false, bytes: metadataBody,
+    contentType: 'application/x-www-form-urlencoded'}), {parent_event_id: metadataStart.sequence_number});
+  row(metadata, 'response_started', hex('application/json'), {status_code: 200});
+  row(metadata, 'request_completed', hex('completed'), {status_code: 200});
+  const bodyArtifact = await artifact(artifactsRoot, {artifact_id: '320', session_id: template.session_id, navigation_id: '0',
+    frame_id: template.frame_id, creator_event_id: record.sequence_number, execution_context_id: '0',
+    capture_origin: 'network_request', kind: 'request_body', mime_type: 'application/json', sensitive: true,
+    url: `https://${REQUEST_BODY_HOST}${REQUEST_BODY_TARGET}`}, body);
+  return {events, artifact: bodyArtifact};
+}
+
 // Like the browser, each gap takes its renderer's own sequence slot, so the
 // stream has no hole. The payload is the reason text, as the producers write it.
 function namedBudgetGaps(template, events) {
@@ -132,7 +205,10 @@ export async function buildEvidence({root, sessions, guestStore, dispatchStore, 
   assert(network, 'demo store must contain a native network event');
   const last = demoEvents.at(-1);
   const scrolled = syntheticRequests(network, Number(last.sequence_number) + 1, last.monotonic_time_ns);
-  const requests = [...scrolled, ...timeAdjacentRequest(network, Number(scrolled.at(-1).sequence_number) + 1, scrolled.at(-1).monotonic_time_ns)];
+  const adjacent = timeAdjacentRequest(network, Number(scrolled.at(-1).sequence_number) + 1, scrolled.at(-1).monotonic_time_ns);
+  const lastBrowser = adjacent.filter(event => event.process_id === network.process_id).at(-1);
+  const withBodies = await requestBodyRequests(network, Number(lastBrowser.sequence_number) + 1, lastBrowser.monotonic_time_ns, artifacts);
+  const requests = [...scrolled, ...adjacent, ...withBodies.events];
   const lines = Array.from({length: SOURCE_LINE_COUNT}, (_, index) => index === 2
     ? `// ${HOSTILE_SOURCE_MARKER}` : `const retainedLine${index} = ${index}; // long line ${'x'.repeat(index % 7 === 0 ? 180 : 12)}`);
   const source = await artifact(artifacts, {artifact_id: '303', session_id: '1', navigation_id: '100', frame_id: '200',
@@ -156,7 +232,7 @@ export async function buildEvidence({root, sessions, guestStore, dispatchStore, 
   // static arm label, and an inner interpreter linked to its outer handler.
   const observed = await goldenEvidence(artifacts, observedStore);
   assert(observed.events.filter(event => event.type === 'wasm_guest_invocation').length === 2, 'observed store holds outer and inner activations');
-  const manifest = [...demoArtifacts, source, bytecode, parseFailure, ...guest.artifacts, ...physical.artifacts, ...observed.artifacts];
+  const manifest = [...demoArtifacts, source, bytecode, parseFailure, withBodies.artifact, ...guest.artifacts, ...physical.artifacts, ...observed.artifacts];
   const retained = [...demoEvents, ...requests, ...guest.events, ...physical.events, ...observed.events];
   const vm = demoEvents.find(event => event.category === 'vm');
   assert(vm, 'demo store must contain a native vm event');

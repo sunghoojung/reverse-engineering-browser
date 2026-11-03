@@ -33,7 +33,7 @@
           'request_completed', 'request_failed', 'vm_finding',
           'vm_dispatch_sample', 'wasm_dispatch_observation', 'wasm_guest_dispatch', 'wasm_guest_invocation',
           'wasm_indirect_observation', 'js_dispatch_observation', 'js_invocation_start', 'js_invocation_settle',
-          'js_invocation_request', 'artifact_captured', 'artifact_capture_failed'
+          'js_invocation_request', 'artifact_captured', 'artifact_capture_failed', 'request_body', 'request_target'
         ])
       };
       const uint64Fields = [
@@ -57,15 +57,18 @@
         ['request_failed', 5]
       ]);
       const networkLifecycleTypes = new Set(lifecycleRanks.keys());
+      // Children of a lifecycle record (protocol/native-network-v2.md). They
+      // describe a request; they never advance its lifecycle rank.
+      const networkRequestDetailTypes = new Set(['request_target', 'request_body']);
       const artifactKinds = new Set([
         'javascript', 'wasm', 'source_map', 'response_body', 'canvas_data_url',
-        'bytecode_buffer', 'wasm_guest_adapter'
+        'bytecode_buffer', 'wasm_guest_adapter', 'request_body'
       ]);
       const artifactCaptureOrigins = new Set([
         'unknown', 'network_response', 'dynamic_javascript', 'webassembly_compile',
         'webassembly_module', 'webassembly_instantiate', 'canvas_to_data_url',
         'runtime_typed_array',
-        'runtime_allocating_script', 'native_wasm_guest'
+        'runtime_allocating_script', 'native_wasm_guest', 'network_request'
       ]);
       const canvasReplayProperties = new Set([
         'fillStyle', 'strokeStyle', 'font', 'textBaseline', 'textAlign',
@@ -425,6 +428,129 @@
         return row;
       }
 
+      // Shared envelope of request_target and request_body. isBrokerEvent keeps
+      // only the generic checks for these types, so one malformed child is
+      // shown as malformed in its request instead of failing the whole poll.
+      function isRequestChildEnvelope(event, type) {
+        return event?.type === type && event.protocol_version === 3 && event.category === 'network' &&
+          event.flags === 0 && event.payload_truncated === false && event.payload_size === 128 &&
+          event.payload_encoding === 'hex' && typeof event.payload === 'string' && /^[0-9a-f]{256}$/i.test(event.payload) &&
+          ['session_id', 'sequence_number', 'parent_event_id'].every(key => isCanonicalInteger(event[key], 1n, uint64Max)) &&
+          BigInt(event.parent_event_id) < BigInt(event.sequence_number) &&
+          isSafeIntegerInRange(event.process_id, 1, 0xffffffff) && event.navigation_id === '0' &&
+          event.status_code === 0 && event.error_code === 0 && event.encoded_data_length === '0' &&
+          event.decoded_body_length === '0' && event.resource_type === 0;
+      }
+
+      const requestSchemes = new Map([[0, null], [1, 'http'], [2, 'https'], [3, 'ws'], [4, 'wss']]);
+
+      function decodeRequestTargetRecord(event) {
+        if (!isRequestChildEnvelope(event, 'request_target') || event.artifact_id !== '0') return null;
+        const bytes = bytesFromHex(event.payload);
+        const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+        const length = view.getUint32(4, true);
+        const prefix = Math.min(length, 116);
+        if (view.getUint16(0, true) !== 1 || view.getUint16(2, true) !== 128 || !requestSchemes.has(bytes[8]) ||
+            bytes[9] !== 0 || bytes.slice(12, 12 + prefix).some(byte => byte === 0) ||
+            bytes.slice(12 + prefix).some(byte => byte !== 0)) return null;
+        return {scheme: requestSchemes.get(bytes[8]), port: view.getUint16(10, true), targetLength: length,
+          // Decoded as text and only ever assigned to textContent.
+          target: new TextDecoder().decode(bytes.slice(12, 12 + prefix)), truncated: length > prefix};
+      }
+
+      const requestBodyKinds = ['none', 'bytes', 'file', 'data_pipe', 'chunked_data_pipe', 'mixed', 'unknown'];
+      const requestBodyStates = [null, 'no_body', 'empty', 'metadata_only', 'captured', 'captured_truncated',
+        'not_captured_body_kind', 'not_captured_artifact_unavailable', 'not_captured_transfer_refused',
+        'not_captured_url', 'not_captured_session_budget', 'not_captured_credential_form'];
+      const requestTokenCharacters = /^[a-z0-9!#$%&'*+.^_`|~-]+\/[a-z0-9!#$%&'*+.^_`|~-]+$/;
+
+      // Every rule of the request_body payload, shared with the C++ core and the
+      // Python evidence validator through tools/check-network-request-wire.mjs.
+      function decodeRequestBodyRecord(event) {
+        if (!isRequestChildEnvelope(event, 'request_body') ||
+            !isCanonicalInteger(event.artifact_id, 0n, uint64Max)) return null;
+        const bytes = bytesFromHex(event.payload);
+        const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+        const [kindCode, stateCode, flags, typeLength] = [bytes[4], bytes[5], bytes[6], bytes[7]];
+        const bodyLength = view.getBigUint64(8, true);
+        const captured = view.getBigUint64(16, true);
+        const elements = view.getUint32(24, true);
+        const digest = bytes.slice(32, 64);
+        const typeBytes = bytes.slice(64, 128);
+        const contentType = String.fromCharCode(...typeBytes.slice(0, Math.min(typeLength, 64)));
+        const has = bit => (flags & bit) !== 0;
+        const [content, hasDigest, sizeLimit, partial, typePresent, typeOmitted] = [1, 2, 4, 8, 16, 32].map(has);
+        const digestLimit = 4n * 1024n * 1024n;
+        if (view.getUint16(0, true) !== 1 || view.getUint16(2, true) !== 128 || view.getUint32(28, true) !== 0 ||
+            kindCode > 6 || stateCode < 1 || stateCode > 11 || (flags & ~0x3f) !== 0 || typeLength > 64 ||
+            (typePresent && typeOmitted) || typePresent !== (typeLength !== 0) ||
+            typeBytes.slice(typeLength).some(byte => byte !== 0) ||
+            (typePresent && !requestTokenCharacters.test(contentType)) || captured > bodyLength) return null;
+        const isBytes = kindCode === 1, isNone = kindCode === 0, state = requestBodyStates[stateCode];
+        if ((hasDigest && (!isBytes || sizeLimit || bodyLength > digestLimit)) ||
+            (!hasDigest && digest.some(byte => byte !== 0)) ||
+            (sizeLimit && (!isBytes || bodyLength <= digestLimit)) ||
+            (isBytes && stateCode !== 11 && hasDigest === sizeLimit) ||
+            (stateCode === 11 && (hasDigest || sizeLimit)) ||
+            partial !== (!isNone && !isBytes) || isNone !== (stateCode === 1) ||
+            (isNone && (elements !== 0 || bodyLength !== 0n)) || (!isNone && elements === 0) ||
+            (kindCode === 5 && elements < 2)) return null;
+        const retained = stateCode === 4 || stateCode === 5;
+        if ((event.artifact_id !== '0') !== retained || (!retained && captured !== 0n)) return null;
+        const stateValid = {
+          no_body: true, not_captured_credential_form: true,
+          empty: isBytes && bodyLength === 0n,
+          metadata_only: !content && (!isBytes || bodyLength !== 0n),
+          captured: content && isBytes && bodyLength !== 0n && captured === bodyLength,
+          captured_truncated: content && isBytes && captured !== 0n && captured < bodyLength,
+          not_captured_body_kind: content && !isNone && !isBytes
+        }[state] ?? (content && isBytes && bodyLength !== 0n);
+        if (!stateValid) return null;
+        return {
+          kind: requestBodyKinds[kindCode], state, contentCapture: content, lengthPartial: partial,
+          contentType: typePresent ? contentType : null, contentTypeOmitted: typeOmitted,
+          bodyLength: String(bodyLength), capturedLength: String(captured), elementCount: elements,
+          sha256: hasDigest ? Array.from(digest, byte => byte.toString(16).padStart(2, '0')).join('') : null,
+          digestSizeLimit: sizeLimit, artifactId: event.artifact_id,
+          sequenceNumber: event.sequence_number, sessionId: event.session_id, processId: event.process_id
+        };
+      }
+
+      // A child record joins its exact parent lifecycle record, never by URL.
+      function requestChildOf(details, parent, type) {
+        return parent ? details.find(event => event.type === type && event.parent_event_id === parent.sequence_number &&
+          event.session_id === parent.session_id && event.process_id === parent.process_id) ?? null : null;
+      }
+
+      function attachRequestDetails(requests, events, browserRequestKeys) {
+        const byId = new Map(requests.map(request => [request.id, request]));
+        for (const event of events) {
+          if (event.category !== 'network' || !networkRequestDetailTypes.has(event.type)) continue;
+          // A child whose lifecycle record left the retained window stays unattached.
+          byId.get(requestIdentity(event, browserRequestKeys))?.details.push(event);
+        }
+        for (const request of requests) {
+          const start = request.events.find(event => event.type === 'request_started') ?? null;
+          const bodyEvent = requestChildOf(request.details, start, 'request_body');
+          request.body = bodyEvent ? decodeRequestBodyRecord(bodyEvent) ?? {malformed: true} : null;
+          const targetEvent = requestChildOf(request.details, request.targetEvent, 'request_target');
+          const target = targetEvent ? decodeRequestTargetRecord(targetEvent) : null;
+          request.targetMalformed = Boolean(targetEvent) && !target;
+          if (!target || request.targetKind !== 'host') continue;
+          const host = request.path;
+          // Rows show these exact captured bytes; the composed URL is for copying.
+          request.host = target.port ? `${host}:${target.port}` : host;
+          request.target = target.target;
+          request.urlTruncated = target.truncated;
+          request.targetLength = target.targetLength;
+          request.path = target.scheme
+            ? `${target.scheme}://${host}${target.port ? `:${target.port}` : ''}${target.target}`
+            : `${host}${target.target}`;
+          request.targetKind = target.scheme ? 'url' : 'path';
+          request.hostOnly = false;
+        }
+      }
+
       // Native JavaScript invocation records, protocol/native-js-invocation-v1.md:
       // the same rules as the C++, Python, Rust and Swift readers. A row keeps
       // kinds, IDs and lengths; digests are only marked as retained.
@@ -591,7 +717,8 @@
               body.canvas_render_captures.every(isCanvasRenderCapture))) &&
           (body.event_window === undefined || isEventWindow(body.event_window)) &&
           (body.network_events === undefined || (Array.isArray(body.network_events) && body.network_events.length <= 5000 &&
-            body.network_events.every(event => isBrokerEvent(event) && event.category === 'network' && networkLifecycleTypes.has(event.type)))) &&
+            body.network_events.every(event => isBrokerEvent(event) && event.category === 'network' &&
+              (networkLifecycleTypes.has(event.type) || networkRequestDetailTypes.has(event.type))))) &&
           body.events.every(isBrokerEvent);
       }
 
@@ -627,6 +754,10 @@
           return false;
         }
         if (artifact.kind === 'wasm_guest_adapter' && artifact.capture_origin !== 'native_wasm_guest') return false;
+        // A request body is created by its browser request_body record only.
+        if ((artifact.kind === 'request_body') !== (artifact.capture_origin === 'network_request') ||
+          (artifact.kind === 'request_body' && (artifact.execution_context_id !== '0' ||
+            !isCanonicalInteger(artifact.creator_event_id, 1n, uint64Max)))) return false;
         if (artifact.capture_origin === 'native_wasm_guest' && (!['bytecode_buffer','wasm_guest_adapter'].includes(artifact.kind) ||
           !['frame_id','parent_artifact_id','creator_event_id','execution_context_id'].every(k => isCanonicalInteger(artifact[k],1n,uint64Max)))) return false;
         if (Object.hasOwn(artifact, 'execution_context_id')) {
@@ -649,8 +780,7 @@
           isSafeIntegerInRange(artifact.byte_size, 0, Number.MAX_SAFE_INTEGER) &&
           typeof artifact.sha256 === 'string' && /^[0-9a-f]{64}$/.test(artifact.sha256) &&
           typeof artifact.sensitive === 'boolean' &&
-          (!artifact.sensitive || artifact.kind === 'response_body' || artifact.kind === 'canvas_data_url') &&
-          (artifact.kind !== 'canvas_data_url' || artifact.sensitive);
+          artifact.sensitive === ['response_body', 'canvas_data_url', 'request_body'].includes(artifact.kind);
       }
 
       function isArtifactResponse(body) {
@@ -1017,6 +1147,8 @@
             end: Math.min(94, 30 + rank * 12),
             event: incomingRank >= (previous?.rank ?? 0) ? event : previous.event,
             events: [...(previous?.events ?? []), event],
+            details: [],
+            targetEvent: updatesTarget ? event : previous?.targetEvent ?? null,
             failed,
             interrupted,
             rank,
@@ -1029,7 +1161,9 @@
             lastTimestamp
           });
         });
-        return [...requests.values()];
+        const rows = [...requests.values()];
+        attachRequestDetails(rows, events, browserRequestKeys);
+        return rows;
       }
 
       function decodeVmFinding(event) {

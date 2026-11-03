@@ -4,8 +4,9 @@
 The broker's origin-trace index must draw issued_during_invocation and
 invocation_settlement edges only from exact (session, process, invocation)
 identities, never from time, and the backend must walk them in a request
-trace. See protocol/native-js-invocation-v1.md. Records are authored here; a
-rebuilt Brave is not involved.
+trace. See protocol/native-js-invocation-v1.md. A retained request body of
+native network v2 (protocol/native-network-v2.md) feeds the value-flow join.
+Records are authored here; a rebuilt Brave is not involved.
 """
 
 import argparse
@@ -20,7 +21,7 @@ import urllib.request
 from pathlib import Path
 
 VM, NETWORK = 10, 9
-REQUEST_STARTED, REQUEST_INITIATED = 5, 8
+REQUEST_STARTED, REQUEST_INITIATED, REQUEST_BODY = 5, 8, 22
 START, SETTLE, REQUEST = 24, 25, 26
 ROLLING_BASE = 0x100000001B3
 
@@ -69,6 +70,36 @@ def request(state, invocation):
     return bytes(p)
 
 
+def body(sequence, parent, value, artifact):
+    """A request_body child of browser record `parent`: captured (state 4) when
+    `artifact` names its retained bytes, metadata only (state 3) otherwise."""
+    content_type = b"application/json"
+    p = bytearray(128)
+    struct.pack_into("<HHBBBBQQI", p, 0, 1, 128, 1, 4 if artifact else 3,
+                     (1 if artifact else 0) | 2 | 16, len(content_type), len(value),
+                     len(value) if artifact else 0, 1)
+    p[32:64] = hashlib.sha256(value).digest()
+    p[64:64 + len(content_type)] = content_type
+    data = bytearray(record(NETWORK, REQUEST_BODY, sequence, 84, 900, payload=bytes(p)))
+    struct.pack_into("<QQ", data, 64, artifact, parent)
+    return bytes(data)
+
+
+def body_artifact(root, artifact, creator, value):
+    """The manifest entry and blob the artifact receiver writes for that body."""
+    digest = hashlib.sha256(value).hexdigest()
+    (root / "artifacts" / "blobs").mkdir(parents=True)
+    (root / "artifacts" / "blobs" / f"{digest}.bin").write_bytes(value)
+    (root / "artifacts" / "manifest.jsonl").write_text(json.dumps({
+        "protocol_version": 1, "artifact_id": str(artifact), "session_id": "7",
+        "navigation_id": "0", "frame_id": "6", "parent_artifact_id": "0",
+        "creator_event_id": str(creator), "execution_context_id": "0",
+        "capture_origin": "network_request", "kind": "request_body",
+        "url": "https://api.example.test/checkcaptcha", "mime_type": "application/json",
+        "byte_size": len(value), "sha256": digest, "sensitive": True,
+        "content_path": f"blobs/{digest}.bin"}) + "\n")
+
+
 def run(broker, records, capacity=64, keep=None):
     with tempfile.TemporaryDirectory(prefix="reb-js-invocation-") as folder:
         root = Path(keep or folder)
@@ -87,7 +118,7 @@ def invocation_edges(edges):
                   if edge["relation"] in ("issued_during_invocation", "invocation_settlement"))
 
 
-def verify_http(backend, root):
+def trace(backend, root):
     endpoint = root / "endpoint"
     with subprocess.Popen([backend, "--port", "0", "--endpoint-file", str(endpoint),
                            "--store", str(root / "events"), "--trace-store", str(root / "edges"),
@@ -104,15 +135,55 @@ def verify_http(backend, root):
             url = (endpoint.read_text().strip() + "/api/origin-trace?request_id=900&session_id=7"
                    "&root_process_id=84&root_sequence_number=1")
             with opener.open(url, timeout=10) as response:
-                trace = json.load(response)
-            relations = [step["relation"] for step in trace["steps"]]
-            assert relations == ["trace_target", "request_initiator", "issued_during_invocation"], trace
-            assert trace["steps"][2]["value"] == "invocation 5 started at site 0 with 2 argument(s)", trace
-            assert trace["coverage"]["observed_links"] == 2, trace
-            assert trace["coverage"]["correlated_links"] == 0, trace
+                return json.load(response)
         finally:
             child.terminate()
             child.wait(timeout=10)
+
+
+def verify_http(backend, root):
+    document = trace(backend, root)
+    relations = [step["relation"] for step in document["steps"]]
+    assert relations == ["trace_target", "request_initiator", "issued_during_invocation"], document
+    assert document["steps"][2]["value"] == "invocation 5 started at site 0 with 2 argument(s)", document
+    assert document["coverage"]["observed_links"] == 2, document
+    assert document["coverage"]["correlated_links"] == 0, document
+
+
+def verify_value_flow(broker, backend):
+    """Request 9 starts with no invocation current, so identity ends at the
+    renderer record. Invocation 5 returned the token earlier in that process
+    and the retained body of the browser's request carries it."""
+    token = b"P1_token-a"
+    value = b'{"n":"' + token + b'"}'
+    for retained in (True, False):
+        with tempfile.TemporaryDirectory(prefix="reb-js-invocation-flow-") as folder:
+            root = Path(folder)
+            run(broker, [
+                record(VM, START, 1, 42, payload=start(5)),
+                record(VM, SETTLE, 2, 42, payload=settle(5, token)),
+                record(NETWORK, REQUEST_INITIATED, 3, 42, 9, payload=b"POST"),
+                record(NETWORK, REQUEST_STARTED, 1, 84, 900, payload=b"POST", initiator=(42, 9)),
+                body(2, 1, value, 31 if retained else 0),
+            ], keep=root)
+            subprocess.run([sys.executable, str(Path(__file__).with_name("validate-evidence-store.py")),
+                            str(root / "events")], check=True, capture_output=True, timeout=30)
+            if retained:
+                body_artifact(root, 31, 2, value)
+            document = trace(backend, root)
+            relations = [step["relation"] for step in document["steps"]]
+            if not retained:
+                # A metadata-only body record keeps no bytes, so nothing is joined.
+                assert relations == ["trace_target", "request_initiator"], document
+                assert document["coverage"]["correlated_links"] == 0, document
+                continue
+            assert relations == ["trace_target", "request_initiator", "invocation_value_flow",
+                                 "invocation_settlement"], document
+            assert document["steps"][2]["value"] == (
+                "invocation 5 fulfilled: string, length 10, digest retained"), document
+            assert document["steps"][2]["confidence"] == "correlated", document
+            assert document["coverage"]["correlated_links"] == 1, document
+            assert document["coverage"]["observed_links"] == 2, document
 
 
 def main():
@@ -150,6 +221,8 @@ def main():
                        capture_output=True, timeout=30)
         if args.backend:
             verify_http(args.backend, root)
+    if args.backend:
+        verify_value_flow(args.broker, args.backend)
 
     # An unknown request, another process, another session or a dropped
     # record never borrows an invocation.
@@ -192,7 +265,8 @@ def main():
             assert not edges.exists() or not edges.read_text().strip()
     print("PASS native JavaScript invocation: exact identity edges through the real broker, "
           "interleaved invocations kept apart, unknown/cross-process/cross-session/reused/evicted "
-          "records refused, and the backend trace walks issued_during_invocation")
+          "records refused, and the backend trace walks issued_during_invocation and joins "
+          "a retained request body by exact value")
 
 
 if __name__ == "__main__":

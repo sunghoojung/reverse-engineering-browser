@@ -91,6 +91,12 @@ for XMLHttpRequest.
 Default network payload prefixes contain only the request method and
 destination host. URL paths, queries, fragments, credentials, headers,
 cookies, and bodies require a separate visibly enabled sensitive-capture mode.
+[Native network v2](native-network-v2.md) defines that mode for requests: event
+types 22 `request_body` (always, with Network: body length, normalized content
+type, SHA-256, kind and capture state) and 23 `request_target` (only with
+request content capture: path and query), both exact children of a lifecycle
+record, plus the sensitive `request_body` artifact kind for at most 256 KiB of
+body bytes. Fragments, credentials, headers and cookies are still not recorded.
 
 Renderer-to-browser delivery uses exact 320-byte `EventRecord` objects in a
 bounded shared-memory queue. Mojo carries session lifecycle and coalesced
@@ -113,7 +119,7 @@ does not hide the missing sequence range from broker accounting.
 ## Large artifact transfer
 
 Large JavaScript files, WASM modules, source maps, explicitly approved response
-bodies, and explicitly approved Canvas data URLs never use `EventRecord`, the
+and request bodies, and explicitly approved Canvas data URLs never use `EventRecord`, the
 renderer ring, or the broker event queue. They use the separate version 1
 artifact stream defined by
 `include/reb/artifact.hpp`. Its fixed 128-byte header carries kind, byte count,
@@ -133,8 +139,8 @@ stream, so a missing artifact is explicit evidence rather than silent loss.
 The receiver defaults to 16 MiB per artifact and 256 MiB per session store. It
 streams and hashes content into immutable content-addressed storage. Canvas
 data URL production has a stricter 2 MiB limit so the UI can retrieve the image
-whole. Response bodies and Canvas data URLs fail closed unless the session
-receiver is explicitly started with sensitive capture enabled. See
+whole. Response bodies, request bodies and Canvas data URLs fail closed unless
+the session receiver is explicitly started with sensitive capture enabled. See
 `docs/architecture/artifact-transfer-channel.md` for the low-level design.
 
 ## VM finding payload

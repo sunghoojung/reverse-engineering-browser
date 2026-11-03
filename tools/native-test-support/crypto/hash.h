@@ -150,6 +150,23 @@ inline std::array<std::uint8_t, kSha256Size> Sha256(std::span<const std::uint8_t
 inline std::array<std::uint8_t, kSha256Size> Sha256(std::string_view text) {
   return Sha256(std::span(reinterpret_cast<const std::uint8_t*>(text.data()), text.size()));
 }
+
+// The streaming shape of Chromium's crypto::hash::Hasher, SHA-256 only.
+enum HashKind { kSha256 };
+class Hasher final {
+ public:
+  explicit Hasher(HashKind) {}
+  void Update(std::span<const std::uint8_t> bytes) noexcept {
+    hash_.Update(bytes.data(), bytes.size());
+  }
+  void Finish(std::span<std::uint8_t> digest) noexcept {
+    const auto value = hash_.Final();
+    std::copy_n(value.begin(), std::min(value.size(), digest.size()), digest.begin());
+  }
+
+ private:
+  detail::GuestSha256 hash_;
+};
 }  // namespace crypto::hash
 
 #endif  // REB_TOOLS_NATIVE_TEST_SUPPORT_CRYPTO_HASH_H_

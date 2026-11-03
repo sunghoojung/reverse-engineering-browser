@@ -305,6 +305,8 @@ fn is_network(event: &Value) -> bool {
                     | "response_completed"
                     | "request_completed"
                     | "request_failed"
+                    | "request_target"
+                    | "request_body"
             )
         )
 }
@@ -507,6 +509,22 @@ mod tests {
         assert_eq!(ids(&window.network_events), vec![1, 2]);
         assert_eq!(window.queue_drops, 23 * 4);
         assert_eq!(window.coverage["scope"], "store");
+    }
+
+    #[test]
+    fn request_target_and_body_records_share_the_network_window() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("events");
+        let mut events = vec![
+            event(1, "network", "request_started", ""),
+            event(2, "network", "request_target", ""),
+            event(3, "network", "request_body", ""),
+        ];
+        events.extend((4..=40).map(|n| event(n, "canvas", "api_call", "")));
+        write(&path, &events);
+        let window = poll(&mut EventWindowCache::default(), &path, 3);
+        // Busy fingerprint traffic cannot evict a request's own child records.
+        assert_eq!(ids(&window.network_events), vec![1, 2, 3]);
     }
 
     #[test]

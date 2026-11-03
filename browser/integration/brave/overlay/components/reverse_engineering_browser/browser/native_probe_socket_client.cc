@@ -44,6 +44,7 @@ constexpr char kCategoryMaskSwitch[] = "reb-category-mask";
 constexpr char kDurationSecondsSwitch[] = "reb-duration-seconds";
 constexpr char kArtifactSocketSwitch[] = "reb-artifact-socket";
 constexpr char kCaptureCanvasImagesSwitch[] = "reb-capture-canvas-images";
+constexpr char kCaptureRequestContentSwitch[] = "reb-capture-request-content";
 constexpr std::size_t kSocketBatchCapacity = 32;
 
 bool SendAll(const int descriptor, base::span<const std::uint8_t> bytes, const bool non_blocking) {
@@ -141,6 +142,7 @@ bool NativeProbeSocketClient::StartFromCommandLine() {
   }
   const std::uint64_t expires_at_monotonic_ns = now + duration_ns;
   const bool capture_canvas_images = command_line.HasSwitch(kCaptureCanvasImagesSwitch);
+  const bool capture_request_content = command_line.HasSwitch(kCaptureRequestContentSwitch);
 
   const base::FilePath user_data_root =
       command_line.HasSwitch("user-data-dir")
@@ -183,8 +185,8 @@ bool NativeProbeSocketClient::StartFromCommandLine() {
   writer_thread_.task_runner()->PostTask(
       FROM_HERE, base::BindOnce(&NativeProbeSocketClient::Run, base::Unretained(this)));
   if (!NativeProbeSession::Get().StartSession(session_id, category_mask, expires_at_monotonic_ns,
-                                              capture_canvas_images,
-                                              &NativeProbeSocketClient::Emit)) {
+                                              capture_canvas_images, &NativeProbeSocketClient::Emit,
+                                              capture_request_content)) {
     connected_.store(false, std::memory_order_release);
     wakeup_.Signal();
     close(socket_descriptor_);
@@ -193,7 +195,9 @@ bool NativeProbeSocketClient::StartFromCommandLine() {
     return false;
   }
   LOG(INFO) << "Native capture armed before profile startup; network metadata scope is proxy-only; "
-               "service-worker synthetic and renderer memory-cache coverage unavailable";
+               "service-worker synthetic and renderer memory-cache coverage unavailable; "
+               "request path and body content "
+            << (NativeProbeSession::Get().capture_request_content() ? "enabled" : "disabled");
   return true;
 }
 

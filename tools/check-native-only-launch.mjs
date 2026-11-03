@@ -346,6 +346,57 @@ exec ${quote(systemGrep)} "$@"
     mixed.framework, ['--reb-wasm-br-table-dispatch', '--reb-wasm-call-indirect-dispatch']));
   console.log('PASS a Brave whose loaded V8 lacks requested flags is refused before any helper or browser, listing each flag and its setting');
 
+  // Request content capture is a Chromium switch, not a V8 flag. Invalid values
+  // and masks without Network and Artifact refuse before any helper starts.
+  const content = await braveApp({framework: allNames});
+  const misconfigured = (result, cause) => {
+    assert.equal(result.status, 2, result.stderr);
+    assert.deepEqual(result.stderr.trimEnd().split('\n'), [cause]);
+    assert.deepEqual(result.receipts, [], 'A configuration refusal starts no helper and no browser');
+  };
+  misconfigured(await launchWith(content.executable, {REB_CAPTURE_REQUEST_CONTENT:'yes'}),
+    `${prefix}REB_CAPTURE_REQUEST_CONTENT must be 0 or 1.`);
+  for (const mask of ['256', '1024', '3839']) {
+    misconfigured(await launchWith(content.executable, {REB_CAPTURE_REQUEST_CONTENT:'1', REB_CAPTURE_CATEGORY_MASK:mask}),
+      `${prefix}REB_CAPTURE_REQUEST_CONTENT requires Network and Artifact category bits (mask 1280).`);
+  }
+  const contentAccepted = await launchWith(content.executable, {REB_CAPTURE_REQUEST_CONTENT:'1'});
+  accepted(contentAccepted, [], content.framework);
+  console.log('PASS request content capture validates its value and categories before any helper or browser');
+
+  // One mask grammar with the packaged app: tools/check-live-session-failure.swift
+  // runs these vectors through LiveSessionCoordinator.categoryMask. The launcher
+  // parses the text itself, never as Bash arithmetic, and passes the broker and
+  // Brave the normalized decimal value, the only form they read.
+  const injected = at('mask-injection');
+  const maskVectors = [['', 4095], ['1', 1], ['1280', 1280], ['4095', 4095], ['0400', 400],
+    ['0x500', 1280], ['0X500', 1280], ['0x300', 768], ['0x0fff', 4095], ['0000001280', 1280],
+    ['0', null], ['4096', null], ['0x', null], ['0x0', null], ['0x1000', null], ['+1280', null],
+    ['-1', null], [' 1280', null], ['1280 ', null], ['1+1', null], ['abc', null], ['1e3', null],
+    ['0b11', null], ['12345678901', null], ['0x123456789', null], ['１２', null],
+    [`a[$(touch ${injected})]`, null]];
+  const maskCode = section('# One category mask grammar', 'if [[ "${native_quiet_mode}"');
+  for (const [value, expected] of maskVectors) {
+    const result = spawnSync(shell, ['-c', `set -eu; fail_live_session() { shift; printf '%s' "$*"; exit 2; }
+category_mask_setting="\${1:-4095}"; ${maskCode}printf '%s' "\${category_mask}"`, 'mask', value], {encoding:'utf8'});
+    if (expected === null) {
+      assert.equal(result.status, 2, `${JSON.stringify(value)}: ${result.stdout}`);
+      assert.match(result.stdout, /^REB_CAPTURE_CATEGORY_MASK must be a category mask from 1 to 4095/);
+    } else {
+      assert.equal(result.status, 0, `${JSON.stringify(value)}: ${result.stderr}`);
+      assert.equal(result.stdout, String(expected), JSON.stringify(value));
+    }
+  }
+  await assert.rejects(access(injected), {code:'ENOENT'}, 'Mask text is never evaluated');
+  const maskCause = `${prefix}REB_CAPTURE_CATEGORY_MASK must be a category mask from 1 to 4095, written as up to 10 decimal digits or 0x and up to 8 hex digits.`;
+  for (const mask of ['0x', 'all', '8191']) {
+    misconfigured(await launchWith(content.executable, {REB_CAPTURE_CATEGORY_MASK:mask}), maskCause);
+  }
+  misconfigured(await launchWith(content.executable, {REB_CAPTURE_REQUEST_CONTENT:'1', REB_CAPTURE_CATEGORY_MASK:'0x300'}),
+    `${prefix}REB_CAPTURE_REQUEST_CONTENT requires Network and Artifact category bits (mask 1280).`);
+  accepted(await launchWith(content.executable, {REB_CAPTURE_REQUEST_CONTENT:'1', REB_CAPTURE_CATEGORY_MASK:'0x500'}), [], content.framework);
+  console.log('PASS category masks share the packaged app grammar, refuse other text before any helper, and reach helpers as decimal');
+
   // A wrapper's own text is not capability evidence. An executable that names
   // no framework, or names a version that is absent, and an app away from its
   // framework or component libraries cannot be checked.

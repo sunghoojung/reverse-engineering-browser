@@ -35,7 +35,14 @@ enum OriginTraceGapChecks {
       precondition(steps.allSatisfy { $0["operation"] as? String != "gap" }, name)
       if let root = steps.first {
         precondition(root["request_id"] as! String == "9007199254740995", name)
-        precondition(root["value"] as! String == "synthetic request", name)
+        if item["step_values"] == nil {
+          precondition(root["value"] as! String == "synthetic request", name)
+        }
+      }
+      // Request target and body records are binary layouts: each reader names
+      // the record with the same summary text and never decodes it.
+      if let values = item["step_values"] as? [String] {
+        precondition(steps.map { $0["value"] as! String } == values, "\(name) values")
       }
       if let sessions = item["step_sessions"] as? [String] {
         precondition(steps.map { ($0["event"] as! [String: Any])["session_id"] as! String } == sessions, name)

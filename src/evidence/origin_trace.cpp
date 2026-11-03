@@ -48,6 +48,16 @@ bool IsRequestEvidence(const EventRecord& event) noexcept {
                                           event.header.category == EventCategory::kArtifact);
 }
 
+// Request target and body records (protocol/native-network-v2.md) are children
+// of one lifecycle record and join it only through their explicit parent. They
+// never become the request's latest lifecycle record, so the next lifecycle
+// record links to the previous lifecycle record, not to a child.
+bool IsRequestChildRecord(const EventRecord& event) noexcept {
+  return event.header.category == EventCategory::kNetwork &&
+         (event.header.type == EventType::kRequestTarget ||
+          event.header.type == EventType::kRequestBody);
+}
+
 }  // namespace
 
 OriginTraceIndex::OriginTraceIndex(const std::size_t capacity) : capacity_(capacity) {
@@ -388,16 +398,21 @@ OriginTraceEdgeBatch OriginTraceIndex::Ingest(const EventRecord& event) {
     }
   }
 
-  const OriginTraceEventReference previous_request_event = FindRequest(event);
-  AddEdge(batch, event, previous_request_event,
-          event.header.category == EventCategory::kArtifact
-              ? OriginTraceRelation::kArtifactRequest
-              : OriginTraceRelation::kRequestLifecycle,
-          event.header.category == EventCategory::kArtifact ? OriginTraceConfidence::kCorrelated
-                                                            : OriginTraceConfidence::kObserved);
+  const bool request_child = IsRequestChildRecord(event);
+  if (!request_child) {
+    const OriginTraceEventReference previous_request_event = FindRequest(event);
+    AddEdge(batch, event, previous_request_event,
+            event.header.category == EventCategory::kArtifact
+                ? OriginTraceRelation::kArtifactRequest
+                : OriginTraceRelation::kRequestLifecycle,
+            event.header.category == EventCategory::kArtifact ? OriginTraceConfidence::kCorrelated
+                                                              : OriginTraceConfidence::kObserved);
+  }
 
   RememberEvent(source);
-  RememberRequest(event, source);
+  if (!request_child) {
+    RememberRequest(event, source);
+  }
   ResolvePendingInitiators(event, batch);
   IndexInvocation(event, batch);
   ++stats_.indexed_events;

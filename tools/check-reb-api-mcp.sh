@@ -107,6 +107,24 @@ assert_log_absent
 assert_stderr_has 'loopback'
 printf 'http://127.0.0.1:11\n' >"$canonical"
 
+run_launcher --allow-session-start
+assert_status 2
+assert_log_absent
+assert_stderr_has 'requires --allow-effects'
+# Before an agent starts its first session the canonical file may not exist.
+mv "$canonical" "${canonical}.saved"
+run_launcher --allow-effects --allow-session-start
+assert_status 0
+grep -q -F -- "mcp --endpoint-file ${canonical} --allow-effects --allow-session-start --require-live" "$log" || fail "session start was not forwarded: $(cat "$log")"
+run_launcher --allow-effects
+assert_status 2
+assert_log_absent
+run_launcher --print-config claude --allow-effects --allow-session-start
+assert_status 0
+grep -q -F -- '"--allow-session-start"' "$out" || fail "config lacks session start: $(cat "$out")"
+assert_stderr_has 'authorized target'
+mv "${canonical}.saved" "$canonical"
+
 run_launcher --sessions-root "$root"
 assert_status 2
 assert_log_absent

@@ -20,6 +20,7 @@ session_id=""
 sessions_root=""
 base_url=""
 allow_effects=0
+allow_session_start=0
 require_live=0
 timeout=""
 mode="serve"
@@ -71,8 +72,15 @@ The stdio process must run on the same computer as the selected loopback API.
 Grok Bot custom MCP runs on the bot's computer. A Mac live session is reached
 from Cursor on that Mac, or from a backend on the same host as the bot.
 
+With --allow-session-start (which needs --allow-effects), the server also
+lists start_live_session and starts even when no live endpoint exists yet. A
+session started through it becomes that connection's endpoint; any other
+endpoint change still retires the connection.
+
 Options:
   --allow-effects       Advertise effectful operations. Not authorization.
+  --allow-session-start Also let the agent start live capture sessions.
+                        Requires --allow-effects. Not authorization.
   --require-live        Refuse idle capture or a disconnected native capture broker.
                         get_session_context remains readable after startup until
                         the endpoint file or backend instance changes.
@@ -327,6 +335,9 @@ build_mcp_args() {
   if [[ "$allow_effects" == 1 ]]; then
     mcp_exec_args+=(--allow-effects)
   fi
+  if [[ "$allow_session_start" == 1 ]]; then
+    mcp_exec_args+=(--allow-session-start)
+  fi
   if [[ "$require_live" == 1 ]]; then
     mcp_exec_args+=(--require-live)
   fi
@@ -335,10 +346,16 @@ build_mcp_args() {
   fi
 }
 
+# Before an agent starts its first session there may be no endpoint file yet.
+# Only that absence is accepted; a present file is still checked.
+endpoint_optional() {
+  [[ "$allow_session_start" == 1 && "$selection_kind" == file && ! -e "$selection_value" ]]
+}
+
 serve_mcp() {
   local binary
   selected_endpoint_file
-  if [[ "$selection_kind" == file ]]; then
+  if [[ "$selection_kind" == file ]] && ! endpoint_optional; then
     require_endpoint_file "$selection_value"
   fi
   binary="$(resolve_reb_api)"
@@ -362,6 +379,9 @@ health_check() {
 effects_note() {
   if [[ "$allow_effects" == 1 ]]; then
     printf 'Write-capable tool list. --allow-effects is not authorization, capture redaction, or permission to send captured data to a model provider.\n' >&2
+    if [[ "$allow_session_start" == 1 ]]; then
+      printf 'The agent can also start live capture sessions. Start them only for an authorized target.\n' >&2
+    fi
   else
     printf 'Read-only tool list. Add --allow-effects for write-capable tools. That flag is not authorization.\n' >&2
   fi
@@ -564,6 +584,10 @@ parse_args() {
       allow_effects=1
       shift
       ;;
+    --allow-session-start)
+      allow_session_start=1
+      shift
+      ;;
     --timeout)
       [[ $# -ge 2 ]] || die "--timeout needs a number of seconds."
       [[ -z "$timeout" ]] || die "Pass --timeout once."
@@ -608,12 +632,15 @@ parse_args() {
 
 main() {
   parse_args "$@"
+  if [[ "$allow_session_start" == 1 && "$allow_effects" != 1 ]]; then
+    die "--allow-session-start requires --allow-effects. No server was started."
+  fi
   case "$mode" in
   list) run_list ;;
   choose) run_choose ;;
   print)
     selected_endpoint_file
-    if [[ "$selection_kind" == file ]]; then
+    if [[ "$selection_kind" == file ]] && ! endpoint_optional; then
       require_endpoint_file "$selection_value"
     fi
     health_check

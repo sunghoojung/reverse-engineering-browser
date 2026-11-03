@@ -50,6 +50,10 @@ Current project scope:
 The only MCP surface is `reb-api mcp`. It projects `protocol/openapi.json`
 operation IDs onto local stdio tools and calls the existing loopback HTTP API.
 It adds no route, dependency, or second API. Do not add another MCP server.
+The one tool that is not an operation is `start_live_session`, declared in
+`x-reb-mcp.session_start`: no backend exists before a session starts, so it
+runs the same launcher as `reb-api session start` and `make live`. It is
+listed only with `--allow-session-start`, which requires `--allow-effects`.
 `scripts/reb-api-mcp.sh` only resolves one explicit endpoint and execs that
 command.
 Effectful tools stay hidden unless `--allow-effects` is set. That flag is not

@@ -179,7 +179,7 @@ const refresh = runInNewContext(`${models}\n${app.slice(refreshStart, refreshEnd
   rebuildTrafficRequests: () => { state.requests = state.nativeRequests; },
   resetRequestSelection: noop, updateSelectionSummary: noop, renderShellStatus: noop,
   renderNetworkNotice: noop, renderRequests: noop, renderInspector: noop, renderEvidence: noop,
-  renderFingerprintActivity: noop, refreshRequestSignalProfile: noop, refreshArtifacts: noop,
+  renderFingerprintActivity: noop, refreshRequestSignalProfile: noop, refreshArtifacts: noop, refreshSelectedRequestBody: noop,
   refreshVmAnalysis: noop, renderVmLab: noop
 });
 await refresh();

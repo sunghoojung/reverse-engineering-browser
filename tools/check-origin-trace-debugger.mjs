@@ -1249,7 +1249,7 @@ const summaryInspector = runInNewContext(
     document: {querySelectorAll: () => [], querySelector: selector => summaryNodes.get(selector)},
     renderTrafficDetails: (_container, request) => {renderedSummaryRequest = request;},
     // Body loading is outside this slice; its states are checked with traffic_view.js.
-    requestBodyView: () => null,
+    requestBodyView: () => null, requestBodyViewKey: () => '',
   });
 for (const [status, failed] of [["pending", false], [200, false], ["failed", true]]) {
   summaryState.requests = [{...summaryState.requests[0], status, failed}];

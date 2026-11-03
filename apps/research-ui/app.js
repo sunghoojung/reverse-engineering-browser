@@ -3204,11 +3204,16 @@ const capturedExportPanel = installCapturedExportDialog({
         const selected = state.requests.find(request => request.id === state.selectedRequestId);
         if (selected?.body?.artifactId === artifact.artifact_id) renderInspector();
       }
+      function requestBodyViewKey(view) {
+        return view ? `${view.status}|${view.reason ?? ''}|${view.url ?? ''}` : '';
+      }
       // A body whose acknowledgment arrives after selection becomes readable on
-      // the next catalog refresh without reselecting the request.
+      // the next catalog refresh without reselecting the request. Unchanged
+      // views do not re-render the inspector on every poll.
       function refreshSelectedRequestBody() {
         const selected = state.requests.find(request => request.id === state.selectedRequestId);
-        if (state.inspectorTab === 'general' && ['captured', 'captured_truncated'].includes(selected?.body?.state)) renderInspector();
+        if (state.inspectorTab !== 'general' || !['captured', 'captured_truncated'].includes(selected?.body?.state)) return;
+        if (requestBodyViewKey(requestBodyView(selected)) !== state.requestBodyViewKey) renderInspector();
       }
 
       function renderInspectorMessage(message) {
@@ -3257,7 +3262,9 @@ const capturedExportPanel = installCapturedExportDialog({
         elements.requestInspector.hidden = showingGeneral;
         document.querySelector('.detail-pane').classList.toggle('showing-exchange', showingGeneral);
         if (showingGeneral) {
-          renderTrafficDetails(exchangeInspector, request, state.trafficSelectionNotice, requestBodyView(request));
+          const bodyView = requestBodyView(request);
+          state.requestBodyViewKey = requestBodyViewKey(bodyView);
+          renderTrafficDetails(exchangeInspector, request, state.trafficSelectionNotice, bodyView);
           return;
         }
         elements.requestInspector.setAttribute('aria-labelledby', `inspector-tab-${state.inspectorTab}`);

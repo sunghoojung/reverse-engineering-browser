@@ -38,8 +38,10 @@ const section = (start, end) => {
   return launch.slice(from, to);
 };
 // The V8 flag list is assembled before any helper starts and joined into the
-// Brave arguments at launch; run both pieces together.
+// Brave arguments at launch; run the pieces together. Invocation capture is
+// added after the scan that decides whether saved sites can be armed.
 const flagsCode = section('native_js_flags=()', 'locate_brave_v8_image() {') +
+  section('js_invocation_session_state=""', 'if [[ ${#native_js_flags[@]} -gt 0 ]]; then\n  require_brave_v8_flags') +
   section('if [[ ${#native_js_flags[@]} -gt 0 ]]; then\n  brave_arguments+=', 'if [[ "${capture_canvas_images}"');
 for (const quiet of [0, 1]) for (const dispatch of [0, 1]) for (const indirect of [0, 1]) {
   const result = spawnSync(shell, ['-c', `set -eu; brave_arguments=(); native_quiet_mode=${quiet}; native_wasm_dispatch=${dispatch}; native_wasm_call_indirect=${indirect}; native_guest_adapter=""; ${flagsCode}
@@ -345,6 +347,26 @@ exec ${quote(systemGrep)} "$@"
   refused(await launchWith(mixed.executable, switches.packaged), undefinedCause(mixed.executable,
     mixed.framework, ['--reb-wasm-br-table-dispatch', '--reb-wasm-call-indirect-dispatch']));
   console.log('PASS a Brave whose loaded V8 lacks requested flags is refused before any helper or browser, listing each flag and its setting');
+
+  // The packaged app's saved invocation sites ask for invocation capture only
+  // if this Brave defines it. A build without it starts without the sites;
+  // explicit sites, and every other flag, keep the strict refusal.
+  const savedSites = {...switches.packaged, REB_NATIVE_JS_INVOCATION_SITES:sitesPath, REB_NATIVE_JS_INVOCATION_DIGESTS:'1'};
+  const preInvocation = await braveApp({framework: allNames});
+  const tolerated = await launchWith(preInvocation.executable, {...savedSites, REB_NATIVE_JS_INVOCATION_IF_SUPPORTED:'1'});
+  accepted(tolerated, [...packaged, '--reb-js-invocation-capture'], preInvocation.framework);
+  refused(await launchWith(preInvocation.executable, savedSites),
+    undefinedCause(preInvocation.executable, preInvocation.framework, ['--reb-js-invocation-capture']));
+  const withInvocation = await braveApp({framework: [...allNames, 'reb_js_invocation_capture']});
+  const armedSites = await launchWith(withInvocation.executable, {...savedSites, REB_NATIVE_JS_INVOCATION_IF_SUPPORTED:'1'});
+  accepted(armedSites, [...packaged, '--reb-js-invocation-capture', '--reb-js-invocation-capture'], withInvocation.framework);
+  const staleOptional = await launchWith(stale.executable, {...savedSites, REB_NATIVE_JS_INVOCATION_IF_SUPPORTED:'1'});
+  refused(staleOptional, undefinedCause(stale.executable, stale.framework,
+    ['--reb-wasm-br-table-dispatch', '--reb-wasm-call-indirect-dispatch']));
+  const badSwitch = await launchWith(withInvocation.executable, {...savedSites, REB_NATIVE_JS_INVOCATION_IF_SUPPORTED:'yes'});
+  assert.equal(badSwitch.status, 2);
+  assert.match(badSwitch.stderr, /REB_NATIVE_JS_INVOCATION_IF_SUPPORTED must be 0 or 1/);
+  console.log('PASS saved invocation sites start without invocation capture on a Brave that lacks it; explicit sites and other flags stay strict');
 
   // Request content capture is a Chromium switch, not a V8 flag. Invalid values
   // and masks without Network and Artifact refuse before any helper starts.

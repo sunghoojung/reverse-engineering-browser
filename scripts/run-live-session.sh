@@ -48,6 +48,9 @@ readonly native_guest_adapter="${REB_NATIVE_WASM_GUEST_ADAPTER:-}"
 readonly native_js_dispatch_sites="${REB_NATIVE_JS_DISPATCH_SITES:-}"
 readonly native_js_invocation_sites="${REB_NATIVE_JS_INVOCATION_SITES:-}"
 readonly native_js_invocation_digests="${REB_NATIVE_JS_INVOCATION_DIGESTS:-0}"
+# The packaged app sets this for the saved sites it arms in every capture: a
+# Brave without invocation capture then starts without them instead of failing.
+readonly native_js_invocation_if_supported="${REB_NATIVE_JS_INVOCATION_IF_SUPPORTED:-0}"
 readonly console_document_start="${REB_CONSOLE_DOCUMENT_START:-0}"
 readonly capture_canvas_images="${REB_CAPTURE_CANVAS_IMAGES:-0}"
 # Raw request paths, queries and bounded request bodies (native-network-v2.md).
@@ -60,6 +63,9 @@ readonly session_handshake="${REB_SESSION_HANDSHAKE:-}"
 readonly session_owner_pid="${REB_SESSION_OWNER_PID:-}"
 readonly api_collection_store="${REB_API_COLLECTION_STORE:-${live_session_root}/../api-collection-v1.json}"
 readonly local_analyst_store="${REB_LOCAL_ANALYST_STORE:-${live_session_root}/../local-analyst-workspace-v1.json}"
+# The saved invocation sites the backend lists and edits. Saving one arms
+# nothing in this session; the app passes the set to its next capture.
+readonly js_invocation_site_store="${REB_JS_INVOCATION_SITE_STORE:-${live_session_root}/../js-invocation-sites-v1.json}"
 readonly active_endpoint_file="${REB_ACTIVE_ENDPOINT_FILE:-${HOME:?HOME is required}/.config/origin-trace/reb-api.endpoint}"
 
 # One category mask grammar, shared with LiveSessionCoordinator.categoryMask in
@@ -139,6 +145,9 @@ if [[ -n "${native_js_invocation_sites}" ]]; then
 fi
 if [[ "${native_js_invocation_digests}" != 0 && "${native_js_invocation_digests}" != 1 ]]; then
   fail_live_session 2 "REB_NATIVE_JS_INVOCATION_DIGESTS must be 0 or 1."
+fi
+if [[ "${native_js_invocation_if_supported}" != 0 && "${native_js_invocation_if_supported}" != 1 ]]; then
+  fail_live_session 2 "REB_NATIVE_JS_INVOCATION_IF_SUPPORTED must be 0 or 1."
 fi
 # Settled-value digests are a sensitive capture path: they exist only for an
 # armed invocation session and are labeled when the session starts.
@@ -295,12 +304,6 @@ if [[ -n "${native_js_dispatch_sites:-}" ]]; then
   add_native_js_flag --reb-js-dispatch-capture \
     REB_NATIVE_JS_DISPATCH_SITES "unset REB_NATIVE_JS_DISPATCH_SITES"
 fi
-# Invocation identity arms function entries at bytecode generation and takes
-# the dispatch flag's compile-path settings by implication.
-if [[ -n "${native_js_invocation_sites:-}" ]]; then
-  add_native_js_flag --reb-js-invocation-capture \
-    REB_NATIVE_JS_INVOCATION_SITES "unset REB_NATIVE_JS_INVOCATION_SITES"
-fi
 
 # Print the one file that holds the V8 flag table Brave will load.
 # chrome/app/chrome_exe_main_mac.cc dlopens a path compiled into the executable,
@@ -413,6 +416,33 @@ require_brave_v8_flags() {
     fail_live_session 1 "Brave at ${brave_binary} does not define the requested V8 ${missing_noun} ${missing} in ${image}. V8 would stop at ${first_missing} and ignore every later --js-flags entry, so that evidence would be silently missing. Use the Brave Browser Development build released with this Origin Trace, or rebuild Brave from this checkout, or turn that capture off with ${opt_outs}."
   fi
 }
+# Invocation identity arms function entries at bytecode generation and takes
+# the dispatch flag's compile-path settings by implication. Sites the packaged
+# app saved are asked for only if this Brave defines the flag: one built before
+# invocation capture starts without them and says so, instead of refusing the
+# whole session below. Explicit sites keep the strict check.
+js_invocation_session_state=""
+if [[ -n "${native_js_invocation_sites:-}" ]]; then
+  js_invocation_session_state=armed
+  if [[ "${native_js_invocation_if_supported:-0}" == 1 ]] &&
+     invocation_image="$(locate_brave_v8_image "${brave_binary}")"; then
+    trap 'stop_brave_v8_scans; exit 143' TERM
+    trap 'stop_brave_v8_scans; exit 130' INT
+    LC_ALL=C grep -a -q -F -e reb_js_invocation_capture "${invocation_image}" &
+    invocation_scan_status=0
+    wait "$!" || invocation_scan_status=$?
+    trap - TERM INT
+    # 1 is an absent name; an unreadable image is left to the check below.
+    if (( invocation_scan_status == 1 )); then
+      js_invocation_session_state=browser_unsupported
+    fi
+  fi
+fi
+readonly js_invocation_session_state
+if [[ "${js_invocation_session_state}" == armed ]]; then
+  add_native_js_flag --reb-js-invocation-capture \
+    REB_NATIVE_JS_INVOCATION_SITES "unset REB_NATIVE_JS_INVOCATION_SITES"
+fi
 if [[ ${#native_js_flags[@]} -gt 0 ]]; then
   require_brave_v8_flags
 fi
@@ -588,6 +618,7 @@ ui_arguments=(
   --store "${store_path}" --trace-store "${trace_store_path}" \
   --signal-store "${signal_store_path}" --artifacts "${artifact_store_path}" \
   --api-collection "${api_collection_store}" --local-analyst "${local_analyst_store}" \
+  --js-invocation-site-store "${js_invocation_site_store}" \
   --decoder "${decoder_binary}" --heap-snapshot "${heap_snapshot_binary}" \
   --socket "${socket_path}" --artifact-socket "${artifact_socket_path}" \
   --capture-session-id "${session_id}"
@@ -600,6 +631,14 @@ ui_arguments=(
 )
 
 ui_arguments+=(--native-console-live-directory "${native_console_directory}")
+# The session header says which functions this capture tracks, or why not.
+if [[ -n "${js_invocation_session_state}" ]]; then
+  ui_arguments+=(--js-invocation-session-sites "${native_js_invocation_sites}"
+    --js-invocation-session-state "${js_invocation_session_state}")
+  if [[ "${js_invocation_session_state}" == armed && "${native_js_invocation_digests}" == 1 ]]; then
+    ui_arguments+=(--js-invocation-session-digests)
+  fi
+fi
 "${research_ui_server}" \
   "${ui_arguments[@]}" \
   >"${ui_log}" 2>&1 &
@@ -665,7 +704,7 @@ fi
 if [[ -n "${native_js_dispatch_sites:-}" ]]; then
   brave_arguments+=("--reb-js-dispatch-sites=${native_js_dispatch_sites}")
 fi
-if [[ -n "${native_js_invocation_sites:-}" ]]; then
+if [[ "${js_invocation_session_state:-}" == armed ]]; then
   brave_arguments+=("--reb-js-invocation-sites=${native_js_invocation_sites}")
   if [[ "${native_js_invocation_digests:-0}" == 1 ]]; then
     brave_arguments+=(--reb-js-invocation-digests)
@@ -755,8 +794,10 @@ if [[ "${capture_request_content}" == 1 ]]; then
 else
   echo "Request content capture: disabled; hosts and body length, type and digest only. Set REB_CAPTURE_REQUEST_CONTENT=1 to retain paths and bodies"
 fi
-echo "Native switches: quiet=${native_quiet_mode} wasm_br_table=${native_wasm_dispatch} wasm_call_indirect=${native_wasm_call_indirect} wasm_guest=$([[ -n "${native_guest_adapter}" ]] && echo 1 || echo 0) js_dispatch=$([[ -n "${native_js_dispatch_sites}" ]] && echo 1 || echo 0) js_invocation=$([[ -n "${native_js_invocation_sites}" ]] && echo 1 || echo 0)"
-if [[ "${native_js_invocation_digests}" == 1 ]]; then
+echo "Native switches: quiet=${native_quiet_mode} wasm_br_table=${native_wasm_dispatch} wasm_call_indirect=${native_wasm_call_indirect} wasm_guest=$([[ -n "${native_guest_adapter}" ]] && echo 1 || echo 0) js_dispatch=$([[ -n "${native_js_dispatch_sites}" ]] && echo 1 || echo 0) js_invocation=$([[ "${js_invocation_session_state}" == armed ]] && echo 1 || echo 0)"
+if [[ "${js_invocation_session_state}" == browser_unsupported ]]; then
+  echo "JavaScript invocation tracking: unavailable; Brave at ${brave_binary} does not define --reb-js-invocation-capture, so this session started without the saved invocation sites and records no invocation evidence"
+elif [[ "${js_invocation_session_state}" == armed && "${native_js_invocation_digests}" == 1 ]]; then
   echo "JavaScript invocation value digests: enabled for this session; settled values of armed calls are hashed (sensitive capture)"
 fi
 echo "Capture transport: native only"

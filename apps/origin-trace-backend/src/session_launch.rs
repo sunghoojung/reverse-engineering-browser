@@ -458,6 +458,7 @@ pub async fn launch(options: &StartOptions) -> Result<Started, String> {
         // Invocation sites are not a named option: an agent session never
         // arms the researcher's functions or settles their values.
         "REB_NATIVE_JS_INVOCATION_SITES",
+        "REB_NATIVE_JS_INVOCATION_IF_SUPPORTED",
         "REB_BRAVE_BINARY",
     ] {
         command.env_remove(name);
@@ -469,6 +470,12 @@ pub async fn launch(options: &StartOptions) -> Result<Started, String> {
     command
         .env("REB_LIVE_SESSION_ROOT", &sessions_root)
         .env("REB_ACTIVE_ENDPOINT_FILE", &active_endpoint)
+        // The app's saved invocation sites arm its next capture, so an agent
+        // session keeps a private set and never changes the researcher's.
+        .env(
+            "REB_JS_INVOCATION_SITE_STORE",
+            agent.join("js-invocation-sites-v1.json"),
+        )
         .env("REB_NATIVE_WASM_DISPATCH", switch(options.wasm_dispatch))
         .env(
             "REB_NATIVE_WASM_CALL_INDIRECT",

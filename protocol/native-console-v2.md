@@ -1,5 +1,9 @@
 # Native Console v2
 
+[Native Console v3](native-console-v3.md) adds the separately armed
+document-start script experiment on top of this contract. Everything below
+remains current and keeps working without it.
+
 Origin Trace executes explicit mutable main-world console commands through the
 native console protocol. **Disposable browser session is the default**, including
 when a live capture has documents. It launches a separate custom Brave profile.

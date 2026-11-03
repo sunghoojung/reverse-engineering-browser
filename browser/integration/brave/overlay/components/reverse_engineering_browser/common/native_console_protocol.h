@@ -25,8 +25,21 @@ inline constexpr char kNativeConsoleSwitch[] = "reb-native-console";
 // Binds this protocol to the browser a live capture is already using.
 // Remote debugging may stay enabled. Losing the socket must not exit that browser.
 inline constexpr char kNativeConsoleLiveBindingSwitch[] = "reb-native-console-live-binding";
+// Permits the separately armed document-start script experiment in this browser
+// session. The switch alone arms nothing: it only lets the owner register
+// scripts later, and its absence makes an arm request fail closed.
+inline constexpr char kNativeConsoleDocumentStartSwitch[] = "reb-native-console-document-start";
 
-enum class NativeConsoleOperation : std::uint16_t { kTargets = 1, kEvaluate = 2, kRuntime = 3 };
+inline constexpr std::uint32_t kNativeConsoleDocumentStartScriptLimit = 4;
+inline constexpr std::uint32_t kNativeConsoleDocumentStartSourceLimit = 4096;
+inline constexpr std::uint32_t kNativeConsoleDocumentStartTotalSourceLimit = 8192;
+
+enum class NativeConsoleOperation : std::uint16_t {
+  kTargets = 1,
+  kEvaluate = 2,
+  kRuntime = 3,
+  kDocumentStart = 4,
+};
 enum class NativeConsoleStatus : std::uint16_t {
   kOk,
   kMalformed,
@@ -49,8 +62,15 @@ enum class NativeConsoleType : std::uint16_t {
   kPromise,
   kTargets,
   kRuntime,
+  kDocumentStart,
 };
 inline constexpr std::uint16_t kNativeConsoleTruncated = 1;
+// Set only on a target listing, and only when this browser session was launched
+// with the document-start switch. An older browser leaves it clear, so the owner
+// refuses to send operation 4 instead of breaking a working v2 session.
+inline constexpr std::uint16_t kNativeConsoleDocumentStartSupported = 2;
+inline constexpr std::uint16_t kNativeConsoleResponseFlags =
+    kNativeConsoleTruncated | kNativeConsoleDocumentStartSupported;
 
 // Same-machine, little-endian records. No pointers, padding-dependent payloads,
 // JSON parsing, or allocation based on unchecked peer lengths.
@@ -97,6 +117,12 @@ struct NativeConsoleTarget final {
   if (request.operation == NativeConsoleOperation::kTargets) {
     return request.target_id == 0 && request.source_bytes == 0;
   }
+  // Document-start scripts belong to the session, not to one selected document,
+  // so operation 4 carries no target and can never be pinned to a stale one.
+  if (request.operation == NativeConsoleOperation::kDocumentStart) {
+    return request.target_id == 0 && request.source_bytes > 0 &&
+           request.source_bytes <= kNativeConsolePayloadLimit;
+  }
   return (request.operation == NativeConsoleOperation::kEvaluate ||
           request.operation == NativeConsoleOperation::kRuntime) &&
          request.target_id != 0 && request.source_bytes > 0 &&
@@ -110,8 +136,12 @@ struct NativeConsoleTarget final {
   if (response.magic != kNativeConsoleMagic || response.version != kNativeConsoleVersion ||
       response.request_id != request_id || response.reserved != 0 ||
       response.status > NativeConsoleStatus::kDisconnected ||
-      response.type > NativeConsoleType::kRuntime ||
-      (response.flags & ~kNativeConsoleTruncated) != 0) {
+      response.type > NativeConsoleType::kDocumentStart ||
+      (response.flags & ~kNativeConsoleResponseFlags) != 0) {
+    return false;
+  }
+  if ((response.flags & kNativeConsoleDocumentStartSupported) != 0 &&
+      response.type != NativeConsoleType::kTargets) {
     return false;
   }
   if (response.type == NativeConsoleType::kTargets) {
@@ -120,7 +150,8 @@ struct NativeConsoleTarget final {
            response.payload_bytes == response.item_count * sizeof(NativeConsoleTarget);
   }
   return response.item_count == 0 &&
-         response.payload_bytes <= (response.type == NativeConsoleType::kRuntime
+         response.payload_bytes <= (response.type == NativeConsoleType::kRuntime ||
+                                            response.type == NativeConsoleType::kDocumentStart
                                         ? kNativeConsolePayloadLimit
                                         : kNativeConsoleTextLimit);
 }
@@ -135,6 +166,8 @@ struct NativeConsoleTarget final {
     return response.type == NativeConsoleType::kTargets;
   if (request.operation == NativeConsoleOperation::kRuntime)
     return response.type == NativeConsoleType::kRuntime;
+  if (request.operation == NativeConsoleOperation::kDocumentStart)
+    return response.type == NativeConsoleType::kDocumentStart;
   return response.type < NativeConsoleType::kTargets;
 }
 

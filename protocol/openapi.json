@@ -36,7 +36,75 @@
       "2025-06-18"
     ],
     "batching": false,
-    "message_limit_bytes": 33554432
+    "message_limit_bytes": 33554432,
+    "session_start": {
+      "tool": "start_live_session",
+      "flag": "--allow-session-start",
+      "requires": "--allow-effects",
+      "cli": [
+        "reb-api",
+        "session",
+        "start"
+      ],
+      "title": "Start a live capture session",
+      "description": "Starts a new visibly labeled live capture session with named capture options: the capture browser, an Origin Trace window and every helper. When it is ready this connection moves to that session; other endpoint changes still retire the connection. Optionally opens url. Start only for an authorized target. End it with session_action end.",
+      "input": {
+        "$ref": "#/components/schemas/LiveSessionStart"
+      },
+      "result": {
+        "$ref": "#/components/schemas/LiveSessionStarted"
+      },
+      "execution": {
+        "kind": "operation",
+        "effects": [
+          "process-launch",
+          "browser-control",
+          "network-access",
+          "local-state-write",
+          "filesystem-write"
+        ],
+        "state_dependent_effects": [
+          {
+            "effects": [
+              "sensitive-capture"
+            ],
+            "when": "canvas_images is true."
+          }
+        ],
+        "uncertainties": [
+          "A timeout stops the launcher, but a browser window may already have opened before it closes."
+        ],
+        "prerequisites": [
+          {
+            "id": "session-launcher",
+            "condition": "run-live-session.sh beside this reb-api build, or REB_LIVE_SESSION_SCRIPT, and a Brave build that defines the requested native V8 flags."
+          }
+        ],
+        "confirmations": [
+          {
+            "field": "confirm_sensitive_capture",
+            "value": true,
+            "when": {
+              "properties": {
+                "canvas_images": {
+                  "const": true
+                }
+              },
+              "required": [
+                "canvas_images"
+              ]
+            }
+          }
+        ],
+        "notes": "Runs the same launcher as make live, detached from this process, so the session outlives the MCP connection until it is ended, Brave is closed, or capture expires.",
+        "sources": [
+          {
+            "path": "apps/origin-trace-backend/src/session_launch.rs",
+            "symbol": "launch"
+          }
+        ]
+      }
+    }
   },
   "paths": {
     "/api/session/context": {
@@ -275,7 +343,7 @@
       "post": {
         "operationId": "session_action",
         "summary": "Open a URL in, or end, this live capture session",
-        "description": "Drives the live session this backend belongs to. open_url opens a page in a new tab of the session's capture browser, only while native capture is recording. end closes the capture browser and stops the session. Use wait_for_events after open_url.",
+        "description": "Drives the live session this backend belongs to. open_url opens a page in a new tab of the session's capture browser, only while native capture is recording. end closes the capture browser and stops the session. Use wait_for_events after open_url. Start a new session with start_live_session (reb-api mcp --allow-session-start) or reb-api session start.",
         "tags": [
           "capture"
         ],
@@ -23462,6 +23530,144 @@
             }
           }
         ]
+      },
+      "LiveSessionStart": {
+        "type": "object",
+        "additionalProperties": false,
+        "description": "Named capture options for a new live session. Every switch is off unless set.",
+        "properties": {
+          "url": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096,
+            "description": "HTTP or HTTPS page to open once capture is ready."
+          },
+          "wasm_dispatch": {
+            "type": "boolean",
+            "default": false,
+            "description": "Sample Wasm br_table dispatch, at most 16 observations per configuration. Needs category bits 512 and 1024."
+          },
+          "wasm_call_indirect": {
+            "type": "boolean",
+            "default": false,
+            "description": "Sample Wasm call_indirect targets. Needs category bits 512 and 1024."
+          },
+          "guest_adapter": {
+            "type": "string",
+            "minLength": 2,
+            "maxLength": 4096,
+            "description": "Absolute path of a native Wasm guest adapter recipe, 1 to 8192 bytes. Requires wasm_dispatch."
+          },
+          "js_dispatch_sites": {
+            "type": "string",
+            "minLength": 2,
+            "maxLength": 4096,
+            "description": "Absolute path of a JavaScript dispatch-site file, 1 to 4096 bytes. Turns off code caching browser-wide for the session."
+          },
+          "quiet": {
+            "type": "boolean",
+            "default": false,
+            "description": "Ignore page debugger statements."
+          },
+          "category_mask": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 4095,
+            "default": 4095,
+            "description": "Native capture categories. 512 is VM, 1024 is Artifact, 1 is Canvas."
+          },
+          "duration_seconds": {
+            "type": "integer",
+            "minimum": 60,
+            "maximum": 3600,
+            "default": 3600,
+            "description": "Capture expires after this many seconds."
+          },
+          "localhost_only": {
+            "type": "boolean",
+            "default": false,
+            "description": "Route the capture browser's traffic to loopback only, for local fixtures."
+          },
+          "canvas_images": {
+            "type": "boolean",
+            "default": false,
+            "description": "Store Canvas images, which can contain sensitive page content. Requires confirm_sensitive_capture and category bits 1 and 1024."
+          },
+          "confirm_sensitive_capture": {
+            "const": true,
+            "type": "boolean",
+            "description": "The researcher authorized storing sensitive Canvas images for this target."
+          },
+          "publish_canonical_endpoint": {
+            "type": "boolean",
+            "default": false,
+            "description": "Also make this the canonical endpoint that new MCP connections use. Off by default, so concurrent agent sessions do not replace each other's."
+          },
+          "brave_binary": {
+            "type": "string",
+            "minLength": 2,
+            "maxLength": 4096,
+            "description": "Absolute path of the Brave executable. Default: REB_BRAVE_BINARY, then Brave Browser Development next to the Origin Trace app, then the checkout build."
+          },
+          "timeout_seconds": {
+            "type": "integer",
+            "minimum": 10,
+            "maximum": 600,
+            "default": 180,
+            "description": "How long to wait for the browser and capture to be ready."
+          }
+        }
+      },
+      "LiveSessionStarted": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "session_id",
+          "endpoint",
+          "instance_id",
+          "canonical_endpoint",
+          "options",
+          "url_opened"
+        ],
+        "properties": {
+          "session_id": {
+            "$ref": "#/components/schemas/Uint64String"
+          },
+          "endpoint": {
+            "type": "string",
+            "maxLength": 256,
+            "description": "Loopback root of the new session's backend."
+          },
+          "instance_id": {
+            "type": "string",
+            "maxLength": 128
+          },
+          "canonical_endpoint": {
+            "type": "boolean"
+          },
+          "options": {
+            "$ref": "#/components/schemas/LiveSessionStart"
+          },
+          "url_opened": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Null when no url was given."
+          },
+          "session_dir": {
+            "type": "string",
+            "description": "CLI only. The MCP tool omits local paths."
+          },
+          "endpoint_file": {
+            "type": "string",
+            "description": "CLI only."
+          },
+          "log_file": {
+            "type": "string",
+            "description": "CLI only."
+          }
+        }
       }
     }
   },

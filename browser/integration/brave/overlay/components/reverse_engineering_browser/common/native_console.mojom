@@ -18,3 +18,26 @@ interface NativeConsoleAgent {
            uint64 expires_at_monotonic_us,
            string source) => (uint16 status, uint16 type, string text, bool truncated);
 };
+
+// Process-wide document-start script delivery for the separately armed
+// experiment. The browser pushes the set before a renderer process launches, so
+// a process created after arming holds it before its first document commits.
+// Arm replies with the number of scripts this renderer can actually run, so the
+// owner can tell "never received the set" from "ran and reported nothing".
+interface NativeConsoleScriptClient {
+  Arm(uint64 generation, array<uint8> scripts) => (uint32 armed);
+};
+
+interface NativeConsoleScriptHost {
+  BindClient(pending_remote<NativeConsoleScriptClient> client);
+  // One bounded page-JavaScript observation. The document token resolves this
+  // record to a nonsecret document ID among the sending process's own frames;
+  // it is never published and never grants console execution ownership.
+  Observed(uint64 generation,
+           uint64 script_id,
+           uint64 frame_id,
+           mojo_base.mojom.UnguessableToken document,
+           uint32 record,
+           bool truncated,
+           string text);
+};

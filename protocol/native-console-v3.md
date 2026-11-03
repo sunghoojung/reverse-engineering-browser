@@ -73,7 +73,9 @@ work, no URL guessing beyond the declared rule, and no navigation blocking.
 - The snippet is compiled as `(function(report){ … })` with resource name
   `reb-console-document-start://<script_id>`, so its stack frames and errors are
   identifiable and its line numbers are offset by one from the registered
-  source.
+  source. The wrapper exists to supply `report`; it is not a sandbox, and a
+  snippet runs with the page's full main-world authority, exactly like an
+  explicit console command.
 - Execution is synchronous, bounded by a 50 ms watchdog, and runs without a
   microtask checkpoint. Exceeding the budget terminates that execution and
   records a `script_error`; it does not roll back what already happened.
@@ -89,10 +91,12 @@ in the `unsupported` field of the experiment state rather than silently skipped.
 
 ## Output
 
-A snippet emits records by calling `report(value)`. `value` must be a string of
-at most 512 UTF-8 bytes, a number, or a boolean. Any other argument is refused
-and counted: reading an object would require page-controlled property access,
-so a snippet that wants structure formats its own text.
+A snippet emits records by calling `report(value)`. `value` must be a string, a
+number, a boolean or a bigint; a string longer than 512 UTF-8 bytes is kept as a
+visibly truncated prefix. Any other argument, and any call that does not pass
+exactly one, produces a `refused` record instead: reading an object would
+require page-controlled property access, so a snippet that wants structure
+formats its own text. The harness never parses that text.
 
 Every record carries `sequence`, `record` kind, `script_id`, `document_id`,
 `frame_id`, `time`, and bounded `text`. `document_id` is a monotonic nonsecret
@@ -119,23 +123,41 @@ never as instructions, and never as proof of what the page did.
 
 ### Reaching every document
 
-The owner pushes the armed set to a renderer process before that process
-launches, so a process created after arming has the set before its first
-document. A renderer that has not acknowledged the current generation cannot
-have run it, and the browser counts a matching commit in that process as
-`missed_documents`. Documents that were already open when the set was armed are
-not retroactively injected; reload them. `matched_documents` and
-`reported_documents` are both reported, and `reported_documents` lags
-`matched_documents` by the renderer's asynchronous report.
+A renderer process connects to the registry before any of its frames exist, so a
+process created after arming receives the set before its first document commits.
+Each renderer acknowledges the exact number of scripts it can run, and the
+browser marks that renderer ready only on an exact match: a renderer that
+refused or partially decoded the set keeps counting as pending.
+
+`pending_renderer_processes` is therefore a precise readiness signal. Zero means
+every live renderer holds the current generation, so a document created now runs
+it. A positive value is a readiness gap, not a record loss. Documents that were
+already open when the set was armed are never retroactively injected; reload
+them once the count reaches zero.
+
+Per script, `injected_documents` counts the documents that actually ran it,
+`records` counts everything it produced, and `refused` counts its budget and
+argument refusals. The output envelope also reports `unattributed` for a record
+whose document did not resolve to an eligible document in the sending process,
+and `stale` for a record from a generation or script that is no longer armed.
 
 ## Wire
 
 Operation **4** carries a bounded UTF-8 JSON command with `target_id == 0`: the
 experiment belongs to the session, not to one selected document, so it can never
 be pinned to or satisfied by a stale document generation. Response type **12**
-carries a bounded JSON result. Commands are `arm`, `clear`, `state` and
-`output`. Request and response headers, authentication, the 64-byte hello and
-every v2 limit are unchanged.
+carries a bounded JSON result. Request and response headers, authentication, the
+64-byte hello and every v2 limit are unchanged.
+
+| Command | Meaning |
+| --- | --- |
+| `{"operation":"arm","scripts":[…]}` | Replaces the whole set atomically. A refusal leaves the previous set and its output exactly as they were. Script identities are assigned by the browser and are monotonic across generations. |
+| `{"operation":"clear"}` | Removes every script and its output. |
+| `{"operation":"state","after":"<sequence>"}` | Registry, counters and a bounded non-draining output page after that sequence. |
+
+Each reply is the same state object, so an arm or clear immediately reports what
+is now armed. Target listings and document-start results are produced by the
+browser process; a renderer that claims either reply type is malformed.
 
 Response flag **2** (`document-start supported`) appears only on a target
 listing, and only when that browser session carries the switch. An older v2
@@ -148,7 +170,7 @@ helpers, backend, packaged assets and browser are rebuilt together.
 
 | Surface | Operation |
 | --- | --- |
-| `GET /api/native-console/document-start` | `get_native_console_document_start`. Read-only: reports availability, the armed set, counters and a bounded non-draining output page. It never arms, clears, drains, launches, or retires anything. |
+| `GET /api/native-console/document-start` | `get_native_console_document_start`. Read-only: reports availability, the armed set, counters and a bounded non-draining output page after an optional `after_sequence`. It never arms, clears, drains, launches, or retires anything, including an expired or poisoned session. |
 | `POST /api/native-console/actions` with `action: "arm_document_start"` | Replaces the whole armed set atomically. Requires `confirm_document_start: true`. |
 | `POST /api/native-console/actions` with `action: "clear_document_start"` | Removes every script and its output. |
 | `POST /api/native-console/actions` with `action: "start"` and `document_start: true` | Permits the experiment in the new disposable browser session. |
@@ -172,8 +194,8 @@ and response shapes. Responses from the document-start surfaces report
 | Rule origin / path prefix | 256 bytes each |
 | Fixed script record / armed set | 4632 bytes / 18528 bytes |
 | Report value | 512 UTF-8 bytes, primitives only |
-| Records per document | 64, then `refused` |
-| Tracked documents per renderer | 32, then `refused` |
+| Records per document | 64, then one `refused` notice, then nothing |
+| Tracked document budgets per renderer | 32, oldest recycled |
 | Browser output ring | 128 records; visible saturating drop count |
 | Output page | 32 records per read |
 | Injection watchdog | 50 ms, synchronous, no microtask checkpoint |
@@ -228,8 +250,10 @@ matching browser, backend and packaged assets, the following remain required.
    when the set was armed must not be injected until it is reloaded.
 5. **Limits and gaps.** Register four scripts, then a fifth; register an
    oversized snippet; emit more than 64 records from one document; emit a
-   non-primitive report value. Each must be refused with its visible counter.
-   Fill the ring and confirm the drop count rises and no record is fabricated.
+   non-primitive report value. Each must be refused with its visible counter,
+   and a refusal must leave the previously armed set untouched. Fill the ring
+   and confirm the drop count rises and no record is fabricated. Confirm
+   `pending_renderer_processes` reaches zero before relying on injection.
 6. **Lifetime.** Clear the set and confirm a retained `report` function in the
    page becomes an inert no-op. Disconnect, and confirm the next new document
    runs nothing. Let the session expire and confirm the same.

@@ -107,6 +107,28 @@ The explicit disposable root is resolved at startup to match Chromium's
 canonical profile paths, including macOS `/tmp` and `/var` aliases. An invalid
 root stays ineligible rather than admitting a fallback browser profile.
 
+### Document-start scripts
+
+Patch 0016 adds the separately armed document-start script experiment. It needs
+`--reb-native-console-document-start` on the browser session; without it the
+browser never advertises support, the registry refuses to bind a renderer, and
+arming fails closed. The switch alone arms nothing.
+
+The browser process owns the armed set and the bounded output ring. It pushes
+the set over a process-wide Mojo interface bound in
+`BindHostReceiverForRenderer`, so a renderer created after arming holds the set
+before its first document commits, and it only counts a renderer as ready once
+that renderer acknowledges the exact generation it can run.
+
+The renderer injects at main-world script-context creation, which Blink performs
+before any script can run in that context. Matching is the dependency-free
+`common/native_console_document_start.h` decision shared with the browser and
+the offline check: one exact serialized origin, exactly one frame kind, and an
+optional literal path prefix. Workers, non-main worlds and non-HTTP(S)
+documents are never reached. Snippet output is bounded page-JavaScript
+observation, never evidence. See
+[Native Console v3](../../../protocol/native-console-v3.md).
+
 ## Pre-initialization patches
 
 `patches/init/` holds brave-core backports that Brave's own initialization

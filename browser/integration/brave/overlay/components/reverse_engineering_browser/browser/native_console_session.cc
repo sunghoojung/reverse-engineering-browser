@@ -34,6 +34,7 @@
 #include "base/threading/platform_thread.h"
 #include "base/time/time.h"
 #include "base/values.h"
+#include "brave/components/reverse_engineering_browser/browser/native_console_document_start.h"
 #include "brave/components/reverse_engineering_browser/browser/native_local_ipc_client.h"
 #include "brave/components/reverse_engineering_browser/common/native_console.mojom.h"
 #include "brave/components/reverse_engineering_browser/common/native_console_io.h"
@@ -207,14 +208,20 @@ class Session final {
   void Retire() {
     DCHECK_CURRENTLY_ON(content::BrowserThread::UI);
     targets_.clear();
+    documents_.clear();
     observers_.clear();
     activity_.clear();
+    // Losing the owner must not leave armed scripts running in new documents.
+    NativeConsoleDocumentStartRegistry::Get().Clear();
     // The caller owns the disposable browser lifetime. Loss of the control
     // channel must not leave a mutable experiment running without its owner.
     if (retired_)
       std::move(retired_).Run();
   }
 
+ public:
+  // Public so the document-start registry applies exactly this admission rule
+  // rather than a second copy of it.
   bool Eligible(content::RenderFrameHost* frame) const {
     // BrowserContext paths identify profiles (for example <user-data-dir>/Default),
     // not the user-data root. Only profiles inside the owned disposable root qualify.
@@ -224,6 +231,34 @@ class Session final {
             frame->GetLastCommittedOrigin().scheme() == "https");
   }
 
+  // One monotonic identity space for Console targets and document-start
+  // records. A document that is not a current target still gets a stable
+  // nonsecret ID, remembered in a bounded table keyed by its exact generation.
+  std::uint64_t DocumentId(content::RenderFrameHost* frame) {
+    DCHECK_CURRENTLY_ON(content::BrowserThread::UI);
+    if (!Eligible(frame))
+      return 0;
+    for (const auto& target : targets_) {
+      if (target.document.AsRenderFrameHostIfValid() == frame)
+        return target.id;
+    }
+    const auto token = frame->GetDocumentToken().value();
+    for (const auto& entry : documents_) {
+      if (entry.first == token)
+        return entry.second;
+    }
+    if (!next_target_)
+      return 0;
+    // Recycling the oldest entry only relabels a long-idle document that
+    // reports again; it never drops or rewrites a retained record.
+    if (documents_.size() >= 256)
+      documents_.pop_front();
+    const auto id = next_target_++;
+    documents_.emplace_back(token, id);
+    return id;
+  }
+
+ private:
   void Dispatch(NativeConsoleRequest request,
                 std::string source,
                 base::TimeTicks deadline,
@@ -240,6 +275,12 @@ class Session final {
     if (!base::IsStringUTF8(source) || source.find('\0') != std::string::npos) {
       reply->Fail(NativeConsoleStatus::kMalformed,
                   "JavaScript must be valid UTF-8 without NUL bytes");
+      return;
+    }
+    // Session-scoped: the armed set belongs to the console session, never to a
+    // selected document, so this path takes no target and never goes stale.
+    if (request.operation == NativeConsoleOperation::kDocumentStart) {
+      DocumentStart(source, std::move(reply));
       return;
     }
     Target* selected = nullptr;
@@ -293,6 +334,8 @@ class Session final {
                              "Document changed during execution; side effects may have occurred");
                 return;
               }
+              // Target listings and document-start results are produced by the
+              // browser process; a renderer that claims either is malformed.
               if (status > static_cast<std::uint16_t>(NativeConsoleStatus::kDisconnected) ||
                   type > static_cast<std::uint16_t>(NativeConsoleType::kRuntime) ||
                   type == static_cast<std::uint16_t>(NativeConsoleType::kTargets) ||
@@ -405,7 +448,13 @@ class Session final {
           std::min(2147483647u, activity_drops_ + static_cast<unsigned>(before - activity_.size()));
     }
     reply->header.type = NativeConsoleType::kTargets;
-    reply->header.flags = truncated ? kNativeConsoleTruncated : 0;
+    // The owner learns from the listing whether this browser session permits
+    // document-start scripts at all, so it never sends operation 4 to a browser
+    // that would reject it and retire a working session.
+    reply->header.flags = static_cast<std::uint16_t>(
+        (truncated ? kNativeConsoleTruncated : 0) |
+        (NativeConsoleDocumentStartRegistry::IsPermitted() ? kNativeConsoleDocumentStartSupported
+                                                           : 0));
     pending_ = targets_.size();
     if (!pending_) {
       FinishList(std::move(reply));
@@ -434,7 +483,7 @@ class Session final {
     for (const auto& target : targets_) {
       if (!target.complete || target.renderer_document.is_empty() ||
           !Eligible(target.document.AsRenderFrameHostIfValid())) {
-        reply->header.flags = kNativeConsoleTruncated;
+        reply->header.flags |= kNativeConsoleTruncated;
         continue;
       }
       NativeConsoleTarget record;
@@ -459,6 +508,55 @@ class Session final {
       reply->payload.append(reinterpret_cast<const char*>(&record), sizeof(record));
       ++reply->header.item_count;
     }
+    reply->header.payload_bytes = static_cast<std::uint32_t>(reply->payload.size());
+    reply->ready.Signal();
+  }
+
+  void DocumentStart(const std::string& source, std::shared_ptr<Reply> reply) {
+    DCHECK_CURRENTLY_ON(content::BrowserThread::UI);
+    const auto failure = [](const std::string& text) {
+      return base::DictValue().Set("status", "error").Set("text", text);
+    };
+    auto& registry = NativeConsoleDocumentStartRegistry::Get();
+    const auto command = base::JSONReader::ReadDict(source, base::JSON_PARSE_RFC);
+    const auto* operation = command ? command->FindString("operation") : nullptr;
+    base::DictValue result;
+    if (!operation) {
+      result = failure("Malformed document-start command");
+    } else if (*operation == "arm") {
+      const auto* scripts = command->FindList("scripts");
+      std::string error;
+      if (command->size() != 2 || !scripts)
+        result = failure("arm takes exactly operation and scripts");
+      else if (!registry.Arm(*scripts, error))
+        result = failure(error);
+      else
+        result = registry.State(0);
+    } else if (*operation == "clear") {
+      if (command->size() != 1) {
+        result = failure("clear takes exactly operation");
+      } else {
+        registry.Clear();
+        result = registry.State(0);
+      }
+    } else if (*operation == "state") {
+      const auto* cursor = command->FindString("after");
+      std::uint64_t after = 0;
+      if (command->size() != 2 || !cursor || !base::StringToUint64(*cursor, &after))
+        result = failure("state takes exactly operation and a decimal after cursor");
+      else
+        result = registry.State(after);
+    } else {
+      result = failure("Unknown document-start operation");
+    }
+    if (!base::JSONWriter::Write(result, &reply->payload) ||
+        reply->payload.size() > kNativeConsolePayloadLimit) {
+      reply->payload.clear();
+      reply->Fail(NativeConsoleStatus::kMalformed,
+                  "Document-start result exceeded bounded transport");
+      return;
+    }
+    reply->header.type = NativeConsoleType::kDocumentStart;
     reply->header.payload_bytes = static_cast<std::uint32_t>(reply->payload.size());
     reply->ready.Signal();
   }
@@ -502,6 +600,8 @@ class Session final {
   // Metadata and weak document references only; no V8 objects are retained.
   base::FilePath user_data_dir_;
   std::vector<Target> targets_;
+  // Exact document generations only; recycled oldest-first and never published.
+  std::deque<std::pair<base::UnguessableToken, std::uint64_t>> documents_;
   std::uint64_t next_target_ = 1;
   std::size_t pending_ = 0;
   bool started_ = false;
@@ -542,6 +642,14 @@ base::OnceClosure NativeConsoleRetireCallback() {
 void StartNativeConsoleSession(base::OnceClosure retired) {
   if (IsNativeConsoleEnabled())
     Session::Get().Start(std::move(retired));
+}
+
+bool IsNativeConsoleDocument(content::RenderFrameHost* frame) {
+  return Session::Get().Eligible(frame);
+}
+
+std::uint64_t NativeConsoleDocumentId(content::RenderFrameHost* frame) {
+  return Session::Get().DocumentId(frame);
 }
 
 }  // namespace reb

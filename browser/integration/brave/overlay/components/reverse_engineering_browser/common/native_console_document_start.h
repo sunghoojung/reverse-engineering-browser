@@ -53,9 +53,8 @@ static_assert(sizeof(NativeConsoleDocumentStartScript) == 4632);
 static_assert(std::is_trivially_copyable_v<NativeConsoleDocumentStartRule>);
 static_assert(std::is_trivially_copyable_v<NativeConsoleDocumentStartScript>);
 // No padding: the fixed records cross Mojo and the offline check as exact bytes.
-static_assert(sizeof(NativeConsoleDocumentStartRule) == 8 +
-                                                            kNativeConsoleDocumentStartOriginLimit +
-                                                            kNativeConsoleDocumentStartPathLimit);
+static_assert(sizeof(NativeConsoleDocumentStartRule) ==
+              8 + kNativeConsoleDocumentStartOriginLimit + kNativeConsoleDocumentStartPathLimit);
 static_assert(sizeof(NativeConsoleDocumentStartScript) ==
               16 + sizeof(NativeConsoleDocumentStartRule) + kNativeConsoleDocumentStartSourceLimit);
 
@@ -83,7 +82,8 @@ enum class NativeConsoleDocumentStartRecord : std::uint32_t {
   kRefused = 4,      // A report argument, per-document budget or stale generation.
 };
 
-[[nodiscard]] inline constexpr bool IsNativeConsoleDocumentStartRecord(std::uint32_t kind) noexcept {
+[[nodiscard]] inline constexpr bool IsNativeConsoleDocumentStartRecord(
+    std::uint32_t kind) noexcept {
   return kind >= static_cast<std::uint32_t>(NativeConsoleDocumentStartRecord::kInjected) &&
          kind <= static_cast<std::uint32_t>(NativeConsoleDocumentStartRecord::kRefused);
 }
@@ -155,7 +155,8 @@ namespace native_console_document_start_detail {
 
 // `scheme://host[:port]` exactly as url::Origin::Serialize writes it: lowercase
 // ASCII, no path, no credentials, no trailing slash, no default port.
-[[nodiscard]] inline bool IsValidNativeConsoleDocumentStartOrigin(std::string_view origin) noexcept {
+[[nodiscard]] inline bool IsValidNativeConsoleDocumentStartOrigin(
+    std::string_view origin) noexcept {
   std::string_view host = origin;
   if (host.starts_with("http://"))
     host.remove_prefix(7);

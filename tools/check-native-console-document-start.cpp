@@ -55,8 +55,8 @@ NativeConsoleDocumentStartScript MakeScript(std::uint64_t id,
 }
 
 void CheckOrigins() {
-  for (const auto* origin : {"http://127.0.0.1:8080", "https://example.test",
-                             "http://localhost:1", "https://a.b.c.test:65535"}) {
+  for (const auto* origin : {"http://127.0.0.1:8080", "https://example.test", "http://localhost:1",
+                             "https://a.b.c.test:65535"}) {
     Check(IsValidNativeConsoleDocumentStartOrigin(origin), origin);
   }
   // A rule may not carry a pattern, a path, credentials, a trailing slash, an
@@ -118,8 +118,7 @@ void CheckMatching() {
   Check(!NativeConsoleDocumentStartMatches(top, "https://fixture.test", "/other", true),
         "a different path is refused");
 
-  const auto child =
-      MakeRule("http://127.0.0.1:8080", "", kNativeConsoleDocumentStartChildFrame);
+  const auto child = MakeRule("http://127.0.0.1:8080", "", kNativeConsoleDocumentStartChildFrame);
   Check(NativeConsoleDocumentStartMatches(child, "http://127.0.0.1:8080", "/anything", false),
         "absent prefix matches any path in the declared origin");
   Check(!NativeConsoleDocumentStartMatches(child, "http://127.0.0.1:8080", "/anything", true),
@@ -129,8 +128,7 @@ void CheckMatching() {
 
   // An invalid rule matches nothing, so a corrupted record cannot widen scope.
   auto broken = top;
-  broken.frame_flags =
-      kNativeConsoleDocumentStartTopFrame | kNativeConsoleDocumentStartChildFrame;
+  broken.frame_flags = kNativeConsoleDocumentStartTopFrame | kNativeConsoleDocumentStartChildFrame;
   Check(!IsValidNativeConsoleDocumentStartRule(broken), "both frame kinds refused");
   Check(!NativeConsoleDocumentStartMatches(broken, "https://fixture.test", "/lab/x", true),
         "an invalid rule never matches");
@@ -185,8 +183,8 @@ void CheckScriptsAndCodec() {
   std::vector<NativeConsoleDocumentStartScript> five;
   for (std::uint64_t id = 1; id <= kNativeConsoleDocumentStartScriptLimit + 1; ++id)
     five.push_back(MakeScript(id, rule, "report('x');"));
-  std::array<std::uint8_t, kNativeConsoleDocumentStartSetBytes +
-                               sizeof(NativeConsoleDocumentStartScript)>
+  std::array<std::uint8_t,
+             kNativeConsoleDocumentStartSetBytes + sizeof(NativeConsoleDocumentStartScript)>
       wide{};
   Check(EncodeNativeConsoleDocumentStartScripts(five, wide) == 0, "more than four scripts refused");
 

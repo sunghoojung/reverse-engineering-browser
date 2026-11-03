@@ -29,6 +29,7 @@ class NativeConsoleAgent final : public content::RenderFrameObserver,
   void OnDestruct() override;
   void Bind(mojo::PendingAssociatedReceiver<mojom::NativeConsoleAgent> receiver);
   void Describe(DescribeCallback callback) override;
+  void DidCreateScriptContext(v8::Local<v8::Context> context, int world_id) override;
   void WillReleaseScriptContext(v8::Local<v8::Context> context, int world_id) override;
   void DetailedConsoleMessageAdded(const std::u16string& message,
                                    const std::u16string& source,

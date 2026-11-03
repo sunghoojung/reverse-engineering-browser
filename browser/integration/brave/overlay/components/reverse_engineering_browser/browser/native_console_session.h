@@ -6,7 +6,13 @@
 #ifndef BRAVE_COMPONENTS_REVERSE_ENGINEERING_BROWSER_BROWSER_NATIVE_CONSOLE_SESSION_H_
 #define BRAVE_COMPONENTS_REVERSE_ENGINEERING_BROWSER_BROWSER_NATIVE_CONSOLE_SESSION_H_
 
+#include <cstdint>
+
 #include "base/functional/callback.h"
+
+namespace content {
+class RenderFrameHost;
+}
 
 namespace reb {
 
@@ -19,6 +25,15 @@ namespace reb {
 // closure so the Chrome browser client can exit that browser.
 [[nodiscard]] base::OnceClosure NativeConsoleRetireCallback();
 void StartNativeConsoleSession(base::OnceClosure retired);
+
+// True for an active HTTP(S) document in the Console's own bound profile. The
+// document-start registry admits an observation only for such a document.
+[[nodiscard]] bool IsNativeConsoleDocument(content::RenderFrameHost* frame);
+// Monotonic nonsecret document identity shared with the Console target listing,
+// so a target and a document-start record name the same document by the same
+// ID. The renderer's document token is never published. Bounded; returns 0 when
+// the frame is not an eligible Console document.
+[[nodiscard]] std::uint64_t NativeConsoleDocumentId(content::RenderFrameHost* frame);
 
 }  // namespace reb
 

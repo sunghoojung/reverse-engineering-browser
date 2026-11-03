@@ -5,7 +5,6 @@
 
 #include "brave/components/reverse_engineering_browser/renderer/native_console_agent.h"
 
-#include <algorithm>
 #include <array>
 #include <charconv>
 #include <cmath>
@@ -15,15 +14,12 @@
 
 #include "base/command_line.h"
 #include "base/functional/bind.h"
-#include "base/memory/raw_ptr.h"
-#include "base/no_destructor.h"
 #include "base/strings/string_util.h"
 #include "base/strings/utf_string_conversions.h"
-#include "base/synchronization/condition_variable.h"
-#include "base/synchronization/lock.h"
-#include "base/task/thread_pool.h"
 #include "base/time/time.h"
 #include "brave/components/reverse_engineering_browser/common/native_console_protocol.h"
+#include "brave/components/reverse_engineering_browser/renderer/native_console_deadline.h"
+#include "brave/components/reverse_engineering_browser/renderer/native_console_document_start.h"
 #include "content/public/renderer/render_frame.h"
 #include "third_party/blink/public/common/associated_interfaces/associated_interface_registry.h"
 #include "third_party/blink/public/platform/scheduler/web_agent_group_scheduler.h"
@@ -33,77 +29,6 @@
 
 namespace reb {
 namespace {
-
-// Only the watchdog and the renderer execution thread share this state. The
-// lock ensures a late watchdog can never terminate a subsequent page task or
-// access an isolate after this evaluation has released it. No V8 handles cross
-// threads. TerminateExecution is explicitly safe to call from another thread.
-class ExecutionDeadline final {
- public:
-  static ExecutionDeadline& Get() {
-    static base::NoDestructor<ExecutionDeadline> deadline;
-    return *deadline;
-  }
-  bool Begin(v8::Isolate* isolate) {
-    base::AutoLock lock(lock_);
-    if (isolate_)
-      return false;
-    isolate_ = isolate;
-    expires_ = base::TimeTicks::Now() + base::Milliseconds(kNativeConsoleExecutionMillis);
-    expired_ = false;
-    if (!worker_running_) {
-      worker_running_ = base::ThreadPool::PostTask(
-          FROM_HERE, {base::WithBaseSyncPrimitives(), base::TaskPriority::USER_BLOCKING},
-          base::BindOnce(&ExecutionDeadline::Watch, base::Unretained(this)));
-      if (!worker_running_) {
-        isolate_ = nullptr;
-        return false;
-      }
-    }
-    changed_.Signal();
-    return true;
-  }
-  bool Finish() {
-    base::AutoLock lock(lock_);
-    if (expired_)
-      isolate_->CancelTerminateExecution();
-    isolate_ = nullptr;
-    changed_.Signal();
-    return expired_;
-  }
-
- private:
-  friend class base::NoDestructor<ExecutionDeadline>;
-  ExecutionDeadline() = default;
-  void Watch() {
-    base::AutoLock lock(lock_);
-    for (;;) {
-      if (!isolate_) {
-        const auto idle_until = base::TimeTicks::Now() + base::Milliseconds(500);
-        while (!isolate_ && base::TimeTicks::Now() < idle_until)
-          changed_.TimedWait(std::max(base::TimeDelta(), idle_until - base::TimeTicks::Now()));
-        if (!isolate_) {
-          worker_running_ = false;
-          return;
-        }
-      }
-      if (!expired_ && base::TimeTicks::Now() >= expires_) {
-        expired_ = true;
-        isolate_->TerminateExecution();
-      }
-      if (expired_)
-        changed_.Wait();
-      else
-        changed_.TimedWait(std::max(base::TimeDelta(), expires_ - base::TimeTicks::Now()));
-    }
-  }
-  base::Lock lock_;
-  base::ConditionVariable changed_{&lock_};
-  raw_ptr<v8::Isolate> isolate_ = nullptr;
-  base::TimeTicks expires_;
-  bool expired_ = false;
-  bool worker_running_ = false;
-};
 
 std::string CopyString(v8::Isolate* isolate, v8::Local<v8::String> string, bool& truncated) {
   std::array<char, kNativeConsoleTextLimit> buffer{};
@@ -209,6 +134,14 @@ void NativeConsoleAgent::Describe(DescribeCallback callback) {
                               : std::nullopt);
 }
 
+// Blink creates the main-world context before any script can run in it, so a
+// matching snippet observes this document before its own scripts. Nothing runs
+// here unless the separate document-start experiment is armed.
+void NativeConsoleAgent::DidCreateScriptContext(v8::Local<v8::Context> context, int world_id) {
+  if (world_id == 0)
+    InjectNativeConsoleDocumentStart(render_frame(), context);
+}
+
 void NativeConsoleAgent::WillReleaseScriptContext(v8::Local<v8::Context> context, int world_id) {
   if (world_id == 0)
     runtime_.Reset();
@@ -250,8 +183,8 @@ void NativeConsoleAgent::Runtime(const base::UnguessableToken& document,
     return;
   }
   v8::Context::Scope entered(context);
-  auto& deadline = ExecutionDeadline::Get();
-  if (!deadline.Begin(isolate)) {
+  auto& deadline = NativeConsoleDeadline::Get();
+  if (!deadline.Begin(isolate, kNativeConsoleExecutionMillis)) {
     reply(NativeConsoleStatus::kForbidden, "Watchdog unavailable");
     return;
   }
@@ -309,8 +242,8 @@ void NativeConsoleAgent::Evaluate(const base::UnguessableToken& document,
   v8::MicrotasksScope microtasks(isolate, context->GetMicrotaskQueue(),
                                  v8::MicrotasksScope::kDoNotRunMicrotasks);
   v8::TryCatch exception(isolate);
-  auto& deadline = ExecutionDeadline::Get();
-  if (!deadline.Begin(isolate)) {
+  auto& deadline = NativeConsoleDeadline::Get();
+  if (!deadline.Begin(isolate, kNativeConsoleExecutionMillis)) {
     reply(NativeConsoleStatus::kForbidden, "Execution watchdog is unavailable");
     return;
   }

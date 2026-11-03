@@ -21,6 +21,7 @@ NATIVE_WORKER_AUTHORITY_OBJECT := $(BUILD_DIR)/browser/integration/brave/overlay
 NATIVE_WORKER_TRANSFER_GATE_OBJECT := $(BUILD_DIR)/browser/integration/brave/overlay/components/reverse_engineering_browser/browser/native_worker_transfer_gate.o
 NATIVE_PROXY_POLICY_OBJECT := $(BUILD_DIR)/browser/integration/brave/overlay/components/reverse_engineering_browser/browser/native_proxy_policy.o
 NATIVE_PROXY_POLICY_TEST := $(BUILD_DIR)/check-native-proxy-policy
+NATIVE_CONSOLE_DOCUMENT_START_TEST := $(BUILD_DIR)/check-native-console-document-start
 EVENT_TEST_BINARY := $(BUILD_DIR)/tests/event-test
 EVENT_BROKER_TEST_BINARY := $(BUILD_DIR)/tests/event-broker-test
 VM_DISPATCH_TEST_BINARY := $(BUILD_DIR)/tests/vm-dispatch-test
@@ -29,7 +30,7 @@ PAGE_GUEST_SAMPLER_TEST := $(BUILD_DIR)/tests/page-guest-sampler-test
 NATIVE_GUEST_TEST := $(BUILD_DIR)/tests/native-wasm-guest-test
 JS_DISPATCH_TEST := $(BUILD_DIR)/tests/js-dispatch-test
 ARTIFACT_TEST_BINARY := $(BUILD_DIR)/tests/artifact-test
-NATIVE_TEST_BINARIES := $(ARTIFACT_TEST_BINARY) $(EVENT_TEST_BINARY) $(EVENT_BROKER_TEST_BINARY) $(VM_DISPATCH_TEST_BINARY) $(OWNED_REGISTER_SAMPLER_TEST) $(PAGE_GUEST_SAMPLER_TEST) $(NATIVE_GUEST_TEST) $(JS_DISPATCH_TEST)
+NATIVE_TEST_BINARIES := $(ARTIFACT_TEST_BINARY) $(EVENT_TEST_BINARY) $(EVENT_BROKER_TEST_BINARY) $(VM_DISPATCH_TEST_BINARY) $(OWNED_REGISTER_SAMPLER_TEST) $(PAGE_GUEST_SAMPLER_TEST) $(NATIVE_GUEST_TEST) $(JS_DISPATCH_TEST) $(NATIVE_CONSOLE_DOCUMENT_START_TEST)
 ORIGIN_TRACE_BACKEND := apps/origin-trace-backend/target/debug/origin-trace-backend
 VM_ANALYZER := apps/origin-trace-backend/target/debug/origin-trace-vm
 
@@ -100,7 +101,11 @@ $(OWNED_VM_FIXTURE_TEST): $(BUILD_DIR)/tools/check-owned-vm-fixture.o $(BUILD_DI
 
 $(NATIVE_PROXY_POLICY_TEST): $(BUILD_DIR)/tools/check-native-proxy-policy.o $(NATIVE_PROXY_POLICY_OBJECT)
 
-$(BUILD_DIR)/tools/check-native-proxy-policy.o: CPPFLAGS += -Ibrowser/integration/brave/overlay
+# The document-start rule, codec and wire admission are header-only and
+# dependency-free, so the production decision code links without Chromium.
+$(NATIVE_CONSOLE_DOCUMENT_START_TEST): $(BUILD_DIR)/tools/check-native-console-document-start.o
+
+$(BUILD_DIR)/tools/check-native-proxy-policy.o $(BUILD_DIR)/tools/check-native-console-document-start.o: CPPFLAGS += -Ibrowser/integration/brave/overlay
 
 $(APP_BINARIES) $(NATIVE_PROXY_POLICY_TEST) $(OWNED_VM_FIXTURE_TEST) $(NATIVE_TEST_BINARIES):
 	@mkdir -p $(@D)
@@ -122,7 +127,7 @@ $(BUILD_DIR)/%.o: %.cc
 NATIVE_CPP_SOURCES := $(wildcard src/*/*.cpp apps/*/main.cpp services/*/main.cpp tests/*.cpp)
 NATIVE_OBJECTS := $(patsubst %.cpp,$(BUILD_DIR)/%.o,$(NATIVE_CPP_SOURCES)) \
 	$(NATIVE_CONSOLE_MESSAGES_OBJECT) $(NATIVE_PROBE_QUEUE_OBJECT) $(NATIVE_CONSOLE_IO_OBJECT) $(NATIVE_WORKER_SOURCE_OBJECT) $(NATIVE_WORKER_OBSERVATION_OBJECT) $(NATIVE_WORKER_TRANSFER_OBJECT) $(NATIVE_WORKER_AUTHORITY_OBJECT) $(NATIVE_WORKER_TRANSFER_GATE_OBJECT) \
-	$(NATIVE_PROXY_POLICY_OBJECT) $(BUILD_DIR)/tools/check-native-proxy-policy.o $(BUILD_DIR)/tools/decoder-test-driver.o $(BUILD_DIR)/tools/check-owned-vm-fixture.o
+	$(NATIVE_PROXY_POLICY_OBJECT) $(BUILD_DIR)/tools/check-native-proxy-policy.o $(BUILD_DIR)/tools/check-native-console-document-start.o $(BUILD_DIR)/tools/decoder-test-driver.o $(BUILD_DIR)/tools/check-owned-vm-fixture.o
 
 $(NATIVE_OBJECTS) $(BUILD_DIR)/tools/check-magic-decoder-limits.o: mk/config.mk mk/native.mk
 $(APP_BINARIES) $(NATIVE_PROXY_POLICY_TEST) $(OWNED_VM_FIXTURE_TEST) $(NATIVE_TEST_BINARIES): mk/native.mk

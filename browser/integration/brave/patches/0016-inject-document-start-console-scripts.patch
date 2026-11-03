@@ -1,0 +1,56 @@
+diff --git a/browser/brave_content_browser_client.cc b/browser/brave_content_browser_client.cc
+--- a/browser/brave_content_browser_client.cc
++++ b/browser/brave_content_browser_client.cc
+@@ -90,4 +90,5 @@
+ #include "brave/components/psst/buildflags/buildflags.h"
++#include "brave/components/reverse_engineering_browser/browser/native_console_document_start.h"
+ #include "brave/components/reverse_engineering_browser/browser/native_console_session.h"
+ #include "brave/components/reverse_engineering_browser/browser/native_probe_session.h"
+ #include "brave/components/request_otr/common/buildflags/buildflags.h"
+@@ -584,6 +585,15 @@ void BraveContentBrowserClient::BindHostReceiverForRenderer(
+         render_process_host->GetID().GetUnsafeValue(), std::move(probe_receiver));
+     return;
+   }
++  // Process-wide document-start script delivery. The registry refuses to bind
++  // unless this browser session was launched with the experiment switch.
++  if (auto script_receiver =
++          receiver.As<reb::mojom::NativeConsoleScriptHost>()) {
++    reb::NativeConsoleDocumentStartRegistry::Get().BindHost(
++        render_process_host->GetID().GetUnsafeValue(),
++        std::move(script_receiver));
++    return;
++  }
+   ChromeContentBrowserClient::BindHostReceiverForRenderer(
+       render_process_host, std::move(receiver));
+ }
+@@ -1136,4 +1145,9 @@ void BraveContentBrowserClient::AppendExtraCommandLineSwitches(
+   if (process_type == switches::kRendererProcess) {
+     if (reb::IsNativeConsoleEnabled()) {
+       command_line->AppendSwitch("reb-native-console");
++      // Permission only. A renderer that receives this switch still runs
++      // nothing until the owner explicitly arms a validated script set.
++      if (reb::NativeConsoleDocumentStartRegistry::IsPermitted()) {
++        command_line->AppendSwitch("reb-native-console-document-start");
++      }
+     }
+diff --git a/renderer/brave_content_renderer_client.cc b/renderer/brave_content_renderer_client.cc
+--- a/renderer/brave_content_renderer_client.cc
++++ b/renderer/brave_content_renderer_client.cc
+@@ -20,2 +20,3 @@
+ #include "brave/components/reverse_engineering_browser/renderer/native_console_agent.h"
++#include "brave/components/reverse_engineering_browser/renderer/native_console_document_start.h"
+ #include "brave/components/reverse_engineering_browser/renderer/native_probe_transport.h"
+@@ -145,5 +146,13 @@ void BraveContentRendererClient::RenderThreadStarted() {
+   mojo::PendingRemote<reb::mojom::NativeProbeHost> pending_probe_host;
+   content::RenderThread::Get()->BindHostReceiver(
+       pending_probe_host.InitWithNewPipeAndPassReceiver());
+   reb::NativeProbeTransport::Get().Connect(std::move(pending_probe_host));
++  // Connect before any frame exists so a process created after arming holds
++  // the set before its first document commits.
++  if (reb::IsNativeConsoleDocumentStartPermitted()) {
++    mojo::PendingRemote<reb::mojom::NativeConsoleScriptHost> pending_script_host;
++    content::RenderThread::Get()->BindHostReceiver(
++        pending_script_host.InitWithNewPipeAndPassReceiver());
++    reb::ConnectNativeConsoleDocumentStart(std::move(pending_script_host));
++  }
+ 

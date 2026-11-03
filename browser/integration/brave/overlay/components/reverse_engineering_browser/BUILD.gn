@@ -25,7 +25,10 @@ source_set("queue") {
 }
 
 source_set("console_protocol") {
-  sources = [ "common/native_console_protocol.h" ]
+  sources = [
+    "common/native_console_document_start.h",
+    "common/native_console_protocol.h",
+  ]
 }
 
 source_set("worker_metadata") {
@@ -128,6 +131,10 @@ static_library("renderer") {
     "common/native_vm_finding.h",
     "renderer/native_console_agent.cc",
     "renderer/native_console_agent.h",
+    "renderer/native_console_deadline.cc",
+    "renderer/native_console_deadline.h",
+    "renderer/native_console_document_start.cc",
+    "renderer/native_console_document_start.h",
     "renderer/native_console_runtime.cc",
     "renderer/native_console_runtime.h",
     "renderer/native_probe_transport.cc",
@@ -145,6 +152,7 @@ static_library("renderer") {
     "//mojo/public/cpp/base",
     "//mojo/public/cpp/bindings",
     "//third_party/blink/public:blink",
+    "//url",
     "//v8",
   ]
 }
@@ -157,6 +165,8 @@ source_set("browser") {
     "browser/native_artifact_capture_sink.h",
     "browser/native_artifact_socket_client.cc",
     "browser/native_artifact_socket_client.h",
+    "browser/native_console_document_start.cc",
+    "browser/native_console_document_start.h",
     "browser/native_console_session.cc",
     "browser/native_console_session.h",
     "browser/native_local_ipc_client.cc",

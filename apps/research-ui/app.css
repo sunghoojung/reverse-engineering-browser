@@ -2316,6 +2316,29 @@ body.resizing-panes-y, body.resizing-panes-y * { cursor: row-resize !important; 
 
 .native-console-value { font: 12px/18px var(--mono); overflow-wrap: anywhere; }
 .native-console-result[data-status="rejected"] .native-console-primitive { color: var(--red); }
+
+/* The document-start experiment states its own provenance on every row and
+   keeps its indicator in the header, outside the settings menu. */
+.native-console-ds-badge { height: 20px; flex-shrink: 0; max-width: 140px; overflow: hidden; padding: 0 6px; border: 1px solid var(--line); border-radius: 10px; background: transparent; color: var(--faint); font: 10px/18px var(--sans); white-space: nowrap; text-overflow: ellipsis; cursor: pointer; }
+.native-console-ds-badge[hidden] { display: none; }
+.native-console-ds-badge:hover { color: var(--text); background: var(--panel-3); }
+.native-console-ds-badge[data-state="armed"] { color: var(--amber); border-color: color-mix(in srgb, var(--amber) 45%, var(--line)); background: color-mix(in srgb, var(--amber) 10%, transparent); }
+.native-console-ds-badge[data-state="ready"] { color: var(--muted); }
+.native-console-ds { font: 11px/18px var(--sans); padding-top: 6px; }
+.native-console-ds > summary { color: var(--muted); cursor: pointer; }
+.native-console-panel[data-document-start="armed"] .native-console-ds > summary { color: var(--amber); }
+.native-console-ds input[type="text"], .native-console-ds textarea { width: 100%; min-width: 0; border: 1px solid var(--line); border-radius: 4px; background: var(--panel); color: var(--text); padding: 2px 6px; font: 11px var(--mono); }
+.native-console-ds textarea { max-height: 120px; resize: vertical; }
+.native-console-ds .native-console-setting { align-items: flex-start; flex-direction: column; gap: 2px; }
+.native-console-ds .native-console-setting:has(input[type="checkbox"]) { flex-direction: row; align-items: flex-start; }
+.native-console-ds select { width: 100%; height: 24px; border: 1px solid var(--line); border-radius: 4px; background: var(--panel); color: var(--text); font: 11px var(--sans); }
+.native-console-ds-armed { margin: 6px 0 0; padding: 0; list-style: none; }
+.native-console-ds-armed li { color: var(--muted); font: 10px/16px var(--mono); overflow-wrap: anywhere; }
+#native-console-ds-state, #native-console-ds-counters, #native-console-ds-privacy, #native-console-ds-rule-help { margin: 6px 0 0; color: var(--faint); font: 10px/16px var(--sans); overflow-wrap: anywhere; }
+.native-console-ds-record { border-left: 2px solid color-mix(in srgb, var(--amber) 55%, transparent); }
+.native-console-ds-record[data-record="script_error"] { border-left-color: var(--red); }
+.native-console-ds-provenance { display: block; padding: 0 0 2px; color: var(--faint); font: 10px/16px var(--mono); overflow-wrap: anywhere; }
+.native-console-ds-record pre { padding-left: 16px; font: 12px/18px var(--mono); overflow-wrap: anywhere; white-space: pre-wrap; }
 #screen-traffic[data-console-traffic="true"] > :not(#console-experiment-traffic) { display: none; }
 .console-experiment-traffic { min-width: 0; min-height: 0; padding: 12px; overflow: auto; flex: 1; }
 .console-experiment-traffic[hidden] { display: none; }

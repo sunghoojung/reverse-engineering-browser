@@ -58,9 +58,132 @@ def response(stream, request, kind, payload=b"", status=0, count=0, flags=0):
     stream.sendall(RESPONSE.pack(MAGIC, 2, status, request, kind, flags, count, len(payload), 0) + payload)
 
 
+def fnv1a(text):
+    value = 0xcbf29ce484222325
+    for byte in text.encode():
+        value = ((value ^ byte) * 0x100000001b3) & 0xFFFFFFFFFFFFFFFF
+    return f"{value:016x}"
+
+
+class DocumentStart:
+    """Synthetic mirror of the browser-process registry: bounded, non-draining.
+
+    It never compiles or runs JavaScript. It exists so the owner's wire
+    admission, cursor, drop counting and refusal paths are exercised by the
+    real C++ transport and the real HTTP API.
+    """
+
+    CAPACITY = 128
+    PAGE = 32
+
+    def __init__(self, permitted):
+        self.permitted = permitted
+        self.generation = 0
+        self.next_script = 1
+        self.next_sequence = 1
+        self.scripts = []
+        self.output = []
+        self.dropped = 0
+
+    def record(self, script, kind, text):
+        if len(self.output) >= self.CAPACITY:
+            self.output.pop(0)
+            self.dropped += 1
+        self.output.append({
+            "sequence": str(self.next_sequence), "record": kind,
+            "provenance": "console-document-start-script", "script_id": script["script_id"],
+            "document_id": "7", "frame_id": "99", "top_frame": script["rule"]["frame"] == "top",
+            "time": 1700000000000.0, "truncated": False, "text": text,
+        })
+        self.next_sequence += 1
+        script["records"] += 1
+        if kind == "injected":
+            script["injected_documents"] += 1
+        if kind == "refused":
+            script["refused"] += 1
+
+    def arm(self, scripts):
+        if not isinstance(scripts, list) or not 1 <= len(scripts) <= 4:
+            return {"status": "error", "text": "Arm 1 to 4 document-start scripts"}
+        prepared = []
+        total = 0
+        for entry in scripts:
+            if not isinstance(entry, dict) or entry.get("frame") not in {"top", "child"}:
+                return {"status": "error", "text": "A document-start rule matches frame top or child"}
+            source = entry.get("source") or ""
+            total += len(source.encode())
+            if not source or len(source.encode()) > 4096 or total > 8192:
+                return {"status": "error", "text": "Document-start snippet exceeds its source limit"}
+            rule = {"origin": entry["origin"], "frame": entry["frame"]}
+            if entry.get("path_prefix"):
+                rule["path_prefix"] = entry["path_prefix"]
+            prepared.append({"script_id": str(self.next_script), "rule": rule,
+                             "source_bytes": len(source.encode()), "digest": fnv1a(source),
+                             "records": 0, "injected_documents": 0, "refused": 0, "source": source})
+            self.next_script += 1
+        self.scripts = prepared
+        self.generation += 1
+        self.output = []
+        self.dropped = 0
+        # A matching new document would run each armed script exactly once.
+        for script in self.scripts:
+            self.record(script, "injected", "Snippet ran before this document's own scripts")
+            if "__flood__" in script["source"]:
+                for index in range(200):
+                    self.record(script, "report", f"flood-{index}")
+            else:
+                self.record(script, "report", "kinds=string:12 return=4 digest=0f0f")
+        return self.state(0)
+
+    def clear(self):
+        self.generation += 1
+        self.scripts = []
+        self.output = []
+        self.dropped = 0
+        return self.state(0)
+
+    def state(self, after):
+        page = [record for record in self.output if int(record["sequence"]) > after][:self.PAGE]
+        return {
+            "status": "ok", "contract_version": 3, "permitted": self.permitted,
+            "generation": str(self.generation), "renderer_processes": 1,
+            "pending_renderer_processes": 0,
+            "scripts": [{key: value for key, value in script.items() if key != "source"}
+                        for script in self.scripts],
+            "output": {
+                "records": page, "next_sequence": str(self.next_sequence),
+                "oldest_sequence": self.output[0]["sequence"] if self.output else "0",
+                "retained": len(self.output), "dropped": self.dropped,
+                "unattributed": 0, "stale": 0,
+            },
+        }
+
+    def command(self, source):
+        try:
+            command = json.loads(source)
+        except json.JSONDecodeError:
+            return {"status": "error", "text": "Malformed document-start command"}
+        if not self.permitted:
+            return {"status": "unavailable", "permitted": False, "scripts": [],
+                    "text": "This browser session does not permit document-start scripts"}
+        operation = command.get("operation")
+        if operation == "arm":
+            return self.arm(command.get("scripts"))
+        if operation == "clear":
+            return self.clear()
+        if operation == "state":
+            cursor = command.get("after")
+            if not isinstance(cursor, str) or not cursor.isdigit():
+                return {"status": "error", "text": "state takes a decimal after cursor"}
+            return self.state(int(cursor))
+        return {"status": "error", "text": "Unknown document-start operation"}
+
+
 def fake_browser(arguments):
     flags = dict(argument[2:].split("=", 1) for argument in arguments if argument.startswith("--") and "=" in argument)
     assert not any("remote-debugging" in argument for argument in arguments)
+    # The switch alone permits the experiment; it arms nothing by itself.
+    document_start = DocumentStart("--reb-native-console-document-start" in arguments)
     token_path = Path(flags["reb-native-console-token-file"])
     assert token_path.stat().st_mode & 0o777 == 0o600
     assert token_path.parent.stat().st_mode & 0o777 == 0o700
@@ -83,7 +206,13 @@ def fake_browser(arguments):
             source = exact(stream, size).decode()
             if operation == 1:
                 target_id += 1
-                response(stream, request, 10, TARGET.pack(target_id, len(origin), 2, 0, origin, 27, 29, b"Synthetic transport fixture", b"http://127.0.0.1:fixture/page", 0), count=1)
+                response(stream, request, 10, TARGET.pack(target_id, len(origin), 2, 0, origin, 27, 29, b"Synthetic transport fixture", b"http://127.0.0.1:fixture/page", 0), count=1,
+                         flags=2 if document_start.permitted else 0)
+            elif operation == 4:
+                # No target: the armed set belongs to the session, so it can
+                # never be pinned to or satisfied by a stale document.
+                assert target == 0
+                response(stream, request, 12, json.dumps(document_start.command(source)).encode())
             elif target != target_id:
                 response(stream, request, 0, b"Selected document changed", status=2)
             elif operation == 3:
@@ -193,7 +322,7 @@ def kill_browser_group(process):
 
 
 @contextlib.contextmanager
-def bridge(binary, browser=None, binary_mode=True):
+def bridge(binary, browser=None, binary_mode=True, document_start=False):
     with tempfile.TemporaryDirectory(prefix="reb-console-check.", dir="/tmp") as directory:
         # Chromium canonicalizes aliases such as /tmp on macOS. Keep the
         # explicitly owned socket, token and profile under that same root.
@@ -206,6 +335,8 @@ def bridge(binary, browser=None, binary_mode=True):
             command.append("--bridge")
         console = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         browser_arguments = ["--reb-native-console", f"--reb-native-console-socket={root / 'console.sock'}", f"--reb-native-console-token-file={token}", "--reb-native-console-session-id=1", f"--user-data-dir={root / 'profile'}", "--no-first-run", "--no-default-browser-check", "--use-mock-keychain", "--password-store=basic"]
+        if document_start:
+            browser_arguments.append("--reb-native-console-document-start")
         child = None
         try:
             if browser:
@@ -431,6 +562,60 @@ def check(binary, browser):
                 assert process.wait(timeout=5) == 0
                 process.native_browser.wait(timeout=10)
         with bridge(binary) as process:
+            # A browser session without the switch must leave the capability
+            # bit clear, so the owner never sends operation 4 to it.
+            header, _ = exchange(process, 1)
+            assert header[5] & 2 == 0, "A session without the switch advertised document-start support"
+        with bridge(binary, document_start=True) as process:
+            request = 0
+            def run(operation=1, target=0, source=""):
+                nonlocal request
+                request += 1
+                return exchange(process, request, operation, target, source)
+            header, _ = run()
+            assert header[5] & 2 == 2, "A permitted session did not advertise document-start support"
+            def document_start(**command):
+                header, payload = run(4, 0, json.dumps(command))
+                assert header[4] == 12 and header[2] == 0, (header, payload)
+                return json.loads(payload)
+            idle = document_start(operation="state", after="0")
+            assert idle["status"] == "ok" and idle["scripts"] == [] and idle["permitted"]
+            armed = document_start(operation="arm", scripts=[
+                {"origin": "http://127.0.0.1:8080", "frame": "top", "path_prefix": "/lab/",
+                 "source": "report('kinds=string:12');"}])
+            assert armed["status"] == "ok" and len(armed["scripts"]) == 1, armed
+            assert armed["scripts"][0]["rule"] == {"origin": "http://127.0.0.1:8080", "frame": "top", "path_prefix": "/lab/"}
+            records = armed["output"]["records"]
+            assert [record["record"] for record in records] == ["injected", "report"], records
+            assert all(record["provenance"] == "console-document-start-script" for record in records)
+            # Reads never drain: the same cursor repeats, a later cursor advances.
+            assert document_start(operation="state", after="0")["output"]["records"] == records
+            assert document_start(operation="state", after=records[-1]["sequence"])["output"]["records"] == []
+            # Each refusal leaves the previously armed set exactly as it was.
+            for refused in [
+                {"operation": "arm", "scripts": []},
+                {"operation": "arm", "scripts": [{"origin": "https://a.test", "frame": "any", "source": "1"}]},
+                {"operation": "arm", "scripts": [{"origin": "https://a.test", "frame": "top", "source": "a" * 4097}]},
+                {"operation": "unknown"},
+                {"operation": "state", "after": "not-a-number"},
+            ]:
+                assert document_start(**refused)["status"] == "error", refused
+            assert document_start(operation="state", after="0")["scripts"] == armed["scripts"]
+            # A bounded ring drops the oldest records with a visible count.
+            flooded = document_start(operation="arm", scripts=[
+                {"origin": "https://a.test", "frame": "child", "source": "report('__flood__');"}])
+            assert flooded["output"]["dropped"] > 0, flooded["output"]
+            assert flooded["output"]["retained"] <= 128
+            assert len(flooded["output"]["records"]) <= 32
+            cleared = document_start(operation="clear")
+            assert cleared["status"] == "ok" and cleared["scripts"] == []
+            assert cleared["output"]["records"] == [] and cleared["output"]["dropped"] == 0
+            # Operation 4 is session-scoped: a target makes it malformed, so a
+            # stale document can never satisfy or block the armed set.
+            process.stdin.write(REQUEST.pack(MAGIC, 2, 4, request + 1, 1, 2, 0) + b"{}")
+            process.stdin.flush()
+            assert process.wait(timeout=5) == 1, "A document-start request with a target was accepted"
+        with bridge(binary) as process:
             _, targets = exchange(process, 1)
             target = TARGET.unpack(targets)[0]
             process.stdin.write(REQUEST.pack(MAGIC, 2, 2, 2, target, 8193, 0))
@@ -450,6 +635,7 @@ def check(binary, browser):
             process.communicate(b":unknown\n:quit\n", timeout=10)
             assert process.returncode == 2, "Invalid stdin commands must exit with a usage error"
         print("PASS native console version/usage, authentication, actual C++ pipe/socket handoff, malformed lengths, stale selection, exception/timeout responses")
+        print("PASS document-start capability advertisement, session-scoped operation 4, non-draining cursor, bounded ring drops, refusals that preserve the armed set")
         print("PASS real Blink/V8 execution, timeout recovery, preview isolation and Unicode bounds" if browser else "NOT RUN browser overlay compilation and actual Blink/V8 execution; supply --browser after rebuilding Brave")
     finally:
         server.shutdown()
@@ -473,9 +659,10 @@ def check_backend(binary, backend):
         process = subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
         live_peer = None
         live_transport = None
-        def call(action=None, status=200, headers=None):
+        def call(action=None, status=200, headers=None, path=None):
             data = json.dumps(action).encode() if action is not None else None
-            request = urllib.request.Request(url + ("/api/native-console/actions" if data else "/api/native-console"), data=data,
+            route = path or ("/api/native-console/actions" if data else "/api/native-console")
+            request = urllib.request.Request(url + route, data=data,
                                              headers={"Content-Type": "application/json", **(headers or {})})
             try:
                 result = urllib.request.urlopen(request, timeout=40)
@@ -484,6 +671,9 @@ def check_backend(binary, backend):
             with result:
                 assert result.status == status, (result.status, result.read())
                 return json.load(result)
+
+        def read_document_start(after="0", status=200):
+            return call(status=status, path=f"/api/native-console/document-start?after_sequence={after}")
         try:
             deadline = time.monotonic() + 15
             while not endpoint.exists():
@@ -508,6 +698,16 @@ def check_backend(binary, backend):
             state = call()
             assert state["available"] and state["state"] == "idle"
             assert state["live_available"] and state["targets"], "Live bridge did not authenticate"
+            # A read with no session reports which gate is missing and starts
+            # nothing: no process, profile or armed set may appear.
+            idle = read_document_start()
+            assert idle["state"] == "idle" and idle["session_id"] is None
+            assert idle["document_start"]["permitted"] is False
+            assert idle["document_start"]["scripts"] == []
+            assert idle["limits"]["scripts"] == 4 and idle["limits"]["execution_millis"] == 50
+            assert call()["state"] == "idle", "A document-start read started a session"
+            read_document_start(after="01", status=400)
+            call(status=400, path="/api/native-console/document-start?unexpected=1")
             call({"action": "start", "url": "http://127.0.0.1/fixture"}, 403, {"Origin": "https://example.invalid"})
             call({"action": "start", "url": "file:///tmp/fixture"}, 400)
             call({"action": "start", "url": "http://user:secret@127.0.0.1/"}, 400)
@@ -515,6 +715,23 @@ def check_backend(binary, backend):
             session = value["session_id"]
             target = value["targets"][0]["id"]
             base = {"action": "evaluate", "session_id": session, "target_id": target}
+            # Disabled control: a session started without the opt-in advertises
+            # no support, so arming fails closed and nothing is relaunched.
+            assert value.get("document_start_supported") is False, value
+            disabled = read_document_start()
+            assert disabled["document_start"]["permitted"] is False
+            assert disabled["document_start"]["status"] == "unavailable"
+            assert "REB_CONSOLE_DOCUMENT_START" in disabled["document_start"]["message"]
+            armed_request = {"action": "arm_document_start", "session_id": session,
+                             "confirm_document_start": True,
+                             "scripts": [{"origin": "http://127.0.0.1:8080", "frame": "top",
+                                          "source": "report('x');"}]}
+            call(armed_request, 503)
+            # Clearing a session that never permitted the experiment reports
+            # that instead of sending an operation this browser would reject.
+            unavailable = call({"action": "clear_document_start", "session_id": session})
+            assert unavailable["document_start"]["status"] == "unavailable"
+            assert call()["state"] == "ready", "A refused arm retired the session"
             assert call({**base, "source": "window.fixture + 1"})["text"] == "42"
             call({**base, "session_id": "1", "source": "1"}, 409)
             call({**base, "source": "雪" * 2731}, 400)
@@ -594,6 +811,56 @@ def check_backend(binary, backend):
             assert failure["details"] == {"phase": "command_exchange", "cause": "transport_failure"}
             assert call()["state"] == "idle", "Malformed native response did not retire the session"
             assert not owned_directories(), "Failed console session leaked its profile"
+            # Document-start enabled: the same public API, Rust manager and C++
+            # bridge, with the browser session permitted at launch.
+            value = call({"action": "start", "url": "http://127.0.0.1/fixture", "document_start": True})
+            session = value["session_id"]
+            assert value.get("document_start_supported") is True, value
+            ready = read_document_start()
+            assert ready["document_start"]["permitted"] is True
+            assert ready["document_start"]["scripts"] == []
+            assert ready["document_start"]["pending_renderer_processes"] == 0
+            armed = call({"action": "arm_document_start", "session_id": session,
+                          "confirm_document_start": True,
+                          "scripts": [{"origin": "http://127.0.0.1:8080", "frame": "child",
+                                       "path_prefix": "/lab/", "source": "report('kinds=string:12');"}]})
+            assert armed["contract_version"] == 3 and armed["document_start"]["status"] == "ok"
+            assert armed["document_start"]["scripts"][0]["rule"]["frame"] == "child"
+            records = armed["document_start"]["output"]["records"]
+            assert [record["record"] for record in records] == ["injected", "report"]
+            assert all(record["provenance"] == "console-document-start-script" for record in records)
+            # A cursor read is non-draining and never fabricates a record.
+            assert read_document_start()["document_start"]["output"]["records"] == records
+            assert read_document_start(after=records[-1]["sequence"])["document_start"]["output"]["records"] == []
+            # Consent and rule shape are enforced before the wire.
+            for refused in [
+                {"confirm_document_start": False},
+                {"confirm_document_start": None},
+                {"scripts": []},
+                {"scripts": [{"origin": "fixture.test", "frame": "top", "source": "1"}]},
+                {"scripts": [{"origin": "https://Fixture.test", "frame": "top", "source": "1"}]},
+                {"scripts": [{"origin": "https://fixture.test/", "frame": "top", "source": "1"}]},
+                {"scripts": [{"origin": "https://*.fixture.test", "frame": "top", "source": "1"}]},
+                {"scripts": [{"origin": "https://fixture.test", "frame": "any", "source": "1"}]},
+                {"scripts": [{"origin": "https://fixture.test", "frame": "top", "source": ""}]},
+                {"scripts": [{"origin": "https://fixture.test", "frame": "top", "source": "a" * 4097}]},
+                {"scripts": [{"origin": "https://fixture.test", "frame": "top", "path_prefix": "lab", "source": "1"}]},
+                {"scripts": [{"origin": "https://fixture.test", "frame": "top", "source": "1", "extra": 1}]},
+                {"scripts": [{"origin": "https://fixture.test", "frame": "top", "source": "a" * 4096}] * 3},
+            ]:
+                call({"action": "arm_document_start", "session_id": session,
+                      "confirm_document_start": True,
+                      "scripts": [{"origin": "http://127.0.0.1:8080", "frame": "top", "source": "report(1);"}],
+                      **refused}, 400)
+            preserved = read_document_start()["document_start"]
+            assert preserved["scripts"] == armed["document_start"]["scripts"], "A refusal changed the armed set"
+            cleared = call({"action": "clear_document_start", "session_id": session})
+            assert cleared["document_start"]["status"] == "ok" and cleared["document_start"]["scripts"] == []
+            assert read_document_start()["document_start"]["output"]["records"] == []
+            call({"action": "arm_document_start", "session_id": "1", "confirm_document_start": True,
+                  "scripts": [{"origin": "http://127.0.0.1:8080", "frame": "top", "source": "report(1);"}]}, 409)
+            call({"action": "stop", "session_id": session})
+            print("PASS document-start HTTP surface: disabled control, launch-time permission, consent and rule refusals that preserve the armed set, non-draining cursor reads and clearing")
             print("PASS public HTTP -> Rust session -> actual C++ bridge -> synthetic browser; locality, UTF-8 limits, identity guards, timeout recovery, malformed peer retirement and profile disposal")
         finally:
             process.terminate()

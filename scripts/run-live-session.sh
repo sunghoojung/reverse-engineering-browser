@@ -46,6 +46,7 @@ readonly native_wasm_dispatch="${REB_NATIVE_WASM_DISPATCH:-0}"
 readonly native_wasm_call_indirect="${REB_NATIVE_WASM_CALL_INDIRECT:-0}"
 readonly native_guest_adapter="${REB_NATIVE_WASM_GUEST_ADAPTER:-}"
 readonly native_js_dispatch_sites="${REB_NATIVE_JS_DISPATCH_SITES:-}"
+readonly console_document_start="${REB_CONSOLE_DOCUMENT_START:-0}"
 readonly capture_canvas_images="${REB_CAPTURE_CANVAS_IMAGES:-0}"
 readonly use_system_keychain="${REB_USE_SYSTEM_KEYCHAIN:-1}"
 readonly localhost_only="${REB_LOCALHOST_ONLY:-0}"
@@ -65,6 +66,9 @@ fi
 if [[ "${native_wasm_dispatch}" == 1 ]] &&
    (( (category_mask & 512) == 0 || (category_mask & 1024) == 0 )); then
   fail_live_session 2 "REB_NATIVE_WASM_DISPATCH requires VM and Artifact capture categories."
+fi
+if [[ "${console_document_start}" != 0 && "${console_document_start}" != 1 ]]; then
+  fail_live_session 2 "REB_CONSOLE_DOCUMENT_START must be 0 or 1."
 fi
 if [[ "${native_wasm_call_indirect}" != 0 && "${native_wasm_call_indirect}" != 1 ]]; then
   fail_live_session 2 "REB_NATIVE_WASM_CALL_INDIRECT must be 0 or 1."
@@ -623,6 +627,12 @@ if [[ "${native_console_session_id}" =~ ^[1-9][0-9]{0,19}$ && -S "${native_conso
     "--reb-native-console-token-file=${native_console_token}"
     "--reb-native-console-session-id=${native_console_session_id}"
   )
+  # Permission only, and only for this capture browser's own lifetime. The
+  # switch arms nothing: a snippet still needs an explicit confirmed action in
+  # an authorized live Console connection. There is no way to add it later.
+  if [[ "${console_document_start}" == 1 ]]; then
+    brave_arguments+=(--reb-native-console-document-start)
+  fi
 fi
 
 "${brave_binary}" "${brave_arguments[@]}" >"${brave_log}" 2>&1 &

@@ -2540,6 +2540,126 @@
         }
       }
     },
+    "/api/native-console/document-start": {
+      "get": {
+        "operationId": "get_native_console_document_start",
+        "summary": "Armed document-start Console scripts and their bounded output",
+        "description": "Reads the separately armed document-start experiment: which gate is missing or which exact rules are armed, renderer readiness, and a bounded non-draining page of page-JavaScript observations after an optional after_sequence cursor. Output is never evidence.",
+        "tags": [
+          "native-console"
+        ],
+        "parameters": [
+          {
+            "name": "after_sequence",
+            "in": "query",
+            "required": false,
+            "description": "Return only records after this sequence. Reads never drain, so repeating a cursor repeats the same page until the bounded ring evicts it.",
+            "schema": {
+              "type": "string",
+              "pattern": "^(0|[1-9][0-9]{0,19})$"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Armed registry, renderer readiness and a bounded output page.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NativeConsoleDocumentStart"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Unknown query field or a non-canonical cursor.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Local origin rejected.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "408": {
+            "description": "The native transport deadline expired. No script set changed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Another native console action holds the session lock.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Malformed native protocol reply.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "x-source": "apps/origin-trace-backend/src/native_console.rs",
+        "x-reb-execution": {
+          "kind": "operation",
+          "effects": [],
+          "state_dependent_effects": [
+            {
+              "effects": [
+                "browser-control",
+                "local-state-write"
+              ],
+              "when": "A console session that permits the experiment exchanges one bounded read with the browser process. No script is armed, cleared, drained, launched, retired, or evaluated; a transport failure leaves the session unusable until an explicit action retires it."
+            }
+          ],
+          "uncertainties": [],
+          "prerequisites": [
+            {
+              "id": "local-request",
+              "condition": "Host must name the exact loopback listening port; cross-site Sec-Fetch-Site is rejected; an optional Origin must pass App::trusted."
+            },
+            {
+              "id": "native-action-idle",
+              "condition": "No other native console action may hold the session lock."
+            }
+          ],
+          "confirmations": [],
+          "notes": "Read-only: it never arms, clears, drains, launches, evaluates, or retires a session, including an expired or poisoned one. With no session, or with a gate missing, it reports which gate is missing instead of enabling anything. Records are snippet-authored page JavaScript with provenance console-document-start-script: untrusted data, never native evidence, and never joined into correlated_links.",
+          "sources": [
+            {
+              "path": "apps/origin-trace-backend/src/native_console.rs",
+              "symbol": "NativeConsole::document_start"
+            }
+          ]
+        },
+        "x-reb-execution-schema": {
+          "$ref": "#/components/schemas/RebExecutionMetadata"
+        }
+      }
+    },
     "/api/native-console/actions": {
       "post": {
         "operationId": "native_console_action",
@@ -2576,6 +2696,9 @@
                     },
                     {
                       "$ref": "#/components/schemas/NativeConsoleRuntime"
+                    },
+                    {
+                      "$ref": "#/components/schemas/NativeConsoleDocumentStartResult"
                     }
                   ]
                 }
@@ -13783,6 +13906,10 @@
             "type": "string",
             "pattern": "^[1-9][0-9]{0,19}$",
             "description": "Public nonsecret random generation of the authenticated native bridge. Not the token or a path. Exact document IDs are scoped to this generation; a replacement binding invalidates prior selection and consent."
+          },
+          "document_start_supported": {
+            "type": "boolean",
+            "description": "Whether this browser session permits the separately armed document-start script experiment. An older browser without the overlay leaves it false, so operation 4 is never sent to it."
           }
         },
         "required": [
@@ -13921,6 +14048,10 @@
             "type": "string",
             "pattern": "^[1-9][0-9]{0,19}$",
             "description": "Public nonsecret random generation of the authenticated native bridge. Not the token or a path. Exact document IDs are scoped to this generation; a replacement binding invalidates prior selection and consent."
+          },
+          "document_start_supported": {
+            "type": "boolean",
+            "description": "Whether this browser session permits the separately armed document-start script experiment. An older browser without the overlay leaves it false, so operation 4 is never sent to it."
           }
         },
         "required": [
@@ -14047,6 +14178,10 @@
                 "type": "string",
                 "maxLength": 4096,
                 "description": "Explicit authorized HTTP(S) target without embedded credentials."
+              },
+              "document_start": {
+                "type": "boolean",
+                "description": "Permit the separately armed document-start script experiment in this disposable browser session. The switch alone arms nothing, and a session started without it can never arm."
               }
             },
             "required": [
@@ -14089,7 +14224,7 @@
                 }
               ],
               "confirmations": [],
-              "notes": "Launches a bridge and custom Brave in a new temporary profile at the requested HTTP(S) URL, then lists documents.",
+              "notes": "Launches a bridge and custom Brave in a new temporary profile at the requested HTTP(S) URL, then lists documents. document_start only permits the document-start experiment for this browser session; it arms no script and runs no snippet.",
               "sources": [
                 {
                   "path": "apps/origin-trace-backend/src/native_console.rs",
@@ -14487,6 +14622,212 @@
                 {
                   "path": "apps/origin-trace-backend/src/native_console.rs",
                   "symbol": "validate_command"
+                }
+              ]
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "action": {
+                "const": "arm_document_start",
+                "type": "string"
+              },
+              "session_id": {
+                "type": "string",
+                "pattern": "^[1-9][0-9]{0,19}$",
+                "description": "Canonical nonzero uint64 decimal identifier."
+              },
+              "scripts": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 4,
+                "description": "Replaces the whole armed set atomically. A refusal leaves the previous set and its output exactly as they were.",
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "origin": {
+                      "type": "string",
+                      "maxLength": 256,
+                      "description": "One exact serialized http(s) origin, lowercase, with no path, credentials, wildcard, host suffix or trailing slash."
+                    },
+                    "frame": {
+                      "type": "string",
+                      "enum": [
+                        "top",
+                        "child"
+                      ],
+                      "description": "Exactly one frame kind. Request both as two rules so the armed set always states which frames it reaches."
+                    },
+                    "path_prefix": {
+                      "type": "string",
+                      "maxLength": 256,
+                      "description": "Optional literal committed-path prefix starting with /. No query or fragment. Absent matches every path in that origin."
+                    },
+                    "source": {
+                      "type": "string",
+                      "x-max-utf8-bytes": 4096,
+                      "description": "The snippet. It runs in the page main world with the page's full authority and receives a bounded report(value) function. Log argument kinds, lengths, counts and digests, never raw strings, tokens, cookies, credentials or bodies."
+                    }
+                  },
+                  "required": [
+                    "origin",
+                    "frame",
+                    "source"
+                  ]
+                }
+              },
+              "confirm_document_start": {
+                "type": "boolean",
+                "const": true,
+                "description": "Confirm that armed snippets run automatically in every new matching document, before that document's own scripts."
+              }
+            },
+            "required": [
+              "action",
+              "session_id",
+              "scripts",
+              "confirm_document_start"
+            ],
+            "x-reb-execution": {
+              "kind": "action",
+              "effects": [
+                "local-state-write",
+                "browser-control",
+                "code-execution",
+                "disposable-target-mutation"
+              ],
+              "state_dependent_effects": [
+                {
+                  "effects": [
+                    "data-discard"
+                  ],
+                  "when": "Replacing the armed set increments its generation, which discards the previous generation's bounded output and makes report functions a page retained inert."
+                },
+                {
+                  "effects": [
+                    "live-target-mutation"
+                  ],
+                  "when": "The session is an explicitly authorized live capture binding, so matching documents are real captured pages rather than a disposable browser's."
+                }
+              ],
+              "uncertainties": [
+                {
+                  "phase": "command_exchange",
+                  "cause": "timeout",
+                  "condition": "A native transport timeout leaves it unknown whether the browser applied the set. Read the state before arming again; nothing is retried automatically."
+                }
+              ],
+              "prerequisites": [
+                {
+                  "id": "local-request",
+                  "condition": "Host must name the exact loopback listening port; cross-site Sec-Fetch-Site is rejected; an optional Origin must pass App::trusted."
+                },
+                {
+                  "id": "bounded-json-object",
+                  "condition": "POST requires one valid Content-Length, no Transfer-Encoding, and a JSON object within x-max-body-bytes and the body deadline."
+                },
+                {
+                  "id": "native-action-idle",
+                  "condition": "No other native console action may hold the session lock."
+                },
+                {
+                  "id": "native-session-current",
+                  "condition": "session_id must equal the current native console session."
+                },
+                {
+                  "id": "native-document-start-permitted",
+                  "condition": "The browser must advertise document-start support on its target listing, which requires the rebuilt overlay and the browser-session switch."
+                }
+              ],
+              "confirmations": [
+                {
+                  "field": "confirm_document_start",
+                  "when": {
+                    "properties": {
+                      "action": {
+                        "const": "arm_document_start"
+                      }
+                    },
+                    "required": [
+                      "action"
+                    ]
+                  },
+                  "condition": "Arming runs the snippet automatically in every new matching document without a further researcher action."
+                }
+              ],
+              "notes": "Declares the authorization boundary: one exact origin, exactly one frame kind, an optional literal path prefix. There is no pattern, wildcard, URL guessing, or retroactive injection into documents that are already open. Snippet output is bounded page JavaScript, never evidence.",
+              "sources": [
+                {
+                  "path": "apps/origin-trace-backend/src/native_console.rs",
+                  "symbol": "NativeConsole::action"
+                },
+                {
+                  "path": "apps/origin-trace-backend/src/native_console.rs",
+                  "symbol": "validate_document_start"
+                }
+              ]
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "action": {
+                "const": "clear_document_start",
+                "type": "string"
+              },
+              "session_id": {
+                "type": "string",
+                "pattern": "^[1-9][0-9]{0,19}$",
+                "description": "Canonical nonzero uint64 decimal identifier."
+              }
+            },
+            "required": [
+              "action",
+              "session_id"
+            ],
+            "x-reb-execution": {
+              "kind": "action",
+              "effects": [
+                "local-state-write",
+                "browser-control",
+                "data-discard"
+              ],
+              "state_dependent_effects": [],
+              "uncertainties": [
+                {
+                  "phase": "command_exchange",
+                  "cause": "timeout",
+                  "condition": "A native transport timeout leaves it unknown whether the browser removed the set. Read the state before relying on it; nothing is retried automatically."
+                }
+              ],
+              "prerequisites": [
+                {
+                  "id": "local-request",
+                  "condition": "Host must name the exact loopback listening port; cross-site Sec-Fetch-Site is rejected; an optional Origin must pass App::trusted."
+                },
+                {
+                  "id": "bounded-json-object",
+                  "condition": "POST requires one valid Content-Length, no Transfer-Encoding, and a JSON object within x-max-body-bytes and the body deadline."
+                },
+                {
+                  "id": "native-action-idle",
+                  "condition": "No other native console action may hold the session lock."
+                },
+                {
+                  "id": "native-session-current",
+                  "condition": "session_id must equal the current native console session."
+                }
+              ],
+              "confirmations": [],
+              "notes": "Removes every armed script and its retained output. New documents stop running snippets, and a report function a page retained becomes an inert no-op. Work a snippet already scheduled in a page is not rolled back. A session that never permitted the experiment reports that instead of exchanging anything.",
+              "sources": [
+                {
+                  "path": "apps/origin-trace-backend/src/native_console.rs",
+                  "symbol": "NativeConsole::action"
                 }
               ]
             }
@@ -21899,6 +22240,393 @@
           }
         },
         "x-source": "protocol/vm-host-links-v1.schema.json"
+      },
+      "NativeConsoleDocumentStartState": {
+        "type": "object",
+        "additionalProperties": false,
+        "description": "Armed document-start registry and bounded page-JavaScript output. Output is never evidence, is never joined into correlated_links, and is snippet-authored untrusted text.",
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "ok",
+              "error",
+              "idle",
+              "unavailable"
+            ]
+          },
+          "permitted": {
+            "type": "boolean",
+            "description": "Whether this browser session permits arming at all. False means a gate is missing, not that the set is empty."
+          },
+          "contract_version": {
+            "const": 3,
+            "type": "integer"
+          },
+          "generation": {
+            "type": "string",
+            "pattern": "^(0|[1-9][0-9]{0,19})$",
+            "description": "Monotonic armed-set generation. Replacing or clearing the set increments it and invalidates the previous generation's output and retained report functions."
+          },
+          "message": {
+            "type": "string",
+            "description": "Which gate is missing, when the experiment is unavailable."
+          },
+          "text": {
+            "type": "string",
+            "x-max-utf8-bytes": 2048,
+            "description": "Refusal text from the browser registry."
+          },
+          "renderer_processes": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "pending_renderer_processes": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Live renderers that have not acknowledged this exact generation. Zero means a document created now runs the set. Positive is a readiness gap, not a record loss."
+          },
+          "scripts": {
+            "type": "array",
+            "maxItems": 4,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "script_id": {
+                  "type": "string",
+                  "pattern": "^[1-9][0-9]{0,19}$",
+                  "description": "Canonical nonzero uint64 decimal identifier."
+                },
+                "rule": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "description": "One exact origin, exactly one frame kind, and an optional literal path prefix. No pattern, wildcard, host suffix or URL guessing.",
+                  "properties": {
+                    "origin": {
+                      "type": "string",
+                      "maxLength": 256,
+                      "description": "Exact serialized http(s) origin."
+                    },
+                    "frame": {
+                      "type": "string",
+                      "enum": [
+                        "top",
+                        "child"
+                      ]
+                    },
+                    "path_prefix": {
+                      "type": "string",
+                      "maxLength": 256,
+                      "description": "Literal committed-path prefix. Absent matches every path in that origin."
+                    }
+                  },
+                  "required": [
+                    "origin",
+                    "frame"
+                  ]
+                },
+                "source_bytes": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 4096
+                },
+                "digest": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{16}$",
+                  "description": "Labeling digest of the armed snippet, so a panel or agent can confirm which exact snippet is armed without echoing its source. Not a security claim."
+                },
+                "records": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "injected_documents": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "description": "Documents that actually ran this snippet."
+                },
+                "refused": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "description": "Report arguments and per-document budgets this snippet's documents were refused."
+                }
+              },
+              "required": [
+                "script_id",
+                "rule",
+                "source_bytes",
+                "digest",
+                "records",
+                "injected_documents",
+                "refused"
+              ]
+            }
+          },
+          "output": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "records": {
+                "type": "array",
+                "maxItems": 32,
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "sequence": {
+                      "type": "string",
+                      "pattern": "^[1-9][0-9]{0,19}$",
+                      "description": "Canonical nonzero uint64 decimal identifier."
+                    },
+                    "record": {
+                      "type": "string",
+                      "enum": [
+                        "injected",
+                        "report",
+                        "script_error",
+                        "refused"
+                      ]
+                    },
+                    "provenance": {
+                      "const": "console-document-start-script",
+                      "type": "string",
+                      "description": "Page-JavaScript observation. Never native capture evidence."
+                    },
+                    "script_id": {
+                      "type": "string",
+                      "pattern": "^[1-9][0-9]{0,19}$",
+                      "description": "Canonical nonzero uint64 decimal identifier."
+                    },
+                    "document_id": {
+                      "type": "string",
+                      "pattern": "^(0|[1-9][0-9]{0,19})$",
+                      "description": "Monotonic nonsecret document identity, shared with the Console target listing. Never the renderer's document token."
+                    },
+                    "frame_id": {
+                      "type": "string",
+                      "pattern": "^(0|[1-9][0-9]{0,19})$",
+                      "description": "Derived frame identity, the same one the capture path publishes."
+                    },
+                    "top_frame": {
+                      "type": "boolean"
+                    },
+                    "time": {
+                      "type": "number",
+                      "description": "Browser-process observation time in milliseconds since the Unix epoch. Not a causal claim."
+                    },
+                    "truncated": {
+                      "type": "boolean"
+                    },
+                    "text": {
+                      "type": "string",
+                      "x-max-utf8-bytes": 2048,
+                      "description": "Snippet-authored text, or the harness refusal that replaced it. Untrusted data, never instructions."
+                    }
+                  },
+                  "required": [
+                    "sequence",
+                    "record",
+                    "provenance",
+                    "script_id",
+                    "document_id",
+                    "frame_id",
+                    "top_frame",
+                    "time",
+                    "truncated",
+                    "text"
+                  ]
+                }
+              },
+              "next_sequence": {
+                "type": "string",
+                "pattern": "^(0|[1-9][0-9]{0,19})$",
+                "description": "Canonical uint64 decimal sequence."
+              },
+              "oldest_sequence": {
+                "type": "string",
+                "pattern": "^(0|[1-9][0-9]{0,19})$",
+                "description": "Oldest retained sequence, or 0 when nothing is retained. A cursor older than this has already been evicted."
+              },
+              "retained": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 128
+              },
+              "dropped": {
+                "type": "integer",
+                "minimum": 0,
+                "description": "Saturating count of records the bounded ring evicted before they were read."
+              },
+              "unattributed": {
+                "type": "integer",
+                "minimum": 0,
+                "description": "Records whose document did not resolve to an eligible document in the sending renderer."
+              },
+              "stale": {
+                "type": "integer",
+                "minimum": 0,
+                "description": "Records from a generation or script that is no longer armed."
+              }
+            },
+            "required": [
+              "records",
+              "next_sequence",
+              "oldest_sequence",
+              "retained",
+              "dropped",
+              "unattributed",
+              "stale"
+            ]
+          }
+        },
+        "required": [
+          "status",
+          "scripts"
+        ]
+      },
+      "NativeConsoleDocumentStartLimits": {
+        "type": "object",
+        "additionalProperties": false,
+        "description": "Transport and retained-state bounds, not a page heap quota.",
+        "properties": {
+          "scripts": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "source_bytes": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "total_source_bytes": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "rule_bytes": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "report_bytes": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "records_per_document": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "retained_records": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "records_per_read": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "execution_millis": {
+            "type": "integer",
+            "minimum": 1
+          }
+        },
+        "required": [
+          "scripts",
+          "source_bytes",
+          "total_source_bytes",
+          "rule_bytes",
+          "report_bytes",
+          "records_per_document",
+          "retained_records",
+          "records_per_read",
+          "execution_millis"
+        ]
+      },
+      "NativeConsoleDocumentStart": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "contract_version": {
+            "const": 3,
+            "type": "integer"
+          },
+          "available": {
+            "type": "boolean",
+            "description": "Whether the bundled helper and a rebuilt custom Brave are present."
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "idle",
+              "ready"
+            ]
+          },
+          "session_id": {
+            "oneOf": [
+              {
+                "type": "string",
+                "pattern": "^[1-9][0-9]{0,19}$",
+                "description": "Canonical nonzero uint64 decimal identifier."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "document_start": {
+            "$ref": "#/components/schemas/NativeConsoleDocumentStartState"
+          },
+          "limits": {
+            "$ref": "#/components/schemas/NativeConsoleDocumentStartLimits"
+          },
+          "code": {
+            "$ref": "#/components/schemas/ErrorCode"
+          },
+          "details": {
+            "$ref": "#/components/schemas/ErrorDetails"
+          }
+        },
+        "required": [
+          "contract_version",
+          "available",
+          "state",
+          "session_id",
+          "document_start",
+          "limits"
+        ]
+      },
+      "NativeConsoleDocumentStartResult": {
+        "type": "object",
+        "additionalProperties": false,
+        "description": "A refused arm leaves the previous set and its output exactly as they were.",
+        "properties": {
+          "contract_version": {
+            "const": 3,
+            "type": "integer"
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "ready"
+            ]
+          },
+          "session_id": {
+            "type": "string",
+            "pattern": "^[1-9][0-9]{0,19}$",
+            "description": "Canonical nonzero uint64 decimal identifier."
+          },
+          "document_start": {
+            "$ref": "#/components/schemas/NativeConsoleDocumentStartState"
+          },
+          "code": {
+            "$ref": "#/components/schemas/ErrorCode"
+          },
+          "details": {
+            "$ref": "#/components/schemas/ErrorDetails"
+          }
+        },
+        "required": [
+          "contract_version",
+          "state",
+          "session_id",
+          "document_start"
+        ]
       }
     }
   },

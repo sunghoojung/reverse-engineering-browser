@@ -15,7 +15,8 @@
   let queue = Promise.resolve(), generation = 0, pollRunning = false;
   let checking = false, submitting = false, commandNumber = 0, unread = 0;
   const numberId = value => typeof value === 'string' && /^[1-9][0-9]{0,19}$/.test(value) && BigInt(value) <= 18446744073709551615n;
-  const validState = value => value?.contract_version === 2 && ['ready', 'idle'].includes(value.state) &&
+  const documentStartActions = ['arm_document_start', 'clear_document_start'];
+  const validState = (value, version = 2) => value?.contract_version === version && ['ready', 'idle'].includes(value.state) &&
     (value.state === 'ready' ? numberId(value.session_id) : value.session_id === null);
   const types = ['undefined', 'null', 'boolean', 'number', 'string', 'bigint', 'symbol', 'function', 'object', 'promise', 'accessor'];
   function notice(message, error = false) {
@@ -61,6 +62,7 @@
       emptyAction.textContent = 'Disconnect';
     }
     emptyAction.disabled = checking || !!busy;
+    documentStart.render();
     updateOutputState();
   }
   function updateOutputState() {
@@ -123,7 +125,7 @@
     });
     const value = await response.json();
     if (!response.ok) throw new Error(typeof value.error === 'string' ? value.error : `Console returned ${response.status}`);
-    if (!validState(value) || value.state !== (action === 'stop' ? 'idle' : 'ready') ||
+    if (!validState(value, documentStartActions.includes(action) ? 3 : 2) || value.state !== (action === 'stop' ? 'idle' : 'ready') ||
         !['start', 'stop', 'connect_live'].includes(action) && value.session_id !== identity) throw new TypeError('Malformed native console response');
     return value;
   }
@@ -402,6 +404,189 @@
       appendRow(row);
     }
   }
+
+  // Document-start script experiment. A separate opt-in: the panel never arms
+  // anything on its own, output is labeled page JavaScript rather than
+  // evidence, and every captured value is inserted as text.
+  const documentStart = (() => {
+    const ds = name => element(`ds-${name}`);
+    const sequence = value => typeof value === 'string' && /^(0|[1-9][0-9]{0,19})$/.test(value);
+    let view = null, cursor = '0', refreshing = false, tick = 0, failed = false, lastGeneration = null;
+    function requested() { return ds('enable').checked; }
+    function armedCount() { return view?.document_start?.scripts?.length || 0; }
+    function permitted() { return view?.document_start?.permitted === true; }
+    function message(text, error = false) {
+      ds('notice').textContent = text; ds('notice').title = text;
+      ds('notice').dataset.kind = error ? 'error' : 'status'; ds('notice').hidden = !text;
+    }
+    function render() {
+      const live = documentSource === 'live_capture';
+      const armed = armedCount();
+      const badge = ds('badge');
+      // The indicator stays outside the settings menu: an armed experiment must
+      // be visible without opening anything.
+      badge.hidden = !session && !armed;
+      badge.textContent = armed ? `Doc-start: ${armed} armed` : permitted() ? 'Doc-start: ready' : 'Doc-start: off';
+      badge.dataset.state = armed ? 'armed' : permitted() ? 'ready' : 'off';
+      badge.setAttribute('aria-label', armed
+        ? `Document-start scripts: ${armed} armed. Open the experiment settings.`
+        : 'Document-start scripts: none armed. Open the experiment settings.');
+      root.dataset.documentStart = badge.dataset.state;
+      const status = ds('state');
+      status.textContent = failed ? 'Document-start state unavailable. The last known state is preserved; nothing was armed or cleared.'
+        : !session ? (requested()
+            ? 'Permitted for the next disposable session. Connect, then arm a rule. Nothing runs until you arm one.'
+            : 'Connect a session with this permitted, or relaunch the live capture with REB_CONSOLE_DOCUMENT_START=1.')
+        : permitted() ? `Armed scripts: ${armed}. A matching new document runs them before its own scripts.`
+        : (view?.document_start?.message || 'Document-start scripts are not available in this session.');
+      ds('enable').disabled = !!session || !!pending || checking || live;
+      const ready = !!session && permitted() && !pending && !submitting;
+      ds('arm').disabled = !ready || !ds('origin').value.trim() || !ds('source').value.trim() || !ds('consent').checked;
+      ds('clear').disabled = !ready;
+      for (const name of ['origin', 'frame', 'path', 'source', 'consent']) ds(name).disabled = !ready;
+      const scripts = view?.document_start?.scripts || [];
+      const list = ds('armed');
+      list.replaceChildren();
+      for (const script of scripts) {
+        const item = document.createElement('li');
+        const prefix = script.rule.path_prefix ? ` path ${script.rule.path_prefix}*` : ' any path';
+        item.textContent = `#${script.script_id} ${script.rule.origin} · ${script.rule.frame} frame ·${prefix} · ${script.source_bytes} bytes · ${script.digest} · ${script.injected_documents} documents · ${script.records} records · ${script.refused} refused`;
+        list.append(item);
+      }
+      const output = view?.document_start?.output;
+      const pendingProcesses = view?.document_start?.pending_renderer_processes;
+      ds('counters').textContent = !output ? '' :
+        `${output.retained} retained · ${output.dropped} dropped · ${output.unattributed} unattributed · ${output.stale} stale · ${pendingProcesses ? `${pendingProcesses} renderer processes not ready yet` : 'every renderer holds this set'}`;
+    }
+    function reset() {
+      view = null; cursor = '0'; failed = false; lastGeneration = null;
+      ds('consent').checked = false; message(''); render();
+    }
+    function check(records) {
+      if (!Array.isArray(records) || records.length > 32) throw new TypeError('Malformed document-start output');
+      for (const record of records) {
+        if (!record || !sequence(record.sequence) || record.provenance !== 'console-document-start-script' ||
+            !['injected', 'report', 'script_error', 'refused'].includes(record.record) ||
+            !numberId(record.script_id) || !sequence(record.document_id) || !sequence(record.frame_id) ||
+            typeof record.top_frame !== 'boolean' || typeof record.truncated !== 'boolean' ||
+            typeof record.text !== 'string' || encoder.encode(record.text).length > 2048 ||
+            typeof record.time !== 'number' || !Number.isFinite(record.time) || Math.abs(record.time) > 8640000000000000) {
+          throw new TypeError('Malformed document-start record');
+        }
+      }
+    }
+    function rows(records, dropped, epoch) {
+      // Clearing the transcript invalidates delayed replies without touching
+      // the armed set or the browser's retained records.
+      if (epoch !== outputGeneration) return;
+      if (dropped) boundary(`${dropped} document-start records were dropped before delivery.`);
+      for (const record of records) {
+        const row = document.createElement('article');
+        row.className = 'native-console-result native-console-ds-record';
+        row.dataset.level = record.record === 'script_error' ? 'error' : record.record === 'refused' ? 'warning' : 'info';
+        row.dataset.record = record.record;
+        row.dataset.consoleDocument = record.document_id;
+        row.setAttribute('aria-label', `Document-start ${record.record} for script ${record.script_id} in document ${record.document_id}`);
+        const time = document.createElement('span'); time.className = 'native-console-time';
+        time.textContent = new Date(record.time).toLocaleTimeString(); row.append(time);
+        const label = document.createElement('span'); label.className = 'native-console-ds-provenance';
+        // Provenance is spelled out on every row: this is page JavaScript the
+        // snippet produced, never native capture evidence.
+        label.textContent = `page JavaScript · console-document-start-script · ${record.record} · script ${record.script_id} · document ${record.document_id} · ${record.top_frame ? 'top' : 'child'} frame`;
+        row.append(label);
+        const output = document.createElement('pre'); output.textContent = record.text; row.append(output);
+        if (record.truncated) row.append(document.createTextNode(' (truncated)'));
+        appendRow(row);
+      }
+    }
+    function apply(value, epoch = outputGeneration) {
+      if (value?.contract_version !== 3 || !['idle', 'ready'].includes(value.state) ||
+          (value.available !== undefined && typeof value.available !== 'boolean') || !value.document_start ||
+          !['ok', 'error', 'idle', 'unavailable'].includes(value.document_start.status)) {
+        throw new TypeError('Malformed document-start state');
+      }
+      const next = value.document_start;
+      if (!Array.isArray(next.scripts) || next.scripts.length > 4) throw new TypeError('Malformed armed set');
+      for (const script of next.scripts) {
+        if (!numberId(script?.script_id) || typeof script.rule?.origin !== 'string' ||
+            !['top', 'child'].includes(script.rule.frame) || !/^[0-9a-f]{16}$/.test(script.digest || '') ||
+            !Number.isInteger(script.source_bytes)) {
+          throw new TypeError('Malformed armed script');
+        }
+      }
+      if (next.output) {
+        check(next.output.records);
+        if (!sequence(next.output.next_sequence) || !sequence(next.output.oldest_sequence) ||
+            !Number.isInteger(next.output.dropped) || next.output.dropped < 0) {
+          throw new TypeError('Malformed document-start output');
+        }
+        // A new generation replaces the previous set's output, so restart the
+        // cursor instead of silently skipping the new generation's records.
+        if (lastGeneration !== null && next.generation !== lastGeneration) cursor = '0';
+        lastGeneration = next.generation ?? null;
+        if (next.output.records.length) {
+          rows(next.output.records, next.output.dropped, epoch);
+          cursor = next.output.records.at(-1).sequence;
+        }
+      }
+      view = value; failed = false;
+    }
+    async function refresh(force = false) {
+      if (refreshing || (!force && (root.hidden || pending || submitting))) return;
+      if (!force && ++tick % 4) return;
+      refreshing = true;
+      const epoch = generation, identity = session;
+      const execute = async () => {
+        try {
+          const response = await fetch(`/api/native-console/document-start?after_sequence=${cursor}`, {cache: 'no-store'});
+          const value = await response.json();
+          if (epoch !== generation || identity !== session) return;
+          if (!response.ok) throw new Error(typeof value.error === 'string' ? value.error : `Document-start read returned ${response.status}`);
+          apply(value);
+        } catch (error) {
+          // Preserve the last understandable state; a failed read changes nothing.
+          if (epoch === generation) { failed = true; message(`${error.message} The read was not retried.`, true); }
+        } finally { refreshing = false; render(); }
+      };
+      const result = queue.then(execute); queue = result.catch(() => {}); return result;
+    }
+    ds('arm').addEventListener('click', () => {
+      if (ds('arm').disabled) return;
+      const script = {origin: ds('origin').value.trim(), frame: ds('frame').value, source: ds('source').value};
+      const prefix = ds('path').value.trim();
+      if (prefix) script.path_prefix = prefix;
+      enqueue('arm_document_start', {scripts: [script], confirm_document_start: true}, value => {
+        ds('consent').checked = false; cursor = '0'; lastGeneration = null;
+        apply(value);
+        const armed = value.document_start.status === 'ok';
+        message(armed ? 'Armed. Reload a matching document to run it; documents already open are not injected.' : (value.document_start.text || 'Arming was refused.'), !armed);
+        boundary(armed
+          ? `Document-start script armed for ${script.origin} ${script.frame} frame. New matching documents run it before their own scripts.`
+          : 'Document-start arming was refused. The previously armed set is unchanged.');
+        render();
+      });
+    });
+    ds('clear').addEventListener('click', () => {
+      if (ds('clear').disabled) return;
+      enqueue('clear_document_start', {}, value => {
+        cursor = '0'; lastGeneration = null; ds('consent').checked = false;
+        apply(value);
+        message('Document-start scripts cleared. New documents run nothing and a retained report function is inert.');
+        boundary('Document-start scripts cleared. Work a snippet already scheduled in a page is not rolled back.');
+        render();
+      });
+    });
+    for (const name of ['origin', 'source', 'path']) ds(name).addEventListener('input', render);
+    ds('frame').addEventListener('change', render);
+    ds('consent').addEventListener('change', render);
+    ds('enable').addEventListener('change', render);
+    ds('badge').addEventListener('click', () => {
+      controls.connection.open = true; element('ds').open = true;
+      (ds('origin').disabled ? ds('enable') : ds('origin')).focus();
+    });
+    return {refresh, render, reset, requested, armed: armedCount};
+  })();
+
   async function poll() {
     if (pollRunning || root.hidden || !session || disconnected || !controls.target.value || pending) return;
     pollRunning = true;
@@ -425,7 +610,7 @@
     } catch { /* The next availability check reports a hard failure. */ }
     finally { listingRunning = false; renderControls(); }
   }
-  setInterval(() => { poll(); refreshLiveDocuments(); }, 500);
+  setInterval(() => { poll(); refreshLiveDocuments(); documentStart.refresh(); }, 500);
   function filter() {
     const query = controls.filter.value.toLocaleLowerCase(), level = controls.level.value;
     for (const row of controls.output.children) row.hidden = !!query && !(row.textContent + (row.dataset.command || '')).toLocaleLowerCase().includes(query) || level !== 'all' && row.dataset.level !== level;
@@ -462,11 +647,18 @@
         if ([...controls.target.options].some(option => option.value === target)) controls.target.value = target;
         controls.connection.open = false;
         boundary('Live capture document connected. This console cannot set breakpoints, step, or inspect paused frames.');
+        documentStart.reset(); documentStart.refresh(true);
       });
       return;
     }
     if (!controls.url.reportValidity() || !controls.url.value.trim()) return;
-    enqueue('start', {url: controls.url.value.trim()}, value => { ++generation; session = value.session_id; documentSource = 'disposable'; targets(value); controls.connection.open = false; boundary('Disposable experiment connected. Select a document.'); });
+    enqueue('start', {url: controls.url.value.trim(), document_start: documentStart.requested()}, value => {
+      ++generation; session = value.session_id; documentSource = 'disposable'; targets(value); controls.connection.open = false;
+      boundary(documentStart.requested()
+        ? 'Disposable experiment connected with document-start scripts permitted. Nothing runs until you arm a rule.'
+        : 'Disposable experiment connected. Select a document.');
+      documentStart.reset(); documentStart.refresh(true);
+    });
   });
   controls.stop.addEventListener('click', () => enqueue('stop', {}, () => {
     ++generation; session = null; controls['live-consent'].checked = false;
@@ -476,6 +668,7 @@
     } else {
       documentSource = ''; clearTargets(); boundary('Experiment disconnected. Retained values released.'); notice('Disposable browser and profile removed.');
     }
+    documentStart.reset();
   }));
   controls.refresh.addEventListener('click', () => !session ? refreshLiveDocuments(true) : enqueue('targets', {}, value => { ++generation; targets(value); controls.connection.open = false; boundary('Document listing refreshed. A missing live document requires disconnect and explicit reselection.'); }));
   controls.target.addEventListener('change', () => {

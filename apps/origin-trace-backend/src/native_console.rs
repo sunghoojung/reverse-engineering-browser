@@ -26,6 +26,10 @@ const TEXT_LIMIT: usize = 8192;
 const TARGET_LIMIT: usize = 64;
 const TARGET_SIZE: usize = 920;
 const RUNTIME_LIMIT: usize = 65536;
+const DOCUMENT_START_SCRIPT_LIMIT: usize = 4;
+const DOCUMENT_START_SOURCE_LIMIT: usize = 4096;
+const DOCUMENT_START_TOTAL_SOURCE_LIMIT: usize = 8192;
+const DOCUMENT_START_RULE_LIMIT: usize = 256;
 
 // Own both process groups, including Chromium descendants. kill_on_drop alone
 // stops only the immediate process and can leave renderer/profile owners alive.
@@ -96,6 +100,10 @@ struct Session {
     live_target: Option<u64>,
     native_targets: BTreeSet<u64>,
     accessed_targets: BTreeSet<u64>,
+    // The browser advertises document-start support on its target listing. An
+    // older browser leaves it clear, so operation 4 is never sent to a browser
+    // that would reject it and retire this working session.
+    document_start: bool,
 }
 impl Session {
     async fn stop(mut self) {
@@ -188,6 +196,9 @@ impl Session {
               e
           })?;
         self.poisoned = false;
+        if operation == 1 {
+            self.document_start = result["document_start_supported"] == json!(true);
+        }
         Ok(result)
     }
 }
@@ -196,6 +207,7 @@ struct ResponseHeader {
     status: u16,
     kind: u16,
     truncated: bool,
+    document_start: bool,
     count: usize,
     bytes: usize,
 }
@@ -203,10 +215,12 @@ impl ResponseHeader {
     fn parse(bytes: &[u8; 32], request: u64, operation: u16) -> Result<Self> {
         let u16_at = |i| u16::from_le_bytes(bytes[i..i + 2].try_into().unwrap());
         let u32_at = |i| u32::from_le_bytes(bytes[i..i + 4].try_into().unwrap());
+        let flags = u16_at(18);
         let parsed = Self {
             status: u16_at(6),
             kind: u16_at(16),
-            truncated: u16_at(18) != 0,
+            truncated: flags & 1 != 0,
+            document_start: flags & 2 != 0,
             count: u32_at(20) as usize,
             bytes: u32_at(24) as usize,
         };
@@ -215,10 +229,15 @@ impl ResponseHeader {
             || u64::from_le_bytes(bytes[8..16].try_into().unwrap()) != request
             || u32_at(28) != 0
             || parsed.status > 6
-            || parsed.kind > 11
+            || parsed.kind > 12
             || (parsed.kind == 11 && operation != 3)
+            || (parsed.kind == 12 && operation != 4)
             || (operation == 3 && parsed.status == 0 && parsed.kind != 11)
-            || u16_at(18) > 1
+            || (operation == 4 && parsed.status == 0 && parsed.kind != 12)
+            || flags > 3
+            // The capability bit is listing-only, so a command reply can never
+            // smuggle in a claim that this browser supports the experiment.
+            || (parsed.document_start && parsed.kind != 10)
             || (parsed.kind == 10
                 && (operation != 1
                     || parsed.status != 0
@@ -227,7 +246,7 @@ impl ResponseHeader {
             || (parsed.kind != 10
                 && (parsed.count != 0
                     || parsed.bytes
-                        > if parsed.kind == 11 {
+                        > if parsed.kind == 11 || parsed.kind == 12 {
                             RUNTIME_LIMIT
                         } else {
                             TEXT_LIMIT
@@ -286,7 +305,8 @@ impl ResponseHeader {
                 targets.push(json!({"id":id.to_string(),"origin":origin,"label":label,"url":url,"main_frame":flags & 2 != 0,"truncated":flags & 1 != 0}));
             }
             return Ok(
-                json!({"contract_version":2,"session_id":session,"state":"ready","targets":targets,"truncated":self.truncated}),
+                json!({"contract_version":2,"session_id":session,"state":"ready","targets":targets,"truncated":self.truncated,
+                    "document_start_supported":self.document_start}),
             );
         }
         if self.kind == 11 {
@@ -300,6 +320,19 @@ impl ResponseHeader {
                 Some("error" | "exception" | "rejected")
             );
             let mut result = json!({"contract_version":2,"session_id":session,"state":"ready","runtime":runtime});
+            if failed {
+                Reason::new(Code::ApplicationFailed).annotate(&mut result);
+            }
+            return Ok(result);
+        }
+        if self.kind == 12 {
+            let document_start: Value = serde_json::from_slice(payload)
+                .map_err(|_| Error::protocol("Native document-start result is not JSON"))?;
+            if !document_start.is_object() || self.status != 0 {
+                return Err(Error::protocol("Invalid document-start envelope"));
+            }
+            let failed = document_start["status"] != json!("ok");
+            let mut result = json!({"contract_version":3,"session_id":session,"state":"ready","document_start":document_start});
             if failed {
                 Reason::new(Code::ApplicationFailed).annotate(&mut result);
             }
@@ -416,6 +449,45 @@ impl NativeConsole {
             "document_source":"live_capture","targets":[],"truncated":false,
             "message":"Live capture console binding unavailable. Rebuild the matching browser and backend, then restart the capture. No second browser profile was launched."})
     }
+    // Read-only. It never arms, clears, drains, launches, evaluates, or retires
+    // a session, including an expired or poisoned one: retirement stays with
+    // the explicit actions so a read can never destroy a researcher's context.
+    pub async fn document_start(&self, after: u64) -> Result<Value> {
+        let mut guard = self
+            .session
+            .try_lock()
+            .map_err(|_| Error::conflict("Another native console action is running"))?;
+        let Some(session) = guard.as_mut() else {
+            return Ok(json!({"contract_version":3,"available":self.available(),"state":"idle","session_id":null,
+                "document_start":{"status":"idle","permitted":false,"scripts":[],
+                    "message":"Connect the Console with document-start scripts enabled, then arm a rule."},
+                "limits":document_start_limits()}));
+        };
+        let ended = if let Some(browser) = session.browser.as_mut() {
+            browser.child.try_wait().ok().flatten().is_some()
+        } else {
+            session.bridge.child.try_wait().ok().flatten().is_some()
+        };
+        if session.poisoned || session.started.elapsed() >= Duration::from_secs(3600) || ended {
+            return Ok(json!({"contract_version":3,"available":self.available(),"state":"ready","session_id":session.id,
+                "document_start":{"status":"error","permitted":false,"scripts":[],
+                    "message":"This Console session ended. Start another session; armed scripts and their output are gone."},
+                "limits":document_start_limits()}));
+        }
+        if !session.document_start {
+            let mut result = document_start_unavailable(&session.id);
+            result["available"] = json!(self.available());
+            result["limits"] = document_start_limits();
+            return Ok(result);
+        }
+        let command = json!({"operation":"state","after":after.to_string()});
+        let mut result = session
+            .exchange(4, 0, &serde_json::to_string(&command)?)
+            .await?;
+        result["available"] = json!(self.available());
+        result["limits"] = document_start_limits();
+        Ok(result)
+    }
     pub async fn stop(&self) {
         if let Some(session) = self.session.lock().await.take() {
             session.stop().await;
@@ -431,7 +503,14 @@ impl NativeConsole {
             .map_err(|_| Error::conflict("Another native console action is running"))?;
         let action = request["action"].as_str().unwrap_or("");
         if action == "start" {
-            validation::fields(request, &["action", "url"], "Native console start")?;
+            // The experiment opt-in is optional so an existing caller that never
+            // asks for it keeps working unchanged.
+            let allowed: &[&str] = if request.get("document_start").is_some() {
+                &["action", "url", "document_start"]
+            } else {
+                &["action", "url"]
+            };
+            validation::fields(request, allowed, "Native console start")?;
             if guard.is_some() {
                 return Err(Error::conflict(
                     "Stop the current native session before starting another",
@@ -454,7 +533,19 @@ impl NativeConsole {
                     "Console URL must use HTTP or HTTPS without embedded credentials",
                 ));
             }
-            let mut session = self.launch(url.as_str()).await?;
+            // Permitting document-start scripts is a launch-time decision for
+            // this disposable browser. The switch alone arms nothing, and a
+            // session started without it can never arm.
+            let document_start = match request.get("document_start") {
+                None => false,
+                Some(Value::Bool(value)) => *value,
+                Some(_) => {
+                    return Err(Error::bad(
+                        "document_start must be true or false on a native console start",
+                    ));
+                }
+            };
+            let mut session = self.launch(url.as_str(), document_start).await?;
             let result = session.exchange(1, 0, "").await;
             if result.is_ok() {
                 *guard = Some(session);
@@ -521,6 +612,10 @@ impl NativeConsole {
             vec!["action", "session_id", "target_id", "command"]
         } else if action == "evaluate" {
             vec!["action", "session_id", "target_id", "source"]
+        } else if action == "arm_document_start" {
+            vec!["action", "session_id", "scripts", "confirm_document_start"]
+        } else if action == "clear_document_start" {
+            vec!["action", "session_id"]
         } else {
             return Err(Error::bad("Native console action is invalid"));
         };
@@ -550,8 +645,35 @@ impl NativeConsole {
             return result;
         }
         let runtime_source;
+        let document_start_source;
         let (operation, target, source) = if action == "targets" {
             (1, 0, "")
+        } else if action == "arm_document_start" || action == "clear_document_start" {
+            if !session.document_start {
+                if action == "clear_document_start" {
+                    // Nothing can be armed in a session that never permitted
+                    // the experiment, so report that instead of sending an
+                    // operation this browser would reject.
+                    return Ok(document_start_unavailable(&session.id));
+                }
+                return Err(Error::new(503, DOCUMENT_START_UNAVAILABLE)
+                    .with_code(Code::DependencyUnavailable));
+            }
+            document_start_source = if action == "clear_document_start" {
+                r#"{"operation":"clear"}"#.to_owned()
+            } else {
+                if request["confirm_document_start"] != true {
+                    return Err(Error::bad(
+                        "Confirm that armed snippets run automatically in every new matching document",
+                    ));
+                }
+                let scripts = validate_document_start(&request["scripts"])?;
+                serde_json::to_string(&json!({"operation":"arm","scripts":scripts}))?
+            };
+            if document_start_source.len() > RUNTIME_LIMIT {
+                return Err(Error::bad("Document-start command exceeds 65536 bytes"));
+            }
+            (4, 0, document_start_source.as_str())
         } else if action == "runtime" {
             validate_command(&request["command"])?;
             runtime_source = serde_json::to_string(&request["command"])?;
@@ -574,7 +696,7 @@ impl NativeConsole {
             let target = validation::canonical(&request["target_id"], 64, true, "Console target")?;
             (2, target, source)
         };
-        if session.live && operation != 1 {
+        if session.live && operation != 1 && operation != 4 {
             // Reject unknown ownership before any request. Refreshing may remove
             // the exact ID but must never translate it to a replacement document.
             if session.live_target != Some(target) || !session.native_targets.contains(&target) {
@@ -641,7 +763,7 @@ impl NativeConsole {
         }
         *self.live_bridge.lock().await = Some(bridge.session(ConsoleDir::Live(transport), true));
     }
-    async fn launch(&self, address: &str) -> Result<Session> {
+    async fn launch(&self, address: &str, document_start: bool) -> Result<Session> {
         let directory = tempfile::Builder::new()
             .prefix("reb-console.")
             .permissions(std::fs::Permissions::from_mode(0o700))
@@ -668,7 +790,11 @@ impl NativeConsole {
                 "--reb-native-console-token-file={}",
                 bridge.token.display()
             ))
-            .arg(format!("--reb-native-console-session-id={}", bridge.id))
+            .arg(format!("--reb-native-console-session-id={}", bridge.id));
+        if document_start {
+            browser.arg("--reb-native-console-document-start");
+        }
+        browser
             .arg(address)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
@@ -750,11 +876,137 @@ impl BridgeProcess {
             live_target: None,
             native_targets: BTreeSet::new(),
             accessed_targets: BTreeSet::new(),
+            document_start: false,
         }
     }
     async fn stop(mut self) {
         self.bridge.stop().await;
     }
+}
+
+const DOCUMENT_START_UNAVAILABLE: &str =
+    "Document-start Console scripts are not available in this session. Rebuild the pinned browser, \
+     then start a disposable Console session with document_start enabled, or relaunch the live \
+     capture with REB_CONSOLE_DOCUMENT_START=1. Nothing is relaunched automatically.";
+
+fn document_start_limits() -> Value {
+    json!({
+        "scripts": DOCUMENT_START_SCRIPT_LIMIT,
+        "source_bytes": DOCUMENT_START_SOURCE_LIMIT,
+        "total_source_bytes": DOCUMENT_START_TOTAL_SOURCE_LIMIT,
+        "rule_bytes": DOCUMENT_START_RULE_LIMIT,
+        "report_bytes": 512,
+        "records_per_document": 64,
+        "retained_records": 128,
+        "records_per_read": 32,
+        "execution_millis": 50,
+    })
+}
+
+fn document_start_unavailable(session: &str) -> Value {
+    json!({"contract_version":3,"state":"ready","session_id":session,
+        "document_start":{"status":"unavailable","permitted":false,"scripts":[],
+            "message":DOCUMENT_START_UNAVAILABLE}})
+}
+
+// The browser revalidates every field and owns the rule grammar. These checks
+// refuse an obviously wrong declaration before it reaches the wire, so a
+// researcher sees which field is wrong instead of one opaque refusal.
+fn validate_document_start(scripts: &Value) -> Result<Value> {
+    let list = scripts
+        .as_array()
+        .ok_or_else(|| Error::bad("Document-start scripts must be an array"))?;
+    if list.is_empty() || list.len() > DOCUMENT_START_SCRIPT_LIMIT {
+        return Err(Error::bad(format!(
+            "Arm 1 to {DOCUMENT_START_SCRIPT_LIMIT} document-start scripts"
+        ))
+        .with_code(Code::ResourceLimit));
+    }
+    let mut normalized = Vec::with_capacity(list.len());
+    let mut total = 0usize;
+    for script in list {
+        let fields: Vec<&str> = if script.get("path_prefix").is_some() {
+            vec!["frame", "origin", "path_prefix", "source"]
+        } else {
+            vec!["frame", "origin", "source"]
+        };
+        validation::fields(script, &fields, "Document-start script")?;
+        let origin = validation::text(
+            &script["origin"],
+            "Document-start origin",
+            DOCUMENT_START_RULE_LIMIT,
+            false,
+            false,
+        )?;
+        // One exact serialized origin: no pattern, wildcard, host suffix, path,
+        // credentials, trailing slash, or uppercase host.
+        let host = origin
+            .strip_prefix("https://")
+            .or_else(|| origin.strip_prefix("http://"))
+            .filter(|host| !host.is_empty())
+            .ok_or_else(|| {
+                Error::bad("Document-start origin must be an exact http:// or https:// origin")
+            })?;
+        if host.contains('/')
+            || host.contains('@')
+            || host.contains('?')
+            || host.contains('#')
+            || host.contains('*')
+            || host != host.to_lowercase()
+        {
+            return Err(Error::bad(
+                "Document-start origin takes no path, credentials, wildcard or uppercase host",
+            ));
+        }
+        let frame = script["frame"].as_str().unwrap_or("");
+        if frame != "top" && frame != "child" {
+            return Err(Error::bad(
+                "A document-start rule matches frame \"top\" or \"child\"; request both as two rules",
+            ));
+        }
+        let prefix = match script.get("path_prefix") {
+            Some(value) => Some(validation::text(
+                value,
+                "Document-start path prefix",
+                DOCUMENT_START_RULE_LIMIT,
+                false,
+                false,
+            )?),
+            None => None,
+        };
+        if let Some(prefix) = prefix
+            && (!prefix.starts_with('/') || prefix.contains('?') || prefix.contains('#'))
+        {
+            return Err(Error::bad(
+                "A document-start path prefix is a literal path starting with / and carries no query or fragment",
+            ));
+        }
+        let source = validation::text(
+            &script["source"],
+            "Document-start snippet",
+            DOCUMENT_START_SOURCE_LIMIT,
+            false,
+            true,
+        )?;
+        if source.is_empty() || source.contains('\0') {
+            return Err(Error::bad(
+                "A document-start snippet must be nonempty and contain no NUL bytes",
+            ));
+        }
+        total += source.len();
+        if total > DOCUMENT_START_TOTAL_SOURCE_LIMIT {
+            return Err(Error::bad(format!(
+                "Document-start snippets exceed {DOCUMENT_START_TOTAL_SOURCE_LIMIT} total source bytes"
+            ))
+            .with_code(Code::ResourceLimit));
+        }
+        let mut entry = json!({"origin":origin,"frame":frame,"source":source});
+        if let Some(prefix) = prefix {
+            entry["path_prefix"] = json!(prefix);
+        }
+        normalized.push(entry);
+    }
+    Ok(Value::Array(normalized))
 }
 
 const LIVE_CAPTURE_MESSAGE: &str =
@@ -942,6 +1194,7 @@ mod tests {
                 status,
                 kind: 0,
                 truncated: false,
+                document_start: false,
                 count: 0,
                 bytes: 0,
             };
@@ -960,6 +1213,7 @@ mod tests {
             status: 0,
             kind: 0,
             truncated: false,
+            document_start: false,
             count: 0,
             bytes: 0,
         };
@@ -973,6 +1227,7 @@ mod tests {
             status: 0,
             kind: 11,
             truncated: false,
+            document_start: false,
             count: 0,
             bytes: 0,
         };
@@ -985,6 +1240,114 @@ mod tests {
         assert_eq!(result["code"], "application_failed");
         assert_eq!(result["details"], json!({}));
     }
+    #[test]
+    fn document_start_rules_refuse_anything_that_could_widen_their_scope() {
+        let rule = |extra: Value| {
+            let mut script = json!({"origin":"https://fixture.test","frame":"top","source":"report('x');"});
+            for (key, value) in extra.as_object().unwrap() {
+                if value.is_null() {
+                    script.as_object_mut().unwrap().remove(key);
+                } else {
+                    script[key] = value.clone();
+                }
+            }
+            validate_document_start(&json!([script]))
+        };
+        assert!(rule(json!({})).is_ok());
+        assert!(rule(json!({"path_prefix":"/lab/"})).is_ok());
+        assert!(rule(json!({"frame":"child"})).is_ok());
+        for refused in [
+            json!({"origin":"fixture.test"}),
+            json!({"origin":"ftp://fixture.test"}),
+            json!({"origin":"https://fixture.test/"}),
+            json!({"origin":"https://Fixture.test"}),
+            json!({"origin":"https://*.fixture.test"}),
+            json!({"origin":"https://user:secret@fixture.test"}),
+            json!({"origin":"https://fixture.test/path"}),
+            json!({"origin":"https://fixture.test?a=b"}),
+            json!({"origin":"https://"}),
+            json!({"frame":"any"}),
+            json!({"frame":Value::Null}),
+            json!({"path_prefix":"lab"}),
+            json!({"path_prefix":"/lab?a=b"}),
+            json!({"path_prefix":"/lab#a"}),
+            json!({"source":""}),
+            json!({"source":Value::Null}),
+            json!({"origin":Value::Null}),
+            json!({"unexpected":"field"}),
+        ] {
+            assert!(rule(refused.clone()).is_err(), "{refused}");
+        }
+        // Bounds: script count, per-snippet source and the whole set's source.
+        let script = json!({"origin":"https://fixture.test","frame":"top","source":"report('x');"});
+        assert!(validate_document_start(&json!([])).is_err());
+        assert!(
+            validate_document_start(&json!([script, script, script, script, script])).is_err()
+        );
+        assert!(validate_document_start(&json!(script)).is_err());
+        let long = json!({"origin":"https://fixture.test","frame":"top","source":"a".repeat(DOCUMENT_START_SOURCE_LIMIT)});
+        assert!(validate_document_start(&json!([long])).is_ok());
+        assert!(validate_document_start(&json!([long, long, long])).is_err());
+        let oversized = json!({"origin":"https://fixture.test","frame":"top","source":"a".repeat(DOCUMENT_START_SOURCE_LIMIT + 1)});
+        assert!(validate_document_start(&json!([oversized])).is_err());
+        // The normalized command keeps exactly the declared rule.
+        let armed = validate_document_start(&json!([{"origin":"http://127.0.0.1:8080","frame":"child","path_prefix":"/lab/","source":"report(1);"}])).unwrap();
+        assert_eq!(
+            armed,
+            json!([{"origin":"http://127.0.0.1:8080","frame":"child","path_prefix":"/lab/","source":"report(1);"}])
+        );
+    }
+
+    #[test]
+    fn document_start_states_match_their_published_contract() {
+        let armed = json!({
+            "contract_version": 3, "available": true, "state": "ready", "session_id": "12",
+            "limits": document_start_limits(),
+            "document_start": {
+                "status": "ok", "permitted": true, "generation": "2", "renderer_processes": 2,
+                "pending_renderer_processes": 0,
+                "scripts": [{"script_id":"1","rule":{"origin":"https://fixture.test","frame":"top","path_prefix":"/lab/"},
+                    "source_bytes": 24, "digest": "0123456789abcdef", "records": 3,
+                    "injected_documents": 1, "refused": 0}],
+                "output": {"records":[{"sequence":"3","record":"report","provenance":"console-document-start-script",
+                    "script_id":"1","document_id":"7","frame_id":"99","top_frame":true,"time":1.0,
+                    "truncated":false,"text":"kinds=string:12"}],
+                    "next_sequence":"4","oldest_sequence":"1","retained":3,"dropped":0,
+                    "unattributed":0,"stale":0},
+            },
+        });
+        crate::validation::schema("NativeConsoleDocumentStart", &armed, 500).unwrap();
+        let mut unavailable = document_start_unavailable("12");
+        unavailable["available"] = json!(false);
+        unavailable["limits"] = document_start_limits();
+        crate::validation::schema("NativeConsoleDocumentStart", &unavailable, 500).unwrap();
+        crate::validation::schema(
+            "NativeConsoleDocumentStartResult",
+            &document_start_unavailable("12"),
+            500,
+        )
+        .unwrap();
+        // Provenance is fixed: output can never be labeled as capture evidence.
+        let mut forged = armed.clone();
+        forged["document_start"]["output"]["records"][0]["provenance"] = json!("native-capture");
+        assert!(crate::validation::schema("NativeConsoleDocumentStart", &forged, 500).is_err());
+    }
+
+    #[tokio::test]
+    async fn document_start_reads_never_start_or_retire_a_session() {
+        let options = Options::try_parse_from(["origin-trace-backend"]).unwrap();
+        let console = NativeConsole::new(&options);
+        let state = console.document_start(0).await.unwrap();
+        assert_eq!(state["state"], "idle");
+        assert_eq!(state["session_id"], Value::Null);
+        assert_eq!(state["document_start"]["permitted"], json!(false));
+        assert_eq!(state["document_start"]["scripts"], json!([]));
+        crate::validation::schema("NativeConsoleDocumentStart", &state, 500).unwrap();
+        // Reading twice cannot launch a browser or change the reported state.
+        assert_eq!(console.document_start(0).await.unwrap(), state);
+        assert!(console.session.lock().await.is_none());
+    }
+
     #[tokio::test]
     async fn connect_live_does_not_launch_a_browser_when_the_capture_has_no_binding() {
         let directory = tempfile::tempdir().unwrap();
@@ -1077,6 +1440,7 @@ while True:
             live_target: None,
             native_targets: BTreeSet::new(),
             accessed_targets: BTreeSet::new(),
+            document_start: false,
         };
         let mut options = Options::try_parse_from(["origin-trace-backend"]).unwrap();
         options.native_console_live_directory = Some(directory.path().into());

@@ -361,7 +361,9 @@ returns 409 `dependency_unavailable` for these actions.
 confirmation field, which an agent sets only on the researcher's
 authorization. Every
 capture switch is off unless named; an inherited capture switch, browser
-profile or embedded-session variable is ignored. Operator settings such as
+profile or embedded-session variable is ignored. Request content capture is
+not a named option, so these sessions record request body length, type and
+digest but no request path, query or body bytes. Operator settings such as
 helper binary paths, `REB_LIVE_SESSION_ROOT`, `REB_ORIGIN_TRACE_APP` and
 `REB_OPEN_COMMAND` still apply. They run the launcher that belongs with the
 `reb-api` build (`Contents/Resources/run-live-session.sh` in the app,

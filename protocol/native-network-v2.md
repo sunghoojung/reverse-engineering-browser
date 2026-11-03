@@ -34,7 +34,9 @@ Request content is the session's sensitive content gate for requests:
   unavailable instead of retaining bytes.
 - The live launcher sets that switch for `REB_CAPTURE_REQUEST_CONTENT=1`, which
   requires category bits 256 (Network) and 1024 (Artifact), and then starts the
-  artifact receiver with `--allow-sensitive`. `make live` leaves it off.
+  artifact receiver with `--allow-sensitive`. `make live` leaves it off, and
+  sessions started by `reb-api session start` or the MCP `start_live_session`
+  tool always set it to 0.
 - The packaged app's "Full request and response content" mode, its default
   research profile, sets `REB_CAPTURE_REQUEST_CONTENT=1` when the category mask
   allows it, reading the mask with the launcher's grammar (decimal or `0x`

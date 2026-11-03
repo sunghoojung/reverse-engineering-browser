@@ -473,6 +473,9 @@ pub async fn launch(options: &StartOptions) -> Result<Started, String> {
         )
         .env("REB_NATIVE_QUIET_MODE", switch(options.quiet))
         .env("REB_CAPTURE_CANVAS_IMAGES", switch(options.canvas_images))
+        // Request paths, queries and bodies are sensitive and not a named
+        // option, so an inherited switch never turns them on here.
+        .env("REB_CAPTURE_REQUEST_CONTENT", "0")
         .env("REB_LOCALHOST_ONLY", switch(options.localhost_only))
         // An agent cannot answer a macOS Keychain prompt, so agent sessions use
         // a prompt-free isolated profile. Do not save passwords in it.

@@ -4807,3 +4807,43 @@ details.decoder-card > header p { margin-top: 0; }
 .source-editor-toolbar > .evidence-name-host { flex: 1 0 100%; }
 .source-editor-toolbar .evidence-name-editor { padding: 4px 0; border: 0; background: transparent; }
 #screen-vm .vm-selection-inspector .evidence-name-editor { padding: 8px 10px; }
+
+/* Saved JavaScript invocation sites. The header chip names what this capture
+   tracks; the Sources pane saves functions for the next capture. Context lines
+   are captured text and wrap rather than widen the sidebar. */
+.session-tracking {
+  min-width: 0; max-width: min(46vw, 420px); min-height: 20px; padding: 0 8px; overflow: hidden;
+  border: 1px solid var(--line); border-radius: var(--control-radius); background: transparent;
+  color: var(--muted); font: 400 11px var(--mono); white-space: nowrap; text-overflow: ellipsis; cursor: pointer;
+}
+.native-shell .session-tracking { min-height: 18px; font-size: 10px; }
+.session-tracking[data-kind="armed"] { color: var(--text); }
+.session-tracking[data-kind="warning"] { border-color: var(--amber); color: var(--amber); }
+.session-tracking:hover { background: var(--control-hover); }
+.session-tracking:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.invocation-sites { display: grid; gap: 8px; overflow-wrap: anywhere; }
+.invocation-sites p { margin: 0; }
+.invocation-sites-note { color: var(--text); }
+.invocation-sites-name { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.invocation-sites-name label { flex: 1 0 100%; color: var(--muted); }
+.invocation-sites-name input {
+  flex: 1 1 140px; min-width: 0; height: 26px; padding: 0 8px; border: 1px solid var(--line);
+  border-radius: var(--control-radius); background: var(--panel-2); color: var(--text); font: 400 12px var(--mono);
+}
+.invocation-sites-status:empty { display: none; }
+.invocation-sites-status { color: var(--text); }
+.invocation-sites-heading { margin: 4px 0 0; color: var(--text); font: 600 11px var(--sans); }
+.invocation-sites-list, .invocation-sites-candidates { display: grid; gap: 6px; margin: 0; padding: 0; list-style: none; }
+.invocation-site, .invocation-site-candidate {
+  display: grid; gap: 4px; padding: 6px 8px; border: 1px solid var(--line); border-radius: var(--control-radius);
+}
+.invocation-site-label { color: var(--text); font: 600 12px var(--mono); }
+.invocation-site-url, .invocation-site-meta, .invocation-site-where { color: var(--faint); }
+.invocation-site-url { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.invocation-site[data-retained="other_version"] { border-color: var(--amber); }
+.invocation-site-stale { color: var(--amber); }
+.invocation-site-context { display: block; padding: 4px 6px; border-radius: 4px; background: var(--panel-2); color: var(--text); font: 400 11px var(--mono); white-space: pre-wrap; }
+.invocation-site-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.invocation-site-refusal { color: var(--amber); }
+.invocation-site > .secondary-button, .invocation-sites > .secondary-button { justify-self: start; }
+.invocation-site-empty { color: var(--faint); }

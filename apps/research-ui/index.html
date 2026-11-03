@@ -14,6 +14,7 @@
         <div class="window-dots" aria-hidden="true"><span class="window-dot"></span><span class="window-dot"></span><span class="window-dot"></span></div>
         <span class="brand-name">Origin Trace</span>
         <span id="session-mode" class="session-mode">Connecting</span>
+        <button id="invocation-tracking" class="session-tracking" type="button" aria-controls="invocation-sites-details" hidden></button>
       </header>
 
       <aside id="sidebar" class="sidebar" aria-label="Origin Trace">
@@ -245,6 +246,7 @@
                 <button id="source-wasm" class="source-tool" type="button" aria-label="Inspect WebAssembly module" aria-pressed="false" hidden>Inspect</button>
                 <button id="investigation-decode-range" class="source-tool" type="button" title="First select an Original bytes link in Facts; this copies at most 64 KiB without running a transformation" disabled>Decode range</button>
                 <button id="source-facts-toggle" class="source-tool" type="button" aria-controls="source-facts-details" aria-expanded="false" disabled>Facts</button>
+                <button id="source-track-calls" class="source-tool" type="button" aria-controls="invocation-sites-details" disabled>Track calls</button>
                 <button id="source-deob" class="source-tool" type="button" aria-label="Run local static cleanup" title="Run local static cleanup" disabled>Static cleanup</button>
 
                 <button id="source-sidebar-toggle" class="source-tool" type="button" aria-controls="source-sidebar" aria-expanded="false">Details</button>
@@ -283,6 +285,7 @@
               <div class="debug-panes">
                 <details id="artifact-details" class="debug-pane" open><summary>Source details</summary><div id="artifact-facts" class="debug-pane-body">Select a source to inspect capture or runtime metadata.</div></details>
                 <details id="source-facts-details" class="debug-pane"><summary>JavaScript facts</summary><div id="source-facts-report" class="debug-pane-body source-facts-report" aria-live="polite"></div></details>
+                <details id="invocation-sites-details" class="debug-pane"><summary>Track function calls</summary><div id="invocation-sites-panel" class="debug-pane-body invocation-sites"></div></details>
                 <details id="deobfuscation-details" class="debug-pane" open><summary>Static cleanup</summary><label class="deobfuscation-assumption"><input id="deobfuscation-intrinsics" type="checkbox"> Assume standard JavaScript intrinsics</label><div id="deobfuscation-report" class="debug-pane-body" role="region" aria-label="Deobfuscation analysis" tabindex="-1">Select a JavaScript source to analyze.</div></details>
 
               </div>
@@ -810,6 +813,7 @@
     <script src="investigation_navigation.js"></script>
     <script src="investigation_notebook.js"></script>
     <script src="evidence_names.js"></script>
+    <script src="invocation_sites.js"></script>
 
     <script src="app.js"></script>
     <script src="vm_program_workspace.js"></script>

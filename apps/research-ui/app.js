@@ -7,6 +7,15 @@ const capturedExportPanel = installCapturedExportDialog({
   getRun: () => null, contextKey: () => null, getRunCapture: () => null,
   notice: message => investigationNotice(message)
 });
+const invocationSitesPanel = createInvocationSitesPanel({
+  root: document.querySelector('#invocation-sites-panel'),
+  chip: document.querySelector('#invocation-tracking'),
+  trackButton: document.querySelector('#source-track-calls'),
+  getSource: selectedSource, positionProblem: invocationSitePositionProblem, getPosition: invocationSitePosition,
+  onReveal: candidate => revealOriginalLine(selectedSource(), candidate.line - 1, candidate.column - 1),
+  onShow: showInvocationSites
+});
+invocationSitesPanel.refresh();
       const evidencePackagePanel = createEvidencePackagePanel({getContext: () => ({
         requestId: evidenceRequestKey(state.requests.find(request => request.id === state.selectedRequestId)),
         requestEvents: state.requests.find(request => request.id === state.selectedRequestId)?.events ?? [],
@@ -6726,6 +6735,7 @@ const capturedExportPanel = installCapturedExportDialog({
 
       function renderSources() {
         const source = selectedSource();
+        invocationSitesPanel.render();
         sourceFactsPanel.sync(source);
         syncInvestigationRange(source);
         const view = source?.content !== undefined ? sourceDisplayView(source) : null;
@@ -6811,6 +6821,51 @@ const capturedExportPanel = installCapturedExportDialog({
 
       function sourceDerivedView(source) {
         return source?.deobfuscation?.representation ?? null;
+      }
+
+      // Only the original view's coordinates are artifact coordinates; pretty
+      // printed, derived and Wasm views would name a different character.
+      function invocationSitePositionProblem() {
+        const source = selectedSource(), editor = state.sourceEditorView;
+        if (source?.source_type !== 'artifact' || source.kind !== 'javascript') return 'Open one captured JavaScript artifact to track a function in it.';
+        if (state.sourceWasm || state.sourceDeobfuscated || state.sourceFormatted) return 'Switch to the original source view to track a function at a position.';
+        if (!editor || editor.identity !== sourceIdentity(source) || typeof editor.view?.original !== 'string') return 'Open the source text first.';
+        return '';
+      }
+
+      // The caret or selection start in the source text, else the last line
+      // and column Sources moved to with Go, Find or a link.
+      function invocationSitePosition() {
+        const problem = invocationSitePositionProblem();
+        if (problem) return {error: problem};
+        const editor = state.sourceEditorView;
+        let {line, column} = editor.window;
+        const selection = globalThis.getSelection?.();
+        const anchor = selection?.rangeCount ? selection.getRangeAt(0) : null;
+        const container = anchor?.startContainer?.nodeType === 1 ? anchor.startContainer : anchor?.startContainer?.parentElement;
+        const text = container?.closest?.('.source-text');
+        if (text && elements.sourceCode.contains(text)) {
+          const prefix = document.createRange();
+          prefix.setStart(text, 0);
+          prefix.setEnd(anchor.startContainer, anchor.startOffset);
+          const row = text.closest('.source-line');
+          line = Number(row.dataset.localLine);
+          column = Number(row.dataset.columnStart ?? 0) + prefix.toString().length;
+        }
+        const start = sourceDocumentOffset(editor.index, line);
+        const original = editor.view.original;
+        const byteOffset = start === null ? null : invocationSiteByteOffset(original, start + column, original.length);
+        if (byteOffset === null) return {error: 'The current position is not a character of the retained source text.'};
+        return {byteOffset, line, column};
+      }
+
+      function showInvocationSites() {
+        if (document.querySelector('#screen-sources').hidden) showScreen('sources');
+        state.sourceSidebarOpen = true;
+        renderSourceSidebar();
+        const details = document.querySelector('#invocation-sites-details');
+        details.open = true;
+        details.scrollIntoView?.({block: 'nearest'});
       }
 
       function revealOriginalLine(source, line, column) {
@@ -7552,6 +7607,8 @@ const capturedExportPanel = installCapturedExportDialog({
             return;
           }
           state.artifactCatalogSignature = catalogSignature;
+          // A newly retained script can be another version of a saved one.
+          invocationSitesPanel.refresh();
           if (body.artifacts.length === 0) {
             if (state.sessionMode === 'live') {
               retireCanvasPreviews('Canvas previews released because the artifact catalog is empty.');

@@ -1,5 +1,6 @@
 import Cocoa
 import CoreFoundation
+import CryptoKit
 import Darwin
 import Foundation
 import WebKit
@@ -2077,14 +2078,18 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
       maxRecordBytes: 2 * 1024,
       recordName: "origin trace edge"
     )
+    let artifacts = try recentArtifactEntries()
     let document = try OriginTraceDocumentBuilder.build(
       events: events,
       edges: edges,
-      artifacts: recentArtifactEntries(),
+      artifacts: artifacts,
       requestID: requestID,
       sessionID: sessionID,
       rootProcessID: rootProcessID,
-      rootSequenceNumber: rootSequence
+      rootSequenceNumber: rootSequence,
+      requestBodies: OriginTraceDocumentBuilder.retainedRequestBodies(
+        events: events, artifacts: artifacts, requestID: requestID,
+        read: verifiedRequestBodyBytes)
     )
     return try JSONSerialization.data(withJSONObject: document, options: [])
   }
@@ -2272,6 +2277,23 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
       !parentDepthLimited || parsedParentDepth == 32
     else { return false }
     return true
+  }
+
+  // The verified bytes of a retained request-body artifact, at most 1 MiB, or
+  // nil: the manifest's size and SHA-256 must both match the stored file.
+  private func verifiedRequestBodyBytes(_ artifact: [String: Any]) -> [UInt8]? {
+    guard let relativePath = artifact["content_path"] as? String,
+      let byteSize = artifact["byte_size"] as? Int, byteSize >= 0, byteSize <= 1 << 20,
+      let sha256 = artifact["sha256"] as? String
+    else { return nil }
+    let root = artifactStoreURL.resolvingSymlinksInPath().standardizedFileURL
+    let contentURL = root.appendingPathComponent(relativePath).resolvingSymlinksInPath()
+      .standardizedFileURL
+    guard contentURL.path.hasPrefix(root.path + "/"),
+      let data = try? Data(contentsOf: contentURL), data.count == byteSize,
+      SHA256.hash(data: data).map({ String(format: "%02x", $0) }).joined() == sha256
+    else { return nil }
+    return [UInt8](data)
   }
 
   private func recentArtifactEntries() throws -> [[String: Any]] {

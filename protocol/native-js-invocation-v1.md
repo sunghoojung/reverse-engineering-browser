@@ -111,10 +111,10 @@ little-endian version-1 payload. `session_id`, `sequence_number`,
 `artifact_id`, `parent_event_id`, `navigation_id` and `flags` are zero. The
 renderer does not know the browser's numeric navigation ID; the document a
 call ran in is the payload's `document_id`. Wide identities are decimal
-strings in JSON. Event numbers 22 to 24 were the next free values; a sibling
-change merged first may renumber them without changing any layout.
+strings in JSON. Event numbers 24 to 26 follow 22 and 23, which the
+request-body capture contract takes; renumbering never changes a layout.
 
-### `js_invocation_start` (22)
+### `js_invocation_start` (24)
 
 `frame_id` is nonzero and `request_id` is zero.
 
@@ -142,7 +142,7 @@ Value kinds: 1 integer, 2 non-integer number, 3 string, 4 symbol,
 5 undefined, 6 null, 7 boolean, 8 BigInt, 9 other object, 10 function,
 11 array, 12 `ArrayBuffer`, 13 typed array or `DataView`, 14 promise.
 
-### `js_invocation_settle` (23)
+### `js_invocation_settle` (25)
 
 `frame_id` is nonzero and `request_id` is zero.
 
@@ -171,7 +171,7 @@ a fulfilled string or bytes; state 4 only to fulfilled bytes that are
 detached, shared or variable-length. A rejection is never digested. Without
 the opt-in the state is 0 and every digest field is zero.
 
-### `js_invocation_request` (24)
+### `js_invocation_request` (26)
 
 `request_id` is the renderer request ID (nonzero, below 2^32) that the
 `request_initiated` record written immediately before carries. `frame_id` may
@@ -233,8 +233,11 @@ exactly its digested length whose rolling hash and SHA-256 both match. Two
 matches are the gap `value_flow_ambiguous`; a search past 16 MiB of hashed
 windows is `value_flow_unsearched`. Only the stated encoding is matched: a
 percent-encoded, escaped or encrypted copy is not found and is not reported as
-a negative. Raw request bodies come from the request-body capture contract;
-until it is merged the join has no input and reports nothing.
+a negative. The body is the request-body capture contract's sensitive
+`request_body` artifact (capture origin `network_request`) whose creator is
+the traced request's `request_body` child record, read only when its size and
+SHA-256 match the manifest. Until that contract is merged no such record
+exists, so the join has no input and reports nothing.
 
 ## Validation boundary
 

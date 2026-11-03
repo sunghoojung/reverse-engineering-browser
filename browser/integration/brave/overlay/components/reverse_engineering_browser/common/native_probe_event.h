@@ -75,9 +75,9 @@ enum class NativeProbeType : std::uint16_t {
   kWasmGuestInvocation = 19,
   kWasmIndirectObservation = 20,
   kJsDispatchObservation = 21,
-  kJsInvocationStart = 22,
-  kJsInvocationSettle = 23,
-  kJsInvocationRequest = 24,
+  kJsInvocationStart = 24,
+  kJsInvocationSettle = 25,
+  kJsInvocationRequest = 26,
 };
 
 enum class NativeProbeFlag : std::uint16_t {

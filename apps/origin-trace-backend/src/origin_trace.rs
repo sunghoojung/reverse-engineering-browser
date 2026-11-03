@@ -4,6 +4,7 @@ use crate::{
 };
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
+use std::path::Path;
 
 type Reference = (String, u32, String);
 /// Raw request body bytes keyed by the retained event that carries them.
@@ -199,13 +200,54 @@ fn adjacent_candidate<'a>(
     }
     found
 }
-/// Raw request bodies retained under sensitive capture, keyed by the event
-/// that carries each one. Integration point: the request path and body capture
-/// contract supplies these bodies. Until it is merged no retained artifact names
-/// a raw request body, so there is nothing to search and
-/// `invocation_value_flow` is never reported.
-fn retained_request_bodies(_events: &[Value], _artifacts: &[Value]) -> RequestBodies {
-    RequestBodies::new()
+/// A request body is searched only as retained raw bytes, at most this many.
+const REQUEST_BODY_LIMIT: usize = 1 << 20;
+/// Raw request bodies retained under sensitive capture for `request_id`, keyed
+/// by the browser request record each belongs to. The request-body capture
+/// contract (protocol/native-network-v2.md, merged separately) writes a
+/// `request_body` record as a child of that request record; for a captured
+/// body its `artifact_id` names a sensitive `request_body` artifact, capture
+/// origin `network_request`, whose creator is that record. Only that exact
+/// pairing and verified bytes count; anything else is no body, never a guess.
+/// Before that contract is merged no such record exists and this is empty.
+pub fn retained_request_bodies(
+    events: &[Value],
+    artifacts: &[Value],
+    request_id: &str,
+    root: &Path,
+) -> RequestBodies {
+    let mut bodies = RequestBodies::new();
+    for event in events {
+        if event["type"] != "request_body"
+            || event["category"] != "network"
+            || event["request_id"] != request_id
+            || event["artifact_id"] == "0"
+            || event["parent_event_id"] == "0"
+        {
+            continue;
+        }
+        let mut matching = artifacts.iter().filter(|artifact| {
+            artifact["artifact_id"] == event["artifact_id"]
+                && artifact["kind"] == "request_body"
+                && artifact["capture_origin"] == "network_request"
+                && artifact["creator_event_id"] == event["sequence_number"]
+                && artifact["session_id"] == event["session_id"]
+        });
+        let (Some(artifact), None) = (matching.next(), matching.next()) else {
+            continue;
+        };
+        let (Some(session), Some(process), Some(parent)) = (
+            event["session_id"].as_str(),
+            event["process_id"].as_u64(),
+            event["parent_event_id"].as_str(),
+        ) else {
+            continue;
+        };
+        if let Ok(bytes) = evidence::content(root, artifact, REQUEST_BODY_LIMIT) {
+            bodies.insert((session.into(), process as u32, parent.into()), bytes);
+        }
+    }
+    bodies
 }
 /// The single settle record whose exact digested value occurs in `body`.
 /// Candidates share the session and the renderer process of `request`, and
@@ -267,8 +309,11 @@ pub fn build(
     session_id: Option<&str>,
     root_process: Option<u32>,
     root_sequence: Option<&str>,
+    artifact_root: Option<&Path>,
 ) -> Result<Value> {
-    let bodies = retained_request_bodies(events, artifacts);
+    let bodies = artifact_root
+        .map(|root| retained_request_bodies(events, artifacts, request_id, root))
+        .unwrap_or_default();
     build_with_bodies(
         events,
         edges,
@@ -878,6 +923,49 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// The request-body capture contract's pairing: a `request_body` child
+    /// record of the request and its own sensitive artifact, verified bytes.
+    #[test]
+    fn retained_bodies_need_the_exact_record_and_verified_artifact() {
+        use sha2::{Digest, Sha256};
+        let root = tempfile::tempdir().unwrap();
+        let body = b"n=P1_token-a".to_vec();
+        let hash = hex::encode(Sha256::digest(&body));
+        std::fs::create_dir_all(root.path().join("blobs")).unwrap();
+        std::fs::write(root.path().join(format!("blobs/{hash}.bin")), &body).unwrap();
+        let mut record = network("request_body", 2, 84, 900, (42, 9));
+        record["artifact_id"] = json!("31");
+        record["parent_event_id"] = json!("1");
+        let artifact = json!({"artifact_id":"31","session_id":"9","kind":"request_body",
+            "capture_origin":"network_request","creator_event_id":"2","byte_size":body.len(),
+            "sha256":hash,"content_path":format!("blobs/{hash}.bin")});
+        let bodies =
+            retained_request_bodies(&[record.clone()], &[artifact.clone()], "900", root.path());
+        assert_eq!(bodies.get(&key(84, 1)), Some(&body));
+        assert!(
+            retained_request_bodies(&[record.clone()], &[artifact.clone()], "901", root.path())
+                .is_empty()
+        );
+        for (field, value) in [
+            ("creator_event_id", json!("3")),
+            ("kind", json!("response_body")),
+            ("capture_origin", json!("unknown")),
+            ("sha256", json!("00".repeat(32))),
+        ] {
+            let mut wrong = artifact.clone();
+            wrong[field] = value;
+            assert!(
+                retained_request_bodies(&[record.clone()], &[wrong], "900", root.path()).is_empty(),
+                "{field}"
+            );
+        }
+        // Two artifacts claiming the same record are ambiguous: no body.
+        assert!(
+            retained_request_bodies(&[record], &[artifact.clone(), artifact], "900", root.path())
+                .is_empty()
+        );
     }
 
     #[test]

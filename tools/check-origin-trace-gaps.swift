@@ -146,6 +146,30 @@ enum OriginTraceGapChecks {
         }
       }
     }
+    // The request-body pairing: the traced request's request_body child record
+    // and its one matching sensitive artifact.
+    let record: [String: Any] = [
+      "type": "request_body", "category": "network", "request_id": "900", "artifact_id": "31",
+      "parent_event_id": "1", "session_id": "7", "process_id": 84, "sequence_number": "2",
+    ]
+    let artifact: [String: Any] = [
+      "artifact_id": "31", "kind": "request_body", "capture_origin": "network_request",
+      "creator_event_id": "2", "session_id": "7",
+    ]
+    let body: [UInt8] = Array("n=token".utf8)
+    let found = OriginTraceDocumentBuilder.retainedRequestBodies(
+      events: [record], artifacts: [artifact], requestID: "900", read: { _ in body })
+    precondition(found == ["7:84:1": body])
+    for (field, value) in [("creator_event_id", "3"), ("kind", "response_body"), ("capture_origin", "unknown")] {
+      var wrong = artifact
+      wrong[field] = value
+      precondition(OriginTraceDocumentBuilder.retainedRequestBodies(
+        events: [record], artifacts: [wrong], requestID: "900", read: { _ in body }).isEmpty, field)
+    }
+    precondition(OriginTraceDocumentBuilder.retainedRequestBodies(
+      events: [record], artifacts: [artifact, artifact], requestID: "900", read: { _ in body }).isEmpty)
+    precondition(OriginTraceDocumentBuilder.retainedRequestBodies(
+      events: [record], artifacts: [artifact], requestID: "900", read: { _ in nil }).isEmpty)
     print("PASS native Origin Trace invocation identity and exact value-flow cases match the Rust builder")
   }
 }

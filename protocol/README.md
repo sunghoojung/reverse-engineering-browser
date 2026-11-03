@@ -350,9 +350,9 @@ use the names.
 | 19 | `wasm_guest_invocation` | `include/reb/wasm_guest.hpp` | [native Wasm guest](native-wasm-guest-v1.md) |
 | 20 | `wasm_indirect_observation` | `include/reb/wasm_dispatch.hpp` | [native Wasm call_indirect](native-wasm-dispatch-v1.md#call_indirect-observations) |
 | 21 | `js_dispatch_observation` | `include/reb/js_dispatch.hpp` | [native JavaScript dispatch](native-js-dispatch-v1.md) |
-| 22 | `js_invocation_start` | `include/reb/js_invocation.hpp` | [native JavaScript invocation](native-js-invocation-v1.md) |
-| 23 | `js_invocation_settle` | `include/reb/js_invocation.hpp` | [native JavaScript invocation](native-js-invocation-v1.md) |
-| 24 | `js_invocation_request` | `include/reb/js_invocation.hpp` | [native JavaScript invocation](native-js-invocation-v1.md) |
+| 24 | `js_invocation_start` | `include/reb/js_invocation.hpp` | [native JavaScript invocation](native-js-invocation-v1.md) |
+| 25 | `js_invocation_settle` | `include/reb/js_invocation.hpp` | [native JavaScript invocation](native-js-invocation-v1.md) |
+| 26 | `js_invocation_request` | `include/reb/js_invocation.hpp` | [native JavaScript invocation](native-js-invocation-v1.md) |
 
 `wasm_dispatch_observation` and `wasm_indirect_observation` payloads are
 version 2 and `wasm_guest_invocation` version 4: each adds the JavaScript

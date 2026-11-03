@@ -59,9 +59,10 @@ enum class EventType : std::uint16_t {
   // The only definition of this number; see protocol/native-js-dispatch-v1.md.
   kJsDispatchObservation = 21,
   // The only definitions of these numbers; see protocol/native-js-invocation-v1.md.
-  kJsInvocationStart = 22,
-  kJsInvocationSettle = 23,
-  kJsInvocationRequest = 24,
+  // 22 and 23 are taken by the request-body capture contract, merged separately.
+  kJsInvocationStart = 24,
+  kJsInvocationSettle = 25,
+  kJsInvocationRequest = 26,
 };
 
 enum class EventFlag : std::uint16_t {

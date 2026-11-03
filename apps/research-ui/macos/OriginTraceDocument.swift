@@ -500,6 +500,36 @@ enum OriginTraceDocumentBuilder {
     case refused(String, String)
   }
 
+  // retained_request_bodies in origin_trace.rs: the request-body capture
+  // contract's `request_body` child record of the traced request and its one
+  // sensitive artifact, keyed by the parent request record. `read` returns
+  // verified bytes or nil; anything else is no body, never a guess.
+  static func retainedRequestBodies(
+    events: [[String: Any]], artifacts: [[String: Any]], requestID: String,
+    read: ([String: Any]) -> [UInt8]?
+  ) -> [String: [UInt8]] {
+    var bodies: [String: [UInt8]] = [:]
+    for event in events {
+      guard event["type"] as? String == "request_body",
+        event["category"] as? String == "network",
+        event["request_id"] as? String == requestID,
+        let artifactID = event["artifact_id"] as? String, artifactID != "0",
+        let parent = event["parent_event_id"] as? String, parent != "0",
+        let session = event["session_id"] as? String,
+        let process = processID(event["process_id"])
+      else { continue }
+      let matching = artifacts.filter {
+        $0["artifact_id"] as? String == artifactID && $0["kind"] as? String == "request_body"
+          && $0["capture_origin"] as? String == "network_request"
+          && $0["creator_event_id"] as? String == event["sequence_number"] as? String
+          && $0["session_id"] as? String == session
+      }
+      guard matching.count == 1, let bytes = read(matching[0]) else { continue }
+      bodies["\(session):\(process):\(parent)"] = bytes
+    }
+    return bodies
+  }
+
   private static let rollingBase: UInt64 = 0x100_0000_01b3
   private static let searchByteLimit = 16 << 20
 

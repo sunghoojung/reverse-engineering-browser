@@ -339,9 +339,11 @@ state, never an inferred one.
 The value-flow join counts as a correlated link only when all hold:
 
 1. The settle record has a present digest and the request has retained raw
-   body bytes, which only exist under sensitive capture (the request-body
-   capture contract is supplied separately; until it is merged the join has no
-   input and reports nothing).
+   body bytes, which only exist under sensitive capture: the request-body
+   capture contract's `request_body` artifact created by the traced request's
+   `request_body` child record, with verified size and SHA-256. That contract
+   is developed in parallel; until it is merged the join has no input and
+   reports nothing.
 2. A window of the body equal in length to the digested encoding has the same
    rolling hash and the same SHA-256. Only the stated encoding counts: a
    percent-encoded, JSON-escaped, base64 or encrypted embedding is not matched
@@ -397,14 +399,13 @@ the last known invocation.
 
 | Event | Number | Category | Payload |
 | --- | --- | --- | --- |
-| `js_invocation_start` | 22 | `vm` | 128 bytes, version 1 |
-| `js_invocation_settle` | 23 | `vm` | 128 bytes, version 1 |
-| `js_invocation_request` | 24 | `vm` | 128 bytes, version 1 |
+| `js_invocation_start` | 24 | `vm` | 128 bytes, version 1 |
+| `js_invocation_settle` | 25 | `vm` | 128 bytes, version 1 |
+| `js_invocation_request` | 26 | `vm` | 128 bytes, version 1 |
 
-Numbers 22 to 24 are the next free values when this design was written. A
-sibling change that lands first may take them; renumbering is a mechanical
-change to the C++, Rust, JavaScript and Python tables and does not change any
-layout. Relation names are added to the Origin Trace edge and document schemas.
+Numbers 24 to 26 follow 22 and 23, which the request-body capture contract
+(developed in parallel) takes. Renumbering is a mechanical change to the C++
+enum tables only; readers use names, and no layout changes. Relation names are added to the Origin Trace edge and document schemas.
 
 ## Acceptance and live verification
 
@@ -440,7 +441,7 @@ Live (needs a rebuilt Brave, on the build machine):
 | V8 | patch `v8/0011`: flag (implies the dispatch flag), embedder interface, arming table and statuses, entry/exit/handler emission, frame record, CPED wrapper and API rules, settle reaction, digests, `GetCurrentJsInvocation`, cctests |
 | Chromium | patch `chromium/0021`: install the callbacks, admit live documents, read the current invocation for Wasm records and `SendAsync` |
 | Overlay | wire header, site-file parsing for `function-entry`, renderer budgets and gaps, Mojo configuration, browser forwarding of Wasm context |
-| Protocol and backend | events 22 to 24, Wasm payload versions, C++/Python/Rust/JavaScript validators, origin-trace relations in the broker index, the value-flow join in both the Rust and the native app's Swift trace builders, viewer labels |
+| Protocol and backend | events 24 to 26, Wasm payload versions, C++/Python/Rust/JavaScript validators, origin-trace relations in the broker index, the value-flow join in both the Rust and the native app's Swift trace builders, viewer labels |
 | Tooling | `tools/native-js-invocation-site.py` writes the site file; the launcher's `REB_NATIVE_JS_INVOCATION_SITES` and `REB_NATIVE_JS_INVOCATION_DIGESTS` |
 
 What runs in this repository's gate: the C++ parity and rule test, the Python

@@ -71,6 +71,8 @@ void CheckGuestWireParity() {
   CheckGuestWireField(&OI::parent_dispatch_sequence_number, &CI::parent_dispatch_sequence_number,
                       std::uint64_t{0x5152535455565758});
   CheckGuestWireField(&OI::site_index, &CI::site_index, std::uint32_t{0x61626364});
+  CheckGuestWireField(&OI::js_invocation_state, &CI::js_invocation_state, std::uint8_t{0x71});
+  CheckGuestWireField(&OI::js_invocation_id, &CI::js_invocation_id, std::uint32_t{0x81828384});
   // A version 1 record reserved bytes 72..128; it still decodes, with no
   // parent dispatch, and the new field occupies exactly bytes 72..80.
   OI legacy;
@@ -87,7 +89,14 @@ void CheckGuestWireParity() {
   OI sited;
   sited.site_index = 7;
   bytes = reb::EncodeNativeWasmGuestInvocationPayload(sited);
-  assert(bytes[0] == std::byte{3} && bytes[80] == std::byte{7} && bytes[84] == std::byte{0});
+  assert(bytes[0] == std::byte{4} && bytes[80] == std::byte{7} && bytes[84] == std::byte{0});
+  // Version 4 adds the JavaScript invocation context at exactly bytes 84..92.
+  OI attributed;
+  attributed.js_invocation_state = 2;
+  attributed.js_invocation_id = 0x01020304;
+  bytes = reb::EncodeNativeWasmGuestInvocationPayload(attributed);
+  assert(bytes[84] == std::byte{2} && bytes[85] == std::byte{0} && bytes[88] == std::byte{4} &&
+         bytes[91] == std::byte{1} && bytes[92] == std::byte{0});
   std::puts("PASS overlay renderer encoder and core decoder agree byte-for-byte on every field");
 }
 // Sites name distinct dispatcher functions in increasing order, 1 to 8 of

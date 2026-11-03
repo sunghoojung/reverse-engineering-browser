@@ -213,7 +213,7 @@ void NativeProbeHostGuestBoundary(reb::ArtifactReceiver& receiver) {
   const auto indirect = [&](std::uint64_t capture_epoch, std::uint64_t sequence,
                             std::uint32_t resolution, std::uint32_t callee) {
     host.CaptureWasmIndirect(capture_epoch, kSession, sequence, 100, 123, 7, frame_id, 10, 11, 12,
-                             1, 8, 0, 4, callee, resolution, 0, "fixture://host-indirect",
+                             1, 8, 0, 4, callee, resolution, 0, 0, 0, "fixture://host-indirect",
                              mojo_base::BigBuffer(indirect_module));
   };
   const auto before_indirect = events.size();

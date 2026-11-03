@@ -50,6 +50,8 @@ class NativeProbeHost final : public mojom::NativeProbeHost {
                            std::uint32_t selector,
                            std::uint32_t table_count,
                            std::uint32_t sample_index,
+                           std::uint8_t js_invocation_state,
+                           std::uint32_t js_invocation_id,
                            const std::string& source_url,
                            mojo_base::BigBuffer content) override;
   void CaptureWasmIndirect(std::uint64_t capture_epoch,
@@ -69,6 +71,8 @@ class NativeProbeHost final : public mojom::NativeProbeHost {
                            std::uint32_t callee_function_index,
                            std::uint32_t resolution,
                            std::uint32_t sample_index,
+                           std::uint8_t js_invocation_state,
+                           std::uint32_t js_invocation_id,
                            const std::string& source_url,
                            mojo_base::BigBuffer content) override;
   void CaptureNativeGuest(std::uint64_t capture_epoch,

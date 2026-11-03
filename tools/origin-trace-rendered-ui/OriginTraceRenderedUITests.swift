@@ -298,6 +298,10 @@ struct Expectations: Decodable {
   let requestCount: Int
   let sourceLines: Int
   let namedGapReasons: [String]
+  let requestBodyHost: String
+  let requestBodyTarget: String
+  let requestBodyMarker: String
+  let metadataBodyHost: String
 
   static func load() throws -> Expectations {
     let text = try Harness.required(ProcessInfo.processInfo.environment, "REB_RENDERED_UI_EXPECT")
@@ -1016,7 +1020,7 @@ final class OriginTraceRenderedUITests: XCTestCase {
       let search = try await ui.value("document.querySelectorAll('#request-search-scope, #request-search-status, #traffic-comparison').length") as? Int ?? -1
       XCTAssertEqual(search, 0, "\(size.name): content search and comparison are removed, not hidden")
       let general = try await ui.value("document.querySelector('#exchange-inspector').innerText") as? String ?? ""
-      XCTAssertTrue(general.contains("Request and response headers and bodies are not captured"), "\(size.name): native coverage is explicit: \(general)")
+      XCTAssertTrue(general.contains("Request and response headers and response bodies are not captured"), "\(size.name): native coverage is explicit: \(general)")
       let panes = try await ui.value("document.querySelectorAll('#exchange-inspector .exchange-pane').length") as? Int ?? -1
       XCTAssertEqual(panes, 0, "\(size.name): no permanently empty request/response header panes")
       try await assertLayout(ui, "#screen-traffic .detail-pane", "\(size.name) traffic general")
@@ -1073,6 +1077,48 @@ final class OriginTraceRenderedUITests: XCTestCase {
   // A renderer record that no initiator edge reached reads as its own, weaker
   // class: after the gap it did not close, named as having no recorded link,
   // and reported beside coverage rather than inside it.
+  // A content-session POST shows its exact target and retained body as text;
+  // a metadata-only POST says why no bytes exist. Markup in either never runs.
+  @MainActor
+  func test16RequestTargetAndBody() async throws {
+    let expected = try Expectations.load()
+    for size in windowSizes {
+      let ui = try await prepare(size)
+      try await show(ui, "traffic")
+      try await ui.click("#screen-traffic .request-row", containing: expected.requestBodyHost)
+      try await ui.waitUntil("!document.querySelector('#screen-traffic .detail-pane').hidden", "request detail did not open")
+      let rowText = try await ui.value("document.querySelector('#screen-traffic .request-row[aria-selected=\"true\"]')?.innerText ?? ''") as? String ?? ""
+      XCTAssertTrue(rowText.contains(expected.requestBodyTarget), "\(size.name): the row shows the captured path and query: \(rowText)")
+      try await ui.waitUntil("document.querySelector('#exchange-inspector .traffic-body-text') !== null", "retained body did not load")
+      let body = try await ui.json("""
+        ({text: document.querySelector('#exchange-inspector .traffic-body-text').innerText,
+          section: document.querySelector('#exchange-inspector .traffic-body').innerText,
+          state: document.querySelector('#exchange-inspector .traffic-body').dataset.state})
+        """)
+      XCTAssertEqual(body["state"] as? String, "captured", "\(size.name): body record state")
+      XCTAssertTrue((body["text"] as? String ?? "").contains(expected.requestBodyMarker), "\(size.name): captured markup is literal text")
+      let section = body["section"] as? String ?? ""
+      for phrase in ["Retained in full", "application/json", "SHA-256", "In-memory bytes"] {
+        XCTAssertTrue(section.contains(phrase), "\(size.name): body section names \(phrase): \(section)")
+      }
+      try await assertInert(ui, "\(size.name) request body")
+      try await assertLayout(ui, "#screen-traffic .detail-pane", "\(size.name) request body")
+      try await ui.screenshot("traffic-request-body-\(size.name)")
+
+      try await ui.click("#screen-traffic .request-row", containing: expected.metadataBodyHost)
+      try await ui.waitUntil(
+        "(document.querySelector('#exchange-inspector .traffic-body')?.innerText ?? '').includes('content capture was off')",
+        "metadata-only body state did not render")
+      let metadata = try await ui.value("document.querySelector('#exchange-inspector').innerText") as? String ?? ""
+      XCTAssertTrue(metadata.contains("application/x-www-form-urlencoded"), "\(size.name): metadata session keeps the type: \(metadata)")
+      XCTAssertTrue(metadata.contains("host only"), "\(size.name): metadata session stays host-only: \(metadata)")
+      let pre = try await ui.value("document.querySelectorAll('#exchange-inspector .traffic-body-text').length") as? Int ?? -1
+      XCTAssertEqual(pre, 0, "\(size.name): no body text exists for a metadata-only request")
+      try await assertLayout(ui, "#screen-traffic .detail-pane", "\(size.name) metadata-only body")
+      try await ui.screenshot("traffic-request-body-metadata-\(size.name)")
+    }
+  }
+
   @MainActor
   func test15BacktraceTimeAdjacentRow() async throws {
     for size in windowSizes {

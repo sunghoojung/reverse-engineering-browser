@@ -759,7 +759,7 @@ assert.match(panel.nodes.selection.textContent,/1024 \/ 1,024/);assert.equal(pan
 console.log('PASS package panel explicit actions, exact download bytes, native fallback, clipboard ownership, keyed refresh focus, eviction, caps, paging, Escape/navigation and stale selection (DOM fixture; not rendered QA)');
 
 const trafficSource = await readFile(join(root, "apps/research-ui/traffic_view.js"), "utf8");
-const trafficUI = runInNewContext(trafficSource + ";({trafficSortedRequests,trafficWindow,renderTrafficRows,renderTrafficDetails,trafficSearchRequests,trafficTableTypeLabel,TRAFFIC_ROW_LIMIT})", {
+const trafficUI = runInNewContext(trafficSource + ";({trafficSortedRequests,trafficWindow,renderTrafficRows,renderTrafficDetails,trafficSearchRequests,trafficTableTypeLabel,trafficTargetParts,TRAFFIC_ROW_LIMIT})", {
   document: trafficDocument, URL, TextEncoder, TextDecoder, Uint8Array, queueMicrotask,
   navigator: {clipboard: {writeText: async () => {}}}, setTimeout: () => 0,
   createSourceTokenizer: () => ({}), sourceSyntaxTokens: text => [{type: "plain", text}],
@@ -931,13 +931,74 @@ trafficUI.renderTrafficRows(ledger, retainedTraffic.slice(4, 504), rowOptions);
 assert.equal(trafficDocument.activeElement, ledger.children[0]);
 assert.equal(ledger.children.length, 500);
 const details = new TrafficFixtureNode();
-// Native rows carry no headers or bodies: the inspector shows General only and
-// says so, and search never reads anything beyond URL, method and status.
+// Native rows carry no headers or response bodies: the inspector shows General
+// and the request body record, and search never reads beyond URL, method and status.
 let selectedTraffic = uiRequest("inspect", {status: 200, hostOnly: true, path: "fixture.invalid"});
 trafficUI.renderTrafficDetails(details, selectedTraffic);
 const generalSection = details.querySelector(".traffic-general");
-assert.match(details.textContent, /Request and response headers and bodies are not captured/);
+assert.match(details.textContent, /Request and response headers and response bodies are not captured/);
 assert.match(details.textContent, /host only; path and query not captured/);
+{
+  // Request body section: every record state reads as its own sentence and the
+  // retained bytes are assigned as text, never parsed.
+  const bodyDetails = new TrafficFixtureNode();
+  const body = (state, extra = {}) => ({kind: "bytes", state, contentCapture: true, lengthPartial: false,
+    contentType: "application/json", contentTypeOmitted: false, bodyLength: "816", capturedLength: "0", elementCount: 1,
+    sha256: "ab".repeat(32), digestSizeLimit: false, artifactId: "0", sequenceNumber: "12", sessionId: "7", processId: 42, ...extra});
+  const live = (requestBody, extra = {}) => ({...uiRequest("body", {status: 200, origin: "live",
+    path: "https://api.hcaptcha.test/checksiteconfig?v=1", hostOnly: false, targetKind: "url"}), body: requestBody, ...extra});
+  const section = () => bodyDetails.querySelector(".traffic-body");
+  const markup = "<img src=x onerror=alert(1)>{\"sitekey\":\"s\"}";
+  trafficUI.renderTrafficDetails(bodyDetails, live(body("captured", {capturedLength: "816", artifactId: "901"})), "",
+    {status: "ready", text: markup, lossy: false, verified: true, url: "https://api.hcaptcha.test/checksiteconfig?v=1&host=x"});
+  assert.equal(section().dataset.state, "captured");
+  assert.match(section().textContent, /Retained in full/);
+  assert.match(section().textContent, /application\/json/);
+  assert.match(section().textContent, /816 bytes/);
+  assert.match(section().textContent, /SHA-256(ab){32}Body kind/);
+  const pre = section().querySelector("pre");
+  assert.equal(pre.textContent, markup, "captured bytes are text content");
+  assert.equal(pre.children.length, 0, "captured markup creates no element");
+  assert.match(section().textContent, /Body artifact URL.*host=x/);
+  trafficUI.renderTrafficDetails(bodyDetails, live(body("captured_truncated", {bodyLength: "300000", capturedLength: "262144", artifactId: "902"})),
+    "", {status: "ready", text: "m", lossy: true, verified: false});
+  assert.match(section().textContent, /Retained prefix: 262,144 bytes of 300,000 bytes/);
+  assert.match(section().textContent, /Not valid UTF-8/);
+  assert.match(section().textContent, /could not be rechecked/);
+  for (const [state, extra, pattern] of [
+    ["metadata_only", {contentCapture: false}, /content capture was off for this session/],
+    ["no_body", {kind: "none", elementCount: 0, bodyLength: "0", sha256: null, contentType: null}, /No request body/],
+    ["empty", {bodyLength: "0"}, /Empty body/],
+    ["not_captured_body_kind", {kind: "file", lengthPartial: true, sha256: null, bodyLength: "0"}, /file upload bodies are never read/],
+    ["not_captured_body_kind", {kind: "chunked_data_pipe", lengthPartial: true, sha256: null, bodyLength: "0"}, /streaming upload bodies are never read/],
+    ["not_captured_artifact_unavailable", {}, /artifact channel was unavailable/],
+    ["not_captured_session_budget", {}, /request body budget/],
+    ["not_captured_credential_form", {sha256: null}, /Withheld for a password form/],
+    ["metadata_only", {sha256: null, digestSizeLimit: true, bodyLength: "5242881", contentCapture: false}, /exceeds the 4 MiB digest bound/],
+  ]) {
+    trafficUI.renderTrafficDetails(bodyDetails, live(body(state, extra)));
+    assert.match(section().textContent, pattern, state);
+    assert.equal(section().querySelector("pre"), null, `${state} has no body text`);
+  }
+  trafficUI.renderTrafficDetails(bodyDetails, live(body("captured", {capturedLength: "816", artifactId: "901"})), "",
+    {status: "refused", reason: "sensitive_capture_disabled"});
+  assert.match(section().textContent, /not started for sensitive capture/);
+  trafficUI.renderTrafficDetails(bodyDetails, live(body("captured", {capturedLength: "816", artifactId: "901"})), "", {status: "missing"});
+  assert.match(section().textContent, /not in the current catalog/);
+  trafficUI.renderTrafficDetails(bodyDetails, live({malformed: true}));
+  assert.equal(section().dataset.state, "malformed");
+  assert.match(section().textContent, /malformed and was not interpreted/);
+  trafficUI.renderTrafficDetails(bodyDetails, live(null));
+  assert.equal(section().dataset.state, "missing");
+  assert.match(section().textContent, /No body record for this request/);
+  trafficUI.renderTrafficDetails(bodyDetails, live(null, {urlTruncated: true, targetLength: 412}));
+  assert.match(bodyDetails.textContent, /truncated; the original path and query are 412 bytes/);
+  // Spread copies the other realm's object so prototypes compare equal.
+  assert.deepEqual({...trafficUI.trafficTargetParts(live(null, {urlTruncated: true}))},
+    {name: "/checksiteconfig?v=1…", host: "api.hcaptcha.test"});
+  assert.deepEqual({...trafficUI.trafficTargetParts({path: "api.test/opaque", targetKind: "path", hostOnly: false})},
+    {name: "/opaque", host: "api.test"});
+}
 assert.equal(details.querySelector(".exchange-pane"), null, "No request/response panes for native rows");
 selectedTraffic = {...selectedTraffic, status: 404};
 trafficUI.renderTrafficDetails(details, selectedTraffic);
@@ -1187,6 +1248,8 @@ const summaryInspector = runInNewContext(
     state: summaryState, elements: summaryElements, evidencePackagePanel: {sync() {}}, trafficCaptureExport: {sync() {}}, passiveSecurityPanel: {sync() {}}, capturedClientWorkflow: {sync() {}},
     document: {querySelectorAll: () => [], querySelector: selector => summaryNodes.get(selector)},
     renderTrafficDetails: (_container, request) => {renderedSummaryRequest = request;},
+    // Body loading is outside this slice; its states are checked with traffic_view.js.
+    requestBodyView: () => null,
   });
 for (const [status, failed] of [["pending", false], [200, false], ["failed", true]]) {
   summaryState.requests = [{...summaryState.requests[0], status, failed}];

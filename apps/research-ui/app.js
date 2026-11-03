@@ -2901,9 +2901,11 @@ const capturedExportPanel = installCapturedExportDialog({
         elements.selectedStatus.classList.toggle('status-neutral', !failed && (!Number.isFinite(numericStatus) || request.status === 'pending'));
         elements.selectedUrl.textContent = request.origin === 'sample'
           ? `https://checkout.acme.test${request.path}`
-          : request.hostOnly ? `${request.path} (host only metadata)` : request.path;
+          : request.hostOnly ? `${request.path} (host only metadata)`
+            : request.urlTruncated ? `${request.path}… (truncated)` : request.path;
         elements.selectedUrl.title = elements.selectedUrl.textContent;
-        elements.requestCopyUrl.disabled = request.hostOnly;
+        // A truncated or scheme-less target is not a URL to copy.
+        elements.requestCopyUrl.disabled = request.hostOnly || Boolean(request.urlTruncated) || request.targetKind === 'path';
       }
 
       function selectRequest(id, expectedIdentity = null) {
@@ -3139,6 +3141,76 @@ const capturedExportPanel = installCapturedExportDialog({
         elements.requestDecoderPivot.disabled = !selected;
       }
 
+      // Retained request bodies (protocol/native-network-v2.md) load only for the
+      // selected request: at most 256 KiB, checked against the catalog's size and
+      // SHA-256, and decoded to text that is only ever assigned to textContent.
+      const REQUEST_BODY_READ_LIMIT = 256 * 1024;
+      const requestBodyViews = new Map();
+      function requestBodyArtifact(body) {
+        const matches = (state.artifacts ?? []).filter(artifact => artifact.artifact_id === body.artifactId &&
+          artifact.kind === 'request_body' && artifact.session_id === body.sessionId &&
+          artifact.creator_event_id === body.sequenceNumber);
+        return matches.length === 1 ? matches[0] : null;
+      }
+      function requestBodyView(request) {
+        const body = request?.body;
+        if (!body || body.malformed || !['captured', 'captured_truncated'].includes(body.state)) return null;
+        if (location.protocol === 'file:') return {status: 'unavailable'};
+        // The receiver's refusal joins the body record exactly, as its parent.
+        const refusal = state.events.find(event => event.type === 'artifact_capture_failed' &&
+          event.artifact_id === body.artifactId && event.parent_event_id === body.sequenceNumber &&
+          event.session_id === body.sessionId && event.process_id === body.processId);
+        if (refusal) return {status: 'refused', reason: decodePayload(refusal)};
+        const artifact = requestBodyArtifact(body);
+        if (!artifact) return {status: 'missing'};
+        const key = `${artifact.session_id}:${artifact.artifact_id}:${artifact.sha256}`;
+        const view = requestBodyViews.get(key);
+        if (view) return {...view, url: artifact.url};
+        requestBodyViews.set(key, {status: 'loading'});
+        void loadRequestBody(artifact, key);
+        return {status: 'loading', url: artifact.url};
+      }
+      async function loadRequestBody(artifact, key) {
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 10000);
+        let view;
+        try {
+          const limit = Math.min(artifact.byte_size, REQUEST_BODY_READ_LIMIT);
+          const response = await fetch(`/api/artifacts/${encodeURIComponent(artifact.artifact_id)}/content?limit=${limit}`,
+            {cache: 'no-store', signal: controller.signal});
+          if (!response.ok) {response.body?.cancel().catch(() => {}); throw new Error(`the artifact store returned ${response.status}`);}
+          const bytes = await sourceFactsReadBytes(response, limit, controller.signal);
+          if (bytes.length !== artifact.byte_size) throw new Error('its retained byte size changed');
+          let verified = false;
+          if (globalThis.crypto?.subtle) {
+            const digest = Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', bytes)),
+              byte => byte.toString(16).padStart(2, '0')).join('');
+            if (digest !== artifact.sha256) throw new Error('its bytes do not match the retained SHA-256');
+            verified = true;
+          }
+          let lossy = false;
+          try {new TextDecoder('utf-8', {fatal: true}).decode(bytes);} catch {lossy = true;}
+          view = {status: 'ready', text: new TextDecoder('utf-8', {fatal: false, ignoreBOM: true}).decode(bytes), lossy, verified};
+        } catch (error) {
+          view = {status: 'error', error: controller.signal.aborted ? 'timed out after 10 seconds'
+            : String(error?.message ?? error).replace(/\.$/, '')};
+        } finally {
+          clearTimeout(timeout);
+        }
+        // Bounded: a few recently selected bodies, never the session's bodies.
+        requestBodyViews.delete(key);
+        requestBodyViews.set(key, view);
+        while (requestBodyViews.size > 8) requestBodyViews.delete(requestBodyViews.keys().next().value);
+        const selected = state.requests.find(request => request.id === state.selectedRequestId);
+        if (selected?.body?.artifactId === artifact.artifact_id) renderInspector();
+      }
+      // A body whose acknowledgment arrives after selection becomes readable on
+      // the next catalog refresh without reselecting the request.
+      function refreshSelectedRequestBody() {
+        const selected = state.requests.find(request => request.id === state.selectedRequestId);
+        if (state.inspectorTab === 'general' && ['captured', 'captured_truncated'].includes(selected?.body?.state)) renderInspector();
+      }
+
       function renderInspectorMessage(message) {
         const empty = document.createElement('div');
         empty.className = 'field-empty';
@@ -3185,7 +3257,7 @@ const capturedExportPanel = installCapturedExportDialog({
         elements.requestInspector.hidden = showingGeneral;
         document.querySelector('.detail-pane').classList.toggle('showing-exchange', showingGeneral);
         if (showingGeneral) {
-          renderTrafficDetails(exchangeInspector, request, state.trafficSelectionNotice);
+          renderTrafficDetails(exchangeInspector, request, state.trafficSelectionNotice, requestBodyView(request));
           return;
         }
         elements.requestInspector.setAttribute('aria-labelledby', `inspector-tab-${state.inspectorTab}`);
@@ -5821,7 +5893,8 @@ const capturedExportPanel = installCapturedExportDialog({
 
       function capturedSources() {
         return state.artifacts
-          .filter(artifact => artifact.kind !== 'canvas_data_url')
+          // Request bodies are network evidence, shown with their Traffic row.
+          .filter(artifact => artifact.kind !== 'canvas_data_url' && artifact.kind !== 'request_body')
           .map(artifact => {
             const key = `artifact:${artifact.artifact_id}`;
             return { ...artifact, source_type: 'artifact', key, deobfuscation: state.deobfuscationCache?.get(deobfuscationKey({...artifact, key})) ?? null };
@@ -7574,6 +7647,7 @@ const capturedExportPanel = installCapturedExportDialog({
           if (response.status === 304) {
             await refreshRequestSignalProfile();
             await refreshArtifacts();
+            refreshSelectedRequestBody();
             await refreshVmAnalysis();
             return;
           }
@@ -7629,6 +7703,7 @@ const capturedExportPanel = installCapturedExportDialog({
           if (!document.querySelector('#screen-signals').hidden) renderFingerprintActivity();
           await refreshRequestSignalProfile();
           await refreshArtifacts();
+          refreshSelectedRequestBody();
           await refreshVmAnalysis();
           renderVmLab();
         } catch (error) {
@@ -7894,7 +7969,7 @@ const capturedExportPanel = installCapturedExportDialog({
       });
       elements.requestCopyUrl.addEventListener('click', async () => {
         const selected = state.requests.find(request => request.id === state.selectedRequestId);
-        if (!selected || selected.hostOnly) return;
+        if (!selected || selected.hostOnly || selected.urlTruncated || selected.targetKind === 'path') return;
         try {
           const url = selected.origin === 'sample' ? `https://checkout.acme.test${selected.path}` : selected.path;
           await navigator.clipboard.writeText(url);

@@ -47,7 +47,7 @@ async function checkTrafficActivation(root) {
     renderInspector: () => {inspector = state.requests.find(row => row.id === state.selectedRequestId) ?? null;},
     evidenceWorkspace: {setVisible() {}}, sourceFactsPanel: {cancel() {}}, float32Panel: {cancel() {}}
   };
-  for (const name of ['acceptEventWindow', 'refreshRequestSignalProfile', 'refreshArtifacts',
+  for (const name of ['acceptEventWindow', 'refreshRequestSignalProfile', 'refreshArtifacts', 'refreshSelectedRequestBody',
     'refreshVmAnalysis', 'renderShellStatus', 'renderNetworkNotice', 'renderEvidence',
     'renderVmLab', 'renderFingerprintActivity', 'investigationBeforeScreen', 'retireCanvasPreviews']) context[name] = () => {};
   const api = runInNewContext(refresh + '\n' + show + '\n;({refresh, showScreen})', context);

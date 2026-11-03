@@ -147,6 +147,23 @@ assert(/const content = sourceHexArtifact\(artifact\)\s*\?\s*formatWasmHex/.test
 for (const [file, source] of sources.filter(([file]) => ['evidence_package.js', 'investigation_navigation.js', 'investigation_notebook.js'].includes(file))) {
   assert(/['"]bytecode_buffer['"]/.test(source), `${file} must offer the Sources hex view for guest bytecode`);
 }
+// The launcher's URL says what this session retains. The packaged app starts
+// content capture without a dialog, so the titlebar labels it for the session.
+const contentLabel = document.getElementById('session-content');
+const shell = (mode, requestContent, canvasImages) => runInContext(`state.sessionMode = ${JSON.stringify(mode)};
+  state.broker = 'connected'; state.requestContentCaptureEnabled = ${requestContent};
+  state.canvasImageCaptureEnabled = ${canvasImages}; renderShellStatus();`, context);
+shell('live', true, true);
+assert.equal(contentLabel.hidden, false);
+assert.equal(contentLabel.textContent, 'Content capture');
+assert.match(contentLabel.getAttribute('title'), /request paths, queries and bodies up to 256 KiB each and Canvas images/);
+shell('live', false, true);
+assert.equal(contentLabel.hidden, false);
+assert.match(contentLabel.getAttribute('aria-label'), /^Content capture: Canvas images$/);
+shell('live', false, false);
+assert.equal(contentLabel.hidden, true, 'a metadata-only session shows no content label');
+shell('demo', true, true);
+assert.equal(contentLabel.hidden, true, 'only a live session is labeled');
 assert.deepEqual(forbidden, [], 'startup/navigation must not attempt CDP transport');
 assert.deepEqual(asyncErrors, [], 'all asynchronous startup failures must be handled');
 release();

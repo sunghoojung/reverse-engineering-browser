@@ -659,7 +659,9 @@ if [[ ! -s "${ui_endpoint_path}" ]]; then
 fi
 ui_endpoint="$(tr -d '\r\n' < "${ui_endpoint_path}")"
 readonly ui_endpoint
-readonly live_ui_url="${ui_endpoint}/?native=1&canvas_images=${capture_canvas_images}"
+# The UI labels the session from these; they describe what this launch passed
+# to Brave and grant nothing.
+readonly live_ui_url="${ui_endpoint}/?native=1&canvas_images=${capture_canvas_images}&request_content=${capture_request_content}"
 
 # The backend writes this after the console socket is listening. Absence is not
 # fatal: capture still starts, and no second browser profile is launched.

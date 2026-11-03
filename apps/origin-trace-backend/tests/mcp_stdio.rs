@@ -1361,7 +1361,7 @@ set -euo pipefail
 mkdir -p "$REB_LIVE_SESSION_ROOT"
 dir="$REB_LIVE_SESSION_ROOT/$((4242 + $(ls "$REB_LIVE_SESSION_ROOT" | wc -l)))"
 mkdir -p "$dir/profile" "$dir/artifacts"
-printf '%s\n' "$REB_NATIVE_WASM_DISPATCH $REB_CAPTURE_CATEGORY_MASK $REB_USE_SYSTEM_KEYCHAIN $REB_CONSOLE_DOCUMENT_START ${{REB_NATIVE_JS_INVOCATION_SITES-unset}} ${{REB_NATIVE_JS_INVOCATION_DIGESTS-unset}}" > "$dir/options"
+printf '%s\n' "$REB_NATIVE_WASM_DISPATCH $REB_CAPTURE_CATEGORY_MASK $REB_USE_SYSTEM_KEYCHAIN $REB_CONSOLE_DOCUMENT_START $REB_CAPTURE_REQUEST_CONTENT ${{REB_NATIVE_JS_INVOCATION_SITES-unset}} ${{REB_NATIVE_JS_INVOCATION_DIGESTS-unset}}" > "$dir/options"
 printf '%s\n' "${{REB_NATIVE_JS_INVOCATION_IF_SUPPORTED-unset}} ${{REB_JS_INVOCATION_SITE_STORE-unset}}" > "$dir/site-store"
 ln -s "test-host-$$" "$dir/profile/SingletonLock"
 "{backend}" --port 0 --endpoint-file "$dir/research-ui.endpoint" \
@@ -1398,8 +1398,10 @@ wait "$backend"
         .env("REB_LIVE_SESSION_SCRIPT", &launcher)
         .env("REB_LIVE_SESSION_ROOT", &sessions)
         .env("REB_BRAVE_BINARY", &brave)
-        // An inherited document-start permission must not reach the session.
+        // The packaged app's defaults, inherited from a researcher's shell,
+        // must not grant an agent session page code execution or content capture.
         .env("REB_CONSOLE_DOCUMENT_START", "1")
+        .env("REB_CAPTURE_REQUEST_CONTENT", "1")
         // Nor may the researcher's invocation sites or value digests.
         .env(
             "REB_NATIVE_JS_INVOCATION_SITES",
@@ -1483,7 +1485,7 @@ wait "$backend"
     );
     assert_eq!(
         std::fs::read_to_string(sessions.join("4242/options")).unwrap(),
-        "1 4095 0 0 unset 0\n"
+        "1 4095 0 0 0 unset 0\n"
     );
     // Nor may it read or change the app's saved invocation sites.
     let store = std::fs::read_to_string(sessions.join("4242/site-store")).unwrap();

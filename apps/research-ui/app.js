@@ -1264,6 +1264,15 @@ invocationSitesPanel.refresh();
             : preview
               ? 'No evidence is bundled. Start a live capture to populate the workspace.'
               : 'Deterministic developer evidence is loaded.';
+        // Sensitive capture is labeled for the whole session, not only in the
+        // rows it fills, because the packaged app turns it on without a dialog.
+        const retained = [state.requestContentCaptureEnabled && 'request paths, queries and bodies up to 256 KiB each',
+          state.canvasImageCaptureEnabled && 'Canvas images'].filter(Boolean);
+        elements.sessionContent.hidden = !live || !retained.length;
+        // The launch turned these on; a browser built before them ignores the
+        // switch, so each row and body still says what was actually captured.
+        elements.sessionContent.title = `Content capture is on for this session: ${retained.join(' and ')}, kept locally. Each Traffic row and body shows what was actually captured. A Metadata only session keeps request hosts and body digests instead.`;
+        elements.sessionContent.setAttribute('aria-label', `Content capture: ${retained.join(' and ')}`);
         elements.capture.classList.toggle('offline', offline || artifactOffline);
         elements.capture.classList.toggle('demo', state.sessionMode === 'demo');
         elements.capture.classList.toggle('preview', preview);

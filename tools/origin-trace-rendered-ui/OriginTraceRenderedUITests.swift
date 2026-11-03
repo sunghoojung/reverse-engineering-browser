@@ -1179,4 +1179,88 @@ final class OriginTraceRenderedUITests: XCTestCase {
       try await ui.screenshot("backtrace-time-adjacent-\(size.name)")
     }
   }
+
+  // An app-started capture retains content and carries document-start Console
+  // permission by default; the titlebar and the Console header say so. The
+  // harness backend serves a stored session with no broker or capture browser,
+  // so this test's own page fetch marks the event reads live and answers the
+  // two Console reads as a permitted capture browser does. Nothing is
+  // connected, armed or executed.
+  @MainActor
+  func test17LiveCaptureDefaultsAreLabeled() async throws {
+    for size in windowSizes {
+      let ui = try await prepare(size)
+      _ = try await ui.webView.callAsyncJavaScript(
+        """
+        const original = window.fetch.bind(window);
+        const reply = value => new Response(JSON.stringify(value), {status: 200, headers: {'Content-Type': 'application/json'}});
+        state.eventEtag = null;
+        window.fetch = async (input, init) => {
+          const path = typeof input === 'string' ? input : input.url;
+          if (path === '/api/events?limit=5000') {
+            const body = await (await original(path, {cache: 'no-store'})).json();
+            return reply({...body, capture_mode: 'live', broker_connected: true});
+          }
+          if (path === '/api/native-console') return Promise.resolve(reply({contract_version: 2, state: 'idle', session_id: null,
+            available: true, live_available: true, document_source: 'live_capture', binding_id: '5', truncated: false,
+            selected_target_id: null, document_start_supported: true, message: 'live capture',
+            targets: [{id: '21', origin: 'https://authorized.test', label: 'top #21', url: 'https://authorized.test/', main_frame: true, truncated: false}]}));
+          if (path.startsWith('/api/native-console/document-start')) return Promise.resolve(reply({contract_version: 3, available: true,
+            state: 'idle', session_id: null, document_start: {status: 'idle', permitted: false, scripts: [],
+              message: 'Connect the Console with document-start scripts enabled, then arm a rule.'}}));
+          return original(input, init);
+        };
+        return true;
+        """, contentWorld: .page)
+      // Content capture is labeled for the session in the titlebar, beside and
+      // never over the session state, and readable at the narrowest window.
+      try await ui.waitUntil("state.sessionMode === 'live' && __rebUiProbe.count('#session-content') === 1",
+        "\(size.name): the live session did not label content capture")
+      let titlebar = try await ui.json(
+        """
+        (() => {
+          const label = document.querySelector('#session-content'), mode = document.querySelector('#session-mode');
+          const a = label.getBoundingClientRect(), b = mode.getBoundingClientRect(), bar = document.querySelector('.titlebar').getBoundingClientRect();
+          return {text: label.innerText, title: label.title, mode: mode.innerText,
+            separate: a.left >= b.right || b.left >= a.right, inside: a.left >= bar.left && a.right <= bar.right && a.top >= bar.top && a.bottom <= bar.bottom,
+            clipped: __rebUiProbe.clippedText('.titlebar')};
+        })()
+        """)
+      XCTAssertEqual(titlebar["text"] as? String, "Content capture", "\(size.name): content label text: \(titlebar)")
+      XCTAssertTrue((titlebar["title"] as? String ?? "").contains("request paths, queries and bodies"), "\(size.name): the label names what is retained")
+      XCTAssertEqual(titlebar["separate"] as? Bool, true, "\(size.name): the content label overlaps the session state: \(titlebar)")
+      XCTAssertEqual(titlebar["inside"] as? Bool, true, "\(size.name): the content label leaves the titlebar: \(titlebar)")
+      XCTAssertEqual(titlebar["clipped"] as? [String], [], "\(size.name): clipped titlebar text")
+
+      try await ui.click("#native-console-toggle")
+      try await ui.waitUntil(
+        "__rebUiProbe.count('#native-console-ds-badge') === 1 && document.querySelector('#native-console-ds-badge').dataset.state === 'permitted'",
+        "\(size.name): the Console header did not show the live capture's permission")
+      let badge = try await ui.json(
+        """
+        (() => {
+          const badge = document.querySelector('#native-console-ds-badge'), rect = badge.getBoundingClientRect();
+          const head = document.querySelector('.native-console-head').getBoundingClientRect();
+          const neighbors = ['.native-console-title', '.native-console-context', '#native-console-search', '#native-console-clear',
+            '#native-console-connection > summary', '#native-console-close'].map(selector => document.querySelector(selector))
+            .filter(node => node && node.getBoundingClientRect().width > 0);
+          const overlaps = neighbors.filter(node => { const other = node.getBoundingClientRect();
+            return rect.left < other.right - 1 && other.left < rect.right - 1 && rect.top < other.bottom - 1 && other.top < rect.bottom - 1; })
+            .map(node => __rebUiProbe.describe(node));
+          return {text: badge.innerText, title: badge.title, complete: badge.scrollWidth <= badge.clientWidth + 1,
+            inside: rect.left >= head.left && rect.right <= head.right && rect.top >= head.top && rect.bottom <= head.bottom, overlaps,
+            armDisabled: document.querySelector('#native-console-ds-arm').disabled};
+        })()
+        """)
+      XCTAssertEqual(badge["text"] as? String, "Doc-start: permitted", "\(size.name): badge text: \(badge)")
+      XCTAssertTrue((badge["title"] as? String ?? "").contains("permitted for this live capture"), "\(size.name): the hover title names the state")
+      XCTAssertEqual(badge["complete"] as? Bool, true, "\(size.name): the badge text is truncated: \(badge)")
+      XCTAssertEqual(badge["inside"] as? Bool, true, "\(size.name): the badge leaves the Console header: \(badge)")
+      XCTAssertEqual(badge["overlaps"] as? [String], [], "\(size.name): the badge overlaps a header control")
+      XCTAssertEqual(badge["armDisabled"] as? Bool, true, "\(size.name): permission alone must not enable arming")
+      let clipped = try await ui.value("__rebUiProbe.clippedText('.native-console-head')") as? [String] ?? ["probe failed"]
+      XCTAssertEqual(clipped, [], "\(size.name): clipped Console header text")
+      try await ui.screenshot("live-capture-defaults-\(size.name)")
+    }
+  }
 }

@@ -562,9 +562,12 @@
       const prefix = ds('path').value.trim();
       if (prefix) script.path_prefix = prefix;
       enqueue('arm_document_start', {scripts: [script], confirm_document_start: true}, value => {
-        ds('consent').checked = false; cursor = '0'; lastGeneration = null;
+        const armed = value?.document_start?.status === 'ok';
+        // Only a replaced set discards the previous generation's records. A
+        // refusal leaves them, so the cursor must not rewind and re-render.
+        if (armed) { cursor = '0'; lastGeneration = null; }
+        ds('consent').checked = false;
         apply(value);
-        const armed = value.document_start.status === 'ok';
         message(armed ? 'Armed. Reload a matching document to run it; documents already open are not injected.' : (value.document_start.text || 'Arming was refused.'), !armed);
         boundary(armed
           ? `Document-start script armed for ${script.origin} ${script.frame} frame. New matching documents run it before their own scripts.`
@@ -575,7 +578,8 @@
     ds('clear').addEventListener('click', () => {
       if (ds('clear').disabled) return;
       enqueue('clear_document_start', {}, value => {
-        cursor = '0'; lastGeneration = null; ds('consent').checked = false;
+        if (value?.document_start?.status === 'ok') { cursor = '0'; lastGeneration = null; }
+        ds('consent').checked = false;
         apply(value);
         message('Document-start scripts cleared. New documents run nothing and a retained report function is inert.');
         boundary('Document-start scripts cleared. Work a snippet already scheduled in a page is not rolled back.');

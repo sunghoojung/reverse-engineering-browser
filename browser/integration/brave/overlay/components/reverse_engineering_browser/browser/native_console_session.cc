@@ -515,10 +515,17 @@ class Session final {
 
   void DocumentStart(const std::string& source, std::shared_ptr<Reply> reply) {
     DCHECK_CURRENTLY_ON(content::BrowserThread::UI);
-    const auto failure = [](const std::string& text) {
-      return base::DictValue().Set("status", "error").Set("text", text);
-    };
     auto& registry = NativeConsoleDocumentStartRegistry::Get();
+    // A refusal reports what is still armed and deliberately omits the output
+    // page: it changed neither the set nor its records, so a reader must not be
+    // handed records it already has.
+    const auto failure = [&registry](const std::string& text) {
+      auto result = registry.State(0);
+      result.Remove("output");
+      result.Set("status", "error");
+      result.Set("text", text);
+      return result;
+    };
     const auto command = base::JSONReader::ReadDict(source, base::JSON_PARSE_RFC);
     const auto* operation = command ? command->FindString("operation") : nullptr;
     base::DictValue result;

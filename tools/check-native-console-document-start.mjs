@@ -92,7 +92,7 @@ export async function checkNativeConsoleDocumentStart(root) {
   const calls = [];
   const reads = [];
   let session = null, permitted = false, generation = 0, armed = [], output = [], nextSequence = 1;
-  let readFails = false, malformed = false;
+  let readFails = false, malformed = false, armRefused = false;
   const record = (sequence, kind, text, script = '1') => ({
     sequence: String(sequence), record: kind, provenance: 'console-document-start-script',
     script_id: script, document_id: '7', frame_id: '99', top_frame: true,
@@ -139,6 +139,13 @@ export async function checkNativeConsoleDocumentStart(root) {
     }
     if (action.action === 'arm_document_start') {
       assert.equal(action.confirm_document_start, true, 'arming must carry explicit consent');
+      if (armRefused) {
+        const refusal = documentStartState('0');
+        delete refusal.output;
+        return {ok: true, status: 200, json: async () => ({contract_version: 3, state: 'ready', session_id: session,
+          document_start: {...refusal, status: 'error', text: 'Synthetic browser refused this rule'},
+          code: 'application_failed', details: {}})};
+      }
       ++generation;
       armed = action.scripts.map((script, index) => ({
         script_id: String(index + 1), rule: {origin: script.origin, frame: script.frame,
@@ -263,6 +270,19 @@ export async function checkNativeConsoleDocumentStart(root) {
   malformed = false;
   await context.testConsole.documentStart.refresh(true); await settle();
 
+  // A browser-side refusal keeps the armed set and re-renders no record.
+  armRefused = true;
+  ds('origin').value = 'https://refused.test';
+  ds('source').value = "report('x');";
+  await ds('source').emit('input');
+  ds('consent').checked = true; await ds('consent').emit('change');
+  await ds('arm').click(); await settle();
+  assert.match(ds('notice').textContent, /Synthetic browser refused/);
+  assert.match(get('output').textContent, /previously armed set is unchanged/);
+  assert.match(ds('armed').textContent, /http:\/\/127\.0\.0\.1:8080/, 'a refusal preserves the armed rule');
+  assert.equal(rows().length, 2, 'a refusal must not re-render retained records');
+  armRefused = false;
+
   // The badge is a keyboard-reachable route into the experiment settings.
   await ds('badge').click();
   assert.equal(get('connection').open, true);
@@ -282,7 +302,8 @@ export async function checkNativeConsoleDocumentStart(root) {
   await context.testConsole.documentStart.refresh(true); await settle();
   assert.equal(ds('badge').hidden, true);
   assert.equal(ds('arm').disabled, true);
-  assert.equal(calls.filter(call => call.action === 'arm_document_start').length, 1);
+  // One accepted arm and one refused arm; a disconnected panel adds neither.
+  assert.equal(calls.filter(call => call.action === 'arm_document_start').length, 2);
 
   console.log('PASS Console document-start panel: disabled control, launch-time permission, explicit consent, exact rule, inert page-JavaScript output, non-draining cursor, preserved state on failure, and a cleared set');
 }

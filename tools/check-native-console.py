@@ -102,18 +102,27 @@ class DocumentStart:
         if kind == "refused":
             script["refused"] += 1
 
+    def refusal(self, text):
+        # Mirror the browser: report what is still armed, without the output
+        # page a reader already has.
+        state = self.state(0)
+        state.pop("output", None)
+        state["status"] = "error"
+        state["text"] = text
+        return state
+
     def arm(self, scripts):
         if not isinstance(scripts, list) or not 1 <= len(scripts) <= 4:
-            return {"status": "error", "text": "Arm 1 to 4 document-start scripts"}
+            return self.refusal("Arm 1 to 4 document-start scripts")
         prepared = []
         total = 0
         for entry in scripts:
             if not isinstance(entry, dict) or entry.get("frame") not in {"top", "child"}:
-                return {"status": "error", "text": "A document-start rule matches frame top or child"}
+                return self.refusal("A document-start rule matches frame top or child")
             source = entry.get("source") or ""
             total += len(source.encode())
             if not source or len(source.encode()) > 4096 or total > 8192:
-                return {"status": "error", "text": "Document-start snippet exceeds its source limit"}
+                return self.refusal("Document-start snippet exceeds its source limit")
             rule = {"origin": entry["origin"], "frame": entry["frame"]}
             if entry.get("path_prefix"):
                 rule["path_prefix"] = entry["path_prefix"]
@@ -162,7 +171,7 @@ class DocumentStart:
         try:
             command = json.loads(source)
         except json.JSONDecodeError:
-            return {"status": "error", "text": "Malformed document-start command"}
+            return self.refusal("Malformed document-start command")
         if not self.permitted:
             return {"status": "unavailable", "permitted": False, "scripts": [],
                     "text": "This browser session does not permit document-start scripts"}
@@ -174,9 +183,9 @@ class DocumentStart:
         if operation == "state":
             cursor = command.get("after")
             if not isinstance(cursor, str) or not cursor.isdigit():
-                return {"status": "error", "text": "state takes a decimal after cursor"}
+                return self.refusal("state takes a decimal after cursor")
             return self.state(int(cursor))
-        return {"status": "error", "text": "Unknown document-start operation"}
+        return self.refusal("Unknown document-start operation")
 
 
 def fake_browser(arguments):
@@ -599,7 +608,10 @@ def check(binary, browser):
                 {"operation": "unknown"},
                 {"operation": "state", "after": "not-a-number"},
             ]:
-                assert document_start(**refused)["status"] == "error", refused
+                refusal = document_start(**refused)
+                assert refusal["status"] == "error", refused
+                assert refusal["scripts"] == armed["scripts"], refused
+                assert "output" not in refusal, "a refusal must not re-send records"
             assert document_start(operation="state", after="0")["scripts"] == armed["scripts"]
             # A bounded ring drops the oldest records with a visible count.
             flooded = document_start(operation="arm", scripts=[

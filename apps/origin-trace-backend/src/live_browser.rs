@@ -5,7 +5,7 @@
 use crate::{
     config::Options,
     error::{Code, Error, Result},
-    event_query, validation,
+    event_query, native_input, validation,
 };
 use serde_json::{Value, json};
 use std::{
@@ -84,6 +84,11 @@ impl LiveBrowser {
                 self.open_url(request).await
             }
             Some("end") => self.end(request),
+            Some("list_inputs") => self.input(request, recording).await,
+            Some("click") => self.input(request, recording).await,
+            Some("type") => self.input(request, recording).await,
+            Some("press") => self.input(request, recording).await,
+            Some("scroll") => self.input(request, recording).await,
             _ => Err(Error::bad("Session action is invalid")),
         }
     }
@@ -160,6 +165,34 @@ impl LiveBrowser {
             json!({"ok": true, "action": "open_url", "opened": "new_tab",
             "capture_observed": observed}),
         )
+    }
+
+    /// Trusted input to this session's own capture browser, found by the
+    /// process that holds its profile. See `native_input`.
+    async fn input(&self, request: &Value, recording: bool) -> Result<Value> {
+        native_input::parse(request)?;
+        if !recording {
+            return Err(Error::conflict(
+                "Native capture is not running, so input would not be captured. No input was sent.",
+            )
+            .with_code(Code::NativeCaptureUnavailable));
+        }
+        let Some(profile) = &self.profile else {
+            return Err(Error::conflict(
+                "This backend was not started with its capture browser profile. No input was sent.",
+            )
+            .with_code(Code::DependencyUnavailable));
+        };
+        let Some(pid) = Self::holder(profile) else {
+            return Err(
+                Error::conflict("The capture browser is not running. No input was sent.")
+                    .with_code(Code::TargetUnavailable),
+            );
+        };
+        let request = request.clone();
+        tokio::task::spawn_blocking(move || native_input::act(pid, &request))
+            .await
+            .map_err(|_| Error::new(500, "Input task failed"))?
     }
 
     /// Asks the launcher that started this backend to stop the session. The

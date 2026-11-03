@@ -324,23 +324,9 @@ fn session_operations(spec: &Value) -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// The start tool's input: `LiveSessionStart` without the options an agent
-/// may not set for itself, such as sensitive Canvas capture.
+/// The start tool's input, the same `LiveSessionStart` options as the CLI.
 fn start_schema(spec: &Value) -> Result<Value, String> {
-    let policy = &spec["x-reb-mcp"]["session_start"];
-    let mut schema = client_schema(spec, &policy["input"])?;
-    for option in policy["mcp_excluded_options"]
-        .as_array()
-        .into_iter()
-        .flatten()
-    {
-        if let (Some(name), Some(properties)) =
-            (option.as_str(), schema["properties"].as_object_mut())
-        {
-            properties.remove(name);
-        }
-    }
-    Ok(schema)
+    client_schema(spec, &spec["x-reb-mcp"]["session_start"]["input"])
 }
 
 /// The one tool that is not an HTTP operation: starting a session has to work

@@ -829,7 +829,7 @@ fn execution_metadata_covers_operations_actions_and_dispatch_without_safe_defaul
         }
     }
     // Only retained native and offline actions are advertised after CDP removal.
-    assert_eq!(action_count, 25);
+    assert_eq!(action_count, 30);
     // Source checks intentionally follow the dispatch syntax. If it changes,
     // audit the new handler before updating this narrow test helper.
     fn arms<'a>(source: &'a str, start: &str, end: &str, indent: usize) -> BTreeSet<&'a str> {
@@ -5651,6 +5651,36 @@ async fn session_actions_drive_only_this_sessions_capture_browser() {
             arguments.lines().any(|line| line == isolation),
             "{isolation}"
         );
+    }
+    // Input never reaches the screen from a test: CI and agent shells lack
+    // macOS Accessibility, other platforms have no input path, and a trusted
+    // developer shell finds no window for this test process.
+    for body in [
+        json!({"action":"list_inputs"}),
+        json!({"action":"click","x":5,"y":5}),
+        json!({"action":"click","role":"checkbox","name":"hCaptcha"}),
+        json!({"action":"type","text":"hello"}),
+        json!({"action":"press","key":"Enter"}),
+        json!({"action":"scroll","dy":200}),
+    ] {
+        let response = call(body.clone()).await;
+        let bytes = assert_contract_response(response, "post", "/api/session/actions", 409).await;
+        let reason = code(bytes);
+        assert!(
+            reason == "dependency_unavailable" || reason == "target_unavailable",
+            "{body}: {reason}"
+        );
+    }
+    for body in [
+        json!({"action":"click"}),
+        json!({"action":"click","x":5}),
+        json!({"action":"click","role":"AXButton"}),
+        json!({"action":"press","key":"F13"}),
+        json!({"action":"scroll","dy":0}),
+        json!({"action":"type","text":""}),
+    ] {
+        let response = call(body.clone()).await;
+        assert_contract_response(response, "post", "/api/session/actions", 400).await;
     }
     let end = call(json!({"action":"end","confirm":true})).await;
     let refused = assert_contract_response(end, "post", "/api/session/actions", 409).await;

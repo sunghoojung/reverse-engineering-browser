@@ -95,13 +95,26 @@ it.
   reaches only that session's capture browser, only while its capture broker
   runs, and never through page JavaScript. A running broker does not prove the
   browser records, so `open_url` reports `capture_observed`; when it is false
-  the page was not recorded and the agent ends the session. Agents cannot turn
-  on sensitive Canvas capture; that stays a CLI option the researcher types.
+  the page was not recorded and the agent ends the session. An agent may turn
+  on sensitive Canvas capture only with `confirm_sensitive_capture`, and only
+  when the researcher's authorization for that session covers Canvas content.
   An agent may supply guest adapter or dispatch-site files it wrote for the
   authorized target; they only select what is sampled. Agent sessions do not
   use the macOS Keychain; do not sign in with real credentials unless the
-  authorization covers it. There is no synthetic input: agents cannot click or
-  type in pages through Origin Trace.
+  authorization covers it.
+- Agents can click, type, press keys and scroll in their own session's page
+  with `session_action` input actions. These send real macOS input events,
+  which pages cannot tell from a person's, so use them only where the
+  authorization covers interacting with the target. They need Accessibility
+  granted to the app that started the session, bring the capture browser to
+  the front and move the real pointer; do not use the Mac while an agent sends
+  input. A click or scroll is sent only when a hit test finds the capture
+  browser's page (and the named control) under the point, keys only while the
+  keyboard focus is inside the page, and there is no right click, so input
+  never reaches the address bar, browser dialogs, DevTools or another
+  application. `list_inputs` reads control names, which are page text; it
+  does not read field values, though a name can include label text that
+  embeds one. No DevTools protocol or page JavaScript is involved.
 - Run mutable tools in a disposable experiment context by default. Experiments
   do not read or modify baseline tabs, production cookies, storage, or
   credentials. Never execute extracted code automatically.

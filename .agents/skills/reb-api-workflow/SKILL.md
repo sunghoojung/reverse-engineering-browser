@@ -36,6 +36,7 @@ Tool names are OpenAPI operation IDs. The same names work with
 | VM analysis of retained samples | `get_vm_analysis`, `get_vm_opcode_workspace`, `get_vm_host_links` (need `--allow-effects`: they write a derived cache) |
 | Start a session with named capture options | `start_live_session` (needs `--allow-effects --allow-session-start`) or `reb-api session start` |
 | Open a page in a session you started, or end it | `session_action` with `open_url` or `end` (listed with `--allow-session-start`; check `capture_observed`) |
+| Click, type, press keys or scroll in that page | `session_action` with `list_inputs`, then `click`, `type`, `press` or `scroll` (needs macOS Accessibility for the app that started the session) |
 
 Filtered reads return a `query` object. Page with `query.next_before` (older)
 or `query.next_after` (newer). JSON over 128 KiB comes back as a structural
@@ -116,8 +117,10 @@ data to a provider. Binary bodies are not inlined.
 
 Starting a session, opening a URL and ending a session change the browser and
 reach the network. Do them only for the target and session the researcher
-authorized, even when the tools are listed. There is no click or typing tool;
-ask the researcher when a page needs a human gesture.
+authorized, even when the tools are listed. Input actions (`list_inputs`,
+`click`, `type`, `press`, `scroll`) are real user input that pages trust: send
+it only where the authorization covers interacting with the target, and never
+type credentials the researcher has not supplied for that purpose.
 
 Changing requests, creating or replacing drafts, enabling capture, running
 hooks or scripts, replaying, or publishing data needs the researcher's approval

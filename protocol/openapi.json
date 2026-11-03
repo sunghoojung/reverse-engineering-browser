@@ -106,10 +106,6 @@
       },
       "operations": [
         "session_action"
-      ],
-      "mcp_excluded_options": [
-        "canvas_images",
-        "confirm_sensitive_capture"
       ]
     }
   },
@@ -349,8 +345,8 @@
     "/api/session/actions": {
       "post": {
         "operationId": "session_action",
-        "summary": "Open a URL in, or end, this live capture session",
-        "description": "Drives the live session this backend belongs to. open_url opens a page in a new tab of the session's capture browser while its capture broker runs, and reports capture_observed. end closes the capture browser and stops the session; it stays available after capture expires. Use wait_for_events after open_url. Through MCP it is listed only with --allow-session-start and acts only on a session started by that connection with start_live_session.",
+        "summary": "Open a URL in, send input to, or end this live capture session",
+        "description": "Drives the live session this backend belongs to. open_url opens a page in a new tab of the session's capture browser while its capture broker runs, and reports capture_observed. list_inputs, click, type, press and scroll send trusted macOS input to the capture browser's page; they need Accessibility for the app that started the session. end closes the capture browser and stops the session; it stays available after capture expires. Use wait_for_events after open_url. Through MCP it is listed only with --allow-session-start and acts only on a session started by that connection with start_live_session.",
         "tags": [
           "capture"
         ],
@@ -417,7 +413,7 @@
             }
           },
           "409": {
-            "description": "Not a live capture, capture not recording, capture browser not running, or launcher gone. Nothing was changed.",
+            "description": "Not a live capture, capture not recording, capture browser not running or not frontmost, no matching control, Accessibility not granted, or launcher gone. Nothing was changed.",
             "content": {
               "application/json": {
                 "schema": {
@@ -438,6 +434,16 @@
           },
           "502": {
             "description": "The capture browser did not accept the URL.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Another session is sending input. Retry explicitly.",
             "content": {
               "application/json": {
                 "schema": {
@@ -23485,6 +23491,300 @@
                 }
               ]
             }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "action"
+            ],
+            "properties": {
+              "action": {
+                "const": "list_inputs",
+                "type": "string"
+              }
+            },
+            "x-reb-execution": {
+              "kind": "action",
+              "effects": [
+                "browser-control"
+              ],
+              "state_dependent_effects": [],
+              "uncertainties": [],
+              "prerequisites": [
+                {
+                  "id": "live-capture-session",
+                  "condition": "capture_mode is live, the broker is connected, capture is not stopped, and a live process holds the session's --brave-profile."
+                },
+                {
+                  "id": "macos-accessibility",
+                  "condition": "macOS grants Accessibility to the app that started the session: Origin Trace for app sessions, or the terminal or T3 Code app for sessions started from reb-api. Other platforms refuse."
+                }
+              ],
+              "confirmations": [],
+              "notes": "Lists up to 200 controls of the tab's HTTP(S) page, including inside cross-origin frames, with role, accessible name, viewport rectangle, visibility clipped by enclosing frames, frame depth and checked state. Names are page text bounded to 120 characters. Field values are not read directly, but an accessible name can include label text that embeds one. It turns on the browser's accessibility tree but sends no input and does not change focus.",
+              "sources": [
+                {
+                  "path": "apps/origin-trace-backend/src/native_input.rs",
+                  "symbol": "act"
+                }
+              ]
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "action"
+            ],
+            "properties": {
+              "action": {
+                "const": "click",
+                "type": "string"
+              },
+              "x": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 100000,
+                "description": "Viewport points from the page's left edge, at 100% zoom."
+              },
+              "y": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 100000,
+                "description": "Viewport points from the page's top edge."
+              },
+              "role": {
+                "type": "string",
+                "enum": [
+                  "switch",
+                  "checkbox",
+                  "tab",
+                  "radio",
+                  "password",
+                  "searchfield",
+                  "textfield",
+                  "button",
+                  "link",
+                  "textarea",
+                  "popup",
+                  "combobox",
+                  "menuitem",
+                  "menubutton",
+                  "slider",
+                  "disclosure"
+                ],
+                "description": "A control role from list_inputs."
+              },
+              "name": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 200,
+                "description": "Case-insensitive part of the control's accessible name."
+              },
+              "nth": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 199,
+                "description": "Which match, when several visible controls match."
+              },
+              "count": {
+                "type": "integer",
+                "enum": [
+                  1,
+                  2
+                ],
+                "default": 1
+              }
+            },
+            "x-reb-execution": {
+              "kind": "action",
+              "effects": [
+                "browser-control",
+                "live-target-mutation",
+                "network-access"
+              ],
+              "state_dependent_effects": [],
+              "uncertainties": [],
+              "prerequisites": [
+                {
+                  "id": "live-capture-session",
+                  "condition": "capture_mode is live, the broker is connected, capture is not stopped, and a live process holds the session's --brave-profile."
+                },
+                {
+                  "id": "macos-accessibility",
+                  "condition": "macOS grants Accessibility to the app that started the session: Origin Trace for app sessions, or the terminal or T3 Code app for sessions started from reb-api. Other platforms refuse."
+                }
+              ],
+              "confirmations": [],
+              "notes": "Clicks a point (x and y) or the center of one visible control matched by role and name. Sends real macOS mouse or keyboard events, the way a person does, so pages see trusted input. It brings the capture browser to the front and moves the real pointer. The page is the tab's largest HTTP(S) web area, never DevTools, side panels or browser pages. A click is sent only when a hit test just before it finds this browser's page, and the named control, under the point; only left clicks exist. A key is sent only while the keyboard focus is inside the page (Escape only needs the browser in front). One lock serializes input across every session on the machine. Nothing is sent without Accessibility; no DevTools protocol or page JavaScript is used.",
+              "sources": [
+                {
+                  "path": "apps/origin-trace-backend/src/native_input.rs",
+                  "symbol": "act"
+                }
+              ]
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "action",
+              "text"
+            ],
+            "properties": {
+              "action": {
+                "const": "type",
+                "type": "string"
+              },
+              "text": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 200,
+                "description": "Up to 200 characters without line breaks or control characters, typed into the focused control in the page. Click a field first; use press for Enter or Tab."
+              }
+            },
+            "x-reb-execution": {
+              "kind": "action",
+              "effects": [
+                "browser-control",
+                "live-target-mutation",
+                "network-access"
+              ],
+              "state_dependent_effects": [],
+              "uncertainties": [],
+              "prerequisites": [
+                {
+                  "id": "live-capture-session",
+                  "condition": "capture_mode is live, the broker is connected, capture is not stopped, and a live process holds the session's --brave-profile."
+                },
+                {
+                  "id": "macos-accessibility",
+                  "condition": "macOS grants Accessibility to the app that started the session: Origin Trace for app sessions, or the terminal or T3 Code app for sessions started from reb-api. Other platforms refuse."
+                }
+              ],
+              "confirmations": [],
+              "notes": "Types text as key events, rechecking before each character that the focus is still in the page. Sends real macOS mouse or keyboard events, the way a person does, so pages see trusted input. It brings the capture browser to the front and moves the real pointer. The page is the tab's largest HTTP(S) web area, never DevTools, side panels or browser pages. A click is sent only when a hit test just before it finds this browser's page, and the named control, under the point; only left clicks exist. A key is sent only while the keyboard focus is inside the page (Escape only needs the browser in front). One lock serializes input across every session on the machine. Nothing is sent without Accessibility; no DevTools protocol or page JavaScript is used.",
+              "sources": [
+                {
+                  "path": "apps/origin-trace-backend/src/native_input.rs",
+                  "symbol": "act"
+                }
+              ]
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "action",
+              "key"
+            ],
+            "properties": {
+              "action": {
+                "const": "press",
+                "type": "string"
+              },
+              "key": {
+                "type": "string",
+                "enum": [
+                  "Enter",
+                  "Tab",
+                  "Escape",
+                  "Backspace",
+                  "Space",
+                  "ArrowLeft",
+                  "ArrowRight",
+                  "ArrowDown",
+                  "ArrowUp",
+                  "PageDown",
+                  "PageUp",
+                  "Home",
+                  "End"
+                ]
+              }
+            },
+            "x-reb-execution": {
+              "kind": "action",
+              "effects": [
+                "browser-control",
+                "live-target-mutation",
+                "network-access"
+              ],
+              "state_dependent_effects": [],
+              "uncertainties": [],
+              "prerequisites": [
+                {
+                  "id": "live-capture-session",
+                  "condition": "capture_mode is live, the broker is connected, capture is not stopped, and a live process holds the session's --brave-profile."
+                },
+                {
+                  "id": "macos-accessibility",
+                  "condition": "macOS grants Accessibility to the app that started the session: Origin Trace for app sessions, or the terminal or T3 Code app for sessions started from reb-api. Other platforms refuse."
+                }
+              ],
+              "confirmations": [],
+              "notes": "Presses one named key. Sends real macOS mouse or keyboard events, the way a person does, so pages see trusted input. It brings the capture browser to the front and moves the real pointer. The page is the tab's largest HTTP(S) web area, never DevTools, side panels or browser pages. A click is sent only when a hit test just before it finds this browser's page, and the named control, under the point; only left clicks exist. A key is sent only while the keyboard focus is inside the page (Escape only needs the browser in front). One lock serializes input across every session on the machine. Nothing is sent without Accessibility; no DevTools protocol or page JavaScript is used.",
+              "sources": [
+                {
+                  "path": "apps/origin-trace-backend/src/native_input.rs",
+                  "symbol": "act"
+                }
+              ]
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "action"
+            ],
+            "properties": {
+              "action": {
+                "const": "scroll",
+                "type": "string"
+              },
+              "dx": {
+                "type": "integer",
+                "minimum": -10000,
+                "maximum": 10000
+              },
+              "dy": {
+                "type": "integer",
+                "minimum": -10000,
+                "maximum": 10000,
+                "description": "Positive scrolls down."
+              }
+            },
+            "x-reb-execution": {
+              "kind": "action",
+              "effects": [
+                "browser-control",
+                "live-target-mutation",
+                "network-access"
+              ],
+              "state_dependent_effects": [],
+              "uncertainties": [],
+              "prerequisites": [
+                {
+                  "id": "live-capture-session",
+                  "condition": "capture_mode is live, the broker is connected, capture is not stopped, and a live process holds the session's --brave-profile."
+                },
+                {
+                  "id": "macos-accessibility",
+                  "condition": "macOS grants Accessibility to the app that started the session: Origin Trace for app sessions, or the terminal or T3 Code app for sessions started from reb-api. Other platforms refuse."
+                }
+              ],
+              "confirmations": [],
+              "notes": "Scrolls the page by points, with the pointer over the page center after a hit test there. Sends real macOS mouse or keyboard events, the way a person does, so pages see trusted input. It brings the capture browser to the front and moves the real pointer. The page is the tab's largest HTTP(S) web area, never DevTools, side panels or browser pages. A click is sent only when a hit test just before it finds this browser's page, and the named control, under the point; only left clicks exist. A key is sent only while the keyboard focus is inside the page (Escape only needs the browser in front). One lock serializes input across every session on the machine. Nothing is sent without Accessibility; no DevTools protocol or page JavaScript is used.",
+              "sources": [
+                {
+                  "path": "apps/origin-trace-backend/src/native_input.rs",
+                  "symbol": "act"
+                }
+              ]
+            }
           }
         ]
       },
@@ -23538,6 +23838,255 @@
               "ending": {
                 "const": true,
                 "type": "boolean"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "ok",
+              "action",
+              "viewport",
+              "elements",
+              "truncated"
+            ],
+            "properties": {
+              "ok": {
+                "const": true,
+                "type": "boolean"
+              },
+              "action": {
+                "const": "list_inputs",
+                "type": "string"
+              },
+              "viewport": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "width",
+                  "height"
+                ],
+                "properties": {
+                  "width": {
+                    "type": "number"
+                  },
+                  "height": {
+                    "type": "number"
+                  }
+                }
+              },
+              "elements": {
+                "type": "array",
+                "maxItems": 200,
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "index",
+                    "role",
+                    "name",
+                    "x",
+                    "y",
+                    "width",
+                    "height",
+                    "visible",
+                    "frame_depth"
+                  ],
+                  "properties": {
+                    "index": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "role": {
+                      "type": "string",
+                      "enum": [
+                        "switch",
+                        "checkbox",
+                        "tab",
+                        "radio",
+                        "password",
+                        "searchfield",
+                        "textfield",
+                        "button",
+                        "link",
+                        "textarea",
+                        "popup",
+                        "combobox",
+                        "menuitem",
+                        "menubutton",
+                        "slider",
+                        "disclosure"
+                      ]
+                    },
+                    "name": {
+                      "type": "string",
+                      "maxLength": 480
+                    },
+                    "x": {
+                      "type": "number"
+                    },
+                    "y": {
+                      "type": "number"
+                    },
+                    "width": {
+                      "type": "number"
+                    },
+                    "height": {
+                      "type": "number"
+                    },
+                    "visible": {
+                      "type": "boolean"
+                    },
+                    "frame_depth": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "checked": {
+                      "type": "boolean"
+                    }
+                  }
+                }
+              },
+              "truncated": {
+                "type": "boolean"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "ok",
+              "action",
+              "x",
+              "y",
+              "target"
+            ],
+            "properties": {
+              "ok": {
+                "const": true,
+                "type": "boolean"
+              },
+              "action": {
+                "const": "click",
+                "type": "string"
+              },
+              "x": {
+                "type": "number"
+              },
+              "y": {
+                "type": "number"
+              },
+              "target": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "role",
+                      "name"
+                    ],
+                    "properties": {
+                      "role": {
+                        "type": "string"
+                      },
+                      "name": {
+                        "type": "string"
+                      }
+                    }
+                  }
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "ok",
+              "action",
+              "characters"
+            ],
+            "properties": {
+              "ok": {
+                "const": true,
+                "type": "boolean"
+              },
+              "action": {
+                "const": "type",
+                "type": "string"
+              },
+              "characters": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 200
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "ok",
+              "action",
+              "key"
+            ],
+            "properties": {
+              "ok": {
+                "const": true,
+                "type": "boolean"
+              },
+              "action": {
+                "const": "press",
+                "type": "string"
+              },
+              "key": {
+                "type": "string",
+                "enum": [
+                  "Enter",
+                  "Tab",
+                  "Escape",
+                  "Backspace",
+                  "Space",
+                  "ArrowLeft",
+                  "ArrowRight",
+                  "ArrowDown",
+                  "ArrowUp",
+                  "PageDown",
+                  "PageUp",
+                  "Home",
+                  "End"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "ok",
+              "action",
+              "dx",
+              "dy"
+            ],
+            "properties": {
+              "ok": {
+                "const": true,
+                "type": "boolean"
+              },
+              "action": {
+                "const": "scroll",
+                "type": "string"
+              },
+              "dx": {
+                "type": "integer"
+              },
+              "dy": {
+                "type": "integer"
               }
             }
           }
@@ -23603,12 +24152,12 @@
           "canvas_images": {
             "type": "boolean",
             "default": false,
-            "description": "Store Canvas images, which can contain sensitive page content. Requires confirm_sensitive_capture and category bits 1 and 1024. CLI only: the MCP tool does not offer it."
+            "description": "Store Canvas images, which can contain sensitive page content. Requires confirm_sensitive_capture and category bits 1 and 1024."
           },
           "confirm_sensitive_capture": {
             "const": true,
             "type": "boolean",
-            "description": "The researcher authorized storing sensitive Canvas images for this target. CLI only."
+            "description": "The researcher authorized storing sensitive Canvas images for this target. Required with canvas_images; never set it by inference."
           },
           "publish_canonical_endpoint": {
             "type": "boolean",

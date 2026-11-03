@@ -320,6 +320,34 @@ backend belongs to. Both actions refuse with 409 `idle_backend` unless
   launcher closes the capture browser and stops every helper, including the
   backend. Stored evidence stays on disk.
 
+- `list_inputs`, `click`, `type`, `press` and `scroll` send trusted input to
+  the session's page on macOS. The backend finds the capture browser by the
+  process holding its profile lock and reads the page through the browser's
+  accessibility tree, which it turns on with `AXManualAccessibility`; that
+  tree spans cross-origin frames. The page is the tab's largest HTTP(S) web
+  area, never DevTools, a side panel or a `chrome://` or `brave://` page.
+  `list_inputs` returns up to 200 controls with a short `role`, an accessible
+  `name` of at most 120 characters, a viewport rectangle in points, `visible`
+  (the center lies inside every enclosing frame), `frame_depth` and `checked`.
+  Names are page text; field values are not read directly, but a name can
+  include label text that embeds one. `click` takes `x` and `y` in viewport
+  points or a `role` and case-insensitive `name` matching exactly one visible
+  control (or `nth`), plus `count`; there is no right click, because a context
+  menu reaches browser features. `type` takes up to 200 characters without
+  line breaks, `press` one named key, and `scroll` `dx` and `dy`. Each input
+  action brings the capture browser to the front and moves the pointer along a
+  short eased path. Just before a click or scroll, a hit test must find this
+  browser's page under the point, and the named control for a named click.
+  Before every key, the keyboard focus must be inside the page, so keys never
+  reach the address bar, a browser dialog or a menu; only Escape is allowed
+  anywhere in the browser. The frameworks are loaded at run time, only in the
+  backend process, never in its sandboxed analysis workers. They
+  refuse with 409 `dependency_unavailable` when macOS has not granted
+  Accessibility to the app that started the session, or off macOS; with 409
+  `target_unavailable` when there is no window, page, focus or match; and
+  with 503 `resource_limit` when another session holds the machine-wide input
+  lock for 15 seconds. Like `open_url`, they require recording capture.
+
 `run-live-session.sh` passes `--brave-binary`, `--brave-profile` and
 `--launcher-pid` to the backend it starts. A backend started any other way
 returns 409 `dependency_unavailable` for these actions.
@@ -327,10 +355,11 @@ returns 409 `dependency_unavailable` for these actions.
 `reb-api session start` and the MCP tool `start_live_session` take the
 `LiveSessionStart` options: `url`, `wasm_dispatch`, `wasm_call_indirect`,
 `guest_adapter`, `js_dispatch_sites`, `quiet`, `category_mask`,
-`duration_seconds`, `localhost_only`, `publish_canonical_endpoint`,
-`brave_binary` and `timeout_seconds`. The CLI also takes `canvas_images` with
-`confirm_sensitive_capture`; the MCP tool leaves both out
-(`mcp_excluded_options`), so an agent cannot turn on sensitive capture. Every
+`duration_seconds`, `localhost_only`, `canvas_images` with
+`confirm_sensitive_capture`, `publish_canonical_endpoint`, `brave_binary` and
+`timeout_seconds`. Sensitive Canvas capture fails without the explicit
+confirmation field, which an agent sets only on the researcher's
+authorization. Every
 capture switch is off unless named; an inherited capture switch, browser
 profile or embedded-session variable is ignored. Operator settings such as
 helper binary paths, `REB_LIVE_SESSION_ROOT`, `REB_ORIGIN_TRACE_APP` and

@@ -1405,10 +1405,11 @@ wait "$backend"
         .unwrap();
     assert_eq!(start["annotations"]["openWorldHint"], true);
     assert_eq!(start["inputSchema"]["additionalProperties"], false);
+    // Sensitive Canvas capture is offered, behind its explicit confirmation.
     assert!(
         start["inputSchema"]["properties"]
             .get("canvas_images")
-            .is_none()
+            .is_some()
     );
 
     let unbound = mcp.request("tools/call", json!({"name": "get_events"}));
@@ -1423,10 +1424,10 @@ wait "$backend"
     assert!(tool_text(&refused).contains("requires wasm_dispatch"));
     let sensitive = mcp.request(
         "tools/call",
-        json!({"name": "start_live_session", "arguments": {"canvas_images": true, "confirm_sensitive_capture": true}}),
+        json!({"name": "start_live_session", "arguments": {"canvas_images": true}}),
     );
     assert_eq!(sensitive["result"]["isError"], true);
-    assert!(tool_text(&sensitive).contains("Unknown argument"));
+    assert!(tool_text(&sensitive).contains("requires confirm_sensitive_capture"));
     assert!(!sessions.exists() || std::fs::read_dir(&sessions).unwrap().next().is_none());
 
     let started = mcp.request(

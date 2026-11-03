@@ -1333,8 +1333,8 @@ final class OriginTraceRenderedUITests: XCTestCase {
       try await ui.key(36, "\r")
       try await ui.waitUntil("(document.querySelector('#invocation-site-status')?.innerText ?? '').includes('Saved window.hsw')",
         "\(size.name): window.hsw was not saved")
-      XCTAssertTrue((try await ui.value("document.querySelector('#invocation-site-status').innerText") as? String ?? "").contains("not the open page"),
-        "\(size.name): saving says tracking starts with the next capture")
+      let savedStatus = try await ui.value("document.querySelector('#invocation-site-status').innerText") as? String ?? ""
+      XCTAssertTrue(savedStatus.contains("not the open page"), "\(size.name): saving says tracking starts with the next capture")
       // Line 2 at the awb( call names the then-callback around it.
       _ = try await ui.webView.callAsyncJavaScript(
         """
@@ -1346,7 +1346,8 @@ final class OriginTraceRenderedUITests: XCTestCase {
       try await ui.click("#source-track-calls")
       try await ui.waitUntil("(document.querySelector('#invocation-site-status')?.innerText ?? '').includes('Saved Function at line 2')",
         "\(size.name): the function at the position was not saved")
-      XCTAssertEqual(try await savedSiteCount(ui), 2, "\(size.name): two sites saved")
+      let savedCount = try await savedSiteCount(ui)
+      XCTAssertEqual(savedCount, 2, "\(size.name): two sites saved")
       try await ui.waitUntil("!document.querySelector('#invocation-tracking').hidden", "\(size.name): the titlebar did not show the saved functions")
       let chip = try await ui.json(
         """
@@ -1389,7 +1390,8 @@ final class OriginTraceRenderedUITests: XCTestCase {
           body: JSON.stringify({action: 'add', session_id: '1', artifact_id: '\(expected.invocationArtifactId)', byte_offset: new TextEncoder().encode(text.slice(0, text.indexOf('awb'))).length})}))
         .then(response => response.status)
       """)
-    XCTAssertEqual(try await savedSiteCount(ui), 2, "two sites are saved before the dialog opens")
+    let seeded = try await savedSiteCount(ui)
+    XCTAssertEqual(seeded, 2, "two sites are saved before the dialog opens")
     let item = NSApp.mainMenu?.items.compactMap(\.submenu).flatMap(\.items).first { $0.action == Selector(("newLiveSession:")) }
     let menu = try XCTUnwrap(item?.menu, "the New Live Session menu item")
     let index = menu.index(of: try XCTUnwrap(item))
@@ -1436,7 +1438,8 @@ final class OriginTraceRenderedUITests: XCTestCase {
     ui.webView.load(URLRequest(url: harnessURL))
     try await ui.waitForInitialLoad()
     try await ui.reload()
-    XCTAssertEqual(try await savedSiteCount(ui), 1, "the backend reads the set the dialog wrote")
+    let remaining = try await savedSiteCount(ui)
+    XCTAssertEqual(remaining, 1, "the backend reads the set the dialog wrote")
     try await clearSavedSites(ui)
   }
 }

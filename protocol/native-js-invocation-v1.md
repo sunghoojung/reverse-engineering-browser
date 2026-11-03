@@ -24,6 +24,18 @@ settled-value digests. The launcher accepts it only with a site file and
 prints a sensitive-capture label. Without it every settle record says
 `digest_state: not_requested`.
 
+Captures the packaged app starts arm its saved site set
+(`js-invocation-sites-v1.json` in Application Support, this exact format) from
+a private per-launch copy, with digests on in Content mode and off in
+Metadata mode; an explicit environment value wins. They also set
+`REB_NATIVE_JS_INVOCATION_IF_SUPPORTED=1`: if the Brave's V8 image does not
+define `reb_js_invocation_capture`, the launcher starts the session without
+the sites and digests and prints `JavaScript invocation tracking:
+unavailable`, instead of refusing the session. Without that switch a missing
+flag still refuses the session. Agent-started sessions never arm sites. The
+routes that resolve and save sites are in
+[the HTTP API](http-api.md#saved-javascript-invocation-sites).
+
 `--reb-js-invocation-capture` implies `--reb-js-dispatch-capture`, so the
 compile-path settings of
 [JavaScript dispatch capture](native-js-dispatch-v1.md#enablement) apply: no
@@ -48,7 +60,9 @@ the first character of an arrow function's head. `source_sha256` and
 `source_length` are computed exactly as for dispatch sites.
 `tools/native-js-invocation-site.py ARTIFACT_PATH:ARTIFACT_ID:BYTE_OFFSET`
 writes the file from a retained artifact and the UTF-8 offset of a `(`, and
-refuses any other character.
+refuses any other character. The backend computes the same key when Origin
+Trace saves a site by name or position; both check
+`tools/fixtures/native-js-invocation/site-cases.json`.
 
 The browser sends the renderer only fixed 44-byte records: `source_sha256`
 (32 bytes), `source_length` (u32), `anchor_offset` (u32), shape byte 3 and 3

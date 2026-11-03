@@ -13,7 +13,7 @@ import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {buildEvidence, HOSTILE_BYTECODE_MARKUP, HOSTILE_SOURCE_MARKER, HOSTILE_SOURCE_URL, HOSTILE_URL, HOSTILE_URL_MARKER, NAMED_GAP_REASONS, SOURCE_LINE_COUNT,
-  SYNTHETIC_REQUEST_COUNT, REQUEST_BODY_HOST, REQUEST_BODY_TARGET, REQUEST_BODY_MARKER, METADATA_BODY_HOST} from './origin-trace-rendered-ui/evidence-fixture.mjs';
+  SYNTHETIC_REQUEST_COUNT, REQUEST_BODY_HOST, REQUEST_BODY_TARGET, REQUEST_BODY_MARKER, METADATA_BODY_HOST, INVOCATION_ARTIFACT_ID} from './origin-trace-rendered-ui/evidence-fixture.mjs';
 
 const root = fileURLToPath(new URL('..', import.meta.url));
 const harness = join(root, 'tools/origin-trace-rendered-ui');
@@ -108,7 +108,10 @@ try {
   backend = spawn(join(host, 'Contents/MacOS/OriginTraceBackend'), ['--host', '127.0.0.1', '--port', '0',
     '--endpoint-file', endpointFile, '--store', stores.store, '--trace-store', stores.traceStore,
     '--signal-store', stores.signalStore, '--artifacts', stores.artifacts, '--api-collection', stores.apiCollection,
-    '--local-analyst', stores.localAnalyst, '--decoder', join(host, 'Contents/MacOS/OriginTraceDecoder')],
+    '--local-analyst', stores.localAnalyst, '--decoder', join(host, 'Contents/MacOS/OriginTraceDecoder'),
+    // Sources and the app's start dialog share one saved site set here, as
+    // they share Application Support in a real app run.
+    '--js-invocation-site-store', stores.invocationSites],
   {cwd: temporary, stdio: ['ignore', 'pipe', 'pipe']});
   let backendLog = '';
   for (const stream of [backend.stdout, backend.stderr]) stream.on('data', chunk => { backendLog = (backendLog + chunk).slice(-256 * 1024); });
@@ -166,6 +169,7 @@ try {
     EnvironmentVariables: {
       ...(maximumHeight === undefined ? {} : {REB_RENDERED_UI_MAX_HEIGHT: maximumHeight}),
       REB_DISABLE_AUTOMATIC_LIVE_SESSION: '1',
+      REB_JS_INVOCATION_SITE_STORE: stores.invocationSites,
       REB_RENDERED_UI_FAILURE_URL: failureURL,
       REB_RENDERED_UI_FAILURE_BINARY: failureBinary,
       REB_RENDERED_UI_OUTPUT: join(report, 'screenshots'),
@@ -174,7 +178,8 @@ try {
         hostileSourceMarker: HOSTILE_SOURCE_MARKER, hostileBytecodeMarkup: HOSTILE_BYTECODE_MARKUP,
         requestCount: SYNTHETIC_REQUEST_COUNT, sourceLines: SOURCE_LINE_COUNT, namedGapReasons: NAMED_GAP_REASONS,
         requestBodyHost: REQUEST_BODY_HOST, requestBodyTarget: REQUEST_BODY_TARGET, requestBodyMarker: REQUEST_BODY_MARKER,
-        metadataBodyHost: METADATA_BODY_HOST}),
+        metadataBodyHost: METADATA_BODY_HOST, invocationArtifactId: INVOCATION_ARTIFACT_ID,
+        invocationSiteStore: stores.invocationSites}),
     },
   });
   target.TestingEnvironmentVariables = {...target.TestingEnvironmentVariables,

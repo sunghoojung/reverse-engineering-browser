@@ -178,6 +178,22 @@ for the API/CLI, byte coordinates, budgets, unknown frontiers and deliberately
 limited meaning of ordering and binding resolution. The operation does not
 rewrite source, resolve values, follow imports, or execute analyzed code.
 
+## Invocation site queries
+
+The `invocation_site` operation finds the function a
+[native JavaScript invocation site](../../protocol/native-js-invocation-v1.md)
+names, for `GET /api/js-invocation-sites/resolve` and the saved-site actions.
+A request carries the BOM-free script text and exactly one of `name`, a dotted
+name of 1 to 8 identifiers, or `byte_offset`, a UTF-8 offset in that text. It
+walks the same bounded tree-sitter preflight tree, so text in strings,
+templates and comments never matches, and replies
+`reb-invocation-site-worker-v1` with byte offsets and syntax facts only: for a
+name, at most 32 matching definitions and 32 with the same final segment, each
+with its parameter-list `(`, kind, binding text and any reason V8 would not
+arm it; for a position, the innermost enclosing definition or why there is
+none. The backend checks every offset against the verified artifact, computes
+the site key itself and decides what to refuse.
+
 Candidate experiments additionally submit `candidate_end_byte` with
 `function_at_byte`. The strict query admits a complete literal range in a
 declared-synchronous function body and adds `candidate_eligible: true` to the

@@ -5,6 +5,7 @@ use oxc_ast_visit::Visit;
 use oxc_parser::Parser;
 use oxc_span::SourceType;
 mod fold;
+mod invocation_site;
 mod preflight;
 mod proxy;
 mod request_field;
@@ -298,6 +299,14 @@ fn serve(reader: &mut impl BufRead, writer: &mut impl Write) -> io::Result<()> {
                     match serde_json::from_slice::<source_facts::Request>(&line) {
                         Ok(request) => source_facts::analyze(request),
                         Err(_) => source_facts::invalid("invalid source facts request", 0),
+                    }
+                } else if operation.as_deref() == Some("invocation_site") {
+                    match serde_json::from_slice::<invocation_site::Request>(&line) {
+                        Ok(request) => serde_json::to_value(invocation_site::analyze(request))?,
+                        Err(_) => serde_json::to_value(invocation_site::invalid(
+                            "invalid invocation site request",
+                            0,
+                        ))?,
                     }
                 } else if operation.as_deref() == Some("request_field") {
                     match serde_json::from_slice::<request_field::Request>(&line) {

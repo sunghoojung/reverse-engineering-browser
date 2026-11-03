@@ -52,7 +52,16 @@ it.
   configuration), argument kinds and integer low bits, the result's kind and
   length, the frame and a digest of the document token, and which Wasm
   records and loader requests ran inside the call. It never records argument,
-  receiver, return or exception contents.
+  receiver, return or exception contents. Captures the packaged app starts arm
+  its saved site set (at most 8 functions, saved from Sources with **Track
+  calls**), which the start dialog lists and the titlebar names while the
+  session runs. Saving a site changes nothing in the open page or the running
+  capture; tracking starts with the next capture. Each saved site keeps its
+  script's raw source URL beside it, locally and user-only, like the artifact
+  manifest. An explicit `REB_NATIVE_JS_INVOCATION_SITES`, even an empty one,
+  replaces the saved set. Agent-started sessions never arm invocation sites and
+  keep a private saved set, so an agent cannot change what the researcher's
+  next capture arms.
 - Standalone probes remain inactive without an enabled session. Enabled artifact
   capture retains raw source URLs locally; metadata is not necessarily secret-free.
 - With Network capture on, every native request records its body's length,
@@ -96,7 +105,14 @@ it.
   rolling hash, retained in the local event store so Origin Trace can find the
   exact value in a retained request body. Both are content-derived; evidence
   package exports never include them. A digest is not redaction: a short or
-  guessable value can be confirmed from it.
+  guessable value can be confirmed from it. Content-mode captures the packaged
+  app starts with saved invocation sites record these digests by default; the
+  start dialog says so, and the launch log and titlebar label the session.
+  Metadata mode never records them, and neither do agent-started sessions,
+  whatever the caller's environment says. An explicit
+  `REB_NATIVE_JS_INVOCATION_DIGESTS=0` opts out in Content mode. A Brave
+  without invocation capture starts without the saved sites, so it records
+  no digests either.
 - Enable sensitive capture only when the authorization for that session
   specifically covers the data being collected. Keep the capture bounded, audit
   the action, and document new capture paths, their limits and explicit export-copy checks.
@@ -224,6 +240,7 @@ of the data-handling policy:
 | Capture category mask and session expiration | `protocol/README.md`, native probes |
 | Agent-started sessions get neither request content nor document-start permission | [`session_launch.rs`](apps/origin-trace-backend/src/session_launch.rs) |
 | JavaScript invocation value digests opt-in | `scripts/run-live-session.sh`, the overlay's `native_probe_session.cc`, and the renderer sink, which refuses a digest without it |
+| App-started digest default and agent-session exclusion | `LiveSessionCoordinator.captureDefaults` (Content mode with saved sites only, explicit value wins) and `session_launch.rs` (agent sessions remove the site file and force digests off) |
 | Origin allowlisting | Not implemented; the native event envelope lacks trustworthy origin identity |
 
 ## Related documents

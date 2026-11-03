@@ -143,7 +143,7 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
           try Data(contentsOf: indexURL.deletingLastPathComponent().appendingPathComponent("app.css")),
           "text/css; charset=utf-8", 200, [:]
         )
-      case "/pane_layout.js", "/app.js", "/command_palette.js", "/app_state.js", "/evidence_models.js", "/evidence_package.js", "/float32_inspector.js", "/evidence_comparison.js", "/source_syntax.js", "/source_facts.js", "/source_search.js", "/investigation_navigation.js", "/investigation_notebook.js", "/evidence_names.js", "/traffic_view.js", "/captured_client.js", "/captured_export_formats.js", "/vm_semantics.js", "/vm_static.js", "/vm_static_view.js", "/vm_analysis_packs.js", "/vm_opcode_ledger.js", "/vm_opcode_ledger_view.js", "/vm_contextual.js", "/vm_contextual_evidence.js", "/vm_contextual_view.js", "/vm_debugger.js", "/vm_program_workspace.js", "/native_console_completion.js", "/native_console.js":
+      case "/pane_layout.js", "/app.js", "/command_palette.js", "/app_state.js", "/evidence_models.js", "/evidence_package.js", "/float32_inspector.js", "/evidence_comparison.js", "/source_syntax.js", "/source_facts.js", "/source_search.js", "/investigation_navigation.js", "/investigation_notebook.js", "/evidence_names.js", "/invocation_sites.js", "/traffic_view.js", "/captured_client.js", "/captured_export_formats.js", "/vm_semantics.js", "/vm_static.js", "/vm_static_view.js", "/vm_analysis_packs.js", "/vm_opcode_ledger.js", "/vm_opcode_ledger_view.js", "/vm_contextual.js", "/vm_contextual_evidence.js", "/vm_contextual_view.js", "/vm_debugger.js", "/vm_program_workspace.js", "/native_console_completion.js", "/native_console.js":
         response = (
           try Data(contentsOf: indexURL.deletingLastPathComponent().appendingPathComponent(requestURL.lastPathComponent)),
           "text/javascript; charset=utf-8", 200, [:]
@@ -2431,6 +2431,137 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
   }
 }
 
+// The start dialog's saved invocation sites: what the capture about to start
+// will track, with Remove and Clear All. Changes are saved at once; each
+// capture arms its own copy, so a running one keeps what it armed.
+private final class InvocationSiteSetupView: NSStackView {
+  private let storeURL: URL
+  private var contentMode: Bool
+  private var state = InvocationSiteSet.State.empty
+  private var confirmClear = false
+  private let title = NSTextField(labelWithString: "")
+  private let detail = NSTextField(wrappingLabelWithString: "")
+  private let rows = NSStackView()
+  private let clearButton = NSButton(title: "Clear All", target: nil, action: nil)
+  var onResize: (() -> Void)?
+
+  init(storeURL: URL, contentMode: Bool) {
+    self.storeURL = storeURL
+    self.contentMode = contentMode
+    super.init(frame: .zero)
+    orientation = .vertical
+    alignment = .leading
+    spacing = 6
+    title.font = NSFont.systemFont(ofSize: NSFont.smallSystemFontSize, weight: .semibold)
+    title.setAccessibilityIdentifier("invocation-sites-title")
+    detail.textColor = .secondaryLabelColor
+    detail.maximumNumberOfLines = 0
+    detail.preferredMaxLayoutWidth = 420
+    rows.orientation = .vertical
+    rows.alignment = .leading
+    rows.spacing = 4
+    clearButton.target = self
+    clearButton.action = #selector(clearAll(_:))
+    clearButton.bezelStyle = .rounded
+    clearButton.controlSize = .small
+    addArrangedSubview(title)
+    addArrangedSubview(detail)
+    addArrangedSubview(rows)
+    addArrangedSubview(clearButton)
+    reload()
+  }
+
+  required init?(coder: NSCoder) { nil }
+
+  func reload() {
+    state = InvocationSiteSet.load(storeURL)
+    render()
+  }
+
+  @objc func modeChanged(_ sender: NSPopUpButton) {
+    contentMode = sender.titleOfSelectedItem == LiveCaptureMode.content.title
+    render()
+  }
+
+  private func render() {
+    for row in rows.arrangedSubviews {
+      rows.removeArrangedSubview(row)
+      row.removeFromSuperview()
+    }
+    clearButton.title = confirmClear ? "Confirm Clear All" : "Clear All"
+    switch state {
+    case .empty:
+      title.stringValue = "Tracking no functions"
+      detail.stringValue = "Choose Track calls in Sources during a capture to save a function. The next capture you start tracks its calls."
+      clearButton.isHidden = true
+    case .unreadable:
+      title.stringValue = "Saved functions unreadable"
+      detail.stringValue = "The saved invocation site file is not a valid site file, so this capture tracks nothing. Clear it to start again."
+      clearButton.isHidden = false
+    case .saved(let sites):
+      title.stringValue = "Tracking \(sites.count) function\(sites.count == 1 ? "" : "s")"
+      detail.stringValue = "This capture arms these functions in pages it loads; a page already open cannot gain tracking. "
+        + (contentMode
+          ? "Content mode also records settled-value digests of their string and byte results (sensitive capture); set REB_NATIVE_JS_INVOCATION_DIGESTS=0 to opt out."
+          : "Metadata mode records no settled-value digests.")
+        + " A Brave without invocation capture starts without them and says so."
+      clearButton.isHidden = false
+      for (index, site) in sites.enumerated() {
+        let name = NSTextField(labelWithString: site.label)
+        name.font = NSFont.monospacedSystemFont(ofSize: NSFont.smallSystemFontSize, weight: .regular)
+        name.lineBreakMode = .byTruncatingMiddle
+        let source = NSTextField(labelWithString: site.sourceURL ?? "Source URL not recorded")
+        source.font = NSFont.systemFont(ofSize: NSFont.smallSystemFontSize - 1)
+        source.textColor = .secondaryLabelColor
+        source.lineBreakMode = .byTruncatingHead
+        source.toolTip = site.sourceURL
+        let text = NSStackView(views: [name, source])
+        text.orientation = .vertical
+        text.alignment = .leading
+        text.spacing = 1
+        text.widthAnchor.constraint(equalToConstant: 330).isActive = true
+        let remove = NSButton(title: "Remove", target: self, action: #selector(remove(_:)))
+        remove.bezelStyle = .rounded
+        remove.controlSize = .small
+        remove.tag = index
+        remove.setAccessibilityLabel("Remove \(site.label)")
+        let row = NSStackView(views: [text, remove])
+        row.orientation = .horizontal
+        row.alignment = .centerY
+        row.spacing = 8
+        rows.addArrangedSubview(row)
+      }
+    }
+    onResize?()
+  }
+
+  @objc private func remove(_ sender: NSButton) {
+    guard case .saved(var sites) = state, sites.indices.contains(sender.tag) else { return }
+    sites.remove(at: sender.tag)
+    confirmClear = false
+    save(sites)
+  }
+
+  @objc private func clearAll(_ sender: NSButton) {
+    guard confirmClear else {
+      confirmClear = true
+      render()
+      return
+    }
+    confirmClear = false
+    save([])
+  }
+
+  private func save(_ sites: [InvocationSiteSet.Site]) {
+    do {
+      try InvocationSiteSet.write(sites, to: storeURL)
+    } catch {
+      detail.stringValue = "The saved functions could not be changed: \(error.localizedDescription)"
+    }
+    reload()
+  }
+}
+
 private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigationDelegate {
   private var window: NSWindow?
   private weak var webView: WKWebView?
@@ -2651,14 +2782,29 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
     keychainLabel.maximumNumberOfLines = 4
     keychainLabel.preferredMaxLayoutWidth = 420
 
+    let tracking = InvocationSiteSetupView(
+      storeURL: InvocationSiteSet.storeURL(
+        environment: ProcessInfo.processInfo.environment,
+        applicationSupport: originTraceSupportURL()),
+      contentMode: selectedCaptureMode == .content)
+    captureMode.target = tracking
+    captureMode.action = #selector(InvocationSiteSetupView.modeChanged(_:))
+    let separator = NSBox()
+    separator.boxType = .separator
+
     let stack = NSStackView(views: [
-      modeLabel, captureMode, privacyLabel, keychainToggle, keychainLabel,
+      modeLabel, captureMode, privacyLabel, keychainToggle, keychainLabel, separator, tracking,
     ])
     stack.orientation = .vertical
     stack.alignment = .leading
     stack.spacing = 8
     stack.distribution = .fill
-    stack.frame = NSRect(x: 0, y: 0, width: 420, height: 260)
+    separator.widthAnchor.constraint(equalToConstant: 420).isActive = true
+    let fit = {
+      stack.layoutSubtreeIfNeeded()
+      stack.frame = NSRect(x: 0, y: 0, width: 420, height: max(260, stack.fittingSize.height))
+    }
+    fit()
 
     let alert = NSAlert()
     alert.alertStyle = .informational
@@ -2667,6 +2813,10 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
     alert.accessoryView = stack
     alert.addButton(withTitle: "Start Session")
     alert.addButton(withTitle: "Continue Offline")
+    tracking.onResize = { [weak alert] in
+      fit()
+      alert?.layout()
+    }
     // A reopen during this modal must not start a session behind it.
     liveSessionDecisionOpen = true
     let response = alert.runModal()
@@ -2897,6 +3047,12 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
       return URL(fileURLWithPath: configuredPath).standardizedFileURL
     }
     return eventStoreURL.deletingLastPathComponent().appendingPathComponent("request-signals.jsonl")
+  }
+
+  private func originTraceSupportURL() -> URL {
+    (FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+      ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support"))
+      .appendingPathComponent("Origin Trace", isDirectory: true)
   }
 
   private func configuredApiCollectionStore() -> URL {

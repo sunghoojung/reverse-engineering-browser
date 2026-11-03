@@ -177,7 +177,7 @@ pub fn check(source: &str) -> Result<(), &'static str> {
     parse_checked(source).map(drop)
 }
 
-fn parse_checked(source: &str) -> Result<tree_sitter::Tree, &'static str> {
+pub(crate) fn parse_checked(source: &str) -> Result<tree_sitter::Tree, &'static str> {
     heap::begin();
     let mut parser = tree_sitter::Parser::new();
     parser

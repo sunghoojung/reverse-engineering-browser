@@ -58,6 +58,23 @@ what is retained and not be clipped. The Console header chip must read
 `Doc-start: permitted` in full, stay inside the header, overlap no other header
 control, and leave arming disabled. Nothing connects, arms or runs.
 
+`test18TrackCallsFromSources` opens a synthetic glue script (artifact 330) in
+Sources at both window sizes. **Track calls** at the default position must
+refuse top-level code; `o.dup`, typed with native keys and Return, must be
+refused with both definitions listed and their markup-bearing context lines
+inert; `window.hsw` must be saved without matching the decoys in a string and
+a comment; and **Line**, **Column**, **Go** and **Track calls** must save the
+callback around `awb(`. The titlebar chip must read `2 functions saved for the
+next capture` in full, inside the titlebar and over no other label.
+`test19StartDialogListsSavedFunctions` opens **New Live Session…** from the
+app menu with two saved sites. The native dialog must say `Tracking 2
+functions`, name each function and its script, say Content mode records
+digests and Metadata mode does not, and its Remove must rewrite the saved file
+at once; the test then continues offline and returns to the harness page. The
+harness backend and the app share one temporary saved set through
+`--js-invocation-site-store` and `REB_JS_INVOCATION_SITE_STORE`. Dialog
+screenshots are drawn from the native window, which WebKit cannot snapshot.
+
 At both window sizes, those budget gaps must leave the footer free of queue
 drops, Traffic without a loss notice and Fingerprinting at full coverage, while
 the VM notice names both reasons as inert text.

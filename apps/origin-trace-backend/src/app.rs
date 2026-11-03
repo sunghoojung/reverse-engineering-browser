@@ -8,6 +8,7 @@ use crate::{
     deobfuscation::Deobfuscator,
     error::{Code, Error, Phase, Reason, Result},
     event_query, event_window, evidence, evidence_comparison, evidence_package, float32,
+    js_invocation_sites,
     live_browser::LiveBrowser,
     native_console::NativeConsole,
     origin_trace,
@@ -34,7 +35,7 @@ use std::{
 };
 use tokio::sync::{Mutex, OwnedMutexGuard, OwnedSemaphorePermit, Semaphore, TryAcquireError};
 
-const UI_ASSETS: [&str; 32] = [
+const UI_ASSETS: [&str; 33] = [
     "index.html",
     "app.css",
     "command_palette.js",
@@ -49,6 +50,7 @@ const UI_ASSETS: [&str; 32] = [
     "investigation_navigation.js",
     "investigation_notebook.js",
     "evidence_names.js",
+    "invocation_sites.js",
     "traffic_view.js",
     "captured_client.js",
     "captured_export_formats.js",
@@ -105,6 +107,10 @@ pub struct App {
     /// Bounds concurrent `/api/events/wait` callers; a full pool refuses.
     event_waiters: Arc<Semaphore>,
     live_browser: LiveBrowser,
+    invocation_sites: Arc<js_invocation_sites::Store>,
+    invocation_session: js_invocation_sites::Session,
+    /// Script-text digests of immutable artifacts, by artifact SHA-256.
+    text_digests: Arc<std::sync::Mutex<BTreeMap<String, String>>>,
 }
 fn cached_artifact_lookup(
     mut cache: OwnedMutexGuard<ArtifactLookupCache>,
@@ -133,6 +139,15 @@ impl App {
     }
     pub async fn new(options: Options, port: u16) -> Arc<Self> {
         let native_console = NativeConsole::new(&options);
+        let invocation_sites = Arc::new(js_invocation_sites::Store::new(
+            options.js_invocation_site_store.clone(),
+        ));
+        let invocation_session = js_invocation_sites::Session::read(
+            options.js_invocation_session_sites.as_deref(),
+            options.js_invocation_session_state.as_deref(),
+            options.js_invocation_session_digests,
+            &invocation_sites,
+        );
         let app = Arc::new(Self {
             port,
             ui_root: options.ui_root(),
@@ -172,6 +187,9 @@ impl App {
                 ),
             ),
             live_browser: LiveBrowser::new(&options),
+            invocation_sites,
+            invocation_session,
+            text_digests: Arc::new(std::sync::Mutex::new(BTreeMap::new())),
             options,
             capture_stopped: AtomicBool::new(false),
             capture: Mutex::new(()),
@@ -485,6 +503,33 @@ impl App {
                 let mut result = self.deobfuscator.source_facts(&source, region).await?;
                 result["source"] = identity;
                 result
+            }
+            "/api/js-invocation-sites" => {
+                if !q.0.is_empty() {
+                    return Err(Error::bad(
+                        "The saved invocation site set takes no query parameters",
+                    ));
+                }
+                self.invocation_site_set().await?
+            }
+            "/api/js-invocation-sites/resolve" => {
+                q.only(&["session_id", "artifact_id", "name", "byte_offset"], &[])?;
+                let target = js_invocation_sites::Target::from_fields(
+                    q.one("name")?.map(|name| json!(name)).as_ref(),
+                    match q.one("byte_offset")? {
+                        Some(_) => Some(json!(q.number("byte_offset", None, 32, false)?)),
+                        None => None,
+                    }
+                    .as_ref(),
+                )?;
+                self.resolve_invocation_site(
+                    q.required("session_id")?,
+                    q.required("artifact_id")?,
+                    &target,
+                    None,
+                )
+                .await?
+                .0
             }
             "/api/deobfuscation" => {
                 let artifact = q.required("artifact_id")?;
@@ -1058,6 +1103,149 @@ impl App {
         });
         Ok(axum::Json(document).into_response())
     }
+    /// Resolves a name or byte offset in one exact retained artifact to one
+    /// site, or to a refusal with its candidates. Identity is never inferred
+    /// from a URL. Returns the document and the artifact record.
+    async fn resolve_invocation_site(
+        &self,
+        session: &str,
+        id: &str,
+        target: &js_invocation_sites::Target,
+        label: Option<&str>,
+    ) -> Result<(Value, Value)> {
+        validation::canonical(&json!(session), 64, false, "session_id")?;
+        validation::canonical(&json!(id), 64, false, "artifact_id")?;
+        let artifact = self.find_artifact(id).await?;
+        if artifact["session_id"] != session {
+            return Err(Error::new(
+                404,
+                "Artifact not found in the requested session",
+            ));
+        }
+        if artifact["kind"] != "javascript" {
+            return Err(Error::bad("Artifact is not JavaScript"));
+        }
+        let root = self.options.artifacts.clone();
+        let record = artifact.clone();
+        let raw = self
+            .blocking(move || {
+                evidence::content(&root, &record, js_invocation_sites::MAX_SOURCE_BYTES)
+            })
+            .await?;
+        let request = js_invocation_sites::worker_request(&raw, target)?;
+        let response = self.deobfuscator.invocation_site(request).await?;
+        js_invocation_sites::validate_worker(&raw, target, &response)?;
+        let store = self.invocation_sites.clone();
+        let saved = tokio::task::spawn_blocking(move || store.load())
+            .await
+            .map_err(|e| Error::new(500, e.to_string()))??;
+        let document =
+            js_invocation_sites::resolution(&raw, &artifact, target, &response, label, &saved)?;
+        Ok((document, artifact))
+    }
+    /// The saved set, whether this session retained each saved version, and
+    /// what this session's launcher armed.
+    async fn invocation_site_set(&self) -> Result<Value> {
+        let store = self.invocation_sites.clone();
+        let saved = tokio::task::spawn_blocking(move || store.load())
+            .await
+            .map_err(|e| Error::new(500, e.to_string()))??;
+        let root = self.options.artifacts.clone();
+        let digests = self.text_digests.clone();
+        let listed = saved.clone();
+        let retained = self
+            .blocking(move || {
+                // A store without a manifest has retained nothing yet.
+                let artifacts = if root.join("manifest.jsonl").exists() {
+                    evidence::artifacts(&root, 5000)?
+                } else {
+                    Vec::new()
+                };
+                // At most four same-URL artifacts are read per listing; their
+                // digests are cached by content SHA-256, which never changes.
+                let mut reads = 0;
+                Ok(listed
+                    .iter()
+                    .map(|saved| {
+                        js_invocation_sites::retained(saved, &artifacts, |artifact| {
+                            let sha = artifact["sha256"].as_str()?.to_owned();
+                            if let Some(known) = digests.lock().ok()?.get(&sha) {
+                                return Some(known.clone());
+                            }
+                            if reads >= 4 {
+                                return None;
+                            }
+                            reads += 1;
+                            let raw = evidence::content(
+                                &root,
+                                artifact,
+                                js_invocation_sites::MAX_SOURCE_BYTES,
+                            )
+                            .ok()?;
+                            let digest = js_invocation_sites::text_digest(&raw)?;
+                            let mut cache = digests.lock().ok()?;
+                            if cache.len() >= 256 {
+                                cache.clear();
+                            }
+                            cache.insert(sha, digest.clone());
+                            Some(digest)
+                        })
+                    })
+                    .collect::<Vec<_>>())
+            })
+            .await?;
+        Ok(js_invocation_sites::set_document(
+            &saved,
+            retained,
+            &self.invocation_session,
+        ))
+    }
+    async fn invocation_site_action(&self, value: &Value) -> Result<Value> {
+        let store = self.invocation_sites.clone();
+        let mut result = match value["action"].as_str() {
+            Some("add") => {
+                let target = js_invocation_sites::Target::from_fields(
+                    value.get("name"),
+                    value.get("byte_offset"),
+                )?;
+                let (document, artifact) = self
+                    .resolve_invocation_site(
+                        value["session_id"].as_str().unwrap_or_default(),
+                        value["artifact_id"].as_str().unwrap_or_default(),
+                        &target,
+                        value["label"].as_str(),
+                    )
+                    .await?;
+                // A refusal saves nothing; it returns the reason and candidates.
+                if document["status"] != "resolved" {
+                    json!({"ok": true, "added": false, "resolution": document})
+                } else {
+                    let saved = js_invocation_sites::saved_from(&document, &artifact)
+                        .ok_or_else(|| Error::new(500, "The resolved site could not be saved"))?;
+                    self.blocking(move || store.add(saved)).await?;
+                    json!({"ok": true, "added": true, "resolution": document})
+                }
+            }
+            Some("remove") => {
+                let sha = value["source_sha256"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_owned();
+                let anchor = value["anchor_offset"].as_u64().unwrap_or(u64::MAX);
+                let anchor = u32::try_from(anchor)
+                    .map_err(|_| Error::bad("anchor_offset must be a UTF-16 offset"))?;
+                self.blocking(move || store.remove(&sha, anchor)).await?;
+                json!({"ok": true, "removed": true})
+            }
+            Some("clear") => {
+                let cleared = self.blocking(move || store.clear()).await?;
+                json!({"ok": true, "cleared": cleared})
+            }
+            _ => return Err(Error::bad("Invocation site action is invalid")),
+        };
+        result["set"] = self.invocation_site_set().await?;
+        Ok(result)
+    }
     async fn find_artifact(&self, id: &str) -> Result<Value> {
         if validation::canonical(&json!(id), 64, false, "Artifact ID").is_err() {
             return Err(Error::new(404, "Artifact not found"));
@@ -1100,6 +1288,10 @@ impl App {
                 _ => Err(Error::bad("Analyst workspace action is invalid")),
             },
             "/api/native-console/actions" => self.native_console.action(value).await,
+            "/api/js-invocation-sites/actions" => {
+                validation::schema("JsInvocationSiteAction", value, 400)?;
+                self.invocation_site_action(value).await
+            }
             "/api/session/actions" => {
                 validation::schema("SessionAction", value, 400)?;
                 if self.options.capture_mode() != "live" {

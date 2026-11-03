@@ -365,7 +365,11 @@ profile or embedded-session variable is ignored. Request content capture is
 not a named option, so these sessions record request body length, type and
 digest but no request path, query or body bytes. Document-start Console
 script permission (`REB_CONSOLE_DOCUMENT_START`) is not a named option
-either, so these sessions can never arm a document-start script. Operator
+either, so these sessions can never arm a document-start script. Native
+JavaScript invocation sites (`REB_NATIVE_JS_INVOCATION_SITES`) and their
+settled-value digests (`REB_NATIVE_JS_INVOCATION_DIGESTS`) are not named
+options, so these sessions never arm an invocation site or record a digest,
+whatever the caller's environment says. Operator
 settings such as helper binary paths, `REB_LIVE_SESSION_ROOT`, `REB_ORIGIN_TRACE_APP` and
 `REB_OPEN_COMMAND` still apply. They run the launcher that belongs with the
 `reb-api` build (`Contents/Resources/run-live-session.sh` in the app,
@@ -426,6 +430,71 @@ The summary scans the same newest 64 MiB as the polling window and the newest
 64 MiB of the manifest. It contains counts, identifiers and origin or
 `wasm://wasm/<hex>` labels only: no payloads, URL paths or queries, source or
 bodies. Identifiers and origins can still be sensitive. It has its own ETag.
+
+## Saved JavaScript invocation sites
+
+The Origin Trace app keeps one saved set of at most 8
+[native JavaScript invocation sites](native-js-invocation-v1.md#site-file)
+and arms it in the next capture it starts. These routes name, save and list
+those sites; none of them changes the open page or a running capture.
+
+- `GET /api/js-invocation-sites/resolve` (`resolve_js_invocation_site`) takes
+  an exact `session_id` and `artifact_id` and exactly one of `name` (a dotted
+  name such as `window.hsw`, `hsw` or `a.b.c`) or `byte_offset` (a UTF-8 offset
+  in the artifact bytes, BOM included). It returns one
+  `reb-js-invocation-site-resolution-v1` document: `status: resolved` with the
+  exact site entry, or `status: refused` with a `reason` and at most 32
+  candidates, each with its byte offset, line, column, kind, binding and a
+  short context line. It saves nothing.
+- `GET /api/js-invocation-sites` (`get_js_invocation_sites`) returns the saved
+  set with each site's label, source URL and session, whether this session
+  retained the saved script version (`retained.state`: `matches`,
+  `other_version` or `not_retained`), and what this session's launcher armed
+  (`session.state`: `not_armed`, `armed`, `browser_unsupported` or
+  `unreadable`, with `digests`).
+- `POST /api/js-invocation-sites/actions` (`js_invocation_site_action`) takes
+  `add` (the resolve inputs and an optional `label`), `remove`
+  (`source_sha256` and `anchor_offset`) or `clear` with `confirm: true`. `add`
+  resolves the artifact again on the server and never accepts a site from the
+  caller. A refused resolution returns HTTP 200 with `added: false` and the
+  resolution; a duplicate `(source_sha256, anchor_offset)` or a ninth site is
+  a 409. Every action returns the updated set.
+
+A name matches only syntax that binds it: an assignment to that identifier or
+member chain (`a.b`, `a["b"]`), a `var`, `let` or `const` initializer, a
+`function NAME(` declaration, or an object-literal `NAME: function(` property
+or `NAME(` method, including chained assignments and properties of an object
+bound to a name. `window.`, `self.` and `globalThis.` are one prefix, because
+in a document's main world they are the same global object and invocation
+capture never arms a worker. A bare name also matches that global property;
+a prefixed name matches a top-level `var` or function declaration of a
+classic script but never a local or a module declaration. Strings, templates
+and comments never match, because the analysis worker reads its bounded
+tree-sitter syntax tree, not text. A local variable named `window` is not told
+apart from the global object, so every refusal lists candidates with context.
+Zero matches list definitions whose name has the same final segment
+(`candidate_relation: same_final_name`).
+
+A position selects the innermost function whose definition contains it,
+counting the head that binds it (`window.hsw=`, `var hsw=`, `hsw:`) as part of
+that function. Refusals carry a reason: `no_match`, `ambiguous`,
+`unsupported_function` (a bare-parameter or `async` arrow, whose anchor is not
+a `(`, a generator or a class constructor), `no_function` (top-level code),
+`class_initializer` (a field initializer or static block) and
+`source_unavailable` (the bounded parse refused the source). The site key is
+computed in the backend exactly as `tools/native-js-invocation-site.py`
+computes it; both check `tools/fixtures/native-js-invocation/site-cases.json`.
+
+The saved set is the exact `native-js-invocation-sites-v1` file at
+`--js-invocation-site-store` (the app passes
+`~/Library/Application Support/Origin Trace/js-invocation-sites-v1.json`;
+`make live` and `make ui` use `build/sessions/js-invocation-sites-v1.json`)
+plus a `js-invocation-sites-v1.labels.json` sidecar with each label, source URL
+and session, which the browser never reads. Both are written atomically with
+user-only permissions. An empty set has no site file. The list and resolve
+routes are read-only; resolve runs the analysis worker, so like
+`get_source_facts` it is listed only with `--allow-effects`, as is the action
+route.
 
 ## Error reasons and uncertain outcomes
 

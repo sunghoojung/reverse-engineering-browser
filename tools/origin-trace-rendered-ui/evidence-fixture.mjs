@@ -27,6 +27,13 @@ export const REQUEST_BODY_HOST = 'api.body.test';
 export const REQUEST_BODY_TARGET = '/getcaptcha/site-key?s=<svg/onload=window.__rebInjected=5>';
 export const REQUEST_BODY_MARKER = '<img src=x onerror="window.__rebInjected=4">';
 export const METADATA_BODY_HOST = 'api.metadata.test';
+// A retained glue script for Track calls: the real window.hsw binder, decoys
+// in a string and a comment that must never match, and two definitions of
+// o.dup that must be refused as ambiguous. Context lines carry markup as text.
+export const INVOCATION_ARTIFACT_ID = '330';
+export const INVOCATION_SOURCE = "var s='window.hsw=function(a){}';/* window.hsw=function(b){} <img src=x onerror=\"window.__rebInjected=6\"> */\n" +
+  '(function(){window.hsw=function(aGh,jR,qN){if(0===aGh)return Mk().then(function(){return awb(jR)});return qN}})();\n' +
+  "o.dup=function(d){return '<img src=x onerror=\"window.__rebInjected=7\">'};if(z){o.dup=function(e){return e}}\n";
 
 const sha256 = bytes => createHash('sha256').update(bytes).digest('hex');
 const hex = text => Buffer.from(text, 'utf8').toString('hex');
@@ -224,6 +231,9 @@ export async function buildEvidence({root, sessions, guestStore, dispatchStore, 
   const parseFailure = await artifact(artifacts, {artifact_id: '311', session_id: '1', navigation_id: '100', frame_id: '200',
     capture_origin: 'dynamic_javascript', kind: 'javascript', mime_type: 'text/javascript', url: 'fixture://parse-failed.js'},
   Buffer.from('function vm(code,stack){var pc=0;var ops={1:function(){stack.push(code[pc++])},2:function(){stack.pop()},3:function(){pc=code.length}};while(pc<code.length){ops[code[pc++]]();}return stack;}\nlet broken=;'));
+  const glue = await artifact(artifacts, {artifact_id: INVOCATION_ARTIFACT_ID, session_id: '1', navigation_id: '100', frame_id: '200',
+    capture_origin: 'network_response', kind: 'javascript', mime_type: 'text/javascript', url: 'https://hcaptcha.test/glue.js'},
+  Buffer.from(INVOCATION_SOURCE, 'utf8'));
   const guest = await goldenEvidence(artifacts, guestStore);
   const physical = await goldenEvidence(artifacts, dispatchStore);
   assert(guest.events.some(event => event.type === 'wasm_guest_dispatch'), 'guest golden store holds a guest sample');
@@ -232,7 +242,7 @@ export async function buildEvidence({root, sessions, guestStore, dispatchStore, 
   // static arm label, and an inner interpreter linked to its outer handler.
   const observed = await goldenEvidence(artifacts, observedStore);
   assert(observed.events.filter(event => event.type === 'wasm_guest_invocation').length === 2, 'observed store holds outer and inner activations');
-  const manifest = [...demoArtifacts, source, bytecode, parseFailure, withBodies.artifact, ...guest.artifacts, ...physical.artifacts, ...observed.artifacts];
+  const manifest = [...demoArtifacts, source, bytecode, parseFailure, glue, withBodies.artifact, ...guest.artifacts, ...physical.artifacts, ...observed.artifacts];
   const retained = [...demoEvents, ...requests, ...guest.events, ...physical.events, ...observed.events];
   const vm = demoEvents.find(event => event.category === 'vm');
   assert(vm, 'demo store must contain a native vm event');
@@ -243,5 +253,6 @@ export async function buildEvidence({root, sessions, guestStore, dispatchStore, 
     store: join(root, 'events.jsonl'), traceStore: join(root, 'origin-trace.jsonl'),
     signalStore: join(root, 'request-signals.jsonl'), artifacts,
     apiCollection: join(root, 'api-collection.json'), localAnalyst: join(root, 'local-analyst.json'),
+    invocationSites: join(root, 'app-support', 'js-invocation-sites-v1.json'),
   };
 }

@@ -31,6 +31,8 @@ check: native-wasm-golden-check native-js-golden-check network-request-wire-chec
 		REB_OWNED_VM_TEST_HELPER="$(abspath $(NATIVE_VM_FIXTURE_BINARY))")
 	$(call ignored-rust-test,--test http,source_facts_real_worker_http_and_cli,\
 		REB_SOURCE_FACTS_TEST_WORKER="$(abspath $(or $(CARGO_TARGET_DIR),apps/deobfuscator-worker/target))/debug/reb-deobfuscator-worker")
+	$(call ignored-rust-test,--test http,js_invocation_sites_real_worker_resolves_names_and_positions,\
+		REB_SOURCE_FACTS_TEST_WORKER="$(abspath $(or $(CARGO_TARGET_DIR),apps/deobfuscator-worker/target))/debug/reb-deobfuscator-worker")
 
 # Owned dispatch-shape fixtures: each checked-in .wasm must be exactly what the
 # pinned wat development dependency builds from its .wat source, and every
@@ -117,6 +119,7 @@ $(UI_STARTUP_DEPS): tools/ui-startup-deps/package-lock.json
 native-only-check: $(UI_STARTUP_DEPS)
 	node tools/check-native-only-ui.mjs
 	node tools/check-source-search.mjs
+	node tools/check-invocation-sites-ui.mjs
 	node tools/check-native-only-startup.cjs
 	node tools/check-native-only-launch.mjs
 	python3 tools/native-js-invocation-site.py --self-test

@@ -102,5 +102,69 @@ enum LiveSessionFailureChecks {
       precondition(explicitStart["REB_CONSOLE_DOCUMENT_START"] == value, "explicit document-start \(value)")
     }
     print("PASS native live document-start permission: on by default for app captures, an explicit 0 survives")
+
+    // Saved invocation sites arm app-started captures. Digests follow the
+    // mode, the launcher drops sites a Brave cannot arm, and explicit values win.
+    let saved = URL(fileURLWithPath: "/private/tmp/origin-trace-live-x-js-invocation-sites.json")
+    let invocationNames = ["REB_NATIVE_JS_INVOCATION_SITES", "REB_NATIVE_JS_INVOCATION_DIGESTS", "REB_NATIVE_JS_INVOCATION_IF_SUPPORTED"]
+    let invocationCases: [(String, [String: String], Bool, URL?, [String?])] = [
+      ("content", [:], true, saved, [saved.path, "1", "1"]),
+      ("metadata", [:], false, saved, [saved.path, "0", "1"]),
+      ("nothing saved", [:], true, nil, [nil, nil, nil]),
+      ("explicit digests off", ["REB_NATIVE_JS_INVOCATION_DIGESTS": "0"], true, saved, [saved.path, "0", "1"]),
+      ("explicit digests on", ["REB_NATIVE_JS_INVOCATION_DIGESTS": "1"], false, saved, [saved.path, "1", "1"]),
+      ("explicit sites", ["REB_NATIVE_JS_INVOCATION_SITES": "/explicit.json"], true, saved, ["/explicit.json", nil, nil]),
+      ("explicit sites off", ["REB_NATIVE_JS_INVOCATION_SITES": ""], true, saved, ["", nil, nil]),
+      ("strict check kept", ["REB_NATIVE_JS_INVOCATION_IF_SUPPORTED": "0"], true, saved, [saved.path, "1", "0"]),
+      ("no VM category", ["REB_CAPTURE_CATEGORY_MASK": "1280"], true, saved, [nil, nil, nil]),
+      ("unreadable mask", ["REB_CAPTURE_CATEGORY_MASK": "0xzz"], true, saved, [nil, nil, nil]),
+    ]
+    for (name, given, content, url, expected) in invocationCases {
+      let environment = LiveSessionCoordinator.captureDefaults(
+        environment: given, captureNetworkContent: content, savedInvocationSites: url)
+      precondition(invocationNames.map { environment[$0] } == expected, "invocation defaults: \(name) \(invocationNames.map { environment[$0] })")
+    }
+    print("PASS native live invocation sites: saved sites armed with digests in Content and without in Metadata, explicit sites and digests win, no VM category arms nothing")
+
+    // The Swift store reads and writes exactly what the backend and browser do.
+    let repository = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
+    let fixture = try! JSONSerialization.jsonObject(with: Data(contentsOf: repository.appendingPathComponent(
+      "tools/fixtures/native-js-invocation/site-cases.json"))) as! [String: Any]
+    let files = (fixture["files"] as! [[String: Any]]).compactMap { $0["file"] as? String }
+    precondition(files.count >= 2, "fixture files")
+    for text in files {
+      let sites = InvocationSiteSet.parse(text)
+      precondition(sites != nil && InvocationSiteSet.file(sites!) == text, "fixture file round trip")
+    }
+    let file = files[0]
+    for bad in ["", "{}", file.replacingOccurrences(of: "\"version\":1", with: "\"version\":1.0"),
+                file.replacingOccurrences(of: "function-entry", with: "dispatch"), " " + file,
+                file.replacingOccurrences(of: "\"anchor_offset\":", with: "\"anchor_offset\":true,\"x\":")] {
+      precondition(InvocationSiteSet.parse(bad) == nil, "refused site file \(bad.prefix(40))")
+    }
+    let folder = FileManager.default.temporaryDirectory.appendingPathComponent("reb-site-store-\(UUID().uuidString)/app")
+    defer { try? FileManager.default.removeItem(at: folder.deletingLastPathComponent()) }
+    let store = folder.appendingPathComponent(InvocationSiteSet.fileName)
+    precondition(InvocationSiteSet.load(store) == .empty, "missing store is empty")
+    var sites = InvocationSiteSet.parse(file)!
+    sites[0].label = "window.hsw"
+    sites[0].sourceURL = "https://example.test/glue.js"
+    sites[0].sessionID = "11"
+    try! InvocationSiteSet.write(sites, to: store)
+    precondition((try? String(contentsOf: store, encoding: .utf8)) == file, "the site file is the browser's exact text")
+    let mode = { (url: URL) in ((try? FileManager.default.attributesOfItem(atPath: url.path))?[.posixPermissions] as? NSNumber)?.intValue }
+    precondition(mode(store) == 0o600 && mode(InvocationSiteSet.labelsURL(store)) == 0o600 && mode(folder) == 0o700, "user-only store")
+    precondition(InvocationSiteSet.load(store) == .saved(sites), "labels round trip")
+    try! InvocationSiteSet.write(Array(sites.dropFirst()), to: store)
+    guard case .saved(let remaining) = InvocationSiteSet.load(store) else { preconditionFailure("removed one site") }
+    precondition(remaining == Array(sites.dropFirst()) && remaining[0].label == "Unlabeled function", "remove keeps the rest")
+    precondition(InvocationSiteSet.file(Array(repeating: sites[0], count: 2)) == nil, "duplicates refused")
+    try! "{\"sites\":[],\"version\":1}".write(to: store, atomically: true, encoding: .utf8)
+    precondition(InvocationSiteSet.load(store) == .unreadable, "an invalid file is unreadable, never armed")
+    try! InvocationSiteSet.write([], to: store)
+    precondition(!FileManager.default.fileExists(atPath: store.path) && InvocationSiteSet.load(store) == .empty, "clear removes the set")
+    precondition(InvocationSiteSet.storeURL(environment: ["REB_JS_INVOCATION_SITE_STORE": "/a/b.json"], applicationSupport: folder).path == "/a/b.json"
+      && InvocationSiteSet.storeURL(environment: [:], applicationSupport: folder) == store, "store location")
+    print("PASS native saved invocation sites: the shared fixture's exact files, refused spellings, atomic user-only writes, labels, remove, unreadable and clear")
   }
 }

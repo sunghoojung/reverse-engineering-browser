@@ -697,7 +697,12 @@ fn openapi_references_and_native_only_operations_are_consistent() {
             assert!(ids.insert(id), "Duplicate operation ID: {id}");
         }
     }
-    assert_eq!(ids.len(), 39, "Review route coverage when the API changes");
+    assert_eq!(ids.len(), 42, "Review route coverage when the API changes");
+    assert!(
+        ids.contains("get_js_invocation_sites")
+            && ids.contains("resolve_js_invocation_site")
+            && ids.contains("js_invocation_site_action")
+    );
     assert!(ids.contains("vm_pack_apply") && ids.contains("vm_pack_compare"));
     assert!(!ids.contains("debugger_action"));
     assert!(
@@ -780,7 +785,7 @@ fn execution_metadata_covers_operations_actions_and_dispatch_without_safe_defaul
             operation_count += 1;
         }
     }
-    assert_eq!(operation_count, 39);
+    assert_eq!(operation_count, 42);
     let schemas = &spec["components"]["schemas"];
     let mut action_count = 0;
     for name in [
@@ -791,6 +796,7 @@ fn execution_metadata_covers_operations_actions_and_dispatch_without_safe_defaul
         "NativeConsoleAction",
         "OwnedVmDebuggerAction",
         "SessionAction",
+        "JsInvocationSiteAction",
     ] {
         let variants = schemas[name]["oneOf"]
             .as_array()
@@ -832,7 +838,7 @@ fn execution_metadata_covers_operations_actions_and_dispatch_without_safe_defaul
         }
     }
     // Only retained native and offline actions are advertised after CDP removal.
-    assert_eq!(action_count, 32);
+    assert_eq!(action_count, 35);
     // Source checks intentionally follow the dispatch syntax. If it changes,
     // audit the new handler before updating this narrow test helper.
     fn arms<'a>(source: &'a str, start: &str, end: &str, indent: usize) -> BTreeSet<&'a str> {
@@ -901,6 +907,17 @@ fn execution_metadata_covers_operations_actions_and_dispatch_without_safe_defaul
         (
             "SessionAction",
             include_str!("../src/live_browser.rs"),
+            r#"Some\("([a-z_]+)"\) =>"#,
+        ),
+        (
+            "JsInvocationSiteAction",
+            include_str!("../src/app.rs")
+                .split_once("async fn invocation_site_action")
+                .unwrap()
+                .1
+                .split_once("async fn find_artifact")
+                .unwrap()
+                .0,
             r#"Some\("([a-z_]+)"\) =>"#,
         ),
     ] {
@@ -8075,3 +8092,461 @@ async fn disconnected_capture_stop_is_not_reported_as_success() {
 }
 
 origin_trace_backend::javascript_worker_test_entry!();
+
+/// Stands in for the analysis worker: each reply is a file the test writes,
+/// keyed by the requested byte offset, or `name` for a name request.
+#[cfg(unix)]
+fn invocation_site_worker(directory: &Path) -> std::path::PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let worker = directory.join("invocation-site-worker");
+    std::fs::write(
+        &worker,
+        format!(
+            "#!/bin/sh\nIFS= read -r request\ncase \"$request\" in *'\"operation\":\"invocation_site\"'*) ;; *) exit 2;; esac\nkey=$(printf '%s' \"$request\" | /usr/bin/sed -n 's/.*\"byte_offset\":\\([0-9]*\\).*/\\1/p')\n[ -n \"$key\" ] || key=name\nexec /bin/cat '{}/reply-'\"$key\"'.json'\n",
+            directory.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&worker, std::fs::Permissions::from_mode(0o700)).unwrap();
+    worker
+}
+
+/// What the worker reports for the function whose `(` is at `anchor`.
+fn invocation_site_reply(source: &str, anchor: Option<usize>, by_name: bool) -> Value {
+    let candidate = anchor.map(|anchor| {
+        json!({"kind":"function","anchor_byte":anchor,"start":anchor.saturating_sub(8),
+            "end":anchor + 3,"binding":"window.hsw","unsupported":null})
+    });
+    json!({"schema":"reb-invocation-site-worker-v1","ok":true,"error":null,
+        "source_bytes":source.len(),
+        "matches": if by_name { candidate.clone().into_iter().collect::<Vec<_>>() } else { vec![] },
+        "match_count": usize::from(by_name && candidate.is_some()),
+        "related":[],"related_count":0,
+        "selected": if by_name { Value::Null } else { candidate.clone().unwrap_or(Value::Null) },
+        "reason": if by_name || candidate.is_some() { Value::Null } else { json!("no_function") }})
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn js_invocation_site_routes_keep_the_saved_set_exact_bounded_and_private() {
+    use std::os::unix::fs::PermissionsExt;
+    let directory = tempfile::tempdir().unwrap();
+    let worker = invocation_site_worker(directory.path());
+    let store = directory.path().join("app/js-invocation-sites-v1.json");
+    let server = Server::start_with_args(&[
+        "--deobfuscator".into(),
+        worker.display().to_string(),
+        "--js-invocation-site-store".into(),
+        store.display().to_string(),
+    ])
+    .await;
+    let source = (0..9)
+        .map(|index| format!("f{index}=function(a){{return a}};"))
+        .collect::<String>();
+    put_source_facts_artifact(&server, source.as_bytes(), "javascript");
+    let anchors = source
+        .match_indices('(')
+        .map(|(offset, _)| offset)
+        .collect::<Vec<_>>();
+    for &anchor in &anchors {
+        std::fs::write(
+            directory.path().join(format!("reply-{anchor}.json")),
+            invocation_site_reply(&source, Some(anchor), false).to_string(),
+        )
+        .unwrap();
+    }
+    let reply = |name: &str, value: Value| {
+        std::fs::write(
+            directory.path().join(format!("reply-{name}.json")),
+            value.to_string(),
+        )
+        .unwrap();
+    };
+    reply(
+        "name",
+        invocation_site_reply(&source, Some(anchors[0]), true),
+    );
+    let set = |bytes: Vec<u8>| serde_json::from_slice::<Value>(&bytes).unwrap();
+    let list = set(assert_contract_response(
+        server.get("/api/js-invocation-sites").await,
+        "get",
+        "/api/js-invocation-sites",
+        200,
+    )
+    .await);
+    assert_eq!(
+        (list["count"].as_u64(), list["limit"].as_u64()),
+        (Some(0), Some(8))
+    );
+    assert_eq!(list["session"]["state"], "not_armed");
+    assert!(
+        list["next_capture"]
+            .as_str()
+            .unwrap()
+            .contains("not the open page")
+    );
+    assert_eq!(
+        server.get("/api/js-invocation-sites?x=1").await.status(),
+        400
+    );
+
+    // Resolving saves nothing.
+    let resolved = set(assert_contract_response(
+        server
+            .get("/api/js-invocation-sites/resolve?session_id=11&artifact_id=7&name=window.hsw")
+            .await,
+        "get",
+        "/api/js-invocation-sites/resolve",
+        200,
+    )
+    .await);
+    assert_eq!(resolved["status"], "resolved", "{resolved}");
+    assert_eq!(resolved["site"]["anchor_offset"], anchors[0]);
+    assert_eq!(resolved["site"]["artifact_id"], "7");
+    assert!(!store.exists());
+    for (query, status) in [
+        ("session_id=11&artifact_id=7", 400),
+        ("session_id=11&artifact_id=7&name=hsw&byte_offset=2", 400),
+        ("session_id=11&artifact_id=7&name=1x", 400),
+        ("session_id=12&artifact_id=7&name=hsw", 404),
+        ("session_id=11&artifact_id=7&name=hsw&extra=1", 400),
+    ] {
+        let response = server
+            .get(&format!("/api/js-invocation-sites/resolve?{query}"))
+            .await;
+        assert_contract_response(response, "get", "/api/js-invocation-sites/resolve", status).await;
+    }
+
+    let action = |body: Value| server.action("/api/js-invocation-sites/actions", body);
+    let added = set(assert_contract_response(
+        action(json!({"action":"add","session_id":"11","artifact_id":"7","name":"window.hsw"}))
+            .await,
+        "post",
+        "/api/js-invocation-sites/actions",
+        200,
+    )
+    .await);
+    assert_eq!(added["added"], true);
+    assert_eq!(added["set"]["count"], 1);
+    let entry = &added["set"]["sites"][0];
+    assert_eq!(entry["label"], "window.hsw");
+    assert_eq!(entry["source_url"], "https://example.test/source.js");
+    assert_eq!(entry["session_id"], "11");
+    assert_eq!(entry["retained"]["state"], "matches");
+    // The file is the browser's exact format, user-only, in a private folder.
+    let text = std::fs::read_to_string(&store).unwrap();
+    assert_eq!(
+        text,
+        format!(r#"{{"sites":[{}],"version":1}}"#, entry["site"])
+    );
+    let mode = |path: &Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode(&store), 0o600);
+    assert_eq!(
+        mode(
+            &directory
+                .path()
+                .join("app/js-invocation-sites-v1.labels.json")
+        ),
+        0o600
+    );
+    assert_eq!(mode(store.parent().unwrap()), 0o700);
+
+    let duplicate = action(
+        json!({"action":"add","session_id":"11","artifact_id":"7","byte_offset":anchors[0]}),
+    )
+    .await;
+    let bytes =
+        assert_contract_response(duplicate, "post", "/api/js-invocation-sites/actions", 409).await;
+    assert!(String::from_utf8_lossy(&bytes).contains("already saved"));
+    for &anchor in &anchors[1..8] {
+        let response = action(json!({"action":"add","session_id":"11","artifact_id":"7","byte_offset":anchor,"label":format!("f at {anchor}")})).await;
+        assert_eq!(
+            set(assert_contract_response(
+                response,
+                "post",
+                "/api/js-invocation-sites/actions",
+                200
+            )
+            .await)["added"],
+            true
+        );
+    }
+    let ninth = action(
+        json!({"action":"add","session_id":"11","artifact_id":"7","byte_offset":anchors[8]}),
+    )
+    .await;
+    let bytes =
+        assert_contract_response(ninth, "post", "/api/js-invocation-sites/actions", 409).await;
+    assert!(String::from_utf8_lossy(&bytes).contains("8 functions"));
+    // A refused resolution saves nothing and returns its reason.
+    std::fs::write(
+        directory.path().join("reply-1.json"),
+        invocation_site_reply(&source, None, false).to_string(),
+    )
+    .unwrap();
+    let refused = set(assert_contract_response(
+        action(json!({"action":"add","session_id":"11","artifact_id":"7","byte_offset":1})).await,
+        "post",
+        "/api/js-invocation-sites/actions",
+        200,
+    )
+    .await);
+    assert_eq!(
+        (
+            refused["added"].as_bool(),
+            refused["resolution"]["reason"].as_str()
+        ),
+        (Some(false), Some("no_function"))
+    );
+    assert_eq!(refused["set"]["count"], 8);
+
+    let sha = entry["site"]["source_sha256"].clone();
+    let removed =
+        action(json!({"action":"remove","source_sha256":sha,"anchor_offset":anchors[0]})).await;
+    assert_eq!(
+        set(
+            assert_contract_response(removed, "post", "/api/js-invocation-sites/actions", 200)
+                .await
+        )["set"]["count"],
+        7
+    );
+    let missing =
+        action(json!({"action":"remove","source_sha256":sha,"anchor_offset":anchors[0]})).await;
+    assert_contract_response(missing, "post", "/api/js-invocation-sites/actions", 404).await;
+    let unconfirmed = action(json!({"action":"clear"})).await;
+    assert_contract_response(unconfirmed, "post", "/api/js-invocation-sites/actions", 400).await;
+    let cleared = set(assert_contract_response(
+        action(json!({"action":"clear","confirm":true})).await,
+        "post",
+        "/api/js-invocation-sites/actions",
+        200,
+    )
+    .await);
+    assert_eq!(
+        (
+            cleared["cleared"].as_u64(),
+            cleared["set"]["count"].as_u64()
+        ),
+        (Some(7), Some(0))
+    );
+    assert!(!store.exists());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn js_invocation_site_set_reports_the_session_and_stale_script_versions() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = directory.path().join("js-invocation-sites-v1.json");
+    let saved_source = "window.hsw=function(aGh){return aGh};";
+    let anchor = saved_source.find("(aGh").unwrap();
+    let site = |artifact: &str| {
+        let raw = saved_source.as_bytes();
+        let units = saved_source
+            .encode_utf16()
+            .flat_map(u16::to_le_bytes)
+            .collect::<Vec<u8>>();
+        format!(
+            r#"{{"anchor_offset":{anchor},"artifact_id":"{artifact}","artifact_sha256":"{}","byte_offset":{anchor},"shape":"function-entry","source_length":{},"source_sha256":"{}"}}"#,
+            hex::encode(Sha256::digest(raw)),
+            units.len() / 2,
+            hex::encode(Sha256::digest(&units))
+        )
+    };
+    let file = format!(r#"{{"sites":[{}],"version":1}}"#, site("3"));
+    std::fs::write(&store, &file).unwrap();
+    std::fs::write(
+        directory.path().join("js-invocation-sites-v1.labels.json"),
+        json!({"version":1,"sites":[{"anchor_offset":anchor,"label":"window.hsw",
+            "session_id":"2","source_sha256":serde_json::from_str::<Value>(&site("3")).unwrap()["source_sha256"],
+            "source_url":"https://example.test/source.js"}]})
+        .to_string(),
+    )
+    .unwrap();
+    let armed = directory.path().join("armed.json");
+    std::fs::write(&armed, &file).unwrap();
+    for (state, digests, expected, expected_digests) in [
+        (None, true, "armed", true),
+        (
+            Some("browser_unsupported"),
+            true,
+            "browser_unsupported",
+            false,
+        ),
+    ] {
+        let mut args = vec![
+            "--js-invocation-site-store".to_owned(),
+            store.display().to_string(),
+            "--js-invocation-session-sites".into(),
+            armed.display().to_string(),
+        ];
+        if let Some(state) = state {
+            args.extend(["--js-invocation-session-state".into(), state.into()]);
+        }
+        if digests {
+            args.push("--js-invocation-session-digests".into());
+        }
+        let server = Server::start_with_args(&args).await;
+        // This session retained a newer version of the saved script's URL.
+        put_source_facts_artifact(
+            &server,
+            b"window.hsw=function(aGh,v2){return aGh};",
+            "javascript",
+        );
+        let list: Value = serde_json::from_slice(
+            &assert_contract_response(
+                server.get("/api/js-invocation-sites").await,
+                "get",
+                "/api/js-invocation-sites",
+                200,
+            )
+            .await,
+        )
+        .unwrap();
+        assert_eq!(list["session"]["state"], expected);
+        assert_eq!(list["session"]["digests"], expected_digests);
+        assert_eq!(list["session"]["count"], 1);
+        assert_eq!(list["session"]["sites"][0]["label"], "window.hsw");
+        let retained = &list["sites"][0]["retained"];
+        assert_eq!(retained["state"], "other_version", "{list}");
+        assert_eq!(retained["other_version_artifact_id"], "7");
+    }
+    // A site file the browser would refuse is reported, not silently used.
+    std::fs::write(&store, "{\"sites\":[],\"version\":1}").unwrap();
+    let server = Server::start_with_args(&[
+        "--js-invocation-site-store".into(),
+        store.display().to_string(),
+    ])
+    .await;
+    assert_contract_response(
+        server.get("/api/js-invocation-sites").await,
+        "get",
+        "/api/js-invocation-sites",
+        500,
+    )
+    .await;
+}
+
+#[tokio::test]
+#[ignore = "requires REB_SOURCE_FACTS_TEST_WORKER pointing to the built Rust worker"]
+async fn js_invocation_sites_real_worker_resolves_names_and_positions() {
+    let worker =
+        std::env::var("REB_SOURCE_FACTS_TEST_WORKER").expect("Set the built Rust worker path");
+    assert!(Path::new(&worker).is_file(), "Build the Rust worker first");
+    let directory = tempfile::tempdir().unwrap();
+    let store = directory.path().join("js-invocation-sites-v1.json");
+    let server = Server::start_with_args(&[
+        "--deobfuscator".into(),
+        worker,
+        "--js-invocation-site-store".into(),
+        store.display().to_string(),
+    ])
+    .await;
+    // Decoys in a string, a template and a comment never match the name.
+    let source = "\u{feff}var s='window.hsw=function(a){}';`window.hsw=function(b){}`;/* window.hsw=function(c){} */\n\
+                  (function(){window.hsw=function(aGh,jR,qN){if(0===aGh)return Mk().then(function(){return awb(jR)});return x=>x}})();\n\
+                  o.dup=function(d){};if(z){o.dup=function(e){}}";
+    let bytes = source.as_bytes();
+    put_source_facts_artifact(&server, bytes, "javascript");
+    let resolve = |query: String| {
+        let server = &server;
+        async move {
+            let response = server
+                .get(&format!(
+                    "/api/js-invocation-sites/resolve?session_id=11&artifact_id=7&{query}"
+                ))
+                .await;
+            serde_json::from_slice::<Value>(
+                &assert_contract_response(response, "get", "/api/js-invocation-sites/resolve", 200)
+                    .await,
+            )
+            .unwrap()
+        }
+    };
+    let anchor = source.find("(aGh").unwrap();
+    for name in ["window.hsw", "hsw", "self.hsw", "globalThis.hsw"] {
+        let named = resolve(format!("name={name}")).await;
+        assert_eq!(named["status"], "resolved", "{name}: {named}");
+        assert_eq!(named["function"]["byte_offset"], anchor);
+        assert_eq!(named["function"]["line"], 2);
+    }
+    let named = resolve("name=window.hsw".into()).await;
+    // The site equals what the Python tool writes for the same bytes and `(`.
+    let path = directory.path().join("glue.js");
+    std::fs::write(&path, bytes).unwrap();
+    let output = Command::new("python3")
+        .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tools/native-js-invocation-site.py"))
+        .arg(format!("{}:7:{anchor}", path.display()))
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap(),
+        format!(r#"{{"sites":[{}],"version":1}}"#, named["site"])
+    );
+    let several = resolve("name=o.dup".into()).await;
+    assert_eq!(
+        (several["status"].as_str(), several["reason"].as_str()),
+        (Some("refused"), Some("ambiguous"))
+    );
+    assert_eq!(several["candidate_count"], 2);
+    assert!(
+        several["candidates"][1]["context"]
+            .as_str()
+            .unwrap()
+            .contains("o.dup=function(e)")
+    );
+    let none = resolve("name=window.dup".into()).await;
+    assert_eq!(none["reason"], "no_match");
+    assert_eq!(
+        (
+            none["candidate_relation"].as_str(),
+            none["candidate_count"].as_u64()
+        ),
+        (Some("same_final_name"), Some(2))
+    );
+    let inner = resolve(format!("byte_offset={}", source.find("awb").unwrap())).await;
+    assert_eq!(
+        inner["function"]["byte_offset"],
+        source.find("(){return awb").unwrap()
+    );
+    let head = resolve(format!(
+        "byte_offset={}",
+        source.find("window.hsw=function(aGh").unwrap()
+    ))
+    .await;
+    assert_eq!(head["function"]["byte_offset"], anchor);
+    let arrow = resolve(format!("byte_offset={}", source.find("x=>x").unwrap())).await;
+    assert_eq!(arrow["reason"], "unsupported_function");
+    assert!(
+        arrow["message"]
+            .as_str()
+            .unwrap()
+            .contains("bare parameter")
+    );
+    let top = resolve(format!("byte_offset={}", source.find("var s").unwrap())).await;
+    assert_eq!(top["reason"], "no_function");
+    let added: Value = serde_json::from_slice(
+        &assert_contract_response(
+            server
+                .action(
+                    "/api/js-invocation-sites/actions",
+                    json!({"action":"add","session_id":"11","artifact_id":"7","name":"window.hsw"}),
+                )
+                .await,
+            "post",
+            "/api/js-invocation-sites/actions",
+            200,
+        )
+        .await,
+    )
+    .unwrap();
+    assert_eq!(added["added"], true);
+    assert_eq!(
+        std::fs::read_to_string(&store).unwrap(),
+        format!(r#"{{"sites":[{}],"version":1}}"#, named["site"])
+    );
+}

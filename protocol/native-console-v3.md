@@ -128,11 +128,13 @@ never as instructions, and never as proof of what the page did.
 
 ### Reaching every document
 
-A renderer process connects to the registry before any of its frames exist, so a
-process created after arming receives the set before its first document commits.
-Each renderer acknowledges the exact number of scripts it can run, and the
-browser marks that renderer ready only on an exact match: a renderer that
-refused or partially decoded the set keeps counting as pending.
+A renderer process asks for its registry connection from the render thread's
+own startup, before any of its frames exist, so a process created after arming
+normally holds the set well before its first document commits. That delivery is
+still asynchronous, so it is not assumed: each renderer acknowledges the exact
+number of scripts it decoded, and the browser marks that renderer ready only on
+an exact match. A renderer that refused, partially decoded, or has not yet
+applied the set keeps counting as pending.
 
 `pending_renderer_processes` is therefore a precise readiness signal. Zero means
 every live renderer holds the current generation, so a document created now runs

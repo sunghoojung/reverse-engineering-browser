@@ -1,0 +1,1960 @@
+diff --git a/BUILD.gn b/BUILD.gn
+index 8ae797fb39769a695470c5749a74048642f3d5f6..813138c1b1faaa6768ff109db3d618fd14bbd990 100644
+--- a/BUILD.gn
++++ b/BUILD.gn
+@@ -4283,6 +4283,7 @@ v8_header_set("v8_internal_headers") {
+     "src/interpreter/interpreter.h",
+     "src/interpreter/prototype-assignment-sequence-builder.h",
+     "src/interpreter/reb-js-dispatch.h",
++    "src/interpreter/reb-js-invocation.h",
+     "src/json/json-parser.h",
+     "src/json/json-stringifier.h",
+     "src/libsampler/sampler.h",
+@@ -6145,6 +6146,7 @@ v8_cluster_source_set("v8_base_without_compiler") {
+     "src/interpreter/interpreter.cc",
+     "src/interpreter/prototype-assignment-sequence-builder.cc",
+     "src/interpreter/reb-js-dispatch.cc",
++    "src/interpreter/reb-js-invocation.cc",
+     "src/json/json-parser.cc",
+     "src/json/json-stringifier.cc",
+     "src/libsampler/sampler.cc",
+diff --git a/include/v8-callbacks.h b/include/v8-callbacks.h
+index e0f09f1cab1218e878a1cc159a639e8b1cd7b0c0..82afcfff99f8f0bff988b6ef458b7a69abf070f3 100644
+--- a/include/v8-callbacks.h
++++ b/include/v8-callbacks.h
+@@ -691,6 +691,151 @@ struct JsDispatchCallbacks {
+   JsDispatchStatusCallback status = nullptr;
+ };
+ 
++// REB native JavaScript invocation identity. Inactive unless V8 runs with
++// --reb-js-invocation-capture (off by default) and the embedder reports a
++// nonzero epoch. A site is a function whose V8 start position (the `(` of its
++// parameter list, or the first character of an arrow head) is anchor_offset,
++// in UTF-16 code units of Script::source.
++constexpr size_t kJsInvocationSiteLimit = 8;
++constexpr size_t kJsInvocationArgumentLimit = 8;
++constexpr uint32_t kJsInvocationDigestByteLimit = 1u << 20;
++
++struct JsInvocationSite {
++  // SHA-256 of the script source as UTF-16LE code units.
++  uint8_t source_sha256[32];
++  uint32_t source_length;  // UTF-16 code units.
++  uint32_t anchor_offset;  // UTF-16 code units.
++};
++
++enum class JsInvocationValueKind : uint8_t {
++  kInteger = 1,  // Smi, or a Number with an integral value in int64 range.
++  kNumber = 2,
++  kString = 3,
++  kSymbol = 4,
++  kUndefined = 5,
++  kNull = 6,
++  kBoolean = 7,
++  kBigInt = 8,
++  kObject = 9,
++  kFunction = 10,
++  kArray = 11,
++  kArrayBuffer = 12,
++  kArrayBufferView = 13,  // A typed array or DataView.
++  kPromise = 14,
++};
++
++struct JsInvocationStart {
++  uint32_t slot;  // Index of the armed site, below kJsInvocationSiteLimit.
++  int script_id;
++  uint32_t source_length;
++  uint32_t anchor_offset;
++  uint32_t invocation_id;         // Nonzero, never reused in this isolate.
++  uint32_t parent_invocation_id;  // The invocation current at entry, or 0.
++  bool parent_unknown;  // Entered under an older configuration's invocation.
++  uint32_t argument_count;  // Actual arguments, excluding the receiver.
++  // The first min(argument_count, kJsInvocationArgumentLimit) arguments:
++  // a kind, and for an integer its low 32 bits, for a boolean 0 or 1. No
++  // other argument or receiver content is read.
++  JsInvocationValueKind argument_kinds[kJsInvocationArgumentLimit];
++  uint32_t argument_low32[kJsInvocationArgumentLimit];
++  const uint8_t* source_sha256;  // 32 bytes, borrowed for the call only.
++};
++
++enum class JsInvocationOutcome : uint8_t { kFulfilled = 1, kRejected = 2 };
++enum class JsInvocationSettleVia : uint8_t {
++  kSyncReturn = 1,  // The call returned a value that is not a promise.
++  kSyncThrow = 2,   // An exception left the call's frame.
++  kPromise = 3,     // The native promise the caller received settled.
++};
++enum class JsInvocationDigestState : uint8_t {
++  kNotRequested = 0,   // The configuration does not enable value digests.
++  kPresent = 1,
++  kNotDigestible = 2,  // A rejection, or a kind with no byte encoding.
++  kTooLarge = 3,       // Over kJsInvocationDigestByteLimit encoded bytes.
++  kUnavailable = 4,    // Detached, shared or variable-length bytes.
++};
++enum class JsInvocationDigestEncoding : uint8_t {
++  kNone = 0,
++  kUtf8 = 1,   // Strings; a lone surrogate is encoded as U+FFFD.
++  kBytes = 2,  // An ArrayBuffer, or the bytes a view covers.
++};
++
++struct JsInvocationSettle {
++  uint32_t slot;
++  uint32_t invocation_id;
++  JsInvocationOutcome outcome;
++  JsInvocationSettleVia via;
++  JsInvocationValueKind value_kind;
++  // UTF-16 length of a string, element count of an array, byte length of
++  // available bytes; otherwise 0.
++  uint32_t value_length;
++  JsInvocationDigestState digest_state;
++  JsInvocationDigestEncoding digest_encoding;
++  bool lossy_utf8;
++  // With kPresent only: the encoded bytes' length, their 64-bit polynomial
++  // rolling hash (h = h * 0x100000001b3 + byte) and their SHA-256.
++  uint32_t digest_byte_length;
++  uint64_t rolling_hash;
++  uint8_t value_sha256[32];
++};
++
++enum class JsInvocationSiteStatus : uint8_t {
++  // The armed function already had bytecode without its entry call.
++  kCompiledBeforeArming = 1,
++  // The armed function is a generator, constructor or initializer.
++  kUnsupportedFunction = 2,
++};
++
++enum class JsInvocationContextState : uint8_t {
++  kNotObserved = 0,  // Invocation capture is not active.
++  kNone = 1,         // No invocation is current.
++  kInside = 2,       // invocation_id is current.
++  kUnknown = 3,      // A context from an older configuration.
++};
++
++struct JsInvocationContext {
++  JsInvocationContextState state;
++  uint32_t invocation_id;  // Nonzero only for kInside.
++};
++
++// Current embedder capture epoch; 0 means inactive. Must not call into V8.
++using JsInvocationEpochCallback = uint64_t (*)();
++// Copies at most capacity armed sites for epoch and returns the count. Must
++// not call into V8.
++using JsInvocationSitesCallback = size_t (*)(uint64_t epoch,
++                                             JsInvocationSite* sites,
++                                             size_t capacity);
++// Admission for a new invocation, before any allocation. Must not allocate
++// or call into V8.
++using JsInvocationEnabledCallback = bool (*)(uint64_t epoch, uint32_t slot);
++// Whether epoch enables value digests, a sensitive capture path. Must not
++// call into V8.
++using JsInvocationDigestsCallback = bool (*)(uint64_t epoch);
++// Synchronous on the isolate thread. Do not execute JS, allocate V8 heap
++// objects, retain pointers, block, or perform I/O.
++using JsInvocationStartCallback = void (*)(Local<Context> context,
++                                           uint64_t epoch,
++                                           const JsInvocationStart& start);
++// Same restrictions. The context is the armed function's for a synchronous
++// settlement and the internal reaction's for a promise.
++using JsInvocationSettleCallback = void (*)(Local<Context> context,
++                                            uint64_t epoch,
++                                            const JsInvocationSettle& settle);
++// Same restrictions; no context is available.
++using JsInvocationStatusCallback = void (*)(uint64_t epoch, uint32_t slot,
++                                            JsInvocationSiteStatus status,
++                                            int script_id);
++
++struct JsInvocationCallbacks {
++  JsInvocationEpochCallback epoch = nullptr;
++  JsInvocationSitesCallback sites = nullptr;
++  JsInvocationEnabledCallback enabled = nullptr;
++  JsInvocationDigestsCallback digests = nullptr;
++  JsInvocationStartCallback start = nullptr;
++  JsInvocationSettleCallback settle = nullptr;
++  JsInvocationStatusCallback status = nullptr;
++};
++
+ #if defined(V8_OS_WIN)
+ /**
+  * Callback to selectively enable ETW tracing based on the document URL.
+diff --git a/include/v8-isolate.h b/include/v8-isolate.h
+index a16807b1abbfff1c68c5d046314aef01da63d08d..06f9c6e5be6128e972dcf66b6ee4c35465fcbb86 100644
+--- a/include/v8-isolate.h
++++ b/include/v8-isolate.h
+@@ -1484,6 +1484,21 @@ class V8_EXPORT Isolate {
+    */
+   void SetJsDispatchCallbacks(const JsDispatchCallbacks& callbacks);
+ 
++  /**
++   * REB native JavaScript invocation identity. Requires
++   * --reb-js-invocation-capture (off by default) for any effect. Call on the
++   * isolate thread. All seven callbacks must be non-null to arm anything;
++   * pass a default-constructed value to disable.
++   */
++  void SetJsInvocationCallbacks(const JsInvocationCallbacks& callbacks);
++
++  /**
++   * The REB invocation the running code belongs to, carried across awaits
++   * and promise jobs. Never allocates or calls into JavaScript, so it may be
++   * called from Wasm and loader callbacks on the isolate thread.
++   */
++  JsInvocationContext GetCurrentJsInvocation();
++
+   /**
+    * Enables the host application to provide a mechanism for recording
+    * statistics counters.
+diff --git a/src/api/api.cc b/src/api/api.cc
+index b9d7709ab6b5bc17f030ee096e3fbec0f1c935d7..4794a8e4e4c049e9887c9d736e0636474f46afae 100644
+--- a/src/api/api.cc
++++ b/src/api/api.cc
+@@ -10445,8 +10445,10 @@ i::ValueHelper::InternalRepresentationType Isolate::GetDataFromSnapshotOnce(
+ Local<Value> Isolate::GetContinuationPreservedEmbedderData() {
+   i::Isolate* i_isolate = reinterpret_cast<i::Isolate*>(this);
+ #ifdef V8_ENABLE_CONTINUATION_PRESERVED_EMBEDDER_DATA
++  // A REB invocation wrapper is never visible to the embedder.
+   return ToApiHandle<Object>(i::direct_handle(
+-      i_isolate->isolate_data()->continuation_preserved_embedder_data(),
++      i::interpreter::RebJsInvocation::EmbedderData(
++          i_isolate->isolate_data()->continuation_preserved_embedder_data()),
+       i_isolate));
+ #else   // V8_ENABLE_CONTINUATION_PRESERVED_EMBEDDER_DATA
+   return v8::Undefined(reinterpret_cast<v8::Isolate*>(i_isolate));
+@@ -10459,16 +10461,18 @@ void Isolate::SetContinuationPreservedEmbedderData(Local<Value> data) {
+   if (data.IsEmpty()) {
+     data = v8::Undefined(reinterpret_cast<v8::Isolate*>(this));
+   }
+-  i_isolate->isolate_data()->set_continuation_preserved_embedder_data(
+-      *Utils::OpenDirectHandle(*data));
++  i_isolate->reb_js_invocation().SetEmbedderData(
++      i_isolate, Utils::OpenDirectHandle(*data));
+ #endif  // V8_ENABLE_CONTINUATION_PRESERVED_EMBEDDER_DATA
+ }
+ 
+ Local<Data> Isolate::GetContinuationPreservedEmbedderDataV2() {
+   i::Isolate* i_isolate = reinterpret_cast<i::Isolate*>(this);
+ #ifdef V8_ENABLE_CONTINUATION_PRESERVED_EMBEDDER_DATA
++  // A REB invocation wrapper is never visible to the embedder.
+   return ToApiHandle<Data>(i::direct_handle(
+-      i_isolate->isolate_data()->continuation_preserved_embedder_data(),
++      i::interpreter::RebJsInvocation::EmbedderData(
++          i_isolate->isolate_data()->continuation_preserved_embedder_data()),
+       i_isolate));
+ #else   // V8_ENABLE_CONTINUATION_PRESERVED_EMBEDDER_DATA
+   return v8::Undefined(reinterpret_cast<v8::Isolate*>(i_isolate));
+@@ -10481,8 +10485,8 @@ void Isolate::SetContinuationPreservedEmbedderDataV2(Local<Data> data) {
+   if (data.IsEmpty()) {
+     data = v8::Undefined(reinterpret_cast<v8::Isolate*>(this));
+   }
+-  i_isolate->isolate_data()->set_continuation_preserved_embedder_data(
+-      *Utils::OpenDirectHandle(*data));
++  i_isolate->reb_js_invocation().SetEmbedderData(
++      i_isolate, Utils::OpenDirectHandle(*data));
+ #endif  // V8_ENABLE_CONTINUATION_PRESERVED_EMBEDDER_DATA
+ }
+ 
+@@ -10780,6 +10784,17 @@ void Isolate::SetJsDispatchCallbacks(const JsDispatchCallbacks& callbacks) {
+   i_isolate->reb_js_dispatch().SetCallbacks(i_isolate, callbacks);
+ }
+ 
++void Isolate::SetJsInvocationCallbacks(
++    const JsInvocationCallbacks& callbacks) {
++  i::Isolate* i_isolate = reinterpret_cast<i::Isolate*>(this);
++  i_isolate->reb_js_invocation().SetCallbacks(i_isolate, callbacks);
++}
++
++JsInvocationContext Isolate::GetCurrentJsInvocation() {
++  i::Isolate* i_isolate = reinterpret_cast<i::Isolate*>(this);
++  return i_isolate->reb_js_invocation().Current(i_isolate);
++}
++
+ void Isolate::SetCounterFunction(CounterLookupCallback callback) {
+   i::Isolate* i_isolate = reinterpret_cast<i::Isolate*>(this);
+   i_isolate->counters()->ResetCounterFunction(callback);
+diff --git a/src/execution/isolate.h b/src/execution/isolate.h
+index ac3acc9bef4df04501e6b25690660cd4cbd47c3c..98e06bf08e17e50179d89e7a92676f15e55ea93c 100644
+--- a/src/execution/isolate.h
++++ b/src/execution/isolate.h
+@@ -44,6 +44,7 @@
+ #include "src/heap/read-only-heap.h"
+ #include "src/init/isolate-group.h"
+ #include "src/interpreter/reb-js-dispatch.h"
++#include "src/interpreter/reb-js-invocation.h"
+ #include "src/objects/code.h"
+ #include "src/objects/contexts.h"
+ #include "src/objects/debug-objects.h"
+@@ -2107,6 +2108,11 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
+   // REB native JavaScript dispatch capture state; main thread only.
+   interpreter::RebJsDispatch& reb_js_dispatch() { return reb_js_dispatch_; }
+ 
++  // REB native JavaScript invocation identity; main thread only.
++  interpreter::RebJsInvocation& reb_js_invocation() {
++    return reb_js_invocation_;
++  }
++
+   bool IsInCreationContext(Tagged<JSObject> object, uint32_t index);
+ 
+   void ClearKeptObjects();
+@@ -2855,6 +2861,7 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
+ 
+   std::unique_ptr<LazyCompileDispatcher> lazy_compile_dispatcher_;
+   interpreter::RebJsDispatch reb_js_dispatch_;
++  interpreter::RebJsInvocation reb_js_invocation_;
+ #ifdef V8_ENABLE_SPARKPLUG
+   baseline::BaselineBatchCompiler* baseline_batch_compiler_ = nullptr;
+ #endif  // V8_ENABLE_SPARKPLUG
+diff --git a/src/flags/flag-definitions.h b/src/flags/flag-definitions.h
+index 0c16ad6c18757a0288d479ad6496d7d1a1202dad..40c8ea58aa25f00941535e4e9bf8990091c47a01 100644
+--- a/src/flags/flag-definitions.h
++++ b/src/flags/flag-definitions.h
+@@ -3213,6 +3213,15 @@ DEFINE_NEG_IMPLICATION(reb_js_dispatch_capture, parallel_compile_tasks_for_lazy)
+ DEFINE_NEG_IMPLICATION(reb_js_dispatch_capture, enable_lazy_source_positions)
+ DEFINE_NEG_IMPLICATION(reb_js_dispatch_capture, stress_lazy_source_positions)
+ 
++// REB native JavaScript invocation identity, a research mode that is off by
++// default. Function-entry sites are armed at bytecode generation exactly like
++// dispatch sites, so it takes the dispatch flag's compile-path guarantees.
++DEFINE_BOOL(reb_js_invocation_capture, false,
++            "give calls of armed JavaScript functions a native invocation "
++            "identity carried across their continuations (implies "
++            "--reb-js-dispatch-capture)")
++DEFINE_IMPLICATION(reb_js_invocation_capture, reb_js_dispatch_capture)
++
+ DEFINE_BOOL(cache_prototype_transitions, true, "cache prototype transitions")
+ 
+ // lazy-compile-dispatcher.cc
+diff --git a/src/interpreter/bytecode-generator.cc b/src/interpreter/bytecode-generator.cc
+index 1981396888cc224bb825151832fb74491104f4da..4f863852e1d5641b8def29ae2dee4603989aed57 100644
+--- a/src/interpreter/bytecode-generator.cc
++++ b/src/interpreter/bytecode-generator.cc
+@@ -1793,9 +1793,46 @@ void BytecodeGenerator::FindRebArmedSites(uintptr_t stack_limit) {
+   if (!finder.found()) reb_armed_ = {};
+ }
+ 
++void BytecodeGenerator::FindRebInvocationEntry() {
++  if (V8_LIKELY(!v8_flags.reb_js_invocation_capture)) return;
++  // The arming table belongs to the main thread, and the flag keeps all
++  // JavaScript bytecode generation there.
++  if (!local_isolate_->is_main_thread() || script_.is_null()) return;
++  FunctionLiteral* literal = info()->literal();
++  if (literal->is_toplevel()) return;
++  Isolate* isolate = local_isolate_->AsIsolate();
++  uint32_t slot = 0;
++  reb_invocation_armed_ = isolate->reb_js_invocation().ArmedSlot(
++      isolate, *script_, literal->start_position(), literal->kind(), &slot);
++}
++
++void BytecodeGenerator::BuildRebInvocationEnter() {
++  // record = %RebJsInvocationEnter(closure); undefined when not admitted.
++  builder()
++      ->CallRuntime(Runtime::kRebJsInvocationEnter,
++                    Register::function_closure())
++      .StoreAccumulatorInRegister(reb_invocation_);
++}
++
++void BytecodeGenerator::BuildRebInvocationExit(RebJsInvocationExitKind kind) {
++  // %RebJsInvocationExit(record, value, kind) restores the caller's context
++  // at the end of the initial synchronous extent. The accumulator holds what
++  // the caller receives and is preserved.
++  RegisterAllocationScope register_scope(this);
++  RegisterList args = register_allocator()->NewRegisterList(3);
++  builder()
++      ->StoreAccumulatorInRegister(args[1])
++      .MoveRegister(reb_invocation_, args[0])
++      .LoadLiteral(Smi::FromInt(kind))
++      .StoreAccumulatorInRegister(args[2])
++      .CallRuntime(Runtime::kRebJsInvocationExit, args)
++      .LoadAccumulatorWithRegister(args[1]);
++}
++
+ void BytecodeGenerator::GenerateBytecode(uintptr_t stack_limit) {
+   InitializeAstVisitor(stack_limit);
+   FindRebArmedSites(stack_limit);
++  FindRebInvocationEntry();
+   if (v8_flags.stress_lazy_compilation && local_isolate_->is_main_thread() &&
+       !local_isolate_->AsIsolate()->bootstrapper()->IsActive()) {
+     // Trigger stack overflow with 1/stress_lazy_compilation probability.
+@@ -1823,14 +1860,46 @@ void BytecodeGenerator::GenerateBytecode(uintptr_t stack_limit) {
+     BuildGeneratorPrologue();
+   }
+ 
+-  if (NeedsContextInitialization(closure_scope())) {
+-    // Push a new inner context scope for the function.
+-    BuildNewLocalActivationContext();
+-    ContextScope local_function_context(this, closure_scope());
+-    BuildLocalActivationContextInitialization();
+-    GenerateBytecodeBody();
++  auto generate_body = [&]() {
++    if (NeedsContextInitialization(closure_scope())) {
++      // Push a new inner context scope for the function.
++      BuildNewLocalActivationContext();
++      ContextScope local_function_context(this, closure_scope());
++      BuildLocalActivationContextInitialization();
++      GenerateBytecodeBody();
++    } else {
++      GenerateBytecodeBody();
++    }
++  };
++  if (V8_UNLIKELY(reb_invocation_.is_valid())) {
++    // REB invocation identity. The entry runs once per call, after the
++    // generator prologue, so a resumed async function never re-enters. An
++    // exception leaving the frame passes through this handler, which restores
++    // the caller's context and rethrows with the original message; like a
++    // finally block it adopts the enclosing catch prediction.
++    BuildRebInvocationEnter();
++    BuildTryCatch(
++        generate_body,
++        [&](Register /* context */) {
++          RegisterAllocationScope register_scope(this);
++          Register exception = register_allocator()->NewRegister();
++          Register message = register_allocator()->NewRegister();
++          builder()
++              ->StoreAccumulatorInRegister(exception)
++              .LoadTheHole()
++              .SetPendingMessage()
++              .StoreAccumulatorInRegister(message)
++              .LoadAccumulatorWithRegister(exception);
++          BuildRebInvocationExit(kRebJsInvocationThrow);
++          builder()
++              ->LoadAccumulatorWithRegister(message)
++              .SetPendingMessage()
++              .LoadAccumulatorWithRegister(exception);
++          BuildReThrow();
++        },
++        catch_prediction());
+   } else {
+-    GenerateBytecodeBody();
++    generate_body();
+   }
+ 
+   // Reset variables with hole check bitmap indices for subsequent compilations
+@@ -2176,6 +2245,10 @@ void BytecodeGenerator::AllocateTopLevelRegisters() {
+     // generator suspends. It starts undefined like every register.
+     reb_activation_ = register_allocator()->NewRegister();
+   }
++  if (V8_UNLIKELY(reb_invocation_armed_)) {
++    // The invocation frame record, saved across suspends like the above.
++    reb_invocation_ = register_allocator()->NewRegister();
++  }
+ }
+ 
+ void BytecodeGenerator::BuildGeneratorPrologue() {
+@@ -4955,6 +5028,9 @@ void BytecodeGenerator::BuildVariableLoadForAccumulatorValue(
+ }
+ 
+ void BytecodeGenerator::BuildReturn(int source_position) {
++  if (V8_UNLIKELY(reb_invocation_.is_valid())) {
++    BuildRebInvocationExit(kRebJsInvocationReturn);
++  }
+   if (v8_flags.trace) {
+     RegisterAllocationScope register_scope(this);
+     Register result = register_allocator()->NewRegister();
+@@ -6150,6 +6226,11 @@ void BytecodeGenerator::BuildSuspendPoint(int position) {
+   if (builder()->RemainderOfBlockIsDead()) {
+     return;
+   }
++  if (V8_UNLIKELY(reb_invocation_.is_valid())) {
++    // An async function's first suspension returns its promise to the
++    // caller, which continues in its own context.
++    BuildRebInvocationExit(kRebJsInvocationSuspend);
++  }
+   const int suspend_id = suspend_count_++;
+ 
+   RegisterList registers = register_allocator()->AllLiveRegisters();
+diff --git a/src/interpreter/bytecode-generator.h b/src/interpreter/bytecode-generator.h
+index 0cd179915d2b56e6fec4cf1d15f81e0306adfa5e..d0736a4bad1a707c2a4025760b454f07e08d1e7a 100644
+--- a/src/interpreter/bytecode-generator.h
++++ b/src/interpreter/bytecode-generator.h
+@@ -13,6 +13,7 @@
+ #include "src/interpreter/bytecode-register.h"
+ #include "src/interpreter/prototype-assignment-sequence-builder.h"
+ #include "src/interpreter/reb-js-dispatch.h"
++#include "src/interpreter/reb-js-invocation.h"
+ #include "src/objects/feedback-vector.h"
+ #include "src/objects/function-kind.h"
+ 
+@@ -75,6 +76,8 @@ class BytecodeGenerator final : public AstVisitor<BytecodeGenerator> {
+   // that contains an armed dispatch site (invalid otherwise), and the anchors
+   // whose trace this generation emitted.
+   Register reb_activation_register() const { return reb_activation_; }
++  // REB invocation identity: whether this function's entry is armed.
++  bool reb_invocation_armed() const { return reb_invocation_armed_; }
+   const RebJsDispatchAnchors& reb_emitted_anchors() const {
+     return reb_emitted_;
+   }
+@@ -416,6 +419,9 @@ class BytecodeGenerator final : public AstVisitor<BytecodeGenerator> {
+   void BuildCreateObjectLiteral(Register literal, uint8_t flags, size_t entry);
+   void AllocateTopLevelRegisters();
+   void FindRebArmedSites(uintptr_t stack_limit);
++  void FindRebInvocationEntry();
++  void BuildRebInvocationEnter();
++  void BuildRebInvocationExit(RebJsInvocationExitKind kind);
+   void BuildRebIndexedCallee(Property* property, Property* keyed, Register key,
+                              RegisterList* args, Register callee,
+                              Register* handler);
+@@ -714,6 +720,12 @@ class BytecodeGenerator final : public AstVisitor<BytecodeGenerator> {
+   RebJsDispatchAnchors reb_armed_;
+   RebJsDispatchAnchors reb_emitted_;
+   Register reb_activation_;
++
++  // REB invocation identity. Unarmed and invalid unless the flag is set and
++  // this function literal starts at an armed function-entry anchor. The
++  // register holds the frame record Runtime_RebJsInvocationEnter returns.
++  bool reb_invocation_armed_ = false;
++  Register reb_invocation_;
+ };
+ 
+ }  // namespace interpreter
+diff --git a/src/interpreter/interpreter.cc b/src/interpreter/interpreter.cc
+index f6452a1327bcd4756c52873a63324385383c8146..31484656a4d7595ef180ba4f05ca58d5d350ef5f 100644
+--- a/src/interpreter/interpreter.cc
++++ b/src/interpreter/interpreter.cc
+@@ -301,6 +301,18 @@ InterpreterCompilationJob::Status InterpreterCompilationJob::DoFinalizeJobImpl(
+           generator()->reb_activation_register().index(),
+           generator()->reb_emitted_anchors());
+     }
++    if (V8_UNLIKELY(generator()->reb_invocation_armed())) {
++      // An armed entry is never optimized or inlined, so its entry, exit and
++      // handler stay in the only tiers that run it, Ignition and Sparkplug.
++      if (shared_info->disabled_optimization_reason() ==
++          BailoutReason::kNoReason) {
++        shared_info->DisableOptimization(isolate,
++                                         BailoutReason::kNeverOptimize);
++      }
++      isolate->reb_js_invocation().RecordArmedFunction(
++          Cast<Script>(shared_info->script())->id(),
++          shared_info->StartPosition());
++    }
+   }
+ 
+   if (compilation_info()->SourcePositionRecordingMode() ==
+diff --git a/src/interpreter/reb-js-invocation.cc b/src/interpreter/reb-js-invocation.cc
+new file mode 100644
+index 0000000000000000000000000000000000000000..f116cb133cd5999acb68eb59621fbabbca1ae753
+--- /dev/null
++++ b/src/interpreter/reb-js-invocation.cc
+@@ -0,0 +1,739 @@
++// Copyright 2026 the V8 project authors. All rights reserved.
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "src/interpreter/reb-js-invocation.h"
++
++#include <algorithm>
++#include <cmath>
++#include <cstring>
++
++#include "include/v8-function.h"
++#include "include/v8-primitive.h"
++#include "src/api/api-inl.h"
++#include "src/execution/frames-inl.h"
++#include "src/execution/isolate-inl.h"
++#include "src/flags/flags.h"
++#include "src/handles/handles-inl.h"
++#include "src/heap/factory.h"
++#include "src/objects/fixed-array-inl.h"
++#include "src/objects/js-array-buffer-inl.h"
++#include "src/objects/js-array-inl.h"
++#include "src/objects/js-function-inl.h"
++#include "src/objects/js-promise-inl.h"
++#include "src/objects/objects-inl.h"
++#include "src/objects/promise-inl.h"
++#include "src/objects/script-inl.h"
++#include "src/objects/shared-function-info-inl.h"
++#include "src/objects/string-inl.h"
++#include "src/objects/struct-inl.h"
++#include "src/utils/sha-256.h"
++
++namespace v8::internal::interpreter {
++
++namespace {
++
++// The site slot (at most 8) travels with the ID in one Smi-sized value.
++constexpr uint32_t kRebIdLimit = static_cast<uint32_t>(Smi::kMaxValue) >> 3;
++constexpr uint64_t kRebRollingBase = 0x100000001b3ULL;
++
++bool IsRebWrapper(Tagged<Object> slot) {
++  return V8_UNLIKELY(v8_flags.reb_js_invocation_capture) && IsTuple2(slot);
++}
++
++// SHA-256 over the script source as UTF-16LE code units, the key the analyzer
++// computes from the captured artifact text, exactly as for dispatch sites.
++bool RebSourceDigest(Tagged<String> source, uint8_t digest[32]) {
++  DisallowGarbageCollection no_gc;
++  String::FlatContent flat = source->GetFlatContent(no_gc);
++  if (!flat.IsFlat()) return false;
++  LITE_SHA256_CTX context;
++  SHA256_init(&context);
++  uint8_t chunk[512];
++  size_t used = 0;
++  auto append = [&](uint16_t unit) {
++    chunk[used++] = static_cast<uint8_t>(unit & 0xff);
++    chunk[used++] = static_cast<uint8_t>(unit >> 8);
++    if (used == sizeof(chunk)) {
++      SHA256_update(&context, chunk, used);
++      used = 0;
++    }
++  };
++  if (flat.IsOneByte()) {
++    for (uint8_t unit : flat.ToOneByteVector()) append(unit);
++  } else {
++    for (base::uc16 unit : flat.ToUC16Vector()) append(unit);
++  }
++  if (used != 0) SHA256_update(&context, chunk, used);
++  std::memcpy(digest, SHA256_final(&context), kSizeOfSha256Digest);
++  return true;
++}
++
++// Kind and low bits only. No string, symbol, BigInt or object content.
++v8::JsInvocationValueKind RebClassify(Tagged<Object> value, uint32_t* low32) {
++  *low32 = 0;
++  if (IsSmi(value)) {
++    *low32 = static_cast<uint32_t>(Smi::ToInt(Cast<Smi>(value)));
++    return v8::JsInvocationValueKind::kInteger;
++  }
++  if (IsHeapNumber(value)) {
++    const double number = Cast<HeapNumber>(value)->value();
++    // [-2^63, 2^63) converts to int64 without overflow.
++    if (std::isfinite(number) && std::trunc(number) == number &&
++        number >= -9223372036854775808.0 && number < 9223372036854775808.0) {
++      *low32 = static_cast<uint32_t>(
++          static_cast<uint64_t>(static_cast<int64_t>(number)));
++      return v8::JsInvocationValueKind::kInteger;
++    }
++    return v8::JsInvocationValueKind::kNumber;
++  }
++  if (IsString(value)) return v8::JsInvocationValueKind::kString;
++  if (IsSymbol(value)) return v8::JsInvocationValueKind::kSymbol;
++  if (IsUndefined(value)) return v8::JsInvocationValueKind::kUndefined;
++  if (IsNull(value)) return v8::JsInvocationValueKind::kNull;
++  if (IsTrue(value) || IsFalse(value)) {
++    *low32 = IsTrue(value) ? 1 : 0;
++    return v8::JsInvocationValueKind::kBoolean;
++  }
++  if (IsBigInt(value)) return v8::JsInvocationValueKind::kBigInt;
++  if (IsJSPromise(value)) return v8::JsInvocationValueKind::kPromise;
++  if (IsJSArray(value)) return v8::JsInvocationValueKind::kArray;
++  if (IsJSArrayBuffer(value)) return v8::JsInvocationValueKind::kArrayBuffer;
++  if (IsJSArrayBufferView(value)) {
++    return v8::JsInvocationValueKind::kArrayBufferView;
++  }
++  if (IsCallable(value)) return v8::JsInvocationValueKind::kFunction;
++  return v8::JsInvocationValueKind::kObject;
++}
++
++// Generators are resumed on behalf of whoever calls next(); constructors and
++// synthesized initializers are not page calls with a caller to return to.
++bool RebSupportedKind(FunctionKind kind) {
++  return !IsGeneratorFunction(kind) && !IsModule(kind) &&
++         !IsClassConstructor(kind) && !IsClassInitializerFunction(kind);
++}
++
++// Streams bytes into SHA-256 and the rolling hash together.
++class RebValueDigest final {
++ public:
++  RebValueDigest() { SHA256_init(&context_); }
++
++  void Add(uint8_t byte) {
++    buffer_[used_++] = byte;
++    rolling_ = rolling_ * kRebRollingBase + byte;
++    ++length_;
++    if (used_ == sizeof(buffer_)) Flush();
++  }
++  void Add(const uint8_t* bytes, size_t length) {
++    for (size_t i = 0; i < length; ++i) Add(bytes[i]);
++  }
++  size_t length() const { return length_; }
++  void Finish(v8::JsInvocationSettle* settle) {
++    Flush();
++    std::memcpy(settle->value_sha256, SHA256_final(&context_),
++                kSizeOfSha256Digest);
++    settle->rolling_hash = rolling_;
++    settle->digest_byte_length = static_cast<uint32_t>(length_);
++  }
++
++ private:
++  void Flush() {
++    if (used_ != 0) SHA256_update(&context_, buffer_, used_);
++    used_ = 0;
++  }
++
++  LITE_SHA256_CTX context_;
++  uint8_t buffer_[512];
++  size_t used_ = 0;
++  size_t length_ = 0;
++  uint64_t rolling_ = 0;
++};
++
++// UTF-8, with every lone surrogate encoded as U+FFFD, which is what
++// TextEncoder and a string request body send. Returns false when the encoding
++// would exceed the digest limit.
++bool RebDigestString(Isolate* isolate, DirectHandle<String> value,
++                     v8::JsInvocationSettle* settle) {
++  DirectHandle<String> flat = String::Flatten(isolate, value);
++  DisallowGarbageCollection no_gc;
++  String::FlatContent content = flat->GetFlatContent(no_gc);
++  if (!content.IsFlat()) return false;
++  const bool one_byte = content.IsOneByte();
++  const base::Vector<const uint8_t> narrow =
++      one_byte ? content.ToOneByteVector() : base::Vector<const uint8_t>();
++  const base::Vector<const base::uc16> wide =
++      one_byte ? base::Vector<const base::uc16>() : content.ToUC16Vector();
++  const size_t length = one_byte ? narrow.size() : wide.size();
++  auto unit = [&](size_t i) -> uint32_t {
++    return one_byte ? narrow[i] : wide[i];
++  };
++  RebValueDigest digest;
++  bool lossy = false;
++  for (size_t i = 0; i < length; ++i) {
++    uint32_t code = unit(i);
++    if (code >= 0xD800 && code <= 0xDBFF && i + 1 < length &&
++        unit(i + 1) >= 0xDC00 && unit(i + 1) <= 0xDFFF) {
++      code = 0x10000 + ((code - 0xD800) << 10) + (unit(i + 1) - 0xDC00);
++      ++i;
++    } else if (code >= 0xD800 && code <= 0xDFFF) {
++      code = 0xFFFD;
++      lossy = true;
++    }
++    if (code < 0x80) {
++      digest.Add(static_cast<uint8_t>(code));
++    } else if (code < 0x800) {
++      digest.Add(static_cast<uint8_t>(0xC0 | (code >> 6)));
++      digest.Add(static_cast<uint8_t>(0x80 | (code & 0x3F)));
++    } else if (code < 0x10000) {
++      digest.Add(static_cast<uint8_t>(0xE0 | (code >> 12)));
++      digest.Add(static_cast<uint8_t>(0x80 | ((code >> 6) & 0x3F)));
++      digest.Add(static_cast<uint8_t>(0x80 | (code & 0x3F)));
++    } else {
++      digest.Add(static_cast<uint8_t>(0xF0 | (code >> 18)));
++      digest.Add(static_cast<uint8_t>(0x80 | ((code >> 12) & 0x3F)));
++      digest.Add(static_cast<uint8_t>(0x80 | ((code >> 6) & 0x3F)));
++      digest.Add(static_cast<uint8_t>(0x80 | (code & 0x3F)));
++    }
++    if (digest.length() > v8::kJsInvocationDigestByteLimit) return false;
++  }
++  digest.Finish(settle);
++  settle->lossy_utf8 = lossy;
++  return true;
++}
++
++void OnWatchedPromise(const v8::FunctionCallbackInfo<v8::Value>& info,
++                      bool fulfilled) {
++  Isolate* isolate = reinterpret_cast<Isolate*>(info.GetIsolate());
++  v8::Local<v8::Value> data = info.Data();
++  if (data.IsEmpty() || !data->IsUint32()) return;
++  const uint32_t encoded = data.As<v8::Uint32>()->Value();
++  DirectHandle<Object> value = isolate->factory()->undefined_value();
++  if (info.Length() > 0) value = Utils::OpenDirectHandle(*info[0]);
++  isolate->reb_js_invocation().PromiseSettled(isolate, encoded, fulfilled,
++                                              value);
++}
++
++void OnWatchedFulfilled(const v8::FunctionCallbackInfo<v8::Value>& info) {
++  OnWatchedPromise(info, true);
++}
++
++void OnWatchedRejected(const v8::FunctionCallbackInfo<v8::Value>& info) {
++  OnWatchedPromise(info, false);
++}
++
++}  // namespace
++
++void RebJsInvocation::SetCallbacks(Isolate* isolate,
++                                   const v8::JsInvocationCallbacks& callbacks) {
++  callbacks_ = callbacks;
++  synced_ = false;
++  Reset(0);
++  Sync(isolate);
++}
++
++bool RebJsInvocation::Complete() const {
++  return callbacks_.epoch != nullptr && callbacks_.sites != nullptr &&
++         callbacks_.enabled != nullptr && callbacks_.digests != nullptr &&
++         callbacks_.start != nullptr && callbacks_.settle != nullptr &&
++         callbacks_.status != nullptr;
++}
++
++void RebJsInvocation::Reset(uint64_t epoch) {
++  epoch_ = epoch;
++  any_armed_ = false;
++  digests_ = false;
++  site_count_ = 0;
++  binding_count_ = 0;
++  next_binding_ = 0;
++  reported_unsupported_ = 0;
++  reported_compiled_ = 0;
++  id_floor_ = next_id_;
++}
++
++bool RebJsInvocation::Sync(Isolate* isolate) {
++#if defined(V8_ENABLE_CONTINUATION_PRESERVED_EMBEDDER_DATA)
++  if (!v8_flags.reb_js_invocation_capture || !Complete()) {
++    if (any_armed_) Reset(0);
++    return false;
++  }
++  const uint64_t epoch = callbacks_.epoch();
++  if (synced_ && epoch == epoch_) return any_armed_;
++  synced_ = true;
++  Reset(epoch);
++  if (epoch == 0) return false;
++  v8::JsInvocationSite copied[v8::kJsInvocationSiteLimit] = {};
++  size_t count = callbacks_.sites(epoch, copied, v8::kJsInvocationSiteLimit);
++  if (count > v8::kJsInvocationSiteLimit) count = v8::kJsInvocationSiteLimit;
++  for (size_t slot = 0; slot < count; ++slot) {
++    const v8::JsInvocationSite& from = copied[slot];
++    Site& to = sites_[slot];
++    std::memcpy(to.source_sha256, from.source_sha256,
++                sizeof(to.source_sha256));
++    to.source_length = from.source_length;
++    to.anchor_offset = from.anchor_offset;
++    to.usable = from.source_length != 0 &&
++                from.source_length <= static_cast<uint32_t>(String::kMaxLength) &&
++                from.anchor_offset < from.source_length;
++    any_armed_ = any_armed_ || to.usable;
++  }
++  site_count_ = count;
++  digests_ = callbacks_.digests(epoch);
++  if (any_armed_) ReportCompiledBeforeArming(isolate);
++  return any_armed_;
++#else
++  // Without continuation-preserved embedder data no continuation can carry an
++  // invocation, so nothing is ever armed.
++  return false;
++#endif
++}
++
++uint32_t RebJsInvocation::BindingMask(Tagged<Script> script) {
++  if (script->type() != Script::Type::kNormal || script->id() <= 0 ||
++      !IsString(script->source())) {
++    return 0;
++  }
++  const int script_id = script->id();
++  for (size_t i = 0; i < binding_count_; ++i) {
++    if (bindings_[i].script_id == script_id) return bindings_[i].mask;
++  }
++  Tagged<String> source = Cast<String>(script->source());
++  const uint32_t length = source->length();
++  bool length_matches = false;
++  for (size_t slot = 0; slot < site_count_; ++slot) {
++    length_matches = length_matches || (sites_[slot].usable &&
++                                        sites_[slot].source_length == length);
++  }
++  // Most scripts are rejected here without hashing or a cache entry.
++  if (!length_matches) return 0;
++  uint8_t digest[kSizeOfSha256Digest];
++  if (!RebSourceDigest(source, digest)) return 0;
++  uint32_t mask = 0;
++  for (size_t slot = 0; slot < site_count_; ++slot) {
++    const Site& site = sites_[slot];
++    if (site.usable && site.source_length == length &&
++        std::memcmp(site.source_sha256, digest, sizeof(digest)) == 0) {
++      mask |= 1u << slot;
++    }
++  }
++  // Negative results are cached too; eviction only costs a rehash.
++  bindings_[next_binding_] = {script_id, mask};
++  next_binding_ = (next_binding_ + 1) % kBindingLimit;
++  if (binding_count_ < kBindingLimit) ++binding_count_;
++  return mask;
++}
++
++bool RebJsInvocation::SlotFor(Tagged<Script> script, int start_position,
++                              uint32_t* slot) {
++  const uint32_t mask = BindingMask(script);
++  for (size_t i = 0; i < site_count_; ++i) {
++    if ((mask & (1u << i)) != 0 &&
++        sites_[i].anchor_offset == static_cast<uint32_t>(start_position)) {
++      *slot = static_cast<uint32_t>(i);
++      return true;
++    }
++  }
++  return false;
++}
++
++void RebJsInvocation::ReportStatus(uint32_t slot,
++                                   v8::JsInvocationSiteStatus status,
++                                   int script_id) {
++  uint32_t* reported =
++      status == v8::JsInvocationSiteStatus::kUnsupportedFunction
++          ? &reported_unsupported_
++          : &reported_compiled_;
++  if ((*reported & (1u << slot)) != 0) return;
++  *reported |= 1u << slot;
++  callbacks_.status(epoch_, slot, status, script_id);
++}
++
++bool RebJsInvocation::ArmedSlot(Isolate* isolate, Tagged<Script> script,
++                                int start_position, FunctionKind kind,
++                                uint32_t* slot) {
++  if (!Sync(isolate) || !SlotFor(script, start_position, slot)) return false;
++  if (!RebSupportedKind(kind)) {
++    ReportStatus(*slot, v8::JsInvocationSiteStatus::kUnsupportedFunction,
++                 script->id());
++    return false;
++  }
++  return true;
++}
++
++void RebJsInvocation::RecordArmedFunction(int script_id, int start_position) {
++  if (IsArmedFunction(script_id, start_position)) return;
++  // Oldest first. A lost entry can only repeat a compiled-before-arming
++  // status for a function that is in fact armed; it never arms anything.
++  armed_functions_[next_armed_function_] = {script_id, start_position};
++  next_armed_function_ = (next_armed_function_ + 1) % kArmedFunctionLimit;
++  if (armed_function_count_ < kArmedFunctionLimit) ++armed_function_count_;
++}
++
++bool RebJsInvocation::IsArmedFunction(int script_id,
++                                      int start_position) const {
++  for (size_t i = 0; i < armed_function_count_; ++i) {
++    if (armed_functions_[i].script_id == script_id &&
++        armed_functions_[i].start_position == start_position) {
++      return true;
++    }
++  }
++  return false;
++}
++
++void RebJsInvocation::ReportCompiledBeforeArming(Isolate* isolate) {
++  DisallowGarbageCollection no_gc;
++  Script::Iterator scripts(isolate);
++  for (Tagged<Script> script = scripts.Next(); !script.is_null();
++       script = scripts.Next()) {
++    const uint32_t mask = BindingMask(script);
++    if (mask == 0) continue;
++    Tagged<WeakFixedArray> infos = script->infos();
++    const uint32_t info_count = infos->ulength().value();
++    for (size_t slot = 0; slot < site_count_; ++slot) {
++      if ((mask & (1u << slot)) == 0) continue;
++      const int anchor = static_cast<int>(sites_[slot].anchor_offset);
++      for (uint32_t i = 0; i < info_count; ++i) {
++        Tagged<HeapObject> object;
++        if (!infos->get(i).GetHeapObject(&object) ||
++            !IsSharedFunctionInfo(object)) {
++          continue;
++        }
++        Tagged<SharedFunctionInfo> shared = Cast<SharedFunctionInfo>(object);
++        if (shared->StartPosition() != anchor) continue;
++        if (!RebSupportedKind(shared->kind())) {
++          ReportStatus(static_cast<uint32_t>(slot),
++                       v8::JsInvocationSiteStatus::kUnsupportedFunction,
++                       script->id());
++        } else if (shared->is_compiled() &&
++                   !IsArmedFunction(script->id(), anchor)) {
++          ReportStatus(static_cast<uint32_t>(slot),
++                       v8::JsInvocationSiteStatus::kCompiledBeforeArming,
++                       script->id());
++        }
++        break;
++      }
++    }
++  }
++}
++
++bool RebJsInvocation::IsCurrentId(uint32_t id) const {
++  return id != 0 && id >= id_floor_ && id < next_id_;
++}
++
++Tagged<Object> RebJsInvocation::Enter(Isolate* isolate,
++                                      DirectHandle<JSFunction> closure) {
++  ReadOnlyRoots roots(isolate);
++  if (!Sync(isolate)) return roots.undefined_value();
++  Tagged<SharedFunctionInfo> shared = closure->shared();
++  if (!IsScript(shared->script())) return roots.undefined_value();
++  Tagged<Script> script = Cast<Script>(shared->script());
++  uint32_t slot = 0;
++  // Bytecode armed by an earlier configuration keeps its call; it returns
++  // here unless the current configuration arms the same function.
++  if (!SlotFor(script, shared->StartPosition(), &slot) ||
++      !callbacks_.enabled(epoch_, slot) || next_id_ >= kRebIdLimit) {
++    return roots.undefined_value();
++  }
++
++  v8::JsInvocationStart start = {};
++  start.slot = slot;
++  start.script_id = script->id();
++  start.source_length = sites_[slot].source_length;
++  start.anchor_offset = sites_[slot].anchor_offset;
++  start.source_sha256 = sites_[slot].source_sha256;
++  {
++    // The armed frame is the innermost JavaScript frame: this runtime call
++    // is its first bytecode after the generator prologue.
++    JavaScriptStackFrameIterator frames(isolate);
++    if (!frames.done() && frames.frame()->function() == *closure) {
++      JavaScriptFrame* frame = frames.frame();
++      start.argument_count = frame->GetActualArgumentCount();
++      const uint32_t described =
++          std::min<uint32_t>(start.argument_count,
++                             static_cast<uint32_t>(v8::kJsInvocationArgumentLimit));
++      for (uint32_t i = 0; i < described; ++i) {
++        start.argument_kinds[i] = RebClassify(
++            frame->GetParameter(static_cast<int>(i)), &start.argument_low32[i]);
++      }
++    }
++  }
++
++  Tagged<Object> saved_slot =
++      isolate->isolate_data()->continuation_preserved_embedder_data();
++  if (IsRebWrapper(saved_slot)) {
++    Tagged<Object> parent = Cast<Tuple2>(saved_slot)->value2();
++    if (IsSmi(parent) && Smi::ToInt(parent) > 0 &&
++        IsCurrentId(static_cast<uint32_t>(Smi::ToInt(parent)))) {
++      start.parent_invocation_id = static_cast<uint32_t>(Smi::ToInt(parent));
++    } else {
++      start.parent_unknown = true;
++    }
++  }
++
++  const uint32_t id = next_id_++;
++  start.invocation_id = id;
++  HandleScope scope(isolate);
++  DirectHandle<Object> saved(saved_slot, isolate);
++  DirectHandle<Object> embedder(EmbedderData(saved_slot), isolate);
++  DirectHandle<NativeContext> context(closure->native_context(), isolate);
++  DirectHandle<Object> id_smi(Smi::FromInt(static_cast<int>(id)), isolate);
++  DirectHandle<Tuple2> wrapper =
++      isolate->factory()->NewTuple2(embedder, id_smi, AllocationType::kYoung);
++  DirectHandle<FixedArray> record =
++      isolate->factory()->NewFixedArray(kRecordLength);
++  record->set(kRecordSaved, *saved);
++  record->set(kRecordId, Smi::FromInt(static_cast<int>(id)));
++  record->set(kRecordSlot, Smi::FromInt(static_cast<int>(slot)));
++  record->set(kRecordContext, *context);
++  isolate->isolate_data()->set_continuation_preserved_embedder_data(*wrapper);
++  callbacks_.start(Utils::ToLocal(context), epoch_, start);
++  return *record;
++}
++
++Tagged<Object> RebJsInvocation::Exit(Isolate* isolate,
++                                     DirectHandle<Object> record_object,
++                                     DirectHandle<Object> value, int kind) {
++  if (!IsFixedArray(*record_object)) return *value;
++  DirectHandle<FixedArray> record = Cast<FixedArray>(record_object);
++  if (record->length() != kRecordLength || !IsSmi(record->get(kRecordId)) ||
++      !IsSmi(record->get(kRecordSlot)) ||
++      !IsNativeContext(record->get(kRecordContext))) {
++    return *value;
++  }
++  const int signed_id = Smi::ToInt(record->get(kRecordId));
++  // A resumed async body runs inside the job that restored its context; only
++  // the initial synchronous extent owns the caller's slot.
++  if (signed_id <= 0) return *value;
++  isolate->isolate_data()->set_continuation_preserved_embedder_data(
++      record->get(kRecordSaved));
++  record->set(kRecordId, Smi::FromInt(-signed_id));
++
++  const uint32_t id = static_cast<uint32_t>(signed_id);
++  const uint32_t slot = static_cast<uint32_t>(Smi::ToInt(record->get(kRecordSlot)));
++  DirectHandle<Context> context(Cast<Context>(record->get(kRecordContext)),
++                                isolate);
++  if (kind == kRebJsInvocationThrow) {
++    Settle(isolate, context, id, slot, false,
++           v8::JsInvocationSettleVia::kSyncThrow, value);
++  } else if (IsJSPromise(*value)) {
++    DirectHandle<JSPromise> promise = Cast<JSPromise>(value);
++    switch (promise->status()) {
++      case v8::Promise::kPending:
++        Watch(isolate, promise, context, id, slot);
++        break;
++      case v8::Promise::kFulfilled:
++      case v8::Promise::kRejected: {
++        DirectHandle<Object> result(promise->result(), isolate);
++        Settle(isolate, context, id, slot,
++               promise->status() == v8::Promise::kFulfilled,
++               v8::JsInvocationSettleVia::kPromise, result);
++        break;
++      }
++    }
++  } else {
++    // A non-promise value, including a thenable: nothing calls its then.
++    Settle(isolate, context, id, slot, true,
++           v8::JsInvocationSettleVia::kSyncReturn, value);
++  }
++  return *value;
++}
++
++void RebJsInvocation::Watch(Isolate* isolate, DirectHandle<JSPromise> promise,
++                            DirectHandle<Context> context, uint32_t id,
++                            uint32_t slot) {
++  if (!Sync(isolate) || !IsCurrentId(id)) return;
++  v8::Isolate* v8_isolate = reinterpret_cast<v8::Isolate*>(isolate);
++  v8::Local<v8::Context> local_context = Utils::ToLocal(context);
++  v8::Local<v8::Value> data =
++      v8::Integer::NewFromUnsigned(v8_isolate, (id << 3) | slot);
++  v8::Local<v8::Function> fulfilled;
++  v8::Local<v8::Function> rejected;
++  if (!v8::Function::New(local_context, OnWatchedFulfilled, data, 1,
++                         v8::ConstructorBehavior::kThrow,
++                         v8::SideEffectType::kHasNoSideEffect)
++           .ToLocal(&fulfilled) ||
++      !v8::Function::New(local_context, OnWatchedRejected, data, 1,
++                         v8::ConstructorBehavior::kThrow,
++                         v8::SideEffectType::kHasNoSideEffect)
++           .ToLocal(&rejected) ||
++      promise->status() != v8::Promise::kPending) {
++    return;
++  }
++  // Appended directly rather than through PerformPromiseThen: has_handler is
++  // untouched, so unhandled rejection is reported to the page as before; no
++  // then, species or getter runs; and with an undefined capability, as for
++  // await, the job has no result promise.
++  DirectHandle<PromiseReaction> reaction = Cast<PromiseReaction>(
++      isolate->factory()->NewStruct(PROMISE_REACTION_TYPE));
++  Tagged<UnionOf<Smi, PromiseReaction>> next =
++      Cast<UnionOf<Smi, PromiseReaction>>(promise->reactions());
++  reaction->set_next(next);
++  Tagged<JSFunction> on_rejected =
++      Cast<JSFunction>(*Utils::OpenDirectHandle(*rejected));
++  Tagged<JSFunction> on_fulfilled =
++      Cast<JSFunction>(*Utils::OpenDirectHandle(*fulfilled));
++  reaction->set_reject_handler(on_rejected);
++  reaction->set_fulfill_handler(on_fulfilled);
++  reaction->set_promise_or_capability(ReadOnlyRoots(isolate).undefined_value());
++#if defined(V8_ENABLE_CONTINUATION_PRESERVED_EMBEDDER_DATA)
++  reaction->set_continuation_preserved_embedder_data(
++      ReadOnlyRoots(isolate).undefined_value());
++#endif
++  promise->set_reactions_or_result(*reaction);
++}
++
++void RebJsInvocation::PromiseSettled(Isolate* isolate, uint32_t encoded,
++                                     bool fulfilled,
++                                     DirectHandle<Object> value) {
++  HandleScope scope(isolate);
++  DirectHandle<NativeContext> context = isolate->native_context();
++  Settle(isolate, context, encoded >> 3, encoded & 7, fulfilled,
++         v8::JsInvocationSettleVia::kPromise, value);
++}
++
++void RebJsInvocation::Settle(Isolate* isolate, DirectHandle<Context> context,
++                             uint32_t id, uint32_t slot, bool fulfilled,
++                             v8::JsInvocationSettleVia via,
++                             DirectHandle<Object> value) {
++  // An invocation of an earlier configuration is never reported under the
++  // current one.
++  if (!Sync(isolate) || !IsCurrentId(id) || slot >= site_count_) return;
++  v8::JsInvocationSettle settle = {};
++  settle.slot = slot;
++  settle.invocation_id = id;
++  settle.outcome = fulfilled ? v8::JsInvocationOutcome::kFulfilled
++                             : v8::JsInvocationOutcome::kRejected;
++  settle.via = via;
++  uint32_t ignored_low32 = 0;
++  settle.value_kind = RebClassify(*value, &ignored_low32);
++  const uint8_t* bytes = nullptr;
++  size_t byte_length = 0;
++  bool bytes_available = false;
++  switch (settle.value_kind) {
++    case v8::JsInvocationValueKind::kString:
++      settle.value_length = Cast<String>(*value)->length();
++      break;
++    case v8::JsInvocationValueKind::kArray: {
++      Tagged<Object> length = Cast<JSArray>(*value)->length();
++      settle.value_length =
++          IsSmi(length) ? static_cast<uint32_t>(Smi::ToInt(length))
++                        : static_cast<uint32_t>(Cast<HeapNumber>(length)->value());
++      break;
++    }
++    case v8::JsInvocationValueKind::kArrayBuffer: {
++      Tagged<JSArrayBuffer> buffer = Cast<JSArrayBuffer>(*value);
++      bytes_available = !buffer->was_detached() && !buffer->is_shared() &&
++                        !buffer->is_resizable_by_js();
++      if (bytes_available) {
++        bytes = static_cast<const uint8_t*>(buffer->backing_store());
++        byte_length = buffer->byte_length();
++      }
++      break;
++    }
++    case v8::JsInvocationValueKind::kArrayBufferView: {
++      Tagged<JSArrayBufferView> view = Cast<JSArrayBufferView>(*value);
++      bytes_available = !view->WasDetached() && !view->IsVariableLength() &&
++                        !view->buffer()->is_shared();
++      if (bytes_available) {
++        bytes = static_cast<const uint8_t*>(view->buffer()->backing_store());
++        if (bytes != nullptr) bytes += view->byte_offset();
++        byte_length = view->byte_length();
++      }
++      break;
++    }
++    default:
++      break;
++  }
++  const bool raw = settle.value_kind == v8::JsInvocationValueKind::kArrayBuffer ||
++                   settle.value_kind == v8::JsInvocationValueKind::kArrayBufferView;
++  if (raw && bytes_available) {
++    settle.value_length =
++        static_cast<uint32_t>(std::min<size_t>(byte_length, UINT32_MAX));
++  }
++
++  if (!digests_) {
++    settle.digest_state = v8::JsInvocationDigestState::kNotRequested;
++  } else if (!fulfilled ||
++             (settle.value_kind != v8::JsInvocationValueKind::kString && !raw)) {
++    settle.digest_state = v8::JsInvocationDigestState::kNotDigestible;
++  } else if (settle.value_kind == v8::JsInvocationValueKind::kString) {
++    if (RebDigestString(isolate, Cast<String>(value), &settle)) {
++      settle.digest_state = v8::JsInvocationDigestState::kPresent;
++      settle.digest_encoding = v8::JsInvocationDigestEncoding::kUtf8;
++    } else {
++      settle.digest_state = v8::JsInvocationDigestState::kTooLarge;
++      settle.lossy_utf8 = false;
++    }
++  } else if (!bytes_available) {
++    settle.digest_state = v8::JsInvocationDigestState::kUnavailable;
++  } else if (byte_length > v8::kJsInvocationDigestByteLimit) {
++    settle.digest_state = v8::JsInvocationDigestState::kTooLarge;
++  } else {
++    RebValueDigest digest;
++    if (byte_length != 0) digest.Add(bytes, byte_length);
++    digest.Finish(&settle);
++    settle.digest_state = v8::JsInvocationDigestState::kPresent;
++    settle.digest_encoding = v8::JsInvocationDigestEncoding::kBytes;
++  }
++  callbacks_.settle(Utils::ToLocal(context), epoch_, settle);
++}
++
++v8::JsInvocationContext RebJsInvocation::Current(Isolate* isolate) {
++  v8::JsInvocationContext result = {
++      v8::JsInvocationContextState::kNotObserved, 0};
++#if defined(V8_ENABLE_CONTINUATION_PRESERVED_EMBEDDER_DATA)
++  if (!v8_flags.reb_js_invocation_capture || !Complete() || !synced_ ||
++      epoch_ == 0) {
++    return result;
++  }
++  Tagged<Object> slot =
++      isolate->isolate_data()->continuation_preserved_embedder_data();
++  // A configuration change since the last sync leaves any wrapper
++  // unattributable until V8 syncs again; it is never reported as current.
++  if (callbacks_.epoch() != epoch_) {
++    if (IsRebWrapper(slot)) {
++      result.state = v8::JsInvocationContextState::kUnknown;
++    }
++    return result;
++  }
++  if (!IsRebWrapper(slot)) {
++    result.state = v8::JsInvocationContextState::kNone;
++    return result;
++  }
++  Tagged<Object> id = Cast<Tuple2>(slot)->value2();
++  if (IsSmi(id) && Smi::ToInt(id) > 0 &&
++      IsCurrentId(static_cast<uint32_t>(Smi::ToInt(id)))) {
++    result.state = v8::JsInvocationContextState::kInside;
++    result.invocation_id = static_cast<uint32_t>(Smi::ToInt(id));
++  } else {
++    result.state = v8::JsInvocationContextState::kUnknown;
++  }
++#endif
++  return result;
++}
++
++// static
++Tagged<Object> RebJsInvocation::EmbedderData(Tagged<Object> slot) {
++  return IsRebWrapper(slot) ? Cast<Tuple2>(slot)->value1() : slot;
++}
++
++void RebJsInvocation::SetEmbedderData(Isolate* isolate,
++                                      DirectHandle<Object> data) {
++  Tagged<Object> current =
++      isolate->isolate_data()->continuation_preserved_embedder_data();
++  // Without a current wrapper, or at a top-level task boundary with no
++  // JavaScript on the stack, the embedder's write replaces the slot.
++  if (V8_LIKELY(!IsRebWrapper(current)) ||
++      isolate->js_entry_sp() == kNullAddress) {
++    isolate->isolate_data()->set_continuation_preserved_embedder_data(*data);
++    return;
++  }
++  // A write inside running script (Blink forks task-state variables there)
++  // keeps the invocation of the synchronous extent it happens in.
++  HandleScope scope(isolate);
++  DirectHandle<Object> id(Cast<Tuple2>(current)->value2(), isolate);
++  DirectHandle<Tuple2> wrapper =
++      isolate->factory()->NewTuple2(data, id, AllocationType::kYoung);
++  isolate->isolate_data()->set_continuation_preserved_embedder_data(*wrapper);
++}
++
++}  // namespace v8::internal::interpreter
+diff --git a/src/interpreter/reb-js-invocation.h b/src/interpreter/reb-js-invocation.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..00f8e8d6b51f26a5708c805134d41b54ca77f007
+--- /dev/null
++++ b/src/interpreter/reb-js-invocation.h
+@@ -0,0 +1,147 @@
++// Copyright 2026 the V8 project authors. All rights reserved.
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef V8_INTERPRETER_REB_JS_INVOCATION_H_
++#define V8_INTERPRETER_REB_JS_INVOCATION_H_
++
++#include <cstddef>
++#include <cstdint>
++
++#include "include/v8-callbacks.h"
++#include "src/common/globals.h"
++#include "src/handles/handles.h"
++#include "src/objects/function-kind.h"
++#include "src/objects/tagged.h"
++
++namespace v8::internal::interpreter {
++
++// How control leaves an armed function's frame. The bytecode generator passes
++// the kind as a Smi operand to Runtime_RebJsInvocationExit.
++enum RebJsInvocationExitKind : int {
++  kRebJsInvocationReturn = 1,
++  kRebJsInvocationThrow = 2,
++  kRebJsInvocationSuspend = 3,
++};
++
++// REB native JavaScript invocation identity (--reb-js-invocation-capture).
++// Holds the per-isolate copy of the embedder's armed function-entry sites and
++// the invocation counter. Used only on the isolate's main thread: the flag
++// implies --reb-js-dispatch-capture, which keeps every bytecode generation
++// there. Tables are fixed-size, so the inactive and hot paths never allocate.
++//
++// The current invocation lives in the continuation-preserved embedder data
++// slot as an internal Tuple2{embedder value, Smi invocation ID}. Promise
++// reactions and microtasks already capture and restore that slot, so a
++// continuation created during a call resumes inside it; the embedder API
++// unwraps the slot, so the embedder always sees its own value.
++class RebJsInvocation final {
++ public:
++  static constexpr size_t kBindingLimit = 64;
++  static constexpr size_t kArmedFunctionLimit = 32;
++  // Frame record slots: saved embedder data slot, signed invocation ID
++  // (negative once the synchronous extent ended), site slot, native context.
++  static constexpr int kRecordSaved = 0;
++  static constexpr int kRecordId = 1;
++  static constexpr int kRecordSlot = 2;
++  static constexpr int kRecordContext = 3;
++  static constexpr int kRecordLength = 4;
++
++  void SetCallbacks(Isolate* isolate,
++                    const v8::JsInvocationCallbacks& callbacks);
++
++  // Pulls the embedder epoch. When it changed, refreshes the armed sites,
++  // starts a new ID range and reports sites whose function already had
++  // bytecode. Returns whether any site is armed.
++  bool Sync(Isolate* isolate);
++
++  // Whether the function literal starting at |start_position| in |script| is
++  // armed. An unsupported kind is reported once per configuration and slot
++  // and never armed.
++  bool ArmedSlot(Isolate* isolate, Tagged<Script> script, int start_position,
++                 FunctionKind kind, uint32_t* slot);
++
++  // Records bytecode generated with an entry call. A fact about bytecode, so
++  // an epoch change keeps it.
++  void RecordArmedFunction(int script_id, int start_position);
++
++  // Runtime_RebJsInvocationEnter: returns the frame record, or undefined
++  // when the call was not admitted.
++  Tagged<Object> Enter(Isolate* isolate, DirectHandle<JSFunction> closure);
++  // Runtime_RebJsInvocationExit: restores the caller's context at the end of
++  // the initial synchronous extent and observes what the caller receives.
++  // Returns |value| unchanged.
++  Tagged<Object> Exit(Isolate* isolate, DirectHandle<Object> record,
++                      DirectHandle<Object> value, int kind);
++  // A watched promise settled; called from the internal reaction's handler.
++  void PromiseSettled(Isolate* isolate, uint32_t encoded, bool fulfilled,
++                      DirectHandle<Object> value);
++
++  // The invocation the running code belongs to. Never allocates or calls
++  // into JavaScript.
++  v8::JsInvocationContext Current(Isolate* isolate);
++
++  // The embedder's view of the embedder data slot: the value inside a REB
++  // wrapper, otherwise the slot itself.
++  static Tagged<Object> EmbedderData(Tagged<Object> slot);
++  // An embedder write. While a wrapper is current and JavaScript is on the
++  // stack, the new value stays inside the same invocation; a top-level write
++  // replaces the wrapper.
++  void SetEmbedderData(Isolate* isolate, DirectHandle<Object> data);
++
++ private:
++  struct Site {
++    uint8_t source_sha256[32];
++    uint32_t source_length;
++    uint32_t anchor_offset;
++    bool usable;
++  };
++  struct Binding {
++    int script_id;
++    uint32_t mask;
++  };
++  struct ArmedFunction {
++    int script_id;
++    int start_position;
++  };
++
++  bool Complete() const;
++  void Reset(uint64_t epoch);
++  uint32_t BindingMask(Tagged<Script> script);
++  bool SlotFor(Tagged<Script> script, int start_position, uint32_t* slot);
++  bool IsArmedFunction(int script_id, int start_position) const;
++  void ReportCompiledBeforeArming(Isolate* isolate);
++  void ReportStatus(uint32_t slot, v8::JsInvocationSiteStatus status,
++                    int script_id);
++  bool IsCurrentId(uint32_t id) const;
++  void Settle(Isolate* isolate, DirectHandle<Context> context, uint32_t id,
++              uint32_t slot, bool fulfilled, v8::JsInvocationSettleVia via,
++              DirectHandle<Object> value);
++  void Watch(Isolate* isolate, DirectHandle<JSPromise> promise,
++             DirectHandle<Context> context, uint32_t id, uint32_t slot);
++
++  v8::JsInvocationCallbacks callbacks_;
++  bool synced_ = false;
++  bool any_armed_ = false;
++  bool digests_ = false;
++  uint64_t epoch_ = 0;
++  Site sites_[v8::kJsInvocationSiteLimit] = {};
++  size_t site_count_ = 0;
++  // Statuses already reported this configuration, one bit per slot.
++  uint32_t reported_unsupported_ = 0;
++  uint32_t reported_compiled_ = 0;
++  Binding bindings_[kBindingLimit] = {};
++  size_t binding_count_ = 0;
++  size_t next_binding_ = 0;
++  ArmedFunction armed_functions_[kArmedFunctionLimit] = {};
++  size_t armed_function_count_ = 0;
++  size_t next_armed_function_ = 0;
++  // IDs are never reused. IDs below id_floor_ belong to an earlier epoch and
++  // are reported as unknown, never as a current invocation.
++  uint32_t next_id_ = 1;
++  uint32_t id_floor_ = 1;
++};
++
++}  // namespace v8::internal::interpreter
++
++#endif  // V8_INTERPRETER_REB_JS_INVOCATION_H_
+diff --git a/src/runtime/runtime-internal.cc b/src/runtime/runtime-internal.cc
+index e0eaf48de2ea43db102ff49ca73403255c19d095..d363bdd362bc147b219eb7eef47101e302b21519 100644
+--- a/src/runtime/runtime-internal.cc
++++ b/src/runtime/runtime-internal.cc
+@@ -255,6 +255,28 @@ RUNTIME_FUNCTION(Runtime_RebTraceJsDispatch) {
+                                           Smi::ToInt(args[4]));
+ }
+ 
++// Emitted only at the entry of an armed function under
++// --reb-js-invocation-capture: (closure). Returns the frame record, or
++// undefined when the call was not admitted. Never throws or runs JavaScript.
++RUNTIME_FUNCTION(Runtime_RebJsInvocationEnter) {
++  HandleScope scope(isolate);
++  DCHECK_EQ(1, args.length());
++  if (!IsJSFunction(args[0])) return ReadOnlyRoots(isolate).undefined_value();
++  return isolate->reb_js_invocation().Enter(isolate, args.at<JSFunction>(0));
++}
++
++// Emitted before every Return of an armed function, before every suspension
++// of an armed async function, and in its whole-body rethrowing handler:
++// (record, value, kind). Returns value. Never throws or runs JavaScript.
++RUNTIME_FUNCTION(Runtime_RebJsInvocationExit) {
++  HandleScope scope(isolate);
++  DCHECK_EQ(3, args.length());
++  DirectHandle<Object> value = args.at(1);
++  if (!IsSmi(args[2])) return *value;
++  return isolate->reb_js_invocation().Exit(isolate, args.at(0), value,
++                                           Smi::ToInt(args[2]));
++}
++
+ RUNTIME_FUNCTION(Runtime_ThrowReferenceError) {
+   HandleScope scope(isolate);
+   DCHECK_EQ(1, args.length());
+diff --git a/src/runtime/runtime.h b/src/runtime/runtime.h
+index 96c4130c2092c4815450f9506eef194a1d9d096b..6e6dc91f5c66337cb03e8b81a1d141d171afa3ec 100644
+--- a/src/runtime/runtime.h
++++ b/src/runtime/runtime.h
+@@ -307,6 +307,8 @@ constexpr bool CanTriggerGC(T... properties) {
+   F(NewTypeError, -1 /* [1, 4] */, 1)                      \
+   F(OrdinaryHasInstance, 2, 1)                             \
+   F(PropagateException, 0, 1)                              \
++  F(RebJsInvocationEnter, 1, 1)                            \
++  F(RebJsInvocationExit, 3, 1)                             \
+   F(RebTraceJsDispatch, 5, 1)                              \
+   F(ReportMessageFromMicrotask, 1, 1)                      \
+   F(RunMicrotaskCallback, 2, 1)                            \
+diff --git a/test/cctest/test-api.cc b/test/cctest/test-api.cc
+index e9addc26f28685ad74d07a09347dbbaa347e5ceb..5fadada03863578a9703476414c76fced20cdc5a 100644
+--- a/test/cctest/test-api.cc
++++ b/test/cctest/test-api.cc
+@@ -32665,3 +32665,485 @@ TEST(RebNativeJsDispatchAdmissionAndSiteCap) {
+            records[0].observation.slot);
+   CHECK(records[0].observation.new_activation);
+ }
++
++#if defined(V8_ENABLE_CONTINUATION_PRESERVED_EMBEDDER_DATA)
++namespace {
++
++// REB native JavaScript invocation identity. A fake embedder records what V8
++// reports; sites are keyed like dispatch sites.
++struct RebJsInvocationEmbedder {
++  uint64_t epoch = 0;
++  std::vector<v8::JsInvocationSite> sites;
++  bool enabled = true;
++  bool digests = false;
++  std::vector<v8::JsInvocationStart> starts;
++  std::vector<v8::JsInvocationSettle> settles;
++  std::vector<std::pair<uint32_t, v8::JsInvocationSiteStatus>> statuses;
++  // (tag passed by script, context V8 reported at that point)
++  std::vector<std::pair<int32_t, v8::JsInvocationContext>> observed;
++};
++
++RebJsInvocationEmbedder* reb_js_invocation_embedder = nullptr;
++
++uint64_t RebJsInvocationEpoch() {
++  return reb_js_invocation_embedder ? reb_js_invocation_embedder->epoch : 0;
++}
++
++size_t RebJsInvocationSites(uint64_t epoch, v8::JsInvocationSite* sites,
++                            size_t capacity) {
++  RebJsInvocationEmbedder* embedder = reb_js_invocation_embedder;
++  if (embedder == nullptr || epoch != embedder->epoch) return 0;
++  const size_t copied = std::min(capacity, embedder->sites.size());
++  std::copy_n(embedder->sites.begin(), copied, sites);
++  return copied;
++}
++
++bool RebJsInvocationEnabled(uint64_t epoch, uint32_t slot) {
++  RebJsInvocationEmbedder* embedder = reb_js_invocation_embedder;
++  CHECK_LT(slot, v8::kJsInvocationSiteLimit);
++  return embedder != nullptr && embedder->enabled && epoch == embedder->epoch;
++}
++
++bool RebJsInvocationDigests(uint64_t epoch) {
++  return reb_js_invocation_embedder != nullptr &&
++         reb_js_invocation_embedder->digests;
++}
++
++void RebJsInvocationStarted(v8::Local<v8::Context> context, uint64_t epoch,
++                            const v8::JsInvocationStart& start) {
++  CHECK(!context.IsEmpty());
++  CHECK_NOT_NULL(reb_js_invocation_embedder);
++  CHECK_EQ(epoch, reb_js_invocation_embedder->epoch);
++  CHECK_NOT_NULL(start.source_sha256);
++  v8::JsInvocationStart copy = start;
++  copy.source_sha256 = nullptr;
++  reb_js_invocation_embedder->starts.push_back(copy);
++}
++
++void RebJsInvocationSettled(v8::Local<v8::Context> context, uint64_t epoch,
++                            const v8::JsInvocationSettle& settle) {
++  CHECK(!context.IsEmpty());
++  CHECK_NOT_NULL(reb_js_invocation_embedder);
++  reb_js_invocation_embedder->settles.push_back(settle);
++}
++
++void RebJsInvocationStatus(uint64_t epoch, uint32_t slot,
++                           v8::JsInvocationSiteStatus status, int script_id) {
++  CHECK_NOT_NULL(reb_js_invocation_embedder);
++  reb_js_invocation_embedder->statuses.emplace_back(slot, status);
++}
++
++void RebJsInvocationObserve(const v8::FunctionCallbackInfo<v8::Value>& info) {
++  CHECK_NOT_NULL(reb_js_invocation_embedder);
++  v8::Isolate* isolate = info.GetIsolate();
++  const int32_t tag =
++      info.Length() > 0
++          ? info[0]->Int32Value(isolate->GetCurrentContext()).FromJust()
++          : 0;
++  reb_js_invocation_embedder->observed.emplace_back(
++      tag, isolate->GetCurrentJsInvocation());
++}
++
++void RebJsInvocationReadData(const v8::FunctionCallbackInfo<v8::Value>& info) {
++  info.GetReturnValue().Set(
++      info.GetIsolate()->GetContinuationPreservedEmbedderDataV2().As<v8::Value>());
++}
++
++void RebJsInvocationWriteData(const v8::FunctionCallbackInfo<v8::Value>& info) {
++  info.GetIsolate()->SetContinuationPreservedEmbedderDataV2(info[0]);
++}
++
++v8::JsInvocationSite RebInvocationSite(const std::string& source,
++                                       size_t anchor) {
++  CHECK_LT(anchor, source.size());
++  std::vector<uint8_t> units;
++  for (char c : source) {
++    units.push_back(static_cast<uint8_t>(c));
++    units.push_back(0);
++  }
++  v8::JsInvocationSite site{};
++  i::SHA256_hash(units.data(), units.size(), site.source_sha256);
++  site.source_length = static_cast<uint32_t>(source.size());
++  site.anchor_offset = static_cast<uint32_t>(anchor);
++  return site;
++}
++
++class RebJsInvocationScope final {
++ public:
++  explicit RebJsInvocationScope(LocalContext& env)
++      : isolate_(env.isolate()),
++        invocation_(&i::v8_flags.reb_js_invocation_capture, true),
++        dispatch_(&i::v8_flags.reb_js_dispatch_capture, true),
++        compilation_cache_(&i::v8_flags.compilation_cache, false),
++        lazy_positions_(&i::v8_flags.enable_lazy_source_positions, false) {
++    reb_js_invocation_embedder = &embedder_;
++    v8::JsInvocationCallbacks callbacks;
++    callbacks.epoch = &RebJsInvocationEpoch;
++    callbacks.sites = &RebJsInvocationSites;
++    callbacks.enabled = &RebJsInvocationEnabled;
++    callbacks.digests = &RebJsInvocationDigests;
++    callbacks.start = &RebJsInvocationStarted;
++    callbacks.settle = &RebJsInvocationSettled;
++    callbacks.status = &RebJsInvocationStatus;
++    isolate_->SetJsInvocationCallbacks(callbacks);
++    for (auto [name, callback] :
++         {std::pair{"observe", &RebJsInvocationObserve},
++          std::pair{"readData", &RebJsInvocationReadData},
++          std::pair{"writeData", &RebJsInvocationWriteData}}) {
++      env->Global()
++          ->Set(env.local(), v8_str(name),
++                v8::FunctionTemplate::New(isolate_, callback)
++                    ->GetFunction(env.local())
++                    .ToLocalChecked())
++          .FromJust();
++    }
++  }
++  ~RebJsInvocationScope() {
++    isolate_->SetJsInvocationCallbacks({});
++    reb_js_invocation_embedder = nullptr;
++  }
++  RebJsInvocationScope(const RebJsInvocationScope&) = delete;
++  RebJsInvocationScope& operator=(const RebJsInvocationScope&) = delete;
++
++  void Arm(uint64_t epoch, std::vector<v8::JsInvocationSite> sites) {
++    embedder_.epoch = epoch;
++    embedder_.sites = std::move(sites);
++  }
++  RebJsInvocationEmbedder& embedder() { return embedder_; }
++
++ private:
++  v8::Isolate* const isolate_;
++  i::FlagScope<bool> invocation_;
++  i::FlagScope<bool> dispatch_;
++  i::FlagScope<bool> compilation_cache_;
++  i::FlagScope<bool> lazy_positions_;
++  RebJsInvocationEmbedder embedder_;
++};
++
++// Compiles a lazy function without calling it.
++void RebCompile(const char* name) {
++  v8::HandleScope scope(CcTest::isolate());
++  i::Isolate* i_isolate = CcTest::i_isolate();
++  i::DirectHandle<i::JSFunction> function = RebFunction(name);
++  i::IsCompiledScope is_compiled_scope;
++  CHECK(i::Compiler::Compile(i_isolate, function, i::Compiler::CLEAR_EXCEPTION,
++                             &is_compiled_scope));
++}
++
++int RebInvocationCalls(const char* name) {
++  v8::HandleScope scope(CcTest::isolate());
++  i::Isolate* i_isolate = CcTest::i_isolate();
++  i::DirectHandle<i::JSFunction> function = RebFunction(name);
++  CHECK(function->shared()->HasBytecodeArray());
++  i::Handle<i::BytecodeArray> bytecode(
++      function->shared()->GetBytecodeArray(i_isolate), i_isolate);
++  int calls = 0;
++  for (i::interpreter::BytecodeArrayIterator it(bytecode); !it.done();
++       it.Advance()) {
++    if (it.current_bytecode() == i::interpreter::Bytecode::kCallRuntime &&
++        (it.GetRuntimeIdOperand(0) == i::Runtime::kRebJsInvocationEnter ||
++         it.GetRuntimeIdOperand(0) == i::Runtime::kRebJsInvocationExit)) {
++      ++calls;
++    }
++  }
++  return calls;
++}
++
++uint64_t RebRolling(const std::string& bytes) {
++  uint64_t hash = 0;
++  for (unsigned char byte : bytes) hash = hash * 0x100000001b3ULL + byte;
++  return hash;
++}
++
++// Shaped like the page's window.hsw: a plain function returning a promise
++// whose work runs in a job registered during the call.
++const char kRebHswSource[] =
++    "function rebHsw(mode, jwt) { observe(1); return Promise.resolve()."
++    "then(function () { observe(2); return 'tok-' + jwt; }); }"
++    "function rebPlain(mode, jwt) { return Promise.resolve().then("
++    "function () { observe(3); return 'tok-' + jwt; }); }";
++
++}  // namespace
++
++TEST(RebNativeJsInvocationDisabledAndUnarmedBytecodeIdentity) {
++  LocalContext env;
++  v8::Isolate* isolate = env.isolate();
++  v8::HandleScope scope(isolate);
++  const std::string source = kRebHswSource;
++  RebBytecode plain;
++  {
++    // Flag off: the generator reads one flag and emits unarmed bytecode.
++    i::FlagScope<bool> cache(&i::v8_flags.compilation_cache, false);
++    CompileRun(source.c_str());
++    RebCompile("rebHsw");
++    plain = RebBytecodeOf("rebHsw");
++  }
++  RebBytecode off;
++  {
++    // Flag on with no armed site: byte-identical.
++    RebJsInvocationScope capture(env);
++    capture.embedder().epoch = 0;
++    CompileRun(source.c_str());
++    RebCompile("rebHsw");
++    off = RebBytecodeOf("rebHsw");
++    CHECK(off.SameAs(plain));
++    CHECK_EQ(0, RebInvocationCalls("rebHsw"));
++  }
++  {
++    RebJsInvocationScope capture(env);
++    capture.Arm(1, {RebInvocationSite(source, RebAnchor(source, "rebHsw(", 6))});
++    CompileRun(source.c_str());
++    RebCompile("rebHsw");
++    RebCompile("rebPlain");
++    // The unarmed sibling keeps exactly its unarmed bytecode.
++    CHECK_EQ(0, RebInvocationCalls("rebPlain"));
++    // Armed but not yet called: an entry and exits are emitted, nothing is
++    // reported.
++    CHECK_LT(1, RebInvocationCalls("rebHsw"));
++    CHECK(!RebBytecodeOf("rebHsw").SameAs(off));
++    CHECK(capture.embedder().starts.empty());
++    CHECK(capture.embedder().settles.empty());
++    CompileRun("rebPlain(1, 'x')");
++    isolate->PerformMicrotaskCheckpoint();
++    CHECK(capture.embedder().starts.empty());
++    CHECK(capture.embedder().settles.empty());
++    // Outside any call no invocation is current.
++    CHECK(isolate->GetCurrentJsInvocation().state ==
++          v8::JsInvocationContextState::kNone);
++  }
++}
++
++TEST(RebNativeJsInvocationArgumentsAndSynchronousSettlement) {
++  LocalContext env;
++  v8::Isolate* isolate = env.isolate();
++  v8::HandleScope scope(isolate);
++  RebJsInvocationScope capture(env);
++  const std::string source =
++      "function rebSync(mode, jwt, extra) { observe(mode); "
++      "if (mode === 2) throw new Error('boom'); return [mode, jwt]; }";
++  capture.Arm(7, {RebInvocationSite(source, RebAnchor(source, "rebSync(", 7))});
++  CompileRun(source.c_str());
++  CompileRun("rebSync(1, 'jwt', {}, 4, 5, 6, 7, 8, 9)");
++  const auto& starts = capture.embedder().starts;
++  CHECK_EQ(1u, starts.size());
++  CHECK_EQ(9u, starts[0].argument_count);
++  CHECK(starts[0].argument_kinds[0] == v8::JsInvocationValueKind::kInteger);
++  CHECK_EQ(1u, starts[0].argument_low32[0]);
++  CHECK(starts[0].argument_kinds[1] == v8::JsInvocationValueKind::kString);
++  CHECK_EQ(0u, starts[0].argument_low32[1]);
++  CHECK(starts[0].argument_kinds[2] == v8::JsInvocationValueKind::kObject);
++  CHECK_EQ(0u, starts[0].parent_invocation_id);
++  const auto& observed = capture.embedder().observed;
++  CHECK_EQ(1u, observed.size());
++  CHECK(observed[0].second.state == v8::JsInvocationContextState::kInside);
++  CHECK_EQ(starts[0].invocation_id, observed[0].second.invocation_id);
++  const auto& settles = capture.embedder().settles;
++  CHECK_EQ(1u, settles.size());
++  CHECK(settles[0].outcome == v8::JsInvocationOutcome::kFulfilled);
++  CHECK(settles[0].via == v8::JsInvocationSettleVia::kSyncReturn);
++  CHECK(settles[0].value_kind == v8::JsInvocationValueKind::kArray);
++  CHECK_EQ(2u, settles[0].value_length);
++  CHECK(settles[0].digest_state ==
++        v8::JsInvocationDigestState::kNotRequested);
++  // A throw is a synchronous rejection; the page sees the same exception.
++  CHECK(CompileRun("try { rebSync(2, 'jwt'); 'no' } catch (e) { e.message }")
++            ->Equals(env.local(), v8_str("boom"))
++            .FromJust());
++  CHECK_EQ(2u, settles.size());
++  CHECK(settles[1].outcome == v8::JsInvocationOutcome::kRejected);
++  CHECK(settles[1].via == v8::JsInvocationSettleVia::kSyncThrow);
++  CHECK(isolate->GetCurrentJsInvocation().state ==
++        v8::JsInvocationContextState::kNone);
++}
++
++TEST(RebNativeJsInvocationPromiseJobsAndDigest) {
++  LocalContext env;
++  v8::Isolate* isolate = env.isolate();
++  v8::HandleScope scope(isolate);
++  RebJsInvocationScope capture(env);
++  const std::string source = kRebHswSource;
++  capture.Arm(3, {RebInvocationSite(source, RebAnchor(source, "rebHsw(", 6))});
++  capture.embedder().digests = true;
++  CompileRun(source.c_str());
++  CompileRun("var rebResult; rebHsw(0, 'abc').then(v => rebResult = v);");
++  // The call returned a pending promise; the job it registered has not run.
++  CHECK(capture.embedder().settles.empty());
++  isolate->PerformMicrotaskCheckpoint();
++  CHECK(CompileRun("rebResult")->Equals(env.local(), v8_str("tok-abc")).FromJust());
++  const auto& starts = capture.embedder().starts;
++  const auto& observed = capture.embedder().observed;
++  CHECK_EQ(1u, starts.size());
++  CHECK_EQ(2u, observed.size());
++  // The promise job registered during the call runs inside the invocation.
++  for (const auto& [tag, context] : observed) {
++    CHECK(context.state == v8::JsInvocationContextState::kInside);
++    CHECK_EQ(starts[0].invocation_id, context.invocation_id);
++  }
++  const auto& settles = capture.embedder().settles;
++  CHECK_EQ(1u, settles.size());
++  CHECK(settles[0].via == v8::JsInvocationSettleVia::kPromise);
++  CHECK(settles[0].outcome == v8::JsInvocationOutcome::kFulfilled);
++  CHECK(settles[0].value_kind == v8::JsInvocationValueKind::kString);
++  CHECK_EQ(7u, settles[0].value_length);
++  CHECK(settles[0].digest_state == v8::JsInvocationDigestState::kPresent);
++  CHECK(settles[0].digest_encoding == v8::JsInvocationDigestEncoding::kUtf8);
++  CHECK_EQ(7u, settles[0].digest_byte_length);
++  uint8_t expected[32];
++  const std::string value = "tok-abc";
++  i::SHA256_hash(value.data(), value.size(), expected);
++  CHECK_EQ(0, std::memcmp(expected, settles[0].value_sha256, 32));
++  CHECK_EQ(RebRolling(value), settles[0].rolling_hash);
++  // A job registered outside the call is not attributed to it.
++  CompileRun("Promise.resolve().then(() => observe(9));");
++  isolate->PerformMicrotaskCheckpoint();
++  CHECK_EQ(9, observed.back().first);
++  CHECK(observed.back().second.state == v8::JsInvocationContextState::kNone);
++}
++
++TEST(RebNativeJsInvocationInterleavedAsyncCallsKeepTheirIds) {
++  LocalContext env;
++  v8::Isolate* isolate = env.isolate();
++  v8::HandleScope scope(isolate);
++  RebJsInvocationScope capture(env);
++  const std::string source =
++      "async function rebAsync(n, gate) { observe(n); await null; observe(n); "
++      "await gate; observe(n); return n; }"
++      "var rebOpen = [], rebGates = [0, 1].map(() => new Promise(r => "
++      "rebOpen.push(r)));";
++  capture.Arm(5, {RebInvocationSite(source, RebAnchor(source, "rebAsync(", 8))});
++  CompileRun(source.c_str());
++  CompileRun("rebAsync(1, rebGates[0]); rebAsync(2, rebGates[1]);");
++  // Each call returned to its caller at its first await.
++  CHECK(isolate->GetCurrentJsInvocation().state ==
++        v8::JsInvocationContextState::kNone);
++  isolate->PerformMicrotaskCheckpoint();
++  // Resolve in the opposite order from outside both invocations.
++  CompileRun("rebOpen[1](); rebOpen[0]();");
++  isolate->PerformMicrotaskCheckpoint();
++  const auto& starts = capture.embedder().starts;
++  CHECK_EQ(2u, starts.size());
++  CHECK_NE(starts[0].invocation_id, starts[1].invocation_id);
++  const auto& observed = capture.embedder().observed;
++  CHECK_EQ(6u, observed.size());
++  for (const auto& [tag, context] : observed) {
++    CHECK(context.state == v8::JsInvocationContextState::kInside);
++    CHECK_EQ(starts[tag - 1].invocation_id, context.invocation_id);
++  }
++  const auto& settles = capture.embedder().settles;
++  CHECK_EQ(2u, settles.size());
++  for (const auto& settle : settles) {
++    CHECK(settle.via == v8::JsInvocationSettleVia::kPromise);
++    CHECK(settle.value_kind == v8::JsInvocationValueKind::kInteger);
++  }
++  // The second call settled first, and each settle names its own call.
++  CHECK_EQ(starts[1].invocation_id, settles[0].invocation_id);
++  CHECK_EQ(starts[0].invocation_id, settles[1].invocation_id);
++}
++
++TEST(RebNativeJsInvocationPreservesEmbedderData) {
++  LocalContext env;
++  v8::Isolate* isolate = env.isolate();
++  v8::HandleScope scope(isolate);
++  RebJsInvocationScope capture(env);
++  const std::string source =
++      "function rebData(x) { var inside = readData(); writeData('fork');"
++      "var forked = readData(); observe(1); writeData(inside);"
++      "Promise.resolve().then(() => { rebLater = readData(); observe(2); });"
++      "return inside + '/' + forked; } var rebLater;";
++  capture.Arm(2, {RebInvocationSite(source, RebAnchor(source, "rebData(", 7))});
++  CompileRun(source.c_str());
++  isolate->SetContinuationPreservedEmbedderDataV2(v8_str("outer"));
++  CHECK(CompileRun("rebData(0)")
++            ->Equals(env.local(), v8_str("outer/fork"))
++            .FromJust());
++  // The caller continues with exactly its own value.
++  CHECK(isolate->GetContinuationPreservedEmbedderDataV2()
++            .As<v8::Value>()
++            ->Equals(env.local(), v8_str("outer"))
++            .FromJust());
++  isolate->PerformMicrotaskCheckpoint();
++  CHECK(CompileRun("rebLater")->Equals(env.local(), v8_str("outer")).FromJust());
++  const auto& observed = capture.embedder().observed;
++  CHECK_EQ(2u, observed.size());
++  // An embedder write inside running script keeps the invocation.
++  CHECK(observed[0].second.state == v8::JsInvocationContextState::kInside);
++  CHECK(observed[1].second.state == v8::JsInvocationContextState::kInside);
++  CHECK_EQ(observed[0].second.invocation_id, observed[1].second.invocation_id);
++  // A top-level write, with no JavaScript on the stack, carries none.
++  isolate->SetContinuationPreservedEmbedderDataV2(v8_str("next task"));
++  CHECK(isolate->GetCurrentJsInvocation().state ==
++        v8::JsInvocationContextState::kNone);
++  isolate->SetContinuationPreservedEmbedderDataV2(v8::Undefined(isolate));
++}
++
++namespace {
++int reb_unhandled_rejections = 0;
++void RebCountRejections(v8::PromiseRejectMessage message) {
++  if (message.GetEvent() == v8::kPromiseRejectWithNoHandler) {
++    ++reb_unhandled_rejections;
++  }
++}
++}  // namespace
++
++TEST(RebNativeJsInvocationLeavesUnhandledRejectionVisible) {
++  LocalContext env;
++  v8::Isolate* isolate = env.isolate();
++  v8::HandleScope scope(isolate);
++  RebJsInvocationScope capture(env);
++  const std::string source =
++      "function rebReject() { return Promise.resolve().then(() => { "
++      "throw new Error('no'); }); }";
++  capture.Arm(4, {RebInvocationSite(source, RebAnchor(source, "rebReject(", 9))});
++  CompileRun(source.c_str());
++  reb_unhandled_rejections = 0;
++  isolate->SetPromiseRejectCallback(RebCountRejections);
++  CompileRun("rebReject();");
++  isolate->PerformMicrotaskCheckpoint();
++  // The internal reaction does not mark the promise handled.
++  CHECK_EQ(1, reb_unhandled_rejections);
++  isolate->SetPromiseRejectCallback(nullptr);
++  const auto& settles = capture.embedder().settles;
++  CHECK_EQ(1u, settles.size());
++  CHECK(settles[0].outcome == v8::JsInvocationOutcome::kRejected);
++  CHECK(settles[0].via == v8::JsInvocationSettleVia::kPromise);
++}
++
++TEST(RebNativeJsInvocationAdmissionAndUnsupportedKinds) {
++  LocalContext env;
++  v8::Isolate* isolate = env.isolate();
++  v8::HandleScope scope(isolate);
++  RebJsInvocationScope capture(env);
++  const std::string source =
++      "function rebAdmitted(a) { observe(1); return a; }"
++      "function* rebGenerator(a) { yield a; }"
++      "function rebEarly(a) { return a; } rebEarly(1);";
++  // rebEarly already has bytecode when arming begins.
++  CompileRun(source.c_str());
++  capture.Arm(6, {RebInvocationSite(source, RebAnchor(source, "rebAdmitted(", 11)),
++                  RebInvocationSite(source, RebAnchor(source, "rebGenerator(", 12)),
++                  RebInvocationSite(source, RebAnchor(source, "rebEarly(", 8))});
++  CompileRun(source.c_str());
++  CompileRun("rebGenerator(1).next(); rebEarly(2);");
++  bool unsupported = false;
++  bool compiled_before = false;
++  for (const auto& [slot, status] : capture.embedder().statuses) {
++    unsupported |= slot == 1 &&
++                   status == v8::JsInvocationSiteStatus::kUnsupportedFunction;
++    compiled_before |=
++        slot == 2 && status == v8::JsInvocationSiteStatus::kCompiledBeforeArming;
++  }
++  CHECK(unsupported);
++  CHECK(compiled_before);
++  CHECK_EQ(0, RebInvocationCalls("rebGenerator"));
++  // Admission refused: no ID is allocated and no invocation becomes current.
++  capture.embedder().enabled = false;
++  CompileRun("rebAdmitted(1)");
++  CHECK(capture.embedder().starts.empty());
++  CHECK(capture.embedder().observed.back().second.state ==
++        v8::JsInvocationContextState::kNone);
++  capture.embedder().enabled = true;
++  CompileRun("rebAdmitted(2)");
++  CHECK_EQ(1u, capture.embedder().starts.size());
++  CHECK_EQ(0u, capture.embedder().starts[0].slot);
++}
++#endif  // V8_ENABLE_CONTINUATION_PRESERVED_EMBEDDER_DATA

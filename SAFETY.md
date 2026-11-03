@@ -145,7 +145,8 @@ it.
   and a separate confirmed action; a live capture additionally requires the
   existing selected-document live opt-in, and nothing is relaunched to obtain any
   of them. Clearing the set, disconnecting, ending the session, or session expiry
-  removes the scripts and their output. Snippet output is bounded, ephemeral
+  removes the scripts and their output; when the browser cannot confirm a removal,
+  the Console reports it unconfirmed instead of idle. Snippet output is bounded, ephemeral
   page-JavaScript observation with provenance `console-document-start-script`: it
   is never native evidence, never correlated, and never exported automatically. A
   snippet runs in the page main world, so log only argument kinds, lengths,

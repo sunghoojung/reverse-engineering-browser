@@ -11,6 +11,7 @@ use std::{
     os::unix::fs::{FileTypeExt, OpenOptionsExt, PermissionsExt},
     path::{Path, PathBuf},
     process::Stdio,
+    sync::atomic::{AtomicBool, Ordering},
     time::{Duration, Instant},
 };
 use tempfile::TempDir;
@@ -104,6 +105,11 @@ struct Session {
     // older browser leaves it clear, so operation 4 is never sent to a browser
     // that would reject it and retire this working session.
     document_start: bool,
+    // The browser may hold an armed set. Raised before an arm is sent, because
+    // an ambiguous failure can still have armed it, and lowered only by a
+    // browser reply that lists no script. A live binding outlives each Console
+    // connection, so Stop must not hand it back while this is set.
+    document_start_armed: bool,
 }
 impl Session {
     async fn stop(mut self) {
@@ -158,6 +164,23 @@ impl Session {
         self.accessed_targets.clear();
         Ok(())
     }
+    // The browser clears its registry only when it is told to or when this wire
+    // connection ends. A live Stop keeps the connection for the next Console
+    // connection, so it clears explicitly and requires the browser to confirm
+    // that nothing is armed.
+    async fn clear_document_start(&mut self) -> Result<()> {
+        match self.exchange(4, 0, r#"{"operation":"clear"}"#).await {
+            Ok(result)
+                if result["document_start"]["status"] == "ok" && !self.document_start_armed =>
+            {
+                Ok(())
+            }
+            Ok(_) => Err(Error::conflict(DOCUMENT_START_UNCONFIRMED)),
+            Err(error) => {
+                Err(Error::conflict(DOCUMENT_START_UNCONFIRMED).with_reason(error.reason))
+            }
+        }
+    }
     async fn exchange(&mut self, operation: u16, target: u64, source: &str) -> Result<Value> {
         // If the HTTP future is cancelled mid-exchange, the session stays
         // poisoned. Never retry an expression or reuse an ambiguous pipe.
@@ -198,6 +221,12 @@ impl Session {
         self.poisoned = false;
         if operation == 1 {
             self.document_start = result["document_start_supported"] == json!(true);
+        }
+        // Every document-start reply, including a refusal, lists what is armed.
+        if operation == 4
+            && let Some(scripts) = result["document_start"]["scripts"].as_array()
+        {
+            self.document_start_armed = !scripts.is_empty();
         }
         Ok(result)
     }
@@ -386,6 +415,10 @@ pub struct NativeConsole {
     session: Mutex<Option<Session>>,
     live_bridge: Mutex<Option<Session>>,
     live_directory: Option<PathBuf>,
+    // A live binding that may have held an armed set ended without the browser
+    // confirming the set was cleared. Reads report that instead of an idle
+    // experiment until the capture, and with it this backend, is restarted.
+    document_start_unconfirmed: AtomicBool,
 }
 impl NativeConsole {
     pub fn new(options: &Options) -> Self {
@@ -399,7 +432,18 @@ impl NativeConsole {
             session: Mutex::new(None),
             live_bridge: Mutex::new(None),
             live_directory: options.native_console_live_directory.clone(),
+            document_start_unconfirmed: AtomicBool::new(false),
         }
+    }
+    // Ending a live binding closes its wire connection, and the browser drops
+    // the armed set once it notices. That is not a confirmed clear, so it is
+    // recorded rather than reported as an idle experiment.
+    async fn retire(&self, session: Session) {
+        if session.live && session.document_start_armed {
+            self.document_start_unconfirmed
+                .store(true, Ordering::Relaxed);
+        }
+        session.stop().await;
     }
     fn available(&self) -> bool {
         worker::executable(&self.helper)
@@ -416,7 +460,7 @@ impl NativeConsole {
                     .is_some_and(|browser| browser.child.try_wait().ok().flatten().is_some())
                 || session.bridge.child.try_wait().ok().flatten().is_some())
         {
-            guard.take().unwrap().stop().await;
+            self.retire(guard.take().unwrap()).await;
         }
         if guard.as_ref().is_some_and(|session| !session.live) || self.live_directory.is_none() {
             let id = guard.as_ref().map(|session| session.id.as_str());
@@ -441,7 +485,7 @@ impl NativeConsole {
                 }
                 return listing;
             }
-            owner.take().unwrap().stop().await;
+            self.retire(owner.take().unwrap()).await;
         }
         // A vanished or unavailable binding never changes the execution mode.
         // Recover by restarting the capture, not by launching another browser.
@@ -458,6 +502,14 @@ impl NativeConsole {
             .try_lock()
             .map_err(|_| Error::conflict("Another native console action is running"))?;
         let Some(session) = guard.as_mut() else {
+            if self.document_start_unconfirmed.load(Ordering::Relaxed) {
+                return Ok(
+                    json!({"contract_version":3,"available":self.available(),"state":"idle","session_id":null,
+                    "document_start":{"status":"unconfirmed","permitted":false,"scripts":[],
+                        "message":DOCUMENT_START_UNCONFIRMED},
+                    "limits":document_start_limits(),"unsupported":document_start_unsupported()}),
+                );
+            }
             return Ok(
                 json!({"contract_version":3,"available":self.available(),"state":"idle","session_id":null,
                 "document_start":{"status":"idle","permitted":false,"scripts":[],
@@ -471,10 +523,22 @@ impl NativeConsole {
             session.bridge.child.try_wait().ok().flatten().is_some()
         };
         if session.poisoned || session.started.elapsed() >= Duration::from_secs(3600) || ended {
+            // A live binding's armed set lives in the capture browser, which
+            // keeps it while the connection is open and confirms nothing when
+            // the connection ends, so neither case may read as gone.
+            let (status, message) = if !session.live || !session.document_start_armed {
+                (
+                    "error",
+                    "This Console session ended. Start another session; armed scripts and their output are gone.",
+                )
+            } else if ended {
+                ("unconfirmed", DOCUMENT_START_UNCONFIRMED)
+            } else {
+                ("unconfirmed", DOCUMENT_START_LIVE_RETIRE)
+            };
             return Ok(
                 json!({"contract_version":3,"available":self.available(),"state":"ready","session_id":session.id,
-                "document_start":{"status":"error","permitted":false,"scripts":[],
-                    "message":"This Console session ended. Start another session; armed scripts and their output are gone."},
+                "document_start":{"status":status,"permitted":false,"scripts":[],"message":message},
                 "limits":document_start_limits(),"unsupported":document_start_unsupported()}),
             );
         }
@@ -556,7 +620,7 @@ impl NativeConsole {
             if result.is_ok() {
                 *guard = Some(session);
             } else {
-                session.stop().await;
+                self.retire(session).await;
             }
             return result;
         }
@@ -598,7 +662,16 @@ impl NativeConsole {
                 let bridge_alive = session.bridge.child.try_wait().ok().flatten().is_none();
                 if session.live && !session.poisoned && bridge_alive {
                     if let Err(error) = session.release_live_values().await {
-                        session.stop().await;
+                        self.retire(session).await;
+                        return Err(error);
+                    }
+                    // The capture browser keeps an armed set for as long as this
+                    // wire connection stays open, so the binding is handed back
+                    // only after the browser confirms it holds no script.
+                    if session.document_start_armed
+                        && let Err(error) = session.clear_document_start().await
+                    {
+                        self.retire(session).await;
                         return Err(error);
                     }
                     session.live_target = None;
@@ -607,7 +680,11 @@ impl NativeConsole {
                         previous.stop().await;
                     }
                 } else {
-                    session.stop().await;
+                    let unconfirmed = session.live && session.document_start_armed;
+                    self.retire(session).await;
+                    if unconfirmed {
+                        return Err(Error::conflict(DOCUMENT_START_UNCONFIRMED));
+                    }
                 }
             }
             return Ok(json!({"contract_version":2,"state":"idle","session_id":null}));
@@ -638,7 +715,7 @@ impl NativeConsole {
             session.bridge.child.try_wait()?.is_some()
         };
         if session.poisoned || session.started.elapsed() >= Duration::from_secs(3600) || ended {
-            guard.take().unwrap().stop().await;
+            self.retire(guard.take().unwrap()).await;
             return Err(Error::conflict(
                 "Native console session ended; start another session",
             ));
@@ -646,7 +723,7 @@ impl NativeConsole {
         if action == "targets" && session.live {
             let result = session.list_live().await;
             if result.is_err() {
-                guard.take().unwrap().stop().await;
+                self.retire(guard.take().unwrap()).await;
             }
             return result;
         }
@@ -674,6 +751,7 @@ impl NativeConsole {
                     ));
                 }
                 let scripts = validate_document_start(&request["scripts"])?;
+                session.document_start_armed = true;
                 serde_json::to_string(&json!({"operation":"arm","scripts":scripts}))?
             };
             if document_start_source.len() > RUNTIME_LIMIT {
@@ -709,7 +787,7 @@ impl NativeConsole {
                 return Ok(stale_document(&session.id));
             }
             if let Err(error) = session.list_live().await {
-                guard.take().unwrap().stop().await;
+                self.retire(guard.take().unwrap()).await;
                 return Err(error);
             }
             if !session.native_targets.contains(&target) {
@@ -726,7 +804,7 @@ impl NativeConsole {
             session.live_target = None;
         }
         if result.is_err() {
-            guard.take().unwrap().stop().await;
+            self.retire(guard.take().unwrap()).await;
         }
         result
     }
@@ -883,12 +961,20 @@ impl BridgeProcess {
             native_targets: BTreeSet::new(),
             accessed_targets: BTreeSet::new(),
             document_start: false,
+            document_start_armed: false,
         }
     }
     async fn stop(mut self) {
         self.bridge.stop().await;
     }
 }
+
+const DOCUMENT_START_UNCONFIRMED: &str = "The capture browser did not confirm that it cleared the armed document-start scripts. \
+     The Console binding was ended, so the browser drops them once it notices; until then new matching \
+     documents can still run them. Restart the capture before relying on documents running nothing.";
+
+const DOCUMENT_START_LIVE_RETIRE: &str = "This Console connection failed while document-start scripts may be armed. \
+     They stay in the capture browser until the connection ends; Stop ends it.";
 
 const DOCUMENT_START_UNAVAILABLE: &str = "Document-start Console scripts are not available in this session. Rebuild the pinned browser, \
      then start a disposable Console session with document_start enabled, or relaunch the live \
@@ -1429,7 +1515,7 @@ while True:
     source = sys.stdin.buffer.read(size).decode()
     with (root / 'requests.jsonl').open('a') as log:
         log.write(json.dumps({'operation':operation,'target':target,'source':source}) + '\n')
-    count, kind = 0, 11
+    count, kind, flags = 0, 11, 0
     if operation == 1:
         documents = json.loads((root / 'targets.json').read_text())
         records = []
@@ -1439,9 +1525,30 @@ while True:
             url = item['url'].encode()[:512]
             records.append(target_record.pack(item['id'],len(origin),2,0,origin,len(label),len(url),label,url,0))
         payload, count, kind = b''.join(records), len(records), 10
+        # The capture browser advertises the experiment only when launched with it.
+        flags = 2 if (root / 'document-start').exists() else 0
+    elif operation == 4:
+        # A synthetic registry that outlives Console connections, like the
+        # capture browser's. clear-refused keeps the set, as a failed clear would.
+        command = json.loads(source)
+        armed = root / 'armed.json'
+        scripts = json.loads(armed.read_text()) if armed.exists() else []
+        status = 'ok'
+        if command['operation'] == 'arm':
+            scripts = [{'script_id':str(index + 1),'rule':{'origin':script['origin'],'frame':script['frame']},
+                        'source_bytes':len(script['source']),'digest':'0123456789abcdef','records':0,
+                        'injected_documents':0,'refused':0} for index, script in enumerate(command['scripts'])]
+        elif command['operation'] == 'clear':
+            if (root / 'clear-refused').exists():
+                status = 'error'
+            else:
+                scripts = []
+        armed.write_text(json.dumps(scripts))
+        payload, kind = json.dumps({'status':status,'contract_version':3,'permitted':True,'generation':'1',
+            'scripts':scripts,'renderer_processes':1,'pending_renderer_processes':0}).encode(), 12
     else:
         payload = json.dumps({'status':'ok','value':{'type':'object','text':str(target),'handle':'7','truncated':False}}).encode()
-    sys.stdout.buffer.write(response.pack(magic,version,0,sequence,kind,0,count,len(payload),0) + payload)
+    sys.stdout.buffer.write(response.pack(magic,version,0,sequence,kind,flags,count,len(payload),0) + payload)
     sys.stdout.buffer.flush()
 "#;
         let mut command = Command::new("python3");
@@ -1470,6 +1577,7 @@ while True:
             native_targets: BTreeSet::new(),
             accessed_targets: BTreeSet::new(),
             document_start: false,
+            document_start_armed: false,
         };
         let mut options = Options::try_parse_from(["origin-trace-backend"]).unwrap();
         options.native_console_live_directory = Some(directory.path().into());
@@ -1653,6 +1761,103 @@ while True:
                 .is_err()
         );
         assert_eq!(requests(&directory).len(), before);
+        console.stop().await;
+    }
+    async fn arm_fixture(console: &NativeConsole, directory: &TempDir) -> String {
+        std::fs::write(directory.path().join("document-start"), "").unwrap();
+        let identity = connect_fixture(console, "22").await;
+        let armed = console
+            .action(&json!({"action":"arm_document_start","session_id":identity,"confirm_document_start":true,
+                "scripts":[{"origin":"https://same.test","frame":"top","source":"report(1);"}]}))
+            .await
+            .unwrap();
+        assert_eq!(armed["document_start"]["scripts"][0]["script_id"], "1");
+        identity
+    }
+    #[tokio::test]
+    async fn live_stop_clears_armed_document_start_scripts_before_reporting_idle() {
+        let (console, directory) = live_fixture().await;
+        let identity = arm_fixture(&console, &directory).await;
+        let stopped = console
+            .action(&json!({"action":"stop","session_id":identity}))
+            .await
+            .unwrap();
+        assert_eq!(stopped["state"], "idle");
+        // The capture browser keeps its registry across Console connections,
+        // so Stop itself must have cleared it before reporting idle.
+        let last = requests(&directory).pop().unwrap();
+        assert_eq!(last["operation"], 4);
+        assert_eq!(last["source"], r#"{"operation":"clear"}"#);
+        let idle = console.document_start(0).await.unwrap();
+        assert_eq!(idle["document_start"]["status"], "idle");
+        crate::validation::schema("NativeConsoleDocumentStart", &idle, 500).unwrap();
+        let second = connect_fixture(&console, "22").await;
+        let state = console.document_start(0).await.unwrap();
+        assert_eq!(state["session_id"], second);
+        assert_eq!(state["document_start"]["scripts"], json!([]));
+        // Nothing armed means nothing to clear: Stop sends no extra request.
+        let before = requests(&directory).len();
+        console
+            .action(&json!({"action":"stop","session_id":second}))
+            .await
+            .unwrap();
+        assert!(
+            requests(&directory)[before..]
+                .iter()
+                .all(|request| request["operation"] != 4)
+        );
+        console.stop().await;
+    }
+    #[tokio::test]
+    async fn live_stop_reports_an_unconfirmed_clear_instead_of_idle() {
+        let (console, directory) = live_fixture().await;
+        let identity = arm_fixture(&console, &directory).await;
+        std::fs::write(directory.path().join("clear-refused"), "").unwrap();
+        let error = console
+            .action(&json!({"action":"stop","session_id":identity}))
+            .await
+            .unwrap_err();
+        assert_eq!(error.status, 409);
+        assert!(
+            error.message.contains("did not confirm"),
+            "{}",
+            error.message
+        );
+        // The binding is ended rather than handed back with a set still armed.
+        assert!(console.live_bridge.lock().await.is_none());
+        let state = console.document_start(0).await.unwrap();
+        assert_eq!(state["state"], "idle");
+        assert_eq!(state["document_start"]["status"], "unconfirmed");
+        assert!(
+            state["document_start"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("Restart the capture")
+        );
+        crate::validation::schema("NativeConsoleDocumentStart", &state, 500).unwrap();
+        assert_eq!(console.state().await["live_available"], false);
+        console.stop().await;
+    }
+    #[tokio::test]
+    async fn live_stop_of_a_failed_connection_never_reports_an_armed_set_gone() {
+        let (console, directory) = live_fixture().await;
+        let identity = arm_fixture(&console, &directory).await;
+        console.session.lock().await.as_mut().unwrap().poisoned = true;
+        let state = console.document_start(0).await.unwrap();
+        assert_eq!(state["document_start"]["status"], "unconfirmed");
+        crate::validation::schema("NativeConsoleDocumentStart", &state, 500).unwrap();
+        let before = requests(&directory).len();
+        let error = console
+            .action(&json!({"action":"stop","session_id":identity}))
+            .await
+            .unwrap_err();
+        assert_eq!(error.status, 409);
+        // A failed connection is never reused to send the clear.
+        assert_eq!(requests(&directory).len(), before);
+        assert_eq!(
+            console.document_start(0).await.unwrap()["document_start"]["status"],
+            "unconfirmed"
+        );
         console.stop().await;
     }
     #[test]

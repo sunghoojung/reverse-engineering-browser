@@ -300,7 +300,9 @@ armed experiment is always visible. Snippet output appears in the transcript
 labeled `page JavaScript · console-document-start-script`, inserted as text and
 filterable by level like any other row. It is never evidence, never joined into
 correlated links, and never exported automatically. Clearing the set, or
-disconnecting, removes the scripts and their output. See
+disconnecting, removes the scripts and their output. When a live capture cannot
+confirm that removal, Disconnect fails and the chip turns red and reads
+`Doc-start: unconfirmed` instead of switching off. See
 [Native Console v3](../../protocol/native-console-v3.md) and the
 [workflow guide](../../docs/development/console-document-start-scripts.md).
 

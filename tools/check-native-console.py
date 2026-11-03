@@ -145,6 +145,10 @@ class DocumentStart:
         return self.state(0)
 
     def clear(self):
+        # A synthetic stand-in for a clear the browser could not apply, so the
+        # owner's unconfirmed-removal path runs through the real C++ relay.
+        if any("__refuse_clear__" in script["source"] for script in self.scripts):
+            return self.refusal("Synthetic browser kept the armed set")
         self.generation += 1
         self.scripts = []
         self.output = []
@@ -193,6 +197,7 @@ def fake_browser(arguments):
     assert not any("remote-debugging" in argument for argument in arguments)
     # The switch alone permits the experiment; it arms nothing by itself.
     document_start = DocumentStart("--reb-native-console-document-start" in arguments)
+    live = "--reb-native-console-live-binding" in arguments
     token_path = Path(flags["reb-native-console-token-file"])
     assert token_path.stat().st_mode & 0o777 == 0o600
     assert token_path.parent.stat().st_mode & 0o777 == 0o700
@@ -214,7 +219,10 @@ def fake_browser(arguments):
             assert magic == MAGIC and version == 2 and reserved == 0 and size <= (65536 if operation == 3 else 8192)
             source = exact(stream, size).decode()
             if operation == 1:
-                target_id += 1
+                # A live capture document keeps its identity across listings; a
+                # disposable fixture renumbers so stale-target paths are reachable.
+                if not (live and target_id):
+                    target_id += 1
                 response(stream, request, 10, TARGET.pack(target_id, len(origin), 2, 0, origin, 27, 29, b"Synthetic transport fixture", b"http://127.0.0.1:fixture/page", 0), count=1,
                          flags=2 if document_start.permitted else 0)
             elif operation == 4:
@@ -700,8 +708,11 @@ def check_backend(binary, backend):
             assert len(live_socket.encode()) < 104 and Path(live_socket).is_socket()
             assert live_transport.stat().st_mode & 0o777 == 0o700
             assert Path(live_token).stat().st_mode & 0o777 == 0o600
+            # A capture launched with REB_CONSOLE_DOCUMENT_START=1: its registry
+            # outlives every Console connection, exactly like the real browser's.
             live_peer = subprocess.Popen([
                 sys.executable, __file__, "--reb-native-console",
+                "--reb-native-console-live-binding", "--reb-native-console-document-start",
                 f"--reb-native-console-socket={live_socket}",
                 f"--reb-native-console-token-file={live_token}",
                 f"--reb-native-console-session-id={live_id}",
@@ -876,6 +887,36 @@ def check_backend(binary, backend):
                   "scripts": [{"origin": "http://127.0.0.1:8080", "frame": "top", "source": "report(1);"}]}, 409)
             call({"action": "stop", "session_id": session})
             print("PASS document-start HTTP surface: disabled control, launch-time permission, consent and rule refusals that preserve the armed set, non-draining cursor reads and clearing")
+
+            # Live capture: the browser's armed set outlives each Console
+            # connection, so Disconnect must clear it before reporting idle.
+            def connect_live():
+                listing = call()
+                assert listing["live_available"] and listing["targets"], listing
+                return call({"action": "connect_live", "binding_id": listing["binding_id"],
+                             "target_id": listing["targets"][0]["id"], "confirm_live": True})["session_id"]
+            live_session = connect_live()
+            live_rule = {"origin": "http://127.0.0.1:8080", "frame": "top", "source": "report('kinds=string:12');"}
+            armed = call({"action": "arm_document_start", "session_id": live_session,
+                          "confirm_document_start": True, "scripts": [live_rule]})
+            assert armed["document_start"]["status"] == "ok" and len(armed["document_start"]["scripts"]) == 1
+            assert call({"action": "stop", "session_id": live_session})["state"] == "idle"
+            assert read_document_start()["document_start"]["status"] == "idle"
+            live_session = connect_live()
+            reconnected = read_document_start()["document_start"]
+            assert reconnected["scripts"] == [] and reconnected["output"]["records"] == [], \
+                "Disconnect left document-start scripts armed in the capture browser"
+            # A clear the browser does not confirm fails the Disconnect and is
+            # reported as unconfirmed, never as an idle experiment.
+            call({"action": "arm_document_start", "session_id": live_session, "confirm_document_start": True,
+                  "scripts": [{**live_rule, "source": "report('__refuse_clear__');"}]})
+            refused = call({"action": "stop", "session_id": live_session}, 409)
+            assert "did not confirm" in refused["error"], refused
+            unconfirmed = read_document_start()
+            assert unconfirmed["state"] == "idle" and unconfirmed["document_start"]["status"] == "unconfirmed"
+            assert "Restart the capture" in unconfirmed["document_start"]["message"]
+            assert call()["live_available"] is False, "An unconfirmed clear handed the live binding back"
+            print("PASS live Disconnect clears and confirms armed document-start scripts, and an unconfirmed clear is never reported idle")
             print("PASS public HTTP -> Rust session -> actual C++ bridge -> synthetic browser; locality, UTF-8 limits, identity guards, timeout recovery, malformed peer retirement and profile disposal")
         finally:
             process.terminate()

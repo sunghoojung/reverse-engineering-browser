@@ -44,6 +44,15 @@ Disposable browser is still the default execution context. Live capture arming
 additionally requires v2's selected-document live opt-in, so a live snippet can
 only be armed from an already authorized live Console connection.
 
+A live capture keeps one wire connection to its browser across Console
+connections, and the browser drops its armed set only when told to or when that
+connection ends. Disconnect therefore sends `clear` whenever a set may be armed
+and reports idle only after the browser confirms that no script is armed. If the
+browser cannot confirm it, Disconnect fails, the binding is ended so the browser
+drops the set once it notices, and every later read reports `unconfirmed` rather
+than idle until the capture is restarted. A failed live connection reads as
+`unconfirmed` too: its set stays in the capture browser until Stop ends it.
+
 ## Match rule
 
 A rule names exactly one target and cannot widen:

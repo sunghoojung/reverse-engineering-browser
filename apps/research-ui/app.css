@@ -2324,6 +2324,9 @@ body.resizing-panes-y, body.resizing-panes-y * { cursor: row-resize !important; 
 .native-console-ds-badge:hover { color: var(--text); background: var(--panel-3); }
 .native-console-ds-badge[data-state="armed"] { color: var(--amber); border-color: color-mix(in srgb, var(--amber) 45%, var(--line)); background: color-mix(in srgb, var(--amber) 10%, transparent); }
 .native-console-ds-badge[data-state="ready"] { color: var(--muted); }
+/* A removal the browser never confirmed is louder than an armed set: the
+   researcher believes nothing runs, and it still might. */
+.native-console-ds-badge[data-state="unconfirmed"] { color: var(--red); border-color: color-mix(in srgb, var(--red) 45%, var(--line)); background: color-mix(in srgb, var(--red) 10%, transparent); }
 .native-console-ds { font: 11px/18px var(--sans); padding-top: 6px; }
 .native-console-ds > summary { color: var(--muted); cursor: pointer; }
 .native-console-panel[data-document-start="armed"] .native-console-ds > summary { color: var(--amber); }
@@ -2482,6 +2485,7 @@ body.resizing-panes-y, body.resizing-panes-y * { cursor: row-resize !important; 
   .native-console-ds-badge::before { content: ''; width: 6px; height: 6px; border-radius: 50%; background: var(--faint); }
   .native-console-ds-badge[data-state="ready"]::before { background: var(--muted); }
   .native-console-ds-badge[data-state="armed"]::before { background: var(--amber); }
+  .native-console-ds-badge[data-state="unconfirmed"]::before { background: var(--red); }
   .native-console-composer-footer { font-size: 10px; }
   .native-console-composer-footer #native-console-input-help { display: none; }
 }

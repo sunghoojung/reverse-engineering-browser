@@ -415,6 +415,8 @@
     function requested() { return ds('enable').checked === true; }
     function armedCount() { return view?.document_start?.scripts?.length || 0; }
     function permitted() { return view?.document_start?.permitted === true; }
+    // The browser may still run a set the owner could not confirm it cleared.
+    function unconfirmed() { return view?.document_start?.status === 'unconfirmed'; }
     function message(text, error = false) {
       ds('notice').textContent = text; ds('notice').title = text;
       ds('notice').dataset.kind = error ? 'error' : 'status'; ds('notice').hidden = !text;
@@ -423,17 +425,21 @@
       const live = documentSource === 'live_capture';
       const armed = armedCount();
       const badge = ds('badge');
-      // The indicator stays outside the settings menu: an armed experiment must
-      // be visible without opening anything.
-      badge.hidden = !session && !armed;
-      badge.textContent = armed ? `Doc-start: ${armed} armed` : permitted() ? 'Doc-start: ready' : 'Doc-start: off';
-      badge.dataset.state = armed ? 'armed' : permitted() ? 'ready' : 'off';
-      badge.setAttribute('aria-label', armed
-        ? `Document-start scripts: ${armed} armed. Open the experiment settings.`
-        : 'Document-start scripts: none armed. Open the experiment settings.');
+      // The indicator stays outside the settings menu: an armed experiment, or
+      // one whose removal was never confirmed, must be visible without opening
+      // anything and must never read as off.
+      const uncleared = unconfirmed();
+      badge.hidden = !session && !armed && !uncleared;
+      badge.textContent = uncleared ? 'Doc-start: unconfirmed' : armed ? `Doc-start: ${armed} armed` : permitted() ? 'Doc-start: ready' : 'Doc-start: off';
+      badge.dataset.state = uncleared ? 'unconfirmed' : armed ? 'armed' : permitted() ? 'ready' : 'off';
+      badge.setAttribute('aria-label', uncleared
+        ? 'Document-start scripts: clearing was not confirmed, so new matching documents may still run them. Open the experiment settings.'
+        : armed ? `Document-start scripts: ${armed} armed. Open the experiment settings.`
+          : 'Document-start scripts: none armed. Open the experiment settings.');
       root.dataset.documentStart = badge.dataset.state;
       const status = ds('state');
       status.textContent = failed ? 'Document-start state unavailable. The last known state is preserved; nothing was armed or cleared.'
+        : uncleared ? (view.document_start.message || 'Clearing document-start scripts was not confirmed.')
         : !session ? (requested()
             ? 'Permitted for the next disposable session. Connect, then arm a rule. Nothing runs until you arm one.'
             : 'Connect a session with this permitted, or relaunch the live capture with REB_CONSOLE_DOCUMENT_START=1.')
@@ -508,7 +514,7 @@
     function apply(value, epoch = outputGeneration) {
       if (value?.contract_version !== 3 || !['idle', 'ready'].includes(value.state) ||
           (value.available !== undefined && typeof value.available !== 'boolean') || !value.document_start ||
-          !['ok', 'error', 'idle', 'unavailable'].includes(value.document_start.status)) {
+          !['ok', 'error', 'idle', 'unavailable', 'unconfirmed'].includes(value.document_start.status)) {
         throw new TypeError('Malformed document-start state');
       }
       const next = value.document_start;
@@ -675,6 +681,8 @@
       documentStart.reset(); documentStart.refresh(true);
     });
   });
+  // Re-read the experiment after either outcome: a failed live Stop can leave
+  // a set the browser never confirmed it cleared, and that must stay visible.
   controls.stop.addEventListener('click', () => enqueue('stop', {}, () => {
     ++generation; session = null; controls['live-consent'].checked = false;
     if (documentSource === 'live_capture') {
@@ -684,7 +692,7 @@
       documentSource = ''; clearTargets(); boundary('Experiment disconnected. Retained values released.'); notice('Disposable browser and profile removed.');
     }
     documentStart.reset();
-  }));
+  }).then(() => documentStart.refresh(true)));
   controls.refresh.addEventListener('click', () => !session ? refreshLiveDocuments(true) : enqueue('targets', {}, value => { ++generation; targets(value); controls.connection.open = false; boundary('Document listing refreshed. A missing live document requires disconnect and explicit reselection.'); }));
   controls.target.addEventListener('change', () => {
     selectedBinding = liveBinding;

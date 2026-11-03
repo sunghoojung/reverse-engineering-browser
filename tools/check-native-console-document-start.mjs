@@ -92,7 +92,7 @@ export async function checkNativeConsoleDocumentStart(root) {
   const calls = [];
   const reads = [];
   let session = null, permitted = false, generation = 0, armed = [], output = [], nextSequence = 1;
-  let readFails = false, malformed = false, armRefused = false;
+  let readFails = false, malformed = false, armRefused = false, stopUnconfirmed = false, unconfirmed = false;
   const record = (sequence, kind, text, script = '1') => ({
     sequence: String(sequence), record: kind, provenance: 'console-document-start-script',
     script_id: script, document_id: '7', frame_id: '99', top_frame: true,
@@ -115,7 +115,10 @@ export async function checkNativeConsoleDocumentStart(root) {
       if (readFails) return {ok: false, status: 503, json: async () => ({error: 'Document-start read unavailable'})};
       const after = new URL(path, 'http://127.0.0.1').searchParams.get('after_sequence');
       assert.match(after, /^(0|[1-9][0-9]{0,19})$/, 'the cursor must stay a canonical decimal');
-      const value = documentStartState(after);
+      const value = !session && unconfirmed
+        ? {status: 'unconfirmed', permitted: false, scripts: [],
+          message: 'The capture browser did not confirm that it cleared the armed document-start scripts. Restart the capture before relying on documents running nothing.'}
+        : documentStartState(after);
       if (malformed) value.output.records = [{...record(nextSequence, 'report', 'x'), provenance: 'native-capture'}];
       return {ok: true, status: 200, json: async () => ({contract_version: 3, available: true,
         state: session ? 'ready' : 'idle', session_id: session, document_start: value,
@@ -164,6 +167,12 @@ export async function checkNativeConsoleDocumentStart(root) {
         document_start: documentStartState('0')})};
     }
     if (action.action === 'stop') {
+      if (stopUnconfirmed && armed.length) {
+        // The owner ended the binding but the browser never confirmed the clear.
+        session = null; permitted = false; armed = []; output = []; unconfirmed = true;
+        return {ok: false, status: 409, json: async () => ({error: 'The capture browser did not confirm that it cleared the armed document-start scripts.',
+          code: 'state_conflict', details: {}})};
+      }
       session = null; permitted = false; armed = []; output = [];
       return {ok: true, status: 200, json: async () => ({contract_version: 2, state: 'idle', session_id: null})};
     }
@@ -305,6 +314,27 @@ export async function checkNativeConsoleDocumentStart(root) {
   // One accepted arm and one refused arm; a disconnected panel adds neither.
   assert.equal(calls.filter(call => call.action === 'arm_document_start').length, 2);
 
+  // A Disconnect whose clear the browser never confirmed must not read as off:
+  // the indicator stays visible and says the scripts may still run.
+  await get('start').click(); await settle();
+  ds('origin').value = 'http://127.0.0.1:8080'; ds('source').value = "report('x');";
+  await ds('source').emit('input');
+  ds('consent').checked = true; await ds('consent').emit('change');
+  await ds('arm').click(); await settle();
+  assert.equal(ds('badge').dataset.state, 'armed');
+  stopUnconfirmed = true;
+  await get('stop').click(); await settle();
+  assert.match(get('notice').textContent, /did not confirm/);
+  assert.equal(ds('badge').hidden, false, 'an unconfirmed removal stays visible');
+  assert.equal(ds('badge').dataset.state, 'unconfirmed');
+  assert.match(ds('badge').getAttribute('aria-label'), /may still run/);
+  assert.match(ds('state').textContent, /Restart the capture/);
+  assert.equal(ds('arm').disabled, true, 'nothing can be armed through an ended binding');
+  // A later Stop that finds no session still cannot turn it into "off".
+  await get('stop').click(); await settle();
+  assert.equal(ds('badge').dataset.state, 'unconfirmed');
+  stopUnconfirmed = false; unconfirmed = false;
+
   // The shipped example snippet, wrapped exactly as the browser wraps it and
   // driven against a synthetic window. It must observe the definition it was
   // installed before, and report only kinds, lengths and a digest.
@@ -321,7 +351,7 @@ export async function checkNativeConsoleDocumentStart(root) {
   assert.ok(reports.every(entry => !String(entry).includes('authored-secret')),
     'the example snippet must never log a raw observed value');
 
-  console.log('PASS Console document-start panel: disabled control, launch-time permission, explicit consent, exact rule, inert page-JavaScript output, non-draining cursor, preserved state on failure, a cleared set, and an example snippet that logs no observed value');
+  console.log('PASS Console document-start panel: disabled control, launch-time permission, explicit consent, exact rule, inert page-JavaScript output, non-draining cursor, preserved state on failure, a cleared set, an unconfirmed removal that never reads as off, and an example snippet that logs no observed value');
 }
 
 if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) {

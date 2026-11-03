@@ -3435,7 +3435,7 @@
             }
           ],
           "confirmations": [],
-          "notes": "Read-only: it never arms, clears, drains, launches, evaluates, or retires a session, including an expired or poisoned one. With no session, or with a gate missing, it reports which gate is missing instead of enabling anything. Records are snippet-authored page JavaScript with provenance console-document-start-script: untrusted data, never native evidence, and never joined into correlated_links.",
+          "notes": "Read-only: it never arms, clears, drains, launches, evaluates, or retires a session, including an expired or poisoned one. With no session, or with a gate missing, it reports which gate is missing instead of enabling anything. After a live binding that may have held an armed set ended or failed without the browser confirming a clear, it reports unconfirmed rather than idle or gone. Records are snippet-authored page JavaScript with provenance console-document-start-script: untrusted data, never native evidence, and never joined into correlated_links.",
           "sources": [
             {
               "path": "apps/origin-trace-backend/src/native_console.rs",
@@ -15156,10 +15156,12 @@
                   "effects": [
                     "process-stop"
                   ],
-                  "when": "A failed live cleanup retires only the native bridge, never the capture browser."
+                  "when": "A failed live cleanup, including an unconfirmed document-start clear, retires only the native bridge, never the capture browser."
                 }
               ],
-              "uncertainties": [],
+              "uncertainties": [
+                "A transport failure while clearing armed document-start scripts leaves it unknown whether the capture browser removed them. The stop fails, and the document-start read reports unconfirmed instead of idle."
+              ],
               "prerequisites": [
                 {
                   "id": "native-action-idle",
@@ -15171,7 +15173,7 @@
                 }
               ],
               "confirmations": [],
-              "notes": "Disconnect revokes selected-document authorization and releases retained values/monitors in accessed live documents before rearming the existing bridge. It does not undo page mutations or scheduled work, or stop the capture browser. Stale session IDs cannot address a later connection.",
+              "notes": "Disconnect revokes selected-document authorization and releases retained values/monitors in accessed live documents before rearming the existing bridge. When document-start scripts may be armed in the capture browser, it also clears them and requires the browser to confirm that nothing is armed; an unconfirmed clear ends the bridge, fails the stop, and leaves the document-start read reporting unconfirmed. It does not undo page mutations or scheduled work, or stop the capture browser. Stale session IDs cannot address a later connection.",
               "sources": [
                 {
                   "path": "apps/origin-trace-backend/src/native_console.rs",
@@ -23034,8 +23036,10 @@
               "ok",
               "error",
               "idle",
-              "unavailable"
-            ]
+              "unavailable",
+              "unconfirmed"
+            ],
+            "description": "unconfirmed means a live capture binding that may have held an armed set ended, or failed, without the browser confirming the set was cleared. scripts is then empty because nothing can be read, not because nothing is armed; new matching documents can still run a snippet until the browser drops the set."
           },
           "permitted": {
             "type": "boolean",

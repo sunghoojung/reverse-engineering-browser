@@ -153,6 +153,11 @@ wildcard, no host suffix, and no URL guessing.
 - **Clearing really stops it.** After `clear_document_start`, a `report`
   function the page retained becomes an inert no-op. Work the snippet already
   scheduled in the page is not rolled back.
+- **Disconnecting a live capture clears it too.** The capture browser outlives
+  each Console connection, so Disconnect clears an armed set and waits for the
+  browser to confirm it. If that cannot be confirmed, Disconnect fails and the
+  state reads `unconfirmed`, not idle: restart the capture before relying on new
+  documents running nothing.
 
 ## Limits worth remembering
 

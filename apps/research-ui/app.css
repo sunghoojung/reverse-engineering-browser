@@ -2474,6 +2474,14 @@ body.resizing-panes-y, body.resizing-panes-y * { cursor: row-resize !important; 
   .native-console-panel[data-session="idle"]:not([data-document-source="live_capture"]) .native-console-context { display: none; }
   .native-console-context select { width: 100%; flex: 1; }
   .native-console-head-spacer, .native-console-extended-help, .native-console-private { display: none; }
+  /* Keep the experiment indicator reachable in a narrow header as a marker
+     rather than a label that squeezes the other controls out. Its title and
+     accessible name still carry the full state, and an armed experiment stays
+     the only amber marker in the header. */
+  .native-console-ds-badge { display: flex; align-items: center; justify-content: center; width: 22px; max-width: 22px; padding: 0; font-size: 0; }
+  .native-console-ds-badge::before { content: ''; width: 6px; height: 6px; border-radius: 50%; background: var(--faint); }
+  .native-console-ds-badge[data-state="ready"]::before { background: var(--muted); }
+  .native-console-ds-badge[data-state="armed"]::before { background: var(--amber); }
   .native-console-composer-footer { font-size: 10px; }
   .native-console-composer-footer #native-console-input-help { display: none; }
 }

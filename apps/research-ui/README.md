@@ -400,8 +400,13 @@ Every app session also enables quiet mode and native Wasm `br_table` and
 `call_indirect` dispatch capture; Wasm dispatch forces Liftoff-only compilation,
 so Wasm-heavy pages run slower. Set `REB_NATIVE_QUIET_MODE=0`,
 `REB_NATIVE_WASM_DISPATCH=0` or `REB_NATIVE_WASM_CALL_INDIRECT=0` to opt out.
-Guest-state and JavaScript dispatch-site capture still need an adapter or site
-file and stay off until one is supplied. The launcher log's `Native switches:`
+Guest-state, JavaScript dispatch-site and JavaScript invocation capture still
+need an adapter or site file and stay off until one is supplied; invocation
+value digests additionally need `REB_NATIVE_JS_INVOCATION_DIGESTS=1`. A request
+trace shows `issued_during_invocation`, `invocation_settlement` and
+`invocation_value_flow` steps, and VM Lab rows name the JavaScript invocation a
+Wasm record ran in; see the
+[invocation contract](../../protocol/native-js-invocation-v1.md). The launcher log's `Native switches:`
 line records the effective state.
 
 The app creates a private evidence directory and isolated browser

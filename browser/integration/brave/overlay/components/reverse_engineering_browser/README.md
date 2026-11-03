@@ -152,6 +152,17 @@ keeps its drop count; budget, emitter, invalid-input and compiled-before-arming
 refusals are coalesced gaps. See the
 [contract](../../../../../../protocol/native-js-dispatch-v1.md).
 
+Native JavaScript invocation records (`js_invocation_start`,
+`js_invocation_settle` and `js_invocation_request`, events 22 to 24) use
+`common/native_js_invocation.h` for the payloads and the 44-byte
+function-entry site records (shape 3), and `common/native_js_invocation_sites.h`
+for the browser-side site file. The sink claims one of 256 starts per
+configuration and one of 64 per site, and one of 256 request records; settles
+carry a digest only under the session's opt-in. It reads the current
+invocation through a provider Blink installs, for Wasm `br_table` and
+`call_indirect` observations, guest invocation markers and loader requests.
+See the [contract](../../../../../../protocol/native-js-invocation-v1.md).
+
 Renderer code never writes files or sockets directly.
 
 The dedicated-worker source foundation uses a separate, dormant process-wide

@@ -23,6 +23,12 @@ coalesced gaps, ring-full claim release, transport and input gaps,
 compiled-before-arming gaps per slot, and the fixed site list. The V8-facing
 calls are checked not to invoke the frame-id provider.
 
+Native JavaScript invocation cases check the disabled, allocation-free path,
+category and expiry refusal, an armed configuration with no call, the
+64-per-site start budget with its coalesced gap, the exact site match, the
+digest opt-in, inside, none, unknown and worker request reads with the
+256-record request budget, status gaps per slot and the fixed site list.
+
 For ASan/UBSan, run:
 
 ```sh

@@ -1,6 +1,8 @@
 # Native JavaScript invocation identity v1
 
-Status: reviewed design, written before any probe code. The wire contract is
+Status: reviewed design, written before any probe code and now implemented by
+V8 patch `0011`, Chromium patch `0021`, the overlay and the backend. The wire
+contract is
 [native JavaScript invocation observations v1](../../protocol/native-js-invocation-v1.md).
 [Implementation map](#implementation-map) records which layer does what and
 which acceptance layers remain.
@@ -368,7 +370,9 @@ The value-flow join counts as a correlated link only when all hold:
 | Emitter refused an admitted record | per configuration | `native_js_invocation_transport_unavailable` |
 | Renderer ring full | 8,192 records | existing drop counter |
 | Wrapper from an older configuration | per record | state `unknown`, never a guessed ID |
-| Settlement never observed | per invocation | no settle record; the backend says "not observed" |
+| Settlement never observed | per invocation | a start without a settle record: its settlement was not observed, and no value-flow join can use it |
+| Value search in one request body | 16 MiB hashed | gap `value_flow_unsearched`; no link |
+| Two settled values match one body | per trace | gap `value_flow_ambiguous`; no link |
 
 Every loss is a gap or a state. Nothing falls back to a time window, a URL or
 the last known invocation.
@@ -436,4 +440,15 @@ Live (needs a rebuilt Brave, on the build machine):
 | V8 | patch `v8/0011`: flag (implies the dispatch flag), embedder interface, arming table and statuses, entry/exit/handler emission, frame record, CPED wrapper and API rules, settle reaction, digests, `GetCurrentJsInvocation`, cctests |
 | Chromium | patch `chromium/0021`: install the callbacks, admit live documents, read the current invocation for Wasm records and `SendAsync` |
 | Overlay | wire header, site-file parsing for `function-entry`, renderer budgets and gaps, Mojo configuration, browser forwarding of Wasm context |
-| Protocol and backend | events 22 to 24, Wasm payload versions, C++/Python/Rust/JavaScript validators, origin-trace relations, value-flow join, viewer labels |
+| Protocol and backend | events 22 to 24, Wasm payload versions, C++/Python/Rust/JavaScript validators, origin-trace relations in the broker index, the value-flow join in both the Rust and the native app's Swift trace builders, viewer labels |
+| Tooling | `tools/native-js-invocation-site.py` writes the site file; the launcher's `REB_NATIVE_JS_INVOCATION_SITES` and `REB_NATIVE_JS_INVOCATION_DIGESTS` |
+
+What runs in this repository's gate: the C++ parity and rule test, the Python
+validator, the Rust readers and value search, the shared Rust and Swift trace
+cases, the broker-to-backend relation check, the real renderer sink under the
+portable admission suite, the browser host's configuration and forwarding, and
+the launcher. What runs only elsewhere: the `RebNativeJsInvocation*` cctests
+(native V8 runtime workflow) and a rebuilt Brave, for which the live checklist
+above is the remaining acceptance layer. Ordered replay of `0011` and `0021`
+was checked statically: every preimage blob equals the postimage the pinned
+upstream, Brave and REB stacks produce for that file.

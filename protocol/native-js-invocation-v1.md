@@ -85,6 +85,15 @@ its frame and a stable 64-bit digest of the document's `DocumentToken`. The
 renderer sink rechecks the configuration generation, session, VM category and
 expiry, requires the start to name its slot's configured site exactly, and
 claims one of 256 starts for the configuration and one of 64 for the site.
+V8 has already wrapped every call whose start it reports, so each reported
+start spends its claims even when the renderer then refuses it as input or
+the emitter rejects it; only a full ring returns them. Blink's refusal of a
+start whose context is not a live document spends one of the 256. A spent
+budget stops admission at once, so V8 stops wrapping calls at the embedder
+predicate, even while the ring cannot take the budget gap. A gap the ring
+could not take is held and written before the next start or settle record
+once the ring has room, or when the configuration ends; the ring's drop
+counter covers it until then.
 Settles have no separate budget: each admitted call settles at most once.
 The renderer records a settle only for a start it admitted, and that settle
 closes the start even when the settle record itself is refused, dropped or

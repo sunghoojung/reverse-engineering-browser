@@ -1524,6 +1524,7 @@ int main() {
   Run<&NativeJsDispatchAdmission>();
   Run<&NativeJsInvocationAdmission>();
   Run<&NativeJsInvocationOpenStarts>();
+  Run<&NativeJsInvocationBudgetCaps>();
   Run<&DispatchSampleAdmission>();
   Run<&DispatchEmitFailureReleasesBudget>();
   Run<&OwnedRegisterSamplerAdmission>();

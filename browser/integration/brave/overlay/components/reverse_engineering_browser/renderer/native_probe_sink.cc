@@ -1178,9 +1178,11 @@ void NativeProbeSink::SetEmitters(const NativeRendererProbeEmitter emitter,
                                   const std::uint64_t expires_at_monotonic_ns,
                                   const bool capture_canvas_images,
                                   const NativeProbeFrameIdProvider frame_id_provider) noexcept {
-  // Flush dispatch losses into the configuration that observed them before
-  // the emitter and generation change. A replacement session must opt in again.
+  // Flush dispatch losses and held invocation gaps into the configuration
+  // that observed them before the emitter and generation change. A
+  // replacement session must opt in again.
   PublishVmDispatchBudgetGap();
+  PublishNativeJsInvocationGaps(config_generation_.load(std::memory_order_acquire));
   DisableOwnedRegisterSampling();
   DisablePageGuestSampling();
   // SetEmitters is serialized by NativeProbeTransport's bound sequence. Stop
@@ -2797,10 +2799,31 @@ bool NativeProbeSink::NoteNativeJsInvocationOmission(const std::uint64_t generat
       auto claimed = generation - 1;
       slot.compare_exchange_strong(claimed, retained ? generation : previous,
                                    std::memory_order_acq_rel);
+      if (!retained) {
+        // The ring counted this record's drop; the reason is written once
+        // the ring has room.
+        CapNativeJsGeneration(native_invocation_gap_wanted_[gap], generation);
+        CapNativeJsGeneration(native_invocation_gap_held_, generation);
+      }
       return retained;
     }
   }
   return previous == generation;
+}
+
+void NativeProbeSink::PublishNativeJsInvocationGaps(const std::uint64_t generation) noexcept {
+  if (generation == 0 || (generation & 1U) != 0)
+    return;
+  auto held = native_invocation_gap_held_.load(std::memory_order_acquire);
+  if (held != generation || !native_invocation_gap_held_.compare_exchange_strong(
+                                held, generation - 1, std::memory_order_acq_rel))
+    return;
+  // A gap that fails again is held again by NoteNativeJsInvocationOmission.
+  for (std::size_t gap = 0; gap < kInvocationGapCount; ++gap) {
+    if (native_invocation_gap_wanted_[gap].load(std::memory_order_acquire) == generation &&
+        native_invocation_gap_generations_[gap].load(std::memory_order_acquire) != generation)
+      NoteNativeJsInvocationOmission(generation, 0, gap);
+  }
 }
 
 void NativeProbeSink::RecordNativeJsInvocationStart(
@@ -2816,11 +2839,33 @@ void NativeProbeSink::RecordNativeJsInvocationStart(
   std::atomic_thread_fence(std::memory_order_acquire);
   if (config_generation_.load(std::memory_order_acquire) != epoch || session_id == 0)
     return;
+  PublishNativeJsInvocationGaps(epoch);
   payload.site_sample_index = 0;
   payload.sample_index = 0;
+  // V8 has already given this call an ID, a wrapper and a coming settle, so
+  // every reported start spends its claims whether or not it is retained, and
+  // a spent budget stops admission at once even when the ring cannot take its
+  // gap yet. Refused calls therefore never keep V8 wrapping past the budget.
   const std::size_t site_slot = payload.site_slot;
-  bool matches =
-      frame_id != 0 && site_slot < native_invocation_site_count_.load(std::memory_order_acquire);
+  const bool known_site = site_slot < native_invocation_site_count_.load(std::memory_order_acquire);
+  std::size_t site_index = 0, index = 0;
+  std::uint64_t site_previous = 0, previous = 0;
+  if (known_site && !ClaimNativeJsSlot(native_invocation_site_slots_[site_slot], epoch, site_index,
+                                       site_previous)) {
+    CapNativeJsGeneration(native_invocation_site_capped_generations_[site_slot], epoch);
+    NoteNativeJsInvocationOmission(epoch, frame_id, kInvocationSiteBudgetGap);
+    return;
+  }
+  if (!ClaimNativeJsSlot(native_invocation_slots_, epoch, index, previous)) {
+    if (known_site)
+      ReleaseNativeJsSlot(native_invocation_site_slots_[site_slot][site_index], epoch,
+                          site_previous);
+    CapNativeJsGeneration(native_invocation_capped_generation_, epoch);
+    NoteNativeJsInvocationOmission(epoch, frame_id, kInvocationBudgetGap);
+    return;
+  }
+  native_invocation_open_starts_[index].store(0, std::memory_order_release);
+  bool matches = known_site && frame_id != 0;
   if (matches) {
     const auto& site = native_invocation_sites_[site_slot];
     matches = payload.source_length == site.source_length &&
@@ -2831,21 +2876,6 @@ void NativeProbeSink::RecordNativeJsInvocationStart(
     NoteNativeJsInvocationOmission(epoch, frame_id, kInvocationInputGap);
     return;
   }
-  auto& site_slots = native_invocation_site_slots_[site_slot];
-  std::size_t site_index = 0, index = 0;
-  std::uint64_t site_previous = 0, previous = 0;
-  if (!ClaimNativeJsSlot(site_slots, epoch, site_index, site_previous)) {
-    if (NoteNativeJsInvocationOmission(epoch, frame_id, kInvocationSiteBudgetGap))
-      CapNativeJsGeneration(native_invocation_site_capped_generations_[site_slot], epoch);
-    return;
-  }
-  if (!ClaimNativeJsSlot(native_invocation_slots_, epoch, index, previous)) {
-    ReleaseNativeJsSlot(site_slots[site_index], epoch, site_previous);
-    if (NoteNativeJsInvocationOmission(epoch, frame_id, kInvocationBudgetGap))
-      CapNativeJsGeneration(native_invocation_capped_generation_, epoch);
-    return;
-  }
-  native_invocation_open_starts_[index].store(0, std::memory_order_release);
   payload.site_sample_index = static_cast<std::uint16_t>(site_index);
   payload.sample_index = static_cast<std::uint16_t>(index);
   NativeProbeEvent event;
@@ -2868,11 +2898,14 @@ void NativeProbeSink::RecordNativeJsInvocationStart(
       native_invocation_open_.fetch_add(1, std::memory_order_relaxed);
     return;
   }
-  // A full ring counts its own drop; any other refusal is a transport gap.
-  ReleaseNativeJsSlot(native_invocation_slots_[index], epoch, previous);
-  ReleaseNativeJsSlot(site_slots[site_index], epoch, site_previous);
-  if (status == NativeProbeEmitStatus::kRejected)
-    NoteNativeJsInvocationOmission(epoch, frame_id, kInvocationTransportGap);
+  // A full ring counts its own drop and drains, so it returns both claims for
+  // a later call. Any other refusal keeps them and is a transport gap.
+  if (status == NativeProbeEmitStatus::kQueueFull) {
+    ReleaseNativeJsSlot(native_invocation_slots_[index], epoch, previous);
+    ReleaseNativeJsSlot(native_invocation_site_slots_[site_slot][site_index], epoch, site_previous);
+    return;
+  }
+  NoteNativeJsInvocationOmission(epoch, frame_id, kInvocationTransportGap);
 }
 
 void NativeProbeSink::RecordNativeJsInvocationSettle(
@@ -2886,6 +2919,7 @@ void NativeProbeSink::RecordNativeJsInvocationSettle(
   std::atomic_thread_fence(std::memory_order_acquire);
   if (config_generation_.load(std::memory_order_acquire) != epoch || session_id == 0)
     return;
+  PublishNativeJsInvocationGaps(epoch);
   // Each admitted call settles once. The settle closes its start before its
   // own record is attempted, so a refused or dropped settle record never
   // leaves the start open. A settle whose start was refused or dropped is not
@@ -2957,8 +2991,20 @@ void NativeProbeSink::NoteNativeJsInvocationStatus(
 void NativeProbeSink::NoteNativeJsInvocationInputUnavailable(
     const std::uint64_t epoch,
     const std::uint64_t frame_id) noexcept {
-  if (NativeJsInvocationActive(epoch))
-    NoteNativeJsInvocationOmission(epoch, frame_id, kInvocationInputGap);
+  if (!NativeJsInvocationActive(epoch))
+    return;
+  PublishNativeJsInvocationGaps(epoch);
+  // V8 already wrapped this call, so its refusal spends a start like any
+  // other; calls from a detached document stop at the budget.
+  std::size_t index = 0;
+  std::uint64_t previous = 0;
+  if (!ClaimNativeJsSlot(native_invocation_slots_, epoch, index, previous)) {
+    CapNativeJsGeneration(native_invocation_capped_generation_, epoch);
+    NoteNativeJsInvocationOmission(epoch, frame_id, kInvocationBudgetGap);
+    return;
+  }
+  native_invocation_open_starts_[index].store(0, std::memory_order_release);
+  NoteNativeJsInvocationOmission(epoch, frame_id, kInvocationInputGap);
 }
 
 void NativeProbeSink::NoteNativeJsInvocationSettleUnavailable(
@@ -3020,8 +3066,9 @@ void NativeProbeSink::RecordNativeJsInvocationRequest(const std::int32_t request
   if (native_invocation_request_capped_generation_.load(std::memory_order_acquire) >= generation)
     return;
   if (!ClaimNativeJsSlot(native_invocation_request_slots_, generation, index, previous)) {
-    if (NoteNativeJsInvocationOmission(generation, frame_id, kInvocationRequestBudgetGap))
-      CapNativeJsGeneration(native_invocation_request_capped_generation_, generation);
+    // Capped even when the ring cannot take the gap yet; the gap is held.
+    CapNativeJsGeneration(native_invocation_request_capped_generation_, generation);
+    NoteNativeJsInvocationOmission(generation, frame_id, kInvocationRequestBudgetGap);
     return;
   }
   payload.sample_index = static_cast<std::uint16_t>(index);

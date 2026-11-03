@@ -156,7 +156,11 @@ Sparkplug) and keeps timing changes declared rather than tier-dependent.
   expiry and the per-configuration and per-site budgets. A call that is not
   admitted gets no ID and does not change the current invocation, so its work
   stays attributed to whatever was current before (its own caller's
-  invocation, or none). The budget loss is a coalesced gap.
+  invocation, or none). The budget loss is a coalesced gap. A call admitted
+  here spends budget even when the renderer then refuses its start record, and
+  a spent budget closes the predicate at once, even while a full ring delays
+  the gap. The budget therefore bounds how many calls V8 wraps, not only how
+  many starts are retained.
 
 ## Propagation rules
 

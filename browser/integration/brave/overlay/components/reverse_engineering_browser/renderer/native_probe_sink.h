@@ -257,7 +257,8 @@ class COMPONENT_EXPORT(REB_NATIVE_PROBE_SINK) NativeProbeSink final {
   [[nodiscard]] std::size_t CopyNativeJsInvocationSites(
       std::uint64_t epoch,
       std::span<NativeJsInvocationSite> out) const noexcept;
-  // False once the configuration's 256 starts or the slot's 64 are spent.
+  // False once the configuration's 256 starts or the slot's 64 are spent,
+  // counting starts the renderer refused, so V8 stops wrapping calls there.
   [[nodiscard]] bool IsNativeJsInvocationEnabled(std::uint64_t epoch,
                                                  std::uint32_t slot) const noexcept;
   [[nodiscard]] bool NativeJsInvocationDigests(std::uint64_t epoch) const noexcept;
@@ -275,6 +276,8 @@ class COMPONENT_EXPORT(REB_NATIVE_PROBE_SINK) NativeProbeSink final {
   void NoteNativeJsInvocationStatus(std::uint64_t epoch,
                                     std::uint32_t slot,
                                     NativeJsInvocationSiteStatus status) noexcept;
+  // Blink refused a start V8 reported because its context is not a live
+  // document; like any refused start it spends one of the 256.
   void NoteNativeJsInvocationInputUnavailable(std::uint64_t epoch, std::uint64_t frame_id) noexcept;
   // The settle of invocation_id could not be read because its document went
   // away; it still closes an admitted start.
@@ -425,9 +428,15 @@ class COMPONENT_EXPORT(REB_NATIVE_PROBE_SINK) NativeProbeSink final {
                                kInvocationGapCount =
                                    kInvocationUnsupportedGap + kNativeJsInvocationSiteLimit;
   [[nodiscard]] bool NativeJsInvocationActive(std::uint64_t generation) const noexcept;
+  // Returns whether the gap is retained. One the ring cannot take is held
+  // until PublishNativeJsInvocationGaps retains it.
   bool NoteNativeJsInvocationOmission(std::uint64_t generation,
                                       std::uint64_t frame_id,
                                       std::size_t gap) noexcept;
+  // Writes the held gaps of generation. Called before an invocation record
+  // takes its sequence and before the configuration changes; one load while
+  // nothing is held.
+  void PublishNativeJsInvocationGaps(std::uint64_t generation) noexcept;
   // Closes the admitted start of invocation_id and returns its site slot;
   // false when no admitted start of this generation is open under that ID.
   bool CloseNativeJsInvocation(std::uint64_t generation,
@@ -451,6 +460,12 @@ class COMPONENT_EXPORT(REB_NATIVE_PROBE_SINK) NativeProbeSink final {
       native_invocation_site_capped_generations_{};
   std::atomic<std::uint64_t> native_invocation_request_capped_generation_{0};
   std::array<std::atomic<std::uint64_t>, kInvocationGapCount> native_invocation_gap_generations_{};
+  // A cap stops admission whether or not its gap was retained, so a gap the
+  // full ring refused is held: the latest generation that needs each gap, and
+  // the generation with at least one held gap (generation - 1 once
+  // published).
+  std::array<std::atomic<std::uint64_t>, kInvocationGapCount> native_invocation_gap_wanted_{};
+  std::atomic<std::uint64_t> native_invocation_gap_held_{0};
   // The admitted start holding each claimed sample index, as
   // (invocation ID << 8) | site slot, or 0 once settled. An entry counts only
   // while native_invocation_slots_ at its index holds the same generation, so

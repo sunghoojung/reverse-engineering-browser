@@ -311,4 +311,89 @@ NativeJsInvocationContext ReadInvocation() noexcept {
                "including when its record is dropped, refused or unavailable, and never a "
                "refused start\n";
 }
+
+// Every start V8 reports spends budget, and a spent budget stops admission at
+// once even while the ring cannot take its gap, so refused calls never keep V8
+// wrapping. A held gap is written before the next invocation record once the
+// ring has room, or when the configuration ends.
+[[gnu::noinline]] void NativeJsInvocationBudgetCaps() {
+  NativeProbeQueue queue;
+  sink.SetNativeJsInvocationContextProvider(&ReadInvocation);
+  const auto next = [&]() {
+    NativeProbeEvent event;
+    assert(queue.TryPop(event));
+    return event;
+  };
+  ConfigureInvocation(queue);
+  const auto epoch = sink.NativeJsInvocationEpoch();
+  for (std::uint32_t n = 0; n < 64; ++n) {
+    sink.RecordNativeJsInvocationStart(epoch, 8, StartFor(0, n + 1));
+    sink.RecordNativeJsInvocationSettle(epoch, 8, SettleFor(n + 1, false));
+    assert(Drain(queue) == 2);
+  }
+  // The 65th call finds site 0 spent while the ring is full. Admission stops
+  // at once and the ring counts the gap it could not take.
+  Fill(queue);
+  const auto dropped = queue.DroppedCount();
+  sink.RecordNativeJsInvocationStart(epoch, 8, StartFor(0, 65));
+  assert(queue.DroppedCount() == dropped + 1);
+  assert(!sink.IsNativeJsInvocationEnabled(epoch, 0) && sink.IsNativeJsInvocationEnabled(epoch, 1));
+  Drain(queue);
+  // V8 still settles the call it wrapped. That settle is not recorded; the
+  // held gap is written once there is room, and only once.
+  sink.RecordNativeJsInvocationSettle(epoch, 8, SettleFor(65, false));
+  assert(InvocationGap(One(queue)) == "native_js_invocation_site_budget_incomplete");
+  sink.RecordNativeJsInvocationStart(epoch, 8, StartFor(1, 66));
+  assert(One(queue).header.type == reb::NativeProbeType::kJsInvocationStart);
+  // Starts refused as input spend site 1's remaining 63 like retained ones.
+  auto wrong = StartFor(1, 67);
+  wrong.anchor_offset = 42;
+  for (std::uint32_t n = 0; n < 63; ++n) {
+    wrong.invocation_id = 67 + n;
+    sink.RecordNativeJsInvocationStart(epoch, 8, wrong);
+  }
+  assert(InvocationGap(One(queue)) == "native_js_invocation_input_unavailable");
+  assert(sink.IsNativeJsInvocationEnabled(epoch, 1));
+  sink.RecordNativeJsInvocationStart(epoch, 8, StartFor(1, 130));
+  assert(Drain(queue) == 0);  // the site budget gap is per configuration
+  assert(!sink.IsNativeJsInvocationEnabled(epoch, 1));
+
+  // Blink's refusals of starts from a detached document spend the
+  // configuration's 256. The cap holds while the ring is full, and the
+  // configuration's end writes the held gap.
+  ConfigureInvocation(queue);
+  const auto second = sink.NativeJsInvocationEpoch();
+  for (std::uint32_t n = 0; n < 256; ++n)
+    sink.NoteNativeJsInvocationInputUnavailable(second, 0);
+  assert(InvocationGap(One(queue)) == "native_js_invocation_input_unavailable");
+  assert(sink.IsNativeJsInvocationEnabled(second, 0));
+  Fill(queue);
+  sink.NoteNativeJsInvocationInputUnavailable(second, 0);
+  assert(!sink.IsNativeJsInvocationEnabled(second, 0) &&
+         !sink.IsNativeJsInvocationEnabled(second, 1));
+  Drain(queue);
+  ConfigureInvocation(queue);
+  assert(InvocationGap(One(queue)) == "native_js_invocation_budget_incomplete");
+
+  // The request budget caps the same way; its held gap precedes the next
+  // start rather than splitting a request from its request_initiated record.
+  const auto third = sink.NativeJsInvocationEpoch();
+  InvocationProvider::context = {2, 4, true};
+  for (std::int32_t n = 0; n < 256; ++n)
+    sink.RecordNativeJsInvocationRequest(100 + n);
+  assert(Drain(queue) == 256);
+  Fill(queue);
+  sink.RecordNativeJsInvocationRequest(1000);
+  Drain(queue);
+  sink.RecordNativeJsInvocationRequest(1001);
+  assert(Drain(queue) == 0);
+  sink.RecordNativeJsInvocationStart(third, 8, StartFor(0, 140));
+  assert(InvocationGap(next()) == "native_js_invocation_request_budget_incomplete");
+  assert(One(queue).header.type == reb::NativeProbeType::kJsInvocationStart);
+  transport.Disable();
+  sink.SetNativeJsInvocationContextProvider(nullptr);
+  std::cout << "PASS native JS invocation budget caps: refused starts spend budget, a spent "
+               "budget stops admission with a full ring, and held gaps are written once the "
+               "ring has room or the configuration ends\n";
+}
 }  // namespace

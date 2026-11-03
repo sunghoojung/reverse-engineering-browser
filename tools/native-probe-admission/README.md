@@ -31,7 +31,11 @@ digest opt-in, inside, none, unknown and worker request reads with the
 open-start cases check that a settle closes only its own admitted start,
 including when the ring drops its record, its input is refused or its document
 went away, and that the settle of a start the site budget refused is not
-recorded and closes nothing.
+recorded and closes nothing. The budget-cap cases check that starts refused
+as input, and Blink's refusals of starts from a detached document, spend
+budget; that a spent site, configuration or request budget stops admission
+while the ring is full; and that the held gap is written once, before the next
+start or settle record or when the configuration ends.
 
 For ASan/UBSan, run:
 

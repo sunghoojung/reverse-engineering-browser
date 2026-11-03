@@ -93,6 +93,9 @@ export async function checkNativeConsoleDocumentStart(root) {
   const reads = [];
   let session = null, permitted = false, generation = 0, armed = [], output = [], nextSequence = 1;
   let readFails = false, malformed = false, armRefused = false, stopUnconfirmed = false, unconfirmed = false, refusedProcesses = 0;
+  // A live capture's binding as /api/native-console lists it before any Console
+  // connection: the browser's own report of its launch-time permission.
+  let liveSupported = null;
   const record = (sequence, kind, text, script = '1') => ({
     sequence: String(sequence), record: kind, provenance: 'console-document-start-script',
     script_id: script, document_id: '7', frame_id: '99', top_frame: true,
@@ -129,6 +132,13 @@ export async function checkNativeConsoleDocumentStart(root) {
           {context: 'already_open_document', reason: 'Reload a document that was open when the set was armed.'}]})};
     }
     if (path === '/api/native-console') {
+      if (liveSupported !== null && !session) {
+        return {ok: true, status: 200, json: async () => ({contract_version: 2, state: 'idle', session_id: null,
+          available: true, live_available: true, document_source: 'live_capture', binding_id: '5',
+          targets: [{id: '21', origin: 'http://127.0.0.1:8080', label: 'top #21', url: 'http://127.0.0.1:8080/lab/',
+            main_frame: true, truncated: false}], truncated: false, selected_target_id: null,
+          document_start_supported: liveSupported, message: 'live capture'})};
+      }
       return {ok: true, status: 200, json: async () => ({contract_version: 2, state: session ? 'ready' : 'idle',
         session_id: session, available: true, message: ''})};
     }
@@ -204,6 +214,29 @@ export async function checkNativeConsoleDocumentStart(root) {
   assert.equal(ds('clear').disabled, true);
   await ds('arm').click(); await settle();
   assert.equal(calls.length, 0, 'a disabled control must never dispatch');
+
+  // A live capture the packaged app launched with the permission shows it
+  // before any Console connection, and still arms nothing on its own.
+  liveSupported = true;
+  await context.testConsole.initialize(true); await context.testConsole.documentStart.refresh(true); await settle();
+  assert.equal(ds('badge').hidden, false, 'a permitted live capture is visible without opening anything');
+  assert.equal(ds('badge').dataset.state, 'permitted');
+  assert.equal(ds('badge').textContent, 'Doc-start: permitted');
+  assert.match(ds('badge').title, /permitted for this live capture, none armed/, 'a narrow header keeps the state in the hover title');
+  assert.equal(ds('badge').getAttribute('aria-label'), ds('badge').title);
+  assert.match(ds('state').textContent, /This live capture permits document-start scripts.*Nothing runs until you arm one/);
+  assert.equal(ds('arm').disabled, true, 'permission is not a connection or consent');
+  await ds('arm').click(); await settle();
+  assert.equal(calls.length, 0, 'a permitted live capture arms nothing without a connection');
+  // An older browser, or an explicit REB_CONSOLE_DOCUMENT_START=0, lists no
+  // permission: no indicator, and the settings say why.
+  liveSupported = false;
+  await context.testConsole.initialize(true); await context.testConsole.documentStart.refresh(true); await settle();
+  assert.equal(ds('badge').hidden, true);
+  assert.match(ds('state').textContent, /lacks the rebuilt overlay, or it was started with REB_CONSOLE_DOCUMENT_START=0/);
+  liveSupported = null;
+  await context.testConsole.initialize(true); await context.testConsole.documentStart.refresh(true); await settle();
+  assert.equal(ds('badge').hidden, true);
 
   // Permission is a launch-time decision carried by the explicit opt-in.
   get('url').value = 'http://127.0.0.1:8080/lab/';
@@ -361,7 +394,7 @@ export async function checkNativeConsoleDocumentStart(root) {
   assert.ok(reports.every(entry => !String(entry).includes('authored-secret')),
     'the example snippet must never log a raw observed value');
 
-  console.log('PASS Console document-start panel: disabled control, launch-time permission, explicit consent, exact rule, inert page-JavaScript output, non-draining cursor, preserved state on failure, a cleared set, an unconfirmed removal that never reads as off, and an example snippet that logs no observed value');
+  console.log('PASS Console document-start panel: disabled control, launch-time permission, a live capture permission shown before connecting, explicit consent, exact rule, inert page-JavaScript output, non-draining cursor, preserved state on failure, a cleared set, an unconfirmed removal that never reads as off, and an example snippet that logs no observed value');
 }
 
 if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) {

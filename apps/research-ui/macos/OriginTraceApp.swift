@@ -2432,22 +2432,6 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
 }
 
 private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigationDelegate {
-  private enum LiveCaptureMode: String {
-    case metadata
-    case content
-
-    var capturesNetworkContent: Bool { self == .content }
-
-    var title: String {
-      switch self {
-      case .metadata:
-        return "Metadata only (recommended)"
-      case .content:
-        return "Full request and response content"
-      }
-    }
-  }
-
   private var window: NSWindow?
   private weak var webView: WKWebView?
   private var contentHandler: LocalContentHandler?
@@ -2457,8 +2441,10 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
   private var closeSmoke: NativeCloseGuardSmoke?
   private let liveSessionCoordinator = LiveSessionCoordinator()
   private let smokeTest = ProcessInfo.processInfo.environment["REB_APP_SMOKE_TEST"] == "1"
-  private var selectedCaptureMode = LiveCaptureMode.content
-  private var selectedSystemKeychain = false
+  // The researcher's choices for this app run. They start from the environment
+  // and follow the setup dialog, so a reopen never replaces Metadata with the default.
+  private lazy var selectedCaptureMode = LiveCaptureMode.configured(ProcessInfo.processInfo.environment)
+  private lazy var selectedSystemKeychain = configuredAutomaticSystemKeychain()
   private var automaticSessionSuppressed = false
   private var liveSessionDecisionOpen = false
   private var localApplicationURL: URL?
@@ -2631,8 +2617,8 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
   private func requestAutomaticLiveSession() {
     guard !liveSessionCoordinator.isRunning else { return }
     startAutomaticLiveSession(
-      captureMode: configuredAutomaticCaptureMode(),
-      useSystemKeychain: configuredAutomaticSystemKeychain()
+      captureMode: selectedCaptureMode,
+      useSystemKeychain: selectedSystemKeychain
     )
   }
 
@@ -2640,17 +2626,15 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
     guard NSApp.isRunning, !liveSessionCoordinator.isRunning else { return }
     presentOriginTraceWindow()
 
+    let captureModes: [LiveCaptureMode] = [.content, .metadata]
     let captureMode = NSPopUpButton(frame: NSRect(x: 0, y: 0, width: 390, height: 28))
-    captureMode.addItems(withTitles: [
-      LiveCaptureMode.metadata.title,
-      LiveCaptureMode.content.title,
-    ])
-    captureMode.selectItem(at: selectedCaptureMode == .content ? 1 : 0)
+    captureMode.addItems(withTitles: captureModes.map(\.title))
+    captureMode.selectItem(at: captureModes.firstIndex(of: selectedCaptureMode) ?? 0)
 
     let modeLabel = NSTextField(labelWithString: "Capture mode")
     modeLabel.font = NSFont.systemFont(ofSize: NSFont.smallSystemFontSize, weight: .semibold)
     let privacyLabel = NSTextField(wrappingLabelWithString:
-      "Metadata mode keeps request hosts and each request body's length, type and SHA-256. Content mode also retains request paths, queries and request bodies up to 256 KiB. Headers are not captured. Artifacts keep raw source URLs locally; only an explicitly exported redacted copy is altered."
+      "Content mode, the default, retains request paths, queries and request bodies up to 256 KiB each, and Canvas images. Metadata mode keeps request hosts and each request body's length, type and SHA-256, without Canvas images. Neither mode captures headers. Artifacts keep raw source URLs locally; only an explicitly exported redacted copy is altered."
     )
     privacyLabel.textColor = .secondaryLabelColor
     privacyLabel.maximumNumberOfLines = 0
@@ -2693,7 +2677,7 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
       return
     }
     automaticSessionSuppressed = false
-    selectedCaptureMode = captureMode.indexOfSelectedItem == 1 ? .content : .metadata
+    selectedCaptureMode = captureModes[max(0, captureMode.indexOfSelectedItem)]
     selectedSystemKeychain = keychainToggle.state == .on
     startAutomaticLiveSession(
       captureMode: selectedCaptureMode,
@@ -2745,13 +2729,6 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
         )
       }
     )
-  }
-
-  private func configuredAutomaticCaptureMode() -> LiveCaptureMode {
-    guard let value = ProcessInfo.processInfo.environment["REB_AUTOMATIC_CAPTURE_MODE"] else {
-      return .content
-    }
-    return LiveCaptureMode(rawValue: value) ?? .content
   }
 
   private func configuredAutomaticSystemKeychain() -> Bool {

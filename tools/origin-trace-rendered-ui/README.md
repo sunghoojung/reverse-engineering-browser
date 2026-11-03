@@ -47,6 +47,17 @@ No smoke flag or test hook exists in the product, and nothing here uses the
 Chrome DevTools Protocol. The evidence is synthetic; this suite does not
 establish live browser capture.
 
+`test17LiveCaptureDefaultsAreLabeled` checks what an app-started capture
+shows by default at both window sizes. The harness URL says the session
+retains request content, as the packaged app's Content mode does. The harness
+backend serves a stored session with no broker or capture browser, so the
+test's own page `fetch` marks the event reads live and answers the two Console
+reads as a capture browser launched with document-start permission does. The
+titlebar's **Content capture** label must sit beside the session state, name
+what is retained and not be clipped. The Console header chip must read
+`Doc-start: permitted` in full, stay inside the header, overlap no other header
+control, and leave arming disabled. Nothing connects, arms or runs.
+
 At both window sizes, those budget gaps must leave the footer free of queue
 drops, Traffic without a loss notice and Fingerprinting at full coverage, while
 the VM notice names both reasons as inert text.

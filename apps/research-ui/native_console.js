@@ -429,19 +429,30 @@
       // one whose removal was never confirmed, must be visible without opening
       // anything and must never read as off.
       const uncleared = unconfirmed();
-      badge.hidden = !session && !armed && !uncleared;
-      badge.textContent = uncleared ? 'Doc-start: unconfirmed' : armed ? `Doc-start: ${armed} armed` : permitted() ? 'Doc-start: ready' : 'Doc-start: off';
-      badge.dataset.state = uncleared ? 'unconfirmed' : armed ? 'armed' : permitted() ? 'ready' : 'off';
-      badge.setAttribute('aria-label', uncleared
+      // Before any Console connection, the capture browser's own listing says
+      // whether this live capture was launched with the permission. The
+      // packaged app grants it by default, so it is shown, not assumed.
+      const listed = !session && liveAvailable ? liveListing?.document_start_supported : undefined;
+      const livePermitted = listed === true;
+      badge.hidden = !session && !armed && !uncleared && !livePermitted;
+      badge.textContent = uncleared ? 'Doc-start: unconfirmed' : armed ? `Doc-start: ${armed} armed` : permitted() ? 'Doc-start: ready'
+        : livePermitted ? 'Doc-start: permitted' : 'Doc-start: off';
+      badge.dataset.state = uncleared ? 'unconfirmed' : armed ? 'armed' : permitted() ? 'ready' : livePermitted ? 'permitted' : 'off';
+      const described = uncleared
         ? 'Document-start scripts: clearing was not confirmed, so new matching documents may still run them. Open the experiment settings.'
         : armed ? `Document-start scripts: ${armed} armed. Open the experiment settings.`
-          : 'Document-start scripts: none armed. Open the experiment settings.');
+          : livePermitted ? 'Document-start scripts: permitted for this live capture, none armed. Arming needs a live Console connection and a separate confirmation. Open the experiment settings.'
+            : 'Document-start scripts: none armed. Open the experiment settings.';
+      // A narrow header shows only a marker, so the hover title carries the state too.
+      badge.setAttribute('aria-label', described); badge.title = described;
       root.dataset.documentStart = badge.dataset.state;
       const status = ds('state');
       status.textContent = failed ? 'Document-start state unavailable. The last known state is preserved; nothing was armed or cleared.'
         : uncleared ? (view.document_start.message || 'Clearing document-start scripts was not confirmed.')
         : !session ? (requested()
             ? 'Permitted for the next disposable session. Connect, then arm a rule. Nothing runs until you arm one.'
+            : livePermitted ? 'This live capture permits document-start scripts. Connect to a selected live document, then arm a rule. Nothing runs until you arm one.'
+            : listed === false ? 'This live capture does not permit document-start scripts: its browser lacks the rebuilt overlay, or it was started with REB_CONSOLE_DOCUMENT_START=0. Permit them for a disposable session above, or restart the capture with a rebuilt browser. Nothing is relaunched automatically.'
             : 'Connect a session with this permitted, or relaunch the live capture with REB_CONSOLE_DOCUMENT_START=1.')
         : permitted() ? `Armed scripts: ${armed}. A matching new document runs them before its own scripts.`
         : (view?.document_start?.message || 'Document-start scripts are not available in this session.');

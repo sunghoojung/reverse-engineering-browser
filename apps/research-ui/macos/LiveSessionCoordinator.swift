@@ -1,5 +1,33 @@
 import Foundation
 
+// The evidence boundary of an app-started capture. Content is the default;
+// Metadata is the opt-out.
+enum LiveCaptureMode: String {
+  case content
+  case metadata
+
+  var capturesNetworkContent: Bool { self == .content }
+
+  var title: String {
+    switch self {
+    case .content:
+      return "Content (default)"
+    case .metadata:
+      return "Metadata only"
+    }
+  }
+
+  // The app saves no choice between launches, so REB_AUTOMATIC_CAPTURE_MODE is
+  // the only durable one. Unset or empty means the default. Any other value but
+  // "content" selects Metadata, so a misspelled opt-out never turns on content.
+  static func configured(_ environment: [String: String]) -> LiveCaptureMode {
+    guard let value = environment["REB_AUTOMATIC_CAPTURE_MODE"], !value.isEmpty else {
+      return .content
+    }
+    return LiveCaptureMode(rawValue: value) ?? .metadata
+  }
+}
+
 final class LiveSessionCoordinator {
   private let lock = NSLock()
   private var process: Process?
@@ -393,6 +421,12 @@ final class LiveSessionCoordinator {
     for name in ["REB_NATIVE_WASM_DISPATCH", "REB_NATIVE_WASM_CALL_INDIRECT"] {
       environment[name] = environment[name] ?? (allows(1536) ? "1" : "0")
     }
+    // Permission only: the capture browser may later arm a document-start
+    // Console script, which still needs a live Console connection to a selected
+    // document and a separate confirmed arm. Nothing runs until then. A browser
+    // without the v3 overlay ignores the switch and the Console reports it
+    // unavailable. An explicit "0" opts out.
+    environment["REB_CONSOLE_DOCUMENT_START"] = environment["REB_CONSOLE_DOCUMENT_START"] ?? "1"
     return environment
   }
 

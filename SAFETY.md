@@ -59,8 +59,8 @@ it.
   normalized content type and SHA-256. A digest of a short or predictable body
   can be confirmed by guessing; password form posts keep no digest. Request
   paths, queries and body bytes are sensitive capture: they are retained only
-  with `REB_CAPTURE_REQUEST_CONTENT=1`, which the packaged app's content mode
-  sets, at most 256 KiB per body and 1,024 bodies or 64 MiB per session. See
+  with `REB_CAPTURE_REQUEST_CONTENT=1`, which the packaged app's default content
+  mode sets, at most 256 KiB per body and 1,024 bodies or 64 MiB per session. See
   [Native network v2](protocol/native-network-v2.md).
 - Historical captures can include sensitive URLs, headers, bodies and source.
   Removal of CDP does not sanitize previously saved evidence. Only collect and
@@ -76,9 +76,19 @@ it.
 
 ## Sensitive capture
 
-- Sensitive capture requires an enabled, visibly labeled session. The packaged
-  app's automatic research profile enables it for its bounded session;
-  standalone and metadata-only sessions leave it disabled.
+- Sensitive capture requires an enabled, visibly labeled session. Content mode
+  is the default for captures the packaged app starts: for its bounded session
+  it turns on retention of request paths, queries and bodies up to 256 KiB each
+  and of Canvas images, and the titlebar labels that session "Content
+  capture". **Metadata
+  only** is the opt-out, chosen in **New Live Session…** or with
+  `REB_AUTOMATIC_CAPTURE_MODE=metadata`; any other value but `content` also
+  selects it. The app saves no choice between launches, and a choice made in the
+  dialog holds for the rest of that app run. The standalone `make live` launcher
+  leaves request content and Canvas images off unless set to `1`. Agent-started
+  sessions (`reb-api session start`, MCP `start_live_session`) always leave
+  request content off, even when the switch is inherited, and turn Canvas images
+  on only with explicit confirmation.
 - Settled-value digests of armed JavaScript invocations are a sensitive
   capture path: `REB_NATIVE_JS_INVOCATION_DIGESTS=1`, accepted only with an
   invocation site file and labeled when the session starts. Each fulfilled
@@ -166,7 +176,17 @@ it.
   open. Arming requires a rebuilt browser, an explicit browser-session switch,
   and a separate confirmed action; a live capture additionally requires the
   existing selected-document live opt-in, and nothing is relaunched to obtain any
-  of them. Clearing the set, disconnecting, ending the session, or session expiry
+  of them. The packaged app grants that browser-session permission to every live
+  capture it starts, and the Console header shows it, reading "Doc-start:
+  permitted" before any Console connection; an explicit
+  `REB_CONSOLE_DOCUMENT_START=0` opts out. The permission arms
+  nothing: the declared rule, armed by that separate confirmed action, remains
+  the authorization boundary, and nothing runs until a rule is armed. A browser
+  built without the experiment ignores the switch and the Console reports it
+  unavailable. The standalone `make live` launcher and the disposable Console
+  grant it only when asked, and agent-started sessions (`reb-api session start`,
+  MCP `start_live_session`) never receive it, even when the switch is
+  inherited. Clearing the set, disconnecting, ending the session, or session expiry
   removes the scripts and their output; when the browser cannot confirm a removal,
   the Console reports it unconfirmed instead of idle. Snippet output is bounded, ephemeral
   page-JavaScript observation with provenance `console-document-start-script`: it
@@ -202,6 +222,7 @@ of the data-handling policy:
 | Artifact receiver `--allow-sensitive` gate | `services/artifact-receiver/main.cpp` |
 | Request path and body gate (`--reb-capture-request-content`) | Brave overlay `native_probe_socket_client.cc` and `native_network_capture_sink.cc`; receiver `--allow-sensitive` |
 | Capture category mask and session expiration | `protocol/README.md`, native probes |
+| Agent-started sessions get neither request content nor document-start permission | [`session_launch.rs`](apps/origin-trace-backend/src/session_launch.rs) |
 | JavaScript invocation value digests opt-in | `scripts/run-live-session.sh`, the overlay's `native_probe_session.cc`, and the renderer sink, which refuses a digest without it |
 | Origin allowlisting | Not implemented; the native event envelope lacks trustworthy origin identity |
 

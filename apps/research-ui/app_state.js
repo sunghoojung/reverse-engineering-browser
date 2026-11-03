@@ -3,6 +3,8 @@
       const standalonePreview = typeof location !== 'undefined' && location.protocol === 'file:';
       const canvasImageCaptureEnabled = typeof location !== 'undefined' &&
         new URLSearchParams(location.search).get('canvas_images') === '1';
+      const requestContentCaptureEnabled = typeof location !== 'undefined' &&
+        new URLSearchParams(location.search).get('request_content') === '1';
       const sampleRequests = [];
       const sampleEvidence = [];
       const sampleArtifacts = [];
@@ -75,6 +77,7 @@
         events: [],
         canvasRenderCaptures: [],
         canvasImageCaptureEnabled,
+        requestContentCaptureEnabled,
         nativeRequests: [],
         requests: standalonePreview ? [...sampleRequests] : [],
         artifacts: standalonePreview ? [...sampleArtifacts] : [],
@@ -252,6 +255,7 @@
       const elements = {
         capture: document.querySelector('#capture-state'),
         sessionMode: document.querySelector('#session-mode'),
+        sessionContent: document.querySelector('#session-content'),
         broker: document.querySelector('#broker-status'),
         updated: document.querySelector('#updated-status'),
         gaps: document.querySelector('#gap-status'),

@@ -15,6 +15,9 @@ unknown tool, or one hidden without `--allow-effects`, is rejected before any
 HTTP call. JSON larger than the inline limit returns a structural summary and
 omits source, bytecode, and long strings. See
 [AGENTS.md](../../AGENTS.md) and the [HTTP API guide](../../protocol/http-api.md).
+For the calls behind common questions, such as whether a capture worked, which
+Wasm modules a session stored, the samples of one frame, or waiting for new
+activity, use the [agent cookbook](agent-cookbook.md).
 
 ## Connect a same-machine MCP client
 
@@ -500,6 +503,14 @@ has at most 16 entries. Artifact coverage is only a 256 KiB manifest tail;
 `window_truncated` and `items_omitted` are not evidence that an absent module was
 never captured. Artifact `script_id` is always `null`; no script is joined by
 URL, time, or hash.
+
+Then call `get_session_summary` with no arguments. It reports event counts by
+type and frame, gap reasons, artifact digests, and `checks` that name what
+looks wrong, in counts and identifiers only. Read the records behind a count
+with `get_events` and `get_artifacts` filters and a small `limit`, and call
+`wait_for_events` after an action instead of polling. See
+[filtered and paged reads](../../protocol/http-api.md#filtered-and-paged-reads)
+and the [agent cookbook](agent-cookbook.md).
 
 Cache `/api/session/context` with its own response ETag and `If-None-Match`;
 context is not an atomic evidence snapshot. Invalid action bodies such as

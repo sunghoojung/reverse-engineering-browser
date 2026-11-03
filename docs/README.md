@@ -31,6 +31,9 @@ skills under `.agents/skills/`.
   explicit session selection, same-machine MCP client configuration, guarded
   CLI inspection, exact evidence correlation, and offline client authoring
   with synthetic tests
+- [Agent cookbook](development/agent-cookbook.md): exact MCP tool calls for
+  checking a capture, finding Wasm modules and samples, waiting for activity,
+  and following native requests
 - [Fast local Brave builds](development/fast-browser-builds.md)
 - [Origin Trace + Brave paired release](development/paired-release.md):
   browser build, provenance, pinned hosting, pairing pin and publication for v0.5.0

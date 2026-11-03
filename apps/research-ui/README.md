@@ -592,11 +592,13 @@ the evidence order. The selected request opens General, Initiator, Timing,
 Signals and Evidence beside the ledger above 1100 px, or below it in narrow
 windows. Both panes stay within the available workspace height; the request
 ledger and inspector body scroll independently. Captured-tab and domain filters
-share a compact row at narrow widths. Native capture records the method, URL or
-host, status and lifecycle timing of each request. Request and response headers
-and bodies are not captured, so Traffic has no header, body, preview, comparison
-or content-search views; General states that coverage. Missing initiators and
-timing phases stay explicitly unavailable.
+share a compact row at narrow widths. Native capture records the method, host,
+status and lifecycle timing of each request, and the request body's length,
+type and SHA-256. Content capture sessions add the path and query and bounded
+request body bytes, which General shows as text. Request and response headers
+and response bodies are not captured, so Traffic has no header, response,
+preview, comparison or content-search views; General states that coverage.
+Missing initiators and timing phases stay explicitly unavailable.
 Request signal profiles are owned by the exact selected session, request and root
 event. Late responses cannot replace a newer selection or refresh. Malformed or
 failed refreshes preserve only the last validated profile for that same identity

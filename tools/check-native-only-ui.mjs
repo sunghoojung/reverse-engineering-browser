@@ -135,7 +135,7 @@ runInContext(`state.requests = [{id: 'legacy', path: 'legacy.invalid', method: '
   state.selectedRequestId = 'legacy'; state.trafficDetailOpen = true; state.inspectorTab = 'payload'; renderInspector();`, context);
 assert.equal(runInContext('state.inspectorTab', context), 'general', 'unknown restored tabs fall back to General');
 const general = document.getElementById('exchange-inspector').textContent;
-assert.match(general, /headers and bodies are not captured/);
+assert.match(general, /headers and response bodies are not captured/);
 assert.doesNotMatch(general, /cdp-body-needle|cdp-header-needle/);
 assert.equal(runInContext("trafficSearchRequests(state.requests, 'cdp-body-needle').matches.size", context), 0);
 // Guest bytecode buffers are binary: hex view, never decoded text.

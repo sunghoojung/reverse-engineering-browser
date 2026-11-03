@@ -416,7 +416,13 @@ pub async fn launch(options: &StartOptions) -> Result<Started, String> {
         .join(".config/origin-trace/agent-sessions")
         .join(&nonce);
     private_directory(&agent)?;
-    let sessions_root = options.sessions_root.clone().unwrap_or(kit.sessions_root);
+    // An explicit root wins, then the operator's REB_LIVE_SESSION_ROOT, as
+    // for make live, then the build's own default.
+    let sessions_root = options
+        .sessions_root
+        .clone()
+        .or_else(|| std::env::var_os("REB_LIVE_SESSION_ROOT").map(PathBuf::from))
+        .unwrap_or(kit.sessions_root);
     private_directory(&sessions_root)?;
     let log_file = agent.join("launch.log");
     let log = {

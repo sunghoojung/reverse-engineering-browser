@@ -149,7 +149,8 @@ enum SessionCommand {
         /// Absolute path of the Brave executable.
         #[arg(long, value_name = "FILE")]
         brave_binary: Option<PathBuf>,
-        /// Directory for session directories (default: the build's own root).
+        /// Directory for session directories (default: REB_LIVE_SESSION_ROOT,
+        /// then the build's own root).
         #[arg(long, value_name = "DIR")]
         sessions_root: Option<PathBuf>,
         /// Seconds to wait for capture to be ready, 10..600 (default 180).

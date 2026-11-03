@@ -93,6 +93,18 @@ class NativeArtifactCaptureSink final {
                                          mojo_base::BigBuffer content,
                                          std::uint64_t parent_artifact_id = 0);
 
+  // Queues the bounded request-body prefix chosen by the network sink as a
+  // sensitive request_body artifact. Returns its ID, or zero when nothing was
+  // queued; the caller records that outcome in its request_body event, so no
+  // failure event is emitted here. The later receiver ACK reports
+  // artifact_captured or artifact_capture_failed with creator_event_id as parent.
+  [[nodiscard]] std::uint64_t CaptureRequestBody(std::uint64_t request_id,
+                                                 std::uint64_t frame_id,
+                                                 std::uint64_t creator_event_id,
+                                                 std::string url,
+                                                 std::string mime_type,
+                                                 std::vector<std::uint8_t> content);
+
   static void TransferCompleted(std::uint64_t artifact_id,
                                 NativeArtifactReceiveStatus status) noexcept;
 

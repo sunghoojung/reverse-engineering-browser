@@ -7,6 +7,7 @@
 #define BRAVE_COMPONENTS_REVERSE_ENGINEERING_BROWSER_BROWSER_NATIVE_NETWORK_CAPTURE_SINK_H_
 
 #include <atomic>
+#include <cstddef>
 #include <cstdint>
 #include <string_view>
 
@@ -14,6 +15,8 @@
 #include "base/no_destructor.h"
 
 #include "brave/components/reverse_engineering_browser/common/native_probe_event.h"
+
+class GURL;
 
 namespace content {
 class BrowserContext;
@@ -49,10 +52,14 @@ class NativeNetworkCaptureSink final {
   void SetOwnedProfilePath(base::FilePath path);
   [[nodiscard]] bool IsOwnedContext(content::BrowserContext* context) const;
   [[nodiscard]] std::uint64_t generation() const noexcept;
+  // capture_content admits raw request targets and body bytes for this
+  // configuration (--reb-capture-network-content). Metadata-only sessions keep
+  // host-only targets and record body length, type and digest without bytes.
   void SetEmitter(NativeProbeEmitter emitter,
                   std::uint64_t session_id,
                   std::uint64_t category_mask,
-                  std::uint64_t expires_at_monotonic_ns) noexcept;
+                  std::uint64_t expires_at_monotonic_ns,
+                  bool capture_content = false) noexcept;
 
   void RecordRequestStarted(std::uint64_t request_id,
                             std::int32_t initiator_request_id,
@@ -95,12 +102,24 @@ class NativeNetworkCaptureSink final {
   friend class base::NoDestructor<NativeNetworkCaptureSink>;
   NativeNetworkCaptureSink() = default;
 
+  void EmitRequestTarget(NativeProbeEmitter emitter,
+                         const NativeProbeHeader& parent,
+                         const GURL& url) noexcept;
+  void EmitRequestBody(NativeProbeEmitter emitter,
+                       const NativeProbeHeader& parent,
+                       const network::ResourceRequest& request,
+                       bool capture_content) noexcept;
+
   base::FilePath owned_profile_path_;
   std::atomic<std::uint64_t> generation_{0};
   std::atomic<NativeProbeEmitter> emitter_{nullptr};
   std::atomic<std::uint64_t> session_id_{0};
   std::atomic<std::uint64_t> category_mask_{0};
   std::atomic<std::uint64_t> expires_at_monotonic_ns_{0};
+  std::atomic<bool> capture_content_{false};
+  // Request-body artifacts admitted in this configuration (UI sequence).
+  std::atomic<std::size_t> request_body_count_{0};
+  std::atomic<std::size_t> request_body_bytes_{0};
 };
 
 }  // namespace reb

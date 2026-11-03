@@ -180,6 +180,7 @@ source_set("browser") {
     "common/native_js_dispatch.h",
     "common/native_js_dispatch_sites.h",
     "common/native_network_lifecycle.h",
+    "common/native_network_request.h",
     "common/native_probe_event.h",
     "common/native_probe_ipc.h",
     "common/native_runtime_snapshot_queue.h",

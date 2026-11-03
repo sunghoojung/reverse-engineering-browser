@@ -75,6 +75,10 @@ enum class NativeProbeType : std::uint16_t {
   kWasmGuestInvocation = 19,
   kWasmIndirectObservation = 20,
   kJsDispatchObservation = 21,
+  // Network request body summary and content-mode request target; see
+  // protocol/native-network-v2.md.
+  kRequestBody = 22,
+  kRequestTarget = 23,
 };
 
 enum class NativeProbeFlag : std::uint16_t {

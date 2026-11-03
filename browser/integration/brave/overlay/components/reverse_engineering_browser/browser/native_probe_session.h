@@ -36,7 +36,8 @@ class NativeProbeSession final {
                                   std::uint64_t category_mask,
                                   std::uint64_t expires_at_monotonic_ns,
                                   bool capture_canvas_images,
-                                  NativeProbeEmitter downstream) noexcept;
+                                  NativeProbeEmitter downstream,
+                                  bool capture_network_content = false) noexcept;
   void StopSession() noexcept;
 
   [[nodiscard]] const std::string& guest_adapter_json() const noexcept {
@@ -52,6 +53,7 @@ class NativeProbeSession final {
   [[nodiscard]] std::uint64_t category_mask() const noexcept;
   [[nodiscard]] std::uint64_t expires_at_monotonic_ns() const noexcept;
   [[nodiscard]] bool capture_canvas_images() const noexcept;
+  [[nodiscard]] bool capture_network_content() const noexcept;
   [[nodiscard]] std::uint64_t NextBrowserSequence() noexcept;
   void Emit(const NativeProbeEvent& event) const noexcept;
 
@@ -75,6 +77,7 @@ class NativeProbeSession final {
   std::atomic<std::uint64_t> category_mask_{0};
   std::atomic<std::uint64_t> expires_at_monotonic_ns_{0};
   std::atomic<bool> capture_canvas_images_{false};
+  std::atomic<bool> capture_network_content_{false};
   std::atomic<std::uint64_t> next_browser_sequence_{1};
 };
 

@@ -1453,4 +1453,3 @@ final class OriginTraceRenderedUITests: XCTestCase {
     try await clearSavedSites(ui)
   }
 }
-

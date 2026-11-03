@@ -23,8 +23,9 @@ existing Traffic, Field trace, reviewed Repeater and Go/JavaScript client paths.
 
 REA's source-pinned API-surface and completeness work inspired this
 retained-evidence/explicit-limitations workflow. The new UI implementation is
-original; the existing source attribution and MIT notice remain in
-[`third_party/rea`](../../third_party/rea/README.md). No runtime or new dependency
+original. REA was reviewed at
+[`bb54082`](https://github.com/morluto/rea/tree/bb540826d65316c164d2de8ba4ef10f81a8ad073);
+its adapted catalog code was later removed with CDP. No runtime or new dependency
 is added, and no route-template or service-semantic inference is imported.
 
 ## Refactor boundary

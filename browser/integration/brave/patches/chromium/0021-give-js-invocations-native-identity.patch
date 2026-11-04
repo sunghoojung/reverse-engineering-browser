@@ -2,7 +2,7 @@ diff --git a/third_party/blink/renderer/bindings/core/v8/v8_initializer.cc b/thi
 index 80e13505a580cc9884ce7c7ec6b17c2f4df102af..ec7cf542bfa3c33911fca06e1fadc1452a166240 100644
 --- a/third_party/blink/renderer/bindings/core/v8/v8_initializer.cc
 +++ b/third_party/blink/renderer/bindings/core/v8/v8_initializer.cc
-@@ -584,6 +584,170 @@ void NoteJsDispatchStatus(const std::uint64_t epoch,
+@@ -584,6 +584,172 @@ void NoteJsDispatchStatus(const std::uint64_t epoch,
    }
  }
  
@@ -94,10 +94,12 @@ index 80e13505a580cc9884ce7c7ec6b17c2f4df102af..ec7cf542bfa3c33911fca06e1fadc145
 +      start.parent_unknown ? 0 : start.parent_invocation_id;
 +  const std::size_t described = std::min<std::size_t>(
 +      start.argument_count, reb::kNativeJsInvocationArgumentLimit);
++  // The V8 struct exposes raw arrays; spans keep every index bounds-checked.
++  const auto kinds = base::span(start.argument_kinds);
++  const auto low32 = base::span(start.argument_low32);
 +  for (std::size_t i = 0; i < described; ++i) {
-+    payload.argument_kinds[i] =
-+        static_cast<std::uint8_t>(start.argument_kinds[i]);
-+    payload.argument_low32[i] = start.argument_low32[i];
++    payload.argument_kinds[i] = static_cast<std::uint8_t>(kinds[i]);
++    payload.argument_low32[i] = low32[i];
 +  }
 +  base::span(payload.source_sha256)
 +      .copy_from(UNSAFE_BUFFERS(
@@ -173,7 +175,7 @@ index 80e13505a580cc9884ce7c7ec6b17c2f4df102af..ec7cf542bfa3c33911fca06e1fadc145
  void CaptureWasmModuleBytes(v8::Local<v8::Context> context,
                              const v8::WasmModuleBytesOrigin origin,
                              const std::uint8_t* bytes,
-@@ -1635,6 +1799,19 @@ void V8Initializer::InitializeV8Common(v8::Isolate* isolate) {
+@@ -1635,6 +1801,19 @@ void V8Initializer::InitializeV8Common(v8::Isolate* isolate) {
      js_dispatch.observe = CaptureJsDispatch;
      js_dispatch.status = NoteJsDispatchStatus;
      isolate->SetJsDispatchCallbacks(js_dispatch);

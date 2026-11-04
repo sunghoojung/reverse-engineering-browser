@@ -68,10 +68,11 @@ Every well-framed increasing ID is consumed, including when a generation/count
 guard rejects the operation. Repeating that ID with corrected fields never
 dispatches. Zero, lower, or reused IDs reject without changing the high-water
 mark. Generation and count must exactly match even for inspect/close. Guards
-are checked in this order: framing, request ID, generation, count, identifier
-exhaustion, real monotonic expiry, operation. Stale generation/count rejection
-does not inspect or expire the current run's deadline and does not attempt a
-recorder write. A current guarded request with ID UINT64_MAX returns resource
+are checked in this order: framing, request ID, identifier exhaustion,
+generation, count, real monotonic expiry, operation. Stale generation/count
+rejection does not inspect or expire the current run's deadline and does not
+attempt a recorder write. A well-framed request with ID UINT64_MAX consumes the
+last ID even when its generation or count is stale, so it returns resource
 limit and retires without dispatch; the ID must never wrap.
 
 The clock is `steady_clock`, expressed as monotonic nanoseconds. An admitted

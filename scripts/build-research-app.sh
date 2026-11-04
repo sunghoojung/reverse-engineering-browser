@@ -8,7 +8,14 @@ if [[ "$(uname -s)" != "Darwin" ]]; then
 fi
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-app_path="${repo_root}/build/Origin Trace.app"
+final_app_path="${repo_root}/build/Origin Trace.app"
+# Assemble and sign a private copy, then replace the bundle in one rename. A
+# failed or interrupted build leaves the previous complete bundle, never an
+# unsigned partial one that only looks like an app.
+mkdir -p "${repo_root}/build"
+staging_root="$(mktemp -d "${repo_root}/build/.origin-trace-app.XXXXXX")"
+trap 'rm -rf "${staging_root}"' EXIT
+app_path="${staging_root}/Origin Trace.app"
 contents_path="${app_path}/Contents"
 macos_path="${contents_path}/MacOS"
 resources_path="${contents_path}/Resources"
@@ -32,15 +39,12 @@ icon_source="${repo_root}/apps/research-ui/macos/assets/origin-trace-icon.png"
 iconset_path="${repo_root}/build/OriginTrace.iconset"
 research_ui_resources="${resources_path}/research-ui"
 
-if [[ -e "${app_path}" ]]; then
-  rm -rf "${app_path}"
-fi
-
 mkdir -p "${macos_path}" "${resources_path}"
 cp "${repo_root}/apps/research-ui/macos/Info.plist" "${contents_path}/Info.plist"
 # Remember a reused local browser output without copying its source or bundle.
 # This optional hint never substitutes for the runtime bundle/executable checks.
-REB_PACKAGE_REPOSITORY="${repo_root}" REB_PACKAGE_RESOURCES="${resources_path}" python3 - <<'PY'
+REB_PACKAGE_REPOSITORY="${repo_root}" REB_PACKAGE_RESOURCES="${resources_path}" \
+  REB_PACKAGE_HEAD="$(git -C "${repo_root}" rev-parse HEAD 2>/dev/null || echo unknown)" python3 - <<'PY'
 import json
 import os
 from pathlib import Path
@@ -52,6 +56,11 @@ receipt = root / "build/integrated-brave-state.json"
 if not brave and receipt.is_file():
     state = json.loads(receipt.read_text())
     brave = state.get("brave")
+    head = os.environ["REB_PACKAGE_HEAD"]
+    if state.get("integration") != head:
+        # Only a location hint; the launcher's own checks still govern the browser.
+        print(f"Note: BraveBuild.plist names the Brave checkout recorded for integration "
+              f"{state.get('integration')}, not this source {head}; rebuild Brave to pair them.")
 output = os.environ.get("REB_BRAVE_OUTPUT_DIRECTORY")
 if not output:
     output = Path(brave).parent / "out/Component_arm64" if brave else root / "browser/worktree/src/out/Component_arm64"
@@ -162,4 +171,6 @@ xcrun swiftc \
   -o "${macos_path}/OriginTraceAnalystRunner"
 
 codesign --force --deep --sign - "${app_path}" >/dev/null
-echo "Built ${app_path}"
+rm -rf "${final_app_path}"
+mv "${app_path}" "${final_app_path}"
+echo "Built ${final_app_path}"

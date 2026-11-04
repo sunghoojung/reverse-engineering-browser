@@ -25,6 +25,7 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use serde_json::{Value, json};
+use sha2::Digest;
 use std::{
     collections::BTreeMap,
     path::{Path, PathBuf},
@@ -456,12 +457,20 @@ impl App {
                 };
                 // These documents are at most 1–2 MiB. Do not wait behind VM
                 // analysis or Wasm inspection, which hold the shared reader permits.
-                let value = tokio::task::spawn_blocking(move || store.load())
-                    .await
-                    .map_err(|e| Error::new(500, e.to_string()))?
-                    .map_err(|e| Error::new(500, e.message))?;
+                let (value, digest) = tokio::task::spawn_blocking(move || {
+                    store.load().map(|value| {
+                        // A store replaced outside this backend can repeat a
+                        // generation; its content still tells them apart.
+                        let bytes = serde_json::to_vec(&value).unwrap_or_default();
+                        let digest = hex::encode(&sha2::Sha256::digest(bytes)[..8]);
+                        (value, digest)
+                    })
+                })
+                .await
+                .map_err(|e| Error::new(500, e.to_string()))?
+                .map_err(|e| Error::new(500, e.message))?;
                 etag = Some(format!(
-                    "\"{}-{}\"",
+                    "\"{}-{}-{digest}\"",
                     if path.ends_with("api-collection") {
                         "api-collection"
                     } else {

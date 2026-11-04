@@ -38,6 +38,13 @@ spend budget; that a spent site, configuration or request budget stops
 admission while the ring is full; and that the held gap is written once,
 before the next start or settle record or when the configuration ends.
 
+Native guest cases also check that full document and activation tables are
+reclaimed (least recently sampled document; activation that is not an ancestor
+of the one being sampled) and refuse only a table of ancestors; that a capture
+the transport refuses frees its sample index and fills each sequence slot it
+took with a gap, as refused Wasm dispatch and call_indirect records do; and
+that a module verdict overwritten in the 256-entry ring is detected and resent.
+
 For ASan/UBSan, run:
 
 ```sh

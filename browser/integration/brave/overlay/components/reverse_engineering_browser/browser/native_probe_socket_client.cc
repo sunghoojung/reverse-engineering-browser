@@ -182,8 +182,8 @@ bool NativeProbeSocketClient::StartFromCommandLine() {
 
   browser_task_runner_ = base::SequencedTaskRunner::GetCurrentDefault();
   session_id_ = session_id;
-  // Until something is dropped, a transport gap names the session's lowest
-  // admitted category.
+  // Every drop records its category, but a gap can be built before that store
+  // is visible; the session's lowest admitted category covers that window.
   last_dropped_category_.store(
       static_cast<NativeProbeCategory>(std::countr_zero(category_mask) + 1),
       std::memory_order_relaxed);

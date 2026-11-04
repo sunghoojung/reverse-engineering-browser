@@ -153,6 +153,33 @@ occur after side effects. Requests are serialized and never automatically
 retried. Loss of the control channel exits the disposable browser. A
 live-capture binding does not exit the capture browser.
 
+## Live binding lifecycle
+
+The capture browser connects to its Console bridge once, at launch, and the
+bridge accepts one connection, so nothing re-arms a binding while the capture
+runs. `GET /api/native-console` reports it as `binding_state`: `connecting`
+until the browser answers its first listing, `ready` while idle, `connected`
+while a Console connection holds it, `lost` once it ends, and `absent` when the
+capture published none. For `lost`, `message` says why; restart the capture to
+recover. No second browser profile is launched.
+
+The backend waits for the first answer in its own handshake, so a state read
+never waits for browser startup. A state read waits for a running action rather
+than failing it, then lists the documents again, from the idle binding or the
+open connection, so a selected document that navigated reads stale. Console
+operations run to completion even when the HTTP client disconnects, so a
+dropped request cannot leave a half-written exchange. A failed or timed-out exchange, a record that retires the
+connection, unconfirmed Disconnect cleanup, an exited bridge, or the
+connection's one-hour limit ends the binding, because an ambiguous pipe is never
+reused. The hour is measured from arming, which precedes the browser's own
+one-hour connection deadline, so the backend never sends into a connection the
+browser has closed.
+
+The `binding` file is the launcher's one-time handshake record and stays with
+the capture's files; the helper removes its socket as soon as the browser
+connects. Each arm leaves exactly one of `binding` and `binding.absent`, even in
+a reused directory.
+
 ## Wire and API
 
 `common/native_console_protocol.h` owns trivially copyable little-endian ABI.
@@ -172,6 +199,11 @@ store, clear, last, source, listeners, monitor, unmonitor and traffic. Handles
 never cross document lifetimes. The [OpenAPI contract](openapi.json) specifies
 HTTP fields, requiredness and response shapes. Runtime status is ok, error,
 exception, pending or rejected, separate from transport status.
+
+An empty timeout (5) or disconnected (6) record retires the wire connection.
+Either status with text is one command's unknown outcome, such as a renderer
+that went away mid-command: the connection stays usable, the result carries
+`command_outcome_unknown`, and the command is never retried.
 
 The renderer uses the project-owned `v8-native-console.h` public bridge rather
 than V8's internal debug headers. Explicit commands retain native REPL evaluation

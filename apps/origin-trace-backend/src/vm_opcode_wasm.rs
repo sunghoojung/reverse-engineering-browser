@@ -9,6 +9,7 @@
 use super::MAX_HANDLERS;
 use crate::vm::{
     dispatch_shape::{Memory, Meter},
+    wasm_control::{self, BlockKind, Control},
     wasm_tables::{Placement, Tables},
 };
 use serde_json::{Value, json};
@@ -148,6 +149,16 @@ pub(super) fn handlers_under(
                         break;
                     };
                     let size = reader.original_position() - start;
+                    match wasm_control::control(&op) {
+                        Control::Open(block) => {
+                            loop_depth += usize::from(block == BlockKind::Loop);
+                            control.push(block);
+                        }
+                        Control::Close { .. } if control.pop() == Some(BlockKind::Loop) => {
+                            loop_depth -= 1;
+                        }
+                        _ => (),
+                    }
                     match op {
                         Operator::Call { function_index } => {
                             if function.calls.len() < MAX_CALLS_PER_FUNCTION
@@ -180,12 +191,6 @@ pub(super) fn handlers_under(
                                 }
                             }
                         }
-                        Operator::Loop { .. } => {
-                            control.push(true);
-                            loop_depth += 1;
-                        }
-                        Operator::Block { .. } | Operator::If { .. } => control.push(false),
-                        Operator::End if control.pop() == Some(true) => loop_depth -= 1,
                         _ => (),
                     }
                 }

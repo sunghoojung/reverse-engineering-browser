@@ -1338,45 +1338,61 @@ fn tool_names(response: &Value) -> Vec<String> {
         .collect()
 }
 
-/// The agent path end to end: an unbound connection starts a session with
-/// named options, is moved to that exact backend, opens a URL in its capture
-/// browser, ends it, and is unbound again. A stand-in launcher runs the real
-/// backend in live mode with the same ready line and TERM cleanup as
-/// run-live-session.sh, and a stand-in browser records how it was invoked.
+/// A stand-in for run-live-session.sh: it runs the real backend in live mode
+/// with the same ready line, TERM cleanup and capture labels, records the
+/// switches it was given, and copies the invocation site file it was asked to
+/// arm. A stand-in browser records how it was invoked and, like a connected
+/// capture browser, adds a native record to the session's store.
 #[cfg(unix)]
-#[test]
-fn an_agent_starts_drives_and_ends_its_own_live_session() {
-    use std::os::unix::fs::PermissionsExt;
-    let root = tempfile::tempdir().unwrap();
-    let home = root.path().join("home");
-    let sessions = root.path().join("sessions");
-    std::fs::create_dir_all(&home).unwrap();
-    let socket = root.path().join("broker.sock");
-    let _broker = std::os::unix::net::UnixListener::bind(&socket).unwrap();
-    let record = root.path().join("brave-args");
-    let brave = root.path().join("brave.sh");
-    // The stand-in browser records its arguments and, like a connected
-    // capture browser, adds a native record to the session's store.
-    let event = r#"{"protocol_version":3,"session_id":"1","sequence_number":"1","monotonic_time_ns":"1","navigation_id":"1","frame_id":"1","artifact_id":"0","request_id":"1","process_id":7,"category":"network","type":"request_started","payload_encoding":"hex","payload":"","payload_size":0}"#;
-    std::fs::write(
-        &brave,
-        format!(
-            "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{record}'\nfor arg; do case $arg in --user-data-dir=*) profile=${{arg#--user-data-dir=}};; esac; done\nprintf '%s\\n' '{event}' >> \"$(dirname \"$profile\")/events.jsonl\"\n",
-            record = record.display()
-        ),
-    )
-    .unwrap();
-    let launcher = root.path().join("launcher.sh");
-    std::fs::write(
-        &launcher,
-        format!(
-            r#"#!/bin/bash
+struct AgentFixture {
+    root: tempfile::TempDir,
+    home: std::path::PathBuf,
+    sessions: std::path::PathBuf,
+    socket: std::path::PathBuf,
+    record: std::path::PathBuf,
+    _broker: std::os::unix::net::UnixListener,
+}
+
+#[cfg(unix)]
+impl AgentFixture {
+    fn new() -> Self {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::tempdir().unwrap();
+        let home = root.path().join("home");
+        let sessions = root.path().join("sessions");
+        std::fs::create_dir_all(&home).unwrap();
+        let socket = root.path().join("broker.sock");
+        let broker = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+        let record = root.path().join("brave-args");
+        let brave = root.path().join("brave.sh");
+        let event = r#"{"protocol_version":3,"session_id":"1","sequence_number":"1","monotonic_time_ns":"1","navigation_id":"1","frame_id":"1","artifact_id":"0","request_id":"1","process_id":7,"category":"network","type":"request_started","payload_encoding":"hex","payload":"","payload_size":0}"#;
+        std::fs::write(
+            &brave,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{record}'\nfor arg; do case $arg in --user-data-dir=*) profile=${{arg#--user-data-dir=}};; esac; done\nprintf '%s\\n' '{event}' >> \"$(dirname \"$profile\")/events.jsonl\"\n",
+                record = record.display()
+            ),
+        )
+        .unwrap();
+        let launcher = root.path().join("launcher.sh");
+        std::fs::write(
+            &launcher,
+            format!(
+                r#"#!/bin/bash
 set -euo pipefail
 mkdir -p "$REB_LIVE_SESSION_ROOT"
 dir="$REB_LIVE_SESSION_ROOT/$((4242 + $(ls "$REB_LIVE_SESSION_ROOT" | wc -l)))"
 mkdir -p "$dir/profile" "$dir/artifacts"
 printf '%s\n' "$REB_NATIVE_WASM_DISPATCH $REB_CAPTURE_CATEGORY_MASK $REB_USE_SYSTEM_KEYCHAIN $REB_CONSOLE_DOCUMENT_START $REB_CAPTURE_REQUEST_CONTENT ${{REB_NATIVE_JS_INVOCATION_SITES-unset}} ${{REB_NATIVE_JS_INVOCATION_DIGESTS-unset}}" > "$dir/options"
 printf '%s\n' "${{REB_NATIVE_JS_INVOCATION_IF_SUPPORTED-unset}} ${{REB_JS_INVOCATION_SITE_STORE-unset}}" > "$dir/site-store"
+labels=()
+if [[ -n "${{REB_NATIVE_JS_INVOCATION_SITES-}}" ]]; then
+  cp "$REB_NATIVE_JS_INVOCATION_SITES" "$dir/sites"
+  labels+=(--js-invocation-session-sites "$REB_NATIVE_JS_INVOCATION_SITES" --js-invocation-session-state armed)
+  [[ "$REB_NATIVE_JS_INVOCATION_DIGESTS" == 1 ]] && labels+=(--js-invocation-session-digests)
+fi
+[[ "$REB_CAPTURE_REQUEST_CONTENT" == 1 ]] && labels+=(--session-request-content)
+[[ "$REB_CONSOLE_DOCUMENT_START" == 1 ]] && labels+=(--session-document-start)
 ln -s "test-host-$$" "$dir/profile/SingletonLock"
 # The stand-in broker holds its event store guard for its life, as the real
 # broker does; the backend reads that lock as the broker running.
@@ -1396,55 +1412,101 @@ for _ in $(seq 1 400); do [[ -e "$dir/broker.ready" ]] && break; sleep 0.05; don
   --store "$dir/events.jsonl" --trace-store "$dir/trace.jsonl" \
   --signal-store "$dir/signals.jsonl" --artifacts "$dir/artifacts" \
   --api-collection "$dir/c.json" --local-analyst "$dir/a.json" \
+  --js-invocation-site-store "$REB_JS_INVOCATION_SITE_STORE" \
   --socket "$TEST_BROKER_SOCKET" --brave-binary "$REB_BRAVE_BINARY" \
-  --brave-profile "$dir/profile" --launcher-pid "$$" >/dev/null 2>&1 &
+  --brave-profile "$dir/profile" --launcher-pid "$$" ${{labels[@]+"${{labels[@]}}"}} >/dev/null 2>&1 &
 backend=$!
 trap 'kill "$broker" 2>/dev/null || true; wait "$broker" 2>/dev/null || true; kill "$backend" 2>/dev/null; wait "$backend" 2>/dev/null; echo ended > "$dir/ended"; exit 0' TERM
 for _ in $(seq 1 400); do [[ -s "$dir/research-ui.endpoint" ]] && break; sleep 0.05; done
 echo "Origin Trace live session $(basename "$dir")"
 wait "$backend"
 "#,
-            backend = env!("CARGO_BIN_EXE_origin-trace-backend")
-        ),
-    )
-    .unwrap();
-    for script in [&brave, &launcher] {
-        std::fs::set_permissions(script, std::fs::Permissions::from_mode(0o700)).unwrap();
+                backend = env!("CARGO_BIN_EXE_origin-trace-backend")
+            ),
+        )
+        .unwrap();
+        for script in [&brave, &launcher] {
+            std::fs::set_permissions(script, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        Self {
+            home,
+            sessions,
+            socket,
+            record,
+            _broker: broker,
+            root,
+        }
     }
-    let mut command = Command::new(env!("CARGO_BIN_EXE_reb-api"));
-    command
-        .args([
-            "mcp",
-            "--allow-effects",
-            "--allow-session-start",
-            "--require-live",
-            "--timeout",
-            "15",
-        ])
-        .env("HOME", &home)
-        .env("REB_LIVE_SESSION_SCRIPT", &launcher)
-        .env("REB_LIVE_SESSION_ROOT", &sessions)
-        .env("REB_BRAVE_BINARY", &brave)
-        // The packaged app's defaults, inherited from a researcher's shell,
-        // must not grant an agent session page code execution or content capture.
-        .env("REB_CONSOLE_DOCUMENT_START", "1")
-        .env("REB_CAPTURE_REQUEST_CONTENT", "1")
-        // Nor may the researcher's invocation sites or value digests.
-        .env(
-            "REB_NATIVE_JS_INVOCATION_SITES",
-            root.path().join("sites.json"),
-        )
-        .env("REB_NATIVE_JS_INVOCATION_DIGESTS", "1")
-        .env("REB_NATIVE_JS_INVOCATION_IF_SUPPORTED", "1")
-        .env(
-            "REB_JS_INVOCATION_SITE_STORE",
-            root.path().join("app-sites.json"),
-        )
-        .env("TEST_BROKER_SOCKET", &socket)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null());
-    let mut mcp = Mcp::from_command(&mut command);
+
+    /// `reb-api mcp` that may start sessions, run from a shell whose
+    /// environment carries every capture switch the packaged app sets. None
+    /// of them may reach an agent session.
+    fn mcp(&self) -> Mcp {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_reb-api"));
+        command
+            .args([
+                "mcp",
+                "--allow-effects",
+                "--allow-session-start",
+                "--require-live",
+                "--timeout",
+                "15",
+            ])
+            .env("HOME", &self.home)
+            .env(
+                "REB_LIVE_SESSION_SCRIPT",
+                self.root.path().join("launcher.sh"),
+            )
+            .env("REB_LIVE_SESSION_ROOT", &self.sessions)
+            .env("REB_BRAVE_BINARY", self.root.path().join("brave.sh"))
+            .env("REB_CONSOLE_DOCUMENT_START", "1")
+            .env("REB_CAPTURE_REQUEST_CONTENT", "1")
+            .env(
+                "REB_NATIVE_JS_INVOCATION_SITES",
+                self.root.path().join("sites.json"),
+            )
+            .env("REB_NATIVE_JS_INVOCATION_DIGESTS", "1")
+            .env("REB_NATIVE_JS_INVOCATION_IF_SUPPORTED", "1")
+            .env(
+                "REB_JS_INVOCATION_SITE_STORE",
+                self.root.path().join("app-sites.json"),
+            )
+            .env("TEST_BROKER_SOCKET", &self.socket)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
+        Mcp::from_command(&mut command)
+    }
+
+    fn session(&self, id: &str) -> std::path::PathBuf {
+        self.sessions.join(id)
+    }
+
+    fn agent_sessions(&self) -> std::path::PathBuf {
+        self.home.join(".config/origin-trace/agent-sessions")
+    }
+
+    fn wait_ended(&self, id: &str) {
+        let path = self.session(id).join("ended");
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !path.exists() {
+            assert!(
+                Instant::now() < deadline,
+                "the launcher was not asked to stop"
+            );
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+}
+
+/// The agent path end to end: an unbound connection starts a session with
+/// named options, is moved to that exact backend, opens a URL in its capture
+/// browser, ends it, and is unbound again.
+#[cfg(unix)]
+#[test]
+fn an_agent_starts_drives_and_ends_its_own_live_session() {
+    let fixture = AgentFixture::new();
+    let mut mcp = fixture.mcp();
     let listed = mcp.request("tools/list", json!({}));
     let names = tool_names(&listed);
     assert!(names.iter().any(|name| name == "start_live_session"));
@@ -1457,12 +1519,10 @@ wait "$backend"
         .unwrap();
     assert_eq!(start["annotations"]["openWorldHint"], true);
     assert_eq!(start["inputSchema"]["additionalProperties"], false);
-    // Sensitive Canvas capture is offered, behind its explicit confirmation.
-    assert!(
-        start["inputSchema"]["properties"]
-            .get("canvas_images")
-            .is_some()
-    );
+    // Sensitive capture is offered, behind its explicit confirmation.
+    for option in ["canvas_images", "request_content", "js_invocation_digests"] {
+        assert!(start["inputSchema"]["properties"].get(option).is_some());
+    }
 
     let unbound = mcp.request("tools/call", json!({"name": "get_events"}));
     assert_eq!(unbound["result"]["isError"], true);
@@ -1480,7 +1540,8 @@ wait "$backend"
     );
     assert_eq!(sensitive["result"]["isError"], true);
     assert!(tool_text(&sensitive).contains("requires confirm_sensitive_capture"));
-    assert!(!sessions.exists() || std::fs::read_dir(&sessions).unwrap().next().is_none());
+    let sessions = &fixture.sessions;
+    assert!(!sessions.exists() || std::fs::read_dir(sessions).unwrap().next().is_none());
 
     let started = mcp.request(
         "tools/call",
@@ -1501,30 +1562,32 @@ wait "$backend"
     assert_eq!(session["canonical_endpoint"], false);
     assert_eq!(session["options"]["wasm_dispatch"], true);
     assert!(session.get("session_dir").is_none());
-    assert!(!tool_text(&started).contains(root.path().to_str().unwrap()));
-    let profile = sessions.join("4242/profile");
-    let arguments = std::fs::read_to_string(&record).unwrap();
+    assert!(!tool_text(&started).contains(fixture.root.path().to_str().unwrap()));
+    let profile = fixture.session("4242").join("profile");
+    let arguments = std::fs::read_to_string(&fixture.record).unwrap();
     assert!(arguments.contains(&format!("--user-data-dir={}", profile.display())));
     assert!(
         arguments
             .lines()
             .any(|line| line == "https://example.test/page")
     );
+    // Inherited switches reach nothing: no request content, document-start
+    // permission, invocation sites or digests.
     assert_eq!(
-        std::fs::read_to_string(sessions.join("4242/options")).unwrap(),
+        std::fs::read_to_string(fixture.session("4242").join("options")).unwrap(),
         "1 4095 0 0 0 unset 0\n"
     );
     // Nor may it read or change the app's saved invocation sites.
-    let store = std::fs::read_to_string(sessions.join("4242/site-store")).unwrap();
-    let (switch, store) = store.trim_end().split_once(' ').unwrap();
-    assert_eq!(switch, "unset");
-    assert!(
-        store.starts_with(
-            home.join(".config/origin-trace/agent-sessions")
-                .to_str()
-                .unwrap()
-        ) && store.ends_with("/js-invocation-sites-v1.json"),
-        "{store}"
+    let store = std::fs::read_to_string(fixture.session("4242").join("site-store")).unwrap();
+    assert_eq!(
+        store,
+        format!(
+            "unset {}\n",
+            fixture
+                .agent_sessions()
+                .join("js-invocation-sites-v1.json")
+                .display()
+        )
     );
 
     let context = mcp.request("tools/call", json!({"name": "get_session_context"}));
@@ -1532,6 +1595,12 @@ wait "$backend"
     let context: Value = serde_json::from_str(tool_text(&context)).unwrap();
     assert_eq!(context["instance_id"], session["instance_id"]);
     assert_eq!(context["live_admission"], "ready");
+    assert_eq!(
+        context["capture_options"],
+        json!({"source":"launcher","request_content":false,"canvas_images":false,
+            "document_start":"not_permitted",
+            "js_invocation":{"state":"not_armed","count":0,"digests":false}})
+    );
     let summary = mcp.request("tools/call", json!({"name": "get_session_summary"}));
     assert_eq!(summary["result"]["isError"], false);
 
@@ -1540,16 +1609,6 @@ wait "$backend"
         json!({"name": "session_action", "arguments": {"body": {"action": "open_url", "url": "ftp://example.test/"}}}),
     );
     assert_eq!(bad["result"]["isError"], true);
-    let wait_for = |path: std::path::PathBuf| {
-        let deadline = Instant::now() + Duration::from_secs(10);
-        while !path.exists() {
-            assert!(
-                Instant::now() < deadline,
-                "the launcher was not asked to stop"
-            );
-            std::thread::sleep(Duration::from_millis(50));
-        }
-    };
     // Starting again replaces the session this connection started.
     let again = mcp.request(
         "tools/call",
@@ -1561,11 +1620,11 @@ wait "$backend"
         again["result"]["structuredContent"]["capture_observed"],
         Value::Null
     );
-    wait_for(sessions.join("4242/ended"));
+    fixture.wait_ended("4242");
     // At capture expiry the broker removes its socket and exits. Under
     // --require-live other tools are then refused, but ending must still work.
-    std::fs::remove_file(&socket).unwrap();
-    let broker = std::fs::read_to_string(sessions.join("4243/broker.pid")).unwrap();
+    std::fs::remove_file(&fixture.socket).unwrap();
+    let broker = std::fs::read_to_string(fixture.session("4243").join("broker.pid")).unwrap();
     assert!(
         Command::new("kill")
             .arg(broker.trim())
@@ -1575,7 +1634,8 @@ wait "$backend"
     );
     {
         use std::os::fd::AsRawFd;
-        let guard = std::fs::File::open(sessions.join("4243/events.jsonl.reb-lock-v1")).unwrap();
+        let guard =
+            std::fs::File::open(fixture.session("4243").join("events.jsonl.reb-lock-v1")).unwrap();
         let deadline = Instant::now() + Duration::from_secs(10);
         while unsafe { libc::flock(guard.as_raw_fd(), libc::LOCK_SH | libc::LOCK_NB) } != 0 {
             assert!(Instant::now() < deadline, "stand-in broker kept its lock");
@@ -1589,10 +1649,214 @@ wait "$backend"
         json!({"name": "session_action", "arguments": {"body": {"action": "end", "confirm": true}}}),
     );
     assert_eq!(ended["result"]["isError"], false, "{}", tool_text(&ended));
-    wait_for(sessions.join("4243/ended"));
+    fixture.wait_ended("4243");
     let after = mcp.request("tools/call", json!({"name": "get_events"}));
     assert_eq!(after["result"]["isError"], true);
     assert!(tool_text(&after).contains("No live session is bound"));
+}
+
+/// Request content, document-start permission, invocation sites and value
+/// digests reach an agent session only when its start names them, each
+/// exactly as named, and each is shown in the result, the launch log and the
+/// session context. The caller's environment sets all of them and still
+/// changes nothing.
+#[cfg(unix)]
+#[test]
+fn agent_session_options_are_named_never_inherited() {
+    let fixture = AgentFixture::new();
+    let mut mcp = fixture.mcp();
+    let site = |offset: u32| {
+        format!(
+            r#"{{"anchor_offset":{offset},"artifact_id":"12","artifact_sha256":"{a}","byte_offset":{offset},"shape":"function-entry","source_length":456,"source_sha256":"{b}"}}"#,
+            a = "a".repeat(64),
+            b = "b".repeat(64)
+        )
+    };
+    let site_file = |offsets: &[u32]| {
+        format!(
+            r#"{{"sites":[{}],"version":1}}"#,
+            offsets
+                .iter()
+                .map(|o| site(*o))
+                .collect::<Vec<_>>()
+                .join(",")
+        )
+    };
+    let agent_file = fixture.root.path().join("agent-sites.json");
+    std::fs::write(&agent_file, site_file(&[120])).unwrap();
+    let call = |mcp: &mut Mcp, arguments: Value| {
+        mcp.request(
+            "tools/call",
+            json!({"name": "start_live_session", "arguments": arguments}),
+        )
+    };
+    // Refusals send nothing and start nothing.
+    for (arguments, needle) in [
+        (
+            json!({"request_content": true}),
+            "requires confirm_sensitive_capture",
+        ),
+        (
+            json!({"js_invocation_digests": true, "confirm_sensitive_capture": true}),
+            "requires js_invocation_sites or js_invocation_saved_sites",
+        ),
+        (
+            json!({"js_invocation_saved_sites": true, "js_invocation_digests": true}),
+            "requires confirm_sensitive_capture",
+        ),
+        (
+            json!({"js_invocation_saved_sites": true, "js_invocation_sites": agent_file}),
+            "not both",
+        ),
+        (json!({"js_invocation_sites": "sites.json"}), "absolute"),
+        (
+            json!({"request_content": true, "confirm_sensitive_capture": true, "category_mask": 1024}),
+            "Network and Artifact",
+        ),
+        (
+            json!({"js_invocation_saved_sites": true}),
+            "saved set, which is empty",
+        ),
+    ] {
+        let refused = call(&mut mcp, arguments.clone());
+        assert_eq!(refused["result"]["isError"], true, "{arguments}");
+        assert!(
+            tool_text(&refused).contains(needle),
+            "{arguments}: {}",
+            tool_text(&refused)
+        );
+    }
+    let garbage = fixture.root.path().join("garbage.json");
+    std::fs::write(&garbage, "{}").unwrap();
+    let refused = call(&mut mcp, json!({"js_invocation_sites": garbage}));
+    assert!(tool_text(&refused).contains("not a native-js-invocation-sites-v1 file"));
+    assert!(
+        !fixture.sessions.exists()
+            || std::fs::read_dir(&fixture.sessions)
+                .unwrap()
+                .next()
+                .is_none()
+    );
+
+    let launch_logs = || {
+        let mut logs = std::fs::read_dir(fixture.agent_sessions())
+            .unwrap()
+            .filter_map(|entry| {
+                let path = entry.unwrap().path().join("launch.log");
+                path.is_file().then_some(path)
+            })
+            .collect::<Vec<_>>();
+        logs.sort_by_key(|path| std::fs::metadata(path).unwrap().modified().unwrap());
+        logs
+    };
+
+    // Document-start permission, request content and a site file the agent
+    // wrote, armed from a private copy.
+    let started = call(
+        &mut mcp,
+        json!({"document_start": true, "request_content": true,
+            "confirm_sensitive_capture": true, "js_invocation_sites": agent_file,
+            "timeout_seconds": 30}),
+    );
+    assert_eq!(
+        started["result"]["isError"],
+        false,
+        "{}",
+        tool_text(&started)
+    );
+    let result = &started["result"]["structuredContent"];
+    assert_eq!(result["session_id"], "4242");
+    assert_eq!(result["js_invocation_sites_armed"], 1);
+    for (option, value) in [
+        ("document_start", json!(true)),
+        ("request_content", json!(true)),
+        ("js_invocation_saved_sites", json!(false)),
+        ("js_invocation_digests", json!(false)),
+        ("canvas_images", json!(false)),
+    ] {
+        assert_eq!(result["options"][option], value, "{option}");
+    }
+    let options = std::fs::read_to_string(fixture.session("4242").join("options")).unwrap();
+    let fields = options.split_whitespace().collect::<Vec<_>>();
+    assert_eq!(fields[..5], ["0", "4095", "0", "1", "1"]);
+    assert_eq!(fields[6], "0");
+    let copy = std::path::Path::new(fields[5]);
+    assert_ne!(copy, agent_file.as_path());
+    assert!(
+        copy.starts_with(fixture.agent_sessions()),
+        "{}",
+        copy.display()
+    );
+    assert_eq!(
+        std::fs::read_to_string(fixture.session("4242").join("sites")).unwrap(),
+        site_file(&[120])
+    );
+    let log = std::fs::read_to_string(launch_logs().last().unwrap()).unwrap();
+    let first = log.lines().next().unwrap();
+    let named: Value =
+        serde_json::from_str(first.strip_prefix("Agent session options: ").unwrap()).unwrap();
+    assert_eq!(named["document_start"], true);
+    assert_eq!(named["request_content"], true);
+    assert_eq!(named["js_invocation_site_count"], 1);
+    let context = mcp.request("tools/call", json!({"name": "get_session_context"}));
+    let context: Value = serde_json::from_str(tool_text(&context)).unwrap();
+    assert_eq!(
+        context["capture_options"],
+        json!({"source":"launcher","request_content":true,"canvas_images":false,
+            "document_start":"permitted",
+            "js_invocation":{"state":"armed","count":1,"digests":false}})
+    );
+
+    // The agent sessions' own saved set, written as js_invocation_site_action
+    // writes it, arms with digests. The app's set is never read.
+    std::fs::write(
+        fixture.agent_sessions().join("js-invocation-sites-v1.json"),
+        site_file(&[120, 200]),
+    )
+    .unwrap();
+    std::fs::write(
+        fixture.root.path().join("app-sites.json"),
+        site_file(&[300]),
+    )
+    .unwrap();
+    let saved = call(
+        &mut mcp,
+        json!({"js_invocation_saved_sites": true, "js_invocation_digests": true,
+            "confirm_sensitive_capture": true, "timeout_seconds": 30}),
+    );
+    assert_eq!(saved["result"]["isError"], false, "{}", tool_text(&saved));
+    assert_eq!(saved["result"]["structuredContent"]["session_id"], "4243");
+    assert_eq!(
+        saved["result"]["structuredContent"]["js_invocation_sites_armed"],
+        2
+    );
+    fixture.wait_ended("4242");
+    let options = std::fs::read_to_string(fixture.session("4243").join("options")).unwrap();
+    let fields = options.split_whitespace().collect::<Vec<_>>();
+    assert_eq!(fields[..5], ["0", "4095", "0", "0", "0"]);
+    assert_eq!(fields[6], "1");
+    assert_eq!(
+        std::fs::read_to_string(fixture.session("4243").join("sites")).unwrap(),
+        site_file(&[120, 200])
+    );
+    let context = mcp.request("tools/call", json!({"name": "get_session_context"}));
+    let context: Value = serde_json::from_str(tool_text(&context)).unwrap();
+    assert_eq!(
+        context["capture_options"]["js_invocation"],
+        json!({"state":"armed","count":2,"digests":true})
+    );
+    assert_eq!(
+        context["capture_options"]["document_start"],
+        "not_permitted"
+    );
+    assert_eq!(context["capture_options"]["request_content"], false);
+
+    let ended = mcp.request(
+        "tools/call",
+        json!({"name": "session_action", "arguments": {"body": {"action": "end", "confirm": true}}}),
+    );
+    assert_eq!(ended["result"]["isError"], false, "{}", tool_text(&ended));
+    fixture.wait_ended("4243");
 }
 
 #[test]

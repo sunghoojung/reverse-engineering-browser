@@ -69,8 +69,12 @@ std::unordered_map<std::uint64_t, std::uint32_t> CurrentFrameTabs(const int rend
 }
 
 // A gap that takes the refused record's own renderer sequence slot, so the
-// broker sees an explicit omission instead of a provisional hole.
+// broker sees an explicit omission instead of a provisional hole. Callers
+// have checked the record's session, process and nonzero sequence; a time
+// the record could not have had is replaced by the refusal time.
 NativeProbeEvent RendererGap(const NativeProbeEvent& source, const std::string_view reason) {
+  const auto now =
+      static_cast<std::uint64_t>(base::TimeTicks::Now().since_origin().InNanoseconds());
   NativeProbeEvent gap;
   gap.header.category = NativeProbeCategory::kVm;
   gap.header.type = NativeProbeType::kGap;
@@ -79,7 +83,10 @@ NativeProbeEvent RendererGap(const NativeProbeEvent& source, const std::string_v
   gap.header.thread_id = source.header.thread_id;
   gap.header.frame_id = source.header.frame_id;
   gap.header.sequence_number = source.header.sequence_number;
-  gap.header.monotonic_time_ns = source.header.monotonic_time_ns;
+  gap.header.monotonic_time_ns =
+      source.header.monotonic_time_ns && source.header.monotonic_time_ns <= now
+          ? source.header.monotonic_time_ns
+          : now;
   const auto size = std::min(reason.size(), gap.inline_payload.size());
   for (std::size_t i = 0; i < size; ++i)
     gap.inline_payload[i] = static_cast<std::byte>(static_cast<unsigned char>(reason[i]));
@@ -154,19 +161,15 @@ void NativeProbeHost::CaptureWasmDispatch(const std::uint64_t capture_epoch,
                         NativeProbeCategoryMask(NativeProbeCategory::kArtifact);
   const auto now =
       static_cast<std::uint64_t>(base::TimeTicks::Now().since_origin().InNanoseconds());
+  // A retired configuration or another session has nothing to record into.
   if (!queue_ || !wasm_epoch_lifetime_ || capture_epoch != wasm_capture_epoch_ ||
       !session_->IsActive() || session_id != session_->session_id() ||
-      (session_->category_mask() & mask) != mask || !sequence_number || !monotonic_time_ns ||
-      monotonic_time_ns > now || now >= session_->expires_at_monotonic_ns() || !thread_id ||
-      !frame_id || !execution_context_id || sample_index >= 16 || wasm_capture_count_ >= 16 ||
-      content.size() > 16U * 1024U * 1024U)
+      (session_->category_mask() & mask) != mask || now >= session_->expires_at_monotonic_ns())
     return;
   auto* process = content::RenderProcessHost::FromID(renderer_process_id_);
-  if (!process || process_id != static_cast<std::uint32_t>(process->GetProcess().Pid()))
+  if (!process || process_id != static_cast<std::uint32_t>(process->GetProcess().Pid()) ||
+      !sequence_number)
     return;
-  ++wasm_capture_count_;
-  content::RenderFrameHost* owner =
-      ActiveDocumentOwner(*process, frame_id, document_token_high, document_token_low);
   NativeWasmDispatchObservation observation;
   observation.header.category = NativeProbeCategory::kVm;
   observation.header.type = NativeProbeType::kWasmDispatchObservation;
@@ -176,18 +179,24 @@ void NativeProbeHost::CaptureWasmDispatch(const std::uint64_t capture_epoch,
   observation.header.process_id = process_id;
   observation.header.thread_id = thread_id;
   observation.header.frame_id = frame_id;
+  // This renderer's own sequence slot: every refusal fills it with a gap.
+  const auto refuse = [&](std::string_view reason) {
+    session_->Emit(RendererGap(NativeProbeEvent{.header = observation.header}, reason));
+  };
+  if (!monotonic_time_ns || monotonic_time_ns > now || !thread_id || !frame_id ||
+      !execution_context_id || sample_index >= 16 || content.size() > 16U * 1024U * 1024U) {
+    refuse("native_wasm_dispatch_limit_or_invalid");
+    return;
+  }
+  if (wasm_capture_count_ >= 16) {
+    refuse("native_wasm_dispatch_browser_budget_incomplete");
+    return;
+  }
+  ++wasm_capture_count_;
+  content::RenderFrameHost* owner =
+      ActiveDocumentOwner(*process, frame_id, document_token_high, document_token_low);
   if (!owner) {
-    if (!wasm_document_gap_emitted_) {
-      wasm_document_gap_emitted_ = true;
-      NativeProbeEvent gap;
-      gap.header = observation.header;
-      gap.header.type = NativeProbeType::kGap;
-      constexpr std::string_view reason = "native_wasm_dispatch_document_unavailable";
-      gap.header.payload_size = reason.size();
-      for (std::size_t i = 0; i < reason.size(); ++i)
-        gap.inline_payload[i] = static_cast<std::byte>(reason[i]);
-      session_->Emit(gap);
-    }
+    refuse("native_wasm_dispatch_document_unavailable");
     return;
   }
   auto* contents = content::WebContents::FromRenderFrameHost(owner);
@@ -240,21 +249,15 @@ void NativeProbeHost::CaptureWasmIndirect(const std::uint64_t capture_epoch,
                         NativeProbeCategoryMask(NativeProbeCategory::kArtifact);
   const auto now =
       static_cast<std::uint64_t>(base::TimeTicks::Now().since_origin().InNanoseconds());
+  // A retired configuration or another session has nothing to record into.
   if (!queue_ || !wasm_epoch_lifetime_ || capture_epoch != wasm_capture_epoch_ ||
       !session_->IsActive() || session_id != session_->session_id() ||
-      (session_->category_mask() & mask) != mask || !sequence_number || !monotonic_time_ns ||
-      monotonic_time_ns > now || now >= session_->expires_at_monotonic_ns() || !thread_id ||
-      !frame_id || !execution_context_id || sample_index >= kNativeWasmIndirectSampleBudget ||
-      resolution >= kNativeWasmIndirectResolutionCount ||
-      wasm_indirect_capture_count_ >= kNativeWasmIndirectSampleBudget ||
-      content.size() > kNativeArtifactMaxContentBytes)
+      (session_->category_mask() & mask) != mask || now >= session_->expires_at_monotonic_ns())
     return;
   auto* process = content::RenderProcessHost::FromID(renderer_process_id_);
-  if (!process || process_id != static_cast<std::uint32_t>(process->GetProcess().Pid()))
+  if (!process || process_id != static_cast<std::uint32_t>(process->GetProcess().Pid()) ||
+      !sequence_number)
     return;
-  ++wasm_indirect_capture_count_;
-  content::RenderFrameHost* owner =
-      ActiveDocumentOwner(*process, frame_id, document_token_high, document_token_low);
   NativeWasmIndirectObservation observation;
   observation.header.category = NativeProbeCategory::kVm;
   observation.header.type = NativeProbeType::kWasmIndirectObservation;
@@ -264,12 +267,26 @@ void NativeProbeHost::CaptureWasmIndirect(const std::uint64_t capture_epoch,
   observation.header.process_id = process_id;
   observation.header.thread_id = thread_id;
   observation.header.frame_id = frame_id;
+  // This renderer's own sequence slot: every refusal fills it with a gap.
+  const auto refuse = [&](std::string_view reason) {
+    session_->Emit(RendererGap(NativeProbeEvent{.header = observation.header}, reason));
+  };
+  if (!monotonic_time_ns || monotonic_time_ns > now || !thread_id || !frame_id ||
+      !execution_context_id || sample_index >= kNativeWasmIndirectSampleBudget ||
+      resolution >= kNativeWasmIndirectResolutionCount ||
+      content.size() > kNativeArtifactMaxContentBytes) {
+    refuse("native_wasm_indirect_limit_or_invalid");
+    return;
+  }
+  if (wasm_indirect_capture_count_ >= kNativeWasmIndirectSampleBudget) {
+    refuse("native_wasm_indirect_browser_budget_incomplete");
+    return;
+  }
+  ++wasm_indirect_capture_count_;
+  content::RenderFrameHost* owner =
+      ActiveDocumentOwner(*process, frame_id, document_token_high, document_token_low);
   if (!owner) {
-    if (!wasm_indirect_document_gap_emitted_) {
-      wasm_indirect_document_gap_emitted_ = true;
-      session_->Emit(RendererGap(NativeProbeEvent{.header = observation.header},
-                                 "native_wasm_indirect_document_unavailable"));
-    }
+    refuse("native_wasm_indirect_document_unavailable");
     return;
   }
   auto* contents = content::WebContents::FromRenderFrameHost(owner);
@@ -336,12 +353,7 @@ void NativeProbeHost::CaptureNativeGuest(const std::uint64_t capture_epoch,
       SendNativeGuestModuleStatus(capture_epoch, h.sequence_number, false);
   };
   if (guest_capture_count_ >= kNativeGuestSampleLimit) {
-    if (carries_module && own_identity)
-      SendNativeGuestModuleStatus(capture_epoch, h.sequence_number, false);
-    if (!guest_budget_gap_emitted_ && own_identity) {
-      guest_budget_gap_emitted_ = true;
-      session_->Emit(RendererGap(capture.dispatch, "native_guest_browser_sample_budget"));
-    }
+    refuse("native_guest_browser_sample_budget");
     return;
   }
   ++guest_capture_count_;
@@ -472,9 +484,15 @@ void NativeProbeHost::CaptureNativeGuestHost(const std::uint64_t capture_epoch,
     return;
   const auto now =
       static_cast<std::uint64_t>(base::TimeTicks::Now().since_origin().InNanoseconds());
-  if (event.header.session_id != session_->session_id() ||
-      event.header.process_id != static_cast<std::uint32_t>(process->GetProcess().Pid()) ||
-      !event.header.monotonic_time_ns || event.header.monotonic_time_ns > now) {
+  const bool own_identity =
+      event.header.session_id == session_->session_id() && event.header.sequence_number &&
+      event.header.process_id == static_cast<std::uint32_t>(process->GetProcess().Pid());
+  if (own_identity && (!event.header.monotonic_time_ns || event.header.monotonic_time_ns > now)) {
+    session_->Emit(RendererGap(event, "native_guest_host_malformed"));
+    return;
+  }
+  if (!own_identity) {
+    // Another identity's slot is not this renderer's to fill.
     if (!guest_host_malformed_gap_emitted_) {
       guest_host_malformed_gap_emitted_ = true;
       NativeProbeEvent gap;
@@ -562,15 +580,15 @@ void NativeProbeHost::Configure(const std::uint64_t session_id,
 }
 
 void NativeProbeHost::Disable() {
+  // Records the renderer already queued, and drops it has not reported, are
+  // this configuration's evidence: publish them before the mapping goes.
+  Drain();
   wasm_epoch_lifetime_.reset();
   if (wasm_capture_epoch_ != std::numeric_limits<std::uint64_t>::max())
     ++wasm_capture_epoch_;
   wasm_capture_count_ = 0;
   wasm_indirect_capture_count_ = 0;
   guest_capture_count_ = 0;
-  wasm_document_gap_emitted_ = false;
-  wasm_indirect_document_gap_emitted_ = false;
-  guest_budget_gap_emitted_ = false;
   guest_host_malformed_gap_emitted_ = false;
   if (client_.is_bound()) {
     client_->Disable();

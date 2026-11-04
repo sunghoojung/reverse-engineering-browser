@@ -3614,7 +3614,7 @@ async fn error_reasons_preserve_http_text_targets_limits_and_cli_contracts() {
             json!({"action":"targets","session_id":"1"}),
             409,
             "state_conflict",
-            "Start a native console session first",
+            "Start a native console session first: send start with an authorized URL. No command was sent.",
         ),
     ] {
         let response = server.action(route, body).await;

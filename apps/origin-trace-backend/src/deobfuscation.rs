@@ -118,13 +118,25 @@ fn representation(source: &str, response: &Value, intrinsics: bool) -> Result<Va
         return Err(malformed());
     }
     if response["ok"] != true {
-        if response["error_kind"] == "derived-validation" {
-            return Err(Error::new(
+        // Every worker refusal names its kind; an unnamed one is a contract break.
+        return Err(match response["error_kind"].as_str() {
+            Some("derived-validation") => Error::new(
                 422,
                 "Derived JavaScript failed bounded syntax validation; original source is preserved",
-            ));
-        }
-        return Err(Error::new(422, "JavaScript could not be parsed"));
+            ),
+            Some("syntax") => Error::new(422, "JavaScript could not be parsed"),
+            Some("preflight-limit") => Error::new(
+                422,
+                "JavaScript exceeds the bounded syntax preflight's depth, size or time budget; original source is preserved",
+            ),
+            Some("source-limit") => {
+                Error::bad("Source is empty or exceeds the deobfuscation byte limit")
+            }
+            Some("invalid-request") => {
+                Error::new(502, "Deobfuscation worker rejected the analysis request")
+            }
+            _ => malformed(),
+        });
     }
     let assumptions = json!(if intrinsics {
         vec!["standard-intrinsics"]
@@ -681,8 +693,22 @@ mod tests {
         assert!(error.message.contains("Derived JavaScript"));
         assert!(error.message.contains("original source is preserved"));
         let mut original_error = response;
-        original_error.as_object_mut().unwrap().remove("error_kind");
-        let error = representation("const broken=;", &original_error, false).unwrap_err();
-        assert_eq!(error.message, "JavaScript could not be parsed");
+        for (kind, status, message) in [
+            ("syntax", 422, "JavaScript could not be parsed"),
+            ("preflight-limit", 422, "bounded syntax preflight"),
+            ("source-limit", 400, "byte limit"),
+            ("invalid-request", 502, "rejected the analysis request"),
+        ] {
+            original_error["error_kind"] = json!(kind);
+            let error = representation("const broken=;", &original_error, false).unwrap_err();
+            assert_eq!(error.status, status, "{kind}");
+            assert!(error.message.contains(message), "{kind}: {}", error.message);
+        }
+        for kind in [json!(null), json!("other")] {
+            original_error["error_kind"] = kind;
+            let error = representation("const broken=;", &original_error, false).unwrap_err();
+            assert_eq!(error.status, 502);
+            assert!(error.message.contains("invalid response"));
+        }
     }
 }

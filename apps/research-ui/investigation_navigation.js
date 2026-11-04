@@ -149,9 +149,7 @@ function restoreInvestigation(entry) {
         resetRequestSelection(); state.trafficSelectionNotice = ''; renderRequests();
       }
       if (typeof entry.trafficDetailOpen === 'boolean') state.trafficDetailOpen = entry.trafficDetailOpen;
-      if (entry.consoleScope) document.querySelector('#screen-traffic').dataset.consoleTraffic = 'true';
-      else delete document.querySelector('#screen-traffic').dataset.consoleTraffic;
-      document.querySelector('#console-experiment-traffic').hidden = !entry.consoleScope;
+      setConsoleTrafficView(Boolean(entry.consoleScope));
       state.inspectorTab = entry.inspectorTab; state.fieldTab = entry.fieldTab; state.selectedField = fieldSets[entry.fieldTab]?.find(field => field.path === entry.fieldPath) ?? null; renderInspector();}
     if (entry.screen === 'evidence' && !evidenceWorkspace.restore(entry.evidence)) {investigationNotice('The original Evidence selection can no longer be restored.', 'stale'); return false;}
     if (entry.screen === 'backtrace') state.selectedTraceRow = entry.traceRow;
@@ -277,6 +275,13 @@ function retireInvestigationReturn() {
   if (pending?.source || sourceFactsPanel.model?.status === 'loading-source') sourceFactsPanel.cancel('A newer interaction retired this original-range return.');
 }
 function investigationBeforeSelection() { retireInvestigationReturn(); }
+// Traffic's separate Console activity view. Its screen flag and panel
+// visibility change together, only here.
+function setConsoleTrafficView(open) {
+  const root = document.querySelector('#screen-traffic');
+  if (open) root.dataset.consoleTraffic = 'true'; else delete root.dataset.consoleTraffic;
+  document.querySelector('#console-experiment-traffic').hidden = !open;
+}
 function investigationBeforeScreen(name) {
   if (!investigationRestore && investigationNavigation && name !== investigationScreen()) investigationNavigation.record();
   retireInvestigationReturn();
@@ -309,8 +314,7 @@ function openInvestigation({kind, identity, relation, inspectorTab, range}) {
   }
   else {
     showScreen(destination);
-    delete document.querySelector('#screen-traffic').dataset.consoleTraffic;
-    document.querySelector('#console-experiment-traffic').hidden = true;
+    setConsoleTrafficView(false);
     if (state.selectedRequestId !== result.record.id || kind === 'request') selectRequest(result.record.id, identity);
     if (inspectorTab) {state.inspectorTab = inspectorTab; renderInspector();}
     const ready = kind === 'trace' ? refreshOriginTrace() : null;

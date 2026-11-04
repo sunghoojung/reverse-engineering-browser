@@ -277,7 +277,7 @@ class NativeProbeSession {
   std::uint64_t session_id() const { return id; }
   std::uint64_t category_mask() const { return mask; }
   std::uint64_t expires_at_monotonic_ns() const { return expires; }
-  bool capture_canvas_images() const { return false; }
+  bool capture_canvas_images() const { return canvas_images; }
   const std::string& guest_adapter_json() const { return adapter_json; }
   const std::vector<std::uint8_t>& js_dispatch_sites() const { return js_sites; }
   const std::vector<std::uint8_t>& js_invocation_sites() const { return invocation_sites; }
@@ -288,7 +288,7 @@ class NativeProbeSession {
   }
   void AddHost(NativeProbeHost&) {}
   void RemoveHost(NativeProbeHost&) {}
-  bool active = false;
+  bool active = false, canvas_images = false;
   std::uint64_t id = 0, mask = 0, expires = 0;
   std::string adapter_json;
   std::vector<std::uint8_t> js_sites;

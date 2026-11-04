@@ -196,6 +196,7 @@ for (const change of [
     'renderVmLab', 'renderApiCollection', 'renderLocalAnalyst', 'setToolsNotice', 'renderTools']) context[name] = noop;
   context.renderRequests = () => assert.equal(state.trafficRenderedView, null, 'Preview retires the old snapshot before repaint');
   const api = runInNewContext(part(app, '      function resetRequestSelection()', '      function renderRequestCount(') +
+    part(app, '      function setEventConnection(', '      function useStandalonePreview()') +
     part(app, '      function useStandalonePreview()', '      function enableTabKeyboardNavigation(') +
     ';({resetRequestSelection, useStandalonePreview})', context);
   api.resetRequestSelection(); assert.equal(state.trafficRenderedView, null);

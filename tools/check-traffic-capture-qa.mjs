@@ -25,7 +25,7 @@ async function checkTrafficActivation(root) {
   let painted = [old], summary = old, inspector = old, status = 200, fetches = 0;
   let body = {events: [], network_events: [old, added], capture_mode: 'live', broker_connected: true};
   const context = {
-    state, location: {protocol: 'http:'}, elements: {gaps: {}},
+    state, AbortSignal, location: {protocol: 'http:'}, elements: {gaps: {}},
     document: {hidden: false, activeElement: null,
       getElementById: id => screens.find(screen => screen.id === id),
       querySelector: selector => screens.find(screen => '#' + screen.id === selector),

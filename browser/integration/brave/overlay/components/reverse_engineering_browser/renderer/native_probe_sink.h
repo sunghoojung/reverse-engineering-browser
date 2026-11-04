@@ -358,6 +358,13 @@ class COMPONENT_EXPORT(REB_NATIVE_PROBE_SINK) NativeProbeSink final {
   [[nodiscard]] NativeProbeEmitStatus EmitStatus(const NativeProbeEvent& event,
                                                  std::uint64_t generation) const noexcept;
 
+  // Writes a gap into the renderer sequence slot a record already took but
+  // could not deliver, so the broker sees an explicit omission there. A full
+  // ring counts it as a drop like any other record.
+  void FillSequenceGap(const NativeProbeHeader& source,
+                       std::string_view reason,
+                       std::uint64_t generation) noexcept;
+
   std::uint64_t RecordRuntimeBufferEvent(NativeProbeType type,
                                          std::uint64_t frame_id,
                                          std::string_view reason,
@@ -387,7 +394,9 @@ class COMPONENT_EXPORT(REB_NATIVE_PROBE_SINK) NativeProbeSink final {
                           std::uint32_t thread_id,
                           std::uint64_t interpreter_artifact_id) noexcept;
 
-  enum class NativeWasmOmission : std::size_t { kInput, kTransport, kBudget };
+  // Coalesced per configuration. A refused transport emit is not: it fills
+  // the sequence slot its record took.
+  enum class NativeWasmOmission : std::size_t { kInput, kBudget };
   bool NoteNativeWasmDispatchOmission(const VmAdmission& admission,
                                       NativeWasmOmission reason) noexcept;
   // Coalesced JS dispatch gaps: budget, site budget, transport, input, then
@@ -480,14 +489,14 @@ class COMPONENT_EXPORT(REB_NATIVE_PROBE_SINK) NativeProbeSink final {
   std::atomic<NativeJsInvocationContextProvider> native_invocation_context_provider_{nullptr};
   std::atomic<NativeWasmDispatchEmitter> native_wasm_emitter_{nullptr};
   std::array<std::atomic<std::uint64_t>, kNativeWasmDispatchSampleBudget> native_wasm_slots_{};
-  std::array<std::atomic<std::uint64_t>, 3> native_wasm_gap_generations_{};
+  std::array<std::atomic<std::uint64_t>, 2> native_wasm_gap_generations_{};
   std::atomic<std::uint64_t> native_wasm_capped_generation_{0};
   bool NoteNativeWasmIndirectOmission(const VmAdmission& admission,
                                       NativeWasmOmission reason) noexcept;
   std::atomic<NativeWasmIndirectEmitter> native_wasm_indirect_emitter_{nullptr};
   std::array<std::atomic<std::uint64_t>, kNativeWasmIndirectSampleBudget>
       native_wasm_indirect_slots_{};
-  std::array<std::atomic<std::uint64_t>, 3> native_wasm_indirect_gap_generations_{};
+  std::array<std::atomic<std::uint64_t>, 2> native_wasm_indirect_gap_generations_{};
   std::atomic<std::uint64_t> native_wasm_indirect_capped_generation_{0};
   std::atomic<NativeRendererProbeEmitter> emitter_{nullptr};
   std::atomic<NativeProbeFrameIdProvider> frame_id_provider_{nullptr};
@@ -509,6 +518,9 @@ class COMPONENT_EXPORT(REB_NATIVE_PROBE_SINK) NativeProbeSink final {
   // dropped_ until a vm gap is admitted. Identity fields describe the losses
   // still waiting to be published. The counters are not reset: a generation
   // bump publishes the remainder first, then new losses append.
+  // Known limitation: these are independent atomics, not one snapshot, so a
+  // loss racing a publish can pair a count with another loss's identity. No
+  // production probe records dispatch samples today.
   std::atomic<std::uint64_t> dispatch_loss_generation_{0};
   std::atomic<std::uint64_t> dispatch_loss_dropped_{0};
   std::atomic<std::uint64_t> dispatch_loss_reported_{0};
@@ -519,7 +531,10 @@ class COMPONENT_EXPORT(REB_NATIVE_PROBE_SINK) NativeProbeSink final {
   std::atomic<std::uint32_t> dispatch_loss_process_id_{0};
   std::atomic<std::uint32_t> dispatch_loss_thread_id_{0};
   // Release-published with the enabled flag. Inactive reads return before
-  // these fields are consulted.
+  // these fields are consulted. Known limitation: like the page guest
+  // opt-ins below, the flag is cleared by SetEmitters but not tagged with a
+  // generation, so an Enable racing a reconfiguration can survive into it.
+  // No production caller enables these samplers today.
   std::atomic<std::uint8_t> owned_register_sampling_{0};
   std::atomic<std::uint64_t> owned_register_finding_id_{0};
   std::atomic<std::uint64_t> owned_register_investigation_id_{0};
@@ -547,17 +562,32 @@ class COMPONENT_EXPORT(REB_NATIVE_PROBE_SINK) NativeProbeSink final {
   std::atomic<NativeWasmGuestReset> native_guest_reset_{nullptr};
   std::array<std::atomic<std::uint64_t>, kNativeGuestSampleLimit> native_guest_slots_{};
   std::atomic<std::uint64_t> native_guest_capped_generation_{0};
-  std::array<std::atomic<std::uint64_t>, 11> native_guest_gap_generations_{};
+  // Coalesced guest gaps, at most one of each per configuration.
+  // A refused capture emit is not coalesced: it fills its own slots.
+  static constexpr std::size_t kGuestSampleLimitGap = 0, kGuestInvocationLimitGap = 1,
+                               kGuestSnapshotGap = 2, kGuestHostTransportGap = 3,
+                               kGuestAdapterRestartGap = 4, kGuestRuntimeIdentityGap = 5,
+                               kGuestModuleUnavailableGap = 6, kGuestHostParentBudgetGap = 7,
+                               kGuestParentUnresolvedGap = 8, kGuestGapCount = 9;
+  std::array<std::atomic<std::uint64_t>, kGuestGapCount> native_guest_gap_generations_{};
   // Parent-binding host routes claimed per configuration (see
   // kNativeGuestHostParentLimit). Same generation-tag scheme as samples.
   std::array<std::atomic<std::uint64_t>, kNativeGuestHostParentLimit> native_guest_host_slots_{};
   std::atomic<std::uint64_t> native_guest_host_capped_generation_{0};
   // Recent module verdicts, (token << 1) | accepted. Tokens are process-unique
   // renderer sequence numbers, so a stale verdict can never match a new send.
-  std::array<std::atomic<std::uint64_t>, 64> native_guest_module_status_{};
-  std::atomic<std::uint32_t> native_guest_module_status_next_{0};
-  enum class GuestModuleVerdict : std::uint8_t { kPending, kAccepted, kRejected };
-  [[nodiscard]] GuestModuleVerdict NativeGuestModuleVerdict(std::uint64_t token) const noexcept;
+  // Each verdict answers one delivered capture and a configuration delivers
+  // at most kNativeGuestSampleLimit, so its own verdicts all fit. next_ counts
+  // writes: a binding that finds no verdict after a full ring of writes since
+  // its send reads kLost, because its verdict may have been overwritten.
+  std::array<std::atomic<std::uint64_t>, kNativeGuestSampleLimit> native_guest_module_status_{};
+  std::atomic<std::uint64_t> native_guest_module_status_next_{0};
+  enum class GuestModuleVerdict : std::uint8_t { kPending, kAccepted, kRejected, kLost };
+  // writes_before_send is native_guest_module_status_next_ read before the
+  // capture carrying token was sent.
+  [[nodiscard]] GuestModuleVerdict NativeGuestModuleVerdict(
+      std::uint64_t token,
+      std::uint64_t writes_before_send) const noexcept;
   [[nodiscard]] bool ClaimNativeGuestHostRoute(std::uint64_t generation) noexcept;
   void NoteNativeGuestOmission(std::uint64_t generation,
                                std::uint64_t frame,

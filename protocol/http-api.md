@@ -299,9 +299,20 @@ in the ETag. The v1 response shape, stored evidence and capture policy are uncha
 a connected agent. It returns bounded current session discovery without fetching
 source or bytecode. It includes `live_admission`, the same process-lifetime
 `instance_id` as `/api/health` (also sent as `X-REB-Expected-Instance`), endpoint,
-capture mode, and a retained Wasm artifact inventory (16 entries from a 256 KiB
-manifest tail). Use this route's own ETag for conditional reads. No
-target/session join is inferred from URL or timing.
+capture mode, `capture_options`, and a retained Wasm artifact inventory (16
+entries from a 256 KiB manifest tail). Use this route's own ETag for
+conditional reads. No target/session join is inferred from URL or timing.
+
+`capture_options` labels what this session's launcher passed to Brave, for
+every live session (agent, app or `make live`): `request_content`,
+`canvas_images`, `document_start` (`permitted` or `not_permitted`; whether
+this Brave honors it is `document_start_supported` in `get_native_console`),
+and `js_invocation` with `state` (`not_armed`, `armed`, `browser_unsupported`
+or `unreadable`), `count` and `digests`. `run-live-session.sh` passes the
+backend `--session-request-content`, `--session-canvas-images` and
+`--session-document-start`; they grant and enable nothing. Idle and demo
+backends report `source: not_live` with everything off. Site labels and
+source URLs stay in `get_js_invocation_sites`.
 
 CDP was removed. Version 1 keeps its debugger fields with fixed retirement
 values so existing clients still parse it: `debugger_state` is `unavailable`,
@@ -375,21 +386,34 @@ returns 409 `dependency_unavailable` for these actions.
 `reb-api session start` and the MCP tool `start_live_session` take the
 `LiveSessionStart` options: `url`, `wasm_dispatch`, `wasm_call_indirect`,
 `guest_adapter`, `js_dispatch_sites`, `quiet`, `category_mask`,
-`duration_seconds`, `localhost_only`, `canvas_images` with
-`confirm_sensitive_capture`, `publish_canonical_endpoint`, `brave_binary` and
-`timeout_seconds`. Sensitive Canvas capture fails without the explicit
-confirmation field, which an agent sets only on the researcher's
-authorization. Every
-capture switch is off unless named; an inherited capture switch, browser
-profile or embedded-session variable is ignored. Request content capture is
-not a named option, so these sessions record request body length, type and
-digest but no request path, query or body bytes. Document-start Console
-script permission (`REB_CONSOLE_DOCUMENT_START`) is not a named option
-either, so these sessions can never arm a document-start script. Native
-JavaScript invocation sites (`REB_NATIVE_JS_INVOCATION_SITES`) and their
-settled-value digests (`REB_NATIVE_JS_INVOCATION_DIGESTS`) are not named
-options, so these sessions never arm an invocation site or record a digest,
-whatever the caller's environment says. Operator
+`duration_seconds`, `localhost_only`, `canvas_images`, `request_content`,
+`document_start`, `js_invocation_sites`, `js_invocation_saved_sites`,
+`js_invocation_digests`, `confirm_sensitive_capture`,
+`publish_canonical_endpoint`, `brave_binary` and `timeout_seconds`. Every
+capture switch is off unless named; an inherited capture switch, site file,
+browser profile or embedded-session variable is ignored, so an inherited
+`REB_CAPTURE_REQUEST_CONTENT`, `REB_CONSOLE_DOCUMENT_START`,
+`REB_NATIVE_JS_INVOCATION_SITES` or `REB_NATIVE_JS_INVOCATION_DIGESTS` never
+reaches an agent session.
+
+| Option | Launcher switch | Rule |
+| --- | --- | --- |
+| `request_content` | `REB_CAPTURE_REQUEST_CONTENT=1` | Sensitive: needs `confirm_sensitive_capture` and category bits 256 and 1024. Without it, request body length, type and digest are still recorded, but no path, query or body bytes. |
+| `document_start` | `REB_CONSOLE_DOCUMENT_START=1` | Permits document-start Console scripts in this capture browser. Arms nothing: a rule still needs a live Console connection and a confirmed `arm_document_start`. |
+| `js_invocation_sites` | `REB_NATIVE_JS_INVOCATION_SITES` | Absolute path of a `native-js-invocation-sites-v1` file. Checked, then armed from a private copy under the agent session directory. Needs category bit 512. |
+| `js_invocation_saved_sites` | `REB_NATIVE_JS_INVOCATION_SITES` | Arms the agent sessions' own saved set, `~/.config/origin-trace/agent-sessions/js-invocation-sites-v1.json`, which `js_invocation_site_action` edits in an agent session. Never the app's set. Refused when empty. Not with `js_invocation_sites`. |
+| `js_invocation_digests` | `REB_NATIVE_JS_INVOCATION_DIGESTS=1` | Sensitive: needs named sites and `confirm_sensitive_capture`. |
+| `canvas_images` | `REB_CAPTURE_CANVAS_IMAGES=1` | Sensitive: needs `confirm_sensitive_capture`. |
+
+An agent sets `confirm_sensitive_capture` only on the researcher's
+authorization for that content and target. Named invocation sites are strict:
+`REB_NATIVE_JS_INVOCATION_IF_SUPPORTED` is removed, so a Brave without
+invocation capture refuses the start instead of silently dropping the sites.
+The start result's `options` (and `js_invocation_sites_armed`), the first
+line of the launch log (`Agent session options: {...}`) and the session
+context's `capture_options` show what the session runs with. A launcher
+refusal that names an environment switch also names the option to change.
+Operator
 settings such as helper binary paths, `REB_LIVE_SESSION_ROOT`, `REB_ORIGIN_TRACE_APP` and
 `REB_OPEN_COMMAND` still apply. They run the launcher that belongs with the
 `reb-api` build (`Contents/Resources/run-live-session.sh` in the app,
@@ -422,6 +446,38 @@ successful start rebinds the connection to that session's own
 and any other endpoint or instance change still retires the connection. After
 a successful `session_action` `end`, the connection is unbound again (or, without
 `--allow-session-start`, retired).
+
+### Native Console for agents
+
+The Console reaches any frame of the capture browser through the same tools
+as the panel; nothing about it is MCP-specific. `get_native_console` lists the
+capture browser's HTTP(S) documents with `binding_id`. Each target has `id`
+(execution identity only within that binding), `frame` (`top` or `child`),
+`origin`, `url` and `label` (display only), and for a child frame
+`top_relation` and `out_of_process`. The browser's target record carries no
+parent frame and no renderer process, so these two are derived: the child's
+origin is compared with every listed top-level document. `same_origin`,
+`same_site` (equal host or IP address, any port), and `cross_site` (another
+scheme, an IP against a name, or names whose last two labels differ) are
+decided without the public suffix list; two names that share their last two
+labels, tops that disagree, or an opaque origin are `undetermined`.
+`out_of_process` is true for `cross_site`, which Chromium's full site isolation
+runs in its own renderer process, false for `same_origin`, and null otherwise.
+After connecting, `location.ancestorOrigins` in the frame confirms its parents.
+
+`native_console_action` `connect_live` with `binding_id`, `target_id` and
+`confirm_live: true` selects one document, cross-site children included, and
+returns a fresh `session_id`. `evaluate` and `runtime` run only in that
+document. While connected, the listing's `selection` is `selected`, `none`, or
+`stale` with the `target_id` that navigated, reloaded or was removed; that
+state lasts until `stop` or the next `connect_live`. A command for any other
+`target_id`, or for a stale selection, returns HTTP 200 with
+`status: stale_target`, `code: target_unavailable` and text that names the next
+step, and nothing is sent to the browser. A second `connect_live` while one is
+open, a stale `session_id` and a stale `binding_id` are 409 refusals that say
+what to read or send next. Document-start rules for a child frame name that
+frame's exact origin with `frame: child`; see
+[Native Console v3](native-console-v3.md).
 
 ## Session summary
 
@@ -508,7 +564,10 @@ computes it; both check `tools/fixtures/native-js-invocation/site-cases.json`.
 The saved set is the exact `native-js-invocation-sites-v1` file at
 `--js-invocation-site-store` (the app passes
 `~/Library/Application Support/Origin Trace/js-invocation-sites-v1.json`;
-`make live` and `make ui` use `build/sessions/js-invocation-sites-v1.json`)
+`make live` and `make ui` use `build/sessions/js-invocation-sites-v1.json`;
+agent-started sessions use their own
+`~/.config/origin-trace/agent-sessions/js-invocation-sites-v1.json`, which a
+later `start_live_session` with `js_invocation_saved_sites` arms)
 plus a `js-invocation-sites-v1.labels.json` sidecar with each label, source URL
 and session, which the browser never reads. Both are written atomically with
 user-only permissions. An empty set has no site file. The list and resolve

@@ -399,6 +399,10 @@ impl App {
                 ));
                 value["broker_connected"] = json!(broker_connected);
                 value["capture_state"] = json!(capture.state.as_str());
+                value["capture_options"] = session_context::capture_options(
+                    &self.options,
+                    &self.invocation_session.value(),
+                );
                 value["allow_effects"] = Value::Null;
                 value["effects_admission"] = json!("caller_specific_unknown");
                 value["limits"] = json!({"items_per_inventory":session_context::ITEMS,"url_policy":"origin_or_wasm_label","title_policy":"omitted","artifact_linkage":"not_inferred"});

@@ -38,6 +38,14 @@ pub struct Options {
     /// This session records settled-value digests of armed calls.
     #[arg(long, requires = "js_invocation_session_sites")]
     pub js_invocation_session_digests: bool,
+    /// Labels for session context: what this session's launcher passed to
+    /// Brave. They grant and enable nothing here.
+    #[arg(long, requires = "socket")]
+    pub session_request_content: bool,
+    #[arg(long, requires = "socket")]
+    pub session_canvas_images: bool,
+    #[arg(long, requires = "socket")]
+    pub session_document_start: bool,
     #[arg(long)]
     pub decoder: Option<PathBuf>,
     #[arg(long)]

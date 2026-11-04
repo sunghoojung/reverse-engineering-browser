@@ -21,6 +21,8 @@ pub(crate) mod js_lexer;
 #[cfg(test)]
 #[path = "vm_review_inputs.rs"]
 pub(crate) mod review_inputs;
+#[path = "vm_wasm_control.rs"]
+pub(crate) mod wasm_control;
 #[path = "vm_wasm_dispatch.rs"]
 mod wasm_dispatch;
 #[path = "vm_wasm_tables.rs"]
@@ -621,7 +623,10 @@ fn wasm(bytes: &[u8]) -> Result<(Vec<Value>, Value)> {
                         | Operator::GlobalSet { global_index } => Some((true, *global_index)),
                         _ => None,
                     };
-                    let loop_depth = control.iter().filter(|c| **c == 3).count();
+                    let loop_depth = control
+                        .iter()
+                        .filter(|block| **block == wasm_control::BlockKind::Loop)
+                        .count();
                     let (arm_count, unique_targets, table_index) = match &op {
                         Operator::BrTable { targets } => {
                             let mut labels = BTreeSet::new();
@@ -650,23 +655,31 @@ fn wasm(bytes: &[u8]) -> Result<(Vec<Value>, Value)> {
                         unique_targets,
                         table_index,
                     });
-                    match op {
-                        Operator::Block { .. } => control.push(2),
-                        Operator::Loop { .. } => control.push(3),
-                        Operator::If { .. } => control.push(4),
-                        Operator::Else => {
-                            if control.last() != Some(&4) {
-                                return Err(Error::bad("WebAssembly else without matching if"));
-                            }
+                    match wasm_control::control(&op) {
+                        wasm_control::Control::Open(block) => control.push(block),
+                        wasm_control::Control::Arm(block) if control.last() != Some(&block) => {
+                            return Err(Error::bad(if block == wasm_control::BlockKind::If {
+                                "WebAssembly else without matching if"
+                            } else {
+                                "WebAssembly catch without matching try"
+                            }));
                         }
-                        Operator::End if control.pop().is_none() => {
-                            ended = true;
-                            if !reader.eof() {
+                        wasm_control::Control::Close { delegate } => match control.pop() {
+                            Some(block) if !delegate || block == wasm_control::BlockKind::Try => (),
+                            Some(_) | None if delegate => {
                                 return Err(Error::bad(
-                                    "WebAssembly function body has trailing instructions",
+                                    "WebAssembly delegate without matching try",
                                 ));
                             }
-                        }
+                            _ => {
+                                ended = true;
+                                if !reader.eof() {
+                                    return Err(Error::bad(
+                                        "WebAssembly function body has trailing instructions",
+                                    ));
+                                }
+                            }
+                        },
                         _ => (),
                     }
                 }

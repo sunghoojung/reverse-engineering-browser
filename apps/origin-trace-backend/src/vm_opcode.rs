@@ -4308,6 +4308,64 @@ if (!validate(document)) throw new Error('Backend workspace rejected by shipped 
             .collect()
     }
 
+    /// `try_table` opens a frame like `block`, so its `end` closes neither the
+    /// function body nor an enclosing loop. A module analyzes exactly like the
+    /// same module with a `nop` where each `try_table` is.
+    #[test]
+    fn try_table_frames_keep_the_function_end_and_loop_depth() {
+        let module = |top: &str, inner: &str| {
+            wat::parse_str(format!(
+                r#"(module (memory 1)
+                  (func (export "run") (param $pc i32) (result i32)
+                    {top}
+                    (block $exit
+                      (loop $next
+                        {inner}
+                        (block $b (block $a
+                          (br_table $a $b $exit (i32.load8_u (local.get $pc)))))
+                        (local.set $pc (i32.add (local.get $pc) (i32.const 1)))
+                        (br $next)))
+                    (local.get $pc)))"#
+            ))
+            .unwrap()
+        };
+        let shape = |bytes: Vec<u8>| {
+            let (_, analysis, document) = analyze_artifact(&bytes, "wasm", &[]);
+            let result = &analysis["results"][0];
+            let sites = result["frontend"]["dispatch_classification"]["sites"]
+                .as_array()
+                .map(|sites| {
+                    sites
+                        .iter()
+                        .map(|site| (site["role"].clone(), site["repeats"].clone()))
+                        .collect::<Vec<_>>()
+                });
+            let handlers = document["workspaces"][0]["handlers"]
+                .as_array()
+                .map(|handlers| {
+                    handlers
+                        .iter()
+                        .map(|h| h["opcode"].clone())
+                        .collect::<Vec<_>>()
+                });
+            (
+                result["status"].clone(),
+                result["tier"].clone(),
+                result["vm_score"].clone(),
+                sites,
+                handlers,
+            )
+        };
+        let expected = shape(module("(nop)", "(nop)"));
+        assert_eq!(expected.1, "likely-vm");
+        for (top, inner) in [
+            ("(try_table (nop))", "(nop)"),
+            ("(nop)", "(try_table (nop))"),
+        ] {
+            assert_eq!(shape(module(top, inner)), expected, "{top} {inner}");
+        }
+    }
+
     /// Regular-expression literals, template substitutions and lone carriage
     /// returns are lexed, not read as quotes or comments that blank code: the
     /// region tree, case labels and function-array positions survive them.

@@ -14,6 +14,7 @@
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <cerrno>
 #include <limits>
 #include <span>
@@ -180,25 +181,34 @@ bool NativeProbeSocketClient::StartFromCommandLine() {
   }
 
   browser_task_runner_ = base::SequencedTaskRunner::GetCurrentDefault();
-  if (!writer_thread_.Start()) {
-    NativeArtifactSocketClient::Get().Stop();
+  session_id_ = session_id;
+  // Until something is dropped, a transport gap names the session's lowest
+  // admitted category.
+  last_dropped_category_.store(
+      static_cast<NativeProbeCategory>(std::countr_zero(category_mask) + 1),
+      std::memory_order_relaxed);
+  const auto refuse = [this] {
+    connected_.store(false, std::memory_order_release);
     close(socket_descriptor_);
     socket_descriptor_ = -1;
+    NativeArtifactSocketClient::Get().Stop();
     return false;
-  }
+  };
+  // Admit records before the session can emit them; they wait in the queue
+  // until the writer starts. The writer starts last, so a refused session
+  // never leaves a thread polling a descriptor this sequence closes.
   connected_.store(true, std::memory_order_release);
-  writer_thread_.task_runner()->PostTask(
-      FROM_HERE, base::BindOnce(&NativeProbeSocketClient::Run, base::Unretained(this)));
   if (!NativeProbeSession::Get().StartSession(session_id, category_mask, expires_at_monotonic_ns,
                                               capture_canvas_images, &NativeProbeSocketClient::Emit,
                                               capture_request_content)) {
-    connected_.store(false, std::memory_order_release);
-    wakeup_.Signal();
-    close(socket_descriptor_);
-    socket_descriptor_ = -1;
-    NativeArtifactSocketClient::Get().Stop();
-    return false;
+    return refuse();
   }
+  if (!writer_thread_.Start()) {
+    NativeProbeSession::Get().StopSession();
+    return refuse();
+  }
+  writer_thread_.task_runner()->PostTask(
+      FROM_HERE, base::BindOnce(&NativeProbeSocketClient::Run, base::Unretained(this)));
   LOG(INFO) << "Native capture armed before profile startup; network metadata scope is proxy-only; "
                "service-worker synthetic and renderer memory-cache coverage unavailable; "
                "request path and body content "
@@ -237,13 +247,32 @@ void NativeProbeSocketClient::ArtifactChannelLost() noexcept {
 }
 
 void NativeProbeSocketClient::Enqueue(const NativeProbeEvent& event) noexcept {
-  if (!connected_.load(std::memory_order_acquire) ||
-      !queue_.TryPush(event, NativeProbeDropWeight(event))) {
+  if (!connected_.load(std::memory_order_acquire)) {
+    return;
+  }
+  if (!queue_.TryPush(event, NativeProbeDropWeight(event))) {
+    last_dropped_category_.store(event.header.category, std::memory_order_relaxed);
     return;
   }
   if (queue_.MarkNotificationPending()) {
     wakeup_.Signal();
   }
+}
+
+NativeProbeEvent NativeProbeSocketClient::MakeTransportGap(
+    const std::uint64_t dropped) const noexcept {
+  // This queue mixes every process's records, so its drops cannot be charged
+  // to one renderer stream. The gap is the browser's own record: it takes the
+  // next browser sequence instead of repeating another stream's number.
+  NativeProbeEvent reference;
+  reference.header.category = last_dropped_category_.load(std::memory_order_relaxed);
+  reference.header.session_id = session_id_;
+  reference.header.process_id = static_cast<std::uint32_t>(base::GetCurrentProcId());
+  reference.header.thread_id = static_cast<std::uint32_t>(base::PlatformThread::CurrentId().raw());
+  reference.header.sequence_number = NativeProbeSession::Get().NextBrowserSequence();
+  reference.header.monotonic_time_ns =
+      static_cast<std::uint64_t>(base::TimeTicks::Now().since_origin().InNanoseconds());
+  return MakeNativeProbeGapEvent(reference, dropped);
 }
 
 void NativeProbeSocketClient::Run() {
@@ -264,18 +293,14 @@ void NativeProbeSocketClient::Run() {
       return;
     }
     std::array<NativeProbeEvent, kSocketBatchCapacity> batch;
-    NativeProbeEvent last_event;
-    bool drained_event = false;
     for (;;) {
       std::size_t batch_size = 0;
       while (batch_size < batch.size() && queue_.TryPop(batch[batch_size])) {
-        last_event = batch[batch_size];
         ++batch_size;
       }
       if (batch_size == 0) {
         break;
       }
-      drained_event = true;
       if (!SendAll(socket_descriptor_, base::as_bytes(base::span(batch).first(batch_size)), true)) {
         browser_task_runner_->PostTask(
             FROM_HERE,
@@ -284,9 +309,11 @@ void NativeProbeSocketClient::Run() {
       }
     }
 
+    // Reported on the next wake-up even if nothing else is queued, so drops
+    // in a final burst are not held back waiting for a later record.
     const std::uint64_t dropped = queue_.DroppedCount();
-    if (drained_event && dropped > reported_dropped) {
-      const NativeProbeEvent gap = MakeNativeProbeGapEvent(last_event, dropped - reported_dropped);
+    if (dropped > reported_dropped) {
+      const NativeProbeEvent gap = MakeTransportGap(dropped - reported_dropped);
       if (!SendAll(socket_descriptor_, base::byte_span_from_ref(gap), true)) {
         browser_task_runner_->PostTask(
             FROM_HERE,
@@ -335,6 +362,9 @@ bool NativeProbeSocketClient::StartFromCommandLine() {
 void NativeProbeSocketClient::Emit(const NativeProbeEvent&) noexcept {}
 void NativeProbeSocketClient::ArtifactChannelLost() noexcept {}
 void NativeProbeSocketClient::Enqueue(const NativeProbeEvent&) noexcept {}
+NativeProbeEvent NativeProbeSocketClient::MakeTransportGap(std::uint64_t) const noexcept {
+  return {};
+}
 void NativeProbeSocketClient::Run() {}
 void NativeProbeSocketClient::HandleDisconnect() {}
 

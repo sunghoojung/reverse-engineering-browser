@@ -2650,7 +2650,7 @@
       "post": {
         "operationId": "capture_action",
         "summary": "capture action",
-        "description": "Validates CaptureAction first; invalid bodies include allowed_actions and missing_fields. Idle backends refuse with idle_backend. Existing capture-controls and clear-confirmation requirements remain unchanged.",
+        "description": "Validates CaptureAction first; invalid bodies include allowed_actions and missing_fields. Idle and demo backends refuse with idle_backend. Stop and clear need a positive broker PID. Stop signals only a running broker whose PID still names the process it did at backend startup; an ended or lost capture, or an unconfirmed PID, refuses with dependency_unavailable and nothing is signaled. A stop that times out stays stop_requested and may be repeated; stop after stopped succeeds. Clear needs a capture that is not running and empties the derived trace and signal stores before the event store.",
         "tags": [
           "capture"
         ],
@@ -13177,7 +13177,8 @@
             "type": "boolean"
           },
           "broker_connected": {
-            "type": "boolean"
+            "type": "boolean",
+            "description": "False only when this live backend's native event broker is not running. Idle and demo backends have no broker to lose and report true; capture_state names the lifecycle."
           },
           "capture_mode": {
             "type": "string",
@@ -13186,6 +13187,18 @@
               "demo",
               "idle"
             ]
+          },
+          "capture_state": {
+            "type": "string",
+            "enum": [
+              "not_live",
+              "running",
+              "stop_requested",
+              "stopped",
+              "ended",
+              "lost"
+            ],
+            "description": "Live capture lifecycle, from the kernel lock the native event broker holds on its event store for its whole life. not_live: idle or demo backend. running: the broker is running. stop_requested: stop was delivered and the broker has not exited yet. stopped: the broker exited after this backend asked it to stop. ended: the broker exited through its own shutdown (session expiry, browser disconnect, or a failure in its log). lost: the broker is gone and left its socket behind, so it was killed or crashed. Exits are final for a backend."
           }
         },
         "required": [
@@ -13208,7 +13221,8 @@
           "local_analyst_runner_available",
           "decoder_available",
           "broker_connected",
-          "capture_mode"
+          "capture_mode",
+          "capture_state"
         ]
       },
       "Event": {
@@ -13230,7 +13244,8 @@
             "maxItems": 5000
           },
           "broker_connected": {
-            "type": "boolean"
+            "type": "boolean",
+            "description": "False only when this live backend's native event broker is not running. Idle and demo backends have no broker to lose and report true; capture_state names the lifecycle."
           },
           "capture_mode": {
             "type": "string",
@@ -13240,11 +13255,25 @@
               "idle"
             ]
           },
+          "capture_state": {
+            "type": "string",
+            "enum": [
+              "not_live",
+              "running",
+              "stop_requested",
+              "stopped",
+              "ended",
+              "lost"
+            ],
+            "description": "Live capture lifecycle, from the kernel lock the native event broker holds on its event store for its whole life. not_live: idle or demo backend. running: the broker is running. stop_requested: stop was delivered and the broker has not exited yet. stopped: the broker exited after this backend asked it to stop. ended: the broker exited through its own shutdown (session expiry, browser disconnect, or a failure in its log). lost: the broker is gone and left its socket behind, so it was killed or crashed. Exits are final for a backend."
+          },
           "capture_stopped": {
-            "type": "boolean"
+            "type": "boolean",
+            "description": "True only in capture_state stopped: this backend stopped the capture."
           },
           "capture_controls_available": {
-            "type": "boolean"
+            "type": "boolean",
+            "description": "A live backend started with a positive broker PID. Stop signals only a running broker whose PID is still the process it named at startup."
           },
           "sequence_gaps": {
             "$ref": "#/components/schemas/Uint64String",
@@ -13335,7 +13364,8 @@
           "queue_drops",
           "queue_drops_saturated",
           "network_events",
-          "event_window"
+          "event_window",
+          "capture_state"
         ]
       },
       "Artifact": {
@@ -14065,7 +14095,7 @@
                 }
               ],
               "confirmations": [],
-              "notes": "Signals a connected broker to stop native capture and marks capture stopped; it can time out after the signal was sent.",
+              "notes": "Signals a running broker to stop native capture and waits up to five seconds for it to exit. A timeout returns 408 after the signal was delivered; capture_state stays stop_requested and stop may be repeated. The PID must still be the process it was at backend startup.",
               "sources": [
                 {
                   "path": "apps/origin-trace-backend/src/app.rs",
@@ -14106,7 +14136,7 @@
                 },
                 {
                   "id": "capture-stopped",
-                  "condition": "The broker socket must be disconnected before clearing."
+                  "condition": "The broker must not be running: capture_state is stopped, ended or lost. A broker that still holds its event store refuses the clear."
                 }
               ],
               "confirmations": [
@@ -14136,11 +14166,29 @@
           },
           "capture_stopped": {
             "type": "boolean"
+          },
+          "capture_state": {
+            "type": "string",
+            "enum": [
+              "not_live",
+              "running",
+              "stop_requested",
+              "stopped",
+              "ended",
+              "lost"
+            ],
+            "description": "Live capture lifecycle, from the kernel lock the native event broker holds on its event store for its whole life. not_live: idle or demo backend. running: the broker is running. stop_requested: stop was delivered and the broker has not exited yet. stopped: the broker exited after this backend asked it to stop. ended: the broker exited through its own shutdown (session expiry, browser disconnect, or a failure in its log). lost: the broker is gone and left its socket behind, so it was killed or crashed. Exits are final for a backend."
+          },
+          "broker_connected": {
+            "type": "boolean",
+            "description": "False only when this live backend's native event broker is not running. Idle and demo backends have no broker to lose and report true; capture_state names the lifecycle."
           }
         },
         "required": [
           "ok",
-          "capture_stopped"
+          "capture_stopped",
+          "capture_state",
+          "broker_connected"
         ]
       },
       "NameValue": {
@@ -16997,7 +17045,8 @@
           "allow_effects",
           "effects_admission",
           "limits",
-          "consistency"
+          "consistency",
+          "capture_state"
         ],
         "properties": {
           "protocol_version": {
@@ -17025,6 +17074,18 @@
             ],
             "type": "string"
           },
+          "capture_state": {
+            "type": "string",
+            "enum": [
+              "not_live",
+              "running",
+              "stop_requested",
+              "stopped",
+              "ended",
+              "lost"
+            ],
+            "description": "Live capture lifecycle, from the kernel lock the native event broker holds on its event store for its whole life. not_live: idle or demo backend. running: the broker is running. stop_requested: stop was delivered and the broker has not exited yet. stopped: the broker exited after this backend asked it to stop. ended: the broker exited through its own shutdown (session expiry, browser disconnect, or a failure in its log). lost: the broker is gone and left its socket behind, so it was killed or crashed. Exits are final for a backend."
+          },
           "debugger_state": {
             "enum": [
               "unavailable",
@@ -17038,7 +17099,8 @@
             "description": "Retired with CDP; always unavailable. Kept so version 1 clients still parse the context."
           },
           "broker_connected": {
-            "type": "boolean"
+            "type": "boolean",
+            "description": "True only while a live backend's native event broker is running, including stop_requested. Idle and demo backends report false."
           },
           "live_admission": {
             "type": "string",
@@ -24593,7 +24655,8 @@
           "artifact_receiver_connected",
           "events",
           "artifacts",
-          "checks"
+          "checks",
+          "capture_state"
         ],
         "properties": {
           "protocol_version": {
@@ -24612,6 +24675,18 @@
               "idle"
             ]
           },
+          "capture_state": {
+            "type": "string",
+            "enum": [
+              "not_live",
+              "running",
+              "stop_requested",
+              "stopped",
+              "ended",
+              "lost"
+            ],
+            "description": "Live capture lifecycle, from the kernel lock the native event broker holds on its event store for its whole life. not_live: idle or demo backend. running: the broker is running. stop_requested: stop was delivered and the broker has not exited yet. stopped: the broker exited after this backend asked it to stop. ended: the broker exited through its own shutdown (session expiry, browser disconnect, or a failure in its log). lost: the broker is gone and left its socket behind, so it was killed or crashed. Exits are final for a backend."
+          },
           "live_admission": {
             "type": "string",
             "enum": [
@@ -24622,7 +24697,8 @@
             ]
           },
           "broker_connected": {
-            "type": "boolean"
+            "type": "boolean",
+            "description": "True only while a live backend's native event broker is running, including stop_requested. Idle and demo backends report false."
           },
           "capture_stopped": {
             "type": "boolean"

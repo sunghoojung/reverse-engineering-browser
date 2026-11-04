@@ -463,7 +463,7 @@ fn read_endpoint_file(path: &Path) -> Result<String, Box<dyn std::error::Error>>
         return Err("Endpoint path must be a regular file. No tools were advertised.".into());
     }
     let mut bytes = Vec::new();
-    file.take(1025).read_to_end(&mut bytes)?;
+    (&file).take(1025).read_to_end(&mut bytes)?;
     if bytes.len() > 1024 {
         return Err(format!(
             "Endpoint file {} is larger than 1024 bytes. No tools were advertised.",
@@ -477,7 +477,17 @@ fn read_endpoint_file(path: &Path) -> Result<String, Box<dyn std::error::Error>>
             path.display()
         )
     })?;
-    validated_loopback_root(text)
+    let root = validated_loopback_root(text)?;
+    // A backend holds the file it published until it exits, even when it is
+    // killed. Without that hold the URL may now reach another process.
+    if !origin_trace_backend::has_live_publisher(&file) {
+        return Err(format!(
+            "Endpoint file {} is stale: the backend that published it is no longer running. Start the session again, or select a running session's endpoint. No tools were advertised.",
+            path.display()
+        )
+        .into());
+    }
+    Ok(root)
 }
 
 fn read_session_endpoint(dir: &Path) -> Result<String, Box<dyn std::error::Error>> {
@@ -1646,16 +1656,26 @@ mod tests {
         let newer = root.path().join("8");
         std::fs::create_dir(&selected).unwrap();
         std::fs::create_dir(&newer).unwrap();
-        std::fs::write(
-            selected.join("research-ui.endpoint"),
-            "http://127.0.0.1:9\n",
+        let _selected = origin_trace_backend::PublishedEndpoint::new(
+            Some(&selected.join("research-ui.endpoint")),
+            "127.0.0.1:9".parse().unwrap(),
         )
         .unwrap();
-        std::fs::write(newer.join("research-ui.endpoint"), "http://127.0.0.1:10\n").unwrap();
+        let _newer = origin_trace_backend::PublishedEndpoint::new(
+            Some(&newer.join("research-ui.endpoint")),
+            "127.0.0.1:10".parse().unwrap(),
+        )
+        .unwrap();
         assert_eq!(
             read_session_endpoint(&selected).unwrap(),
             "http://127.0.0.1:9"
         );
+        // The same bytes with no running publisher, as a killed backend leaves them.
+        let killed = root.path().join("killed");
+        std::fs::create_dir(&killed).unwrap();
+        std::fs::write(killed.join("research-ui.endpoint"), "http://127.0.0.1:9\n").unwrap();
+        let error = read_session_endpoint(&killed).unwrap_err().to_string();
+        assert!(error.contains("is stale"), "{error}");
         let missing = root.path().join("9");
         std::fs::create_dir(&missing).unwrap();
         let error = read_session_endpoint(&missing).unwrap_err().to_string();

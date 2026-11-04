@@ -83,6 +83,9 @@ retargeting pending calls. MCP sends `X-REB-Expected-Instance` with the startup
 health identity on tool requests; the backend rejects a nonmatching or duplicate
 supplied precondition with HTTP 409 `state_conflict` before body processing or
 dispatch. Existing API clients that omit the header remain supported.
+A backend holds the endpoint file it published until it exits, so an endpoint
+file that no running backend holds is stale, as a killed backend leaves it, and
+MCP refuses it before any request.
 This closes replacement at the same port between health and action. It is not
 an authentication token, permission grant, or a document-generation selector;
 existing action-specific target/document ownership checks remain required. A
@@ -187,6 +190,23 @@ The last call stops capture. A server without configured live services still
 exposes stored-evidence operations and returns explicit unavailable state or 409
 for live controls. Every retired `/api/debugger` route returns 410
 `debugger_unavailable`.
+
+Health, events, session context, session summary and capture action results
+report `capture_state`, the live capture lifecycle: `running`,
+`stop_requested`, `stopped`, `ended`, `lost`, or `not_live` for idle and demo
+backends. A broker counts as running while it holds the lock on its event store
+guard, which the kernel releases even when the broker is killed; a socket file
+alone is never a broker. `ended` means it shut down on its own and removed its
+socket; `lost` means it left the socket behind. `broker_connected` keeps its
+per-surface reading: health and events report false only for a live backend
+whose broker is not running, while session context and summary report true only
+while a live broker runs. `capture_action` `stop` signals only a running broker
+whose `--broker-pid` still names the process it named at backend startup;
+otherwise it returns 409 `dependency_unavailable` and signals nothing. A stop
+that times out returns 408 `timeout` after the signal was delivered and stays
+`stop_requested`; repeating it signals again, and stop after `stopped`
+succeeds. `clear` empties the trace and signal stores before the event store.
+
 `curl --json` sends the required Content-Length; streaming/chunked request bodies
 are unsupported. Action bodies must be JSON objects within the per-operation
 `x-max-body-bytes` limit. The server does not enforce Content-Type, but clients
@@ -316,13 +336,13 @@ backend belongs to. Both actions refuse with 409 `idle_backend` unless
   credentials to the session's running capture browser, which opens it in a
   new tab. It uses Chromium's same-profile relay: the backend runs its
   `--brave-binary` with the session's `--brave-profile` and the URL. It
-  refuses with 409 `native_capture_unavailable` when the broker is disconnected
-  or capture was stopped, and with 409 `target_unavailable` when no live
+  refuses with 409 `native_capture_unavailable` unless `capture_state` is
+  `running`, and with 409 `target_unavailable` when no live
   process holds the profile's `SingletonLock`. The relay carries proxy and
   resolver switches that the running browser ignores but that leave a relay
   with no network if it ever starts a browser of its own; such a relay is
-  stopped after 10 seconds and reported. A broker socket proves only that the
-  broker listens, so the response reports `capture_observed`: true once a new
+  stopped after 10 seconds and reported. A running broker proves only that the
+  broker runs, so the response reports `capture_observed`: true once a new
   record reaches the session's store within 10 seconds. False means nothing
   was recorded, for example because the configured browser is not a capture
   build. It never runs page JavaScript.

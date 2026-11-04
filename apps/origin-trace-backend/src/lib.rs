@@ -4,6 +4,7 @@ mod analyst;
 mod app;
 mod artifact_lookup;
 mod artifact_query;
+mod capture;
 mod config;
 mod decoder;
 mod deobfuscation;
@@ -45,7 +46,7 @@ mod workspace;
 mod workspace_lease;
 pub use app::App;
 pub use config::Options;
-pub use endpoint::PublishedEndpoint;
+pub use endpoint::{PublishedEndpoint, has_live_publisher};
 
 pub use durable::write_private_noclobber;
 

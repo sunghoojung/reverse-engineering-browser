@@ -80,7 +80,7 @@ pub(crate) fn url_label(value: &Value) -> Value {
 /// scripts are permitted, and what invocation capture armed. Counts and
 /// switches only; site labels and source URLs stay in get_js_invocation_sites.
 pub fn capture_options(options: &crate::config::Options, invocation: &Value) -> Value {
-    let live = options.capture_mode() == "live";
+    let live = options.capture_mode() == crate::config::CaptureMode::Live;
     json!({
         "source": if live { "launcher" } else { "not_live" },
         "request_content": live && options.session_request_content,

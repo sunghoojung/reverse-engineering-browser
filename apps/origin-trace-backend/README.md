@@ -36,6 +36,33 @@ decoding, saved collections and evidence export remain local workflows.
 Only `reb-api mcp` exposes the existing versioned HTTP contract; effectful tools
 remain opt-in, not authorization to inspect an unowned target.
 
+## Live capture lifecycle
+
+A live backend (`--socket`) belongs to one native event broker, which the
+launcher starts first. The backend reads the broker as running while some
+process holds the exclusive lock the broker keeps on its event store guard
+(`<store>.reb-lock-v1`) for its whole life. The kernel drops that lock even
+when the broker is killed, so a socket file left behind never reads as a
+broker. Every capture surface reports one `capture_state`: `running`,
+`stop_requested`, `stopped`, `ended` (the broker shut down on its own and
+removed its socket), `lost` (it is gone and left its socket, so it was killed
+or crashed), or `not_live` for idle and demo backends. Exits are final.
+
+Stop signals only a running broker, and only while `--broker-pid` still names
+the process it named when the backend started; the start time is compared, so
+a reused PID is never signaled. A stop that times out stays `stop_requested`
+and can be repeated. Clear refuses while the broker runs and empties the
+derived trace and signal stores before the event store, so an interrupted
+clear never leaves derived records for cleared events; clearing again finishes
+it. `--demo-evidence` with `--socket`, and `--broker-pid` without `--socket`,
+are rejected at startup.
+
+Endpoint files keep their one-line format. The backend holds an exclusive lock
+on the exact file it published until it exits, and publishers serialize on the
+directory, so retiring removes only that file, never a successor's at the same
+port. `reb-api mcp` refuses an endpoint file that no running backend holds as
+stale, which is what a killed backend leaves behind.
+
 ## MCP agent workflow
 
 `reb-api mcp` answers `initialize` with a short workflow guide (orient,

@@ -1300,6 +1300,7 @@ fn event_response(events: &[Value], scan_end: usize, limited: bool) -> Value {
         "event_window": {"scope":"store", "scan_start":"0", "scan_end":scan_end.to_string(), "scan_limit":67108864, "events_limited":limited, "network_events_limited":limited},
         "broker_connected": true,
         "capture_mode": "idle",
+        "capture_state": "not_live",
         "capture_stopped": false,
         "capture_controls_available": false,
         "sequence_gaps": "0",
@@ -5589,7 +5590,6 @@ async fn session_actions_drive_only_this_sessions_capture_browser() {
 
     let root = tempfile::tempdir().unwrap();
     let socket = root.path().join("broker.sock");
-    let _broker = std::os::unix::net::UnixListener::bind(&socket).unwrap();
     let profile = root.path().join("profile");
     std::fs::create_dir_all(&profile).unwrap();
     let record = root.path().join("brave-args");
@@ -5606,6 +5606,7 @@ async fn session_actions_drive_only_this_sessions_capture_browser() {
         "1".into(),
     ])
     .await;
+    let _broker = FakeBroker::start(server.root.path(), &socket);
     let call = |body: Value| server.action("/api/session/actions", body);
     let code = |bytes: Vec<u8>| serde_json::from_slice::<Value>(&bytes).unwrap()["code"].clone();
 
@@ -8089,6 +8090,304 @@ async fn disconnected_capture_stop_is_not_reported_as_success() {
     assert_eq!(context["broker_connected"], false);
     assert_eq!(context["capture_mode"], "live");
     assert_eq!(context["live_admission"], "native_capture_unavailable");
+}
+
+/// What the backend observes of a running native event broker: its
+/// exclusive lifetime lock on the event store guard, and its socket.
+#[cfg(unix)]
+struct FakeBroker {
+    socket: std::path::PathBuf,
+    listener: Option<std::os::unix::net::UnixListener>,
+    guard: Option<std::fs::File>,
+}
+#[cfg(unix)]
+impl FakeBroker {
+    fn start(store_root: &Path, socket: &Path) -> Self {
+        use std::os::{fd::AsRawFd, unix::fs::PermissionsExt};
+        let path = store_root.join("events.jsonl.reb-lock-v1");
+        std::fs::write(&path, b"REB_EVIDENCE_GUARD_V1\n").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let guard = std::fs::File::open(&path).unwrap();
+        assert_eq!(
+            unsafe { libc::flock(guard.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) },
+            0
+        );
+        Self {
+            socket: socket.to_owned(),
+            listener: Some(std::os::unix::net::UnixListener::bind(socket).unwrap()),
+            guard: Some(guard),
+        }
+    }
+    /// The broker's own shutdown path unlinks its socket before it exits.
+    fn exit(&mut self) {
+        self.listener = None;
+        let _ = std::fs::remove_file(&self.socket);
+        self.guard = None;
+    }
+    /// A killed broker releases its lock and leaves its socket behind.
+    fn kill(&mut self) {
+        self.guard = None;
+    }
+}
+
+#[cfg(unix)]
+async fn capture_fields(server: &Server) -> Value {
+    let health: Value = server.get("/api/health").await.json().await.unwrap();
+    let context: Value = server
+        .get("/api/session/context")
+        .await
+        .json()
+        .await
+        .unwrap();
+    let events = server.get("/api/events").await;
+    let events: Value =
+        serde_json::from_slice(&assert_contract_response(events, "get", "/api/events", 200).await)
+            .unwrap();
+    let summary: Value = server
+        .get("/api/session/summary")
+        .await
+        .json()
+        .await
+        .unwrap();
+    for document in [&health, &context, &summary] {
+        assert_eq!(document["capture_state"], events["capture_state"]);
+    }
+    assert_eq!(context["broker_connected"], summary["broker_connected"]);
+    assert_eq!(events["capture_stopped"], summary["capture_stopped"]);
+    if health["capture_mode"] == "live" {
+        assert_eq!(health["broker_connected"], context["broker_connected"]);
+        assert_eq!(events["broker_connected"], context["broker_connected"]);
+    }
+    json!({
+        "capture_state": events["capture_state"],
+        "broker_connected": events["broker_connected"],
+        "capture_stopped": events["capture_stopped"],
+        "capture_controls_available": events["capture_controls_available"],
+        "live_admission": context["live_admission"],
+    })
+}
+
+#[cfg(unix)]
+async fn capture_action(server: &Server, body: Value, status: u16) -> Value {
+    let response = server.action("/api/capture/actions", body).await;
+    serde_json::from_slice(
+        &assert_contract_response(response, "post", "/api/capture/actions", status).await,
+    )
+    .unwrap()
+}
+
+/// A crashed broker leaves its socket file. That file is not a broker: the
+/// capture reads as lost, its PID is never signaled, and clear is allowed.
+#[cfg(unix)]
+#[tokio::test]
+async fn stale_broker_socket_is_lost_and_its_pid_is_never_signaled() {
+    let root = tempfile::tempdir().unwrap();
+    let socket = root.path().join("broker.sock");
+    drop(std::os::unix::net::UnixListener::bind(&socket).unwrap());
+    assert!(socket.exists());
+    // Stands in for whatever process holds the dead broker's PID now.
+    let mut unrelated = Command::new("sleep").arg("60").spawn().unwrap();
+    let server = Server::start_with_args(&[
+        "--socket".into(),
+        socket.display().to_string(),
+        "--broker-pid".into(),
+        unrelated.id().to_string(),
+    ])
+    .await;
+    let mut broker = FakeBroker::start(server.root.path(), &root.path().join("unused.sock"));
+    broker.kill();
+    server.file("events.jsonl", &jsonl(&[metadata_event(1)]));
+    assert_eq!(
+        capture_fields(&server).await,
+        json!({"capture_state":"lost","broker_connected":false,"capture_stopped":false,"capture_controls_available":true,"live_admission":"native_capture_unavailable"})
+    );
+    let refused = capture_action(&server, json!({"action":"stop"}), 409).await;
+    assert_eq!(refused["code"], "dependency_unavailable");
+    assert!(
+        refused["error"]
+            .as_str()
+            .unwrap()
+            .contains("stop was not dispatched")
+    );
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(
+        unrelated.try_wait().unwrap().is_none(),
+        "a PID behind a stale socket must never be signaled"
+    );
+    let cleared = capture_action(&server, json!({"action":"clear","confirm":true}), 200).await;
+    assert_eq!(
+        cleared,
+        json!({"ok":true,"capture_state":"lost","capture_stopped":false,"broker_connected":false})
+    );
+    assert!(
+        std::fs::read(server.root.path().join("events.jsonl"))
+            .unwrap()
+            .is_empty()
+    );
+    let _ = unrelated.kill();
+    let _ = unrelated.wait();
+}
+
+/// Stop signals the broker, waits for it to exit, and reports stopped. A
+/// broker that ends on its own reads as ended, not as stopped or lost.
+#[cfg(unix)]
+#[tokio::test]
+async fn capture_stop_and_natural_end_follow_the_broker_lifecycle() {
+    let root = tempfile::tempdir().unwrap();
+    let socket = root.path().join("broker.sock");
+    // SIGUSR1 ends `sleep` as it ends the real broker.
+    let mut process = Command::new("sleep").arg("60").spawn().unwrap();
+    let server = Server::start_with_args(&[
+        "--socket".into(),
+        socket.display().to_string(),
+        "--broker-pid".into(),
+        process.id().to_string(),
+    ])
+    .await;
+    let mut broker = FakeBroker::start(server.root.path(), &socket);
+    server.file("events.jsonl", &jsonl(&[metadata_event(1)]));
+    assert_eq!(
+        capture_fields(&server).await,
+        json!({"capture_state":"running","broker_connected":true,"capture_stopped":false,"capture_controls_available":true,"live_admission":"ready"})
+    );
+    let busy = capture_action(&server, json!({"action":"clear","confirm":true}), 409).await;
+    assert_eq!(busy["error"], "Stop native capture before clearing events");
+    let exited = std::thread::spawn(move || {
+        process.wait().unwrap();
+        broker.exit();
+    });
+    let stopped = capture_action(&server, json!({"action":"stop"}), 200).await;
+    exited.join().unwrap();
+    assert_eq!(
+        stopped,
+        json!({"ok":true,"capture_state":"stopped","capture_stopped":true,"broker_connected":false})
+    );
+    assert_eq!(
+        capture_fields(&server).await,
+        json!({"capture_state":"stopped","broker_connected":false,"capture_stopped":true,"capture_controls_available":true,"live_admission":"native_capture_unavailable"})
+    );
+    // Stop is idempotent once stopped; clear now succeeds.
+    assert_eq!(
+        capture_action(&server, json!({"action":"stop"}), 200).await["capture_state"],
+        "stopped"
+    );
+    capture_action(&server, json!({"action":"clear","confirm":true}), 200).await;
+
+    let ended_root = tempfile::tempdir().unwrap();
+    let ended_socket = ended_root.path().join("broker.sock");
+    let mut process = Command::new("sleep").arg("60").spawn().unwrap();
+    let ended = Server::start_with_args(&[
+        "--socket".into(),
+        ended_socket.display().to_string(),
+        "--broker-pid".into(),
+        process.id().to_string(),
+    ])
+    .await;
+    let mut broker = FakeBroker::start(ended.root.path(), &ended_socket);
+    assert_eq!(capture_fields(&ended).await["capture_state"], "running");
+    broker.exit();
+    assert_eq!(
+        capture_fields(&ended).await,
+        json!({"capture_state":"ended","broker_connected":false,"capture_stopped":false,"capture_controls_available":true,"live_admission":"native_capture_unavailable"})
+    );
+    let refused = capture_action(&ended, json!({"action":"stop"}), 409).await;
+    assert_eq!(refused["code"], "dependency_unavailable");
+    assert!(
+        process.try_wait().unwrap().is_none(),
+        "an ended capture's PID is never signaled"
+    );
+    let _ = process.kill();
+    let _ = process.wait();
+}
+
+/// A stop that times out was still delivered. The capture stays
+/// stop_requested, and the broker's later exit reads as stopped.
+#[cfg(unix)]
+#[tokio::test]
+async fn timed_out_stop_stays_requested_until_the_broker_exits() {
+    let root = tempfile::tempdir().unwrap();
+    let socket = root.path().join("broker.sock");
+    let mut process = Command::new("/bin/sh")
+        .args(["-c", "trap '' USR1; exec sleep 60"])
+        .spawn()
+        .unwrap();
+    let server = Server::start_with_args(&[
+        "--socket".into(),
+        socket.display().to_string(),
+        "--broker-pid".into(),
+        process.id().to_string(),
+    ])
+    .await;
+    let mut broker = FakeBroker::start(server.root.path(), &socket);
+    let late = capture_action(&server, json!({"action":"stop"}), 408).await;
+    assert_eq!(late["code"], "timeout");
+    assert_eq!(
+        capture_fields(&server).await,
+        json!({"capture_state":"stop_requested","broker_connected":true,"capture_stopped":false,"capture_controls_available":true,"live_admission":"ready"})
+    );
+    capture_action(&server, json!({"action":"clear","confirm":true}), 409).await;
+    let _ = process.kill();
+    let _ = process.wait();
+    broker.exit();
+    assert_eq!(
+        capture_action(&server, json!({"action":"stop"}), 200).await,
+        json!({"ok":true,"capture_state":"stopped","capture_stopped":true,"broker_connected":false})
+    );
+}
+
+/// A PID that was not running when this backend started cannot be
+/// confirmed as the broker, so stop is refused while the broker runs.
+#[cfg(unix)]
+#[tokio::test]
+async fn unconfirmed_broker_pid_is_not_signaled() {
+    let root = tempfile::tempdir().unwrap();
+    let socket = root.path().join("broker.sock");
+    let server = Server::start_with_args(&[
+        "--socket".into(),
+        socket.display().to_string(),
+        "--broker-pid".into(),
+        i32::MAX.to_string(),
+    ])
+    .await;
+    let _broker = FakeBroker::start(server.root.path(), &socket);
+    let refused = capture_action(&server, json!({"action":"stop"}), 409).await;
+    assert_eq!(refused["code"], "dependency_unavailable");
+    assert_eq!(capture_fields(&server).await["capture_state"], "running");
+}
+
+/// Capture mode has one meaning: contradictory flags fail at startup, and
+/// a backend without a broker never offers capture controls.
+#[tokio::test]
+async fn capture_mode_rejects_contradictory_flags() {
+    for arguments in [
+        &["--socket", "/nonexistent/broker.sock", "--demo-evidence"][..],
+        &["--broker-pid", "12345"][..],
+    ] {
+        let output = std::process::Command::new(env!("CARGO_BIN_EXE_origin-trace-backend"))
+            .args(arguments)
+            .args(["--port", "0"])
+            .output()
+            .unwrap();
+        assert!(!output.status.success(), "{arguments:?}");
+    }
+    for (arguments, mode) in [(&[][..], "idle"), (&["--demo-evidence"][..], "demo")] {
+        let server =
+            Server::start_with_args(&arguments.iter().map(|a| a.to_string()).collect::<Vec<_>>())
+                .await;
+        let health: Value = server.get("/api/health").await.json().await.unwrap();
+        assert_eq!(health["capture_mode"], mode);
+        assert_eq!(health["capture_state"], "not_live");
+        let events: Value = server.get("/api/events").await.json().await.unwrap();
+        assert_eq!(events["capture_controls_available"], false);
+        assert_eq!(events["capture_state"], "not_live");
+        let refused: Value = server
+            .action("/api/capture/actions", json!({"action":"stop"}))
+            .await
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(refused["code"], "idle_backend");
+    }
 }
 
 origin_trace_backend::javascript_worker_test_entry!();

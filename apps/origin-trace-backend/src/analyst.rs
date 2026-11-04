@@ -119,7 +119,7 @@ impl Analyst {
             }
             *active = Some((request["run_id"].as_u64().unwrap(), sender));
         }
-        let _active = Active(self);
+        let active = Active(self);
         let mut command = Command::new(executable);
         if !self.native {
             command
@@ -172,6 +172,9 @@ impl Analyst {
             Some(&mut receiver),
         )
         .await;
+        // The run is over once its worker returns; a later cancel finds no
+        // active run instead of reporting a request nothing will observe.
+        drop(active);
         match result {
             Err(e) if e.reason.code == Code::Cancelled => Ok(failure(
                 &request,

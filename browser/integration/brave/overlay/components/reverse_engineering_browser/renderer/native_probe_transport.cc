@@ -122,6 +122,9 @@ void NativeProbeTransport::Configure(const std::uint64_t session_id,
 
 void NativeProbeTransport::Disable() {
   wasm_capture_epoch_.store(0, std::memory_order_release);
+  // Wasm callbacks then fail their first enabled check, not a later one.
+  NativeProbeSink::Get().SetNativeWasmDispatchEmitter(nullptr);
+  NativeProbeSink::Get().SetNativeWasmIndirectEmitter(nullptr);
   NativeProbeSink::Get().SetEmitters(nullptr, nullptr, 0, 0, 0, false);
   queue_.store(nullptr, std::memory_order_release);
 }

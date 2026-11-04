@@ -518,6 +518,9 @@ class COMPONENT_EXPORT(REB_NATIVE_PROBE_SINK) NativeProbeSink final {
   // dropped_ until a vm gap is admitted. Identity fields describe the losses
   // still waiting to be published. The counters are not reset: a generation
   // bump publishes the remainder first, then new losses append.
+  // Known limitation: these are independent atomics, not one snapshot, so a
+  // loss racing a publish can pair a count with another loss's identity. No
+  // production probe records dispatch samples today.
   std::atomic<std::uint64_t> dispatch_loss_generation_{0};
   std::atomic<std::uint64_t> dispatch_loss_dropped_{0};
   std::atomic<std::uint64_t> dispatch_loss_reported_{0};
@@ -528,7 +531,10 @@ class COMPONENT_EXPORT(REB_NATIVE_PROBE_SINK) NativeProbeSink final {
   std::atomic<std::uint32_t> dispatch_loss_process_id_{0};
   std::atomic<std::uint32_t> dispatch_loss_thread_id_{0};
   // Release-published with the enabled flag. Inactive reads return before
-  // these fields are consulted.
+  // these fields are consulted. Known limitation: like the page guest
+  // opt-ins below, the flag is cleared by SetEmitters but not tagged with a
+  // generation, so an Enable racing a reconfiguration can survive into it.
+  // No production caller enables these samplers today.
   std::atomic<std::uint8_t> owned_register_sampling_{0};
   std::atomic<std::uint64_t> owned_register_finding_id_{0};
   std::atomic<std::uint64_t> owned_register_investigation_id_{0};

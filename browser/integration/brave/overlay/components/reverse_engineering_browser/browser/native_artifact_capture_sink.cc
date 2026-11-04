@@ -998,6 +998,14 @@ std::uint64_t NativeArtifactCaptureSink::CaptureGeneratedArtifactInternal(
   const std::uint64_t capture_session_id = session_id_.load(std::memory_order_relaxed);
   const std::uint64_t capture_generation = generation_.load(std::memory_order_acquire);
   const std::uint64_t artifact_id = next_artifact_id_.fetch_add(1, std::memory_order_relaxed);
+  // Canvas images are sensitive: the session's opt-in decides, not the
+  // renderer's view of its configuration.
+  if (kind == NativeArtifactKind::kCanvasDataUrl &&
+      !NativeProbeSession::Get().capture_canvas_images()) {
+    EmitResult(NativeProbeType::kArtifactCaptureFailed, artifact_id, 0, frame_id,
+               "canvas_image_capture_disabled", result_category);
+    return 0;
+  }
   const bool valid_kind_and_origin =
       (native_wasm_runtime &&
        ((kind == NativeArtifactKind::kWasm &&
@@ -1136,18 +1144,20 @@ void NativeArtifactCaptureSink::OnTransferCompleted(
                                                                        : GuestReceipt::kRejected;
     DrainGuestDependencies();
   }
+  const bool accepted = status == NativeArtifactReceiveStatus::kAccepted;
+  // The module map follows every receipt, including one whose observations
+  // were already flushed as gaps, so later observations reuse or replace it.
+  for (auto entry = wasm_dispatch_modules_.begin(); entry != wasm_dispatch_modules_.end();
+       ++entry) {
+    if (entry->second.first != artifact_id)
+      continue;
+    if (accepted)
+      entry->second.second = true;
+    else
+      wasm_dispatch_modules_.erase(entry);
+    break;
+  }
   if (!context.wasm_observations.empty()) {
-    const bool accepted = status == NativeArtifactReceiveStatus::kAccepted;
-    for (auto entry = wasm_dispatch_modules_.begin(); entry != wasm_dispatch_modules_.end();
-         ++entry) {
-      if (entry->second.first != artifact_id)
-        continue;
-      if (accepted)
-        entry->second.second = true;
-      else
-        wasm_dispatch_modules_.erase(entry);
-      break;
-    }
     if (!IsEnabledFor(NativeProbeCategory::kVm) || !IsEnabled())
       return;
     const auto emitter = emitter_.load(std::memory_order_acquire);

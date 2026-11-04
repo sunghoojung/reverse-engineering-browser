@@ -1242,7 +1242,25 @@ bool NativeProbeSink::CanAdmitEvent(const NativeProbeEvent& event,
 }
 
 bool NativeProbeSink::IsCanvasImageCaptureEnabled() const noexcept {
-  return capture_canvas_images_.load(std::memory_order_acquire) && IsArtifactCaptureEnabled();
+  if (!artifact_emitter_.load(std::memory_order_acquire)) [[likely]] {
+    return false;
+  }
+  // The opt-in is read inside the same stable generation as the policy it
+  // belongs to, never paired with a replacement configuration's.
+  const std::uint64_t generation = config_generation_.load(std::memory_order_acquire);
+  if ((generation & 1U) != 0) {
+    return false;
+  }
+  const bool capture_canvas_images = capture_canvas_images_.load(std::memory_order_relaxed);
+  const std::uint64_t category_mask = category_mask_.load(std::memory_order_relaxed);
+  const std::uint64_t expires_at = expires_at_monotonic_ns_.load(std::memory_order_relaxed);
+  const NativeGeneratedArtifactEmitter artifact_emitter =
+      artifact_emitter_.load(std::memory_order_relaxed);
+  std::atomic_thread_fence(std::memory_order_acquire);
+  return config_generation_.load(std::memory_order_acquire) == generation &&
+         capture_canvas_images && artifact_emitter &&
+         (category_mask & NativeProbeCategoryMask(NativeProbeCategory::kArtifact)) != 0 &&
+         MonotonicTimeNs() < expires_at;
 }
 
 bool NativeProbeSink::IsArtifactCaptureEnabled() const noexcept {

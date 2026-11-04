@@ -778,10 +778,35 @@ void NativeWasmIndirect(reb::ArtifactReceiver& receiver) {
                              Payload(e) == "native_wasm_dispatch_pending_at_expiry";
                     }),
         "A held call_indirect record is an explicit gap at expiry");
+  Receive(receiver, transfers.begin()->first);
+  observation.header.sequence_number = 4201;
+  sink.CaptureWasmIndirect(observation, mojo_base::BigBuffer(module), [] { return true; });
+  Check(transfers.empty() &&
+            events.back().header.type == NativeProbeType::kWasmIndirectObservation &&
+            events.back().header.sequence_number == 4201,
+        "A module accepted after its observations were flushed is reused, not resent");
+  runner.tasks.clear();
   transfers.clear();
   Configure(kSession, reb::NativeProbeCategoryMask(reb::NativeProbeCategory::kArtifact));
   sink.CaptureWasmIndirect(observation, mojo_base::BigBuffer(module), [] { return true; });
   Check(transfers.empty(), "Artifact permission alone cannot admit call_indirect observation");
+  // Canvas images follow the session's opt-in, whatever the renderer sends.
+  Configure(kSession, kMask);
+  const std::string image = "data:image/png;base64,AAAA";
+  const auto canvas = [&] {
+    return sink.CaptureGeneratedArtifact(
+        reb::NativeArtifactKind::kCanvasDataUrl, reb::NativeArtifactCaptureOrigin::kCanvasToDataUrl,
+        5, 0, kFrame, "canvas://readback",
+        mojo_base::BigBuffer(
+            std::span(reinterpret_cast<const std::uint8_t*>(image.data()), image.size())));
+  };
+  Check(canvas() == 0 && transfers.empty() &&
+            Payload(events.back()) == "canvas_image_capture_disabled",
+        "A Canvas image without the session opt-in is refused explicitly");
+  reb::NativeProbeSession::Get().canvas_images = true;
+  Check(canvas() != 0 && transfers.size() == 1, "A Canvas image with the session opt-in is kept");
+  reb::NativeProbeSession::Get().canvas_images = false;
+  transfers.clear();
   std::cout << "PASS native Wasm call_indirect artifact ACK, shared module artifact, typed "
                "payload, document retirement, pre-expiry flush and separate budget\n";
 }

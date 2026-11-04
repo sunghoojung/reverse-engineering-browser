@@ -57,6 +57,12 @@ clear never leaves derived records for cleared events; clearing again finishes
 it. `--demo-evidence` with `--socket`, and `--broker-pid` without `--socket`,
 are rejected at startup.
 
+Endpoint files keep their one-line format. The backend holds an exclusive lock
+on the exact file it published until it exits, and publishers serialize on the
+directory, so retiring removes only that file, never a successor's at the same
+port. `reb-api mcp` refuses an endpoint file that no running backend holds as
+stale, which is what a killed backend leaves behind.
+
 ## Native Wasm observations
 
 See [native-wasm-dispatch-v1](../../protocol/native-wasm-dispatch-v1.md). Runtime

@@ -83,6 +83,9 @@ retargeting pending calls. MCP sends `X-REB-Expected-Instance` with the startup
 health identity on tool requests; the backend rejects a nonmatching or duplicate
 supplied precondition with HTTP 409 `state_conflict` before body processing or
 dispatch. Existing API clients that omit the header remain supported.
+A backend holds the endpoint file it published until it exits, so an endpoint
+file that no running backend holds is stale, as a killed backend leaves it, and
+MCP refuses it before any request.
 This closes replacement at the same port between health and action. It is not
 an authentication token, permission grant, or a document-generation selector;
 existing action-specific target/document ownership checks remain required. A

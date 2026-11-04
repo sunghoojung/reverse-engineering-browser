@@ -699,16 +699,8 @@ fn mcp_session_dir_uses_the_selected_directory_only() {
     let newer = root.path().join("100");
     std::fs::create_dir(&selected).unwrap();
     std::fs::create_dir(&newer).unwrap();
-    std::fs::write(
-        selected.join("research-ui.endpoint"),
-        format!("{}\n", server.url),
-    )
-    .unwrap();
-    std::fs::write(
-        newer.join("research-ui.endpoint"),
-        format!("{}\n", closed_loopback()),
-    )
-    .unwrap();
+    let _selected = publish(&selected.join("research-ui.endpoint"), &server.url);
+    let _newer = publish(&newer.join("research-ui.endpoint"), &closed_loopback());
     let mut mcp = Mcp::start_with(
         [
             "mcp".to_owned(),
@@ -773,7 +765,7 @@ fn reb_api_mcp_wrapper_selects_one_session_and_can_pass_effects() {
     let server = Server::start();
     let root = tempfile::tempdir().unwrap();
     let endpoint = root.path().join("research-ui.endpoint");
-    std::fs::write(&endpoint, format!("{}\n", server.url)).unwrap();
+    let _published = publish(&endpoint, &server.url);
     let mut command = Command::new(repo_path("scripts/reb-api-mcp.sh"));
     command
         .args(["--endpoint-file"])
@@ -796,15 +788,18 @@ fn reb_api_mcp_wrapper_selects_one_session_and_can_pass_effects() {
     drop(mcp);
 
     let dead = root.path().join("dead.endpoint");
-    std::fs::write(&dead, format!("{}\n", closed_loopback())).unwrap();
-    let output = Command::new(repo_path("scripts/reb-api-mcp.sh"))
-        .args(["--endpoint-file"])
-        .arg(&dead)
-        .args(["--timeout", "2"])
-        .env("REB_API", env!("CARGO_BIN_EXE_reb-api"))
-        .stdin(Stdio::null())
-        .output()
-        .unwrap();
+    let _dead = publish(&dead, &closed_loopback());
+    let run = |endpoint: &std::path::Path| {
+        Command::new(repo_path("scripts/reb-api-mcp.sh"))
+            .args(["--endpoint-file"])
+            .arg(endpoint)
+            .args(["--timeout", "2"])
+            .env("REB_API", env!("CARGO_BIN_EXE_reb-api"))
+            .stdin(Stdio::null())
+            .output()
+            .unwrap()
+    };
+    let output = run(&dead);
     assert_eq!(output.status.code(), Some(2), "{output:?}");
     assert!(output.stdout.is_empty());
     assert!(
@@ -812,6 +807,25 @@ fn reb_api_mcp_wrapper_selects_one_session_and_can_pass_effects() {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
+    // A killed backend's file still names a port that may now be another
+    // backend's. Without its publisher it is refused before any request.
+    let stale = root.path().join("stale.endpoint");
+    std::fs::write(&stale, format!("{}\n", server.url)).unwrap();
+    let output = run(&stale);
+    assert_eq!(output.status.code(), Some(2), "{output:?}");
+    assert!(output.stdout.is_empty());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("is stale"),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// Publishes `url` at `path` as a running backend does. The file has a live
+/// publisher until the returned value drops.
+fn publish(path: &std::path::Path, url: &str) -> origin_trace_backend::PublishedEndpoint {
+    let address = url.trim_start_matches("http://").parse().unwrap();
+    origin_trace_backend::PublishedEndpoint::new(Some(path), address).unwrap()
 }
 
 fn repo_path(relative: &str) -> std::path::PathBuf {
@@ -974,8 +988,7 @@ fn canonical_wrapper_reconnects_without_retargeting_pending_tools() {
     let second = LiveApi::start();
     let home = tempfile::tempdir().unwrap();
     let canonical = home.path().join(".config/origin-trace/reb-api.endpoint");
-    std::fs::create_dir_all(canonical.parent().unwrap()).unwrap();
-    std::fs::write(&canonical, &first.url).unwrap();
+    let mut _published = publish(&canonical, &first.url);
     let start = || {
         let mut command = Command::new(repo_path("scripts/reb-api-mcp.sh"));
         command
@@ -999,7 +1012,7 @@ fn canonical_wrapper_reconnects_without_retargeting_pending_tools() {
         ["/api/health"],
         "tool arguments overrode the transport precondition"
     );
-    std::fs::write(&canonical, &second.url).unwrap();
+    _published = publish(&canonical, &second.url);
     let changed = mcp.request(
         "tools/call",
         json!({"name": "capture_action", "arguments": {"body": {"action": "stop"}}}),
@@ -1018,11 +1031,11 @@ fn canonical_wrapper_reconnects_without_retargeting_pending_tools() {
         "old backend received an action"
     );
     // Restoring a file cannot resurrect the retired connection's authorization.
-    std::fs::write(&canonical, &first.url).unwrap();
+    _published = publish(&canonical, &first.url);
     let retired = mcp.request("tools/call", json!({"name": "get_health"}));
     assert_eq!(retired["result"]["isError"], true);
     drop(mcp);
-    std::fs::write(&canonical, &second.url).unwrap();
+    _published = publish(&canonical, &second.url);
     let mut reconnected = start();
     let healthy = reconnected.request("tools/call", json!({"name": "get_health"}));
     assert_eq!(healthy["result"]["isError"], false, "{healthy}");
@@ -1115,6 +1128,7 @@ fn canonical_wrapper_reconnects_without_retargeting_pending_tools() {
         "{blocked_context}"
     );
     assert_eq!(second.paths.lock().unwrap().len(), before_replacement + 1);
+    drop(_published);
     std::fs::write(&canonical, "https://example.test/secret").unwrap();
     let invalid = reconnected.request("tools/call", json!({"name": "get_health"}));
     assert_eq!(invalid["result"]["isError"], true);

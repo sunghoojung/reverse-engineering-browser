@@ -1933,6 +1933,9 @@ invocationSitesPanel.refresh();
 
       const ownedExperimentDrafts = new Map();
       const ownedExperimentResults = new Map();
+      // Running and failure text per workspace key. Polls rebuild the form while
+      // a request runs, so its outcome cannot live in the form's own DOM node.
+      const ownedExperimentNotices = new Map();
       let ownedExperimentPending = false;
       function renderVmOwnedExperiment(workspace) {
         const section = document.createElement('section'); section.className = 'vm-workspace-card';
@@ -1962,10 +1965,12 @@ invocationSitesPanel.refresh();
         form.append(textElement('p','',fixture==='register'?'Selected state: register 0 for add; unchanged register 2 for branch.':'Selected state: stack slot 0 for add or branch.'));
         const run=document.createElement('button');run.type='submit';run.textContent='Run isolated native experiment';run.disabled=ownedExperimentPending;
         const load=document.createElement('button');load.type='button';load.textContent='Read saved results';
-        const output=document.createElement('div');output.setAttribute('role','status');
+        const output=document.createElement('div');output.className='vm-experiment-output';output.dataset.experimentKey=key;output.setAttribute('role','status');
         const retain = rows => { if(!ownedExperimentResults.has(key) && ownedExperimentResults.size>=64) ownedExperimentResults.delete(ownedExperimentResults.keys().next().value); ownedExperimentResults.set(key,rows); };
-        const show = rows => { output.replaceChildren(); if(rows.length===0) output.append(textElement('p','','No saved result for this exact workspace and selected effect.')); rows.forEach(row=>output.append(textElement('p','',`${row.status}: opcode ${row.request.opcode}, inputs ${row.request.inputs.left}, ${row.request.inputs.right}; expected ${row.request.expected.value}, next PC ${row.request.expected.next_pc}; observed ${row.observed?.effect.value ?? 'unknown'}, handler ${row.observed?.handler_index ?? 'unknown'}, PC ${row.observed?.pc_before ?? 'unknown'} → next PC ${row.observed?.effect.next_pc ?? 'unknown'}. ${row.reason}. These inputs only; does not generalize.`))); };
-        show(ownedExperimentResults.get(key) ?? []);
+        const note = text => { ownedExperimentNotices.delete(key); if(text!==null){ if(ownedExperimentNotices.size>=64) ownedExperimentNotices.delete(ownedExperimentNotices.keys().next().value); ownedExperimentNotices.set(key,text);} };
+        // A finished request paints the form now on screen for this key.
+        const show = (target = [...document.querySelectorAll('.vm-experiment-output')].find(node=>node.dataset.experimentKey===key) ?? output) => { const text=ownedExperimentNotices.get(key); target.replaceChildren(); if(text!==undefined){target.textContent=text;return;} const rows=ownedExperimentResults.get(key) ?? []; if(rows.length===0) target.append(textElement('p','','No saved result for this exact workspace and selected effect.')); rows.forEach(row=>target.append(textElement('p','',`${row.status}: opcode ${row.request.opcode}, inputs ${row.request.inputs.left}, ${row.request.inputs.right}; expected ${row.request.expected.value}, next PC ${row.request.expected.next_pc}; observed ${row.observed?.effect.value ?? 'unknown'}, handler ${row.observed?.handler_index ?? 'unknown'}, PC ${row.observed?.pc_before ?? 'unknown'} → next PC ${row.observed?.effect.next_pc ?? 'unknown'}. ${row.reason}. These inputs only; does not generalize.`))); };
+        show(output);
         form.addEventListener('submit',async event=>{
           event.preventDefault(); if(ownedExperimentPending) return;
           const candidate=candidates.find(c=>String(c.opcode)===select.value); if(!candidate) return;
@@ -1973,16 +1978,16 @@ invocationSitesPanel.refresh();
             source_artifact_sha256:workspace.source_artifact_sha256,interpreter_artifact_id:workspace.interpreter_artifact_id,finding_id:workspace.finding_id,
             opcode:candidate.opcode,effect_id:candidate.effect.effect_id,inputs:{left:fields.left.value,right:fields.right.value},
             expected:{operation:candidate.effect.operation,value:fields.value.value,next_pc:fields.next_pc.value,branch_taken:candidate.opcode===7?branch.value==='true':null}};
-          ownedExperimentPending=true;run.disabled=true;output.textContent='Running the disposable owned fixture. No automatic retry.';
+          ownedExperimentPending=true;run.disabled=true;note('Running the disposable owned fixture. No automatic retry.');show();
           try {const response=await fetch('/api/analysis/vm/experiments',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(request),signal:AbortSignal.timeout(30000)});
             const row=await response.json();if(!response.ok || !isVmOwnedExperimentRecord(row) || !sameVmOwnedExperimentRequest(row.request,request)) throw new Error('Outcome unknown or refused. Read saved results before trying another experiment.');
-            const rows=[...(ownedExperimentResults.get(key) ?? []),row].slice(-64);retain(rows);show(rows);
-          } catch(error) {output.textContent=error.message;} finally {ownedExperimentPending=false;document.querySelectorAll('.vm-experiment-form button[type=submit]').forEach(button=>{button.disabled=false;});}
+            const rows=[...(ownedExperimentResults.get(key) ?? []),row].slice(-64);retain(rows);note(null);
+          } catch(error) {note(error.message);} finally {ownedExperimentPending=false;show();document.querySelectorAll('.vm-experiment-form button[type=submit]').forEach(button=>{button.disabled=false;});}
         });
         load.addEventListener('click',async()=>{load.disabled=true;try {const response=await fetch('/api/analysis/vm/experiments',{cache:'no-store',signal:AbortSignal.timeout(5000)});const doc=await response.json();
           if(!response.ok || doc.schema!=='reb-owned-opcode-experiments-v1' || !Array.isArray(doc.records) || doc.records.length>64 || !doc.records.every(isVmOwnedExperimentRecord)) throw new Error('Saved experiment results are unavailable or malformed.');
-          const rows=doc.records.filter(r=>r.request.workspace_digest===workspaceDigest && r.request.finding_id===workspace.finding_id && r.request.source_artifact_sha256===workspace.source_artifact_sha256 && r.request.interpreter_artifact_id===workspace.interpreter_artifact_id && candidates.some(c=>c.opcode===r.request.opcode && c.effect.effect_id===r.request.effect_id));retain(rows);show(rows);
-        }catch(error){output.textContent=error.message;}finally{load.disabled=false;}});
+          const rows=doc.records.filter(r=>r.request.workspace_digest===workspaceDigest && r.request.finding_id===workspace.finding_id && r.request.source_artifact_sha256===workspace.source_artifact_sha256 && r.request.interpreter_artifact_id===workspace.interpreter_artifact_id && candidates.some(c=>c.opcode===r.request.opcode && c.effect.effect_id===r.request.effect_id));retain(rows);note(null);
+        }catch(error){note(error.message);}finally{load.disabled=false;show();}});
         form.append(run,load);section.append(form,output);return section;
       }
 

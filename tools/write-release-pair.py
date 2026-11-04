@@ -17,7 +17,7 @@ PIN_SCRIPT = "scripts/prepare-release-brave.sh"
 PIN_BEGIN = "# BEGIN reviewed paired browser pin"
 PIN_END = "# END reviewed paired browser pin"
 PIN_SHAPES = {
-    "brave_name": r"Brave-Browser-Development-v[0-9]+\.[0-9]+\.[0-9]+-macos-arm64",
+    "brave_name": r"Brave-Browser-Development-(v[0-9]+\.[0-9]+\.[0-9]+)-macos-arm64",
     "source_url": re.escape(REPOSITORY) + r"/releases/download/[A-Za-z0-9._-]+",
     "brave_sha256": r"[0-9a-f]{64}",
     "provenance_sha256": r"[0-9a-f]{64}",
@@ -63,6 +63,10 @@ def place_pinned_copy(source, destination, sha256):
         temporary.unlink(missing_ok=True)
 
 
+def version_key(tag):
+    return tuple(int(part) for part in tag[1:].split("."))
+
+
 def pin_block(text):
     """Parse the one reviewed pin block that prepare-release-brave.sh also uses."""
     if text.count(PIN_BEGIN) != 1 or text.count(PIN_END) != 1:
@@ -90,42 +94,35 @@ def browser_pin(root):
     return values
 
 
-def notes_text(tag, source_sha, run_url, assets, browser):
+def notes_text(tag, brave_tag, source_sha, run_url, assets, browser):
     origin, brave, provenance, pair, sums = assets
     downloads = f"{REPOSITORY}/releases/download/{tag}"
     pins = browser["pins"]
+    reused = brave_tag != tag
+    paired = (
+        f"the unchanged Brave Browser Development build first published with {brave_tag}"
+        if reused else "a new Brave Browser Development build that carries its native probes"
+    )
+    validated = f"Before {brave_tag} was published" if reused else "Before publishing"
+    unchanged = (
+        f"- **Browser:** the Brave build is the {brave_tag} build byte for byte: the same "
+        "ZIP, provenance and code signature. The browser inputs and protocol match its "
+        "build commit.\n" if reused else ""
+    )
     return (
         f"Origin Trace {tag} is a paired macOS Apple silicon release: the Origin Trace "
-        "app and a new Brave Browser Development build that carries its native probes.\n\n"
+        f"app and {paired}.\n\n"
         f"Download both [Origin Trace]({downloads}/{origin.name}) and "
         f"[Brave Browser Development for Apple silicon]({downloads}/{brave.name}). "
         "Extract the app bundles beside each other, or install Brave Browser "
         "Development in `/Applications`.\n\n"
-        "## Changes since v0.3.2\n\n"
-        "- **Native capture on by default.** Opening Origin Trace now also turns on "
-        "every native capture switch that needs no researcher input: quiet mode "
-        "(page `debugger;` statements are ignored) and Wasm `br_table` and "
-        "`call_indirect` dispatch capture. Set `REB_NATIVE_QUIET_MODE`, "
-        "`REB_NATIVE_WASM_DISPATCH` or `REB_NATIVE_WASM_CALL_INDIRECT` to `0` to "
-        "opt out. Wasm dispatch capture compiles Wasm with Liftoff only.\n"
-        "- **Wasm guest-state capture** with a researcher-supplied adapter recipe: "
-        "typed locals and bounded memory snapshots at up to eight adapter sites, "
-        "with the exact parent dispatch of nested guests. Recipes are evidence "
-        "inputs, not proof of guest semantics.\n"
-        "- **JavaScript dispatch-site capture** with a researcher-supplied site file: "
-        "at most eight static interpreter-candidate sites. It records selector kinds and "
-        "integer low bits, script IDs, source positions and the site's source digest, "
-        "never argument, receiver or string contents.\n"
-        "- **VM analysis:** structural dispatch-site classification, handler claims "
-        "for array, rotated, aliased, helper-fetched and threaded interpreters, and "
-        "observed runtime claims compared with static claims, including nested VMs.\n"
-        "- **Native-only capture:** CDP transport, injected hooks and the live "
-        "debugger are removed. Saved historical evidence stays inert.\n"
-        "- **Interface:** a quieter Origin Trace shell and screens, and VM workspace "
-        "layout fixes at narrow and short window sizes.\n"
-        "- **Browser build:** depot_tools is pinned and a backported Brave init patch "
-        "lets a fresh pinned checkout initialize again. The native integration "
-        "now compiles in the full Brave build.\n\n"
+        "## Changes since v0.5.1\n\n"
+        "- **MCP reconnects:** `reb-api mcp` now exits with status 3 after it refuses a "
+        "call because its endpoint file or backend instance changed, for example after "
+        "a live session restart. MCP clients then show the server as stopped instead of "
+        "connected while every call fails, and restarting the server connects it to the "
+        "current session. No call is sent to the replaced backend.\n"
+        f"{unchanged}\n"
         "## Live sessions\n\n"
         "Opening Origin Trace starts a live session directly with the Brave Browser "
         "Development build it finds, with no pairing prompt. This release was validated "
@@ -147,7 +144,7 @@ def notes_text(tag, source_sha, run_url, assets, browser):
         "Wallet) stay off in this build.\n"
         "- Worker and proxy foundations remain dormant; live proxy routing is not "
         "implemented.\n"
-        "- Before publishing, a fresh live session with this browser build on a local "
+        f"- {validated}, a fresh live session with this browser build on a local "
         "fixture recorded Wasm `br_table` and `call_indirect` observations, the Canvas "
         "readback image, network and fingerprint surfaces, and the native Console "
         "runtime check passed on the extracted ZIP. Guest-state adapters, JavaScript "
@@ -178,9 +175,12 @@ def main():
     if info.get("OriginTraceReleaseType") != "paired":
         raise ValueError("Only a paired application can be recorded as a release pair")
     pin = browser_pin(root)
-    name = f"Brave-Browser-Development-{tag}-macos-arm64"
-    if pin["brave_name"] != name:
-        raise ValueError("The paired browser was not built for this release")
+    name = pin["brave_name"]
+    # An unchanged browser build may be paired again; it keeps the name and
+    # provenance of the release it was built for.
+    brave_tag = re.fullmatch(PIN_SHAPES["brave_name"], name).group(1)
+    if version_key(brave_tag) > version_key(tag):
+        raise ValueError("The paired browser was built for a later release")
     source_sha = subprocess.check_output(
         ["git", "rev-parse", "HEAD"], cwd=root, text=True
     ).strip()
@@ -192,7 +192,7 @@ def main():
         raise ValueError("Pinned Brave bytes or provenance changed")
     browser = json.loads(source_provenance.read_text())
     expected = {
-        "schema": PROVENANCE_SCHEMA, "release": tag, "artifact": f"{name}.zip",
+        "schema": PROVENANCE_SCHEMA, "release": brave_tag, "artifact": f"{name}.zip",
         "sha256": pin["brave_sha256"], "build_source_commit": pin["build_source"],
     }
     if any(browser.get(key) != value for key, value in expected.items()):
@@ -260,7 +260,7 @@ def main():
     sums = output / f"SHA256SUMS-{tag}.txt"
     write_text_atomically(sums, "".join(f"{digest(path)}  {path.name}\n" for path in assets))
     write_text_atomically(output / "release-notes.md",
-                          notes_text(tag, source_sha, run_url, [*assets, sums], browser))
+                          notes_text(tag, brave_tag, source_sha, run_url, [*assets, sums], browser))
 
 
 if __name__ == "__main__":

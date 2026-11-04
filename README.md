@@ -20,9 +20,17 @@
 Origin Trace connects captured requests, source bytes, runtime observations and
 local research notes in one macOS workspace.
 
-[Download v0.5.1: Origin Trace + Brave](https://github.com/sunghoojung/reverse-engineering-browser/releases/tag/v0.5.1)
-· [Changes since v0.5.0](https://github.com/sunghoojung/reverse-engineering-browser/compare/v0.5.0...v0.5.1)
+[Download v0.5.2: Origin Trace + Brave](https://github.com/sunghoojung/reverse-engineering-browser/releases/tag/v0.5.2)
+· [Changes since v0.5.1](https://github.com/sunghoojung/reverse-engineering-browser/compare/v0.5.1...v0.5.2)
 · [Paired release procedure](docs/development/paired-release.md)
+
+### v0.5.2: MCP reconnects
+
+v0.5.2 changes only Origin Trace and pairs it with the unchanged v0.5.1 Brave
+build. `reb-api mcp` now exits after it refuses a call because its endpoint or
+backend instance changed, for example after a live session restart, so MCP
+clients show the server as stopped and a restart connects it to the current
+session.
 
 ### v0.5.1: Origin Trace + Brave
 
@@ -149,6 +157,8 @@ boundaries and the [capture policy](SAFETY.md) before starting a session.
 
 ### Feature changelog
 
+- **v0.5.2:** Origin Trace with the unchanged v0.5.1 Brave build: a retired MCP
+  connection exits so clients can reconnect to the current session.
 - **v0.5.1:** paired release with a new Brave build: native request path and body
   capture, JavaScript invocation identity, document-start Console scripts, a
   redesigned Origin Trace, MCP agent session control, and explicit capture and
@@ -230,11 +240,12 @@ boundaries and the [capture policy](SAFETY.md) before starting a session.
 
 ### Download the compiled macOS apps
 
-1. Download both apps from [v0.5.1](https://github.com/sunghoojung/reverse-engineering-browser/releases/tag/v0.5.1):
-   - [Origin Trace for macOS](https://github.com/sunghoojung/reverse-engineering-browser/releases/download/v0.5.1/Origin-Trace-v0.5.1-macos.zip)
-   - [Brave Browser Development for Apple silicon](https://github.com/sunghoojung/reverse-engineering-browser/releases/download/v0.5.1/Brave-Browser-Development-v0.5.1-macos-arm64.zip)
-2. Verify both ZIPs against [SHA256SUMS-v0.5.1.txt](https://github.com/sunghoojung/reverse-engineering-browser/releases/download/v0.5.1/SHA256SUMS-v0.5.1.txt).
-   The [pair provenance](https://github.com/sunghoojung/reverse-engineering-browser/releases/download/v0.5.1/Origin-Trace-Brave-v0.5.1.provenance.json)
+1. Download both apps from [v0.5.2](https://github.com/sunghoojung/reverse-engineering-browser/releases/tag/v0.5.2):
+   - [Origin Trace for macOS](https://github.com/sunghoojung/reverse-engineering-browser/releases/download/v0.5.2/Origin-Trace-v0.5.2-macos.zip)
+   - [Brave Browser Development for Apple silicon](https://github.com/sunghoojung/reverse-engineering-browser/releases/download/v0.5.2/Brave-Browser-Development-v0.5.1-macos-arm64.zip)
+     (the unchanged v0.5.1 build)
+2. Verify both ZIPs against [SHA256SUMS-v0.5.2.txt](https://github.com/sunghoojung/reverse-engineering-browser/releases/download/v0.5.2/SHA256SUMS-v0.5.2.txt).
+   The [pair provenance](https://github.com/sunghoojung/reverse-engineering-browser/releases/download/v0.5.2/Origin-Trace-Brave-v0.5.2.provenance.json)
    records the exact companion source, the browser's CDHash and its build
    provenance.
 3. Unzip both files and place the applications beside each other, or install
@@ -248,7 +259,7 @@ Read the selected release's validation results and limits. Origin Trace contains
 no bundled sample evidence. The applications are ad-hoc signed but not
 Apple-notarized.
 
-In v0.5.1, opening Origin Trace starts an isolated one-hour research session with
+In v0.5.2, opening Origin Trace starts an isolated one-hour research session with
 the implemented capture categories, bounded request/response content, Canvas
 artifacts, quiet mode and native Wasm dispatch capture enabled. Use it only for
 authorized targets. **New Live Session…** offers metadata-only controls. Enabled

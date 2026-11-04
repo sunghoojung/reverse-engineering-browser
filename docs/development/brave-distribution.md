@@ -64,9 +64,9 @@ self-hosted runners](https://docs.github.com/en/actions/reference/security/secur
 Use an isolated build host with a trusted-only job trigger and no personal
 credentials instead. Until that infrastructure exists, the local ZIP is a
 verified development preview, not the source of an official release asset.
-The v0.3.0, v0.5.0 and v0.5.1 paired releases are explicit exceptions: they publish a
-local workstation build and disclose that in the browser provenance and release
-notes. See the [paired release procedure](paired-release.md).
+The v0.3.0, v0.5.0, v0.5.1 and v0.5.2 paired releases are explicit exceptions:
+they publish a local workstation build and disclose that in the browser
+provenance and release notes. See the [paired release procedure](paired-release.md).
 
 Ad-hoc signing is not Developer ID signing or notarization. A broadly
 distributed macOS browser also needs hardened-runtime signing, notarization,

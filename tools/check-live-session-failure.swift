@@ -30,6 +30,39 @@ enum LiveSessionFailureChecks {
     }
     print("PASS native live failure causes: marked browser/helper errors, Bash noise, fallback, and bounds")
 
+    // The coordinator's phase rule: one transition per report, startup and
+    // ended sessions named apart, and nothing after a launch ends.
+    typealias Coordinator = LiveSessionCoordinator
+    let workspace = URL(string: "http://127.0.0.1:7319/")!
+    let marked = Data((prefix + browser + "\n" + noise).utf8)
+    let log = "\n\nSession log: /owned/live.log"
+    let next = { (phase: Coordinator.Phase, report: Coordinator.Report) in
+      Coordinator.next(phase, after: report, logPath: "/owned/live.log")
+    }
+    let transitions: [(String, Coordinator.Phase, Coordinator.Report, Coordinator.Phase?)] = [
+      ("handshake", .starting, .published(workspace), .ready(workspace)),
+      ("exit during startup", .starting, .exited(log: marked), .failed(.init(message: browser + log, afterStartup: false))),
+      ("unmarked exit during startup", .starting, .exited(log: nil), .failed(.init(message: fallback + log, afterStartup: false))),
+      ("startup deadline", .starting, .timedOut(log: nil), .failed(.init(
+        message: "Live capture did not become ready within 60 seconds. " + fallback + log, afterStartup: false))),
+      ("exit after the handshake", .ready(workspace), .exited(log: marked), .failed(.init(message: browser + log, afterStartup: true))),
+      ("unmarked exit after the handshake", .ready(workspace), .exited(log: nil),
+        .failed(.init(message: Coordinator.sessionFallback + log, afterStartup: true))),
+      ("stop while starting", .starting, .stopped, .ended),
+      ("stop while ready", .ready(workspace), .stopped, .ended),
+      ("second handshake", .ready(workspace), .published(workspace), nil),
+      ("deadline after the handshake", .ready(workspace), .timedOut(log: nil), nil),
+      ("exit after stop", .ended, .exited(log: marked), nil),
+      ("exit after a reported failure", .failed(.init(message: browser, afterStartup: false)), .exited(log: nil), nil),
+      ("handshake after stop", .ended, .published(workspace), nil),
+      ("stop after a failure", .failed(.init(message: browser, afterStartup: true)), .stopped, nil),
+      ("report before start", .idle, .published(workspace), nil),
+    ]
+    for (name, phase, report, expected) in transitions {
+      precondition(next(phase, report) == expected, name)
+    }
+    print("PASS native live session phases: handshake, startup failure, ended session, stop, and no report after the end")
+
     // The launcher's mask grammar. tools/check-native-only-launch.mjs runs the
     // same vectors through scripts/run-live-session.sh.
     let masks: [(String?, UInt32?)] = [

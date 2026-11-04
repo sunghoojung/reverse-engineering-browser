@@ -238,7 +238,7 @@
         return value;
       });
     };
-    return {model, load, save, cancel};
+    return {model, load, save, cancel, writing: () => active?.write === true};
   }
 
   function mount({button, getContext, getSelection, openReference, validateLibrary, fetcher = fetch, protocol = location.protocol}) {
@@ -458,7 +458,8 @@
     });
     window.addEventListener('pagehide', () => {change(); store.cancel();});
     render();
-    return {show, close: hide, model: store.model, dialog};
+    // A pin draft, or a library write whose outcome is not known yet.
+    return {show, close: hide, model: store.model, dialog, hasUnsavedWork: () => dirty || store.writing()};
   }
   globalThis.RebInvestigationNotebook = Object.freeze({empty, validate, validReference, strictParse, readNotebook, candidates,
     eventCanonical, eventReference, artifactReference, resolve, stillMatches, describe, createStore, mount});

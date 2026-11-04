@@ -63,6 +63,33 @@ private func checkNativeUIURLs() {
   print("PASS native UI URL validation, query preservation and capability marker")
 }
 
+// WebKit raises an exception when a request it already stopped is answered.
+// It stops requests when the page navigates, reloads or loses its content
+// process, which can happen while native work for a request still runs. Each
+// request is started when WebKit hands it over and leaves exactly once:
+// finished by its single reply, or stopped by WebKit. Only started requests
+// are kept, because a released request's address can be reused by a later
+// one. Main thread only, like WebKit's start and stop calls.
+private struct SchemeTaskRegistry {
+  private var started = Set<ObjectIdentifier>()
+
+  mutating func start(_ task: WKURLSchemeTask) {
+    dispatchPrecondition(condition: .onQueue(.main))
+    started.insert(ObjectIdentifier(task))
+  }
+
+  mutating func stop(_ task: WKURLSchemeTask) {
+    dispatchPrecondition(condition: .onQueue(.main))
+    started.remove(ObjectIdentifier(task))
+  }
+
+  // True once, for the reply that may still reach WebKit.
+  mutating func finish(_ task: WKURLSchemeTask) -> Bool {
+    dispatchPrecondition(condition: .onQueue(.main))
+    return started.remove(ObjectIdentifier(task)) != nil
+  }
+}
+
 private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
   private let indexURL: URL
   private let eventStoreURL: URL
@@ -73,8 +100,7 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
   private let localAnalystStoreURL: URL
   private let analystRunnerURL: URL
   private let analystRunnerCoreURL: URL
-  private let deobfuscationTasksLock = NSLock()
-  private var deobfuscationTasks = Set<ObjectIdentifier>()
+  private var tasks = SchemeTaskRegistry()
   private let deobfuscationService: NativeDeobfuscationService
   private let wasmService: NativeWasmService
   private let decoderService: NativeDecoderService
@@ -125,6 +151,7 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
   }
 
   func webView(_ webView: WKWebView, start urlSchemeTask: WKURLSchemeTask) {
+    tasks.start(urlSchemeTask)
     if ProcessInfo.processInfo.environment["REB_APP_SMOKE_TEST"] == "1" {
       print("SMOKE_RESOURCE \(urlSchemeTask.request.url?.absoluteString ?? "invalid")")
     }
@@ -285,9 +312,7 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
   }
 
   func webView(_ webView: WKWebView, stop urlSchemeTask: WKURLSchemeTask) {
-    deobfuscationTasksLock.lock()
-    deobfuscationTasks.remove(ObjectIdentifier(urlSchemeTask))
-    deobfuscationTasksLock.unlock()
+    tasks.stop(urlSchemeTask)
   }
 
   private func healthResponse() throws -> Data {
@@ -1502,8 +1527,15 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
       outputGroup.leave()
     }
     let started = Date()
-    inputPipe.fileHandleForWriting.write(normalized.0)
-    try? inputPipe.fileHandleForWriting.close()
+    // The deadline covers the input too: a runner that never reads it must not
+    // hold this write, and with it the only runner slot. A write after the
+    // runner ended fails with EPIPE instead of signalling this app.
+    let input = inputPipe.fileHandleForWriting
+    _ = fcntl(input.fileDescriptor, F_SETNOSIGPIPE, 1)
+    DispatchQueue.global(qos: .userInitiated).async {
+      try? input.write(contentsOf: normalized.0)
+      try? input.close()
+    }
     let timedOut = terminated.wait(timeout: .now() + 2.5) == .timedOut
     if timedOut {
       process.terminate()
@@ -1512,7 +1544,9 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
         _ = terminated.wait(timeout: .now() + 0.25)
       }
     }
-    outputGroup.wait()
+    // Ending the runner closes its output, unless something it started still
+    // holds the pipe. The slot is released either way.
+    let drained = outputGroup.wait(timeout: .now() + 1) == .success
     let duration = Int(Date().timeIntervalSince(started) * 1_000)
     analystRunnerLock.lock()
     let cancelled = analystCancelRequested && activeAnalystProcess === process
@@ -1535,6 +1569,14 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
         action: action,
         outcome: "timed_out",
         message: "Analyst script exceeded the 2 second execution limit",
+        duration: duration
+      )
+    }
+    if !drained {
+      return try localAnalystFailure(
+        action: action,
+        outcome: "failed",
+        message: "The analyst runner ended without closing its output",
         duration: duration
       )
     }
@@ -1818,18 +1860,10 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
   }
 
   private func completeDeobfuscation(_ body: Data, status: Int, to task: WKURLSchemeTask) {
-    DispatchQueue.main.async {
-      self.deobfuscationTasksLock.lock()
-      let active = self.deobfuscationTasks.remove(ObjectIdentifier(task)) != nil
-      self.deobfuscationTasksLock.unlock()
-      if active { self.send(body, contentType: "application/json; charset=utf-8", status: status, headers: [:], to: task) }
-    }
+    send(body, contentType: "application/json; charset=utf-8", status: status, headers: [:], to: task)
   }
 
   private func handleWasm(_ url: URL, to task: WKURLSchemeTask) {
-    deobfuscationTasksLock.lock()
-    deobfuscationTasks.insert(ObjectIdentifier(task))
-    deobfuscationTasksLock.unlock()
     DispatchQueue.global(qos: .userInitiated).async {
       do {
         let items = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems ?? []
@@ -1851,9 +1885,6 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
   }
 
   private func handleDeobfuscation(_ url: URL, to task: WKURLSchemeTask) {
-    deobfuscationTasksLock.lock()
-    deobfuscationTasks.insert(ObjectIdentifier(task))
-    deobfuscationTasksLock.unlock()
     DispatchQueue.global(qos: .userInitiated).async {
       do {
         let query = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems ?? []
@@ -2397,6 +2428,8 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
     send(body, contentType: "application/json; charset=utf-8", status: status, headers: [:], to: task)
   }
 
+  // Every reply goes through here, from any thread. It reaches WebKit on the
+  // main thread, and only while WebKit has not stopped the request.
   private func send(
     _ body: Data,
     contentType: String,
@@ -2404,6 +2437,13 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
     headers: [String: String],
     to task: WKURLSchemeTask
   ) {
+    guard Thread.isMainThread else {
+      DispatchQueue.main.async {
+        self.send(body, contentType: contentType, status: status, headers: headers, to: task)
+      }
+      return
+    }
+    guard tasks.finish(task) else { return }
     guard let requestURL = task.request.url,
       let response = HTTPURLResponse(
         url: requestURL,
@@ -2562,7 +2602,7 @@ private final class InvocationSiteSetupView: NSStackView {
   }
 }
 
-private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigationDelegate {
+private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigationDelegate, NSMenuItemValidation {
   private var window: NSWindow?
   private weak var webView: WKWebView?
   private var contentHandler: LocalContentHandler?
@@ -2579,6 +2619,13 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
   private var automaticSessionSuppressed = false
   private var liveSessionDecisionOpen = false
   private var localApplicationURL: URL?
+  // The live workspace the app last opened, so its page is recognized after
+  // its session ends.
+  private var liveWorkspaceURL: URL?
+  // The session published its workspace while the window was still loading.
+  private var openLiveWorkspaceWhenLoaded = false
+  // When the app last reloaded after the web content process stopped.
+  private var lastContentProcessReload: Date?
 
   func applicationDidFinishLaunching(_ notification: Notification) {
     if smokeTest {
@@ -2665,9 +2712,7 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
       presentFatalError("The live UI URL must be an explicit loopback HTTP address")
       return
     }
-    closeGuard.prepareForLoad(requestedUIURL ?? localApplicationURL)
-    clientProjectExport.prepareForLoad(requestedUIURL ?? localApplicationURL)
-    webView.load(URLRequest(url: requestedUIURL ?? localApplicationURL))
+    load(requestedUIURL ?? localApplicationURL)
     if smokeTest && ProcessInfo.processInfo.environment["REB_APP_SMOKE_LIVE_FAILURE"] == "1" {
       // Exercise the real startup failure path without a browser or modal dialog.
       liveSessionCoordinator.start(
@@ -2678,8 +2723,8 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
           print("SMOKE_ERROR Unexpected live session readiness")
           NSApp.terminate(nil)
         },
-        failed: { [weak self] message in
-          self?.presentLiveSessionError(message, captureMode: .metadata, useSystemKeychain: false)
+        failed: { [weak self] failure in
+          self?.presentLiveSessionError(failure, captureMode: .metadata, useSystemKeychain: false)
         }
       )
     }
@@ -2710,9 +2755,46 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
     decisionHandler(.allow)
   }
 
+  // The page, and any unsaved work in it, is gone. Reload it once; a page that
+  // stops again within 30 seconds of that reload is asked about, so a
+  // document that cannot stay up never reloads in a loop.
   func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
     closeGuard?.navigationWillStart()
     clientProjectExport?.navigationWillStart()
+    // WebKit can forget the page's URL once this callback returns.
+    let url = webView.url
+    if let last = lastContentProcessReload, Date().timeIntervalSince(last) < 30 {
+      // Outside this WebKit callback, which must not run a modal dialog.
+      RunLoop.main.perform(inModes: [.default]) { [weak self] in self?.askToReloadAfterRepeatedStop(url) }
+    } else {
+      reloadAfterContentProcessStop(url)
+    }
+  }
+
+  // The page that stopped, again with its native capability marker; neither
+  // that nor the offline fallback widens what the close guard trusts.
+  private func reloadAfterContentProcessStop(_ url: URL?) {
+    lastContentProcessReload = Date()
+    let page = url.flatMap { $0.scheme == "reb" ? $0 : nativeUIURL($0.absoluteString) }
+    if let page, !isEndedLiveWorkspace(url) {
+      webView?.load(URLRequest(url: page))
+    } else if let localApplicationURL {
+      load(localApplicationURL)
+    }
+  }
+
+  private func askToReloadAfterRepeatedStop(_ url: URL?) {
+    guard NSApp.isRunning, window?.isVisible == true else { return }
+    let alert = NSAlert()
+    alert.alertStyle = .warning
+    alert.messageText = "The workspace stopped again"
+    alert.informativeText =
+      "Its page stopped within 30 seconds of being reloaded, and unsaved edits in it were lost. "
+      + "Reload it once more, or leave the window empty."
+    alert.addButton(withTitle: "Reload")
+    alert.addButton(withTitle: "Not Now")
+    guard alert.runModal() == .alertFirstButtonReturn else { return }
+    reloadAfterContentProcessStop(url)
   }
 
   func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
@@ -2845,8 +2927,10 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
       let braveExecutableURL = braveBundle.executableURL
     else {
       presentLiveSessionError(
-        "Origin Trace could not find Brave Browser Development. "
-          + "Place it beside Origin Trace or set REB_BRAVE_BINARY.",
+        .init(
+          message: "Origin Trace could not find Brave Browser Development. "
+            + "Place it beside Origin Trace or set REB_BRAVE_BINARY.",
+          afterStartup: false),
         captureMode: captureMode,
         useSystemKeychain: useSystemKeychain
       )
@@ -2857,23 +2941,20 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
       captureNetworkContent: captureMode.capturesNetworkContent,
       useSystemKeychain: useSystemKeychain,
       ready: { [weak self] liveURL in
-        guard let self, let webView = self.webView else { return }
-        guard let nativeURL = nativeUIURL(liveURL.absoluteString) else {
+        guard let self else { return }
+        guard nativeUIURL(liveURL.absoluteString) != nil else {
           self.presentLiveSessionError(
-            "Origin Trace received an invalid loopback UI URL.",
+            .init(message: "Origin Trace received an invalid loopback UI URL.", afterStartup: false),
             captureMode: captureMode,
             useSystemKeychain: useSystemKeychain
           )
           return
         }
-        self.closeGuard?.prepareForLoad(nativeURL)
-        self.clientProjectExport?.prepareForLoad(nativeURL)
-        webView.load(URLRequest(url: nativeURL))
-        self.presentOriginTraceWindow()
+        self.openLiveWorkspace(nil)
       },
-      failed: { [weak self] message in
+      failed: { [weak self] failure in
         self?.presentLiveSessionError(
-          message,
+          failure,
           captureMode: captureMode,
           useSystemKeychain: useSystemKeychain
         )
@@ -2881,19 +2962,83 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
     )
   }
 
+  // The only way the app replaces the window's document. The close guard and
+  // project export trust only the URL loaded here.
+  private func load(_ url: URL) {
+    closeGuard?.prepareForLoad(url)
+    clientProjectExport?.prepareForLoad(url)
+    webView?.load(URLRequest(url: url))
+  }
+
+  private var readyLiveWorkspaceURL: URL? {
+    guard case .ready(let published) = liveSessionCoordinator.phase else { return nil }
+    return nativeUIURL(published.absoluteString)
+  }
+
+  // The workspace of a session that has ended, which can no longer load.
+  private func isEndedLiveWorkspace(_ url: URL?) -> Bool {
+    url != nil && url == liveWorkspaceURL && url != readyLiveWorkspaceURL
+  }
+
+  // Shows the running session's workspace, asking first about unsaved work in
+  // the current document. After Stay the session keeps running and this menu
+  // item opens its workspace later.
+  @objc private func openLiveWorkspace(_ sender: Any?) {
+    guard let url = readyLiveWorkspaceURL, let webView, webView.url != url else { return }
+    guard !webView.isLoading else {
+      // Ask about the current document once it has loaded.
+      openLiveWorkspaceWhenLoaded = true
+      return
+    }
+    closeGuard?.replaceDocument(.init(
+      question: "Open the live workspace with unsaved or unconfirmed changes?",
+      actionTitle: "Open Live Workspace"
+    ) { [weak self] in
+      guard let self, self.readyLiveWorkspaceURL == url else { return }
+      self.liveWorkspaceURL = url
+      self.load(url)
+      self.presentOriginTraceWindow()
+    })
+  }
+
+  func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
+    guard menuItem.action == #selector(openLiveWorkspace(_:)) else { return true }
+    guard let url = readyLiveWorkspaceURL else { return false }
+    return webView?.url != url
+  }
+
+  // An ended session's page can no longer load or save anything. Continue
+  // Offline replaces it with the offline workspace, asking first when it still
+  // holds unsaved work the researcher may want to copy.
+  private func leaveEndedLiveWorkspace() {
+    guard isEndedLiveWorkspace(webView?.url), let localApplicationURL else { return }
+    closeGuard?.replaceDocument(.init(
+      question: "Open the offline workspace with unsaved or unconfirmed changes?",
+      actionTitle: "Open Offline Workspace"
+    ) { [weak self] in
+      self?.load(localApplicationURL)
+    })
+  }
+
   private func configuredAutomaticSystemKeychain() -> Bool {
     ProcessInfo.processInfo.environment["REB_AUTOMATIC_USE_SYSTEM_KEYCHAIN"] == "1"
   }
 
+  // Nothing changes, including a running session, until unsaved work in the
+  // current document is settled.
   @objc private func newLiveSession(_ sender: Any?) {
-    automaticSessionSuppressed = false
-    liveSessionCoordinator.stop()
-    if let localApplicationURL, let webView {
-      closeGuard?.prepareForLoad(localApplicationURL)
-      clientProjectExport?.prepareForLoad(localApplicationURL)
-      webView.load(URLRequest(url: localApplicationURL))
-    }
-    presentLiveSessionSetup()
+    closeGuard?.replaceDocument(.init(
+      question: "Start a new live session with unsaved or unconfirmed changes?",
+      actionTitle: "Start New Session"
+    ) { [weak self] in
+      guard let self else { return }
+      self.automaticSessionSuppressed = false
+      self.liveSessionCoordinator.stop()
+      if let localApplicationURL = self.localApplicationURL { self.load(localApplicationURL) }
+      // From the run loop, outside the WebKit or AppKit callback that settled
+      // the decision, so the dialog's modal session runs at the top level.
+      RunLoop.main.perform(inModes: [.default]) { self.presentLiveSessionSetup() }
+    })
   }
 
   private func automaticLiveSessionEnabled() -> Bool {
@@ -3139,6 +3284,11 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
       keyEquivalent: "n"
     )
     newSessionItem.target = self
+    applicationMenu.addItem(
+      withTitle: "Open Live Workspace",
+      action: #selector(openLiveWorkspace(_:)),
+      keyEquivalent: ""
+    ).target = self
     applicationMenu.addItem(.separator())
     applicationMenu.addItem(
       withTitle: "Hide Origin Trace",
@@ -3208,20 +3358,20 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
   }
 
   private func presentLiveSessionError(
-    _ message: String,
+    _ failure: LiveSessionCoordinator.Failure,
     captureMode: LiveCaptureMode,
     useSystemKeychain: Bool
   ) {
     guard NSApp.isRunning else { return }
     if smokeTest {
-      print("SMOKE_LIVE_FAILURE \(message)")
+      print("SMOKE_LIVE_FAILURE \(failure.message)")
       automaticSessionSuppressed = true
       return
     }
     let alert = NSAlert()
     alert.alertStyle = .critical
-    alert.messageText = "Live session unavailable"
-    alert.informativeText = message
+    alert.messageText = failure.afterStartup ? "Live session ended" : "Live session unavailable"
+    alert.informativeText = failure.message
     alert.addButton(withTitle: "Retry")
     alert.addButton(withTitle: "Continue Offline")
     // A reopen during this modal must not start a second session behind it.
@@ -3238,10 +3388,15 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
     }
     automaticSessionSuppressed = true
     presentOriginTraceWindow()
+    leaveEndedLiveWorkspace()
   }
 
   func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
     clientProjectExport?.navigationDidFinish(webView)
+    if openLiveWorkspaceWhenLoaded {
+      openLiveWorkspaceWhenLoaded = false
+      openLiveWorkspace(nil)
+    }
     guard smokeTest else { return }
     if ProcessInfo.processInfo.environment["REB_APP_SMOKE_CLIENT_PROJECT"] == "1",
       let window, let clientProjectExport

@@ -219,7 +219,8 @@ export async function checkNotebookController(root) {
   await ui.show(); node('new-name').value = 'Mounted case'; await document.body.querySelector('.notebook-create').fire('submit');
   assert.equal(library.files.length, 3); await node('add').fire('click');
   node('pin-name').value = 'Mounted source'; await node('pin-name').fire('input'); node('pin-note').value = 'Authored note'; await node('pin-note').fire('input');
-  await node('editor').fire('submit');
+  assert.equal(ui.hasUnsavedWork(), true, 'A pin draft is unsaved work');
+  await node('editor').fire('submit'); assert.equal(ui.hasUnsavedWork(), false, 'A saved pin leaves no unsaved work');
   assert.equal(JSON.parse(library.files[2].content).pins.length, 1, 'Mounted Save must call its retained-context function, not pass its result as a function');
   assert(node('cancel').hidden, 'Successful verification releases its busy state');
   await node('open').fire('click'); assert.equal(opened, 1); assert.equal(ui.dialog.open, false);
@@ -230,11 +231,14 @@ export async function checkNotebookController(root) {
   failContext = false; await node('editor').fire('submit'); assert.equal(JSON.parse(library.files[2].content).pins.length, 2);
   await node('delete-pin').fire('click'); await node('delete-pin').fire('click'); assert.equal(JSON.parse(library.files[2].content).pins.length, 1);
   hold = true; const refresh = node('refresh').fire('click'); await Promise.resolve();
+  assert.equal(ui.hasUnsavedWork(), false, 'Loading the library is not unsaved work');
   assert.equal(document.activeElement, node('cancel'));
   assert((await ui.dialog.fire('keydown', {key: 'Tab'})).defaultPrevented); assert.equal(document.activeElement, node('close'));
   assert((await ui.dialog.fire('keydown', {key: 'Tab', shiftKey: true})).defaultPrevented); assert.equal(document.activeElement, node('cancel'));
   node('close').focus(); assert.equal((await ui.dialog.fire('keydown', {key: 'Tab'})).defaultPrevented, false, 'Interior native tab order is not replaced');
   hold = false; release(); await refresh; assert.equal(document.activeElement, node('close'), 'Completion preserves the newer keyboard focus choice');
-  await node('delete-book').fire('click'); await node('delete-book').fire('click'); assert.deepEqual(library.files, original);
+  await node('delete-book').fire('click'); hold = true; const deleting = node('delete-book').fire('click'); await Promise.resolve();
+  assert.equal(ui.hasUnsavedWork(), true, 'A library write in flight is unsaved work'); hold = false; release(); await deleting;
+  assert.equal(ui.hasUnsavedWork(), false); assert.deepEqual(library.files, original);
   console.log('PASS mounted Notebook create/pin/Save/open/delete handlers, failed verification recovery and unrelated-file preservation (DOM/controller fixture; not rendered QA)');
 }

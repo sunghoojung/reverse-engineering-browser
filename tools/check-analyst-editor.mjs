@@ -81,7 +81,7 @@ async function controllerFixture(root) {
   f.context=context;
   f.ui=runInNewContext((await readFile(join(root,'apps/research-ui/evidence_models.js'),'utf8'))+'\n'+
     (await readFile(join(root,'apps/research-ui/source_facts.js'),'utf8'))+'\n'+section+
-    '\n;({renderLocalAnalyst,selectAnalystFile,selectAnalystFolder,saveAnalystFile,saveAnalystFolder,createAnalystFile,createAnalystFolder,deleteAnalystFile,deleteAnalystFolder,refreshLocalAnalyst,discardAnalystDraft,moveAnalystTreeSelection,guardAnalystUnload,analystHasUnsavedWork,isLocalAnalystWorkspace})',context);
+    '\n;({renderLocalAnalyst,selectAnalystFile,selectAnalystFolder,saveAnalystFile,saveAnalystFolder,createAnalystFile,createAnalystFolder,deleteAnalystFile,deleteAnalystFolder,refreshLocalAnalyst,discardAnalystDraft,moveAnalystTreeSelection,guardUnsavedWorkUnload,hasUnsavedWork,analystHasUnsavedWork,isLocalAnalystWorkspace})',context);
   assert(f.ui.isLocalAnalystWorkspace(f.server));f.ui.renderLocalAnalyst();
   f.edit=text=>{analystElements.content.value=text;state.analystDraftDirty=true;};
   f.postCount=()=>f.calls.filter(call=>call.options.method==='POST').length;
@@ -98,12 +98,18 @@ export async function checkAnalystController(root) {
   const row=elements.tree.querySelector('[data-file-id="1"]');row.focus();elements.tree.scrollTop=60;ui.renderLocalAnalyst();
   assert.equal(document.activeElement.dataset.fileId,'1');assert.equal(elements.tree.scrollTop,60);
   ui.moveAnalystTreeSelection({key:'ArrowDown',currentTarget:document.activeElement,preventDefault(){}});assert.equal(state.analystSelectedFileId,1);assert.equal(document.activeElement.dataset.fileId,'1');
-  let warned=false;ui.guardAnalystUnload({preventDefault(){warned=true;}});assert(warned);
+  let warned=false;ui.guardUnsavedWorkUnload({preventDefault(){warned=true;}});assert(warned);
   ui.discardAnalystDraft();assert.equal(elements.content.value,'Saved note 1');assert.equal(document.activeElement,elements.content);assert.equal(ui.selectAnalystFile(2),true);
   elements.folderName.value='Unfinished folder';elements.folderParent.value='3';state.analystFolderDirty=true;
   assert.equal(ui.selectAnalystFile(1),false);await ui.deleteAnalystFolder();assert.equal(f.postCount(),0);
   await ui.refreshLocalAnalyst(true);assert.equal(elements.folderName.value,'Unfinished folder');assert.equal(elements.folderParent.value,'3');
   ui.discardAnalystDraft(true);assert.equal(document.activeElement,elements.folderName);assert.equal(ui.analystHasUnsavedWork(),false);
+  // Beforeunload and the native shell ask one question across every editor.
+  assert.equal(ui.hasUnsavedWork(),false);
+  for(const flag of ['collectionDraftDirty','collectionFolderDirty','apiCollectionSaving']){state[flag]=true;assert.equal(ui.hasUnsavedWork(),true,flag);state[flag]=false;}
+  f.context.investigationNotebook={hasUnsavedWork:()=>true};assert.equal(ui.hasUnsavedWork(),true,'notebook draft');
+  warned=false;ui.guardUnsavedWorkUnload({preventDefault(){warned=true;}});assert(warned,'beforeunload covers the notebook');
+  f.context.investigationNotebook={hasUnsavedWork:()=>false};assert.equal(ui.hasUnsavedWork(),false);
 
   f=await controllerFixture(root);f.elements.folderName.value='Unsaved folder';f.state.analystFolderDirty=true;
   f.edit('File move');f.elements.folder.value='3';assert.equal(await f.ui.saveAnalystFile(),false);

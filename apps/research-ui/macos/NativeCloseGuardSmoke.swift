@@ -70,7 +70,7 @@ final class NativeCloseGuardSmoke: NSObject {
 
   private func configure() {
     if scenario == "untrusted-close" {
-      webView.loadHTMLString("<script>function analystHasUnsavedWork() { return false; }</script>",
+      webView.loadHTMLString("<script>function hasUnsavedWork() { return false; }</script>",
                             baseURL: nil)
       wait(until: { !self.webView.isLoading }, label: "untrusted replacement document") {
         self.waitForDecision { self.chooseStay() }
@@ -94,9 +94,11 @@ final class NativeCloseGuardSmoke: NSObject {
         """,
       "saving-quit": "state.localAnalystSaving = true;",
       "pending-close": "state.localAnalystPendingSave = {generation: 1};",
-      "missing-close": "analystHasUnsavedWork = undefined;",
-      "throwing-quit": "analystHasUnsavedWork = () => { throw new Error('synthetic'); };",
-      "malformed-close": "analystHasUnsavedWork = () => 0;",
+      // An API Collection edit alone is unsaved work for the same decision.
+      "collection-close": "state.collectionFolderDirty = true;",
+      "missing-close": "hasUnsavedWork = undefined;",
+      "throwing-quit": "hasUnsavedWork = () => { throw new Error('synthetic'); };",
+      "malformed-close": "hasUnsavedWork = () => 0;",
       "repeated-close-quit": "state.analystDraftDirty = true;",
       "navigation-close": "state.analystDraftDirty = true;",
     ]
@@ -104,20 +106,22 @@ final class NativeCloseGuardSmoke: NSObject {
     evaluate("""
       state.analystDraftDirty = false; state.analystFolderDirty = false;
       state.localAnalystSaving = false; state.localAnalystPendingSave = null;
+      state.collectionDraftDirty = false; state.collectionFolderDirty = false;
       if (!selectAnalystFile(1)) throw new Error('Synthetic file selection failed');
       \(setup)
       window.__closeSnapshotNow = () => JSON.stringify({
         file: analystFileDraft(), folder: analystFolderDraft(),
         fileID: state.analystSelectedFileId, folderID: state.analystSelectedFolderId,
         fileDirty: state.analystDraftDirty, folderDirty: state.analystFolderDirty,
-        saving: state.localAnalystSaving, pending: state.localAnalystPendingSave
+        saving: state.localAnalystSaving, pending: state.localAnalystPendingSave,
+        collection: [state.collectionDraftDirty, state.collectionFolderDirty]
       });
       window.__closeSnapshot = window.__closeSnapshotNow();
       window.__closeQueries = 0;
       window.__closeQueryStacks = [];
-      if (typeof analystHasUnsavedWork === 'function') {
-        const query = analystHasUnsavedWork;
-        analystHasUnsavedWork = () => {
+      if (typeof hasUnsavedWork === 'function') {
+        const query = hasUnsavedWork;
+        hasUnsavedWork = () => {
           window.__closeQueries++;
           if (window.__closeQueryStacks.length < 8) {
             window.__closeQueryStacks.push(String(new Error().stack).slice(0, 1024));
@@ -322,8 +326,8 @@ final class NativeCloseGuardSmoke: NSObject {
       self.trace("decision-ready \(self.observedQuitCount)")
       let unavailable = ["missing-close", "throwing-quit", "malformed-close", "untrusted-close", "timeout-close"]
         .contains(self.scenario)
-      let expected = unavailable ? "Couldn’t check unsaved Analyst work"
-        : "Close with unsaved or unconfirmed Analyst changes?"
+      let expected = unavailable ? "Couldn’t check for unsaved work"
+        : "Close with unsaved or unconfirmed changes?"
       self.captureDecision()
       self.require(self.sheetText().contains(expected), "wrong warning category; a timeout is not a dirty-state pass")
       completion()

@@ -405,13 +405,19 @@ for(const [search,expected] of [['',false],['?x=a%2Bb&x=c%26d',false],['?native=
 }
 const nativeAppSource=await readFile(join(root,'apps/research-ui/macos/OriginTraceApp.swift'),'utf8');
 assert.match(nativeAppSource,/return nativeUIURL\(arguments\[urlFlag \+ 1\]\)/);
-assert.match(nativeAppSource,/let nativeURL = nativeUIURL\(liveURL\.absoluteString\)/);
-assert.match(nativeAppSource,/webView\.load\(URLRequest\(url: nativeURL\)\)/);
-assert.match(nativeAppSource,/webView\.load\(URLRequest\(url: requestedUIURL \?\? localApplicationURL\)\)/);
-assert.match(nativeAppSource,/webView\.load\(URLRequest\(url: localApplicationURL\)\)/);
+// The app loads documents through one function; each caller passes a
+// normalized live URL, the requested --ui-url or the bundled workspace. A
+// stopped page reloads only through the same normalization.
+assert.match(nativeAppSource,/return nativeUIURL\(published\.absoluteString\)/);
+assert.match(nativeAppSource,/private func load\(_ url: URL\) \{\s+closeGuard\?\.prepareForLoad\(url\)\s+clientProjectExport\?\.prepareForLoad\(url\)\s+webView\?\.load\(URLRequest\(url: url\)\)/);
+assert.match(nativeAppSource,/guard let self, self\.readyLiveWorkspaceURL == url else \{ return \}\s+self\.liveWorkspaceURL = url\s+self\.load\(url\)/);
+assert.match(nativeAppSource,/load\(requestedUIURL \?\? localApplicationURL\)/);
+assert.match(nativeAppSource,/self\.load\(localApplicationURL\)/);
+assert.match(nativeAppSource,/\$0\.scheme == "reb" \? \$0 : nativeUIURL\(\$0\.absoluteString\)/);
 assert.match(nativeAppSource,/self\.localApplicationURL = localApplicationURL/);
 assert.match(nativeAppSource,/URL\(string: "reb:\/\/app\/index\.html\?native=1"\)/);
-assert.equal((nativeAppSource.match(/webView\.load\(URLRequest\(url:/g)??[]).length,3,'Review every new native entry path');
+assert.equal((nativeAppSource.match(/webView\??\.load\(URLRequest\(url:/g)??[]).length,2,'Review every new native entry path');
+assert.equal((nativeAppSource.match(/\bload\((?:url|localApplicationURL|requestedUIURL \?\? localApplicationURL)\)/g)??[]).length,5,'Review every new native entry path');
 assert.match(nativeAppSource,/components\.percentEncodedQuery = \(retained \+ \["native=1"\]\)\.joined/);
 assert.match(nativeAppSource,/name\.removingPercentEncoding != "native"/);
 assert.match(nativeAppSource,/contains\("--check-native-ui-url"\) \{\s+checkNativeUIURLs\(\)\s+return/);

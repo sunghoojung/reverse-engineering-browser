@@ -9,7 +9,7 @@ import {notebookModels} from './check-investigation-notebook.mjs';
 
 const root = fileURLToPath(new URL('..', import.meta.url));
 const scenarios = ['clean-close', 'clean-quit', 'file-return-close', 'folder-escape-quit',
-  'saving-quit', 'pending-close', 'missing-close', 'throwing-quit', 'malformed-close',
+  'saving-quit', 'pending-close', 'collection-close', 'missing-close', 'throwing-quit', 'malformed-close',
   'repeated-close-quit', 'navigation-close', 'untrusted-close', 'late-callback', 'timeout-close'];
 
 const repeatedCloseTrace = [
@@ -122,7 +122,7 @@ export async function checkNativeCloseContract() {
     'Sudden termination must not bypass the native close delegate');
   assert(!/enableSuddenTermination\s*\(/.test(app + guard));
   const frontend = await readFile(join(root, 'apps/research-ui/app.js'), 'utf8');
-  assert(frontend.includes('function analystHasUnsavedWork()'));
+  assert(frontend.includes('function hasUnsavedWork()'));
   console.log('PASS native close guard build wiring and frontend dependency (not lifecycle acceptance)');
 }
 

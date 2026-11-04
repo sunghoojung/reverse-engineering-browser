@@ -195,19 +195,60 @@ struct InvocationSiteSet: Equatable {
   }
 }
 
+// One app-started capture at a time. Every phase change happens on the main
+// thread in apply(_:to:); the launcher's readiness poll and its termination
+// handler only report there, and a report from an older launch is ignored.
 final class LiveSessionCoordinator {
-  private let lock = NSLock()
-  private var process: Process?
-  private var logHandle: FileHandle?
-  // This launch's copy of the saved invocation sites, removed when it ends.
-  private var invocationSitesCopy: URL?
-  private var generation = UUID()
-  private var failureReported = false
+  enum Phase: Equatable {
+    case idle
+    // The launcher runs and has not published its workspace yet.
+    case starting
+    // The launcher published this loopback workspace.
+    case ready(URL)
+    // stop() ended the launch on purpose; nothing is reported.
+    case ended
+    // The launch ended by itself, reported once.
+    case failed(Failure)
+  }
+
+  struct Failure: Equatable {
+    let message: String
+    // The session had published its workspace, so it ended rather than
+    // failed to start.
+    let afterStartup: Bool
+  }
+
+  // What a launch reports. Exit and timeout carry the launcher log, read off
+  // the main thread, so the cause is named for the phase the launch was in.
+  enum Report {
+    case published(URL)
+    case exited(log: Data?)
+    case timedOut(log: Data?)
+    case stopped
+  }
+
+  static let startupFallback = "The live capture coordinator stopped before startup completed."
+  static let sessionFallback = "The live capture coordinator stopped unexpectedly."
+
+  private struct Launch {
+    let id: UUID
+    let process: Process
+    let logHandle: FileHandle
+    let logURL: URL
+    // This launch's copy of the saved invocation sites, removed when it ends.
+    let invocationSitesCopy: URL?
+    let ready: (URL) -> Void
+    let failed: (Failure) -> Void
+  }
+
+  private(set) var phase = Phase.idle
+  private var launch: Launch?
 
   var isRunning: Bool {
-    lock.lock()
-    defer { lock.unlock() }
-    return process?.isRunning == true
+    switch phase {
+    case .starting, .ready: return true
+    case .idle, .ended, .failed: return false
+    }
   }
 
   func start(
@@ -215,18 +256,11 @@ final class LiveSessionCoordinator {
     captureNetworkContent: Bool,
     useSystemKeychain: Bool,
     ready: @escaping (URL) -> Void,
-    failed: @escaping (String) -> Void
+    failed: @escaping (Failure) -> Void
   ) {
-    lock.lock()
-    if process?.isRunning == true {
-      lock.unlock()
-      return
-    }
-    let currentGeneration = UUID()
-    generation = currentGeneration
-    failureReported = false
-    lock.unlock()
-
+    dispatchPrecondition(condition: .onQueue(.main))
+    guard !isRunning else { return }
+    let id = UUID()
     do {
       let configuration = try makeConfiguration(
         braveExecutableURL: braveExecutableURL,
@@ -240,60 +274,83 @@ final class LiveSessionCoordinator {
       child.currentDirectoryURL = configuration.researchUIURL
       child.standardOutput = configuration.logHandle
       child.standardError = configuration.logHandle
-      child.terminationHandler = { [weak self] terminated in
-        self?.handleTermination(
-          process: terminated,
-          generation: currentGeneration,
-          logURL: configuration.logURL,
-          failed: failed
-        )
+      let report = { [weak self] (report: Report) in
+        DispatchQueue.main.async { self?.apply(report, to: id) }
       }
-
-      lock.lock()
-      process = child
-      logHandle = configuration.logHandle
-      invocationSitesCopy = configuration.invocationSitesURL
-      lock.unlock()
+      child.terminationHandler = { _ in report(.exited(log: try? Data(contentsOf: configuration.logURL))) }
+      launch = Launch(
+        id: id, process: child, logHandle: configuration.logHandle, logURL: configuration.logURL,
+        invocationSitesCopy: configuration.invocationSitesURL, ready: ready, failed: failed)
+      phase = .starting
       try child.run()
-
-      DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-        self?.waitForReadiness(
-          process: child,
-          generation: currentGeneration,
-          handshakeURL: configuration.handshakeURL,
-          logURL: configuration.logURL,
-          ready: ready,
-          failed: failed
-        )
+      DispatchQueue.global(qos: .userInitiated).async {
+        Self.waitForReadiness(
+          process: child, handshakeURL: configuration.handshakeURL, logURL: configuration.logURL, report: report)
       }
     } catch {
-      stop()
-      DispatchQueue.main.async {
-        failed(error.localizedDescription)
-      }
+      if let current = launch { end(current) }
+      let failure = Failure(message: error.localizedDescription, afterStartup: false)
+      phase = .failed(failure)
+      DispatchQueue.main.async { failed(failure) }
     }
   }
 
   func stop() {
-    lock.lock()
-    let child = process
-    process = nil
-    let handle = logHandle
-    logHandle = nil
-    let copy = invocationSitesCopy
-    invocationSitesCopy = nil
-    generation = UUID()
-    lock.unlock()
-
-    if child?.isRunning == true {
-      child?.terminate()
-    }
-    try? handle?.close()
-    if let copy { try? FileManager.default.removeItem(at: copy) }
+    dispatchPrecondition(condition: .onQueue(.main))
+    if let current = launch { apply(.stopped, to: current.id) }
   }
 
   deinit {
-    stop()
+    if launch?.process.isRunning == true { launch?.process.terminate() }
+  }
+
+  // The phase rule, kept pure so it can be checked without a launcher.
+  static func next(_ phase: Phase, after report: Report, logPath: String) -> Phase? {
+    let message = { (log: Data?, fallback: String) in
+      failureCause(in: log, fallback: fallback) + "\n\nSession log: " + logPath
+    }
+    switch (phase, report) {
+    case (.starting, .published(let url)):
+      return .ready(url)
+    case (.starting, .exited(let log)):
+      return .failed(Failure(message: message(log, startupFallback), afterStartup: false))
+    case (.starting, .timedOut(let log)):
+      return .failed(Failure(
+        message: "Live capture did not become ready within 60 seconds. " + message(log, startupFallback),
+        afterStartup: false))
+    case (.ready, .exited(let log)):
+      return .failed(Failure(message: message(log, sessionFallback), afterStartup: true))
+    case (.starting, .stopped), (.ready, .stopped):
+      return .ended
+    default:
+      return nil
+    }
+  }
+
+  private func apply(_ report: Report, to id: UUID) {
+    dispatchPrecondition(condition: .onQueue(.main))
+    guard let current = launch, current.id == id,
+      let next = Self.next(phase, after: report, logPath: current.logURL.path)
+    else { return }
+    phase = next
+    switch next {
+    case .ready(let url):
+      current.ready(url)
+    case .failed(let failure):
+      end(current)
+      current.failed(failure)
+    case .ended:
+      end(current)
+    case .idle, .starting:
+      break
+    }
+  }
+
+  private func end(_ current: Launch) {
+    launch = nil
+    if current.process.isRunning { current.process.terminate() }
+    try? current.logHandle.close()
+    if let copy = current.invocationSitesCopy { try? FileManager.default.removeItem(at: copy) }
   }
 
   private struct Configuration {
@@ -456,105 +513,29 @@ final class LiveSessionCoordinator {
     )
   }
 
-  private func waitForReadiness(
+  // Reports the published workspace or a timeout; the termination handler
+  // reports an exit. Broker and receiver each allow 5 seconds, backend 15, and
+  // Brave 30. Let those helpers report their own failure before this deadline.
+  private static func waitForReadiness(
     process child: Process,
-    generation currentGeneration: UUID,
     handshakeURL: URL,
     logURL: URL,
-    ready: @escaping (URL) -> Void,
-    failed: @escaping (String) -> Void
+    report: (Report) -> Void
   ) {
-    // Broker and receiver each allow 5 seconds, backend 15, and Brave 30.
-    // Let those helpers report their own failure before the outer deadline.
     for _ in 0..<1200 {
-      if !isCurrent(currentGeneration) { return }
       if let text = try? String(contentsOf: handshakeURL, encoding: .utf8),
         let url = validatedLoopbackURL(text.trimmingCharacters(in: .whitespacesAndNewlines))
       {
-        lock.lock()
-        guard generation == currentGeneration, !failureReported else {
-          lock.unlock()
-          return
-        }
-        lock.unlock()
-        DispatchQueue.main.async { [weak self] in
-          guard self?.isCurrent(currentGeneration) == true else { return }
-          ready(url)
-        }
+        report(.published(url))
         return
       }
-      if !child.isRunning {
-        reportFailureOnce(
-          generation: currentGeneration,
-          message: failureMessage(logURL: logURL),
-          failed: failed
-        )
-        return
-      }
+      if !child.isRunning { return }
       Thread.sleep(forTimeInterval: 0.05)
     }
-    if child.isRunning {
-      child.terminate()
-    }
-    reportFailureOnce(
-      generation: currentGeneration,
-      message: "Live capture did not become ready within 60 seconds. "
-        + failureMessage(logURL: logURL),
-      failed: failed
-    )
+    report(.timedOut(log: try? Data(contentsOf: logURL)))
   }
 
-  private func handleTermination(
-    process child: Process,
-    generation currentGeneration: UUID,
-    logURL: URL,
-    failed: @escaping (String) -> Void
-  ) {
-    lock.lock()
-    let shouldReport = generation == currentGeneration && !failureReported
-    var copy: URL?
-    if process === child {
-      process = nil
-      try? logHandle?.close()
-      logHandle = nil
-      copy = invocationSitesCopy
-      invocationSitesCopy = nil
-    }
-    lock.unlock()
-    if let copy { try? FileManager.default.removeItem(at: copy) }
-    if shouldReport {
-      reportFailureOnce(
-        generation: currentGeneration,
-        message: failureMessage(logURL: logURL),
-        failed: failed
-      )
-    }
-  }
-
-  private func reportFailureOnce(
-    generation currentGeneration: UUID,
-    message: String,
-    failed: @escaping (String) -> Void
-  ) {
-    lock.lock()
-    guard generation == currentGeneration, !failureReported else {
-      lock.unlock()
-      return
-    }
-    failureReported = true
-    lock.unlock()
-    DispatchQueue.main.async {
-      failed(message)
-    }
-  }
-
-  private func isCurrent(_ currentGeneration: UUID) -> Bool {
-    lock.lock()
-    defer { lock.unlock() }
-    return generation == currentGeneration && !failureReported
-  }
-
-  private func validatedLoopbackURL(_ value: String) -> URL? {
+  private static func validatedLoopbackURL(_ value: String) -> URL? {
     guard let url = URL(string: value),
       let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
       components.scheme == "http",
@@ -642,8 +623,7 @@ final class LiveSessionCoordinator {
     return environment
   }
 
-  static func failureCause(in data: Data?) -> String {
-    let fallback = "The live capture coordinator stopped before startup completed."
+  static func failureCause(in data: Data?, fallback: String = startupFallback) -> String {
     guard let data, !data.isEmpty else { return fallback }
     let prefix = "REB_LIVE_SESSION_FAILURE: "
     let lines = String(decoding: data, as: UTF8.self).split(separator: "\n")
@@ -653,11 +633,6 @@ final class LiveSessionCoordinator {
       $0.hasPrefix(prefix) && !$0.dropFirst(prefix.count).trimmingCharacters(in: .whitespaces).isEmpty
     }) else { return fallback }
     return String(marked.dropFirst(prefix.count).prefix(4 * 1_024))
-  }
-
-  private func failureMessage(logURL: URL) -> String {
-    let cause = Self.failureCause(in: try? Data(contentsOf: logURL))
-    return cause + "\n\nSession log: " + logURL.path
   }
 
   private func sessionError(_ message: String) -> NSError {

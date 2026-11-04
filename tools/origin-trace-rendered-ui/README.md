@@ -74,6 +74,33 @@ at once; the test then continues offline and returns to the harness page. The
 harness backend and the app share one temporary saved set through
 `--js-invocation-site-store` and `REB_JS_INVOCATION_SITE_STORE`. Dialog
 screenshots are drawn from the native window, which WebKit cannot snapshot.
+The app also receives the harness's `--api-collection` and `--local-analyst`
+stores, so the bundled `reb://` workspace those tests open never reads or
+writes Application Support.
+
+`test21StoppedRequestIsNotAnswered` opens the bundled `reb://` workspace, saves
+a synthetic script that never returns and runs it, then reloads the page while
+the native runner still holds the request. WebKit stops that request, and the
+runner's answer at its 2 second limit must not reach it: answering a stopped
+request raises an exception that ended the app. The next run must get its own
+`timed_out` answer, not 409.
+
+`test22NewLiveSessionAsksAboutUnsavedWork` first opens the bundled workspace
+through **New Live Session…** and **Continue Offline**, because the close guard
+trusts only a document the app loaded itself. When an earlier test left the
+harness page in place, that page cannot answer, and the test makes the
+deliberate **Start New Session** choice. In the bundled workspace it makes an
+API Collection folder edit through its editor's input event and chooses **New
+Live Session…** again. The unsaved-work sheet must name the new session, keep
+**Stay** as the Return default and photograph complete; Stay must leave the
+page, the edit and the start dialog untouched. Once the edit is discarded, the
+start dialog opens at once and the test continues offline.
+
+`test23WorkspaceReloadsAfterContentProcessStops` ends the web content process
+with SIGKILL, as a crash would; WebKit's testing selector names its process ID.
+The workspace must reload once by itself; a second stop within 30 seconds must
+ask, photographed, and **Reload** must restore it. Whether a reload starts is
+observed natively, because page JavaScript cannot answer until one does.
 
 At both window sizes, those budget gaps must leave the footer free of queue
 drops, Traffic without a loss notice and Fingerprinting at full coverage, while

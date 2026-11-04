@@ -400,7 +400,7 @@ class NativeProbeSession {
                     std::uint64_t category_mask,
                     std::uint64_t,
                     bool,
-                    NativeProbeEmitter downstream,
+                    NativeProbeEmitter emitter,
                     bool) noexcept {
     ++start_calls;
     if (!start_result) {
@@ -408,7 +408,7 @@ class NativeProbeSession {
     }
     session_id_ = session_id;
     category_mask_ = category_mask;
-    downstream_.store(downstream);
+    downstream_.store(emitter);
     return true;
   }
   void StopSession() noexcept {
@@ -422,10 +422,10 @@ class NativeProbeSession {
   std::uint64_t category_mask() const noexcept { return category_mask_; }
   std::uint64_t NextBrowserSequence() noexcept { return next_browser_sequence_.fetch_add(1); }
   void Emit(const NativeProbeEvent& event) const noexcept {
-    const NativeProbeEmitter downstream = downstream_.load();
-    if (downstream && event.header.session_id == session_id_ &&
+    const NativeProbeEmitter emitter = downstream_.load();
+    if (emitter && event.header.session_id == session_id_ &&
         (category_mask_ & NativeProbeCategoryMask(event.header.category)) != 0) {
-      downstream(event);
+      emitter(event);
     }
   }
   NativeProbeEmitter downstream() const noexcept { return downstream_.load(); }

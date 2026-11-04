@@ -360,7 +360,8 @@ void CheckOlderReceiver(const std::string& root) {
     DiscardBody(third, header);
     Ack(third, header, NativeArtifactReceiveStatus::kAccepted);
     char byte = 0;
-    static_cast<void>(read(third, &byte, 1));
+    // Hold the connection until the writer stops, which ends it with EOF.
+    Require(read(third, &byte, 1) <= 0, "the writer sends nothing after its last frame");
     close(third);
   });
   ConfigureArtifactSwitches(socket_path, root + "/token");

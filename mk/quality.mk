@@ -236,6 +236,7 @@ javascript-check: capture-completeness-check
 	node tools/check-traffic-capture.mjs
 	node tools/check-traffic-selection-work.mjs
 	node tools/check-event-window.mjs
+	node tools/check-event-poll-states.mjs
 	node tools/check-traffic-capture-qa.mjs
 	node tools/check-captured-client-project.mjs
 	node tools/check-captured-client-export.mjs

@@ -12,9 +12,11 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <array>
 #include <cerrno>
 #include <limits>
+#include <span>
 #include <string>
 #include <utility>
 
@@ -24,8 +26,10 @@
 #include "base/files/file_util.h"
 #include "base/functional/bind.h"
 #include "base/logging.h"
+#include "base/process/process_handle.h"
 #include "base/strings/string_number_conversions.h"
 #include "base/task/sequenced_task_runner.h"
+#include "base/threading/platform_thread.h"
 #include "base/time/time.h"
 #include "brave/components/reverse_engineering_browser/browser/native_artifact_capture_sink.h"
 #include "brave/components/reverse_engineering_browser/browser/native_artifact_socket_client.h"
@@ -168,7 +172,8 @@ bool NativeProbeSocketClient::StartFromCommandLine() {
   const bool has_artifact_socket = command_line.HasSwitch(kArtifactSocketSwitch);
   if (artifact_capture_enabled &&
       (!has_artifact_socket || !NativeArtifactSocketClient::Get().StartFromCommandLine(
-                                   session_id, &NativeArtifactCaptureSink::TransferCompleted))) {
+                                   session_id, &NativeArtifactCaptureSink::TransferCompleted,
+                                   &NativeProbeSocketClient::ArtifactChannelLost))) {
     close(socket_descriptor_);
     socket_descriptor_ = -1;
     return false;
@@ -203,6 +208,32 @@ bool NativeProbeSocketClient::StartFromCommandLine() {
 
 void NativeProbeSocketClient::Emit(const NativeProbeEvent& event) noexcept {
   Get().Enqueue(event);
+}
+
+void NativeProbeSocketClient::ArtifactChannelLost() noexcept {
+  // From here every artifact capture is refused at admission without a
+  // per-capture record, so one named gap marks where artifacts stop.
+  static constexpr char kReason[] = "artifact_channel_lost";
+  NativeProbeSession& session = NativeProbeSession::Get();
+  NativeProbeEvent gap;
+  gap.header.category =
+      (session.category_mask() & NativeProbeCategoryMask(NativeProbeCategory::kArtifact)) != 0
+          ? NativeProbeCategory::kArtifact
+          : NativeProbeCategory::kVm;
+  gap.header.type = NativeProbeType::kGap;
+  gap.header.session_id = session.session_id();
+  gap.header.process_id = static_cast<std::uint32_t>(base::GetCurrentProcId());
+  gap.header.thread_id = static_cast<std::uint32_t>(base::PlatformThread::CurrentId().raw());
+  gap.header.sequence_number = session.NextBrowserSequence();
+  gap.header.monotonic_time_ns =
+      static_cast<std::uint64_t>(base::TimeTicks::Now().since_origin().InNanoseconds());
+  const std::span<const char> reason(kReason, sizeof(kReason) - 1);
+  std::ranges::transform(reason, gap.inline_payload.begin(), [](const char value) {
+    return static_cast<std::byte>(static_cast<unsigned char>(value));
+  });
+  gap.header.payload_size = static_cast<std::uint32_t>(reason.size());
+  // Emit applies the session, category and expiry filters.
+  session.Emit(gap);
 }
 
 void NativeProbeSocketClient::Enqueue(const NativeProbeEvent& event) noexcept {
@@ -302,6 +333,7 @@ bool NativeProbeSocketClient::StartFromCommandLine() {
   return false;
 }
 void NativeProbeSocketClient::Emit(const NativeProbeEvent&) noexcept {}
+void NativeProbeSocketClient::ArtifactChannelLost() noexcept {}
 void NativeProbeSocketClient::Enqueue(const NativeProbeEvent&) noexcept {}
 void NativeProbeSocketClient::Run() {}
 void NativeProbeSocketClient::HandleDisconnect() {}

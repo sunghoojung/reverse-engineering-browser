@@ -40,6 +40,7 @@ class NativeProbeSocketClient final {
   ~NativeProbeSocketClient();
 
   static void Emit(const NativeProbeEvent& event) noexcept;
+  static void ArtifactChannelLost() noexcept;
   void Enqueue(const NativeProbeEvent& event) noexcept;
   void Run();
   void HandleDisconnect();

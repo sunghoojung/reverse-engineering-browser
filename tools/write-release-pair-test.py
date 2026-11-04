@@ -15,11 +15,11 @@ from unittest.mock import patch
 
 HELPER = Path(__file__).with_name("write-release-pair.py")
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
-TAG = "v0.5.0"
+TAG = "v0.5.1"
 NAME = f"Brave-Browser-Development-{TAG}-macos-arm64"
 CDHASH = "c" * 40
 BUILD = "b" * 40
-SOURCE_URL = "https://github.com/sunghoojung/reverse-engineering-browser/releases/download/preview-0.5.0"
+SOURCE_URL = "https://github.com/sunghoojung/reverse-engineering-browser/releases/download/preview-0.5.1"
 
 
 def pin_script(**values):
@@ -42,7 +42,7 @@ class ReleasePair(unittest.TestCase):
         self.output = self.root / "build/release-pair"
         self.output.mkdir(parents=True)
         self.info = {
-            "CFBundleShortVersionString": "0.5.0",
+            "CFBundleShortVersionString": "0.5.1",
             "OriginTraceReleaseType": "paired",
         }
         self.plist = self.root / "apps/research-ui/macos/Info.plist"

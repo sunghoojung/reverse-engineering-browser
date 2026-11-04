@@ -1,7 +1,7 @@
 # Origin Trace v0.3.2 companion release
 
 > Historical record of the published v0.3.2 release. Current source is the
-> v0.5.0 paired release; see [paired-release.md](paired-release.md). The
+> v0.5.1 paired release; see [paired-release.md](paired-release.md). The
 > companion workflow now skips paired sources on pull requests and refuses to
 > publish them.
 

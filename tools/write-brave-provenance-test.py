@@ -72,9 +72,9 @@ class BraveProvenance(unittest.TestCase):
         self.args.write_text(ARGS)
         self.output = Path(temporary.name) / "release"
         self.output.mkdir()
-        self.zip = self.output / "Brave-Browser-Development-v0.5.0-macos-arm64.zip"
+        self.zip = self.output / "Brave-Browser-Development-v0.5.1-macos-arm64.zip"
         self.zip.write_bytes(b"synthetic browser archive")
-        self.record = self.output / "Brave-Browser-Development-v0.5.0-macos-arm64.provenance.json"
+        self.record = self.output / "Brave-Browser-Development-v0.5.1-macos-arm64.provenance.json"
 
     def argv(self, **overrides):
         values = {
@@ -95,7 +95,7 @@ class BraveProvenance(unittest.TestCase):
         self.assertEqual(first, (self.output / "again.json").read_bytes())
         record = json.loads(first)
         self.assertEqual(record["schema"], "reb-brave-distribution-provenance-v1")
-        self.assertEqual(record["release"], "v0.5.0")
+        self.assertEqual(record["release"], "v0.5.1")
         self.assertEqual(record["artifact"], self.zip.name)
         self.assertEqual(record["sha256"], self.helper.digest(self.zip))
         self.assertEqual(record["size_bytes"], self.zip.stat().st_size)
@@ -157,7 +157,7 @@ class BraveProvenance(unittest.TestCase):
         for name, overrides in cases.items():
             with self.subTest(name=name), self.assertRaises(ValueError):
                 self.write(**overrides)
-        renamed = self.output / "Brave-Browser-Development-0.5.0-macos-arm64.zip"
+        renamed = self.output / "Brave-Browser-Development-0.5.1-macos-arm64.zip"
         renamed.write_bytes(self.zip.read_bytes())
         with self.assertRaises(ValueError):
             self.write(zip=str(renamed))

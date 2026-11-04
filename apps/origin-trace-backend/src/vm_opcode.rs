@@ -174,11 +174,12 @@ fn matching(bytes: &[u8], opening: usize, open: u8, close: u8) -> Option<usize> 
     None
 }
 
+/// `region` is already masked as part of its whole artifact; it is never
+/// re-masked, because its slashes were decided by context outside it.
 fn without_nested_functions(region: &str) -> String {
-    let mut masked = vm::mask(region).into_bytes();
-    let source = String::from_utf8(masked.clone()).expect("masked JavaScript");
+    let mut masked = region.as_bytes().to_vec();
     let mut ranges = Vec::new();
-    for signature in FUNCTION_SIGNATURE.find_iter(&source) {
+    for signature in FUNCTION_SIGNATURE.find_iter(region) {
         let opening = signature.end() - 1;
         if let Some(closing) = matching(&masked, opening, b'{', b'}') {
             ranges.push((opening + 1, closing));
@@ -4305,6 +4306,85 @@ if (!validate(document)) throw new Error('Backend workspace rejected by shipped 
             .iter()
             .filter_map(|handler| handler["opcode"].as_u64())
             .collect()
+    }
+
+    /// `try_table` opens a frame like `block`, so its `end` closes neither the
+    /// function body nor an enclosing loop. A module analyzes exactly like the
+    /// same module with a `nop` where each `try_table` is.
+    #[test]
+    fn try_table_frames_keep_the_function_end_and_loop_depth() {
+        let module = |top: &str, inner: &str| {
+            wat::parse_str(format!(
+                r#"(module (memory 1)
+                  (func (export "run") (param $pc i32) (result i32)
+                    {top}
+                    (block $exit
+                      (loop $next
+                        {inner}
+                        (block $b (block $a
+                          (br_table $a $b $exit (i32.load8_u (local.get $pc)))))
+                        (local.set $pc (i32.add (local.get $pc) (i32.const 1)))
+                        (br $next)))
+                    (local.get $pc)))"#
+            ))
+            .unwrap()
+        };
+        let shape = |bytes: Vec<u8>| {
+            let (_, analysis, document) = analyze_artifact(&bytes, "wasm", &[]);
+            let result = &analysis["results"][0];
+            let sites = result["frontend"]["dispatch_classification"]["sites"]
+                .as_array()
+                .map(|sites| {
+                    sites
+                        .iter()
+                        .map(|site| (site["role"].clone(), site["repeats"].clone()))
+                        .collect::<Vec<_>>()
+                });
+            let handlers = document["workspaces"][0]["handlers"]
+                .as_array()
+                .map(|handlers| {
+                    handlers
+                        .iter()
+                        .map(|h| h["opcode"].clone())
+                        .collect::<Vec<_>>()
+                });
+            (
+                result["status"].clone(),
+                result["tier"].clone(),
+                result["vm_score"].clone(),
+                sites,
+                handlers,
+            )
+        };
+        let expected = shape(module("(nop)", "(nop)"));
+        assert_eq!(expected.1, "likely-vm");
+        for (top, inner) in [
+            ("(try_table (nop))", "(nop)"),
+            ("(nop)", "(try_table (nop))"),
+        ] {
+            assert_eq!(shape(module(top, inner)), expected, "{top} {inner}");
+        }
+    }
+
+    /// Regular-expression literals, template substitutions and lone carriage
+    /// returns are lexed, not read as quotes or comments that blank code: the
+    /// region tree, case labels and function-array positions survive them.
+    #[test]
+    fn literals_and_line_ends_keep_handlers_and_array_positions() {
+        const SWITCH: &str = "while(pc<code.length){switch(code[pc++]){case 1:stack.push(code[pc++]);break;case 2:stack.pop();break;case 3:return stack;}}}";
+        for (name, prefix) in [
+            ("regex quote", "var quote=/'/g;"),
+            ("substitution", "var label=`${'`'}`;"),
+            ("carriage return", "// fetch\r"),
+        ] {
+            let source = format!("function vm(code,stack){{var pc=0;{prefix}{SWITCH}\n");
+            let (_, analysis, document) = analyze_artifact(source.as_bytes(), "javascript", &[]);
+            assert_eq!(analysis["results"][0]["tier"], "likely-vm", "{name}");
+            assert_eq!(handler_opcodes(&document), [1, 2, 3], "{name}");
+        }
+        let source = "function vm(code,s){var pc=0,ops=[function(){s.push(code[pc++])},()=>s.push(/[\\]]/.test(code)),function(){pc=code.length}];while(pc<code.length){ops[code[pc++]]();}return s;}\n";
+        let (_, _, document) = analyze_artifact(source.as_bytes(), "javascript", &[]);
+        assert_eq!(handler_opcodes(&document), [0, 1, 2]);
     }
 
     /// Second review: the gate reads the full classification, not the 256

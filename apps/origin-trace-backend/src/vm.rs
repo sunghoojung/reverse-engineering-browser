@@ -16,9 +16,13 @@ use wasmparser::{ElementItems, ElementKind, Operator, Parser, Payload, TypeRef};
 pub(crate) mod capture_mode;
 #[path = "vm_dispatch_shape.rs"]
 pub(crate) mod dispatch_shape;
+#[path = "vm_js_lexer.rs"]
+pub(crate) mod js_lexer;
 #[cfg(test)]
 #[path = "vm_review_inputs.rs"]
 pub(crate) mod review_inputs;
+#[path = "vm_wasm_control.rs"]
+pub(crate) mod wasm_control;
 #[path = "vm_wasm_dispatch.rs"]
 mod wasm_dispatch;
 #[path = "vm_wasm_tables.rs"]
@@ -150,50 +154,28 @@ fn rank(observations: &[Value]) -> (u64, usize) {
             .len(),
     )
 }
+/// Blank comments, quoted and template text and regular-expression bodies,
+/// keeping every byte offset, line terminators outside them, template
+/// substitution code and its braces, and each literal's two slashes. A kept
+/// slash still names the regex-or-division guess for consumers that refuse it.
+/// The input must be complete source text: masking a slice or masked text
+/// re-guesses its slashes without the context that decided them.
 pub(crate) fn mask(source: &str) -> String {
+    use js_lexer::{Kind, Lexer};
     let mut bytes = source.as_bytes().to_vec();
-    let mut index = 0;
-    let mut quote = 0;
-    let mut line = false;
-    let mut block = false;
-    let mut escaped = false;
-    while index < bytes.len() {
-        let c = source.as_bytes()[index];
-        let next = source.as_bytes().get(index + 1).copied().unwrap_or(0);
-        if line {
-            if c == b'\n' {
-                line = false;
-            } else {
-                bytes[index] = b' ';
+    for token in Lexer::new(source) {
+        match token.kind {
+            Kind::Comment | Kind::String | Kind::TemplateText => {
+                bytes[token.start..token.end].fill(b' ');
             }
-        } else if block {
-            bytes[index] = b' ';
-            if c == b'*' && next == b'/' {
-                bytes[index + 1] = b' ';
-                index += 1;
-                block = false;
+            Kind::Regex { body_end, .. } => {
+                bytes[token.start + 1..body_end].fill(b' ');
+                bytes[body_end + 1..token.end].fill(b' ');
             }
-        } else if quote != 0 {
-            bytes[index] = b' ';
-            if escaped {
-                escaped = false;
-            } else if c == b'\\' {
-                escaped = true;
-            } else if c == quote {
-                quote = 0;
-            }
-        } else if c == b'/' && b"/*".contains(&next) {
-            bytes[index] = b' ';
-            bytes[index + 1] = b' ';
-            index += 1;
-            line = next == b'/';
-            block = next == b'*';
-        } else if b"\"'`".contains(&c) {
-            bytes[index] = b' ';
-            quote = c;
+            _ => (),
         }
-        index += 1;
     }
+    // Every blanked range starts and ends at an ASCII delimiter.
     String::from_utf8(bytes).expect("UTF-8 literal masking")
 }
 fn js(source: &str) -> Result<(Vec<Value>, Vec<Value>)> {
@@ -641,7 +623,10 @@ fn wasm(bytes: &[u8]) -> Result<(Vec<Value>, Value)> {
                         | Operator::GlobalSet { global_index } => Some((true, *global_index)),
                         _ => None,
                     };
-                    let loop_depth = control.iter().filter(|c| **c == 3).count();
+                    let loop_depth = control
+                        .iter()
+                        .filter(|block| **block == wasm_control::BlockKind::Loop)
+                        .count();
                     let (arm_count, unique_targets, table_index) = match &op {
                         Operator::BrTable { targets } => {
                             let mut labels = BTreeSet::new();
@@ -670,23 +655,31 @@ fn wasm(bytes: &[u8]) -> Result<(Vec<Value>, Value)> {
                         unique_targets,
                         table_index,
                     });
-                    match op {
-                        Operator::Block { .. } => control.push(2),
-                        Operator::Loop { .. } => control.push(3),
-                        Operator::If { .. } => control.push(4),
-                        Operator::Else => {
-                            if control.last() != Some(&4) {
-                                return Err(Error::bad("WebAssembly else without matching if"));
-                            }
+                    match wasm_control::control(&op) {
+                        wasm_control::Control::Open(block) => control.push(block),
+                        wasm_control::Control::Arm(block) if control.last() != Some(&block) => {
+                            return Err(Error::bad(if block == wasm_control::BlockKind::If {
+                                "WebAssembly else without matching if"
+                            } else {
+                                "WebAssembly catch without matching try"
+                            }));
                         }
-                        Operator::End if control.pop().is_none() => {
-                            ended = true;
-                            if !reader.eof() {
+                        wasm_control::Control::Close { delegate } => match control.pop() {
+                            Some(block) if !delegate || block == wasm_control::BlockKind::Try => (),
+                            Some(_) | None if delegate => {
                                 return Err(Error::bad(
-                                    "WebAssembly function body has trailing instructions",
+                                    "WebAssembly delegate without matching try",
                                 ));
                             }
-                        }
+                            _ => {
+                                ended = true;
+                                if !reader.eof() {
+                                    return Err(Error::bad(
+                                        "WebAssembly function body has trailing instructions",
+                                    ));
+                                }
+                            }
+                        },
                         _ => (),
                     }
                 }

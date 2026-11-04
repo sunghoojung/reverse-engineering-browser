@@ -2300,170 +2300,59 @@ fn unavailable(meter: &Meter, reason: &str, detail: &'static str) -> Classified 
     }
 }
 
-/// Iterative lexical admission. Literals/comments are single tokens; template
-/// substitutions re-enter code. This pass only limits parser stack growth and
-/// cannot authorize a site. Oxc still owns parsing and all semantic decisions.
+/// Iterative lexical admission over the shared token pass. Literals and
+/// comments are single tokens; template substitutions re-enter syntax. A
+/// literal read where valid code may divide instead also counts its bytes as
+/// nesting, so either reading of that slash stays inside the reserved stack.
+/// This pass only limits parser stack growth and cannot authorize a site. Oxc
+/// still owns parsing and all semantic decisions.
 fn syntax_stack(source: &str) -> Option<usize> {
-    #[derive(Clone, Copy)]
-    enum Delimiter {
-        Plain,
-        Control,
-        Template,
-    }
-    let bytes = source.as_bytes();
+    use crate::vm::js_lexer::{Kind, Lexer};
+    const OPERATORS: &[u8] = b"=+-!~?&|*/%<>^.";
     let mut delimiters = Vec::new();
-    let mut index = 0;
-    let mut chain = 0;
+    let mut chain = 0usize;
     let mut stack = PARSER_STACK;
-    let mut operand = true;
-    let mut control = false;
-    let mut template = false;
-    while index < bytes.len() {
-        let byte = bytes[index];
-        if template {
-            match byte {
-                b'\\' => index = (index + 2).min(bytes.len()),
-                b'`' => {
-                    index += 1;
-                    template = false;
-                    operand = false;
-                }
-                b'$' if bytes.get(index + 1) == Some(&b'{') => {
-                    delimiters.push((Delimiter::Template, chain));
-                    chain = 0;
-                    index += 2;
-                    template = false;
-                    operand = true;
-                }
-                _ => index += 1,
-            }
-        } else if byte.is_ascii_whitespace() {
-            index += 1;
-        } else if byte == b'/' && bytes.get(index + 1) == Some(&b'/') {
-            index += 2;
-            while index < bytes.len() && !matches!(bytes[index], b'\n' | b'\r') {
-                index += 1;
-            }
-        } else if byte == b'/' && bytes.get(index + 1) == Some(&b'*') {
-            index += 2;
-            while index < bytes.len() {
-                if bytes[index] == b'*' && bytes.get(index + 1) == Some(&b'/') {
-                    index += 2;
-                    break;
-                }
-                index += 1;
-            }
-        } else if matches!(byte, b'\'' | b'"') {
-            index += 1;
-            while index < bytes.len() {
-                let current = bytes[index];
-                index += 1;
-                if current == b'\\' {
-                    index = (index + 1).min(bytes.len());
-                } else if current == byte {
-                    break;
-                }
-            }
-            operand = false;
-            control = false;
-        } else if byte == b'`' {
-            index += 1;
-            template = true;
-            control = false;
-        } else if byte == b'/' && operand {
-            // A regexp token ends at its unescaped slash outside a class.
-            // Unterminated regexps are left for Oxc's syntax diagnostics.
-            index += 1;
-            let mut class = false;
-            while index < bytes.len() {
-                let current = bytes[index];
-                index += 1;
-                match current {
-                    b'\\' => index = (index + 1).min(bytes.len()),
-                    b'[' => class = true,
-                    b']' => class = false,
-                    b'/' if !class => break,
-                    b'\n' | b'\r' => break,
-                    _ => (),
-                }
-            }
-            while index < bytes.len() && bytes[index].is_ascii_alphabetic() {
-                index += 1;
-            }
-            operand = false;
-            control = false;
-        } else if byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'$') || byte >= 128 {
-            let start = index;
-            while index < bytes.len()
-                && (bytes[index].is_ascii_alphanumeric()
-                    || matches!(bytes[index], b'_' | b'$')
-                    || bytes[index] >= 128)
-            {
-                index += 1;
-            }
-            let word = &bytes[start..index];
-            control = matches!(
-                word,
-                b"if" | b"while" | b"for" | b"with" | b"switch" | b"catch"
-            );
-            operand = control
-                || matches!(
-                    word,
-                    b"return"
-                        | b"throw"
-                        | b"case"
-                        | b"else"
-                        | b"new"
-                        | b"typeof"
-                        | b"void"
-                        | b"delete"
-                        | b"await"
-                        | b"yield"
-                        | b"in"
-                        | b"instanceof"
-                );
-            if matches!(
-                word,
-                b"new" | b"typeof" | b"void" | b"delete" | b"await" | b"yield"
-            ) {
-                chain += 1;
-            }
-        } else {
-            index += 1;
-            match byte {
-                b'(' | b'[' | b'{' => {
-                    delimiters.push((
-                        if byte == b'(' && control {
-                            Delimiter::Control
-                        } else {
-                            Delimiter::Plain
-                        },
-                        chain,
-                    ));
-                    chain = 0;
-                    operand = true;
-                }
-                b')' | b']' | b'}' => {
-                    let (kind, parent_chain) = delimiters
-                        .pop()
-                        .map_or((None, 0), |(kind, chain)| (Some(kind), chain));
-                    chain = parent_chain;
-                    template = byte == b'}' && matches!(kind, Some(Delimiter::Template));
-                    operand = byte == b'}' || matches!(kind, Some(Delimiter::Control));
-                }
-                _ => operand = true,
-            }
-            control = false;
-            if matches!(byte, b';' | b',' | b':') {
+    for token in Lexer::new(source) {
+        let text = &source.as_bytes()[token.start..token.end];
+        let mut uncertain = 0;
+        match token.kind {
+            Kind::Open => {
+                delimiters.push(chain);
                 chain = 0;
-            } else if b"=+-!~?&|*/%<>^.".contains(&byte) {
+            }
+            Kind::Close => chain = delimiters.pop().unwrap_or(0),
+            Kind::Word
+                if matches!(
+                    text,
+                    b"new" | b"typeof" | b"void" | b"delete" | b"await" | b"yield"
+                ) =>
+            {
                 chain += 1;
             }
+            Kind::Punct => {
+                for byte in text {
+                    if b";,:".contains(byte) {
+                        chain = 0;
+                    } else if OPERATORS.contains(byte) {
+                        chain += 1;
+                    }
+                }
+            }
+            Kind::Regex {
+                uncertain: true, ..
+            } => {
+                uncertain = text
+                    .iter()
+                    .filter(|byte| b"([{".contains(byte) || OPERATORS.contains(byte))
+                    .count();
+            }
+            _ => (),
         }
-        if delimiters.len() > MAX_SYNTAX_DEPTH || chain > MAX_SYNTAX_DEPTH {
+        let (depth, chain) = (delimiters.len() + uncertain, chain + uncertain);
+        if depth > MAX_SYNTAX_DEPTH || chain > MAX_SYNTAX_DEPTH {
             return None;
         }
-        if delimiters.len() > 1024 || chain > 1024 {
+        if depth > 1024 || chain > 1024 {
             stack = PARSER_STACK * 2;
         }
     }
@@ -2985,4 +2874,38 @@ fn worker_drops_inherited_environment_descriptors_and_network() {
             .iter()
             .any(|site| site.role() == Role::InterpreterCandidate)
     );
+}
+
+/// A divisor's nesting stays in the stack estimate. Debug Oxc needs about
+/// 3.3 KB of stack per parenthesis level, so 20,000 levels the guard did not
+/// see overflowed the 32 MiB parser stack: the worker crashed and every retry
+/// refused to save any analysis. Too-deep input is a counted refusal instead.
+#[cfg(test)]
+#[test]
+fn nesting_after_a_division_or_an_uncertain_literal_is_counted() {
+    let levels = 20_000;
+    for prefix in [
+        "a++",
+        "a--",
+        "a[0]",
+        "f(a)",
+        "a = {}",
+        "f = function(){}",
+        "await",
+    ] {
+        let source = format!(
+            "var a=0,f;{prefix} / {}1{} / 2;",
+            "(".repeat(levels),
+            ")".repeat(levels)
+        );
+        assert_eq!(syntax_stack(&source), None, "{prefix}");
+        let result = classify(&source, &Meter::new());
+        assert_eq!(
+            result.omissions[0]["reason"], "classification-work-limit",
+            "{prefix}"
+        );
+    }
+    for source in ["a++ / 2 / 3;", "function f(){}\n/[(]/.test(s);"] {
+        assert_eq!(syntax_stack(source), Some(PARSER_STACK), "{source}");
+    }
 }

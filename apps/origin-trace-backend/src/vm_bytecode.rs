@@ -207,9 +207,10 @@ pub(crate) fn snapshot(source: &str, id: &str) -> Value {
         );
     }
     let masked = crate::vm::mask(source);
-    // The lightweight mask removes comments and quoted text, but does not
-    // distinguish regular-expression literals from division. Neither may turn
-    // literal text into a byte initializer, so refuse this lexical ambiguity.
+    // The mask blanks comments, quoted text and regular-expression bodies, but
+    // without a parser a division can still be read as a literal or the
+    // reverse, and it keeps both slashes of each guess. Neither reading may
+    // turn literal text into a byte initializer, so refuse this ambiguity.
     if masked.contains('/') {
         return unavailable(
             id,

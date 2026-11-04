@@ -165,7 +165,9 @@ try {
   Object.assign(target, {
     TestHostPath: host,
     IsAppHostedTestBundle: true,
-    CommandLineArguments: ['--ui-url', uiURL],
+    // The bundled reb:// workspace reads and writes the same synthetic stores
+    // as the harness backend, never the user's Application Support files.
+    CommandLineArguments: ['--ui-url', uiURL, '--api-collection', stores.apiCollection, '--local-analyst', stores.localAnalyst],
     EnvironmentVariables: {
       ...(maximumHeight === undefined ? {} : {REB_RENDERED_UI_MAX_HEIGHT: maximumHeight}),
       REB_DISABLE_AUTOMATIC_LIVE_SESSION: '1',

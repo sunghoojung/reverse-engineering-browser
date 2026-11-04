@@ -129,7 +129,9 @@ final class Harness {
     let context = (try? await json(
       "({screens: [...document.querySelectorAll('.screen')].filter(screen => !screen.hidden).map(screen => screen.id).join(','), " +
       "focus: __rebUiProbe.describe(document.activeElement), documentFocused: document.hasFocus(), notice: document.querySelector('#investigation-notice')?.textContent ?? '', " +
-      "back: document.querySelector('#investigation-back')?.innerText ?? '', forward: document.querySelector('#investigation-forward')?.innerText ?? ''})"
+      "back: document.querySelector('#investigation-back')?.innerText ?? '', forward: document.querySelector('#investigation-forward')?.innerText ?? '', " +
+      "location: location.href, readyState: document.readyState, outgoing: window.__rebOutgoingDocument === true, " +
+      "requests: typeof state === 'object' ? state.requests.length : -1})"
     )).map { "\($0)" } ?? "state unavailable"
     throw HarnessError("Timed out: \(message) [active=\(NSApp.isActive), key=\(window.isKeyWindow), \(context)]")
   }
@@ -138,8 +140,8 @@ final class Harness {
   // one, so a fixed sleep can return before navigation and deliver the next
   // click to a page being torn down. Mark the old document and wait for a
   // document without the mark.
-  func reload(requireRequests: Bool = true) async throws {
-    try await activate()
+  func reload(requireRequests: Bool = true, activating: Bool = true) async throws {
+    if activating { try await activate() }
     _ = try await webView.callAsyncJavaScript("window.__rebOutgoingDocument = true; return true;", contentWorld: .page)
     webView.reload()
     try await waitUntil(
@@ -1451,5 +1453,109 @@ final class OriginTraceRenderedUITests: XCTestCase {
     let remaining = try await savedSiteCount(ui)
     XCTAssertEqual(remaining, 1, "the backend reads the set the dialog wrote")
     try await clearSavedSites(ui)
+  }
+
+  private func views(_ root: NSView) -> [NSView] { [root] + root.subviews.flatMap(views) }
+
+  private func texts(_ panel: NSWindow) -> [String] {
+    views(panel.contentView!).compactMap { ($0 as? NSTextField)?.stringValue }
+  }
+
+  private func button(_ panel: NSWindow, _ title: String) -> NSButton? {
+    views(panel.contentView!).compactMap { $0 as? NSButton }.first { $0.title == title }
+  }
+
+  // Runs an app menu action from the run loop, as AppKit runs a chosen item, so
+  // a modal it opens does not block this main-actor test. A backstop ends any
+  // modal the test leaves open.
+  @MainActor
+  private func chooseMenuItem(_ action: String) throws -> Timer {
+    let item = NSApp.mainMenu?.items.compactMap(\.submenu).flatMap(\.items).first { $0.action == Selector((action)) }
+    let menu = try XCTUnwrap(item?.menu, "the \(action) menu item")
+    let index = menu.index(of: try XCTUnwrap(item))
+    RunLoop.main.add(Timer(timeInterval: 0, repeats: false) { _ in menu.performActionForItem(at: index) }, forMode: .default)
+    let backstop = Timer(timeInterval: 60, repeats: false) { _ in if NSApp.modalWindow != nil { NSApp.abortModal() } }
+    RunLoop.main.add(backstop, forMode: .modalPanel)
+    return backstop
+  }
+
+  @MainActor
+  private func waitFor(_ label: String, timeout: TimeInterval = 20, _ condition: () -> Bool) async throws {
+    let deadline = Date().addingTimeInterval(timeout)
+    while !condition() {
+      guard Date() < deadline else { throw HarnessError("Timed out: \(label)") }
+      try await Task.sleep(nanoseconds: 100_000_000)
+    }
+  }
+
+  @MainActor
+  private func returnToHarness(_ ui: Harness, _ url: URL) async throws {
+    if let sheet = ui.window.attachedSheet { ui.window.endSheet(sheet, returnCode: .abort) }
+    if ui.webView.url != url {
+      ui.webView.load(URLRequest(url: url))
+      try await ui.waitForInitialLoad()
+    }
+    try await ui.reload(activating: false)
+  }
+
+  // The bundled reb:// workspace answers its requests natively. A request the
+  // page no longer owns, because the page reloaded while the analyst runner
+  // held it for its 2 second limit, must not be answered: WebKit raises on a
+  // reply to a stopped request, which ended the app. The runner slot must also
+  // come back, so the next run gets its own answer instead of 409.
+  @MainActor
+  func test20StoppedRequestIsNotAnswered() async throws {
+    let ui = try Harness()
+    try await ui.waitForInitialLoad()
+    let harnessURL = try XCTUnwrap(ui.webView.url)
+    let arguments = ProcessInfo.processInfo.arguments
+    let store = arguments.firstIndex(of: "--local-analyst").flatMap { arguments.indices.contains($0 + 1) ? arguments[$0 + 1] : nil }
+    guard let store, store.contains("reb-rendered-ui-") else {
+      throw HarnessError("The bundled workspace must use the harness Analyst store, not Application Support: \(arguments)")
+    }
+    ui.webView.load(URLRequest(url: try XCTUnwrap(URL(string: "reb://app/index.html?native=1"))))
+    try await ui.waitUntil("location.protocol === 'reb:' && document.readyState === 'complete' && typeof state === 'object' && state.localAnalystLoaded",
+      timeout: 30, "the bundled workspace did not load")
+    let runner = "fetch('/api/local-analyst/runner', {cache: 'no-store'}).then(response => response.json())"
+    let post = "{method: 'POST', cache: 'no-store', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)}"
+    // Save a script that never returns, then run it without awaiting its answer.
+    let saved = try await ui.json(
+      """
+      (async () => {
+        const current = await fetch('/api/local-analyst', {cache: 'no-store'}).then(response => response.json());
+        const files = current.files.map(({content_bytes, created_at_ms, updated_at_ms, ...file}) => file);
+        const id = Math.max(0, ...files.map(file => file.id)) + 1, source = 'for (;;) {}';
+        let body = {action: 'replace_local_analyst_workspace', expected_generation: current.generation, folders: current.folders,
+          files: [...files, {id, folder_id: 1, name: '__stopped-request.js', kind: 'analyst-script', language: 'javascript', content: source}]};
+        const library = await fetch('/api/local-analyst/actions', \(post)).then(response => response.json());
+        window.__rebRun = {action: 'run_local_analyst_script', protocol_version: 1, run_id: 1, script_id: id,
+          library_generation: library.generation, source, variables: {}, evidence: {events: [], artifacts: [], trace_edges: [],
+          signal_profiles: [], vm_analysis: null, selected_artifact: null, summary: {}}, confirmed: true, confirmed_sensitive: false};
+        body = window.__rebRun;
+        fetch('/api/local-analyst/actions', \(post)).catch(() => {});
+        return {run: JSON.stringify(window.__rebRun), files: JSON.stringify(files), generation: library.generation};
+      })()
+      """)
+    let run = try XCTUnwrap(saved["run"] as? String)
+    try await ui.waitUntil("\(runner).then(state => state.active_run_id === 1)", timeout: 10, "the analyst runner did not start")
+    _ = try await ui.webView.callAsyncJavaScript("window.__rebOutgoingDocument = true; return true;", contentWorld: .page)
+    ui.webView.reload()
+    try await ui.waitUntil("window.__rebOutgoingDocument === undefined && document.readyState === 'complete' && typeof state === 'object'",
+      timeout: 30, "the bundled workspace did not reload")
+    // The runner gives up after 2 seconds and replies to the request the reload stopped.
+    try await ui.waitUntil("\(runner).then(state => state.active_run_id === null)", timeout: 10, "the analyst runner slot was not released")
+    try await Task.sleep(nanoseconds: 1_000_000_000)
+    let second = try await ui.json(
+      "(async () => { const body = {...JSON.parse(\(String(reflecting: run))), run_id: 2}; " +
+      "const response = await fetch('/api/local-analyst/actions', \(post)); return {status: response.status, outcome: (await response.json()).outcome}; })()")
+    XCTAssertEqual(second["status"] as? Int, 200, "the next run gets its own answer: \(second)")
+    XCTAssertEqual(second["outcome"] as? String, "timed_out", "the next run reaches the runner: \(second)")
+    let files = try XCTUnwrap(saved["files"] as? String)
+    let generation = try XCTUnwrap(saved["generation"] as? Int)
+    _ = try await ui.value(
+      "(async () => { const body = {action: 'replace_local_analyst_workspace', expected_generation: \(generation), " +
+      "folders: (await fetch('/api/local-analyst', {cache: 'no-store'}).then(response => response.json())).folders, files: JSON.parse(\(String(reflecting: files)))}; " +
+      "return (await fetch('/api/local-analyst/actions', \(post))).status; })()")
+    try await returnToHarness(ui, harnessURL)
   }
 }

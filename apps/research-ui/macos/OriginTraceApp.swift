@@ -63,6 +63,33 @@ private func checkNativeUIURLs() {
   print("PASS native UI URL validation, query preservation and capability marker")
 }
 
+// WebKit raises an exception when a request it already stopped is answered.
+// It stops requests when the page navigates, reloads or loses its content
+// process, which can happen while native work for a request still runs. Each
+// request is started when WebKit hands it over and leaves exactly once:
+// finished by its single reply, or stopped by WebKit. Only started requests
+// are kept, because a released request's address can be reused by a later
+// one. Main thread only, like WebKit's start and stop calls.
+private struct SchemeTaskRegistry {
+  private var started = Set<ObjectIdentifier>()
+
+  mutating func start(_ task: WKURLSchemeTask) {
+    dispatchPrecondition(condition: .onQueue(.main))
+    started.insert(ObjectIdentifier(task))
+  }
+
+  mutating func stop(_ task: WKURLSchemeTask) {
+    dispatchPrecondition(condition: .onQueue(.main))
+    started.remove(ObjectIdentifier(task))
+  }
+
+  // True once, for the reply that may still reach WebKit.
+  mutating func finish(_ task: WKURLSchemeTask) -> Bool {
+    dispatchPrecondition(condition: .onQueue(.main))
+    return started.remove(ObjectIdentifier(task)) != nil
+  }
+}
+
 private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
   private let indexURL: URL
   private let eventStoreURL: URL
@@ -73,8 +100,7 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
   private let localAnalystStoreURL: URL
   private let analystRunnerURL: URL
   private let analystRunnerCoreURL: URL
-  private let deobfuscationTasksLock = NSLock()
-  private var deobfuscationTasks = Set<ObjectIdentifier>()
+  private var tasks = SchemeTaskRegistry()
   private let deobfuscationService: NativeDeobfuscationService
   private let wasmService: NativeWasmService
   private let decoderService: NativeDecoderService
@@ -125,6 +151,7 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
   }
 
   func webView(_ webView: WKWebView, start urlSchemeTask: WKURLSchemeTask) {
+    tasks.start(urlSchemeTask)
     if ProcessInfo.processInfo.environment["REB_APP_SMOKE_TEST"] == "1" {
       print("SMOKE_RESOURCE \(urlSchemeTask.request.url?.absoluteString ?? "invalid")")
     }
@@ -285,9 +312,7 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
   }
 
   func webView(_ webView: WKWebView, stop urlSchemeTask: WKURLSchemeTask) {
-    deobfuscationTasksLock.lock()
-    deobfuscationTasks.remove(ObjectIdentifier(urlSchemeTask))
-    deobfuscationTasksLock.unlock()
+    tasks.stop(urlSchemeTask)
   }
 
   private func healthResponse() throws -> Data {
@@ -1818,18 +1843,10 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
   }
 
   private func completeDeobfuscation(_ body: Data, status: Int, to task: WKURLSchemeTask) {
-    DispatchQueue.main.async {
-      self.deobfuscationTasksLock.lock()
-      let active = self.deobfuscationTasks.remove(ObjectIdentifier(task)) != nil
-      self.deobfuscationTasksLock.unlock()
-      if active { self.send(body, contentType: "application/json; charset=utf-8", status: status, headers: [:], to: task) }
-    }
+    send(body, contentType: "application/json; charset=utf-8", status: status, headers: [:], to: task)
   }
 
   private func handleWasm(_ url: URL, to task: WKURLSchemeTask) {
-    deobfuscationTasksLock.lock()
-    deobfuscationTasks.insert(ObjectIdentifier(task))
-    deobfuscationTasksLock.unlock()
     DispatchQueue.global(qos: .userInitiated).async {
       do {
         let items = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems ?? []
@@ -1851,9 +1868,6 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
   }
 
   private func handleDeobfuscation(_ url: URL, to task: WKURLSchemeTask) {
-    deobfuscationTasksLock.lock()
-    deobfuscationTasks.insert(ObjectIdentifier(task))
-    deobfuscationTasksLock.unlock()
     DispatchQueue.global(qos: .userInitiated).async {
       do {
         let query = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems ?? []
@@ -2397,6 +2411,8 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
     send(body, contentType: "application/json; charset=utf-8", status: status, headers: [:], to: task)
   }
 
+  // Every reply goes through here, from any thread. It reaches WebKit on the
+  // main thread, and only while WebKit has not stopped the request.
   private func send(
     _ body: Data,
     contentType: String,
@@ -2404,6 +2420,13 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
     headers: [String: String],
     to task: WKURLSchemeTask
   ) {
+    guard Thread.isMainThread else {
+      DispatchQueue.main.async {
+        self.send(body, contentType: contentType, status: status, headers: headers, to: task)
+      }
+      return
+    }
+    guard tasks.finish(task) else { return }
     guard let requestURL = task.request.url,
       let response = HTTPURLResponse(
         url: requestURL,

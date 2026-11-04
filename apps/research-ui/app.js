@@ -2956,10 +2956,11 @@ invocationSitesPanel.refresh();
             investigationNotice('The exact request cannot be selected: its row identifier is missing, changed or ambiguous.', 'ambiguous'); return false;
           }
         }
-        investigationBeforeSelection();
-        state.originTraceController?.abort();
+        // A stale id selects nothing, so it must not cancel the current trace.
         const request = state.requests.find(candidate => candidate.id === id);
         if (!request) return;
+        investigationBeforeSelection();
+        state.originTraceController?.abort();
         state.selectedRequestId = id;
         state.trafficDetailOpen = true;
         state.trafficSelectionNotice = null;

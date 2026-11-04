@@ -206,6 +206,10 @@ bool SendAck(const int descriptor,
   return true;
 }
 
+// A socket connection survives a rejection that left the stream at a frame
+// boundary: the sender has its acknowledgment and the next frame is intact.
+// Standard input has no acknowledgment, so any rejection stops it and the exit
+// status is the only signal its producer gets.
 bool ReceiveStream(std::istream& stream,
                    reb::ArtifactReceiver& receiver,
                    const int acknowledgment_descriptor) {
@@ -218,10 +222,16 @@ bool ReceiveStream(std::istream& stream,
         !SendAck(acknowledgment_descriptor, status, receiver.LastArtifactId())) {
       return false;
     }
-    if (status != reb::ArtifactReceiveStatus::kAccepted) {
+    if (status == reb::ArtifactReceiveStatus::kAccepted) {
+      continue;
+    }
+    if (acknowledgment_descriptor < 0 ||
+        receiver.StreamPosition() != reb::ArtifactStreamPosition::kFrameBoundary) {
       std::cerr << "Artifact receiver stopped: " << receiver.LastError() << '\n';
       return false;
     }
+    std::cerr << "Artifact " << receiver.LastArtifactId()
+              << " rejected; connection kept: " << receiver.LastError() << '\n';
   }
 }
 
@@ -272,7 +282,8 @@ bool ReceiveSocketConnections(const int listener,
     std::istream stream(&buffer);
     const bool received = ReceiveStream(stream, receiver, connection.get());
     if (!received) {
-      std::cerr << "Artifact connection closed after a rejected frame; waiting for reconnect\n";
+      std::cerr << "Artifact connection closed after an unsynchronized frame; waiting for "
+                   "reconnect\n";
     } else {
       std::cerr << "Artifact connection closed; waiting for reconnect\n";
     }

@@ -644,9 +644,11 @@ ArtifactReceiver::ArtifactReceiver(std::filesystem::path store_directory,
 ArtifactReceiveStatus ArtifactReceiver::ReceiveOne(std::istream& stream) {
   last_error_.clear();
   last_artifact_id_ = 0;
+  stream_position_ = ArtifactStreamPosition::kUnsynchronized;
   ArtifactHeader header{};
   stream.read(reinterpret_cast<char*>(&header), static_cast<std::streamsize>(sizeof(header)));
   if (stream.gcount() == 0 && stream.eof()) {
+    stream_position_ = ArtifactStreamPosition::kFrameBoundary;
     return ArtifactReceiveStatus::kEndOfStream;
   }
   if (stream.gcount() != static_cast<std::streamsize>(sizeof(header))) {
@@ -660,19 +662,28 @@ ArtifactReceiveStatus ArtifactReceiver::ReceiveOne(std::istream& stream) {
     return Reject(ArtifactReceiveStatus::kInvalid,
                   "Artifact session does not match the authenticated connection");
   }
+  // The header is valid and bounds both metadata lengths, so the remaining
+  // frame length is trusted from here: a rejection consumes it, keeping the
+  // stream at a frame boundary.
+  const std::uint64_t metadata_size =
+      static_cast<std::uint64_t>(header.url_size) + header.mime_type_size;
   if (artifact_ids_.size() >= limits_.max_artifacts) {
-    return Reject(ArtifactReceiveStatus::kTooLarge, "Artifact count exceeds its configured limit");
+    return RejectFrame(stream, metadata_size, header.content_size, ArtifactReceiveStatus::kTooLarge,
+                       "Artifact count exceeds its configured limit");
   }
   if (header.content_size > limits_.max_artifact_bytes ||
       header.content_size > limits_.max_store_bytes - stored_bytes_) {
-    return Reject(ArtifactReceiveStatus::kTooLarge, "Artifact exceeds a configured byte limit");
+    return RejectFrame(stream, metadata_size, header.content_size, ArtifactReceiveStatus::kTooLarge,
+                       "Artifact exceeds a configured byte limit");
   }
   if ((header.flags & kArtifactFlagSensitive) != 0 && !limits_.allow_sensitive) {
-    return Reject(ArtifactReceiveStatus::kSensitiveCaptureDisabled,
-                  "Sensitive content capture is disabled");
+    return RejectFrame(stream, metadata_size, header.content_size,
+                       ArtifactReceiveStatus::kSensitiveCaptureDisabled,
+                       "Sensitive content capture is disabled");
   }
   if (artifact_ids_.contains(header.artifact_id)) {
-    return Reject(ArtifactReceiveStatus::kConflict, "Artifact identifier already exists");
+    return RejectFrame(stream, metadata_size, header.content_size, ArtifactReceiveStatus::kConflict,
+                       "Artifact identifier already exists");
   }
 
   std::string url(header.url_size, '\0');
@@ -686,8 +697,8 @@ ArtifactReceiveStatus ArtifactReceiver::ReceiveOne(std::istream& stream) {
     return Reject(ArtifactReceiveStatus::kInvalid, "Truncated artifact MIME type");
   }
   if (!IsValidUtf8(url) || !IsValidUtf8(mime_type)) {
-    return Reject(ArtifactReceiveStatus::kInvalid,
-                  "Artifact metadata is not valid printable UTF-8");
+    return RejectFrame(stream, 0, header.content_size, ArtifactReceiveStatus::kInvalid,
+                       "Artifact metadata is not valid printable UTF-8");
   }
 
   const int directory = evidence_guard_.Directory();
@@ -696,7 +707,8 @@ ArtifactReceiveStatus ArtifactReceiver::ReceiveOne(std::istream& stream) {
   temporary.Open(EvidenceGuard::OpenFile(directory, temporary_name, O_WRONLY | O_CREAT | O_EXCL),
                  true);
   if (!temporary) {
-    return Reject(ArtifactReceiveStatus::kIoError, "Unable to create safe temporary artifact file");
+    return RejectFrame(stream, 0, header.content_size, ArtifactReceiveStatus::kIoError,
+                       "Unable to create safe temporary artifact file");
   }
   const auto remove_temporary = [&] { return unlinkat(directory, temporary_name.c_str(), 0) == 0; };
 
@@ -714,15 +726,19 @@ ArtifactReceiveStatus ArtifactReceiver::ReceiveOne(std::istream& stream) {
       return Reject(ArtifactReceiveStatus::kInvalid, "Truncated artifact content");
     }
     const auto received_size = static_cast<std::size_t>(received);
+    remaining -= static_cast<std::uint64_t>(received_size);
     temporary.write(reinterpret_cast<const char*>(buffer.data()), received);
     if (!temporary) {
       temporary.close();
       remove_temporary();
-      return Reject(ArtifactReceiveStatus::kIoError, "Unable to write artifact content");
+      return RejectFrame(stream, 0, remaining, ArtifactReceiveStatus::kIoError,
+                         "Unable to write artifact content");
     }
     sha256.Update(buffer.data(), received_size);
-    remaining -= static_cast<std::uint64_t>(received_size);
   }
+  // Every declared byte has been read; whatever follows, the next frame
+  // starts here.
+  stream_position_ = ArtifactStreamPosition::kFrameBoundary;
   temporary.flush();
   if (!temporary || fsync(temporary.Descriptor()) != 0) {
     temporary.close();
@@ -829,6 +845,10 @@ const std::string& ArtifactReceiver::LastError() const noexcept {
   return last_error_;
 }
 
+ArtifactStreamPosition ArtifactReceiver::StreamPosition() const noexcept {
+  return stream_position_;
+}
+
 ArtifactReceiveStatus ArtifactReceiver::Reject(const ArtifactReceiveStatus status,
                                                std::string message) {
   last_error_ = std::move(message);
@@ -853,6 +873,32 @@ ArtifactReceiveStatus ArtifactReceiver::Reject(const ArtifactReceiveStatus statu
       break;
   }
   return status;
+}
+
+ArtifactReceiveStatus ArtifactReceiver::RejectFrame(std::istream& stream,
+                                                    const std::uint64_t unread_metadata,
+                                                    const std::uint64_t unread_content,
+                                                    const ArtifactReceiveStatus status,
+                                                    std::string message) {
+  // Reading the rest of the frame before the acknowledgment also lets a
+  // sender that is still writing finish and read this status, rather than
+  // fail on a closed connection and record an I/O error instead.
+  if (unread_content <= std::max(limits_.max_artifact_bytes, kMaxDiscardedArtifactBytes)) {
+    std::uint64_t remaining = unread_metadata + unread_content;
+    constexpr std::uint64_t kChunk = 64 * 1024;
+    while (remaining > 0) {
+      const auto requested = static_cast<std::streamsize>(std::min(remaining, kChunk));
+      stream.ignore(requested);
+      if (stream.gcount() != requested) {
+        break;
+      }
+      remaining -= static_cast<std::uint64_t>(requested);
+    }
+    if (remaining == 0) {
+      stream_position_ = ArtifactStreamPosition::kFrameBoundary;
+    }
+  }
+  return Reject(status, std::move(message));
 }
 
 }  // namespace reb

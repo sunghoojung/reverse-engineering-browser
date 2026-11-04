@@ -24,6 +24,11 @@ inline constexpr std::uint32_t kMaxArtifactMimeTypeBytes = 255;
 inline constexpr std::uint16_t kArtifactFlagSensitive = 1U << 0U;
 inline constexpr std::uint64_t kDefaultMaxStoredArtifacts = 4'096;
 inline constexpr std::uint64_t kDefaultMaxManifestBytes = 64ULL * 1024ULL * 1024ULL;
+// A rejected frame whose header was valid is read and discarded so the socket
+// connection can carry the next frame. This covers the browser's 16 MiB
+// per-artifact cap; a larger declared size than this and the configured
+// artifact limit cannot come from a supported sender, so it closes instead.
+inline constexpr std::uint64_t kMaxDiscardedArtifactBytes = 16ULL * 1024ULL * 1024ULL;
 
 enum class ArtifactKind : std::uint16_t {
   kUnknown = 0,
@@ -93,6 +98,16 @@ enum class ArtifactReceiveStatus : std::uint32_t {
   kIoError,
 };
 
+// Where ReceiveOne left its input stream. Only a frame boundary can carry
+// another frame; an unsynchronized stream must be closed.
+enum class ArtifactStreamPosition : std::uint8_t {
+  // The whole frame was consumed, whether it was accepted or rejected.
+  kFrameBoundary,
+  // The header was invalid, the stream ended early, or a declared length was
+  // too large to discard, so the next byte's meaning is unknown.
+  kUnsynchronized,
+};
+
 struct ArtifactAck final {
   std::uint32_t magic = kArtifactAckMagic;
   std::uint16_t protocol_version = kArtifactProtocolVersion;
@@ -140,9 +155,16 @@ class ArtifactReceiver final {
   [[nodiscard]] std::uint64_t StoredBytes() const noexcept;
   [[nodiscard]] std::uint64_t LastArtifactId() const noexcept;
   [[nodiscard]] const std::string& LastError() const noexcept;
+  // Set by every ReceiveOne call.
+  [[nodiscard]] ArtifactStreamPosition StreamPosition() const noexcept;
 
  private:
   [[nodiscard]] ArtifactReceiveStatus Reject(ArtifactReceiveStatus status, std::string message);
+  [[nodiscard]] ArtifactReceiveStatus RejectFrame(std::istream& stream,
+                                                  std::uint64_t unread_metadata,
+                                                  std::uint64_t unread_content,
+                                                  ArtifactReceiveStatus status,
+                                                  std::string message);
 
   // Lives through all receiver-owned scans, writes, flushes and closes.
   EvidenceGuard evidence_guard_;
@@ -155,6 +177,7 @@ class ArtifactReceiver final {
   std::unordered_set<std::uint64_t> artifact_ids_;
   ArtifactReceiverStats stats_;
   std::string last_error_;
+  ArtifactStreamPosition stream_position_ = ArtifactStreamPosition::kFrameBoundary;
 };
 
 [[nodiscard]] bool IsValidArtifactHeader(const ArtifactHeader& header) noexcept;

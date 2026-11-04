@@ -818,9 +818,9 @@ echo "Close Brave to stop this capture session."
 if [[ "${embedded_session}" == 1 ]]; then
   # A PID is reused once its process exits, so the owner is the process with
   # this PID and this start time.
-  session_owner_started="$(ps -o lstart= -p "${session_owner_pid}" 2>/dev/null || true)"
+  session_owner_started="$(/bin/ps -o lstart= -p "${session_owner_pid}" 2>/dev/null || true)"
   while [[ -n "${session_owner_started}" &&
-           "$(ps -o lstart= -p "${session_owner_pid}" 2>/dev/null || true)" == "${session_owner_started}" ]]; do
+           "$(/bin/ps -o lstart= -p "${session_owner_pid}" 2>/dev/null || true)" == "${session_owner_started}" ]]; do
     if ! kill -0 "${brave_pid}" 2>/dev/null; then
       fail_live_session 1 "Brave stopped; the live capture connection has closed. See: ${brave_log}"
     fi

@@ -568,10 +568,18 @@ class COMPONENT_EXPORT(REB_NATIVE_PROBE_SINK) NativeProbeSink final {
   std::atomic<std::uint64_t> native_guest_host_capped_generation_{0};
   // Recent module verdicts, (token << 1) | accepted. Tokens are process-unique
   // renderer sequence numbers, so a stale verdict can never match a new send.
-  std::array<std::atomic<std::uint64_t>, 64> native_guest_module_status_{};
-  std::atomic<std::uint32_t> native_guest_module_status_next_{0};
-  enum class GuestModuleVerdict : std::uint8_t { kPending, kAccepted, kRejected };
-  [[nodiscard]] GuestModuleVerdict NativeGuestModuleVerdict(std::uint64_t token) const noexcept;
+  // Each verdict answers one delivered capture and a configuration delivers
+  // at most kNativeGuestSampleLimit, so its own verdicts all fit. next_ counts
+  // writes: a binding that finds no verdict after a full ring of writes since
+  // its send reads kLost, because its verdict may have been overwritten.
+  std::array<std::atomic<std::uint64_t>, kNativeGuestSampleLimit> native_guest_module_status_{};
+  std::atomic<std::uint64_t> native_guest_module_status_next_{0};
+  enum class GuestModuleVerdict : std::uint8_t { kPending, kAccepted, kRejected, kLost };
+  // writes_before_send is native_guest_module_status_next_ read before the
+  // capture carrying token was sent.
+  [[nodiscard]] GuestModuleVerdict NativeGuestModuleVerdict(
+      std::uint64_t token,
+      std::uint64_t writes_before_send) const noexcept;
   [[nodiscard]] bool ClaimNativeGuestHostRoute(std::uint64_t generation) noexcept;
   void NoteNativeGuestOmission(std::uint64_t generation,
                                std::uint64_t frame,

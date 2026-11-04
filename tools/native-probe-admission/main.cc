@@ -1520,6 +1520,7 @@ int main() {
   Run<&NativeGuestTwoSiteNesting>();
   Run<&NativeGuestBindingReclaim>();
   Run<&NativeGuestTransportFailureCoversSlots>();
+  Run<&NativeGuestModuleVerdictOverflow>();
   Run<&NativeWasmRuntimeAdmission>();
   Run<&NativeWasmIndirectAdmission>();
   Run<&NativeJsDispatchWire>();

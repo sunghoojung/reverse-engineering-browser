@@ -683,3 +683,41 @@ void NativeGuestTransportFailureCoversSlots() {
   std::cout << "PASS a refused guest capture frees its sample index and fills each sequence it "
                "took with a gap\n";
 }
+
+// A binding whose verdict was pushed out of the ring by a full ring of later
+// writes knows it may be lost and resends, instead of waiting forever and
+// leaving the browser to refuse every later sample of that document.
+void NativeGuestModuleVerdictOverflow() {
+  const std::array<std::uint8_t, 11> module{0, 97, 115, 109, 1, 0, 0, 0, 0x0e, 0, 0};
+  const auto adapter = GuestTestAdapter(module);
+  sink.SetEmitters(&RecordGuestQueue, &CaptureRuntimeMetadata, 47, reb::kAllNativeProbeCategoryMask,
+                   kForever, false, &GuestFrame);
+  sink.ConfigureNativeWasmGuest(adapter, &GuestCapture, &GuestHost);
+  sink.SetNativeWasmGuestRuntime(&GuestContext, nullptr);
+  guest_dispatches.clear();
+  guest_module_sizes.clear();
+  guest_capture_accept = true;
+  guest_pc = 0;
+  guest_memory[0] = 0x41;
+  reb::NativeWasmGuestStateView view{7, 70, 414, 8, 0, 0, nullptr, &GuestRead, &GuestCopy};
+  const auto record = [&] {
+    sink.RecordNativeWasmGuest(1, 8, "https://owned.test/module.wasm", module, view, 5, 6);
+  };
+  record();
+  assert(guest_dispatches.size() == 1 && guest_module_sizes.back() == module.size());
+  const auto token = guest_dispatches.back().header.sequence_number;
+  sink.NoteNativeGuestModuleStatus(token, false);
+  for (std::uint64_t n = 1; n < reb::kNativeGuestSampleLimit; ++n)
+    sink.NoteNativeGuestModuleStatus(token + 1'000'000 + n, true);
+  record();  // The rejection is still in the ring: resend.
+  assert(guest_dispatches.size() == 2 && guest_module_sizes.back() == module.size());
+  const auto resent = guest_dispatches.back().header.sequence_number;
+  for (std::uint64_t n = 1; n < reb::kNativeGuestSampleLimit; ++n)
+    sink.NoteNativeGuestModuleStatus(resent + 2'000'000 + n, true);
+  sink.NoteNativeGuestModuleStatus(resent + 3'000'000, true);
+  record();  // A full ring of other writes: the verdict may be lost, resend.
+  assert(guest_dispatches.size() == 3 && guest_module_sizes.back() == module.size());
+  sink.SetEmitters(nullptr, nullptr, 0, 0, 0);
+  sink.SetNativeWasmGuestRuntime(nullptr, nullptr);
+  std::cout << "PASS a guest module verdict overwritten in the ring is detected and resent\n";
+}

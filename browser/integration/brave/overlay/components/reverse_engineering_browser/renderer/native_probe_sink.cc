@@ -3137,9 +3137,10 @@ struct GuestInvocationState final {
 enum class GuestModuleState : std::uint8_t { kUnsent, kPending, kAccepted };
 struct GuestDocumentBinding final {
   std::uint64_t frame = 0, high = 0, low = 0, context = 0;
-  std::uint64_t module_token = 0;
+  std::uint64_t module_token = 0, module_writes_before_send = 0;
   std::uint64_t last_use = 0;
   GuestModuleState module = GuestModuleState::kUnsent;
+  // Rejected transfers; a verdict lost from the ring is not one.
   std::uint8_t module_attempts = 0;
 };
 struct GuestThreadState final {
@@ -3326,13 +3327,19 @@ void NativeProbeSink::NoteNativeGuestModuleStatus(std::uint64_t module_token,
                                           std::memory_order_release);
 }
 NativeProbeSink::GuestModuleVerdict NativeProbeSink::NativeGuestModuleVerdict(
-    std::uint64_t token) const noexcept {
+    std::uint64_t token,
+    std::uint64_t writes_before_send) const noexcept {
   for (const auto& entry : native_guest_module_status_) {
     const auto value = entry.load(std::memory_order_acquire);
     if (value >> 1U == token)
       return value & 1U ? GuestModuleVerdict::kAccepted : GuestModuleVerdict::kRejected;
   }
-  return GuestModuleVerdict::kPending;
+  // Read after the scan: a write counted here but not yet stored only costs
+  // one resend, which the browser answers from its own binding.
+  return native_guest_module_status_next_.load(std::memory_order_acquire) - writes_before_send >=
+                 native_guest_module_status_.size()
+             ? GuestModuleVerdict::kLost
+             : GuestModuleVerdict::kPending;
 }
 bool NativeProbeSink::ClaimNativeGuestHostRoute(std::uint64_t generation) noexcept {
   if (native_guest_host_capped_generation_.load(std::memory_order_acquire) >= generation)
@@ -3440,11 +3447,17 @@ void NativeProbeSink::RecordNativeWasmGuest(std::uint64_t execution_context_id,
   auto* document =
       &ClaimGuestDocument(frame_id, execution_context_id, document_token_high, document_token_low);
   if (document->module == GuestModuleState::kPending) {
-    switch (NativeGuestModuleVerdict(document->module_token)) {
+    switch (NativeGuestModuleVerdict(document->module_token, document->module_writes_before_send)) {
       case GuestModuleVerdict::kAccepted:
         document->module = GuestModuleState::kAccepted;
         break;
       case GuestModuleVerdict::kRejected:
+        document->module = GuestModuleState::kUnsent;
+        ++document->module_attempts;
+        break;
+      case GuestModuleVerdict::kLost:
+        // Resend: an accepted binding is confirmed at once, a rejected one
+        // retries within its attempts.
         document->module = GuestModuleState::kUnsent;
         break;
       case GuestModuleVerdict::kPending:
@@ -3583,6 +3596,8 @@ void NativeProbeSink::RecordNativeWasmGuest(std::uint64_t execution_context_id,
   capture.adapter_json = adapter->json;
   capture.module_bytes = send_module ? module_bytes : std::span<const std::uint8_t>{};
   capture.bytecode_bytes = std::span(snapshot.bytes.data(), snapshot.memory_length);
+  const auto writes_before_send =
+      send_module ? native_guest_module_status_next_.load(std::memory_order_acquire) : 0;
   const auto emit = native_guest_capture_.load(std::memory_order_acquire);
   if (guest_snapshot_cancelled ||
       config_generation_.load(std::memory_order_acquire) != generation || !emit ||
@@ -3606,7 +3621,7 @@ void NativeProbeSink::RecordNativeWasmGuest(std::uint64_t execution_context_id,
   if (send_module) {
     document->module = GuestModuleState::kPending;
     document->module_token = event.header.sequence_number;
-    ++document->module_attempts;
+    document->module_writes_before_send = writes_before_send;
   }
   state->dispatch_sequence = event.header.sequence_number;
 }

@@ -414,6 +414,42 @@ void SaturatingAdd(std::uint64_t& value, const std::uint64_t increment) noexcept
               : value + increment;
 }
 
+constexpr std::uint64_t kUnreadableManifest = std::numeric_limits<std::uint64_t>::max();
+
+// Returns the length of the manifest prefix that ends in a newline: `size`
+// when the final record is complete, or the end of the last complete record.
+std::uint64_t CompleteManifestBytes(const int descriptor, const std::uint64_t size) noexcept {
+  std::array<char, 4096> buffer{};
+  std::uint64_t end = size;
+  while (end > 0) {
+    const std::uint64_t begin = end > buffer.size() ? end - buffer.size() : 0;
+    const auto count = static_cast<std::size_t>(end - begin);
+    if (pread(descriptor, buffer.data(), count, static_cast<off_t>(begin)) !=
+        static_cast<ssize_t>(count)) {
+      return kUnreadableManifest;
+    }
+    for (std::size_t index = count; index > 0; --index) {
+      if (buffer[index - 1] == '\n') {
+        return begin + index;
+      }
+    }
+    end = begin;
+  }
+  return 0;
+}
+
+// Shortens the manifest to `size` bytes, durably. Opens its own descriptor so
+// no buffered stream can write pending bytes back after the cut.
+bool TruncateManifest(const int directory, const std::uint64_t size) noexcept {
+  const int descriptor = EvidenceGuard::OpenFile(directory, "manifest.jsonl", O_WRONLY);
+  if (descriptor < 0) {
+    return false;
+  }
+  const bool truncated =
+      ftruncate(descriptor, static_cast<off_t>(size)) == 0 && fsync(descriptor) == 0;
+  return close(descriptor) == 0 && truncated;
+}
+
 }  // namespace
 
 bool IsValidArtifactHeader(const ArtifactHeader& header) noexcept {
@@ -615,12 +651,21 @@ ArtifactReceiver::ArtifactReceiver(std::filesystem::path store_directory,
   if (!manifest) {
     throw std::runtime_error("Unable to read safe artifact manifest");
   }
-  if (manifest_bytes_ > 0) {
-    char last = 0;
-    if (pread(manifest.Descriptor(), &last, 1, static_cast<off_t>(manifest_bytes_ - 1)) != 1 ||
-        last != '\n') {
-      throw std::runtime_error("Artifact manifest ends with an incomplete record");
+  const std::uint64_t complete_bytes =
+      CompleteManifestBytes(manifest.Descriptor(), manifest_bytes_);
+  if (complete_bytes == kUnreadableManifest) {
+    throw std::runtime_error("Unable to inspect the end of the artifact manifest");
+  }
+  if (complete_bytes != manifest_bytes_) {
+    // Only an interrupted append leaves a final record without its newline.
+    // That record was never acknowledged, so the browser already reported it
+    // as failed; keeping it would claim an artifact the evidence says is
+    // missing. Cut it back and report the removed byte count to the caller.
+    if (!TruncateManifest(directory, complete_bytes)) {
+      throw std::runtime_error("Unable to remove an incomplete final artifact manifest record");
     }
+    recovered_manifest_bytes_ = manifest_bytes_ - complete_bytes;
+    manifest_bytes_ = complete_bytes;
   }
   std::string line;
   while (std::getline(manifest, line)) {
@@ -644,9 +689,11 @@ ArtifactReceiver::ArtifactReceiver(std::filesystem::path store_directory,
 ArtifactReceiveStatus ArtifactReceiver::ReceiveOne(std::istream& stream) {
   last_error_.clear();
   last_artifact_id_ = 0;
+  stream_position_ = ArtifactStreamPosition::kUnsynchronized;
   ArtifactHeader header{};
   stream.read(reinterpret_cast<char*>(&header), static_cast<std::streamsize>(sizeof(header)));
   if (stream.gcount() == 0 && stream.eof()) {
+    stream_position_ = ArtifactStreamPosition::kFrameBoundary;
     return ArtifactReceiveStatus::kEndOfStream;
   }
   if (stream.gcount() != static_cast<std::streamsize>(sizeof(header))) {
@@ -660,19 +707,32 @@ ArtifactReceiveStatus ArtifactReceiver::ReceiveOne(std::istream& stream) {
     return Reject(ArtifactReceiveStatus::kInvalid,
                   "Artifact session does not match the authenticated connection");
   }
+  // The header is valid and bounds both metadata lengths, so the remaining
+  // frame length is trusted from here: a rejection consumes it, keeping the
+  // stream at a frame boundary.
+  const std::uint64_t metadata_size =
+      static_cast<std::uint64_t>(header.url_size) + header.mime_type_size;
+  if (store_state_ == StoreState::kFailed) {
+    return RejectFrame(stream, metadata_size, header.content_size, ArtifactReceiveStatus::kIoError,
+                       "Artifact store stopped accepting after an unrecoverable manifest failure");
+  }
   if (artifact_ids_.size() >= limits_.max_artifacts) {
-    return Reject(ArtifactReceiveStatus::kTooLarge, "Artifact count exceeds its configured limit");
+    return RejectFrame(stream, metadata_size, header.content_size, ArtifactReceiveStatus::kTooLarge,
+                       "Artifact count exceeds its configured limit");
   }
   if (header.content_size > limits_.max_artifact_bytes ||
       header.content_size > limits_.max_store_bytes - stored_bytes_) {
-    return Reject(ArtifactReceiveStatus::kTooLarge, "Artifact exceeds a configured byte limit");
+    return RejectFrame(stream, metadata_size, header.content_size, ArtifactReceiveStatus::kTooLarge,
+                       "Artifact exceeds a configured byte limit");
   }
   if ((header.flags & kArtifactFlagSensitive) != 0 && !limits_.allow_sensitive) {
-    return Reject(ArtifactReceiveStatus::kSensitiveCaptureDisabled,
-                  "Sensitive content capture is disabled");
+    return RejectFrame(stream, metadata_size, header.content_size,
+                       ArtifactReceiveStatus::kSensitiveCaptureDisabled,
+                       "Sensitive content capture is disabled");
   }
   if (artifact_ids_.contains(header.artifact_id)) {
-    return Reject(ArtifactReceiveStatus::kConflict, "Artifact identifier already exists");
+    return RejectFrame(stream, metadata_size, header.content_size, ArtifactReceiveStatus::kConflict,
+                       "Artifact identifier already exists");
   }
 
   std::string url(header.url_size, '\0');
@@ -686,8 +746,8 @@ ArtifactReceiveStatus ArtifactReceiver::ReceiveOne(std::istream& stream) {
     return Reject(ArtifactReceiveStatus::kInvalid, "Truncated artifact MIME type");
   }
   if (!IsValidUtf8(url) || !IsValidUtf8(mime_type)) {
-    return Reject(ArtifactReceiveStatus::kInvalid,
-                  "Artifact metadata is not valid printable UTF-8");
+    return RejectFrame(stream, 0, header.content_size, ArtifactReceiveStatus::kInvalid,
+                       "Artifact metadata is not valid printable UTF-8");
   }
 
   const int directory = evidence_guard_.Directory();
@@ -696,7 +756,8 @@ ArtifactReceiveStatus ArtifactReceiver::ReceiveOne(std::istream& stream) {
   temporary.Open(EvidenceGuard::OpenFile(directory, temporary_name, O_WRONLY | O_CREAT | O_EXCL),
                  true);
   if (!temporary) {
-    return Reject(ArtifactReceiveStatus::kIoError, "Unable to create safe temporary artifact file");
+    return RejectFrame(stream, 0, header.content_size, ArtifactReceiveStatus::kIoError,
+                       "Unable to create safe temporary artifact file");
   }
   const auto remove_temporary = [&] { return unlinkat(directory, temporary_name.c_str(), 0) == 0; };
 
@@ -714,15 +775,19 @@ ArtifactReceiveStatus ArtifactReceiver::ReceiveOne(std::istream& stream) {
       return Reject(ArtifactReceiveStatus::kInvalid, "Truncated artifact content");
     }
     const auto received_size = static_cast<std::size_t>(received);
+    remaining -= static_cast<std::uint64_t>(received_size);
     temporary.write(reinterpret_cast<const char*>(buffer.data()), received);
     if (!temporary) {
       temporary.close();
       remove_temporary();
-      return Reject(ArtifactReceiveStatus::kIoError, "Unable to write artifact content");
+      return RejectFrame(stream, 0, remaining, ArtifactReceiveStatus::kIoError,
+                         "Unable to write artifact content");
     }
     sha256.Update(buffer.data(), received_size);
-    remaining -= static_cast<std::uint64_t>(received_size);
   }
+  // Every declared byte has been read; whatever follows, the next frame
+  // starts here.
+  stream_position_ = ArtifactStreamPosition::kFrameBoundary;
   temporary.flush();
   if (!temporary || fsync(temporary.Descriptor()) != 0) {
     temporary.close();
@@ -742,7 +807,7 @@ ArtifactReceiveStatus ArtifactReceiver::ReceiveOne(std::istream& stream) {
   }
   const std::string digest_hex = DigestHex(digest);
   const std::string blob_name = digest_hex + ".bin";
-  bool blob_exists = false;
+  bool blob_created = false;
   if (linkat(directory, temporary_name.c_str(), blob_directory_.Descriptor(), blob_name.c_str(),
              0) != 0) {
     if (errno != EEXIST) {
@@ -755,12 +820,25 @@ ArtifactReceiveStatus ArtifactReceiver::ReceiveOne(std::istream& stream) {
       return Reject(ArtifactReceiveStatus::kIoError, "Existing artifact blob is unsafe");
     }
     close(existing);
-    blob_exists = true;
+  } else {
+    // The blob is on disk from here, so it counts until it is retired again.
+    blob_created = true;
+    stored_bytes_ += header.content_size;
   }
+  // Removes a blob this frame created while no manifest record names it. A
+  // blob that cannot be removed stays counted, as a restart would count it.
+  const auto retire_blob = [&] {
+    if (blob_created && unlinkat(blob_directory_.Descriptor(), blob_name.c_str(), 0) == 0) {
+      stored_bytes_ -= header.content_size;
+      static_cast<void>(fsync(blob_directory_.Descriptor()));
+    }
+  };
   if (!remove_temporary()) {
+    retire_blob();
     return Reject(ArtifactReceiveStatus::kIoError, "Unable to retire temporary artifact link");
   }
   if (fsync(blob_directory_.Descriptor()) != 0 || fsync(directory) != 0) {
+    retire_blob();
     return Reject(ArtifactReceiveStatus::kIoError, "Unable to durably commit artifact directories");
   }
 
@@ -780,9 +858,7 @@ ArtifactReceiveStatus ArtifactReceiver::ReceiveOne(std::istream& stream) {
                  << ",\"content_path\":\"blobs/" << digest_hex << ".bin\"}\n";
   const std::string manifest_line = manifest_entry.str();
   if (manifest_line.size() > limits_.max_manifest_bytes - manifest_bytes_) {
-    if (!blob_exists) {
-      static_cast<void>(unlinkat(blob_directory_.Descriptor(), blob_name.c_str(), 0));
-    }
+    retire_blob();
     return Reject(ArtifactReceiveStatus::kTooLarge,
                   "Artifact manifest exceeds its configured byte limit");
   }
@@ -791,21 +867,39 @@ ArtifactReceiveStatus ArtifactReceiver::ReceiveOne(std::istream& stream) {
   manifest.Open(EvidenceGuard::OpenFile(directory, "manifest.jsonl", O_WRONLY | O_APPEND | O_CREAT),
                 true);
   if (!manifest) {
+    retire_blob();
     return Reject(ArtifactReceiveStatus::kIoError, "Unable to open safe artifact manifest");
+  }
+  struct stat manifest_metadata {};
+  if (fstat(manifest.Descriptor(), &manifest_metadata) != 0 ||
+      static_cast<std::uint64_t>(manifest_metadata.st_size) != manifest_bytes_) {
+    // Appending after bytes this receiver did not write would hide them behind
+    // an acknowledged record.
+    manifest.close();
+    retire_blob();
+    store_state_ = StoreState::kFailed;
+    return Reject(ArtifactReceiveStatus::kIoError,
+                  "Artifact manifest changed outside this receiver; refusing further artifacts");
   }
   manifest << manifest_line;
   manifest.flush();
-  if (!manifest || fsync(manifest.Descriptor()) != 0 || fsync(directory) != 0) {
-    return Reject(ArtifactReceiveStatus::kIoError, "Unable to durably append artifact manifest");
-  }
+  bool durable = static_cast<bool>(manifest) && fsync(manifest.Descriptor()) == 0;
   manifest.close();
-  if (!manifest) {
-    return Reject(ArtifactReceiveStatus::kIoError, "Unable to close artifact manifest");
+  durable = durable && static_cast<bool>(manifest) && fsync(directory) == 0;
+  if (!durable) {
+    // Nothing is acknowledged yet, so remove whatever part of the record
+    // reached the file. Only then may the blob it names be retired.
+    if (!RestoreManifest()) {
+      store_state_ = StoreState::kFailed;
+      return Reject(ArtifactReceiveStatus::kIoError,
+                    "Unable to durably append or roll back the artifact manifest; refusing "
+                    "further artifacts");
+    }
+    retire_blob();
+    return Reject(ArtifactReceiveStatus::kIoError,
+                  "Unable to durably append artifact manifest; the record was rolled back");
   }
 
-  if (!blob_exists) {
-    stored_bytes_ += header.content_size;
-  }
   manifest_bytes_ += manifest_line.size();
   artifact_ids_.insert(header.artifact_id);
   SaturatingAdd(stats_.accepted, 1);
@@ -827,6 +921,14 @@ std::uint64_t ArtifactReceiver::LastArtifactId() const noexcept {
 
 const std::string& ArtifactReceiver::LastError() const noexcept {
   return last_error_;
+}
+
+ArtifactStreamPosition ArtifactReceiver::StreamPosition() const noexcept {
+  return stream_position_;
+}
+
+std::uint64_t ArtifactReceiver::RecoveredManifestBytes() const noexcept {
+  return recovered_manifest_bytes_;
 }
 
 ArtifactReceiveStatus ArtifactReceiver::Reject(const ArtifactReceiveStatus status,
@@ -853,6 +955,39 @@ ArtifactReceiveStatus ArtifactReceiver::Reject(const ArtifactReceiveStatus statu
       break;
   }
   return status;
+}
+
+ArtifactReceiveStatus ArtifactReceiver::RejectFrame(std::istream& stream,
+                                                    const std::uint64_t unread_metadata,
+                                                    const std::uint64_t unread_content,
+                                                    const ArtifactReceiveStatus status,
+                                                    std::string message) {
+  // Reading the rest of the frame before the acknowledgment also lets a
+  // sender that is still writing finish and read this status, rather than
+  // fail on a closed connection and record an I/O error instead.
+  if (unread_content <= std::max(limits_.max_artifact_bytes, kMaxDiscardedArtifactBytes)) {
+    std::uint64_t remaining = unread_metadata + unread_content;
+    // read(), not ignore(): libstdc++'s ignore(n) peeks one byte past n, which
+    // blocks on a socket whose sender is waiting for this acknowledgment.
+    std::array<char, 64 * 1024> discarded{};
+    while (remaining > 0) {
+      const auto requested = static_cast<std::streamsize>(
+          std::min(remaining, static_cast<std::uint64_t>(discarded.size())));
+      stream.read(discarded.data(), requested);
+      if (stream.gcount() != requested) {
+        break;
+      }
+      remaining -= static_cast<std::uint64_t>(requested);
+    }
+    if (remaining == 0) {
+      stream_position_ = ArtifactStreamPosition::kFrameBoundary;
+    }
+  }
+  return Reject(status, std::move(message));
+}
+
+bool ArtifactReceiver::RestoreManifest() noexcept {
+  return TruncateManifest(evidence_guard_.Directory(), manifest_bytes_);
 }
 
 }  // namespace reb

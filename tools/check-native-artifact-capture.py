@@ -3,16 +3,24 @@
 
 Only Chromium platform, Mojo completion delivery and socket scheduling are adapters.
 All corpus bytes come from the compiled production sinks; no evidence is repaired.
+With --receiver, the production browser socket writers also run over real
+AF_UNIX sockets against that receiver executable, and its socket framing and
+manifest recovery are exercised directly.
 """
+
+from __future__ import annotations
 
 import argparse
 import hashlib
 import json
 import os
 from pathlib import Path
+import signal
 import socket
+import struct
 import subprocess
 import tempfile
+import time
 
 ROOT = Path(__file__).resolve().parent.parent
 OVERLAY = ROOT / "browser/integration/brave/overlay"
@@ -56,22 +64,38 @@ HEADERS = (
 )
 
 
+TRANSPORT_HEADERS = (
+    "build/build_config.h",
+    "base/command_line.h",
+    "base/containers/span.h",
+    "base/files/file_path.h",
+    "base/files/file_util.h",
+    "base/functional/bind.h",
+    "base/logging.h",
+    "base/memory/scoped_refptr.h",
+    "base/no_destructor.h",
+    "base/process/process_handle.h",
+    "base/strings/string_number_conversions.h",
+    "base/synchronization/condition_variable.h",
+    "base/synchronization/lock.h",
+    "base/synchronization/waitable_event.h",
+    "base/task/sequenced_task_runner.h",
+    "base/task/thread_pool.h",
+    "base/thread_annotations.h",
+    "base/threading/platform_thread.h",
+    "base/threading/thread.h",
+    "base/time/time.h",
+    "brave/components/reverse_engineering_browser/browser/native_artifact_capture_sink.h",
+    "brave/components/reverse_engineering_browser/browser/native_network_capture_sink.h",
+    "brave/components/reverse_engineering_browser/browser/native_probe_session.h",
+)
+
+
 def run(*command: str, **kwargs) -> None:
     subprocess.run(command, check=True, **kwargs)
 
 
-def compile_driver(build: Path) -> Path:
-    include = build / "include"
-    include.mkdir()
-    (include / "brave").symlink_to(OVERLAY, target_is_directory=True)
-    stubs = build / "stubs"
-    for header in HEADERS:
-        path = stubs / header
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text('#include "chromium_stubs.h"\n', encoding="utf-8")
-    fixture = ROOT / "tools/native-artifact-capture"
-    sources = OVERLAY / "components/reverse_engineering_browser"
-    binary = build / "native-artifact-capture"
+def compiler_flags() -> list[str]:
     flags = [
         "-std=c++20",
         "-O2",
@@ -87,9 +111,24 @@ def compile_driver(build: Path) -> Path:
     ]
     if sanitizer := os.environ.get("REB_PROBE_TEST_SANITIZERS"):
         flags.extend(["-O1", f"-fsanitize={sanitizer}", "-fno-omit-frame-pointer"])
+    return flags
+
+
+def compile_driver(build: Path) -> Path:
+    include = build / "include"
+    include.mkdir()
+    (include / "brave").symlink_to(OVERLAY, target_is_directory=True)
+    stubs = build / "stubs"
+    for header in HEADERS:
+        path = stubs / header
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text('#include "chromium_stubs.h"\n', encoding="utf-8")
+    fixture = ROOT / "tools/native-artifact-capture"
+    sources = OVERLAY / "components/reverse_engineering_browser"
+    binary = build / "native-artifact-capture"
     run(
         os.environ.get("CXX", "c++"),
-        *flags,
+        *compiler_flags(),
         f"-I{fixture}",
         f"-I{stubs}",
         f"-I{ROOT / 'tools/native-test-support'}",
@@ -106,6 +145,209 @@ def compile_driver(build: Path) -> Path:
         str(binary),
     )
     return binary
+
+
+def check_transport(receiver: str) -> None:
+    """Production browser socket writers against the production receiver."""
+    # A short root keeps every socket path inside sockaddr_un.
+    with tempfile.TemporaryDirectory(prefix="reb-at-", dir="/tmp") as temporary:
+        build = Path(temporary)
+        include = build / "include"
+        include.mkdir()
+        (include / "brave").symlink_to(OVERLAY, target_is_directory=True)
+        stubs = build / "stubs"
+        for header in TRANSPORT_HEADERS:
+            path = stubs / header
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text('#include "chromium_stubs.h"\n', encoding="utf-8")
+        fixture = ROOT / "tools/native-artifact-transport"
+        sources = OVERLAY / "components/reverse_engineering_browser"
+        binary = build / "native-artifact-transport"
+        run(
+            os.environ.get("CXX", "c++"),
+            *compiler_flags(),
+            f"-I{fixture}",
+            f"-I{stubs}",
+            f"-I{include}",
+            str(fixture / "main.cc"),
+            str(sources / "browser/native_artifact_socket_client.cc"),
+            str(sources / "browser/native_probe_socket_client.cc"),
+            str(sources / "browser/native_local_ipc_client.cc"),
+            str(sources / "common/native_probe_queue.cc"),
+            "-o",
+            str(binary),
+        )
+        root = build / "run"
+        root.mkdir()
+        run(str(binary), receiver, str(root), timeout=120)
+
+
+ARTIFACT_MAGIC = 0x41424552
+ACK_MAGIC = 0x4B414252
+HELLO_MAGIC = 0x52454249
+KIND_JAVASCRIPT = 1
+STATUS_ACCEPTED = 0
+STATUS_INVALID = 2
+STATUS_TOO_LARGE = 3
+TEST_TOKEN = bytes([0xAA]) * 32
+
+
+def artifact_frame(
+    artifact_id: int, content: bytes, *, session_id: int = 7, declared: int | None = None
+) -> bytes:
+    url = f"https://fixture.test/{artifact_id}.js".encode()
+    mime = b"text/javascript"
+    size = len(content) if declared is None else declared
+    # magic, version, header size, kind, flags, reserved; six identifiers and
+    # the content size; metadata sizes, digest, context, origin, reserved.
+    header = struct.pack(
+        "<IHHHHI7QII32sQHHI",
+        *(ARTIFACT_MAGIC, 1, 128, KIND_JAVASCRIPT, 0, 0),
+        *(session_id, 0, 0, artifact_id, 0, 0, size),
+        *(len(url), len(mime), bytes(32), 0, 0, 0, 0),
+    )
+    assert len(header) == 128
+    return header + url + mime + content
+
+
+def read_ack(connection: socket.socket) -> tuple[int, int] | None:
+    data = b""
+    while len(data) < 32:
+        chunk = connection.recv(32 - len(data))
+        if not chunk:
+            return None
+        data += chunk
+    magic, version, size, status, reserved0, artifact_id, reserved1 = struct.unpack(
+        "<IHHIIQ8s", data
+    )
+    assert (magic, version, size, reserved0, reserved1) == (ACK_MAGIC, 1, 32, 0, bytes(8))
+    return status, artifact_id
+
+
+def check_receiver_socket(receiver: str) -> None:
+    """Receiver socket framing: what keeps a connection and what closes it."""
+    with tempfile.TemporaryDirectory(prefix="reb-rs-", dir="/tmp") as temporary:
+        root = Path(temporary)
+        token = root / "token"
+        token.write_text("a" * 64)
+        token.chmod(0o600)
+        socket_path = root / "artifact.sock"
+        child = subprocess.Popen(
+            [
+                receiver,
+                "--store",
+                str(root / "artifacts"),
+                "--socket",
+                str(socket_path),
+                "--token-file",
+                str(token),
+                "--session-id",
+                "7",
+                "--max-artifact-bytes",
+                "65536",
+            ],
+            stderr=subprocess.PIPE,
+        )
+        try:
+            deadline = time.monotonic() + 10
+            while not socket_path.is_socket():
+                assert child.poll() is None and time.monotonic() < deadline, "receiver socket"
+                time.sleep(0.01)
+
+            def connect() -> socket.socket:
+                connection = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                connection.settimeout(10)
+                connection.connect(str(socket_path))
+                connection.sendall(
+                    struct.pack("<IHHQ32s16s", HELLO_MAGIC, 1, 64, 7, TEST_TOKEN, bytes(16))
+                )
+                return connection
+
+            with connect() as connection:
+                connection.sendall(artifact_frame(1, b"one();"))
+                assert read_ack(connection) == (STATUS_ACCEPTED, 1)
+                # Over the 64 KiB limit but within the discard bound: the
+                # receiver reads the body, answers, and keeps the connection.
+                connection.sendall(artifact_frame(2, b"x" * (256 * 1024)))
+                assert read_ack(connection) == (STATUS_TOO_LARGE, 2)
+                connection.sendall(artifact_frame(3, b"three();"))
+                assert read_ack(connection) == (STATUS_ACCEPTED, 3)
+                # A declared body past the discard bound cannot come from a
+                # supported sender; the receiver answers and closes.
+                connection.sendall(artifact_frame(4, b"", declared=32 * 1024 * 1024)[:128])
+                assert read_ack(connection) == (STATUS_TOO_LARGE, 4)
+                assert read_ack(connection) is None, "an undiscardable frame closes"
+            with connect() as connection:
+                connection.sendall(bytes(128))
+                assert read_ack(connection) == (STATUS_INVALID, 0)
+                assert read_ack(connection) is None, "an invalid header closes"
+            with connect() as connection:
+                connection.sendall(artifact_frame(5, b"five();", session_id=8))
+                assert read_ack(connection) == (STATUS_INVALID, 5)
+                assert read_ack(connection) is None, "a session mismatch closes"
+            with connect() as connection:
+                connection.sendall(artifact_frame(6, b"six();"))
+                assert read_ack(connection) == (STATUS_ACCEPTED, 6)
+        finally:
+            child.send_signal(signal.SIGTERM)
+            _, errors = child.communicate(timeout=10)
+        assert child.returncode == 0, errors.decode()
+        log = errors.decode()
+        assert log.count("rejected; connection kept") == 1, log
+        assert log.count("closed after an unsynchronized frame") == 3, log
+        assert "accepted=3 " in log and "too_large=2 " in log and "invalid=2 " in log, log
+        manifest = (root / "artifacts/manifest.jsonl").read_text().splitlines()
+        assert [json.loads(line)["artifact_id"] for line in manifest] == ["1", "3", "6"]
+    print(
+        "PASS artifact receiver socket: a valid rejected frame is discarded and answered on the "
+        "same connection; invalid, mismatched and undiscardable frames close it"
+    )
+
+
+def check_receiver_recovery(receiver: str) -> None:
+    """Interrupted-append recovery in the production executable.
+
+    Commit rollback is driven by injected fsync failures in tests/artifact_test.cpp;
+    macOS does not apply RLIMIT_FSIZE to O_APPEND writes, so it cannot be used here.
+    """
+    with tempfile.TemporaryDirectory(prefix="reb-recover-") as temporary:
+        store = Path(temporary) / "artifacts"
+        manifest = store / "manifest.jsonl"
+        subprocess.run(
+            [receiver, "--store", str(store)],
+            input=artifact_frame(1, b"one();"),
+            capture_output=True,
+            check=True,
+            timeout=10,
+        )
+        before = manifest.read_bytes()
+        # An interrupted append leaves a final record without its newline.
+        torn = b'{"protocol_version":1,"artifact_id":"9'
+        with manifest.open("ab") as stream:
+            stream.write(torn)
+        recovered = subprocess.run(
+            [receiver, "--store", str(store)],
+            input=b"",
+            capture_output=True,
+            check=True,
+            timeout=10,
+        )
+        note = f"removed an unacknowledged final record of {len(torn)} bytes".encode()
+        assert note in recovered.stderr, recovered.stderr.decode()
+        assert manifest.read_bytes() == before, "only the torn record is removed"
+        resumed = subprocess.run(
+            [receiver, "--store", str(store)],
+            input=artifact_frame(2, b"two();"),
+            capture_output=True,
+            check=True,
+            timeout=10,
+        )
+        assert b"removed an unacknowledged" not in resumed.stderr
+        assert len(manifest.read_bytes().splitlines()) == 2
+    print(
+        "PASS artifact receiver recovery: an interrupted final record is cut back with a note "
+        "and capture resumes on the same store"
+    )
 
 
 def records(path: Path) -> list[dict]:
@@ -270,7 +512,7 @@ def main() -> None:
         try:
             with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM):
                 unix_status = (
-                    "available, but native socket writer is outside this component test"
+                    "available; the socket writers run in the separate transport stage"
                 )
         except OSError as error:
             unix_status = f"unavailable: {error}"
@@ -311,9 +553,13 @@ def main() -> None:
                     stdin=stream,
                 )
             check_stores(output, cases)
+            check_receiver_socket(args.receiver)
+            check_receiver_recovery(args.receiver)
+            check_transport(args.receiver)
         else:
             print(
-                "SKIPPED production service stdio replay: --receiver/--broker not supplied"
+                "SKIPPED production service stdio replay, receiver socket/recovery and socket "
+                "writer transport: --receiver/--broker not supplied"
             )
         if args.analyzer:
             run(

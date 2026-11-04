@@ -277,7 +277,10 @@ separate queue permits at most 16 pending artifacts and 32 MiB of queued
 content, then transfers frames over an authenticated user-only socket. Brave
 emits `artifact_captured` only after a durable receiver acknowledgment and
 emits `artifact_capture_failed` for limits, incomplete bodies, queue pressure,
-disconnects, and receiver rejection.
+disconnects, and receiver rejection. A receiver rejection keeps the
+connection, and a failed connection is replaced within a bounded retry budget.
+If the receiver stays unreachable, Brave emits one `artifact_channel_lost`
+gap; later artifacts are not attempted.
 
 The same category enables runtime-generated source capture. Blink submits only
 accepted dynamic JavaScript, and V8 exposes copied byte buffers used by

@@ -40,7 +40,9 @@ class NativeProbeSocketClient final {
   ~NativeProbeSocketClient();
 
   static void Emit(const NativeProbeEvent& event) noexcept;
+  static void ArtifactChannelLost() noexcept;
   void Enqueue(const NativeProbeEvent& event) noexcept;
+  [[nodiscard]] NativeProbeEvent MakeTransportGap(std::uint64_t dropped) const noexcept;
   void Run();
   void HandleDisconnect();
 
@@ -50,7 +52,14 @@ class NativeProbeSocketClient final {
   base::Thread writer_thread_{"REB broker writer"};
   scoped_refptr<base::SequencedTaskRunner> browser_task_runner_;
   std::atomic<bool> connected_{false};
+  // Written on the starting sequence before the writer starts. Only the
+  // writer reads it until it posts HandleDisconnect() and returns, so the
+  // descriptor is closed only after the writer has stopped using it.
   int socket_descriptor_ = -1;
+  std::uint64_t session_id_ = 0;
+  // Category of the most recent record this queue dropped. Every queued record
+  // passed the session's category filter, so a gap that names it is admitted.
+  std::atomic<NativeProbeCategory> last_dropped_category_{NativeProbeCategory::kUnknown};
 };
 
 }  // namespace reb

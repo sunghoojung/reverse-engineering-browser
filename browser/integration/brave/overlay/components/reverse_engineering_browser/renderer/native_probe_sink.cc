@@ -2310,9 +2310,8 @@ bool NativeProbeSink::NoteNativeWasmDispatchOmission(const VmAdmission& admissio
   // Odd generation is an in-flight claim; never overwrite a newer configuration.
   while (previous < admission.generation - 1) {
     if (slot.compare_exchange_weak(previous, admission.generation - 1, std::memory_order_acq_rel)) {
-      constexpr std::array<std::string_view, 3> reasons{
-          "native_wasm_dispatch_input_unavailable", "native_wasm_dispatch_transport_unavailable",
-          "native_wasm_dispatch_budget_incomplete"};
+      constexpr std::array<std::string_view, 2> reasons{"native_wasm_dispatch_input_unavailable",
+                                                        "native_wasm_dispatch_budget_incomplete"};
       const bool retained = RecordRuntimeBufferEvent(NativeProbeType::kGap, admission.frame_id,
                                                      reasons[static_cast<std::size_t>(reason)],
                                                      admission.generation) != 0;
@@ -2379,7 +2378,8 @@ void NativeProbeSink::RecordNativeWasmDispatch(std::uint64_t execution_context_i
             !emitter || !emitter(observation, admission.generation)) {
           auto claimed = admission.generation;
           slot.compare_exchange_strong(claimed, previous, std::memory_order_acq_rel);
-          NoteNativeWasmDispatchOmission(admission, NativeWasmOmission::kTransport);
+          FillSequenceGap(observation.header, "native_wasm_dispatch_transport_unavailable",
+                          admission.generation);
         }
         return;
       }
@@ -2422,9 +2422,8 @@ bool NativeProbeSink::NoteNativeWasmIndirectOmission(const VmAdmission& admissio
   // Odd generation is an in-flight claim; never overwrite a newer configuration.
   while (previous < admission.generation - 1) {
     if (slot.compare_exchange_weak(previous, admission.generation - 1, std::memory_order_acq_rel)) {
-      constexpr std::array<std::string_view, 3> reasons{
-          "native_wasm_indirect_input_unavailable", "native_wasm_indirect_transport_unavailable",
-          "native_wasm_indirect_budget_incomplete"};
+      constexpr std::array<std::string_view, 2> reasons{"native_wasm_indirect_input_unavailable",
+                                                        "native_wasm_indirect_budget_incomplete"};
       const bool retained = RecordRuntimeBufferEvent(NativeProbeType::kGap, admission.frame_id,
                                                      reasons[static_cast<std::size_t>(reason)],
                                                      admission.generation) != 0;
@@ -2474,7 +2473,8 @@ void NativeProbeSink::RecordNativeWasmIndirect(NativeWasmIndirectObservation obs
             !emitter || !emitter(observation, admission.generation)) {
           auto claimed = admission.generation;
           slot.compare_exchange_strong(claimed, previous, std::memory_order_acq_rel);
-          NoteNativeWasmIndirectOmission(admission, NativeWasmOmission::kTransport);
+          FillSequenceGap(observation.header, "native_wasm_indirect_transport_unavailable",
+                          admission.generation);
         }
         return;
       }

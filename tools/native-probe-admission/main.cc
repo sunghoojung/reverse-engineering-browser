@@ -1281,8 +1281,10 @@ std::uint64_t NativeWasmFrameLookup() noexcept {
 }
 std::size_t native_wasm_retained = 0;
 bool native_wasm_accept = true;
+std::uint64_t native_wasm_attempted = 0, native_indirect_attempted = 0;
 bool CaptureNativeWasm(const reb::NativeWasmDispatchObservation& observation,
                        std::uint64_t generation) noexcept {
+  native_wasm_attempted = observation.header.sequence_number;
   assert(generation != 0);
   assert(observation.header.type == reb::NativeProbeType::kWasmDispatchObservation);
   assert(observation.header.artifact_id == 0 && observation.header.parent_event_id == 0);
@@ -1343,7 +1345,12 @@ void NativeWasmRuntimeAdmission() {
   assert(native_wasm_retained == 0);
   native_wasm_accept = false;
   record();
-  assert(One(queue).header.type == reb::NativeProbeType::kGap);
+  const auto refused = One(queue);  // Fills the refused record's own slot.
+  assert(refused.header.type == reb::NativeProbeType::kGap &&
+         refused.header.sequence_number == native_wasm_attempted &&
+         std::string_view(reinterpret_cast<const char*>(refused.inline_payload.data()),
+                          refused.header.payload_size) ==
+             "native_wasm_dispatch_transport_unavailable");
   native_wasm_accept = true;
   for (unsigned i = 0; i < 16; ++i)
     record();
@@ -1381,6 +1388,7 @@ std::size_t native_indirect_retained = 0;
 bool native_indirect_accept = true;
 bool CaptureNativeIndirect(const reb::NativeWasmIndirectObservation& observation,
                            std::uint64_t generation) noexcept {
+  native_indirect_attempted = observation.header.sequence_number;
   assert(generation != 0);
   assert(observation.header.type == reb::NativeProbeType::kWasmIndirectObservation);
   assert(observation.header.artifact_id == 0 && observation.header.parent_event_id == 0);
@@ -1464,6 +1472,7 @@ void NativeWasmIndirectAdmission() {
   gap = One(queue);
   assert(std::string_view(reinterpret_cast<const char*>(gap.inline_payload.data()),
                           gap.header.payload_size) == "native_wasm_indirect_transport_unavailable");
+  assert(gap.header.sequence_number == native_indirect_attempted);  // Its own slot.
   native_indirect_accept = true;
   // The br_table budget is independent: exhausting it leaves this stream open.
   for (unsigned i = 0; i < 16; ++i)

@@ -156,7 +156,8 @@ void NativeGuestDependencies(reb::ArtifactReceiver& receiver) {
   const auto retired = transfers.begin()->first;
   configure();
   Receive(receiver, retired);
-  Check(typed().size() == 6, "Same-session reconfiguration rejects old dependencies");
+  Check(typed().size() == 6 && gap_for(107, "native_guest_pending_at_capture_end"),
+        "Reconfiguration turns old pending dependencies into gaps in their own slots");
   d.header.sequence_number = 108;
   sink.CaptureNativeGuest(capture, 1, [] { return true; });
   Check(transfers.empty() && gap_for(108, "native_guest_module_unbound"),
@@ -271,7 +272,25 @@ void NativeGuestDependencies(reb::ArtifactReceiver& receiver) {
   sink.CaptureNativeGuestHost(malformed, 1);
   malformed.header.sequence_number = 134;
   sink.CaptureNativeGuestHost(malformed, 1);
-  Check(events.size() == malformed_before + 1, "Malformed hosts have one bounded marker");
+  Check(events.size() == malformed_before + 2 && gap_for(133, "native_guest_host_malformed") &&
+            gap_for(134, "native_guest_host_malformed"),
+        "Each malformed host fills its own slot");
+  // Without the artifact channel no parent can be published, but the host is.
+  NativeArtifactSocketClient::Get().connected = false;
+  host.header.sequence_number = 135;
+  host.header.parent_event_id = 99;
+  const auto before_disconnected = typed().size();
+  sink.CaptureNativeGuestHost(host, 1);
+  NativeArtifactSocketClient::Get().connected = true;
+  Check(typed().size() == before_disconnected + 1 && typed().back().header.sequence_number == 135 &&
+            typed().back().header.parent_event_id == 0,
+        "A host without the artifact channel is published unparented");
+  d.header.sequence_number = 136;
+  NativeArtifactSocketClient::Get().connected = false;
+  sink.CaptureNativeGuest(capture, 1, [] { return true; });
+  NativeArtifactSocketClient::Get().connected = true;
+  Check(gap_for(136, "native_guest_artifact_unavailable"),
+        "A capture without the artifact channel fills its own slot");
 
   // Held hosts are bounded; overflow is published at once without parent.
   configure();
@@ -348,7 +367,8 @@ void NativeGuestDependencies(reb::ArtifactReceiver& receiver) {
   const auto capped = events.size();
   d.header.sequence_number = 1001;
   sink.CaptureNativeGuest(capture, 4, [] { return true; });
-  Check(events.size() == capped, "Budget omission bounded");
+  Check(events.size() == capped + 1 && gap_for(1001, "native_guest_browser_sample_budget"),
+        "Every capture past the budget fills its own slot");
 
   // Bindings are held for live documents only: a gone document's group is
   // reclaimed for a new one, and past the bound a live set is refused.

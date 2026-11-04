@@ -182,13 +182,18 @@ class NativeArtifactCaptureSink final {
                               std::uint64_t document_token_low,
                               std::string_view source_url,
                               std::function<bool()> is_current_document);
-  // Fills the renderer sequence slot of an unpublished record with a gap.
+  // Fills the renderer sequence slot of an unpublished record with a gap. A
+  // record without a slot gets a browser-sequence gap, so every refusal stays
+  // visible.
   void EmitRendererGap(const NativeProbeEvent& source, std::string_view reason) noexcept;
   // Publishes a host record without its guest parent; one marker per reason.
   void PublishUnparentedHost(NativeProbeEvent host, bool& gap_emitted, std::string_view reason);
   // Runs shortly before session expiry, after which the session drops every
   // record: unresolved guest work becomes explicit gaps, held hosts survive.
   void FlushBeforeExpiry(std::uint64_t generation);
+  // Turns every unresolved guest dispatch and held Wasm observation into a
+  // gap in its own slot, publishing held hosts unparented.
+  void FlushPendingWork(std::string_view guest_reason, std::string_view wasm_reason);
   std::vector<GuestGroup> guest_groups_;
   std::map<GuestEventKey, GuestInvocation> guest_invocations_;
   std::map<GuestEventKey, GuestDispatch> guest_dispatches_;
@@ -196,8 +201,10 @@ class NativeArtifactCaptureSink final {
   std::map<std::uint64_t, GuestReceipt> guest_receipts_;
   std::size_t guest_routed_host_count_ = 0, guest_held_host_count_ = 0, guest_capture_count_ = 0;
   std::set<GuestEventKey> guest_host_identities_;
+  // One marker per reason for losses with no renderer slot to fill: a host
+  // published without its parent, or a host record without a sequence.
   bool guest_host_malformed_gap_emitted_ = false, guest_host_parent_lost_gap_emitted_ = false,
-       guest_host_parent_omitted_gap_emitted_ = false, guest_budget_gap_emitted_ = false;
+       guest_host_parent_omitted_gap_emitted_ = false;
 
   NativeArtifactCaptureSink();
   ~NativeArtifactCaptureSink();
@@ -250,9 +257,7 @@ class NativeArtifactCaptureSink final {
                                    std::uint64_t,
                                    std::array<std::uint8_t, 32>>;
   std::map<WasmModuleKey, std::pair<std::uint64_t, bool>> wasm_dispatch_modules_;
-  bool wasm_dispatch_budget_gap_emitted_ = false;
   std::size_t wasm_indirect_count_ = 0;
-  bool wasm_indirect_budget_gap_emitted_ = false;
   // Only the browser assigns artifact IDs. Never key this relation by URL.
   using ScriptKey = std::tuple<int, std::uint64_t, std::uint64_t, std::uint64_t>;
   std::map<ScriptKey, std::uint64_t> allocating_scripts_;

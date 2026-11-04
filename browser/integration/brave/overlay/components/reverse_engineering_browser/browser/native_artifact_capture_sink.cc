@@ -123,6 +123,11 @@ void NativeArtifactCaptureSink::SetEmitter(const NativeProbeEmitter emitter,
                                            const std::uint64_t session_id,
                                            const std::uint64_t category_mask,
                                            const std::uint64_t expires_at_monotonic_ns) noexcept {
+  // The ending configuration's unresolved records become gaps while its
+  // session can still record them.
+  if (emitter_.load(std::memory_order_acquire))
+    FlushPendingWork("native_guest_pending_at_capture_end",
+                     "native_wasm_dispatch_pending_at_capture_end");
   emitter_.store(nullptr, std::memory_order_release);
   generation_.fetch_add(1, std::memory_order_acq_rel);
   session_id_.store(emitter ? session_id : 0, std::memory_order_relaxed);
@@ -140,12 +145,9 @@ void NativeArtifactCaptureSink::SetEmitter(const NativeProbeEmitter emitter,
   guest_host_malformed_gap_emitted_ = false;
   guest_host_parent_lost_gap_emitted_ = false;
   guest_host_parent_omitted_gap_emitted_ = false;
-  guest_budget_gap_emitted_ = false;
   wasm_dispatch_modules_.clear();
   wasm_dispatch_count_ = 0;
-  wasm_dispatch_budget_gap_emitted_ = false;
   wasm_indirect_count_ = 0;
-  wasm_indirect_budget_gap_emitted_ = false;
   runtime_typed_array_count_.store(0, std::memory_order_relaxed);
   allocating_scripts_.clear();
   emitter_.store(emitter, std::memory_order_release);
@@ -354,6 +356,11 @@ void NativeArtifactCaptureSink::EmitRendererGap(const NativeProbeEvent& source,
   const auto emitter = emitter_.load(std::memory_order_acquire);
   if (!emitter)
     return;
+  if (!source.header.sequence_number || !source.header.process_id) {
+    EmitResult(NativeProbeType::kGap, 0, 0, source.header.frame_id, std::string(reason),
+               NativeProbeCategory::kVm);
+    return;
+  }
   NativeProbeEvent gap;
   gap.header.category = NativeProbeCategory::kVm;
   gap.header.type = NativeProbeType::kGap;
@@ -402,16 +409,15 @@ void NativeArtifactCaptureSink::CaptureNativeGuest(const NativeGuestCapture& cap
     if (carries_module && module_status)
       module_status(false);
   };
-  if (!IsEnabledFor(NativeProbeCategory::kVm) || !IsEnabled() ||
+  if (!emitter_.load(std::memory_order_acquire) ||
       dispatch.header.session_id != session_id_.load(std::memory_order_relaxed))
     return;
+  if (!IsEnabledFor(NativeProbeCategory::kVm) || !IsEnabled()) {
+    refuse("native_guest_artifact_unavailable");
+    return;
+  }
   if (guest_capture_count_ >= kNativeGuestSampleLimit) {
-    if (carries_module && module_status)
-      module_status(false);
-    if (!guest_budget_gap_emitted_) {
-      guest_budget_gap_emitted_ = true;
-      EmitRendererGap(dispatch, "native_guest_browser_sample_budget");
-    }
+    refuse("native_guest_browser_sample_budget");
     return;
   }
   ++guest_capture_count_;
@@ -600,7 +606,7 @@ void NativeArtifactCaptureSink::CaptureNativeGuest(const NativeGuestCapture& cap
 void NativeArtifactCaptureSink::CaptureNativeGuestHost(const NativeProbeEvent& event,
                                                        const std::uint64_t epoch) {
   DrainGuestDependencies();
-  if (!IsEnabled() || !IsEnabledFor(event.header.category) ||
+  if (!emitter_.load(std::memory_order_acquire) ||
       event.header.session_id != session_id_.load(std::memory_order_relaxed))
     return;
   const auto& h = event.header;
@@ -613,11 +619,20 @@ void NativeArtifactCaptureSink::CaptureNativeGuestHost(const NativeProbeEvent& e
       (h.type != NativeProbeType::kApiCall && h.type != NativeProbeType::kPropertyRead) ||
       h.category == NativeProbeCategory::kVm || h.category == NativeProbeCategory::kArtifact ||
       h.category == NativeProbeCategory::kUnknown) {
-    if (!guest_host_malformed_gap_emitted_) {
+    if (h.sequence_number && h.process_id)
+      EmitRendererGap(event, "native_guest_host_malformed");
+    else if (!guest_host_malformed_gap_emitted_) {
       guest_host_malformed_gap_emitted_ = true;
       EmitResult(NativeProbeType::kGap, 0, 0, h.frame_id, "native_guest_host_malformed",
                  NativeProbeCategory::kVm);
     }
+    return;
+  }
+  if (!IsEnabled() || !IsEnabledFor(h.category)) {
+    // Without the artifact channel no parent can be published; the session
+    // still decides whether the host itself is recordable.
+    PublishUnparentedHost(event, guest_host_parent_lost_gap_emitted_,
+                          "native_guest_host_parent_lost");
     return;
   }
   const GuestEventKey identity{h.process_id, h.sequence_number};
@@ -758,12 +773,17 @@ void NativeArtifactCaptureSink::FlushBeforeExpiry(const std::uint64_t generation
   if (generation != generation_.load(std::memory_order_acquire))
     return;
   DrainGuestDependencies();
+  FlushPendingWork("native_guest_pending_at_expiry", "native_wasm_dispatch_pending_at_expiry");
+}
+
+void NativeArtifactCaptureSink::FlushPendingWork(const std::string_view guest_reason,
+                                                 const std::string_view wasm_reason) {
   for (auto& [key, pending] : guest_dispatches_) {
     static_cast<void>(key);
     if (pending.failed || pending.published)
       continue;
     pending.failed = true;
-    EmitRendererGap(pending.event, "native_guest_pending_at_expiry");
+    EmitRendererGap(pending.event, guest_reason);
     for (const auto& host : pending.hosts)
       PublishUnparentedHost(host, guest_host_parent_lost_gap_emitted_,
                             "native_guest_host_parent_lost");
@@ -774,7 +794,7 @@ void NativeArtifactCaptureSink::FlushBeforeExpiry(const std::uint64_t generation
     static_cast<void>(artifact_id);
     for (const auto& [observation, unused] : context.wasm_observations) {
       static_cast<void>(unused);
-      EmitRendererGap(observation, "native_wasm_dispatch_pending_at_expiry");
+      EmitRendererGap(observation, wasm_reason);
     }
     context.wasm_observations.clear();
   }
@@ -784,19 +804,23 @@ void NativeArtifactCaptureSink::CaptureWasmDispatch(
     const NativeWasmDispatchObservation& observation,
     mojo_base::BigBuffer content,
     std::function<bool()> is_current_document) {
-  if (!IsEnabledFor(NativeProbeCategory::kVm) || !IsEnabled() ||
-      observation.header.session_id != session_id_.load(std::memory_order_relaxed) ||
-      !is_current_document || !is_current_document())
+  if (!emitter_.load(std::memory_order_acquire) ||
+      observation.header.session_id != session_id_.load(std::memory_order_relaxed))
     return;
-  const auto gap = [&](const char* reason) {
-    EmitResult(NativeProbeType::kGap, 0, 0, observation.header.frame_id, reason,
-               NativeProbeCategory::kVm);
+  // Every refusal fills the observation's own renderer sequence slot.
+  const auto gap = [&](std::string_view reason) {
+    EmitRendererGap(NativeProbeEvent{.header = observation.header}, reason);
   };
+  if (!IsEnabledFor(NativeProbeCategory::kVm) || !IsEnabled()) {
+    gap("native_wasm_dispatch_artifact_unavailable");
+    return;
+  }
+  if (!is_current_document || !is_current_document()) {
+    gap("native_wasm_dispatch_document_unavailable");
+    return;
+  }
   if (wasm_dispatch_count_ >= kNativeWasmDispatchSampleBudget) {
-    if (!wasm_dispatch_budget_gap_emitted_) {
-      wasm_dispatch_budget_gap_emitted_ = true;
-      gap("native_wasm_dispatch_browser_budget_incomplete");
-    }
+    gap("native_wasm_dispatch_browser_budget_incomplete");
     return;
   }
   ++wasm_dispatch_count_;
@@ -840,20 +864,24 @@ void NativeArtifactCaptureSink::CaptureWasmIndirect(
     const NativeWasmIndirectObservation& observation,
     mojo_base::BigBuffer content,
     std::function<bool()> is_current_document) {
-  if (!IsEnabledFor(NativeProbeCategory::kVm) || !IsEnabled() ||
-      observation.header.session_id != session_id_.load(std::memory_order_relaxed) ||
-      !is_current_document || !is_current_document())
+  if (!emitter_.load(std::memory_order_acquire) ||
+      observation.header.session_id != session_id_.load(std::memory_order_relaxed))
     return;
-  const auto gap = [&](const char* reason) {
-    EmitResult(NativeProbeType::kGap, 0, 0, observation.header.frame_id, reason,
-               NativeProbeCategory::kVm);
+  // Every refusal fills the observation's own renderer sequence slot.
+  const auto gap = [&](std::string_view reason) {
+    EmitRendererGap(NativeProbeEvent{.header = observation.header}, reason);
   };
+  if (!IsEnabledFor(NativeProbeCategory::kVm) || !IsEnabled()) {
+    gap("native_wasm_indirect_artifact_unavailable");
+    return;
+  }
+  if (!is_current_document || !is_current_document()) {
+    gap("native_wasm_indirect_document_unavailable");
+    return;
+  }
   // A budget separate from br_table: one stream never starves the other.
   if (wasm_indirect_count_ >= kNativeWasmIndirectSampleBudget) {
-    if (!wasm_indirect_budget_gap_emitted_) {
-      wasm_indirect_budget_gap_emitted_ = true;
-      gap("native_wasm_indirect_browser_budget_incomplete");
-    }
+    gap("native_wasm_indirect_browser_budget_incomplete");
     return;
   }
   ++wasm_indirect_count_;

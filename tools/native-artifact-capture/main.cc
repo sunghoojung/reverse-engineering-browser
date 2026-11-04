@@ -624,14 +624,26 @@ void NativeWasmDispatch(reb::ArtifactReceiver& receiver) {
     sink.CaptureWasmDispatch(observation, mojo_base::BigBuffer(module), [] { return true; });
   }
   Check(transfers.size() == 1, "Sixteen observations of one module share one artifact");
-  Check(Payload(events.back()) == "native_wasm_dispatch_browser_budget_incomplete",
-        "Cross-renderer browser budget reports incompleteness");
+  Check(Payload(events.back()) == "native_wasm_dispatch_browser_budget_incomplete" &&
+            events.back().header.sequence_number == 2016 && events.back().header.process_id == 123,
+        "Cross-renderer browser budget fills the refused observation's own slot");
   const auto after_budget_gap = events.size();
+  observation.header.sequence_number = 2017;
   sink.CaptureWasmDispatch(observation, mojo_base::BigBuffer(module), [] { return true; });
-  Check(events.size() == after_budget_gap, "Browser budget marker is bounded per configuration");
+  Check(events.size() == after_budget_gap + 1 && events.back().header.sequence_number == 2017,
+        "Every observation past the browser budget fills its own slot");
   while (!transfers.empty())
     Receive(receiver, transfers.begin()->first);
   Check(count() == before_budget + 16, "Every admitted observation is published after one ACK");
+  Configure();
+  NativeArtifactSocketClient::Get().connected = false;
+  observation.header.sequence_number = 2100;
+  sink.CaptureWasmDispatch(observation, mojo_base::BigBuffer(module), [] { return true; });
+  NativeArtifactSocketClient::Get().connected = true;
+  Check(transfers.empty() &&
+            Payload(events.back()) == "native_wasm_dispatch_artifact_unavailable" &&
+            events.back().header.sequence_number == 2100,
+        "A lost artifact channel fills the observation's own slot");
   Configure(kSession, reb::NativeProbeCategoryMask(reb::NativeProbeCategory::kArtifact));
   sink.CaptureWasmDispatch(observation, mojo_base::BigBuffer(module), [] { return true; });
   Check(transfers.empty(), "Artifact permission alone cannot admit runtime observation");
@@ -732,11 +744,14 @@ void NativeWasmIndirect(reb::ArtifactReceiver& receiver) {
     sink.CaptureWasmIndirect(observation, mojo_base::BigBuffer(module), [] { return true; });
   }
   Check(transfers.size() == 1, "Sixteen observations of one module share one artifact");
-  Check(Payload(events.back()) == "native_wasm_indirect_browser_budget_incomplete",
-        "The browser call_indirect budget reports incompleteness");
+  Check(Payload(events.back()) == "native_wasm_indirect_browser_budget_incomplete" &&
+            events.back().header.sequence_number == 4016,
+        "The browser call_indirect budget fills the refused observation's own slot");
   const auto after_budget_gap = events.size();
+  observation.header.sequence_number = 4017;
   sink.CaptureWasmIndirect(observation, mojo_base::BigBuffer(module), [] { return true; });
-  Check(events.size() == after_budget_gap, "The budget marker is bounded per configuration");
+  Check(events.size() == after_budget_gap + 1 && events.back().header.sequence_number == 4017,
+        "Every observation past the budget fills its own slot");
   physical.header.sequence_number = 4100;
   sink.CaptureWasmDispatch(physical, mojo_base::BigBuffer(module), [] { return true; });
   while (!transfers.empty())

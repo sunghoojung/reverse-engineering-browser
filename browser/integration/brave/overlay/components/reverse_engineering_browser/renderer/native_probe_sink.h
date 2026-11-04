@@ -394,7 +394,9 @@ class COMPONENT_EXPORT(REB_NATIVE_PROBE_SINK) NativeProbeSink final {
                           std::uint32_t thread_id,
                           std::uint64_t interpreter_artifact_id) noexcept;
 
-  enum class NativeWasmOmission : std::size_t { kInput, kTransport, kBudget };
+  // Coalesced per configuration. A refused transport emit is not: it fills
+  // the sequence slot its record took.
+  enum class NativeWasmOmission : std::size_t { kInput, kBudget };
   bool NoteNativeWasmDispatchOmission(const VmAdmission& admission,
                                       NativeWasmOmission reason) noexcept;
   // Coalesced JS dispatch gaps: budget, site budget, transport, input, then
@@ -487,14 +489,14 @@ class COMPONENT_EXPORT(REB_NATIVE_PROBE_SINK) NativeProbeSink final {
   std::atomic<NativeJsInvocationContextProvider> native_invocation_context_provider_{nullptr};
   std::atomic<NativeWasmDispatchEmitter> native_wasm_emitter_{nullptr};
   std::array<std::atomic<std::uint64_t>, kNativeWasmDispatchSampleBudget> native_wasm_slots_{};
-  std::array<std::atomic<std::uint64_t>, 3> native_wasm_gap_generations_{};
+  std::array<std::atomic<std::uint64_t>, 2> native_wasm_gap_generations_{};
   std::atomic<std::uint64_t> native_wasm_capped_generation_{0};
   bool NoteNativeWasmIndirectOmission(const VmAdmission& admission,
                                       NativeWasmOmission reason) noexcept;
   std::atomic<NativeWasmIndirectEmitter> native_wasm_indirect_emitter_{nullptr};
   std::array<std::atomic<std::uint64_t>, kNativeWasmIndirectSampleBudget>
       native_wasm_indirect_slots_{};
-  std::array<std::atomic<std::uint64_t>, 3> native_wasm_indirect_gap_generations_{};
+  std::array<std::atomic<std::uint64_t>, 2> native_wasm_indirect_gap_generations_{};
   std::atomic<std::uint64_t> native_wasm_indirect_capped_generation_{0};
   std::atomic<NativeRendererProbeEmitter> emitter_{nullptr};
   std::atomic<NativeProbeFrameIdProvider> frame_id_provider_{nullptr};

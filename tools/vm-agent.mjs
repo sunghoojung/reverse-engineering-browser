@@ -234,7 +234,7 @@ function validateAction(value, saved, action, commandId) {
   if (value.ack === 'completed' && action === 'step' && (!after.execution_state_known || BigInt(after.executed_count) !== BigInt(before.executed_count) + 1n || !['paused', 'halted', 'expired'].includes(after.state))) fail('invalid_response', 'Step did not confirm exactly one completed native instruction.');
   if (value.ack === 'completed' && action === 'run' && (!after.execution_state_known || after.state !== 'running')) fail('invalid_response', 'Run did not confirm native scheduling.');
   if (value.ack === 'completed' && action === 'pause' && ['starting', 'running', 'pausing', 'stepping', 'stopping'].includes(after.state)) fail('invalid_response', 'Pause did not confirm a stable instruction boundary.');
-  if (value.ack === 'completed' && action === 'stop' && (after.state !== 'stopped' || after.disposal_failed)) fail('invalid_response', 'Stop did not confirm helper disposal.');
+  if (value.ack === 'completed' && action === 'stop' && (!['stopped', 'halted', 'expired', 'failed'].includes(after.state) || after.disposal_failed)) fail('invalid_response', 'Stop did not confirm helper disposal.');
   return value;
 }
 

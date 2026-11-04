@@ -37,7 +37,11 @@ module artifact; each is emitted once that artifact is accepted (or at once if
 it already was). Capture is capped at 16 observations per configuration and
 16 MiB per module. A lost observation becomes a `gap` in its own renderer
 sequence slot. Queue, transport and budget losses are explicit incompleteness,
-never invented samples.
+never invented samples. Every observation the browser refuses, whether
+malformed, over the host or browser budget, without its owning document or
+without the artifact channel, fills its own slot with a gap, not only the first
+one. A record still waiting for its module when the capture ends becomes
+`native_wasm_dispatch_pending_at_capture_end` in its slot.
 
 ## Wire contract
 
@@ -151,14 +155,17 @@ Blink, the renderer sink, the browser host and the artifact sink apply the same
 document, session, generation, category and expiry rules as `br_table`
 observations, through the same bounded transport. A separate budget allows 16
 records per configuration in the renderer and in the browser, so one stream
-never starves the other. The renderer coalesces each loss into one gap per
-configuration: `native_wasm_indirect_input_unavailable`,
-`native_wasm_indirect_transport_unavailable` or
+never starves the other. The renderer coalesces input and budget losses into
+one gap per configuration: `native_wasm_indirect_input_unavailable` or
 `native_wasm_indirect_budget_incomplete`. A full ring does not mark a gap as
-sent, so it is retried. The browser reports
-`native_wasm_indirect_browser_budget_incomplete`,
-`native_wasm_indirect_limit_or_invalid`, `native_wasm_indirect_module_invalid`
-and `native_wasm_indirect_document_unavailable`. A record waiting for its
+sent, so it is retried. A record the transport refuses frees its sample index
+and fills the sequence slot it took with
+`native_wasm_indirect_transport_unavailable`, as `br_table` does with
+`native_wasm_dispatch_transport_unavailable`. The browser fills each refused
+record's own slot with `native_wasm_indirect_browser_budget_incomplete`,
+`native_wasm_indirect_limit_or_invalid`, `native_wasm_indirect_module_invalid`,
+`native_wasm_indirect_document_unavailable` or
+`native_wasm_indirect_artifact_unavailable`. A record waiting for its
 module ACK shares the `br_table` path: it becomes a gap in its own sequence slot
 when the document or artifact is lost or the session nears expiry. Observations
 of one module in one document, from either stream, share one module artifact.

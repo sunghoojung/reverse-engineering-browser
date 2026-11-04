@@ -203,6 +203,8 @@ class NativeProbeSession {
     return value;
   }
   std::uint64_t NextBrowserSequence() { return next_++; }
+  // This pipeline carries no Canvas images.
+  bool capture_canvas_images() const { return false; }
 
  private:
   std::uint64_t next_ = 1;

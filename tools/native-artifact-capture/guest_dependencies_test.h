@@ -156,7 +156,8 @@ void NativeGuestDependencies(reb::ArtifactReceiver& receiver) {
   const auto retired = transfers.begin()->first;
   configure();
   Receive(receiver, retired);
-  Check(typed().size() == 6, "Same-session reconfiguration rejects old dependencies");
+  Check(typed().size() == 6 && gap_for(107, "native_guest_pending_at_capture_end"),
+        "Reconfiguration turns old pending dependencies into gaps in their own slots");
   d.header.sequence_number = 108;
   sink.CaptureNativeGuest(capture, 1, [] { return true; });
   Check(transfers.empty() && gap_for(108, "native_guest_module_unbound"),
@@ -271,7 +272,25 @@ void NativeGuestDependencies(reb::ArtifactReceiver& receiver) {
   sink.CaptureNativeGuestHost(malformed, 1);
   malformed.header.sequence_number = 134;
   sink.CaptureNativeGuestHost(malformed, 1);
-  Check(events.size() == malformed_before + 1, "Malformed hosts have one bounded marker");
+  Check(events.size() == malformed_before + 2 && gap_for(133, "native_guest_host_malformed") &&
+            gap_for(134, "native_guest_host_malformed"),
+        "Each malformed host fills its own slot");
+  // Without the artifact channel no parent can be published, but the host is.
+  NativeArtifactSocketClient::Get().connected = false;
+  host.header.sequence_number = 135;
+  host.header.parent_event_id = 99;
+  const auto before_disconnected = typed().size();
+  sink.CaptureNativeGuestHost(host, 1);
+  NativeArtifactSocketClient::Get().connected = true;
+  Check(typed().size() == before_disconnected + 1 && typed().back().header.sequence_number == 135 &&
+            typed().back().header.parent_event_id == 0,
+        "A host without the artifact channel is published unparented");
+  d.header.sequence_number = 136;
+  NativeArtifactSocketClient::Get().connected = false;
+  sink.CaptureNativeGuest(capture, 1, [] { return true; });
+  NativeArtifactSocketClient::Get().connected = true;
+  Check(gap_for(136, "native_guest_artifact_unavailable"),
+        "A capture without the artifact channel fills its own slot");
 
   // Held hosts are bounded; overflow is published at once without parent.
   configure();
@@ -348,7 +367,43 @@ void NativeGuestDependencies(reb::ArtifactReceiver& receiver) {
   const auto capped = events.size();
   d.header.sequence_number = 1001;
   sink.CaptureNativeGuest(capture, 4, [] { return true; });
-  Check(events.size() == capped, "Budget omission bounded");
+  Check(events.size() == capped + 1 && gap_for(1001, "native_guest_browser_sample_budget"),
+        "Every capture past the budget fills its own slot");
+
+  // Bindings are held for live documents only: a gone document's group is
+  // reclaimed for a new one, and past the bound a live set is refused.
+  configure();
+  transfers.clear();
+  verdicts.clear();
+  capture.module_bytes = module;
+  std::array<bool, 17> live{};
+  live.fill(true);
+  const auto bind_document = [&](std::size_t n, std::uint64_t sequence) {
+    capture.document_token_low = 600 + n;
+    i.header.sequence_number = sequence;
+    d.header.sequence_number = sequence + 1;
+    d.header.parent_event_id = sequence;
+    sink.CaptureNativeGuest(capture, 7, [&live, n] { return live[n]; }, status);
+  };
+  for (std::size_t n = 0; n < 16; ++n)
+    bind_document(n, 600 + 2 * n);
+  Check(transfers.size() == 48 && verdicts.empty(), "Sixteen live documents bind");
+  bind_document(16, 640);
+  Check(transfers.size() == 48 && gap_for(641, "native_guest_document_limit") &&
+            verdicts == std::vector<bool>{false},
+        "A seventeenth live document is refused explicitly");
+  live[3] = false;
+  bind_document(16, 642);
+  Check(transfers.size() == 51 && verdicts == std::vector<bool>{false, false},
+        "A gone document's binding is reclaimed and its pending verdict is a rejection");
+  receive_all();
+  Check(gap_for(607, "native_guest_dependency_lost") &&
+            std::count(verdicts.begin(), verdicts.end(), true) == 16,
+        "The reclaimed document's dispatch is an explicit gap; live bindings are accepted");
+  capture.document_token_low = 12;
+  i.header.sequence_number = 100;
+  d.header.parent_event_id = 100;
+
   configure();
   transfers.clear();
   capture.module_bytes = module;
@@ -357,6 +412,7 @@ void NativeGuestDependencies(reb::ArtifactReceiver& receiver) {
   sink.CaptureNativeGuest(capture, 1, [] { return true; });
   Check(transfers.empty() && gap_for(1002, "native_guest_dependency_rejected"),
         "Wrong invocation or dispatch category rejected");
-  std::cout << "PASS production guest ACK ordering, module verdicts and bounded retry, exact host "
-               "parents without host loss, pre-expiry flush and explicit gaps\n";
+  std::cout << "PASS production guest ACK ordering, module verdicts and bounded retry, "
+               "live-document binding reclaim, exact host parents without host loss, "
+               "pre-expiry flush and explicit gaps\n";
 }

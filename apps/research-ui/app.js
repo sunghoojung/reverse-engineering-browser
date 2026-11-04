@@ -3838,15 +3838,20 @@ invocationSitesPanel.refresh();
         };
       }
 
+      // The notice is text for the researcher, never operation state; whether a
+      // save or load runs is apiCollectionSaving and apiCollectionRefreshing.
       function setCollectionNotice(kind, message) {
         state.apiCollectionStatus = kind;
         state.apiCollectionMessage = message;
+        state.apiCollectionNoticeRevision += 1;
         elements.collectionNotice.dataset.kind = kind;
         elements.collectionNotice.textContent = message;
       }
 
-      async function refreshApiCollection(force = false) {
-        if (state.apiCollectionRefreshing || state.apiCollectionSaving || location.protocol === 'file:') return false;
+      // A save that met a conflict reloads while it still holds
+      // apiCollectionSaving, so no second save can start until it has settled.
+      async function refreshApiCollection(force = false, conflictReload = false) {
+        if (state.apiCollectionRefreshing || (state.apiCollectionSaving && !conflictReload) || location.protocol === 'file:') return false;
         state.apiCollectionRefreshing = true;
         const version = state.apiCollectionVersion;
         const controller = new AbortController();
@@ -3913,9 +3918,11 @@ invocationSitesPanel.refresh();
           const body = await response.json();
           if (response.status === 409) {
             state.apiCollectionEtag = null;
-            state.apiCollectionSaving = false;
-            const refreshed = await refreshApiCollection(true);
-            if (refreshed || state.apiCollectionStatus === 'saving') setCollectionNotice('conflict', `${body.error || 'The collection changed in another window.'} Your edits are retained; retry load and review them before saving again.`);
+            const noticeRevision = state.apiCollectionNoticeRevision;
+            const refreshed = await refreshApiCollection(true, true);
+            // Keep a notice the reload published itself (a load error or a
+            // removed draft); otherwise name the conflict.
+            if (refreshed || noticeRevision === state.apiCollectionNoticeRevision) setCollectionNotice('conflict', `${body.error || 'The collection changed in another window.'} Your edits are retained; retry load and review them before saving again.`);
             return false;
           }
           if (!response.ok) throw new Error(body.error || `API Collection store returned ${response.status}`);

@@ -180,6 +180,7 @@
         apiCollectionSaving: false,
         apiCollectionStatus: 'loading',
         apiCollectionMessage: 'Loading the local API Collection…',
+        apiCollectionNoticeRevision: 0,
         collectionSelectedFolderId: 1,
         collectionSelectedRequestId: null,
         collectionExpandedFolderIds: new Set([1]),

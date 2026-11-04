@@ -83,19 +83,49 @@ then runs `tools/validate-evidence-store.py` over the broker output. Component
 cases cover a metadata-only session, a receiver started without
 `--allow-sensitive` and a session without the Artifact category.
 
+## Socket transport stages
+
+With `--receiver`, the runner also exercises the socket boundary the corpus
+replay above does not:
+
+- The production receiver in socket mode, over a raw AF_UNIX client. A valid
+  rejected frame larger than the socket buffers is discarded and answered on the
+  same connection. An invalid header, a session mismatch and a body past the
+  discard bound close it.
+- The production receiver restarted on a store whose final manifest record was
+  interrupted. The record is cut back with a stderr note and capture resumes.
+- `tools/native-artifact-transport`, which compiles the unchanged production
+  `native_artifact_socket_client.cc`, `native_probe_socket_client.cc` and
+  `native_local_ipc_client.cc` against narrow base adapters with real threads,
+  locks and task queues. The probe session and capture sinks are recording
+  doubles. It drives the artifact writer against the production receiver
+  through sensitive, oversize and duplicate rejections on one connection and
+  then a vanished receiver. It also uses a scripted older receiver that rejects
+  before reading the body or closes after a rejection, and stops the writer
+  during a reconnect. It drives the broker writer through a refused session, an
+  overflowing mixed queue whose drops must all be counted by browser-sequenced
+  gaps, and a lost artifact channel, which must arrive as an
+  `artifact_channel_lost` gap.
+
+Commit rollback and the receiver's failed-store state are covered in
+`tests/artifact_test.cpp` with injected `fsync` failures.
+
 ## Deliberate limits
 
 Chromium process/thread/time/profile types and the browser sequence allocator
 are minimal adapters. The Mojo adapter schedules the real sink's body callback
 but does not test data-pipe forwarding, backpressure, watches, or Chromium task
 execution. The artifact socket enqueue adapter allows deterministic delayed,
-missing, reordered, and rejected transfers; it does not test the production
-socket writer's queue/thread/authentication behavior. Only the receiver return
-status creates an ACK in the normal success and rejection cases.
+missing, reordered, and rejected transfers; the production socket writer's
+queue, thread and reconnect behavior is covered by the transport stage instead.
+Only the receiver return status creates an ACK in the normal success and
+rejection cases.
 
 The runner reports whether AF_UNIX socket creation is permitted on the current
 host. An unavailable AF_UNIX boundary does not masquerade as socket coverage:
-service replay uses stdin even when sockets are available. This is not a Brave
+corpus service replay uses stdin even when sockets are available, and the socket
+stages fail rather than skip. The transport adapters do not model Chromium's
+thread restrictions or task scheduling. This is not a Brave
 checkout build, a V8/Blink capture runtime, a rendered-browser UI test, or macOS
 packaged-app acceptance. Those remain separate repository/Brave validation gates.
 All retained bytes are authored test fixtures, never private captures.

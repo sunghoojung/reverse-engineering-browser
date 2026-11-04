@@ -516,6 +516,11 @@ shutdown grace, then stops remaining children. An active analyzer worker has a
 shorter two-second grace so its supervising shell can reap it before exiting.
 Console commands still require explicit actions in their disposable contexts. Worker/proxy foundations do not yet have runtime adapters.
 
+If the window's web content process stops, the workspace reloads once. If it
+stops again within 30 seconds of that reload, Origin Trace asks before
+reloading, so a page that cannot stay up never reloads in a loop. Unsaved edits
+in a stopped page are lost.
+
 For an explicit development session with deterministic sample evidence:
 
 ```sh

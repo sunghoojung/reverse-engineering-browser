@@ -2624,6 +2624,8 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
   private var liveWorkspaceURL: URL?
   // The session published its workspace while the window was still loading.
   private var openLiveWorkspaceWhenLoaded = false
+  // When the app last reloaded after the web content process stopped.
+  private var lastContentProcessReload: Date?
 
   func applicationDidFinishLaunching(_ notification: Notification) {
     if smokeTest {
@@ -2753,9 +2755,44 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
     decisionHandler(.allow)
   }
 
+  // The page, and any unsaved work in it, is gone. Reload it once; a page that
+  // stops again within 30 seconds of that reload is asked about, so a
+  // document that cannot stay up never reloads in a loop.
   func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
     closeGuard?.navigationWillStart()
     clientProjectExport?.navigationWillStart()
+    // WebKit can forget the page's URL once this callback returns.
+    let url = webView.url
+    if let last = lastContentProcessReload, Date().timeIntervalSince(last) < 30 {
+      // Outside this WebKit callback, which must not run a modal dialog.
+      RunLoop.main.perform(inModes: [.default]) { [weak self] in self?.askToReloadAfterRepeatedStop(url) }
+    } else {
+      reloadAfterContentProcessStop(url)
+    }
+  }
+
+  private func reloadAfterContentProcessStop(_ url: URL?) {
+    lastContentProcessReload = Date()
+    if let url, !isEndedLiveWorkspace(url) {
+      // The same document again, which never widens what the close guard trusts.
+      webView?.load(URLRequest(url: url))
+    } else if let localApplicationURL {
+      load(localApplicationURL)
+    }
+  }
+
+  private func askToReloadAfterRepeatedStop(_ url: URL?) {
+    guard NSApp.isRunning, window?.isVisible == true else { return }
+    let alert = NSAlert()
+    alert.alertStyle = .warning
+    alert.messageText = "The workspace stopped again"
+    alert.informativeText =
+      "Its page stopped within 30 seconds of being reloaded, and unsaved edits in it were lost. "
+      + "Reload it once more, or leave the window empty."
+    alert.addButton(withTitle: "Reload")
+    alert.addButton(withTitle: "Not Now")
+    guard alert.runModal() == .alertFirstButtonReturn else { return }
+    reloadAfterContentProcessStop(url)
   }
 
   func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {

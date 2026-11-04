@@ -92,6 +92,12 @@ Return default and photograph complete; Stay must leave the page, the edit and
 the start dialog untouched. After the edit is discarded the start dialog opens
 at once and the test continues offline.
 
+`test22WorkspaceReloadsAfterContentProcessStops` ends the web content process
+with SIGKILL, as a crash would; WebKit's testing selector names its process ID.
+The workspace must reload once by itself; a second stop within 30 seconds must
+ask, photographed, and **Reload** must restore it. Whether a reload starts is
+observed natively, because page JavaScript cannot answer until one does.
+
 At both window sizes, those budget gaps must leave the footer free of queue
 drops, Traffic without a loss notice and Fingerprinting at full coverage, while
 the VM notice names both reasons as inert text.

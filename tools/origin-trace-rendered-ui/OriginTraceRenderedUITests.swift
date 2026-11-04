@@ -1631,4 +1631,62 @@ final class OriginTraceRenderedUITests: XCTestCase {
     }
     try await returnToHarness(ui, harnessURL)
   }
+
+  // Ends the page's web content process with SIGKILL, as a crash would. Its
+  // process ID comes from WebKit's testing interface; WebKit's own kill request
+  // is not reported to the app as a stop. Page JavaScript cannot run until
+  // something reloads the page, so whether a reload starts is observed natively.
+  @MainActor
+  private func stopContentProcess(_ ui: Harness) async throws -> NSKeyValueObservation {
+    guard ui.webView.responds(to: Selector(("_webProcessIdentifier"))),
+      let pid = (ui.webView.value(forKey: "_webProcessIdentifier") as? NSNumber)?.int32Value, pid > 0
+    else { throw XCTSkip("This WebKit does not name its content process") }
+    _ = try await ui.webView.callAsyncJavaScript("window.__rebOutgoingDocument = true; return true;", contentWorld: .page)
+    reloadStarted = false
+    let observation = ui.webView.observe(\.isLoading, options: [.new]) { [weak self] view, _ in
+      if view.isLoading { self?.reloadStarted = true }
+    }
+    guard kill(pid, SIGKILL) == 0 else { throw HarnessError("Could not stop web content process \(pid): errno \(errno)") }
+    return observation
+  }
+
+  private var reloadStarted = false
+
+  // A web content process that stops leaves an empty window. The app reloads
+  // its workspace once; if it stops again soon after, it asks before reloading.
+  @MainActor
+  func test22WorkspaceReloadsAfterContentProcessStops() async throws {
+    let ui = try Harness()
+    try await ui.waitForInitialLoad()
+    try await ui.resize(width: windowSizes[0].width, height: windowSizes[0].height)
+    try await ui.reload(activating: false)
+    let harnessURL = try XCTUnwrap(ui.webView.url)
+    let reloaded = "window.__rebOutgoingDocument === undefined && document.readyState === 'complete' && typeof state === 'object' && state.requests.length > 0"
+    var observation = try await stopContentProcess(ui)
+    try await waitFor("the workspace to reload after its content process stopped", timeout: 10) { reloadStarted }
+    observation.invalidate()
+    try await ui.waitUntil(reloaded, timeout: 30, "the reloaded workspace did not show its evidence")
+    XCTAssertEqual(ui.webView.url, harnessURL, "the same workspace reloads")
+    try await ui.screenshot("content-process-reloaded")
+    let backstop = Timer(timeInterval: 60, repeats: false) { _ in if NSApp.modalWindow != nil { NSApp.abortModal() } }
+    RunLoop.main.add(backstop, forMode: .modalPanel)
+    defer { backstop.invalidate() }
+    observation = try await stopContentProcess(ui)
+    defer { observation.invalidate() }
+    do {
+      try await waitFor("the repeated-stop decision") { NSApp.modalWindow != nil || reloadStarted }
+      XCTAssertFalse(reloadStarted, "a second stop within 30 seconds must ask before reloading")
+      let panel = try XCTUnwrap(NSApp.modalWindow)
+      XCTAssertTrue(texts(panel).contains("The workspace stopped again"), "\(texts(panel))")
+      try await Task.sleep(nanoseconds: 1_500_000_000)
+      try ui.screenshot(window: panel, "content-process-stopped-again")
+      try XCTUnwrap(button(panel, "Reload")).performClick(nil)
+    } catch {
+      if NSApp.modalWindow != nil { NSApp.abortModal() }
+      throw error
+    }
+    try await waitFor("Reload to start", timeout: 10) { reloadStarted }
+    try await ui.waitUntil(reloaded, timeout: 30, "Reload did not restore the workspace")
+    XCTAssertEqual(ui.webView.url, harnessURL)
+  }
 }

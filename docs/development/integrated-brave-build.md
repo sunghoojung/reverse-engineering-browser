@@ -142,9 +142,12 @@ REB_BRAVE_DIRECTORY=/existing/worktree/src/brave ./scripts/build-integrated-brav
 The previous receipt is preserved. Private before/after backups and
 `build/integrated-brave-patch-advance.json` record the exact transition. A normal
 failure restores only the command's own known bytes; concurrent unknown edits
-are preserved and marked `needs_review`. Repeating an interrupted operation
-accepts only its recorded before/after file with unchanged surrounding inputs
-and index entries. A completed repeat is a no-op. Preserve conflicting receipts
+are preserved and marked `needs_review`. That mark stays: a repeat refuses
+until a person has inspected the destination and moved the audit aside, even if
+the file later holds familiar bytes. Repeating an interrupted operation accepts
+only its recorded before/after file with unchanged surrounding inputs and index
+entries. Backups are published only once complete. A completed repeat is a
+no-op. Preserve conflicting receipts
 or audits separately; never edit them to admit an unexplained source state.
 Successful-build proof and the smaller disk reserve are not inherited.
 

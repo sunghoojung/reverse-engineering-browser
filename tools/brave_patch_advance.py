@@ -104,11 +104,21 @@ def preserve_blob(path, content):
         if path.read_bytes() != content:
             raise ValueError("Existing patch-advance backup differs; preserve it separately")
         return
-    with path.open("xb") as file:
+    # Publish only complete bytes: an interrupted write leaves a temporary file,
+    # never a partial backup that a rerun would have to refuse.
+    with tempfile.NamedTemporaryFile(dir=path.parent, prefix=".reb-patch-backup-", delete=False) as file:
+        temporary = Path(file.name)
         os.fchmod(file.fileno(), 0o600)
         file.write(content)
         file.flush()
         os.fsync(file.fileno())
+    try:
+        os.link(temporary, path)  # Never replaces a backup that appeared meanwhile.
+    except FileExistsError:
+        if path.is_symlink() or path.read_bytes() != content:
+            raise ValueError("Existing patch-advance backup differs; preserve it separately") from None
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 @contextmanager

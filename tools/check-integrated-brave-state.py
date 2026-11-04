@@ -430,9 +430,14 @@ def advance_known_patch(args, identity):
     audit = json.loads(audit_path.read_text()) if audit_path.exists() else None
     if audit is not None and (not isinstance(audit, dict) or audit.get("request") != request):
         raise ValueError("An audit from another operation exists; preserve it separately")
+    if audit is not None and audit.get("status") == "needs_review":
+        # A concurrent unknown edit was preserved. Only a person can explain
+        # it; a rerun must not proceed just because the file looks familiar.
+        raise ValueError("A previous patch advancement needs review: an unknown edit to its "
+                         "destination was preserved. Inspect it, then move the audit aside")
     if audit is not None:
         plan = audit.get("file")
-        if (audit.get("status") not in ("prepared", "complete", "rolled_back", "needs_review") or
+        if (audit.get("status") not in ("prepared", "complete", "rolled_back") or
                 not isinstance(plan, dict) or not isinstance(plan.get("relative"), str) or
                 not isinstance(plan.get("mode"), int) or not 0 <= plan["mode"] <= 0o777 or
                 not isinstance(audit.get("unaffected_upstream"), dict) or

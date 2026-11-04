@@ -256,6 +256,13 @@ class StateGuards(unittest.TestCase):
         audit = json.loads(receipt.with_name("integrated-brave-patch-advance.json").read_text())
         self.assertEqual(audit["status"], "needs_review")
         self.assertFalse(receipt.exists())
+        # Restoring familiar bytes does not explain the preserved edit.
+        (self.chromium / "tracked.txt").write_text("second\n")
+        result = self.advance(current, receipt)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("needs review", result.stdout)
+        self.assertEqual((self.chromium / "tracked.txt").read_text(), "second\n")
+        self.assertFalse(receipt.exists())
 
     def test_patch_advance_serializes_checkout_updates(self):
         from brave_patch_advance import exclusive_source_update

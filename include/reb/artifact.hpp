@@ -157,27 +157,40 @@ class ArtifactReceiver final {
   [[nodiscard]] const std::string& LastError() const noexcept;
   // Set by every ReceiveOne call.
   [[nodiscard]] ArtifactStreamPosition StreamPosition() const noexcept;
+  // Bytes of an unacknowledged final manifest record that construction cut
+  // away; nonzero only after an interrupted append.
+  [[nodiscard]] std::uint64_t RecoveredManifestBytes() const noexcept;
 
  private:
+  // kFailed once a manifest append could not be rolled back. The file may
+  // then hold an unacknowledged record, so bookkeeping no longer matches the
+  // disk and every later frame is refused rather than appended after it.
+  enum class StoreState : std::uint8_t { kConsistent, kFailed };
+
   [[nodiscard]] ArtifactReceiveStatus Reject(ArtifactReceiveStatus status, std::string message);
   [[nodiscard]] ArtifactReceiveStatus RejectFrame(std::istream& stream,
                                                   std::uint64_t unread_metadata,
                                                   std::uint64_t unread_content,
                                                   ArtifactReceiveStatus status,
                                                   std::string message);
+  [[nodiscard]] bool RestoreManifest() noexcept;
 
   // Lives through all receiver-owned scans, writes, flushes and closes.
   EvidenceGuard evidence_guard_;
   std::filesystem::path store_directory_;
   EvidenceDirectory blob_directory_;
   ArtifactReceiverLimits limits_;
+  // Both mirror the files on disk: blob bytes in blobs/ and the manifest's
+  // size, whatever the outcome of the frame that changed them.
   std::uint64_t stored_bytes_ = 0;
   std::uint64_t manifest_bytes_ = 0;
+  std::uint64_t recovered_manifest_bytes_ = 0;
   std::uint64_t last_artifact_id_ = 0;
   std::unordered_set<std::uint64_t> artifact_ids_;
   ArtifactReceiverStats stats_;
   std::string last_error_;
   ArtifactStreamPosition stream_position_ = ArtifactStreamPosition::kFrameBoundary;
+  StoreState store_state_ = StoreState::kConsistent;
 };
 
 [[nodiscard]] bool IsValidArtifactHeader(const ArtifactHeader& header) noexcept;

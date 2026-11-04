@@ -284,6 +284,11 @@ document; navigation, reload, closure or binding loss clears authorization and
 retains an unavailable selection rather than silently choosing another tab or
 falling back to disposable execution. Disconnect before selecting and authorizing
 another document. Disconnect does not undo page effects or kill capture.
+Until the capture browser answers its first listing, the document list says it
+is waiting. A lost binding names why and needs a capture restart. A connected
+panel notices when another window, an agent or a lost binding ended its session
+instead of staying Connected, and a Disconnect clicked while a background read
+runs is always sent.
 
 ### Document-start scripts
 

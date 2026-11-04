@@ -6,10 +6,11 @@
 //! expression or divides according to the previous significant token, the
 //! heuristic every parser-free JavaScript tokenizer uses: it divides after an
 //! operand (a name, literal, `)`, `]`, an object literal's `}` or a postfix
-//! `++`/`--`) and starts a literal elsewhere. The guesses that can be wrong in
-//! valid code are a slash after a block-like `}` (a function or class
-//! expression body divides) and an unterminated literal; the first is marked
-//! on its token and the second is read as division. Oxc remains the parser.
+//! `++`/`--`) and starts a literal elsewhere. Literals read where valid code
+//! may also divide are marked uncertain: after a block-like `}` (a function or
+//! class expression body divides) and after `await` or `yield` (identifiers in
+//! scripts). An unterminated literal is read as division. Oxc remains the
+//! parser; consumers that bound it must not trust these guesses alone.
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Kind {
@@ -21,8 +22,8 @@ pub(crate) enum Kind {
     /// including the next backtick or the `$` of `${`.
     TemplateText,
     /// A regular-expression literal with its flags; `body_end` is the closing
-    /// slash. `after_block` marks the uncertain reading after a block `}`.
-    Regex { body_end: usize, after_block: bool },
+    /// slash. `uncertain` marks a reading where valid code may divide instead.
+    Regex { body_end: usize, uncertain: bool },
     /// An identifier, keyword, number or private name.
     Word,
     /// `(`, `[`, `{` or the `{` of a template substitution.
@@ -56,6 +57,9 @@ enum Previous {
     /// A `}` that closed a block-like brace: a statement usually follows, but
     /// a function or class expression body can be divided.
     BlockEnd,
+    /// `await` or `yield`: an operator keyword in async or generator code, but
+    /// an identifier, which can be divided, in a script.
+    Contextual,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -254,7 +258,7 @@ impl Iterator for Lexer<'_> {
         }
         let regex_allowed = matches!(
             self.previous,
-            Previous::Statement | Previous::Operator | Previous::BlockEnd
+            Previous::Statement | Previous::Operator | Previous::BlockEnd | Previous::Contextual
         );
         if byte == b'/' && regex_allowed && start >= self.regex_barrier {
             if let Some(body_end) = self.regex_end(start) {
@@ -265,12 +269,12 @@ impl Iterator for Lexer<'_> {
                 {
                     self.index += 1;
                 }
-                let after_block = self.previous == Previous::BlockEnd;
+                let uncertain = matches!(self.previous, Previous::BlockEnd | Previous::Contextual);
                 self.previous = Previous::Operand;
                 return self.token(
                     Kind::Regex {
                         body_end,
-                        after_block,
+                        uncertain,
                     },
                     start,
                 );
@@ -290,14 +294,16 @@ impl Iterator for Lexer<'_> {
             if self.previous == Previous::Dot || word[0].is_ascii_digit() || word[0] == b'.' {
                 self.previous = Previous::Operand;
             } else {
+                // `for await (` still opens a control head.
                 self.control = matches!(
                     word,
                     b"if" | b"while" | b"for" | b"with" | b"switch" | b"catch"
-                );
+                ) || (control && word == b"await");
                 self.previous = match word {
                     b"else" | b"do" | b"try" | b"finally" => Previous::Statement,
                     b"return" | b"throw" | b"case" | b"new" | b"typeof" | b"void" | b"delete"
-                    | b"await" | b"yield" | b"in" | b"instanceof" => Previous::Operator,
+                    | b"in" | b"instanceof" => Previous::Operator,
+                    b"await" | b"yield" => Previous::Contextual,
                     _ if self.control => Previous::Operator,
                     _ => Previous::Operand,
                 };
@@ -311,7 +317,9 @@ impl Iterator for Lexer<'_> {
                     b'(' => Frame::Paren { control },
                     b'[' => Frame::Bracket,
                     _ if std::mem::take(&mut self.substitution) => Frame::Substitution,
-                    _ if self.previous == Previous::Operator => Frame::Object,
+                    _ if matches!(self.previous, Previous::Operator | Previous::Contextual) => {
+                        Frame::Object
+                    }
                     _ => Frame::Block,
                 };
                 self.previous = if frame == Frame::Block {
@@ -397,16 +405,24 @@ mod tests {
     }
 
     #[test]
-    fn a_slash_after_a_block_is_marked_uncertain() {
-        let tokens = Lexer::new("function f(){}\n/a/.test(s); x = {}\n/ 2;").collect::<Vec<_>>();
-        let flagged = tokens
-            .iter()
+    fn literals_where_code_may_divide_are_marked_uncertain() {
+        let source = "function f(){}\n/a/.test(s); x = {}\n/ 2; y = /b/; await /c/; yield /d/;\nfor await (x of y) /e/.test(x)";
+        let flagged = Lexer::new(source)
             .filter_map(|token| match token.kind {
-                Kind::Regex { after_block, .. } => Some(after_block),
+                Kind::Regex { uncertain, .. } => Some((&source[token.start..token.end], uncertain)),
                 _ => None,
             })
             .collect::<Vec<_>>();
-        assert_eq!(flagged, [true]);
+        assert_eq!(
+            flagged,
+            [
+                ("/a/", true),
+                ("/b/", false),
+                ("/c/", true),
+                ("/d/", true),
+                ("/e/", false)
+            ]
+        );
     }
 
     #[test]
@@ -430,7 +446,7 @@ mod tests {
                 (
                     Kind::Regex {
                         body_end: 27,
-                        after_block: false
+                        uncertain: false
                     },
                     "/}/"
                 ),

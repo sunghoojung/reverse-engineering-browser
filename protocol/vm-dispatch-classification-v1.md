@@ -335,8 +335,13 @@ the measured 8 MiB target is approximately 1 GiB or less on a local workstation.
 An iterative lexical guard refuses more than 8192 nested delimiters or operators
 in one expression. Delimiter scopes and sibling expression boundaries reset the
 local expression counter; object properties and switch arms never accumulate. Strings, template text, comments and regexp bodies are atomic
-for this guard; template substitutions re-enter syntax. Literal bytes never count
-as nesting. This admission pass cannot create claims; Oxc owns syntax and binding. A linear AST prepass bounds hoisting by intervening block scopes
+for this guard; template substitutions re-enter syntax. It shares the VM
+detector's lexer, which reads a slash as division after an operand (a name,
+literal, `)`, `]`, an object literal's `}` or a postfix `++`/`--`) and as a
+literal elsewhere. Literal bytes never count as nesting, except that a literal
+read where valid code may divide instead (after a block-like `}`, or after
+`await` or `yield`, which are identifiers in scripts) also counts its
+delimiters and operators, so either reading stays inside the reserved stack. This admission pass cannot create claims; Oxc owns syntax and binding. A linear AST prepass bounds hoisting by intervening block scopes
 times binding-pattern bytes (at most twice source bytes). It also pre-charges
 twice the sum of AST node depths, an upper bound on scope-resolution and syntax
 ancestor walks, plus redeclaration and private-name suggestion work. Semantic

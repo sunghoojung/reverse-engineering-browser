@@ -202,7 +202,10 @@ writer lock (`vm-analysis-v1.json.reb-workspace-lock-v1`, waiting at most five
 seconds for another writer). Dependants are removed before their source is
 replaced and written after it, so after a crash or failed write each present
 document still names the digest of the present one it was derived from; a
-missing dependant is unavailable, not stale. A reader that opens these files
+missing dependant is unavailable, not stale. If a previous dependant cannot be
+removed, the earlier chain is kept on disk, the API still serves the new
+analysis, and that dependant and its own dependants are reported unavailable.
+A reader that opens these files
 without that lock must still compare `analysis_digest` and
 `workspace_document_digest` before joining them.
 Integer switch cases and statically visible numeric handler tables are

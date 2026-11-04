@@ -1588,11 +1588,34 @@ const CHAIN: [&str; 3] = [
     "analysis/vm-host-links-v1.json",
 ];
 
+impl Documents {
+    /// The chain document at `index` and everything derived from it are
+    /// unavailable. The analysis itself stays served from memory.
+    fn fail_from(&mut self, index: usize, error: Error) {
+        if index == 1 {
+            self.opcode_workspace = Err(error.clone());
+        }
+        self.host_links = Err(error);
+    }
+}
+
+/// Removes a dependant before its source changes. A directory in its place is
+/// no document a reader could join; the later write reports it.
+fn remove_dependant(path: &Path) -> std::io::Result<bool> {
+    match std::fs::symlink_metadata(path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error),
+        Ok(metadata) if metadata.is_dir() => Ok(false),
+        Ok(_) => std::fs::remove_file(path).map(|()| true),
+    }
+}
+
 /// One cooperative writer at a time, the backend or the CLI, publishes the
 /// chain. Dependants are removed before their source is replaced and written
 /// after it, so a crash or failed write leaves a prefix of the chain whose
 /// digest links all hold, never a document naming a replaced source. A
-/// document that could not be written is reported as unavailable.
+/// dependant that cannot be written or removed is reported as unavailable,
+/// with everything derived from it; the analysis is still served.
 fn publish(
     root: &Path,
     documents: &mut Documents,
@@ -1602,29 +1625,41 @@ fn publish(
     #[cfg(unix)]
     let _lease = chain_lease(&paths[0])?;
     let mut removed = false;
-    for path in paths[1..].iter().rev() {
-        match std::fs::remove_file(path) {
-            Ok(()) => removed = true,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error.into()),
+    for index in [2, 1] {
+        match remove_dependant(&paths[index]) {
+            Ok(gone) => removed |= gone,
+            Err(error) => {
+                // Replacing its source would leave this stale document naming
+                // a replaced one, so the previous chain stays as it was.
+                documents.fail_from(
+                    index,
+                    Error::new(
+                        500,
+                        format!(
+                            "The previous {} could not be removed, so the VM analysis documents were not replaced: {error}",
+                            CHAIN[index]
+                        ),
+                    ),
+                );
+                return Ok(());
+            }
         }
     }
     if removed && let Some(directory) = paths[0].parent() {
         std::fs::File::open(directory)?.sync_all()?;
     }
     write(&paths[0], &canonical(&documents.analysis)?)?;
-    let mut failure: Option<crate::error::Error> = None;
-    for (path, result) in [
-        (&paths[1], &mut documents.opcode_workspace),
-        (&paths[2], &mut documents.host_links),
-    ] {
-        if let Some(error) = &failure {
-            *result = Err(error.clone());
-        } else if let Ok(value) = result
-            && let Err(error) = canonical(value).and_then(|bytes| write(path, &bytes))
-        {
-            failure = Some(error.clone());
-            *result = Err(error);
+    for index in [1, 2] {
+        let document = if index == 1 {
+            &documents.opcode_workspace
+        } else {
+            &documents.host_links
+        };
+        // An unavailable document has no written dependant either.
+        let Ok(value) = document else { break };
+        if let Err(error) = canonical(value).and_then(|bytes| write(&paths[index], &bytes)) {
+            documents.fail_from(index, error);
+            break;
         }
     }
     Ok(())
@@ -1713,6 +1748,37 @@ mod chain_tests {
             // A failed analysis write fails the whole call instead.
             assert_eq!(next.opcode_workspace.is_ok(), failing != 1);
             assert_eq!(next.host_links.is_ok(), failing == 0);
+        }
+    }
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn an_unremovable_dependant_keeps_the_previous_chain() {
+        use std::os::unix::ffi::OsStrExt;
+        for stuck in [1, 2] {
+            let root = tempfile::tempdir().unwrap();
+            let store = inputs(root.path(), &[]);
+            let first = store_documents(root.path(), &store).unwrap();
+            let path = root.path().join(CHAIN[stuck]);
+            let path = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap();
+            assert_eq!(
+                unsafe { libc::chflags(path.as_ptr(), libc::UF_IMMUTABLE as _) },
+                0
+            );
+            inputs(root.path(), &["{\"x\":1}\n"]);
+            let next = store_documents(root.path(), &store);
+            assert_eq!(unsafe { libc::chflags(path.as_ptr(), 0) }, 0);
+            let next = next.unwrap();
+            assert_eq!(linked(root.path()), [true, true, stuck == 2], "{stuck}");
+            assert_eq!(
+                read(root.path(), 0).unwrap()["document_digest"],
+                first.analysis["document_digest"]
+            );
+            assert_ne!(
+                next.analysis["document_digest"],
+                first.analysis["document_digest"]
+            );
+            assert_eq!(next.opcode_workspace.is_ok(), stuck == 2);
+            assert!(next.host_links.is_err());
         }
     }
     #[test]

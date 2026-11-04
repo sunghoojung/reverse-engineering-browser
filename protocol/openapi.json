@@ -2186,6 +2186,16 @@
               }
             }
           },
+          "409": {
+            "description": "Another backend or CLI process held the VM analysis writer lock for more than five seconds; nothing was published or cached. Retry the read.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
           "500": {
             "description": "Store, read, validation, or internal failure.",
             "content": {
@@ -2284,7 +2294,7 @@
                 "local-state-write",
                 "filesystem-write"
               ],
-              "when": "When the in-memory cache is absent or either artifact-manifest or event-store identity/signature changes, App::get calls vm::store, writes artifacts/analysis/vm-analysis-v1.json, and caches the result. Unix signatures include file identity and change time; non-Unix platforms recompute every request."
+              "when": "When the in-memory cache is absent or either artifact-manifest or event-store identity/signature changes, App::get calls vm::store_documents, publishes artifacts/analysis/vm-analysis-v1.json, vm-opcode-workspace-v2.json and vm-host-links-v1.json as one chain under the cooperative vm-analysis-v1.json.reb-workspace-lock-v1 writer lock, removing dependants before their source is replaced, and caches the result. Unix signatures include file identity and change time; non-Unix platforms recompute every request."
             }
           ],
           "uncertainties": [],
@@ -2374,6 +2384,16 @@
               }
             }
           },
+          "409": {
+            "description": "Another backend or CLI process held the VM analysis writer lock for more than five seconds; nothing was published or cached. Retry the read.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
           "500": {
             "description": "Workspace generation, storage, or validation failure.",
             "content": {
@@ -2408,7 +2428,7 @@
                 "local-state-write",
                 "filesystem-write"
               ],
-              "when": "When the in-memory cache is absent or either artifact-manifest or event-store identity/signature changes, App::get calls vm::store_documents, writes artifacts/analysis/vm-opcode-workspace-v2.json, and caches the result. Unix signatures include file identity and change time; non-Unix platforms recompute every request."
+              "when": "When the in-memory cache is absent or either artifact-manifest or event-store identity/signature changes, App::get calls vm::store_documents, publishes artifacts/analysis/vm-analysis-v1.json, vm-opcode-workspace-v2.json and vm-host-links-v1.json as one chain under the cooperative vm-analysis-v1.json.reb-workspace-lock-v1 writer lock, removing dependants before their source is replaced, and caches the result. Unix signatures include file identity and change time; non-Unix platforms recompute every request."
             }
           ],
           "uncertainties": [],
@@ -2427,7 +2447,7 @@
             },
             {
               "path": "apps/origin-trace-backend/src/vm_opcode.rs",
-              "symbol": "store"
+              "symbol": "document"
             },
             {
               "path": "apps/origin-trace-backend/src/app.rs",
@@ -5477,6 +5497,16 @@
               }
             }
           },
+          "409": {
+            "description": "Another backend or CLI process held the VM analysis writer lock for more than five seconds; nothing was published or cached. Retry the read.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
           "500": {
             "description": "Workspace generation, storage, or validation failure.",
             "content": {
@@ -5500,7 +5530,7 @@
                 "local-state-write",
                 "filesystem-write"
               ],
-              "when": "When the in-memory cache is absent or either artifact-manifest or event-store identity/signature changes, App::get calls vm::store_documents, writes artifacts/analysis/vm-opcode-workspace-v2.json, and caches the result. Unix signatures include file identity and change time; non-Unix platforms recompute every request."
+              "when": "When the in-memory cache is absent or either artifact-manifest or event-store identity/signature changes, App::get calls vm::store_documents, publishes artifacts/analysis/vm-analysis-v1.json, vm-opcode-workspace-v2.json and vm-host-links-v1.json as one chain under the cooperative vm-analysis-v1.json.reb-workspace-lock-v1 writer lock, removing dependants before their source is replaced, and caches the result. Unix signatures include file identity and change time; non-Unix platforms recompute every request."
             }
           ],
           "uncertainties": [],
@@ -5518,8 +5548,8 @@
               "symbol": "store_documents"
             },
             {
-              "path": "apps/origin-trace-backend/src/vm_opcode.rs",
-              "symbol": "store"
+              "path": "apps/origin-trace-backend/src/vm_host_links.rs",
+              "symbol": "document"
             },
             {
               "path": "apps/origin-trace-backend/src/app.rs",
@@ -23473,6 +23503,105 @@
                   "properties": {
                     "observed": {
                       "type": "null"
+                    }
+                  }
+                }
+              },
+              {
+                "if": {
+                  "properties": {
+                    "status": {
+                      "const": "pending"
+                    }
+                  }
+                },
+                "then": {
+                  "properties": {
+                    "reason": {
+                      "const": "execution-not-yet-complete"
+                    }
+                  }
+                }
+              },
+              {
+                "if": {
+                  "properties": {
+                    "status": {
+                      "const": "confirmed"
+                    }
+                  }
+                },
+                "then": {
+                  "properties": {
+                    "reason": {
+                      "const": "agreement-for-listed-inputs-only"
+                    }
+                  }
+                }
+              },
+              {
+                "if": {
+                  "properties": {
+                    "status": {
+                      "const": "mismatch"
+                    }
+                  }
+                },
+                "then": {
+                  "properties": {
+                    "reason": {
+                      "const": "expected-or-observed-effect-differs"
+                    }
+                  }
+                }
+              },
+              {
+                "if": {
+                  "properties": {
+                    "status": {
+                      "const": "unsupported"
+                    }
+                  }
+                },
+                "then": {
+                  "properties": {
+                    "reason": {
+                      "const": "fixed-owned-inputs-only"
+                    }
+                  }
+                }
+              },
+              {
+                "if": {
+                  "properties": {
+                    "status": {
+                      "const": "unknown"
+                    }
+                  }
+                },
+                "then": {
+                  "properties": {
+                    "reason": {
+                      "enum": [
+                        "completion-unverified",
+                        "native-execution-or-disposal-unconfirmed"
+                      ]
+                    }
+                  }
+                }
+              },
+              {
+                "if": {
+                  "properties": {
+                    "reason": {
+                      "const": "native-execution-or-disposal-unconfirmed"
+                    }
+                  }
+                },
+                "then": {
+                  "properties": {
+                    "independent": {
+                      "$ref": "#/components/schemas/OwnedOpcodeExperiments/$defs/expectation"
                     }
                   }
                 }

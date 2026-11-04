@@ -858,6 +858,9 @@ struct Envelope {
     request: ControlRequest,
     reply: oneshot::Sender<Result<Value>>,
 }
+/// A run keeps its identity until Reset or Close has disposed its helper, so a
+/// failed disposal can be retried with the same scope. Stopping between events
+/// always means the lifetime ended while one instruction was in flight.
 struct Runtime {
     view: SessionView,
     spec: SpawnSpec,
@@ -865,8 +868,37 @@ struct Runtime {
     last_clock: Duration,
     next_tick: Option<Duration>,
     next_request: u64,
-    identity_active: bool,
-    expiry_pending: bool,
+}
+impl Runtime {
+    /// The only place a run changes state. Terminal states are final.
+    /// Starting and Stopping keep naming the boundary a queued Pause waits for.
+    fn transition(&mut self, next: State) -> bool {
+        let current = self.view.state;
+        let allowed = !current.terminal()
+            && (next.terminal()
+                || match current {
+                    State::Starting => matches!(next, State::Paused | State::Stopping),
+                    State::Stopping => false,
+                    _ => true,
+                });
+        if allowed {
+            self.view.state = next;
+        }
+        allowed
+    }
+    /// The first terminal state names why the run ended.
+    fn terminate(&mut self, state: State, reason: &'static str) {
+        debug_assert!(state.terminal());
+        if self.transition(state) {
+            self.view.termination_reason = Some(reason);
+        }
+    }
+    fn initializing(&self) -> bool {
+        self.view.initial_snapshot.is_none()
+    }
+    fn expiring(&self) -> bool {
+        self.view.state == State::Stopping
+    }
 }
 struct Owner {
     factory: Arc<dyn Factory>,
@@ -1068,8 +1100,7 @@ impl Owner {
     }
     fn scope_matches(&self, request: &ControlRequest) -> bool {
         self.session.as_ref().is_some_and(|s| {
-            s.identity_active
-                && request.backend_instance_id.as_ref() == Some(&s.view.backend_instance_id)
+            request.backend_instance_id.as_ref() == Some(&s.view.backend_instance_id)
                 && request.session_id.as_ref() == Some(&s.view.session_id)
                 && request.run_id.as_ref() == Some(&s.view.run_id)
                 && request.run_generation == Some(s.view.run_generation)
@@ -1130,7 +1161,7 @@ impl Owner {
         };
         let now = self.clock.now();
         let deadline = session.created.saturating_add(LIFETIME);
-        let next = if session.expiry_pending {
+        let next = if session.expiring() {
             None
         } else {
             Some(deadline)
@@ -1202,14 +1233,7 @@ impl Owner {
             return;
         }
         if let Err(error) = self.advance_control() {
-            let unknown = self.exchange.is_some()
-                && self
-                    .session
-                    .as_ref()
-                    .unwrap()
-                    .view
-                    .initial_snapshot
-                    .is_some();
+            let unknown = self.exchange.is_some() && !self.session.as_ref().unwrap().initializing();
             self.retire(State::Failed, "resource_limit", unknown).await;
             self.reject_waiters(if unknown {
                 uncertain(Cause::Disconnected)
@@ -1225,14 +1249,14 @@ impl Owner {
             Action::Run => {
                 let now = self.clock.now();
                 let session = self.session.as_mut().unwrap();
-                session.view.state = State::Running;
+                session.transition(State::Running);
                 session.next_tick = Some(now.saturating_add(RUN_INTERVAL));
                 self.stamp(&message.request, Ack::Completed);
                 self.publish();
                 self.answer(message, Ack::Completed);
             }
             Action::Step => {
-                self.session.as_mut().unwrap().view.state = State::Stepping;
+                self.session.as_mut().unwrap().transition(State::Stepping);
                 self.pending = Some(message);
                 if let Err(error) = self.dispatch() {
                     self.retire(State::Failed, "resource_limit", false).await;
@@ -1243,14 +1267,13 @@ impl Owner {
                 self.publish();
             }
             Action::Pause => {
-                self.session.as_mut().unwrap().next_tick = None;
+                let session = self.session.as_mut().unwrap();
+                session.next_tick = None;
                 if self.exchange.is_some() {
-                    self.session.as_mut().unwrap().view.state = State::Pausing;
+                    session.transition(State::Pausing);
                     self.pause = Some(message);
                 } else {
-                    if !state.terminal() {
-                        self.session.as_mut().unwrap().view.state = State::Paused;
-                    }
+                    session.transition(State::Paused);
                     self.stamp(&message.request, Ack::Completed);
                     self.publish();
                     self.answer(message, Ack::Completed);
@@ -1259,19 +1282,12 @@ impl Owner {
                 self.publish();
             }
             Action::Stop | Action::Close | Action::Reset => {
-                let uncertain_step = self.exchange.is_some()
-                    && self
-                        .session
-                        .as_ref()
-                        .unwrap()
-                        .view
-                        .initial_snapshot
-                        .is_some();
+                let uncertain_step =
+                    self.exchange.is_some() && !self.session.as_ref().unwrap().initializing();
                 let session_id = self.session.as_ref().unwrap().spec.session;
                 let fixture = self.session.as_ref().unwrap().spec.fixture;
                 let session = self.session.as_mut().unwrap();
-                session.identity_active = action != Action::Reset && action != Action::Close;
-                session.view.state = State::Stopping;
+                session.transition(State::Stopping);
                 session.next_tick = None;
                 if uncertain_step {
                     session.view.execution_state_known = false;
@@ -1283,10 +1299,9 @@ impl Owner {
                     busy()
                 });
                 self.publish();
+                // A failed disposal keeps this run's identity, so the same
+                // Reset or Close can retry it; Create waits for the reap.
                 if let Err(error) = self.dispose().await {
-                    self.session.as_mut().unwrap().view.state = State::Failed;
-                    self.session.as_mut().unwrap().view.termination_reason =
-                        Some("disposal_failed");
                     self.stamp(&message.request, Ack::Rejected);
                     self.publish();
                     Self::reject(message, error);
@@ -1308,9 +1323,10 @@ impl Owner {
                         },
                     );
                 } else {
-                    let session = self.session.as_mut().unwrap();
-                    session.view.state = State::Stopped;
-                    session.view.termination_reason = Some("stopped");
+                    self.session
+                        .as_mut()
+                        .unwrap()
+                        .terminate(State::Stopped, "stopped");
                     let ack = if uncertain_step {
                         Ack::OutcomeUnknown
                     } else {
@@ -1335,8 +1351,7 @@ impl Owner {
         let generation = self.next_generation;
         let Some(next_generation) = generation.checked_add(1) else {
             if let Some(session) = &mut self.session {
-                session.view.state = State::Failed;
-                session.view.termination_reason = Some("resource_limit");
+                session.terminate(State::Failed, "resource_limit");
             }
             self.publish();
             Self::reject(
@@ -1405,8 +1420,6 @@ impl Owner {
             last_clock: now,
             next_tick: None,
             next_request: 1,
-            identity_active: true,
-            expiry_pending: false,
         });
         self.publish();
         match self.factory.spawn(&spec) {
@@ -1423,9 +1436,10 @@ impl Owner {
                 self.publish();
             }
             Err(error) => {
-                self.session.as_mut().unwrap().view.state = State::Failed;
-                self.session.as_mut().unwrap().view.termination_reason =
-                    Some("dependency_unavailable");
+                self.session
+                    .as_mut()
+                    .unwrap()
+                    .terminate(State::Failed, "dependency_unavailable");
                 self.stamp(&message.request, Ack::Rejected);
                 self.publish();
                 Self::reject(message, error);
@@ -1459,9 +1473,7 @@ impl Owner {
         self.check_time().await;
         let now = self.clock.now();
         let eligible = self.session.as_ref().is_some_and(|s| {
-            s.view.state == State::Running
-                && !s.expiry_pending
-                && s.next_tick.is_some_and(|at| at <= now)
+            s.view.state == State::Running && s.next_tick.is_some_and(|at| at <= now)
         });
         if eligible && self.exchange.is_none() {
             if let Err(error) = self.dispatch() {
@@ -1476,7 +1488,7 @@ impl Owner {
         let Some(session) = &mut self.session else {
             return;
         };
-        if session.view.state.terminal() || session.expiry_pending {
+        if session.view.state.terminal() || session.expiring() {
             return;
         }
         if now < session.last_clock {
@@ -1492,10 +1504,9 @@ impl Owner {
         }
         session.last_clock = now;
         if now >= session.created.saturating_add(LIFETIME) {
-            session.expiry_pending = true;
             session.next_tick = None;
             if self.exchange.is_some() {
-                session.view.state = State::Stopping;
+                session.transition(State::Stopping);
                 self.publish();
             } else {
                 self.retire(State::Expired, "expired", false).await;
@@ -1517,8 +1528,11 @@ impl Owner {
                 session.view.diagnostics = child.diagnostics();
             }
             if let Err(error) = child.dispose().await {
+                // Disposal is separate from how the run ended: a halted or
+                // expired run stays so, and only an unsettled run fails here.
                 if let Some(session) = &mut self.session {
                     session.view.disposal_failed = true;
+                    session.terminate(State::Failed, "disposal_failed");
                 }
                 return Err(error);
             }
@@ -1536,12 +1550,11 @@ impl Owner {
         self.exchange = None;
         if let Some(session) = &mut self.session {
             session.next_tick = None;
-            session.view.state = state;
+            session.terminate(state, reason);
             // Retired revisions never wrap or become usable again.
             if let Some(revision) = session.view.control_revision.0.checked_add(1) {
                 session.view.control_revision = Decimal(revision);
             }
-            session.view.termination_reason = Some(reason);
             if unknown {
                 session.view.execution_state_known = false;
             }
@@ -1553,18 +1566,11 @@ impl Owner {
                 };
             }
         }
-        if self.dispose().await.is_err()
-            && let Some(session) = &mut self.session
-        {
-            session.view.state = State::Failed;
-            session.view.termination_reason = Some("disposal_failed");
-        }
+        // dispose() records a failure in the view and keeps ownership.
+        let _ = self.dispose().await;
     }
     async fn complete(&mut self, result: Result<NativeReply>) {
-        let initializing = self
-            .session
-            .as_ref()
-            .is_some_and(|s| s.view.initial_snapshot.is_none());
+        let initializing = self.session.as_ref().is_some_and(Runtime::initializing);
         let reply = result.and_then(|reply| {
             validate_native(self.session.as_ref().unwrap(), &reply, initializing)?;
             Ok(reply)
@@ -1576,7 +1582,7 @@ impl Owner {
                     error = Error::new(503, "Owned VM helper initialization failed")
                         .with_code(Code::DependencyUnavailable);
                 }
-                let expired = self.session.as_ref().is_some_and(|s| s.expiry_pending);
+                let expired = self.session.as_ref().is_some_and(Runtime::expiring);
                 self.retire(
                     if expired {
                         State::Expired
@@ -1646,20 +1652,21 @@ impl Owner {
         }
         session.view.execution_state_known = true;
         let halted = reply.view.state == NativeState::Halted;
-        let expired = session.expiry_pending || now >= session.created.saturating_add(LIFETIME);
+        let expired = session.expiring() || now >= session.created.saturating_add(LIFETIME);
         let paused = initializing || session.view.state != State::Running || self.pause.is_some();
-        session.view.state = if expired {
-            State::Expired
+        if expired {
+            session.terminate(State::Expired, "expired");
         } else if halted {
-            State::Halted
-        } else if paused {
-            State::Paused
+            session.terminate(State::Halted, "halt");
         } else {
-            State::Running
-        };
+            session.transition(if paused {
+                State::Paused
+            } else {
+                State::Running
+            });
+        }
         if expired || halted {
             session.next_tick = None;
-            session.view.termination_reason = Some(if expired { "expired" } else { "halt" });
         } else if !paused {
             session.next_tick = Some(now.saturating_add(RUN_INTERVAL));
         }
@@ -1675,9 +1682,6 @@ impl Owner {
         if (expired || halted)
             && let Err(error) = self.dispose().await
         {
-            let session = self.session.as_mut().unwrap();
-            session.view.state = State::Failed;
-            session.view.termination_reason = Some("disposal_failed");
             self.reject_waiters(error);
             self.publish();
             return;
@@ -2690,7 +2694,9 @@ mod tests {
         );
         assert_eq!(h.ledger.spawned.load(Ordering::SeqCst), 1);
         h.ledger.refuse_reap.store(false, Ordering::SeqCst);
-        h.owner.dispose().await.unwrap();
+        let closed = h.submit(Action::Close, "close").await.await.unwrap();
+        assert!(closed.unwrap()["session"].is_null());
+        assert_eq!(h.ledger.live.load(Ordering::SeqCst), 0);
         let mut h = Harness::new();
         h.create().await;
         h.owner.session.as_mut().unwrap().next_request = u64::MAX;
@@ -2703,6 +2709,125 @@ mod tests {
         );
         assert_eq!(h.dispatches(), 0);
         assert_eq!(h.view().state, State::Failed);
+    }
+    #[tokio::test]
+    async fn failed_reset_or_close_keeps_its_identity_and_retries_through_the_api() {
+        for action in [Action::Reset, Action::Close] {
+            let mut h = Harness::new();
+            h.create().await;
+            h.ledger.refuse_reap.store(true, Ordering::SeqCst);
+            for attempt in ["first", "second"] {
+                let error = h.submit(action, attempt).await.await.unwrap().unwrap_err();
+                assert_ne!(error.reason.code, Code::StaleGeneration, "{action:?}");
+                assert!(h.view().disposal_failed);
+                assert_eq!(h.view().state, State::Failed);
+                assert_eq!(h.view().termination_reason, Some("disposal_failed"));
+                assert_eq!(h.view().run_generation, Decimal(1));
+            }
+            // One helper at a time: an unreaped child still blocks Create.
+            let (create, created) = envelope(h.request(Action::Create, "create"));
+            h.owner.handle(create).await;
+            assert!(created.await.unwrap().is_err());
+            assert_eq!(h.ledger.spawned.load(Ordering::SeqCst), 1);
+            h.ledger.refuse_reap.store(false, Ordering::SeqCst);
+            let retried = h.submit(action, "retry").await;
+            assert_eq!(
+                h.ledger.live.load(Ordering::SeqCst),
+                usize::from(action == Action::Reset)
+            );
+            if action == Action::Reset {
+                assert_eq!(h.view().run_generation, Decimal(2));
+                assert!(!h.view().disposal_failed);
+                h.finish(0).await;
+                assert_eq!(
+                    retried.await.unwrap().unwrap()["session"]["state"],
+                    "paused"
+                );
+                h.owner.dispose().await.unwrap();
+            } else {
+                assert!(retried.await.unwrap().unwrap()["session"].is_null());
+                h.create().await;
+                assert_eq!(h.ledger.spawned.load(Ordering::SeqCst), 2);
+                h.owner.dispose().await.unwrap();
+            }
+        }
+    }
+    #[tokio::test]
+    async fn terminal_states_and_reasons_survive_later_stop_and_pause() {
+        async fn settle(h: &mut Harness, expected: State, reason: &str) {
+            for action in [Action::Stop, Action::Pause, Action::Stop] {
+                let view = h.submit(action, "late").await.await.unwrap().unwrap();
+                assert_eq!(view["ack"], "completed");
+                assert_eq!(view["session"]["state"], json!(expected));
+                assert_eq!(view["session"]["termination_reason"], reason);
+            }
+            assert_eq!(h.ledger.live.load(Ordering::SeqCst), 0);
+        }
+        let mut h = Harness::new();
+        h.create().await;
+        for count in 1..=9 {
+            let result = h.submit(Action::Step, &format!("step-{count}")).await;
+            h.finish(count).await;
+            result.await.unwrap().unwrap();
+        }
+        settle(&mut h, State::Halted, "halt").await;
+        // Stop admitted exactly at the deadline observes expiry first.
+        let mut h = Harness::new();
+        h.create().await;
+        h.clock.set(60_000);
+        settle(&mut h, State::Expired, "expired").await;
+        let mut h = Harness::new();
+        h.create().await;
+        h.clock.set(100);
+        h.owner.check_time().await;
+        h.clock.set(99);
+        h.owner.check_time().await;
+        settle(&mut h, State::Failed, "clock_rollback").await;
+        // A failed reap after HALT keeps the run halted; disposal is separate.
+        let mut h = Harness::new();
+        h.create().await;
+        for count in 1..=9 {
+            if count == 9 {
+                h.ledger.refuse_reap.store(true, Ordering::SeqCst);
+            }
+            let result = h.submit(Action::Step, &format!("step-{count}")).await;
+            h.finish(count).await;
+            let _ = result.await.unwrap();
+        }
+        assert_eq!(h.view().state, State::Halted);
+        assert_eq!(h.view().termination_reason, Some("halt"));
+        assert!(h.view().disposal_failed);
+        h.ledger.refuse_reap.store(false, Ordering::SeqCst);
+        let stopped = h
+            .submit(Action::Stop, "retry")
+            .await
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stopped["session"]["state"], "halted");
+        assert_eq!(stopped["session"]["disposal_failed"], false);
+        assert_eq!(h.ledger.live.load(Ordering::SeqCst), 0);
+    }
+    #[tokio::test]
+    async fn pause_keeps_reporting_startup_and_expiry_until_they_settle() {
+        let mut h = Harness::new();
+        let create = h.submit(Action::Create, "create").await;
+        let pause = h.submit(Action::Pause, "pause-starting").await;
+        assert_eq!(h.view().state, State::Starting);
+        h.finish(0).await;
+        assert_eq!(create.await.unwrap().unwrap()["session"]["state"], "paused");
+        assert_eq!(pause.await.unwrap().unwrap()["session"]["state"], "paused");
+        h.clock.set(59_999);
+        let step = h.submit(Action::Step, "last-step").await;
+        h.clock.set(60_000);
+        h.owner.check_time().await;
+        assert_eq!(h.view().state, State::Stopping);
+        let pause = h.submit(Action::Pause, "pause-expiring").await;
+        assert_eq!(h.view().state, State::Stopping);
+        h.finish(1).await;
+        assert_eq!(step.await.unwrap().unwrap()["session"]["state"], "expired");
+        assert_eq!(pause.await.unwrap().unwrap()["session"]["state"], "expired");
+        assert_eq!(h.view().termination_reason, Some("expired"));
     }
     // These tests run the actual select loop with all competing events already
     // queued. Reply/admission probes inspect the competing response channel at

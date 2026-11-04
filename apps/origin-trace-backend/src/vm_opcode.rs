@@ -1,5 +1,4 @@
 use crate::{
-    durable,
     error::{Error, Result},
     evidence, vm,
 };
@@ -1925,7 +1924,9 @@ pub(crate) fn workspace(
     Some(workspace)
 }
 
-pub(crate) fn store(root: &Path, analysis: &Value, mut workspaces: Vec<Value>) -> Result<Value> {
+/// Builds the workspace document. vm::store_documents publishes it with the
+/// analysis it names.
+pub(crate) fn document(analysis: &Value, mut workspaces: Vec<Value>) -> Result<Value> {
     if workspaces.len() > MAX_WORKSPACES {
         workspaces.truncate(MAX_WORKSPACES);
         if let Some(last) = workspaces.last_mut() {
@@ -1972,10 +1973,6 @@ pub(crate) fn store(root: &Path, analysis: &Value, mut workspaces: Vec<Value>) -
         },
     });
     document["document_digest"] = json!(vm::digest(&document)?);
-    durable::write_private(
-        &root.join("analysis/vm-opcode-workspace-v2.json"),
-        &vm::canonical(&document)?,
-    )?;
     Ok(document)
 }
 

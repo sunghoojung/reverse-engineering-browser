@@ -354,6 +354,105 @@
               }
             }
           }
+        },
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "pending"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "reason": {
+                "const": "execution-not-yet-complete"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "confirmed"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "reason": {
+                "const": "agreement-for-listed-inputs-only"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "mismatch"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "reason": {
+                "const": "expected-or-observed-effect-differs"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "unsupported"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "reason": {
+                "const": "fixed-owned-inputs-only"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "unknown"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "reason": {
+                "enum": [
+                  "completion-unverified",
+                  "native-execution-or-disposal-unconfirmed"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "reason": {
+                "const": "native-execution-or-disposal-unconfirmed"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "independent": {
+                "$ref": "#/$defs/expectation"
+              }
+            }
+          }
         }
       ]
     }

@@ -474,6 +474,33 @@ bool Respond(helper::Status status,
   return WriteAll(header) &&
          WriteAll({reinterpret_cast<const std::uint8_t*>(payload.data()), payload.size()});
 }
+// A reply's wire state, retirement and exit code all follow from its status.
+// Only replies that leave the helper available report the fixture's own state.
+struct Outcome final {
+  const char* state;
+  bool terminal;
+  int exit_code;
+};
+Outcome Settle(helper::Status status, const OwnedVmFixture& fixture) {
+  switch (status) {
+    case helper::Status::kMalformed:
+    case helper::Status::kFixtureError:
+      return {"failed", true, 2};
+    case helper::Status::kResourceLimit:
+      return {"failed", true, 0};
+    case helper::Status::kExpired:
+      return {"expired", true, 0};
+    case helper::Status::kClosed:
+      return {"stopped", true, 0};
+    case helper::Status::kOk:
+    case helper::Status::kStaleGeneration:
+    case helper::Status::kCountMismatch:
+    case helper::Status::kRequestId:
+    case helper::Status::kHalted:
+      break;
+  }
+  return {fixture.snapshot().halted ? "halted" : "paused", false, 0};
+}
 enum class ReadResult { kComplete, kEof, kShort, kError };
 ReadResult ReadRequest(std::array<std::uint8_t, helper::kRequestBytes>& bytes) {
   std::size_t offset = 0;
@@ -523,73 +550,60 @@ int ControlMain(int argc, char** argv) {
     }
     helper::Request request;
     auto status = helper::Status::kOk;
-    const char* state = fixture.snapshot().halted ? "halted" : "paused";
-    bool terminal = false;
     OwnedVmExecuteResult execution;
     const VmRecordResult* recorded = nullptr;
     if (!helper::DecodeRequest(bytes, request)) {
       status = helper::Status::kMalformed;
-      state = "failed";
-      terminal = true;
     } else if (request.request_id == 0 || request.request_id <= last_request_id) {
       status = helper::Status::kRequestId;
     } else {
       // Even a well-framed guard rejection consumes its request ID. Reusing it
       // with corrected fields is never a retry grant or a second dispatch.
       last_request_id = request.request_id;
-      if (request.generation != options.run_generation) {
+      if (request.request_id == std::numeric_limits<std::uint64_t>::max()) {
+        // No later ID can be admitted, whatever the other guards say, so the
+        // helper retires rather than refusing every later request.
+        status = helper::Status::kResourceLimit;
+      } else if (request.generation != options.run_generation) {
         status = helper::Status::kStaleGeneration;
       } else if (request.executed_count != fixture.executed_count()) {
         status = helper::Status::kCountMismatch;
-      } else if (request.request_id == std::numeric_limits<std::uint64_t>::max()) {
-        status = helper::Status::kResourceLimit;
-        state = "failed";
-        terminal = true;
       } else {
         // Do not inspect the replacement run's deadline for stale identity or
         // count. Real monotonic expiry is checked immediately before dispatch.
         const auto now = MonotonicNow();
         if (helper::Expired(now, last_now, options.scope.expires_at)) {
           status = helper::Status::kExpired;
-          state = "expired";
-          terminal = true;
         } else {
           last_now = now;
           if (request.operation == helper::Operation::kClose) {
             status = helper::Status::kClosed;
-            state = "stopped";
-            terminal = true;
           } else if (request.operation == helper::Operation::kExecuteOne) {
             execution =
                 fixture.ExecuteOne(&recorder, options.scope.document_id, recorder_generation, now);
             switch (execution.status) {
               case OwnedVmExecuteStatus::kCommitted:
                 recorded = &execution.recorder_result;
-                state = fixture.snapshot().halted ? "halted" : "paused";
                 break;
               case OwnedVmExecuteStatus::kHalted:
                 status = helper::Status::kHalted;
                 break;
               case OwnedVmExecuteStatus::kBudget:
                 status = helper::Status::kResourceLimit;
-                state = "failed";
-                terminal = true;
                 break;
               case OwnedVmExecuteStatus::kInvalidState:
                 status = helper::Status::kFixtureError;
-                state = "failed";
-                terminal = true;
                 break;
             }
           }
         }
       }
     }
-    if (!Respond(status, request.request_id, options, fixture, recorder, state, recorded))
+    const auto outcome = Settle(status, fixture);
+    if (!Respond(status, request.request_id, options, fixture, recorder, outcome.state, recorded))
       return 1;
-    if (terminal)
-      return status == helper::Status::kMalformed || status == helper::Status::kFixtureError ? 2
-                                                                                             : 0;
+    if (outcome.terminal)
+      return outcome.exit_code;
   }
 }
 }  // namespace

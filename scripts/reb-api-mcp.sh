@@ -51,7 +51,8 @@ capture redaction, or permission to send captured data to a model provider.
 Without an endpoint selection, use ~/.config/origin-trace/reb-api.endpoint
 and require live capture with a running or paused debugger. The live launcher
 publishes this canonical file. Each reconnect reads it again. An existing MCP
-connection refuses changed/missing endpoint files; it never retargets a call.
+connection refuses changed/missing endpoint files, then exits with status 3 so
+the client shows the disconnect; it never retargets a call.
 
 A single session, the newest directory, or a native
 handshake URL with a query is not chosen for you. `--session-id` reads

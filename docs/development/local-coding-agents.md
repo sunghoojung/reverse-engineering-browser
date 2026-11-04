@@ -61,10 +61,12 @@ and validates that file again. Restart/reconnect the client MCP server after an
 Origin Trace restart: within that one reconnect it uses the new port without
 editing client configuration. A running connection refuses calls if its file
 changes, disappears, becomes invalid, or its live backend instance changes,
-including replacement at the same port. It stays retired until reconnect, even
-if the old file contents return. It never retries or forwards a pending tool
-call to another backend. Reconfirm the intended session and reselect evidence
-before issuing new work after reconnect; this does not transfer authorization.
+including replacement at the same port. The refused call returns its error, then
+the server exits with status 3, so the client shows a stopped server rather than
+a connected one whose every call fails. Restoring the old file contents does not
+revive it. It never retries or forwards a pending tool call to another backend.
+Reconfirm the intended session and reselect evidence before issuing new work
+after reconnect; this does not transfer authorization.
 Tool requests also carry the startup backend identity as an instance precondition;
 the backend rejects a mismatch before dispatch, closing same-port replacement
 between health and action. This is not authentication or authorization, and does
@@ -108,7 +110,7 @@ After a live connection is up, call `get_session_context` before other tools.
 If that same connection later leaves the ready state, other tools fail with
 those codes and are not dispatched. `get_session_context` still reads that
 connection unless the endpoint file or backend instance changed; either change
-retires the connection with no request sent. See
+retires the connection with no request sent, and the server then exits. See
 [Start with compact session context](#start-with-compact-session-context).
 
 ### Read-only and write-capable tools

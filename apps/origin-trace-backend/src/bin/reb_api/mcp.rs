@@ -1269,6 +1269,20 @@ async fn start_session(_: &Value, _: &Value) -> (Value, Option<()>) {
     )
 }
 
+// A retired connection can never serve another call, so it exits after its
+// refusal. Staying alive made clients report a connected server whose every
+// call failed. Exiting lets the client show the disconnect, and a restart
+// resolves the current endpoint again.
+const RETIRED_EXIT: i32 = 3;
+
+fn retire(message: &Value) -> Result<i32, Box<dyn std::error::Error>> {
+    write_message(message)?;
+    eprintln!(
+        "reb-api mcp: this connection was retired because its endpoint or backend instance changed, became unavailable, or its session ended. Restart the MCP server to connect to the current endpoint."
+    );
+    Ok(RETIRED_EXIT)
+}
+
 const NOT_STARTED_HERE: &str = "session_action acts only on a session this connection started with start_live_session. The researcher controls this session. No request was sent.";
 
 const UNBOUND: &str = "No live session is bound to this connection. Call start_live_session to start one for an authorized target, or reconnect after the researcher starts one. No request was sent.";
@@ -1419,8 +1433,7 @@ pub async fn serve(
                 } else {
                     rpc_error(id, -32000, error)
                 };
-                write_message(&response)?;
-                continue;
+                return retire(&response);
             }
             // Preserve preflight rejection for unknown, hidden, binary and
             // invalid tools: live checks must not turn those into HTTP calls.
@@ -1453,8 +1466,7 @@ pub async fn serve(
                     }
                 };
                 if let Err(error) = endpoint_guard.verify_instance(current, health.instance_id) {
-                    write_message(&rpc_result(&id, tool_message(error, true)))?;
-                    continue;
+                    return retire(&rpc_result(&id, tool_message(error, true)));
                 }
                 let tool_name = message["params"]["name"].as_str().unwrap_or("");
                 // Ending must stay possible after capture expires or stops,

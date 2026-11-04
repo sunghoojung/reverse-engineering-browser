@@ -11,11 +11,11 @@ cd "${repository_root}"
 # provenance, where both are hosted, and the commit whose browser inputs built
 # them. Replace every PLACEHOLDER before release. tools/write-release-pair.py
 # reads this block too.
-readonly brave_name=Brave-Browser-Development-v0.5.0-macos-arm64
-readonly source_url=https://github.com/sunghoojung/reverse-engineering-browser/releases/download/brave-0.5.0-79a2b77
-readonly brave_sha256=2fbd6b09dba321550a3e360fcc62839ece0303b9ce356ecc98c903e1e3b09246
-readonly provenance_sha256=4de5d37fdda889753776acc263a94bfeaad44ff1011cefd81e2c68d49b1684c2
-readonly build_source=79a2b770c0e193bcae65ec76160cbc589151f8cb
+readonly brave_name=Brave-Browser-Development-v0.5.1-macos-arm64
+readonly source_url=https://github.com/sunghoojung/reverse-engineering-browser/releases/download/brave-0.5.1-c31239e
+readonly brave_sha256=04c4a3fd929c420ff110aa37bdccf4a47d4a03aa845edcca6857da448004da8a
+readonly provenance_sha256=1b1ac88402dc94ba2ef327496aecc4ed33e2a17c7a35d630a0d8e57703a22605
+readonly build_source=c31239e9c4099883ad90b5fb6bd5f415aea1f29d
 # END reviewed paired browser pin
 
 readonly plist=apps/research-ui/macos/Info.plist

@@ -5298,15 +5298,25 @@ invocationSitesPanel.refresh();
         return (state.decoderInputSnapshot?.bytes ?? 0) + state.decoderSteps.reduce((sum, step) => sum + step.output_bytes, 0);
       }
 
+      // The notice reports the last operation or probe. Engine availability
+      // is decoderEngineStatus ('unknown', 'ready' or 'unavailable').
       function setToolsNotice(kind, message) {
         state.decoderStatus = kind;
         state.decoderMessage = message;
+        state.decoderNoticeRevision += 1;
       }
 
+      // Probes only an engine not yet known to work. A probe's result never
+      // replaces a newer operation notice or claims ready while one runs, and
+      // a failed re-check keeps an engine that already worked.
       async function refreshDecoderEngine(force = false) {
-        if (state.decoderRefreshing || location.protocol === 'file:' || (!force && state.decoderStatus === 'ready')) return;
+        if (state.decoderRefreshing || location.protocol === 'file:' || (!force && state.decoderEngineStatus === 'ready')) return;
         state.decoderRefreshing = true;
-        if (state.decoderStatus !== 'ready') setToolsNotice('loading', 'Checking the native decoder engine…');
+        if (state.decoderEngineStatus === 'unknown' && !state.decoderPending && !state.jwtPending) {
+          setToolsNotice('loading', 'Checking the native decoder engine…');
+        }
+        const noticeRevision = state.decoderNoticeRevision;
+        let notice = null;
         renderTools();
         try {
           const response = await fetch('/api/decoder', {cache: 'no-store'});
@@ -5314,14 +5324,21 @@ invocationSitesPanel.refresh();
           const body = await response.json();
           if (!isDecoderEngine(body)) throw new TypeError('Decoder service returned a malformed capability contract.');
           state.decoderEngine = body;
-          setToolsNotice(body.available ? 'ready' : 'error', body.available
-            ? 'Native C++ decoder ready. Every transform runs only when requested.'
-            : 'The native decoder executable is unavailable. Rebuild the application to restore local tools.');
+          state.decoderEngineStatus = body.available ? 'ready' : 'unavailable';
+          notice = body.available
+            ? ['ready', 'Native C++ decoder ready. Every transform runs only when requested.']
+            : ['error', 'The native decoder executable is unavailable. Rebuild the application to restore local tools.'];
         } catch (error) {
-          state.decoderEngine = emptyDecoderEngine();
-          setToolsNotice('error', `Decoder service unavailable: ${error.message}`);
+          if (state.decoderEngineStatus !== 'ready') {
+            state.decoderEngine = emptyDecoderEngine();
+            state.decoderEngineStatus = 'unavailable';
+            notice = ['error', `Decoder service unavailable: ${error.message}`];
+          }
         } finally {
           state.decoderRefreshing = false;
+          if (notice && noticeRevision === state.decoderNoticeRevision && !state.decoderPending && !state.jwtPending) {
+            setToolsNotice(...notice);
+          }
           renderTools();
         }
       }
@@ -7944,6 +7961,7 @@ invocationSitesPanel.refresh();
           limits: emptyLocalAnalystWorkspace().limits};
         renderLocalAnalyst();
         state.decoderEngine = emptyDecoderEngine();
+        state.decoderEngineStatus = 'unavailable';
         setToolsNotice('error', 'Standalone preview. Open the local app to run native decoder and JWT tools.');
         renderTools();
       }

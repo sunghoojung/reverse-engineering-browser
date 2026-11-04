@@ -10,12 +10,14 @@
 #include <bit>
 #include <cstddef>
 #include <cstdint>
+#include <iterator>
 #include <limits>
 #include <memory>
 #include <span>
 #include <string>
 #include <string_view>
 #include <utility>
+#include <vector>
 
 #include "base/functional/bind.h"
 #include "base/location.h"
@@ -43,6 +45,8 @@ constexpr std::size_t kMaxActiveCaptureBytes = 32U * 1024U * 1024U;
 constexpr std::size_t kRuntimeTypedArrayMinBytes = 32;
 constexpr std::size_t kRuntimeTypedArrayMaxSnapshots = 16;
 constexpr std::uint64_t kExpiryFlushLeadNs = 250'000'000;
+// Live guest documents bound per session across all renderers.
+constexpr std::size_t kGuestBindingLimit = 16;
 // Synced with blink.mojom.ResourceType.kScript. MIME classification below also
 // covers module and worker script requests that use another resource type.
 constexpr int kScriptResourceType = 3;
@@ -482,7 +486,9 @@ void NativeArtifactCaptureSink::CaptureNativeGuest(const NativeGuestCapture& cap
       refuse("native_guest_module_unbound");
       return;
     }
-    if (guest_groups_.size() >= 16) {
+    if (guest_groups_.size() >= kGuestBindingLimit)
+      ReclaimGuestGroups();
+    if (guest_groups_.size() >= kGuestBindingLimit) {
       refuse("native_guest_document_limit");
       return;
     }
@@ -494,19 +500,20 @@ void NativeArtifactCaptureSink::CaptureNativeGuest(const NativeGuestCapture& cap
     created.context_id = capture.execution_context_id;
     created.frame_id = dispatch.header.frame_id;
     created.recipe_digest = recipe_digest;
-    created.failed = true;  // Not yet bound to transferred artifacts.
+    created.current_document = is_current_document;
     guest_groups_.push_back(std::move(created));
     group = &guest_groups_.back();
   }
-  if (group->failed) {
-    // A failed binding is revived only by freshly sent module bytes.
+  if (group->binding == GuestBinding::kUnbound || group->binding == GuestBinding::kRejected) {
+    // Only freshly sent module bytes bind, or revive a rejected binding.
     if (!carries_module || group->attempts >= kNativeGuestModuleAttemptLimit) {
-      refuse(carries_module ? "native_guest_module_unavailable" : "native_guest_module_lost");
+      refuse(carries_module                             ? "native_guest_module_unavailable"
+             : group->binding == GuestBinding::kUnbound ? "native_guest_module_unbound"
+                                                        : "native_guest_module_lost");
       return;
     }
     ++group->attempts;
-    group->failed = false;
-    group->status_reported = false;
+    group->binding = GuestBinding::kPending;
     group->module_digest = module_digest;
     const auto transfer_binding = [&](NativeArtifactKind kind, NativeArtifactCaptureOrigin origin,
                                       std::span<const std::uint8_t> bytes, std::uint64_t parent,
@@ -515,7 +522,7 @@ void NativeArtifactCaptureSink::CaptureNativeGuest(const NativeGuestCapture& cap
           kind, origin, creator, capture.execution_context_id, dispatch.header.frame_id,
           capture.source_url, mojo_base::BigBuffer(bytes), parent, true);
       if (id)
-        guest_receipts_.emplace(id, 0);
+        guest_receipts_.emplace(id, GuestReceipt::kPending);
       return id;
     };
     group->module_id =
@@ -528,7 +535,7 @@ void NativeArtifactCaptureSink::CaptureNativeGuest(const NativeGuestCapture& cap
                                group->module_id, invocation.header.sequence_number)
             : 0;
     if (!group->adapter_id) {
-      group->failed = true;
+      group->binding = GuestBinding::kRejected;
       refuse("native_guest_module_unavailable");
       return;
     }
@@ -541,7 +548,7 @@ void NativeArtifactCaptureSink::CaptureNativeGuest(const NativeGuestCapture& cap
       return;
     }
     if (module_status) {
-      if (group->status_reported)
+      if (group->binding == GuestBinding::kAccepted)
         module_status(true);
       else
         group->status_waiters.push_back(std::move(module_status));
@@ -575,7 +582,7 @@ void NativeArtifactCaptureSink::CaptureNativeGuest(const NativeGuestCapture& cap
     EmitRendererGap(dispatch, "native_guest_snapshot_unavailable");
     return;
   }
-  guest_receipts_.emplace(bytecode_id, 0);
+  guest_receipts_.emplace(bytecode_id, GuestReceipt::kPending);
   GuestDispatch pending;
   pending.event = dispatch;
   pending.event.header.artifact_id = group->module_id;
@@ -673,28 +680,29 @@ void NativeArtifactCaptureSink::DrainGuestDependencies() {
     return;
   const auto receipt = [&](std::uint64_t id) {
     const auto found = guest_receipts_.find(id);
-    return found == guest_receipts_.end() ? std::uint8_t{2} : found->second;
+    return found == guest_receipts_.end() ? GuestReceipt::kRejected : found->second;
   };
+  const auto accepted = [&](std::uint64_t id) { return receipt(id) == GuestReceipt::kAccepted; };
+  const auto rejected = [&](std::uint64_t id) { return receipt(id) == GuestReceipt::kRejected; };
   for (auto& group : guest_groups_) {
-    if (group.failed || group.status_reported)
+    if (group.binding != GuestBinding::kPending)
       continue;
-    const bool rejected = receipt(group.module_id) == 2 || receipt(group.adapter_id) == 2;
-    const bool accepted = receipt(group.module_id) == 1 && receipt(group.adapter_id) == 1;
-    if (!rejected && !accepted)
+    const bool lost = rejected(group.module_id) || rejected(group.adapter_id);
+    const bool bound = accepted(group.module_id) && accepted(group.adapter_id);
+    if (!lost && !bound)
       continue;
-    group.failed = rejected;
-    group.status_reported = accepted;
+    group.binding = bound ? GuestBinding::kAccepted : GuestBinding::kRejected;
     auto waiters = std::move(group.status_waiters);
     group.status_waiters.clear();
     for (auto& waiter : waiters)
-      waiter(accepted);
+      waiter(bound);
   }
   // Invocation is observed independently of successful bytecode capture.
   // Retain the first invocation that created a shared adapter artifact.
   for (auto& [identity, invocation] : guest_invocations_) {
     static_cast<void>(identity);
     if (!invocation.published && invocation.current_document && invocation.current_document() &&
-        receipt(invocation.module_id) == 1 && receipt(invocation.adapter_id) == 1) {
+        accepted(invocation.module_id) && accepted(invocation.adapter_id)) {
       emitter(invocation.event);
       invocation.published = true;
     }
@@ -703,9 +711,8 @@ void NativeArtifactCaptureSink::DrainGuestDependencies() {
     static_cast<void>(key);
     if (pending.failed || pending.published)
       continue;
-    if (!pending.current_document || !pending.current_document() ||
-        receipt(pending.module_id) == 2 || receipt(pending.adapter_id) == 2 ||
-        receipt(pending.bytecode_id) == 2) {
+    if (!pending.current_document || !pending.current_document() || rejected(pending.module_id) ||
+        rejected(pending.adapter_id) || rejected(pending.bytecode_id)) {
       pending.failed = true;
       EmitRendererGap(pending.event, "native_guest_dependency_lost");
       for (const auto& host : pending.hosts)
@@ -715,8 +722,8 @@ void NativeArtifactCaptureSink::DrainGuestDependencies() {
       pending.hosts.clear();
       continue;
     }
-    if (receipt(pending.module_id) != 1 || receipt(pending.adapter_id) != 1 ||
-        receipt(pending.bytecode_id) != 1)
+    if (!accepted(pending.module_id) || !accepted(pending.adapter_id) ||
+        !accepted(pending.bytecode_id))
       continue;
     auto& invocation = guest_invocations_.at(pending.invocation);
     if (!invocation.published) {
@@ -730,6 +737,21 @@ void NativeArtifactCaptureSink::DrainGuestDependencies() {
     guest_held_host_count_ -= pending.hosts.size();
     pending.hosts.clear();
   }
+}
+
+void NativeArtifactCaptureSink::ReclaimGuestGroups() {
+  std::vector<std::function<void(bool)>> waiters;
+  std::erase_if(guest_groups_, [&](GuestGroup& group) {
+    if (group.current_document && group.current_document())
+      return false;
+    std::move(group.status_waiters.begin(), group.status_waiters.end(),
+              std::back_inserter(waiters));
+    return true;
+  });
+  // Dispatches bound to a reclaimed group keep their artifact IDs and are
+  // settled by DrainGuestDependencies, which sees the same lost document.
+  for (auto& waiter : waiters)
+    waiter(false);
 }
 
 void NativeArtifactCaptureSink::FlushBeforeExpiry(const std::uint64_t generation) {
@@ -1082,7 +1104,8 @@ void NativeArtifactCaptureSink::OnTransferCompleted(
     return;
   }
   if (auto receipt = guest_receipts_.find(artifact_id); receipt != guest_receipts_.end()) {
-    receipt->second = status == NativeArtifactReceiveStatus::kAccepted ? 1 : 2;
+    receipt->second = status == NativeArtifactReceiveStatus::kAccepted ? GuestReceipt::kAccepted
+                                                                       : GuestReceipt::kRejected;
     DrainGuestDependencies();
   }
   if (!context.wasm_observations.empty()) {

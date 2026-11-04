@@ -349,6 +349,41 @@ void NativeGuestDependencies(reb::ArtifactReceiver& receiver) {
   d.header.sequence_number = 1001;
   sink.CaptureNativeGuest(capture, 4, [] { return true; });
   Check(events.size() == capped, "Budget omission bounded");
+
+  // Bindings are held for live documents only: a gone document's group is
+  // reclaimed for a new one, and past the bound a live set is refused.
+  configure();
+  transfers.clear();
+  verdicts.clear();
+  capture.module_bytes = module;
+  std::array<bool, 17> live{};
+  live.fill(true);
+  const auto bind_document = [&](std::size_t n, std::uint64_t sequence) {
+    capture.document_token_low = 600 + n;
+    i.header.sequence_number = sequence;
+    d.header.sequence_number = sequence + 1;
+    d.header.parent_event_id = sequence;
+    sink.CaptureNativeGuest(capture, 7, [&live, n] { return live[n]; }, status);
+  };
+  for (std::size_t n = 0; n < 16; ++n)
+    bind_document(n, 600 + 2 * n);
+  Check(transfers.size() == 48 && verdicts.empty(), "Sixteen live documents bind");
+  bind_document(16, 640);
+  Check(transfers.size() == 48 && gap_for(641, "native_guest_document_limit") &&
+            verdicts == std::vector<bool>{false},
+        "A seventeenth live document is refused explicitly");
+  live[3] = false;
+  bind_document(16, 642);
+  Check(transfers.size() == 51 && verdicts == std::vector<bool>{false, false},
+        "A gone document's binding is reclaimed and its pending verdict is a rejection");
+  receive_all();
+  Check(gap_for(607, "native_guest_dependency_lost") &&
+            std::count(verdicts.begin(), verdicts.end(), true) == 16,
+        "The reclaimed document's dispatch is an explicit gap; live bindings are accepted");
+  capture.document_token_low = 12;
+  i.header.sequence_number = 100;
+  d.header.parent_event_id = 100;
+
   configure();
   transfers.clear();
   capture.module_bytes = module;
@@ -357,6 +392,7 @@ void NativeGuestDependencies(reb::ArtifactReceiver& receiver) {
   sink.CaptureNativeGuest(capture, 1, [] { return true; });
   Check(transfers.empty() && gap_for(1002, "native_guest_dependency_rejected"),
         "Wrong invocation or dispatch category rejected");
-  std::cout << "PASS production guest ACK ordering, module verdicts and bounded retry, exact host "
-               "parents without host loss, pre-expiry flush and explicit gaps\n";
+  std::cout << "PASS production guest ACK ordering, module verdicts and bounded retry, "
+               "live-document binding reclaim, exact host parents without host loss, "
+               "pre-expiry flush and explicit gaps\n";
 }

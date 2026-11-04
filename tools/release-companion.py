@@ -202,19 +202,12 @@ def publish(root):
     expected_assets = {
         path.name: (path.stat().st_size, PUBLISHER.digest(path)) for path in assets
     }
-    # The shared helper creates a new ref only and refuses existing tags/releases.
-    # The companion's stricter event admission above never enables its push path.
+    # The shared helper creates a new ref, or adopts one naming this exact
+    # source, and refuses existing releases. The companion's stricter event
+    # admission above never enables its push path.
     PUBLISHER.establish_tag(TAG, source["source_commit"], "workflow_dispatch")
-    subprocess.run([
-        "gh", "release", "create", TAG, "--repo", REPOSITORY,
-        *[str(path) for path in assets], "--verify-tag", "--target", source["source_commit"],
-        "--title", f"Origin Trace {TAG} (companion only)",
-        "--notes-file", str(directory / NOTES),
-    ], check=True)
-    if PUBLISHER.tag_commit(TAG) != source["source_commit"]:
-        raise ValueError("Published tag no longer matches the tested companion source")
-    release = PUBLISHER.api(f"releases/tags/{TAG}")
-    PUBLISHER.verify_assets(release, expected_assets)
+    PUBLISHER.publish_verified(TAG, source["source_commit"], assets, expected_assets,
+                               f"Origin Trace {TAG} (companion only)", directory / NOTES)
 
 
 def main():

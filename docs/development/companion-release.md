@@ -36,10 +36,12 @@ After approval, manually dispatch `release-companion.yml` on the reviewed main
 revision with its full 40-character `source_sha`. That SHA must still be main when
 checked out. The workflow reruns package acceptance, records an immutable artifact
 ID, and downloads those bytes into a read-only checkout for publication. Only the
-publish job has `contents: write`; it creates a fresh `v0.3.2` tag and release and
-verifies the remote asset sizes and SHA256 digests. Existing tags/releases are
-never replaced or adopted. A failed partial publication needs inspection, not a
-blind retry or tag deletion.
+publish job has `contents: write`; it creates the `v0.3.2` tag, uploads a draft
+release, verifies the draft's remote asset sizes and SHA256 digests, and then
+publishes it, as the [paired release](paired-release.md#5-validate-and-publish)
+does. A rerun adopts only a tag naming the same source with no release. Existing
+releases and tags at other commits are never replaced. Inspect a failed
+publication rather than deleting its tag.
 
 Assets are the macOS arm64 ZIP, companion provenance and SHA256SUMS. The ZIP's
 Info.plist must match the source version, build number and companion release type.

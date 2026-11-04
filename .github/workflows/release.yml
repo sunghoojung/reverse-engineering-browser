@@ -32,8 +32,10 @@ on:
 permissions:
   contents: read
 
+# A manual dispatch runs on a branch ref and a tag push on the tag ref. Both can
+# publish the same release, so every publishing run shares one group.
 concurrency:
-  group: release-${{ github.ref }}
+  group: ${{ github.event_name == 'pull_request' && format('release-check-{0}', github.ref) || 'release-publication' }}
   cancel-in-progress: false
 
 jobs:
@@ -104,7 +106,10 @@ jobs:
             [[ "$source_sha" == "$REQUESTED_SHA" ]]
             [[ "$tag" == "$REQUESTED_TAG" ]]
             [[ "$source_sha" == "$(git rev-parse origin/main)" ]]
-            if git show-ref --verify --quiet "refs/tags/$tag"; then
+            # A tag an interrupted run created for this exact source is adopted;
+            # the publish job still refuses it if a release already exists.
+            if git show-ref --verify --quiet "refs/tags/$tag" &&
+               [[ "$(git rev-parse "refs/tags/$tag^{commit}")" != "$source_sha" ]]; then
               echo "Refusing to replace an existing tag: $tag" >&2
               exit 1
             fi
@@ -212,7 +217,7 @@ jobs:
           path: build/release-pair
           digest-mismatch: error
 
-      - name: Publish the fresh tag and verified pair
+      - name: Publish the tag and the verified pair
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ needs.build.outputs.release_tag }}

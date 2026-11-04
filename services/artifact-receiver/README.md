@@ -44,12 +44,19 @@ The socket is mode 0600 and accepts only same-user peers that prove possession
 of the 256-bit token. Every frame must also match the authenticated session ID.
 Stores and their files are restricted to the current user. Each accepted
 artifact receives a fixed acknowledgment only after its immutable blob,
-manifest entry, and containing directory entries are committed. A rejection
-closes that connection because declared frame lengths cannot be trusted for
-resynchronization. Socket mode then keeps the listener and accepts a later
-authenticated connection, so a browser-side reconnect does not silently end
-artifact capture. The live launcher stops the listener explicitly when the
-browser session ends.
+manifest entry, and containing directory entries are committed.
+
+A rejected frame keeps the connection when its header is valid and matches the
+authenticated session: those lengths are bounded, so the receiver reads and
+discards the rest of the frame (at most 16 MiB of content, the browser's own
+cap, or the configured artifact limit if larger) and then acknowledges it. The
+browser therefore always reads the real status, even for a body larger than the
+socket buffers. An invalid header, a session mismatch, a truncated stream or a
+larger declared body leaves the stream unsynchronized, so the receiver
+acknowledges and closes that connection. Socket mode then keeps the listener and
+accepts a later authenticated connection; the browser reconnects within a
+bounded budget and records an `artifact_channel_lost` gap if it cannot. The live
+launcher stops the listener explicitly when the browser session ends.
 
 Response bodies, request bodies and Canvas data URLs are rejected by default.
 Add `--allow-sensitive` only under the sensitive-capture rules in
@@ -63,8 +70,18 @@ runtime-generated source while remaining readable when those fields are absent
 from older version 1 sessions.
 Content bytes, artifact count, and manifest bytes have independent bounds, so
 empty artifacts cannot grow storage or duplicate checks indefinitely. In
-standard-input mode, the receiver stops on invalid or rejected input because a
-pipe cannot resynchronize safely.
+standard-input mode, the receiver stops on invalid or rejected input: there is
+no acknowledgment, so the exit status is the producer's only signal.
+
+The receiver's stored-byte and manifest accounting always matches the files on
+disk. A new blob counts from the moment it is linked. Any failure before its
+manifest record is durable rolls the manifest back to the last acknowledged
+record and then removes that blob. If the rollback itself fails, or the manifest
+changed outside the receiver, the store stops accepting for the rest of the run
+and answers every later frame with an I/O status. On start, a final record with
+no newline, which only an interrupted append leaves and which was never
+acknowledged, is cut back to the last complete record. The receiver reports the
+removed byte count on stderr after `Artifact store ready`.
 
 ## Store ownership
 

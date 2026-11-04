@@ -120,6 +120,12 @@ When a renderer queue drops records, the browser emits a `gap` record after it
 drains the retained batch. Its UTF-8 decimal payload is the number of newly
 dropped records. The gap record repeats the last retained sequence number so it
 does not hide the missing sequence range from broker accounting.
+The browser's own broker queue mixes every process's records, so its drops
+cannot be charged to one renderer stream. Its `gap` record is a browser record:
+it carries the browser process ID, takes the next browser sequence number, names
+the category of the most recently dropped record, and is sent on the writer's
+next wake-up whether or not other records follow. The dropped records' own
+streams still show their missing sequence numbers.
 
 ## Large artifact transfer
 
@@ -140,6 +146,11 @@ complete. Browser capture reports `artifact_captured` after an accepted
 acknowledgment and `artifact_capture_failed` for every other local or receiver
 outcome. These event types use the `artifact` category in the normal event
 stream, so a missing artifact is explicit evidence rather than silent loss.
+A rejection whose header was valid keeps the connection open, and the browser
+reconnects after a connection failure. If it cannot reconnect, it emits one
+`gap` record with the payload `artifact_channel_lost` in the `artifact`
+category, or `vm` when only that category is enabled. Later artifacts are
+refused at admission without a per-capture record.
 
 The receiver defaults to 16 MiB per artifact and 256 MiB per session store. It
 streams and hashes content into immutable content-addressed storage. Canvas

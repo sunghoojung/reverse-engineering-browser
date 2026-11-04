@@ -743,6 +743,13 @@ def check_backend(binary, backend):
             assert len(live_socket.encode()) < 104 and Path(live_socket).is_socket()
             assert live_transport.stat().st_mode & 0o777 == 0o700
             assert Path(live_token).stat().st_mode & 0o777 == 0o600
+            assert not (live_directory / "binding.absent").exists(), "A published binding left a stale absence marker"
+            # No browser has connected yet. The backend's handshake waits for its
+            # first answer, so a read returns at once instead of blocking on it.
+            started = time.monotonic()
+            early = call()
+            assert time.monotonic() - started < 5, "A state read waited for the capture browser"
+            assert early["binding_state"] == "connecting" and early["live_available"] is False, early
             # A capture launched with REB_CONSOLE_DOCUMENT_START=1: its registry
             # outlives every Console connection, exactly like the real browser's.
             live_peer = subprocess.Popen([
@@ -753,8 +760,14 @@ def check_backend(binary, backend):
                 f"--reb-native-console-session-id={live_id}",
                 f"--user-data-dir={live_transport / 'profile'}",
             ])
+            deadline = time.monotonic() + 35
             state = call()
+            while state.get("binding_state") == "connecting":
+                assert time.monotonic() < deadline, "Live bridge never answered its first listing"
+                time.sleep(0.05)
+                state = call()
             assert state["available"] and state["state"] == "idle"
+            assert state["binding_state"] == "ready", state
             assert state["live_available"] and state["targets"], "Live bridge did not authenticate"
             # The packaged app launches its captures with the permission. Before
             # any Console connection, the listing carries the browser's own report
@@ -954,7 +967,9 @@ def check_backend(binary, backend):
             unconfirmed = read_document_start()
             assert unconfirmed["state"] == "idle" and unconfirmed["document_start"]["status"] == "unconfirmed"
             assert "Restart the capture" in unconfirmed["document_start"]["message"]
-            assert call()["live_available"] is False, "An unconfirmed clear handed the live binding back"
+            lost = call()
+            assert lost["live_available"] is False, "An unconfirmed clear handed the live binding back"
+            assert lost["binding_state"] == "lost" and "restart the capture" in lost["message"], lost
             print("PASS live Disconnect clears and confirms armed document-start scripts, and an unconfirmed clear is never reported idle")
             print("PASS public HTTP -> Rust session -> actual C++ bridge -> synthetic browser; locality, UTF-8 limits, identity guards, timeout recovery, malformed peer retirement and profile disposal")
         finally:

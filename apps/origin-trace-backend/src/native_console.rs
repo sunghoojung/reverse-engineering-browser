@@ -11,7 +11,10 @@ use std::{
     os::unix::fs::{FileTypeExt, OpenOptionsExt, PermissionsExt},
     path::{Path, PathBuf},
     process::Stdio,
-    sync::atomic::{AtomicBool, Ordering},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
     time::{Duration, Instant},
 };
 use tempfile::TempDir;
@@ -128,6 +131,20 @@ impl Session {
         self.bridge.stop().await;
         if let Some(browser) = self.browser.as_mut() {
             browser.stop().await;
+        }
+    }
+    // Why this session can no longer be used, decided without an exchange.
+    // An unreadable process status counts as ended.
+    fn ended(&mut self) -> Option<&'static str> {
+        let exited = |process: &mut OwnedProcess| !matches!(process.child.try_wait(), Ok(None));
+        if self.poisoned {
+            Some(LOST_EXCHANGE)
+        } else if self.started.elapsed() >= Duration::from_secs(3600) {
+            Some(LOST_EXPIRED)
+        } else if exited(&mut self.bridge) || self.browser.as_mut().is_some_and(exited) {
+            Some(LOST_EXITED)
+        } else {
+            None
         }
     }
     async fn list_live(&mut self) -> Result<Value> {
@@ -305,7 +322,11 @@ impl ResponseHeader {
                 "Native document listing failed; restart the session",
             ));
         }
-        if parsed.status == 6 || (parsed.status == 5 && parsed.bytes == 0) {
+        // An empty timeout or disconnect record is the browser retiring this
+        // wire connection. With text, either is one command's outcome, such as
+        // a renderer that went away mid-command; the connection stays usable
+        // and `value` reports the outcome as unknown.
+        if parsed.bytes == 0 && (parsed.status == 5 || parsed.status == 6) {
             return Err(Error::conflict(
                 "Native session retired; restart it. Execution may have occurred",
             )
@@ -424,12 +445,86 @@ impl ResponseHeader {
 }
 
 pub struct NativeConsole {
+    // Every operation runs to completion on its own task. An HTTP client that
+    // disconnects mid-exchange would otherwise abandon a half-written request
+    // or an unread reply, leaving the pipe ambiguous, and for a live capture
+    // that ends the one binding its browser connects.
+    inner: Arc<Inner>,
+}
+impl NativeConsole {
+    pub fn new(options: &Options) -> Self {
+        Self {
+            inner: Arc::new(Inner::new(options)),
+        }
+    }
+    pub async fn state(&self) -> Value {
+        let inner = self.inner.clone();
+        detach(async move { inner.state().await })
+            .await
+            .unwrap_or_else(|error| {
+                json!({"contract_version":2,"available":false,"state":"idle","session_id":null,"message":error.message})
+            })
+    }
+    pub async fn document_start(&self, after: u64) -> Result<Value> {
+        let inner = self.inner.clone();
+        detach(async move { inner.document_start(after).await }).await?
+    }
+    pub async fn action(&self, request: &Value) -> Result<Value> {
+        let (inner, request) = (self.inner.clone(), request.clone());
+        detach(async move { inner.action(&request).await }).await?
+    }
+    pub async fn stop(&self) {
+        self.inner.stop().await;
+    }
+    pub async fn arm_live_bridge(&self) {
+        self.inner.arm_live_bridge().await;
+    }
+}
+
+async fn detach<T: Send + 'static>(work: impl Future<Output = T> + Send + 'static) -> Result<T> {
+    tokio::spawn(work)
+        .await
+        .map_err(|_| Error::new(500, "Native console task ended unexpectedly"))
+}
+
+// The live capture's Console binding. The capture browser connects to its
+// bridge once, at launch, and the bridge accepts one connection, so a lost
+// binding cannot be re-armed: it stays lost until the capture restarts. A loss
+// is entered only through `Inner::lose`, which records why for state reads.
+enum LiveBridge {
+    // No binding was published for this capture.
+    Absent,
+    // Published. The handshake task owns the bridge until the capture browser
+    // answers its first document listing.
+    Connecting,
+    // Answered and idle, ready for `connect_live`.
+    Ready(Box<Session>),
+    // Lent to the Console connection in `Inner::session`. A Stop that confirms
+    // its cleanup hands it back as `Ready`.
+    Connected,
+    // Ended. The reason completes `lost_message`.
+    Lost(&'static str),
+}
+impl LiveBridge {
+    fn name(&self) -> &'static str {
+        match self {
+            Self::Absent => "absent",
+            Self::Connecting => "connecting",
+            Self::Ready(_) => "ready",
+            Self::Connected => "connected",
+            Self::Lost(_) => "lost",
+        }
+    }
+}
+
+struct Inner {
     helper: PathBuf,
     browser: Option<PathBuf>,
-    // Lock order: `session`, then `live_bridge`.
+    // Lock order: `session`, then `live`.
     session: Mutex<Option<Session>>,
-    live_bridge: Mutex<Option<Session>>,
+    live: Mutex<LiveBridge>,
     live_directory: Option<PathBuf>,
+    handshake: std::sync::Mutex<Option<tokio::task::AbortHandle>>,
     // A live binding that may have held an armed set ended without the browser
     // confirming the set was cleared. Reads report that instead of an idle
     // experiment until the capture, and with it this backend, is restarted.
@@ -439,8 +534,8 @@ pub struct NativeConsole {
     // different next step from a capture started without the permission.
     live_document_start_permitted: bool,
 }
-impl NativeConsole {
-    pub fn new(options: &Options) -> Self {
+impl Inner {
+    fn new(options: &Options) -> Self {
         Self {
             helper: options.worker(
                 &options.native_console,
@@ -449,8 +544,9 @@ impl NativeConsole {
             ),
             browser: options.brave_binary.clone(),
             session: Mutex::new(None),
-            live_bridge: Mutex::new(None),
+            live: Mutex::new(LiveBridge::Absent),
             live_directory: options.native_console_live_directory.clone(),
+            handshake: std::sync::Mutex::new(None),
             document_start_unconfirmed: AtomicBool::new(false),
             live_document_start_permitted: options.session_document_start,
         }
@@ -472,58 +568,95 @@ impl NativeConsole {
         }
         session.stop().await;
     }
+    // A session that can no longer be used. A live one takes its binding with
+    // it, because the capture browser never connects another.
+    async fn end(&self, session: Session, why: &'static str) {
+        if session.live {
+            let mut live = self.live.lock().await;
+            self.lose(&mut live, Some(session), why).await;
+        } else {
+            self.retire(session).await;
+        }
+    }
+    async fn lose(&self, live: &mut LiveBridge, session: Option<Session>, why: &'static str) {
+        if let LiveBridge::Ready(ready) = std::mem::replace(live, LiveBridge::Lost(why)) {
+            self.retire(*ready).await;
+        }
+        if let Some(session) = session {
+            self.retire(session).await;
+        }
+    }
     fn available(&self) -> bool {
         worker::executable(&self.helper)
             && self.browser.as_ref().is_some_and(|p| worker::executable(p))
     }
-    pub async fn state(&self) -> Value {
+    async fn state(&self) -> Value {
+        // A running action holds `session` for its exchanges. This waits for
+        // it rather than failing it.
         let mut guard = self.session.lock().await;
-        if let Some(session) = guard.as_mut()
-            && (session.poisoned
-                || session.started.elapsed() >= Duration::from_secs(3600)
-                || session
-                    .browser
-                    .as_mut()
-                    .is_some_and(|browser| browser.child.try_wait().ok().flatten().is_some())
-                || session.bridge.child.try_wait().ok().flatten().is_some())
-        {
-            self.retire(guard.take().unwrap()).await;
+        if let Some(why) = guard.as_mut().and_then(Session::ended) {
+            // Records an end that already happened; a usable session is never
+            // ended by a read.
+            self.end(guard.take().unwrap(), why).await;
         }
         if guard.as_ref().is_some_and(|session| !session.live) || self.live_directory.is_none() {
             let id = guard.as_ref().map(|session| session.id.as_str());
             return json!({"contract_version":2,"available":self.available(),"state":if id.is_some() {"ready"} else {"idle"},
                 "session_id":id,"message":if self.available() {"Native console uses a separate disposable browser profile"} else {"Configure a rebuilt custom Brave executable using REB_BRAVE_BINARY"}});
         }
-        let mut armed = self.live_bridge.lock().await;
-        let connected = guard.is_some();
-        let owner = if connected { &mut *guard } else { &mut *armed };
-        if let Some(session) = owner.as_mut() {
-            if !session.poisoned
-                && session.started.elapsed() < Duration::from_secs(3600)
-                && session.bridge.child.try_wait().ok().flatten().is_none()
-                && let Ok(mut listing) = session.list_live().await
-            {
+        // Listing again is how a connected reader sees its selected document
+        // go stale. A failed listing leaves an ambiguous pipe, so it ends the
+        // binding with that reason rather than being retried.
+        if let Some(session) = guard.as_mut() {
+            match session.list_live().await {
+                Ok(mut listing) => {
+                    listing["available"] = json!(self.available());
+                    listing["live_available"] = json!(true);
+                    listing["binding_state"] = json!("connected");
+                    listing["message"] = json!(LIVE_CAPTURE_MESSAGE);
+                    return listing;
+                }
+                Err(_) => self.end(guard.take().unwrap(), LOST_EXCHANGE).await,
+            }
+        }
+        let mut live = self.live.lock().await;
+        drop(guard);
+        // Discovery before any connection: the idle bridge is the only source
+        // of live documents. A failed listing leaves an ambiguous pipe.
+        let listed = match &mut *live {
+            LiveBridge::Ready(session) => Some(match session.ended() {
+                Some(why) => Err(why),
+                None => session.list_live().await.map_err(|_| LOST_EXCHANGE),
+            }),
+            _ => None,
+        };
+        match listed {
+            Some(Ok(mut listing)) => {
                 listing["available"] = json!(self.available());
                 listing["live_available"] = json!(true);
+                listing["binding_state"] = json!("ready");
                 listing["message"] = json!(LIVE_CAPTURE_MESSAGE);
-                if !connected {
-                    listing["state"] = json!("idle");
-                    listing["session_id"] = Value::Null;
-                }
+                listing["state"] = json!("idle");
+                listing["session_id"] = Value::Null;
                 return listing;
             }
-            self.retire(owner.take().unwrap()).await;
+            Some(Err(why)) => self.lose(&mut live, None, why).await,
+            None => {}
         }
         // A vanished or unavailable binding never changes the execution mode.
         // Recover by restarting the capture, not by launching another browser.
+        let message = match &*live {
+            LiveBridge::Connecting => LIVE_CONNECTING.to_owned(),
+            LiveBridge::Lost(why) => lost_message(why),
+            _ => LIVE_UNAVAILABLE.to_owned(),
+        };
         json!({"contract_version":2,"available":self.available(),"live_available":false,"state":"idle","session_id":null,
-            "document_source":"live_capture","targets":[],"truncated":false,
-            "message":"Live capture console binding unavailable. Rebuild the matching browser and backend, then restart the capture. No second browser profile was launched."})
+            "document_source":"live_capture","binding_state":live.name(),"targets":[],"truncated":false,"message":message})
     }
     // Read-only. It never arms, clears, drains, launches, evaluates, or retires
     // a session, including an expired or poisoned one: retirement stays with
     // the explicit actions so a read can never destroy a researcher's context.
-    pub async fn document_start(&self, after: u64) -> Result<Value> {
+    async fn document_start(&self, after: u64) -> Result<Value> {
         let mut guard = self
             .session
             .try_lock()
@@ -586,15 +719,23 @@ impl NativeConsole {
         result["unsupported"] = document_start_unsupported();
         Ok(result)
     }
-    pub async fn stop(&self) {
+    async fn stop(&self) {
+        let handshake = self.handshake.lock().unwrap().take();
+        if let Some(handshake) = handshake {
+            handshake.abort();
+        }
         if let Some(session) = self.session.lock().await.take() {
             session.stop().await;
         }
-        if let Some(session) = self.live_bridge.lock().await.take() {
+        let mut live = self.live.lock().await;
+        if !matches!(*live, LiveBridge::Absent)
+            && let LiveBridge::Ready(session) =
+                std::mem::replace(&mut *live, LiveBridge::Lost(LOST_STOPPED))
+        {
             session.stop().await;
         }
     }
-    pub async fn action(&self, request: &Value) -> Result<Value> {
+    async fn action(&self, request: &Value) -> Result<Value> {
         let mut guard = self
             .session
             .try_lock()
@@ -668,7 +809,7 @@ impl NativeConsole {
                 validation::canonical(&request["target_id"], 64, true, "Console target")?;
             let binding =
                 validation::canonical(&request["binding_id"], 64, true, "Console binding")?;
-            let (session, result) = bind_live(&self.live_bridge, selected, binding).await?;
+            let (session, result) = self.bind_live(selected, binding).await?;
             *guard = Some(session);
             return Ok(result);
         }
@@ -683,10 +824,10 @@ impl NativeConsole {
                 return Err(Error::conflict(SESSION_CHANGED));
             }
             if let Some(mut session) = guard.take() {
-                let bridge_alive = session.bridge.child.try_wait().ok().flatten().is_none();
-                if session.live && !session.poisoned && bridge_alive {
+                let ended = session.ended();
+                if session.live && ended.is_none() {
                     if let Err(error) = session.release_live_values().await {
-                        self.retire(session).await;
+                        self.end(session, LOST_CLEANUP).await;
                         return Err(error);
                     }
                     // The capture browser keeps an armed set for as long as this
@@ -695,21 +836,25 @@ impl NativeConsole {
                     if session.document_start_armed
                         && let Err(error) = session.clear_document_start().await
                     {
-                        self.retire(session).await;
+                        self.end(session, LOST_DOCUMENT_START).await;
                         return Err(error);
                     }
                     session.live_target = None;
                     session.stale_target = None;
-                    let mut armed = self.live_bridge.lock().await;
-                    if let Some(previous) = armed.replace(session) {
-                        previous.stop().await;
+                    let mut live = self.live.lock().await;
+                    if matches!(*live, LiveBridge::Connected) {
+                        *live = LiveBridge::Ready(Box::new(session));
+                    } else {
+                        self.retire(session).await;
                     }
-                } else {
-                    let unconfirmed = session.live && session.document_start_armed;
-                    self.retire(session).await;
+                } else if let Some(why) = ended.filter(|_| session.live) {
+                    let unconfirmed = session.document_start_armed;
+                    self.end(session, why).await;
                     if unconfirmed {
                         return Err(Error::conflict(DOCUMENT_START_UNCONFIRMED));
                     }
+                } else {
+                    self.retire(session).await;
                 }
             }
             return Ok(json!({"contract_version":2,"state":"idle","session_id":null}));
@@ -738,13 +883,8 @@ impl NativeConsole {
         if request["session_id"] != session.id {
             return Err(Error::conflict(SESSION_CHANGED));
         }
-        let ended = if let Some(browser) = session.browser.as_mut() {
-            browser.child.try_wait()?.is_some()
-        } else {
-            session.bridge.child.try_wait()?.is_some()
-        };
-        if session.poisoned || session.started.elapsed() >= Duration::from_secs(3600) || ended {
-            self.retire(guard.take().unwrap()).await;
+        if let Some(why) = session.ended() {
+            self.end(guard.take().unwrap(), why).await;
             return Err(Error::conflict(
                 "Native console session ended; start another session",
             ));
@@ -752,7 +892,7 @@ impl NativeConsole {
         if action == "targets" && session.live {
             let result = session.list_live().await;
             if result.is_err() {
-                self.retire(guard.take().unwrap()).await;
+                self.end(guard.take().unwrap(), LOST_EXCHANGE).await;
             }
             return result;
         }
@@ -824,7 +964,7 @@ impl NativeConsole {
                 return Ok(stale_document(&session.id, target));
             }
             if let Err(error) = session.list_live().await {
-                self.retire(guard.take().unwrap()).await;
+                self.end(guard.take().unwrap(), LOST_EXCHANGE).await;
                 return Err(error);
             }
             if !session.native_targets.contains(&target) {
@@ -842,21 +982,25 @@ impl NativeConsole {
             value["text"] = json!(stale_message(target));
         }
         if result.is_err() {
-            self.retire(guard.take().unwrap()).await;
+            self.end(guard.take().unwrap(), LOST_EXCHANGE).await;
         }
         result
     }
-    pub async fn arm_live_bridge(&self) {
+    async fn arm_live_bridge(self: &Arc<Self>) {
         let Some(directory) = self.live_directory.clone() else {
             return;
         };
-        if !private_directory(&directory) || !worker::executable(&self.helper) {
-            if private_directory(&directory) {
-                write_absent(&directory);
-            }
+        if !private_directory(&directory) {
             return;
         }
+        // Exactly one marker describes this arm, even in a reused directory,
+        // so the launcher never reads an earlier backend's binding.
+        let _ = std::fs::remove_file(directory.join("binding"));
         let _ = std::fs::remove_file(directory.join("binding.absent"));
+        if !worker::executable(&self.helper) {
+            write_absent(&directory);
+            return;
+        }
         // Capture paths can exceed sockaddr_un.sun_path, especially beneath
         // macOS Application Support. Publish the binding there, but keep the
         // authenticated socket and token in a short, privately owned directory.
@@ -883,7 +1027,81 @@ impl NativeConsole {
             write_absent(&directory);
             return;
         }
-        *self.live_bridge.lock().await = Some(bridge.session(ConsoleDir::Live(transport), true));
+        self.handshake(bridge.session(ConsoleDir::Live(transport), true))
+            .await;
+    }
+    // The capture browser launches only after it reads the binding, so its
+    // first answer can take as long as browser startup. That wait happens here,
+    // never in a state read or an action.
+    async fn handshake(self: &Arc<Self>, mut session: Session) {
+        *self.live.lock().await = LiveBridge::Connecting;
+        let inner = self.clone();
+        let task = tokio::spawn(async move {
+            let listed = session.list_live().await;
+            let mut live = inner.live.lock().await;
+            if !matches!(*live, LiveBridge::Connecting) {
+                session.stop().await;
+            } else if listed.is_ok() {
+                *live = LiveBridge::Ready(Box::new(session));
+            } else {
+                inner.lose(&mut live, Some(session), LOST_HANDSHAKE).await;
+            }
+        });
+        *self.handshake.lock().unwrap() = Some(task.abort_handle());
+    }
+    async fn bind_live(&self, selected: u64, binding: u64) -> Result<(Session, Value)> {
+        let mut live = self.live.lock().await;
+        let session = match &mut *live {
+            LiveBridge::Ready(session) => session,
+            LiveBridge::Connecting => return Err(Error::conflict(LIVE_CONNECTING)),
+            LiveBridge::Lost(why) => return Err(Error::conflict(lost_message(why))),
+            LiveBridge::Absent | LiveBridge::Connected => {
+                return Err(Error::conflict(
+                    "The live capture has no native console binding. Restart the capture; a second browser profile was not launched.",
+                ));
+            }
+        };
+        if session.binding_id != binding.to_string() {
+            return Err(Error::conflict(
+                "Live capture binding changed; select and authorize a current document. Read get_native_console for the current binding_id.",
+            ));
+        }
+        if let Some(why) = session.ended() {
+            self.lose(&mut live, None, why).await;
+            return Err(Error::conflict(lost_message(why)));
+        }
+        let mut listing = match session.list_live().await {
+            Ok(listing) => listing,
+            Err(error) => {
+                self.lose(&mut live, None, LOST_EXCHANGE).await;
+                return Err(error);
+            }
+        };
+        if !session.native_targets.contains(&selected) {
+            return Err(Error::conflict(format!(
+                "Selected live document changed; explicitly select a current document. Document {selected} is not in the current listing: it was replaced or closed. Read get_native_console and pick a current id."
+            )));
+        }
+        // HTTP connections get a fresh identity, independently of the existing
+        // authenticated wire connection. Requests and handles from before Stop
+        // cannot become valid again after reconnecting to the capture browser.
+        let mut random = [0u8; 8];
+        std::fs::File::open("/dev/urandom")?.read_exact(&mut random)?;
+        let next = u64::from_le_bytes(random).max(1).to_string();
+        if next == session.id {
+            return Err(Error::conflict("Console identity collision; connect again"));
+        }
+        session.id = next;
+        session.live_target = Some(selected);
+        session.stale_target = None;
+        listing["session_id"] = json!(session.id);
+        listing["selected_target_id"] = json!(selected.to_string());
+        listing["selection"] = session.selection();
+        let LiveBridge::Ready(session) = std::mem::replace(&mut *live, LiveBridge::Connected)
+        else {
+            unreachable!("the binding was ready above");
+        };
+        Ok((*session, listing))
     }
     async fn launch(&self, address: &str, document_start: bool) -> Result<Session> {
         let directory = tempfile::Builder::new()
@@ -1436,57 +1654,28 @@ fn document_start_path(path: &str) -> bool {
 const LIVE_CAPTURE_MESSAGE: &str =
     "These documents come from the live capture. A second browser profile is not opened.";
 
-async fn bind_live(
-    live_bridge: &Mutex<Option<Session>>,
-    selected: u64,
-    binding: u64,
-) -> Result<(Session, Value)> {
-    let mut armed = live_bridge.lock().await;
-    let session = armed.as_mut().ok_or_else(|| Error::conflict(
-        "The live capture has no native console binding. Restart the capture; a second browser profile was not launched.",
-    ))?;
-    if session.binding_id != binding.to_string() {
-        return Err(Error::conflict(
-            "Live capture binding changed; select and authorize a current document. Read get_native_console for the current binding_id.",
-        ));
-    }
-    if session.poisoned
-        || session.started.elapsed() >= Duration::from_secs(3600)
-        || session.bridge.child.try_wait()?.is_some()
-    {
-        armed.take().unwrap().stop().await;
-        return Err(Error::conflict(
-            "Live console binding ended; restart the capture",
-        ));
-    }
-    let mut listing = match session.list_live().await {
-        Ok(listing) => listing,
-        Err(error) => {
-            armed.take().unwrap().stop().await;
-            return Err(error);
-        }
-    };
-    if !session.native_targets.contains(&selected) {
-        return Err(Error::conflict(format!(
-            "Selected live document changed; explicitly select a current document. Document {selected} is not in the current listing: it was replaced or closed. Read get_native_console and pick a current id."
-        )));
-    }
-    // HTTP connections get a fresh identity, independently of the existing
-    // authenticated wire connection. Requests and handles from before Stop
-    // cannot become valid again after reconnecting to the capture browser.
-    let mut random = [0u8; 8];
-    std::fs::File::open("/dev/urandom")?.read_exact(&mut random)?;
-    let next = u64::from_le_bytes(random).max(1).to_string();
-    if next == session.id {
-        return Err(Error::conflict("Console identity collision; connect again"));
-    }
-    session.id = next;
-    session.live_target = Some(selected);
-    session.stale_target = None;
-    listing["session_id"] = json!(session.id);
-    listing["selected_target_id"] = json!(selected.to_string());
-    listing["selection"] = session.selection();
-    Ok((armed.take().unwrap(), listing))
+const LIVE_CONNECTING: &str = "Waiting for the capture browser to connect its Console binding. \
+     Its documents appear here once it answers. No second browser profile is opened.";
+
+const LIVE_UNAVAILABLE: &str = "Live capture console binding unavailable. Rebuild the matching browser and backend, \
+     then restart the capture. No second browser profile was launched.";
+
+// Why a live binding ended, completing `lost_message`.
+const LOST_EXCHANGE: &str =
+    "a native exchange failed or timed out, and an ambiguous pipe is never reused";
+const LOST_HANDSHAKE: &str = "the capture browser did not answer its first document listing";
+const LOST_EXPIRED: &str = "its one-hour connection limit elapsed";
+const LOST_EXITED: &str = "its bridge process exited";
+const LOST_CLEANUP: &str = "live value cleanup was not confirmed";
+const LOST_DOCUMENT_START: &str =
+    "the capture browser did not confirm clearing document-start scripts";
+const LOST_STOPPED: &str = "the backend stopped";
+
+fn lost_message(why: &str) -> String {
+    format!(
+        "The live capture's Console binding ended: {why}. The capture browser connects its binding once, \
+         so restart the capture to use the live Console again. No second browser profile was launched."
+    )
 }
 
 fn stale_message(target: u64) -> String {
@@ -1940,7 +2129,7 @@ mod tests {
         crate::validation::schema("NativeConsoleDocumentStart", &state, 500).unwrap();
         // Reading twice cannot launch a browser or change the reported state.
         assert_eq!(console.document_start(0).await.unwrap(), state);
-        assert!(console.session.lock().await.is_none());
+        assert!(console.inner.session.lock().await.is_none());
     }
 
     #[tokio::test]
@@ -1968,10 +2157,19 @@ mod tests {
                 .message
                 .contains("second browser profile was not launched")
         );
-        assert!(console.session.lock().await.is_none());
+        assert!(console.inner.session.lock().await.is_none());
     }
     // A scripted pipe peer tests backend dispatch, not Blink/V8 behavior.
     async fn live_fixture() -> (NativeConsole, TempDir) {
+        let (session, directory) = live_peer();
+        let mut options = Options::try_parse_from(["origin-trace-backend"]).unwrap();
+        options.native_console_live_directory = Some(directory.path().into());
+        let console = NativeConsole::new(&options);
+        console.inner.handshake(session).await;
+        settle(&console).await;
+        (console, directory)
+    }
+    fn live_peer() -> (Session, TempDir) {
         let directory = tempfile::tempdir().unwrap();
         std::fs::write(
             directory.path().join("targets.json"),
@@ -1982,7 +2180,7 @@ mod tests {
         )
         .unwrap();
         let script = r#"
-import json, pathlib, struct, sys
+import json, pathlib, struct, sys, time
 root = pathlib.Path(sys.argv[1])
 request = struct.Struct('<IHHQQII')
 response = struct.Struct('<IHHQHHIII')
@@ -1995,7 +2193,11 @@ while True:
     source = sys.stdin.buffer.read(size).decode()
     with (root / 'requests.jsonl').open('a') as log:
         log.write(json.dumps({'operation':operation,'target':target,'source':source}) + '\n')
-    count, kind, flags = 0, 11, 0
+    count, kind, flags, wire_status = 0, 11, 0, 0
+    # A slow browser answer, to hold an exchange open.
+    delay = root / ('slow-listing' if operation == 1 else 'slow-command')
+    if delay.exists():
+        time.sleep(float(delay.read_text() or '1'))
     if operation == 1:
         documents = json.loads((root / 'targets.json').read_text())
         records = []
@@ -2027,9 +2229,12 @@ while True:
         payload, kind = json.dumps({'status':status,'contract_version':3,'permitted':True,'generation':'1',
             'scripts':scripts,'renderer_processes':1,'pending_renderer_processes':0,
             'refused_renderer_processes':0}).encode(), 12
+    elif '__renderer_gone__' in source:
+        # The browser's per-command reply when the selected renderer's pipe drops.
+        payload, kind, wire_status = b'Renderer disconnected', 0, 6
     else:
         payload = json.dumps({'status':'ok','value':{'type':'object','text':str(target),'handle':'7','truncated':False}}).encode()
-    sys.stdout.buffer.write(response.pack(magic,version,0,sequence,kind,flags,count,len(payload),0) + payload)
+    sys.stdout.buffer.write(response.pack(magic,version,wire_status,sequence,kind,flags,count,len(payload),0) + payload)
     sys.stdout.buffer.flush()
 "#;
         let mut command = Command::new("python3");
@@ -2061,11 +2266,19 @@ while True:
             document_start: false,
             document_start_armed: false,
         };
-        let mut options = Options::try_parse_from(["origin-trace-backend"]).unwrap();
-        options.native_console_live_directory = Some(directory.path().into());
-        let console = NativeConsole::new(&options);
-        *console.live_bridge.lock().await = Some(session);
-        (console, directory)
+        (session, directory)
+    }
+    async fn settle(console: &NativeConsole) {
+        while matches!(*console.inner.live.lock().await, LiveBridge::Connecting) {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+    fn binding(console: &NativeConsole) -> &'static str {
+        match console.inner.live.try_lock().as_deref() {
+            Ok(LiveBridge::Ready(_)) => "ready",
+            Ok(live) => live.name(),
+            Err(_) => "locked",
+        }
     }
     fn requests(directory: &TempDir) -> Vec<Value> {
         std::fs::read_to_string(directory.path().join("requests.jsonl"))
@@ -2140,18 +2353,14 @@ while True:
     async fn live_replaced_binding_rejects_reused_document_id_before_dispatch() {
         let (console, directory) = live_fixture().await;
         assert_eq!(console.state().await["binding_id"], "42");
-        console
-            .live_bridge
-            .lock()
-            .await
-            .as_mut()
-            .unwrap()
-            .binding_id = "99".into();
+        if let LiveBridge::Ready(session) = &mut *console.inner.live.lock().await {
+            session.binding_id = "99".into();
+        }
         let before = requests(&directory).len();
         let error = console.action(&json!({"action":"connect_live","binding_id":"42","target_id":"22","confirm_live":true})).await.unwrap_err();
         assert_eq!(error.status, 409);
         assert_eq!(requests(&directory).len(), before);
-        assert!(console.session.lock().await.is_none());
+        assert!(console.inner.session.lock().await.is_none());
         let state = console.state().await;
         assert_eq!(state["binding_id"], "99");
         assert_eq!(state["targets"][1]["id"], "22");
@@ -2260,7 +2469,9 @@ while True:
         assert_eq!(missing.status, 503);
         assert!(missing.message.contains("document_start true"));
         let mut console = console;
-        console.live_document_start_permitted = true;
+        Arc::get_mut(&mut console.inner)
+            .expect("no task holds the console")
+            .live_document_start_permitted = true;
         let unsupported = console.action(&arm).await.unwrap_err();
         assert!(
             unsupported
@@ -2289,16 +2500,10 @@ while True:
         let last = requests(&directory).pop().unwrap();
         assert_eq!(last["target"], 22);
         assert_eq!(last["source"], r#"{"operation":"clear"}"#);
-        assert!(
-            console
-                .live_bridge
-                .lock()
-                .await
-                .as_ref()
-                .unwrap()
-                .browser
-                .is_none()
-        );
+        assert!(matches!(
+            &*console.inner.live.lock().await,
+            LiveBridge::Ready(session) if session.browser.is_none()
+        ));
         let second = connect_fixture(&console, "11").await;
         assert_ne!(first, second);
         let before = requests(&directory).len();
@@ -2307,6 +2512,7 @@ while True:
         assert_eq!(requests(&directory).len(), before);
         // Binding loss stays live/unavailable and cannot spawn or bind a replacement.
         console
+            .inner
             .session
             .lock()
             .await
@@ -2318,7 +2524,10 @@ while True:
         let state = console.state().await;
         assert_eq!(state["document_source"], "live_capture");
         assert_eq!(state["live_available"], false);
+        assert_eq!(state["binding_state"], "lost");
+        assert!(state["message"].as_str().unwrap().contains(LOST_EXITED));
         assert_eq!(state["targets"], json!([]));
+        crate::validation::schema("NativeConsoleState", &state, 500).unwrap();
         assert!(
             console
                 .action(&json!({"action":"connect_live","binding_id":"42","target_id":"11","confirm_live":true}))
@@ -2389,7 +2598,7 @@ while True:
             error.message
         );
         // The binding is ended rather than handed back with a set still armed.
-        assert!(console.live_bridge.lock().await.is_none());
+        assert_eq!(binding(&console), "lost");
         let state = console.document_start(0).await.unwrap();
         assert_eq!(state["state"], "idle");
         assert_eq!(state["document_start"]["status"], "unconfirmed");
@@ -2407,7 +2616,14 @@ while True:
     async fn live_stop_of_a_failed_connection_never_reports_an_armed_set_gone() {
         let (console, directory) = live_fixture().await;
         let identity = arm_fixture(&console, &directory).await;
-        console.session.lock().await.as_mut().unwrap().poisoned = true;
+        console
+            .inner
+            .session
+            .lock()
+            .await
+            .as_mut()
+            .unwrap()
+            .poisoned = true;
         let state = console.document_start(0).await.unwrap();
         assert_eq!(state["document_start"]["status"], "unconfirmed");
         crate::validation::schema("NativeConsoleDocumentStart", &state, 500).unwrap();
@@ -2425,6 +2641,200 @@ while True:
         );
         console.stop().await;
     }
+    #[tokio::test]
+    async fn a_renderer_that_goes_away_mid_command_does_not_end_the_live_binding() {
+        let (console, directory) = live_fixture().await;
+        let identity = connect_fixture(&console, "22").await;
+        let gone = console
+            .action(
+                &json!({"action":"runtime","session_id":identity,"target_id":"22",
+            "command":{"operation":"evaluate","source":"__renderer_gone__"}}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(gone["status"], "disconnected");
+        assert_eq!(gone["code"], "command_outcome_unknown");
+        assert_eq!(gone["text"], "Renderer disconnected");
+        let evaluations = |directory: &TempDir| {
+            requests(directory)
+                .iter()
+                .filter(|request| request["operation"] == 3)
+                .count()
+        };
+        assert_eq!(
+            evaluations(&directory),
+            1,
+            "an unknown outcome is never retried"
+        );
+        let state = console.state().await;
+        assert_eq!(state["session_id"], identity);
+        assert_eq!(state["binding_state"], "connected");
+        crate::validation::schema("NativeConsoleState", &state, 500).unwrap();
+        let next = console
+            .action(
+                &json!({"action":"runtime","session_id":identity,"target_id":"22",
+            "command":{"operation":"evaluate","source":"1"}}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(next["runtime"]["status"], "ok");
+        console
+            .action(&json!({"action":"stop","session_id":identity}))
+            .await
+            .unwrap();
+        assert_eq!(binding(&console), "ready");
+        console.stop().await;
+    }
+    #[tokio::test]
+    async fn a_client_that_disconnects_mid_command_does_not_end_the_live_binding() {
+        let (console, directory) = live_fixture().await;
+        let identity = connect_fixture(&console, "22").await;
+        std::fs::write(directory.path().join("slow-command"), "0.4").unwrap();
+        let evaluate = json!({"action":"runtime","session_id":identity,"target_id":"22",
+            "command":{"operation":"evaluate","source":"1"}});
+        // The HTTP future is dropped while the browser is still answering.
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), console.action(&evaluate))
+                .await
+                .is_err()
+        );
+        std::fs::remove_file(directory.path().join("slow-command")).unwrap();
+        // The command finishes on its own; this read waits for it.
+        let state = console.state().await;
+        assert_eq!(state["state"], "ready");
+        assert_eq!(state["session_id"], identity);
+        assert_eq!(state["binding_state"], "connected");
+        let before = requests(&directory).len();
+        let next = console.action(&evaluate).await.unwrap();
+        assert_eq!(next["runtime"]["status"], "ok");
+        assert_eq!(
+            requests(&directory)[before..]
+                .iter()
+                .filter(|request| request["operation"] == 3)
+                .count(),
+            1
+        );
+        console.stop().await;
+    }
+    #[tokio::test]
+    async fn state_reads_wait_for_actions_instead_of_failing_them() {
+        let (console, directory) = live_fixture().await;
+        let console = Arc::new(console);
+        std::fs::write(directory.path().join("slow-listing"), "0.3").unwrap();
+        let reader = console.clone();
+        let read = tokio::spawn(async move { reader.state().await });
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        // Connecting waits for the read's listing instead of failing.
+        let identity = connect_fixture(&console, "22").await;
+        assert_eq!(read.await.unwrap()["binding_state"], "ready");
+        std::fs::remove_file(directory.path().join("slow-listing")).unwrap();
+        // A connected read lists once, so the selection it reports is current.
+        let before = requests(&directory).len();
+        let state = console.state().await;
+        assert_eq!(state["binding_state"], "connected");
+        assert_eq!(state["selected_target_id"], "22");
+        assert_eq!(state["targets"][1]["id"], "22");
+        crate::validation::schema("NativeConsoleState", &state, 500).unwrap();
+        let listed = &requests(&directory)[before..];
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0]["operation"], 1);
+        // A read during a running command waits for it and leaves it alone.
+        std::fs::write(directory.path().join("slow-command"), "0.3").unwrap();
+        let actor = console.clone();
+        let command = tokio::spawn(async move {
+            actor
+                .action(
+                    &json!({"action":"runtime","session_id":identity,"target_id":"22",
+                "command":{"operation":"evaluate","source":"1"}}),
+                )
+                .await
+        });
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(console.state().await["binding_state"], "connected");
+        assert_eq!(command.await.unwrap().unwrap()["runtime"]["status"], "ok");
+        console.stop().await;
+    }
+    #[tokio::test]
+    async fn the_first_browser_answer_waits_in_the_handshake_and_a_failed_one_is_reported() {
+        let (session, directory) = live_peer();
+        std::fs::write(directory.path().join("slow-listing"), "0.4").unwrap();
+        let mut options = Options::try_parse_from(["origin-trace-backend"]).unwrap();
+        options.native_console_live_directory = Some(directory.path().into());
+        let console = NativeConsole::new(&options);
+        console.inner.handshake(session).await;
+        let started = Instant::now();
+        let state = console.state().await;
+        assert!(
+            started.elapsed() < Duration::from_millis(300),
+            "a read never waits for the browser"
+        );
+        assert_eq!(state["binding_state"], "connecting");
+        assert_eq!(state["live_available"], false);
+        assert!(
+            state["message"]
+                .as_str()
+                .unwrap()
+                .contains("Waiting for the capture browser")
+        );
+        crate::validation::schema("NativeConsoleState", &state, 500).unwrap();
+        let error = console
+            .action(&json!({"action":"connect_live","binding_id":"42","target_id":"22","confirm_live":true}))
+            .await
+            .unwrap_err();
+        assert_eq!(error.status, 409);
+        std::fs::remove_file(directory.path().join("slow-listing")).unwrap();
+        settle(&console).await;
+        let state = console.state().await;
+        assert_eq!(state["binding_state"], "ready");
+        assert_eq!(state["targets"][1]["id"], "22");
+        console.stop().await;
+        assert_eq!(console.state().await["binding_state"], "lost");
+
+        // A bridge that never answers is reported lost, with why.
+        let (mut session, directory) = live_peer();
+        session.bridge.stop().await;
+        let mut options = Options::try_parse_from(["origin-trace-backend"]).unwrap();
+        options.native_console_live_directory = Some(directory.path().into());
+        let console = NativeConsole::new(&options);
+        console.inner.handshake(session).await;
+        settle(&console).await;
+        let state = console.state().await;
+        assert_eq!(state["binding_state"], "lost");
+        let message = state["message"].as_str().unwrap();
+        assert!(message.contains(LOST_HANDSHAKE), "{message}");
+        assert!(message.contains("restart the capture"), "{message}");
+        crate::validation::schema("NativeConsoleState", &state, 500).unwrap();
+        let error = console
+            .action(&json!({"action":"connect_live","binding_id":"42","target_id":"22","confirm_live":true}))
+            .await
+            .unwrap_err();
+        assert!(error.message.contains(LOST_HANDSHAKE), "{}", error.message);
+    }
+    #[tokio::test]
+    async fn arming_in_a_reused_directory_leaves_exactly_one_marker() {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        std::fs::write(
+            directory.path().join("binding"),
+            "1\n/tmp/earlier/console.sock\n/tmp/earlier/token\n",
+        )
+        .unwrap();
+        let options = Options::try_parse_from([
+            "origin-trace-backend",
+            "--native-console",
+            "/nonexistent/reb-console",
+            "--native-console-live-directory",
+            directory.path().to_str().unwrap(),
+        ])
+        .unwrap();
+        let console = NativeConsole::new(&options);
+        console.arm_live_bridge().await;
+        assert!(!directory.path().join("binding").exists());
+        assert!(directory.path().join("binding.absent").is_file());
+        let state = console.state().await;
+        assert_eq!(state["binding_state"], "absent");
+        crate::validation::schema("NativeConsoleState", &state, 500).unwrap();
+    }
     #[test]
     fn retired_session_does_not_claim_the_command_had_no_effect() {
         for (status, cause) in [(5u16, "timeout"), (6, "disconnected")] {
@@ -2440,6 +2850,13 @@ while True:
                 serde_json::to_value(error).unwrap()["details"],
                 json!({"phase":"command_exchange","cause":cause})
             );
+            // With text it is one command's unknown outcome, and the
+            // connection stays usable.
+            bytes[24..28].copy_from_slice(&21u32.to_le_bytes());
+            let parsed = ResponseHeader::parse(&bytes, 1, 2).unwrap();
+            let result = parsed.value(b"Renderer disconnected", "1").unwrap();
+            assert_eq!(result["code"], "command_outcome_unknown");
+            assert_eq!(result["details"]["cause"], cause);
         }
     }
 }

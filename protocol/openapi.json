@@ -3344,15 +3344,16 @@
                 "process-stop",
                 "data-discard"
               ],
-              "when": "An expired, poisoned, disconnected, or failed native session can be retired, killing its owned processes and deleting its temporary profile."
+              "when": "A native session that already ended (its browser or bridge exited, its hour elapsed, or an exchange failed) is retired, killing its owned processes and deleting its temporary profile. A usable session is never ended by this read, which waits for a running action rather than failing it."
             },
             {
               "effects": [
                 "local-state-write",
                 "browser-control",
+                "process-stop",
                 "data-discard"
               ],
-              "when": "A live capture binding is present: lists exact native documents and revokes stale selected-document authorization. No supplied JavaScript is evaluated."
+              "when": "A live capture binding is present: lists exact native documents from the idle binding or the open connection and revokes stale selected-document authorization. A failed listing marks the binding lost and stops its bridge, because the capture browser connects its binding once and never again. No supplied JavaScript is evaluated."
             }
           ],
           "uncertainties": [],
@@ -3363,7 +3364,7 @@
             }
           ],
           "confirmations": [],
-          "notes": "Reports disposable startup availability and separately live binding availability. Live discovery lists native documents from the same capture browser, never via CDP or URL matching, and does not opt into live execution. May retire invalid sessions even though this is GET.",
+          "notes": "Reports disposable startup availability and separately live binding availability. Live discovery lists native documents from the same capture browser, never via CDP or URL matching, and does not opt into live execution. Never waits for the capture browser to connect; binding_state reports connecting until it answers. May retire sessions and bindings that already ended even though this is GET.",
           "sources": [
             {
               "path": "apps/origin-trace-backend/src/native_console.rs",
@@ -15389,6 +15390,17 @@
           },
           "selection": {
             "$ref": "#/components/schemas/NativeConsoleSelection"
+          },
+          "binding_state": {
+            "type": "string",
+            "enum": [
+              "absent",
+              "connecting",
+              "ready",
+              "connected",
+              "lost"
+            ],
+            "description": "Live capture binding lifecycle, present with document_source. The capture browser connects its binding once, at launch, so lost lasts until the capture restarts; message says why. connecting means the browser has not answered its first listing yet. ready is idle and listable; connected is held by the Console session."
           }
         },
         "required": [

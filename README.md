@@ -257,7 +257,10 @@ make live
 
 Origin Trace and the custom Brave browser open together. Browse in that Brave
 window and select requests in the **Traffic** tab. Close Brave to end the
-session. Captured evidence is stored under `build/sessions/live/`.
+session. If Brave exits without ever connecting, for example because a Brave
+already running with the same `REB_BRAVE_PROFILE` took the launch, the session
+ends within 10 seconds and says so. Captured evidence is stored under
+`build/sessions/live/`.
 
 Capture is native-only. Do not set `REB_CDP_NETWORK_CAPTURE` or configure a
 debugger transport: the launcher rejects those removed paths. Native network

@@ -160,7 +160,12 @@ console.log(
 );
 
 // Reproduce a browser exit after readiness through the actual packaged launcher.
-// Only the PID recorded by our disposable wrapper is terminated.
+// Only the PID recorded by our disposable wrapper is terminated. The launcher
+// is ready 250 ms after it starts the browser, often before the browser opens
+// its first window. On macOS, Chromium handles only the first SIGTERM, and an
+// exit requested before that window exists only marks it as quitting, so the
+// browser keeps running. The coordinator handles every browser exit the same
+// way, so SIGKILL, which no startup phase can defer, exercises that teardown.
 await writeFile(browserPid, "");
 const interrupted = spawn(join(contents, "Resources/run-live-session.sh"), [], {
   cwd: temporary,
@@ -203,7 +208,7 @@ try {
   const pid = Number((await readFile(browserPid, "utf8")).trim());
   assert(Number.isSafeInteger(pid) && pid > 0, "Disposable browser PID missing");
   interruptedBrowserPid = pid;
-  process.kill(pid, "SIGTERM");
+  process.kill(pid, "SIGKILL");
   const code = await Promise.race([
     interruptionExit,
     new Promise((_, reject) => {

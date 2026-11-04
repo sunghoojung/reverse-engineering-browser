@@ -2771,11 +2771,13 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
     }
   }
 
+  // The page that stopped, again with its native capability marker; neither
+  // that nor the offline fallback widens what the close guard trusts.
   private func reloadAfterContentProcessStop(_ url: URL?) {
     lastContentProcessReload = Date()
-    if let url, !isEndedLiveWorkspace(url) {
-      // The same document again, which never widens what the close guard trusts.
-      webView?.load(URLRequest(url: url))
+    let page = url.flatMap { $0.scheme == "reb" ? $0 : nativeUIURL($0.absoluteString) }
+    if let page, !isEndedLiveWorkspace(url) {
+      webView?.load(URLRequest(url: page))
     } else if let localApplicationURL {
       load(localApplicationURL)
     }

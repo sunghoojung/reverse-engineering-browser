@@ -126,11 +126,11 @@ static_library("renderer") {
     "common/native_js_dispatch.h",
     "common/native_js_invocation.h",
     "common/native_vm_dispatch.h",
+    "common/native_vm_finding.h",
     "common/native_wasm_dispatch.h",
     "common/native_wasm_guest.h",
     "common/native_wasm_guest_adapter.h",
     "common/native_wasm_guest_wire.h",
-    "common/native_vm_finding.h",
     "renderer/native_console_agent.cc",
     "renderer/native_console_agent.h",
     "renderer/native_console_deadline.cc",
@@ -199,11 +199,11 @@ source_set("browser") {
     "common/native_probe_ipc.h",
     "common/native_runtime_snapshot_queue.h",
     "common/native_vm_dispatch.h",
+    "common/native_vm_finding.h",
     "common/native_wasm_dispatch.h",
     "common/native_wasm_guest.h",
     "common/native_wasm_guest_adapter.h",
     "common/native_wasm_guest_wire.h",
-    "common/native_vm_finding.h",
   ]
 
   deps = [
@@ -223,7 +223,8 @@ source_set("browser") {
   ]
 }
 
-# Requires the pinned Chromium JSON implementation; never covered by the portable stub.
+# Requires the pinned Chromium JSON implementation; never covered by the
+# portable stub.
 test("native_wasm_guest_adapter_unittests") {
   sources = [ "common/native_wasm_guest_adapter_unittest.cc" ]
   deps = [

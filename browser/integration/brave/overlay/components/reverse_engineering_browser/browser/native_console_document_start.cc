@@ -7,7 +7,6 @@
 
 #include <algorithm>
 #include <array>
-#include <cstring>
 #include <span>
 #include <utility>
 
@@ -234,13 +233,13 @@ bool NativeConsoleDocumentStartRegistry::Arm(const base::ListValue& scripts, std
       return false;
     }
     armed.script.rule.origin_bytes = static_cast<std::uint16_t>(origin->size());
-    std::memcpy(armed.script.rule.origin.data(), origin->data(), origin->size());
+    std::copy_n(origin->begin(), origin->size(), armed.script.rule.origin.begin());
     if (prefix) {
       armed.script.rule.path_bytes = static_cast<std::uint16_t>(prefix->size());
-      std::memcpy(armed.script.rule.path.data(), prefix->data(), prefix->size());
+      std::copy_n(prefix->begin(), prefix->size(), armed.script.rule.path.begin());
     }
     armed.script.source_bytes = static_cast<std::uint32_t>(source->size());
-    std::memcpy(armed.script.source.data(), source->data(), source->size());
+    std::copy_n(source->begin(), source->size(), armed.script.source.begin());
     if (!IsValidNativeConsoleDocumentStartScript(armed.script)) {
       error =
           "A document-start rule needs one exact http or https origin, frame \"top\" or \"child\", "

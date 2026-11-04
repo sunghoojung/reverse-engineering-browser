@@ -112,8 +112,7 @@ class DocumentStart final : public mojom::NativeConsoleScriptClient {
     if (host_.is_bound() || !pending.is_valid())
       return;
     host_.Bind(std::move(pending), base::SequencedTaskRunner::GetCurrentDefault());
-    host_.set_disconnect_handler(base::BindOnce(&DocumentStart::Disarm, base::Unretained(this)),
-                                 base::SequencedTaskRunner::GetCurrentDefault());
+    host_.set_disconnect_handler(base::BindOnce(&DocumentStart::Disarm, base::Unretained(this)));
     host_->BindClient(receiver_.BindNewPipeAndPassRemote());
   }
 
@@ -134,7 +133,7 @@ class DocumentStart final : public mojom::NativeConsoleScriptClient {
     if (!url.SchemeIsHTTPOrHTTPS())
       return;
     const std::string serialized = origin.Serialize();
-    const std::string path = url.path();
+    const std::string_view path = url.path();
     const bool top = frame->IsOutermostMainFrame();
     for (std::size_t index = 0; index < scripts_.size(); ++index) {
       if (NativeConsoleDocumentStartMatches(scripts_[index].rule, serialized, path, top))
@@ -221,7 +220,7 @@ class DocumentStart final : public mojom::NativeConsoleScriptClient {
   }
 
   void Run(blink::WebLocalFrame* frame, v8::Local<v8::Context> context, std::size_t index) {
-    auto* const isolate = context->GetIsolate();
+    auto* const isolate = frame->GetAgentGroupScheduler()->Isolate();
     // Release this injection's temporaries instead of leaving them in Blink's
     // enclosing scope for the rest of document creation.
     v8::HandleScope handles(isolate);
@@ -306,7 +305,7 @@ class DocumentStart final : public mojom::NativeConsoleScriptClient {
   void Announce(blink::WebLocalFrame* frame, std::size_t index) {
     frame->AddMessageToConsole(blink::WebConsoleMessage(
         blink::mojom::ConsoleMessageLevel::kWarning,
-        blink::WebString::FromUTF8("Reverse Engineering Browser: document-start Console script " +
+        blink::WebString::FromUtf8("Reverse Engineering Browser: document-start Console script " +
                                    base::NumberToString(scripts_[index].script_id) +
                                    " runs in this document's main world before its own scripts")));
     Emit(frame, index, NativeConsoleDocumentStartRecord::kInjected, false,

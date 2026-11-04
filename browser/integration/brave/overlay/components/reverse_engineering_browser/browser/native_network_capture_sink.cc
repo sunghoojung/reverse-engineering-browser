@@ -178,6 +178,8 @@ NativeRequestBodyKind KindOf(const network::DataElement& element) noexcept {
 
 }  // namespace
 
+NativeNetworkCaptureSink::NativeNetworkCaptureSink() = default;
+
 NativeNetworkCaptureSink& NativeNetworkCaptureSink::Get() {
   static base::NoDestructor<NativeNetworkCaptureSink> sink;
   return *sink;

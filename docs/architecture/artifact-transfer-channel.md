@@ -129,12 +129,30 @@ visible status counter. It does not truncate original evidence. The
 browser-process bridge must treat rejection as artifact-unavailable evidence
 and emit a small gap or failure event through the normal event path.
 
-The standard-input receiver stops after a rejected frame because a pipe cannot
-safely resynchronize after an untrusted declared length. Socket mode closes
-the authenticated connection and continues listening for a reconnect. The live
-session supervisor stops the listener explicitly when the browser session ends,
-and the listener path is the UI's artifact-channel health signal while the
-session is running.
+After a header passes validation and matches the authenticated session, its
+declared lengths are bounded. Socket mode then discards the rest of a rejected
+frame, at most `max(16 MiB, configured artifact limit)` of content, before
+acknowledging, so the connection stays at a frame boundary and carries the next
+frame. An invalid header, a session mismatch, a truncated stream or a larger
+declared body leaves the stream unsynchronized; the receiver acknowledges and
+closes that connection, then keeps listening for a reconnect. The
+standard-input receiver stops after any rejected frame, because without an
+acknowledgment its exit status is the producer's only signal. The live session
+supervisor stops the listener explicitly when the browser session ends, and the
+listener path is the UI's artifact-channel health signal while the session is
+running.
+
+The browser writer's lifecycle is explicit: connected, reconnecting, lost,
+stopping or idle. A rejection acknowledgment keeps the connection. A failed
+connection is replaced within five attempts over about three seconds. During
+those attempts, new transfers wait in the same bounded queue and capture
+admission stays open. Before writing a frame, the writer replaces an idle
+connection the receiver has already closed. If a send fails, the writer reads an
+acknowledgment the receiver wrote before closing, so the real status is
+recorded instead of an I/O error. When reconnection fails, every queued transfer
+is reported as `artifact_capture_failed` with `io_error`, and the browser emits
+one `artifact_channel_lost` gap. Capture admission refuses artifacts from then
+on, and that gap marks where they stop.
 
 ## Storage layout
 
@@ -223,11 +241,15 @@ artifact store and does not supply a guest position.
 - Authenticated session mismatch: reject the frame and close the connection.
 - Artifact count or manifest limit: reject before publishing a manifest entry.
 - Blob commit failure: report I/O failure and publish nothing.
-- Manifest failure after blob commit: leave an unreferenced immutable blob. A
-  later maintenance pass may remove unreferenced blobs, but capture never
-  guesses or rewrites provenance.
-- Restart recovery: reject incomplete, malformed, duplicate, or mixed-session
-  manifest records before accepting new evidence.
+- Manifest failure after blob commit: roll the manifest back to the last
+  acknowledged record, then remove the blob this frame created. If the rollback
+  fails, keep the blob, which the record may name, count it, and stop accepting
+  for the rest of the run. A later maintenance pass may remove unreferenced
+  blobs, but capture never guesses or rewrites provenance.
+- Restart recovery: cut back a final record without its newline, which only an
+  interrupted append leaves and which was never acknowledged, and report the
+  removed byte count. Reject malformed, duplicate, or mixed-session manifest
+  records before accepting new evidence.
 - Malformed manifest: the UI retains its last valid catalog and reports the
   artifact catalog as unavailable.
 

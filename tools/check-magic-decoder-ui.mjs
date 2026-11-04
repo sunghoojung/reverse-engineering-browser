@@ -43,7 +43,7 @@ export async function checkMagicDecoderUI(run) {
   assert.deepEqual([...identityGroup[1].matchAll(/value="([^"]+)"/g)].map(match => match[1]),
     ['magic-inspect', 'sha256', 'sha384', 'sha512']);
 
-  const state = {decoderPending: false, decoderSteps: [], decoderSelectedStepId: null,
+  const state = {decoderPending: false, decoderSteps: [], decoderSelectedStepId: null, decoderNoticeRevision: 0,
     decoderInputSnapshot: null, decoderNextOperationId: 1, decoderEngine: {available: true}};
   const toolsElements = {input: {value: 'deadbeef'}, inputEncoding: {value: 'text'},
     operation: {value: 'magic-inspect'}};
@@ -118,4 +118,46 @@ export async function checkMagicDecoderUI(run) {
   assert.equal(calls.length, requestCount); assert.equal(state.decoderSteps[0], completed);
   assert.match(state.decoderMessage, /unavailable/);
   console.log('PASS exact C++/Rust/Swift/UI/OpenAPI operation parity and production chain: explicit-only Magic, preserved root/history, failed-step retention, report-byte hashing, explicit branching and unavailable/changed-input refusal (not rendered QA)');
+
+  // Engine availability is separate from the notice: a probe never replaces
+  // an operation's outcome, never reports ready while one runs, and a failed
+  // re-check keeps a working engine.
+  const probes = [];
+  const probeState = {decoderEngineStatus: 'unknown', decoderStatus: 'loading', decoderMessage: '', decoderNoticeRevision: 0,
+    decoderRefreshing: false, decoderPending: false, jwtPending: false, decoderEngine: {available: false}};
+  const probe = runInNewContext(
+    section('      const decoderNativeOperations =', '      function isJwtInspection') +
+    section('      function setToolsNotice(', '      function decoderHtmlTransform') +
+    ';({refreshDecoderEngine, setToolsNotice})', {
+      state: probeState, location: {protocol: 'http:'}, renderTools() {},
+      emptyDecoderEngine: () => ({available: false}),
+      isPlainObject: value => value !== null && typeof value === 'object' && !Array.isArray(value),
+      isSafeIntegerInRange: (value, minimum, maximum) => Number.isSafeInteger(value) && value >= minimum && value <= maximum,
+      fetch: () => new Promise((resolve, reject) => probes.push({resolve, reject}))
+    });
+  const answerProbe = value => probes.shift().resolve({ok: true, json: async () => value});
+  let pendingProbe = probe.refreshDecoderEngine();
+  assert.equal(probeState.decoderStatus, 'loading');
+  // A transform starts while the first probe is still out.
+  probeState.decoderPending = true; probe.setToolsNotice('running', 'base64 decode is running locally…');
+  answerProbe(engine); await pendingProbe;
+  assert.equal(probeState.decoderEngineStatus, 'ready');
+  assert.equal(probeState.decoderStatus, 'running', 'A probe does not report ready during a transform');
+  probeState.decoderPending = false; probe.setToolsNotice('error', 'Authored malformed input rejected');
+  await probe.refreshDecoderEngine();
+  assert.equal(probes.length, 0, 'A transform error does not trigger a re-probe of a working engine');
+  assert.equal(probeState.decoderMessage, 'Authored malformed input rejected');
+  pendingProbe = probe.refreshDecoderEngine(true);
+  probes.shift().reject(new Error('connection reset'));
+  await pendingProbe;
+  assert.equal(probeState.decoderEngine.available, true, 'A failed re-check keeps a working engine');
+  assert.equal(probeState.decoderEngineStatus, 'ready');
+  assert.equal(probeState.decoderMessage, 'Authored malformed input rejected');
+  // An unavailable engine is probed again and its recovery is reported.
+  probeState.decoderEngineStatus = 'unavailable'; probeState.decoderEngine = {available: false};
+  probe.setToolsNotice('error', 'Decoder service unavailable: connection reset');
+  pendingProbe = probe.refreshDecoderEngine();
+  answerProbe(engine); await pendingProbe;
+  assert.deepEqual([probeState.decoderEngineStatus, probeState.decoderStatus], ['ready', 'ready']);
+  console.log('PASS decoder engine probe: availability separate from the notice; no re-probe of a working engine, no ready notice over a running or newer operation, failed re-check keeps the engine');
 }

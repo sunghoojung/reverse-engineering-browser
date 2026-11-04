@@ -59,9 +59,11 @@ it.
   capture; tracking starts with the next capture. Each saved site keeps its
   script's raw source URL beside it, locally and user-only, like the artifact
   manifest. An explicit `REB_NATIVE_JS_INVOCATION_SITES`, even an empty one,
-  replaces the saved set. Agent-started sessions never arm invocation sites and
-  keep a private saved set, so an agent cannot change what the researcher's
-  next capture arms.
+  replaces the saved set. Agent-started sessions arm invocation sites only when
+  the start request names them (`js_invocation_sites`, a file the agent wrote,
+  or `js_invocation_saved_sites`), never inherited, and keep their own saved
+  set, so an agent cannot read or change what the researcher's next capture
+  arms.
 - Standalone probes remain inactive without an enabled session. Enabled artifact
   capture retains raw source URLs locally; metadata is not necessarily secret-free.
 - With Network capture on, every native request records its body's length,
@@ -95,9 +97,10 @@ it.
   selects it. The app saves no choice between launches, and a choice made in the
   dialog holds for the rest of that app run. The standalone `make live` launcher
   leaves request content and Canvas images off unless set to `1`. Agent-started
-  sessions (`reb-api session start`, MCP `start_live_session`) always leave
-  request content off, even when the switch is inherited, and turn Canvas images
-  on only with explicit confirmation.
+  sessions (`reb-api session start`, MCP `start_live_session`) retain request
+  content only when the start request names it (`request_content` with
+  `confirm_sensitive_capture`), never inherited, and turn Canvas images on only
+  with the same explicit confirmation.
 - Settled-value digests of armed JavaScript invocations are a sensitive
   capture path: `REB_NATIVE_JS_INVOCATION_DIGESTS=1`, accepted only with an
   invocation site file and labeled when the session starts. Each fulfilled
@@ -108,8 +111,9 @@ it.
   guessable value can be confirmed from it. Content-mode captures the packaged
   app starts with saved invocation sites record these digests by default; the
   start dialog says so, and the launch log and titlebar label the session.
-  Metadata mode never records them, and neither do agent-started sessions,
-  whatever the caller's environment says. An explicit
+  Metadata mode never records them. Agent-started sessions record them only
+  when the start request names them (`js_invocation_digests` with named sites
+  and `confirm_sensitive_capture`), never inherited. An explicit
   `REB_NATIVE_JS_INVOCATION_DIGESTS=0` opts out in Content mode. A Brave
   without invocation capture starts without the saved sites, so it records
   no digests either.
@@ -144,8 +148,11 @@ it.
   runs, and never through page JavaScript. A running broker does not prove the
   browser records, so `open_url` reports `capture_observed`; when it is false
   the page was not recorded and the agent ends the session. An agent may turn
-  on sensitive Canvas capture only with `confirm_sensitive_capture`, and only
-  when the researcher's authorization for that session covers Canvas content.
+  on sensitive capture (Canvas images, request content or invocation value
+  digests) only with `confirm_sensitive_capture`, and only when the
+  researcher's authorization for that session covers that content. The start
+  result, the first line of its launch log and the session context name every
+  such switch the session runs with.
   An agent may supply guest adapter or dispatch-site files it wrote for the
   authorized target; they only select what is sampled. Agent sessions do not
   use the macOS Keychain; do not sign in with real credentials unless the
@@ -201,8 +208,10 @@ it.
   built without the experiment ignores the switch and the Console reports it
   unavailable. The standalone `make live` launcher and the disposable Console
   grant it only when asked, and agent-started sessions (`reb-api session start`,
-  MCP `start_live_session`) never receive it, even when the switch is
-  inherited. Clearing the set, disconnecting, ending the session, or session expiry
+  MCP `start_live_session`) receive it only when the start request names it
+  (`document_start: true`), never inherited. An agent arms a rule only through
+  the same live Console connection to a selected document and the same
+  confirmed action. Clearing the set, disconnecting, ending the session, or session expiry
   removes the scripts and their output; when the browser cannot confirm a removal,
   the Console reports it unconfirmed instead of idle. Snippet output is bounded, ephemeral
   page-JavaScript observation with provenance `console-document-start-script`: it
@@ -237,10 +246,11 @@ of the data-handling policy:
 | Loopback-only research API trust check | [`config.rs`](apps/origin-trace-backend/src/config.rs) and [`app.rs`](apps/origin-trace-backend/src/app.rs) |
 | Artifact receiver `--allow-sensitive` gate | `services/artifact-receiver/main.cpp` |
 | Request path and body gate (`--reb-capture-request-content`) | Brave overlay `native_probe_socket_client.cc` and `native_network_capture_sink.cc`; receiver `--allow-sensitive` |
+| Canvas image opt-in | Brave overlay renderer `native_probe_sink.cc` and browser `native_artifact_capture_sink.cc`, which refuses an image the session did not opt in to |
 | Capture category mask and session expiration | `protocol/README.md`, native probes |
-| Agent-started sessions get neither request content nor document-start permission | [`session_launch.rs`](apps/origin-trace-backend/src/session_launch.rs) |
+| Agent-started sessions get request content, document-start permission, invocation sites and digests only when the start request names them, never inherited | [`session_launch.rs`](apps/origin-trace-backend/src/session_launch.rs) |
 | JavaScript invocation value digests opt-in | `scripts/run-live-session.sh`, the overlay's `native_probe_session.cc`, and the renderer sink, which refuses a digest without it |
-| App-started digest default and agent-session exclusion | `LiveSessionCoordinator.captureDefaults` (Content mode with saved sites only, explicit value wins) and `session_launch.rs` (agent sessions remove the site file and force digests off) |
+| App-started digest default and agent-session exclusion | `LiveSessionCoordinator.captureDefaults` (Content mode with saved sites only, explicit value wins) and `session_launch.rs` (agent sessions remove an inherited site file and digest switch, and arm only named sites from a private copy) |
 | Origin allowlisting | Not implemented; the native event envelope lacks trustworthy origin identity |
 
 ## Related documents

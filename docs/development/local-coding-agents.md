@@ -146,9 +146,15 @@ The server then lists `start_live_session` and starts even when no live
 endpoint exists yet. Until a session is bound, other tools refuse without
 sending a request. `start_live_session` takes named capture options (`url`,
 `wasm_dispatch`, `wasm_call_indirect`, `guest_adapter`, `js_dispatch_sites`,
-`quiet`, `category_mask`, `duration_seconds`, `localhost_only` and others; all
-off unless named), starts the same launcher as `make live` with an Origin
-Trace window, and moves this connection to that exact session.
+`quiet`, `category_mask`, `duration_seconds`, `localhost_only`,
+`document_start`, `request_content`, `js_invocation_sites`,
+`js_invocation_saved_sites`, `js_invocation_digests` and others; all off
+unless named and never inherited from the environment, with sensitive capture
+behind `confirm_sensitive_capture`), starts the same launcher as `make live`
+with an Origin Trace window, and moves this connection to that exact session.
+`get_session_context` then reports the session's `capture_options`, and
+`get_native_console` lists its documents and frames for the Console
+([recipes 18 and 19](agent-cookbook.md#18-run-javascript-in-one-frame-including-a-cross-site-iframe)).
 `session_action` then opens a URL in the session's capture browser or ends
 it. It acts only on a session this connection started, never on the
 researcher's own session, and it is hidden without `--allow-session-start`.

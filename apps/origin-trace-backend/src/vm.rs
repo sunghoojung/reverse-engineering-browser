@@ -16,9 +16,13 @@ use wasmparser::{ElementItems, ElementKind, Operator, Parser, Payload, TypeRef};
 pub(crate) mod capture_mode;
 #[path = "vm_dispatch_shape.rs"]
 pub(crate) mod dispatch_shape;
+#[path = "vm_js_lexer.rs"]
+pub(crate) mod js_lexer;
 #[cfg(test)]
 #[path = "vm_review_inputs.rs"]
 pub(crate) mod review_inputs;
+#[path = "vm_wasm_control.rs"]
+pub(crate) mod wasm_control;
 #[path = "vm_wasm_dispatch.rs"]
 mod wasm_dispatch;
 #[path = "vm_wasm_tables.rs"]
@@ -150,50 +154,28 @@ fn rank(observations: &[Value]) -> (u64, usize) {
             .len(),
     )
 }
+/// Blank comments, quoted and template text and regular-expression bodies,
+/// keeping every byte offset, line terminators outside them, template
+/// substitution code and its braces, and each literal's two slashes. A kept
+/// slash still names the regex-or-division guess for consumers that refuse it.
+/// The input must be complete source text: masking a slice or masked text
+/// re-guesses its slashes without the context that decided them.
 pub(crate) fn mask(source: &str) -> String {
+    use js_lexer::{Kind, Lexer};
     let mut bytes = source.as_bytes().to_vec();
-    let mut index = 0;
-    let mut quote = 0;
-    let mut line = false;
-    let mut block = false;
-    let mut escaped = false;
-    while index < bytes.len() {
-        let c = source.as_bytes()[index];
-        let next = source.as_bytes().get(index + 1).copied().unwrap_or(0);
-        if line {
-            if c == b'\n' {
-                line = false;
-            } else {
-                bytes[index] = b' ';
+    for token in Lexer::new(source) {
+        match token.kind {
+            Kind::Comment | Kind::String | Kind::TemplateText => {
+                bytes[token.start..token.end].fill(b' ');
             }
-        } else if block {
-            bytes[index] = b' ';
-            if c == b'*' && next == b'/' {
-                bytes[index + 1] = b' ';
-                index += 1;
-                block = false;
+            Kind::Regex { body_end, .. } => {
+                bytes[token.start + 1..body_end].fill(b' ');
+                bytes[body_end + 1..token.end].fill(b' ');
             }
-        } else if quote != 0 {
-            bytes[index] = b' ';
-            if escaped {
-                escaped = false;
-            } else if c == b'\\' {
-                escaped = true;
-            } else if c == quote {
-                quote = 0;
-            }
-        } else if c == b'/' && b"/*".contains(&next) {
-            bytes[index] = b' ';
-            bytes[index + 1] = b' ';
-            index += 1;
-            line = next == b'/';
-            block = next == b'*';
-        } else if b"\"'`".contains(&c) {
-            bytes[index] = b' ';
-            quote = c;
+            _ => (),
         }
-        index += 1;
     }
+    // Every blanked range starts and ends at an ASCII delimiter.
     String::from_utf8(bytes).expect("UTF-8 literal masking")
 }
 fn js(source: &str) -> Result<(Vec<Value>, Vec<Value>)> {
@@ -641,7 +623,10 @@ fn wasm(bytes: &[u8]) -> Result<(Vec<Value>, Value)> {
                         | Operator::GlobalSet { global_index } => Some((true, *global_index)),
                         _ => None,
                     };
-                    let loop_depth = control.iter().filter(|c| **c == 3).count();
+                    let loop_depth = control
+                        .iter()
+                        .filter(|block| **block == wasm_control::BlockKind::Loop)
+                        .count();
                     let (arm_count, unique_targets, table_index) = match &op {
                         Operator::BrTable { targets } => {
                             let mut labels = BTreeSet::new();
@@ -670,23 +655,31 @@ fn wasm(bytes: &[u8]) -> Result<(Vec<Value>, Value)> {
                         unique_targets,
                         table_index,
                     });
-                    match op {
-                        Operator::Block { .. } => control.push(2),
-                        Operator::Loop { .. } => control.push(3),
-                        Operator::If { .. } => control.push(4),
-                        Operator::Else => {
-                            if control.last() != Some(&4) {
-                                return Err(Error::bad("WebAssembly else without matching if"));
-                            }
+                    match wasm_control::control(&op) {
+                        wasm_control::Control::Open(block) => control.push(block),
+                        wasm_control::Control::Arm(block) if control.last() != Some(&block) => {
+                            return Err(Error::bad(if block == wasm_control::BlockKind::If {
+                                "WebAssembly else without matching if"
+                            } else {
+                                "WebAssembly catch without matching try"
+                            }));
                         }
-                        Operator::End if control.pop().is_none() => {
-                            ended = true;
-                            if !reader.eof() {
+                        wasm_control::Control::Close { delegate } => match control.pop() {
+                            Some(block) if !delegate || block == wasm_control::BlockKind::Try => (),
+                            Some(_) | None if delegate => {
                                 return Err(Error::bad(
-                                    "WebAssembly function body has trailing instructions",
+                                    "WebAssembly delegate without matching try",
                                 ));
                             }
-                        }
+                            _ => {
+                                ended = true;
+                                if !reader.eof() {
+                                    return Err(Error::bad(
+                                        "WebAssembly function body has trailing instructions",
+                                    ));
+                                }
+                            }
+                        },
                         _ => (),
                     }
                 }
@@ -1253,6 +1246,12 @@ pub(crate) struct Documents {
 }
 
 pub(crate) fn store_documents(root: &Path, event_store: &Path) -> Result<Documents> {
+    let mut documents = build_documents(root, event_store)?;
+    publish(root, &mut documents, &mut durable::write_private)?;
+    Ok(documents)
+}
+
+fn build_documents(root: &Path, event_store: &Path) -> Result<Documents> {
     let (manifest, mut omissions, manifest_digest) = input(
         &root.join("manifest.jsonl"),
         65536,
@@ -1562,20 +1561,233 @@ pub(crate) fn store_documents(root: &Path, event_store: &Path) -> Result<Documen
     }
     let mut document = json!({"contract_version":1,"document_kind":"vm-analysis","producer":current_producer(),"profile_digest":digest(&profile)?,"profile":profile,"inputs":{"artifact_manifest_digest":manifest_digest,"event_store_digest":event_digest,"capture_provenance_digest":capture_provenance.digest},"capture_mode":capture_mode,"input_coverage":{"complete":omissions.is_empty(),"omissions":omissions},"summary":{"analyzed_artifacts":results.len(),"candidate_count":results.iter().filter(|r|r["tier"]=="candidate").count(),"likely_vm_count":results.iter().filter(|r|r["tier"]=="likely-vm").count(),"failed_count":results.iter().filter(|r|r["status"]=="failed").count(),"mixed_count":mixed.len()},"results":results,"mixed_findings":mixed});
     document["document_digest"] = json!(digest(&document)?);
-    durable::write_private(
-        &root.join("analysis/vm-analysis-v1.json"),
-        &canonical(&document)?,
-    )?;
-    let opcode_workspace = crate::vm_opcode::store(root, &document, opcode_workspaces);
+    let opcode_workspace = crate::vm_opcode::document(&document, opcode_workspaces);
     let host_links = opcode_workspace
         .as_ref()
         .map_err(Clone::clone)
-        .and_then(|workspace| crate::vm_host_links::store(root, workspace, &artifacts, &events));
+        .and_then(|workspace| crate::vm_host_links::document(workspace, &artifacts, &events));
     Ok(Documents {
         analysis: document,
         opcode_workspace,
         host_links,
     })
+}
+
+/// Analysis, then the workspace naming its digest, then host links naming
+/// the workspace digest.
+const CHAIN: [&str; 3] = [
+    "analysis/vm-analysis-v1.json",
+    "analysis/vm-opcode-workspace-v2.json",
+    "analysis/vm-host-links-v1.json",
+];
+
+impl Documents {
+    /// The chain document at `index` and everything derived from it are
+    /// unavailable. The analysis itself stays served from memory.
+    fn fail_from(&mut self, index: usize, error: Error) {
+        if index == 1 {
+            self.opcode_workspace = Err(error.clone());
+        }
+        self.host_links = Err(error);
+    }
+}
+
+/// Removes a dependant before its source changes. A directory in its place is
+/// no document a reader could join; the later write reports it.
+fn remove_dependant(path: &Path) -> std::io::Result<bool> {
+    match std::fs::symlink_metadata(path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error),
+        Ok(metadata) if metadata.is_dir() => Ok(false),
+        Ok(_) => std::fs::remove_file(path).map(|()| true),
+    }
+}
+
+/// One cooperative writer at a time, the backend or the CLI, publishes the
+/// chain. Dependants are removed before their source is replaced and written
+/// after it, so a crash or failed write leaves a prefix of the chain whose
+/// digest links all hold, never a document naming a replaced source. A
+/// dependant that cannot be written or removed is reported as unavailable,
+/// with everything derived from it; the analysis is still served.
+fn publish(
+    root: &Path,
+    documents: &mut Documents,
+    write: &mut dyn FnMut(&Path, &[u8]) -> Result<()>,
+) -> Result<()> {
+    let paths = CHAIN.map(|name| root.join(name));
+    #[cfg(unix)]
+    let _lease = chain_lease(&paths[0])?;
+    let mut removed = false;
+    for index in [2, 1] {
+        match remove_dependant(&paths[index]) {
+            Ok(gone) => removed |= gone,
+            Err(error) => {
+                // Replacing its source would leave this stale document naming
+                // a replaced one, so the previous chain stays as it was.
+                documents.fail_from(
+                    index,
+                    Error::new(
+                        500,
+                        format!(
+                            "The previous {} could not be removed, so the VM analysis documents were not replaced: {error}",
+                            CHAIN[index]
+                        ),
+                    ),
+                );
+                return Ok(());
+            }
+        }
+    }
+    if removed && let Some(directory) = paths[0].parent() {
+        std::fs::File::open(directory)?.sync_all()?;
+    }
+    write(&paths[0], &canonical(&documents.analysis)?)?;
+    for index in [1, 2] {
+        let document = if index == 1 {
+            &documents.opcode_workspace
+        } else {
+            &documents.host_links
+        };
+        // An unavailable document has no written dependant either.
+        let Ok(value) = document else { break };
+        if let Err(error) = canonical(value).and_then(|bytes| write(&paths[index], &bytes)) {
+            documents.fail_from(index, error);
+            break;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn chain_lease(path: &Path) -> Result<crate::workspace_lease::Lease> {
+    // Publication itself takes milliseconds. Wait briefly for another
+    // writer rather than refusing a read that has already recomputed.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        match crate::workspace_lease::Lease::acquire(path) {
+            Err(error) if error.status == 409 => {
+                if std::time::Instant::now() >= deadline {
+                    return Err(crate::error::Error::conflict(
+                        "VM analysis documents are being published by another process; retry",
+                    ));
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            result => return result,
+        }
+    }
+}
+
+#[cfg(all(test, unix))]
+mod chain_tests {
+    use super::*;
+
+    fn inputs(root: &Path, events: &[&str]) -> std::path::PathBuf {
+        std::fs::write(root.join("manifest.jsonl"), "").unwrap();
+        let store = root.join("events.jsonl");
+        std::fs::write(&store, events.concat()).unwrap();
+        store
+    }
+    fn read(root: &Path, index: usize) -> Option<Value> {
+        durable::read_private(&root.join(CHAIN[index]), 1 << 26)
+            .unwrap()
+            .map(|bytes| serde_json::from_slice(&bytes).unwrap())
+    }
+    /// Every present dependant names the present document it was derived from.
+    fn linked(root: &Path) -> [bool; 3] {
+        let [analysis, workspace, links] = [0, 1, 2].map(|index| read(root, index));
+        if let Some(workspace) = &workspace {
+            assert_eq!(
+                workspace["analysis_digest"],
+                analysis.as_ref().unwrap()["document_digest"]
+            );
+        }
+        if let Some(links) = &links {
+            assert_eq!(
+                links["workspace_document_digest"],
+                workspace.as_ref().unwrap()["document_digest"]
+            );
+        }
+        [analysis.is_some(), workspace.is_some(), links.is_some()]
+    }
+    #[test]
+    fn failed_chain_write_never_leaves_a_document_naming_a_replaced_source() {
+        for failing in 0..CHAIN.len() {
+            let root = tempfile::tempdir().unwrap();
+            let store = inputs(root.path(), &[]);
+            let first = store_documents(root.path(), &store).unwrap();
+            assert_eq!(linked(root.path()), [true; 3]);
+            inputs(root.path(), &["{\"x\":1}\n"]);
+            let mut next = build_documents(root.path(), &store).unwrap();
+            assert_ne!(
+                next.analysis["document_digest"],
+                first.analysis["document_digest"]
+            );
+            let result = publish(root.path(), &mut next, &mut |path, bytes| {
+                if path.ends_with(CHAIN[failing]) {
+                    Err(crate::error::Error::new(500, "Synthetic write failure"))
+                } else {
+                    durable::write_private(path, bytes)
+                }
+            });
+            assert_eq!(result.is_err(), failing == 0);
+            let present = linked(root.path());
+            assert_eq!(present, [true, failing > 1, false], "{failing}");
+            let analysis = read(root.path(), 0).unwrap();
+            assert_eq!(
+                analysis["document_digest"],
+                if failing == 0 { &first } else { &next }.analysis["document_digest"]
+            );
+            // A failed analysis write fails the whole call instead.
+            assert_eq!(next.opcode_workspace.is_ok(), failing != 1);
+            assert_eq!(next.host_links.is_ok(), failing == 0);
+        }
+    }
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn an_unremovable_dependant_keeps_the_previous_chain() {
+        use std::os::unix::ffi::OsStrExt;
+        for stuck in [1, 2] {
+            let root = tempfile::tempdir().unwrap();
+            let store = inputs(root.path(), &[]);
+            let first = store_documents(root.path(), &store).unwrap();
+            let path = root.path().join(CHAIN[stuck]);
+            let path = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap();
+            assert_eq!(
+                unsafe { libc::chflags(path.as_ptr(), libc::UF_IMMUTABLE as _) },
+                0
+            );
+            inputs(root.path(), &["{\"x\":1}\n"]);
+            let next = store_documents(root.path(), &store);
+            assert_eq!(unsafe { libc::chflags(path.as_ptr(), 0) }, 0);
+            let next = next.unwrap();
+            assert_eq!(linked(root.path()), [true, true, stuck == 2], "{stuck}");
+            assert_eq!(
+                read(root.path(), 0).unwrap()["document_digest"],
+                first.analysis["document_digest"]
+            );
+            assert_ne!(
+                next.analysis["document_digest"],
+                first.analysis["document_digest"]
+            );
+            assert_eq!(next.opcode_workspace.is_ok(), stuck == 2);
+            assert!(next.host_links.is_err());
+        }
+    }
+    #[test]
+    fn chain_publication_waits_for_another_writer() {
+        let root = tempfile::tempdir().unwrap();
+        let store = inputs(root.path(), &[]);
+        let held = crate::workspace_lease::Lease::acquire(&root.path().join(CHAIN[0])).unwrap();
+        let path = root.path().to_owned();
+        let writer = std::thread::spawn(move || store_documents(&path, &store).map(|_| ()));
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        assert!(!writer.is_finished());
+        assert_eq!(linked(root.path()), [false; 3]);
+        drop(held);
+        writer.join().unwrap().unwrap();
+        assert_eq!(linked(root.path()), [true; 3]);
+    }
 }
 
 pub fn store(root: &Path, event_store: &Path) -> Result<Value> {

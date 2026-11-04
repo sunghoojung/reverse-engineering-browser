@@ -113,16 +113,83 @@ struct Observation {
     inputs: Inputs,
     effect: Expectation,
 }
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum Status {
+    Pending,
+    Confirmed,
+    Mismatch,
+    Unsupported,
+    Unknown,
+}
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+enum Reason {
+    ExecutionNotYetComplete,
+    CompletionUnverified,
+    FixedOwnedInputsOnly,
+    AgreementForListedInputsOnly,
+    ExpectedOrObservedEffectDiffers,
+    NativeExecutionOrDisposalUnconfirmed,
+}
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct Record {
     request: Request,
     effect_digest: String,
     fixture_revision: u32,
-    status: String,
+    status: Status,
     independent: Option<Expectation>,
     observed: Option<Observation>,
-    reason: String,
+    reason: Reason,
+}
+impl Record {
+    fn agrees(&self, observed: &Observation) -> bool {
+        observed.inputs == self.request.inputs
+            && Some(&observed.effect) == self.independent.as_ref()
+            && self.independent.as_ref() == Some(&self.request.expected)
+    }
+    /// Status, reason and evidence must describe one reachable outcome: a
+    /// pending write, its recovery, or one of the settled results below.
+    fn consistent(&self) -> bool {
+        match (self.status, self.reason, &self.observed) {
+            (Status::Pending, Reason::ExecutionNotYetComplete, None)
+            | (Status::Unknown, Reason::CompletionUnverified, None) => true,
+            (Status::Unknown, Reason::NativeExecutionOrDisposalUnconfirmed, None) => {
+                self.independent.is_some()
+            }
+            (Status::Unsupported, Reason::FixedOwnedInputsOnly, None) => self.independent.is_none(),
+            (Status::Confirmed, Reason::AgreementForListedInputsOnly, Some(observed)) => {
+                self.agrees(observed)
+            }
+            (Status::Mismatch, Reason::ExpectedOrObservedEffectDiffers, Some(observed)) => {
+                self.independent.is_some() && !self.agrees(observed)
+            }
+            _ => false,
+        }
+    }
+    /// The one transition out of pending. Without a prediction no helper runs.
+    fn settle(&mut self, outcome: Option<Result<Observation>>) {
+        (self.status, self.reason) = match &outcome {
+            None => (Status::Unsupported, Reason::FixedOwnedInputsOnly),
+            Some(Ok(observed)) if self.agrees(observed) => {
+                (Status::Confirmed, Reason::AgreementForListedInputsOnly)
+            }
+            Some(Ok(_)) => (Status::Mismatch, Reason::ExpectedOrObservedEffectDiffers),
+            Some(Err(_)) => (
+                Status::Unknown,
+                Reason::NativeExecutionOrDisposalUnconfirmed,
+            ),
+        };
+        self.observed = outcome.and_then(Result::ok);
+    }
+    /// A restart cannot turn an interrupted experiment into a success.
+    fn recover(&mut self) {
+        if self.status == Status::Pending {
+            self.status = Status::Unknown;
+            self.reason = Reason::CompletionUnverified;
+        }
+    }
 }
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -185,14 +252,7 @@ fn decode(bytes: Option<Vec<u8>>, recover: bool) -> Result<Document> {
         }
         if !ids.insert(&record.request.command_id)
             || record.independent != predict(&record.request)
-            || (record.status == "confirmed"
-                && (record.independent.as_ref() != Some(&record.request.expected)
-                    || record.observed.as_ref().is_none_or(|o| {
-                        Some(&o.effect) != record.independent.as_ref()
-                            || o.inputs != record.request.inputs
-                            || o.opcode != record.request.opcode
-                            || !valid_observation(&record.request, o)
-                    })))
+            || !record.consistent()
         {
             return Err(Error::bad("Inconsistent owned experiment record"));
         }
@@ -200,16 +260,15 @@ fn decode(bytes: Option<Vec<u8>>, recover: bool) -> Result<Document> {
     if document.schema != SCHEMA || document.records.len() > MAX_RECORDS {
         return Err(Error::bad("Unsupported owned experiment store"));
     }
-    // A process restart cannot turn an interrupted experiment into a success.
-    for record in &mut document.records {
-        if record.status == "pending" && recover {
-            record.status = "unknown".into();
-            record.reason = "completion-unverified".into();
-        }
+    if recover {
+        document.records.iter_mut().for_each(Record::recover);
     }
     Ok(document)
 }
 fn encode(document: &Document) -> Result<Vec<u8>> {
+    if !document.records.iter().all(Record::consistent) {
+        return Err(Error::new(500, "Owned experiment record is inconsistent"));
+    }
     crate::validation::schema(
         "OwnedOpcodeExperiments",
         &serde_json::to_value(document)?,
@@ -455,8 +514,23 @@ impl Experiments {
             permit: Arc::new(Semaphore::new(1)),
         }
     }
+    /// A pending record is a running experiment only while a writer holds the
+    /// permit or the cross-process lease. Otherwise it was interrupted: report
+    /// the unverified outcome the next writer persists, without writing here.
     pub fn list(&self) -> Result<Value> {
-        Ok(serde_json::to_value(load(&self.root)?)?)
+        let document = load(&self.root)?;
+        if !document.records.iter().any(|r| r.status == Status::Pending) {
+            return Ok(serde_json::to_value(document)?);
+        }
+        let Ok(_permit) = self.permit.try_acquire() else {
+            return Ok(serde_json::to_value(document)?);
+        };
+        let lease = match crate::workspace_lease::Lease::acquire(&path(&self.root)) {
+            Ok(lease) => lease,
+            Err(error) if error.status == 409 => return Ok(serde_json::to_value(document)?),
+            Err(error) => return Err(error),
+        };
+        Ok(serde_json::to_value(decode(lease.read(MAX_BYTES)?, true)?)?)
     }
     pub async fn run(&self, bytes: &[u8], workspace: Value) -> Result<Value> {
         let request = Request::parse(bytes)?;
@@ -476,7 +550,7 @@ impl Experiments {
             let unresolved = decode(previous.clone(), false)?
                 .records
                 .iter()
-                .any(|r| r.status == "pending");
+                .any(|r| r.status == Status::Pending);
             let mut document = decode(previous, true)?;
             if unresolved {
                 lease.write(&encode(&document)?)?;
@@ -502,36 +576,17 @@ impl Experiments {
                 request,
                 effect_digest,
                 fixture_revision: 1,
-                status: "pending".into(),
+                status: Status::Pending,
                 observed: None,
-                reason: "execution-not-yet-complete".into(),
+                reason: Reason::ExecutionNotYetComplete,
             };
             document.records.push(record.clone());
             lease.write(&encode(&document)?)?;
-            if record.independent.is_none() {
-                record.status = "unsupported".into();
-                record.reason = "fixed-owned-inputs-only".into();
-            } else {
-                match execute(helper, &record.request).await {
-                    Ok(observed) => {
-                        let matches = observed.inputs == record.request.inputs
-                            && Some(&observed.effect) == record.independent.as_ref()
-                            && record.independent.as_ref() == Some(&record.request.expected);
-                        record.status = if matches { "confirmed" } else { "mismatch" }.into();
-                        record.reason = if matches {
-                            "agreement-for-listed-inputs-only"
-                        } else {
-                            "expected-or-observed-effect-differs"
-                        }
-                        .into();
-                        record.observed = Some(observed);
-                    }
-                    Err(_) => {
-                        record.status = "unknown".into();
-                        record.reason = "native-execution-or-disposal-unconfirmed".into();
-                    }
-                }
-            }
+            let outcome = match record.independent {
+                None => None,
+                Some(_) => Some(execute(helper, &record.request).await),
+            };
+            record.settle(outcome);
             *document.records.last_mut().unwrap() = record.clone();
             lease.write(&encode(&document)?)?;
             Ok(serde_json::to_value(record)?)
@@ -653,9 +708,9 @@ mod tests {
             independent: predict(&r),
             request: r,
             fixture_revision: 1,
-            status: "pending".into(),
+            status: Status::Pending,
             observed: None,
-            reason: "execution-not-yet-complete".into(),
+            reason: Reason::ExecutionNotYetComplete,
         };
         let mut doc = empty();
         doc.records.push(record);
@@ -694,10 +749,10 @@ mod tests {
             request: r.clone(),
             effect_digest: bind(&r, &workspace(&r)).unwrap(),
             fixture_revision: 1,
-            status: "pending".into(),
+            status: Status::Pending,
             independent: predict(&r),
             observed: None,
-            reason: "execution-not-yet-complete".into(),
+            reason: Reason::ExecutionNotYetComplete,
         };
         let mut doc = empty();
         doc.records.push(pending.clone());
@@ -729,6 +784,115 @@ mod tests {
                 .iter()
                 .all(|row| row["status"] == "unknown")
         );
+    }
+    fn observation(r: &Request) -> Observation {
+        let refs: Value = serde_json::from_str(REFERENCES).unwrap();
+        Observation {
+            backend_instance_id: "backend".into(),
+            session_id: "session-1".into(),
+            run_id: "run-1".into(),
+            run_generation: Decimal(1),
+            invocation_id: Decimal(1),
+            record_sequence: Decimal(if r.opcode == 2 { 3 } else { 8 }),
+            build_id: "c".repeat(64),
+            program_sha256: refs["program_manifest_sha256"].as_str().unwrap().into(),
+            opcode: r.opcode,
+            handler_index: r.opcode,
+            pc_before: Decimal(if r.opcode == 2 { 2 } else { 8 }),
+            instruction_pointer_units: "instruction-index".into(),
+            inputs: r.inputs.clone(),
+            effect: predict(r).unwrap(),
+        }
+    }
+    fn stored(record: &Record) -> Result<Document> {
+        let mut document = empty();
+        document.records.push(record.clone());
+        decode(Some(serde_json::to_vec(&document).unwrap()), false)
+    }
+    #[test]
+    fn stored_status_reason_and_evidence_must_describe_one_outcome() {
+        let r = request("register", 2);
+        let confirmed = Record {
+            request: r.clone(),
+            effect_digest: bind(&r, &workspace(&r)).unwrap(),
+            fixture_revision: 1,
+            status: Status::Confirmed,
+            independent: predict(&r),
+            observed: Some(observation(&r)),
+            reason: Reason::AgreementForListedInputsOnly,
+        };
+        let mut mismatch = confirmed.clone();
+        mismatch.status = Status::Mismatch;
+        mismatch.reason = Reason::ExpectedOrObservedEffectDiffers;
+        mismatch.observed.as_mut().unwrap().effect.value = Decimal(13);
+        let mut interrupted = confirmed.clone();
+        interrupted.observed = None;
+        (interrupted.status, interrupted.reason) = (Status::Unknown, Reason::CompletionUnverified);
+        let mut unconfirmed = interrupted.clone();
+        unconfirmed.reason = Reason::NativeExecutionOrDisposalUnconfirmed;
+        for valid in [&confirmed, &mismatch, &interrupted, &unconfirmed] {
+            assert!(stored(valid).is_ok(), "{:?}", valid.status);
+        }
+        let mut invalid = Vec::new();
+        for (status, reason) in [
+            (Status::Mismatch, Reason::ExpectedOrObservedEffectDiffers),
+            (Status::Confirmed, Reason::ExpectedOrObservedEffectDiffers),
+            (Status::Confirmed, Reason::CompletionUnverified),
+        ] {
+            let mut row = confirmed.clone();
+            (row.status, row.reason) = (status, reason);
+            invalid.push(row);
+        }
+        let mut row = mismatch.clone();
+        (row.status, row.reason) = (Status::Confirmed, Reason::AgreementForListedInputsOnly);
+        invalid.push(row);
+        for (status, reason) in [
+            (Status::Pending, Reason::AgreementForListedInputsOnly),
+            (Status::Pending, Reason::CompletionUnverified),
+            (Status::Unknown, Reason::FixedOwnedInputsOnly),
+            (Status::Unknown, Reason::ExecutionNotYetComplete),
+        ] {
+            let mut row = interrupted.clone();
+            (row.status, row.reason) = (status, reason);
+            invalid.push(row);
+        }
+        for row in &invalid {
+            assert!(stored(row).is_err(), "{:?} {:?}", row.status, row.reason);
+            let mut document = empty();
+            document.records.push(row.clone());
+            assert!(encode(&document).is_err());
+        }
+    }
+    #[tokio::test]
+    async fn interrupted_pending_lists_as_unverified_without_a_write() {
+        let root = tempfile::tempdir().unwrap();
+        let service = Experiments::new(root.path().into(), PathBuf::from("/no-helper"));
+        let r = request("stack", 7);
+        let pending = Record {
+            effect_digest: bind(&r, &workspace(&r)).unwrap(),
+            independent: predict(&r),
+            request: r,
+            fixture_revision: 1,
+            status: Status::Pending,
+            observed: None,
+            reason: Reason::ExecutionNotYetComplete,
+        };
+        let mut doc = empty();
+        doc.records.push(pending);
+        durable::write_private(&path(root.path()), &encode(&doc).unwrap()).unwrap();
+        let saved = std::fs::read(path(root.path())).unwrap();
+        let listed = service.list().unwrap();
+        assert_eq!(listed["records"][0]["status"], "unknown");
+        assert_eq!(listed["records"][0]["reason"], "completion-unverified");
+        assert_eq!(std::fs::read(path(root.path())).unwrap(), saved);
+        // A running writer, in this process or another, keeps it pending.
+        let permit = service.permit.clone().acquire_owned().await.unwrap();
+        assert_eq!(service.list().unwrap()["records"][0]["status"], "pending");
+        drop(permit);
+        let held = crate::workspace_lease::Lease::acquire(&path(root.path())).unwrap();
+        assert_eq!(service.list().unwrap()["records"][0]["status"], "pending");
+        drop(held);
+        assert_eq!(service.list().unwrap(), listed);
     }
     #[tokio::test]
     async fn unsupported_owned_inputs_are_stored_without_starting_helper() {

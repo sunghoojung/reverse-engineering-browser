@@ -225,14 +225,16 @@ void NativeProbeHostGuestBoundary(reb::ArtifactReceiver& receiver) {
   const auto before_indirect = events.size();
   indirect(epoch + 1, 600, 0, 2);
   indirect(epoch, 601, 5, 0);
-  Check(events.size() == before_indirect && transfers.empty(),
-        "Retired epochs and unknown resolutions are discarded");
+  Check(events.size() == before_indirect + 1 &&
+            gap_for(601, "native_wasm_indirect_limit_or_invalid") && transfers.empty(),
+        "A retired epoch is discarded; an unknown resolution fills its own slot");
   frame.document = {11, 99};
   indirect(epoch, 602, 0, 2);
   indirect(epoch, 603, 0, 2);
   Check(gap_for(602, "native_wasm_indirect_document_unavailable") &&
-            events.size() == before_indirect + 1 && transfers.empty(),
-        "A missing owning document is one bounded gap");
+            gap_for(603, "native_wasm_indirect_document_unavailable") &&
+            events.size() == before_indirect + 3 && transfers.empty(),
+        "Each observation without its owning document fills its own slot");
   frame.document = {11, 12};
   indirect(epoch, 604, 0, 2);
   Check(transfers.size() == 1, "A valid call_indirect observation reaches the production sink");
@@ -344,7 +346,11 @@ void NativeProbeHostJsDispatchForwarding() {
             reb::IsValidNativeJsInvocationStartHeader(events[1].header) &&
             events[1].inline_payload == start_record.inline_payload,
         "Host forwards the invocation start unchanged with its tab");
+  start_record.header.sequence_number = 603;
+  Check(queue->TryPush(start_record), "Renderer ring admits a record before disable");
   host.Disable();
+  Check(events.size() == 3 && events[2].header.sequence_number == 603,
+        "Disable publishes what the renderer already queued");
   session.active = false;
   session.js_sites.clear();
   session.invocation_sites.clear();

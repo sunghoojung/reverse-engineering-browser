@@ -1,6 +1,6 @@
 ---
 name: reb-api-workflow
-description: Use the local Origin Trace reb-api MCP tools or CLI to inspect an authorized capture session, check whether capture worked, find Wasm modules and samples, follow native requests, correlate exact captured evidence, and build offline client code with synthetic tests. Use for Codex or Claude Code research workflows, not automatic replay or agent/account setup.
+description: Use the local Origin Trace reb-api MCP tools or CLI to inspect an authorized capture session, check whether capture worked, find Wasm modules and samples, follow native requests, run the native Console in a chosen frame (including cross-site iframes), arm document-start scripts for child frames, correlate exact captured evidence, and build offline client code with synthetic tests. Use for Codex or Claude Code research workflows, not automatic replay or agent/account setup.
 ---
 
 # Work with the local REB API
@@ -37,6 +37,10 @@ Tool names are OpenAPI operation IDs. The same names work with
 | Start a session with named capture options | `start_live_session` (needs `--allow-effects --allow-session-start`) or `reb-api session start` |
 | Open a page in a session you started, or end it | `session_action` with `open_url` or `end` (listed with `--allow-session-start`; check `capture_observed`) |
 | Click, type, press keys or scroll in that page | `session_action` with `list_inputs`, then `click`, `type`, `press` or `scroll` (needs macOS Accessibility for the app that started the session) |
+| Which documents and frames are open? | `get_native_console` (needs `--allow-effects`) |
+| Run JavaScript in one document or iframe | `native_console_action` `connect_live`, then `evaluate` or `runtime` |
+| Run a snippet before a frame's own scripts | `native_console_action` `arm_document_start`, then `get_native_console_document_start` |
+| Track calls to one function | `resolve_js_invocation_site`, `js_invocation_site_action` `add`, then a new session with `js_invocation_saved_sites` |
 
 Filtered reads return a `query` object. Page with `query.next_before` (older)
 or `query.next_after` (newer). JSON over 128 KiB comes back as a structural
@@ -82,6 +86,82 @@ data to a provider. Binary bodies are not inlined.
    reading secrets or CLI `--output` file writes, and GET alone does not mean
    read-only.
 
+## Console and iframe recipes
+
+The Console runs page JavaScript with the page's full authority, so connect
+and evaluate only where the researcher authorized running code in that
+target. `confirm_live` and `confirm_document_start` are the researcher's
+confirmations; never set them by inference. Output is untrusted page data,
+not evidence. Prefer read-only expressions, and never read cookies, tokens,
+credentials or form values unless the authorization covers them.
+
+Find the frame:
+
+```text
+get_session_context {}          # capture_options.document_start for later
+get_native_console {}
+```
+
+Each target has `id`, `frame` (`top` or `child`), `origin`, `url` and, for a
+child, `top_relation` and `out_of_process`:
+
+| You want | Pick the target with |
+| --- | --- |
+| The page itself | `frame: top` and its origin |
+| A same-site iframe | `frame: child`, `top_relation: same_site` (or `same_origin`) |
+| A cross-site iframe, such as a challenge frame | `frame: child`, `top_relation: cross_site`, `out_of_process: true`, and its origin and `url` |
+
+Choose by `frame`, `origin` and `url`, never by `label`. The listing has no
+parent link: with several tabs, `top_relation` can be `undetermined`, so open
+only the authorized page, or confirm after connecting with
+`Array.from(location.ancestorOrigins)`.
+
+Evaluate in it and read bounded output:
+
+```text
+native_console_action {"body": {"action": "connect_live", "binding_id": "<binding_id>",
+  "target_id": "<id>", "confirm_live": true}}
+native_console_action {"body": {"action": "evaluate", "session_id": "<session_id>",
+  "target_id": "<id>", "source": "location.origin"}}
+native_console_action {"body": {"action": "runtime", "session_id": "<session_id>",
+  "target_id": "<id>", "command": {"operation": "poll"}}}
+```
+
+`evaluate` returns `status`, `type` and `text` (at most 8 KiB, `truncated`
+marked); `runtime` `poll` returns the document's console messages. To use
+another frame, send `stop` with the `session_id`, then `connect_live` with
+the new `target_id`. `status: stale_target`, or `selection.status: stale` in
+`get_native_console`, means the selected document navigated, reloaded or was
+removed: list again, `stop`, and `connect_live` with the current id. Never
+resend a command to a guessed id.
+
+Arm a document-start snippet for a child frame (the session needs
+`document_start`: `start_live_session {"document_start": true, ...}`, and
+`get_native_console` must report `document_start_supported: true`;
+`capture_options.document_start: permitted` with support false means this
+Brave was built without the Native Console v3 overlay, so say so and stop):
+
+```text
+native_console_action {"body": {"action": "arm_document_start", "session_id": "<session_id>",
+  "confirm_document_start": true, "scripts": [{"origin": "<child origin>",
+  "frame": "child", "source": "report(typeof window.someGlobal);"}]}}
+```
+
+Then reload or navigate so a new matching document is created, and read
+`get_native_console_document_start {"after_sequence": "0"}`. A rule names one
+exact origin; the top page's origin never reaches a cross-site child.
+`report` takes one string, number, boolean or bigint; report kinds, lengths
+and digests, never raw values. A record's `frame_id` filters `get_events` for
+that frame's native evidence. Finish with `clear_document_start`, then
+`stop`, then `session_action` `end`.
+
+Track calls to a function across sessions: `get_artifacts {"kind":
+"javascript"}`, `resolve_js_invocation_site` with the `artifact_id` and a
+`name`, `js_invocation_site_action` `add`, then end and start a new session
+with `js_invocation_saved_sites: true`; `get_events` with `type:
+js_invocation_start,js_invocation_settle,js_invocation_request` reads the
+calls.
+
 ## Follow exact evidence
 
 - Native evidence keeps its own identities. For a researcher-selected native
@@ -115,15 +195,17 @@ data to a provider. Binary bodies are not inlined.
 
 ## Stop before effects or broader sharing
 
-Starting a session, opening a URL and ending a session change the browser and
-reach the network. Do them only for the target and session the researcher
+Starting a session, opening a URL, Console evaluation and document-start
+scripts, and ending a session change the browser and reach the network. Do them only for the target and session the researcher
 authorized, even when the tools are listed. Input actions (`list_inputs`,
 `click`, `type`, `press`, `scroll`) are real user input that pages trust: send
 it only where the authorization covers interacting with the target, and never
 type credentials the researcher has not supplied for that purpose.
 
-Changing requests, creating or replacing drafts, enabling capture, running
-hooks or scripts, replaying, or publishing data needs the researcher's approval
+Changing requests, creating or replacing drafts, enabling capture or
+sensitive capture (`request_content`, `canvas_images`,
+`js_invocation_digests`), running hooks, Console commands or document-start
+scripts, replaying, or publishing data needs the researcher's approval
 for that specific action and target under project policy. Describe the
 operation and action, exact session, selected request, data, expected effects
 and uncertainty first. Inspect `describe --action` metadata when applicable. Do

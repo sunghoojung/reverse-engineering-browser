@@ -153,6 +153,11 @@ void NativeProbeSession::StopSession() noexcept {
   js_dispatch_sites_.clear();
   js_invocation_sites_.clear();
   js_invocation_digests_ = false;
+  // Hosts drain records their renderers already queued, and the artifact sink
+  // turns unresolved work into gaps, while the session can still record them.
+  for (NativeProbeHost* const host : hosts_) {
+    host->Disable();
+  }
   NativeArtifactCaptureSink::Get().SetEmitter(nullptr, 0, 0, 0);
   NativeNetworkCaptureSink::Get().SetEmitter(nullptr, 0, 0, 0);
   session_id_.store(0, std::memory_order_release);
@@ -160,9 +165,6 @@ void NativeProbeSession::StopSession() noexcept {
   expires_at_monotonic_ns_.store(0, std::memory_order_release);
   capture_canvas_images_.store(false, std::memory_order_release);
   capture_request_content_.store(false, std::memory_order_release);
-  for (NativeProbeHost* const host : hosts_) {
-    host->Disable();
-  }
   downstream_.store(nullptr, std::memory_order_release);
 }
 

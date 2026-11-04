@@ -39,8 +39,8 @@ spelling, and makes every activation belong to exactly one site, so its parent
 walk and host attribution stay unambiguous. Two dispatch loops in one function
 are not supported.
 
-All sites share one `sample_limit` (at most 256), the renderer's 128 sampled
-activations and its document bindings. The 16 MiB snapshot budget is therefore
+All sites share one `sample_limit` (at most 256), the renderer's 128 tracked
+activations and its 16 document bindings. The 16 MiB snapshot budget is therefore
 never multiplied per site: it stays at most 256 snapshots of 65536 bytes. When
 the shared limit is reached the next sample at any site records
 `native_guest_sample_limit`, as with one site. The browser's session parser
@@ -73,10 +73,16 @@ locals. Compiler metadata and active-frame checks control access; reference
 values and host addresses are never exposed. Memory snapshots reject shared
 memory and out-of-bounds/overflowing ranges. A snapshot is at most 65536 bytes;
 adapter sample limit is 1–256, with a 16 MiB aggregate bytecode-snapshot budget
-(module and adapter artifacts are additional). The renderer retains
-at most 128 distinct sampled activations per capture configuration; this can
-stop coverage before the sample limit. Separately, the engine bounds its active
-frame/instance bookkeeping. Resource exhaustion
+(module and adapter artifacts are additional). Each renderer thread tracks at
+most 128 sampled activations at once. Activations have no exit callback, so a
+full table reclaims the least recently sampled activation that is not an
+ancestor of the one being sampled, following the engine's resolved parent
+chain; invocation identities grow with entry, so without stack switching every
+other entry has returned. Only a table of ancestors refuses the new activation
+with `native_guest_invocation_limit`. An activation reclaimed while it still
+runs above an unresolved parent is sampled as a new activation if it reaches
+another boundary. Separately, the engine bounds its active frame/instance
+bookkeeping. Resource exhaustion
 fails closed rather than silently resetting a budget or inventing observations.
 
 Module and adapter artifacts are acknowledged before publishing invocation
@@ -140,17 +146,36 @@ then only empty-module samples, until the browser reports a verdict through
 token is the sequence number of the dispatch that carried the bytes; a verdict
 for a retired configuration or another token has no effect. Acceptance means the
 module and adapter artifacts were both accepted by the receiver. A rejection
-makes the next sample resend the bytes, at most 3 transfers per binding; after
-that the renderer records `native_guest_module_unavailable` and stops sampling
-that binding. Samples sent while a transfer is pending bind to it, and become
-explicit gaps if it is rejected.
+makes the next sample resend the bytes, at most 3 rejected transfers per
+binding; after that the renderer records `native_guest_module_unavailable` and
+stops sampling that binding. Samples sent while a transfer is pending bind to
+it, and become explicit gaps if it is rejected.
+
+The renderer keeps the latest 256 verdicts, which covers every verdict of one
+configuration (one per delivered capture). It counts verdict writes, and a
+binding that finds no verdict after 256 writes since its send treats the
+verdict as lost and resends the bytes without spending an attempt; the browser
+confirms an accepted binding at once. Each renderer thread keeps 16 document
+bindings and replaces the least recently sampled one when a new document
+arrives, since a binding only caches the browser's: a replaced live document
+resends its module once. The browser binds at most 16 live documents per
+session. It reclaims a binding once its document is gone (navigation, frame or
+renderer exit, retired configuration), reporting any verdict still owed as a
+rejection, and refuses a seventeenth live document with
+`native_guest_document_limit`.
 
 Every browser refusal of a guest capture (invalid record, adapter or module
 mismatch, missing owning document, unbound or lost module binding, snapshot
-transfer failure, sample budget) emits a `gap` that reuses the refused
-dispatch's own renderer process and sequence number, so it closes that
-provisional hole instead of leaving it. Invocation sequence numbers are reused
-by later samples and are not filled this way.
+transfer failure, sample budget, missing artifact channel) emits a `gap` that
+reuses the refused dispatch's own renderer process and sequence number, every
+time, so it closes that provisional hole instead of leaving it. Invocation
+sequence numbers are reused by later samples and are not filled this way. A
+capture the renderer transport refuses never reached the browser: its sample
+index is free again, and the renderer fills its dispatch slot, and the slot of
+an invocation marker created for it, with `native_guest_transport_unavailable`.
+A malformed host record from the renderer fills its own slot with
+`native_guest_host_malformed`; one naming another identity gets one
+browser-sequence marker.
 
 Host API-call and property-read records travel the parent-binding path for at
 most 256 records per capture configuration; later ones stay on the ordinary
@@ -162,7 +187,10 @@ already held (`native_guest_host_parent_omitted`). Host records are never
 dropped because their parent was. About 250 ms before session expiry the
 browser turns unresolved guest dispatches into `native_guest_pending_at_expiry`
 gaps and publishes their held hosts unparented, because the session refuses
-every record after expiry.
+every record after expiry. Ending the capture does the same with
+`native_guest_pending_at_capture_end`, and each browser host first drains the
+records its renderer already queued. Without the artifact channel no parent can
+be published, so a routed host is published unparented.
 
 ### Engine cost and module admission
 

@@ -140,7 +140,28 @@ enum SessionCommand {
         /// Store Canvas images, which can contain sensitive page content.
         #[arg(long, requires = "confirm_sensitive_capture")]
         canvas_images: bool,
-        /// Confirm the researcher authorized sensitive Canvas capture.
+        /// Retain request paths, queries and bounded bodies (sensitive).
+        #[arg(long, requires = "confirm_sensitive_capture")]
+        request_content: bool,
+        /// Permit document-start Console scripts in this capture browser.
+        /// Arming one is still a separate confirmed Console action.
+        #[arg(long)]
+        document_start: bool,
+        /// Absolute path of a JavaScript invocation site file to arm.
+        #[arg(
+            long,
+            value_name = "FILE",
+            conflicts_with = "js_invocation_saved_sites"
+        )]
+        js_invocation_sites: Option<PathBuf>,
+        /// Arm the agent sessions' own saved invocation sites, never the app's.
+        #[arg(long)]
+        js_invocation_saved_sites: bool,
+        /// Hash settled values of armed calls (sensitive). Needs sites.
+        #[arg(long, requires = "confirm_sensitive_capture")]
+        js_invocation_digests: bool,
+        /// Confirm the researcher authorized the sensitive capture named here:
+        /// Canvas images, request content or invocation value digests.
         #[arg(long)]
         confirm_sensitive_capture: bool,
         /// Also publish the canonical endpoint used by default MCP configs.
@@ -1192,6 +1213,11 @@ async fn run_session(command: SessionCommand) -> Result<i32, Box<dyn std::error:
         duration_seconds,
         localhost_only,
         canvas_images,
+        request_content,
+        document_start,
+        js_invocation_sites,
+        js_invocation_saved_sites,
+        js_invocation_digests,
         confirm_sensitive_capture,
         publish_canonical_endpoint,
         brave_binary,
@@ -1209,6 +1235,11 @@ async fn run_session(command: SessionCommand) -> Result<i32, Box<dyn std::error:
         duration_seconds,
         localhost_only,
         canvas_images,
+        request_content,
+        document_start,
+        js_invocation_sites,
+        js_invocation_saved_sites,
+        js_invocation_digests,
         confirm_sensitive_capture,
         publish_canonical_endpoint,
         brave_binary,

@@ -50,7 +50,13 @@ request cap allows JSON escaping of a 4 MiB source. At most 4,096 rewrites and
 64 syntax diagnostics are retained. Further rewrites set
 `transformations_truncated`; the remaining source is preserved unchanged.
 
-See [the response contract](../../protocol/deobfuscation-v1.md).
+Each request is exactly one operation. Untagged records are deobfuscation
+(`source`, optional `assume_intrinsics`) or, when they carry
+`function_at_byte`, the function lookup (`source`, `function_at_byte`,
+optional `candidate_end_byte`); `source_facts`, `invocation_site` and
+`request_field` are named by `operation`. Unknown operations and unknown fields
+are refused with `error_kind: "invalid-request"`, and every other refusal names
+its kind too. See [the response contract](../../protocol/deobfuscation-v1.md).
 
 Before recursive Oxc parsing, a heap-backed Tree-sitter preflight admits only
 error-free JavaScript trees with depth at most 128, at most 2,097,152 nodes, and

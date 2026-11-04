@@ -4,6 +4,8 @@ std::array<std::uint8_t, 16> guest_memory{};
 std::uint64_t guest_pc = 0;
 reb::NativeWasmGuestContext guest_context{}, guest_outer_context{};
 bool guest_context_valid = true, guest_outer_context_valid = false, guest_capture_accept = true;
+// False makes the PC read fail, refusing a sample after its bindings are made.
+bool guest_read_ok = true;
 std::function<void()> guest_reenter;
 std::vector<NativeProbeEvent> guest_dispatches, guest_hosts, guest_invocations;
 std::vector<std::size_t> guest_module_sizes;
@@ -11,7 +13,7 @@ std::uint64_t GuestFrame() noexcept {
   return 8;
 }
 bool GuestRead(void*, std::uint32_t index, std::uint64_t* value, std::uint8_t* type) {
-  if (index != 320)
+  if (index != 320 || !guest_read_ok)
     return false;
   *value = guest_pc;
   *type = 32;
@@ -543,4 +545,89 @@ void NativeGuestTwoSiteNesting() {
   std::cout << "PASS two-site guests: an inner interpreter at site 1 names the exact current "
                "dispatch of site 0, sites share one sample budget, hosts belong to the "
                "innermost site, and loss, unresolved, disabled and expired cases stay explicit\n";
+}
+
+// Bindings have no exit callback, so full tables are reclaimed instead of
+// refusing every later document or activation for the configuration. A
+// document's binding is a cache of the browser's; an activation is kept while
+// it is an ancestor of the one being sampled. Samples refused by a failed PC
+// read still make their bindings, so the tables fill without spending the
+// three-sample budget.
+void NativeGuestBindingReclaim() {
+  const std::array<std::uint8_t, 11> module{0, 97, 115, 109, 1, 0, 0, 0, 0x0e, 0, 0};
+  const auto adapter = GuestTestAdapter(module);
+  const auto configure = [&] {
+    sink.SetEmitters(&RecordGuestQueue, &CaptureRuntimeMetadata, 45,
+                     reb::kAllNativeProbeCategoryMask, kForever, false, &GuestFrame);
+    sink.ConfigureNativeWasmGuest(adapter, &GuestCapture, &GuestHost);
+    sink.SetNativeWasmGuestRuntime(&GuestContext, nullptr);
+    guest_queue_events.clear();
+  };
+  guest_dispatches.clear();
+  guest_invocations.clear();
+  guest_module_sizes.clear();
+  guest_capture_accept = true;
+  guest_pc = 0;
+  guest_memory[0] = 0x41;
+  reb::NativeWasmGuestStateView view{7, 0, 414, 8, 0, 0, nullptr, &GuestRead, &GuestCopy};
+  const auto record = [&](std::uint64_t invocation, std::uint64_t document, bool read = true) {
+    view.invocation_id = invocation;
+    guest_read_ok = read;
+    sink.RecordNativeWasmGuest(1, 8, "https://owned.test/module.wasm", module, view, document, 6);
+    guest_read_ok = true;
+  };
+
+  // Seventeen documents: the least recently sampled binding is replaced, and
+  // a replaced accepted document resends its module once.
+  configure();
+  record(100, 1000);
+  assert(guest_dispatches.size() == 1 && guest_module_sizes.back() == module.size());
+  sink.NoteNativeGuestModuleStatus(guest_dispatches.back().header.sequence_number, true);
+  for (std::uint64_t n = 1; n <= 16; ++n)
+    record(100 + n, 1000 + n, false);
+  assert(guest_dispatches.size() == 1 && !GuestQueueHasGap("native_guest_document_limit"));
+  record(100, 1000);
+  assert(guest_dispatches.size() == 2 && guest_module_sizes.back() == module.size());
+  record(116, 1016);
+  assert(guest_dispatches.size() == 3 && guest_module_sizes.back() == module.size());
+
+  // A full activation table reclaims a returned activation, never an ancestor.
+  configure();
+  record(2000, 5);
+  assert(guest_dispatches.size() == 4);
+  const auto parent_dispatch = guest_dispatches.back().header.sequence_number;
+  for (std::uint64_t n = 1; n < 128; ++n)
+    record(2000 + n, 5, false);
+  view.parent = reb::NativeWasmGuestParent::kResolved;
+  view.parent_invocation_id = 2000;
+  record(3000, 5);
+  reb::NativeWasmGuestInvocationPayload payload;
+  assert(guest_dispatches.size() == 5 &&
+         reb::DecodeNativeWasmGuestInvocationPayload(guest_invocations.back().inline_payload,
+                                                     payload) &&
+         payload.parent_invocation_id == 2000 &&
+         payload.parent_dispatch_sequence_number == parent_dispatch &&
+         !GuestQueueHasGap("native_guest_invocation_limit") &&
+         !GuestQueueHasGap("native_guest_parent_unresolved"));
+
+  // When every tracked activation is an ancestor, a new one is refused.
+  configure();
+  view.parent = reb::NativeWasmGuestParent::kNone;
+  view.parent_invocation_id = 0;
+  for (std::uint64_t n = 0; n < 128; ++n) {
+    record(4000 + n, 5, false);
+    view.parent = reb::NativeWasmGuestParent::kResolved;
+    view.parent_invocation_id = 4000 + n;
+  }
+  assert(!GuestQueueHasGap("native_guest_invocation_limit"));
+  record(5000, 5);
+  assert(guest_dispatches.size() == 5 && GuestQueueHasGap("native_guest_invocation_limit"));
+  view.parent = reb::NativeWasmGuestParent::kNone;
+  view.parent_invocation_id = 0;
+  record(5001, 5);
+  assert(guest_dispatches.size() == 6);
+  sink.SetEmitters(nullptr, nullptr, 0, 0, 0);
+  sink.SetNativeWasmGuestRuntime(nullptr, nullptr);
+  std::cout << "PASS guest document bindings and activations are reclaimed when full; "
+               "ancestors stay, and a table of ancestors refuses explicitly\n";
 }

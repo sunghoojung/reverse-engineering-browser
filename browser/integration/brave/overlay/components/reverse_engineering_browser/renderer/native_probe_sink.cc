@@ -3101,25 +3101,38 @@ void NativeProbeSink::RecordNativeJsInvocationRequest(const std::int32_t request
 }
 
 namespace {
+// Per renderer thread and configuration.
+constexpr std::size_t kGuestInvocationLimit = 128, kGuestDocumentLimit = 16;
 struct GuestInvocationState final {
   std::uint64_t instance = 0, invocation = 0, frame = 0, document_high = 0, document_low = 0,
                 dispatch_sequence = 0;
+  // V8's resolved parent activation, or 0. Ancestors are never reclaimed.
+  std::uint64_t parent = 0;
+  // guest_thread.use_clock at this activation's latest sample.
+  std::uint64_t last_use = 0;
   // The adapter site of this activation's dispatcher function.
   std::uint32_t site = 0;
   NativeProbeEvent invocation_event{};
 };
+// kUnsent: the next sample carries the module bytes. kPending: the dispatch
+// module_token carried them and the browser verdict is unknown; samples bind
+// to that in-flight module. kAccepted: samples carry no bytes. A rejection
+// returns the binding to kUnsent.
+enum class GuestModuleState : std::uint8_t { kUnsent, kPending, kAccepted };
 struct GuestDocumentBinding final {
   std::uint64_t frame = 0, high = 0, low = 0, context = 0;
-  // Sequence number of the dispatch that last carried the module bytes; zero
-  // means the next sample must carry them. Cleared again on a rejection.
   std::uint64_t module_token = 0;
+  std::uint64_t last_use = 0;
+  GuestModuleState module = GuestModuleState::kUnsent;
   std::uint8_t module_attempts = 0;
-  bool module_accepted = false;
 };
 struct GuestThreadState final {
   std::uint64_t generation = 0;
-  std::array<GuestInvocationState, 128> invocations{};
-  std::array<GuestDocumentBinding, 16> documents{};
+  // Orders samples on this thread, so a full table replaces its least
+  // recently sampled entry.
+  std::uint64_t use_clock = 0;
+  std::array<GuestInvocationState, kGuestInvocationLimit> invocations{};
+  std::array<GuestDocumentBinding, kGuestDocumentLimit> documents{};
 };
 thread_local GuestThreadState guest_thread;
 thread_local NativeGuestSnapshot guest_snapshot;
@@ -3140,7 +3153,66 @@ void ResetGuestThread(std::uint64_t generation) noexcept {
     state = {};
   for (auto& document : guest_thread.documents)
     document = {};
+  guest_thread.use_clock = 0;
   guest_thread.generation = generation;
+}
+// A binding caches only what the browser holds for its document, so a full
+// table replaces the least recently sampled binding (an unused one first)
+// instead of refusing a new document. A replaced document that is still
+// live resends its module once and the browser answers from its own binding.
+GuestDocumentBinding& ClaimGuestDocument(std::uint64_t frame,
+                                         std::uint64_t context,
+                                         std::uint64_t high,
+                                         std::uint64_t low) noexcept {
+  auto& documents = guest_thread.documents;
+  auto found = std::find_if(documents.begin(), documents.end(), [&](const auto& entry) {
+    return entry.frame == frame && entry.context == context && entry.high == high &&
+           entry.low == low;
+  });
+  if (found == documents.end()) {
+    found = std::min_element(documents.begin(), documents.end(),
+                             [](const auto& a, const auto& b) { return a.last_use < b.last_use; });
+    *found = {};
+    found->frame = frame;
+    found->context = context;
+    found->high = high;
+    found->low = low;
+  }
+  found->last_use = ++guest_thread.use_clock;
+  return *found;
+}
+// Activations have no exit callback. A full table reclaims the least recently
+// sampled activation that is not an ancestor of the current one; ancestors
+// are the chain of V8-resolved parents, which strictly descends because
+// invocation IDs grow with entry. Without stack switching, every other entry
+// has returned. One still running above an unresolved parent is sampled as a
+// new activation if it reaches another boundary. Null when all are ancestors.
+GuestInvocationState* ClaimGuestInvocation(const NativeWasmGuestStateView& view) noexcept {
+  auto& invocations = guest_thread.invocations;
+  std::array<bool, kGuestInvocationLimit> ancestor{};
+  for (std::uint64_t id =
+           view.parent == NativeWasmGuestParent::kResolved ? view.parent_invocation_id : 0;
+       id;) {
+    std::uint64_t next = 0;
+    for (std::size_t i = 0; i < invocations.size(); ++i)
+      if (invocations[i].invocation == id) {
+        ancestor[i] = true;
+        next = invocations[i].parent < id ? invocations[i].parent : 0;
+        break;
+      }
+    id = next;
+  }
+  GuestInvocationState* victim = nullptr;
+  for (std::size_t i = 0; i < invocations.size(); ++i) {
+    auto& entry = invocations[i];
+    if (!entry.invocation)
+      return &entry;
+    if (!ancestor[i] && (!victim || entry.last_use < victim->last_use))
+      victim = &entry;
+  }
+  if (victim)
+    *victim = {};
+  return victim;
 }
 struct GuestParentLink final {
   std::uint64_t invocation = 0, dispatch = 0;
@@ -3198,7 +3270,8 @@ void NativeProbeSink::InvalidateNativeWasmGuest(const NativeWasmGuestStateView& 
   if (!view.instance_id || !view.invocation_id) {
     for (auto& state : guest_thread.invocations)
       state.dispatch_sequence = 0;
-    NoteNativeGuestOmission(generation, 0, 7, "native_guest_runtime_identity_unavailable");
+    NoteNativeGuestOmission(generation, 0, kGuestRuntimeIdentityGap,
+                            "native_guest_runtime_identity_unavailable");
     return;
   }
   for (auto& state : guest_thread.invocations)
@@ -3221,8 +3294,8 @@ void NativeProbeSink::ConfigureNativeWasmGuest(
     native_guest_retained_adapter_ = new NativeWasmGuestAdapter(*adapter);
   if (native_guest_retained_adapter_->json != adapter->json) {
     native_guest_adapter_.store(nullptr, std::memory_order_release);
-    NoteNativeGuestOmission(config_generation_.load(std::memory_order_acquire), 0, 6,
-                            "native_guest_adapter_restart_required");
+    NoteNativeGuestOmission(config_generation_.load(std::memory_order_acquire), 0,
+                            kGuestAdapterRestartGap, "native_guest_adapter_restart_required");
     return;
   }
   native_guest_adapter_.store(native_guest_retained_adapter_, std::memory_order_release);
@@ -3322,7 +3395,8 @@ void NativeProbeSink::RecordNativeWasmGuest(std::uint64_t execution_context_id,
   if (!view.instance_id || !view.invocation_id) {
     for (auto& state : guest_thread.invocations)
       state.dispatch_sequence = 0;
-    NoteNativeGuestOmission(generation, frame_id, 7, "native_guest_runtime_identity_unavailable");
+    NoteNativeGuestOmission(generation, frame_id, kGuestRuntimeIdentityGap,
+                            "native_guest_runtime_identity_unavailable");
     return;
   }
   GuestInvocationState* state = nullptr;
@@ -3343,38 +3417,19 @@ void NativeProbeSink::RecordNativeWasmGuest(std::uint64_t execution_context_id,
     return;
   admission.frame_id = frame_id;
   if (native_guest_capped_generation_.load(std::memory_order_acquire) >= generation) {
-    NoteNativeGuestOmission(generation, frame_id, 0, "native_guest_sample_limit");
+    NoteNativeGuestOmission(generation, frame_id, kGuestSampleLimitGap,
+                            "native_guest_sample_limit");
     return;
   }
-  GuestDocumentBinding* document = nullptr;
-  for (auto& entry : guest_thread.documents)
-    if (entry.frame == frame_id && entry.context == execution_context_id &&
-        entry.high == document_token_high && entry.low == document_token_low) {
-      document = &entry;
-      break;
-    }
-  if (!document) {
-    for (auto& entry : guest_thread.documents)
-      if (!entry.frame) {
-        document = &entry;
-        break;
-      }
-    if (!document) {
-      NoteNativeGuestOmission(generation, frame_id, 5, "native_guest_document_limit");
-      return;
-    }
-    document->frame = frame_id;
-    document->context = execution_context_id;
-    document->high = document_token_high;
-    document->low = document_token_low;
-  }
-  if (!document->module_accepted && document->module_token) {
+  auto* document =
+      &ClaimGuestDocument(frame_id, execution_context_id, document_token_high, document_token_low);
+  if (document->module == GuestModuleState::kPending) {
     switch (NativeGuestModuleVerdict(document->module_token)) {
       case GuestModuleVerdict::kAccepted:
-        document->module_accepted = true;
+        document->module = GuestModuleState::kAccepted;
         break;
       case GuestModuleVerdict::kRejected:
-        document->module_token = 0;
+        document->module = GuestModuleState::kUnsent;
         break;
       case GuestModuleVerdict::kPending:
         break;
@@ -3382,25 +3437,24 @@ void NativeProbeSink::RecordNativeWasmGuest(std::uint64_t execution_context_id,
   }
   // While a transfer is pending, later samples bind to the browser's in-flight
   // module; if it is rejected the browser marks those dispatches lost.
-  const bool send_module = !document->module_accepted && !document->module_token;
+  const bool send_module = document->module == GuestModuleState::kUnsent;
   if (send_module && document->module_attempts >= kNativeGuestModuleAttemptLimit) {
-    NoteNativeGuestOmission(generation, frame_id, 8, "native_guest_module_unavailable");
+    NoteNativeGuestOmission(generation, frame_id, kGuestModuleUnavailableGap,
+                            "native_guest_module_unavailable");
     return;
   }
   if (!state) {
-    for (auto& slot : guest_thread.invocations)
-      if (!slot.invocation) {
-        state = &slot;
-        break;
-      }
-    if (!state) {
-      NoteNativeGuestOmission(generation, frame_id, 1, "native_guest_invocation_limit");
-      return;
-    }
     if (NativeGuestDigest(module_bytes) != adapter->module_sha256)
       return;
+    state = ClaimGuestInvocation(view);
+    if (!state) {
+      NoteNativeGuestOmission(generation, frame_id, kGuestInvocationLimitGap,
+                              "native_guest_invocation_limit");
+      return;
+    }
     state->instance = view.instance_id;
     state->invocation = view.invocation_id;
+    state->parent = view.parent == NativeWasmGuestParent::kResolved ? view.parent_invocation_id : 0;
     state->frame = frame_id;
     state->document_high = document_token_high;
     state->document_low = document_token_low;
@@ -3409,15 +3463,18 @@ void NativeProbeSink::RecordNativeWasmGuest(std::uint64_t execution_context_id,
   if (state->frame != frame_id || state->document_high != document_token_high ||
       state->document_low != document_token_low || state->site != site_index)
     return;
+  state->last_use = ++guest_thread.use_clock;
   if (guest_snapshot_busy) {
     guest_snapshot_cancelled = true;
-    NoteNativeGuestOmission(generation, frame_id, 2, "native_guest_snapshot_reentry");
+    NoteNativeGuestOmission(generation, frame_id, kGuestSnapshotGap,
+                            "native_guest_snapshot_reentry");
     return;
   }
   GuestSnapshotGuard snapshot_guard;
   auto& snapshot = guest_snapshot;
   if (!ResolveNativeGuestSnapshot(*site, view, snapshot) || guest_snapshot_cancelled) {
-    NoteNativeGuestOmission(generation, frame_id, 2, "native_guest_state_unavailable");
+    NoteNativeGuestOmission(generation, frame_id, kGuestSnapshotGap,
+                            "native_guest_state_unavailable");
     return;
   }
   // Generation tags prevent stale in-flight work consuming a replacement budget.
@@ -3440,7 +3497,8 @@ void NativeProbeSink::RecordNativeWasmGuest(std::uint64_t execution_context_id,
     while (previous < generation && !native_guest_capped_generation_.compare_exchange_weak(
                                         previous, generation, std::memory_order_acq_rel)) {
     }
-    NoteNativeGuestOmission(generation, frame_id, 0, "native_guest_sample_limit");
+    NoteNativeGuestOmission(generation, frame_id, kGuestSampleLimitGap,
+                            "native_guest_sample_limit");
     return;
   }
   NativeGuestCapture capture;
@@ -3466,7 +3524,8 @@ void NativeProbeSink::RecordNativeWasmGuest(std::uint64_t execution_context_id,
     payload.parent_invocation_id = parent.invocation;
     payload.parent_dispatch_sequence_number = parent.dispatch;
     if (parent.unresolved)
-      NoteNativeGuestOmission(generation, frame_id, 10, "native_guest_parent_unresolved");
+      NoteNativeGuestOmission(generation, frame_id, kGuestParentUnresolvedGap,
+                              "native_guest_parent_unresolved");
     payload.site_index = site_index;
     // The JavaScript invocation this guest activation began in.
     const NativeJsInvocationContext js_invocation = CurrentNativeJsInvocation();
@@ -3509,10 +3568,12 @@ void NativeProbeSink::RecordNativeWasmGuest(std::uint64_t execution_context_id,
   if (config_generation_.load(std::memory_order_acquire) != generation || !emit ||
       !emit(capture, generation) || guest_snapshot_cancelled ||
       config_generation_.load(std::memory_order_acquire) != generation) {
-    NoteNativeGuestOmission(generation, frame_id, 3, "native_guest_transport_unavailable");
+    NoteNativeGuestOmission(generation, frame_id, kGuestTransportGap,
+                            "native_guest_transport_unavailable");
     return;
   }
   if (send_module) {
+    document->module = GuestModuleState::kPending;
     document->module_token = event.header.sequence_number;
     ++document->module_attempts;
   }
@@ -3561,7 +3622,7 @@ bool NativeProbeSink::TryRecordNativeGuestHost(NativeProbeEvent& event,
     // Beyond the routing budget the host stays on the ordinary queue without
     // its parent link; the event itself is still retained.
     if (!ClaimNativeGuestHostRoute(generation)) {
-      NoteNativeGuestOmission(generation, event.header.frame_id, 9,
+      NoteNativeGuestOmission(generation, event.header.frame_id, kGuestHostParentBudgetGap,
                               "native_guest_host_parent_budget");
       return false;
     }
@@ -3570,7 +3631,7 @@ bool NativeProbeSink::TryRecordNativeGuestHost(NativeProbeEvent& event,
       return true;
     event.header.parent_event_id = 0;
     state.dispatch_sequence = 0;
-    NoteNativeGuestOmission(generation, event.header.frame_id, 4,
+    NoteNativeGuestOmission(generation, event.header.frame_id, kGuestHostTransportGap,
                             "native_guest_host_transport_unavailable");
     return false;
   }

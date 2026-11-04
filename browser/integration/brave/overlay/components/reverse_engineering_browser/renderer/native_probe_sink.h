@@ -547,7 +547,14 @@ class COMPONENT_EXPORT(REB_NATIVE_PROBE_SINK) NativeProbeSink final {
   std::atomic<NativeWasmGuestReset> native_guest_reset_{nullptr};
   std::array<std::atomic<std::uint64_t>, kNativeGuestSampleLimit> native_guest_slots_{};
   std::atomic<std::uint64_t> native_guest_capped_generation_{0};
-  std::array<std::atomic<std::uint64_t>, 11> native_guest_gap_generations_{};
+  // Coalesced guest gaps, at most one of each per configuration.
+  static constexpr std::size_t kGuestSampleLimitGap = 0, kGuestInvocationLimitGap = 1,
+                               kGuestSnapshotGap = 2, kGuestTransportGap = 3,
+                               kGuestHostTransportGap = 4, kGuestAdapterRestartGap = 5,
+                               kGuestRuntimeIdentityGap = 6, kGuestModuleUnavailableGap = 7,
+                               kGuestHostParentBudgetGap = 8, kGuestParentUnresolvedGap = 9,
+                               kGuestGapCount = 10;
+  std::array<std::atomic<std::uint64_t>, kGuestGapCount> native_guest_gap_generations_{};
   // Parent-binding host routes claimed per configuration (see
   // kNativeGuestHostParentLimit). Same generation-tag scheme as samples.
   std::array<std::atomic<std::uint64_t>, kNativeGuestHostParentLimit> native_guest_host_slots_{};

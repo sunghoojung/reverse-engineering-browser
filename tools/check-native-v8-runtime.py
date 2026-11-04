@@ -211,7 +211,76 @@ def self_test():
             pass
         else:
             raise AssertionError("Invalid builtins must fail closed")
+    check_claim(claim_work_directory, WORK_MARKER, ("running", "failed"), "passed")
     print("PASS standalone adapter preserves every production C++ hunk and excludes only embedder GN wiring")
+
+
+# Written inside a work directory this tool creates, so a rerun can tell its
+# own interrupted or failed attempt from a checkout it must never reset.
+WORK_MARKER = ".reb-native-v8-work.json"
+
+
+def write_json(path, value):
+    """Replace a status record only with complete bytes."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile("w", dir=path.parent, prefix=f".{path.name}.", delete=False) as target:
+        temporary = Path(target.name)
+        target.write(json.dumps(value, indent=2) + "\n")
+    try:
+        temporary.replace(path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def claim_work_directory(work):
+    """Create the work directory, or replace only one this tool left unfinished."""
+    marker = work / WORK_MARKER
+    if work.is_symlink():
+        raise ValueError("The work directory must not be a symlink")
+    if work.exists() and any(work.iterdir()):
+        status = None
+        if marker.is_file() and not marker.is_symlink():
+            try:
+                status = json.loads(marker.read_text()).get("status")
+            except (ValueError, AttributeError):
+                status = None
+        if status not in ("running", "failed"):
+            raise ValueError("Use a fresh work directory; existing checkouts are never reset")
+        print(f"Removing the unfinished work directory an earlier attempt left in {work}", flush=True)
+        shutil.rmtree(work)
+    work.mkdir(parents=True, exist_ok=True)
+    write_json(marker, {"status": "running"})
+
+
+def check_claim(claim, marker, incomplete, complete):
+    """A rerun replaces only this tool's own unfinished directory."""
+    with tempfile.TemporaryDirectory() as directory:
+        target = Path(directory) / "target"
+        claim(target)
+        (target / "partial").write_text("left by an interrupted attempt")
+        for status in incomplete:
+            (target / marker).write_text(json.dumps({"status": status}))
+            (target / "partial").write_text("left by an interrupted attempt")
+            claim(target)
+            assert not (target / "partial").exists()
+        for status in (complete, None):
+            (target / marker).write_text(json.dumps({"status": status}))
+            (target / "kept").write_text("not ours to remove")
+            try:
+                claim(target)
+            except ValueError:
+                pass
+            else:
+                raise AssertionError(f"Directory with status {status} was replaced")
+            assert (target / "kept").exists()
+        (target / marker).unlink()
+        try:
+            claim(target)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("Unmarked directory was replaced")
+        assert (target / "kept").exists()
 
 
 def main():
@@ -227,18 +296,15 @@ def main():
         return
     if args.work_dir is None or args.receipt is None:
         parser.error("--work-dir and --receipt are required")
+    claim_work_directory(args.work_dir.absolute())
     work = args.work_dir.resolve()
-    if work.exists():
-        raise ValueError("Use a fresh work directory; existing checkouts are never reset")
-    work.mkdir(parents=True)
     receipt = {
         "status": "running", "profile": "standalone-system-clang23-hardened-libcxx-not-Brave",
         "tests": {}, "patches": [], "brave_validated": False,
         "public_native_hook_validated": False,
     }
     def save_receipt():
-        args.receipt.parent.mkdir(parents=True, exist_ok=True)
-        args.receipt.write_text(json.dumps(receipt, indent=2) + "\n")
+        write_json(args.receipt, receipt)
 
     save_receipt()
     # Explicit disposable checkouts must not inherit Git hook routing/config.
@@ -465,6 +531,7 @@ def main():
             except (OSError, subprocess.TimeoutExpired) as error:
                 receipt["compiler_cache"]["statistics_error"] = str(error)
         save_receipt()
+        write_json(work / WORK_MARKER, {"status": receipt["status"]})
 
 
 if __name__ == "__main__":

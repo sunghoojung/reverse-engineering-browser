@@ -8595,10 +8595,7 @@ invocationSitesPanel.refresh();
       });
 
       const consoleTraffic = new Map();
-      document.querySelector('#console-traffic-back').addEventListener('click', () => {
-        delete document.querySelector('#screen-traffic').dataset.consoleTraffic;
-        document.querySelector('#console-experiment-traffic').hidden = true;
-      });
+      document.querySelector('#console-traffic-back').addEventListener('click', () => setConsoleTrafficView(false));
       document.addEventListener('reb-console-traffic', event => {
         const {session, target, events, dropped} = event.detail;
         if (!/^[1-9][0-9]{0,19}$/.test(session) || !/^[1-9][0-9]{0,19}$/.test(target) || !Array.isArray(events) || events.length > 64) return;
@@ -8608,8 +8605,7 @@ invocationSitesPanel.refresh();
         }
         if (investigationScreen() === 'traffic') investigationNavigation?.record();
         while (consoleTraffic.size > 128) consoleTraffic.delete(consoleTraffic.keys().next().value);
-        showScreen('traffic'); document.querySelector('#screen-traffic').dataset.consoleTraffic = 'true';
-        document.querySelector('#console-experiment-traffic').hidden = false;
+        showScreen('traffic'); setConsoleTrafficView(true);
         document.querySelector('#console-experiment-traffic').dataset.session = session;
         document.querySelector('#console-experiment-traffic').dataset.document = target;
         document.querySelector('#console-traffic-title').textContent = `Console experiment · document ${target}`;

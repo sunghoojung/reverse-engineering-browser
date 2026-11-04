@@ -102,7 +102,6 @@
         sourceDeobfuscated: false,
         sourceFormatted: false,
         sourceFormatCache: new Map(),
-        consoleOpen: false,
         selectedRequestId: standalonePreview ? '81' : null,
         inspectorTab: 'general',
         fieldTab: 'body',

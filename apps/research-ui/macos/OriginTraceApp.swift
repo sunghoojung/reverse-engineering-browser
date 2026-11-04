@@ -1527,8 +1527,15 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
       outputGroup.leave()
     }
     let started = Date()
-    inputPipe.fileHandleForWriting.write(normalized.0)
-    try? inputPipe.fileHandleForWriting.close()
+    // The deadline covers the input too: a runner that never reads it must not
+    // hold this write, and with it the only runner slot. A write after the
+    // runner ended fails with EPIPE instead of signalling this app.
+    let input = inputPipe.fileHandleForWriting
+    _ = fcntl(input.fileDescriptor, F_SETNOSIGPIPE, 1)
+    DispatchQueue.global(qos: .userInitiated).async {
+      try? input.write(contentsOf: normalized.0)
+      try? input.close()
+    }
     let timedOut = terminated.wait(timeout: .now() + 2.5) == .timedOut
     if timedOut {
       process.terminate()
@@ -1537,7 +1544,9 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
         _ = terminated.wait(timeout: .now() + 0.25)
       }
     }
-    outputGroup.wait()
+    // Ending the runner closes its output, unless something it started still
+    // holds the pipe. The slot is released either way.
+    let drained = outputGroup.wait(timeout: .now() + 1) == .success
     let duration = Int(Date().timeIntervalSince(started) * 1_000)
     analystRunnerLock.lock()
     let cancelled = analystCancelRequested && activeAnalystProcess === process
@@ -1560,6 +1569,14 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
         action: action,
         outcome: "timed_out",
         message: "Analyst script exceeded the 2 second execution limit",
+        duration: duration
+      )
+    }
+    if !drained {
+      return try localAnalystFailure(
+        action: action,
+        outcome: "failed",
+        message: "The analyst runner ended without closing its output",
         duration: duration
       )
     }

@@ -17,8 +17,8 @@
 #include <bit>
 #include <cerrno>
 #include <limits>
-#include <span>
 #include <string>
+#include <string_view>
 #include <utility>
 
 #include "base/command_line.h"
@@ -223,7 +223,7 @@ void NativeProbeSocketClient::Emit(const NativeProbeEvent& event) noexcept {
 void NativeProbeSocketClient::ArtifactChannelLost() noexcept {
   // From here every artifact capture is refused at admission without a
   // per-capture record, so one named gap marks where artifacts stop.
-  static constexpr char kReason[] = "artifact_channel_lost";
+  static constexpr std::string_view kReason = "artifact_channel_lost";
   NativeProbeSession& session = NativeProbeSession::Get();
   NativeProbeEvent gap;
   gap.header.category =
@@ -237,11 +237,11 @@ void NativeProbeSocketClient::ArtifactChannelLost() noexcept {
   gap.header.sequence_number = session.NextBrowserSequence();
   gap.header.monotonic_time_ns =
       static_cast<std::uint64_t>(base::TimeTicks::Now().since_origin().InNanoseconds());
-  const std::span<const char> reason(kReason, sizeof(kReason) - 1);
-  std::ranges::transform(reason, gap.inline_payload.begin(), [](const char value) {
+  static_assert(kReason.size() <= kNativeProbeInlinePayloadSize);
+  std::ranges::transform(kReason, gap.inline_payload.begin(), [](const char value) {
     return static_cast<std::byte>(static_cast<unsigned char>(value));
   });
-  gap.header.payload_size = static_cast<std::uint32_t>(reason.size());
+  gap.header.payload_size = static_cast<std::uint32_t>(kReason.size());
   // Emit applies the session, category and expiry filters.
   session.Emit(gap);
 }

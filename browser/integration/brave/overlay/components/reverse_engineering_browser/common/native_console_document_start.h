@@ -24,6 +24,7 @@
 
 namespace reb {
 
+inline constexpr std::string_view kNativeConsoleDocumentStartHexDigits = "0123456789abcdef";
 inline constexpr std::size_t kNativeConsoleDocumentStartOriginLimit = 256;
 inline constexpr std::size_t kNativeConsoleDocumentStartPathLimit = 256;
 inline constexpr std::uint16_t kNativeConsoleDocumentStartTopFrame = 1;
@@ -241,7 +242,7 @@ namespace native_console_document_start_detail {
       if (leading && digit == 0 && shift != 0)
         continue;
       leading = false;
-      canonical[size++] = "0123456789abcdef"[digit];
+      canonical[size++] = kNativeConsoleDocumentStartHexDigits[static_cast<std::size_t>(digit)];
     }
     if (++piece < pieces.size())
       canonical[size++] = ':';
@@ -459,9 +460,9 @@ namespace native_console_document_start_detail {
   for (const auto& script : scripts) {
     if (!IsValidNativeConsoleDocumentStartScript(script))
       return 0;
-    const auto* bytes = reinterpret_cast<const std::uint8_t*>(&script);
-    for (std::size_t index = 0; index < sizeof(script); ++index)
-      out[offset + index] = bytes[index];
+    const auto bytes = std::as_bytes(std::span(&script, 1));
+    for (std::size_t index = 0; index < bytes.size(); ++index)
+      out[offset + index] = static_cast<std::uint8_t>(bytes[index]);
     offset += sizeof(script);
   }
   return offset;
@@ -481,9 +482,9 @@ namespace native_console_document_start_detail {
   std::size_t total = 0;
   for (std::size_t index = 0; index < count; ++index) {
     NativeConsoleDocumentStartScript script;
-    auto* destination = reinterpret_cast<std::uint8_t*>(&script);
+    const auto destination = std::as_writable_bytes(std::span(&script, 1));
     for (std::size_t offset = 0; offset < record; ++offset)
-      destination[offset] = bytes[index * record + offset];
+      destination[offset] = static_cast<std::byte>(bytes[index * record + offset]);
     if (!IsValidNativeConsoleDocumentStartScript(script))
       return 0;
     for (std::size_t previous = 0; previous < index; ++previous)

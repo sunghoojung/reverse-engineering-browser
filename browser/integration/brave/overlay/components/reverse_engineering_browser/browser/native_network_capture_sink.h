@@ -100,7 +100,7 @@ class NativeNetworkCaptureSink final {
 
  private:
   friend class base::NoDestructor<NativeNetworkCaptureSink>;
-  NativeNetworkCaptureSink() = default;
+  NativeNetworkCaptureSink();
 
   void EmitRequestTarget(NativeProbeEmitter emitter,
                          const NativeProbeHeader& parent,

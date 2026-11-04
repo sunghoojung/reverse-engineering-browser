@@ -30,6 +30,7 @@ def check_artifact_scoped_ui(repository, analyzer, artifacts, store, artifact):
                    capture_output=True, check=True, timeout=30)
     analysis = json.loads((artifacts / "analysis/vm-analysis-v1.json").read_text())
     document = json.loads((artifacts / "analysis/vm-opcode-workspace-v2.json").read_text())
+    assert document["analysis_digest"] == analysis["document_digest"]
     assert len(analysis["results"]) == 2
     assert len({row["finding_id"] for row in analysis["results"]}) == 1
     model = (repository / "apps/research-ui/evidence_models.js").read_text()

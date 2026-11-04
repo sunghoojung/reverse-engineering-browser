@@ -1,7 +1,6 @@
 //! Exact retained dispatch-parent links. Frame correlation never supplies a PC.
-use crate::{durable, error::Result, vm};
+use crate::{error::Result, vm};
 use serde_json::{Value, json};
-use std::path::Path;
 
 const MAX_LINKS: usize = 4096;
 const MAX_WORKSPACE_LINKS: usize = 256;
@@ -72,8 +71,9 @@ fn position(host: &Value, artifact: &Value, samples: &[Value]) -> Option<Value> 
     })
 }
 
-pub(crate) fn store(
-    root: &Path,
+/// Builds the report. vm::store_documents publishes it with the workspace
+/// document it names.
+pub(crate) fn document(
     workspace_document: &Value,
     artifacts: &[Value],
     events: &[Value],
@@ -155,10 +155,6 @@ pub(crate) fn store(
     let mut document = json!({"contract_version":1,"document_kind":"vm-host-links",
         "workspace_document_digest":workspace_document["document_digest"], "workspaces":workspaces});
     document["document_digest"] = json!(vm::digest(&document)?);
-    durable::write_private(
-        &root.join("analysis/vm-host-links-v1.json"),
-        &vm::canonical(&document)?,
-    )?;
     Ok(document)
 }
 
@@ -180,8 +176,7 @@ mod tests {
         (workspace, artifact, host)
     }
     fn analyze(workspace: &Value, artifacts: &[Value], events: &[Value]) -> Value {
-        let root = tempfile::tempdir().unwrap();
-        let document = store(root.path(), workspace, artifacts, events).unwrap();
+        let document = super::document(workspace, artifacts, events).unwrap();
         let schema: Value = serde_json::from_str(include_str!(
             "../../../protocol/vm-host-links-v1.schema.json"
         ))

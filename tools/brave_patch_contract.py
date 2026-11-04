@@ -61,9 +61,9 @@ class PrivateIndex:
         self.path = Path(directory) / "index"
         self.environment = dict(os.environ, GIT_INDEX_FILE=str(self.path))
 
-    def git(self, *arguments, check=True):
+    def git(self, *arguments, check=True, input=None):
         result = subprocess.run(["git", "--literal-pathspecs", "-C", str(self.checkout), *arguments],
-                                env=self.environment, stdout=subprocess.PIPE,
+                                env=self.environment, input=input, stdout=subprocess.PIPE,
                                 stderr=subprocess.PIPE, check=False)
         if check and result.returncode:
             detail = result.stderr.decode(errors="replace").strip()[:500]
@@ -71,8 +71,15 @@ class PrivateIndex:
         return result
 
     def load_worktree(self, paths):
-        """Stage HEAD plus the working-tree content of exactly these paths."""
-        self.git("read-tree", "HEAD")
+        """Stage the working-tree content of exactly these paths over their HEAD entries.
+
+        The index holds only these paths: Chromium's full tree would make every
+        patch check rewrite an index of hundreds of thousands of entries.
+        """
+        self.git("read-tree", "--empty")
+        if paths:
+            entries = self.git("ls-tree", "-r", "-z", "--full-tree", "HEAD", "--", *map(str, paths)).stdout
+            self.git("update-index", "-z", "--index-info", input=entries)
         known = set(self.git("ls-files", "-z", "--", *map(str, paths)).stdout.split(b"\0")) if paths else set()
         # A path absent from both HEAD and the working tree matches no pathspec.
         present = [str(path) for path in paths

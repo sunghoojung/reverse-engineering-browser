@@ -64,7 +64,9 @@ pub struct Options {
     pub ui_directory: Option<PathBuf>,
     #[arg(long)]
     pub socket: Option<PathBuf>,
-    #[arg(long)]
+    /// PID of the live session's event broker, which `capture_action stop`
+    /// signals. Only a live backend has a broker to stop.
+    #[arg(long, requires = "socket")]
     pub broker_pid: Option<i32>,
     #[arg(long)]
     pub artifact_socket: Option<PathBuf>,
@@ -75,7 +77,8 @@ pub struct Options {
     /// When set, the console attaches to that capture browser instead of launching one.
     #[arg(long)]
     pub native_console_live_directory: Option<PathBuf>,
-    #[arg(long)]
+    /// Serve deterministic developer evidence. A live capture never does.
+    #[arg(long, conflicts_with = "socket")]
     pub demo_evidence: bool,
     #[arg(long)]
     pub endpoint_file: Option<PathBuf>,
@@ -177,13 +180,34 @@ impl Options {
         }
         path
     }
-    pub fn capture_mode(&self) -> &'static str {
+    pub fn capture_mode(&self) -> CaptureMode {
         if self.socket.is_some() {
-            "live"
+            CaptureMode::Live
         } else if self.demo_evidence {
-            "demo"
+            CaptureMode::Demo
         } else {
-            "idle"
+            CaptureMode::Idle
+        }
+    }
+}
+
+/// What this backend serves, fixed at startup. Parsing rejects the
+/// contradictory flag combinations, so each mode has one meaning.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CaptureMode {
+    /// A live capture session's backend, with its native event broker.
+    Live,
+    /// Deterministic developer evidence.
+    Demo,
+    /// Stored evidence only.
+    Idle,
+}
+impl CaptureMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Live => "live",
+            Self::Demo => "demo",
+            Self::Idle => "idle",
         }
     }
 }

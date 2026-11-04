@@ -3,7 +3,8 @@ use crate::{
     analyst::Analyst,
     artifact_lookup::ArtifactLookupCache,
     artifact_query,
-    config::Options,
+    capture::{self, Capture, StopRefusal},
+    config::{CaptureMode, Options},
     decoder::Decoder,
     deobfuscation::Deobfuscator,
     error::{Code, Error, Phase, Reason, Result},
@@ -27,10 +28,7 @@ use serde_json::{Value, json};
 use std::{
     collections::BTreeMap,
     path::{Path, PathBuf},
-    sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering},
-    },
+    sync::Arc,
     time::Duration,
 };
 use tokio::sync::{Mutex, OwnedMutexGuard, OwnedSemaphorePermit, Semaphore, TryAcquireError};
@@ -83,6 +81,25 @@ struct VmDocumentsCache {
     host_links: Result<Value>,
 }
 
+/// What every route reports about the capture, from one observation.
+#[derive(Clone, Copy)]
+struct CaptureView {
+    mode: CaptureMode,
+    state: capture::State,
+}
+impl CaptureView {
+    /// Health and events keep the UI's reading of `broker_connected`: false
+    /// means a live broker is gone, so a backend without one reports true.
+    /// Session context and summary report only a running live broker.
+    /// `capture_state` names the lifecycle on all of them.
+    fn source_connected(self) -> bool {
+        self.mode != CaptureMode::Live || self.state.broker_running()
+    }
+    fn stopped(self) -> bool {
+        self.state == capture::State::Stopped
+    }
+}
+
 pub struct App {
     options: Options,
     port: u16,
@@ -97,7 +114,8 @@ pub struct App {
     native_console: NativeConsole,
     owned_vm_debugger: OwnedVmDebugger,
     vm_experiments: crate::vm_experiment::Experiments,
-    capture_stopped: AtomicBool,
+    /// The live capture lifecycle; `capture` serializes stop and clear.
+    lifecycle: Capture,
     capture: Mutex<()>,
     io: Arc<Semaphore>,
     package_io: Arc<Semaphore>,
@@ -187,11 +205,11 @@ impl App {
                 ),
             ),
             live_browser: LiveBrowser::new(&options),
+            lifecycle: Capture::new(&options),
             invocation_sites,
             invocation_session,
             text_digests: Arc::new(std::sync::Mutex::new(BTreeMap::new())),
             options,
-            capture_stopped: AtomicBool::new(false),
             capture: Mutex::new(()),
             io: Arc::new(Semaphore::new(4)),
             package_io: Arc::new(Semaphore::new(2)),
@@ -325,8 +343,12 @@ impl App {
         .await
         .map_err(|_| Error::new(500, "Float32 diagnostic task failed"))?
     }
-    async fn broker_connected(&self) -> bool {
-        self.options.socket.is_none() || socket_connected(self.options.socket.as_deref()).await
+    /// One observation of the capture for every route that reports it.
+    fn capture_view(&self) -> CaptureView {
+        CaptureView {
+            mode: self.options.capture_mode(),
+            state: self.lifecycle.state(),
+        }
     }
     async fn receiver_connected(&self) -> bool {
         socket_connected(self.options.artifact_socket.as_deref()).await
@@ -343,7 +365,8 @@ impl App {
         let mut etag = None;
         let value = match path {
             "/api/health" => {
-                json!({"status":"ok","instance_id":self.instance_id,"store":self.options.store,"store_exists":self.options.store.exists(),"trace_store":self.options.trace_store,"trace_store_exists":self.options.trace_store.exists(),"signal_store":self.options.signal_store,"signal_store_exists":self.options.signal_store.exists(),"artifact_store":self.options.artifacts,"artifact_store_exists":self.options.artifacts.exists(),"artifact_receiver_configured":self.options.artifact_socket.is_some(),"artifact_receiver_connected":self.receiver_connected().await,"api_collection_store":self.collection.path,"api_collection_store_exists":self.collection.path.exists(),"local_analyst_store":self.workspace.path,"local_analyst_store_exists":self.workspace.path.exists(),"local_analyst_runner_available":self.analyst.state()["available"],"decoder_available":self.decoder.state()["available"],"broker_connected":self.broker_connected().await,"capture_mode":self.options.capture_mode(),"debugger_state":"unavailable"})
+                let capture = self.capture_view();
+                json!({"status":"ok","instance_id":self.instance_id,"store":self.options.store,"store_exists":self.options.store.exists(),"trace_store":self.options.trace_store,"trace_store_exists":self.options.trace_store.exists(),"signal_store":self.options.signal_store,"signal_store_exists":self.options.signal_store.exists(),"artifact_store":self.options.artifacts,"artifact_store_exists":self.options.artifacts.exists(),"artifact_receiver_configured":self.options.artifact_socket.is_some(),"artifact_receiver_connected":self.receiver_connected().await,"api_collection_store":self.collection.path,"api_collection_store_exists":self.collection.path.exists(),"local_analyst_store":self.workspace.path,"local_analyst_store_exists":self.workspace.path.exists(),"local_analyst_runner_available":self.analyst.state()["available"],"decoder_available":self.decoder.state()["available"],"broker_connected":capture.source_connected(),"capture_mode":capture.mode.as_str(),"capture_state":capture.state.as_str(),"debugger_state":"unavailable"})
             }
             "/api/session/context" => {
                 if !q.0.is_empty() {
@@ -366,14 +389,15 @@ impl App {
                     },
                     self.port
                 ));
-                value["capture_mode"] = json!(self.options.capture_mode());
-                let broker_connected =
-                    self.options.socket.is_some() && self.broker_connected().await;
+                let capture = self.capture_view();
+                value["capture_mode"] = json!(capture.mode.as_str());
+                let broker_connected = capture.state.broker_running();
                 value["live_admission"] = json!(session_context::live_admission(
-                    self.options.capture_mode(),
+                    capture.mode.as_str(),
                     broker_connected,
                 ));
                 value["broker_connected"] = json!(broker_connected);
+                value["capture_state"] = json!(capture.state.as_str());
                 value["allow_effects"] = Value::Null;
                 value["effects_admission"] = json!("caller_specific_unknown");
                 value["limits"] = json!({"items_per_inventory":session_context::ITEMS,"url_policy":"origin_or_wasm_label","title_policy":"omitted","artifact_linkage":"not_inferred"});
@@ -570,15 +594,13 @@ impl App {
                 if q.any(&event_query::EVENT_QUERY_KEYS) {
                     return self.filtered_events(&q, limit, headers).await;
                 }
-                let connected = self.broker_connected().await;
-                let stopped = self.capture_stopped.load(Ordering::Acquire);
+                let capture = self.capture_view();
                 etag = Some(event_window::etag(
                     &self.options.store,
                     &format!(
-                        "{}-{}-{limit}-{}",
-                        u8::from(connected),
-                        self.options.capture_mode(),
-                        u8::from(stopped)
+                        "{}-{limit}-{}",
+                        capture.mode.as_str(),
+                        capture.state.as_str()
                     ),
                 ));
                 if matches_etag(headers, etag.as_deref()) {
@@ -587,10 +609,6 @@ impl App {
                 let window = self.read_event_window(limit).await?;
                 let mut result = json!({
                     "count": window.events.len(),
-                    "broker_connected": connected,
-                    "capture_mode": self.options.capture_mode(),
-                    "capture_stopped": stopped,
-                    "capture_controls_available": self.options.broker_pid.is_some(),
                     "sequence_gaps": window.sequence_gaps.to_string(),
                     "sequence_gaps_saturated": window.sequence_gaps_saturated,
                     "queue_drops": window.queue_drops.to_string(),
@@ -606,7 +624,8 @@ impl App {
                 // of allocating a second complete evidence tree on every refresh.
                 result["events"] = Value::Array(window.events);
                 result["network_events"] = Value::Array(window.network_events);
-                if self.options.capture_mode() == "demo" {
+                self.event_state(&mut result, capture);
+                if capture.mode == CaptureMode::Demo {
                     result["canvas_render_captures"] =
                         serde_json::from_str(include_str!("../assets/demo-canvas.json"))
                             .expect("Demo canvas capture");
@@ -675,12 +694,14 @@ impl App {
                 if !q.0.is_empty() {
                     return Err(Error::bad("Session summary takes no query parameters"));
                 }
+                let capture = self.capture_view();
                 let state = (
-                    self.options.capture_mode(),
-                    self.options.socket.is_some() && self.broker_connected().await,
-                    self.capture_stopped.load(Ordering::Acquire),
+                    capture.mode.as_str(),
+                    capture.state.broker_running(),
+                    capture.stopped(),
                     self.options.artifact_socket.is_some(),
                     self.receiver_connected().await,
+                    capture.state.as_str(),
                 );
                 etag = Some(event_window::etag(
                     &self.options.store,
@@ -695,21 +716,24 @@ impl App {
                 let store = self.options.store.clone();
                 let artifacts = self.options.artifacts.clone();
                 let instance = self.instance_id.clone();
-                self.blocking(move || {
-                    session_summary::build(
-                        &store,
-                        &artifacts,
-                        &session_summary::CaptureState {
-                            instance_id: &instance,
-                            capture_mode: state.0,
-                            broker_connected: state.1,
-                            capture_stopped: state.2,
-                            artifact_receiver_configured: state.3,
-                            artifact_receiver_connected: state.4,
-                        },
-                    )
-                })
-                .await?
+                let mut summary = self
+                    .blocking(move || {
+                        session_summary::build(
+                            &store,
+                            &artifacts,
+                            &session_summary::CaptureState {
+                                instance_id: &instance,
+                                capture_mode: state.0,
+                                broker_connected: state.1,
+                                capture_stopped: state.2,
+                                artifact_receiver_configured: state.3,
+                                artifact_receiver_connected: state.4,
+                            },
+                        )
+                    })
+                    .await?;
+                summary["capture_state"] = json!(state.5);
+                summary
             }
             "/api/origin-trace" => {
                 let request = q.required("request_id")?.to_owned();
@@ -952,11 +976,12 @@ impl App {
         }
         Ok(response)
     }
-    fn event_state(&self, document: &mut Value, connected: bool, stopped: bool) {
-        document["broker_connected"] = json!(connected);
-        document["capture_mode"] = json!(self.options.capture_mode());
-        document["capture_stopped"] = json!(stopped);
-        document["capture_controls_available"] = json!(self.options.broker_pid.is_some());
+    fn event_state(&self, document: &mut Value, capture: CaptureView) {
+        document["broker_connected"] = json!(capture.source_connected());
+        document["capture_mode"] = json!(capture.mode.as_str());
+        document["capture_stopped"] = json!(capture.stopped());
+        document["capture_state"] = json!(capture.state.as_str());
+        document["capture_controls_available"] = json!(self.lifecycle.controls_available());
     }
     /// A filtered or cursor-paged event read. It bypasses the polling cache:
     /// the UI window stays exactly as it was for callers without filters.
@@ -968,15 +993,13 @@ impl App {
     ) -> Result<Response> {
         let filter = event_query::event_filter(q)?;
         let cursor = event_query::cursor(q)?;
-        let connected = self.broker_connected().await;
-        let stopped = self.capture_stopped.load(Ordering::Acquire);
+        let capture = self.capture_view();
         let etag = event_window::etag(
             &self.options.store,
             &format!(
-                "query:{}-{}-{}-{limit}:{cursor:?}:{}",
-                u8::from(connected),
-                self.options.capture_mode(),
-                u8::from(stopped),
+                "query:{}-{}-{limit}:{cursor:?}:{}",
+                capture.mode.as_str(),
+                capture.state.as_str(),
                 filter.echo()
             ),
         );
@@ -999,7 +1022,7 @@ impl App {
             })
             .await?;
         let mut document = event_query::events_document(&page, &tally, &filter, cursor, limit);
-        self.event_state(&mut document, connected, stopped);
+        self.event_state(&mut document, capture);
         let mut response = axum::Json(document).into_response();
         response
             .headers_mut()
@@ -1093,9 +1116,7 @@ impl App {
         };
         let cursor = event_query::Cursor::After(origin);
         let mut document = event_query::events_document(&page, &tally, &filter, cursor, limit);
-        let connected = self.broker_connected().await;
-        let stopped = self.capture_stopped.load(Ordering::Acquire);
-        self.event_state(&mut document, connected, stopped);
+        self.event_state(&mut document, self.capture_view());
         document["wait"] = json!({
             "timed_out": timed_out,
             "timeout_ms": timeout,
@@ -1294,77 +1315,100 @@ impl App {
             }
             "/api/session/actions" => {
                 validation::schema("SessionAction", value, 400)?;
-                if self.options.capture_mode() != "live" {
+                if self.options.capture_mode() != CaptureMode::Live {
                     return Err(Error::conflict(
                         "This backend is not a live capture session. No browser was changed.",
                     )
                     .with_code(Code::IdleBackend));
                 }
-                let recording =
-                    self.broker_connected().await && !self.capture_stopped.load(Ordering::Acquire);
+                let recording = self.lifecycle.state() == capture::State::Running;
                 self.live_browser.action(value, recording).await
             }
             "/api/capture/actions" => {
                 validation::schema("CaptureAction", value, 400)?;
-                if self.options.capture_mode() == "idle" {
-                    return Err(Error::conflict(
-                        "Idle backend: live capture controls are unavailable",
-                    )
-                    .with_code(Code::IdleBackend));
-                }
-                let _guard = self.capture.lock().await;
-                let pid = self
-                    .options
-                    .broker_pid
-                    .filter(|p| *p > 0)
-                    .ok_or_else(|| Error::conflict("Live capture controls are unavailable"))?;
-                if self.options.socket.is_none() {
-                    return Err(Error::conflict("Live capture controls are unavailable"));
-                }
-                if *value == json!({"action":"stop"}) {
-                    let connected = self.broker_connected().await;
-                    if !connected && !self.capture_stopped.load(Ordering::Acquire) {
-                        return Err(Error::conflict(
-                            "Live capture broker unavailable: stop was not dispatched",
-                        )
-                        .with_code(Code::DependencyUnavailable));
-                    }
-                    if connected {
-                        #[cfg(unix)]
-                        if unsafe { libc::kill(pid, libc::SIGUSR1) } != 0 {
-                            return Err(std::io::Error::last_os_error().into());
-                        }
-                        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
-                        while self.broker_connected().await {
-                            if tokio::time::Instant::now() >= deadline {
-                                return Err(Error::new(408, "Native capture did not stop in time"));
-                            }
-                            tokio::time::sleep(Duration::from_millis(50)).await;
-                        }
-                    }
-                    self.capture_stopped.store(true, Ordering::Release);
-                } else if *value == json!({"action":"clear","confirm":true}) {
-                    if self.broker_connected().await {
-                        return Err(Error::conflict(
-                            "Stop native capture before clearing events",
-                        ));
-                    }
-                    let paths = vec![
-                        self.options.store.clone(),
-                        self.options.trace_store.clone(),
-                        self.options.signal_store.clone(),
-                    ];
-                    self.blocking(move || evidence::clear_stores(&paths))
-                        .await?;
-                } else {
-                    return Err(Error::bad("Capture action is invalid"));
-                }
-                Ok(
-                    json!({"ok":true,"capture_stopped":self.capture_stopped.load(Ordering::Acquire),"broker_connected":self.broker_connected().await}),
-                )
+                self.capture_action(value).await
             }
             _ => Err(Error::new(404, "Application resource not found")),
         }
+    }
+    /// Stop and clear change the capture only through `Capture`'s
+    /// transitions; `capture` keeps them from interleaving.
+    async fn capture_action(&self, value: &Value) -> Result<Value> {
+        let mode = self.options.capture_mode();
+        if mode != CaptureMode::Live {
+            return Err(Error::conflict(format!(
+                "{} backend: live capture controls are unavailable",
+                if mode == CaptureMode::Demo {
+                    "Demo"
+                } else {
+                    "Idle"
+                }
+            ))
+            .with_code(Code::IdleBackend));
+        }
+        if !self.lifecycle.controls_available() {
+            return Err(Error::conflict("Live capture controls are unavailable"));
+        }
+        let _guard = self.capture.lock().await;
+        if *value == json!({"action":"stop"}) {
+            self.stop_capture().await?;
+        } else if *value == json!({"action":"clear","confirm":true}) {
+            if self.lifecycle.state().broker_running() {
+                return Err(Error::conflict(
+                    "Stop native capture before clearing events",
+                ));
+            }
+            let paths = vec![
+                self.options.store.clone(),
+                self.options.trace_store.clone(),
+                self.options.signal_store.clone(),
+            ];
+            self.blocking(move || evidence::clear_stores(&paths))
+                .await?;
+        } else {
+            return Err(Error::bad("Capture action is invalid"));
+        }
+        let capture = self.capture_view();
+        Ok(
+            json!({"ok":true,"capture_stopped":capture.stopped(),"broker_connected":capture.source_connected(),"capture_state":capture.state.as_str()}),
+        )
+    }
+    /// Signals a running broker and waits for it to exit. A timed-out stop
+    /// stays requested, and a retry signals again.
+    async fn stop_capture(&self) -> Result<()> {
+        let unavailable = |message: &str| {
+            Error::conflict(format!("{message}: stop was not dispatched"))
+                .with_code(Code::DependencyUnavailable)
+        };
+        match self.lifecycle.request_stop() {
+            Ok(_) | Err(StopRefusal::NotRunning(capture::State::Stopped)) => {}
+            Err(StopRefusal::NotRunning(capture::State::Lost)) => {
+                return Err(unavailable(
+                    "The live capture broker exited without shutting down",
+                ));
+            }
+            Err(StopRefusal::NotRunning(_)) => {
+                return Err(unavailable("The live capture broker already ended"));
+            }
+            Err(StopRefusal::UnconfirmedBroker) => {
+                return Err(unavailable(
+                    "The configured broker PID is not the process this session started with",
+                ));
+            }
+            Err(StopRefusal::Signal(error)) => return Err(error.into()),
+        }
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        while self.lifecycle.state().broker_running() {
+            if tokio::time::Instant::now() >= deadline {
+                return Err(Error::new(
+                    408,
+                    "Native capture did not stop in time. The stop request was delivered; stop again to retry.",
+                )
+                .with_code(Code::Timeout));
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        Ok(())
     }
     fn trusted(&self, headers: &HeaderMap) -> bool {
         if headers.get_all("host").iter().count() != 1

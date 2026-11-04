@@ -4,6 +4,7 @@ mod analyst;
 mod app;
 mod artifact_lookup;
 mod artifact_query;
+mod capture;
 mod config;
 mod decoder;
 mod deobfuscation;

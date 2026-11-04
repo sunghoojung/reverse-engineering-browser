@@ -1364,6 +1364,19 @@ mkdir -p "$dir/profile" "$dir/artifacts"
 printf '%s\n' "$REB_NATIVE_WASM_DISPATCH $REB_CAPTURE_CATEGORY_MASK $REB_USE_SYSTEM_KEYCHAIN $REB_CONSOLE_DOCUMENT_START $REB_CAPTURE_REQUEST_CONTENT ${{REB_NATIVE_JS_INVOCATION_SITES-unset}} ${{REB_NATIVE_JS_INVOCATION_DIGESTS-unset}}" > "$dir/options"
 printf '%s\n' "${{REB_NATIVE_JS_INVOCATION_IF_SUPPORTED-unset}} ${{REB_JS_INVOCATION_SITE_STORE-unset}}" > "$dir/site-store"
 ln -s "test-host-$$" "$dir/profile/SingletonLock"
+# The stand-in broker holds its event store guard for its life, as the real
+# broker does; the backend reads that lock as the broker running.
+guard="$dir/events.jsonl.reb-lock-v1"
+printf 'REB_EVIDENCE_GUARD_V1\n' > "$guard"
+chmod 600 "$guard"
+python3 -I -c 'import fcntl, os, sys, time
+fd = os.open(sys.argv[1], os.O_RDONLY)
+fcntl.flock(fd, fcntl.LOCK_EX)
+open(sys.argv[2], "w").close()
+time.sleep(3600)' "$guard" "$dir/broker.ready" &
+broker=$!
+echo "$broker" > "$dir/broker.pid"
+for _ in $(seq 1 400); do [[ -e "$dir/broker.ready" ]] && break; sleep 0.05; done
 "{backend}" --port 0 --endpoint-file "$dir/research-ui.endpoint" \
   --active-endpoint-file "$REB_ACTIVE_ENDPOINT_FILE" \
   --store "$dir/events.jsonl" --trace-store "$dir/trace.jsonl" \
@@ -1372,7 +1385,7 @@ ln -s "test-host-$$" "$dir/profile/SingletonLock"
   --socket "$TEST_BROKER_SOCKET" --brave-binary "$REB_BRAVE_BINARY" \
   --brave-profile "$dir/profile" --launcher-pid "$$" >/dev/null 2>&1 &
 backend=$!
-trap 'kill "$backend" 2>/dev/null; wait "$backend" 2>/dev/null; echo ended > "$dir/ended"; exit 0' TERM
+trap 'kill "$broker" 2>/dev/null || true; wait "$broker" 2>/dev/null || true; kill "$backend" 2>/dev/null; wait "$backend" 2>/dev/null; echo ended > "$dir/ended"; exit 0' TERM
 for _ in $(seq 1 400); do [[ -s "$dir/research-ui.endpoint" ]] && break; sleep 0.05; done
 echo "Origin Trace live session $(basename "$dir")"
 wait "$backend"
@@ -1535,9 +1548,26 @@ wait "$backend"
         Value::Null
     );
     wait_for(sessions.join("4242/ended"));
-    // Capture expiry removes the broker socket. Under --require-live other
-    // tools are then refused, but ending must still work.
+    // At capture expiry the broker removes its socket and exits. Under
+    // --require-live other tools are then refused, but ending must still work.
     std::fs::remove_file(&socket).unwrap();
+    let broker = std::fs::read_to_string(sessions.join("4243/broker.pid")).unwrap();
+    assert!(
+        Command::new("kill")
+            .arg(broker.trim())
+            .status()
+            .unwrap()
+            .success()
+    );
+    {
+        use std::os::fd::AsRawFd;
+        let guard = std::fs::File::open(sessions.join("4243/events.jsonl.reb-lock-v1")).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while unsafe { libc::flock(guard.as_raw_fd(), libc::LOCK_SH | libc::LOCK_NB) } != 0 {
+            assert!(Instant::now() < deadline, "stand-in broker kept its lock");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
     let expired = mcp.request("tools/call", json!({"name": "get_events"}));
     assert_eq!(expired["result"]["isError"], true);
     let ended = mcp.request(

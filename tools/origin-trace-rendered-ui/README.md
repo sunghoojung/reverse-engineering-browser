@@ -85,12 +85,16 @@ runner's answer at its 2 second limit must not reach it: answering a stopped
 request raises an exception that ended the app. The next run must get its own
 `timed_out` answer, not 409.
 
-`test21NewLiveSessionAsksAboutUnsavedWork` makes an API Collection folder edit
-through its editor's input event and chooses **New Live Session…** from the app
-menu. The unsaved-work sheet must name the new session, keep **Stay** as the
-Return default and photograph complete; Stay must leave the page, the edit and
-the start dialog untouched. After the edit is discarded the start dialog opens
-at once and the test continues offline.
+`test21NewLiveSessionAsksAboutUnsavedWork` first opens the bundled workspace
+through **New Live Session…** and **Continue Offline**, because the close guard
+trusts only a document the app loaded itself. When an earlier test left the
+harness page in place, that page cannot answer, and the test makes the
+deliberate **Start New Session** choice. In the bundled workspace it makes an
+API Collection folder edit through its editor's input event and chooses **New
+Live Session…** again. The unsaved-work sheet must name the new session, keep
+**Stay** as the Return default and photograph complete; Stay must leave the
+page, the edit and the start dialog untouched. Once the edit is discarded, the
+start dialog opens at once and the test continues offline.
 
 `test22WorkspaceReloadsAfterContentProcessStops` ends the web content process
 with SIGKILL, as a crash would; WebKit's testing selector names its process ID.

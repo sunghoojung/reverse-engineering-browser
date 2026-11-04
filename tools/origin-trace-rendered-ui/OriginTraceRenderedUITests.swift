@@ -1559,6 +1559,36 @@ final class OriginTraceRenderedUITests: XCTestCase {
     try await returnToHarness(ui, harnessURL)
   }
 
+  // Chooses New Live Session, then Continue Offline, as a researcher opens the
+  // bundled workspace. The close guard trusts only a document the app loaded
+  // itself; earlier tests return to the harness page directly, which then
+  // cannot answer, so that question is answered deliberately.
+  @MainActor
+  private func openOfflineWorkspace(_ ui: Harness) async throws {
+    let backstop = try chooseMenuItem("newLiveSession:")
+    defer { backstop.invalidate() }
+    do {
+      try await waitFor("the start dialog or an unsaved-work question") {
+        NSApp.modalWindow != nil || ui.window.attachedSheet.flatMap { button($0, "Start New Session") }?.isEnabled == true
+      }
+      if NSApp.modalWindow == nil, let sheet = ui.window.attachedSheet {
+        XCTAssertTrue(texts(sheet).contains("Couldn’t check for unsaved work"), "\(texts(sheet))")
+        try XCTUnwrap(button(sheet, "Start New Session")).performClick(nil)
+        try await waitFor("the start dialog") { NSApp.modalWindow != nil }
+      }
+      let panel = try XCTUnwrap(NSApp.modalWindow)
+      XCTAssertTrue(texts(panel).contains("Start a live research session"), "\(texts(panel))")
+      try XCTUnwrap(button(panel, "Continue Offline")).performClick(nil)
+      try await waitFor("the start dialog to close", timeout: 10) { NSApp.modalWindow == nil }
+    } catch {
+      if let sheet = ui.window.attachedSheet { button(sheet, "Stay")?.performClick(nil) }
+      if NSApp.modalWindow != nil { NSApp.abortModal() }
+      throw error
+    }
+    try await ui.waitUntil("location.protocol === 'reb:' && document.readyState === 'complete' && typeof state === 'object' && state.apiCollectionLoaded",
+      timeout: 30, "the bundled workspace did not load")
+  }
+
   // New Live Session replaces the window's document. An unsaved API Collection
   // edit must be asked about first, Stay must keep the edit, the page and any
   // session, and a clean document must go straight to the start dialog.
@@ -1567,9 +1597,9 @@ final class OriginTraceRenderedUITests: XCTestCase {
     let ui = try Harness()
     try await ui.waitForInitialLoad()
     try await ui.resize(width: windowSizes[0].width, height: windowSizes[0].height)
-    try await ui.reload(activating: false)
     let harnessURL = try XCTUnwrap(ui.webView.url)
-    try await ui.waitUntil("state.apiCollectionLoaded", "the API Collection did not load")
+    try await openOfflineWorkspace(ui)
+    let workspaceURL = try XCTUnwrap(ui.webView.url)
     let dirty = try await ui.value(
       """
       (() => {
@@ -1583,7 +1613,7 @@ final class OriginTraceRenderedUITests: XCTestCase {
     XCTAssertEqual(dirty as? Bool, true, "the folder editor marked its edit unsaved")
     let asked = try? await ui.value("hasUnsavedWork()")
     XCTAssertEqual(asked as? Bool, true, "the native shell's question counts an API Collection edit")
-    var backstop = try chooseMenuItem("newLiveSession:")
+    let backstop = try chooseMenuItem("newLiveSession:")
     do {
       try await waitFor("the unsaved-work decision") {
         NSApp.modalWindow != nil || ui.window.attachedSheet.flatMap { button($0, "Start New Session") }?.isEnabled == true
@@ -1603,7 +1633,7 @@ final class OriginTraceRenderedUITests: XCTestCase {
       try await waitFor("Stay dismissal") { ui.window.attachedSheet == nil }
       try await Task.sleep(nanoseconds: 1_000_000_000)
       XCTAssertNil(NSApp.modalWindow, "Stay does not open the start dialog")
-      XCTAssertEqual(ui.webView.url, harnessURL, "Stay keeps the page")
+      XCTAssertEqual(ui.webView.url, workspaceURL, "Stay keeps the page")
       let kept = try await ui.value("state.collectionFolderDirty === true && elements.collectionFolderVariables.value.includes('unsaved_rendered_check')")
       XCTAssertEqual(kept as? Bool, true, "Stay keeps the unsaved edit")
       try await ui.screenshot("new-session-stay-keeps-edit")
@@ -1617,18 +1647,8 @@ final class OriginTraceRenderedUITests: XCTestCase {
     backstop.invalidate()
     let clean = try await ui.value("(() => { elements.collectionDiscardFolder.click(); return hasUnsavedWork(); })()")
     XCTAssertEqual(clean as? Bool, false, "discarding the edit leaves no unsaved work")
-    backstop = try chooseMenuItem("newLiveSession:")
-    defer { backstop.invalidate() }
-    do {
-      try await waitFor("the start dialog") { NSApp.modalWindow != nil }
-      let panel = try XCTUnwrap(NSApp.modalWindow)
-      XCTAssertTrue(texts(panel).contains("Start a live research session"), "\(texts(panel))")
-      try XCTUnwrap(button(panel, "Continue Offline")).performClick(nil)
-      try await waitFor("the start dialog to close", timeout: 10) { NSApp.modalWindow == nil }
-    } catch {
-      if NSApp.modalWindow != nil { NSApp.abortModal() }
-      throw error
-    }
+    // A clean document the app loaded goes straight to the start dialog.
+    try await openOfflineWorkspace(ui)
     try await returnToHarness(ui, harnessURL)
   }
 

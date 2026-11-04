@@ -975,8 +975,8 @@ pub fn clear_stores(paths: &[std::path::PathBuf]) -> Result<()> {
             file.truncate().map_err(|mut error| {
                 if cleared > 0 {
                     error.message = format!(
-                        "Clear stopped after emptying {cleared} of {sidecars} derived trace and signal stores: {} Events were kept; clear again to finish.",
-                        error.message
+                        "Clear stopped after emptying {cleared} of {sidecars} derived trace and signal stores: {}. Events were kept; clear again to finish.",
+                        error.message.trim_end_matches('.')
                     );
                 }
                 error

@@ -129,6 +129,15 @@ class BraveProvenance(unittest.TestCase):
         self.assertEqual(args["mac_sdk_path"], "<redacted: local path>")
         self.assertNotIn("synthetic", self.record.read_text())
 
+    def test_rerun_accepts_only_the_identical_record(self):
+        self.write()
+        first = self.record.read_bytes()
+        self.write()
+        self.assertEqual(self.record.read_bytes(), first)
+        with self.assertRaises(FileExistsError):
+            self.write(cdhash="b" * 40)
+        self.assertEqual(self.record.read_bytes(), first)
+
     def test_existing_record_is_not_replaced(self):
         self.record.write_text("existing")
         with self.assertRaises(FileExistsError):

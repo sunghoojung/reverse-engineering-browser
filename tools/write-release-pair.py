@@ -9,6 +9,7 @@ import plistlib
 import re
 import shutil
 import subprocess
+import tempfile
 
 
 REPOSITORY = "https://github.com/sunghoojung/reverse-engineering-browser"
@@ -31,6 +32,35 @@ def digest(path):
         for block in iter(lambda: source.read(1024 * 1024), b""):
             result.update(block)
     return result.hexdigest()
+
+
+def write_text_atomically(path, text):
+    """Replace a derived output only with complete bytes."""
+    with tempfile.NamedTemporaryFile("w", dir=path.parent, prefix=f".{path.name}.", delete=False) as target:
+        temporary = Path(target.name)
+        target.write(text)
+    try:
+        temporary.replace(path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def place_pinned_copy(source, destination, sha256):
+    """Copy a pinned file once. A rerun accepts only the identical pinned bytes."""
+    if destination.is_symlink() or (destination.exists() and digest(destination) != sha256):
+        raise FileExistsError(destination)
+    if destination.exists():
+        return
+    with tempfile.NamedTemporaryFile(dir=destination.parent, prefix=f".{destination.name}.",
+                                     delete=False) as target:
+        temporary = Path(target.name)
+    try:
+        shutil.copyfile(source, temporary)
+        if digest(temporary) != sha256:
+            raise ValueError(f"Copied bytes differ from the pin: {destination.name}")
+        os.link(temporary, destination)  # Never replaces a file that appeared meanwhile.
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def pin_block(text):
@@ -137,7 +167,10 @@ def main():
     if not re.fullmatch(r"\d+\.\d+\.\d+", version):
         raise ValueError("Invalid application version")
     tag = f"v{version}"
-    if os.environ.get("RELEASE_TAG", tag) != tag:
+    requested = os.environ.get("RELEASE_TAG")
+    if requested is None:
+        raise ValueError("Set RELEASE_TAG to the release being recorded")
+    if requested != tag:
         raise ValueError("Requested release does not match the application version")
     if os.environ.get("GITHUB_REF_TYPE") == "tag":
         if os.environ["GITHUB_REF_NAME"] != tag:
@@ -168,13 +201,8 @@ def main():
         raise ValueError("Brave provenance does not record the app CDHash")
     brave = output / f"{name}.zip"
     provenance = output / f"{name}.provenance.json"
-    for path in (brave, provenance):
-        if path.exists():
-            raise FileExistsError(path)
-    shutil.copyfile(source_brave, brave)
-    shutil.copyfile(source_provenance, provenance)
-    if digest(brave) != pin["brave_sha256"]:
-        raise ValueError("Copied Brave bytes differ")
+    place_pinned_copy(source_brave, brave, pin["brave_sha256"])
+    place_pinned_copy(source_provenance, provenance, pin["provenance_sha256"])
     run_url = f"{REPOSITORY}/actions/runs/{os.environ['GITHUB_RUN_ID']}"
     manifest = {
         "schema": "origin-trace-release-pair-v2",
@@ -227,13 +255,12 @@ def main():
         },
     }
     pair = output / f"Origin-Trace-Brave-{tag}.provenance.json"
-    pair.write_text(json.dumps(manifest, indent=2) + "\n")
+    write_text_atomically(pair, json.dumps(manifest, indent=2) + "\n")
     assets = [origin, brave, provenance, pair]
     sums = output / f"SHA256SUMS-{tag}.txt"
-    sums.write_text("".join(f"{digest(path)}  {path.name}\n" for path in assets))
-    (output / "release-notes.md").write_text(
-        notes_text(tag, source_sha, run_url, [*assets, sums], browser)
-    )
+    write_text_atomically(sums, "".join(f"{digest(path)}  {path.name}\n" for path in assets))
+    write_text_atomically(output / "release-notes.md",
+                          notes_text(tag, source_sha, run_url, [*assets, sums], browser))
 
 
 if __name__ == "__main__":

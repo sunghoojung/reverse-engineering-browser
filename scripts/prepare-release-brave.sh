@@ -60,33 +60,70 @@ git diff --exit-code "${build_source}" -- \
   scripts/package-brave-distribution.sh scripts/sync-browser-integration.sh
 
 readonly release_root=build/release-pair
+# The pin this directory was prepared from. A rerun reuses only a directory
+# prepared from the same pin, after verifying it again.
+readonly prepared_record="${release_root}/prepared-brave-pin.txt"
+prepared_pin="$(printf '%s\n' "${brave_name}" "${source_url}" "${brave_sha256}" \
+  "${provenance_sha256}" "${build_source}")"
+readonly prepared_pin
+
+verify_prepared_brave() {
+  local root="$1"
+  local app="${root}/extracted/Brave Browser Development.app"
+  local cdhash
+  local recorded_cdhash
+  (
+    cd "${root}/source"
+    printf '%s  %s\n' \
+      "${brave_sha256}" "${brave_name}.zip" \
+      "${provenance_sha256}" "${brave_name}.provenance.json" |
+      shasum -a 256 --check
+  )
+  codesign --verify --deep --strict "${app}"
+  # The digest-pinned provenance records the packaged app's code signature, so a
+  # matching CDHash ties the extracted bundle to that exact recorded build.
+  cdhash="$(codesign -dvvv "${app}" 2>&1 | sed -n 's/^CDHash=//p')"
+  recorded_cdhash="$(python3 -I -c 'import json, sys
+print(json.load(open(sys.argv[1]))["app_cdhash"])' \
+    "${root}/source/${brave_name}.provenance.json")"
+  if [[ "${cdhash}" != "${recorded_cdhash}" ]]; then
+    echo "Extracted Brave CDHash ${cdhash:-<none>} differs from its provenance (${recorded_cdhash})." >&2
+    exit 1
+  fi
+  "${app}/Contents/MacOS/Brave Browser Development" --version
+}
+
 if [[ -e "${release_root}" ]]; then
-  echo "Refusing to overwrite an existing paired release directory." >&2
+  if [[ -f "${prepared_record}" && ! -L "${prepared_record}" &&
+        "$(cat "${prepared_record}")" == "${prepared_pin}" ]]; then
+    verify_prepared_brave "${release_root}"
+    echo "Reused ${release_root}, prepared from this browser pin."
+    exit 0
+  fi
+  echo "Refusing to overwrite ${release_root}: it was not prepared from this browser pin." >&2
+  echo "Preserve anything you need from it, then remove it to prepare again." >&2
   exit 1
 fi
-mkdir -p "${release_root}/source"
+# Work in a private directory and publish it by rename, so a failed or
+# interrupted run leaves nothing that blocks the next one.
+mkdir -p build
+staging="$(mktemp -d build/release-pair.partial.XXXXXX)"
+readonly staging
+trap 'rm -rf "${staging}"' EXIT
+mkdir -p "${staging}/source"
 curl --fail --location --silent --show-error --retry 3 \
-  "${source_url}/${brave_name}.zip" -o "${release_root}/source/${brave_name}.zip"
+  "${source_url}/${brave_name}.zip" -o "${staging}/source/${brave_name}.zip"
 curl --fail --location --silent --show-error --retry 3 \
-  "${source_url}/${brave_name}.provenance.json" -o "${release_root}/source/${brave_name}.provenance.json"
+  "${source_url}/${brave_name}.provenance.json" -o "${staging}/source/${brave_name}.provenance.json"
 (
-  cd "${release_root}/source"
+  cd "${staging}/source"
   printf '%s  %s\n' \
     "${brave_sha256}" "${brave_name}.zip" \
     "${provenance_sha256}" "${brave_name}.provenance.json" |
     shasum -a 256 --check
 )
-ditto -x -k "${release_root}/source/${brave_name}.zip" "${release_root}/extracted"
-readonly app="${release_root}/extracted/Brave Browser Development.app"
-codesign --verify --deep --strict "${app}"
-# The digest-pinned provenance records the packaged app's code signature, so a
-# matching CDHash ties the extracted bundle to that exact recorded build.
-cdhash="$(codesign -dvvv "${app}" 2>&1 | sed -n 's/^CDHash=//p')"
-recorded_cdhash="$(python3 -I -c 'import json, sys
-print(json.load(open(sys.argv[1]))["app_cdhash"])' \
-  "${release_root}/source/${brave_name}.provenance.json")"
-if [[ "${cdhash}" != "${recorded_cdhash}" ]]; then
-  echo "Extracted Brave CDHash ${cdhash:-<none>} differs from its provenance (${recorded_cdhash})." >&2
-  exit 1
-fi
-"${app}/Contents/MacOS/Brave Browser Development" --version
+ditto -x -k "${staging}/source/${brave_name}.zip" "${staging}/extracted"
+verify_prepared_brave "${staging}"
+printf '%s\n' "${prepared_pin}" >"${staging}/prepared-brave-pin.txt"
+mv "${staging}" "${release_root}"
+trap - EXIT

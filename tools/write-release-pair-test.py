@@ -63,6 +63,7 @@ class ReleasePair(unittest.TestCase):
         self.write_provenance(self.browser)
         self.environment = {
             "GITHUB_REF_TYPE": "tag", "GITHUB_REF_NAME": TAG, "GITHUB_RUN_ID": "123",
+            "RELEASE_TAG": TAG,
         }
 
     def write_pin(self, **overrides):
@@ -165,6 +166,19 @@ class ReleasePair(unittest.TestCase):
         self.environment["GITHUB_REF_NAME"] = "v0.3.2"
         with self.assertRaises(ValueError):
             self.run_helper()
+
+    def test_missing_requested_release_is_rejected(self):
+        del self.environment["RELEASE_TAG"]
+        with self.assertRaises(ValueError):
+            self.run_helper()
+        self.assertFalse((self.output / f"{NAME}.zip").exists())
+
+    def test_rerun_reuses_identical_pinned_copies(self):
+        self.run_helper()
+        recorded = {path.name: path.read_bytes() for path in self.output.iterdir() if path.is_file()}
+        self.run_helper()
+        self.assertEqual({path.name: path.read_bytes() for path in self.output.iterdir() if path.is_file()},
+                         recorded)
 
     def test_existing_archive_or_provenance_is_not_replaced(self):
         for name in (f"{NAME}.zip", f"{NAME}.provenance.json"):

@@ -61,12 +61,16 @@ instrumented Brave and is not established by these offline checks.
 ## Integrated browser inputs
 
 `brave_patch_contract.py` validates patch destinations against their independent
-Git checkout owners and supplies scoped paths for temporary-index replay.
-`check-integrated-brave-state.py` preserves pinned source receipts; its explicit
-`adopt` mode accepts only verified tooling or byte-equivalent patch-routing
-handoffs, without changing the previous receipt. The bounded Git fixtures in
-`check-integrated-brave-state-test.py` exercise replay, added files, ownership,
-receipt preservation and rejected production/upstream changes. See the
+Git checkout owners, finds each ordered stack's applied prefix in a private
+index, and holds the per-workspace source lock that sync, bootstrap, the
+integrated build and `advance-patch` share.
+`check-integrated-brave-state.py` preserves pinned source receipts and the
+build intents (`begin`) that let an interrupted init, sync or preparation
+resume; its explicit `adopt` mode accepts only verified tooling or
+byte-equivalent patch-routing handoffs, without changing the previous receipt.
+The bounded Git fixtures in `check-integrated-brave-state-test.py` exercise
+replay, added files, ownership, interrupted phases, out-of-order stacks, the
+lock, receipt preservation and rejected production/upstream changes. See the
 [integrated build guide](../docs/development/integrated-brave-build.md) for the
 complete command and remaining runtime gates.
 

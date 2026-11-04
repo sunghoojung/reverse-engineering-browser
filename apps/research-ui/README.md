@@ -501,6 +501,9 @@ preserving Chromium's sandbox. Do not wrap live Brave in `sandbox-exec`: nested
 macOS sandbox initialization fails. Build commands can still use that wrapper.
 If Brave or a required live helper exits, Origin Trace reports the closed
 connection and offers retry instead of silently leaving a failed session running.
+A session that stops after its workspace opened is reported as **Live session
+ended**, with the launcher's cause; one that never became ready is **Live
+session unavailable**.
 The coordinator signals all owned helpers together, allows a shared five-second
 shutdown grace, then stops remaining children. An active analyzer worker has a
 shorter two-second grace so its supervising shell can reap it before exiting.

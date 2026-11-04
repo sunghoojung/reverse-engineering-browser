@@ -2718,8 +2718,8 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
           print("SMOKE_ERROR Unexpected live session readiness")
           NSApp.terminate(nil)
         },
-        failed: { [weak self] message in
-          self?.presentLiveSessionError(message, captureMode: .metadata, useSystemKeychain: false)
+        failed: { [weak self] failure in
+          self?.presentLiveSessionError(failure, captureMode: .metadata, useSystemKeychain: false)
         }
       )
     }
@@ -2885,8 +2885,10 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
       let braveExecutableURL = braveBundle.executableURL
     else {
       presentLiveSessionError(
-        "Origin Trace could not find Brave Browser Development. "
-          + "Place it beside Origin Trace or set REB_BRAVE_BINARY.",
+        .init(
+          message: "Origin Trace could not find Brave Browser Development. "
+            + "Place it beside Origin Trace or set REB_BRAVE_BINARY.",
+          afterStartup: false),
         captureMode: captureMode,
         useSystemKeychain: useSystemKeychain
       )
@@ -2900,7 +2902,7 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
         guard let self, let webView = self.webView else { return }
         guard let nativeURL = nativeUIURL(liveURL.absoluteString) else {
           self.presentLiveSessionError(
-            "Origin Trace received an invalid loopback UI URL.",
+            .init(message: "Origin Trace received an invalid loopback UI URL.", afterStartup: false),
             captureMode: captureMode,
             useSystemKeychain: useSystemKeychain
           )
@@ -2911,9 +2913,9 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
         webView.load(URLRequest(url: nativeURL))
         self.presentOriginTraceWindow()
       },
-      failed: { [weak self] message in
+      failed: { [weak self] failure in
         self?.presentLiveSessionError(
-          message,
+          failure,
           captureMode: captureMode,
           useSystemKeychain: useSystemKeychain
         )
@@ -3248,20 +3250,20 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
   }
 
   private func presentLiveSessionError(
-    _ message: String,
+    _ failure: LiveSessionCoordinator.Failure,
     captureMode: LiveCaptureMode,
     useSystemKeychain: Bool
   ) {
     guard NSApp.isRunning else { return }
     if smokeTest {
-      print("SMOKE_LIVE_FAILURE \(message)")
+      print("SMOKE_LIVE_FAILURE \(failure.message)")
       automaticSessionSuppressed = true
       return
     }
     let alert = NSAlert()
     alert.alertStyle = .critical
-    alert.messageText = "Live session unavailable"
-    alert.informativeText = message
+    alert.messageText = failure.afterStartup ? "Live session ended" : "Live session unavailable"
+    alert.informativeText = failure.message
     alert.addButton(withTitle: "Retry")
     alert.addButton(withTitle: "Continue Offline")
     // A reopen during this modal must not start a second session behind it.

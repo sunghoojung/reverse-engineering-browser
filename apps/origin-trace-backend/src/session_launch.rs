@@ -3,6 +3,7 @@
 //! packaged app, detached from the caller, with named capture options in place
 //! of environment variables. Every capture switch is off unless requested, so
 //! a session never inherits a switch from the caller's shell.
+use crate::js_invocation_sites;
 use serde_json::{Value, json};
 use std::{
     io::Read,
@@ -28,6 +29,17 @@ pub struct StartOptions {
     pub duration_seconds: Option<u32>,
     pub localhost_only: bool,
     pub canvas_images: bool,
+    /// Retain request paths, queries and bounded bodies. Sensitive.
+    pub request_content: bool,
+    /// Permit document-start Console scripts in this capture browser. Arming
+    /// one stays a separate confirmed Console action.
+    pub document_start: bool,
+    /// A site file the agent wrote, armed from a private copy.
+    pub js_invocation_sites: Option<PathBuf>,
+    /// The agent's own saved site set, never the researcher's.
+    pub js_invocation_saved_sites: bool,
+    /// Hash settled values of armed calls. Sensitive; needs sites.
+    pub js_invocation_digests: bool,
     pub confirm_sensitive_capture: bool,
     pub publish_canonical_endpoint: bool,
     pub brave_binary: Option<PathBuf>,
@@ -52,6 +64,11 @@ impl StartOptions {
             duration_seconds: value["duration_seconds"].as_u64().map(|n| n as u32),
             localhost_only: flag("localhost_only"),
             canvas_images: flag("canvas_images"),
+            request_content: flag("request_content"),
+            document_start: flag("document_start"),
+            js_invocation_sites: path("js_invocation_sites"),
+            js_invocation_saved_sites: flag("js_invocation_saved_sites"),
+            js_invocation_digests: flag("js_invocation_digests"),
             confirm_sensitive_capture: flag("confirm_sensitive_capture"),
             publish_canonical_endpoint: flag("publish_canonical_endpoint"),
             brave_binary: path("brave_binary"),
@@ -75,6 +92,7 @@ impl StartOptions {
         for (name, path) in [
             ("guest_adapter", &self.guest_adapter),
             ("js_dispatch_sites", &self.js_dispatch_sites),
+            ("js_invocation_sites", &self.js_invocation_sites),
             ("brave_binary", &self.brave_binary),
             ("sessions_root", &self.sessions_root),
         ] {
@@ -90,11 +108,39 @@ impl StartOptions {
                 "canvas_images stores page content and requires confirm_sensitive_capture".into(),
             );
         }
+        if self.request_content && !self.confirm_sensitive_capture {
+            return Err("request_content retains request paths, queries and bodies and requires confirm_sensitive_capture".into());
+        }
+        if self.js_invocation_sites.is_some() && self.js_invocation_saved_sites {
+            return Err("Name js_invocation_sites or js_invocation_saved_sites, not both".into());
+        }
+        let invocation = self.js_invocation_sites.is_some() || self.js_invocation_saved_sites;
+        if self.js_invocation_digests && !invocation {
+            return Err(
+                "js_invocation_digests requires js_invocation_sites or js_invocation_saved_sites"
+                    .into(),
+            );
+        }
+        if self.js_invocation_digests && !self.confirm_sensitive_capture {
+            return Err("js_invocation_digests hashes settled call values and requires confirm_sensitive_capture".into());
+        }
         if self
             .category_mask
             .is_some_and(|mask| !(1..=4095).contains(&mask))
         {
             return Err("category_mask must be between 1 and 4095".into());
+        }
+        // The launcher refuses the same masks; naming the option here says
+        // which one to change.
+        let mask = self.category_mask.unwrap_or(4095);
+        if self.request_content && mask & 1280 != 1280 {
+            return Err("request_content needs Network and Artifact category bits (256 and 1024) in category_mask".into());
+        }
+        if invocation && mask & 512 == 0 {
+            return Err(
+                "JavaScript invocation sites need the VM category bit (512) in category_mask"
+                    .into(),
+            );
         }
         if self
             .duration_seconds
@@ -121,12 +167,17 @@ impl StartOptions {
             "duration_seconds": self.duration_seconds.unwrap_or(3600),
             "localhost_only": self.localhost_only,
             "canvas_images": self.canvas_images,
+            "request_content": self.request_content,
+            "document_start": self.document_start,
+            "js_invocation_saved_sites": self.js_invocation_saved_sites,
+            "js_invocation_digests": self.js_invocation_digests,
             "publish_canonical_endpoint": self.publish_canonical_endpoint,
             "timeout_seconds": self.timeout(),
         });
         for (key, path) in [
             ("guest_adapter", &self.guest_adapter),
             ("js_dispatch_sites", &self.js_dispatch_sites),
+            ("js_invocation_sites", &self.js_invocation_sites),
             ("brave_binary", &self.brave_binary),
         ] {
             if let Some(path) = path {
@@ -161,6 +212,8 @@ pub struct Started {
     pub url_error: Option<String>,
     /// Whether a stored record followed the opened page. Null without a url.
     pub capture_observed: Option<bool>,
+    /// How many invocation sites this session armed, when it armed any.
+    pub js_invocation_sites_armed: Option<usize>,
 }
 
 impl Started {
@@ -176,6 +229,9 @@ impl Started {
         });
         if let Some(error) = &self.url_error {
             value["url_error"] = json!(error);
+        }
+        if let Some(count) = self.js_invocation_sites_armed {
+            value["js_invocation_sites_armed"] = json!(count);
         }
         if paths {
             value["session_dir"] = json!(self.session_dir.display().to_string());
@@ -329,6 +385,95 @@ fn failure(log: &str) -> Option<String> {
         .map(|cause| cause.chars().take(1000).collect())
 }
 
+/// Launcher refusals name its environment switches. An agent sets named
+/// options instead, so the switch's option is named beside the cause.
+fn with_option_names(cause: &str) -> String {
+    let names = [
+        ("REB_CAPTURE_REQUEST_CONTENT", "request_content"),
+        ("REB_CONSOLE_DOCUMENT_START", "document_start"),
+        (
+            "REB_NATIVE_JS_INVOCATION_SITES",
+            "js_invocation_sites or js_invocation_saved_sites",
+        ),
+        ("REB_NATIVE_JS_INVOCATION_DIGESTS", "js_invocation_digests"),
+        ("REB_NATIVE_JS_DISPATCH_SITES", "js_dispatch_sites"),
+        ("REB_NATIVE_WASM_GUEST_ADAPTER", "guest_adapter"),
+        ("REB_NATIVE_WASM_DISPATCH", "wasm_dispatch"),
+        ("REB_NATIVE_WASM_CALL_INDIRECT", "wasm_call_indirect"),
+        ("REB_NATIVE_QUIET_MODE", "quiet"),
+        ("REB_CAPTURE_CANVAS_IMAGES", "canvas_images"),
+        ("REB_CAPTURE_CATEGORY_MASK", "category_mask"),
+        ("REB_BRAVE_BINARY", "brave_binary"),
+    ];
+    let named = names
+        .iter()
+        .filter(|(switch, _)| {
+            cause.match_indices(switch).any(|(at, _)| {
+                !cause[at + switch.len()..]
+                    .starts_with(|c: char| c == '_' || c.is_ascii_uppercase())
+            })
+        })
+        .map(|(switch, option)| format!("{switch} is the option {option}"))
+        .collect::<Vec<_>>();
+    if named.is_empty() {
+        cause.to_owned()
+    } else {
+        format!("{cause} (For this start: {}.)", named.join("; "))
+    }
+}
+
+/// The agent's saved invocation sites, shared by the sessions agents start
+/// under this HOME and never the app's own set. Sites saved with
+/// `js_invocation_site_action` in one agent session arm the next one started
+/// with `js_invocation_saved_sites`.
+pub fn agent_site_store(home: &Path) -> PathBuf {
+    home.join(".config/origin-trace/agent-sessions/js-invocation-sites-v1.json")
+}
+
+/// The site file this session arms, as a private copy nothing changes while
+/// it runs: the browser rereads the file it was given and refuses a session
+/// whose file changed. Returns the copy and how many sites it names.
+fn invocation_sites(
+    options: &StartOptions,
+    home: &Path,
+    agent: &Path,
+) -> Result<Option<(PathBuf, usize)>, String> {
+    let sites = if options.js_invocation_saved_sites {
+        let store = agent_site_store(home);
+        let saved = js_invocation_sites::Store::new(store)
+            .load()
+            .map_err(|error| {
+                format!(
+                    "The agent's saved invocation sites cannot be read: {}",
+                    error.message
+                )
+            })?;
+        if saved.is_empty() {
+            return Err("js_invocation_saved_sites names the agent's saved set, which is empty. In an agent session, resolve a function with resolve_js_invocation_site and save it with js_invocation_site_action add; it arms in the next session started with js_invocation_saved_sites.".into());
+        }
+        saved.into_iter().map(|saved| saved.site).collect()
+    } else if let Some(path) = &options.js_invocation_sites {
+        let bytes = std::fs::read(path)
+            .map_err(|error| format!("js_invocation_sites cannot be read: {error}"))?;
+        std::str::from_utf8(&bytes)
+            .ok()
+            .and_then(js_invocation_sites::parse_sites_file)
+            .ok_or("js_invocation_sites is not a native-js-invocation-sites-v1 file: canonical JSON naming 1 to 8 distinct function-entry sites in at most 4096 bytes. resolve_js_invocation_site returns exact site entries.")?
+    } else {
+        return Ok(None);
+    };
+    let text = js_invocation_sites::sites_file(&sites)
+        .map_err(|_| "The invocation site set cannot be written as a site file")?;
+    let copy = agent.join("js-invocation-sites.json");
+    crate::durable::write_private(&copy, text.as_bytes()).map_err(|error| {
+        format!(
+            "Cannot write the session's invocation site file: {}",
+            error.message
+        )
+    })?;
+    Ok(Some((copy, sites.len())))
+}
+
 fn ready(log: &str) -> Option<String> {
     log.lines().find_map(|line| {
         let id = line.strip_prefix(READY_LINE)?.trim();
@@ -416,6 +561,9 @@ pub async fn launch(options: &StartOptions) -> Result<Started, String> {
         .join(".config/origin-trace/agent-sessions")
         .join(&nonce);
     private_directory(&agent)?;
+    let armed_sites = invocation_sites(options, &home, &agent).inspect_err(|_| {
+        let _ = std::fs::remove_dir_all(&agent);
+    })?;
     // An explicit root wins, then the operator's REB_LIVE_SESSION_ROOT, as
     // for make live, then the build's own default.
     let sessions_root = options
@@ -434,6 +582,17 @@ pub async fn launch(options: &StartOptions) -> Result<Started, String> {
             .open(&log_file)
             .map_err(|error| format!("Cannot create the launch log: {error}"))?
     };
+    {
+        // The named options lead the log, so what this session was asked for
+        // is visible beside what the launcher reports it passed to Brave.
+        use std::io::Write;
+        let mut named = options.effective();
+        if let Some((_, count)) = &armed_sites {
+            named["js_invocation_site_count"] = json!(count);
+        }
+        writeln!(&log, "Agent session options: {named}")
+            .map_err(|error| format!("Cannot write the launch log: {error}"))?;
+    }
     let active_endpoint = if options.publish_canonical_endpoint {
         home.join(".config/origin-trace/reb-api.endpoint")
     } else {
@@ -455,8 +614,9 @@ pub async fn launch(options: &StartOptions) -> Result<Started, String> {
         "REB_BRAVE_PROFILE",
         "REB_NATIVE_WASM_GUEST_ADAPTER",
         "REB_NATIVE_JS_DISPATCH_SITES",
-        // Invocation sites are not a named option: an agent session never
-        // arms the researcher's functions or settles their values.
+        // Invocation sites arm only from a named option, never from the
+        // researcher's file or saved set. A named set is strict: a Brave
+        // without invocation capture refuses the start instead of dropping it.
         "REB_NATIVE_JS_INVOCATION_SITES",
         "REB_NATIVE_JS_INVOCATION_IF_SUPPORTED",
         "REB_BRAVE_BINARY",
@@ -470,12 +630,9 @@ pub async fn launch(options: &StartOptions) -> Result<Started, String> {
     command
         .env("REB_LIVE_SESSION_ROOT", &sessions_root)
         .env("REB_ACTIVE_ENDPOINT_FILE", &active_endpoint)
-        // The app's saved invocation sites arm its next capture, so an agent
-        // session keeps a private set and never changes the researcher's.
-        .env(
-            "REB_JS_INVOCATION_SITE_STORE",
-            agent.join("js-invocation-sites-v1.json"),
-        )
+        // The app's saved invocation sites arm its next capture, so agent
+        // sessions keep their own saved set and never change the researcher's.
+        .env("REB_JS_INVOCATION_SITE_STORE", agent_site_store(&home))
         .env("REB_NATIVE_WASM_DISPATCH", switch(options.wasm_dispatch))
         .env(
             "REB_NATIVE_WASM_CALL_INDIRECT",
@@ -483,16 +640,21 @@ pub async fn launch(options: &StartOptions) -> Result<Started, String> {
         )
         .env("REB_NATIVE_QUIET_MODE", switch(options.quiet))
         .env("REB_CAPTURE_CANVAS_IMAGES", switch(options.canvas_images))
-        // Request paths, queries and bodies are sensitive and not a named
-        // option, so an inherited switch never turns them on here.
-        .env("REB_CAPTURE_REQUEST_CONTENT", "0")
-        // Document-start Console scripts run researcher code in new matching
-        // documents. The browser-session permission is not a named option, so
-        // an inherited switch never grants it to an agent-started capture.
-        .env("REB_CONSOLE_DOCUMENT_START", "0")
-        // Settled-value digests are sensitive capture and need invocation
-        // sites, which agent sessions never arm.
-        .env("REB_NATIVE_JS_INVOCATION_DIGESTS", "0")
+        // Request paths, queries and bodies are sensitive: on only when the
+        // start names request_content, never from an inherited switch.
+        .env(
+            "REB_CAPTURE_REQUEST_CONTENT",
+            switch(options.request_content),
+        )
+        // Document-start Console scripts run code in new matching documents.
+        // The browser-session permission comes only from document_start, never
+        // from an inherited switch, and it arms nothing by itself.
+        .env("REB_CONSOLE_DOCUMENT_START", switch(options.document_start))
+        // Settled-value digests are sensitive capture and need named sites.
+        .env(
+            "REB_NATIVE_JS_INVOCATION_DIGESTS",
+            switch(options.js_invocation_digests),
+        )
         .env("REB_LOCALHOST_ONLY", switch(options.localhost_only))
         // An agent cannot answer a macOS Keychain prompt, so agent sessions use
         // a prompt-free isolated profile. Do not save passwords in it.
@@ -510,6 +672,9 @@ pub async fn launch(options: &StartOptions) -> Result<Started, String> {
     }
     if let Some(path) = &options.js_dispatch_sites {
         command.env("REB_NATIVE_JS_DISPATCH_SITES", path);
+    }
+    if let Some((path, _)) = &armed_sites {
+        command.env("REB_NATIVE_JS_INVOCATION_SITES", path);
     }
     if let Some(path) = &brave {
         command.env("REB_BRAVE_BINARY", path);
@@ -549,7 +714,10 @@ pub async fn launch(options: &StartOptions) -> Result<Started, String> {
             if !exited(&mut child, Duration::from_secs(15)) {
                 stop(&mut child);
             }
-            return Err(format!("The live session did not start: {cause}"));
+            return Err(format!(
+                "The live session did not start: {}",
+                with_option_names(&cause)
+            ));
         }
         if let Ok(Some(status)) = child.try_wait() {
             return Err(format!(
@@ -576,6 +744,7 @@ pub async fn launch(options: &StartOptions) -> Result<Started, String> {
                         url_opened: None,
                         url_error: None,
                         capture_observed: None,
+                        js_invocation_sites_armed: armed_sites.as_ref().map(|(_, count)| *count),
                     };
                 }
             }
@@ -635,6 +804,28 @@ mod tests {
             (json!({"canvas_images":true}), "confirm_sensitive_capture"),
             (json!({"category_mask":0}), "category_mask"),
             (json!({"duration_seconds":7200}), "duration_seconds"),
+            (json!({"request_content":true}), "confirm_sensitive_capture"),
+            (
+                json!({"request_content":true,"confirm_sensitive_capture":true,"category_mask":1024}),
+                "256 and 1024",
+            ),
+            (
+                json!({"js_invocation_saved_sites":true,"category_mask":1024}),
+                "VM category",
+            ),
+            (
+                json!({"js_invocation_digests":true,"confirm_sensitive_capture":true}),
+                "requires js_invocation_sites",
+            ),
+            (
+                json!({"js_invocation_digests":true,"js_invocation_saved_sites":true}),
+                "confirm_sensitive_capture",
+            ),
+            (
+                json!({"js_invocation_sites":"/tmp/s.json","js_invocation_saved_sites":true}),
+                "not both",
+            ),
+            (json!({"js_invocation_sites":"s.json"}), "absolute"),
         ] {
             let error = StartOptions::from_json(&value).validate().unwrap_err();
             assert!(error.contains(message), "{value}: {error}");
@@ -644,6 +835,39 @@ mod tests {
         assert_eq!(effective["category_mask"], 4095);
         assert_eq!(effective["timeout_seconds"], 180);
         assert!(effective.get("url").is_none());
+        // Every switch an agent can name is shown, off unless named.
+        for key in [
+            "request_content",
+            "document_start",
+            "js_invocation_saved_sites",
+            "js_invocation_digests",
+        ] {
+            assert_eq!(effective[key], false, "{key}");
+        }
+        let named = StartOptions::from_json(&json!({"document_start":true,
+            "js_invocation_sites":"/tmp/s.json","js_invocation_digests":true,
+            "confirm_sensitive_capture":true}));
+        assert!(named.validate().is_ok());
+        let effective = named.effective();
+        assert_eq!(effective["document_start"], true);
+        assert_eq!(effective["js_invocation_sites"], "/tmp/s.json");
+        assert_eq!(effective["js_invocation_digests"], true);
+    }
+
+    #[test]
+    fn launcher_refusals_name_the_option_to_change() {
+        let cause = "Brave does not define --reb-js-invocation-capture (from REB_NATIVE_JS_INVOCATION_SITES); turn it off with unset REB_NATIVE_JS_INVOCATION_SITES.";
+        let named = with_option_names(cause);
+        assert!(named.starts_with(cause));
+        assert!(named.ends_with(
+            "(For this start: REB_NATIVE_JS_INVOCATION_SITES is the option js_invocation_sites or js_invocation_saved_sites.)"
+        ));
+        // A longer switch that starts with a known one is not mistaken for it.
+        assert_eq!(
+            with_option_names("REB_NATIVE_WASM_DISPATCH_EXTRA is unknown"),
+            "REB_NATIVE_WASM_DISPATCH_EXTRA is unknown"
+        );
+        assert_eq!(with_option_names("Brave is missing"), "Brave is missing");
     }
 
     #[test]

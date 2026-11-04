@@ -47,7 +47,7 @@
         "start"
       ],
       "title": "Start a live capture session",
-      "description": "Starts a new visibly labeled live capture session with named capture options: the capture browser, an Origin Trace window and every helper. When it is ready this connection moves to that session; other endpoint changes still retire the connection. Starting again first ends the session this connection started. With url, the result reports capture_observed; false means nothing was recorded, so end the session. Start only for an authorized target. session_action, listed with this tool, acts only on a session this connection started.",
+      "description": "Starts a new visibly labeled live capture session with named capture options: the capture browser, an Origin Trace window and every helper. When it is ready this connection moves to that session; other endpoint changes still retire the connection. Starting again first ends the session this connection started. Every option is off unless named and none is inherited from the environment. document_start permits document-start Console scripts (arming is a separate Console action). Sensitive capture needs confirm_sensitive_capture: canvas_images, request_content (request paths, queries and bodies) and js_invocation_digests. js_invocation_sites (a site file) or js_invocation_saved_sites (the agent sessions' own saved set) arm invocation sites. The result options and get_session_context capture_options show what the session runs with. With url, the result reports capture_observed; false means nothing was recorded, so end the session. Next: get_session_context, then get_session_summary; get_native_console for the Console. Start only for an authorized target. session_action, listed with this tool, acts only on a session this connection started.",
       "input": {
         "$ref": "#/components/schemas/LiveSessionStart"
       },
@@ -68,7 +68,7 @@
             "effects": [
               "sensitive-capture"
             ],
-            "when": "canvas_images is true."
+            "when": "canvas_images, request_content or js_invocation_digests is true."
           }
         ],
         "uncertainties": [
@@ -94,6 +94,34 @@
                 "canvas_images"
               ]
             }
+          },
+          {
+            "field": "confirm_sensitive_capture",
+            "value": true,
+            "when": {
+              "properties": {
+                "request_content": {
+                  "const": true
+                }
+              },
+              "required": [
+                "request_content"
+              ]
+            }
+          },
+          {
+            "field": "confirm_sensitive_capture",
+            "value": true,
+            "when": {
+              "properties": {
+                "js_invocation_digests": {
+                  "const": true
+                }
+              },
+              "required": [
+                "js_invocation_digests"
+              ]
+            }
           }
         ],
         "notes": "Runs the same launcher as make live, detached from this process, so the session outlives the MCP connection until it is ended, Brave is closed, or capture expires.",
@@ -113,8 +141,8 @@
     "/api/session/context": {
       "get": {
         "operationId": "get_session_context",
-        "summary": "Get compact session context",
-        "description": "First read for a connected agent. Reports live_admission, capture mode, the health instance id, and up to 16 retained Wasm artifacts from a 256 KiB manifest tail, without fetching bytecode. Debugger fields are fixed retirement values since CDP was removed. The HTTP API cannot know client effects flags: allow_effects is null; reb-api mcp fills its actual invocation admission. live_admission is availability, not authorization. Cache the context with its own ETag.",
+        "summary": "Get compact session context and capture options",
+        "description": "First read for a connected agent. Reports live_admission (ready means live capture with its broker connected), capture mode, the health instance id, capture_options (what the launcher passed to Brave: request_content, canvas_images, document_start permitted or not_permitted, and js_invocation state, count and digests), and up to 16 retained Wasm artifacts from a 256 KiB manifest tail, without fetching bytecode. Next: get_session_summary. Debugger fields are fixed retirement values since CDP was removed. The HTTP API cannot know client effects flags: allow_effects is null; reb-api mcp fills its actual invocation admission. live_admission is availability, not authorization. Cache the context with its own ETag.",
         "tags": [
           "health"
         ],
@@ -230,7 +258,7 @@
       "get": {
         "operationId": "get_session_summary",
         "summary": "Summarize what this capture recorded",
-        "description": "One call that answers whether a capture worked: capture state, event counts by type, the busiest frames with their event types, session IDs, gap counts and named gap reasons, artifact counts by kind with the newest digests, and checks that name what looks wrong, such as a full sampling budget or Wasm compiled without a stored module. Counts, identifiers and origin labels only: no payloads, source, URLs paths or bodies. Covers the newest 64 MiB of events. Use get_events filters to read the records behind a count.",
+        "description": "One call that answers whether a capture worked: capture state, event counts by type, the busiest frames with their event types, session IDs, gap counts and named gap reasons, artifact counts by kind with the newest digests, and checks that name what looks wrong, such as a full sampling budget or Wasm compiled without a stored module. Call it after get_session_context and again after an action. Counts, identifiers and origin labels only: no payloads, source, URLs paths or bodies. Covers the newest 64 MiB of events. Use get_events filters (type, frame_id, request_id) to read the records behind a count.",
         "tags": [
           "health"
         ],
@@ -346,7 +374,7 @@
       "post": {
         "operationId": "session_action",
         "summary": "Open a URL in, send input to, or end this live capture session",
-        "description": "Drives the live session this backend belongs to. open_url opens a page in a new tab of the session's capture browser while its capture broker runs, and reports capture_observed. list_inputs, click, type, press and scroll send trusted macOS input to the capture browser's page; they need Accessibility for the app that started the session. end closes the capture browser and stops the session; it stays available after capture expires. Use wait_for_events after open_url. Through MCP it is listed only with --allow-session-start and acts only on a session started by that connection with start_live_session.",
+        "description": "Drives the live session this backend belongs to. open_url opens a page in a new tab of the session's capture browser while its capture broker runs, and reports capture_observed. list_inputs, click, type, press and scroll send trusted macOS input to the capture browser's page, including cross-origin frames; they need Accessibility for the app that started the session. end closes the capture browser and stops the session; it stays available after capture expires; stop any Console connection first so armed document-start scripts are cleared and confirmed. Take a wait_for_events cursor before open_url or input, then wait. To run JavaScript in the page or one of its frames, use get_native_console and native_console_action. Through MCP it is listed only with --allow-session-start and acts only on a session started by that connection with start_live_session.",
         "tags": [
           "capture"
         ],
@@ -1407,7 +1435,7 @@
       "get": {
         "operationId": "get_events",
         "summary": "Read native events, optionally filtered and paged",
-        "description": "Without filters this is the Origin Trace UI polling window: the newest events of the last 64 MiB plus an independent network window. With any filter or cursor it scans complete records from the cursor (default: newest first), returns up to limit matches unchanged, and adds a query object with next_before and next_after cursors. Filters combine with AND. Gap fields then describe only the scanned byte range, and network_events is empty: select network records with category=network. Payloads are hex. Unknown parameters are rejected.",
+        "description": "Without filters this is the Origin Trace UI polling window: the newest events of the last 64 MiB plus an independent network window. With any filter or cursor it scans complete records from the cursor (default: newest first), returns up to limit matches unchanged, and adds a query object with next_before and next_after cursors. Filters combine with AND. Gap fields then describe only the scanned byte range, and network_events is empty: select network records with category=network. Network requests: request_body (22) gives each body's length, type and digest, and request_target (23) the path and query only when the session retains request content; select one request with request_id. Invocation sites: js_invocation_start (24), js_invocation_settle (25) and js_invocation_request (26) give armed calls and the requests made inside them. Payloads are hex. Unknown parameters are rejected. Use a small limit through MCP and page with query.next_before.",
         "tags": [
           "events"
         ],
@@ -1499,7 +1527,7 @@
             "name": "type",
             "in": "query",
             "required": false,
-            "description": "Comma-separated event types to keep, for example wasm_dispatch_observation,module_compiled. Exact names, at most 16.",
+            "description": "Comma-separated event types to keep, at most 16 exact names: api_call, property_read, module_compiled, module_instantiated, request_started, request_initiated, request_redirected, response_started, response_completed, request_completed, request_failed, request_body, request_target, artifact_captured, artifact_capture_failed, vm_finding, vm_dispatch_sample, wasm_dispatch_observation, wasm_indirect_observation, wasm_guest_dispatch, wasm_guest_invocation, js_dispatch_observation, js_invocation_start, js_invocation_settle, js_invocation_request, gap. An unknown name matches nothing.",
             "schema": {
               "type": "string",
               "maxLength": 1040
@@ -1509,7 +1537,7 @@
             "name": "category",
             "in": "query",
             "required": false,
-            "description": "Comma-separated event categories to keep, for example wasm,vm,network. Exact names, at most 16.",
+            "description": "Comma-separated event categories to keep, at most 16 exact names: canvas, webgl, web_audio, navigator, permissions, storage, webrtc, wasm, network, vm, artifact, runtime.",
             "schema": {
               "type": "string",
               "maxLength": 1040
@@ -1537,7 +1565,7 @@
             "name": "frame_id",
             "in": "query",
             "required": false,
-            "description": "Keep events of this frame. get_session_summary lists frames with their event counts.",
+            "description": "Keep events of this frame. get_session_summary lists frames with their event counts; a document-start record's frame_id is the same identity.",
             "schema": {
               "$ref": "#/components/schemas/Uint64String"
             }
@@ -1662,7 +1690,7 @@
       "get": {
         "operationId": "wait_for_events",
         "summary": "Wait for matching events",
-        "description": "Waits up to timeout_ms for the first events after a cursor that match the same filters as get_events, then returns them in the filtered get_events shape plus a wait object. Without after, only events written after the call count, so call it right after the action you expect to cause them. On timeout it returns no events, wait.timed_out true and query.next_after for the next wait. Waiting does not change the browser or the stores.",
+        "description": "Waits up to timeout_ms for the first events after a cursor that match the same filters as get_events, then returns them in the filtered get_events shape plus a wait object. Without after, only events written after the call count, so take a cursor first (timeout_ms 1) and then act: session_action open_url or click, or a Console evaluate. On timeout it returns no events, wait.timed_out true and query.next_after for the next wait. Waiting does not change the browser or the stores. At most eight waits run at once.",
         "tags": [
           "events"
         ],
@@ -1695,7 +1723,7 @@
             "name": "type",
             "in": "query",
             "required": false,
-            "description": "Comma-separated event types to keep, for example wasm_dispatch_observation,module_compiled. Exact names, at most 16.",
+            "description": "Comma-separated event types to keep, at most 16 exact names: api_call, property_read, module_compiled, module_instantiated, request_started, request_initiated, request_redirected, response_started, response_completed, request_completed, request_failed, request_body, request_target, artifact_captured, artifact_capture_failed, vm_finding, vm_dispatch_sample, wasm_dispatch_observation, wasm_indirect_observation, wasm_guest_dispatch, wasm_guest_invocation, js_dispatch_observation, js_invocation_start, js_invocation_settle, js_invocation_request, gap. An unknown name matches nothing.",
             "schema": {
               "type": "string",
               "maxLength": 1040
@@ -1705,7 +1733,7 @@
             "name": "category",
             "in": "query",
             "required": false,
-            "description": "Comma-separated event categories to keep, for example wasm,vm,network. Exact names, at most 16.",
+            "description": "Comma-separated event categories to keep, at most 16 exact names: canvas, webgl, web_audio, navigator, permissions, storage, webrtc, wasm, network, vm, artifact, runtime.",
             "schema": {
               "type": "string",
               "maxLength": 1040
@@ -1733,7 +1761,7 @@
             "name": "frame_id",
             "in": "query",
             "required": false,
-            "description": "Keep events of this frame. get_session_summary lists frames with their event counts.",
+            "description": "Keep events of this frame. get_session_summary lists frames with their event counts; a document-start record's frame_id is the same identity.",
             "schema": {
               "$ref": "#/components/schemas/Uint64String"
             }
@@ -1900,7 +1928,7 @@
       "get": {
         "operationId": "get_artifacts",
         "summary": "List stored artifacts, optionally filtered and paged",
-        "description": "Lists retained script, Wasm and other artifact records with their sha256, size, frame and session. Without filters it returns the newest records. With any filter or cursor it scans the manifest from the cursor and adds a query object with next_before and next_after cursors. Filters combine with AND. Bytes come from get_artifact_content, which the MCP projection does not inline; inspect_wasm describes a Wasm module. Unknown parameters are rejected.",
+        "description": "Lists retained script, Wasm and other artifact records with their sha256, size, frame and session. Without filters it returns the newest records. With any filter or cursor it scans the manifest from the cursor and adds a query object with next_before and next_after cursors. Filters combine with AND. Bytes come from get_artifact_content, which the MCP projection does not inline; inspect_wasm describes a Wasm module, and resolve_js_invocation_site names a function in a javascript artifact. request_body artifacts are sensitive and exist only when the session retains request content. Unknown parameters are rejected.",
         "tags": [
           "artifacts"
         ],
@@ -1992,7 +2020,7 @@
             "name": "kind",
             "in": "query",
             "required": false,
-            "description": "Comma-separated artifact kinds: javascript, wasm, source_map, response_body, canvas_data_url, bytecode_buffer, wasm_guest_adapter.",
+            "description": "Comma-separated artifact kinds: javascript, wasm, source_map, response_body, request_body, canvas_data_url, bytecode_buffer, wasm_guest_adapter. request_body exists only in sessions that retain request content.",
             "schema": {
               "type": "string",
               "maxLength": 1040
@@ -3256,7 +3284,7 @@
     "/api/native-console": {
       "get": {
         "operationId": "get_native_console",
-        "summary": "Native console availability and session state",
+        "summary": "List native Console documents, including child frames, and the connection state",
         "tags": [
           "native-console"
         ],
@@ -3325,14 +3353,15 @@
         },
         "x-reb-execution-schema": {
           "$ref": "#/components/schemas/RebExecutionMetadata"
-        }
+        },
+        "description": "First Console step. In a live capture it lists the capture browser's HTTP(S) documents (document_source live_capture) and binding_id; before connect_live, state is idle and session_id null. Each target has id (the exact native document, valid only with this binding_id), frame (top or child), origin, url and label (display only, never identity), and for a child top_relation (same_origin, same_site, cross_site or undetermined) and out_of_process (true for a cross-site frame in its own renderer process). There is no parent link: choose a frame by frame, origin and url, and after connecting, evaluate location.ancestorOrigins to confirm its parents. Next: native_console_action connect_live with binding_id, target_id and confirm_live true. While connected, selection is selected, none, or stale when the document navigated, reloaded or was removed (stop, then connect_live with a current id). document_start_supported says whether this browser permits arm_document_start. At most 64 documents; truncated marks a cut listing. live_available false means no Console binding: restart the capture; no second browser is opened."
       }
     },
     "/api/native-console/document-start": {
       "get": {
         "operationId": "get_native_console_document_start",
-        "summary": "Armed document-start Console scripts and their bounded output",
-        "description": "Reads the separately armed document-start experiment: which gate is missing or which exact rules are armed, renderer readiness, and a bounded non-draining page of page-JavaScript observations after an optional after_sequence cursor. Output is never evidence.",
+        "summary": "Read armed document-start scripts and their bounded output",
+        "description": "Read after arm_document_start and after reloading a matching document. permitted false names the missing gate in message. Each armed script has its rule (origin, frame, path_prefix), digest, injected_documents, records and refused. pending_renderer_processes 0 means a document created now runs the set; reload after that. output holds at most 32 records after after_sequence, each with sequence, record (injected, report, script_error or refused), script_id, document_id (a get_native_console target id), frame_id (the capture's frame identity, usable as a get_events frame_id filter), top_frame and text. Pass the last sequence as after_sequence: reads never drain, and dropped counts ring evictions. status unconfirmed means a clear was not confirmed; restart the capture. unsupported lists contexts never injected, such as workers and documents already open. Output is never evidence.",
         "tags": [
           "native-console"
         ],
@@ -3451,8 +3480,8 @@
     "/api/native-console/actions": {
       "post": {
         "operationId": "native_console_action",
-        "summary": "Explicit native console session and evaluation actions",
-        "description": "Starts a fresh disposable browser without CDP. Commands are never retried automatically. Console values remain ephemeral. Session and document identifiers must be selected explicitly. A timeout does not roll back side effects.",
+        "summary": "Connect the Console to one document, evaluate there, arm document-start scripts",
+        "description": "Live capture: connect_live selects one document from get_native_console, top or child, cross-site frames included, and returns a new session_id. evaluate runs up to 8 KiB of JavaScript in that document's main world and returns status, type and text (at most 8 KiB, truncated marked); runtime adds inspect, await, poll for console messages, and traffic. Commands run only in the selected document: another target_id, or one that navigated, returns status stale_target with the next step, and nothing runs. To switch frames, stop, then connect_live with the new id. arm_document_start replaces the armed set: at most 4 rules, each one exact origin, frame top or child, an optional path_prefix and a snippet that calls report(value). It runs only in documents created after arming, so reload or navigate, then read get_native_console_document_start. clear_document_start removes the set; stop clears it too and must be confirmed. start opens a separate disposable browser instead. Refusals: 409 with another connection open or a stale session_id or binding_id; 503 for arming where document-start is not permitted (an agent session needs start_live_session document_start true). Never retried. Output is ephemeral page data, not evidence.",
         "tags": [
           "native-console"
         ],
@@ -5809,7 +5838,7 @@
       "get": {
         "operationId": "get_js_invocation_sites",
         "summary": "Get the saved JavaScript invocation sites",
-        "description": "The app's saved native-js-invocation-sites-v1 set (at most 8), each with its label, source URL and whether this session retained the saved script version or another version the site will not match, plus what this session's launcher armed. Saved sites are armed by the next capture the Origin Trace app starts, never the open page.",
+        "description": "The saved native-js-invocation-sites-v1 set this backend edits (at most 8), each with its label, source URL and whether this session retained the saved script version or another version the site will not match, plus session: what this session's launcher armed. In the Origin Trace app it is the app's set, armed by the app's next capture. In an agent session it is the agent sessions' own set, armed by the next start_live_session with js_invocation_saved_sites; the researcher's set is never read or changed. Saved sites never arm the open page.",
         "tags": [
           "js-invocation-sites"
         ],
@@ -5899,7 +5928,7 @@
       "get": {
         "operationId": "resolve_js_invocation_site",
         "summary": "Resolve one JavaScript function to an invocation site",
-        "description": "Finds the function definitions in one exact retained JavaScript artifact that bind a dotted name (assignments, var/let/const initializers, function declarations and object-literal properties; window., self. and globalThis. name the same global object), or the function at or around a byte offset. Strings, templates and comments never match. Exactly one supported function resolves to its site; zero or several are refused with a bounded candidate list. Bare-parameter and async arrows, generators, class constructors and class initializers are refused with a reason. Saves nothing.",
+        "description": "Finds the function definitions in one exact retained JavaScript artifact (choose it with get_artifacts kind=javascript) that bind a dotted name (assignments, var/let/const initializers, function declarations and object-literal properties; window., self. and globalThis. name the same global object), or the function at or around a byte offset. Strings, templates and comments never match. Exactly one supported function resolves to its site; zero or several are refused with a bounded candidate list. Bare-parameter and async arrows, generators, class constructors and class initializers are refused with a reason. Saves nothing: save it with js_invocation_site_action add, or write the site entry to a file for start_live_session js_invocation_sites.",
         "tags": [
           "js-invocation-sites"
         ],
@@ -6111,7 +6140,7 @@
       "post": {
         "operationId": "js_invocation_site_action",
         "summary": "Add, remove or clear saved JavaScript invocation sites",
-        "description": "add resolves a name or byte offset in one exact artifact on the server and saves the site (refusals save nothing and return the reason and candidates); remove deletes one site by source_sha256 and anchor_offset; clear deletes the set. At most 8 sites; a duplicate function is refused. The app's next capture arms the set; in Content mode it also records settled-value digests.",
+        "description": "add resolves a name or byte offset in one exact artifact on the server and saves the site (refusals save nothing and return the reason and candidates); remove deletes one site by source_sha256 and anchor_offset; clear deletes the set. At most 8 sites; a duplicate function is refused. Nothing changes in the open page. In the app, the app's next capture arms the set and in Content mode records settled-value digests. In an agent session it edits the agent sessions' own set, which arms only in a later start_live_session with js_invocation_saved_sites.",
         "tags": [
           "js-invocation-sites"
         ],
@@ -15297,41 +15326,7 @@
             "type": "array",
             "maxItems": 64,
             "items": {
-              "type": "object",
-              "additionalProperties": false,
-              "properties": {
-                "id": {
-                  "type": "string",
-                  "pattern": "^[1-9][0-9]{0,19}$",
-                  "description": "Canonical nonzero uint64 decimal identifier."
-                },
-                "origin": {
-                  "type": "string",
-                  "maxLength": 256
-                },
-                "truncated": {
-                  "type": "boolean"
-                },
-                "label": {
-                  "type": "string",
-                  "x-max-utf8-bytes": 128
-                },
-                "url": {
-                  "type": "string",
-                  "x-max-utf8-bytes": 512
-                },
-                "main_frame": {
-                  "type": "boolean"
-                }
-              },
-              "required": [
-                "id",
-                "origin",
-                "truncated",
-                "label",
-                "url",
-                "main_frame"
-              ]
+              "$ref": "#/components/schemas/NativeConsoleTarget"
             }
           },
           "truncated": {
@@ -15361,6 +15356,9 @@
           "document_start_supported": {
             "type": "boolean",
             "description": "Whether this browser session permits the separately armed document-start script experiment. An older browser without the overlay leaves it false, so operation 4 is never sent to it."
+          },
+          "selection": {
+            "$ref": "#/components/schemas/NativeConsoleSelection"
           }
         },
         "required": [
@@ -15436,41 +15434,7 @@
             "type": "array",
             "maxItems": 64,
             "items": {
-              "type": "object",
-              "additionalProperties": false,
-              "properties": {
-                "id": {
-                  "type": "string",
-                  "pattern": "^[1-9][0-9]{0,19}$",
-                  "description": "Canonical nonzero uint64 decimal identifier."
-                },
-                "origin": {
-                  "type": "string",
-                  "maxLength": 256
-                },
-                "truncated": {
-                  "type": "boolean"
-                },
-                "label": {
-                  "type": "string",
-                  "x-max-utf8-bytes": 128
-                },
-                "url": {
-                  "type": "string",
-                  "x-max-utf8-bytes": 512
-                },
-                "main_frame": {
-                  "type": "boolean"
-                }
-              },
-              "required": [
-                "id",
-                "origin",
-                "truncated",
-                "label",
-                "url",
-                "main_frame"
-              ]
+              "$ref": "#/components/schemas/NativeConsoleTarget"
             }
           },
           "truncated": {
@@ -15503,6 +15467,9 @@
           "document_start_supported": {
             "type": "boolean",
             "description": "Whether this browser session permits the separately armed document-start script experiment. An older browser without the overlay leaves it false, so operation 4 is never sent to it."
+          },
+          "selection": {
+            "$ref": "#/components/schemas/NativeConsoleSelection"
           }
         },
         "required": [
@@ -15699,7 +15666,7 @@
               "target_id": {
                 "type": "string",
                 "pattern": "^[1-9][0-9]{0,19}$",
-                "description": "Exact native document ID from the current live listing, never a URL/CDP mapping. Refresh preserves an unchanged document; navigation/reload/close/restart invalidates it."
+                "description": "Exact native document ID from the current get_native_console listing (targets[].id), top or child frame, never a URL/CDP mapping. Refresh preserves an unchanged document; navigation/reload/close/restart invalidates it."
               },
               "confirm_live": {
                 "type": "boolean",
@@ -15751,7 +15718,7 @@
                   "when": {}
                 }
               ],
-              "notes": "Explicitly opts into mutable live evaluation for one selected native document. Rotates the HTTP session identity and pins the document until disconnect or invalidation. No second browser, URL join, automatic remapping, retry or disposable fallback. No breakpoints, stepping or paused-frame inspection.",
+              "notes": "Explicitly opts into mutable live evaluation for one selected native document, which can be any listed frame, including a cross-site child in its own renderer process. Rotates the HTTP session identity and pins the document until disconnect or invalidation. No second browser, URL join, automatic remapping, retry or disposable fallback. No breakpoints, stepping or paused-frame inspection.",
               "sources": [
                 {
                   "path": "apps/origin-trace-backend/src/native_console.rs",
@@ -15975,7 +15942,7 @@
                 }
               ],
               "confirmations": [],
-              "notes": "Evaluates arbitrary supplied JavaScript in the explicitly selected native document. The request has no confirmation boolean; that is not permission to execute. Live ownership is revalidated immediately before dispatch and again by native weak-document/token guards. A stale request never remaps to another document; mutation before an in-flight navigation may already have occurred.",
+              "notes": "Evaluates arbitrary supplied JavaScript in the explicitly selected native document. The request has no confirmation boolean; that is not permission to execute. Live ownership is revalidated immediately before dispatch and again by native weak-document/token guards. A target_id that is not the selected document, or a selected document that navigated, returns status stale_target with the next step and runs nothing; it never remaps to another document. Mutation before an in-flight navigation may already have occurred.",
               "sources": [
                 {
                   "path": "apps/origin-trace-backend/src/native_console.rs",
@@ -16974,6 +16941,7 @@
           "capture_mode",
           "debugger_state",
           "broker_connected",
+          "capture_options",
           "live_admission",
           "generation",
           "debugger_protocol_version",
@@ -17270,6 +17238,70 @@
             "type": "string",
             "const": "independent_debugger_snapshot_and_manifest_tail",
             "description": "Historical constant: the context and the manifest tail are read independently."
+          },
+          "capture_options": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "source",
+              "request_content",
+              "canvas_images",
+              "document_start",
+              "js_invocation"
+            ],
+            "description": "What this session's launcher passed to Brave, for every live session: agent, app or make live. Labels only; they grant nothing. Idle and demo backends report not_live with everything off.",
+            "properties": {
+              "source": {
+                "type": "string",
+                "enum": [
+                  "launcher",
+                  "not_live"
+                ]
+              },
+              "request_content": {
+                "type": "boolean",
+                "description": "Request paths, queries and bodies are retained (request_target events, request_body artifacts)."
+              },
+              "canvas_images": {
+                "type": "boolean"
+              },
+              "document_start": {
+                "type": "string",
+                "enum": [
+                  "permitted",
+                  "not_permitted"
+                ],
+                "description": "Whether the launcher gave Brave the document-start permission. Whether this Brave honors it is document_start_supported in get_native_console."
+              },
+              "js_invocation": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "state",
+                  "count",
+                  "digests"
+                ],
+                "properties": {
+                  "state": {
+                    "type": "string",
+                    "enum": [
+                      "not_armed",
+                      "armed",
+                      "browser_unsupported",
+                      "unreadable"
+                    ]
+                  },
+                  "count": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 8
+                  },
+                  "digests": {
+                    "type": "boolean"
+                  }
+                }
+              }
+            }
           }
         },
         "description": "Bounded discovery only. Titles are omitted and URL labels contain only HTTP(S) origins or conventional Wasm hex labels, not full locations. Identifiers and origins remain potentially sensitive metadata. Scripts and retained artifacts are separate inventories with no inferred association. Byte length is CDP script length when known; sha256 is populated only from validated artifact metadata. Not an authorization or retention guarantee."
@@ -25512,7 +25544,7 @@
       "LiveSessionStart": {
         "type": "object",
         "additionalProperties": false,
-        "description": "Named capture options for a new live session. Every switch is off unless set.",
+        "description": "Named capture options for a new live session. Every switch is off unless set, and none is inherited from the caller's environment.",
         "properties": {
           "url": {
             "type": "string",
@@ -25571,10 +25603,36 @@
             "default": false,
             "description": "Store Canvas images, which can contain sensitive page content. Requires confirm_sensitive_capture and category bits 1 and 1024."
           },
+          "request_content": {
+            "type": "boolean",
+            "default": false,
+            "description": "Retain request paths, queries and bodies (at most 256 KiB each, 1,024 bodies or 64 MiB per session) as request_target events and request_body artifacts. Sensitive capture: requires confirm_sensitive_capture and category bits 256 and 1024. Off, Network capture still records each body's length, type and digest."
+          },
+          "document_start": {
+            "type": "boolean",
+            "default": false,
+            "description": "Permit document-start Console scripts in this capture browser. Arms nothing: a rule still needs a live Console connection (connect_live) and a confirmed arm_document_start. Needs a Brave with the Native Console v3 overlay; get_native_console reports document_start_supported."
+          },
+          "js_invocation_sites": {
+            "type": "string",
+            "minLength": 2,
+            "maxLength": 4096,
+            "description": "Absolute path of a native-js-invocation-sites-v1 file (1 to 8 sites) to arm, from resolve_js_invocation_site entries. Armed from a private copy. Needs category bit 512 and a Brave with invocation capture; a Brave without it refuses the start. Not with js_invocation_saved_sites."
+          },
+          "js_invocation_saved_sites": {
+            "type": "boolean",
+            "default": false,
+            "description": "Arm the agent sessions' own saved invocation sites, saved earlier with js_invocation_site_action in an agent session. Never the Origin Trace app's saved set. Refused when that set is empty. Not with js_invocation_sites."
+          },
+          "js_invocation_digests": {
+            "type": "boolean",
+            "default": false,
+            "description": "Record SHA-256 and rolling-hash digests of settled string and byte values of armed calls. Sensitive capture: requires js_invocation_sites or js_invocation_saved_sites and confirm_sensitive_capture."
+          },
           "confirm_sensitive_capture": {
             "const": true,
             "type": "boolean",
-            "description": "The researcher authorized storing sensitive Canvas images for this target. Required with canvas_images; never set it by inference."
+            "description": "The researcher authorized the sensitive capture named in this start for this target: Canvas images, request content or invocation value digests. Required with canvas_images, request_content or js_invocation_digests; never set it by inference."
           },
           "publish_canonical_endpoint": {
             "type": "boolean",
@@ -25625,7 +25683,8 @@
             "type": "boolean"
           },
           "options": {
-            "$ref": "#/components/schemas/LiveSessionStart"
+            "$ref": "#/components/schemas/LiveSessionStart",
+            "description": "The options this session runs with, defaults included. The launch log starts with the same line, and get_session_context capture_options reports what the launcher passed to Brave."
           },
           "url_opened": {
             "type": [
@@ -25657,6 +25716,12 @@
               "null"
             ],
             "description": "Whether a stored record followed the opened url. Null without url. False means the browser did not record: end the session."
+          },
+          "js_invocation_sites_armed": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 8,
+            "description": "How many invocation sites this session armed. Present only with js_invocation_sites or js_invocation_saved_sites."
           }
         }
       },
@@ -26313,6 +26378,97 @@
             }
           }
         ]
+      },
+      "NativeConsoleTarget": {
+        "type": "object",
+        "additionalProperties": false,
+        "description": "One native document. id is execution identity only within this binding_id; url and label are display metadata, never identity.",
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^[1-9][0-9]{0,19}$",
+            "description": "Canonical nonzero uint64 decimal identifier."
+          },
+          "origin": {
+            "type": "string",
+            "maxLength": 256
+          },
+          "truncated": {
+            "type": "boolean"
+          },
+          "label": {
+            "type": "string",
+            "x-max-utf8-bytes": 128
+          },
+          "url": {
+            "type": "string",
+            "x-max-utf8-bytes": 512
+          },
+          "main_frame": {
+            "type": "boolean",
+            "description": "True for a top-level document."
+          },
+          "frame": {
+            "type": "string",
+            "enum": [
+              "top",
+              "child"
+            ],
+            "description": "Frame kind, in the vocabulary of document-start rules."
+          },
+          "top_relation": {
+            "type": "string",
+            "enum": [
+              "same_origin",
+              "same_site",
+              "cross_site",
+              "undetermined"
+            ],
+            "description": "Child frames only: this frame's origin compared with every listed top-level document. The listing has no parent link, so with several tabs whose tops disagree it is undetermined; two host names that share their last two labels need the public suffix list and are undetermined too."
+          },
+          "out_of_process": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Child frames only, derived from top_relation and not read from the browser: true for cross_site, which Chromium's full site isolation runs in its own renderer process; false for same_origin; null otherwise."
+          }
+        },
+        "required": [
+          "id",
+          "origin",
+          "truncated",
+          "label",
+          "url",
+          "main_frame",
+          "frame"
+        ]
+      },
+      "NativeConsoleSelection": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "status"
+        ],
+        "description": "The live connection's selected document. selected: commands run in target_id. stale: target_id was replaced or closed (navigation, reload or frame removal) and its authorization ended; stop, then connect_live with a current id. none: nothing selected.",
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "selected",
+              "stale",
+              "none"
+            ]
+          },
+          "target_id": {
+            "type": "string",
+            "pattern": "^[1-9][0-9]{0,19}$"
+          },
+          "message": {
+            "type": "string",
+            "maxLength": 512
+          }
+        }
       }
     }
   },

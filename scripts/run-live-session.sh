@@ -631,6 +631,16 @@ ui_arguments=(
 )
 
 ui_arguments+=(--native-console-live-directory "${native_console_directory}")
+# Labels for the session context; they enable nothing in the backend.
+if [[ "${capture_request_content}" == 1 ]]; then
+  ui_arguments+=(--session-request-content)
+fi
+if [[ "${capture_canvas_images}" == 1 ]]; then
+  ui_arguments+=(--session-canvas-images)
+fi
+if [[ "${console_document_start}" == 1 ]]; then
+  ui_arguments+=(--session-document-start)
+fi
 # The session header says which functions this capture tracks, or why not.
 if [[ -n "${js_invocation_session_state}" ]]; then
   ui_arguments+=(--js-invocation-session-sites "${native_js_invocation_sites}"
@@ -732,7 +742,9 @@ if [[ "${localhost_only}" == 1 ]]; then
   )
 fi
 
+native_console_bound=0
 if [[ "${native_console_session_id}" =~ ^[1-9][0-9]{0,19}$ && -S "${native_console_socket}" && -f "${native_console_token}" ]]; then
+  native_console_bound=1
   brave_arguments+=(
     --reb-native-console
     --reb-native-console-live-binding
@@ -795,6 +807,13 @@ if [[ "${capture_request_content}" == 1 ]]; then
   echo "Request content capture: enabled for this session; request paths, queries and bodies are retained locally"
 else
   echo "Request content capture: disabled; hosts and body length, type and digest only. Set REB_CAPTURE_REQUEST_CONTENT=1 to retain paths and bodies"
+fi
+if [[ "${console_document_start}" == 1 && "${native_console_bound}" == 1 ]]; then
+  echo "Console document-start scripts: permitted for this capture browser; nothing runs until a live Console connection arms a confirmed rule"
+elif [[ "${console_document_start}" == 1 ]]; then
+  echo "Console document-start scripts: requested, but the live Console binding is unavailable, so Brave did not receive the permission"
+else
+  echo "Console document-start scripts: not permitted; set REB_CONSOLE_DOCUMENT_START=1 to permit them for one session"
 fi
 echo "Native switches: quiet=${native_quiet_mode} wasm_br_table=${native_wasm_dispatch} wasm_call_indirect=${native_wasm_call_indirect} wasm_guest=$([[ -n "${native_guest_adapter}" ]] && echo 1 || echo 0) js_dispatch=$([[ -n "${native_js_dispatch_sites}" ]] && echo 1 || echo 0) js_invocation=$([[ "${js_invocation_session_state}" == armed ]] && echo 1 || echo 0)"
 if [[ "${js_invocation_session_state}" == browser_unsupported ]]; then

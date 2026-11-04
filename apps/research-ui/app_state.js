@@ -119,6 +119,9 @@
         trafficWindowAnchor: null,
         trafficNewIds: new Set(),
         trafficDetailOpen: false,
+        // Written only by setEventConnection(); broker and eventFailureKind
+        // are its projections for existing readers.
+        connection: 'connecting',
         broker: 'connecting',
         eventFailureKind: null,
         sessionMode: standalonePreview ? 'preview' : 'live',
@@ -134,6 +137,7 @@
         queueDropsSaturated: false,
         lastUpdatedLabel: null,
         refreshing: false,
+        refreshingDependents: false,
         eventEtag: null,
         vmFindings: [],
         lastValidAnalysisFindings: [],
@@ -248,6 +252,11 @@
         signalNewKeys: new Set(),
         captureStopped: false,
         captureControlsAvailable: false,
+        // 'stop' or 'clear' while its POST runs. The generation changes when an
+        // action starts and ends, so an overlapping event poll is discarded.
+        captureAction: null,
+        captureActionGeneration: 0,
+        captureActionError: null,
         signalCategoryFilter: 'all',
         selectedSignalEventKey: null
       };

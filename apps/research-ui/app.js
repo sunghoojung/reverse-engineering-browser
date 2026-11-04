@@ -215,7 +215,9 @@ invocationSitesPanel.refresh();
           messages.push('The broker returned malformed event data.');
         } else if (state.broker === 'unavailable') {
           kind = 'disconnected';
-          messages.push('The local evidence broker is disconnected.');
+          messages.push(state.connection === 'unresponsive'
+            ? 'The local evidence broker did not answer within 10 seconds.'
+            : 'The local evidence broker is disconnected.');
         }
         if (state.eventsLimited) {
           if (kind === 'empty') kind = 'gap';
@@ -1096,9 +1098,9 @@ invocationSitesPanel.refresh();
         elements.signalDetailToggle.setAttribute('aria-expanded', String(state.signalDetailOpen));
         elements.signalDetailToggle.textContent = state.signalDetailOpen ? 'Hide details' : 'Details';
         elements.signalDetailToggle.disabled = orderedEvents.length === 0;
-        elements.signalStopCapture.disabled = !state.captureControlsAvailable || state.captureStopped ||
-          state.broker !== 'connected' || state.sessionMode !== 'live';
-        elements.signalClearEvents.disabled = !state.captureControlsAvailable ||
+        elements.signalStopCapture.disabled = Boolean(state.captureAction) || !state.captureControlsAvailable ||
+          state.captureStopped || state.broker !== 'connected' || state.sessionMode !== 'live';
+        elements.signalClearEvents.disabled = Boolean(state.captureAction) || !state.captureControlsAvailable ||
           (state.broker === 'connected' && !state.captureStopped) || state.events.length === 0;
 
         elements.signalFamilyCount.textContent = String(familyCounts.size);
@@ -1111,12 +1113,18 @@ invocationSitesPanel.refresh();
         const displayLimited = visibleEvents.length > signalEventDisplayLimit;
         elements.signalVisibleCount.textContent = displayLimited
           ? `${orderedEvents.length} of ${visibleEvents.length} shown` : `${orderedEvents.length} shown`;
-        const offline = state.broker === 'unavailable' || state.eventFailureKind === 'disconnected';
-        elements.signalSessionBadge.textContent = state.captureStopped ? 'Probes stopped'
-          : offline ? (signalEvents.length ? 'Evidence retained' : 'Disconnected')
+        // A failed poll leaves the last reported capture state unknown, so it
+        // outranks Probes stopped. A broker that is merely offline (as after
+        // Stop) still answers, and its stopped state stays visible.
+        const failed = state.eventFailureKind !== null;
+        const offline = state.broker === 'unavailable' || failed;
+        const retainedLabel = signalEvents.length ? 'Evidence retained' : 'Disconnected';
+        elements.signalSessionBadge.textContent = failed ? retainedLabel
+          : state.captureStopped ? 'Probes stopped'
+          : offline ? retainedLabel
           : state.sessionMode === 'demo' ? 'Demo evidence'
             : state.sessionMode === 'live' ? 'Live native capture' : 'No capture';
-        elements.signalSessionBadge.dataset.kind = state.captureStopped ? 'stopped' : offline ? 'offline' : state.sessionMode;
+        elements.signalSessionBadge.dataset.kind = failed ? 'offline' : state.captureStopped ? 'stopped' : offline ? 'offline' : state.sessionMode;
 
         elements.signalViewTabs.forEach(button => {
           const selected = button.dataset.signalView === state.signalView;
@@ -1130,10 +1138,20 @@ invocationSitesPanel.refresh();
         const gapCount = shownSequenceGaps();
         const reportedDrops = shownQueueDrops();
         const signalLimits = namedGapsIn(shownNamedGaps(), fingerprintSignalCategories);
-        if (state.eventFailureKind === 'malformed') {
+        if (state.captureAction) {
+          setSignalNotice('loading', state.captureAction === 'stop'
+            ? 'Stopping native probes…' : 'Clearing this session’s events…');
+        } else if (state.eventFailureKind === 'malformed') {
           setSignalNotice('error', signalEvents.length
             ? 'The broker returned malformed event data. The last understandable fingerprint evidence remains visible.'
             : 'The broker returned malformed event data. No fingerprint evidence is available.');
+        } else if (failed) {
+          const reason = state.connection === 'unresponsive' ? 'The broker did not answer within 10 seconds' : 'The broker is disconnected';
+          setSignalNotice('disconnected', signalEvents.length
+            ? `${reason}. The last understandable fingerprint evidence remains visible.`
+            : `${reason} and no fingerprint evidence is available.`);
+        } else if (state.captureActionError) {
+          setSignalNotice('error', state.captureActionError);
         } else if (state.captureStopped) {
           setSignalNotice('stopped', signalEvents.length
             ? 'Native probes are stopped. Current-session evidence is retained until you clear it.'
@@ -1280,7 +1298,7 @@ invocationSitesPanel.refresh();
         elements.capture.setAttribute('aria-label', `${modeLabel}: ${captureLabel}`);
         elements.broker.classList.toggle('offline', offline);
         elements.broker.textContent = connecting ? 'connecting to evidence'
-          : offline ? 'broker unavailable'
+          : offline ? state.connection === 'unresponsive' ? 'broker not responding' : 'broker unavailable'
             : live ? 'broker connected' : idle ? 'no capture session'
               : preview ? 'standalone preview' : 'demo evidence loaded';
         elements.sampleStatus.textContent = live
@@ -7746,21 +7764,29 @@ invocationSitesPanel.refresh();
         }
       }
 
+      // The event poll alone decides the connection state, and it is bounded:
+      // a backend that does not answer within 10 seconds is shown as not
+      // responding (renderNetworkNotice names the same limit). The reads that
+      // follow a poll run afterwards, outside its guard.
       async function refresh() {
         if (state.refreshing) return;
         state.refreshing = true;
+        // A capture action that starts or ends while this poll is in flight
+        // makes its answer stale: it can describe evidence from before a stop
+        // or a clear. Such a poll changes nothing and is read again.
+        const captureGeneration = state.captureActionGeneration;
+        const stale = () => Boolean(state.captureAction) || captureGeneration !== state.captureActionGeneration;
+        const deadline = AbortSignal.timeout(10000);
+        let next = null;
         try {
           const headers = state.eventEtag ? { 'If-None-Match': state.eventEtag } : {};
-          const response = await fetch('/api/events?limit=5000', { cache: 'no-store', headers });
-          if (response.status === 304) {
-            await refreshRequestSignalProfile();
-            await refreshArtifacts();
-            refreshSelectedRequestBody();
-            await refreshVmAnalysis();
-            return;
-          }
+          const response = await fetch('/api/events?limit=5000', { cache: 'no-store', headers, signal: deadline });
+          if (stale()) { next = 'repeat'; return; }
+          // A failed poll drops the entity tag, so 304 always follows a valid answer.
+          if (response.status === 304) { next = 'unchanged'; return; }
           if (!response.ok) throw new Error(`Broker returned ${response.status}`);
           const rawBody = await response.text();
+          if (stale()) { next = 'repeat'; return; }
           let body;
           try { body = JSON.parse(rawBody); } catch { throw new TypeError('Malformed broker response'); }
           if (!isBrokerResponse(body)) throw new TypeError('Malformed broker response');
@@ -7795,8 +7821,7 @@ invocationSitesPanel.refresh();
           let selectedRequest = state.requests.find(request => request.id === state.selectedRequestId);
           if (!selectedRequest && state.selectedRequestId !== null) resetRequestSelection();
           updateSelectionSummary(selectedRequest);
-          state.broker = brokerConnected ? 'connected' : 'unavailable';
-          state.eventFailureKind = null;
+          setEventConnection(brokerConnected ? 'connected' : 'broker-offline');
           state.lastUpdatedLabel = brokerConnected
             ? state.sessionMode === 'live'
               ? `updated ${new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}`
@@ -7809,16 +7834,12 @@ invocationSitesPanel.refresh();
           renderInspector();
           renderEvidence();
           if (!document.querySelector('#screen-signals').hidden) renderFingerprintActivity();
-          await refreshRequestSignalProfile();
-          await refreshArtifacts();
-          refreshSelectedRequestBody();
-          await refreshVmAnalysis();
-          renderVmLab();
+          next = 'changed';
         } catch (error) {
-          state.broker = 'unavailable';
+          if (stale()) { next = 'repeat'; return; }
           state.eventEtag = null;
           const malformed = error instanceof TypeError && error.message === 'Malformed broker response';
-          state.eventFailureKind = malformed ? 'malformed' : 'disconnected';
+          setEventConnection(malformed ? 'malformed' : deadline.aborted ? 'unresponsive' : 'unreachable');
           const retainedEvidence = state.events.length > 0;
           state.lastUpdatedLabel = retainedEvidence ? 'last valid evidence retained' : 'no live evidence';
           renderShellStatus();
@@ -7830,13 +7851,50 @@ invocationSitesPanel.refresh();
           renderVmLab();
         } finally {
           state.refreshing = false;
+          // An action that is still running reads again when it ends.
+          if (next === 'repeat') { if (!state.captureAction) await refresh(); }
+          else if (next) await refreshPollDependents(next === 'changed');
         }
+      }
+
+      // Signal profile, artifact and VM reads follow a valid poll as one chain.
+      // A later poll neither waits for a slow chain (a cold VM analysis can run
+      // for minutes, bounded by its worker deadline) nor restarts it, so the
+      // poll keeps the connection state current meanwhile.
+      async function refreshPollDependents(eventsChanged) {
+        if (state.refreshingDependents) {
+          if (eventsChanged) renderVmLab();
+          return;
+        }
+        state.refreshingDependents = true;
+        try {
+          await refreshRequestSignalProfile();
+          await refreshArtifacts();
+          refreshSelectedRequestBody();
+          await refreshVmAnalysis();
+          if (eventsChanged) renderVmLab();
+        } finally {
+          state.refreshingDependents = false;
+        }
+      }
+
+      // The single transition for the event connection. 'connected' and
+      // 'broker-offline' are valid answers (the second has no live broker,
+      // for example after Stop). 'unreachable', 'unresponsive' (no answer in
+      // time) and 'malformed' are failed polls: the backend's capture state is
+      // unknown, so Stop and Clear stay disabled until a valid answer.
+      function setEventConnection(connection) {
+        state.connection = connection;
+        state.broker = connection === 'connecting' || connection === 'connected' || connection === 'preview'
+          ? connection : 'unavailable';
+        state.eventFailureKind = connection === 'malformed' ? 'malformed'
+          : connection === 'unreachable' || connection === 'unresponsive' ? 'disconnected' : null;
+        if (state.eventFailureKind) state.captureControlsAvailable = false;
       }
 
       function useStandalonePreview() {
         state.trafficRenderedView = null;
-        state.broker = 'preview';
-        state.eventFailureKind = null;
+        setEventConnection('preview');
         state.sessionMode = 'preview';
         state.events = [];
         state.canvasRenderCaptures = [];
@@ -7927,16 +7985,24 @@ invocationSitesPanel.refresh();
         state.signalDetailOpen = !state.signalDetailOpen;
         renderFingerprintActivity();
       });
+      // One capture action at a time. The poll re-renders these buttons from
+      // state, so the in-flight action is state rather than a disabled button.
       async function performCaptureAction(action) {
         const button = action === 'stop' ? elements.signalStopCapture : elements.signalClearEvents;
-        if (button.disabled) return;
+        if (state.captureAction || button.disabled) return;
         if (action === 'clear' && !window.confirm(
           'Clear all recorded events, traces, and request signal profiles from this capture session? Canvas artifacts and other saved files will remain on disk. This cannot be undone.'
         )) return;
-        button.disabled = true;
+        state.captureAction = action;
+        state.captureActionGeneration += 1;
+        state.captureActionError = null;
+        renderFingerprintActivity();
+        // Stop waits up to 5 seconds for the broker. Past this deadline the
+        // outcome is unknown, and the next valid poll shows the capture state.
+        const deadline = AbortSignal.timeout(15000);
         try {
           const response = await fetch('/api/capture/actions', {
-            method: 'POST', cache: 'no-store',
+            method: 'POST', cache: 'no-store', signal: deadline,
             headers: {'Content-Type': 'application/json'},
             body: JSON.stringify(action === 'clear' ? {action, confirm: true} : {action})
           });
@@ -7953,12 +8019,18 @@ invocationSitesPanel.refresh();
             state.signalProfileKey = null;
           }
           state.eventEtag = null;
-          await refresh();
         } catch (error) {
-          setSignalNotice('error', error.message);
+          state.captureActionError = deadline.aborted
+            ? `${action === 'stop' ? 'Stop' : 'Clear'} did not answer within 15 seconds; its outcome is unknown. The next refresh shows the current capture state.`
+            : error.message;
         } finally {
-          renderFingerprintActivity();
+          state.captureAction = null;
+          state.captureActionGeneration += 1;
         }
+        renderFingerprintActivity();
+        // A poll that overlapped the action is discarded and repeats itself.
+        await refresh();
+        renderFingerprintActivity();
       }
       elements.signalStopCapture.addEventListener('click', () => performCaptureAction('stop'));
       elements.signalClearEvents.addEventListener('click', () => performCaptureAction('clear'));

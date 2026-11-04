@@ -202,7 +202,7 @@ whose `--broker-pid` still names the process it named at backend startup;
 otherwise it returns 409 `dependency_unavailable` and signals nothing. A stop
 that times out returns 408 `timeout` after the signal was delivered and stays
 `stop_requested`; repeating it signals again, and stop after `stopped`
-succeeds.
+succeeds. `clear` empties the trace and signal stores before the event store.
 
 `curl --json` sends the required Content-Length; streaming/chunked request bodies
 are unsupported. Action bodies must be JSON objects within the per-operation

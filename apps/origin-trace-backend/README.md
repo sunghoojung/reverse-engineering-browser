@@ -51,9 +51,11 @@ or crashed), or `not_live` for idle and demo backends. Exits are final.
 Stop signals only a running broker, and only while `--broker-pid` still names
 the process it named when the backend started; the start time is compared, so
 a reused PID is never signaled. A stop that times out stays `stop_requested`
-and can be repeated. Clear refuses while the broker runs. `--demo-evidence`
-with `--socket`, and `--broker-pid` without `--socket`, are rejected at
-startup.
+and can be repeated. Clear refuses while the broker runs and empties the
+derived trace and signal stores before the event store, so an interrupted
+clear never leaves derived records for cleared events; clearing again finishes
+it. `--demo-evidence` with `--socket`, and `--broker-pid` without `--socket`,
+are rejected at startup.
 
 ## Native Wasm observations
 

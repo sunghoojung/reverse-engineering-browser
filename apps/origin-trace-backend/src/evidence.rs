@@ -945,6 +945,7 @@ pub(crate) mod frozen {
 
 /// Event clear participates in the same lifetime lease as both export and the
 /// broker. Sidecars remain under that ownership until all truncations finish.
+/// The first path is the event store; the rest are sidecars derived from it.
 pub fn clear_stores(paths: &[std::path::PathBuf]) -> Result<()> {
     #[cfg(unix)]
     {
@@ -966,8 +967,20 @@ pub fn clear_stores(paths: &[std::path::PathBuf]) -> Result<()> {
         for file in &files {
             file.verify()?;
         }
-        for file in files {
-            file.truncate()?;
+        // Derived sidecars go first. An interrupted clear then leaves events
+        // with fewer derived records, never sidecars naming cleared events,
+        // and clearing again finishes it.
+        let sidecars = files.len() - 1;
+        for (cleared, file) in files.iter().rev().enumerate() {
+            file.truncate().map_err(|mut error| {
+                if cleared > 0 {
+                    error.message = format!(
+                        "Clear stopped after emptying {cleared} of {sidecars} derived trace and signal stores: {} Events were kept; clear again to finish.",
+                        error.message
+                    );
+                }
+                error
+            })?;
         }
         Ok(())
     }

@@ -2602,7 +2602,7 @@
       "post": {
         "operationId": "capture_action",
         "summary": "capture action",
-        "description": "Validates CaptureAction first; invalid bodies include allowed_actions and missing_fields. Idle and demo backends refuse with idle_backend. Stop and clear need a positive broker PID. Stop signals only a running broker whose PID still names the process it did at backend startup; an ended or lost capture, or an unconfirmed PID, refuses with dependency_unavailable and nothing is signaled. A stop that times out stays stop_requested and may be repeated; stop after stopped succeeds. Clear needs a capture that is not running.",
+        "description": "Validates CaptureAction first; invalid bodies include allowed_actions and missing_fields. Idle and demo backends refuse with idle_backend. Stop and clear need a positive broker PID. Stop signals only a running broker whose PID still names the process it did at backend startup; an ended or lost capture, or an unconfirmed PID, refuses with dependency_unavailable and nothing is signaled. A stop that times out stays stop_requested and may be repeated; stop after stopped succeeds. Clear needs a capture that is not running and empties the derived trace and signal stores before the event store.",
         "tags": [
           "capture"
         ],

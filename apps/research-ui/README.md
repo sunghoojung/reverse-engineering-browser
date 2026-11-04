@@ -504,6 +504,13 @@ connection and offers retry instead of silently leaving a failed session running
 A session that stops after its workspace opened is reported as **Live session
 ended**, with the launcher's cause; one that never became ready is **Live
 session unavailable**.
+**Continue Offline** after an ended session replaces its workspace, which can no
+longer load or save anything, with the offline workspace; the ended session's
+evidence stays in its session folder. Origin Trace asks first when that page
+still holds unsaved work, so Stay leaves it open for copying. When a session
+becomes ready while the window holds unsaved work, the same question comes
+before its workspace opens; after Stay the session keeps running and **Open Live
+Workspace** in the application menu opens it later.
 The coordinator signals all owned helpers together, allows a shared five-second
 shutdown grace, then stops remaining children. An active analyzer worker has a
 shorter two-second grace so its supervising shell can reap it before exiting.
@@ -759,11 +766,18 @@ If readback still shows the original generation, an explicit retry uses that sam
 generation check, so a delayed original save conflicts instead of committing
 twice. Conflicts and validation reasons remain visible. There is no autosave or
 persistent draft copy. Browser reload/close warns while drafts or unresolved saves
-exist. The native shell separately checks the current Analyst document before
-normal window close or Quit. Its sheet keeps **Stay** as the Return/Escape default;
-**Close Anyway** requires a deliberate choice for unsaved or unconfirmed changes,
-including when the document cannot report its state. Navigation invalidates an
-older close decision. Quit while this guard's sheet is open can reach the
+exist. One question, `hasUnsavedWork()`, covers Analyst file and folder drafts
+and saves, API Collection request and folder drafts and saves, and notebook pin
+drafts and library writes. The native shell asks it of the current document
+before normal window close or Quit, and before it replaces the document itself:
+**New Live Session…**, opening a session's live workspace, and **Continue
+Offline** after a session ended. Its sheet keeps **Stay** as the Return/Escape
+default; **Close Anyway**, or the named replacement such as **Start New
+Session**, requires a deliberate choice for unsaved or unconfirmed changes,
+including when the document cannot report its state. Stay changes nothing,
+including a running session. Close or Quit during a replacement question takes
+it over for the same document. Navigation invalidates an older decision. Quit
+while this guard's sheet is open can reach the
 delegate. AppKit aborts the Close sheet before delivering Quit; the guard cancels
 that request and checks the current document in a fresh Quit-owned decision.
 Callbacks that reach a still-active request coalesce without another query.
@@ -777,7 +791,8 @@ Native acceptance requires `make app-build`, strict code-signature verification,
 and `node tools/check-origin-trace-native-close.mjs` on macOS. The existing macOS
 CI job runs a relocated packaged app with synthetic workspaces through actual
 window close, application Quit, Stay by Return/Escape, explicit Close Anyway,
-save/pending states, coalesced requests, unavailable/untrusted documents, actual
+save/pending states, an API Collection draft, coalesced requests,
+unavailable/untrusted documents, actual
 navigation, and injected stale/timeout replies. It verifies draft/owner retention
 and the expected warning before shutdown. Ordinary Quit scenarios enqueue
 Command-Q through AppKit. The repeated Close/Close/Quit case defers the native
@@ -788,7 +803,7 @@ satisfy the test. Stay must preserve the exact draft snapshot. The repeated case
 requires exactly two queries before Stay: one for the aborted Close request and
 one for the fresh Quit request. UUID traces require one query per request, the
 abort/cancel transition, and fresh requests for the later explicit approved exit.
-All 14 scenarios run; the repeated case
+All 15 scenarios run; the repeated case
 runs in five fresh processes and every attempt must pass. Per-attempt logs,
 dispatch-mode diagnostics and prompt PNGs are retained in `build/native-close-qa/`
 and uploaded by CI. The `--contract-only` mode checks wiring, sheet/sudden-exit

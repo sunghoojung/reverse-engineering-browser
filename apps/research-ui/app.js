@@ -4536,8 +4536,17 @@ invocationSitesPanel.refresh();
           Boolean(state.localAnalystPendingSave);
       }
 
-      function guardAnalystUnload(event) {
-        if (!analystHasUnsavedWork()) return;
+      // Every unsaved draft and unconfirmed save in this document. The native
+      // shell asks before it closes the window or replaces this document; a
+      // browser asks through beforeunload. A script that stopped before the
+      // notebook mounted throws here, which the native shell reports as unknown.
+      function hasUnsavedWork() {
+        return Boolean(analystHasUnsavedWork() || state.collectionDraftDirty || state.collectionFolderDirty ||
+          state.apiCollectionSaving || (typeof investigationNotebook === 'object' && investigationNotebook.hasUnsavedWork()));
+      }
+
+      function guardUnsavedWorkUnload(event) {
+        if (!hasUnsavedWork()) return;
         event.preventDefault();
         event.returnValue = '';
       }
@@ -8386,7 +8395,7 @@ invocationSitesPanel.refresh();
       analystElements.revert.addEventListener('click', () => discardAnalystDraft());
       analystElements.revertFolder.addEventListener('click', () => discardAnalystDraft(true));
       analystElements.reload.addEventListener('click', () => refreshLocalAnalyst(true));
-      window.addEventListener('beforeunload', guardAnalystUnload);
+      window.addEventListener('beforeunload', guardUnsavedWorkUnload);
       analystElements.deleteFile.addEventListener('click', deleteAnalystFile);
       analystElements.runForm.addEventListener('submit', event => {
         event.preventDefault();

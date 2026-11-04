@@ -85,6 +85,13 @@ runner's answer at its 2 second limit must not reach it: answering a stopped
 request raises an exception that ended the app. The next run must get its own
 `timed_out` answer, not 409.
 
+`test21NewLiveSessionAsksAboutUnsavedWork` makes an API Collection folder edit
+through its editor's input event and chooses **New Live Session…** from the app
+menu. The unsaved-work sheet must name the new session, keep **Stay** as the
+Return default and photograph complete; Stay must leave the page, the edit and
+the start dialog untouched. After the edit is discarded the start dialog opens
+at once and the test continues offline.
+
 At both window sizes, those budget gaps must leave the footer free of queue
 drops, Traffic without a loss notice and Fingerprinting at full coverage, while
 the VM notice names both reasons as inert text.

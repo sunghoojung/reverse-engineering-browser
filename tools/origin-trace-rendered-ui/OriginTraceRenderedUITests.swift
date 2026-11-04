@@ -1558,4 +1558,77 @@ final class OriginTraceRenderedUITests: XCTestCase {
       "return (await fetch('/api/local-analyst/actions', \(post))).status; })()")
     try await returnToHarness(ui, harnessURL)
   }
+
+  // New Live Session replaces the window's document. An unsaved API Collection
+  // edit must be asked about first, Stay must keep the edit, the page and any
+  // session, and a clean document must go straight to the start dialog.
+  @MainActor
+  func test21NewLiveSessionAsksAboutUnsavedWork() async throws {
+    let ui = try Harness()
+    try await ui.waitForInitialLoad()
+    try await ui.resize(width: windowSizes[0].width, height: windowSizes[0].height)
+    try await ui.reload(activating: false)
+    let harnessURL = try XCTUnwrap(ui.webView.url)
+    try await ui.waitUntil("state.apiCollectionLoaded", "the API Collection did not load")
+    let dirty = try await ui.value(
+      """
+      (() => {
+        showScreen('api-collection');
+        const field = elements.collectionFolderVariables;
+        field.value = '{"unsaved_rendered_check": "1"}';
+        field.dispatchEvent(new Event('input', {bubbles: true}));
+        return state.collectionFolderDirty;
+      })()
+      """)
+    XCTAssertEqual(dirty as? Bool, true, "the folder editor marked its edit unsaved")
+    let asked = try? await ui.value("hasUnsavedWork()")
+    XCTAssertEqual(asked as? Bool, true, "the native shell's question counts an API Collection edit")
+    var backstop = try chooseMenuItem("newLiveSession:")
+    do {
+      try await waitFor("the unsaved-work decision") {
+        NSApp.modalWindow != nil || ui.window.attachedSheet.flatMap { button($0, "Start New Session") }?.isEnabled == true
+      }
+      if let panel = NSApp.modalWindow {
+        throw HarnessError("New Live Session opened \(texts(panel).first ?? "its dialog") over unsaved work without asking")
+      }
+      let sheet = try XCTUnwrap(ui.window.attachedSheet)
+      XCTAssertTrue(texts(sheet).contains("Start a new live session with unsaved or unconfirmed changes?"), "\(texts(sheet))")
+      XCTAssertNil(NSApp.modalWindow, "the start dialog waits for the decision")
+      let stay = try XCTUnwrap(button(sheet, "Stay"))
+      XCTAssertTrue(sheet.defaultButtonCell === (stay.cell as? NSButtonCell), "Stay is the Return default")
+      XCTAssertEqual(button(sheet, "Start New Session")?.keyEquivalent, "", "the destructive choice has no key equivalent")
+      try await Task.sleep(nanoseconds: 1_500_000_000)
+      try ui.screenshot(window: sheet, "new-session-unsaved-prompt")
+      stay.performClick(nil)
+      try await waitFor("Stay dismissal") { ui.window.attachedSheet == nil }
+      try await Task.sleep(nanoseconds: 1_000_000_000)
+      XCTAssertNil(NSApp.modalWindow, "Stay does not open the start dialog")
+      XCTAssertEqual(ui.webView.url, harnessURL, "Stay keeps the page")
+      let kept = try await ui.value("state.collectionFolderDirty === true && elements.collectionFolderVariables.value.includes('unsaved_rendered_check')")
+      XCTAssertEqual(kept as? Bool, true, "Stay keeps the unsaved edit")
+      try await ui.screenshot("new-session-stay-keeps-edit")
+    } catch {
+      if let sheet = ui.window.attachedSheet { button(sheet, "Stay")?.performClick(nil) }
+      if NSApp.modalWindow != nil { NSApp.abortModal() }
+      backstop.invalidate()
+      try? await returnToHarness(ui, harnessURL)
+      throw error
+    }
+    backstop.invalidate()
+    let clean = try await ui.value("(() => { elements.collectionDiscardFolder.click(); return hasUnsavedWork(); })()")
+    XCTAssertEqual(clean as? Bool, false, "discarding the edit leaves no unsaved work")
+    backstop = try chooseMenuItem("newLiveSession:")
+    defer { backstop.invalidate() }
+    do {
+      try await waitFor("the start dialog") { NSApp.modalWindow != nil }
+      let panel = try XCTUnwrap(NSApp.modalWindow)
+      XCTAssertTrue(texts(panel).contains("Start a live research session"), "\(texts(panel))")
+      try XCTUnwrap(button(panel, "Continue Offline")).performClick(nil)
+      try await waitFor("the start dialog to close", timeout: 10) { NSApp.modalWindow == nil }
+    } catch {
+      if NSApp.modalWindow != nil { NSApp.abortModal() }
+      throw error
+    }
+    try await returnToHarness(ui, harnessURL)
+  }
 }

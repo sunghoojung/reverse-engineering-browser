@@ -2602,7 +2602,7 @@ private final class InvocationSiteSetupView: NSStackView {
   }
 }
 
-private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigationDelegate {
+private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigationDelegate, NSMenuItemValidation {
   private var window: NSWindow?
   private weak var webView: WKWebView?
   private var contentHandler: LocalContentHandler?
@@ -2619,6 +2619,11 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
   private var automaticSessionSuppressed = false
   private var liveSessionDecisionOpen = false
   private var localApplicationURL: URL?
+  // The live workspace the app last opened, so its page is recognized after
+  // its session ends.
+  private var liveWorkspaceURL: URL?
+  // The session published its workspace while the window was still loading.
+  private var openLiveWorkspaceWhenLoaded = false
 
   func applicationDidFinishLaunching(_ notification: Notification) {
     if smokeTest {
@@ -2705,9 +2710,7 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
       presentFatalError("The live UI URL must be an explicit loopback HTTP address")
       return
     }
-    closeGuard.prepareForLoad(requestedUIURL ?? localApplicationURL)
-    clientProjectExport.prepareForLoad(requestedUIURL ?? localApplicationURL)
-    webView.load(URLRequest(url: requestedUIURL ?? localApplicationURL))
+    load(requestedUIURL ?? localApplicationURL)
     if smokeTest && ProcessInfo.processInfo.environment["REB_APP_SMOKE_LIVE_FAILURE"] == "1" {
       // Exercise the real startup failure path without a browser or modal dialog.
       liveSessionCoordinator.start(
@@ -2899,8 +2902,8 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
       captureNetworkContent: captureMode.capturesNetworkContent,
       useSystemKeychain: useSystemKeychain,
       ready: { [weak self] liveURL in
-        guard let self, let webView = self.webView else { return }
-        guard let nativeURL = nativeUIURL(liveURL.absoluteString) else {
+        guard let self else { return }
+        guard nativeUIURL(liveURL.absoluteString) != nil else {
           self.presentLiveSessionError(
             .init(message: "Origin Trace received an invalid loopback UI URL.", afterStartup: false),
             captureMode: captureMode,
@@ -2908,10 +2911,7 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
           )
           return
         }
-        self.closeGuard?.prepareForLoad(nativeURL)
-        self.clientProjectExport?.prepareForLoad(nativeURL)
-        webView.load(URLRequest(url: nativeURL))
-        self.presentOriginTraceWindow()
+        self.openLiveWorkspace(nil)
       },
       failed: { [weak self] failure in
         self?.presentLiveSessionError(
@@ -2923,19 +2923,83 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
     )
   }
 
+  // The only way the app replaces the window's document. The close guard and
+  // project export trust only the URL loaded here.
+  private func load(_ url: URL) {
+    closeGuard?.prepareForLoad(url)
+    clientProjectExport?.prepareForLoad(url)
+    webView?.load(URLRequest(url: url))
+  }
+
+  private var readyLiveWorkspaceURL: URL? {
+    guard case .ready(let published) = liveSessionCoordinator.phase else { return nil }
+    return nativeUIURL(published.absoluteString)
+  }
+
+  // The workspace of a session that has ended, which can no longer load.
+  private func isEndedLiveWorkspace(_ url: URL?) -> Bool {
+    url != nil && url == liveWorkspaceURL && url != readyLiveWorkspaceURL
+  }
+
+  // Shows the running session's workspace, asking first about unsaved work in
+  // the current document. After Stay the session keeps running and this menu
+  // item opens its workspace later.
+  @objc private func openLiveWorkspace(_ sender: Any?) {
+    guard let url = readyLiveWorkspaceURL, let webView, webView.url != url else { return }
+    guard !webView.isLoading else {
+      // Ask about the current document once it has loaded.
+      openLiveWorkspaceWhenLoaded = true
+      return
+    }
+    closeGuard?.replaceDocument(.init(
+      question: "Open the live workspace with unsaved or unconfirmed changes?",
+      actionTitle: "Open Live Workspace"
+    ) { [weak self] in
+      guard let self, self.readyLiveWorkspaceURL == url else { return }
+      self.liveWorkspaceURL = url
+      self.load(url)
+      self.presentOriginTraceWindow()
+    })
+  }
+
+  func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
+    guard menuItem.action == #selector(openLiveWorkspace(_:)) else { return true }
+    guard let url = readyLiveWorkspaceURL else { return false }
+    return webView?.url != url
+  }
+
+  // An ended session's page can no longer load or save anything. Continue
+  // Offline replaces it with the offline workspace, asking first when it still
+  // holds unsaved work the researcher may want to copy.
+  private func leaveEndedLiveWorkspace() {
+    guard isEndedLiveWorkspace(webView?.url), let localApplicationURL else { return }
+    closeGuard?.replaceDocument(.init(
+      question: "Open the offline workspace with unsaved or unconfirmed changes?",
+      actionTitle: "Open Offline Workspace"
+    ) { [weak self] in
+      self?.load(localApplicationURL)
+    })
+  }
+
   private func configuredAutomaticSystemKeychain() -> Bool {
     ProcessInfo.processInfo.environment["REB_AUTOMATIC_USE_SYSTEM_KEYCHAIN"] == "1"
   }
 
+  // Nothing changes, including a running session, until unsaved work in the
+  // current document is settled.
   @objc private func newLiveSession(_ sender: Any?) {
-    automaticSessionSuppressed = false
-    liveSessionCoordinator.stop()
-    if let localApplicationURL, let webView {
-      closeGuard?.prepareForLoad(localApplicationURL)
-      clientProjectExport?.prepareForLoad(localApplicationURL)
-      webView.load(URLRequest(url: localApplicationURL))
-    }
-    presentLiveSessionSetup()
+    closeGuard?.replaceDocument(.init(
+      question: "Start a new live session with unsaved or unconfirmed changes?",
+      actionTitle: "Start New Session"
+    ) { [weak self] in
+      guard let self else { return }
+      self.automaticSessionSuppressed = false
+      self.liveSessionCoordinator.stop()
+      if let localApplicationURL = self.localApplicationURL { self.load(localApplicationURL) }
+      // From the run loop, outside the WebKit or AppKit callback that settled
+      // the decision, so the dialog's modal session runs at the top level.
+      RunLoop.main.perform(inModes: [.default]) { self.presentLiveSessionSetup() }
+    })
   }
 
   private func automaticLiveSessionEnabled() -> Bool {
@@ -3181,6 +3245,11 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
       keyEquivalent: "n"
     )
     newSessionItem.target = self
+    applicationMenu.addItem(
+      withTitle: "Open Live Workspace",
+      action: #selector(openLiveWorkspace(_:)),
+      keyEquivalent: ""
+    ).target = self
     applicationMenu.addItem(.separator())
     applicationMenu.addItem(
       withTitle: "Hide Origin Trace",
@@ -3280,10 +3349,15 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
     }
     automaticSessionSuppressed = true
     presentOriginTraceWindow()
+    leaveEndedLiveWorkspace()
   }
 
   func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
     clientProjectExport?.navigationDidFinish(webView)
+    if openLiveWorkspaceWhenLoaded {
+      openLiveWorkspaceWhenLoaded = false
+      openLiveWorkspace(nil)
+    }
     guard smokeTest else { return }
     if ProcessInfo.processInfo.environment["REB_APP_SMOKE_CLIENT_PROJECT"] == "1",
       let window, let clientProjectExport

@@ -235,8 +235,8 @@ class Admission(unittest.TestCase):
         self.directory.mkdir(parents=True)
         self.names = [
             f"Origin-Trace-{TAG}-macos.zip",
-            f"Brave-Browser-Development-{TAG}-macos-arm64.zip",
-            f"Brave-Browser-Development-{TAG}-macos-arm64.provenance.json",
+            f"Brave-Browser-Development-{HELPER.REVIEWED_BRAVE_TAG}-macos-arm64.zip",
+            f"Brave-Browser-Development-{HELPER.REVIEWED_BRAVE_TAG}-macos-arm64.provenance.json",
             f"Origin-Trace-Brave-{TAG}.provenance.json",
         ]
         for name in self.names[:3]:
@@ -274,7 +274,7 @@ class Admission(unittest.TestCase):
         self.assertEqual(notes, self.directory / "release-notes.md")
 
     def test_other_tags_and_assets_stop_before_any_publication(self):
-        cases = [("tag", "v0.3.1"), ("tag", "v0.5.0"), ("event", "pull_request"),
+        cases = [("tag", "v0.3.1"), ("tag", "v0.5.1"), ("event", "pull_request"),
                  ("sums", self.names[:3]), ("sums", self.names + ["release-notes.md"])]
         for kind, value in cases:
             with self.subTest(kind=kind, value=value):

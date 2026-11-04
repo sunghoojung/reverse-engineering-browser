@@ -135,12 +135,12 @@ impl Mcp {
             json!({
                 "protocolVersion": "2025-06-18",
                 "capabilities": {},
-                "clientInfo": {"name": "reb-api-test", "version": "0.5.1"}
+                "clientInfo": {"name": "reb-api-test", "version": "0.5.2"}
             }),
         );
         assert_eq!(response["result"]["protocolVersion"], "2025-06-18");
         assert_eq!(response["result"]["serverInfo"]["name"], "origin-trace");
-        assert_eq!(response["result"]["serverInfo"]["version"], "0.5.1");
+        assert_eq!(response["result"]["serverInfo"]["version"], "0.5.2");
         mcp.notify(json!({
             "jsonrpc": "2.0",
             "method": "notifications/initialized"

@@ -8,7 +8,7 @@ on:
         required: true
         type: string
       release_tag:
-        description: "New release tag matching the application version (v0.5.1)"
+        description: "New release tag matching the application version (v0.5.2)"
         required: true
         type: string
   push:
@@ -83,7 +83,7 @@ jobs:
           REQUESTED_TAG: ${{ inputs.release_tag }}
         run: |
           [[ "$REQUESTED_SHA" =~ ^[0-9a-f]{40}$ ]]
-          [[ "$REQUESTED_TAG" == v0.5.1 ]]
+          [[ "$REQUESTED_TAG" == v0.5.2 ]]
 
       - name: Check out repository
         uses: actions/checkout@v7

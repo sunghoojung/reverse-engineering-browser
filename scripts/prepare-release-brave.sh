@@ -7,10 +7,12 @@ readonly repository_root
 cd "${repository_root}"
 
 # BEGIN reviewed paired browser pin
-# One reviewed unit: the browser ZIP built for this paired release, its
-# provenance, where both are hosted, and the commit whose browser inputs built
-# them. Replace every PLACEHOLDER before release. tools/write-release-pair.py
-# reads this block too.
+# One reviewed unit: the browser ZIP paired with this release, its provenance,
+# where both are hosted, and the commit whose browser inputs built them. The ZIP
+# may come from an earlier release when the browser inputs have not changed
+# since its build commit; its name keeps the release it was built for. Replace
+# every PLACEHOLDER before release. tools/write-release-pair.py reads this block
+# too.
 readonly brave_name=Brave-Browser-Development-v0.5.1-macos-arm64
 readonly source_url=https://github.com/sunghoojung/reverse-engineering-browser/releases/download/brave-0.5.1-c31239e
 readonly brave_sha256=04c4a3fd929c420ff110aa37bdccf4a47d4a03aa845edcca6857da448004da8a
@@ -29,8 +31,15 @@ readonly version
 # Validate the whole pin before any platform, network or filesystem work, so an
 # unfinished release fails the same way everywhere.
 unfinished=()
-[[ "${brave_name}" == "Brave-Browser-Development-v${version}-macos-arm64" ]] ||
-  unfinished+=("brave_name (must match Info.plist version ${version})")
+# The browser must have been built for this version or an earlier one.
+brave_version=""
+if [[ "${brave_name}" =~ ^Brave-Browser-Development-v([0-9]+\.[0-9]+\.[0-9]+)-macos-arm64$ ]]; then
+  brave_version="${BASH_REMATCH[1]}"
+fi
+if [[ -z "${brave_version}" ||
+      "$(printf '%s\n' "${brave_version}" "${version}" | sort -t. -k1,1n -k2,2n -k3,3n | tail -1)" != "${version}" ]]; then
+  unfinished+=("brave_name (must name Info.plist version ${version} or an earlier release)")
+fi
 [[ "${source_url}" =~ ^https://github\.com/sunghoojung/reverse-engineering-browser/releases/download/[A-Za-z0-9._-]+$ ]] ||
   unfinished+=(source_url)
 [[ "${brave_sha256}" =~ ^[0-9a-f]{64}$ ]] || unfinished+=(brave_sha256)

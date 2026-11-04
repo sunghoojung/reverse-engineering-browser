@@ -15,8 +15,10 @@ from unittest.mock import patch
 
 HELPER = Path(__file__).with_name("write-release-pair.py")
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
-TAG = "v0.5.1"
-NAME = f"Brave-Browser-Development-{TAG}-macos-arm64"
+TAG = "v0.5.2"
+# The paired browser is the unchanged v0.5.1 build, so it keeps that release's name.
+BRAVE_TAG = "v0.5.1"
+NAME = f"Brave-Browser-Development-{BRAVE_TAG}-macos-arm64"
 CDHASH = "c" * 40
 BUILD = "b" * 40
 SOURCE_URL = "https://github.com/sunghoojung/reverse-engineering-browser/releases/download/preview-0.5.1"
@@ -42,7 +44,7 @@ class ReleasePair(unittest.TestCase):
         self.output = self.root / "build/release-pair"
         self.output.mkdir(parents=True)
         self.info = {
-            "CFBundleShortVersionString": "0.5.1",
+            "CFBundleShortVersionString": "0.5.2",
             "OriginTraceReleaseType": "paired",
         }
         self.plist = self.root / "apps/research-ui/macos/Info.plist"
@@ -54,7 +56,7 @@ class ReleasePair(unittest.TestCase):
         self.brave.write_bytes(b"synthetic paired browser")
         self.provenance = self.output / "source" / f"{NAME}.provenance.json"
         self.browser = {
-            "schema": "reb-brave-distribution-provenance-v1", "release": TAG,
+            "schema": "reb-brave-distribution-provenance-v1", "release": BRAVE_TAG,
             "artifact": f"{NAME}.zip", "sha256": self.helper.digest(self.brave),
             "build_source_commit": BUILD, "app_cdhash": CDHASH,
             "pins": {"brave_core": "v1.95.52", "chromium": "151.0.7922.108"},
@@ -111,11 +113,38 @@ class ReleasePair(unittest.TestCase):
         for phrase in [f"{downloads}/{NAME}.zip", f"{downloads}/{NAME}.provenance.json",
                        f"{downloads}/SHA256SUMS-{TAG}.txt", CDHASH, "a" * 40,
                        "Brave v1.95.52 and Chromium 151.0.7922.108", "not an official Brave release",
-                       "not Apple-notarized", "consumer services", "dormant", "since v0.3.2",
-                       "REB_NATIVE_WASM_CALL_INDIRECT", "researcher-supplied",
+                       "not Apple-notarized", "consumer services", "dormant", "since v0.5.1",
+                       "first published with v0.5.1", "exits with status 3", "byte for byte",
+                       "Before v0.5.1 was published", "REB_NATIVE_WASM_CALL_INDIRECT",
                        "defines every native V8 flag", "`REB_NATIVE_QUIET_MODE=0`"]:
             self.assertIn(phrase, notes)
         self.assertNotIn("\u2014", notes)
+        self.assertNotIn("a new Brave Browser Development build", notes)
+
+    def test_browser_built_for_this_release_is_described_as_new(self):
+        name = f"Brave-Browser-Development-{TAG}-macos-arm64"
+        self.brave = self.brave.rename(self.brave.with_name(f"{name}.zip"))
+        self.provenance.unlink()
+        self.provenance = self.provenance.with_name(f"{name}.provenance.json")
+        self.write_provenance({**self.browser, "release": TAG, "artifact": f"{name}.zip"})
+        self.write_pin(brave_name=name)
+        self.run_helper()
+        notes = (self.output / "release-notes.md").read_text()
+        self.assertIn("a new Brave Browser Development build", notes)
+        self.assertIn("Before publishing", notes)
+        self.assertNotIn("byte for byte", notes)
+        self.assertTrue((self.output / f"{name}.zip").exists())
+
+    def test_browser_built_for_a_later_release_is_rejected(self):
+        name = "Brave-Browser-Development-v0.5.3-macos-arm64"
+        self.brave = self.brave.rename(self.brave.with_name(f"{name}.zip"))
+        self.provenance.unlink()
+        self.provenance = self.provenance.with_name(f"{name}.provenance.json")
+        self.write_provenance({**self.browser, "release": "v0.5.3", "artifact": f"{name}.zip"})
+        self.write_pin(brave_name=name)
+        with self.assertRaises(ValueError):
+            self.run_helper()
+        self.assertFalse((self.output / f"{name}.zip").exists())
 
     def test_changed_browser_or_provenance_bytes_are_rejected(self):
         for path in (self.brave, self.provenance):
@@ -128,7 +157,8 @@ class ReleasePair(unittest.TestCase):
 
     def test_provenance_for_another_archive_or_build_is_rejected(self):
         # prepare-release-brave.sh compares the recorded CDHash with the extracted app.
-        for key, value in [("schema", "other"), ("release", "v0.3.0"), ("sha256", "0" * 64),
+        for key, value in [("schema", "other"), ("release", "v0.3.0"), ("release", TAG),
+                           ("sha256", "0" * 64),
                            ("artifact", "other.zip"), ("build_source_commit", "d" * 40)]:
             with self.subTest(key=key):
                 self.write_provenance({**self.browser, key: value})
@@ -139,7 +169,7 @@ class ReleasePair(unittest.TestCase):
         for key, value in [("source_url", "PLACEHOLDER"), ("brave_sha256", "PLACEHOLDER"),
                            ("provenance_sha256", "PLACEHOLDER"), ("build_source", "PLACEHOLDER"),
                            ("source_url", "https://example.invalid/releases/download/x"),
-                           ("brave_name", "Brave-Browser-Development-v0.4.0-macos-arm64")]:
+                           ("brave_name", "Brave-Browser-Development-v0.5.3-macos-arm64")]:
             with self.subTest(key=key, value=value):
                 self.write_pin(**{key: value})
                 with self.assertRaises(ValueError):
@@ -209,10 +239,16 @@ class RepositoryPin(unittest.TestCase):
         with (REPOSITORY_ROOT / "apps/research-ui/macos/Info.plist").open("rb") as source:
             self.info = plistlib.load(source)
 
-    def test_checked_in_pin_names_this_release(self):
+    def test_checked_in_pin_names_this_or_an_earlier_release(self):
         pin = self.helper.pin_block(self.script)
-        version = self.info["CFBundleShortVersionString"]
-        self.assertEqual(pin["brave_name"], f"Brave-Browser-Development-v{version}-macos-arm64")
+        version = "v" + self.info["CFBundleShortVersionString"]
+        brave = re.fullmatch(self.helper.PIN_SHAPES["brave_name"], pin["brave_name"]).group(1)
+        self.assertLessEqual(self.helper.version_key(brave), self.helper.version_key(version))
+        publish = importlib.util.spec_from_file_location(
+            "publish_pair", HELPER.with_name("publish-release-pair.py"))
+        reviewed = importlib.util.module_from_spec(publish)
+        publish.loader.exec_module(reviewed)
+        self.assertEqual((reviewed.REVIEWED_TAG, reviewed.REVIEWED_BRAVE_TAG), (version, brave))
         self.assertEqual(self.info["OriginTraceReleaseType"], "paired")
 
     def test_shell_refuses_placeholders_before_any_work(self):
@@ -234,6 +270,15 @@ class RepositoryPin(unittest.TestCase):
             for name in ["source_url", "brave_sha256", "provenance_sha256", "build_source"]:
                 self.assertIn(name, result.stderr)
             self.assertNotIn("brave_name", result.stderr)
+            self.assertFalse((root / "build").exists())
+            later = pin_script(
+                brave_name="Brave-Browser-Development-v99.0.0-macos-arm64", source_url="PLACEHOLDER",
+                brave_sha256="PLACEHOLDER", provenance_sha256="PLACEHOLDER", build_source="PLACEHOLDER",
+            ).split("\n", 1)[1]
+            script.write_text(block.sub(lambda _: later, self.script, count=1))
+            result = subprocess.run(["bash", str(script)], cwd=root, capture_output=True, text=True)
+            self.assertEqual(result.returncode, 1, result.stderr)
+            self.assertIn("brave_name", result.stderr)
             self.assertFalse((root / "build").exists())
 
 

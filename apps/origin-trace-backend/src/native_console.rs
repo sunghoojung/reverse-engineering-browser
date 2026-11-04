@@ -305,7 +305,11 @@ impl ResponseHeader {
                 "Native document listing failed; restart the session",
             ));
         }
-        if parsed.status == 6 || (parsed.status == 5 && parsed.bytes == 0) {
+        // An empty timeout or disconnect record is the browser retiring this
+        // wire connection. With text, either is one command's outcome, such as
+        // a renderer that went away mid-command; the connection stays usable
+        // and `value` reports the outcome as unknown.
+        if parsed.bytes == 0 && (parsed.status == 5 || parsed.status == 6) {
             return Err(Error::conflict(
                 "Native session retired; restart it. Execution may have occurred",
             )
@@ -2440,6 +2444,13 @@ while True:
                 serde_json::to_value(error).unwrap()["details"],
                 json!({"phase":"command_exchange","cause":cause})
             );
+            // With text it is one command's unknown outcome, and the
+            // connection stays usable.
+            bytes[24..28].copy_from_slice(&21u32.to_le_bytes());
+            let parsed = ResponseHeader::parse(&bytes, 1, 2).unwrap();
+            let result = parsed.value(b"Renderer disconnected", "1").unwrap();
+            assert_eq!(result["code"], "command_outcome_unknown");
+            assert_eq!(result["details"]["cause"], cause);
         }
     }
 }

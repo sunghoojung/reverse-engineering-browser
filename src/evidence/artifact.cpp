@@ -967,10 +967,13 @@ ArtifactReceiveStatus ArtifactReceiver::RejectFrame(std::istream& stream,
   // fail on a closed connection and record an I/O error instead.
   if (unread_content <= std::max(limits_.max_artifact_bytes, kMaxDiscardedArtifactBytes)) {
     std::uint64_t remaining = unread_metadata + unread_content;
-    constexpr std::uint64_t kChunk = 64 * 1024;
+    // read(), not ignore(): libstdc++'s ignore(n) peeks one byte past n, which
+    // blocks on a socket whose sender is waiting for this acknowledgment.
+    std::array<char, 64 * 1024> discarded{};
     while (remaining > 0) {
-      const auto requested = static_cast<std::streamsize>(std::min(remaining, kChunk));
-      stream.ignore(requested);
+      const auto requested = static_cast<std::streamsize>(
+          std::min(remaining, static_cast<std::uint64_t>(discarded.size())));
+      stream.read(discarded.data(), requested);
       if (stream.gcount() != requested) {
         break;
       }

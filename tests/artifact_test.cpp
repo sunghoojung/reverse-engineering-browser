@@ -9,6 +9,7 @@
 #include <sstream>
 #include <string>
 #include <string_view>
+#include <utility>
 
 #include "reb/artifact.hpp"
 
@@ -60,6 +61,26 @@ reb::ArtifactReceiverLimits Limits() {
   return limits;
 }
 
+// Serves exactly one frame. A socket blocks on a read past the frame while the
+// sender waits for the acknowledgment, so any such read is recorded.
+class FrameBuffer final : public std::streambuf {
+ public:
+  explicit FrameBuffer(std::string frame) : frame_(std::move(frame)) {
+    setg(frame_.data(), frame_.data(), frame_.data() + frame_.size());
+  }
+  [[nodiscard]] bool ReadPastFrame() const noexcept { return read_past_frame_; }
+
+ protected:
+  int_type underflow() override {
+    read_past_frame_ = true;
+    return traits_type::eof();
+  }
+
+ private:
+  std::string frame_;
+  bool read_past_frame_ = false;
+};
+
 reb::ArtifactReceiveStatus Receive(reb::ArtifactReceiver& receiver, const std::string& frame) {
   std::istringstream stream(frame);
   return receiver.ReceiveOne(stream);
@@ -109,6 +130,12 @@ void CheckFraming() {
                receiver.StreamPosition() == reb::ArtifactStreamPosition::kUnsynchronized,
            "a declared size past the discard bound is not read");
     Expect(Lines(store / "manifest.jsonl") == 2, "only accepted frames are recorded");
+    FrameBuffer rejected(Frame(6, std::string(4096, 'y')));
+    std::istream rejected_stream(&rejected);
+    Expect(receiver.ReceiveOne(rejected_stream) == Status::kTooLarge &&
+               receiver.StreamPosition() == reb::ArtifactStreamPosition::kFrameBoundary &&
+               !rejected.ReadPastFrame(),
+           "a discarded frame is consumed without reading past its end");
   }
   std::filesystem::remove_all(store);
 }

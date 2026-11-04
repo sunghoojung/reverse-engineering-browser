@@ -1,12 +1,15 @@
-"""Patch paths, independent checkout ownership, and byte-equivalent routing."""
+"""Patch paths, independent checkout ownership, ordered stack state, and source locking."""
 
 import argparse
+import errno
 import os
 from pathlib import Path
 import re
 import shlex
+import stat
 import subprocess
 import sys
+import tempfile
 
 
 def patch_paths(patches):
@@ -48,6 +51,122 @@ def verify_ownership(checkout, patches):
         if actual != expected:
             raise ValueError(f"Patch destination {relative} belongs to nested checkout {actual}; "
                              "move the patch to that checkout's stack")
+
+
+class PrivateIndex:
+    """A throwaway Git index for one checkout; the real index is never read or written."""
+
+    def __init__(self, checkout, directory):
+        self.checkout = Path(checkout)
+        self.path = Path(directory) / "index"
+        self.environment = dict(os.environ, GIT_INDEX_FILE=str(self.path))
+
+    def git(self, *arguments, check=True):
+        result = subprocess.run(["git", "--literal-pathspecs", "-C", str(self.checkout), *arguments],
+                                env=self.environment, stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE, check=False)
+        if check and result.returncode:
+            detail = result.stderr.decode(errors="replace").strip()[:500]
+            raise ValueError(f"git {arguments[0]} failed in {self.checkout}: {detail}")
+        return result
+
+    def load_worktree(self, paths):
+        """Stage HEAD plus the working-tree content of exactly these paths."""
+        self.git("read-tree", "HEAD")
+        known = set(self.git("ls-files", "-z", "--", *map(str, paths)).stdout.split(b"\0")) if paths else set()
+        # A path absent from both HEAD and the working tree matches no pathspec.
+        present = [str(path) for path in paths
+                   if os.fsencode(str(path)) in known or os.path.lexists(self.checkout / path)]
+        if present:
+            self.git("add", "-A", "-f", "--", *present)
+
+    def entries(self, paths):
+        """Map each path to "<mode> <blob>" or None when the index lacks it."""
+        result = {str(path): None for path in paths}
+        if paths:
+            for record in self.git("ls-files", "-s", "-z", "--", *map(str, paths)).stdout.split(b"\0"):
+                if record:
+                    meta, name = record.split(b"\t", 1)
+                    mode, blob, _ = meta.split(b" ")
+                    result[os.fsdecode(name)] = f"{mode.decode()} {blob.decode()}"
+        return result
+
+    def applies(self, patch, reverse=False):
+        return self.git("apply", "--cached", *(["--reverse"] if reverse else []),
+                        "--", str(patch), check=False).returncode == 0
+
+
+def worktree_entries(checkout, paths):
+    """Current working-tree content of the given paths, hashed as Git would stage it."""
+    with tempfile.TemporaryDirectory(prefix="reb-worktree-entries-") as directory:
+        index = PrivateIndex(checkout, directory)
+        index.load_worktree(paths)
+        return index.entries(paths)
+
+
+def stack_plan(checkout, patches):
+    """Return (applied, expected) for an ordered stack, or raise ValueError.
+
+    A synchronized checkout holds an applied prefix of its stack: the first
+    ``applied`` patches and none of the rest. An interrupted sync leaves such a
+    prefix, and the next sync resumes from it. A later patch may edit lines an
+    earlier one introduced, so every candidate prefix is removed newest-first in
+    a private index before the remaining patches are checked forward from the
+    current content. ``expected`` is each patched path's content once the whole
+    stack is applied. Any other state, such as a later patch applied without an
+    earlier one, has no explanation and is refused before anything changes.
+    """
+    patches = [Path(patch) for patch in patches]
+    paths = patch_paths(patches)
+    with tempfile.TemporaryDirectory(prefix="reb-patch-plan-") as directory:
+        index = PrivateIndex(checkout, directory)
+        index.load_worktree(paths)
+        current = index.path.read_bytes()
+        for applied in range(len(patches), -1, -1):
+            index.path.write_bytes(current)
+            if not all(index.applies(patch, reverse=True) for patch in reversed(patches[:applied])):
+                continue
+            index.path.write_bytes(current)
+            if all(index.applies(patch) for patch in patches[applied:]):
+                return applied, index.entries(paths)
+    names = ", ".join(patch.name for patch in patches)
+    raise ValueError(f"{checkout} does not hold an ordered prefix of its patch stack ({names}). "
+                     "A later patch is applied without an earlier one, or a patched file was edited; "
+                     "inspect `git -C <checkout> diff` before synchronizing")
+
+
+def source_lock_path(brave):
+    """One lock per upstream workspace: Brave, Chromium and V8 change together."""
+    return Path(os.path.abspath(brave)).parent.parent / ".reb-source.lock"
+
+
+def open_source_lock(brave):
+    path = source_lock_path(brave)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor = os.open(path, os.O_CREAT | os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+    if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+        os.close(descriptor)
+        raise ValueError(f"Brave source lock is not a regular file: {path}")
+    return descriptor
+
+
+def lock_source(brave, descriptor):
+    """Take the workspace lock on an open descriptor without waiting for it."""
+    import fcntl
+    path = source_lock_path(brave)
+    try:
+        held, named = os.fstat(descriptor), os.lstat(path)
+    except OSError as error:
+        raise ValueError(f"Brave source lock descriptor {descriptor} is not open on {path}") from error
+    if stat.S_ISLNK(named.st_mode) or (held.st_dev, held.st_ino) != (named.st_dev, named.st_ino):
+        raise ValueError(f"Descriptor {descriptor} does not hold the Brave source lock {path}")
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError as error:
+        if error.errno not in (errno.EWOULDBLOCK, errno.EAGAIN):
+            raise
+        raise ValueError(f"Another integrated build, sync, bootstrap or patch advancement holds {path}; "
+                         "let it finish before changing this Brave checkout") from None
 
 
 def monitored_paths(repository):
@@ -105,14 +224,27 @@ def patch_projection(repository):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("mode", choices=("paths", "verify"))
+    parser.add_argument("mode", choices=("paths", "verify", "plan", "lock-path", "lock"))
     parser.add_argument("--checkout", type=Path)
+    parser.add_argument("--brave", type=Path)
+    parser.add_argument("--fd", type=int)
     parser.add_argument("patches", type=Path, nargs="*")
     args = parser.parse_intermixed_args()
+    if args.mode in ("verify", "plan") and args.checkout is None:
+        parser.error(f"{args.mode} requires --checkout")
+    if args.mode in ("lock-path", "lock") and args.brave is None:
+        parser.error(f"{args.mode} requires --brave")
     if args.mode == "verify":
-        if args.checkout is None:
-            parser.error("verify requires --checkout")
         verify_ownership(args.checkout, args.patches)
+    elif args.mode == "plan":
+        print(stack_plan(args.checkout, args.patches)[0])
+    elif args.mode == "lock-path":
+        os.close(open_source_lock(args.brave))
+        print(source_lock_path(args.brave))
+    elif args.mode == "lock":
+        if args.fd is None:
+            parser.error("lock requires --fd")
+        lock_source(args.brave, args.fd)
     else:
         for path in patch_paths(args.patches):
             sys.stdout.buffer.write(os.fsencode(path) + b"\0")

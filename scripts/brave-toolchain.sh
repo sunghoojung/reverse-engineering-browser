@@ -234,6 +234,22 @@ run_pnpm() {
   fi
 }
 
+# The sync below takes, or reuses, the Brave source lock. Compilers and the
+# cache daemons they start must not inherit a caller's lock descriptor, or the
+# lock would outlive the integrated build that took it.
+release_inherited_source_lock() {
+  local descriptor="${REB_BRAVE_SOURCE_LOCK_FD:-}"
+  if [[ -z "${descriptor}" ]]; then
+    return
+  fi
+  if [[ ! "${descriptor}" =~ ^[0-9]+$ ]]; then
+    echo "REB_BRAVE_SOURCE_LOCK_FD must name an open descriptor." >&2
+    exit 2
+  fi
+  eval "exec ${descriptor}<&-"
+  unset REB_BRAVE_SOURCE_LOCK_FD
+}
+
 generated_probe_present() {
   local generated_file="$1"
   local operation="$2"
@@ -285,6 +301,7 @@ case "${command_name}" in
     ;;
   gen)
     "${repository_root}/scripts/sync-browser-integration.sh"
+    release_inherited_source_lock
     configure_brave_python
     touch_brave_overrides
     (
@@ -294,6 +311,7 @@ case "${command_name}" in
     ;;
   probe-check|foundation-check)
     "${repository_root}/scripts/sync-browser-integration.sh"
+    release_inherited_source_lock
     configure_brave_python
     touch_brave_overrides
     (

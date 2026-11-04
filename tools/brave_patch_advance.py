@@ -8,7 +8,7 @@ import stat
 import subprocess
 import tempfile
 
-from brave_patch_contract import patch_paths, verify_ownership
+from brave_patch_contract import lock_source, open_source_lock, patch_paths, verify_ownership
 
 
 OWNERS = (("brave-core", ""), ("chromium", "chromium"), ("v8", "v8"))
@@ -113,20 +113,14 @@ def preserve_blob(path, content):
 
 @contextmanager
 def exclusive_source_update(brave):
+    """Hold the workspace lock that integrated builds, syncs and bootstrap also take."""
     try:
-        import fcntl
+        import fcntl  # noqa: F401  # POSIX only.
     except ImportError:
         raise ValueError("Patch advancement requires POSIX file locking") from None
-    directory = Path(os.fsdecode(subprocess.check_output(
-        ["git", "-C", str(brave), "rev-parse", "--absolute-git-dir"]
-    )).strip())
-    descriptor = os.open(directory / "reb-source-advance.lock",
-                         os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+    descriptor = open_source_lock(brave)
     try:
-        try:
-            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            raise ValueError("Another patch advancement owns this checkout; wait for it to finish") from None
+        lock_source(brave, descriptor)
         yield
     finally:
         os.close(descriptor)

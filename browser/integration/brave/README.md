@@ -156,9 +156,11 @@ needs, so `./scripts/bootstrap-brave.sh --init` applies them before Brave reads
 
 Keep V8 edits in `patches/v8/`, relative to the independent V8 checkout.
 The synchronization script rejects destinations belonging to a nested Git
-checkout before changing any stack. Its temporary-index replay includes added
-patch files, so overlapping patches can be recognized without rewriting the
-working tree or real index on repeated builds.
+checkout before changing any stack. Each checkout must hold an ordered prefix
+of its stack: the first patches applied and none of the rest. A temporary-index
+replay, which includes added patch files, finds that prefix even where a later
+patch edits lines an earlier one added, without rewriting the working tree or
+real index on repeated builds.
 
 Apply the tracked integration to the local checkout with:
 
@@ -167,10 +169,24 @@ Apply the tracked integration to the local checkout with:
 ```
 
 Initialize Chromium with `./scripts/bootstrap-brave.sh --init` first. The sync
-command verifies the tracked Brave, Chromium, and V8 pins, preflights all three
-checkouts and every patch before copying overlays, is safe to run again, and
-applies each patch only when needed. Revision mismatches fail with the current
-and expected commits without changing any checkout.
+command verifies the tracked Brave, Chromium, and V8 pins and plans all three
+stacks before copying overlays, then applies only the patches after each
+checkout's applied prefix. It never reverses a patch. A stack in any other
+state, such as a later patch applied without an earlier one, is refused before
+anything changes. A patch that fails to apply writes nothing, so the stack stays
+a prefix and the next run resumes from it. Revision mismatches fail with the
+current and expected commits without changing any checkout.
+
+Sync, bootstrap, the integrated build and `advance-patch` take one lock per
+upstream workspace (`.reb-source.lock` beside its `src/`) and refuse to run
+while another holds it. When `build/integrated-brave-state.json` or an
+interrupted build's intent records this Brave checkout, a direct sync (including
+`make browser-sync` and the `brave-toolchain.sh` `gen`, `probe-check` and
+`foundation-check` modes) passes the integrated build's state check, names its
+expected result before changing anything and records it afterwards. It refuses
+an unrecorded edit, an uncommitted integration checkout, or a changed integration
+commit, so `adopt` and `advance-patch` stay available. A Brave checkout recorded
+by a different integration checkout's receipt is not detected.
 
 The integration now observes renderer request initiation and the browser-side
 request, redirect, response, completion, and failure lifecycle. It reuses

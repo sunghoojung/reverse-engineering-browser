@@ -76,9 +76,10 @@ Never switch global Xcode selection or accept a license as a build workaround.
 2. Verify ordered replay on a disposable, pinned, Brave-initialized baseline.
    Check Brave, Chromium, and V8 separately; a raw Chromium tag lacks Brave's
    own initialized patch state. The sync script has no read-only dry-run mode:
-   overlapping-stack preflight can reverse/reapply patches, and copying overlays
-   overwrites their destinations. Do not claim it is an atomic three-tree
-   transaction or run it as a harmless diagnostic on unexplained local edits.
+   it plans each stack in a private index and never reverses a patch, but
+   copying overlays overwrites their destinations. Do not claim it is an atomic
+   three-tree transaction or run it as a harmless diagnostic on unexplained
+   local edits.
 3. Apply production integration only through `scripts/sync-browser-integration.sh`
    or the wrapper that invokes it, then repeat sync and check the resulting
    content is unchanged. Keep exploratory patch regeneration in disposable

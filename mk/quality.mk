@@ -226,8 +226,18 @@ workflow-check:
 agent-preflight:
 	TYPECHECK="$(TYPECHECK)" ./tools/agent-preflight.sh
 
+# Integrated Brave source receipts, build intents and patch-advance backups
+# describe the separate upstream checkout, not build output. Without them the
+# next integrated build would refuse its own recorded checkout.
 clean:
-	rm -rf $(BUILD_DIR)
+	@if [ -d "$(BUILD_DIR)" ]; then \
+		find "$(BUILD_DIR)" -mindepth 1 -maxdepth 1 ! -name 'integrated-brave-*' -exec rm -rf {} +; \
+		if [ -n "$$(find "$(BUILD_DIR)" -mindepth 1 -maxdepth 1 -print -quit)" ]; then \
+			echo "Kept integrated Brave source receipts: $(BUILD_DIR)/integrated-brave-*"; \
+		else \
+			rmdir "$(BUILD_DIR)"; \
+		fi; \
+	fi
 
 javascript-check: capture-completeness-check
 	@command -v node >/dev/null 2>&1 || { echo "Node.js is not installed" >&2; exit 1; }

@@ -89,6 +89,18 @@ if [[ -n "$(git status --porcelain)" ]]; then
 fi
 state_arguments=(--repository "${repository_root}" --brave "${brave_directory}"
   --receipt "${repository_root}/build/integrated-brave-state.json")
+state_helper=(python3 tools/check-integrated-brave-state.py)
+# One build, sync, bootstrap or patch advancement changes a Brave workspace at a
+# time. Steps that change sources inherit this descriptor; build tools do not,
+# because a daemon they leave behind (such as a compiler cache server) would
+# otherwise keep holding the lock after this wrapper exits.
+lock_path="$(python3 tools/brave_patch_contract.py lock-path --brave "${brave_directory}")"
+exec 9<"${lock_path}"
+export REB_BRAVE_SOURCE_LOCK_FD=9
+python3 tools/brave_patch_contract.py lock --brave "${brave_directory}" --fd 9
+unlocked() {
+  "$@" 9<&-
+}
 # Check the destination filesystem before bootstrap downloads anything.
 disk_path="${brave_directory}"
 while [[ ! -d "${disk_path}" ]]; do
@@ -96,9 +108,9 @@ while [[ ! -d "${disk_path}" ]]; do
 done
 available_kib="$(df -Pk "${disk_path}" | awk 'NR == 2 {print $4}')"
 if [[ "${initialize}" == true ]]; then
-  required_kib="$(python3 tools/check-integrated-brave-state.py reserve "${state_arguments[@]}" --require-clean)"
+  required_kib="$("${state_helper[@]}" reserve "${state_arguments[@]}" --require-clean)"
 else
-  required_kib="$(python3 tools/check-integrated-brave-state.py reserve "${state_arguments[@]}")"
+  required_kib="$("${state_helper[@]}" reserve "${state_arguments[@]}")"
 fi
 if [[ ! "${available_kib}" =~ ^[0-9]+$ || ! "${required_kib}" =~ ^[0-9]+$ ]] ||
    ((available_kib < required_kib)); then
@@ -106,42 +118,45 @@ if [[ ! "${available_kib}" =~ ^[0-9]+$ || ! "${required_kib}" =~ ^[0-9]+$ ]] ||
   echo "First/init builds reserve 150 GiB; verified repeats reserve max(50 GiB, existing output size)." >&2
   exit 1
 fi
+# Each step that changes upstream sources is named in
+# build/integrated-brave-pending.json before it starts. A rerun of the same
+# command after an interruption resumes that step instead of refusing the tree.
 if [[ "${initialize}" == true ]]; then
-  python3 tools/check-integrated-brave-state.py check "${state_arguments[@]}" --require-clean
-else
-  python3 tools/check-integrated-brave-state.py check "${state_arguments[@]}"
-fi
-if [[ "${initialize}" == true ]]; then
+  "${state_helper[@]}" begin --phase init "${state_arguments[@]}" --require-clean
   ./scripts/bootstrap-brave.sh --init
   # Initialization's own patches become the known input to the next sync.
-  python3 tools/check-integrated-brave-state.py record "${state_arguments[@]}"
+  "${state_helper[@]}" record "${state_arguments[@]}"
+else
+  "${state_helper[@]}" check "${state_arguments[@]}"
 fi
-make brave-doctor
-python3 tools/check-integrated-brave-state.py check "${state_arguments[@]}"
+unlocked make brave-doctor
+"${state_helper[@]}" begin --phase sync "${state_arguments[@]}"
 ./scripts/sync-browser-integration.sh
-python3 tools/check-integrated-brave-state.py record "${state_arguments[@]}"
-make demo native-probe-admission-check native-proxy-policy-check
-./build/reb-event-demo
+"${state_helper[@]}" record "${state_arguments[@]}"
+unlocked make demo native-probe-admission-check native-proxy-policy-check
+unlocked ./build/reb-event-demo
 # Branding and policy generation both copy inputs into Chromium's source tree.
 # Complete those authorized preparations before recording compilation inputs.
-./scripts/brave-toolchain.sh build --prepare_only
-./scripts/brave-toolchain.sh build --target components/policy:generate_policy_templates
-python3 tools/check-integrated-brave-state.py record "${state_arguments[@]}"
+"${state_helper[@]}" begin --phase prepare "${state_arguments[@]}"
+unlocked ./scripts/brave-toolchain.sh build --prepare_only
+unlocked ./scripts/brave-toolchain.sh build --target components/policy:generate_policy_templates
+"${state_helper[@]}" record "${state_arguments[@]}"
 # Preparation/policy generation created component args. Compile the native
 # integration and run its separate proxy test before the aggregate browser.
 test -f "${brave_directory}/../out/Component_arm64/args.gn"
 python3 tools/check-brave-services.py \
   --args "${brave_directory}/../out/Component_arm64/args.gn"
+# Its sync takes this lock; brave-toolchain.sh releases it before compiling.
 make brave-foundation-check
-python3 tools/check-integrated-brave-state.py check "${state_arguments[@]}"
+"${state_helper[@]}" check "${state_arguments[@]}"
 if [[ -n "${REB_BRAVE_JOBS:-}" ]]; then
-  ./scripts/brave-toolchain.sh build --ninja "j:${REB_BRAVE_JOBS}"
+  unlocked ./scripts/brave-toolchain.sh build --ninja "j:${REB_BRAVE_JOBS}"
 else
-  ./scripts/brave-toolchain.sh build
+  unlocked ./scripts/brave-toolchain.sh build
 fi
-python3 tools/check-integrated-brave-state.py check "${state_arguments[@]}"
-make app-build native-console-check
+"${state_helper[@]}" check "${state_arguments[@]}"
+unlocked make app-build native-console-check
 codesign --verify --deep --strict "build/Origin Trace.app"
-python3 tools/check-integrated-brave-state.py complete "${state_arguments[@]}"
+"${state_helper[@]}" complete "${state_arguments[@]}"
 echo "Build steps passed. Complete the runtime checklist in docs/development/integrated-brave-build.md."
 echo "This is a local component browser plus an Origin Trace companion, not a portable release."

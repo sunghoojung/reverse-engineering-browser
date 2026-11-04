@@ -79,9 +79,10 @@ or explicit diffs, not just a zero exit status. Verify overlay copies, run sync
 twice, and confirm the second pass changes no content. Keep exploratory edits
 out of the final generated tree; recreate through the tracked sync path.
 
-The current sync implementation is not a global rollback transaction. If it
-fails after a stack refresh, inspect all three tree diffs. Stop on a partly
-applied or unexplained state; reconstruct the disposable trial from the known
+The current sync implementation is not a global rollback transaction. A failed
+patch leaves its stack at an applied prefix that the next sync resumes from; a
+stack in any other state is refused. If it fails, inspect all three tree diffs.
+Stop on an unexplained state; reconstruct the disposable trial from the known
 baseline rather than resetting a working checkout or blindly rerunning hooks.
 Do not manufacture a new integrated-build receipt to bless unexplained edits.
 

@@ -34,11 +34,6 @@ if [[ ! -d "${brave_directory}" ]]; then
   echo "Pinned Brave checkout is missing: ${brave_directory}" >&2
   exit 1
 fi
-if ! command -v sccache >/dev/null 2>&1; then
-  echo "sccache is required for the distribution build." >&2
-  exit 1
-fi
-
 chromium_directory="$(cd "${brave_directory}/.." && pwd)"
 readonly chromium_directory
 v8_directory="${chromium_directory}/v8"
@@ -73,9 +68,40 @@ while IFS= read -r -d '' authored_file; do
   fi
 done < <(find "${overlay_directory}" -type f -print0)
 
+# Each ordered stack must be fully applied: a distribution built from a partly
+# synchronized checkout would silently lack project instrumentation.
+verify_patch_stack() {
+  local checkout_directory="$1"
+  local stack_directory="$2"
+  local label="$3"
+  local applied
+  local -a patch_files=()
+  [[ -d "${stack_directory}" ]] || return 0
+  while IFS= read -r -d '' patch_file; do
+    patch_files+=("${patch_file}")
+  done < <(find "${stack_directory}" -maxdepth 1 -type f -name '*.patch' -print0 | sort -z)
+  ((${#patch_files[@]} > 0)) || return 0
+  applied="$(python3 "${repository_root}/tools/brave_patch_contract.py" plan \
+    --checkout "${checkout_directory}" "${patch_files[@]}")"
+  if ((applied != ${#patch_files[@]})); then
+    echo "${label} patch stack is not synchronized: ${applied} of ${#patch_files[@]} patches applied." >&2
+    echo "Run ./scripts/sync-browser-integration.sh first." >&2
+    exit 1
+  fi
+}
+readonly patches_directory="${repository_root}/browser/integration/brave/patches"
+verify_patch_stack "${brave_directory}" "${patches_directory}" Brave
+verify_patch_stack "${chromium_directory}" "${patches_directory}/chromium" Chromium
+verify_patch_stack "${v8_directory}" "${patches_directory}/v8" V8
+
 if [[ "${verify_only}" == true ]]; then
-  echo "Pinned Brave, Chromium, V8, and authored overlays match."
+  echo "Pinned Brave, Chromium, V8, authored overlays and ordered patch stacks match."
   exit 0
+fi
+# Only the build itself needs the compiler cache, not --verify-only.
+if ! command -v sccache >/dev/null 2>&1; then
+  echo "sccache is required for the distribution build." >&2
+  exit 1
 fi
 
 # Static keeps all Chromium code inside the app instead of referring to the

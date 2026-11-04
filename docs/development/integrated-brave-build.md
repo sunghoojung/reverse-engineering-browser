@@ -51,7 +51,36 @@ including ignored overlay/patch destinations; symlink destinations are refused.
 The private source receipt is `build/integrated-brave-state.json`. Only after
 all browser, native tests, companion build and signature steps succeed does the
 wrapper write `build/integrated-brave-complete.json`. These are local build
-receipts, not source artifacts.
+receipts, not source artifacts. `make clean` keeps every
+`build/integrated-brave-*` file, because they describe the upstream checkout
+rather than build output.
+
+One build, sync, bootstrap or `advance-patch` changes an upstream workspace at a
+time. Each takes the lock `.reb-source.lock` beside the workspace's `src/` and
+refuses to start while another holds it. The wrapper passes its lock only to the
+steps that change sources, so a compiler cache daemon cannot keep holding it.
+
+### Resuming an interrupted build
+
+Before each step that changes upstream sources (initialization, sync, and
+Brave's branding and policy preparation), the wrapper names the step in
+`build/integrated-brave-pending.json`. The sync intent also records the exact
+planned result of every patched file and overlay. If the wrapper is interrupted,
+rerun the same command. A rerun resumes only when:
+
+- **initialization** (`--init` again): Brave-core differs from its pin only by
+  the pre-initialization patches and `.env`. Chromium and V8 continue
+  downloading. A rerun without `--init` is refused with that instruction.
+- **sync**: nothing outside REB overlay and patch destinations changed, and every
+  overlay destination still holds its pre-sync or overlay bytes. Each stack
+  resumes from its applied prefix, and the result must equal the recorded plan
+  before the receipt is written.
+- **preparation**: Brave-core and V8 are unchanged, and every Chromium path that
+  changed holds the exact bytes of a Brave-core file, as Brave's branding and
+  policy copies do. The wrapper reports how many such paths it admitted.
+
+Anything else is refused as an unexplained edit. A completed step removes the
+intent. Do not edit or delete an intent to admit a checkout.
 
 A verified repeat for the exact integration commit, upstream state, component
 output path, GN args and browser executable can use an adaptive free-space
@@ -63,9 +92,10 @@ Missing/stale/incomplete successful-build proof, changed source/args/browser, or
 an unmeasurable output never earns the smaller reserve. The disk check runs
 before downloads, synchronization or build changes. Source/pin errors still
 stop the build independently of free space.
-If a receipt is missing or no longer matches, preserve the checkout and use a
-fresh pinned worktree. Never stash/reset/clean or discard edits to bypass this
-guard. The helper does none of those operations.
+If a receipt is missing or no longer matches and no interrupted step explains
+the difference, preserve the checkout and use a fresh pinned worktree. Never
+stash/reset/clean or discard edits to bypass this guard. The helper does none of
+those operations.
 
 An explicit handoff can preserve an incomplete build across a tooling-only
 update or exact patch-owner relocation. Both source checkouts must be clean,
@@ -112,9 +142,12 @@ REB_BRAVE_DIRECTORY=/existing/worktree/src/brave ./scripts/build-integrated-brav
 The previous receipt is preserved. Private before/after backups and
 `build/integrated-brave-patch-advance.json` record the exact transition. A normal
 failure restores only the command's own known bytes; concurrent unknown edits
-are preserved and marked `needs_review`. Repeating an interrupted operation
-accepts only its recorded before/after file with unchanged surrounding inputs
-and index entries. A completed repeat is a no-op. Preserve conflicting receipts
+are preserved and marked `needs_review`. That mark stays: a repeat refuses
+until a person has inspected the destination and moved the audit aside, even if
+the file later holds familiar bytes. Repeating an interrupted operation accepts
+only its recorded before/after file with unchanged surrounding inputs and index
+entries. Backups are published only once complete. A completed repeat is a
+no-op. Preserve conflicting receipts
 or audits separately; never edit them to admit an unexplained source state.
 Successful-build proof and the smaller disk reserve are not inherited.
 

@@ -22,6 +22,40 @@ FLAGS = ["-fdiagnostics-show-inlining-chain", "-fno-lifetime-dse",
          "-fsanitize-ignore-for-ubsan-feature=return"]
 RELEASE_PREFIX = "https://github.com/llvm/llvm-project/releases/download/"
 MAX_ARCHIVE_BYTES = 2 * 1024**3
+# Written inside a prefix this tool creates, so a rerun can tell its own
+# incomplete extraction from a toolchain it must never overwrite.
+PREFIX_MARKER = ".reb-native-llvm.json"
+
+
+def write_json(path, value):
+    """Replace a status record only with complete bytes."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile("w", dir=path.parent, prefix=f".{path.name}.", delete=False) as target:
+        temporary = Path(target.name)
+        target.write(json.dumps(value, indent=2) + "\n")
+    try:
+        temporary.replace(path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def claim_prefix(prefix):
+    """Create the private prefix, or replace only one this tool left incomplete."""
+    marker = prefix / PREFIX_MARKER
+    if prefix.is_symlink():
+        raise ValueError("The private prefix must not be a symlink")
+    if prefix.exists() and any(prefix.iterdir()):
+        status = None
+        if marker.is_file() and not marker.is_symlink():
+            try:
+                status = json.loads(marker.read_text()).get("status")
+            except (ValueError, AttributeError):
+                status = None
+        if status not in ("installing", "failed"):
+            raise ValueError("Use a fresh private prefix; never overwrite an existing toolchain")
+        print(f"Removing the incomplete toolchain an earlier attempt left in {prefix}", flush=True)
+        shutil.rmtree(prefix)
+    prefix.mkdir(parents=True, exist_ok=True)
 
 
 def validate_manifest(manifest):
@@ -54,6 +88,37 @@ def validate_manifest(manifest):
     return manifest
 
 
+def check_claim(claim, marker, incomplete, complete):
+    """A rerun replaces only this tool's own unfinished directory."""
+    with tempfile.TemporaryDirectory() as directory:
+        target = Path(directory) / "target"
+        claim(target)
+        (target / "partial").write_text("left by an interrupted attempt")
+        for status in incomplete:
+            (target / marker).write_text(json.dumps({"status": status}))
+            (target / "partial").write_text("left by an interrupted attempt")
+            claim(target)
+            assert not (target / "partial").exists()
+        for status in (complete, None):
+            (target / marker).write_text(json.dumps({"status": status}))
+            (target / "kept").write_text("not ours to remove")
+            try:
+                claim(target)
+            except ValueError:
+                pass
+            else:
+                raise AssertionError(f"Directory with status {status} was replaced")
+            assert (target / "kept").exists()
+        (target / marker).unlink()
+        try:
+            claim(target)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("Unmarked directory was replaced")
+        assert (target / "kept").exists()
+
+
 def self_test():
     good = {"version": 2, "compiler_major": 23, "release": "llvmorg-23.1.4",
             "url": RELEASE_PREFIX + "llvmorg-23.1.4/LLVM-23.1.4-Linux-X64.tar.zst",
@@ -72,7 +137,8 @@ def self_test():
             pass
         else:
             raise AssertionError("Invalid manifest accepted: " + field)
-    print("PASS official LLVM release manifest validation; no download performed")
+    check_claim(claim_prefix, PREFIX_MARKER, ("installing", "failed"), "passed")
+    print("PASS official LLVM release manifest validation and prefix recovery; no download performed")
 
 
 def main():
@@ -89,19 +155,20 @@ def main():
         parser.error("--prefix and --receipt are required")
     manifest_bytes = args.manifest.read_bytes()
     manifest = validate_manifest(json.loads(manifest_bytes))
-    prefix = args.prefix.resolve()
-    if prefix.exists():
-        raise ValueError("Use a fresh private prefix; never overwrite an existing toolchain")
-    prefix.mkdir(parents=True)
-    if shutil.disk_usage(prefix).free < 4 * 1024**3:
-        raise RuntimeError("Need 4GiB free for the download and private LLVM extraction")
-    if shutil.which("zstd") is None:
-        raise RuntimeError("Missing required tool: zstd")
+    prefix = args.prefix.absolute()
+    claim_prefix(prefix)
+    prefix = prefix.resolve()
     receipt = {"status": "installing", "manifest_sha256": hashlib.sha256(manifest_bytes).hexdigest(),
                "release": manifest["release"], "archive_sha256": manifest["sha256"],
                "prefix": str(prefix), "system_installation": False}
-    args.receipt.parent.mkdir(parents=True, exist_ok=True)
+    # Recorded before any work, so an interrupted run is visible as one.
+    write_json(prefix / PREFIX_MARKER, receipt)
+    write_json(args.receipt, receipt)
     try:
+        if shutil.disk_usage(prefix).free < 4 * 1024**3:
+            raise RuntimeError("Need 4GiB free for the download and private LLVM extraction")
+        if shutil.which("zstd") is None:
+            raise RuntimeError("Missing required tool: zstd")
         with tempfile.TemporaryDirectory(prefix="llvm-release-", dir=prefix.parent) as downloads:
             archive = Path(downloads) / "llvm.tar.zst"
             digest = hashlib.sha256()
@@ -155,7 +222,8 @@ def main():
         receipt.update(status="failed", error=str(error))
         raise
     finally:
-        args.receipt.write_text(json.dumps(receipt, indent=2) + "\n")
+        write_json(prefix / PREFIX_MARKER, receipt)
+        write_json(args.receipt, receipt)
 
 
 if __name__ == "__main__":

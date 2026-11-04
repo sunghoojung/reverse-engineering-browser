@@ -10,10 +10,12 @@ import argparse
 import hashlib
 import importlib.util
 import json
+import os
 from pathlib import Path
 import re
 import subprocess
 import sys
+import tempfile
 
 
 SCHEMA = "reb-brave-distribution-provenance-v1"
@@ -209,8 +211,20 @@ def main(argv=None):
     options = parser.parse_args(argv)
     record = provenance(Path(__file__).resolve().parents[1], options)
     output = Path(options.output or str(Path(options.zip))[: -len(".zip")] + ".provenance.json")
-    with output.open("x") as target:
-        target.write(json.dumps(record, indent=2) + "\n")
+    text = json.dumps(record, indent=2) + "\n"
+    # A rerun with the same inputs reproduces the same record and accepts it;
+    # any other existing file is preserved. Only complete bytes are published.
+    if output.is_symlink() or (output.exists() and output.read_text() != text):
+        raise FileExistsError(output)
+    if not output.exists():
+        with tempfile.NamedTemporaryFile("w", dir=output.parent, prefix=f".{output.name}.",
+                                         delete=False) as target:
+            temporary = Path(target.name)
+            target.write(text)
+        try:
+            os.link(temporary, output)
+        finally:
+            temporary.unlink()
     print(f"{digest(output)}  {output.name}")
 
 

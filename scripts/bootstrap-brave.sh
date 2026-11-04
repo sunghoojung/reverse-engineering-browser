@@ -10,6 +10,7 @@ readonly default_remote="https://github.com/brave/brave-core.git"
 readonly revision_file="${repository_root}/browser/config/brave-core.rev"
 readonly depot_tools_revision_file="${repository_root}/browser/config/depot_tools.rev"
 readonly init_patches_directory="${repository_root}/browser/integration/brave/patches/init"
+readonly patch_contract="${repository_root}/tools/brave_patch_contract.py"
 readonly minimum_init_free_gib=150
 
 if [[ -z "${DEVELOPER_DIR:-}" ]] &&
@@ -74,6 +75,37 @@ apply_init_patches() {
     git -C "${brave_directory}" apply "${patch_file}"
     echo "Applied pre-initialization patch $(basename "${patch_file}")"
   done < <(find "${init_patches_directory}" -maxdepth 1 -type f -name '*.patch' -print0 | sort -z)
+}
+
+# Initialization may resume over its own pre-initialization patches, as the
+# integrated build wrapper admits. Brave init over any other local change could
+# replace it, so that tree is preserved instead.
+require_initialization_owned_changes() {
+  local unexpected
+  unexpected="$(python3 -I - "${brave_directory}" "${init_patches_directory}" \
+    "${repository_root}/tools" <<'PYTHON'
+import os
+from pathlib import Path
+import subprocess
+import sys
+
+sys.path.insert(0, sys.argv[3])
+from brave_patch_contract import patch_paths  # noqa: E402
+
+owned = {str(path) for path in patch_paths(sorted(Path(sys.argv[2]).glob("*.patch")))} | {".env"}
+status = subprocess.check_output(["git", "-C", sys.argv[1], "status", "--porcelain=v1", "-z",
+                                  "--untracked-files=all", "--no-renames"])
+for record in status.split(b"\0"):
+    if record and os.fsdecode(record[3:]) not in owned:
+        print(os.fsdecode(record[3:]))
+        break
+PYTHON
+  )"
+  if [[ -n "${unexpected}" ]]; then
+    echo "Brave checkout has changes beyond its pre-initialization patches, such as ${unexpected}." >&2
+    echo "Initialization could replace them. Preserve them and initialize a fresh pinned worktree." >&2
+    exit 1
+  fi
 }
 
 configure_node() {
@@ -171,6 +203,18 @@ readonly worktree_root="${REB_BRAVE_WORKTREE:-${repository_root}/browser/worktre
 readonly brave_directory="${worktree_root}/src/brave"
 brave_fetch_remote="origin"
 
+# Serialize with integrated builds, syncs and patch advancement on this
+# workspace. The integrated build wrapper passes down the lock it holds.
+if [[ -z "${REB_BRAVE_SOURCE_LOCK_FD:-}" ]]; then
+  lock_path="$(python3 "${patch_contract}" lock-path --brave "${brave_directory}")"
+  exec 9<"${lock_path}"
+  export REB_BRAVE_SOURCE_LOCK_FD=9
+elif [[ ! "${REB_BRAVE_SOURCE_LOCK_FD}" =~ ^[0-9]+$ ]]; then
+  echo "REB_BRAVE_SOURCE_LOCK_FD must name an open descriptor." >&2
+  exit 2
+fi
+python3 "${patch_contract}" lock --brave "${brave_directory}" --fd "${REB_BRAVE_SOURCE_LOCK_FD}"
+
 if [[ -e "${brave_directory}" ]]; then
   if ! is_git_checkout_root "${brave_directory}"; then
     echo "Existing path is not a Git checkout: ${brave_directory}" >&2
@@ -216,6 +260,9 @@ if [[ -n "$(git -C "${brave_directory}" status --porcelain)" ]]; then
     echo "Requested: ${requested_commit}" >&2
     echo "Preserve or remove the local changes before switching revisions." >&2
     exit 1
+  fi
+  if [[ "${run_init}" == true ]]; then
+    require_initialization_owned_changes
   fi
   echo "Brave checkout has local integration changes at the requested revision."
 else

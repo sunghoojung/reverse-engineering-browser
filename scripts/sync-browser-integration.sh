@@ -112,6 +112,46 @@ verify_revision() {
   fi
 }
 
+# Serialize every change to these upstream checkouts. The integrated build
+# wrapper already holds the lock and passes its descriptor down; it also owns
+# the source receipt, so a sync it starts leaves receipts to it.
+lock_path="$(python3 "${patch_contract}" lock-path --brave "${brave_directory}")"
+guarded_by_caller=false
+if [[ -n "${REB_BRAVE_SOURCE_LOCK_FD:-}" ]]; then
+  if [[ ! "${REB_BRAVE_SOURCE_LOCK_FD}" =~ ^[0-9]+$ ]]; then
+    echo "REB_BRAVE_SOURCE_LOCK_FD must name an open descriptor." >&2
+    exit 2
+  fi
+  guarded_by_caller=true
+else
+  exec 9<"${lock_path}"
+  export REB_BRAVE_SOURCE_LOCK_FD=9
+fi
+python3 "${patch_contract}" lock --brave "${brave_directory}" --fd "${REB_BRAVE_SOURCE_LOCK_FD}"
+
+# A checkout recorded by the integrated build stays provable: a direct sync
+# (make browser-sync, brave-toolchain.sh gen/probe-check/foundation-check)
+# passes the same state check, names its expected result before changing
+# anything, and records it afterwards, or refuses.
+readonly state_helper="${repository_root}/tools/check-integrated-brave-state.py"
+readonly state_arguments=(--repository "${repository_root}" --brave "${brave_directory}"
+  --receipt "${repository_root}/build/integrated-brave-state.json")
+guarded_sync=false
+recorded_checkout=false
+if [[ "${guarded_by_caller}" == false ]]; then
+  recorded_checkout="$(python3 "${state_helper}" guarded "${state_arguments[@]}")"
+fi
+if [[ "${recorded_checkout}" == true ]]; then
+  for variable in REB_BRAVE_CORE_REVISION REB_CHROMIUM_REVISION REB_V8_REVISION \
+    REB_BRAVE_INTEGRATION_DIRECTORY; do
+    if [[ -n "${!variable:-}" ]]; then
+      echo "Unset ${variable}: build/integrated-brave-state.json records this checkout from the tracked pins and integration." >&2
+      exit 2
+    fi
+  done
+  guarded_sync=true
+fi
+
 verify_revision "${brave_directory}" "Brave" "${brave_revision}"
 if ((${#chromium_patch_files[@]} > 0)); then
   verify_revision "${chromium_directory}" "Chromium" "${chromium_revision}"
@@ -121,7 +161,7 @@ if ((${#v8_patch_files[@]} > 0)); then
 fi
 
 # A nested Git checkout is an independent patch owner. Validate every stack
-# before any preflight can reverse/reapply an overlapping patch.
+# before planning or applying any patch.
 if ((${#brave_patch_files[@]} > 0)); then
   python3 "${patch_contract}" verify --checkout "${brave_directory}" "${brave_patch_files[@]}"
 fi
@@ -132,125 +172,46 @@ if ((${#v8_patch_files[@]} > 0)); then
   python3 "${patch_contract}" verify --checkout "${v8_directory}" "${v8_patch_files[@]}"
 fi
 
-patch_stack_is_applied() {
-  local checkout_directory="$1"
-  shift
-  local temporary_directory
-  local temporary_index
-  local -a patch_files=("$@")
-  local -a patch_paths=()
-  local patch_path
-  local patch_index
-  temporary_directory="$(mktemp -d)"
-  temporary_index="${temporary_directory}/index"
-
-  if ! python3 "${patch_contract}" paths "${patch_files[@]}" >"${temporary_directory}/paths"; then
-    rm -rf "${temporary_directory}"
-    return 1
-  fi
-  while IFS= read -r -d '' patch_path; do
-    patch_paths+=("${patch_path}")
-  done <"${temporary_directory}/paths"
-  # Include added patch files, without staging unrelated untracked content or
-  # touching the real index. add -u alone omits new inspector regression files.
-  if ! GIT_INDEX_FILE="${temporary_index}" git -C "${checkout_directory}" read-tree HEAD ||
-    ! GIT_INDEX_FILE="${temporary_index}" git --literal-pathspecs -C "${checkout_directory}" \
-      add -A -f -- "${patch_paths[@]}" 2>/dev/null; then
-    rm -rf "${temporary_directory}"
-    return 1
-  fi
-  for ((patch_index = ${#patch_files[@]} - 1; patch_index >= 0; patch_index--)); do
-    if ! GIT_INDEX_FILE="${temporary_index}" git -C "${checkout_directory}" \
-      apply --cached --reverse --check "${patch_files[patch_index]}" 2>/dev/null; then
-      rm -rf "${temporary_directory}"
-      return 1
-    fi
-    GIT_INDEX_FILE="${temporary_index}" git -C "${checkout_directory}" \
-      apply --cached --reverse "${patch_files[patch_index]}"
-  done
-  rm -rf "${temporary_directory}"
-}
-
-preflight_patches() {
+# Each checkout must hold an ordered prefix of its stack: an interrupted sync
+# leaves one, and the next sync resumes from it. Anything else, such as a later
+# patch applied without an earlier one, stops here before any file changes.
+plan_patches() {
   local checkout_directory="$1"
   local patch_label="$2"
   shift 2
-  local patch_file
-  local needs_stack_refresh=0
-  for patch_file in "$@"; do
-    if git -C "${checkout_directory}" apply --check "${patch_file}" 2>/dev/null; then
-      continue
-    elif git -C "${checkout_directory}" apply --reverse --check \
-      "${patch_file}" 2>/dev/null; then
-      continue
-    else
-      needs_stack_refresh=1
-      break
-    fi
-  done
-  if ((needs_stack_refresh == 0)); then
-    return
+  local applied
+  if ! applied="$(python3 "${patch_contract}" plan --checkout "${checkout_directory}" "$@")"; then
+    echo "${patch_label}patch stack state is not resumable; no file was changed." >&2
+    exit 1
   fi
-
-  if patch_stack_is_applied "${checkout_directory}" "$@"; then
-    echo "Already applied: ${patch_label}patch stack"
-    return 11
-  fi
-
-  # A later patch can deliberately edit lines introduced by an earlier one.
-  # In an already-synchronized checkout that makes the earlier patch neither
-  # forward- nor reverse-applicable. Remove the applied stack from newest to
-  # oldest, verify the complete stack can be applied again, and roll back if
-  # any patch is not reproducible.
-  local -a patch_files=("$@")
-  local -a reversed_patch_files=()
-  local -a reapplied_patch_files=()
-  local patch_index
-  for ((patch_index = ${#patch_files[@]} - 1; patch_index >= 0; patch_index--)); do
-    patch_file="${patch_files[patch_index]}"
-    if git -C "${checkout_directory}" apply --reverse --check "${patch_file}" 2>/dev/null; then
-      git -C "${checkout_directory}" apply --reverse "${patch_file}"
-      reversed_patch_files+=("${patch_file}")
-    fi
-  done
-
-  for patch_file in "${patch_files[@]}"; do
-    if ! git -C "${checkout_directory}" apply --check "${patch_file}" 2>/dev/null; then
-      for ((patch_index = ${#reapplied_patch_files[@]} - 1; patch_index >= 0; patch_index--)); do
-        git -C "${checkout_directory}" apply --reverse "${reapplied_patch_files[patch_index]}"
-      done
-      for ((patch_index = ${#reversed_patch_files[@]} - 1; patch_index >= 0; patch_index--)); do
-        git -C "${checkout_directory}" apply "${reversed_patch_files[patch_index]}"
-      done
-      echo "${patch_label}patch does not apply cleanly: ${patch_file}" >&2
-      exit 1
-    fi
-    git -C "${checkout_directory}" apply "${patch_file}"
-    reapplied_patch_files+=("${patch_file}")
-  done
-
-  echo "Refreshed ${patch_label}patch stack to preflight overlapping changes."
-  return 10
+  printf '%s\n' "${applied}"
 }
 
-apply_patches() {
+# A failed git apply writes nothing, so the stack stays an ordered prefix that
+# the next sync resumes from. Nothing is reversed or rolled back.
+apply_remaining_patches() {
   local checkout_directory="$1"
-  local patch_prefix="$2"
-  shift 2
+  local patch_label="$2"
+  local applied="$3"
+  shift 3
+  local total=$#
   local patch_file
+  local index=0
+  if ((applied == total)); then
+    echo "Already applied: ${patch_label}patch stack"
+    return
+  fi
   for patch_file in "$@"; do
-    # An insertion can still apply forward after it was applied once.
-    # Prefer the reverse check so repeat syncs never duplicate those additions.
-    if git -C "${checkout_directory}" apply --reverse --check \
-      "${patch_file}" 2>/dev/null; then
-      echo "Already applied: ${patch_prefix}$(basename "${patch_file}")"
-    elif git -C "${checkout_directory}" apply --check "${patch_file}" 2>/dev/null; then
-      git -C "${checkout_directory}" apply "${patch_file}"
-    else
-      echo "Patch state changed after preflight: ${patch_file}" >&2
-      exit 1
+    if ((index >= applied)); then
+      if ! git -C "${checkout_directory}" apply "${patch_file}"; then
+        echo "${patch_label}patch did not apply: ${patch_file}" >&2
+        echo "The ${patch_label}stack holds the first ${index} of ${total} patches. Inspect the checkout; a rerun resumes from that prefix." >&2
+        exit 1
+      fi
     fi
+    index=$((index + 1))
   done
+  echo "Applied ${patch_label}patches $((applied + 1)) through ${total} of ${total}."
 }
 
 sync_brave_siso_config() {
@@ -270,57 +231,43 @@ sync_brave_siso_config() {
   fi
 }
 
-brave_stack_refreshed=0
+brave_applied=0
 if ((${#brave_patch_files[@]} > 0)); then
-  if preflight_patches "${brave_directory}" "" "${brave_patch_files[@]}"; then
-    :
-  else
-    preflight_status=$?
-    if ((preflight_status != 10 && preflight_status != 11)); then
-      exit "${preflight_status}"
-    fi
-    brave_stack_refreshed=1
-  fi
+  brave_applied="$(plan_patches "${brave_directory}" "Brave " "${brave_patch_files[@]}")"
 fi
-chromium_stack_refreshed=0
+chromium_applied=0
 if ((${#chromium_patch_files[@]} > 0)); then
-  if preflight_patches "${chromium_directory}" "Chromium " "${chromium_patch_files[@]}"; then
-    :
-  else
-    preflight_status=$?
-    if ((preflight_status != 10 && preflight_status != 11)); then
-      exit "${preflight_status}"
-    fi
-    chromium_stack_refreshed=1
-  fi
+  chromium_applied="$(plan_patches "${chromium_directory}" "Chromium " "${chromium_patch_files[@]}")"
 fi
-v8_stack_refreshed=0
+v8_applied=0
 if ((${#v8_patch_files[@]} > 0)); then
-  if preflight_patches "${v8_directory}" "V8 " "${v8_patch_files[@]}"; then
-    :
-  else
-    preflight_status=$?
-    if ((preflight_status != 10 && preflight_status != 11)); then
-      exit "${preflight_status}"
-    fi
-    v8_stack_refreshed=1
-  fi
+  v8_applied="$(plan_patches "${v8_directory}" "V8 " "${v8_patch_files[@]}")"
+fi
+
+if [[ "${guarded_sync}" == true ]]; then
+  # Name the expected result before the first change, so an interrupted sync
+  # can be resumed and its result verified instead of abandoning the checkout.
+  python3 "${state_helper}" begin --phase sync "${state_arguments[@]}"
 fi
 
 if [[ -d "${overlay_directory}" ]]; then
   cp -Rp "${overlay_directory}/." "${brave_directory}/"
 fi
 
-if ((${#brave_patch_files[@]} > 0 && brave_stack_refreshed == 0)); then
-  apply_patches "${brave_directory}" "" "${brave_patch_files[@]}"
+if ((${#brave_patch_files[@]} > 0)); then
+  apply_remaining_patches "${brave_directory}" "Brave " "${brave_applied}" "${brave_patch_files[@]}"
 fi
-if ((${#chromium_patch_files[@]} > 0 && chromium_stack_refreshed == 0)); then
-  apply_patches "${chromium_directory}" "chromium/" "${chromium_patch_files[@]}"
+if ((${#chromium_patch_files[@]} > 0)); then
+  apply_remaining_patches "${chromium_directory}" "Chromium " "${chromium_applied}" "${chromium_patch_files[@]}"
 fi
-if ((${#v8_patch_files[@]} > 0 && v8_stack_refreshed == 0)); then
-  apply_patches "${v8_directory}" "v8/" "${v8_patch_files[@]}"
+if ((${#v8_patch_files[@]} > 0)); then
+  apply_remaining_patches "${v8_directory}" "V8 " "${v8_applied}" "${v8_patch_files[@]}"
 fi
 
 sync_brave_siso_config
+
+if [[ "${guarded_sync}" == true ]]; then
+  python3 "${state_helper}" record "${state_arguments[@]}"
+fi
 
 echo "Synchronized Brave integration (${#brave_patch_files[@]} Brave patch(es), ${#chromium_patch_files[@]} Chromium patch(es), ${#v8_patch_files[@]} V8 patch(es))."

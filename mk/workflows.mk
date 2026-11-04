@@ -116,7 +116,9 @@ app-demo: app-build e2e
 		--signal-store "$(CURDIR)/$(BUILD_DIR)/sessions/request-signals.jsonl" \
 		--artifacts "$(CURDIR)/$(BUILD_DIR)/sessions/artifacts"
 
-live: app-build broker artifact-receiver
+# The launcher runs the debug backend and VM analyzer from target/debug, while
+# the app bundle carries release builds; build what the launcher runs.
+live: app-build broker artifact-receiver origin-trace-backend
 	./scripts/run-live-session.sh
 
 deob-benchmark: deob-worker-build

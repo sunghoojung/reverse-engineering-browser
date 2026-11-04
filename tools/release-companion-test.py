@@ -6,7 +6,6 @@ import json
 import os
 from pathlib import Path
 import plistlib
-import subprocess
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -64,19 +63,12 @@ class CompanionRelease(unittest.TestCase):
 
     def reject_publish(self):
         with patch.object(HELPER.PUBLISHER, "establish_tag") as establish, patch.object(
-            HELPER.subprocess, "run"
-        ) as command:
+            HELPER.PUBLISHER, "publish_verified"
+        ) as publish:
             with self.assertRaises((ValueError, zipfile.BadZipFile)):
                 HELPER.publish(self.root)
         establish.assert_not_called()
-        command.assert_not_called()
-
-    def remote_release(self):
-        return {"draft": False, "assets": [
-            {"name": name, "state": "uploaded", "size": (self.output / name).stat().st_size,
-             "digest": f"sha256:{HELPER.PUBLISHER.digest(self.output / name)}"}
-            for name in (HELPER.ARCHIVE, HELPER.PROVENANCE, HELPER.CHECKSUMS)
-        ]}
+        publish.assert_not_called()
 
     def test_prepare_binds_exact_source_run_archive_and_companion_limits(self):
         HELPER.prepare(self.root)
@@ -193,20 +185,16 @@ class CompanionRelease(unittest.TestCase):
     def test_publish_verifies_fresh_tag_and_exact_remote_assets_on_linux(self):
         HELPER.prepare(self.root)
         with patch.object(HELPER.PUBLISHER, "establish_tag") as establish, patch.object(
-            HELPER.PUBLISHER, "tag_commit", return_value=SHA
-        ) as tag, patch.object(HELPER.PUBLISHER, "api", return_value=self.remote_release()) as api, \
-                patch.object(HELPER.subprocess, "run") as command, \
-                patch.object(HELPER.platform, "system", return_value="Linux"):
+            HELPER.PUBLISHER, "publish_verified"
+        ) as publish, patch.object(HELPER.platform, "system", return_value="Linux"):
             HELPER.publish(self.root)
         establish.assert_called_once_with("v0.3.2", SHA, "workflow_dispatch")
-        tag.assert_called_once_with("v0.3.2")
-        api.assert_called_once_with("releases/tags/v0.3.2")
-        command.assert_called_once_with([
-            "gh", "release", "create", "v0.3.2", "--repo", HELPER.REPOSITORY,
-            *[str(self.output / name) for name in (HELPER.ARCHIVE, HELPER.PROVENANCE, HELPER.CHECKSUMS)],
-            "--verify-tag", "--target", SHA, "--title", "Origin Trace v0.3.2 (companion only)",
-            "--notes-file", str(self.output / HELPER.NOTES),
-        ], check=True)
+        names = (HELPER.ARCHIVE, HELPER.PROVENANCE, HELPER.CHECKSUMS)
+        publish.assert_called_once_with(
+            "v0.3.2", SHA, [self.output / name for name in names],
+            {name: ((self.output / name).stat().st_size, HELPER.PUBLISHER.digest(self.output / name))
+             for name in names},
+            "Origin Trace v0.3.2 (companion only)", self.output / HELPER.NOTES)
 
     def test_publish_requires_dispatch_and_same_run_attempt(self):
         HELPER.prepare(self.root)
@@ -260,50 +248,26 @@ class CompanionRelease(unittest.TestCase):
         notes.symlink_to(outside)
         self.reject_publish()
 
-    def test_existing_tag_or_release_never_creates_or_updates_release(self):
+    def test_existing_release_or_other_tag_never_creates_or_updates_release(self):
         HELPER.prepare(self.root)
-        for release, tag in [({"id": 1}, None), (None, SHA)]:
+        for release, tag in [({"id": 1}, None), (None, "b" * 40)]:
             with self.subTest(release=release, tag=tag), patch.object(
                 HELPER.PUBLISHER, "api", return_value=release
             ) as api, patch.object(HELPER.PUBLISHER, "tag_commit", return_value=tag), \
-                    patch.object(HELPER.subprocess, "run") as command:
+                    patch.object(HELPER.PUBLISHER, "publish_verified") as publish:
                 with self.assertRaises(ValueError):
                     HELPER.publish(self.root)
                 self.assertEqual(api.call_count, 1)
-                command.assert_not_called()
+                publish.assert_not_called()
 
-    def test_remote_missing_or_mismatched_assets_fail_after_single_create(self):
+    def test_rerun_adopts_its_own_tag_without_a_release(self):
         HELPER.prepare(self.root)
-        for failure in ("missing", "digest", "size", "draft"):
-            remote = self.remote_release()
-            if failure == "missing":
-                remote["assets"].pop()
-            elif failure == "draft":
-                remote["draft"] = True
-            else:
-                remote["assets"][0][failure] = "wrong" if failure == "digest" else 0
-            with self.subTest(failure=failure), patch.object(HELPER.PUBLISHER, "establish_tag"), \
-                    patch.object(HELPER.PUBLISHER, "tag_commit", return_value=SHA), \
-                    patch.object(HELPER.PUBLISHER, "api", return_value=remote), \
-                    patch.object(HELPER.subprocess, "run") as command:
-                with self.assertRaises(ValueError):
-                    HELPER.publish(self.root)
-                command.assert_called_once()
-
-    def test_changed_remote_tag_and_create_failure_are_not_retried(self):
-        HELPER.prepare(self.root)
-        with patch.object(HELPER.PUBLISHER, "establish_tag"), patch.object(
-            HELPER.PUBLISHER, "tag_commit", return_value="b" * 40
-        ), patch.object(HELPER.subprocess, "run") as command:
-            with self.assertRaises(ValueError):
-                HELPER.publish(self.root)
-            command.assert_called_once()
-        with patch.object(HELPER.PUBLISHER, "establish_tag"), patch.object(
-            HELPER.subprocess, "run", side_effect=subprocess.CalledProcessError(1, "gh")
-        ) as command:
-            with self.assertRaises(subprocess.CalledProcessError):
-                HELPER.publish(self.root)
-            command.assert_called_once()
+        with patch.object(HELPER.PUBLISHER, "api", return_value=None) as api, patch.object(
+            HELPER.PUBLISHER, "tag_commit", return_value=SHA
+        ), patch.object(HELPER.PUBLISHER, "publish_verified") as publish:
+            HELPER.publish(self.root)
+        api.assert_called_once_with("releases/tags/v0.3.2")
+        publish.assert_called_once()
 
 
 if __name__ == "__main__":

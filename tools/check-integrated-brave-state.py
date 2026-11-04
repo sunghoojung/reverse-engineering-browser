@@ -11,8 +11,16 @@ import subprocess
 import sys
 import tempfile
 
-from brave_patch_contract import monitored_paths, patch_paths, patch_projection
+from brave_patch_contract import (monitored_paths, patch_paths, patch_projection, stack_plan,
+                                  verify_ownership, worktree_entries)
 from brave_patch_advance import OWNERS, atomic_source, digest, exclusive_source_update, prepare_single_file, preserve_blob, stacks
+
+
+# The wrapper names each mutating phase here before it starts, so a rerun can
+# tell an interrupted phase from an unexplained edit and resume it.
+PHASES = ("init", "sync", "prepare")
+OVERLAY = Path("browser/integration/brave/overlay")
+INIT_PATCHES = Path("browser/integration/brave/patches/init")
 
 
 def git(directory, *arguments):
@@ -21,7 +29,7 @@ def git(directory, *arguments):
     )
 
 
-def pristine_unborn_brave(directory):
+def pristine_unborn_brave(directory, pin):
     git_directory = directory / ".git"
     if not git_directory.is_dir() or git_directory.is_symlink():
         return False
@@ -43,7 +51,11 @@ def pristine_unborn_brave(directory):
         raise ValueError("Unexpected Git hook/monitor/include configuration; inspect it before initialization")
     if configuration.returncode != 1:
         raise ValueError("Cannot verify Git configuration before initialization")
-    if git(directory, "ls-files", "-z") or git(directory, "for-each-ref", "--format=%(refname)"):
+    # Bootstrap fetches a pinned release tag before its checkout, so an
+    # interrupted bootstrap can leave that one ref and nothing else.
+    tag = pin if pin.startswith("refs/tags/") else f"refs/tags/{pin}"
+    if git(directory, "ls-files", "-z") or git(directory, "for-each-ref", "--format=%(refname)").split() not in (
+            [], [tag.encode()]):
         return False
     if not git(directory, "symbolic-ref", "-q", "HEAD").startswith(b"refs/heads/"):
         return False
@@ -72,7 +84,7 @@ def snapshot(directory, pin, overlays=(), allow_unborn=False, excluded=()):
     try:
         actual = git(directory, "rev-parse", "--verify", "HEAD^{commit}").strip()
     except subprocess.CalledProcessError:
-        if allow_unborn and pristine_unborn_brave(directory):
+        if allow_unborn and pristine_unborn_brave(directory, pin):
             return None  # Bootstrap may safely finish its empty, official-remote checkout.
         raise ValueError(f"Uninitialized or partial upstream checkout is not safely reusable: {directory}") from None
     expected = git(directory, "rev-parse", f"{pin}^{{commit}}").strip()
@@ -169,7 +181,7 @@ def repeat_reserve_kib(output):
     return max(50 * 1024 * 1024, int(result[0]))
 
 
-def source_states(repository, brave, require_clean=False, excluded=()):
+def source_states(repository, brave, require_clean=False, excluded=(), initializing=False):
     roots = (brave, brave.parent, brave.parent / "v8")
     pins = ("brave-core", "chromium", "v8")
     monitored = monitored_paths(repository)
@@ -178,15 +190,138 @@ def source_states(repository, brave, require_clean=False, excluded=()):
         pin = (repository / "browser/config" / f"{name}.rev").read_text().strip()
         if directory.is_symlink():
             raise ValueError(f"Symlinked upstream checkout: {directory}")
-        if name == "chromium" and not (directory / ".git").exists():
-            if directory.exists() and any(path.name != "brave" for path in directory.iterdir()):
-                raise ValueError(f"Nonempty Chromium path is not a checkout: {directory}")
+        try:
+            if name == "chromium" and not (directory / ".git").exists():
+                if directory.exists() and any(path.name != "brave" for path in directory.iterdir()):
+                    raise ValueError(f"Nonempty Chromium path is not a checkout: {directory}")
+                states[name] = None
+            else:
+                states[name] = snapshot(directory, pin, sorted(monitored[name]),
+                                        allow_unborn=name == "brave-core" and require_clean,
+                                        excluded=tuple(path for owner, path in excluded if owner == name))
+        except (ValueError, subprocess.CalledProcessError):
+            # An interrupted initialization owns Chromium and V8 while Brave's
+            # init downloads them; it was admitted only from absent or clean trees.
+            if not initializing or name == "brave-core":
+                raise
             states[name] = None
-        else:
-            states[name] = snapshot(directory, pin, sorted(monitored[name]),
-                                    allow_unborn=name == "brave-core" and require_clean,
-                                    excluded=tuple(path for owner, path in excluded if owner == name))
     return states
+
+
+def owner_roots(brave):
+    return {"brave-core": brave, "chromium": brave.parent, "v8": brave.parent / "v8"}
+
+
+def pending_path(receipt):
+    return receipt.with_name("integrated-brave-pending.json")
+
+
+def read_pending(receipt):
+    path = pending_path(receipt)
+    if path.is_symlink():
+        raise ValueError(f"Symlinked build intent {path}; preserve it and inspect")
+    if not path.exists():
+        return None
+    value = json.loads(path.read_text())
+    if (not isinstance(value, dict) or value.get("version") != 1 or value.get("phase") not in PHASES
+            or not isinstance(value.get("integration"), str) or not isinstance(value.get("brave"), str)):
+        raise ValueError(f"Malformed build intent {path}; preserve it and inspect")
+    return value
+
+
+def file_entry(path):
+    if path.is_symlink() or (path.exists() and not path.is_file()):
+        raise ValueError(f"Non-file overlay destination: {path}")
+    if not path.exists():
+        return None
+    return f"{stat.S_IMODE(path.stat().st_mode):o} {file_digest(path)}"
+
+
+def sync_owned(repository):
+    """Every path the sync writes: overlays, patch destinations and the Siso copy."""
+    owned = monitored_paths(repository)
+    return tuple((owner, path) for owner in sorted(owned) for path in sorted(owned[owner]))
+
+
+def sync_intent(repository, brave):
+    roots = owner_roots(brave)
+    patched = {}
+    for owner, patches in stacks(repository).items():
+        if patches:
+            verify_ownership(roots[owner], patches)
+            patched[owner] = stack_plan(roots[owner], patches)[1]
+    overlay = repository / OVERLAY
+    overlays = {
+        str(path.relative_to(overlay)): {"before": file_entry(brave / path.relative_to(overlay)),
+                                         "after": file_entry(path)}
+        for path in sorted(overlay.rglob("*")) if path.is_file()
+    }
+    return {"unaffected": source_states(repository, brave, excluded=sync_owned(repository)),
+            "patched": patched, "overlays": overlays}
+
+
+def resume_sync(repository, brave, pending):
+    if source_states(repository, brave, excluded=sync_owned(repository)) != pending["unaffected"]:
+        raise ValueError("Paths outside REB overlays and patch destinations changed after the "
+                         "interrupted sync began")
+    for relative, entry in pending["overlays"].items():
+        if file_entry(brave / relative) not in (entry["before"], entry["after"]):
+            raise ValueError(f"Overlay destination {relative} holds neither its pre-sync nor its "
+                             "overlay content")
+    return "integration sync; the stack resumes from its applied prefix"
+
+
+def verify_sync(repository, brave, pending):
+    if source_states(repository, brave, excluded=sync_owned(repository)) != pending["unaffected"]:
+        raise ValueError("Paths outside REB overlays and patch destinations changed during sync")
+    roots = owner_roots(brave)
+    for owner, expected in pending["patched"].items():
+        actual = worktree_entries(roots[owner], [Path(path) for path in expected])
+        differing = [path for path in expected if actual[path] != expected[path]]
+        if differing:
+            raise ValueError(f"Synchronized {owner} files differ from the planned stack result: "
+                             + ", ".join(differing[:5]))
+    for relative, entry in pending["overlays"].items():
+        if file_entry(brave / relative) != entry["after"]:
+            raise ValueError(f"Overlay destination differs from its source after sync: {relative}")
+
+
+def changed_entries(directory):
+    """Content of every modified, deleted or untracked path in one checkout."""
+    status = git(directory, "status", "--porcelain=v1", "-z", "--untracked-files=all", "--no-renames")
+    paths = sorted({Path(os.fsdecode(record[3:])) for record in status.split(b"\0") if record})
+    return worktree_entries(directory, paths)
+
+
+def resume_prepare(repository, brave, pending, states):
+    for name in ("brave-core", "v8"):
+        if states[name] != pending["before"][name]:
+            raise ValueError(f"{name} changed after the interrupted Brave preparation began")
+    chromium = brave.parent
+    now, recorded = changed_entries(chromium), pending["chromium"]
+    changed = sorted(path for path in set(now) | set(recorded) if now.get(path) != recorded.get(path))
+    owned = {str(path) for path in monitored_paths(repository)["chromium"]}
+    # Preparation copies Brave-core branding and policy files into Chromium.
+    # Admit a changed Chromium path only when it holds exactly such a copy.
+    sources = {line.split()[1] for line in git(brave, "ls-files", "-s").decode().splitlines()}
+    sources.update(entry.split()[1] for entry in changed_entries(brave).values() if entry)
+    for path in changed:
+        if path in owned or now.get(path) is None or now[path].split()[1] not in sources:
+            raise ValueError(f"Chromium path {path} changed after preparation began and is not a "
+                             "copy of a Brave-core file")
+    return f"Brave preparation; {len(changed)} Chromium path(s) hold Brave-core copies so far"
+
+
+def resume_init(repository, brave):
+    if not brave.exists():
+        return "Brave initialization"
+    pin = (repository / "browser/config/brave-core.rev").read_text().strip()
+    owned = (*patch_paths(sorted((repository / INIT_PATCHES).glob("*.patch"))), Path(".env"))
+    state = snapshot(brave, pin, sorted(monitored_paths(repository)["brave-core"]),
+                     allow_unborn=True, excluded=owned)
+    if state is not None and state["dirty"]:
+        raise ValueError("Brave-core has changes beyond its pre-initialization patches")
+    return "Brave initialization; Chromium and V8 continue downloading"
 
 
 def adopt_known_inputs(args, identity):
@@ -295,9 +430,14 @@ def advance_known_patch(args, identity):
     audit = json.loads(audit_path.read_text()) if audit_path.exists() else None
     if audit is not None and (not isinstance(audit, dict) or audit.get("request") != request):
         raise ValueError("An audit from another operation exists; preserve it separately")
+    if audit is not None and audit.get("status") == "needs_review":
+        # A concurrent unknown edit was preserved. Only a person can explain
+        # it; a rerun must not proceed just because the file looks familiar.
+        raise ValueError("A previous patch advancement needs review: an unknown edit to its "
+                         "destination was preserved. Inspect it, then move the audit aside")
     if audit is not None:
         plan = audit.get("file")
-        if (audit.get("status") not in ("prepared", "complete", "rolled_back", "needs_review") or
+        if (audit.get("status") not in ("prepared", "complete", "rolled_back") or
                 not isinstance(plan, dict) or not isinstance(plan.get("relative"), str) or
                 not isinstance(plan.get("mode"), int) or not 0 <= plan["mode"] <= 0o777 or
                 not isinstance(audit.get("unaffected_upstream"), dict) or
@@ -387,24 +527,76 @@ def advance_known_patch(args, identity):
     return True
 
 
+def guards_checkout(receipt, brave):
+    """Whether a source receipt or build intent already records this Brave checkout."""
+    for path in (receipt, pending_path(receipt)):
+        if path.is_symlink():
+            raise ValueError(f"Symlinked source receipt or build intent: {path}")
+        if path.exists():
+            value = json.loads(path.read_text())
+            if isinstance(value, dict) and value.get("brave") == brave:
+                return True
+    return False
+
+
+def verify_reusable(args, identity, pending):
+    """Admit clean checkouts, the recorded state, or an interrupted recorded phase."""
+    states = identity["upstream"]
+    if not any(value and value["dirty"] for value in states.values()):
+        return
+    phase = pending["phase"] if pending else None
+    if args.require_clean:
+        if phase == "init":
+            print("Resuming interrupted " + resume_init(args.repository, args.brave))
+            return
+        raise ValueError("--init requires clean upstream checkouts; omit --init for a recorded build")
+    previous = json.loads(args.receipt.read_text()) if args.receipt.exists() else None
+    if previous == identity:
+        return
+    if phase == "sync":
+        print("Resuming interrupted " + resume_sync(args.repository, args.brave, pending))
+        return
+    if phase == "prepare":
+        print("Resuming interrupted " + resume_prepare(args.repository, args.brave, pending, states))
+        return
+    if phase == "init":
+        raise ValueError("Brave initialization was interrupted; rerun with --init to resume it")
+    raise ValueError("Upstream edits differ from this integration's recorded sync state")
+
+
 def main():
     parser = argparse.ArgumentParser(description=(__doc__ + " advance-patch explicitly updates one recorded source file after ordered patch preflight."))
-    parser.add_argument("mode", choices=("check", "record", "reserve", "complete", "adopt", "advance-patch"))
+    parser.add_argument("mode", choices=("check", "begin", "record", "reserve", "complete", "guarded",
+                                         "adopt", "advance-patch"))
     parser.add_argument("--brave", type=Path, required=True)
     parser.add_argument("--repository", type=Path, required=True)
     parser.add_argument("--receipt", type=Path, required=True)
     parser.add_argument("--require-clean", action="store_true")
+    parser.add_argument("--phase", choices=PHASES)
     parser.add_argument("--previous-repository", type=Path)
     parser.add_argument("--previous-receipt", type=Path)
     args = parser.parse_args()
     if args.mode not in ("adopt", "advance-patch") and (args.previous_repository is not None or args.previous_receipt is not None):
         parser.error("Previous-source options apply only to adopt or advance-patch")
-    states = source_states(args.repository, args.brave, args.require_clean)
-    identity = {
-        "integration": git(args.repository, "rev-parse", "HEAD").decode().strip(),
-        "brave": str(args.brave.resolve()),
-        "upstream": states,
-    }
+    if (args.phase is None) == (args.mode == "begin"):
+        parser.error("begin requires --phase, which applies only to begin")
+    if args.mode == "begin" and (args.phase == "init") != args.require_clean:
+        parser.error("begin --phase init, and only it, requires --require-clean")
+    integration = git(args.repository, "rev-parse", "HEAD").decode().strip()
+    brave = str(args.brave.resolve())
+    if args.mode == "guarded":
+        print(json.dumps(guards_checkout(args.receipt, brave)))
+        return
+    pending = read_pending(args.receipt)
+    if pending is not None and (pending["integration"], pending["brave"]) != (integration, brave):
+        pending = None  # Another integration's intent proves nothing about this one.
+    if (pending and pending["phase"] == "init" and not args.require_clean
+            and args.mode in ("check", "begin", "reserve")):
+        raise ValueError("Brave initialization was interrupted; rerun "
+                         "./scripts/build-integrated-brave.sh --init to resume it")
+    initializing = bool(args.require_clean and pending and pending["phase"] == "init")
+    states = source_states(args.repository, args.brave, args.require_clean, initializing=initializing)
+    identity = {"integration": integration, "brave": brave, "upstream": states}
     completion_receipt = args.receipt.with_name("integrated-brave-complete.json")
     if args.mode == "advance-patch":
         with exclusive_source_update(args.brave):
@@ -443,13 +635,26 @@ def main():
             write_receipt(completion_receipt,
                           {"source": identity, "output": completed_output(args.brave)})
         else:
+            if pending and pending["phase"] == "sync":
+                verify_sync(args.repository, args.brave, pending)
             write_receipt(args.receipt, identity)
-    elif any(value and value["dirty"] for value in states.values()):
-        if args.require_clean:
-            raise ValueError("--init requires clean upstream checkouts; omit --init for a recorded build")
-        previous = json.loads(args.receipt.read_text()) if args.receipt.exists() else None
-        if previous != identity:
-            raise ValueError("Upstream edits differ from this integration's recorded sync state")
+            if pending:
+                pending_path(args.receipt).unlink()
+    else:
+        verify_reusable(args, identity, pending)
+    if args.mode == "begin":
+        if git(args.repository, "status", "--porcelain", "--untracked-files=all"):
+            raise ValueError("The integration checkout has uncommitted changes, and a recorded Brave "
+                             "checkout admits only committed integration states. Commit them, or "
+                             "synchronize a separate Brave checkout")
+        intent = {"version": 1, "phase": args.phase, "integration": integration, "brave": brave}
+        if args.phase != "init" and any(value is None for value in states.values()):
+            raise ValueError("Cannot record incomplete upstream checkouts")
+        if args.phase == "sync":
+            intent.update(sync_intent(args.repository, args.brave))
+        elif args.phase == "prepare":
+            intent.update(before=states, chromium=changed_entries(args.brave.parent))
+        write_receipt(pending_path(args.receipt), intent)
     print(f"Upstream state {args.mode} passed")
 
 

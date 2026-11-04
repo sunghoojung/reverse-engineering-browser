@@ -500,9 +500,19 @@ stop_artifact_receiver() {
 }
 
 cleanup() {
+  local job_pid
+  local unrecorded=()
   echo "Live session cleanup started: browser=${brave_pid:-none} analyzer=${analyzer_pid:-none} broker=${broker_pid:-none} artifacts=${artifact_receiver_pid:-none} backend=${ui_pid:-none}" >&2
+  # A signal can arrive after a helper starts but before its PID is saved. The
+  # job table already holds that helper, so stop every unrecorded job as well.
+  for job_pid in $(jobs -p); do
+    case " ${brave_pid} ${analyzer_pid} ${broker_pid} ${artifact_receiver_pid} ${ui_pid} " in
+      *" ${job_pid} "*) ;;
+      *) unrecorded+=("${job_pid}") ;;
+    esac
+  done
   stop_processes 100 "${brave_pid}" "${analyzer_pid}" "${broker_pid}" \
-    "${artifact_receiver_pid}" "${ui_pid}"
+    "${artifact_receiver_pid}" "${ui_pid}" ${unrecorded[@]+"${unrecorded[@]}"}
   artifact_receiver_pid=""
   if [[ -S "${socket_path}" ]]; then
     rm -f "${socket_path}"
@@ -825,7 +835,11 @@ echo "Capture transport: native only"
 echo "Close Brave to stop this capture session."
 
 if [[ "${embedded_session}" == 1 ]]; then
-  while kill -0 "${session_owner_pid}" 2>/dev/null; do
+  # A PID is reused once its process exits, so the owner is the process with
+  # this PID and this start time.
+  session_owner_started="$(/bin/ps -o lstart= -p "${session_owner_pid}" 2>/dev/null || true)"
+  while [[ -n "${session_owner_started}" &&
+           "$(/bin/ps -o lstart= -p "${session_owner_pid}" 2>/dev/null || true)" == "${session_owner_started}" ]]; do
     if ! kill -0 "${brave_pid}" 2>/dev/null; then
       fail_live_session 1 "Brave stopped; the live capture connection has closed. See: ${brave_log}"
     fi
@@ -840,6 +854,23 @@ else
   wait "${brave_pid}"
   brave_pid=""
   stop_artifact_receiver
+  # The broker accepts one browser connection and finishes when it closes. A
+  # Brave that exits without connecting, for example after handing this launch
+  # to a Brave already running with the same profile, would leave the broker
+  # waiting for the whole capture duration. A connected broker drains well
+  # within this bound; one still waiting is asked to stop.
+  for _ in {1..200}; do
+    if ! kill -0 "${broker_pid}" 2>/dev/null; then
+      break
+    fi
+    sleep 0.05
+  done
+  if kill -0 "${broker_pid}" 2>/dev/null; then
+    kill -USR1 "${broker_pid}" 2>/dev/null || true
+    wait "${broker_pid}" || true
+    broker_pid=""
+    fail_live_session 1 "Brave exited, but the event broker was still waiting for its capture connection, so this session recorded no browser evidence. A Brave already running with this profile may have taken the launch; quit it or use a separate REB_BRAVE_PROFILE. See: ${brave_log}"
+  fi
   wait "${broker_pid}"
   broker_pid=""
 fi

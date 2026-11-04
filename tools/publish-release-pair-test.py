@@ -7,9 +7,10 @@ import os
 from pathlib import Path
 import plistlib
 import re
+import subprocess
 import tempfile
 import unittest
-from unittest.mock import call, patch
+from unittest.mock import Mock, call, patch
 from urllib.error import HTTPError
 
 
@@ -39,6 +40,9 @@ class Publication(unittest.TestCase):
             HELPER.verify_assets({"draft": False, "assets": []}, {"pair.zip": (12, "abc")})
         with self.assertRaises(ValueError):
             HELPER.verify_assets({**valid, "draft": True}, {"pair.zip": (12, "abc")})
+        HELPER.verify_assets({**valid, "draft": True}, {"pair.zip": (12, "abc")}, draft=True)
+        with self.assertRaises(ValueError):
+            HELPER.verify_assets(valid, {"pair.zip": (12, "abc")}, draft=True)
 
     def test_only_get_404_means_absence(self):
         for method, status in [("GET", 404), ("GET", 401), ("GET", 403),
@@ -70,9 +74,14 @@ class Publication(unittest.TestCase):
                 HELPER.establish_tag(TAG, SHA, "workflow_dispatch")
         self.assertEqual(api.call_count, 1)
 
-    def test_existing_dispatch_tag_is_never_adopted(self):
+    def test_dispatch_adopts_only_a_tag_naming_the_tested_source(self):
         with patch.object(HELPER, "api", return_value=None) as api, patch.object(
             HELPER, "tag_commit", return_value=SHA
+        ):
+            HELPER.establish_tag(TAG, SHA, "workflow_dispatch")
+        self.assertEqual(api.call_args_list, [call(f"releases/tags/{TAG}")])
+        with patch.object(HELPER, "api", return_value=None) as api, patch.object(
+            HELPER, "tag_commit", return_value="b" * 40
         ):
             with self.assertRaises(ValueError):
                 HELPER.establish_tag(TAG, SHA, "workflow_dispatch")
@@ -105,6 +114,114 @@ class Publication(unittest.TestCase):
                     with self.assertRaises(ValueError):
                         HELPER.establish_tag(TAG, SHA, "push")
                 self.assertEqual(api.call_args_list, [call(f"releases/tags/{TAG}")])
+
+
+class FakeGitHub:
+    """Release endpoints with drafts, as the publication helper uses them."""
+
+    def __init__(self, expected, damage=None):
+        self.expected, self.damage = expected, damage
+        self.releases, self.calls, self.next_id = [], [], 1
+
+    def release(self, title, draft=True, target=SHA):
+        release = {"id": self.next_id, "tag_name": TAG, "name": title, "draft": draft,
+                   "target_commitish": target, "assets": [
+                       {"name": name, "state": "uploaded", "size": size, "digest": f"sha256:{checksum}"}
+                       for name, (size, checksum) in self.expected.items()]}
+        self.next_id += 1
+        self.releases.append(release)
+        return release
+
+    def api(self, path, method="GET", data=None):
+        self.calls.append((method, path))
+        if path.startswith("releases?"):
+            return [dict(release) for release in self.releases]
+        if path == f"releases/tags/{TAG}":
+            return next((release for release in self.releases if not release["draft"]), None)
+        identifier = int(path.split("/")[1])
+        release = next(release for release in self.releases if release["id"] == identifier)
+        if method == "DELETE":
+            self.releases.remove(release)
+            return None
+        release.update(data)
+        return release
+
+    def run(self, command, check):
+        title = command[command.index("--title") + 1]
+        release = self.release(title)
+        if self.damage:
+            release["assets"][0]["digest"] = "sha256:damaged"
+
+
+class DraftPublication(unittest.TestCase):
+    expected = {"pair.zip": (12, "abc"), f"SHA256SUMS-{TAG}.txt": (64, "def")}
+    title = f"Origin Trace + Brave {TAG}"
+
+    def publish(self, github, tag_commit=SHA):
+        with patch.object(HELPER, "api", side_effect=github.api), patch.object(
+            HELPER.subprocess, "run", side_effect=github.run
+        ) as command, patch.object(HELPER, "tag_commit", return_value=tag_commit):
+            try:
+                HELPER.publish_verified(TAG, SHA, [Path("pair.zip")], self.expected, self.title,
+                                        Path("release-notes.md"))
+            finally:
+                self.command = command
+
+    def test_verified_draft_is_published(self):
+        github = FakeGitHub(self.expected)
+        self.publish(github)
+        self.assertIn("--draft", self.command.call_args.args[0])
+        self.assertEqual([release["draft"] for release in github.releases], [False])
+
+    def test_damaged_upload_is_deleted_before_publication(self):
+        github = FakeGitHub(self.expected, damage=True)
+        with self.assertRaises(ValueError):
+            self.publish(github)
+        self.assertEqual(github.releases, [])
+        self.assertNotIn(("PATCH", "releases/1"), github.calls)
+
+    def test_moved_tag_withdraws_nothing_it_did_not_publish(self):
+        github = FakeGitHub(self.expected)
+        with self.assertRaises(ValueError):
+            self.publish(github, tag_commit="b" * 40)
+        self.assertEqual(github.releases, [])
+
+    def test_failed_published_check_withdraws_to_a_draft(self):
+        github = FakeGitHub(self.expected)
+        original = github.api
+
+        def lose_asset(path, method="GET", data=None):
+            result = original(path, method, data)
+            if path == f"releases/tags/{TAG}" and result:
+                result = {**result, "assets": result["assets"][:1]}
+            return result
+
+        github.api = lose_asset
+        with self.assertRaises(ValueError):
+            self.publish(github)
+        self.assertEqual([release["draft"] for release in github.releases], [True])
+
+    def test_create_failure_is_not_retried_or_published(self):
+        github = FakeGitHub(self.expected)
+        github.run = Mock(side_effect=subprocess.CalledProcessError(1, "gh"))
+        with self.assertRaises(subprocess.CalledProcessError):
+            self.publish(github)
+        self.command.assert_called_once()
+        self.assertFalse([entry for entry in github.calls if entry[0] != "GET"])
+
+    def test_rerun_replaces_only_its_own_interrupted_draft(self):
+        github = FakeGitHub(self.expected)
+        github.release(self.title)
+        self.publish(github)
+        self.assertEqual([release["draft"] for release in github.releases], [False])
+        for other in ({"title": "Someone else's draft"}, {"title": self.title, "target": "b" * 40}):
+            with self.subTest(other=other):
+                github = FakeGitHub(self.expected)
+                github.release(**other)
+                with self.assertRaises(ValueError):
+                    self.publish(github)
+                self.command.assert_not_called()
+                self.assertEqual(len(github.releases), 1)
 
 
 class Admission(unittest.TestCase):
@@ -140,25 +257,21 @@ class Admission(unittest.TestCase):
     def run_main(self):
         with patch.dict(os.environ, self.environment, clear=True), patch.object(
             HELPER, "establish_tag"
-        ) as establish, patch.object(HELPER.subprocess, "run") as command, patch.object(
-            HELPER, "tag_commit", return_value=SHA
-        ), patch.object(HELPER, "api") as api, patch.object(HELPER, "verify_assets") as verify:
+        ) as establish, patch.object(HELPER, "publish_verified") as publish:
             try:
                 HELPER.main()
             finally:
-                self.calls = establish, command, api, verify
+                self.calls = establish, publish
 
     def test_reviewed_pair_publishes_exact_assets(self):
         self.run_main()
-        establish, command, api, verify = self.calls
+        establish, publish = self.calls
         establish.assert_called_once_with(TAG, SHA, "workflow_dispatch")
-        arguments = command.call_args.args[0]
-        self.assertEqual(arguments[:6], ["gh", "release", "create", TAG, "--repo", HELPER.REPOSITORY])
-        published = [Path(argument).name for argument in arguments[6:arguments.index("--verify-tag")]]
-        self.assertEqual(published, sorted(self.names) + [f"SHA256SUMS-{TAG}.txt"])
-        self.assertEqual(arguments[-1], str(self.directory / "release-notes.md"))
-        api.assert_called_once_with(f"releases/tags/{TAG}")
-        verify.assert_called_once()
+        tag, source, assets, expected, title, notes = publish.call_args.args
+        self.assertEqual((tag, source, title), (TAG, SHA, f"Origin Trace + Brave {TAG}"))
+        self.assertEqual([path.name for path in assets], sorted(self.names) + [f"SHA256SUMS-{TAG}.txt"])
+        self.assertEqual(set(expected), {path.name for path in assets})
+        self.assertEqual(notes, self.directory / "release-notes.md")
 
     def test_other_tags_and_assets_stop_before_any_publication(self):
         cases = [("tag", "v0.3.1"), ("tag", "v0.5.1"), ("event", "pull_request"),

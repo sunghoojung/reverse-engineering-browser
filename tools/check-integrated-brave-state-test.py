@@ -256,6 +256,13 @@ class StateGuards(unittest.TestCase):
         audit = json.loads(receipt.with_name("integrated-brave-patch-advance.json").read_text())
         self.assertEqual(audit["status"], "needs_review")
         self.assertFalse(receipt.exists())
+        # Restoring familiar bytes does not explain the preserved edit.
+        (self.chromium / "tracked.txt").write_text("second\n")
+        result = self.advance(current, receipt)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("needs review", result.stdout)
+        self.assertEqual((self.chromium / "tracked.txt").read_text(), "second\n")
+        self.assertFalse(receipt.exists())
 
     def test_patch_advance_serializes_checkout_updates(self):
         from brave_patch_advance import exclusive_source_update
@@ -263,7 +270,7 @@ class StateGuards(unittest.TestCase):
         with exclusive_source_update(self.brave):
             result = self.advance(current, receipt)
             self.assertNotEqual(result.returncode, 0)
-            self.assertIn("Another patch advancement", result.stdout)
+            self.assertIn("patch advancement holds", result.stdout)
             self.assertEqual((self.chromium / "tracked.txt").read_text(), "second\n")
         self.assertEqual(self.advance(current, receipt).returncode, 0)
 
@@ -333,6 +340,26 @@ class StateGuards(unittest.TestCase):
         destination.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(patch, destination)
 
+    def commit_service_patch_result(self):
+        """Make the fixture's pinned Brave already hold the staged service patch."""
+        patch = self.repo / "browser/integration/brave/patches/0014-disable-bundled-consumer-services.patch"
+        contents, target = {}, None
+        for line in patch.read_text().splitlines(keepends=True):
+            if line.startswith("diff --git "):
+                target = None
+            elif line.startswith("+++ b/"):
+                target = line[6:].strip()
+                contents[target] = ""
+            elif target and line.startswith((" ", "+")):
+                contents[target] += line[1:]
+        for relative, content in contents.items():
+            path = self.brave / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(content)
+        git(self.brave, "add", "-A")
+        git(self.brave, "commit", "-qm", "service patch result")
+        (self.repo / "browser/config/brave-core.rev").write_text(git(self.brave, "rev-parse", "HEAD"))
+
     def wrapper(self, overrides=None, initialize=False, expect_bootstrap=False):
         scripts = self.repo / "scripts"
         scripts.mkdir(exist_ok=True)
@@ -348,7 +375,8 @@ class StateGuards(unittest.TestCase):
         shutil.copyfile(HELPER.with_name("brave_patch_advance.py"), helper_dir / "brave_patch_advance.py")
         self.stage_bundled_service_gate()
         git(self.repo, "add", "scripts", "tools", "browser")
-        git(self.repo, "commit", "-qm", "wrapper fixture")
+        if git(self.repo, "status", "--porcelain"):
+            git(self.repo, "commit", "-qm", "wrapper fixture")
         mocks = self.root / "bin"
         mocks.mkdir(exist_ok=True)
         values = {
@@ -506,6 +534,7 @@ class StateGuards(unittest.TestCase):
         shutil.copyfile(HELPER.with_name("brave_patch_contract.py"), helper_dir / "brave_patch_contract.py")
         shutil.copyfile(HELPER.with_name("brave_patch_advance.py"), helper_dir / "brave_patch_advance.py")
         self.stage_bundled_service_gate()
+        self.commit_service_patch_result()
         output = self.chromium / "out/Component_arm64"
         executable = output / "Brave Browser.app/Contents/MacOS/Brave Browser"
         phases = self.root / "phases"
@@ -524,7 +553,9 @@ class StateGuards(unittest.TestCase):
         )
         toolchain.chmod(0o755)
         sync = scripts / "sync-browser-integration.sh"
-        sync.write_text("#!/bin/sh\nexit 0\n")
+        # Its stack is already applied upstream; a sync then only copies overlays.
+        overlay = self.repo / "browser/integration/brave/overlay"
+        sync.write_text(f"#!/bin/sh\ncp -Rp {shlex.quote(str(overlay))}/. {shlex.quote(str(self.brave))}/\n")
         sync.chmod(0o755)
         demo = self.repo / "build/reb-event-demo"
         demo.parent.mkdir()
@@ -690,7 +721,8 @@ class StateGuards(unittest.TestCase):
         shutil.copyfile(HELPER.parent.parent / "scripts/sync-browser-integration.sh", scripts / "sync.sh")
         tools = self.repo / "tools"
         tools.mkdir()
-        shutil.copyfile(HELPER.with_name("brave_patch_contract.py"), tools / "brave_patch_contract.py")
+        for name in (HELPER.name, "brave_patch_contract.py", "brave_patch_advance.py"):
+            shutil.copyfile(HELPER.with_name(name), tools / name)
         patches = self.repo / "browser/integration/brave/patches"
         for folder, value in (("", "Brave"), ("chromium", "Chromium")):
             directory = patches / folder
@@ -738,6 +770,172 @@ class StateGuards(unittest.TestCase):
         self.assertIn("belongs to nested checkout", result.stderr)
         for root in (self.brave, self.chromium, self.v8):
             self.assertEqual((root / "tracked.txt").read_text(), "original\n")
+
+    def guarded_state(self, *arguments):
+        receipt = self.repo / "build/integrated-brave-state.json"
+        return subprocess.run([sys.executable, str(HELPER), *arguments, "--repository", str(self.repo),
+                               "--brave", str(self.brave), "--receipt", str(receipt)],
+                              capture_output=True, text=True, check=False)
+
+    def committed_sync_fixture(self):
+        sync = self.sync_fixture()
+        git(self.repo, "add", "-A")
+        git(self.repo, "commit", "-qm", "sync fixture")
+        return sync, self.repo / "build/integrated-brave-state.json"
+
+    def test_interrupted_sync_resumes_from_its_prefix_and_records(self):
+        sync, receipt = self.committed_sync_fixture()
+        self.assertEqual(self.guarded_state("begin", "--phase", "sync").returncode, 0)
+        # Interrupted after the first of two overlapping V8 patches.
+        git(self.v8, "apply", str(self.repo / "browser/integration/brave/patches/v8/0001.patch"))
+        self.assertIn("Resuming interrupted integration sync", self.guarded_state("check").stdout)
+        result = sync()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("Applied V8 patches 2 through 2 of 2", result.stdout)
+        self.assertEqual((self.v8 / "tracked.txt").read_text(), "second\ncontext\n")
+        self.assertFalse(receipt.with_name("integrated-brave-pending.json").exists())
+        self.assertEqual(json.loads(receipt.read_text())["integration"], git(self.repo, "rev-parse", "HEAD"))
+        self.assertEqual(self.guarded_state("check").returncode, 0)
+
+    def test_interrupted_sync_refuses_an_unrelated_edit(self):
+        sync, receipt = self.committed_sync_fixture()
+        self.assertEqual(self.guarded_state("begin", "--phase", "sync").returncode, 0)
+        git(self.v8, "apply", str(self.repo / "browser/integration/brave/patches/v8/0001.patch"))
+        private = self.chromium / "private.txt"
+        private.write_text("private edit\n")
+        result = sync()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("outside REB overlays", result.stderr)
+        self.assertEqual((self.v8 / "tracked.txt").read_text(), "first\ncontext\n")
+        self.assertEqual(private.read_text(), "private edit\n")
+        self.assertFalse(receipt.exists())
+
+    def test_sync_record_verifies_the_planned_result(self):
+        _, receipt = self.committed_sync_fixture()
+        self.assertEqual(self.guarded_state("begin", "--phase", "sync").returncode, 0)
+        patches = self.repo / "browser/integration/brave/patches"
+        for root, name in ((self.brave, "0001.patch"), (self.chromium, "chromium/0001.patch"),
+                           (self.v8, "v8/0001.patch"), (self.v8, "v8/0002.patch")):
+            git(root, "apply", str(patches / name))
+        (self.v8 / "added.txt").write_text("edited during sync\n")
+        result = self.guarded_state("record")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("differ from the planned stack result: added.txt", result.stderr)
+        self.assertFalse(receipt.exists())
+        self.assertTrue(receipt.with_name("integrated-brave-pending.json").exists())
+
+    def test_sync_refuses_an_out_of_order_stack_before_any_change(self):
+        sync = self.sync_fixture()
+        (self.repo / "browser/integration/brave/patches/chromium/0002.patch").write_text(
+            "diff --git a/late.txt b/late.txt\nnew file mode 100644\n--- /dev/null\n+++ b/late.txt\n"
+            "@@ -0,0 +1 @@\n+late\n")
+        git(self.chromium, "apply", str(self.repo / "browser/integration/brave/patches/chromium/0002.patch"))
+        result = sync()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("does not hold an ordered prefix", result.stderr)
+        for root in (self.brave, self.chromium, self.v8):
+            self.assertEqual((root / "tracked.txt").read_text(), "original\n")
+        self.assertFalse((self.v8 / "added.txt").exists())
+
+    def test_direct_sync_of_a_recorded_checkout_records_or_refuses(self):
+        sync, receipt = self.committed_sync_fixture()
+        self.assertEqual(sync().returncode, 0)
+        self.assertEqual(self.guarded_state("record").returncode, 0)
+        repeat = sync()
+        self.assertEqual(repeat.returncode, 0, repeat.stdout + repeat.stderr)
+        self.assertIn("Upstream state record passed", repeat.stdout)
+        self.assertEqual(self.guarded_state("check").returncode, 0)
+        (self.repo / "uncommitted.txt").write_text("work in progress\n")
+        dirty = sync()
+        self.assertNotEqual(dirty.returncode, 0)
+        self.assertIn("uncommitted changes", dirty.stderr)
+        (self.repo / "uncommitted.txt").unlink()
+        (self.repo / "browser/integration/brave/patches/chromium/0002.patch").write_text(
+            "diff --git a/late.txt b/late.txt\nnew file mode 100644\n--- /dev/null\n+++ b/late.txt\n"
+            "@@ -0,0 +1 @@\n+late\n")
+        git(self.repo, "add", "-A")
+        git(self.repo, "commit", "-qm", "new integration patch")
+        before = receipt.read_bytes()
+        changed = sync()
+        self.assertNotEqual(changed.returncode, 0)
+        self.assertIn("recorded sync state", changed.stderr)
+        self.assertFalse((self.chromium / "late.txt").exists())
+        self.assertEqual(receipt.read_bytes(), before)
+
+    def test_interrupted_preparation_resumes_only_over_brave_core_copies(self):
+        self.assertEqual(self.call("record").returncode, 0)
+        self.assertEqual(self.call("begin", "--phase", "prepare").returncode, 0)
+        copied = self.chromium / "branding.txt"
+        copied.write_bytes((self.brave / ".gitignore").read_bytes())
+        result = self.call()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("Resuming interrupted Brave preparation; 1 Chromium path", result.stdout)
+        (self.chromium / "tracked.txt").write_text("private edit\n")
+        result = self.call()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("tracked.txt changed after preparation began", result.stderr)
+        (self.chromium / "tracked.txt").write_text("original\n")
+        (self.v8 / "tracked.txt").write_text("private edit\n")
+        self.assertIn("v8 changed after", self.call().stderr)
+        self.assertEqual((self.v8 / "tracked.txt").read_text(), "private edit\n")
+
+    def test_interrupted_initialization_resumes_only_with_init(self):
+        upstream = self.brave
+        self.fresh_nested_brave()
+        self.brave.parent.mkdir(parents=True)
+        subprocess.check_call(["git", "clone", "-q", str(upstream), str(self.brave)])
+        init = self.repo / "browser/integration/brave/patches/init/0001-init.patch"
+        init.parent.mkdir(parents=True)
+        init.write_text("diff --git a/tracked.txt b/tracked.txt\n--- a/tracked.txt\n+++ b/tracked.txt\n"
+                        "@@ -1 +1 @@\n-original\n+initialized\n")
+        self.assertEqual(self.wrapper(initialize=True, expect_bootstrap=True).returncode, 91)
+        self.assertTrue(self.receipt.parent.joinpath("repository/build/integrated-brave-pending.json").exists())
+        # Bootstrap applied its pre-initialization patch before Brave init stopped.
+        git(self.brave, "apply", str(init))
+        (self.root / "bootstrap-admitted").unlink()
+        result = self.wrapper(initialize=True, expect_bootstrap=True)
+        self.assertIn("Resuming interrupted Brave initialization", result.stdout)
+        (self.root / "bootstrap-admitted").unlink()
+        self.assertIn("rerun ./scripts/build-integrated-brave.sh --init", self.wrapper().stderr)
+        (self.brave / "private.txt").write_text("private edit\n")
+        self.assertIn("beyond its pre-initialization patches",
+                      self.wrapper(initialize=True).stderr)
+        self.assertEqual((self.brave / "private.txt").read_text(), "private edit\n")
+
+    def test_pristine_unborn_brave_admits_its_fetched_pin_tag(self):
+        upstream = self.brave
+        pin = self.repo / "browser/config/brave-core.rev"
+        git(upstream, "tag", "v1.2.3")
+        pin.write_text("v1.2.3\n")
+        git(self.repo, "add", "browser")
+        git(self.repo, "commit", "-qm", "release pin")
+        self.make_pristine_unborn_brave()
+        git(self.brave, "fetch", "-q", str(upstream), "refs/tags/v1.2.3:refs/tags/v1.2.3")
+        self.assertEqual(self.call("check", "--require-clean").returncode, 0)
+        git(self.brave, "update-ref", "refs/tags/v9.9.9", git(self.brave, "rev-parse", "v1.2.3"))
+        self.assertNotEqual(self.call("check", "--require-clean").returncode, 0)
+
+    def test_wrapper_refuses_a_locked_workspace(self):
+        from brave_patch_advance import exclusive_source_update
+        with exclusive_source_update(self.brave):
+            self.assertIn("holds", self.wrapper().stderr)
+
+    def test_make_clean_keeps_integrated_receipts(self):
+        build = self.root / "clean-build"
+        (build / "obj").mkdir(parents=True)
+        (build / "obj/demo.o").write_text("object")
+        kept = ["integrated-brave-patch-before.bin", "integrated-brave-pending.json",
+                "integrated-brave-state.json"]
+        for name in kept:
+            (build / name).write_text(name)
+        command = ["make", "--no-print-directory", "-C", str(HELPER.parent.parent),
+                   f"BUILD_DIR={build}", "clean"]
+        subprocess.run(command, check=True, capture_output=True)
+        self.assertEqual(sorted(path.name for path in build.iterdir()), kept)
+        for name in kept:
+            (build / name).unlink()
+        subprocess.run(command, check=True, capture_output=True)
+        self.assertFalse(build.exists())
 
     def test_first_incomplete_and_unproven_build_disk_reserve(self):
         first = str(150 * 1024 * 1024)

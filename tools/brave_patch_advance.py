@@ -8,7 +8,7 @@ import stat
 import subprocess
 import tempfile
 
-from brave_patch_contract import patch_paths, verify_ownership
+from brave_patch_contract import lock_source, open_source_lock, patch_paths, verify_ownership
 
 
 OWNERS = (("brave-core", ""), ("chromium", "chromium"), ("v8", "v8"))
@@ -104,29 +104,33 @@ def preserve_blob(path, content):
         if path.read_bytes() != content:
             raise ValueError("Existing patch-advance backup differs; preserve it separately")
         return
-    with path.open("xb") as file:
+    # Publish only complete bytes: an interrupted write leaves a temporary file,
+    # never a partial backup that a rerun would have to refuse.
+    with tempfile.NamedTemporaryFile(dir=path.parent, prefix=".reb-patch-backup-", delete=False) as file:
+        temporary = Path(file.name)
         os.fchmod(file.fileno(), 0o600)
         file.write(content)
         file.flush()
         os.fsync(file.fileno())
+    try:
+        os.link(temporary, path)  # Never replaces a backup that appeared meanwhile.
+    except FileExistsError:
+        if path.is_symlink() or path.read_bytes() != content:
+            raise ValueError("Existing patch-advance backup differs; preserve it separately") from None
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 @contextmanager
 def exclusive_source_update(brave):
+    """Hold the workspace lock that integrated builds, syncs and bootstrap also take."""
     try:
-        import fcntl
+        import fcntl  # noqa: F401  # POSIX only.
     except ImportError:
         raise ValueError("Patch advancement requires POSIX file locking") from None
-    directory = Path(os.fsdecode(subprocess.check_output(
-        ["git", "-C", str(brave), "rev-parse", "--absolute-git-dir"]
-    )).strip())
-    descriptor = os.open(directory / "reb-source-advance.lock",
-                         os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+    descriptor = open_source_lock(brave)
     try:
-        try:
-            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            raise ValueError("Another patch advancement owns this checkout; wait for it to finish") from None
+        lock_source(brave, descriptor)
         yield
     finally:
         os.close(descriptor)

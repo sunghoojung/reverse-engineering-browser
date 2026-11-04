@@ -246,7 +246,7 @@ async function checkLiveSessionCleanup() {
   const failure = section('fail_live_session() {', '\nscript_dir=');
   const cleanup = section('broker_pid=""', '"${broker_binary}" --store');
   const analyzer = section('analyzer_log=', 'ui_arguments=(');
-  const monitor = section('if [[ "${embedded_session}" == 1 ]]; then\n  while kill', null);
+  const monitor = section('if [[ "${embedded_session}" == 1 ]]; then\n  # A PID is reused', null);
   const quote = value => `'${value.replaceAll("'", "'\\''")}'`;
   const temporary = await mkdtemp(join(tmpdir(), "origin-trace-cleanup-"));
   const helper = join(temporary, "helper.cjs");
@@ -260,7 +260,14 @@ process.on("SIGTERM", () => {
   writeFileSync(join(root, role + ".term"), String(Date.now()));
   if (!process.env.REB_CLEANUP_TEST_STUBBORN.split(",").includes(role)) process.exit(0);
 });
+// The broker's graceful stop request; Node would otherwise start its inspector.
+process.on("SIGUSR1", () => {
+  writeFileSync(join(root, role + ".usr1"), String(Date.now()));
+  process.exit(0);
+});
 writeFileSync(join(root, role + ".pid"), String(process.pid));
+// A Brave that hands its launch to another instance exits 0 on its own.
+if (role === "browser" && process.env.REB_CLEANUP_TEST_BROWSER_EXIT) setTimeout(() => process.exit(0), 500);
 setInterval(() => {}, 1000);
 `);
   await writeFile(worker, `#!/bin/sh\nexec ${quote(process.execPath)} ${quote(helper)} analyzer\n`, {mode: 0o700});
@@ -273,7 +280,9 @@ setInterval(() => {}, 1000);
     {name: "responsive-browser-exit", stubborn: [], signal: "browser", code: 1},
     {name: "shared-grace-and-analyzer-worker", stubborn: ["broker", "ui", "analyzer"], signal: "browser", code: 1},
     {name: "coordinator-cancellation", stubborn: [], signal: "coordinator", code: 143},
+    {name: "browser-exits-without-connecting", stubborn: [], signal: null, code: 1, embedded: 0, bound: 16000},
   ]) {
+    const embedded = scenario.embedded ?? 1;
     const directory = join(temporary, scenario.name);
     await mkdir(directory);
     const handshake = join(directory, "handshake");
@@ -287,7 +296,7 @@ store_path=${quote(join(directory, "events"))}
 socket_path=${quote(join(directory, "socket"))}
 artifact_socket_path=${quote(join(directory, "artifact-socket"))}
 session_handshake=${quote(handshake)}
-embedded_session=1
+embedded_session=${embedded}
 session_owner_pid=${process.pid}
 brave_log=${quote(join(directory, "brave.log"))}
 vm_analyzer=${quote(worker)}
@@ -303,7 +312,8 @@ touch "\${session_handshake}"
 ${monitor}`);
     const child = spawn("bash", [script], {
       detached: true,
-      env: {...process.env, REB_CLEANUP_TEST_ROOT: directory, REB_CLEANUP_TEST_STUBBORN: scenario.stubborn.join(",")},
+      env: {...process.env, REB_CLEANUP_TEST_ROOT: directory, REB_CLEANUP_TEST_STUBBORN: scenario.stubborn.join(","),
+        REB_CLEANUP_TEST_BROWSER_EXIT: embedded ? "" : "1"},
     });
     let output = "";
     for (const pipe of [child.stdout, child.stderr]) pipe.on("data", chunk => { output = (output + chunk).slice(-16384); });
@@ -330,10 +340,11 @@ ${monitor}`);
         }
       }
       const started = Date.now();
-      process.kill(scenario.signal === "browser" ? pids.browser : child.pid, "SIGTERM");
+      if (scenario.signal) process.kill(scenario.signal === "browser" ? pids.browser : child.pid, "SIGTERM");
+      const bound = scenario.bound ?? 8000;
       const result = await Promise.race([
         exit,
-        new Promise((_, reject) => { timer = setTimeout(() => reject(new Error(`${scenario.name} survived 8-second shutdown bound\n${output}`)), 8000); }),
+        new Promise((_, reject) => { timer = setTimeout(() => reject(new Error(`${scenario.name} survived ${bound / 1000}-second shutdown bound\n${output}`)), bound); }),
       ]);
       const elapsed = Date.now() - started;
       assert.equal(result.code, scenario.code, output);
@@ -345,10 +356,15 @@ ${monitor}`);
         assert.deepEqual(markedFailures, [`REB_LIVE_SESSION_FAILURE: Brave stopped; the live capture connection has closed. See: ${join(directory, "brave.log")}`]);
         assert(output.indexOf(markedFailures[0]) < output.indexOf("Live session cleanup started:"),
           "The actionable cause must be recorded before teardown diagnostics");
+      } else if (!embedded) {
+        assert.equal(markedFailures.length, 1, output);
+        assert.match(markedFailures[0], /^REB_LIVE_SESSION_FAILURE: Brave exited, but the event broker was still waiting for its capture connection/);
+        await access(join(directory, "broker.usr1"));
       } else {
         assert.deepEqual(markedFailures, [], "Cancellation must not invent a diagnosed failure");
       }
-      await assert.rejects(access(handshake));
+      // Only an embedded session owns a handshake file.
+      if (embedded) await assert.rejects(access(handshake));
       for (const [role, pid] of Object.entries(pids)) assert.equal(alive(pid), false, `${scenario.name} orphaned ${role} ${pid}\n${output}`);
       if (scenario.stubborn.length) {
         for (const role of scenario.stubborn) assert.match(output, new RegExp(`forcing owned child ${pids[role]} to stop`));

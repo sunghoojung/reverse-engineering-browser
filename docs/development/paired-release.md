@@ -111,8 +111,14 @@ After merge, manually dispatch `release.yml` with the full `main` commit as
 `source_sha` and `v0.5.0` as `release_tag`, or push the `v0.5.0` tag at that
 commit. Only `v0.5.0` is admitted (`REVIEWED_TAG` in
 [`publish-release-pair.py`](../../tools/publish-release-pair.py)). The publish
-job creates a fresh tag and release and verifies remote sizes and digests; it
-never replaces or adopts an existing tag or release.
+job creates the tag, uploads the assets to a draft release, verifies the draft's
+remote sizes and digests, and only then publishes it. A draft that fails
+verification is deleted. A published release that then fails its check is
+withdrawn to a draft for inspection rather than deleted. A rerun adopts a tag
+that names the same tested commit and has no release, and replaces only a draft
+with this exact source and title. It never replaces an existing release, a tag
+at another commit, or anyone else's draft. Every publishing run, manual or tag
+push, shares one concurrency group, so two cannot publish at once.
 
 Release assets: `Origin-Trace-v0.5.0-macos.zip`,
 `Brave-Browser-Development-v0.5.0-macos-arm64.zip`, its `.provenance.json`,

@@ -99,6 +99,10 @@ struct Session {
     started: Instant,
     live: bool,
     live_target: Option<u64>,
+    // The selected document that a listing or the browser reported gone. It
+    // stays reported until the next connect_live or Stop, so a caller can tell
+    // "my document went stale" from "nothing was ever selected".
+    stale_target: Option<u64>,
     native_targets: BTreeSet<u64>,
     accessed_targets: BTreeSet<u64>,
     // The browser advertises document-start support on its target listing. An
@@ -136,11 +140,12 @@ impl Session {
             .flatten()
             .filter_map(|target| target["id"].as_str()?.parse().ok())
             .collect();
-        if self
+        if let Some(target) = self
             .live_target
-            .is_some_and(|target| !self.native_targets.contains(&target))
+            .filter(|target| !self.native_targets.contains(target))
         {
             self.live_target = None;
+            self.stale_target = Some(target);
         }
         listing["document_source"] = json!("live_capture");
         listing["binding_id"] = json!(self.binding_id);
@@ -148,7 +153,16 @@ impl Session {
             .live_target
             .map(|target| json!(target.to_string()))
             .unwrap_or(Value::Null);
+        listing["selection"] = self.selection();
         Ok(listing)
+    }
+    fn selection(&self) -> Value {
+        match (self.live_target, self.stale_target) {
+            (Some(target), _) => json!({"status":"selected","target_id":target.to_string()}),
+            (None, Some(target)) => json!({"status":"stale","target_id":target.to_string(),
+                "message":stale_message(target)}),
+            (None, None) => json!({"status":"none"}),
+        }
     }
     async fn release_live_values(&mut self) -> Result<()> {
         // Clear only documents used by this console connection. Stale native
@@ -333,6 +347,7 @@ impl ResponseHeader {
                     .map_err(|_| Error::protocol("Native URL is not UTF-8"))?;
                 targets.push(json!({"id":id.to_string(),"origin":origin,"label":label,"url":url,"main_frame":flags & 2 != 0,"truncated":flags & 1 != 0}));
             }
+            annotate_frames(&mut targets);
             return Ok(
                 json!({"contract_version":2,"session_id":session,"state":"ready","targets":targets,"truncated":self.truncated,
                     "document_start_supported":self.document_start}),
@@ -419,6 +434,10 @@ pub struct NativeConsole {
     // confirming the set was cleared. Reads report that instead of an idle
     // experiment until the capture, and with it this backend, is restarted.
     document_start_unconfirmed: AtomicBool,
+    // The capture launcher passed Brave the document-start permission. A live
+    // browser that still lists no support then lacks the overlay, which is a
+    // different next step from a capture started without the permission.
+    live_document_start_permitted: bool,
 }
 impl NativeConsole {
     pub fn new(options: &Options) -> Self {
@@ -433,6 +452,14 @@ impl NativeConsole {
             live_bridge: Mutex::new(None),
             live_directory: options.native_console_live_directory.clone(),
             document_start_unconfirmed: AtomicBool::new(false),
+            live_document_start_permitted: options.session_document_start,
+        }
+    }
+    fn unavailable_message(&self, session: &Session) -> &'static str {
+        if session.live && self.live_document_start_permitted {
+            DOCUMENT_START_BROWSER_UNSUPPORTED
+        } else {
+            DOCUMENT_START_UNAVAILABLE
         }
     }
     // Ending a live binding closes its wire connection, and the browser drops
@@ -543,7 +570,8 @@ impl NativeConsole {
             );
         }
         if !session.document_start {
-            let mut result = document_start_unavailable(&session.id);
+            let mut result =
+                document_start_unavailable(&session.id, self.unavailable_message(session));
             result["available"] = json!(self.available());
             result["limits"] = document_start_limits();
             result["unsupported"] = document_start_unsupported();
@@ -581,10 +609,8 @@ impl NativeConsole {
                 &["action", "url"]
             };
             validation::fields(request, allowed, "Native console start")?;
-            if guard.is_some() {
-                return Err(Error::conflict(
-                    "Stop the current native session before starting another",
-                ));
+            if let Some(open) = guard.as_ref() {
+                return Err(Error::conflict(already_open(open)));
             }
             if !self.available() {
                 return Err(Error::new(
@@ -630,10 +656,8 @@ impl NativeConsole {
                 &["action", "target_id", "binding_id", "confirm_live"],
                 "Native console live connect",
             )?;
-            if guard.is_some() {
-                return Err(Error::conflict(
-                    "Stop the current native session before starting another",
-                ));
+            if let Some(open) = guard.as_ref() {
+                return Err(Error::conflict(already_open(open)));
             }
             if request["confirm_live"] != true {
                 return Err(Error::bad(
@@ -656,7 +680,7 @@ impl NativeConsole {
             if let Some(session) = guard.as_ref()
                 && request["session_id"] != session.id
             {
-                return Err(Error::conflict("Native console session changed"));
+                return Err(Error::conflict(SESSION_CHANGED));
             }
             if let Some(mut session) = guard.take() {
                 let bridge_alive = session.bridge.child.try_wait().ok().flatten().is_none();
@@ -675,6 +699,7 @@ impl NativeConsole {
                         return Err(error);
                     }
                     session.live_target = None;
+                    session.stale_target = None;
                     let mut armed = self.live_bridge.lock().await;
                     if let Some(previous) = armed.replace(session) {
                         previous.stop().await;
@@ -703,11 +728,15 @@ impl NativeConsole {
             return Err(Error::bad("Native console action is invalid"));
         };
         validation::fields(request, &allowed, "Native console action")?;
-        let session = guard
-            .as_mut()
-            .ok_or_else(|| Error::conflict("Start a native console session first"))?;
+        let session = guard.as_mut().ok_or_else(|| {
+            Error::conflict(if self.live_directory.is_some() {
+                "Start a native console session first: read get_native_console for binding_id and a target id, then send connect_live with confirm_live true. No command was sent."
+            } else {
+                "Start a native console session first: send start with an authorized URL. No command was sent."
+            })
+        })?;
         if request["session_id"] != session.id {
-            return Err(Error::conflict("Native console session changed"));
+            return Err(Error::conflict(SESSION_CHANGED));
         }
         let ended = if let Some(browser) = session.browser.as_mut() {
             browser.child.try_wait()?.is_some()
@@ -737,9 +766,12 @@ impl NativeConsole {
                     // Nothing can be armed in a session that never permitted
                     // the experiment, so report that instead of sending an
                     // operation this browser would reject.
-                    return Ok(document_start_unavailable(&session.id));
+                    return Ok(document_start_unavailable(
+                        &session.id,
+                        self.unavailable_message(session),
+                    ));
                 }
-                return Err(Error::new(503, DOCUMENT_START_UNAVAILABLE)
+                return Err(Error::new(503, self.unavailable_message(session))
                     .with_code(Code::DependencyUnavailable));
             }
             document_start_source = if action == "clear_document_start" {
@@ -783,25 +815,31 @@ impl NativeConsole {
         if session.live && operation != 1 && operation != 4 {
             // Reject unknown ownership before any request. Refreshing may remove
             // the exact ID but must never translate it to a replacement document.
-            if session.live_target != Some(target) || !session.native_targets.contains(&target) {
-                return Ok(stale_document(&session.id));
+            if session.live_target != Some(target) {
+                return Ok(not_selected(session, target));
+            }
+            if !session.native_targets.contains(&target) {
+                session.live_target = None;
+                session.stale_target = Some(target);
+                return Ok(stale_document(&session.id, target));
             }
             if let Err(error) = session.list_live().await {
                 self.retire(guard.take().unwrap()).await;
                 return Err(error);
             }
             if !session.native_targets.contains(&target) {
-                return Ok(stale_document(&session.id));
+                return Ok(stale_document(&session.id, target));
             }
             session.accessed_targets.insert(target);
         }
-        let result = session.exchange(operation, target, source).await;
+        let mut result = session.exchange(operation, target, source).await;
         if session.live
-            && result
-                .as_ref()
-                .is_ok_and(|value| value["status"] == "stale_target")
+            && let Ok(value) = result.as_mut()
+            && value["status"] == "stale_target"
         {
             session.live_target = None;
+            session.stale_target = Some(target);
+            value["text"] = json!(stale_message(target));
         }
         if result.is_err() {
             self.retire(guard.take().unwrap()).await;
@@ -958,6 +996,7 @@ impl BridgeProcess {
             started: Instant::now(),
             live,
             live_target: None,
+            stale_target: None,
             native_targets: BTreeSet::new(),
             accessed_targets: BTreeSet::new(),
             document_start: false,
@@ -978,7 +1017,107 @@ const DOCUMENT_START_LIVE_RETIRE: &str = "This Console connection failed while d
 
 const DOCUMENT_START_UNAVAILABLE: &str = "Document-start Console scripts are not available in this session. Rebuild the pinned browser, \
      then start a disposable Console session with document_start enabled, or relaunch the live \
-     capture with REB_CONSOLE_DOCUMENT_START=1. Nothing is relaunched automatically.";
+     capture with REB_CONSOLE_DOCUMENT_START=1 (an agent session: start_live_session with \
+     document_start true). Nothing is relaunched automatically.";
+
+const DOCUMENT_START_BROWSER_UNSUPPORTED: &str = "This capture was started with the document-start permission, but its browser \
+     does not advertise document-start support: it was built without the Native Console v3 overlay. Use a Brave \
+     built from this checkout's pinned revisions. Nothing is relaunched automatically.";
+
+const SESSION_CHANGED: &str = "Native console session changed: session_id does not name the open Console connection. \
+     Read get_native_console for the current session_id. No command was sent.";
+
+fn already_open(open: &Session) -> String {
+    if open.live {
+        format!(
+            "A live Console connection is already open (session_id {}, document {}). To use another document, send stop with that session_id, then connect_live with the new target_id.",
+            open.id,
+            open.live_target
+                .map(|target| target.to_string())
+                .unwrap_or_else(|| "none".into())
+        )
+    } else {
+        format!(
+            "A disposable Console session is already open (session_id {}). Send stop with that session_id first.",
+            open.id
+        )
+    }
+}
+
+/// Derived from the listing alone. The browser's target record carries no
+/// parent frame and no renderer process, so a child frame is compared with
+/// every listed top-level document; when they disagree the relation is
+/// undetermined rather than guessed. Under Chromium's full site isolation a
+/// cross-site child runs in its own renderer process, an out-of-process frame.
+fn annotate_frames(targets: &mut [Value]) {
+    let tops = targets
+        .iter()
+        .filter(|target| target["main_frame"] == true)
+        .filter_map(|target| target["origin"].as_str().map(str::to_owned))
+        .collect::<Vec<_>>();
+    for target in targets.iter_mut() {
+        if target["main_frame"] == true {
+            target["frame"] = json!("top");
+            continue;
+        }
+        target["frame"] = json!("child");
+        let origin = target["origin"].as_str().unwrap_or_default().to_owned();
+        let mut relations = tops.iter().map(|top| frame_relation(&origin, top));
+        let relation = match relations.next() {
+            Some(first) if relations.all(|other| other == first) => first,
+            _ => "undetermined",
+        };
+        target["top_relation"] = json!(relation);
+        target["out_of_process"] = match relation {
+            "cross_site" => json!(true),
+            "same_origin" => json!(false),
+            // Same-site frames normally share a process, but an
+            // Origin-Agent-Cluster header can still isolate one.
+            _ => Value::Null,
+        };
+    }
+}
+
+/// Schemeful same-site without the public suffix list: equal hosts, or equal
+/// IP addresses, are same-site; a different scheme, an IP against a name, or
+/// names whose last two labels differ are cross-site, because a registrable
+/// domain always spans at least two labels. Two names that share their last
+/// two labels need the list (`a.example.com` and `b.example.com` are
+/// same-site, `a.github.io` and `b.github.io` are not), so they stay
+/// undetermined. An opaque or non-HTTP origin is undetermined.
+fn frame_relation(child: &str, top: &str) -> &'static str {
+    let parse = |origin: &str| {
+        url::Url::parse(origin)
+            .ok()
+            .filter(|url| matches!(url.scheme(), "http" | "https") && url.host().is_some())
+    };
+    let (Some(child_url), Some(top_url)) = (parse(child), parse(top)) else {
+        return "undetermined";
+    };
+    if child == top {
+        return "same_origin";
+    }
+    if child_url.scheme() != top_url.scheme() {
+        return "cross_site";
+    }
+    match (child_url.host().unwrap(), top_url.host().unwrap()) {
+        (url::Host::Domain(a), url::Host::Domain(b)) => {
+            fn suffix(host: &str) -> Vec<&str> {
+                host.rsplitn(3, '.').take(2).collect()
+            }
+            if a == b {
+                "same_site"
+            } else if suffix(a) != suffix(b) {
+                "cross_site"
+            } else {
+                "undetermined"
+            }
+        }
+        (url::Host::Domain(_), _) | (_, url::Host::Domain(_)) => "cross_site",
+        (a, b) if a == b => "same_site",
+        _ => "cross_site",
+    }
+}
 
 // Stated rather than silently skipped. These contexts are never reached by an
 // armed snippet, whatever a rule declares, so a researcher or agent can tell
@@ -1010,10 +1149,10 @@ fn document_start_limits() -> Value {
     })
 }
 
-fn document_start_unavailable(session: &str) -> Value {
+fn document_start_unavailable(session: &str, message: &str) -> Value {
     json!({"contract_version":3,"state":"ready","session_id":session,
         "document_start":{"status":"unavailable","permitted":false,"scripts":[],
-            "message":DOCUMENT_START_UNAVAILABLE}})
+            "message":message}})
 }
 
 // The browser revalidates every field and owns the rule grammar. These checks
@@ -1308,7 +1447,7 @@ async fn bind_live(
     ))?;
     if session.binding_id != binding.to_string() {
         return Err(Error::conflict(
-            "Live capture binding changed; select and authorize a current document",
+            "Live capture binding changed; select and authorize a current document. Read get_native_console for the current binding_id.",
         ));
     }
     if session.poisoned
@@ -1328,9 +1467,9 @@ async fn bind_live(
         }
     };
     if !session.native_targets.contains(&selected) {
-        return Err(Error::conflict(
-            "Selected live document changed; explicitly select a current document",
-        ));
+        return Err(Error::conflict(format!(
+            "Selected live document changed; explicitly select a current document. Document {selected} is not in the current listing: it was replaced or closed. Read get_native_console and pick a current id."
+        )));
     }
     // HTTP connections get a fresh identity, independently of the existing
     // authenticated wire connection. Requests and handles from before Stop
@@ -1343,19 +1482,51 @@ async fn bind_live(
     }
     session.id = next;
     session.live_target = Some(selected);
+    session.stale_target = None;
     listing["session_id"] = json!(session.id);
     listing["selected_target_id"] = json!(selected.to_string());
+    listing["selection"] = session.selection();
     Ok((armed.take().unwrap(), listing))
 }
 
-fn stale_document(session: &str) -> Value {
+fn stale_message(target: u64) -> String {
+    format!(
+        "Selected document changed: document {target} was replaced or closed (navigation, reload or frame removal), which ended its authorization. Read get_native_console for current ids, then send stop and connect_live with the new document's id. Nothing was run."
+    )
+}
+
+fn stale_document(session: &str, target: u64) -> Value {
     let mut result = json!({
         "contract_version": 2,
         "session_id": session,
         "state": "ready",
         "status": "stale_target",
         "type": "undefined",
-        "text": "Selected document changed. Explicitly select a current live document.",
+        "text": stale_message(target),
+        "truncated": false,
+    });
+    Reason::new(Code::TargetUnavailable).annotate(&mut result);
+    result
+}
+
+// A live connection runs commands only in the one document connect_live
+// selected. Another id is refused before the wire, never remapped.
+fn not_selected(session: &Session, target: u64) -> Value {
+    if session.live_target.is_none()
+        && let Some(stale) = session.stale_target
+    {
+        return stale_document(&session.id, stale);
+    }
+    let mut result = json!({
+        "contract_version": 2,
+        "session_id": session.id,
+        "state": "ready",
+        "status": "stale_target",
+        "type": "undefined",
+        "text": format!(
+            "Selected document changed: document {target} is not the document this connection selected ({}). Live commands run only in the connect_live document; to use {target}, send stop, then connect_live with target_id {target}. Nothing was run.",
+            session.live_target.map(|id| id.to_string()).unwrap_or_else(|| "none".into())
+        ),
         "truncated": false,
     });
     Reason::new(Code::TargetUnavailable).annotate(&mut result);
@@ -1465,6 +1636,86 @@ fn validate_command(command: &Value) -> Result<()> {
 mod tests {
     use super::*;
     use clap::Parser;
+
+    #[test]
+    fn frames_name_their_kind_and_relation_to_the_top_document() {
+        for (child, top, relation) in [
+            (
+                "http://localhost:8001",
+                "http://localhost:8001",
+                "same_origin",
+            ),
+            (
+                "http://localhost:8002",
+                "http://localhost:8001",
+                "same_site",
+            ),
+            (
+                "http://127.0.0.1:8003",
+                "http://localhost:8001",
+                "cross_site",
+            ),
+            (
+                "http://127.0.0.1:8003",
+                "http://127.0.0.1:8001",
+                "same_site",
+            ),
+            ("http://10.0.0.1", "http://127.0.0.1", "cross_site"),
+            (
+                "https://localhost:8001",
+                "http://localhost:8001",
+                "cross_site",
+            ),
+            (
+                "https://assets.widget.test",
+                "https://shop.example",
+                "cross_site",
+            ),
+            (
+                "https://a.example.com",
+                "https://b.example.com",
+                "undetermined",
+            ),
+            ("https://a.github.io", "https://b.github.io", "undetermined"),
+            ("http://[::1]:8002", "http://[::1]:8001", "same_site"),
+            ("null", "null", "undetermined"),
+            ("null", "http://localhost:8001", "undetermined"),
+        ] {
+            assert_eq!(frame_relation(child, top), relation, "{child} in {top}");
+        }
+        let target = |id: &str, origin: &str, top: bool| json!({"id":id,"origin":origin,"label":"","url":"","main_frame":top,"truncated":false});
+        let mut listing = vec![
+            target("1", "http://localhost:8001", true),
+            target("2", "http://localhost:8002", false),
+            target("3", "http://127.0.0.1:8003", false),
+            target("4", "http://localhost:8001", false),
+        ];
+        annotate_frames(&mut listing);
+        assert_eq!(listing[0]["frame"], "top");
+        assert!(listing[0].get("top_relation").is_none());
+        assert_eq!(
+            (&listing[1]["top_relation"], &listing[1]["out_of_process"]),
+            (&json!("same_site"), &Value::Null)
+        );
+        assert_eq!(
+            (&listing[2]["top_relation"], &listing[2]["out_of_process"]),
+            (&json!("cross_site"), &json!(true))
+        );
+        assert_eq!(
+            (&listing[3]["top_relation"], &listing[3]["out_of_process"]),
+            (&json!("same_origin"), &json!(false))
+        );
+        // Two tabs whose top documents disagree leave a child undetermined:
+        // the listing has no parent link to choose between them.
+        listing.push(target("5", "http://127.0.0.1:8003", true));
+        annotate_frames(&mut listing);
+        assert_eq!(listing[2]["top_relation"], "undetermined");
+        assert_eq!(listing[2]["out_of_process"], Value::Null);
+        // No top document listed: nothing to compare with.
+        let mut orphan = vec![target("6", "http://127.0.0.1:8003", false)];
+        annotate_frames(&mut orphan);
+        assert_eq!(orphan[0]["top_relation"], "undetermined");
+    }
 
     #[test]
     fn wire_status_reasons_preserve_native_application_text() {
@@ -1652,14 +1903,14 @@ mod tests {
             },
         });
         crate::validation::schema("NativeConsoleDocumentStart", &armed, 500).unwrap();
-        let mut unavailable = document_start_unavailable("12");
+        let mut unavailable = document_start_unavailable("12", DOCUMENT_START_UNAVAILABLE);
         unavailable["available"] = json!(false);
         unavailable["limits"] = document_start_limits();
         unavailable["unsupported"] = document_start_unsupported();
         crate::validation::schema("NativeConsoleDocumentStart", &unavailable, 500).unwrap();
         crate::validation::schema(
             "NativeConsoleDocumentStartResult",
-            &document_start_unavailable("12"),
+            &document_start_unavailable("12", DOCUMENT_START_BROWSER_UNSUPPORTED),
             500,
         )
         .unwrap();
@@ -1804,6 +2055,7 @@ while True:
             started: Instant::now(),
             live: true,
             live_target: None,
+            stale_target: None,
             native_targets: BTreeSet::new(),
             accessed_targets: BTreeSet::new(),
             document_start: false,
@@ -1941,6 +2193,89 @@ while True:
             assert_eq!(requests(&directory).len(), after.len());
             console.stop().await;
         }
+    }
+    #[tokio::test]
+    async fn live_selection_goes_stale_visibly_and_refusals_name_the_next_step() {
+        let (console, directory) = live_fixture().await;
+        let identity = connect_fixture(&console, "22").await;
+        let listing = console.state().await;
+        assert_eq!(
+            listing["selection"],
+            json!({"status":"selected","target_id":"22"})
+        );
+        // Another listed document is refused before the wire, not remapped.
+        let before = requests(&directory).len();
+        let other = console
+            .action(
+                &json!({"action":"evaluate","session_id":identity,"target_id":"11","source":"1"}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(other["status"], "stale_target");
+        assert!(
+            other["text"]
+                .as_str()
+                .unwrap()
+                .contains("connect_live with target_id 11")
+        );
+        assert_eq!(requests(&directory).len(), before);
+        let busy = console
+            .action(&json!({"action":"connect_live","binding_id":"42","target_id":"11","confirm_live":true}))
+            .await
+            .unwrap_err();
+        assert!(busy.message.contains(&identity) && busy.message.contains("send stop"));
+        // A navigation replaces document 22; the listing says so until stop.
+        std::fs::write(
+            directory.path().join("targets.json"),
+            r#"[{"id":11,"url":"https://same.test/page"},{"id":33,"url":"https://same.test/page"}]"#,
+        )
+        .unwrap();
+        let stale = console.state().await;
+        assert!(stale["selected_target_id"].is_null());
+        assert_eq!(stale["selection"]["status"], "stale");
+        assert_eq!(stale["selection"]["target_id"], "22");
+        let refused = console
+            .action(
+                &json!({"action":"evaluate","session_id":identity,"target_id":"22","source":"1"}),
+            )
+            .await
+            .unwrap();
+        assert!(
+            refused["text"]
+                .as_str()
+                .unwrap()
+                .contains("replaced or closed")
+        );
+        console
+            .action(&json!({"action":"stop","session_id":identity}))
+            .await
+            .unwrap();
+        assert_eq!(console.state().await["selection"], json!({"status":"none"}));
+        // A session without the browser-session permission and a browser that
+        // lacks the overlay are different next steps.
+        let identity = connect_fixture(&console, "33").await;
+        let arm = json!({"action":"arm_document_start","session_id":identity,"confirm_document_start":true,
+            "scripts":[{"origin":"https://same.test","frame":"child","source":"report(1);"}]});
+        let missing = console.action(&arm).await.unwrap_err();
+        assert_eq!(missing.status, 503);
+        assert!(missing.message.contains("document_start true"));
+        let mut console = console;
+        console.live_document_start_permitted = true;
+        let unsupported = console.action(&arm).await.unwrap_err();
+        assert!(
+            unsupported
+                .message
+                .contains("without the Native Console v3 overlay")
+        );
+        let read = console.document_start(0).await.unwrap();
+        assert_eq!(read["document_start"]["status"], "unavailable");
+        assert!(
+            read["document_start"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("without the Native Console v3 overlay")
+        );
+        console.stop().await;
     }
     #[tokio::test]
     async fn live_reconnect_clears_values_rotates_identity_and_rejects_stale_handles() {

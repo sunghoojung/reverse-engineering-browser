@@ -36,6 +36,32 @@ decoding, saved collections and evidence export remain local workflows.
 Only `reb-api mcp` exposes the existing versioned HTTP contract; effectful tools
 remain opt-in, not authorization to inspect an unowned target.
 
+## MCP agent workflow
+
+`reb-api mcp` answers `initialize` with a short workflow guide (orient,
+evidence filters, the Console in a chosen frame, document-start for child
+frames, invocation sites and, with `--allow-session-start`, starting and
+ending a session). A unit test in `src/bin/reb_api/mcp.rs` fails if the guide
+names a tool the contract does not serve. Tool descriptions come from the
+OpenAPI operation descriptions in `protocol/openapi.json`.
+
+- `src/session_launch.rs` turns `start_live_session` options into launcher
+  switches. Request content, document-start permission, invocation sites and
+  digests are set only from named options; inherited switches are removed or
+  forced off. Saved sites come from the agent sessions' own store and are armed
+  from a private per-launch copy.
+- `src/native_console.rs` annotates every target with `frame`, and child
+  frames with `top_relation` and `out_of_process`, derived from the listing,
+  and reports a live connection's `selection` (`selected`, `stale`, `none`).
+- `src/session_context.rs` reports `capture_options` from the launcher's
+  `--session-*` labels.
+
+`tests/mcp_stdio.rs` drives agent sessions through a stand-in launcher, and
+`make native-console-check` drives the iframe Console flow through
+`reb-api mcp` against the real C++ bridge and a synthetic browser peer. The
+recipes are in the [agent cookbook](../../docs/development/agent-cookbook.md)
+and the [`reb-api-workflow` skill](../../.agents/skills/reb-api-workflow/SKILL.md).
+
 ## Native Wasm observations
 
 See [native-wasm-dispatch-v1](../../protocol/native-wasm-dispatch-v1.md). Runtime

@@ -298,7 +298,8 @@ or host suffix, and a document already open is never retroactively injected.
 The packaged app launches every live capture with that permission; set
 `REB_CONSOLE_DOCUMENT_START=0` before opening it to opt out. The permission
 arms nothing, and a live snippet still needs a connection to a selected
-document and the arming confirmation. Agent-started sessions never have it.
+document and the arming confirmation. Agent-started sessions have it only when
+their start request names `document_start: true`.
 
 A header chip shows the experiment's state without opening the settings, so an
 armed experiment is always visible. Before any connection it reads

@@ -6,7 +6,8 @@ import {join} from 'node:path';
 import {pathToFileURL} from 'node:url';
 import {runInNewContext} from 'node:vm';
 
-export async function checkNativeConsoleLiveDocuments(root) {
+// Mounts the production panel in a minimal DOM. The fixture owns `fetch`.
+async function mount(root, fetch) {
   class Node {
     constructor(tag = 'div') {
       this.tagName = tag; this.children = []; this.parentNode = null; this.dataset = {}; this.style = {};
@@ -80,6 +81,23 @@ export async function checkNativeConsoleLiveDocuments(root) {
   get('level').value = 'all';
   get('scroll').append(get('output'));
   get('source').value = '';
+  const source = await readFile(join(root, 'apps/research-ui/native_console.js'), 'utf8');
+  const context = {
+    document, TextEncoder, console, setTimeout, clearTimeout, setInterval() {},
+    ResizeObserver: class { observe() {} }, MutationObserver: class { observe() {} }, CustomEvent: class {},
+    navigator: {clipboard: {writeText: async () => {}}},
+    createNativeConsoleCompletion: () => ({close() {}, keydown() { return false; }}),
+    createSourceTokenizer: () => ({}), SOURCE_HIGHLIGHT_TOKEN_LIMIT: 8192,
+    sourceSyntaxTokens: text => [{type: 'plain', text}], sourcePrettyTokens: () => [], fetch,
+  };
+  runInNewContext(source.replace(/\}\)\(\);\s*$/, 'globalThis.testConsole = {initialize, refreshLiveDocuments, runtime, poll, watchSession: typeof watchSession === "function" ? watchSession : undefined};})();'), context);
+  const settle = async () => { for (let i = 0; i < 40; i++) await Promise.resolve(); };
+  const select = async id => { get('target').value = id; await get('target').emit('change'); };
+  const consent = async () => { get('live-consent').checked = true; await get('live-consent').emit('change'); };
+  return {get, panel, api: context.testConsole, settle, select, consent};
+}
+
+export async function checkNativeConsoleLiveDocuments(root) {
   let documents = [
     {id: '11', origin: 'https://alpha.test', label: 'Alpha', url: 'https://alpha.test/a', main_frame: true, truncated: false},
     {id: '22', origin: 'https://alpha.test', label: 'Beta', url: 'https://alpha.test/a', main_frame: true, truncated: false},
@@ -126,19 +144,8 @@ export async function checkNativeConsoleLiveDocuments(root) {
     if (command.operation === 'poll') runtime = {status: 'ok', messages: [], dropped: 0};
     return {ok: true, status: 200, json: async () => ({...state(), request_id: '1', runtime})};
   };
-  const source = await readFile(join(root, 'apps/research-ui/native_console.js'), 'utf8');
-  const context = {
-    document, TextEncoder, console, setTimeout, clearTimeout, setInterval() {},
-    ResizeObserver: class { observe() {} }, MutationObserver: class { observe() {} }, CustomEvent: class {},
-    navigator: {clipboard: {writeText: async () => {}}},
-    createNativeConsoleCompletion: () => ({close() {}, keydown() { return false; }}),
-    createSourceTokenizer: () => ({}), SOURCE_HIGHLIGHT_TOKEN_LIMIT: 8192,
-    sourceSyntaxTokens: text => [{type: 'plain', text}], sourcePrettyTokens: () => [], fetch,
-  };
-  runInNewContext(source.replace(/\}\)\(\);\s*$/, 'globalThis.testConsole = {initialize, refreshLiveDocuments, runtime};})();'), context);
-  const settle = async () => { for (let i = 0; i < 20; i++) await Promise.resolve(); };
-  const select = async id => { get('target').value = id; await get('target').emit('change'); };
-  const consent = async () => { get('live-consent').checked = true; await get('live-consent').emit('change'); };
+  const {get, api, settle, select, consent} = await mount(root, fetch);
+  const context = {testConsole: api};
   await context.testConsole.initialize();
   assert.equal(get('mode').value, 'disposable', 'live discovery cannot change the default execution mode');
   assert.equal(get('target').options.filter(option => option.value).length, 0);
@@ -199,7 +206,122 @@ export async function checkNativeConsoleLiveDocuments(root) {
   assert.match(get('notice').textContent, /binding unavailable/); assert.equal(get('mode').value, 'live_capture');
   assert.equal(calls.some(call => call.action === 'start'), false);
   console.log('PASS native live mode requires exact document consent, preserves selection, revokes stale authorization, and never launches a fallback');
+  await checkNativeConsoleSessionLifecycle(root);
+}
 
+// One backend holds one Console session. A queued Stop, an abandoned Await
+// and a session ended by another window must each stay visible to this one.
+async function checkNativeConsoleSessionLifecycle(root) {
+  const documents = [
+    {id: '11', origin: 'https://alpha.test', label: 'Alpha', url: 'https://alpha.test/a', main_frame: true, truncated: false},
+    {id: '22', origin: 'https://alpha.test', label: 'Beta', url: 'https://alpha.test/b', main_frame: true, truncated: false},
+  ];
+  const calls = [], held = {};
+  let session = null, live = true, bindingState = 'ready', nextSession = 70;
+  const hold = name => new Promise(resolve => { held[name] = resolve; });
+  const release = name => { const resolve = held[name]; delete held[name]; resolve(); };
+  const state = () => ({contract_version: 2, state: session ? 'ready' : 'idle', session_id: session, available: true});
+  const listing = () => ({...state(), document_source: 'live_capture', live_available: bindingState === 'ready' || bindingState === 'connected',
+    binding_state: bindingState, binding_id: '7', targets: bindingState === 'connecting' ? [] : documents, truncated: false, selected_target_id: session ? '22' : null});
+  const reply = value => ({ok: true, status: 200, json: async () => value});
+  const fetch = async (path, options) => {
+    if (path === '/api/native-console') {
+      return reply(live ? {...listing(), message: bindingState === 'connecting' ? 'Waiting for the capture browser to connect its Console binding.' : 'These documents come from the live capture.'}
+        : {...state(), message: 'Native console uses a separate disposable browser profile'});
+    }
+    if (path.startsWith('/api/native-console/document-start')) {
+      return reply({contract_version: 3, available: true, state: session ? 'ready' : 'idle', session_id: session,
+        document_start: {status: 'unavailable', permitted: false, scripts: [], message: 'Unavailable'}});
+    }
+    const action = JSON.parse(options.body);
+    calls.push(action);
+    const operation = action.command?.operation;
+    const name = action.action === 'runtime' ? operation : action.action;
+    if (held[`want:${name}`]) { delete held[`want:${name}`]; await hold(name); }
+    if (action.action === 'connect_live' || action.action === 'start') { session = String(nextSession++); return reply(live ? listing() : {...state(), targets: documents, truncated: false}); }
+    assert.equal(action.session_id, session, 'an action addresses the backend session');
+    if (action.action === 'stop') { session = null; return reply(state()); }
+    if (action.action === 'targets') return reply(live ? listing() : {...state(), targets: documents, truncated: false});
+    let runtime = {status: 'ok', value: {type: 'number', text: '1', truncated: false}};
+    if (operation === 'poll') runtime = {status: 'ok', messages: [], dropped: 0};
+    if (operation === 'evaluate' && action.command.source === 'fixture.promise') runtime = {status: 'ok', value: {type: 'promise', text: 'Promise {<pending>}', handle: '9', truncated: false}};
+    if (operation === 'await') runtime = {status: 'ok', value: {type: 'number', text: '2', truncated: false}};
+    return reply({...state(), request_id: '1', runtime});
+  };
+  const want = name => { held[`want:${name}`] = true; };
+  const {get, panel, api, settle, select, consent} = await mount(root, fetch);
+  const connect = async () => {
+    get('mode').value = 'live_capture'; await get('mode').emit('change');
+    await api.refreshLiveDocuments(true); await select('22'); await consent();
+    await get('start').click(); await settle();
+    assert.equal(get('badge').textContent, 'Connected');
+  };
+  await api.initialize();
+
+  // The binding is still waiting for the capture browser: a wait, not an error.
+  bindingState = 'connecting';
+  get('mode').value = 'live_capture'; await get('mode').emit('change');
+  await api.refreshLiveDocuments(true);
+  assert.match(get('notice').textContent, /Waiting for the capture browser/);
+  assert.equal(get('notice').dataset.kind, 'status');
+  get('mode').value = 'disposable'; await get('mode').emit('change');
+  bindingState = 'ready';
+
+  // Refresh and then Stop, both queued behind a quiet poll. Refresh changes the
+  // selection generation; the Stop clicked for this session is still sent.
+  await connect();
+  const identity = session;
+  want('poll'); const poll = api.poll(); await settle();
+  assert.ok(held.poll, 'the quiet poll is in flight');
+  assert.equal(get('stop').disabled, false, 'a background poll does not block Stop');
+  // Each click waits behind the held poll, so neither is awaited here.
+  const refreshed = get('refresh').click();
+  const stopped = get('stop').click(); await settle();
+  assert.notEqual(get('badge').textContent, 'Connected', 'a queued Stop never reads as Connected');
+  assert.equal(get('target').disabled, true);
+  release('poll'); await Promise.all([poll, refreshed, stopped]); await settle();
+  assert.ok(calls.some(call => call.action === 'stop' && call.session_id === identity), 'the queued Stop was sent');
+  assert.equal(session, null);
+  assert.equal(panel.dataset.session, 'idle');
+  assert.equal(get('badge').textContent, 'Connect');
+
+  // Another window's Stop ends the backend's session. This panel reads that
+  // from state, without sending a command, and needs fresh consent to reconnect.
+  await select('22'); await consent(); await get('start').click(); await settle();
+  assert.equal(get('badge').textContent, 'Connected');
+  session = null;
+  const before = calls.length;
+  assert.equal(typeof api.watchSession, 'function', 'a connected panel watches the backend session');
+  await api.watchSession(true); await settle();
+  assert.equal(calls.length, before, 'reading state sends no command');
+  assert.equal(panel.dataset.session, 'idle');
+  assert.notEqual(get('badge').textContent, 'Connected');
+  assert.match(get('output').textContent, /ended outside this window/);
+  assert.equal(get('live-consent').checked, false);
+  assert.equal(get('start').disabled, true, 'reconnecting needs explicit consent again');
+
+  // A disposable Disconnect leaves the declared disposable mode.
+  live = false;
+  get('mode').value = 'disposable'; await get('mode').emit('change');
+  get('url').value = 'https://disposable.test/'; await get('start').click(); await settle();
+  await select('22');
+  await get('stop').click(); await settle();
+  assert.equal(panel.dataset.documentSource, 'disposable');
+  assert.equal(get('mode').value, 'disposable');
+
+  // An Await abandoned by a selection change can be requested again.
+  await get('start').click(); await settle(); await select('22');
+  get('source').value = 'fixture.promise'; await get('source').emit('input'); await get('form').emit('submit'); await settle();
+  const buttons = node => [node, ...node.children.flatMap(buttons)].filter(child => child.tagName === 'button');
+  const awaitButton = () => buttons(get('output')).filter(button => button.textContent === 'Await').at(-1);
+  const container = awaitButton().closest('.native-console-value');
+  want('await'); awaitButton().click(); await settle();
+  assert.equal(container.dataset.awaiting, 'true');
+  await select('22'); release('await'); await settle();
+  assert.equal(container.dataset.awaiting, 'false', 'an abandoned wait releases Await');
+  await awaitButton().click(); await settle();
+  assert.match(container.textContent, /earlier document selection/, 'Await answers instead of silently doing nothing');
+  console.log('PASS native console never drops a queued Stop, watches for a session ended elsewhere, keeps a declared mode, and releases an abandoned Await');
 }
 
 if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) {

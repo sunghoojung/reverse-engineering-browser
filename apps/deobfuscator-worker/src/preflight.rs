@@ -15,6 +15,9 @@
 use std::time::{Duration, Instant};
 
 pub(crate) const MAX_TREE_DEPTH: usize = 128;
+/// The one preflight refusal that is about syntax; every other refusal is a
+/// depth, node, heap or time budget.
+pub(crate) const MALFORMED: &str = "JavaScript preflight found malformed or unsupported syntax";
 /// Bounds the traversal and every recursive stage behind it, expressed against
 /// the source byte cap it guards rather than as a free-standing number: at most
 /// one tree-sitter node per two declared source bytes.
@@ -212,7 +215,7 @@ pub(crate) fn parse_checked(source: &str) -> Result<tree_sitter::Tree, &'static 
     // Error recovery can flatten unsupported syntax. Never infer a depth bound
     // from such a tree and then send the unchecked syntax to the recursive parser.
     if tree.root_node().has_error() {
-        return Err("JavaScript preflight found malformed or unsupported syntax");
+        return Err(MALFORMED);
     }
     let mut cursor = tree.walk();
     let mut depth = 0;

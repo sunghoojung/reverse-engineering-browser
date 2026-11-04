@@ -10,12 +10,14 @@
 #include <bit>
 #include <cstddef>
 #include <cstdint>
+#include <iterator>
 #include <limits>
 #include <memory>
 #include <span>
 #include <string>
 #include <string_view>
 #include <utility>
+#include <vector>
 
 #include "base/functional/bind.h"
 #include "base/location.h"
@@ -43,6 +45,8 @@ constexpr std::size_t kMaxActiveCaptureBytes = 32U * 1024U * 1024U;
 constexpr std::size_t kRuntimeTypedArrayMinBytes = 32;
 constexpr std::size_t kRuntimeTypedArrayMaxSnapshots = 16;
 constexpr std::uint64_t kExpiryFlushLeadNs = 250'000'000;
+// Live guest documents bound per session across all renderers.
+constexpr std::size_t kGuestBindingLimit = 16;
 // Synced with blink.mojom.ResourceType.kScript. MIME classification below also
 // covers module and worker script requests that use another resource type.
 constexpr int kScriptResourceType = 3;
@@ -119,6 +123,11 @@ void NativeArtifactCaptureSink::SetEmitter(const NativeProbeEmitter emitter,
                                            const std::uint64_t session_id,
                                            const std::uint64_t category_mask,
                                            const std::uint64_t expires_at_monotonic_ns) noexcept {
+  // The ending configuration's unresolved records become gaps while its
+  // session can still record them.
+  if (emitter_.load(std::memory_order_acquire))
+    FlushPendingWork("native_guest_pending_at_capture_end",
+                     "native_wasm_dispatch_pending_at_capture_end");
   emitter_.store(nullptr, std::memory_order_release);
   generation_.fetch_add(1, std::memory_order_acq_rel);
   session_id_.store(emitter ? session_id : 0, std::memory_order_relaxed);
@@ -136,12 +145,9 @@ void NativeArtifactCaptureSink::SetEmitter(const NativeProbeEmitter emitter,
   guest_host_malformed_gap_emitted_ = false;
   guest_host_parent_lost_gap_emitted_ = false;
   guest_host_parent_omitted_gap_emitted_ = false;
-  guest_budget_gap_emitted_ = false;
   wasm_dispatch_modules_.clear();
   wasm_dispatch_count_ = 0;
-  wasm_dispatch_budget_gap_emitted_ = false;
   wasm_indirect_count_ = 0;
-  wasm_indirect_budget_gap_emitted_ = false;
   runtime_typed_array_count_.store(0, std::memory_order_relaxed);
   allocating_scripts_.clear();
   emitter_.store(emitter, std::memory_order_release);
@@ -350,6 +356,11 @@ void NativeArtifactCaptureSink::EmitRendererGap(const NativeProbeEvent& source,
   const auto emitter = emitter_.load(std::memory_order_acquire);
   if (!emitter)
     return;
+  if (!source.header.sequence_number || !source.header.process_id) {
+    EmitResult(NativeProbeType::kGap, 0, 0, source.header.frame_id, std::string(reason),
+               NativeProbeCategory::kVm);
+    return;
+  }
   NativeProbeEvent gap;
   gap.header.category = NativeProbeCategory::kVm;
   gap.header.type = NativeProbeType::kGap;
@@ -398,16 +409,15 @@ void NativeArtifactCaptureSink::CaptureNativeGuest(const NativeGuestCapture& cap
     if (carries_module && module_status)
       module_status(false);
   };
-  if (!IsEnabledFor(NativeProbeCategory::kVm) || !IsEnabled() ||
+  if (!emitter_.load(std::memory_order_acquire) ||
       dispatch.header.session_id != session_id_.load(std::memory_order_relaxed))
     return;
+  if (!IsEnabledFor(NativeProbeCategory::kVm) || !IsEnabled()) {
+    refuse("native_guest_artifact_unavailable");
+    return;
+  }
   if (guest_capture_count_ >= kNativeGuestSampleLimit) {
-    if (carries_module && module_status)
-      module_status(false);
-    if (!guest_budget_gap_emitted_) {
-      guest_budget_gap_emitted_ = true;
-      EmitRendererGap(dispatch, "native_guest_browser_sample_budget");
-    }
+    refuse("native_guest_browser_sample_budget");
     return;
   }
   ++guest_capture_count_;
@@ -482,7 +492,9 @@ void NativeArtifactCaptureSink::CaptureNativeGuest(const NativeGuestCapture& cap
       refuse("native_guest_module_unbound");
       return;
     }
-    if (guest_groups_.size() >= 16) {
+    if (guest_groups_.size() >= kGuestBindingLimit)
+      ReclaimGuestGroups();
+    if (guest_groups_.size() >= kGuestBindingLimit) {
       refuse("native_guest_document_limit");
       return;
     }
@@ -494,19 +506,20 @@ void NativeArtifactCaptureSink::CaptureNativeGuest(const NativeGuestCapture& cap
     created.context_id = capture.execution_context_id;
     created.frame_id = dispatch.header.frame_id;
     created.recipe_digest = recipe_digest;
-    created.failed = true;  // Not yet bound to transferred artifacts.
+    created.current_document = is_current_document;
     guest_groups_.push_back(std::move(created));
     group = &guest_groups_.back();
   }
-  if (group->failed) {
-    // A failed binding is revived only by freshly sent module bytes.
+  if (group->binding == GuestBinding::kUnbound || group->binding == GuestBinding::kRejected) {
+    // Only freshly sent module bytes bind, or revive a rejected binding.
     if (!carries_module || group->attempts >= kNativeGuestModuleAttemptLimit) {
-      refuse(carries_module ? "native_guest_module_unavailable" : "native_guest_module_lost");
+      refuse(carries_module                             ? "native_guest_module_unavailable"
+             : group->binding == GuestBinding::kUnbound ? "native_guest_module_unbound"
+                                                        : "native_guest_module_lost");
       return;
     }
     ++group->attempts;
-    group->failed = false;
-    group->status_reported = false;
+    group->binding = GuestBinding::kPending;
     group->module_digest = module_digest;
     const auto transfer_binding = [&](NativeArtifactKind kind, NativeArtifactCaptureOrigin origin,
                                       std::span<const std::uint8_t> bytes, std::uint64_t parent,
@@ -515,7 +528,7 @@ void NativeArtifactCaptureSink::CaptureNativeGuest(const NativeGuestCapture& cap
           kind, origin, creator, capture.execution_context_id, dispatch.header.frame_id,
           capture.source_url, mojo_base::BigBuffer(bytes), parent, true);
       if (id)
-        guest_receipts_.emplace(id, 0);
+        guest_receipts_.emplace(id, GuestReceipt::kPending);
       return id;
     };
     group->module_id =
@@ -528,7 +541,7 @@ void NativeArtifactCaptureSink::CaptureNativeGuest(const NativeGuestCapture& cap
                                group->module_id, invocation.header.sequence_number)
             : 0;
     if (!group->adapter_id) {
-      group->failed = true;
+      group->binding = GuestBinding::kRejected;
       refuse("native_guest_module_unavailable");
       return;
     }
@@ -541,7 +554,7 @@ void NativeArtifactCaptureSink::CaptureNativeGuest(const NativeGuestCapture& cap
       return;
     }
     if (module_status) {
-      if (group->status_reported)
+      if (group->binding == GuestBinding::kAccepted)
         module_status(true);
       else
         group->status_waiters.push_back(std::move(module_status));
@@ -575,7 +588,7 @@ void NativeArtifactCaptureSink::CaptureNativeGuest(const NativeGuestCapture& cap
     EmitRendererGap(dispatch, "native_guest_snapshot_unavailable");
     return;
   }
-  guest_receipts_.emplace(bytecode_id, 0);
+  guest_receipts_.emplace(bytecode_id, GuestReceipt::kPending);
   GuestDispatch pending;
   pending.event = dispatch;
   pending.event.header.artifact_id = group->module_id;
@@ -593,7 +606,7 @@ void NativeArtifactCaptureSink::CaptureNativeGuest(const NativeGuestCapture& cap
 void NativeArtifactCaptureSink::CaptureNativeGuestHost(const NativeProbeEvent& event,
                                                        const std::uint64_t epoch) {
   DrainGuestDependencies();
-  if (!IsEnabled() || !IsEnabledFor(event.header.category) ||
+  if (!emitter_.load(std::memory_order_acquire) ||
       event.header.session_id != session_id_.load(std::memory_order_relaxed))
     return;
   const auto& h = event.header;
@@ -606,11 +619,20 @@ void NativeArtifactCaptureSink::CaptureNativeGuestHost(const NativeProbeEvent& e
       (h.type != NativeProbeType::kApiCall && h.type != NativeProbeType::kPropertyRead) ||
       h.category == NativeProbeCategory::kVm || h.category == NativeProbeCategory::kArtifact ||
       h.category == NativeProbeCategory::kUnknown) {
-    if (!guest_host_malformed_gap_emitted_) {
+    if (h.sequence_number && h.process_id)
+      EmitRendererGap(event, "native_guest_host_malformed");
+    else if (!guest_host_malformed_gap_emitted_) {
       guest_host_malformed_gap_emitted_ = true;
       EmitResult(NativeProbeType::kGap, 0, 0, h.frame_id, "native_guest_host_malformed",
                  NativeProbeCategory::kVm);
     }
+    return;
+  }
+  if (!IsEnabled() || !IsEnabledFor(h.category)) {
+    // Without the artifact channel no parent can be published; the session
+    // still decides whether the host itself is recordable.
+    PublishUnparentedHost(event, guest_host_parent_lost_gap_emitted_,
+                          "native_guest_host_parent_lost");
     return;
   }
   const GuestEventKey identity{h.process_id, h.sequence_number};
@@ -673,28 +695,29 @@ void NativeArtifactCaptureSink::DrainGuestDependencies() {
     return;
   const auto receipt = [&](std::uint64_t id) {
     const auto found = guest_receipts_.find(id);
-    return found == guest_receipts_.end() ? std::uint8_t{2} : found->second;
+    return found == guest_receipts_.end() ? GuestReceipt::kRejected : found->second;
   };
+  const auto accepted = [&](std::uint64_t id) { return receipt(id) == GuestReceipt::kAccepted; };
+  const auto rejected = [&](std::uint64_t id) { return receipt(id) == GuestReceipt::kRejected; };
   for (auto& group : guest_groups_) {
-    if (group.failed || group.status_reported)
+    if (group.binding != GuestBinding::kPending)
       continue;
-    const bool rejected = receipt(group.module_id) == 2 || receipt(group.adapter_id) == 2;
-    const bool accepted = receipt(group.module_id) == 1 && receipt(group.adapter_id) == 1;
-    if (!rejected && !accepted)
+    const bool lost = rejected(group.module_id) || rejected(group.adapter_id);
+    const bool bound = accepted(group.module_id) && accepted(group.adapter_id);
+    if (!lost && !bound)
       continue;
-    group.failed = rejected;
-    group.status_reported = accepted;
+    group.binding = bound ? GuestBinding::kAccepted : GuestBinding::kRejected;
     auto waiters = std::move(group.status_waiters);
     group.status_waiters.clear();
     for (auto& waiter : waiters)
-      waiter(accepted);
+      waiter(bound);
   }
   // Invocation is observed independently of successful bytecode capture.
   // Retain the first invocation that created a shared adapter artifact.
   for (auto& [identity, invocation] : guest_invocations_) {
     static_cast<void>(identity);
     if (!invocation.published && invocation.current_document && invocation.current_document() &&
-        receipt(invocation.module_id) == 1 && receipt(invocation.adapter_id) == 1) {
+        accepted(invocation.module_id) && accepted(invocation.adapter_id)) {
       emitter(invocation.event);
       invocation.published = true;
     }
@@ -703,9 +726,8 @@ void NativeArtifactCaptureSink::DrainGuestDependencies() {
     static_cast<void>(key);
     if (pending.failed || pending.published)
       continue;
-    if (!pending.current_document || !pending.current_document() ||
-        receipt(pending.module_id) == 2 || receipt(pending.adapter_id) == 2 ||
-        receipt(pending.bytecode_id) == 2) {
+    if (!pending.current_document || !pending.current_document() || rejected(pending.module_id) ||
+        rejected(pending.adapter_id) || rejected(pending.bytecode_id)) {
       pending.failed = true;
       EmitRendererGap(pending.event, "native_guest_dependency_lost");
       for (const auto& host : pending.hosts)
@@ -715,8 +737,8 @@ void NativeArtifactCaptureSink::DrainGuestDependencies() {
       pending.hosts.clear();
       continue;
     }
-    if (receipt(pending.module_id) != 1 || receipt(pending.adapter_id) != 1 ||
-        receipt(pending.bytecode_id) != 1)
+    if (!accepted(pending.module_id) || !accepted(pending.adapter_id) ||
+        !accepted(pending.bytecode_id))
       continue;
     auto& invocation = guest_invocations_.at(pending.invocation);
     if (!invocation.published) {
@@ -732,16 +754,36 @@ void NativeArtifactCaptureSink::DrainGuestDependencies() {
   }
 }
 
+void NativeArtifactCaptureSink::ReclaimGuestGroups() {
+  std::vector<std::function<void(bool)>> waiters;
+  std::erase_if(guest_groups_, [&](GuestGroup& group) {
+    if (group.current_document && group.current_document())
+      return false;
+    std::move(group.status_waiters.begin(), group.status_waiters.end(),
+              std::back_inserter(waiters));
+    return true;
+  });
+  // Dispatches bound to a reclaimed group keep their artifact IDs and are
+  // settled by DrainGuestDependencies, which sees the same lost document.
+  for (auto& waiter : waiters)
+    waiter(false);
+}
+
 void NativeArtifactCaptureSink::FlushBeforeExpiry(const std::uint64_t generation) {
   if (generation != generation_.load(std::memory_order_acquire))
     return;
   DrainGuestDependencies();
+  FlushPendingWork("native_guest_pending_at_expiry", "native_wasm_dispatch_pending_at_expiry");
+}
+
+void NativeArtifactCaptureSink::FlushPendingWork(const std::string_view guest_reason,
+                                                 const std::string_view wasm_reason) {
   for (auto& [key, pending] : guest_dispatches_) {
     static_cast<void>(key);
     if (pending.failed || pending.published)
       continue;
     pending.failed = true;
-    EmitRendererGap(pending.event, "native_guest_pending_at_expiry");
+    EmitRendererGap(pending.event, guest_reason);
     for (const auto& host : pending.hosts)
       PublishUnparentedHost(host, guest_host_parent_lost_gap_emitted_,
                             "native_guest_host_parent_lost");
@@ -752,7 +794,7 @@ void NativeArtifactCaptureSink::FlushBeforeExpiry(const std::uint64_t generation
     static_cast<void>(artifact_id);
     for (const auto& [observation, unused] : context.wasm_observations) {
       static_cast<void>(unused);
-      EmitRendererGap(observation, "native_wasm_dispatch_pending_at_expiry");
+      EmitRendererGap(observation, wasm_reason);
     }
     context.wasm_observations.clear();
   }
@@ -762,19 +804,23 @@ void NativeArtifactCaptureSink::CaptureWasmDispatch(
     const NativeWasmDispatchObservation& observation,
     mojo_base::BigBuffer content,
     std::function<bool()> is_current_document) {
-  if (!IsEnabledFor(NativeProbeCategory::kVm) || !IsEnabled() ||
-      observation.header.session_id != session_id_.load(std::memory_order_relaxed) ||
-      !is_current_document || !is_current_document())
+  if (!emitter_.load(std::memory_order_acquire) ||
+      observation.header.session_id != session_id_.load(std::memory_order_relaxed))
     return;
-  const auto gap = [&](const char* reason) {
-    EmitResult(NativeProbeType::kGap, 0, 0, observation.header.frame_id, reason,
-               NativeProbeCategory::kVm);
+  // Every refusal fills the observation's own renderer sequence slot.
+  const auto gap = [&](std::string_view reason) {
+    EmitRendererGap(NativeProbeEvent{.header = observation.header}, reason);
   };
+  if (!IsEnabledFor(NativeProbeCategory::kVm) || !IsEnabled()) {
+    gap("native_wasm_dispatch_artifact_unavailable");
+    return;
+  }
+  if (!is_current_document || !is_current_document()) {
+    gap("native_wasm_dispatch_document_unavailable");
+    return;
+  }
   if (wasm_dispatch_count_ >= kNativeWasmDispatchSampleBudget) {
-    if (!wasm_dispatch_budget_gap_emitted_) {
-      wasm_dispatch_budget_gap_emitted_ = true;
-      gap("native_wasm_dispatch_browser_budget_incomplete");
-    }
+    gap("native_wasm_dispatch_browser_budget_incomplete");
     return;
   }
   ++wasm_dispatch_count_;
@@ -818,20 +864,24 @@ void NativeArtifactCaptureSink::CaptureWasmIndirect(
     const NativeWasmIndirectObservation& observation,
     mojo_base::BigBuffer content,
     std::function<bool()> is_current_document) {
-  if (!IsEnabledFor(NativeProbeCategory::kVm) || !IsEnabled() ||
-      observation.header.session_id != session_id_.load(std::memory_order_relaxed) ||
-      !is_current_document || !is_current_document())
+  if (!emitter_.load(std::memory_order_acquire) ||
+      observation.header.session_id != session_id_.load(std::memory_order_relaxed))
     return;
-  const auto gap = [&](const char* reason) {
-    EmitResult(NativeProbeType::kGap, 0, 0, observation.header.frame_id, reason,
-               NativeProbeCategory::kVm);
+  // Every refusal fills the observation's own renderer sequence slot.
+  const auto gap = [&](std::string_view reason) {
+    EmitRendererGap(NativeProbeEvent{.header = observation.header}, reason);
   };
+  if (!IsEnabledFor(NativeProbeCategory::kVm) || !IsEnabled()) {
+    gap("native_wasm_indirect_artifact_unavailable");
+    return;
+  }
+  if (!is_current_document || !is_current_document()) {
+    gap("native_wasm_indirect_document_unavailable");
+    return;
+  }
   // A budget separate from br_table: one stream never starves the other.
   if (wasm_indirect_count_ >= kNativeWasmIndirectSampleBudget) {
-    if (!wasm_indirect_budget_gap_emitted_) {
-      wasm_indirect_budget_gap_emitted_ = true;
-      gap("native_wasm_indirect_browser_budget_incomplete");
-    }
+    gap("native_wasm_indirect_browser_budget_incomplete");
     return;
   }
   ++wasm_indirect_count_;
@@ -948,6 +998,14 @@ std::uint64_t NativeArtifactCaptureSink::CaptureGeneratedArtifactInternal(
   const std::uint64_t capture_session_id = session_id_.load(std::memory_order_relaxed);
   const std::uint64_t capture_generation = generation_.load(std::memory_order_acquire);
   const std::uint64_t artifact_id = next_artifact_id_.fetch_add(1, std::memory_order_relaxed);
+  // Canvas images are sensitive: the session's opt-in decides, not the
+  // renderer's view of its configuration.
+  if (kind == NativeArtifactKind::kCanvasDataUrl &&
+      !NativeProbeSession::Get().capture_canvas_images()) {
+    EmitResult(NativeProbeType::kArtifactCaptureFailed, artifact_id, 0, frame_id,
+               "canvas_image_capture_disabled", result_category);
+    return 0;
+  }
   const bool valid_kind_and_origin =
       (native_wasm_runtime &&
        ((kind == NativeArtifactKind::kWasm &&
@@ -1082,21 +1140,24 @@ void NativeArtifactCaptureSink::OnTransferCompleted(
     return;
   }
   if (auto receipt = guest_receipts_.find(artifact_id); receipt != guest_receipts_.end()) {
-    receipt->second = status == NativeArtifactReceiveStatus::kAccepted ? 1 : 2;
+    receipt->second = status == NativeArtifactReceiveStatus::kAccepted ? GuestReceipt::kAccepted
+                                                                       : GuestReceipt::kRejected;
     DrainGuestDependencies();
   }
+  const bool accepted = status == NativeArtifactReceiveStatus::kAccepted;
+  // The module map follows every receipt, including one whose observations
+  // were already flushed as gaps, so later observations reuse or replace it.
+  for (auto entry = wasm_dispatch_modules_.begin(); entry != wasm_dispatch_modules_.end();
+       ++entry) {
+    if (entry->second.first != artifact_id)
+      continue;
+    if (accepted)
+      entry->second.second = true;
+    else
+      wasm_dispatch_modules_.erase(entry);
+    break;
+  }
   if (!context.wasm_observations.empty()) {
-    const bool accepted = status == NativeArtifactReceiveStatus::kAccepted;
-    for (auto entry = wasm_dispatch_modules_.begin(); entry != wasm_dispatch_modules_.end();
-         ++entry) {
-      if (entry->second.first != artifact_id)
-        continue;
-      if (accepted)
-        entry->second.second = true;
-      else
-        wasm_dispatch_modules_.erase(entry);
-      break;
-    }
     if (!IsEnabledFor(NativeProbeCategory::kVm) || !IsEnabled())
       return;
     const auto emitter = emitter_.load(std::memory_order_acquire);

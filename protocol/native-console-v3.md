@@ -38,7 +38,8 @@ Three independent gates must all be satisfied; none of them is implied.
      researcher sets `REB_CONSOLE_DOCUMENT_START=1`. A live capture that was
      started without it cannot arm, and nothing is relaunched to change that.
      An agent session (`reb-api session start`, MCP `start_live_session`)
-     always launches without it, even when the switch is inherited.
+     launches with it only when the start request names `document_start: true`,
+     never from an inherited switch.
 3. **Explicit arming.** A separate confirmed action registers the set. Clearing
    it, disconnecting, ending the session, or session expiry removes it.
 
@@ -208,6 +209,31 @@ helpers, backend, packaged assets and browser are rebuilt together.
 | `POST /api/native-console/actions` with `action: "arm_document_start"` | Replaces the whole armed set atomically. Requires `confirm_document_start: true`. |
 | `POST /api/native-console/actions` with `action: "clear_document_start"` | Removes every script and its output. |
 | `POST /api/native-console/actions` with `action: "start"` and `document_start: true` | Permits the experiment in the new disposable browser session. |
+
+### Agent path
+
+An MCP agent uses exactly these surfaces; the agent workflow guide in
+`reb-api mcp`'s initialize instructions and the repository skill
+`.agents/skills/reb-api-workflow` follow it.
+
+1. `start_live_session` with `document_start: true` (or a capture that already
+   permits it); `get_session_context` reports `capture_options.document_start`
+   and `get_native_console` reports `document_start_supported`.
+2. `get_native_console` lists documents with `frame`, `origin`, `url` and, for
+   a child, `top_relation` and `out_of_process`. A rule for an iframe names
+   that frame's exact origin with `frame: child`; the top page's origin does
+   not reach it.
+3. `native_console_action` `connect_live` to any listed document, then
+   `arm_document_start` with `confirm_document_start: true`.
+4. Reload or navigate so a new matching document is created; documents that
+   were open when the set was armed never run it. Wait for
+   `pending_renderer_processes` to reach 0 first.
+5. `get_native_console_document_start` with `after_sequence` returns the
+   records. `document_id` is a `get_native_console` target id, and `frame_id`
+   is the capture's frame identity, so `get_events` with that `frame_id` reads
+   the native evidence of the same frame.
+6. `clear_document_start`, then `stop`, which clears again and needs the
+   browser's confirmation, before `session_action` `end`.
 
 Every document-start surface exchanges a request with the browser process, so
 all of them are classified as effectful and stay hidden in the MCP projection

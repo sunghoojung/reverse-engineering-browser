@@ -406,6 +406,12 @@ async function checkInvestigationReturns(root) {
     assert.equal(t.state.selectedRequestId,null);
   }
   {
+    // A stale row id selects nothing and must not cancel the trace in flight.
+    const t=setup();let aborted=0;t.state.originTraceController={abort(){aborted++;}};const generation=t.state.originTraceGeneration;
+    t.run('selectRequest("request-gone")');
+    assert.equal(aborted,0);assert.equal(t.state.originTraceGeneration,generation);assert.equal(t.state.selectedRequestId,'request-2');
+  }
+  {
     const t=setup();t.setScreen('tools');t.state.selectedArtifactId='8';t.context.route={kind:'artifact',identity:t.run('investigationArtifactIdentity(state.artifacts[0])')};
     assert(t.run('openInvestigation(route)'));assert.deepEqual(t.sourceReads,['7']);assert(t.renders.every(item=>item.id==='7'&&item.passive));
   }

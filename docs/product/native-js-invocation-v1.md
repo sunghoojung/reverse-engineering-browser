@@ -173,9 +173,14 @@ the titlebar names what the running capture tracks.
 
 Digests follow the capture mode: on in Content mode when sites are saved, off
 in Metadata mode. An explicit `REB_NATIVE_JS_INVOCATION_SITES` or
-`REB_NATIVE_JS_INVOCATION_DIGESTS` wins. Agent-started sessions never arm
-sites or digests and keep a private saved set, so an agent cannot change the
-researcher's next capture.
+`REB_NATIVE_JS_INVOCATION_DIGESTS` wins. Agent-started sessions arm sites and
+digests only when the start request names them (`js_invocation_sites`,
+`js_invocation_saved_sites`, `js_invocation_digests` with
+`confirm_sensitive_capture`), never from the caller's environment. They keep
+their own saved set at `~/.config/origin-trace/agent-sessions/`, which an
+agent session's site routes edit and a later `js_invocation_saved_sites`
+start arms, so an agent never reads or changes the researcher's next capture.
+A named set is strict: a Brave without invocation capture refuses the start.
 
 A Brave built before invocation capture would refuse a session that asks for
 `--reb-js-invocation-capture`. For the app's saved sites only, the launcher

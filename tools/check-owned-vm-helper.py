@@ -270,6 +270,17 @@ def guard_and_transport(binary):
         assert limited["state"] == "failed"
         assert_inert(limited, 0, helper.initial["snapshot"])
         helper.finish()
+    # Even a stale guard consumes the last ID. No later request can be admitted,
+    # so the helper must retire instead of answering request_id forever.
+    for changes in ({"generation": 18}, {"count": 1}):
+        with Helper(binary) as helper:
+            helper.write(helper.frame(2, MAX_U64, changes.get("count", 0),
+                                      generation=changes.get("generation")))
+            limited = helper.reply(MAX_U64, 7)
+            assert limited["state"] == "failed"
+            assert_inert(limited, 0, helper.initial["snapshot"])
+            assert helper.process.wait(timeout=3) == 0
+            helper.finish()
     with Helper(binary, lifetime=40) as helper:
         time.sleep(0.08)
         snapshot = helper.initial["snapshot"]

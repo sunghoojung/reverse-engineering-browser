@@ -75,6 +75,29 @@ pub(crate) fn url_label(value: &Value) -> Value {
     }
 }
 
+/// What this session's launcher passed to Brave, as labels: whether request
+/// content and Canvas images are retained, whether document-start Console
+/// scripts are permitted, and what invocation capture armed. Counts and
+/// switches only; site labels and source URLs stay in get_js_invocation_sites.
+pub fn capture_options(options: &crate::config::Options, invocation: &Value) -> Value {
+    let live = options.capture_mode() == "live";
+    json!({
+        "source": if live { "launcher" } else { "not_live" },
+        "request_content": live && options.session_request_content,
+        "canvas_images": live && options.session_canvas_images,
+        "document_start": if live && options.session_document_start {
+            "permitted"
+        } else {
+            "not_permitted"
+        },
+        "js_invocation": {
+            "state": invocation["state"],
+            "count": invocation["count"],
+            "digests": invocation["digests"],
+        },
+    })
+}
+
 /// The CDP debugger was removed. Version 1 keeps its debugger fields with
 /// fixed retired values so existing clients still parse the context; no
 /// target, script or debugger generation is ever reported.

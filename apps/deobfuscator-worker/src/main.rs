@@ -17,13 +17,32 @@ const MAX_REQUEST_BYTES: usize = MAX_SOURCE_BYTES * 6 + 64 * 1024;
 const MAX_TRANSFORMATIONS: usize = 4096;
 const MAX_DERIVED_BYTES: usize = MAX_SOURCE_BYTES + 512 * 1024;
 
+/// One JSON-line request. Deobfuscation and its function lookup predate the
+/// `operation` tag and keep their untagged form, told apart by the lookup's
+/// `function_at_byte`; every other operation is named. An unknown operation or
+/// field is refused, never read as a deobfuscation request.
+enum Operation {
+    Deobfuscate(Request),
+    FunctionLookup(FunctionLookup),
+    SourceFacts(source_facts::Request),
+    InvocationSite(invocation_site::Request),
+    RequestField(request_field::Request),
+}
+
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct Request {
     source: String,
     #[serde(default)]
     assume_intrinsics: bool,
-    #[serde(default)]
-    function_at_byte: Option<u32>,
+}
+
+/// No rewrite runs here, so the intrinsic assumption is not a field.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FunctionLookup {
+    source: String,
+    function_at_byte: u32,
     #[serde(default)]
     candidate_end_byte: Option<u32>,
 }
@@ -68,7 +87,10 @@ struct Transformation {
     replacement: String,
 }
 
-fn error_response(message: impl Into<String>) -> Response {
+/// Every refusal names its kind: `invalid-request`, `source-limit`,
+/// `preflight-limit` (a Tree-sitter depth, node, heap or time budget),
+/// `syntax` (either parser rejected the source) or `derived-validation`.
+fn error_response(kind: &'static str, message: impl Into<String>) -> Response {
     Response {
         schema: "reb-deobfuscator-worker-v1",
         ok: false,
@@ -84,9 +106,20 @@ fn error_response(message: impl Into<String>) -> Response {
         transformations: Vec::new(),
         transformations_truncated: false,
         assumptions: vec![],
-        error_kind: None,
+        error_kind: Some(kind),
         function_location: None,
     }
+}
+
+fn preflight_refusal(message: &'static str, source_bytes: usize) -> Response {
+    let kind = if message == preflight::MALFORMED {
+        "syntax"
+    } else {
+        "preflight-limit"
+    };
+    let mut response = error_response(kind, message);
+    response.source_bytes = source_bytes;
+    response
 }
 
 // Validate the whole candidate before publishing any rewrite receipts. The
@@ -123,46 +156,47 @@ fn validate_response(mut response: Response, original: &str, source_type: Source
     response
 }
 
+fn locate(request: FunctionLookup) -> Response {
+    let source_bytes = request.source.len();
+    if source_bytes > MAX_SOURCE_BYTES {
+        return error_response(
+            "source-limit",
+            "source exceeds the deobfuscation byte limit",
+        );
+    }
+    let offset = request.function_at_byte as usize;
+    match match request.candidate_end_byte {
+        Some(end) => preflight::candidate_function_at(&request.source, offset, end as usize),
+        None => preflight::function_at(&request.source, offset),
+    } {
+        Ok(function_location) => Response {
+            schema: "reb-deobfuscator-worker-v1",
+            ok: true,
+            parsed: true,
+            source_bytes,
+            syntax_errors: vec![],
+            evidence: Evidence::default(),
+            derived_source: String::new(),
+            transformations: vec![],
+            transformations_truncated: false,
+            assumptions: vec![],
+            error_kind: None,
+            function_location,
+        },
+        Err(message) => preflight_refusal(message, source_bytes),
+    }
+}
+
 fn analyze(request: Request) -> Response {
     let source_bytes = request.source.len();
     if source_bytes > MAX_SOURCE_BYTES {
-        return error_response("source exceeds the deobfuscation byte limit");
-    }
-
-    if request.candidate_end_byte.is_some() && request.function_at_byte.is_none() {
-        return error_response("candidate_end_byte requires function_at_byte");
-    }
-    if let Some(offset) = request.function_at_byte {
-        return match match request.candidate_end_byte {
-            Some(end) => {
-                preflight::candidate_function_at(&request.source, offset as usize, end as usize)
-            }
-            None => preflight::function_at(&request.source, offset as usize),
-        } {
-            Ok(function_location) => Response {
-                schema: "reb-deobfuscator-worker-v1",
-                ok: true,
-                parsed: true,
-                source_bytes,
-                syntax_errors: vec![],
-                evidence: Evidence::default(),
-                derived_source: String::new(),
-                transformations: vec![],
-                transformations_truncated: false,
-                assumptions: vec![],
-                error_kind: None,
-                function_location,
-            },
-            Err(message) => {
-                let mut response = error_response(message);
-                response.source_bytes = source_bytes;
-                response
-            }
-        };
+        return error_response(
+            "source-limit",
+            "source exceeds the deobfuscation byte limit",
+        );
     }
     if let Err(message) = preflight::check(&request.source) {
-        let mut response = error_response(message);
-        response.source_bytes = source_bytes;
+        let mut response = preflight_refusal(message, source_bytes);
         response.derived_source = request.source;
         return response;
     }
@@ -230,13 +264,51 @@ fn analyze(request: Request) -> Response {
         } else {
             vec![]
         },
-        error_kind: None,
+        // Tree-sitter admitted the source and Oxc rejected it: `parsed` stays
+        // true because a parse ran, but the source is not valid JavaScript.
+        error_kind: (!parsed_ok).then_some("syntax"),
         function_location: None,
     };
     if parsed_ok && !response.transformations.is_empty() {
         return validate_response(response, &request.source, parsed.program.source_type);
     }
     response
+}
+
+/// A record that does not decode as the operation it names. Each operation
+/// answers in its own response schema; untagged records use this worker's.
+enum Rejected {
+    Request(String),
+    SourceFacts,
+    InvocationSite,
+    RequestField,
+}
+
+fn operation(line: &[u8]) -> Result<Operation, Rejected> {
+    let value = serde_json::from_slice::<serde_json::Value>(line)
+        .map_err(|error| Rejected::Request(format!("invalid request: {error}")))?;
+    let lookup =
+        value.get("function_at_byte").is_some() || value.get("candidate_end_byte").is_some();
+    match value.get("operation").map(serde_json::Value::as_str) {
+        None if lookup => serde_json::from_value(value)
+            .map(Operation::FunctionLookup)
+            .map_err(|error| Rejected::Request(format!("invalid function lookup: {error}"))),
+        None => serde_json::from_value(value)
+            .map(Operation::Deobfuscate)
+            .map_err(|error| Rejected::Request(format!("invalid request: {error}"))),
+        Some(Some("source_facts")) => serde_json::from_value(value)
+            .map(Operation::SourceFacts)
+            .map_err(|_| Rejected::SourceFacts),
+        Some(Some("invocation_site")) => serde_json::from_value(value)
+            .map(Operation::InvocationSite)
+            .map_err(|_| Rejected::InvocationSite),
+        Some(Some("request_field")) => serde_json::from_value(value)
+            .map(Operation::RequestField)
+            .map_err(|_| Rejected::RequestField),
+        Some(_) => Err(Rejected::Request(
+            "invalid request: unknown operation".into(),
+        )),
+    }
 }
 
 // Read at most limit bytes, then drain the remainder of an oversized record.
@@ -286,49 +358,36 @@ fn serve(reader: &mut impl BufRead, writer: &mut impl Write) -> io::Result<()> {
     loop {
         let response = match read_request(reader, MAX_REQUEST_BYTES) {
             Ok(None) => return Ok(()),
-            Ok(Some(line)) => {
-                let operation = serde_json::from_slice::<serde_json::Value>(&line)
-                    .ok()
-                    .and_then(|value| {
-                        value
-                            .get("operation")
-                            .and_then(|v| v.as_str())
-                            .map(str::to_owned)
-                    });
-                if operation.as_deref() == Some("source_facts") {
-                    match serde_json::from_slice::<source_facts::Request>(&line) {
-                        Ok(request) => source_facts::analyze(request),
-                        Err(_) => source_facts::invalid("invalid source facts request", 0),
-                    }
-                } else if operation.as_deref() == Some("invocation_site") {
-                    match serde_json::from_slice::<invocation_site::Request>(&line) {
-                        Ok(request) => serde_json::to_value(invocation_site::analyze(request))?,
-                        Err(_) => serde_json::to_value(invocation_site::invalid(
-                            "invalid invocation site request",
-                            0,
-                        ))?,
-                    }
-                } else if operation.as_deref() == Some("request_field") {
-                    match serde_json::from_slice::<request_field::Request>(&line) {
-                        Ok(request) => serde_json::to_value(request_field::extract(request))?,
-                        Err(_) => {
-                            serde_json::to_value(request_field::extract(request_field::Request {
-                                operation: String::new(),
-                                body: String::new(),
-                                pointer: String::new(),
-                            }))?
-                        }
-                    }
-                } else {
-                    let analyzed = match serde_json::from_slice::<Request>(&line) {
-                        Ok(request) => analyze(request),
-                        Err(error) => error_response(format!("invalid request: {error}")),
-                    };
-                    serde_json::to_value(analyzed)?
+            Ok(Some(line)) => match operation(&line) {
+                Ok(Operation::Deobfuscate(request)) => serde_json::to_value(analyze(request))?,
+                Ok(Operation::FunctionLookup(request)) => serde_json::to_value(locate(request))?,
+                Ok(Operation::SourceFacts(request)) => source_facts::analyze(request),
+                Ok(Operation::InvocationSite(request)) => {
+                    serde_json::to_value(invocation_site::analyze(request))?
                 }
-            }
+                Ok(Operation::RequestField(request)) => {
+                    serde_json::to_value(request_field::extract(request))?
+                }
+                Err(Rejected::Request(message)) => {
+                    serde_json::to_value(error_response("invalid-request", message))?
+                }
+                Err(Rejected::SourceFacts) => {
+                    source_facts::invalid("invalid source facts request", 0)
+                }
+                Err(Rejected::InvocationSite) => serde_json::to_value(invocation_site::invalid(
+                    "invalid invocation site request",
+                    0,
+                ))?,
+                Err(Rejected::RequestField) => {
+                    serde_json::to_value(request_field::extract(request_field::Request {
+                        operation: String::new(),
+                        body: String::new(),
+                        pointer: String::new(),
+                    }))?
+                }
+            },
             Err(error) if error.kind() == io::ErrorKind::InvalidData => {
-                serde_json::to_value(error_response(error.to_string()))?
+                serde_json::to_value(error_response("source-limit", error.to_string()))?
             }
             Err(error) => return Err(error),
         };
@@ -362,8 +421,6 @@ mod tests {
             let response = analyze(Request {
                 source: source.to_string(),
                 assume_intrinsics: false,
-                function_at_byte: None,
-                candidate_end_byte: None,
             });
             assert!(response.ok, "{source}: {:?}", response.syntax_errors);
             assert!(validate_derived(&response.derived_source, SourceType::unambiguous()).is_ok());
@@ -384,8 +441,6 @@ mod tests {
         let mut response = analyze(Request {
             source: original.to_string(),
             assume_intrinsics: false,
-            function_at_byte: None,
-            candidate_end_byte: None,
         });
         assert_eq!(response.transformations.len(), 1);
         response.derived_source = "const result={(3)};".to_string();
@@ -432,8 +487,6 @@ mod tests {
             let response = analyze(Request {
                 source,
                 assume_intrinsics: true,
-                function_at_byte: None,
-                candidate_end_byte: None,
             });
             assert!(response.ok);
             assert!(response.derived_source.contains("f(\"ab\")"));
@@ -446,8 +499,6 @@ mod tests {
         let response = analyze(Request {
             source: "const f=function(){var a=[0];for(var i=0;i<3;i++){a=[a,a]}return a.length};const result=f();".to_string(),
             assume_intrinsics: true,
-            function_at_byte: None,
-                candidate_end_byte: None,
         });
         assert!(response.ok);
         assert!(!response.transformations_truncated);
@@ -468,16 +519,12 @@ mod tests {
             let disabled = analyze(Request {
                 source: source.clone(),
                 assume_intrinsics: false,
-                function_at_byte: None,
-                candidate_end_byte: None,
             });
             assert!(disabled.ok);
             assert_eq!(disabled.derived_source, source);
             let enabled = analyze(Request {
                 source: source.clone(),
                 assume_intrinsics: true,
-                function_at_byte: None,
-                candidate_end_byte: None,
             });
             assert!(enabled.ok);
             assert!(!enabled.transformations_truncated);
@@ -514,8 +561,6 @@ mod tests {
             let response = analyze(Request {
                 source: source.to_string(),
                 assume_intrinsics: true,
-                function_at_byte: None,
-                candidate_end_byte: None,
             });
             assert!(response.ok);
             for kind in required {
@@ -552,8 +597,6 @@ mod tests {
             let response = analyze(Request {
                 source: source.to_string(),
                 assume_intrinsics: true,
-                function_at_byte: None,
-                candidate_end_byte: None,
             });
             assert!(response.ok, "{source}");
             assert!(
@@ -575,8 +618,6 @@ mod tests {
         let response = analyze(Request {
             source: split.clone(),
             assume_intrinsics: true,
-            function_at_byte: None,
-            candidate_end_byte: None,
         });
         assert!(response.ok);
         assert!(response.transformations_truncated);
@@ -591,8 +632,6 @@ mod tests {
             let response = analyze(Request {
                 source: source.clone(),
                 assume_intrinsics: true,
-                function_at_byte: None,
-                candidate_end_byte: None,
             });
             assert!(response.ok);
             assert_eq!(response.derived_source, source);
@@ -604,8 +643,6 @@ mod tests {
         let response = analyze(Request {
             assume_intrinsics: false,
             source: "const value = 1 + 2 * 3; const unsafe = 1 / 0;".to_string(),
-            function_at_byte: None,
-            candidate_end_byte: None,
         });
 
         assert!(response.ok);
@@ -622,8 +659,6 @@ mod tests {
         let response = analyze(Request {
             assume_intrinsics: false,
             source: "const broken = ;".to_string(),
-            function_at_byte: None,
-            candidate_end_byte: None,
         });
 
         assert!(!response.ok);
@@ -638,8 +673,6 @@ mod tests {
         let response = analyze(Request {
             assume_intrinsics: false,
             source: "x".repeat(MAX_SOURCE_BYTES + 1),
-            function_at_byte: None,
-            candidate_end_byte: None,
         });
 
         assert!(!response.ok);
@@ -651,7 +684,63 @@ mod tests {
 #[cfg(test)]
 mod framing_tests {
     use super::*;
+    use serde_json::json;
     use std::io::{BufReader, Cursor};
+
+    fn respond(request: serde_json::Value) -> serde_json::Value {
+        let mut input = serde_json::to_vec(&request).unwrap();
+        input.push(b'\n');
+        let mut output = Vec::new();
+        serve(&mut Cursor::new(input), &mut output).unwrap();
+        serde_json::from_slice(output.trim_ascii_end()).unwrap()
+    }
+
+    #[test]
+    fn unknown_operations_and_fields_are_refused_not_deobfuscated() {
+        for request in [
+            json!({"operation":"source_fact","source":"1+2"}),
+            json!({"operation":7,"source":"1+2"}),
+            json!({"source":"1+2","assume_intrinsic":true}),
+            json!({"source":"function f(){}","function_at_byte":0,"assume_intrinsics":true}),
+        ] {
+            let response = respond(request.clone());
+            assert_eq!(response["ok"], false, "{request}");
+            assert_eq!(response["error_kind"], "invalid-request", "{request}");
+            assert_eq!(response["derived_source"], "", "{request}");
+        }
+        assert_eq!(respond(json!({"source":"1+2"}))["derived_source"], "(3)");
+    }
+
+    /// Tree-sitter admits a top-level `return`; Oxc parses it and rejects it.
+    /// That is a syntax refusal with `parsed: true`, not an unlabelled failure.
+    #[test]
+    fn every_refusal_names_its_kind() {
+        for (request, kind, parsed) in [
+            (json!({"source":"const broken = ;"}), "syntax", false),
+            (json!({"source":"return 1;"}), "syntax", true),
+            (
+                json!({"source":format!("{}0;", "!".repeat(10_000))}),
+                "preflight-limit",
+                false,
+            ),
+            (
+                json!({"source":"x".repeat(MAX_SOURCE_BYTES + 1)}),
+                "source-limit",
+                false,
+            ),
+            (
+                json!({"source":"const broken = ;","function_at_byte":0}),
+                "syntax",
+                false,
+            ),
+        ] {
+            let response = respond(request);
+            assert_eq!(response["ok"], false, "{kind}");
+            assert_eq!(response["error_kind"], kind);
+            assert_eq!(response["parsed"], parsed, "{kind}");
+        }
+        assert!(respond(json!({"source":"1+2"})).get("error_kind").is_none());
+    }
 
     #[test]
     fn drains_oversize_and_preserves_next_record() {
@@ -695,19 +784,15 @@ mod framing_tests {
         let source = "function f(){return 'value';}";
         let start = source.find("value").unwrap();
         let base = serde_json::json!({"source":source,"function_at_byte":start});
-        let ordinary = analyze(serde_json::from_value(base.clone()).unwrap());
+        let ordinary = locate(serde_json::from_value(base.clone()).unwrap());
         assert!(!ordinary.function_location.unwrap().candidate_eligible);
         let mut strict = base;
         strict["candidate_end_byte"] = serde_json::json!(start + 5);
-        let strict = analyze(serde_json::from_value(strict).unwrap());
+        let strict = locate(serde_json::from_value(strict).unwrap());
         assert!(strict.function_location.unwrap().candidate_eligible);
-        let malformed = analyze(
-            serde_json::from_value(
-                serde_json::json!({"source":source,"candidate_end_byte":start+5}),
-            )
-            .unwrap(),
-        );
-        assert!(!malformed.ok);
+        let malformed = respond(serde_json::json!({"source":source,"candidate_end_byte":start+5}));
+        assert_eq!(malformed["ok"], false);
+        assert_eq!(malformed["error_kind"], "invalid-request");
     }
 
     #[test]

@@ -32,7 +32,11 @@ Metadata mode; an explicit environment value wins. They also set
 define `reb_js_invocation_capture`, the launcher starts the session without
 the sites and digests and prints `JavaScript invocation tracking:
 unavailable`, instead of refusing the session. Without that switch a missing
-flag still refuses the session. Agent-started sessions never arm sites. The
+flag still refuses the session. Agent-started sessions arm sites only from the
+named options `js_invocation_sites` or `js_invocation_saved_sites` (their own
+saved set, never the app's), from a private copy and without that switch;
+digests need `js_invocation_digests`. See
+[live session control](http-api.md#live-session-control). The
 routes that resolve and save sites are in
 [the HTTP API](http-api.md#saved-javascript-invocation-sites).
 

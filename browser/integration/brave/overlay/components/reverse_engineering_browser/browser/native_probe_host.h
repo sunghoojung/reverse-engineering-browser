@@ -124,8 +124,9 @@ class NativeProbeHost final : public mojom::NativeProbeHost {
   std::uint32_t wasm_capture_count_ = 0;
   std::uint32_t wasm_indirect_capture_count_ = 0;
   std::uint32_t guest_capture_count_ = 0;
-  bool wasm_document_gap_emitted_ = false, wasm_indirect_document_gap_emitted_ = false,
-       guest_budget_gap_emitted_ = false, guest_host_malformed_gap_emitted_ = false;
+  // One marker for host records naming another identity, whose sequence
+  // slots are not this renderer's to fill. Every other refusal fills its own.
+  bool guest_host_malformed_gap_emitted_ = false;
   std::shared_ptr<const std::uint64_t> wasm_epoch_lifetime_;
   base::WeakPtrFactory<NativeProbeHost> weak_factory_{this};
 };

@@ -40,7 +40,9 @@ nothing is relaunched to obtain one.
      out. A standalone `make live` capture needs
      `REB_CONSOLE_DOCUMENT_START=1`. A capture already running without it
      cannot be upgraded. An agent session started with `reb-api session start`
-     or `start_live_session` never has it.
+     or `start_live_session` has it only when the start names
+     `document_start: true` (`--document-start` on the CLI); an inherited
+     `REB_CONSOLE_DOCUMENT_START` never grants it.
 3. An explicit confirmed arm. Clearing the set, disconnecting, ending the
    session, or session expiry removes it.
 
@@ -128,6 +130,41 @@ Through `reb-api mcp`, the same surfaces are the `get_native_console_document_st
 request with the browser process, so they are classified as effectful and stay
 hidden unless `--allow-effects` is set. That flag is not authorization,
 redaction, or permission to send captured data to a model.
+
+## From an agent, for a child frame
+
+An agent session needs the permission at start. With the cross-origin child
+page above, an agent arms a rule for the child frame like this; every argument
+is a real tool field:
+
+```text
+start_live_session {"document_start": true, "localhost_only": true,
+  "url": "http://127.0.0.1:8080/synthetic-transform.html?child=http://127.0.0.1:8081/synthetic-transform-child.html"}
+get_native_console {}
+```
+
+Pick the child by `frame: child` and `origin: http://127.0.0.1:8081`; its
+`top_relation` and `out_of_process` say whether it shares the top page's site
+and process. Connect to any listed document (the rule belongs to the session,
+not the document), then arm, reload and read:
+
+```text
+native_console_action {"body": {"action": "connect_live", "binding_id": "<binding_id>",
+  "target_id": "<child id>", "confirm_live": true}}
+native_console_action {"body": {"action": "arm_document_start", "session_id": "<session_id>",
+  "confirm_document_start": true, "scripts": [{"origin": "http://127.0.0.1:8081",
+  "frame": "child", "source": "<observe-synthetic-transform.js>"}]}}
+native_console_action {"body": {"action": "evaluate", "session_id": "<session_id>",
+  "target_id": "<child id>", "source": "location.reload()"}}
+get_native_console_document_start {"after_sequence": "0"}
+```
+
+The reload replaces the selected document, so the Console then reports it
+stale; that is expected. Read `injected` and `report` records, then pass the
+last `sequence` as `after_sequence`. A record's `frame_id` is the capture's
+frame identity: `get_events {"frame_id": "<frame_id>"}` reads that frame's
+native evidence. Finish with `clear_document_start`, `stop` and
+`session_action {"body": {"action": "end", "confirm": true}}`.
 
 ## Writing a rule that cannot widen
 

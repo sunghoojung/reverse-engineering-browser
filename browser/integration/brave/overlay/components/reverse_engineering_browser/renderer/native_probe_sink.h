@@ -358,6 +358,13 @@ class COMPONENT_EXPORT(REB_NATIVE_PROBE_SINK) NativeProbeSink final {
   [[nodiscard]] NativeProbeEmitStatus EmitStatus(const NativeProbeEvent& event,
                                                  std::uint64_t generation) const noexcept;
 
+  // Writes a gap into the renderer sequence slot a record already took but
+  // could not deliver, so the broker sees an explicit omission there. A full
+  // ring counts it as a drop like any other record.
+  void FillSequenceGap(const NativeProbeHeader& source,
+                       std::string_view reason,
+                       std::uint64_t generation) noexcept;
+
   std::uint64_t RecordRuntimeBufferEvent(NativeProbeType type,
                                          std::uint64_t frame_id,
                                          std::string_view reason,
@@ -548,12 +555,12 @@ class COMPONENT_EXPORT(REB_NATIVE_PROBE_SINK) NativeProbeSink final {
   std::array<std::atomic<std::uint64_t>, kNativeGuestSampleLimit> native_guest_slots_{};
   std::atomic<std::uint64_t> native_guest_capped_generation_{0};
   // Coalesced guest gaps, at most one of each per configuration.
+  // A refused capture emit is not coalesced: it fills its own slots.
   static constexpr std::size_t kGuestSampleLimitGap = 0, kGuestInvocationLimitGap = 1,
-                               kGuestSnapshotGap = 2, kGuestTransportGap = 3,
-                               kGuestHostTransportGap = 4, kGuestAdapterRestartGap = 5,
-                               kGuestRuntimeIdentityGap = 6, kGuestModuleUnavailableGap = 7,
-                               kGuestHostParentBudgetGap = 8, kGuestParentUnresolvedGap = 9,
-                               kGuestGapCount = 10;
+                               kGuestSnapshotGap = 2, kGuestHostTransportGap = 3,
+                               kGuestAdapterRestartGap = 4, kGuestRuntimeIdentityGap = 5,
+                               kGuestModuleUnavailableGap = 6, kGuestHostParentBudgetGap = 7,
+                               kGuestParentUnresolvedGap = 8, kGuestGapCount = 9;
   std::array<std::atomic<std::uint64_t>, kGuestGapCount> native_guest_gap_generations_{};
   // Parent-binding host routes claimed per configuration (see
   // kNativeGuestHostParentLimit). Same generation-tag scheme as samples.

@@ -631,3 +631,55 @@ void NativeGuestBindingReclaim() {
   std::cout << "PASS guest document bindings and activations are reclaimed when full; "
                "ancestors stay, and a table of ancestors refuses explicitly\n";
 }
+
+// A capture the transport refuses never reached the browser: its sample
+// index is free again and every sequence number it took is filled with a gap
+// in that slot, so the broker sees no silent hole.
+void NativeGuestTransportFailureCoversSlots() {
+  const std::array<std::uint8_t, 11> module{0, 97, 115, 109, 1, 0, 0, 0, 0x0e, 0, 0};
+  const auto adapter = GuestTestAdapter(module);
+  sink.SetEmitters(&RecordGuestQueue, &CaptureRuntimeMetadata, 46, reb::kAllNativeProbeCategoryMask,
+                   kForever, false, &GuestFrame);
+  sink.ConfigureNativeWasmGuest(adapter, &GuestCapture, &GuestHost);
+  sink.SetNativeWasmGuestRuntime(&GuestContext, nullptr);
+  guest_queue_events.clear();
+  guest_dispatches.clear();
+  guest_invocations.clear();
+  guest_module_sizes.clear();
+  guest_pc = 0;
+  guest_memory[0] = 0x41;
+  reb::NativeWasmGuestStateView view{7, 60, 414, 8, 0, 0, nullptr, &GuestRead, &GuestCopy};
+  const auto record = [&] {
+    sink.RecordNativeWasmGuest(1, 8, "https://owned.test/module.wasm", module, view, 5, 6);
+  };
+  guest_capture_accept = false;
+  for (int n = 0; n < 5; ++n)
+    record();
+  guest_capture_accept = true;
+  std::vector<std::uint64_t> gaps;
+  for (const auto& event : guest_queue_events) {
+    assert(event.header.type == reb::NativeProbeType::kGap);
+    assert(std::string_view(reinterpret_cast<const char*>(event.inline_payload.data()),
+                            event.header.payload_size) == "native_guest_transport_unavailable");
+    gaps.push_back(event.header.sequence_number);
+  }
+  // Each refused sample took a fresh marker and a dispatch slot.
+  assert(gaps.size() == 10 && guest_dispatches.empty());
+  for (int n = 0; n < 3; ++n)
+    record();
+  assert(guest_dispatches.size() == 3 && guest_module_sizes.front() == module.size() &&
+         !GuestQueueHasGap("native_guest_sample_limit"));
+  // The refused slots and the delivered records form one unbroken range.
+  gaps.push_back(guest_invocations.front().header.sequence_number);
+  for (const auto& dispatch : guest_dispatches)
+    gaps.push_back(dispatch.header.sequence_number);
+  std::sort(gaps.begin(), gaps.end());
+  assert(gaps.back() - gaps.front() + 1 == gaps.size() &&
+         std::adjacent_find(gaps.begin(), gaps.end()) == gaps.end());
+  record();
+  assert(guest_dispatches.size() == 3 && GuestQueueHasGap("native_guest_sample_limit"));
+  sink.SetEmitters(nullptr, nullptr, 0, 0, 0);
+  sink.SetNativeWasmGuestRuntime(nullptr, nullptr);
+  std::cout << "PASS a refused guest capture frees its sample index and fills each sequence it "
+               "took with a gap\n";
+}

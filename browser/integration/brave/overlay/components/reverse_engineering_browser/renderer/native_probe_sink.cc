@@ -1579,6 +1579,22 @@ void NativeProbeSink::CaptureRuntimeTypedArray(const std::uint64_t execution_con
   }
 }
 
+void NativeProbeSink::FillSequenceGap(const NativeProbeHeader& source,
+                                      const std::string_view reason,
+                                      const std::uint64_t generation) noexcept {
+  NativeProbeEvent gap;
+  gap.header.category = NativeProbeCategory::kVm;
+  gap.header.type = NativeProbeType::kGap;
+  gap.header.sequence_number = source.sequence_number;
+  gap.header.monotonic_time_ns = source.monotonic_time_ns;
+  gap.header.session_id = source.session_id;
+  gap.header.process_id = source.process_id;
+  gap.header.thread_id = source.thread_id;
+  gap.header.frame_id = source.frame_id;
+  SetPayload(gap, reason);
+  static_cast<void>(EmitStatus(gap, generation));
+}
+
 std::uint64_t NativeProbeSink::RecordRuntimeBufferEvent(const NativeProbeType type,
                                                         const std::uint64_t frame_id,
                                                         const std::string_view reason,
@@ -3480,12 +3496,14 @@ void NativeProbeSink::RecordNativeWasmGuest(std::uint64_t execution_context_id,
   // Generation tags prevent stale in-flight work consuming a replacement budget.
   // Every site claims from these same slots, so sites share one sample limit.
   std::uint32_t sample_index = UINT32_MAX;
+  std::uint64_t slot_previous = 0;
   for (std::size_t index = 0; index < adapter->sample_limit; ++index) {
     auto& slot = native_guest_slots_[index];
     auto previous = slot.load(std::memory_order_acquire);
     while (previous < generation) {
       if (slot.compare_exchange_weak(previous, generation, std::memory_order_acq_rel)) {
         sample_index = static_cast<std::uint32_t>(index);
+        slot_previous = previous;
         break;
       }
     }
@@ -3511,7 +3529,8 @@ void NativeProbeSink::RecordNativeWasmGuest(std::uint64_t execution_context_id,
   event.header.thread_id = admission.thread_id;
   event.header.frame_id = frame_id;
   event.header.monotonic_time_ns = admission.monotonic_time_ns;
-  if (!state->invocation_event.header.sequence_number) {
+  const bool new_marker = !state->invocation_event.header.sequence_number;
+  if (new_marker) {
     auto& invocation = state->invocation_event;
     invocation.header = event.header;
     invocation.header.type = NativeProbeType::kWasmGuestInvocation;
@@ -3565,13 +3584,25 @@ void NativeProbeSink::RecordNativeWasmGuest(std::uint64_t execution_context_id,
   capture.module_bytes = send_module ? module_bytes : std::span<const std::uint8_t>{};
   capture.bytecode_bytes = std::span(snapshot.bytes.data(), snapshot.memory_length);
   const auto emit = native_guest_capture_.load(std::memory_order_acquire);
-  if (config_generation_.load(std::memory_order_acquire) != generation || !emit ||
-      !emit(capture, generation) || guest_snapshot_cancelled ||
-      config_generation_.load(std::memory_order_acquire) != generation) {
-    NoteNativeGuestOmission(generation, frame_id, kGuestTransportGap,
-                            "native_guest_transport_unavailable");
+  if (guest_snapshot_cancelled ||
+      config_generation_.load(std::memory_order_acquire) != generation || !emit ||
+      !emit(capture, generation)) {
+    // Nothing reached the browser. The sample index is free again, and each
+    // sequence number this sample took becomes a gap in its own slot; a new
+    // marker is dropped so the next sample of the activation takes another.
+    auto claimed = generation;
+    native_guest_slots_[sample_index].compare_exchange_strong(claimed, slot_previous,
+                                                              std::memory_order_acq_rel);
+    FillSequenceGap(event.header, "native_guest_transport_unavailable", generation);
+    if (new_marker) {
+      FillSequenceGap(state->invocation_event.header, "native_guest_transport_unavailable",
+                      generation);
+      state->invocation_event = {};
+    }
     return;
   }
+  if (config_generation_.load(std::memory_order_acquire) != generation)
+    return;  // Sent under a retired configuration, whose state is discarded.
   if (send_module) {
     document->module = GuestModuleState::kPending;
     document->module_token = event.header.sequence_number;

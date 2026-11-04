@@ -29,8 +29,12 @@ run. Exporting does not advance execution.
 Creation starts paused at count zero with a confirmed initial snapshot and empty
 history. Step commits at most one native instruction. Run schedules one instruction
 per 250 ms tick without catch-up bursts. Pause acknowledgment waits for any
-in-flight instruction boundary. Stop and Close dispose the child; uncertain
-in-flight execution remains explicitly unknown. Reset creates fresh run identity,
+in-flight instruction boundary; until then a run that is starting, or that
+reached its lifetime mid-instruction, keeps reporting `starting` or `stopping`.
+Stop and Close dispose the child; uncertain in-flight execution remains
+explicitly unknown. Halted, stopped, expired and failed are final: a later Stop
+or Pause is acknowledged with the same state and termination reason, so Stop on
+an ended run only confirms disposal. Reset creates fresh run identity,
 generation and lifetime; it never resumes automatically. Leaving the view does
 not pause a fixture. Every run expires after 60 seconds, including paused time.
 
@@ -61,7 +65,10 @@ returns; no guest instruction executes during setup or initial handshake. The
 are capped at 32768 bytes before allocation. Public
 views are capped at 1 MiB, diagnostics retain at most 8192 bytes, and helper-file
 hashing accepts at most 64 MiB. Protocol failure retires the run; it does not retry
-a possibly completed instruction. Failed disposal blocks replacement.
+a possibly completed instruction. Failed disposal blocks replacement: Create
+is refused while the helper is unreaped. The run keeps its identity and reports
+`disposal_failed`, so Reset or Close with that identity retries disposal. A
+failed reap does not turn a halted or expired run into a failed one.
 
 ## Validation
 

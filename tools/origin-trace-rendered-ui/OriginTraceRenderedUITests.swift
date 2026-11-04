@@ -1455,6 +1455,91 @@ final class OriginTraceRenderedUITests: XCTestCase {
     try await clearSavedSites(ui)
   }
 
+  // A backend that stops answering: the bounded poll reports it, keeps the
+  // last evidence and withdraws Stop and Clear. A capture action stays in
+  // progress across polls, which could otherwise re-enable its button.
+  @MainActor
+  func test20EventPollTimeoutAndCaptureActions() async throws {
+    for size in windowSizes {
+      let ui = try await prepare(size)
+      _ = try await ui.webView.callAsyncJavaScript(
+        """
+        const original = window.fetch.bind(window);
+        const reply = value => new Response(JSON.stringify(value), {status: 200, headers: {'Content-Type': 'application/json'}});
+        const shim = window.__rebPollShim = {hang: false, stopped: false, eventPolls: 0, actions: [], answer: null};
+        state.eventEtag = null;
+        window.fetch = async (input, init = {}) => {
+          const path = typeof input === 'string' ? input : input.url;
+          if (path === '/api/events?limit=5000') {
+            shim.eventPolls += 1;
+            if (shim.hang) return new Promise((_, reject) => init.signal?.addEventListener('abort', () => reject(init.signal.reason), {once: true}));
+            const body = await (await original(path, {cache: 'no-store'})).json();
+            return reply({...body, capture_mode: 'live', broker_connected: !shim.stopped, capture_stopped: shim.stopped, capture_controls_available: true});
+          }
+          if (path === '/api/capture/actions') {
+            shim.actions.push(JSON.parse(init.body));
+            return new Promise(resolve => { shim.answer = value => resolve(reply(value)); });
+          }
+          return original(input, init);
+        };
+        return true;
+        """, contentWorld: .page)
+      try await show(ui, "signals")
+      try await ui.waitUntil("state.connection === 'connected' && !document.querySelector('#signal-stop-capture').disabled",
+        "\(size.name): the live capture did not offer Stop")
+      let retained = try await ui.value("state.requests.length") as? Int ?? 0
+      XCTAssertGreaterThan(retained, 0, "\(size.name): fixture requests are loaded")
+
+      try await ui.click("#signal-stop-capture")
+      try await ui.waitUntil("document.querySelector('#signal-notice').textContent === 'Stopping native probes…'",
+        "\(size.name): the in-flight stop was not announced")
+      let polls = try await ui.value("__rebPollShim.eventPolls") as? Int ?? 0
+      try await ui.waitUntil("__rebPollShim.eventPolls >= \(polls + 2)", "\(size.name): polling stopped during the action")
+      let inFlight = try await ui.json(
+        "({stop: document.querySelector('#signal-stop-capture').disabled, clear: document.querySelector('#signal-clear-events').disabled, actions: __rebPollShim.actions.length, stopped: state.captureStopped})")
+      XCTAssertEqual(inFlight["stop"] as? Bool, true, "\(size.name): a poll re-enabled Stop during its action: \(inFlight)")
+      XCTAssertEqual(inFlight["clear"] as? Bool, true, "\(size.name): Clear is offered during an action: \(inFlight)")
+      XCTAssertEqual(inFlight["actions"] as? Int, 1, "\(size.name): \(inFlight)")
+      XCTAssertEqual(inFlight["stopped"] as? Bool, false, "\(size.name): \(inFlight)")
+      try await assertLayout(ui, "#screen-signals", "\(size.name) capture action in flight")
+      try await ui.screenshot("capture-action-in-flight-\(size.name)")
+
+      _ = try await ui.value("(__rebPollShim.stopped = true, __rebPollShim.answer({ok: true, capture_stopped: true, broker_connected: false}), true)")
+      try await ui.waitUntil(
+        "document.querySelector('#signal-session-badge').textContent === 'Probes stopped' && !document.querySelector('#signal-clear-events').disabled",
+        "\(size.name): the stop did not settle")
+
+      _ = try await ui.value("(__rebPollShim.hang = true, true)")
+      try await ui.waitUntil("state.connection === 'unresponsive'", timeout: 20, "\(size.name): a hung backend was never reported")
+      let hung = try await ui.json(
+        """
+        ({footer: document.querySelector('#broker-status').textContent, updated: document.querySelector('#updated-status').textContent,
+          badge: document.querySelector('#signal-session-badge').textContent, notice: document.querySelector('#signal-notice').textContent,
+          stop: document.querySelector('#signal-stop-capture').disabled, clear: document.querySelector('#signal-clear-events').disabled,
+          requests: state.requests.length})
+        """)
+      XCTAssertEqual(hung["footer"] as? String, "broker not responding", "\(size.name): \(hung)")
+      XCTAssertEqual(hung["updated"] as? String, "last valid evidence retained", "\(size.name): \(hung)")
+      XCTAssertNotEqual(hung["badge"] as? String, "Probes stopped", "\(size.name): an unknown capture state outranks the stale stop: \(hung)")
+      XCTAssertTrue((hung["notice"] as? String ?? "").contains("did not answer within 10 seconds"), "\(size.name): \(hung)")
+      XCTAssertEqual(hung["stop"] as? Bool, true, "\(size.name): \(hung)")
+      XCTAssertEqual(hung["clear"] as? Bool, true, "\(size.name): Clear is offered against an unresponsive backend: \(hung)")
+      XCTAssertEqual(hung["requests"] as? Int, retained, "\(size.name): the last valid evidence was not kept: \(hung)")
+      try await assertLayout(ui, "#screen-signals", "\(size.name) unresponsive Fingerprinting")
+      try await ui.screenshot("event-poll-unresponsive-signals-\(size.name)")
+      try await show(ui, "traffic")
+      let notice = try await ui.value("document.querySelector('#network-notice').hidden ? '' : document.querySelector('#network-notice').textContent") as? String ?? ""
+      XCTAssertTrue(notice.contains("did not answer within 10 seconds"), "\(size.name): Traffic names the timeout: \(notice)")
+      try await assertInert(ui, "\(size.name) unresponsive Traffic")
+      try await assertLayout(ui, "#screen-traffic", "\(size.name) unresponsive Traffic")
+      try await ui.screenshot("event-poll-unresponsive-traffic-\(size.name)")
+
+      _ = try await ui.value("(__rebPollShim.hang = false, true)")
+      try await ui.waitUntil("state.connection === 'broker-offline' && document.querySelector('#broker-status').textContent === 'broker unavailable'",
+        timeout: 20, "\(size.name): the poll did not recover")
+    }
+  }
+
   private func views(_ root: NSView) -> [NSView] { [root] + root.subviews.flatMap(views) }
 
   private func texts(_ panel: NSWindow) -> [String] {
@@ -1504,7 +1589,7 @@ final class OriginTraceRenderedUITests: XCTestCase {
   // reply to a stopped request, which ended the app. The runner slot must also
   // come back, so the next run gets its own answer instead of 409.
   @MainActor
-  func test20StoppedRequestIsNotAnswered() async throws {
+  func test21StoppedRequestIsNotAnswered() async throws {
     let ui = try Harness()
     try await ui.waitForInitialLoad()
     let harnessURL = try XCTUnwrap(ui.webView.url)
@@ -1593,7 +1678,7 @@ final class OriginTraceRenderedUITests: XCTestCase {
   // edit must be asked about first, Stay must keep the edit, the page and any
   // session, and a clean document must go straight to the start dialog.
   @MainActor
-  func test21NewLiveSessionAsksAboutUnsavedWork() async throws {
+  func test22NewLiveSessionAsksAboutUnsavedWork() async throws {
     let ui = try Harness()
     try await ui.waitForInitialLoad()
     try await ui.resize(width: windowSizes[0].width, height: windowSizes[0].height)
@@ -1675,7 +1760,7 @@ final class OriginTraceRenderedUITests: XCTestCase {
   // A web content process that stops leaves an empty window. The app reloads
   // its workspace once; if it stops again soon after, it asks before reloading.
   @MainActor
-  func test22WorkspaceReloadsAfterContentProcessStops() async throws {
+  func test23WorkspaceReloadsAfterContentProcessStops() async throws {
     let ui = try Harness()
     try await ui.waitForInitialLoad()
     try await ui.resize(width: windowSizes[0].width, height: windowSizes[0].height)

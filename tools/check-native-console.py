@@ -208,6 +208,18 @@ def fake_browser(arguments):
     stream.settimeout(None)
     origin = b"http://127.0.0.1:fixture"
     target_id = 0
+    # Opt-in page with frames for the agent iframe check: a top document, a
+    # same-site child on another localhost port and a cross-site child on
+    # 127.0.0.1, which site isolation would put in its own renderer process.
+    # Listing order follows the browser's, which groups frames by process.
+    frames = None
+    if "--reb-test-frames" in arguments:
+        frames = [
+            {"id": 1, "origin": "http://localhost:41001", "url": "http://localhost:41001/top.html", "top": True, "name": "", "parent": None},
+            {"id": 2, "origin": "http://localhost:41002", "url": "http://localhost:41002/same-site.html", "top": False, "name": "same", "parent": 1},
+            {"id": 3, "origin": "http://127.0.0.1:41003", "url": "http://127.0.0.1:41003/challenge.html", "top": False, "name": "challenge", "parent": 1},
+        ]
+        next_frame_id = 4
     handles = {}
     pending_handles = set()
     logs = []
@@ -218,7 +230,17 @@ def fake_browser(arguments):
             magic, version, operation, request, target, size, reserved = REQUEST.unpack(exact(stream, 32))
             assert magic == MAGIC and version == 2 and reserved == 0 and size <= (65536 if operation == 3 else 8192)
             source = exact(stream, size).decode()
-            if operation == 1:
+            frame = next((entry for entry in frames if entry["id"] == target), None) if frames else None
+            if operation == 1 and frames:
+                records = []
+                for entry in frames:
+                    label = f"{'top' if entry['top'] else 'frame'} #{entry['id']}{'' if entry['top'] else ' ' + entry['name']} · Synthetic frames".encode()
+                    records.append(TARGET.pack(entry["id"], len(entry["origin"]), 2 if entry["top"] else 0, 0,
+                                               entry["origin"].encode(), len(label), len(entry["url"]), label,
+                                               entry["url"].encode(), 0))
+                response(stream, request, 10, b"".join(records), count=len(records),
+                         flags=2 if document_start.permitted else 0)
+            elif operation == 1:
                 # A live capture document keeps its identity across listings; a
                 # disposable fixture renumbers so stale-target paths are reachable.
                 if not (live and target_id):
@@ -230,7 +252,20 @@ def fake_browser(arguments):
                 # never be pinned to or satisfied by a stale document.
                 assert target == 0
                 response(stream, request, 12, json.dumps(document_start.command(source)).encode())
-            elif target != target_id:
+            elif frames and frame is None:
+                response(stream, request, 0, b"Selected document changed", status=2)
+            elif frames and operation == 2 and source == "location.origin":
+                response(stream, request, 4, frame["origin"].encode())
+            elif frames and operation == 2 and source == "Array.from(location.ancestorOrigins)":
+                parent = next((entry for entry in frames if entry["id"] == frame["parent"]), None)
+                response(stream, request, 8, json.dumps([parent["origin"]] if parent else []).encode())
+            elif frames and operation == 2 and source == "location.reload()":
+                # A reload commits a new document in the same frame: a new id,
+                # never the old one, exactly like the browser's weak documents.
+                frame["id"] = next_frame_id
+                next_frame_id += 1
+                response(stream, request, 0, b"undefined")
+            elif not frames and target != target_id:
                 response(stream, request, 0, b"Selected document changed", status=2)
             elif operation == 3:
                 command = json.loads(source)
@@ -708,6 +743,13 @@ def check_backend(binary, backend):
             assert len(live_socket.encode()) < 104 and Path(live_socket).is_socket()
             assert live_transport.stat().st_mode & 0o777 == 0o700
             assert Path(live_token).stat().st_mode & 0o777 == 0o600
+            assert not (live_directory / "binding.absent").exists(), "A published binding left a stale absence marker"
+            # No browser has connected yet. The backend's handshake waits for its
+            # first answer, so a read returns at once instead of blocking on it.
+            started = time.monotonic()
+            early = call()
+            assert time.monotonic() - started < 5, "A state read waited for the capture browser"
+            assert early["binding_state"] == "connecting" and early["live_available"] is False, early
             # A capture launched with REB_CONSOLE_DOCUMENT_START=1: its registry
             # outlives every Console connection, exactly like the real browser's.
             live_peer = subprocess.Popen([
@@ -718,8 +760,14 @@ def check_backend(binary, backend):
                 f"--reb-native-console-session-id={live_id}",
                 f"--user-data-dir={live_transport / 'profile'}",
             ])
+            deadline = time.monotonic() + 35
             state = call()
+            while state.get("binding_state") == "connecting":
+                assert time.monotonic() < deadline, "Live bridge never answered its first listing"
+                time.sleep(0.05)
+                state = call()
             assert state["available"] and state["state"] == "idle"
+            assert state["binding_state"] == "ready", state
             assert state["live_available"] and state["targets"], "Live bridge did not authenticate"
             # The packaged app launches its captures with the permission. Before
             # any Console connection, the listing carries the browser's own report
@@ -919,7 +967,9 @@ def check_backend(binary, backend):
             unconfirmed = read_document_start()
             assert unconfirmed["state"] == "idle" and unconfirmed["document_start"]["status"] == "unconfirmed"
             assert "Restart the capture" in unconfirmed["document_start"]["message"]
-            assert call()["live_available"] is False, "An unconfirmed clear handed the live binding back"
+            lost = call()
+            assert lost["live_available"] is False, "An unconfirmed clear handed the live binding back"
+            assert lost["binding_state"] == "lost" and "restart the capture" in lost["message"], lost
             print("PASS live Disconnect clears and confirms armed document-start scripts, and an unconfirmed clear is never reported idle")
             print("PASS public HTTP -> Rust session -> actual C++ bridge -> synthetic browser; locality, UTF-8 limits, identity guards, timeout recovery, malformed peer retirement and profile disposal")
         finally:
@@ -934,6 +984,186 @@ def check_backend(binary, backend):
         print("PASS long live capture paths use an authenticated private short socket directory; shutdown removes transport and preserves capture-owned files")
 
 
+class McpClient:
+    """A stdio JSON-RPC client for reb-api mcp, used the way an agent uses it."""
+
+    def __init__(self, reb_api, url):
+        self.process = subprocess.Popen(
+            [reb_api, "mcp", "--base-url", url, "--allow-effects", "--timeout", "15"],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+        self.next_id = 1
+        initialized = self.request("initialize", {"protocolVersion": "2025-06-18", "capabilities": {},
+                                                  "clientInfo": {"name": "console-iframe-check", "version": "1"}})
+        self.instructions = initialized["instructions"]
+        self.process.stdin.write(json.dumps({"jsonrpc": "2.0", "method": "notifications/initialized"}) + "\n")
+        self.process.stdin.flush()
+
+    def request(self, method, params):
+        identifier = self.next_id
+        self.next_id += 1
+        self.process.stdin.write(json.dumps({"jsonrpc": "2.0", "id": identifier, "method": method, "params": params}) + "\n")
+        self.process.stdin.flush()
+        while True:
+            line = self.process.stdout.readline()
+            assert line, "reb-api mcp closed stdout"
+            message = json.loads(line)
+            if message.get("id") == identifier:
+                assert "error" not in message, message
+                return message["result"]
+
+    def tool(self, name, arguments=None, error=False):
+        result = self.request("tools/call", {"name": name, "arguments": arguments or {}})
+        assert result["isError"] is error, (name, arguments, result["content"][0]["text"])
+        if error:
+            return result["content"][0]["text"]
+        return result.get("structuredContent") or json.loads(result["content"][0]["text"])
+
+    def console(self, body, error=False):
+        return self.tool("native_console_action", {"body": body}, error)
+
+    def close(self):
+        self.process.stdin.close()
+        self.process.wait(timeout=10)
+        self.process.stdout.close()
+
+
+def check_agent_iframes(binary, backend):
+    """The Console path an MCP agent takes into a page with frames: find each
+    frame, connect to a cross-site child, evaluate there and read its output,
+    see a navigated document go stale, arm a child-frame document-start rule
+    and clear it. Only the browser peer is synthetic."""
+    reb_api = Path(backend).parent / "reb-api"
+    with tempfile.TemporaryDirectory(prefix="reb-console-agent.", dir="/tmp") as directory:
+        root = Path(directory)
+        endpoint = root / "endpoint"
+        live_directory = root / "live"
+        live_directory.mkdir(mode=0o700)
+        command = [backend, "--port", "0", "--endpoint-file", str(endpoint),
+                   "--native-console", binary, "--brave-binary", str(Path(__file__).resolve()),
+                   "--native-console-live-directory", str(live_directory)]
+        for flag in ["store", "trace-store", "signal-store", "artifacts", "api-collection", "local-analyst"]:
+            command += [f"--{flag}", str(root / flag)]
+        process = subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        peer = None
+        mcp = None
+        try:
+            deadline = time.monotonic() + 15
+            while not (endpoint.exists() and (live_directory / "binding").exists()):
+                assert process.poll() is None, "Backend exited before publishing its endpoint"
+                assert time.monotonic() < deadline
+                time.sleep(0.02)
+            binding_id, socket_path, token = (live_directory / "binding").read_text().splitlines()
+            peer = subprocess.Popen([
+                sys.executable, __file__, "--reb-native-console", "--reb-native-console-live-binding",
+                "--reb-native-console-document-start", "--reb-test-frames",
+                f"--reb-native-console-socket={socket_path}", f"--reb-native-console-token-file={token}",
+                f"--reb-native-console-session-id={binding_id}",
+                f"--user-data-dir={Path(socket_path).parent / 'profile'}",
+            ])
+            mcp = McpClient(str(reb_api), endpoint.read_text().strip())
+            for name in ["get_native_console", "native_console_action", "get_native_console_document_start"]:
+                assert name in mcp.instructions, name
+            tools = {tool["name"] for tool in mcp.request("tools/list", {})["tools"]}
+            assert {"get_native_console", "native_console_action", "get_native_console_document_start"} <= tools
+
+            # 1. Find each frame. The listing says which is the top document,
+            # which child shares its site and which is cross-site and so out of
+            # process; the agent picks by frame, origin and url, never by label.
+            deadline = time.monotonic() + 15
+            while True:
+                listing = mcp.tool("get_native_console")
+                if listing.get("live_available") and len(listing.get("targets", [])) == 3:
+                    break
+                assert time.monotonic() < deadline, listing
+                time.sleep(0.1)
+            assert listing["state"] == "idle" and listing["session_id"] is None
+            assert listing["selection"] == {"status": "none"}, listing
+            assert listing["document_start_supported"] is True
+            frames = {target["origin"]: target for target in listing["targets"]}
+            top = frames["http://localhost:41001"]
+            same = frames["http://localhost:41002"]
+            cross = frames["http://127.0.0.1:41003"]
+            assert top["frame"] == "top" and "top_relation" not in top
+            assert (same["frame"], same["top_relation"], same["out_of_process"]) == ("child", "same_site", None)
+            assert (cross["frame"], cross["top_relation"], cross["out_of_process"]) == ("child", "cross_site", True)
+            assert cross["url"] == "http://127.0.0.1:41003/challenge.html"
+
+            # 2. Select the cross-site child and evaluate there.
+            connected = mcp.console({"action": "connect_live", "binding_id": listing["binding_id"],
+                                     "target_id": cross["id"], "confirm_live": True})
+            session = connected["session_id"]
+            assert connected["selection"] == {"status": "selected", "target_id": cross["id"]}
+            run = {"action": "evaluate", "session_id": session, "target_id": cross["id"]}
+            result = mcp.console({**run, "source": "location.origin"})
+            assert (result["status"], result["type"], result["text"]) == ("ok", "string", "http://127.0.0.1:41003"), result
+            ancestors = mcp.console({**run, "source": "Array.from(location.ancestorOrigins)"})
+            assert json.loads(ancestors["text"]) == ["http://localhost:41001"], ancestors
+            # Bounded output: console messages are read with runtime poll.
+            runtime = {"action": "runtime", "session_id": session, "target_id": cross["id"]}
+            mcp.console({**runtime, "command": {"operation": "evaluate", "source": 'console.log("hello")'}})
+            polled = mcp.console({**runtime, "command": {"operation": "poll"}})
+            assert [message["text"] for message in polled["runtime"]["messages"]] == ["hello"], polled
+
+            # 3. Another document is refused before the wire, with the next step.
+            other = mcp.console({**run, "target_id": top["id"], "source": "location.origin"})
+            assert other["status"] == "stale_target" and other["code"] == "target_unavailable"
+            assert f"connect_live with target_id {top['id']}" in other["text"], other
+            busy = mcp.console({"action": "connect_live", "binding_id": listing["binding_id"],
+                                "target_id": same["id"], "confirm_live": True}, error=True)
+            assert "already open" in busy and session in busy, busy
+
+            # 4. A navigated document goes stale with a clear status and runs nothing.
+            mcp.console({**run, "source": "location.reload()"})
+            stale = mcp.tool("get_native_console")
+            assert stale["selected_target_id"] is None
+            assert stale["selection"]["status"] == "stale" and stale["selection"]["target_id"] == cross["id"], stale
+            refused = mcp.console({**run, "source": "location.origin"})
+            assert refused["status"] == "stale_target" and "replaced or closed" in refused["text"], refused
+            reloaded = next(target for target in stale["targets"] if target["origin"] == cross["origin"])
+            assert reloaded["id"] != cross["id"]
+            assert mcp.console({"action": "stop", "session_id": session})["state"] == "idle"
+
+            # 5. Reconnect to the reloaded child, then the same-site child.
+            session = mcp.console({"action": "connect_live", "binding_id": listing["binding_id"],
+                                   "target_id": reloaded["id"], "confirm_live": True})["session_id"]
+            again = mcp.console({"action": "evaluate", "session_id": session, "target_id": reloaded["id"],
+                                 "source": "location.origin"})
+            assert again["text"] == "http://127.0.0.1:41003", again
+            mcp.console({"action": "stop", "session_id": session})
+            session = mcp.console({"action": "connect_live", "binding_id": listing["binding_id"],
+                                   "target_id": same["id"], "confirm_live": True})["session_id"]
+            assert mcp.console({"action": "evaluate", "session_id": session, "target_id": same["id"],
+                                "source": "location.origin"})["text"] == "http://localhost:41002"
+
+            # 6. Document-start for the cross-site child: one exact origin, frame child.
+            armed = mcp.console({"action": "arm_document_start", "session_id": session,
+                                 "confirm_document_start": True,
+                                 "scripts": [{"origin": cross["origin"], "frame": "child",
+                                              "source": "report(typeof window.challenge);"}]})
+            script = armed["document_start"]["scripts"][0]
+            assert script["rule"] == {"origin": "http://127.0.0.1:41003", "frame": "child"}, script
+            records = mcp.tool("get_native_console_document_start", {"after_sequence": "0"})
+            output = records["document_start"]["output"]["records"]
+            assert [record["record"] for record in output] == ["injected", "report"], output
+            assert all(record["document_id"] and record["frame_id"] for record in output)
+            later = mcp.tool("get_native_console_document_start", {"after_sequence": output[-1]["sequence"]})
+            assert later["document_start"]["output"]["records"] == []
+            cleared = mcp.console({"action": "clear_document_start", "session_id": session})
+            assert cleared["document_start"]["scripts"] == []
+
+            # 7. End the Console connection; the binding returns for the next one.
+            assert mcp.console({"action": "stop", "session_id": session})["state"] == "idle"
+            assert mcp.tool("get_native_console")["selection"] == {"status": "none"}
+            print("PASS agent iframe flow over reb-api mcp: frames listed with kind and site relation, cross-site child selected, evaluated and polled, other and navigated documents refused with the next step, child-frame document-start armed, read and cleared")
+        finally:
+            if mcp:
+                mcp.close()
+            process.terminate()
+            process.wait(timeout=10)
+            if peer:
+                peer.wait(timeout=10)
+
+
 def main():
     if "--reb-native-console" in sys.argv:
         return fake_browser(sys.argv[1:])
@@ -946,6 +1176,7 @@ def main():
     check(binary, arguments.browser)
     if arguments.backend:
         check_backend(binary, str(Path(arguments.backend).resolve()))
+        check_agent_iframes(binary, str(Path(arguments.backend).resolve()))
     return 0
 
 

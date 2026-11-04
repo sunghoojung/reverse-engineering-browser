@@ -215,7 +215,9 @@ invocationSitesPanel.refresh();
           messages.push('The broker returned malformed event data.');
         } else if (state.broker === 'unavailable') {
           kind = 'disconnected';
-          messages.push('The local evidence broker is disconnected.');
+          messages.push(state.connection === 'unresponsive'
+            ? 'The local evidence broker did not answer within 10 seconds.'
+            : 'The local evidence broker is disconnected.');
         }
         if (state.eventsLimited) {
           if (kind === 'empty') kind = 'gap';
@@ -1096,9 +1098,9 @@ invocationSitesPanel.refresh();
         elements.signalDetailToggle.setAttribute('aria-expanded', String(state.signalDetailOpen));
         elements.signalDetailToggle.textContent = state.signalDetailOpen ? 'Hide details' : 'Details';
         elements.signalDetailToggle.disabled = orderedEvents.length === 0;
-        elements.signalStopCapture.disabled = !state.captureControlsAvailable || state.captureStopped ||
-          state.broker !== 'connected' || state.sessionMode !== 'live';
-        elements.signalClearEvents.disabled = !state.captureControlsAvailable ||
+        elements.signalStopCapture.disabled = Boolean(state.captureAction) || !state.captureControlsAvailable ||
+          state.captureStopped || state.broker !== 'connected' || state.sessionMode !== 'live';
+        elements.signalClearEvents.disabled = Boolean(state.captureAction) || !state.captureControlsAvailable ||
           (state.broker === 'connected' && !state.captureStopped) || state.events.length === 0;
 
         elements.signalFamilyCount.textContent = String(familyCounts.size);
@@ -1111,12 +1113,18 @@ invocationSitesPanel.refresh();
         const displayLimited = visibleEvents.length > signalEventDisplayLimit;
         elements.signalVisibleCount.textContent = displayLimited
           ? `${orderedEvents.length} of ${visibleEvents.length} shown` : `${orderedEvents.length} shown`;
-        const offline = state.broker === 'unavailable' || state.eventFailureKind === 'disconnected';
-        elements.signalSessionBadge.textContent = state.captureStopped ? 'Probes stopped'
-          : offline ? (signalEvents.length ? 'Evidence retained' : 'Disconnected')
+        // A failed poll leaves the last reported capture state unknown, so it
+        // outranks Probes stopped. A broker that is merely offline (as after
+        // Stop) still answers, and its stopped state stays visible.
+        const failed = state.eventFailureKind !== null;
+        const offline = state.broker === 'unavailable' || failed;
+        const retainedLabel = signalEvents.length ? 'Evidence retained' : 'Disconnected';
+        elements.signalSessionBadge.textContent = failed ? retainedLabel
+          : state.captureStopped ? 'Probes stopped'
+          : offline ? retainedLabel
           : state.sessionMode === 'demo' ? 'Demo evidence'
             : state.sessionMode === 'live' ? 'Live native capture' : 'No capture';
-        elements.signalSessionBadge.dataset.kind = state.captureStopped ? 'stopped' : offline ? 'offline' : state.sessionMode;
+        elements.signalSessionBadge.dataset.kind = failed ? 'offline' : state.captureStopped ? 'stopped' : offline ? 'offline' : state.sessionMode;
 
         elements.signalViewTabs.forEach(button => {
           const selected = button.dataset.signalView === state.signalView;
@@ -1130,10 +1138,20 @@ invocationSitesPanel.refresh();
         const gapCount = shownSequenceGaps();
         const reportedDrops = shownQueueDrops();
         const signalLimits = namedGapsIn(shownNamedGaps(), fingerprintSignalCategories);
-        if (state.eventFailureKind === 'malformed') {
+        if (state.captureAction) {
+          setSignalNotice('loading', state.captureAction === 'stop'
+            ? 'Stopping native probes…' : 'Clearing this session’s events…');
+        } else if (state.eventFailureKind === 'malformed') {
           setSignalNotice('error', signalEvents.length
             ? 'The broker returned malformed event data. The last understandable fingerprint evidence remains visible.'
             : 'The broker returned malformed event data. No fingerprint evidence is available.');
+        } else if (failed) {
+          const reason = state.connection === 'unresponsive' ? 'The broker did not answer within 10 seconds' : 'The broker is disconnected';
+          setSignalNotice('disconnected', signalEvents.length
+            ? `${reason}. The last understandable fingerprint evidence remains visible.`
+            : `${reason} and no fingerprint evidence is available.`);
+        } else if (state.captureActionError) {
+          setSignalNotice('error', state.captureActionError);
         } else if (state.captureStopped) {
           setSignalNotice('stopped', signalEvents.length
             ? 'Native probes are stopped. Current-session evidence is retained until you clear it.'
@@ -1280,7 +1298,7 @@ invocationSitesPanel.refresh();
         elements.capture.setAttribute('aria-label', `${modeLabel}: ${captureLabel}`);
         elements.broker.classList.toggle('offline', offline);
         elements.broker.textContent = connecting ? 'connecting to evidence'
-          : offline ? 'broker unavailable'
+          : offline ? state.connection === 'unresponsive' ? 'broker not responding' : 'broker unavailable'
             : live ? 'broker connected' : idle ? 'no capture session'
               : preview ? 'standalone preview' : 'demo evidence loaded';
         elements.sampleStatus.textContent = live
@@ -1915,6 +1933,9 @@ invocationSitesPanel.refresh();
 
       const ownedExperimentDrafts = new Map();
       const ownedExperimentResults = new Map();
+      // Running and failure text per workspace key. Polls rebuild the form while
+      // a request runs, so its outcome cannot live in the form's own DOM node.
+      const ownedExperimentNotices = new Map();
       let ownedExperimentPending = false;
       function renderVmOwnedExperiment(workspace) {
         const section = document.createElement('section'); section.className = 'vm-workspace-card';
@@ -1944,10 +1965,12 @@ invocationSitesPanel.refresh();
         form.append(textElement('p','',fixture==='register'?'Selected state: register 0 for add; unchanged register 2 for branch.':'Selected state: stack slot 0 for add or branch.'));
         const run=document.createElement('button');run.type='submit';run.textContent='Run isolated native experiment';run.disabled=ownedExperimentPending;
         const load=document.createElement('button');load.type='button';load.textContent='Read saved results';
-        const output=document.createElement('div');output.setAttribute('role','status');
+        const output=document.createElement('div');output.className='vm-experiment-output';output.dataset.experimentKey=key;output.setAttribute('role','status');
         const retain = rows => { if(!ownedExperimentResults.has(key) && ownedExperimentResults.size>=64) ownedExperimentResults.delete(ownedExperimentResults.keys().next().value); ownedExperimentResults.set(key,rows); };
-        const show = rows => { output.replaceChildren(); if(rows.length===0) output.append(textElement('p','','No saved result for this exact workspace and selected effect.')); rows.forEach(row=>output.append(textElement('p','',`${row.status}: opcode ${row.request.opcode}, inputs ${row.request.inputs.left}, ${row.request.inputs.right}; expected ${row.request.expected.value}, next PC ${row.request.expected.next_pc}; observed ${row.observed?.effect.value ?? 'unknown'}, handler ${row.observed?.handler_index ?? 'unknown'}, PC ${row.observed?.pc_before ?? 'unknown'} → next PC ${row.observed?.effect.next_pc ?? 'unknown'}. ${row.reason}. These inputs only; does not generalize.`))); };
-        show(ownedExperimentResults.get(key) ?? []);
+        const note = text => { ownedExperimentNotices.delete(key); if(text!==null){ if(ownedExperimentNotices.size>=64) ownedExperimentNotices.delete(ownedExperimentNotices.keys().next().value); ownedExperimentNotices.set(key,text);} };
+        // A finished request paints the form now on screen for this key.
+        const show = (target = [...document.querySelectorAll('.vm-experiment-output')].find(node=>node.dataset.experimentKey===key) ?? output) => { const text=ownedExperimentNotices.get(key); target.replaceChildren(); if(text!==undefined){target.textContent=text;return;} const rows=ownedExperimentResults.get(key) ?? []; if(rows.length===0) target.append(textElement('p','','No saved result for this exact workspace and selected effect.')); rows.forEach(row=>target.append(textElement('p','',`${row.status}: opcode ${row.request.opcode}, inputs ${row.request.inputs.left}, ${row.request.inputs.right}; expected ${row.request.expected.value}, next PC ${row.request.expected.next_pc}; observed ${row.observed?.effect.value ?? 'unknown'}, handler ${row.observed?.handler_index ?? 'unknown'}, PC ${row.observed?.pc_before ?? 'unknown'} → next PC ${row.observed?.effect.next_pc ?? 'unknown'}. ${row.reason}. These inputs only; does not generalize.`))); };
+        show(output);
         form.addEventListener('submit',async event=>{
           event.preventDefault(); if(ownedExperimentPending) return;
           const candidate=candidates.find(c=>String(c.opcode)===select.value); if(!candidate) return;
@@ -1955,16 +1978,16 @@ invocationSitesPanel.refresh();
             source_artifact_sha256:workspace.source_artifact_sha256,interpreter_artifact_id:workspace.interpreter_artifact_id,finding_id:workspace.finding_id,
             opcode:candidate.opcode,effect_id:candidate.effect.effect_id,inputs:{left:fields.left.value,right:fields.right.value},
             expected:{operation:candidate.effect.operation,value:fields.value.value,next_pc:fields.next_pc.value,branch_taken:candidate.opcode===7?branch.value==='true':null}};
-          ownedExperimentPending=true;run.disabled=true;output.textContent='Running the disposable owned fixture. No automatic retry.';
+          ownedExperimentPending=true;run.disabled=true;note('Running the disposable owned fixture. No automatic retry.');show();
           try {const response=await fetch('/api/analysis/vm/experiments',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(request),signal:AbortSignal.timeout(30000)});
             const row=await response.json();if(!response.ok || !isVmOwnedExperimentRecord(row) || !sameVmOwnedExperimentRequest(row.request,request)) throw new Error('Outcome unknown or refused. Read saved results before trying another experiment.');
-            const rows=[...(ownedExperimentResults.get(key) ?? []),row].slice(-64);retain(rows);show(rows);
-          } catch(error) {output.textContent=error.message;} finally {ownedExperimentPending=false;document.querySelectorAll('.vm-experiment-form button[type=submit]').forEach(button=>{button.disabled=false;});}
+            const rows=[...(ownedExperimentResults.get(key) ?? []),row].slice(-64);retain(rows);note(null);
+          } catch(error) {note(error.message);} finally {ownedExperimentPending=false;show();document.querySelectorAll('.vm-experiment-form button[type=submit]').forEach(button=>{button.disabled=false;});}
         });
         load.addEventListener('click',async()=>{load.disabled=true;try {const response=await fetch('/api/analysis/vm/experiments',{cache:'no-store',signal:AbortSignal.timeout(5000)});const doc=await response.json();
           if(!response.ok || doc.schema!=='reb-owned-opcode-experiments-v1' || !Array.isArray(doc.records) || doc.records.length>64 || !doc.records.every(isVmOwnedExperimentRecord)) throw new Error('Saved experiment results are unavailable or malformed.');
-          const rows=doc.records.filter(r=>r.request.workspace_digest===workspaceDigest && r.request.finding_id===workspace.finding_id && r.request.source_artifact_sha256===workspace.source_artifact_sha256 && r.request.interpreter_artifact_id===workspace.interpreter_artifact_id && candidates.some(c=>c.opcode===r.request.opcode && c.effect.effect_id===r.request.effect_id));retain(rows);show(rows);
-        }catch(error){output.textContent=error.message;}finally{load.disabled=false;}});
+          const rows=doc.records.filter(r=>r.request.workspace_digest===workspaceDigest && r.request.finding_id===workspace.finding_id && r.request.source_artifact_sha256===workspace.source_artifact_sha256 && r.request.interpreter_artifact_id===workspace.interpreter_artifact_id && candidates.some(c=>c.opcode===r.request.opcode && c.effect.effect_id===r.request.effect_id));retain(rows);note(null);
+        }catch(error){note(error.message);}finally{load.disabled=false;show();}});
         form.append(run,load);section.append(form,output);return section;
       }
 
@@ -2933,10 +2956,11 @@ invocationSitesPanel.refresh();
             investigationNotice('The exact request cannot be selected: its row identifier is missing, changed or ambiguous.', 'ambiguous'); return false;
           }
         }
-        investigationBeforeSelection();
-        state.originTraceController?.abort();
+        // A stale id selects nothing, so it must not cancel the current trace.
         const request = state.requests.find(candidate => candidate.id === id);
         if (!request) return;
+        investigationBeforeSelection();
+        state.originTraceController?.abort();
         state.selectedRequestId = id;
         state.trafficDetailOpen = true;
         state.trafficSelectionNotice = null;
@@ -3820,15 +3844,20 @@ invocationSitesPanel.refresh();
         };
       }
 
+      // The notice is text for the researcher, never operation state; whether a
+      // save or load runs is apiCollectionSaving and apiCollectionRefreshing.
       function setCollectionNotice(kind, message) {
         state.apiCollectionStatus = kind;
         state.apiCollectionMessage = message;
+        state.apiCollectionNoticeRevision += 1;
         elements.collectionNotice.dataset.kind = kind;
         elements.collectionNotice.textContent = message;
       }
 
-      async function refreshApiCollection(force = false) {
-        if (state.apiCollectionRefreshing || state.apiCollectionSaving || location.protocol === 'file:') return false;
+      // A save that met a conflict reloads while it still holds
+      // apiCollectionSaving, so no second save can start until it has settled.
+      async function refreshApiCollection(force = false, conflictReload = false) {
+        if (state.apiCollectionRefreshing || (state.apiCollectionSaving && !conflictReload) || location.protocol === 'file:') return false;
         state.apiCollectionRefreshing = true;
         const version = state.apiCollectionVersion;
         const controller = new AbortController();
@@ -3895,9 +3924,11 @@ invocationSitesPanel.refresh();
           const body = await response.json();
           if (response.status === 409) {
             state.apiCollectionEtag = null;
-            state.apiCollectionSaving = false;
-            const refreshed = await refreshApiCollection(true);
-            if (refreshed || state.apiCollectionStatus === 'saving') setCollectionNotice('conflict', `${body.error || 'The collection changed in another window.'} Your edits are retained; retry load and review them before saving again.`);
+            const noticeRevision = state.apiCollectionNoticeRevision;
+            const refreshed = await refreshApiCollection(true, true);
+            // Keep a notice the reload published itself (a load error or a
+            // removed draft); otherwise name the conflict.
+            if (refreshed || noticeRevision === state.apiCollectionNoticeRevision) setCollectionNotice('conflict', `${body.error || 'The collection changed in another window.'} Your edits are retained; retry load and review them before saving again.`);
             return false;
           }
           if (!response.ok) throw new Error(body.error || `API Collection store returned ${response.status}`);
@@ -5053,7 +5084,8 @@ invocationSitesPanel.refresh();
           !state.localAnalystPendingSave && runnerAvailable && !runnerBusy &&
           !state.analystRunPending && state.analystTotalRuns < 256;
         analystElements.run.disabled = !runnable;
-        analystElements.cancel.disabled = !state.analystRunPending;
+        analystElements.cancel.disabled = !state.analystRunPending ||
+          (state.analystCancelRunId !== null && state.analystCancelRunId === state.analystActiveRunId);
         analystElements.clearHistory.disabled = state.analystRunPending || state.analystRuns.length === 0;
         analystElements.variables.disabled = state.analystRunPending;
         analystElements.includeEvents.disabled = state.analystRunPending;
@@ -5282,15 +5314,25 @@ invocationSitesPanel.refresh();
         return (state.decoderInputSnapshot?.bytes ?? 0) + state.decoderSteps.reduce((sum, step) => sum + step.output_bytes, 0);
       }
 
+      // The notice reports the last operation or probe. Engine availability
+      // is decoderEngineStatus ('unknown', 'ready' or 'unavailable').
       function setToolsNotice(kind, message) {
         state.decoderStatus = kind;
         state.decoderMessage = message;
+        state.decoderNoticeRevision += 1;
       }
 
+      // Probes only an engine not yet known to work. A probe's result never
+      // replaces a newer operation notice or claims ready while one runs, and
+      // a failed re-check keeps an engine that already worked.
       async function refreshDecoderEngine(force = false) {
-        if (state.decoderRefreshing || location.protocol === 'file:' || (!force && state.decoderStatus === 'ready')) return;
+        if (state.decoderRefreshing || location.protocol === 'file:' || (!force && state.decoderEngineStatus === 'ready')) return;
         state.decoderRefreshing = true;
-        if (state.decoderStatus !== 'ready') setToolsNotice('loading', 'Checking the native decoder engine…');
+        if (state.decoderEngineStatus === 'unknown' && !state.decoderPending && !state.jwtPending) {
+          setToolsNotice('loading', 'Checking the native decoder engine…');
+        }
+        const noticeRevision = state.decoderNoticeRevision;
+        let notice = null;
         renderTools();
         try {
           const response = await fetch('/api/decoder', {cache: 'no-store'});
@@ -5298,14 +5340,21 @@ invocationSitesPanel.refresh();
           const body = await response.json();
           if (!isDecoderEngine(body)) throw new TypeError('Decoder service returned a malformed capability contract.');
           state.decoderEngine = body;
-          setToolsNotice(body.available ? 'ready' : 'error', body.available
-            ? 'Native C++ decoder ready. Every transform runs only when requested.'
-            : 'The native decoder executable is unavailable. Rebuild the application to restore local tools.');
+          state.decoderEngineStatus = body.available ? 'ready' : 'unavailable';
+          notice = body.available
+            ? ['ready', 'Native C++ decoder ready. Every transform runs only when requested.']
+            : ['error', 'The native decoder executable is unavailable. Rebuild the application to restore local tools.'];
         } catch (error) {
-          state.decoderEngine = emptyDecoderEngine();
-          setToolsNotice('error', `Decoder service unavailable: ${error.message}`);
+          if (state.decoderEngineStatus !== 'ready') {
+            state.decoderEngine = emptyDecoderEngine();
+            state.decoderEngineStatus = 'unavailable';
+            notice = ['error', `Decoder service unavailable: ${error.message}`];
+          }
         } finally {
           state.decoderRefreshing = false;
+          if (notice && noticeRevision === state.decoderNoticeRevision && !state.decoderPending && !state.jwtPending) {
+            setToolsNotice(...notice);
+          }
           renderTools();
         }
       }
@@ -5834,6 +5883,7 @@ invocationSitesPanel.refresh();
         } finally {
           state.analystRunPending = false;
           state.analystActiveRunId = null;
+          state.analystCancelRunId = null;
           analystElements.confirm.checked = false;
           analystElements.confirmSensitive.checked = false;
           await refreshLocalAnalyst();
@@ -5841,11 +5891,14 @@ invocationSitesPanel.refresh();
         }
       }
 
+      // A requested cancellation is state, so a render while the run is
+      // pending cannot re-enable Cancel for the same run.
       async function cancelLocalAnalystScript() {
         const runId = state.analystActiveRunId;
-        if (!runId) return;
-        analystElements.cancel.disabled = true;
+        if (!runId || state.analystCancelRunId === runId) return;
+        state.analystCancelRunId = runId;
         setAnalystNotice('running', `Cancelling analyst run ${runId}…`);
+        renderAnalystExecution();
         try {
           const response = await fetch('/api/local-analyst/actions', {
             method: 'POST', cache: 'no-store', headers: {'Content-Type': 'application/json'},
@@ -5856,8 +5909,12 @@ invocationSitesPanel.refresh();
             throw new Error(body.error || 'The runner rejected cancellation.');
           }
         } catch (error) {
+          // A run that finished first owns the notice; refusing to cancel a
+          // completed run is not news, and there is nothing left to cancel.
+          if (state.analystActiveRunId !== runId) return;
+          state.analystCancelRunId = null;
           setAnalystNotice('error', `Cancellation failed: ${error.message}`);
-          analystElements.cancel.disabled = false;
+          renderAnalystExecution();
         }
       }
 
@@ -7755,21 +7812,29 @@ invocationSitesPanel.refresh();
         }
       }
 
+      // The event poll alone decides the connection state, and it is bounded:
+      // a backend that does not answer within 10 seconds is shown as not
+      // responding (renderNetworkNotice names the same limit). The reads that
+      // follow a poll run afterwards, outside its guard.
       async function refresh() {
         if (state.refreshing) return;
         state.refreshing = true;
+        // A capture action that starts or ends while this poll is in flight
+        // makes its answer stale: it can describe evidence from before a stop
+        // or a clear. Such a poll changes nothing and is read again.
+        const captureGeneration = state.captureActionGeneration;
+        const stale = () => Boolean(state.captureAction) || captureGeneration !== state.captureActionGeneration;
+        const deadline = AbortSignal.timeout(10000);
+        let next = null;
         try {
           const headers = state.eventEtag ? { 'If-None-Match': state.eventEtag } : {};
-          const response = await fetch('/api/events?limit=5000', { cache: 'no-store', headers });
-          if (response.status === 304) {
-            await refreshRequestSignalProfile();
-            await refreshArtifacts();
-            refreshSelectedRequestBody();
-            await refreshVmAnalysis();
-            return;
-          }
+          const response = await fetch('/api/events?limit=5000', { cache: 'no-store', headers, signal: deadline });
+          if (stale()) { next = 'repeat'; return; }
+          // A failed poll drops the entity tag, so 304 always follows a valid answer.
+          if (response.status === 304) { next = 'unchanged'; return; }
           if (!response.ok) throw new Error(`Broker returned ${response.status}`);
           const rawBody = await response.text();
+          if (stale()) { next = 'repeat'; return; }
           let body;
           try { body = JSON.parse(rawBody); } catch { throw new TypeError('Malformed broker response'); }
           if (!isBrokerResponse(body)) throw new TypeError('Malformed broker response');
@@ -7804,8 +7869,7 @@ invocationSitesPanel.refresh();
           let selectedRequest = state.requests.find(request => request.id === state.selectedRequestId);
           if (!selectedRequest && state.selectedRequestId !== null) resetRequestSelection();
           updateSelectionSummary(selectedRequest);
-          state.broker = brokerConnected ? 'connected' : 'unavailable';
-          state.eventFailureKind = null;
+          setEventConnection(brokerConnected ? 'connected' : 'broker-offline');
           state.lastUpdatedLabel = brokerConnected
             ? state.sessionMode === 'live'
               ? `updated ${new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}`
@@ -7818,16 +7882,12 @@ invocationSitesPanel.refresh();
           renderInspector();
           renderEvidence();
           if (!document.querySelector('#screen-signals').hidden) renderFingerprintActivity();
-          await refreshRequestSignalProfile();
-          await refreshArtifacts();
-          refreshSelectedRequestBody();
-          await refreshVmAnalysis();
-          renderVmLab();
+          next = 'changed';
         } catch (error) {
-          state.broker = 'unavailable';
+          if (stale()) { next = 'repeat'; return; }
           state.eventEtag = null;
           const malformed = error instanceof TypeError && error.message === 'Malformed broker response';
-          state.eventFailureKind = malformed ? 'malformed' : 'disconnected';
+          setEventConnection(malformed ? 'malformed' : deadline.aborted ? 'unresponsive' : 'unreachable');
           const retainedEvidence = state.events.length > 0;
           state.lastUpdatedLabel = retainedEvidence ? 'last valid evidence retained' : 'no live evidence';
           renderShellStatus();
@@ -7839,13 +7899,50 @@ invocationSitesPanel.refresh();
           renderVmLab();
         } finally {
           state.refreshing = false;
+          // An action that is still running reads again when it ends.
+          if (next === 'repeat') { if (!state.captureAction) await refresh(); }
+          else if (next) await refreshPollDependents(next === 'changed');
         }
+      }
+
+      // Signal profile, artifact and VM reads follow a valid poll as one chain.
+      // A later poll neither waits for a slow chain (a cold VM analysis can run
+      // for minutes, bounded by its worker deadline) nor restarts it, so the
+      // poll keeps the connection state current meanwhile.
+      async function refreshPollDependents(eventsChanged) {
+        if (state.refreshingDependents) {
+          if (eventsChanged) renderVmLab();
+          return;
+        }
+        state.refreshingDependents = true;
+        try {
+          await refreshRequestSignalProfile();
+          await refreshArtifacts();
+          refreshSelectedRequestBody();
+          await refreshVmAnalysis();
+          if (eventsChanged) renderVmLab();
+        } finally {
+          state.refreshingDependents = false;
+        }
+      }
+
+      // The single transition for the event connection. 'connected' and
+      // 'broker-offline' are valid answers (the second has no live broker,
+      // for example after Stop). 'unreachable', 'unresponsive' (no answer in
+      // time) and 'malformed' are failed polls: the backend's capture state is
+      // unknown, so Stop and Clear stay disabled until a valid answer.
+      function setEventConnection(connection) {
+        state.connection = connection;
+        state.broker = connection === 'connecting' || connection === 'connected' || connection === 'preview'
+          ? connection : 'unavailable';
+        state.eventFailureKind = connection === 'malformed' ? 'malformed'
+          : connection === 'unreachable' || connection === 'unresponsive' ? 'disconnected' : null;
+        if (state.eventFailureKind) state.captureControlsAvailable = false;
       }
 
       function useStandalonePreview() {
         state.trafficRenderedView = null;
-        state.broker = 'preview';
-        state.eventFailureKind = null;
+        setEventConnection('preview');
         state.sessionMode = 'preview';
         state.events = [];
         state.canvasRenderCaptures = [];
@@ -7888,6 +7985,7 @@ invocationSitesPanel.refresh();
           limits: emptyLocalAnalystWorkspace().limits};
         renderLocalAnalyst();
         state.decoderEngine = emptyDecoderEngine();
+        state.decoderEngineStatus = 'unavailable';
         setToolsNotice('error', 'Standalone preview. Open the local app to run native decoder and JWT tools.');
         renderTools();
       }
@@ -7936,16 +8034,24 @@ invocationSitesPanel.refresh();
         state.signalDetailOpen = !state.signalDetailOpen;
         renderFingerprintActivity();
       });
+      // One capture action at a time. The poll re-renders these buttons from
+      // state, so the in-flight action is state rather than a disabled button.
       async function performCaptureAction(action) {
         const button = action === 'stop' ? elements.signalStopCapture : elements.signalClearEvents;
-        if (button.disabled) return;
+        if (state.captureAction || button.disabled) return;
         if (action === 'clear' && !window.confirm(
           'Clear all recorded events, traces, and request signal profiles from this capture session? Canvas artifacts and other saved files will remain on disk. This cannot be undone.'
         )) return;
-        button.disabled = true;
+        state.captureAction = action;
+        state.captureActionGeneration += 1;
+        state.captureActionError = null;
+        renderFingerprintActivity();
+        // Stop waits up to 5 seconds for the broker. Past this deadline the
+        // outcome is unknown, and the next valid poll shows the capture state.
+        const deadline = AbortSignal.timeout(15000);
         try {
           const response = await fetch('/api/capture/actions', {
-            method: 'POST', cache: 'no-store',
+            method: 'POST', cache: 'no-store', signal: deadline,
             headers: {'Content-Type': 'application/json'},
             body: JSON.stringify(action === 'clear' ? {action, confirm: true} : {action})
           });
@@ -7962,12 +8068,18 @@ invocationSitesPanel.refresh();
             state.signalProfileKey = null;
           }
           state.eventEtag = null;
-          await refresh();
         } catch (error) {
-          setSignalNotice('error', error.message);
+          state.captureActionError = deadline.aborted
+            ? `${action === 'stop' ? 'Stop' : 'Clear'} did not answer within 15 seconds; its outcome is unknown. The next refresh shows the current capture state.`
+            : error.message;
         } finally {
-          renderFingerprintActivity();
+          state.captureAction = null;
+          state.captureActionGeneration += 1;
         }
+        renderFingerprintActivity();
+        // A poll that overlapped the action is discarded and repeats itself.
+        await refresh();
+        renderFingerprintActivity();
       }
       elements.signalStopCapture.addEventListener('click', () => performCaptureAction('stop'));
       elements.signalClearEvents.addEventListener('click', () => performCaptureAction('clear'));
@@ -8492,10 +8604,7 @@ invocationSitesPanel.refresh();
       });
 
       const consoleTraffic = new Map();
-      document.querySelector('#console-traffic-back').addEventListener('click', () => {
-        delete document.querySelector('#screen-traffic').dataset.consoleTraffic;
-        document.querySelector('#console-experiment-traffic').hidden = true;
-      });
+      document.querySelector('#console-traffic-back').addEventListener('click', () => setConsoleTrafficView(false));
       document.addEventListener('reb-console-traffic', event => {
         const {session, target, events, dropped} = event.detail;
         if (!/^[1-9][0-9]{0,19}$/.test(session) || !/^[1-9][0-9]{0,19}$/.test(target) || !Array.isArray(events) || events.length > 64) return;
@@ -8505,8 +8614,7 @@ invocationSitesPanel.refresh();
         }
         if (investigationScreen() === 'traffic') investigationNavigation?.record();
         while (consoleTraffic.size > 128) consoleTraffic.delete(consoleTraffic.keys().next().value);
-        showScreen('traffic'); document.querySelector('#screen-traffic').dataset.consoleTraffic = 'true';
-        document.querySelector('#console-experiment-traffic').hidden = false;
+        showScreen('traffic'); setConsoleTrafficView(true);
         document.querySelector('#console-experiment-traffic').dataset.session = session;
         document.querySelector('#console-experiment-traffic').dataset.document = target;
         document.querySelector('#console-traffic-title').textContent = `Console experiment · document ${target}`;
@@ -8879,6 +8987,16 @@ invocationSitesPanel.refresh();
       const investigationNotebook = RebInvestigationNotebook.mount({
         button: document.querySelector('#open-investigation-notebook'),
         validateLibrary: isLocalAnalystWorkspace,
+        // The notebook and Analyst hold separate copies of one library. After
+        // a notebook write commits, Analyst reloads its copy, so its next save
+        // does not meet a generation conflict that this app caused itself.
+        // The notebook reloads on every open, and it is modal, so the reverse
+        // direction needs nothing here.
+        fetcher: async (path, options) => {
+          const response = await fetch(path, options);
+          if (path === '/api/local-analyst/actions' && response.ok) queueMicrotask(() => refreshLocalAnalyst());
+          return response;
+        },
         getContext: () => ({events: state.events, artifacts: state.artifacts}),
         getSelection: () => {
           if (investigationScreen() === 'sources') {

@@ -170,7 +170,7 @@ Object.assign(state, {refreshing: false, eventEtag: null, signalKnownKeys: null,
 let refreshBody = {...bounded, network_events: bounded.network_events.map(event => ({...event, request_id: '1'})), events: [{...request(999, 'api_call'), category: 'canvas'}], count: 1};
 const noop = () => {};
 const refresh = runInNewContext(`${models}\n${app.slice(refreshStart, refreshEnd)};refresh`, {
-  state, TextEncoder, TextDecoder, TypeError,
+  state, TextEncoder, TextDecoder, TypeError, AbortSignal,
   elements: {gaps: {textContent: ''}},
   document: {querySelector: () => ({hidden: true})},
   fetch: async () => ({ok: true, status: 200, text: async () => JSON.stringify(refreshBody), headers: {get: () => 'fixture'}}),

@@ -46,8 +46,13 @@ and executed; omitted stages are explicitly reported as skipped.
 
 - The production `native_probe_host.cc` guest boundary is compiled against
   narrow content/Mojo/shared-memory adapters and driven into the production sink:
-  refusals become gaps in the refused record's own sequence slot, module
-  verdicts reach the renderer client, and host records keep exact parents.
+  every refusal becomes a gap in the refused record's own sequence slot, module
+  verdicts reach the renderer client, host records keep exact parents, and
+  `Disable` publishes records the renderer already queued.
+- The sink reclaims a guest binding once its document is gone and refuses a
+  seventeenth live document explicitly; unresolved work becomes gaps when the
+  capture ends; a module accepted after its observations were flushed is
+  reused; and a Canvas image without the session opt-in is refused.
 
 ## Cases
 

@@ -23,6 +23,7 @@ pub(crate) const OMISSION_REASONS: &[&str] = &[
     "handler-binding-unproven",
 ];
 
+use crate::vm::wasm_control::{BlockKind, Control};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
@@ -950,9 +951,10 @@ impl<'a> Facts<'a> {
                     UNKNOWN
                 }
             };
+            let control = crate::vm::wasm_control::control(&op);
             match &op {
-                Operator::Block { .. } | Operator::Loop { .. } | Operator::If { .. } => {
-                    if matches!(op, Operator::If { .. }) {
+                _ if matches!(control, Control::Open(_)) => {
+                    if control == Control::Open(BlockKind::If) {
                         let condition = pop(&mut stack);
                         facts.compare(condition, start, end - start);
                     }
@@ -964,7 +966,7 @@ impl<'a> Facts<'a> {
                         &mut frames,
                         Frame {
                             height: stack.len(),
-                            is_loop: matches!(op, Operator::Loop { .. }),
+                            is_loop: control == Control::Open(BlockKind::Loop),
                             start,
                         },
                     );
@@ -974,7 +976,8 @@ impl<'a> Facts<'a> {
                         }
                     }
                 }
-                Operator::Else => {
+                // `else`, `catch` and `catch_all` restart the frame's stack.
+                _ if matches!(control, Control::Arm(_)) => {
                     if let Some(frame) = frames.last() {
                         stack.truncate(frame.height);
                     }
@@ -985,7 +988,7 @@ impl<'a> Facts<'a> {
                         }
                     }
                 }
-                Operator::End => {
+                _ if matches!(control, Control::Close { .. }) => {
                     if let Some(frame) = frames.pop() {
                         stack.truncate(frame.height);
                         if frame.is_loop {

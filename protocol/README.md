@@ -196,6 +196,18 @@ Inspector-free dynamic debugging writes the derived version 2 opcode workspace
 defined by [`vm-opcode-workspace-v2.schema.json`](vm-opcode-workspace-v2.schema.json)
 to `artifacts/analysis/vm-opcode-workspace-v2.json`. It is bound by digest to
 the detector profile, VM analysis document, artifact manifest, and event store.
+The backend and the `origin-trace-vm` CLI publish the analysis, this workspace
+and the [host links](vm-host-links-v1.md) as one chain under a cooperative
+writer lock (`vm-analysis-v1.json.reb-workspace-lock-v1`, waiting at most five
+seconds for another writer). Dependants are removed before their source is
+replaced and written after it, so after a crash or failed write each present
+document still names the digest of the present one it was derived from; a
+missing dependant is unavailable, not stale. If a previous dependant cannot be
+removed, the earlier chain is kept on disk, the API still serves the new
+analysis, and that dependant and its own dependants are reported unavailable.
+A reader that opens these files
+without that lock must still compare `analysis_digest` and
+`workspace_document_digest` before joining them.
 Integer switch cases and statically visible numeric handler tables are
 `inferred`. A matching `vm_dispatch_sample` event upgrades that opcode to
 `observed` for both JavaScript and Wasm artifacts. The separate

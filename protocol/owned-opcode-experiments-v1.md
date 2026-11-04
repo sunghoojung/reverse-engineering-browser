@@ -54,9 +54,15 @@ and at most 64 results/1 MiB are retained.
 At capacity the next action is refused, without eviction. The exact command ID
 is retained: the same request returns its stored result, while changed content
 with the same ID is refused. A pending receipt is written before execution;
-HTTP cancellation does not cancel native cleanup or persistence. GET preserves a pending receipt without claiming that its owner is still
-running. After a later explicit action acquires the store lease, an older pending
-receipt becomes unknown/completion-unverified and is never automatically replayed. The helper enforces the existing 60-second lifetime and bounded
+HTTP cancellation does not cancel native cleanup or persistence. GET reports a
+pending receipt as pending only while an experiment holds this backend's
+admission or the store lease. Otherwise its owner was interrupted, and GET
+reports it as unknown/completion-unverified without writing; the next explicit
+action that acquires the store lease persists that outcome. An interrupted
+receipt is never automatically replayed. Each status admits one reason
+(unknown admits completion-unverified or
+native-execution-or-disposal-unconfirmed), and confirmed or mismatch must agree
+with its observation; a store that breaks this is refused. The helper enforces the existing 60-second lifetime and bounded
 exchange deadlines. Disk failures or a lost HTTP reply mean the result is
 unknown to the caller; use Read saved results, not an automatic retry.
 

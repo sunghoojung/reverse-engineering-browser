@@ -284,6 +284,11 @@ document; navigation, reload, closure or binding loss clears authorization and
 retains an unavailable selection rather than silently choosing another tab or
 falling back to disposable execution. Disconnect before selecting and authorizing
 another document. Disconnect does not undo page effects or kill capture.
+Until the capture browser answers its first listing, the document list says it
+is waiting. A lost binding names why and needs a capture restart. A connected
+panel notices when another window, an agent or a lost binding ended its session
+instead of staying Connected, and a Disconnect clicked while a background read
+runs is always sent.
 
 ### Document-start scripts
 
@@ -298,7 +303,8 @@ or host suffix, and a document already open is never retroactively injected.
 The packaged app launches every live capture with that permission; set
 `REB_CONSOLE_DOCUMENT_START=0` before opening it to opt out. The permission
 arms nothing, and a live snippet still needs a connection to a selected
-document and the arming confirmation. Agent-started sessions never have it.
+document and the arming confirmation. Agent-started sessions have it only when
+their start request names `document_start: true`.
 
 A header chip shows the experiment's state without opening the settings, so an
 armed experiment is always visible. Before any connection it reads
@@ -545,7 +551,11 @@ retain unmasked source URLs in their separate local store. CDP content capture
 was removed; historical `reb-traffic-capture-v1` copies are not re-read by the
 viewer. Broker gaps, queue drops, and network-window evictions remain visible.
 Failed refreshes request a complete validated response on retry, so an unchanged
-ETag cannot leave the connection warning stuck after recovery.
+ETag cannot leave the connection warning stuck after recovery. The event poll
+waits at most 10 seconds; a backend that does not answer is shown as not
+responding, with the last valid evidence kept. Signal profile, artifact and VM
+reads follow a valid poll as one chain that later polls neither wait for nor
+restart, so a long cold VM analysis cannot hide a disconnect.
 Short windows keep at least one request row visible when status warnings wrap.
 
 A healthy live Traffic view leaves the status line hidden. The line appears for
@@ -1013,7 +1023,12 @@ matching operations. Latest jumps back to the top and marks the scoped new
 rows seen. The Stop probes button disables the native session through the
 local broker without closing the browser. Clear events is available after
 capture stops, requires confirmation, and truncates only this session's event,
-trace, and request-profile stores. Canvas artifact files and other saved files
+trace, and request-profile stores. One capture action runs at a time: while it
+does, both buttons stay disabled and the notice says so, and an event poll that
+overlapped it is discarded and read again, so it cannot restore pre-stop or
+pre-clear evidence. A refused action, or one with no answer within 15 seconds,
+stays in the notice until the next action. When the backend stops answering,
+both controls are withdrawn until a valid poll reports them again. Canvas artifact files and other saved files
 remain on disk. Detailed identifiers stay behind a disclosure. The
 captured-tab buttons are historical evidence, not an open-tab count. The footer separates missing per-process sequence IDs from
 reported queue drops, since a gap report can describe the same missing IDs. It

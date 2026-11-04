@@ -55,8 +55,20 @@ the original parse goal. A rejected candidate has `ok: false`,
 `error_kind: "derived-validation"`, `parsed: true` (the original parsed), original
 text in `derived_source`, and an empty `transformations` list. Its diagnostic
 uses a zero-width range at zero rather than attributing a generated error to
-original bytes. Existing source-parse failures do not carry this error kind.
+original bytes. Source-parse failures never carry this error kind.
 The candidate check proves syntax acceptance only and never executes the source.
+
+Every worker response with `ok: false` names its `error_kind`:
+`invalid-request` (malformed JSON, an unknown field or operation, or a function
+lookup carrying `assume_intrinsics`), `source-limit` (the source or request
+record exceeds its byte limit), `preflight-limit` (the Tree-sitter preflight's
+depth, node, heap or time budget), `syntax` (either parser rejected the source;
+`parsed: true` means Tree-sitter admitted it and Oxc rejected it) or
+`derived-validation`. The backend maps `syntax`, `preflight-limit` and
+`derived-validation` to 422 with distinct messages, `source-limit` to 400, and
+`invalid-request`, a missing kind or an unknown kind to 502. Requests are no
+longer read leniently: a misspelled `operation` or field is refused instead of
+falling through to deobfuscation.
 
 `assume_intrinsics=0|1` defaults to 0. Opt-in responses carry
 `analysis.assumptions: ["standard-intrinsics"]`; default responses carry an empty

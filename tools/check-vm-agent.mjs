@@ -242,6 +242,15 @@ try {
   }
   const runExpired = actionReply('run'); runExpired.session.state = 'expired'; reply(runExpired);
   await bad(actionArgs('run'), 3, 'command_outcome_unknown');
+  // An ended run keeps its state and reason; Stop then only confirms disposal.
+  for (const state of ['halted', 'expired', 'failed']) {
+    const ended = actionReply('stop'); ended.session.state = state; ended.session.termination_reason = state === 'halted' ? 'halt' : state;
+    reply(ended); assert.deepEqual(await good(...actionArgs('stop')), ended);
+    const unreaped = copy(ended); unreaped.session.disposal_failed = true;
+    reply(unreaped); await bad(actionArgs('stop'), 3, 'command_outcome_unknown');
+  }
+  const stopRunning = actionReply('stop'); stopRunning.session.state = 'running'; reply(stopRunning);
+  await bad(actionArgs('stop'), 3, 'command_outcome_unknown');
   for (const mutate of [v => v.available = false, v => v.session.state = 'running', v => v.session.execution_state_known = false,
     v => v.session.disposal_failed = true, v => v.session.last_command = {command_id: 'previous', action: 'step', ack: 'pending'}]) {
     const value = view(); mutate(value); const file = await input('unconfirmed.json', value), count = calls.length; await bad(actionArgs('step', file), 2, 'state_refused'); assert.equal(calls.length, count);

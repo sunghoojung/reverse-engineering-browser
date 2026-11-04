@@ -106,7 +106,7 @@
     } else { liveListing = null; liveAvailable = false; }
     if (documentSource === 'live_capture') {
       targets(liveListing || {targets: [], truncated: false}, session && numberId(value.selected_target_id) ? value.selected_target_id : controls.target.value);
-      if (!liveAvailable) notice(value.message || 'Live capture binding unavailable. Restart the capture; no second browser was launched.', true);
+      if (!liveAvailable) notice(value.message || 'Live capture binding unavailable. Restart the capture; no second browser was launched.', value.binding_state !== 'connecting');
     }
   }
   controls.mode.addEventListener('change', () => {
@@ -129,19 +129,29 @@
         !['start', 'stop', 'connect_live'].includes(action) && value.session_id !== identity) throw new TypeError('Malformed native console response');
     return value;
   }
+  // Stop belongs to the session it was clicked for, not to a document
+  // selection, so a selection change while it waits never discards it. It
+  // counts as pending from the click, so the badge reads Working rather than
+  // Connected and nothing else queues behind it.
   function enqueue(action, fields, apply, {quiet = false, context = false} = {}) {
-    const identity = session, target = controls.target.value, epoch = generation;
+    const identity = session, target = controls.target.value, epoch = generation, stop = action === 'stop';
+    if (stop) { ++pending; renderControls(); }
     const execute = async () => {
-      if (epoch !== generation || context && (!identity || identity !== session || target !== controls.target.value)) return null;
-      if (!quiet) { ++pending; renderControls(); }
+      let counted = stop;
       try {
+        if (stop && identity !== session) { notice('This Console session had already ended. Nothing was sent.'); return null; }
+        if (!stop && (epoch !== generation || context && (!identity || identity !== session || target !== controls.target.value))) {
+          if (!quiet) notice('Not sent: the document selection or session changed while this waited. Nothing ran.', true);
+          return null;
+        }
+        if (!quiet && !stop) { ++pending; counted = true; renderControls(); }
         const value = await request(action, fields, identity);
-        if (epoch !== generation) return null;
+        if (!stop && epoch !== generation) return null;
         disconnected = false; return apply ? apply(value) : value;
       } catch (error) {
-        if (epoch === generation) { invalidateTargets(); disconnected = true; notice(`${error.message}. Commands are never retried automatically.`, true); renderControls(); }
+        if (stop || epoch === generation) { invalidateTargets(); disconnected = true; notice(`${error.message}. Commands are never retried automatically.`, true); renderControls(); }
         return null;
-      } finally { if (!quiet) { --pending; renderControls(); } }
+      } finally { if (counted) { --pending; renderControls(); } }
     };
     const result = queue.then(execute); queue = result.catch(() => {}); return result;
   }
@@ -355,19 +365,25 @@
     const started = Date.now(); const token = generation;
     const wait = String(Number(container.dataset.wait || 0) + 1); container.dataset.wait = wait;
     container.dataset.awaiting = 'true';
+    const current = () => container.dataset.wait === wait && container.isConnected && token === generation && session === scope.session && controls.target.value === scope.target;
     async function tick() {
-      if (container.dataset.wait !== wait || !container.isConnected || token !== generation || session !== scope.session || controls.target.value !== scope.target) return;
-      const result = await runtime({operation: 'await', handle: value.handle}, scope.target, true, scope.session, scope.generation);
-      if (!result || !container.isConnected || container.dataset.wait !== wait || token !== generation || session !== scope.session || controls.target.value !== scope.target) return;
-      if (result.status === 'pending' && Date.now() - started < 10000) { setTimeout(tick, 200); return; }
-      container.dataset.awaiting = 'false';
-      const settled = document.createElement('div'); settled.className = 'native-console-value';
-      if (result.value) { renderValue(settled, result.value, scope); const row = container.closest('article'); row.dataset.status = result.status; row.dataset.level = result.status === 'ok' ? 'result' : 'error'; }
-      else settled.textContent = result.status === 'pending' ? 'Promise still pending after 10 seconds. Await again or stop waiting.' : result.text || 'Await stopped';
-      if (replace && result.value) { container.replaceChildren(); renderValue(container, result.value, scope); }
-      else if (replace) container.replaceChildren(settled);
-      else { container.querySelector('summary').textContent = result.status === 'rejected' ? 'Promise {<rejected>}' : result.status === 'ok' ? 'Promise {<fulfilled>}' : value.text; container.append(settled); }
-      boundRow(container.closest('article'));
+      let polling = false;
+      try {
+        if (!current()) return;
+        const result = await runtime({operation: 'await', handle: value.handle}, scope.target, true, scope.session, scope.generation);
+        if (!result || !current()) return;
+        if (result.status === 'pending' && Date.now() - started < 10000) { polling = true; setTimeout(tick, 200); return; }
+        const settled = document.createElement('div'); settled.className = 'native-console-value';
+        if (result.value) { renderValue(settled, result.value, scope); const row = container.closest('article'); row.dataset.status = result.status; row.dataset.level = result.status === 'ok' ? 'result' : 'error'; }
+        else settled.textContent = result.status === 'pending' ? 'Promise still pending after 10 seconds. Await again or stop waiting.' : result.text || 'Await stopped';
+        if (replace && result.value) { container.replaceChildren(); renderValue(container, result.value, scope); }
+        else if (replace) container.replaceChildren(settled);
+        else { container.querySelector('summary').textContent = result.status === 'rejected' ? 'Promise {<rejected>}' : result.status === 'ok' ? 'Promise {<fulfilled>}' : value.text; container.append(settled); }
+        boundRow(container.closest('article'));
+      } finally {
+        // Only a newer wait owns the flag, so every other exit lets Await run again.
+        if (!polling && container.dataset.wait === wait) container.dataset.awaiting = 'false';
+      }
     }
     tick();
   }
@@ -645,7 +661,33 @@
     } catch { /* The next availability check reports a hard failure. */ }
     finally { listingRunning = false; renderControls(); }
   }
-  setInterval(() => { poll(); refreshLiveDocuments(); documentStart.refresh(); }, 500);
+  // The backend holds one Console session, which another window, an agent or
+  // a lost binding can end. Its state read does no native exchange, so a
+  // connected panel checks it rather than showing Connected for a session the
+  // backend no longer has.
+  let watchTick = 0, watching = false;
+  async function watchSession(force = false) {
+    if ((!force && root.hidden) || !session || disconnected || pending || submitting || checking || watching) return;
+    if (!force && ++watchTick % 4) return;
+    const identity = session, epoch = generation; watching = true;
+    const execute = async () => {
+      try {
+        const response = await fetch('/api/native-console', {cache: 'no-store'});
+        const value = await response.json();
+        if (!response.ok || !validState(value) || typeof value.available !== 'boolean' || value.session_id === identity ||
+            identity !== session || epoch !== generation || pending || submitting) return;
+        ++generation; session = null; completion.close(); controls['live-consent'].checked = false;
+        if (documentSource !== 'live_capture') { documentSource = 'disposable'; clearTargets(); }
+        available = value.available; captureState(value);
+        boundary('This Console session ended outside this window: another window or agent disconnected it, or its browser or binding ended. Nothing was retried.');
+        notice(`Console session ended outside this window.${value.message ? ` ${value.message}` : ''}`, true);
+        documentStart.reset();
+      } catch { /* A failed read changes nothing; the next command reports its own failure. */ }
+      finally { watching = false; renderControls(); }
+    };
+    const result = queue.then(execute); queue = result.catch(() => {}); return result;
+  }
+  setInterval(() => { poll(); refreshLiveDocuments(); watchSession(); documentStart.refresh(); }, 500);
   function filter() {
     const query = controls.filter.value.toLocaleLowerCase(), level = controls.level.value;
     for (const row of controls.output.children) row.hidden = !!query && !(row.textContent + (row.dataset.command || '')).toLocaleLowerCase().includes(query) || level !== 'all' && row.dataset.level !== level;
@@ -703,7 +745,7 @@
       boundary('Live capture evaluation disconnected. The capture browser stays open.');
       notice('These documents come from the live capture. Select one, explicitly authorize mutation, then connect. Commands can change that captured page. This console cannot set breakpoints, step, or inspect paused frames.');
     } else {
-      documentSource = ''; clearTargets(); boundary('Experiment disconnected. Retained values released.'); notice('Disposable browser and profile removed.');
+      documentSource = 'disposable'; clearTargets(); boundary('Experiment disconnected. Retained values released.'); notice('Disposable browser and profile removed.');
     }
     documentStart.reset();
   }).then(() => documentStart.refresh(true)));

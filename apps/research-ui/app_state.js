@@ -102,7 +102,6 @@
         sourceDeobfuscated: false,
         sourceFormatted: false,
         sourceFormatCache: new Map(),
-        consoleOpen: false,
         selectedRequestId: standalonePreview ? '81' : null,
         inspectorTab: 'general',
         fieldTab: 'body',
@@ -119,6 +118,9 @@
         trafficWindowAnchor: null,
         trafficNewIds: new Set(),
         trafficDetailOpen: false,
+        // Written only by setEventConnection(); broker and eventFailureKind
+        // are its projections for existing readers.
+        connection: 'connecting',
         broker: 'connecting',
         eventFailureKind: null,
         sessionMode: standalonePreview ? 'preview' : 'live',
@@ -134,6 +136,7 @@
         queueDropsSaturated: false,
         lastUpdatedLabel: null,
         refreshing: false,
+        refreshingDependents: false,
         eventEtag: null,
         vmFindings: [],
         lastValidAnalysisFindings: [],
@@ -176,6 +179,7 @@
         apiCollectionSaving: false,
         apiCollectionStatus: 'loading',
         apiCollectionMessage: 'Loading the local API Collection…',
+        apiCollectionNoticeRevision: 0,
         collectionSelectedFolderId: 1,
         collectionSelectedRequestId: null,
         collectionExpandedFolderIds: new Set([1]),
@@ -216,14 +220,17 @@
         analystDeleteFolderId: null,
         analystRunPending: false,
         analystActiveRunId: null,
+        analystCancelRunId: null,
         analystNextRunId: 1,
         analystTotalRuns: 0,
         analystHistoryEvictions: 0,
         analystRuns: [],
         analystSelectedRunId: null,
         decoderEngine: emptyDecoderEngine(),
+        decoderEngineStatus: 'unknown',
         decoderStatus: 'loading',
         decoderMessage: 'Checking the native decoder engine…',
+        decoderNoticeRevision: 0,
         decoderRefreshing: false,
         toolsTab: 'decoder',
         decoderInputSnapshot: null,
@@ -248,6 +255,11 @@
         signalNewKeys: new Set(),
         captureStopped: false,
         captureControlsAvailable: false,
+        // 'stop' or 'clear' while its POST runs. The generation changes when an
+        // action starts and ends, so an overlapping event poll is discarded.
+        captureAction: null,
+        captureActionGeneration: 0,
+        captureActionError: null,
         signalCategoryFilter: 'all',
         selectedSignalEventKey: null
       };

@@ -244,7 +244,14 @@ session and tell the researcher. This connection now reads that session, so
 continue with recipe 2. Starting again ends this connection's previous
 session first. Sensitive Canvas images need `"canvas_images": true` with
 `"confirm_sensitive_capture": true`, only when the researcher authorized
-Canvas content for this target. A guest adapter
+Canvas content for this target; `"request_content": true` (request paths,
+queries and bodies) and `"js_invocation_digests": true` take the same
+confirmation. `"document_start": true` permits document-start Console scripts
+(recipe 19). `"js_invocation_sites": "/absolute/path/sites.json"`, or
+`"js_invocation_saved_sites": true` for the sites agent sessions saved with
+`js_invocation_site_action`, arms invocation tracking. None of these is ever
+taken from the environment; `options` in the result and
+`capture_options` in `get_session_context` show what the session runs with. A guest adapter
 needs `"guest_adapter": "/absolute/path/recipe.json"` with `wasm_dispatch`.
 An error names the launcher's reason, for example a Brave build that lacks a
 requested V8 flag; nothing is left running. From a shell, `reb-api session
@@ -311,6 +318,68 @@ Accessibility. `target_unavailable` means no window, page or matching control.
 A 503 means another session is sending input; retry. Input only lands inside
 the page, never on browser controls.
 
+## 18. Run JavaScript in one frame, including a cross-site iframe
+
+Needs `--allow-effects` and the researcher's authorization to run code in
+that document. List the documents first:
+
+```text
+get_native_console {}
+```
+
+Good: `live_available: true`, a `binding_id`, and `targets`. Each target has
+`id`, `frame` (`top` or `child`), `origin`, `url`, and for a child
+`top_relation` (`same_origin`, `same_site`, `cross_site` or `undetermined`)
+and `out_of_process` (true for a cross-site frame in its own renderer
+process). A challenge widget is usually `frame: child`, `top_relation:
+cross_site`, `out_of_process: true`. Choose by `frame`, `origin` and `url`;
+the label is display text. Then connect and evaluate:
+
+```text
+native_console_action {"body": {"action": "connect_live", "binding_id": "<binding_id>",
+  "target_id": "<id>", "confirm_live": true}}
+native_console_action {"body": {"action": "evaluate", "session_id": "<session_id>",
+  "target_id": "<id>", "source": "Array.from(location.ancestorOrigins)"}}
+```
+
+Good: `status: ok` with `type` and `text` (at most 8 KiB, `truncated`
+marked); the ancestor origins confirm which page holds the frame. Console
+messages come from `runtime` with `{"operation": "poll"}`. `status:
+stale_target` means either another `target_id` than the one you connected to,
+or a document that navigated; its `text` says which and what to send next.
+`get_native_console` then shows `selection: {"status": "stale", ...}`. To
+switch frames, `stop` with the `session_id`, then `connect_live` again. A 409
+"already open" names the open `session_id` to stop.
+
+## 19. Run a snippet before a child frame's own scripts
+
+Needs a session started with `"document_start": true` and
+`document_start_supported: true` in `get_native_console`. While connected
+(recipe 18; any document will do), arm one rule per exact origin:
+
+```text
+native_console_action {"body": {"action": "arm_document_start", "session_id": "<session_id>",
+  "confirm_document_start": true, "scripts": [{"origin": "<child origin>", "frame": "child",
+  "source": "report(typeof window.someGlobal);"}]}}
+```
+
+Reload the page or navigate so a new child document is created, then read:
+
+```text
+get_native_console_document_start {"after_sequence": "0"}
+```
+
+Good: `pending_renderer_processes: 0`, and `output.records` with `injected`
+then `report` records whose `document_id` is a target id and whose
+`frame_id` filters `get_events` for that frame's evidence. Pass the last
+`sequence` as `after_sequence` for newer records. A 503 means this session
+does not permit document-start scripts; its message says whether the start
+lacked `document_start` or the Brave lacks the Native Console v3 overlay
+(`capture_options.document_start: permitted` with
+`document_start_supported: false`). Finish with `clear_document_start`
+and `stop` before `session_action` `end`. Details:
+[document-start Console scripts](console-document-start-scripts.md).
+
 ## Response shapes at a glance
 
 | Tool | Look at |
@@ -322,3 +391,6 @@ the page, never on browser controls.
 | `inspect_wasm` | `coverage`, then the requested section rows |
 | `start_live_session` | `session_id`, `url_opened`, `capture_observed`, `options` |
 | `session_action` `list_inputs` | `elements` with `role`, `name`, `visible`, `x`, `y` |
+| `get_native_console` | `binding_id`, `targets` (`frame`, `origin`, `top_relation`, `out_of_process`), `selection` |
+| `native_console_action` `evaluate` | `status`, `type`, `text`, `truncated` |
+| `get_native_console_document_start` | `document_start.scripts`, `pending_renderer_processes`, `output.records` |

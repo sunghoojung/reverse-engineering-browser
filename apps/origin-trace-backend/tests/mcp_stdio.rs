@@ -186,6 +186,18 @@ impl Mcp {
             }
         }
     }
+
+    /// Waits for the server to exit on its own, with stdin still open.
+    fn exit_code(&mut self) -> Option<i32> {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        loop {
+            if let Some(status) = self.child.try_wait().unwrap() {
+                return status.code();
+            }
+            assert!(Instant::now() < deadline, "retired MCP server kept running");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
 }
 
 fn specification() -> Value {
@@ -1020,21 +1032,35 @@ fn canonical_wrapper_reconnects_without_retargeting_pending_tools() {
     assert_eq!(changed["result"]["isError"], true, "{changed}");
     assert!(tool_text(&changed).contains("Reconnect"), "{changed}");
     assert!(second.paths.lock().unwrap().is_empty());
-    for method in ["tools/list", "initialize"] {
-        let rejected = mcp.request(method, json!({}));
-        assert_eq!(rejected["error"]["code"], -32000, "{rejected}");
-        assert!(rejected.get("result").is_none(), "{rejected}");
-    }
+    // A retired connection exits after its refusal, so the client sees the
+    // disconnect instead of a live server that refuses every call.
+    assert_eq!(mcp.exit_code(), Some(3), "retired connection kept serving");
+    drop(mcp);
     assert_eq!(
         first.paths.lock().unwrap().len(),
         1,
         "old backend received an action"
     );
-    // Restoring a file cannot resurrect the retired connection's authorization.
-    _published = publish(&canonical, &first.url);
-    let retired = mcp.request("tools/call", json!({"name": "get_health"}));
-    assert_eq!(retired["result"]["isError"], true);
-    drop(mcp);
+    // A non-tool request is refused as a JSON-RPC error before the exit.
+    for method in ["tools/list", "initialize"] {
+        _published = publish(&canonical, &first.url);
+        let mut listing = start();
+        _published = publish(&canonical, &second.url);
+        let rejected = listing.request(method, json!({}));
+        assert_eq!(rejected["error"]["code"], -32000, "{rejected}");
+        assert!(rejected.get("result").is_none(), "{rejected}");
+        assert_eq!(listing.exit_code(), Some(3), "{method}");
+    }
+    assert!(second.paths.lock().unwrap().is_empty());
+    assert!(
+        first
+            .paths
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|path| path == "/api/health"),
+        "old backend received an action"
+    );
     _published = publish(&canonical, &second.url);
     let mut reconnected = start();
     let healthy = reconnected.request("tools/call", json!({"name": "get_health"}));
@@ -1122,17 +1148,19 @@ fn canonical_wrapper_reconnects_without_retargeting_pending_tools() {
         second.paths.lock().unwrap().last().map(String::as_str),
         Some("/api/health")
     );
-    let blocked_context = reconnected.request("tools/call", json!({"name": "get_session_context"}));
     assert_eq!(
-        blocked_context["result"]["isError"], true,
-        "{blocked_context}"
+        reconnected.exit_code(),
+        Some(3),
+        "replaced instance kept serving"
     );
     assert_eq!(second.paths.lock().unwrap().len(), before_replacement + 1);
+    let mut invalidated = start();
     drop(_published);
     std::fs::write(&canonical, "https://example.test/secret").unwrap();
-    let invalid = reconnected.request("tools/call", json!({"name": "get_health"}));
+    let invalid = invalidated.request("tools/call", json!({"name": "get_health"}));
     assert_eq!(invalid["result"]["isError"], true);
     assert!(!tool_text(&invalid).contains("example.test"));
+    assert_eq!(invalidated.exit_code(), Some(3));
 }
 
 #[test]

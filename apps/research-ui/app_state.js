@@ -221,6 +221,7 @@
         analystDeleteFolderId: null,
         analystRunPending: false,
         analystActiveRunId: null,
+        analystCancelRunId: null,
         analystNextRunId: 1,
         analystTotalRuns: 0,
         analystHistoryEvictions: 0,

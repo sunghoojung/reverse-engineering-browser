@@ -5069,7 +5069,8 @@ invocationSitesPanel.refresh();
           !state.localAnalystPendingSave && runnerAvailable && !runnerBusy &&
           !state.analystRunPending && state.analystTotalRuns < 256;
         analystElements.run.disabled = !runnable;
-        analystElements.cancel.disabled = !state.analystRunPending;
+        analystElements.cancel.disabled = !state.analystRunPending ||
+          (state.analystCancelRunId !== null && state.analystCancelRunId === state.analystActiveRunId);
         analystElements.clearHistory.disabled = state.analystRunPending || state.analystRuns.length === 0;
         analystElements.variables.disabled = state.analystRunPending;
         analystElements.includeEvents.disabled = state.analystRunPending;
@@ -5867,6 +5868,7 @@ invocationSitesPanel.refresh();
         } finally {
           state.analystRunPending = false;
           state.analystActiveRunId = null;
+          state.analystCancelRunId = null;
           analystElements.confirm.checked = false;
           analystElements.confirmSensitive.checked = false;
           await refreshLocalAnalyst();
@@ -5874,11 +5876,14 @@ invocationSitesPanel.refresh();
         }
       }
 
+      // A requested cancellation is state, so a render while the run is
+      // pending cannot re-enable Cancel for the same run.
       async function cancelLocalAnalystScript() {
         const runId = state.analystActiveRunId;
-        if (!runId) return;
-        analystElements.cancel.disabled = true;
+        if (!runId || state.analystCancelRunId === runId) return;
+        state.analystCancelRunId = runId;
         setAnalystNotice('running', `Cancelling analyst run ${runId}…`);
+        renderAnalystExecution();
         try {
           const response = await fetch('/api/local-analyst/actions', {
             method: 'POST', cache: 'no-store', headers: {'Content-Type': 'application/json'},
@@ -5889,8 +5894,12 @@ invocationSitesPanel.refresh();
             throw new Error(body.error || 'The runner rejected cancellation.');
           }
         } catch (error) {
+          // A run that finished first owns the notice; refusing to cancel a
+          // completed run is not news, and there is nothing left to cancel.
+          if (state.analystActiveRunId !== runId) return;
+          state.analystCancelRunId = null;
           setAnalystNotice('error', `Cancellation failed: ${error.message}`);
-          analystElements.cancel.disabled = false;
+          renderAnalystExecution();
         }
       }
 
@@ -8967,6 +8976,16 @@ invocationSitesPanel.refresh();
       const investigationNotebook = RebInvestigationNotebook.mount({
         button: document.querySelector('#open-investigation-notebook'),
         validateLibrary: isLocalAnalystWorkspace,
+        // The notebook and Analyst hold separate copies of one library. After
+        // a notebook write commits, Analyst reloads its copy, so its next save
+        // does not meet a generation conflict that this app caused itself.
+        // The notebook reloads on every open, and it is modal, so the reverse
+        // direction needs nothing here.
+        fetcher: async (path, options) => {
+          const response = await fetch(path, options);
+          if (path === '/api/local-analyst/actions' && response.ok) queueMicrotask(() => refreshLocalAnalyst());
+          return response;
+        },
         getContext: () => ({events: state.events, artifacts: state.artifacts}),
         getSelection: () => {
           if (investigationScreen() === 'sources') {

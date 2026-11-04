@@ -229,4 +229,56 @@ export async function checkAnalystController(root) {
   assert.equal(f.state.analystDraftDirty,false);assert.equal(f.postCount(),2,'Only the explicit retry sent another application POST');
   assert.equal(await f.ui.refreshLocalAnalyst(true),true);
   console.log('PASS Analyst dirty same-file/navigation/folder/unload guards, focus, exact receipts, uncertain reconciliation, conflict bases, stale replies, deadlines and duplicate-write suppression (controller fixture; not rendered QA)');
+  await checkAnalystCancel(root);
+}
+
+// Run and cancel through the production functions. Every render recomputes
+// Cancel from state, as a poll or edit would while a run is pending.
+async function checkAnalystCancel(root) {
+  const app=await readFile(join(root,'apps/research-ui/app.js'),'utf8');
+  const slice=(start,end)=>{const first=app.indexOf(start),last=app.indexOf(end,first);assert(first>=0&&last>first,start);return app.slice(first,last);};
+  const control=()=>({disabled:false,checked:false,hidden:false,textContent:'',style:{}});
+  const analystElements=new Proxy({},{get:(target,key)=>target[key]??=control()});
+  const state={analystRunPending:false,analystActiveRunId:null,analystCancelRunId:null,analystNextRunId:1,analystTotalRuns:0,analystRuns:[],
+    analystHistoryEvictions:0,analystSelectedRunId:null,analystDraftDirty:false,localAnalystNeedsReload:false,localAnalystPendingSave:null,
+    localAnalyst:{generation:3},localAnalystRunner:{available:true,active_run_id:null},events:[],artifacts:[],originTrace:null,signalProfile:null,
+    vmAnalysisStatus:'ready',vmFindings:[]};
+  const posts=[],notices=[];
+  const context={state,analystElements,
+    analystFile:()=>({id:4,kind:'analyst-script',name:'probe.js',content:'return 1;'}),selectedAnalystArtifact:()=>null,
+    analystVariables:()=>[],buildAnalystEvidence:()=>({summary:{events:0}}),isLocalAnalystResult:()=>true,refreshLocalAnalyst:async()=>true,
+    setAnalystNotice:(kind,message)=>notices.push({kind,message}),
+    fetch:(path,options)=>new Promise(resolve=>posts.push({body:JSON.parse(options.body),reply:(status,value)=>resolve({ok:status<400,status,json:async()=>value})}))};
+  const ui=runInNewContext(slice('      function renderAnalystExecution()','      function renderAnalystResult(')+
+    slice('      async function runLocalAnalystScript()','      // Source ownership never comes from a URL.')+';({renderAnalystExecution,runLocalAnalystScript,cancelLocalAnalystScript})',context);
+  context.renderLocalAnalyst=ui.renderAnalystExecution;
+  const settle=()=>new Promise(resolve=>setTimeout(resolve,0));
+  const post=action=>{const index=posts.findIndex(item=>item.body.action===action);assert(index>=0,action);return posts.splice(index,1)[0];};
+  const result=run_id=>({protocol_version:1,run_id,ok:true,outcome:'completed',duration_ms:4,result_type:'number',result_text:'1',result_truncated:false,logs:[],logs_truncated:false});
+  // A late cancellation: the run completes before the runner refuses it.
+  analystElements.confirm.checked=true;
+  const run=ui.runLocalAnalystScript();
+  assert.equal(analystElements.cancel.disabled,false);
+  const cancel=ui.cancelLocalAnalystScript();
+  assert.equal(analystElements.cancel.disabled,true);
+  ui.renderAnalystExecution();
+  assert.equal(analystElements.cancel.disabled,true,'A render while pending keeps the requested cancellation');
+  await ui.cancelLocalAnalystScript();
+  assert.equal(posts.filter(item=>item.body.action==='cancel_local_analyst_script').length,1,'One cancellation per run');
+  post('run_local_analyst_script').reply(200,result(1));await run;
+  const completed=notices.at(-1);
+  assert.match(completed.message,/Run 1 completed/);
+  post('cancel_local_analyst_script').reply(409,{error:'No analyst run is active.'});await cancel;
+  assert.equal(notices.at(-1),completed,'A late refusal does not replace the completion notice');
+  assert.equal(analystElements.cancel.disabled,true,'Nothing remains to cancel');
+  // A refusal while the run still executes is reported and Cancel returns.
+  analystElements.confirm.checked=true;
+  const second=ui.runLocalAnalystScript();
+  const refused=ui.cancelLocalAnalystScript();
+  post('cancel_local_analyst_script').reply(409,{error:'The runner is busy.'});await refused;
+  assert.match(notices.at(-1).message,/Cancellation failed: The runner is busy/);
+  assert.equal(analystElements.cancel.disabled,false);
+  post('run_local_analyst_script').reply(200,result(2));await second;await settle();
+  assert.equal(state.analystCancelRunId,null);
+  console.log('PASS Analyst cancellation: requested state survives renders, one request per run, late refusals keep the completion notice and leave Cancel disabled (production functions; not rendered QA)');
 }

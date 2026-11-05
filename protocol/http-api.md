@@ -2,7 +2,11 @@
 
 [`openapi.json`](openapi.json) describes the Rust loopback backend in
 `apps/origin-trace-backend`, including the [native console](native-console-v2.md)
-state and action routes.
+state and action routes and the
+[live Wasm instance commands](live-wasm-instance-v1.md). Those commands are
+confirmed reads, writes, and calls on an already attached instance. They do
+not restore the retired `/api/debugger` routes. Without a command peer they
+report the command unavailable and invent no memory bytes or return values.
 It is OpenAPI 3.1 with JSON Schema 2020-12. Stable `operationId` values drive the
 included Rust CLI. The routes and stored evidence contracts are unchanged by
 the implementation migration.

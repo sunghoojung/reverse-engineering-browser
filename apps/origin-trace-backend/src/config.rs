@@ -85,6 +85,11 @@ pub struct Options {
     /// When set, the console attaches to that capture browser instead of launching one.
     #[arg(long)]
     pub native_console_live_directory: Option<PathBuf>,
+    /// Unix socket of a live Wasm command peer for the instance dispatch
+    /// capture is already attached to. Unset, the live Wasm routes report the
+    /// command unsupported and send nothing.
+    #[arg(long)]
+    pub live_wasm_socket: Option<PathBuf>,
     /// Serve deterministic developer evidence. A live capture never does.
     #[arg(long, conflicts_with = "socket")]
     pub demo_evidence: bool,
@@ -136,6 +141,7 @@ impl Options {
             &mut self.socket,
             &mut self.artifact_socket,
             &mut self.native_console_live_directory,
+            &mut self.live_wasm_socket,
             &mut self.endpoint_file,
             &mut self.active_endpoint_file,
             &mut self.js_invocation_session_sites,

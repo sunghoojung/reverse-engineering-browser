@@ -346,6 +346,14 @@ backend belongs to. Both actions refuse with 409 `idle_backend` unless
   record reaches the session's store within 10 seconds. False means nothing
   was recorded, for example because the configured browser is not a capture
   build. It never runs page JavaScript.
+- `{"action":"reset_wasm_sample_budgets"}` increments the session's Wasm
+  sample-budget reset file. The capture browser restarts both sample indexes
+  at 0 without closing the profile or replacing the capture configuration.
+  It needs recording capture, `--wasm-budget-reset-file`, and a live process
+  holding the profile, and otherwise returns 409. The browser applies the new
+  generation on its writer wake, about 250ms later. A rebuilt Brave is
+  required before a live browser honors the file. The response is
+  `{"ok":true,"action":"reset_wasm_sample_budgets","generation":N}`.
 - `{"action":"end","confirm":true}` replies, then about 300 ms later sends
   SIGTERM to the backend's `--launcher-pid`, which must be its parent. The
   launcher closes the capture browser and stops every helper, including the
@@ -389,7 +397,11 @@ returns 409 `dependency_unavailable` for these actions.
 `duration_seconds`, `localhost_only`, `canvas_images`, `request_content`,
 `document_start`, `js_invocation_sites`, `js_invocation_saved_sites`,
 `js_invocation_digests`, `confirm_sensitive_capture`,
-`publish_canonical_endpoint`, `brave_binary` and `timeout_seconds`. Every
+`publish_canonical_endpoint`, `brave_binary`, `timeout_seconds`,
+`wasm_samples_per_function`, `wasm_samples_per_indirect_site`,
+`wasm_function_allow`, `wasm_function_deny` and `wasm_module_allowlist`.
+The Wasm budget options require `wasm_dispatch` or `wasm_call_indirect` and
+do not raise the 16-record cap. Every
 capture switch is off unless named; an inherited capture switch, site file,
 browser profile or embedded-session variable is ignored, so an inherited
 `REB_CAPTURE_REQUEST_CONTENT`, `REB_CONSOLE_DOCUMENT_START`,
@@ -404,6 +416,11 @@ reaches an agent session.
 | `js_invocation_saved_sites` | `REB_NATIVE_JS_INVOCATION_SITES` | Arms the agent sessions' own saved set, `~/.config/origin-trace/agent-sessions/js-invocation-sites-v1.json`, which `js_invocation_site_action` edits in an agent session. Never the app's set. Refused when empty. Not with `js_invocation_sites`. |
 | `js_invocation_digests` | `REB_NATIVE_JS_INVOCATION_DIGESTS=1` | Sensitive: needs named sites and `confirm_sensitive_capture`. |
 | `canvas_images` | `REB_CAPTURE_CANVAS_IMAGES=1` | Sensitive: needs `confirm_sensitive_capture`. |
+| `wasm_samples_per_function` | `REB_NATIVE_WASM_SAMPLES_PER_FUNCTION` | 1..16 retained samples of each function on each Wasm stream. Needs `wasm_dispatch` or `wasm_call_indirect`. |
+| `wasm_samples_per_indirect_site` | `REB_NATIVE_WASM_SAMPLES_PER_INDIRECT_SITE` | 1..16 retained `call_indirect` samples of each caller and module offset. |
+| `wasm_function_allow` | `REB_NATIVE_WASM_FUNCTION_ALLOW` | Up to 32 function indexes. Other functions do not consume either sample index. Deny wins. |
+| `wasm_function_deny` | `REB_NATIVE_WASM_FUNCTION_DENY` | Up to 32 function indexes to exclude. |
+| `wasm_module_allowlist` | `REB_NATIVE_WASM_MODULE_ALLOWLIST` | Up to 8 SHA-256 digests, written to a private file. Other modules do not advance either sample index. |
 
 An agent sets `confirm_sensitive_capture` only on the researcher's
 authorization for that content and target. Named invocation sites are strict:

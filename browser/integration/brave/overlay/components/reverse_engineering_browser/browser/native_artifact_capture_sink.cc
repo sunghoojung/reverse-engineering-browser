@@ -148,6 +148,10 @@ void NativeArtifactCaptureSink::SetEmitter(const NativeProbeEmitter emitter,
   wasm_dispatch_modules_.clear();
   wasm_dispatch_count_ = 0;
   wasm_indirect_count_ = 0;
+  wasm_sample_budget_ = {};
+  if ((wasm_budget_epoch_ & 1U) == 0 &&
+      wasm_budget_epoch_ <= std::numeric_limits<std::uint64_t>::max() - 2)
+    wasm_budget_epoch_ += 2;
   runtime_typed_array_count_.store(0, std::memory_order_relaxed);
   allocating_scripts_.clear();
   emitter_.store(emitter, std::memory_order_release);
@@ -800,6 +804,21 @@ void NativeArtifactCaptureSink::FlushPendingWork(const std::string_view guest_re
   }
 }
 
+void NativeArtifactCaptureSink::SetWasmSampleBudgetPolicy(
+    const NativeWasmSampleBudgetPolicy& policy) noexcept {
+  if (!IsValidNativeWasmSampleBudgetPolicy(policy))
+    return;
+  wasm_sample_budget_ = policy;
+}
+
+void NativeArtifactCaptureSink::ResetWasmSampleBudgets() noexcept {
+  wasm_dispatch_count_ = 0;
+  wasm_indirect_count_ = 0;
+  if ((wasm_budget_epoch_ & 1U) == 0 &&
+      wasm_budget_epoch_ <= std::numeric_limits<std::uint64_t>::max() - 2)
+    wasm_budget_epoch_ += 2;
+}
+
 void NativeArtifactCaptureSink::CaptureWasmDispatch(
     const NativeWasmDispatchObservation& observation,
     mojo_base::BigBuffer content,
@@ -819,7 +838,22 @@ void NativeArtifactCaptureSink::CaptureWasmDispatch(
     gap("native_wasm_dispatch_document_unavailable");
     return;
   }
+  std::array<std::uint8_t, 32> module_digest{};
+  const std::uint8_t* module_digest_bytes = nullptr;
+  if (wasm_sample_budget_.module_allow_count != 0 && content.size() <= 16U * 1024U * 1024U) {
+    module_digest =
+        NativeGuestDigest(std::span<const std::uint8_t>(content.data(), content.size()));
+    module_digest_bytes = module_digest.data();
+  }
+  const auto budget = AdmitNativeWasmBudgetKeys(wasm_sample_budget_, wasm_dispatch_function_keys_,
+                                                {}, wasm_budget_epoch_, observation.function_index,
+                                                0, module_digest_bytes);
+  if (const char* reason = NativeWasmBrowserBudgetReason(budget.status, false)) {
+    gap(reason);
+    return;
+  }
   if (wasm_dispatch_count_ >= kNativeWasmDispatchSampleBudget) {
+    ReleaseNativeWasmBudgetAdmission(budget, wasm_dispatch_function_keys_, {}, wasm_budget_epoch_);
     gap("native_wasm_dispatch_browser_budget_incomplete");
     return;
   }
@@ -879,8 +913,25 @@ void NativeArtifactCaptureSink::CaptureWasmIndirect(
     gap("native_wasm_indirect_document_unavailable");
     return;
   }
+  std::array<std::uint8_t, 32> module_digest{};
+  const std::uint8_t* module_digest_bytes = nullptr;
+  if (wasm_sample_budget_.module_allow_count != 0 && content.size() <= 16U * 1024U * 1024U) {
+    module_digest =
+        NativeGuestDigest(std::span<const std::uint8_t>(content.data(), content.size()));
+    module_digest_bytes = module_digest.data();
+  }
   // A budget separate from br_table: one stream never starves the other.
+  const auto budget = AdmitNativeWasmBudgetKeys(
+      wasm_sample_budget_, wasm_indirect_function_keys_, wasm_indirect_site_keys_,
+      wasm_budget_epoch_, observation.function_index, observation.module_byte_offset,
+      module_digest_bytes);
+  if (const char* reason = NativeWasmBrowserBudgetReason(budget.status, true)) {
+    gap(reason);
+    return;
+  }
   if (wasm_indirect_count_ >= kNativeWasmIndirectSampleBudget) {
+    ReleaseNativeWasmBudgetAdmission(budget, wasm_indirect_function_keys_, wasm_indirect_site_keys_,
+                                     wasm_budget_epoch_);
     gap("native_wasm_indirect_browser_budget_incomplete");
     return;
   }

@@ -6,10 +6,13 @@
 #ifndef BRAVE_COMPONENTS_REVERSE_ENGINEERING_BROWSER_BROWSER_NATIVE_PROBE_HOST_H_
 #define BRAVE_COMPONENTS_REVERSE_ENGINEERING_BROWSER_BROWSER_NATIVE_PROBE_HOST_H_
 
+#include <array>
 #include <cstdint>
 #include <memory>
 #include <string>
 #include <vector>
+
+#include "brave/components/reverse_engineering_browser/common/native_wasm_sample_budget.h"
 
 #include "base/memory/raw_ptr.h"
 #include "base/memory/raw_ref.h"
@@ -104,6 +107,9 @@ class NativeProbeHost final : public mojom::NativeProbeHost {
                  std::uint64_t expires_at_monotonic_ns,
                  bool capture_canvas_images);
   void Disable();
+  // Zeros this renderer's stream counters and asks the renderer to restart
+  // sample indexes. The queue and capture epoch stay.
+  void ResetWasmSampleBudgets();
 
  private:
   void Drain();
@@ -123,6 +129,10 @@ class NativeProbeHost final : public mojom::NativeProbeHost {
   std::uint64_t wasm_capture_epoch_ = 0;
   std::uint32_t wasm_capture_count_ = 0;
   std::uint32_t wasm_indirect_capture_count_ = 0;
+  std::uint64_t wasm_budget_epoch_ = 2;
+  std::array<NativeWasmBudgetKeySlot, kNativeWasmBudgetKeySlots> wasm_dispatch_function_keys_{};
+  std::array<NativeWasmBudgetKeySlot, kNativeWasmBudgetKeySlots> wasm_indirect_function_keys_{};
+  std::array<NativeWasmBudgetKeySlot, kNativeWasmBudgetKeySlots> wasm_indirect_site_keys_{};
   std::uint32_t guest_capture_count_ = 0;
   // One marker for host records naming another identity, whose sequence
   // slots are not this renderer's to fill. Every other refusal fills its own.

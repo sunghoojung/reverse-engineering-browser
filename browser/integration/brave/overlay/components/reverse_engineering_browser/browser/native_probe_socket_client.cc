@@ -37,6 +37,7 @@
 #include "brave/components/reverse_engineering_browser/browser/native_local_ipc_client.h"
 #include "brave/components/reverse_engineering_browser/browser/native_network_capture_sink.h"
 #include "brave/components/reverse_engineering_browser/browser/native_probe_session.h"
+#include "brave/components/reverse_engineering_browser/common/native_wasm_sample_budget.h"
 
 namespace reb {
 
@@ -182,6 +183,8 @@ bool NativeProbeSocketClient::StartFromCommandLine() {
 
   browser_task_runner_ = base::SequencedTaskRunner::GetCurrentDefault();
   session_id_ = session_id;
+  wasm_budget_reset_file_ = command_line.GetSwitchValueASCII("reb-wasm-budget-reset-file");
+  applied_wasm_budget_reset_ = 0;
   // Every drop records its category, but a gap can be built before that store
   // is visible; the session's lowest admitted category covers that window.
   last_dropped_category_.store(
@@ -286,6 +289,7 @@ void NativeProbeSocketClient::Run() {
         connection_status > 0 && ((connection.revents & (POLLHUP | POLLERR | POLLNVAL)) != 0 ||
                                   ((connection.revents & POLLIN) != 0 &&
                                    recv(socket_descriptor_, &control_byte, 1, MSG_PEEK) == 0));
+    PollWasmBudgetReset();
     if (peer_closed) {
       browser_task_runner_->PostTask(
           FROM_HERE,
@@ -330,6 +334,20 @@ void NativeProbeSocketClient::Run() {
   }
 }
 
+void NativeProbeSocketClient::PollWasmBudgetReset() {
+  if (wasm_budget_reset_file_.empty())
+    return;
+  const auto generation = ReadNativeWasmBudgetResetGeneration(wasm_budget_reset_file_);
+  if (!generation || *generation <= applied_wasm_budget_reset_)
+    return;
+  applied_wasm_budget_reset_ = *generation;
+  // The writer must not touch session hosts. The browser sequence applies a
+  // strictly newer generation within this poll, about 250ms after the file
+  // changes.
+  browser_task_runner_->PostTask(
+      FROM_HERE, base::BindOnce([] { NativeProbeSession::Get().ResetWasmSampleBudgets(); }));
+}
+
 void NativeProbeSocketClient::HandleDisconnect() {
   if (!connected_.exchange(false, std::memory_order_acq_rel)) {
     return;
@@ -366,6 +384,7 @@ NativeProbeEvent NativeProbeSocketClient::MakeTransportGap(std::uint64_t) const 
   return {};
 }
 void NativeProbeSocketClient::Run() {}
+void NativeProbeSocketClient::PollWasmBudgetReset() {}
 void NativeProbeSocketClient::HandleDisconnect() {}
 
 }  // namespace reb

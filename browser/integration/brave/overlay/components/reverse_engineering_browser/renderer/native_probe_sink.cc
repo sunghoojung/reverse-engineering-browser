@@ -1221,6 +1221,14 @@ void NativeProbeSink::SetEmitters(const NativeRendererProbeEmitter emitter,
   frame_id_provider_.store(active ? frame_id_provider : nullptr, std::memory_order_relaxed);
   emitter_.store(emitter, std::memory_order_relaxed);
   artifact_emitter_.store(artifact_emitter, std::memory_order_relaxed);
+  // A replacement configuration starts both Wasm sample indexes at 0. The
+  // pending policy is the one SetNativeWasmSampleBudgetPolicy last accepted.
+  native_wasm_budget_policy_ = native_wasm_budget_policy_pending_;
+  const auto wasm_budget_epoch = native_wasm_budget_epoch_.load(std::memory_order_relaxed);
+  if ((wasm_budget_epoch & 1U) == 0 &&
+      wasm_budget_epoch <= std::numeric_limits<std::uint64_t>::max() - 2) {
+    native_wasm_budget_epoch_.store(wasm_budget_epoch + 2, std::memory_order_relaxed);
+  }
   config_generation_.fetch_add(1, std::memory_order_release);
 }
 
@@ -2307,8 +2315,9 @@ bool NativeProbeSink::IsNativeWasmDispatchEnabled() const noexcept {
   // Called by V8 before handle allocation/frame walking. Do not invoke the
   // frame-id provider here: its Blink implementation re-enters V8.
   const auto generation = config_generation_.load(std::memory_order_acquire);
-  if (generation == 0 || (generation & 1U) != 0 ||
-      native_wasm_capped_generation_.load(std::memory_order_acquire) >= generation ||
+  const auto epoch = native_wasm_budget_epoch_.load(std::memory_order_acquire);
+  if (generation == 0 || (generation & 1U) != 0 || epoch < 2 || (epoch & 1U) != 0 ||
+      native_wasm_capped_epoch_.load(std::memory_order_acquire) >= epoch ||
       !native_wasm_emitter_.load(std::memory_order_acquire))
     return false;
   const auto categories = category_mask_.load(std::memory_order_relaxed);
@@ -2319,27 +2328,34 @@ bool NativeProbeSink::IsNativeWasmDispatchEnabled() const noexcept {
                       emitter_.load(std::memory_order_relaxed) != nullptr &&
                       MonotonicTimeNs() < expires_at_monotonic_ns_.load(std::memory_order_relaxed);
   std::atomic_thread_fence(std::memory_order_acquire);
-  return active && config_generation_.load(std::memory_order_acquire) == generation;
+  return active && config_generation_.load(std::memory_order_acquire) == generation &&
+         native_wasm_budget_epoch_.load(std::memory_order_acquire) == epoch;
 }
 bool NativeProbeSink::NoteNativeWasmDispatchOmission(const VmAdmission& admission,
-                                                     NativeWasmOmission reason) noexcept {
-  auto& slot = native_wasm_gap_generations_[static_cast<std::size_t>(reason)];
+                                                     NativeWasmOmission reason,
+                                                     const std::uint64_t budget_epoch) noexcept {
+  if (budget_epoch < 2 || (budget_epoch & 1U) != 0 ||
+      static_cast<std::size_t>(reason) >= native_wasm_gap_epochs_.size())
+    return false;
+  auto& slot = native_wasm_gap_epochs_[static_cast<std::size_t>(reason)];
   auto previous = slot.load(std::memory_order_acquire);
-  // Odd generation is an in-flight claim; never overwrite a newer configuration.
-  while (previous < admission.generation - 1) {
-    if (slot.compare_exchange_weak(previous, admission.generation - 1, std::memory_order_acq_rel)) {
-      constexpr std::array<std::string_view, 2> reasons{"native_wasm_dispatch_input_unavailable",
-                                                        "native_wasm_dispatch_budget_incomplete"};
+  // The odd value is an in-flight claim; a newer budget epoch is left alone.
+  while (previous < budget_epoch - 1) {
+    if (slot.compare_exchange_weak(previous, budget_epoch - 1, std::memory_order_acq_rel)) {
+      constexpr std::array<std::string_view, 5> reasons{
+          "native_wasm_dispatch_input_unavailable", "native_wasm_dispatch_budget_incomplete",
+          "native_wasm_dispatch_filtered", "native_wasm_dispatch_function_budget_incomplete",
+          "native_wasm_dispatch_site_budget_incomplete"};
       const bool retained = RecordRuntimeBufferEvent(NativeProbeType::kGap, admission.frame_id,
                                                      reasons[static_cast<std::size_t>(reason)],
                                                      admission.generation) != 0;
-      auto claimed = admission.generation - 1;
-      slot.compare_exchange_strong(claimed, retained ? admission.generation : previous,
+      auto claimed = budget_epoch - 1;
+      slot.compare_exchange_strong(claimed, retained ? budget_epoch : previous,
                                    std::memory_order_acq_rel);
       return retained;
     }
   }
-  return previous == admission.generation;
+  return previous == budget_epoch;
 }
 void NativeProbeSink::RecordNativeWasmDispatch(std::uint64_t execution_context_id,
                                                std::uint64_t frame_id,
@@ -2380,22 +2396,58 @@ void NativeProbeSink::RecordNativeWasmDispatch(std::uint64_t execution_context_i
   const NativeJsInvocationContext invocation = CurrentNativeJsInvocation();
   observation.js_invocation_state = invocation.state;
   observation.js_invocation_id = invocation.invocation_id;
+  const auto epoch = native_wasm_budget_epoch_.load(std::memory_order_acquire);
+  if (epoch < 2 || (epoch & 1U) != 0 ||
+      config_generation_.load(std::memory_order_acquire) != admission.generation)
+    return;
   if (!IsValidNativeWasmDispatchInput(observation)) {
-    NoteNativeWasmDispatchOmission(admission, NativeWasmOmission::kInput);
+    NoteNativeWasmDispatchOmission(admission, NativeWasmOmission::kInput, epoch);
     return;
   }
+  const auto policy = native_wasm_budget_policy_;
+  std::atomic_thread_fence(std::memory_order_acquire);
+  if (native_wasm_budget_epoch_.load(std::memory_order_acquire) != epoch ||
+      config_generation_.load(std::memory_order_acquire) != admission.generation)
+    return;
+  std::array<std::uint8_t, 32> digest{};
+  const std::uint8_t* digest_bytes = nullptr;
+  if (policy.module_allow_count != 0) {
+    digest = NativeGuestDigest(module_bytes);
+    digest_bytes = digest.data();
+  }
+  const auto keys = AdmitNativeWasmBudgetKeys(policy, native_wasm_function_keys_, {}, epoch,
+                                              function_index, 0, digest_bytes);
+  if (keys.status != NativeWasmBudgetAdmission::Status::kAdmit) {
+    const auto reason = keys.status == NativeWasmBudgetAdmission::Status::kFunctionBudget
+                            ? NativeWasmOmission::kFunctionBudget
+                            : NativeWasmOmission::kFiltered;
+    NoteNativeWasmDispatchOmission(admission, reason, epoch);
+    return;
+  }
+  const auto release_keys = [&] {
+    ReleaseNativeWasmBudgetAdmission(keys, native_wasm_function_keys_, {}, epoch);
+  };
   for (std::size_t i = 0; i < native_wasm_slots_.size(); ++i) {
     auto& slot = native_wasm_slots_[i];
     auto previous = slot.load(std::memory_order_acquire);
-    while (previous < admission.generation) {
-      if (slot.compare_exchange_weak(previous, admission.generation, std::memory_order_acq_rel)) {
+    while (previous < epoch) {
+      if (slot.compare_exchange_weak(previous, epoch, std::memory_order_acq_rel)) {
+        if (native_wasm_budget_epoch_.load(std::memory_order_acquire) != epoch ||
+            config_generation_.load(std::memory_order_acquire) != admission.generation) {
+          auto claimed = epoch;
+          slot.compare_exchange_strong(claimed, previous, std::memory_order_acq_rel);
+          release_keys();
+          return;
+        }
         observation.sample_index = static_cast<std::uint32_t>(i);
         observation.header.sequence_number = next_sequence_.fetch_add(1, std::memory_order_relaxed);
         const auto emitter = native_wasm_emitter_.load(std::memory_order_acquire);
-        if (config_generation_.load(std::memory_order_acquire) != admission.generation ||
+        if (native_wasm_budget_epoch_.load(std::memory_order_acquire) != epoch ||
+            config_generation_.load(std::memory_order_acquire) != admission.generation ||
             !emitter || !emitter(observation, admission.generation)) {
-          auto claimed = admission.generation;
+          auto claimed = epoch;
           slot.compare_exchange_strong(claimed, previous, std::memory_order_acq_rel);
+          release_keys();
           FillSequenceGap(observation.header, "native_wasm_dispatch_transport_unavailable",
                           admission.generation);
         }
@@ -2403,13 +2455,31 @@ void NativeProbeSink::RecordNativeWasmDispatch(std::uint64_t execution_context_i
       }
     }
   }
-  if (NoteNativeWasmDispatchOmission(admission, NativeWasmOmission::kBudget)) {
-    auto previous = native_wasm_capped_generation_.load(std::memory_order_acquire);
-    while (previous < admission.generation &&
-           !native_wasm_capped_generation_.compare_exchange_weak(previous, admission.generation,
-                                                                 std::memory_order_acq_rel)) {
+  release_keys();
+  if (NoteNativeWasmDispatchOmission(admission, NativeWasmOmission::kBudget, epoch) &&
+      native_wasm_budget_epoch_.load(std::memory_order_acquire) == epoch) {
+    auto previous = native_wasm_capped_epoch_.load(std::memory_order_acquire);
+    while (previous < epoch && !native_wasm_capped_epoch_.compare_exchange_weak(
+                                   previous, epoch, std::memory_order_acq_rel)) {
     }
   }
+}
+
+void NativeProbeSink::SetNativeWasmSampleBudgetPolicy(
+    const NativeWasmSampleBudgetPolicy& policy) noexcept {
+  if (!IsValidNativeWasmSampleBudgetPolicy(policy))
+    return;
+  native_wasm_budget_policy_pending_ = policy;
+}
+
+void NativeProbeSink::ResetNativeWasmSampleBudgets() noexcept {
+  const auto epoch = native_wasm_budget_epoch_.load(std::memory_order_acquire);
+  if (epoch < 2 || (epoch & 1U) != 0 || epoch > std::numeric_limits<std::uint64_t>::max() - 2)
+    return;
+  // Odd stops admission. The following even value makes every previous slot
+  // reusable, so the next record of each stream is sample index 0.
+  native_wasm_budget_epoch_.store(epoch + 1, std::memory_order_release);
+  native_wasm_budget_epoch_.store(epoch + 2, std::memory_order_release);
 }
 
 void NativeProbeSink::SetNativeWasmIndirectEmitter(NativeWasmIndirectEmitter emitter) noexcept {
@@ -2419,8 +2489,9 @@ bool NativeProbeSink::IsNativeWasmIndirectEnabled() const noexcept {
   // Called by V8 before handle allocation/frame walking, like the br_table
   // predicate. Do not invoke the frame-id provider here.
   const auto generation = config_generation_.load(std::memory_order_acquire);
-  if (generation == 0 || (generation & 1U) != 0 ||
-      native_wasm_indirect_capped_generation_.load(std::memory_order_acquire) >= generation ||
+  const auto epoch = native_wasm_budget_epoch_.load(std::memory_order_acquire);
+  if (generation == 0 || (generation & 1U) != 0 || epoch < 2 || (epoch & 1U) != 0 ||
+      native_wasm_indirect_capped_epoch_.load(std::memory_order_acquire) >= epoch ||
       !native_wasm_indirect_emitter_.load(std::memory_order_acquire))
     return false;
   const auto categories = category_mask_.load(std::memory_order_relaxed);
@@ -2431,27 +2502,33 @@ bool NativeProbeSink::IsNativeWasmIndirectEnabled() const noexcept {
                       emitter_.load(std::memory_order_relaxed) != nullptr &&
                       MonotonicTimeNs() < expires_at_monotonic_ns_.load(std::memory_order_relaxed);
   std::atomic_thread_fence(std::memory_order_acquire);
-  return active && config_generation_.load(std::memory_order_acquire) == generation;
+  return active && config_generation_.load(std::memory_order_acquire) == generation &&
+         native_wasm_budget_epoch_.load(std::memory_order_acquire) == epoch;
 }
 bool NativeProbeSink::NoteNativeWasmIndirectOmission(const VmAdmission& admission,
-                                                     NativeWasmOmission reason) noexcept {
-  auto& slot = native_wasm_indirect_gap_generations_[static_cast<std::size_t>(reason)];
+                                                     NativeWasmOmission reason,
+                                                     const std::uint64_t budget_epoch) noexcept {
+  if (budget_epoch < 2 || (budget_epoch & 1U) != 0 ||
+      static_cast<std::size_t>(reason) >= native_wasm_indirect_gap_epochs_.size())
+    return false;
+  auto& slot = native_wasm_indirect_gap_epochs_[static_cast<std::size_t>(reason)];
   auto previous = slot.load(std::memory_order_acquire);
-  // Odd generation is an in-flight claim; never overwrite a newer configuration.
-  while (previous < admission.generation - 1) {
-    if (slot.compare_exchange_weak(previous, admission.generation - 1, std::memory_order_acq_rel)) {
-      constexpr std::array<std::string_view, 2> reasons{"native_wasm_indirect_input_unavailable",
-                                                        "native_wasm_indirect_budget_incomplete"};
+  while (previous < budget_epoch - 1) {
+    if (slot.compare_exchange_weak(previous, budget_epoch - 1, std::memory_order_acq_rel)) {
+      constexpr std::array<std::string_view, 5> reasons{
+          "native_wasm_indirect_input_unavailable", "native_wasm_indirect_budget_incomplete",
+          "native_wasm_indirect_filtered", "native_wasm_indirect_function_budget_incomplete",
+          "native_wasm_indirect_site_budget_incomplete"};
       const bool retained = RecordRuntimeBufferEvent(NativeProbeType::kGap, admission.frame_id,
                                                      reasons[static_cast<std::size_t>(reason)],
                                                      admission.generation) != 0;
-      auto claimed = admission.generation - 1;
-      slot.compare_exchange_strong(claimed, retained ? admission.generation : previous,
+      auto claimed = budget_epoch - 1;
+      slot.compare_exchange_strong(claimed, retained ? budget_epoch : previous,
                                    std::memory_order_acq_rel);
       return retained;
     }
   }
-  return previous == admission.generation;
+  return previous == budget_epoch;
 }
 void NativeProbeSink::RecordNativeWasmIndirect(NativeWasmIndirectObservation observation) noexcept {
   if (!IsNativeWasmIndirectEnabled())
@@ -2475,22 +2552,62 @@ void NativeProbeSink::RecordNativeWasmIndirect(NativeWasmIndirectObservation obs
   const NativeJsInvocationContext invocation = CurrentNativeJsInvocation();
   observation.js_invocation_state = invocation.state;
   observation.js_invocation_id = invocation.invocation_id;
+  const auto epoch = native_wasm_budget_epoch_.load(std::memory_order_acquire);
+  if (epoch < 2 || (epoch & 1U) != 0 ||
+      config_generation_.load(std::memory_order_acquire) != admission.generation)
+    return;
   if (!IsValidNativeWasmIndirectInput(observation)) {
-    NoteNativeWasmIndirectOmission(admission, NativeWasmOmission::kInput);
+    NoteNativeWasmIndirectOmission(admission, NativeWasmOmission::kInput, epoch);
     return;
   }
+  const auto policy = native_wasm_budget_policy_;
+  std::atomic_thread_fence(std::memory_order_acquire);
+  if (native_wasm_budget_epoch_.load(std::memory_order_acquire) != epoch ||
+      config_generation_.load(std::memory_order_acquire) != admission.generation)
+    return;
+  std::array<std::uint8_t, 32> digest{};
+  const std::uint8_t* digest_bytes = nullptr;
+  if (policy.module_allow_count != 0) {
+    digest = NativeGuestDigest(observation.module_bytes);
+    digest_bytes = digest.data();
+  }
+  const auto keys = AdmitNativeWasmBudgetKeys(
+      policy, native_wasm_indirect_function_keys_, native_wasm_indirect_site_keys_, epoch,
+      observation.function_index, observation.module_byte_offset, digest_bytes);
+  if (keys.status != NativeWasmBudgetAdmission::Status::kAdmit) {
+    const auto reason = keys.status == NativeWasmBudgetAdmission::Status::kFunctionBudget
+                            ? NativeWasmOmission::kFunctionBudget
+                        : keys.status == NativeWasmBudgetAdmission::Status::kSiteBudget
+                            ? NativeWasmOmission::kSiteBudget
+                            : NativeWasmOmission::kFiltered;
+    NoteNativeWasmIndirectOmission(admission, reason, epoch);
+    return;
+  }
+  const auto release_keys = [&] {
+    ReleaseNativeWasmBudgetAdmission(keys, native_wasm_indirect_function_keys_,
+                                     native_wasm_indirect_site_keys_, epoch);
+  };
   for (std::size_t i = 0; i < native_wasm_indirect_slots_.size(); ++i) {
     auto& slot = native_wasm_indirect_slots_[i];
     auto previous = slot.load(std::memory_order_acquire);
-    while (previous < admission.generation) {
-      if (slot.compare_exchange_weak(previous, admission.generation, std::memory_order_acq_rel)) {
+    while (previous < epoch) {
+      if (slot.compare_exchange_weak(previous, epoch, std::memory_order_acq_rel)) {
+        if (native_wasm_budget_epoch_.load(std::memory_order_acquire) != epoch ||
+            config_generation_.load(std::memory_order_acquire) != admission.generation) {
+          auto claimed = epoch;
+          slot.compare_exchange_strong(claimed, previous, std::memory_order_acq_rel);
+          release_keys();
+          return;
+        }
         observation.sample_index = static_cast<std::uint32_t>(i);
         observation.header.sequence_number = next_sequence_.fetch_add(1, std::memory_order_relaxed);
         const auto emitter = native_wasm_indirect_emitter_.load(std::memory_order_acquire);
-        if (config_generation_.load(std::memory_order_acquire) != admission.generation ||
+        if (native_wasm_budget_epoch_.load(std::memory_order_acquire) != epoch ||
+            config_generation_.load(std::memory_order_acquire) != admission.generation ||
             !emitter || !emitter(observation, admission.generation)) {
-          auto claimed = admission.generation;
+          auto claimed = epoch;
           slot.compare_exchange_strong(claimed, previous, std::memory_order_acq_rel);
+          release_keys();
           FillSequenceGap(observation.header, "native_wasm_indirect_transport_unavailable",
                           admission.generation);
         }
@@ -2498,11 +2615,12 @@ void NativeProbeSink::RecordNativeWasmIndirect(NativeWasmIndirectObservation obs
       }
     }
   }
-  if (NoteNativeWasmIndirectOmission(admission, NativeWasmOmission::kBudget)) {
-    auto previous = native_wasm_indirect_capped_generation_.load(std::memory_order_acquire);
-    while (previous < admission.generation &&
-           !native_wasm_indirect_capped_generation_.compare_exchange_weak(
-               previous, admission.generation, std::memory_order_acq_rel)) {
+  release_keys();
+  if (NoteNativeWasmIndirectOmission(admission, NativeWasmOmission::kBudget, epoch) &&
+      native_wasm_budget_epoch_.load(std::memory_order_acquire) == epoch) {
+    auto previous = native_wasm_indirect_capped_epoch_.load(std::memory_order_acquire);
+    while (previous < epoch && !native_wasm_indirect_capped_epoch_.compare_exchange_weak(
+                                   previous, epoch, std::memory_order_acq_rel)) {
     }
   }
 }

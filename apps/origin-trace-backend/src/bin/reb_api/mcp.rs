@@ -1018,7 +1018,7 @@ const INSTRUCTIONS: &str = "Origin Trace tools are OpenAPI operationId values an
 5. Invocation sites: get_artifacts kind javascript, resolve_js_invocation_site, then js_invocation_site_action add. Saved sites arm only in a later session, never the open page. \
 The default list is the read-only projection. Binary responses are not inlined. A 304 is a status object, not a body. JSON larger than the inline limit returns a structural summary and omits source, bytecode, and long strings. Recipes are in docs/development/agent-cookbook.md.";
 
-const SESSION_INSTRUCTIONS: &str = "6. Session: start_live_session starts a visibly labeled live capture for an authorized target and moves this connection to it; until then other tools refuse without a request. Every option is off unless named: document_start permits step 4; request_content and js_invocation_digests are sensitive and need confirm_sensitive_capture; js_invocation_sites (a site file) or js_invocation_saved_sites (the agent sessions' own saved set from step 5) arm invocation sites. session_action open_url opens a page; capture_observed false means nothing was recorded. End with native_console_action stop when connected, then session_action end with confirm true.";
+const SESSION_INSTRUCTIONS: &str = "6. Session: start_live_session starts a visibly labeled live capture for an authorized target and moves this connection to it; until then other tools refuse without a request. Every option is off unless named: document_start permits step 4; request_content and js_invocation_digests are sensitive and need confirm_sensitive_capture; js_invocation_sites (a site file) or js_invocation_saved_sites (the agent sessions' own saved set from step 5) arm invocation sites. wasm_samples_per_function, wasm_samples_per_indirect_site, wasm_function_allow, wasm_function_deny and wasm_module_allowlist restrict the 16-record Wasm budgets and need wasm_dispatch or wasm_call_indirect. session_action open_url opens a page; capture_observed false means nothing was recorded. session_action reset_wasm_sample_budgets restarts both Wasm sample indexes without a new session. End with native_console_action stop when connected, then session_action end with confirm true.";
 
 fn instructions(session_start: bool) -> String {
     if !session_start {
@@ -1578,6 +1578,14 @@ mod tests {
             "js_invocation_saved_sites",
             "open_url",
             "capture_observed",
+            "wasm_samples_per_function",
+            "wasm_samples_per_indirect_site",
+            "wasm_function_allow",
+            "wasm_function_deny",
+            "wasm_module_allowlist",
+            "wasm_dispatch",
+            "wasm_call_indirect",
+            "reset_wasm_sample_budgets",
         ];
         let text = super::instructions(true);
         let mut tools = std::collections::BTreeSet::new();

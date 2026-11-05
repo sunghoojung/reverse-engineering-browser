@@ -811,6 +811,144 @@ void NativeWasmIndirect(reb::ArtifactReceiver& receiver) {
                "payload, document retirement, pre-expiry flush and separate budget\n";
 }
 
+void NativeWasmSampleBudget(reb::ArtifactReceiver& receiver) {
+  record_corpus = false;
+  Configure();
+  auto& sink = NativeArtifactCaptureSink::Get();
+  auto& transfers = NativeArtifactSocketClient::Get().transfers;
+  const std::vector<std::uint8_t> allowed{0,    97, 115,  109, 1, 0,    0, 0,
+                                          0x0e, 2,  0x11, 0,   0, 0x11, 0, 0};
+  auto blocked = allowed;
+  blocked.push_back(0x7f);
+  reb::NativeWasmSampleBudgetPolicy policy;
+  policy.samples_per_function = 2;
+  policy.module_allow_count = 1;
+  policy.module_allow[0] = reb::NativeGuestDigest(allowed);
+  sink.SetWasmSampleBudgetPolicy(policy);
+  reb::NativeWasmDispatchObservation dispatch;
+  dispatch.header.session_id = kSession;
+  dispatch.header.frame_id = kFrame;
+  dispatch.header.monotonic_time_ns = 99;
+  dispatch.header.process_id = 123;
+  dispatch.header.thread_id = 7;
+  dispatch.execution_context_id = 81;
+  dispatch.document_token_high = 72;
+  dispatch.document_token_low = 73;
+  dispatch.module_byte_offset = 8;
+  dispatch.table_count = 2;
+  dispatch.selector = 1;
+  dispatch.source_url = "fixture://wasm-budget";
+  reb::NativeWasmIndirectObservation indirect;
+  indirect.header = dispatch.header;
+  indirect.execution_context_id = dispatch.execution_context_id;
+  indirect.document_token_high = dispatch.document_token_high;
+  indirect.document_token_low = dispatch.document_token_low;
+  indirect.module_byte_offset = 10;
+  indirect.resolution = reb::NativeWasmIndirectResolution::kOutOfBounds;
+  indirect.source_url = dispatch.source_url;
+  const auto observations = [](NativeProbeType type) {
+    return std::count_if(events.begin(), events.end(),
+                         [type](const auto& event) { return event.header.type == type; });
+  };
+  const auto dispatch_count = [&] {
+    return observations(NativeProbeType::kWasmDispatchObservation);
+  };
+  const auto indirect_count = [&] {
+    return observations(NativeProbeType::kWasmIndirectObservation);
+  };
+  const auto before_dispatch = dispatch_count();
+  const auto before_indirect = indirect_count();
+  dispatch.header.sequence_number = 6000;
+  sink.CaptureWasmDispatch(dispatch, mojo_base::BigBuffer(blocked), [] { return true; });
+  Check(transfers.empty() && Payload(events.back()) == "native_wasm_dispatch_browser_filtered",
+        "A module outside the allowlist does not transfer or take a br_table slot");
+  indirect.header.sequence_number = 6001;
+  sink.CaptureWasmIndirect(indirect, mojo_base::BigBuffer(blocked), [] { return true; });
+  Check(transfers.empty() && Payload(events.back()) == "native_wasm_indirect_browser_filtered",
+        "A module outside the allowlist does not take a call_indirect slot");
+  dispatch.header.sequence_number = 6002;
+  sink.CaptureWasmDispatch(dispatch, mojo_base::BigBuffer(allowed), [] { return true; });
+  Check(transfers.size() == 1, "The allowed module transfers once");
+  Receive(receiver, transfers.begin()->first);
+  Check(dispatch_count() == before_dispatch + 1, "First sample of a function is retained");
+  dispatch.header.sequence_number = 6003;
+  sink.CaptureWasmDispatch(dispatch, mojo_base::BigBuffer(allowed), [] { return true; });
+  Check(transfers.empty() && dispatch_count() == before_dispatch + 2,
+        "Second sample of that function is retained");
+  dispatch.header.sequence_number = 6004;
+  sink.CaptureWasmDispatch(dispatch, mojo_base::BigBuffer(allowed), [] { return true; });
+  Check(dispatch_count() == before_dispatch + 2 &&
+            Payload(events.back()) == "native_wasm_dispatch_browser_function_budget_incomplete",
+        "A later sample of that function is a per-function gap");
+  dispatch.function_index = 1;
+  dispatch.header.sequence_number = 6005;
+  sink.CaptureWasmDispatch(dispatch, mojo_base::BigBuffer(allowed), [] { return true; });
+  Check(transfers.empty() && dispatch_count() == before_dispatch + 3,
+        "A different function continues to be recorded");
+  indirect.header.sequence_number = 6006;
+  sink.CaptureWasmIndirect(indirect, mojo_base::BigBuffer(allowed), [] { return true; });
+  indirect.header.sequence_number = 6007;
+  sink.CaptureWasmIndirect(indirect, mojo_base::BigBuffer(allowed), [] { return true; });
+  Check(indirect_count() == before_indirect + 2,
+        "The br_table per-function cap does not consume the call_indirect budget");
+  indirect.header.sequence_number = 6008;
+  sink.CaptureWasmIndirect(indirect, mojo_base::BigBuffer(allowed), [] { return true; });
+  Check(indirect_count() == before_indirect + 2 &&
+            Payload(events.back()) == "native_wasm_indirect_browser_function_budget_incomplete",
+        "call_indirect keeps its own per-function cap");
+  dispatch.function_index = 2;
+  dispatch.header.sequence_number = 6009;
+  sink.CaptureWasmDispatch(dispatch, mojo_base::BigBuffer(allowed), [] { return true; });
+  Check(dispatch_count() == before_dispatch + 4,
+        "A full call_indirect per-function cap leaves br_table recording");
+
+  Configure();
+  policy.samples_per_function = 0;
+  sink.SetWasmSampleBudgetPolicy(policy);
+  const auto reset_dispatch = dispatch_count();
+  const auto reset_indirect = indirect_count();
+  dispatch.function_index = 0;
+  dispatch.header.sequence_number = 6100;
+  sink.CaptureWasmDispatch(dispatch, mojo_base::BigBuffer(blocked), [] { return true; });
+  indirect.header.sequence_number = 6101;
+  sink.CaptureWasmIndirect(indirect, mojo_base::BigBuffer(blocked), [] { return true; });
+  Check(Payload(events.back()) == "native_wasm_indirect_browser_filtered",
+        "The fresh configuration still excludes the other module");
+  for (unsigned index = 0; index < 16; ++index) {
+    dispatch.header.sequence_number = 6200 + index;
+    sink.CaptureWasmDispatch(dispatch, mojo_base::BigBuffer(allowed), [] { return true; });
+    if (index == 0)
+      Receive(receiver, transfers.begin()->first);
+  }
+  Check(dispatch_count() == reset_dispatch + 16 && transfers.empty(),
+        "A filtered module did not consume one of the 16 br_table slots");
+  dispatch.header.sequence_number = 6216;
+  sink.CaptureWasmDispatch(dispatch, mojo_base::BigBuffer(allowed), [] { return true; });
+  Check(Payload(events.back()) == "native_wasm_dispatch_browser_budget_incomplete",
+        "The seventeenth br_table sample is still the global browser budget");
+  for (unsigned index = 0; index < 16; ++index) {
+    indirect.header.sequence_number = 6300 + index;
+    sink.CaptureWasmIndirect(indirect, mojo_base::BigBuffer(allowed), [] { return true; });
+  }
+  Check(indirect_count() == reset_indirect + 16 && transfers.empty(),
+        "A filtered module did not consume one of the 16 call_indirect slots");
+  indirect.header.sequence_number = 6316;
+  sink.CaptureWasmIndirect(indirect, mojo_base::BigBuffer(allowed), [] { return true; });
+  Check(Payload(events.back()) == "native_wasm_indirect_browser_budget_incomplete",
+        "Exhausting br_table did not exhaust call_indirect");
+  sink.ResetWasmSampleBudgets();
+  dispatch.header.sequence_number = 6400;
+  sink.CaptureWasmDispatch(dispatch, mojo_base::BigBuffer(allowed), [] { return true; });
+  indirect.header.sequence_number = 6401;
+  sink.CaptureWasmIndirect(indirect, mojo_base::BigBuffer(allowed), [] { return true; });
+  Check(transfers.empty() && dispatch_count() == reset_dispatch + 17 &&
+            indirect_count() == reset_indirect + 17 &&
+            events.back().header.type == NativeProbeType::kWasmIndirectObservation,
+        "Reset accepts both streams again without a new configuration or transfer");
+  std::cout << "PASS native Wasm sample budget controls; per function, module allowlist, "
+               "independent streams and reset\n";
+}
+
 #include "guest_dependencies_test.h"
 #include "probe_host_test.h"
 }  // namespace
@@ -841,6 +979,7 @@ int main(int argc, char** argv) {
     Admission(output);
     NativeWasmDispatch(receiver);
     NativeWasmIndirect(receiver);
+    NativeWasmSampleBudget(receiver);
     NativeGuestDependencies(receiver);
     NativeProbeHostGuestBoundary(receiver);
     NativeProbeHostJsDispatchForwarding();

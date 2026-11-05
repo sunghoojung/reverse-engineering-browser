@@ -24,6 +24,12 @@ interface NativeProbeClient {
             array<uint8> js_invocation_sites,
             // The session's sensitive opt-in for settled-value digests.
             bool js_invocation_digests);
+  // Fixed 524-byte sample-budget policy, or empty for the unrestricted
+  // historical budgets. The next Configure publishes it. It does not arm
+  // compilation, so a later session may replace it.
+  SetWasmSampleBudget(array<uint8> policy);
+  // Restarts both sample indexes without Disable or a new configuration.
+  ResetWasmSampleBudgets();
   Disable();
   // Browser verdict on the module bytes carried by the guest capture whose
   // dispatch sequence number is module_token. The renderer keeps sending an

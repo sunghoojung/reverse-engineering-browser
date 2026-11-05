@@ -17,6 +17,8 @@ struct RecordingProbeClient final : reb::mojom::NativeProbeClient {
     invocation_sites = js_invocation_sites;
     invocation_digests = js_invocation_digests;
   }
+  void SetWasmSampleBudget(const std::vector<std::uint8_t>&) override {}
+  void ResetWasmSampleBudgets() override {}
   void Disable() override {}
   void NativeGuestModuleStatus(std::uint64_t epoch, std::uint64_t token, bool accepted) override {
     verdicts.push_back({epoch, token, accepted});

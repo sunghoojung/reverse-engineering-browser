@@ -188,7 +188,23 @@ void NativeProbeHost::CaptureWasmDispatch(const std::uint64_t capture_epoch,
     refuse("native_wasm_dispatch_limit_or_invalid");
     return;
   }
+  std::array<std::uint8_t, 32> module_digest{};
+  const std::uint8_t* module_digest_bytes = nullptr;
+  const auto& policy = session_->wasm_sample_budget();
+  if (policy.module_allow_count != 0) {
+    module_digest =
+        NativeGuestDigest(std::span<const std::uint8_t>(content.data(), content.size()));
+    module_digest_bytes = module_digest.data();
+  }
+  const auto budget =
+      AdmitNativeWasmBudgetKeys(policy, wasm_dispatch_function_keys_, {}, wasm_budget_epoch_,
+                                function_index, 0, module_digest_bytes);
+  if (const char* reason = NativeWasmBrowserBudgetReason(budget.status, false)) {
+    refuse(reason);
+    return;
+  }
   if (wasm_capture_count_ >= 16) {
+    ReleaseNativeWasmBudgetAdmission(budget, wasm_dispatch_function_keys_, {}, wasm_budget_epoch_);
     refuse("native_wasm_dispatch_browser_budget_incomplete");
     return;
   }
@@ -278,7 +294,24 @@ void NativeProbeHost::CaptureWasmIndirect(const std::uint64_t capture_epoch,
     refuse("native_wasm_indirect_limit_or_invalid");
     return;
   }
+  std::array<std::uint8_t, 32> module_digest{};
+  const std::uint8_t* module_digest_bytes = nullptr;
+  const auto& policy = session_->wasm_sample_budget();
+  if (policy.module_allow_count != 0 && content.size() <= 16U * 1024U * 1024U) {
+    module_digest =
+        NativeGuestDigest(std::span<const std::uint8_t>(content.data(), content.size()));
+    module_digest_bytes = module_digest.data();
+  }
+  const auto budget = AdmitNativeWasmBudgetKeys(
+      policy, wasm_indirect_function_keys_, wasm_indirect_site_keys_, wasm_budget_epoch_,
+      function_index, module_byte_offset, module_digest_bytes);
+  if (const char* reason = NativeWasmBrowserBudgetReason(budget.status, true)) {
+    refuse(reason);
+    return;
+  }
   if (wasm_indirect_capture_count_ >= kNativeWasmIndirectSampleBudget) {
+    ReleaseNativeWasmBudgetAdmission(budget, wasm_indirect_function_keys_, wasm_indirect_site_keys_,
+                                     wasm_budget_epoch_);
     refuse("native_wasm_indirect_browser_budget_incomplete");
     return;
   }
@@ -573,6 +606,8 @@ void NativeProbeHost::Configure(const std::uint64_t session_id,
     return;
   }
   wasm_epoch_lifetime_ = std::make_shared<const std::uint64_t>(wasm_capture_epoch_);
+  const auto encoded = EncodeNativeWasmSampleBudgetPolicy(session_->wasm_sample_budget());
+  client_->SetWasmSampleBudget(std::vector<std::uint8_t>(encoded.begin(), encoded.end()));
   client_->Configure(session_id, category_mask, expires_at_monotonic_ns, capture_canvas_images,
                      std::move(renderer_region), wasm_capture_epoch_,
                      session_->guest_adapter_json(), session_->js_dispatch_sites(),
@@ -588,6 +623,9 @@ void NativeProbeHost::Disable() {
     ++wasm_capture_epoch_;
   wasm_capture_count_ = 0;
   wasm_indirect_capture_count_ = 0;
+  if ((wasm_budget_epoch_ & 1U) == 0 &&
+      wasm_budget_epoch_ <= std::numeric_limits<std::uint64_t>::max() - 2)
+    wasm_budget_epoch_ += 2;
   guest_capture_count_ = 0;
   guest_host_malformed_gap_emitted_ = false;
   if (client_.is_bound()) {
@@ -597,6 +635,16 @@ void NativeProbeHost::Disable() {
   reported_dropped_events_ = 0;
   queue_mapping_ = base::WritableSharedMemoryMapping();
   queue_region_ = base::UnsafeSharedMemoryRegion();
+}
+
+void NativeProbeHost::ResetWasmSampleBudgets() {
+  wasm_capture_count_ = 0;
+  wasm_indirect_capture_count_ = 0;
+  if ((wasm_budget_epoch_ & 1U) == 0 &&
+      wasm_budget_epoch_ <= std::numeric_limits<std::uint64_t>::max() - 2)
+    wasm_budget_epoch_ += 2;
+  if (client_.is_bound())
+    client_->ResetWasmSampleBudgets();
 }
 
 void NativeProbeHost::Drain() {

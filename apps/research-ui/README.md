@@ -710,7 +710,10 @@ categories in Fingerprinting. The configured sampling budgets
 `native_js_dispatch_budget_incomplete`, `native_js_dispatch_site_budget_incomplete`,
 `native_guest_sample_limit` and `native_guest_browser_sample_budget`) read as
 "Sampling budget reached": retained observations are exact and later ones were not
-sampled. Every other reason, including transport, input, document, module, expiry,
+sampled. That includes the per-function and per-call-site Wasm budgets. Filter
+reasons such as `native_wasm_dispatch_filtered` are exclusions, not capacity
+losses; this build still groups them with lost evidence, and the reason string
+is the authority. Every other reason, including transport, input, document, module, expiry,
 compiled-before-arming, capacity and parent-link reasons and any reason this
 build does not know, reads as reported lost evidence with its raw reason as text.
 The Swift stored-evidence reader uses the same newest-general and

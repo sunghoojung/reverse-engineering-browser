@@ -260,6 +260,15 @@ assert.equal(api.namedGapsIn(api.shownNamedGaps(), api.fingerprintSignalCategori
 const vmNotice = api.namedGapNotice(api.namedGapsIn(api.shownNamedGaps(), api.vmGapCategories), 'the stored capture');
 assert.equal(vmNotice, 'Sampling budget reached in the stored capture for Wasm br_table dispatch (native_wasm_dispatch_budget_incomplete); ' +
   'Wasm call_indirect dispatch (native_wasm_indirect_budget_incomplete). Retained observations are exact; later ones were not sampled.');
+const controlledBudgets = [
+  budgetGap(3, 'native_wasm_dispatch_function_budget_incomplete'),
+  budgetGap(4, 'native_wasm_indirect_site_budget_incomplete'),
+  budgetGap(5, 'native_wasm_dispatch_filtered')
+];
+assert.equal(api.namedGapNotice(api.namedGapsFromEvents(controlledBudgets), 'the stored capture'),
+  'Capture reported lost vm evidence in the stored capture: native_wasm_dispatch_filtered. ' +
+  'Sampling budget reached in the stored capture for Wasm br_table per function (native_wasm_dispatch_function_budget_incomplete); ' +
+  'Wasm call_indirect per call site (native_wasm_indirect_site_budget_incomplete). Retained observations are exact; later ones were not sampled.');
 console.log('PASS named vm sampling budgets are scoped capture limits, not queue drops or Traffic/Fingerprinting loss');
 
 // Numeric gap payloads remain queue drops beside named markers in the same total.

@@ -35,7 +35,33 @@ observation only after accepted ACK. Stale navigation/configuration callbacks
 are rejected. Observations of the same module in the same document share one
 module artifact; each is emitted once that artifact is accepted (or at once if
 it already was). Capture is capped at 16 observations per configuration and
-16 MiB per module. A lost observation becomes a `gap` in its own renderer
+16 MiB per module. Raising that global cap does not keep a hot function from
+filling it. A session can instead restrict admission before a sample index is
+taken: a module-digest allowlist, a function-index allowlist and denylist
+(deny wins), and a maximum number of retained samples per function. Empty
+lists and a zero maximum keep the historical behavior. A module whose digest
+is not allowed, and a function that is denied or past its own maximum, does
+not advance the sample index. The same controls apply to `call_indirect`,
+which also has a maximum per caller function and module byte offset. The two
+streams keep independent counters. `session_action`
+`reset_wasm_sample_budgets` restarts both sample indexes at 0 in the same
+browser session; it does not change the policy, the session id, or the
+capture configuration. The browser notices the reset file on its writer wake,
+about 250ms later. A rebuilt Brave is required before a live session honors
+the policy or the reset. `sample_index` remains the configuration slot, 0
+through 15, not a per-function index and not an interpreter guest PC.
+
+A filtered record is an exclusion, not a capacity loss. The renderer coalesces
+it once per budget epoch into `native_wasm_dispatch_filtered`. A new
+configuration and `reset_wasm_sample_budgets` each start an epoch. A per-function refusal
+is `native_wasm_dispatch_function_budget_incomplete`. The browser names the
+same cases `native_wasm_dispatch_browser_filtered` and
+`native_wasm_dispatch_browser_function_budget_incomplete` on each refused
+record. The global 16 still coalesces into
+`native_wasm_dispatch_budget_incomplete` and then disables that stream only.
+These gaps do not carry the dropped function, offset, or selector; that
+identity remains the open omission in issue 409. A lost observation becomes a
+`gap` in its own renderer
 sequence slot. Queue, transport and budget losses are explicit incompleteness,
 never invented samples. Every observation the browser refuses, whether
 malformed, over the host or browser budget, without its owning document or
@@ -155,8 +181,16 @@ Blink, the renderer sink, the browser host and the artifact sink apply the same
 document, session, generation, category and expiry rules as `br_table`
 observations, through the same bounded transport. A separate budget allows 16
 records per configuration in the renderer and in the browser, so one stream
-never starves the other. The renderer coalesces input and budget losses into
-one gap per configuration: `native_wasm_indirect_input_unavailable` or
+never starves the other. The sample-budget policy in the `br_table` section
+applies here independently, including the per-call-site maximum. A filtered
+record is `native_wasm_indirect_filtered` in the renderer and
+`native_wasm_indirect_browser_filtered` in the browser. A per-function refusal
+is `native_wasm_indirect_function_budget_incomplete` or
+`native_wasm_indirect_browser_function_budget_incomplete`. A per-call-site
+refusal is `native_wasm_indirect_site_budget_incomplete` or
+`native_wasm_indirect_browser_site_budget_incomplete`. None of those disable
+the stream. The renderer coalesces input and budget losses into
+one gap per budget epoch: `native_wasm_indirect_input_unavailable` or
 `native_wasm_indirect_budget_incomplete`. A full ring does not mark a gap as
 sent, so it is retried. A record the transport refuses frees its sample index
 and fills the sequence slot it took with

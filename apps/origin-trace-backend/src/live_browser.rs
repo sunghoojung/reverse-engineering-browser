@@ -43,6 +43,7 @@ pub struct LiveBrowser {
     profile: Option<PathBuf>,
     launcher_pid: Option<i32>,
     store: PathBuf,
+    wasm_budget_reset_file: Option<PathBuf>,
 }
 
 impl LiveBrowser {
@@ -52,6 +53,7 @@ impl LiveBrowser {
             profile: options.brave_profile.clone(),
             launcher_pid: options.launcher_pid,
             store: options.store.clone(),
+            wasm_budget_reset_file: options.wasm_budget_reset_file.clone(),
         }
     }
 
@@ -84,6 +86,7 @@ impl LiveBrowser {
                 self.open_url(request).await
             }
             Some("end") => self.end(request),
+            Some("reset_wasm_sample_budgets") => self.reset_wasm_sample_budgets(request, recording),
             Some("list_inputs") => self.input(request, recording).await,
             Some("click") => self.input(request, recording).await,
             Some("type") => self.input(request, recording).await,
@@ -91,6 +94,40 @@ impl LiveBrowser {
             Some("scroll") => self.input(request, recording).await,
             _ => Err(Error::bad("Session action is invalid")),
         }
+    }
+
+    fn reset_wasm_sample_budgets(&self, request: &Value, recording: bool) -> Result<Value> {
+        validation::fields(request, &["action"], "Reset Wasm sample budgets")?;
+        if !recording {
+            return Err(Error::conflict(
+                "Native capture is not running, so the Wasm sample budgets were not reset.",
+            )
+            .with_code(Code::NativeCaptureUnavailable));
+        }
+        let Some(path) = &self.wasm_budget_reset_file else {
+            return Err(Error::conflict(
+                "This backend was not started with a Wasm sample-budget reset file.",
+            )
+            .with_code(Code::DependencyUnavailable));
+        };
+        let Some(profile) = &self.profile else {
+            return Err(Error::conflict(
+                "This backend was not started with its capture browser and profile.",
+            )
+            .with_code(Code::DependencyUnavailable));
+        };
+        if Self::holder(profile).is_none() {
+            return Err(Error::conflict(
+                "The capture browser is not running, so the Wasm sample budgets were not reset.",
+            )
+            .with_code(Code::TargetUnavailable));
+        }
+        let generation = bump_wasm_budget_reset(path)?;
+        Ok(json!({
+            "ok": true,
+            "action": "reset_wasm_sample_budgets",
+            "generation": generation,
+        }))
     }
 
     async fn open_url(&self, request: &Value) -> Result<Value> {
@@ -231,6 +268,57 @@ impl LiveBrowser {
     }
 }
 
+/// Writes the next generation beside the file and renames it into place. The
+/// browser applies a generation only when it is greater than the last one it
+/// saw, on its writer wake of about 250ms.
+pub fn bump_wasm_budget_reset(path: &Path) -> Result<u64> {
+    let text = std::fs::read_to_string(path).map_err(|_| {
+        Error::conflict("The Wasm sample-budget reset file could not be read.")
+            .with_code(Code::DependencyUnavailable)
+    })?;
+    let current = parse_wasm_budget_generation(&text).ok_or_else(|| {
+        Error::conflict("The Wasm sample-budget reset file is not a generation.")
+            .with_code(Code::DependencyUnavailable)
+    })?;
+    let next = current.checked_add(1).ok_or_else(|| {
+        Error::conflict("The Wasm sample-budget reset generation cannot increase.")
+            .with_code(Code::DependencyUnavailable)
+    })?;
+    let temporary = path.with_extension("tmp");
+    {
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(&temporary)
+            .map_err(|_| {
+                Error::conflict("The Wasm sample-budget reset file could not be updated.")
+                    .with_code(Code::DependencyUnavailable)
+            })?;
+        writeln!(file, "{next}").map_err(|_| {
+            Error::conflict("The Wasm sample-budget reset file could not be updated.")
+                .with_code(Code::DependencyUnavailable)
+        })?;
+    }
+    std::fs::rename(&temporary, path).map_err(|_| {
+        Error::conflict("The Wasm sample-budget reset file could not be updated.")
+            .with_code(Code::DependencyUnavailable)
+    })?;
+    Ok(next)
+}
+
+fn parse_wasm_budget_generation(text: &str) -> Option<u64> {
+    let text = text.strip_suffix('\n').unwrap_or(text);
+    let text = text.strip_suffix('\r').unwrap_or(text);
+    if text.is_empty() || text.len() > 20 || !text.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    text.parse().ok()
+}
+
 fn alive(pid: i32) -> bool {
     #[cfg(unix)]
     {
@@ -262,5 +350,18 @@ mod tests {
         std::os::unix::fs::symlink("host-2147483646", profile.path().join("SingletonLock"))
             .unwrap();
         assert_eq!(LiveBrowser::holder(profile.path()), None);
+    }
+
+    #[test]
+    fn bump_wasm_budget_reset_increases_the_generation() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("wasm-sample-budget-reset");
+        std::fs::write(&path, "0\n").unwrap();
+        assert_eq!(bump_wasm_budget_reset(&path).unwrap(), 1);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "1\n");
+        assert_eq!(bump_wasm_budget_reset(&path).unwrap(), 2);
+        assert!(bump_wasm_budget_reset(&directory.path().join("missing")).is_err());
+        std::fs::write(&path, "x\n").unwrap();
+        assert!(bump_wasm_budget_reset(&path).is_err());
     }
 }

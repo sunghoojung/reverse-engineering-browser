@@ -62,6 +62,10 @@ pub struct Options {
     /// this process's parent; `session_action end` asks it to stop the session.
     #[arg(long, requires = "socket")]
     pub launcher_pid: Option<i32>,
+    /// Generation file the capture browser polls. `reset_wasm_sample_budgets`
+    /// increments it without closing the browser.
+    #[arg(long, requires = "socket")]
+    pub wasm_budget_reset_file: Option<PathBuf>,
     #[arg(long)]
     pub heap_snapshot: Option<PathBuf>,
     #[arg(long, env = "REB_DEOBFUSCATOR_WORKER")]
@@ -139,6 +143,7 @@ impl Options {
             &mut self.endpoint_file,
             &mut self.active_endpoint_file,
             &mut self.js_invocation_session_sites,
+            &mut self.wasm_budget_reset_file,
         ]
         .into_iter()
         .flatten()

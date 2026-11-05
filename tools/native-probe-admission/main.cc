@@ -26,6 +26,7 @@
 // Leave these headers outside the sorted common-header block above.
 #include "brave/components/reverse_engineering_browser/common/native_vm_finding.h"
 #include "brave/components/reverse_engineering_browser/common/page_guest_dispatch.h"
+#include "reb/wasm_dispatch.hpp"
 // clang-format on
 
 std::atomic<std::uint64_t> allocations{0};
@@ -79,6 +80,32 @@ NativeProbeEvent One(NativeProbeQueue& queue) {
   NativeProbeEvent extra;
   assert(!queue.TryPop(extra));
   return event;
+}
+NativeProbeEvent Pop(NativeProbeQueue& queue) {
+  NativeProbeEvent event;
+  assert(queue.TryPop(event));
+  return event;
+}
+std::string_view PayloadText(const NativeProbeEvent& event) {
+  return {reinterpret_cast<const char*>(event.inline_payload.data()), event.header.payload_size};
+}
+reb::WasmDispatchOverflowPayload ReadDispatchOverflow(const NativeProbeEvent& event) {
+  assert(event.header.type == reb::NativeProbeType::kWasmDispatchOverflow);
+  assert(event.header.artifact_id == 0 && event.header.parent_event_id == 0);
+  reb::WasmDispatchOverflowPayload value{};
+  assert(reb::DecodeWasmDispatchOverflowPayload(
+      std::span(event.inline_payload).first(event.header.payload_size), value));
+  assert(reb::IsValidWasmDispatchOverflow(std::bit_cast<reb::EventRecord>(event)));
+  return value;
+}
+reb::WasmIndirectOverflowPayload ReadIndirectOverflow(const NativeProbeEvent& event) {
+  assert(event.header.type == reb::NativeProbeType::kWasmIndirectOverflow);
+  assert(event.header.artifact_id == 0 && event.header.parent_event_id == 0);
+  reb::WasmIndirectOverflowPayload value{};
+  assert(reb::DecodeWasmIndirectOverflowPayload(
+      std::span(event.inline_payload).first(event.header.payload_size), value));
+  assert(reb::IsValidWasmIndirectOverflow(std::bit_cast<reb::EventRecord>(event)));
+  return value;
 }
 
 void QueueMappingAndCanvasBurst() {
@@ -1361,12 +1388,32 @@ void NativeWasmRuntimeAdmission() {
   assert(sink.IsNativeWasmDispatchEnabled());
   assert(Drain(queue) == reb::kNativeProbeQueueCapacity);
   record();
-  const auto gap = One(queue);
-  assert(std::string_view(reinterpret_cast<const char*>(gap.inline_payload.data()),
-                          gap.header.payload_size) == "native_wasm_dispatch_budget_incomplete");
-  assert(!sink.IsNativeWasmDispatchEnabled());
-  record();
+  const auto gap = Pop(queue);
+  assert(PayloadText(gap) == "native_wasm_dispatch_budget_incomplete");
+  auto identity = ReadDispatchOverflow(Pop(queue));
+  assert(identity.kind == reb::kWasmOverflowKindIdentity && identity.ring_index == 0 &&
+         identity.function_index == 0 && identity.module_byte_offset == 8 &&
+         identity.selector == UINT32_MAX && identity.arm_count == 2 && identity.omitted_count == 0);
+  assert(sink.IsNativeWasmDispatchEnabled());
   assert(native_wasm_retained == 16 && Drain(queue) == 0);
+  for (unsigned index = 1; index < reb::kWasmOverflowRingLimit; ++index) {
+    sink.RecordNativeWasmDispatch(7, 8, "https://owned.test/module.wasm", module, index, 8,
+                                  1000U + index, 2, 9, 10);
+    identity = ReadDispatchOverflow(One(queue));
+    assert(identity.kind == reb::kWasmOverflowKindIdentity && identity.ring_index == index &&
+           identity.function_index == index && identity.selector == 1000U + index &&
+           identity.arm_count == 2 && identity.module_byte_offset == 8);
+  }
+  for (unsigned extra = 0; extra < 3; ++extra) {
+    sink.RecordNativeWasmDispatch(7, 8, "https://owned.test/module.wasm", module, 40U + extra, 8,
+                                  2000U + extra, 2, 9, 10);
+  }
+  assert(native_wasm_retained == 16 && Drain(queue) == 0);
+  transport.Disable();
+  identity = ReadDispatchOverflow(One(queue));
+  assert(identity.kind == reb::kWasmOverflowKindOmitted && identity.omitted_count == 3 &&
+         identity.ring_index == 0 && identity.function_index == 0 && identity.selector == 0 &&
+         identity.arm_count == 0);
   Configure(queue);
   sink.SetNativeWasmDispatchEmitter(&CaptureNativeWasm);  // Same session, fresh policy generation.
   native_wasm_retained = 0;
@@ -1381,7 +1428,7 @@ void NativeWasmRuntimeAdmission() {
   assert(!sink.IsNativeWasmDispatchEnabled());
   transport.Disable();
   std::cout << "PASS native Wasm runtime-input admission; scoped bounds, unsigned selector, "
-               "transport retry and full-ring cap retry\n";
+               "transport retry, full-ring cap retry and br_table overflow identities\n";
 }
 
 std::size_t native_indirect_retained = 0;
@@ -1484,12 +1531,47 @@ void NativeWasmIndirectAdmission() {
   assert(sink.IsNativeWasmIndirectEnabled());
   assert(Drain(queue) == reb::kNativeProbeQueueCapacity);
   record();
-  gap = One(queue);
-  assert(std::string_view(reinterpret_cast<const char*>(gap.inline_payload.data()),
-                          gap.header.payload_size) == "native_wasm_indirect_budget_incomplete");
-  assert(!sink.IsNativeWasmIndirectEnabled());
-  record();
+  gap = Pop(queue);
+  assert(PayloadText(gap) == "native_wasm_indirect_budget_incomplete");
+  auto identity = ReadIndirectOverflow(Pop(queue));
+  assert(identity.kind == reb::kWasmOverflowKindIdentity && identity.ring_index == 0 &&
+         identity.function_index == 0 && identity.module_byte_offset == 8 &&
+         identity.table_index == 0 && identity.slot == UINT32_MAX &&
+         identity.resolution ==
+             static_cast<std::uint32_t>(reb::WasmIndirectResolution::kOutOfBounds) &&
+         identity.omitted_count == 0);
+  assert(sink.IsNativeWasmIndirectEnabled());
   assert(native_indirect_retained == 16 && Drain(queue) == 0);
+  for (unsigned index = 1; index < reb::kWasmOverflowRingLimit; ++index) {
+    auto call = input;
+    call.function_index = index;
+    call.slot = 3000U + index;
+    const bool resolved = index % 5U == 0U;
+    call.resolution = resolved ? reb::NativeWasmIndirectResolution::kResolved
+                               : reb::NativeWasmIndirectResolution::kOutOfBounds;
+    call.callee_function_index = resolved ? 4U : 0U;
+    sink.RecordNativeWasmIndirect(call);
+    identity = ReadIndirectOverflow(One(queue));
+    assert(identity.kind == reb::kWasmOverflowKindIdentity && identity.ring_index == index &&
+           identity.function_index == index && identity.slot == 3000U + index &&
+           identity.table_index == 0 && identity.module_byte_offset == 8 &&
+           identity.resolution ==
+               static_cast<std::uint32_t>(resolved ? reb::WasmIndirectResolution::kResolved
+                                                   : reb::WasmIndirectResolution::kOutOfBounds) &&
+           identity.omitted_count == 0);
+  }
+  for (unsigned extra = 0; extra < 3; ++extra) {
+    auto call = input;
+    call.function_index = 40U + extra;
+    call.slot = 4000U + extra;
+    sink.RecordNativeWasmIndirect(call);
+  }
+  assert(native_indirect_retained == 16 && Drain(queue) == 0);
+  transport.Disable();
+  identity = ReadIndirectOverflow(One(queue));
+  assert(identity.kind == reb::kWasmOverflowKindOmitted && identity.omitted_count == 3 &&
+         identity.ring_index == 0 && identity.function_index == 0 && identity.slot == 0 &&
+         identity.resolution == 0);
   Configure(queue);
   sink.SetNativeWasmIndirectEmitter(&CaptureNativeIndirect);  // Fresh policy generation.
   native_indirect_retained = 0;
@@ -1505,7 +1587,7 @@ void NativeWasmIndirectAdmission() {
   assert(!sink.IsNativeWasmIndirectEnabled());
   transport.Disable();
   std::cout << "PASS native Wasm call_indirect admission; disabled, expired, input, transport, "
-               "separate 16-record budget and full-ring cap retry\n";
+               "separate 16-record budget, full-ring cap retry and overflow identities\n";
 }
 
 #include "guest_sampler_tests.h"

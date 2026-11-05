@@ -387,9 +387,14 @@ use the names.
 | 24 | `js_invocation_start` | `include/reb/js_invocation.hpp` | [native JavaScript invocation](native-js-invocation-v1.md) |
 | 25 | `js_invocation_settle` | `include/reb/js_invocation.hpp` | [native JavaScript invocation](native-js-invocation-v1.md) |
 | 26 | `js_invocation_request` | `include/reb/js_invocation.hpp` | [native JavaScript invocation](native-js-invocation-v1.md) |
+| 27 | `wasm_dispatch_overflow` | `include/reb/wasm_dispatch.hpp` | [native Wasm overflow identities](native-wasm-dispatch-v1.md#overflow-identities) |
+| 28 | `wasm_indirect_overflow` | `include/reb/wasm_dispatch.hpp` | [native Wasm overflow identities](native-wasm-dispatch-v1.md#overflow-identities) |
 
 `wasm_dispatch_observation` and `wasm_indirect_observation` payloads are
 version 2 and `wasm_guest_invocation` version 4: each adds the JavaScript
 invocation context in previously reserved bytes, and older versions remain
 readable as not observed. See
 [invocation context of Wasm records](native-js-invocation-v1.md#invocation-context-of-wasm-records).
+`wasm_dispatch_overflow` and `wasm_indirect_overflow` are version 1 and do not
+carry that context: they are compact identities past the 16-record caps, not
+full observations.

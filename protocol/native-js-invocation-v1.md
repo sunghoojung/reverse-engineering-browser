@@ -238,6 +238,8 @@ exactly with state 2):
 | `wasm_guest_invocation` (19) | 4 | 84..92 | 92..128 |
 
 Earlier versions reserved those bytes and still decode, as not observed.
+`wasm_dispatch_overflow` and `wasm_indirect_overflow` do not carry this
+context. They name an execution past the 16-record cap and are not observations.
 Guest dispatch records stay version 1; each names its guest invocation, which
 carries the context. VM Lab rows show the context as
 `js_invocation: {state, invocation_id}` and omit it when not observed.

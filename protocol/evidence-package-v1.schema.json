@@ -568,6 +568,8 @@
             "wasm_guest_dispatch",
             "wasm_guest_invocation",
             "wasm_indirect_observation",
+            "wasm_dispatch_overflow",
+            "wasm_indirect_overflow",
             "js_dispatch_observation",
             "request_body",
             "request_target",

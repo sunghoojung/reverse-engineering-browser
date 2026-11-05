@@ -244,5 +244,154 @@ using NativeWasmIndirectEmitter = bool (*)(const NativeWasmIndirectObservation&,
   return ReadNativeWasmU32(bytes, offset, type_index) &&
          ReadNativeWasmU32(bytes, offset, table_index) && table_index == value.table_index;
 }
+// Compact identities for executions past the 16-record budgets. Not observations.
+inline constexpr std::uint8_t kNativeWasmOverflowKindIdentity = 1;
+inline constexpr std::uint8_t kNativeWasmOverflowKindOmitted = 2;
+inline constexpr std::size_t kNativeWasmOverflowRingLimit = 32;
+struct NativeWasmDispatchOverflowPayload final {
+  std::uint16_t protocol_version = 1;
+  std::uint16_t payload_size = 32;
+  std::uint8_t kind = kNativeWasmOverflowKindIdentity;
+  std::uint8_t reserved0 = 0;
+  std::uint16_t ring_index = 0;
+  std::uint32_t function_index = 0;
+  std::uint32_t module_byte_offset = 0;
+  std::uint32_t selector = 0;
+  std::uint32_t arm_count = 0;
+  std::uint32_t omitted_count = 0;
+  std::uint32_t reserved1 = 0;
+};
+static_assert(sizeof(NativeWasmDispatchOverflowPayload) == 32);
+static_assert(std::is_standard_layout_v<NativeWasmDispatchOverflowPayload>);
+static_assert(std::is_trivially_copyable_v<NativeWasmDispatchOverflowPayload>);
+static_assert(offsetof(NativeWasmDispatchOverflowPayload, protocol_version) == 0);
+static_assert(offsetof(NativeWasmDispatchOverflowPayload, payload_size) == 2);
+static_assert(offsetof(NativeWasmDispatchOverflowPayload, kind) == 4);
+static_assert(offsetof(NativeWasmDispatchOverflowPayload, ring_index) == 6);
+static_assert(offsetof(NativeWasmDispatchOverflowPayload, function_index) == 8);
+static_assert(offsetof(NativeWasmDispatchOverflowPayload, module_byte_offset) == 12);
+static_assert(offsetof(NativeWasmDispatchOverflowPayload, selector) == 16);
+static_assert(offsetof(NativeWasmDispatchOverflowPayload, arm_count) == 20);
+static_assert(offsetof(NativeWasmDispatchOverflowPayload, omitted_count) == 24);
+static_assert(offsetof(NativeWasmDispatchOverflowPayload, reserved1) == 28);
+[[nodiscard]] inline std::array<std::byte, 32> EncodeNativeWasmDispatchOverflowPayload(
+    const NativeWasmDispatchOverflowPayload& value) noexcept {
+  std::array<std::byte, 32> out{};
+  const auto put = [&out](std::size_t offset, std::uint64_t v, std::size_t width) {
+    for (std::size_t i = 0; i < width; ++i)
+      out[offset + i] = static_cast<std::byte>((v >> (8U * i)) & 255U);
+  };
+  put(0, value.protocol_version, 2);
+  put(2, value.payload_size, 2);
+  put(4, value.kind, 1);
+  put(5, value.reserved0, 1);
+  put(6, value.ring_index, 2);
+  put(8, value.function_index, 4);
+  put(12, value.module_byte_offset, 4);
+  put(16, value.selector, 4);
+  put(20, value.arm_count, 4);
+  put(24, value.omitted_count, 4);
+  put(28, value.reserved1, 4);
+  return out;
+}
+[[nodiscard]] inline bool DecodeNativeWasmDispatchOverflowPayload(
+    std::span<const std::byte> bytes,
+    NativeWasmDispatchOverflowPayload& value) noexcept {
+  if (bytes.size() != 32)
+    return false;
+  const auto get = [bytes](std::size_t offset, std::size_t width) {
+    std::uint32_t v = 0;
+    for (std::size_t i = 0; i < width; ++i)
+      v |= std::to_integer<std::uint32_t>(bytes[offset + i]) << (8U * i);
+    return v;
+  };
+  value.protocol_version = static_cast<std::uint16_t>(get(0, 2));
+  value.payload_size = static_cast<std::uint16_t>(get(2, 2));
+  value.kind = static_cast<std::uint8_t>(get(4, 1));
+  value.reserved0 = static_cast<std::uint8_t>(get(5, 1));
+  value.ring_index = static_cast<std::uint16_t>(get(6, 2));
+  value.function_index = get(8, 4);
+  value.module_byte_offset = get(12, 4);
+  value.selector = get(16, 4);
+  value.arm_count = get(20, 4);
+  value.omitted_count = get(24, 4);
+  value.reserved1 = get(28, 4);
+  return true;
+}
+struct NativeWasmIndirectOverflowPayload final {
+  std::uint16_t protocol_version = 1;
+  std::uint16_t payload_size = 40;
+  std::uint8_t kind = kNativeWasmOverflowKindIdentity;
+  std::uint8_t reserved0 = 0;
+  std::uint16_t ring_index = 0;
+  std::uint32_t function_index = 0;
+  std::uint32_t module_byte_offset = 0;
+  std::uint32_t table_index = 0;
+  std::uint32_t slot = 0;
+  std::uint32_t resolution = 0;
+  std::uint32_t omitted_count = 0;
+  std::uint64_t reserved1 = 0;
+};
+static_assert(sizeof(NativeWasmIndirectOverflowPayload) == 40);
+static_assert(std::is_standard_layout_v<NativeWasmIndirectOverflowPayload>);
+static_assert(std::is_trivially_copyable_v<NativeWasmIndirectOverflowPayload>);
+static_assert(offsetof(NativeWasmIndirectOverflowPayload, protocol_version) == 0);
+static_assert(offsetof(NativeWasmIndirectOverflowPayload, payload_size) == 2);
+static_assert(offsetof(NativeWasmIndirectOverflowPayload, kind) == 4);
+static_assert(offsetof(NativeWasmIndirectOverflowPayload, ring_index) == 6);
+static_assert(offsetof(NativeWasmIndirectOverflowPayload, function_index) == 8);
+static_assert(offsetof(NativeWasmIndirectOverflowPayload, module_byte_offset) == 12);
+static_assert(offsetof(NativeWasmIndirectOverflowPayload, table_index) == 16);
+static_assert(offsetof(NativeWasmIndirectOverflowPayload, slot) == 20);
+static_assert(offsetof(NativeWasmIndirectOverflowPayload, resolution) == 24);
+static_assert(offsetof(NativeWasmIndirectOverflowPayload, omitted_count) == 28);
+static_assert(offsetof(NativeWasmIndirectOverflowPayload, reserved1) == 32);
+[[nodiscard]] inline std::array<std::byte, 40> EncodeNativeWasmIndirectOverflowPayload(
+    const NativeWasmIndirectOverflowPayload& value) noexcept {
+  std::array<std::byte, 40> out{};
+  const auto put = [&out](std::size_t offset, std::uint64_t v, std::size_t width) {
+    for (std::size_t i = 0; i < width; ++i)
+      out[offset + i] = static_cast<std::byte>((v >> (8U * i)) & 255U);
+  };
+  put(0, value.protocol_version, 2);
+  put(2, value.payload_size, 2);
+  put(4, value.kind, 1);
+  put(5, value.reserved0, 1);
+  put(6, value.ring_index, 2);
+  put(8, value.function_index, 4);
+  put(12, value.module_byte_offset, 4);
+  put(16, value.table_index, 4);
+  put(20, value.slot, 4);
+  put(24, value.resolution, 4);
+  put(28, value.omitted_count, 4);
+  put(32, value.reserved1, 8);
+  return out;
+}
+[[nodiscard]] inline bool DecodeNativeWasmIndirectOverflowPayload(
+    std::span<const std::byte> bytes,
+    NativeWasmIndirectOverflowPayload& value) noexcept {
+  if (bytes.size() != 40)
+    return false;
+  const auto get = [bytes](std::size_t offset, std::size_t width) {
+    std::uint64_t v = 0;
+    for (std::size_t i = 0; i < width; ++i)
+      v |= static_cast<std::uint64_t>(std::to_integer<std::uint32_t>(bytes[offset + i]))
+           << (8U * i);
+    return v;
+  };
+  value.protocol_version = static_cast<std::uint16_t>(get(0, 2));
+  value.payload_size = static_cast<std::uint16_t>(get(2, 2));
+  value.kind = static_cast<std::uint8_t>(get(4, 1));
+  value.reserved0 = static_cast<std::uint8_t>(get(5, 1));
+  value.ring_index = static_cast<std::uint16_t>(get(6, 2));
+  value.function_index = static_cast<std::uint32_t>(get(8, 4));
+  value.module_byte_offset = static_cast<std::uint32_t>(get(12, 4));
+  value.table_index = static_cast<std::uint32_t>(get(16, 4));
+  value.slot = static_cast<std::uint32_t>(get(20, 4));
+  value.resolution = static_cast<std::uint32_t>(get(24, 4));
+  value.omitted_count = static_cast<std::uint32_t>(get(28, 4));
+  value.reserved1 = get(32, 8);
+  return true;
+}
 }  // namespace reb
 #endif

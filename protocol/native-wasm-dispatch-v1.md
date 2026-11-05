@@ -35,7 +35,9 @@ observation only after accepted ACK. Stale navigation/configuration callbacks
 are rejected. Observations of the same module in the same document share one
 module artifact; each is emitted once that artifact is accepted (or at once if
 it already was). Capture is capped at 16 observations per configuration and
-16 MiB per module. A lost observation becomes a `gap` in its own renderer
+16 MiB per module. An execution past that cap keeps a compact identity, up to
+a separate ring, described in [Overflow identities](#overflow-identities).
+The 16 full observations stay the cap. A lost observation becomes a `gap` in its own renderer
 sequence slot. Queue, transport and budget losses are explicit incompleteness,
 never invented samples. Every observation the browser refuses, whether
 malformed, over the host or browser budget, without its owning document or
@@ -155,7 +157,8 @@ Blink, the renderer sink, the browser host and the artifact sink apply the same
 document, session, generation, category and expiry rules as `br_table`
 observations, through the same bounded transport. A separate budget allows 16
 records per configuration in the renderer and in the browser, so one stream
-never starves the other. The renderer coalesces input and budget losses into
+never starves the other. Executions past that cap keep compact identities in
+the same [overflow ring](#overflow-identities); the 16 full records stay the cap. The renderer coalesces input and budget losses into
 one gap per configuration: `native_wasm_indirect_input_unavailable` or
 `native_wasm_indirect_budget_incomplete`. A full ring does not mark a gap as
 sent, so it is retried. A record the transport refuses frees its sample index
@@ -222,3 +225,98 @@ the native V8 runtime workflow. None of these is a rebuilt-Brave run: live
 acceptance still needs the pinned browser build and an owned interpreter whose
 table is filled at run time, including navigation, disable, expiry and
 transport loss.
+
+## Overflow identities
+
+Full observations stay capped at 16 per stream per configuration. An execution
+that does not receive one of those records is not discarded without a trace.
+The renderer keeps a fixed ring of 32 compact identities per stream per
+configuration. Thirty-two is twice the full-observation cap: a fixed renderer
+array, large enough to name the sites that ran after the cap, and not another
+128-byte module transfer. The ring is not a full observation. It has no parent
+event and no module artifact id. The renderer does not assign those, and this
+record does not invent them.
+
+`wasm_dispatch_overflow` (numeric 27) and `wasm_indirect_overflow` (numeric 28),
+category `vm`, protocol 3. Parent event id is 0. Artifact id is 0. The payload
+is little-endian and exactly 32 bytes for `br_table` or 40 bytes for
+`call_indirect`. Version is 1.
+
+`br_table` payload:
+
+| Offset | Field | Type |
+| --- | --- | --- |
+| 0 | version (1) | u16 |
+| 2 | size (32) | u16 |
+| 4 | kind (1 identity, 2 omitted) | u8 |
+| 5 | reserved (0) | u8 |
+| 6 | ring index | u16 |
+| 8 | function index | u32 |
+| 12 | module instruction offset | u32 |
+| 16 | unsigned selector | u32 |
+| 20 | explicit arm count | u32 |
+| 24 | omitted count | u32 |
+| 28 | reserved (0) | u32 |
+
+`call_indirect` payload:
+
+| Offset | Field | Type |
+| --- | --- | --- |
+| 0 | version (1) | u16 |
+| 2 | size (40) | u16 |
+| 4 | kind (1 identity, 2 omitted) | u8 |
+| 5 | reserved (0) | u8 |
+| 6 | ring index | u16 |
+| 8 | caller function index | u32 |
+| 12 | module instruction offset | u32 |
+| 16 | table index | u32 |
+| 20 | dynamic slot | u32 |
+| 24 | resolution (0 to 4) | u32 |
+| 28 | omitted count | u32 |
+| 32 | reserved (0) | u64 |
+
+Kind 1 is one identity that fit in the ring. Its omitted count is 0 and its
+ring index is below 32. Function, arm and table indexes are below 16 Mi, and
+the offset is at least 8 and below 16 Mi, the same bounds as a full
+observation. Any u32 selector or slot is legal. Kind 2 is the count of valid
+executions that did not fit. Its identity fields, ring index and resolution
+are 0, and the omitted count is at least 1. A resolved indirect identity does
+not carry a callee; that index exists only on a full
+`wasm_indirect_observation`.
+
+The ring index is a slot in this configuration's ring, not an execution
+counter. Sequence number orders the records. A reused index after a new
+configuration is not a drop.
+
+Unknown versions, the wrong size, a kind other than 1 or 2, a nonzero reserved
+field, an identity that also carries an omitted count, an omitted record that
+also carries an identity, a ring index past 31, an out-of-range index or
+offset, or an unknown resolution are invalid. C++, Rust, Python and JavaScript
+reject them. They are not partial observations. Bytes past the payload in the
+inline record must be zero.
+
+The budget gap is unchanged and still marks the cap. The ring does not replace
+it. Each identity is written when the execution is seen. The omitted record is
+one cumulative snapshot written when the configuration retires (the renderer
+emitter is replaced or cleared). If several omitted records exist, the count
+is the maximum, not the sum. The count saturates at 2^32−1 and does not wrap;
+at that point the hook stops. A probe queue that cannot take an identity does
+not consume a ring slot; that loss stays a queue drop. A probe queue that
+cannot take the omitted record at retirement leaves the count unpublished.
+A crash before retirement loses the omitted count; the budget gap and any
+identities already enqueued remain. A late increment after the retirement
+snapshot is read and before the emitter is cleared can be missed.
+
+The admission predicate stays true after the 16 full observations, so V8 still
+walks a frame for later executions and those executions can be named or
+counted. It turns false when the omitted counter saturates or the
+configuration ends.
+
+Opcode workspaces do not copy these identities into
+`native_wasm_observations` or `native_wasm_indirect_observations` and do not
+match them to static arms. That would claim a module artifact the record does
+not carry. They stay event-store records.
+
+A rebuilt Brave is required before a live session emits these records. The
+in-process sink test is not a live browser run, and it does not invent a
+sample the browser has not produced.

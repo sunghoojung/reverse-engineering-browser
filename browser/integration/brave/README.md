@@ -452,7 +452,11 @@ not arbitrary interpreter guest-PC recovery. See
 Each record names the table slot and, when the entry is a function of the same
 module, the callee it was about to run; arguments and memory are never read.
 It has its own 16-record budget and shares the module artifact and transport.
-See [call_indirect observations](../../../protocol/native-wasm-dispatch-v1.md#call_indirect-observations).
+Executions past either 16-record cap keep a compact overflow identity, up to a
+ring, and then a count. A rebuilt Brave is required before a live session
+emits those records. See
+[overflow identities](../../../protocol/native-wasm-dispatch-v1.md#overflow-identities)
+and [call_indirect observations](../../../protocol/native-wasm-dispatch-v1.md#call_indirect-observations).
 
 Guest-state capture additionally needs `REB_NATIVE_WASM_GUEST_ADAPTER`, which
 makes the launcher add `--reb-wasm-guest-capture`. That flag compiles a call on

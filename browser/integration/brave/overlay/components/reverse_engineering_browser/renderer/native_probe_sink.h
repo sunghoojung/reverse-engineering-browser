@@ -399,6 +399,30 @@ class COMPONENT_EXPORT(REB_NATIVE_PROBE_SINK) NativeProbeSink final {
   enum class NativeWasmOmission : std::size_t { kInput, kBudget };
   bool NoteNativeWasmDispatchOmission(const VmAdmission& admission,
                                       NativeWasmOmission reason) noexcept;
+  // Scope copied from a real admission. The omitted count is one snapshot
+  // published when the configuration retires, not one event per execution.
+  struct NativeWasmOverflowAccount {
+    std::atomic<std::uint64_t> generation{0};
+    std::atomic<std::uint64_t> session_id{0};
+    std::atomic<std::uint64_t> monotonic_time_ns{0};
+    std::atomic<std::uint64_t> frame_id{0};
+    std::atomic<std::uint32_t> process_id{0};
+    std::atomic<std::uint32_t> thread_id{0};
+    std::atomic<std::uint32_t> omitted{0};
+  };
+  enum class WasmOverflowStore : std::uint8_t { kStored, kRingFull, kRejected };
+  void RememberNativeWasmOverflowScope(NativeWasmOverflowAccount& account,
+                                       const VmAdmission& admission) noexcept;
+  void NoteNativeWasmOverflowOmitted(NativeWasmOverflowAccount& account,
+                                     const VmAdmission& admission,
+                                     std::atomic<std::uint64_t>& capped) noexcept;
+  void PublishNativeWasmOverflow(NativeWasmOverflowAccount& account, NativeProbeType type) noexcept;
+  [[nodiscard]] WasmOverflowStore StoreNativeWasmDispatchOverflow(
+      const VmAdmission& admission,
+      const NativeWasmDispatchObservation& observation) noexcept;
+  [[nodiscard]] WasmOverflowStore StoreNativeWasmIndirectOverflow(
+      const VmAdmission& admission,
+      const NativeWasmIndirectObservation& observation) noexcept;
   // Coalesced JS dispatch gaps: budget, site budget, transport, input, then
   // one compiled-before-arming reason per site slot.
   static constexpr std::size_t kNativeJsBudgetGap = 0, kNativeJsSiteBudgetGap = 1,
@@ -490,14 +514,23 @@ class COMPONENT_EXPORT(REB_NATIVE_PROBE_SINK) NativeProbeSink final {
   std::atomic<NativeWasmDispatchEmitter> native_wasm_emitter_{nullptr};
   std::array<std::atomic<std::uint64_t>, kNativeWasmDispatchSampleBudget> native_wasm_slots_{};
   std::array<std::atomic<std::uint64_t>, 2> native_wasm_gap_generations_{};
+  // Saturation of the overflow omitted count, not the 16-observation cap.
+  // The hook stays enabled after that cap so later executions can be named.
   std::atomic<std::uint64_t> native_wasm_capped_generation_{0};
+  std::array<std::atomic<std::uint64_t>, kNativeWasmOverflowRingLimit>
+      native_wasm_overflow_slots_{};
+  NativeWasmOverflowAccount native_wasm_overflow_{};
   bool NoteNativeWasmIndirectOmission(const VmAdmission& admission,
                                       NativeWasmOmission reason) noexcept;
   std::atomic<NativeWasmIndirectEmitter> native_wasm_indirect_emitter_{nullptr};
   std::array<std::atomic<std::uint64_t>, kNativeWasmIndirectSampleBudget>
       native_wasm_indirect_slots_{};
   std::array<std::atomic<std::uint64_t>, 2> native_wasm_indirect_gap_generations_{};
+  // Same saturation rule as native_wasm_capped_generation_.
   std::atomic<std::uint64_t> native_wasm_indirect_capped_generation_{0};
+  std::array<std::atomic<std::uint64_t>, kNativeWasmOverflowRingLimit>
+      native_wasm_indirect_overflow_slots_{};
+  NativeWasmOverflowAccount native_wasm_indirect_overflow_{};
   std::atomic<NativeRendererProbeEmitter> emitter_{nullptr};
   std::atomic<NativeProbeFrameIdProvider> frame_id_provider_{nullptr};
   std::atomic<NativeGeneratedArtifactEmitter> artifact_emitter_{nullptr};

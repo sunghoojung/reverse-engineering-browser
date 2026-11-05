@@ -468,9 +468,79 @@ enum OriginTraceDocumentBuilder {
     return number.stringValue == String(expected)
   }
 
+  // Compact identity past a 16-record Wasm budget. The same wording as
+  // overflow_summary in origin_trace.rs. Nil rejects the record.
+  private static func wasmOverflowSummary(_ event: [String: Any]) -> String? {
+    guard let operation = event["type"] as? String,
+      operation == "wasm_dispatch_overflow" || operation == "wasm_indirect_overflow",
+      let payload = event["payload"] as? String,
+      payload.count.isMultiple(of: 2),
+      event["payload_encoding"] as? String == "hex",
+      exactInteger(event["payload_size"], equals: payload.count / 2)
+    else { return nil }
+    var bytes: [UInt8] = []
+    bytes.reserveCapacity(payload.count / 2)
+    var index = payload.startIndex
+    while index < payload.endIndex {
+      let next = payload.index(index, offsetBy: 2)
+      guard let byte = UInt8(payload[index..<next], radix: 16) else { return nil }
+      bytes.append(byte)
+      index = next
+    }
+    let indirect = operation == "wasm_indirect_overflow"
+    let size = indirect ? 40 : 32
+    guard bytes.count == size else { return nil }
+    func u16(_ at: Int) -> UInt16 { UInt16(bytes[at]) | (UInt16(bytes[at + 1]) << 8) }
+    func u32(_ at: Int) -> UInt32 {
+      UInt32(bytes[at]) | (UInt32(bytes[at + 1]) << 8) | (UInt32(bytes[at + 2]) << 16)
+        | (UInt32(bytes[at + 3]) << 24)
+    }
+    guard u16(0) == 1, u16(2) == UInt16(size), bytes[5] == 0 else { return nil }
+    if indirect {
+      var reserved: UInt64 = 0
+      for shift in 0..<8 { reserved |= UInt64(bytes[32 + shift]) << (8 * shift) }
+      guard reserved == 0 else { return nil }
+    } else if u32(28) != 0 {
+      return nil
+    }
+    let omittedAt = indirect ? 28 : 24
+    let omitted = u32(omittedAt)
+    let ring = u16(6)
+    let label = indirect ? "call_indirect" : "br_table"
+    if bytes[4] == 2 {
+      guard ring == 0, omitted >= 1, bytes[8..<omittedAt].allSatisfy({ $0 == 0 }) else { return nil }
+      return
+        "Wasm \(label) overflow omitted \(omitted) identities past the ring. Not a full observation."
+    }
+    let limit: UInt32 = 16 * 1024 * 1024
+    let function = u32(8)
+    let offset = u32(12)
+    guard bytes[4] == 1, omitted == 0, ring < 32, function < limit, offset >= 8, offset < limit
+    else { return nil }
+    if !indirect {
+      let selector = u32(16)
+      let arms = u32(20)
+      guard arms < limit else { return nil }
+      return
+        "Wasm br_table overflow identity: function \(function), byte \(offset), selector \(selector), arms \(arms), ring \(ring). Not a full observation."
+    }
+    let table = u32(16)
+    let slot = u32(20)
+    let resolution = u32(24)
+    let names = ["resolved", "null", "out-of-bounds", "foreign", "unresolved"]
+    guard table < limit, resolution < names.count else { return nil }
+    return
+      "Wasm call_indirect overflow identity: caller \(function), byte \(offset), table \(table), slot \(slot), resolution \(names[Int(resolution)]), ring \(ring). Not a full observation."
+  }
+
   // A JavaScript invocation record reads as text, never as its binary payload:
   // the same wording as invocation_value in origin_trace.rs.
   private static func stepValue(_ event: [String: Any]) -> String? {
+    if let operation = event["type"] as? String,
+      operation == "wasm_dispatch_overflow" || operation == "wasm_indirect_overflow"
+    {
+      return wasmOverflowSummary(event)
+    }
     guard let operation = event["type"] as? String, operation.hasPrefix("js_invocation_") else {
       return decodedPayload(event)
     }

@@ -125,13 +125,16 @@ identifiers, for example:
 
 | Reason | Meaning |
 | --- | --- |
-| `native_wasm_dispatch_budget_incomplete` | The 16-observation `br_table` budget filled. |
+| `native_wasm_dispatch_budget_incomplete` | The 16-observation `br_table` budget filled. Later executions are `wasm_dispatch_overflow` identities up to the ring, then one omitted count. |
 | `native_guest_sample_limit` | The guest adapter's `sample_limit` was reached. |
 | `native_guest_parent_unresolved` | A guest record's parent invocation was not linked. |
 | `..._transport_unavailable`, `..._document_unavailable` | A capture stage was not available. |
 
-A full budget is evidence too: the capture saw more than it kept. To sample
-something else, start a new session with narrower capture options.
+A full budget is evidence too: the capture saw more than it kept. For Wasm
+`br_table` and `call_indirect`, `get_events` with `type` `wasm_dispatch_overflow`
+or `wasm_indirect_overflow` reads the compact identities past the 16 full
+observations. Those records are not full observations and have no parent edge.
+To sample something else, start a new session with narrower capture options.
 
 ## 7. Wait for the browser to produce something
 

@@ -98,7 +98,9 @@ produce an ambiguous result instead of an arbitrary trace.
   own sequence slot and is a sampling limit of its own category. Like Traffic,
   a request trace neither counts it as a `capture_gap` nor refuses the window
   over it. A gap whose payload is neither a count nor a reason identifier is
-  still malformed.
+  still malformed. Wasm executions past that cap are separate
+  `wasm_dispatch_overflow` and `wasm_indirect_overflow` event-store records.
+  A request trace does not turn them into parent edges or full observations.
 
 ## User workflow
 

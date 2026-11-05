@@ -349,6 +349,24 @@ pub(super) mod tests {
         json!({"protocol_version":3,"session_id":"1","sequence_number":"1","process_id":1,"thread_id":1,"monotonic_time_ns":"1","navigation_id":"1","frame_id":"1","artifact_id":"1","parent_event_id":"0","flags":0,"payload_size":128,"payload_encoding":"hex","payload_truncated":false,"category":"vm","type":"wasm_dispatch_observation","payload":hex::encode(bytes)})
     }
     #[test]
+    fn overflow_identities_are_not_observations() {
+        let mut event = event(0);
+        let mut bytes = [0u8; 32];
+        bytes[0] = 1;
+        bytes[2] = 32;
+        bytes[4] = 1;
+        bytes[8..12].copy_from_slice(&3u32.to_le_bytes());
+        bytes[12..16].copy_from_slice(&47u32.to_le_bytes());
+        bytes[16..20].copy_from_slice(&1u32.to_le_bytes());
+        bytes[20..24].copy_from_slice(&2u32.to_le_bytes());
+        event["type"] = json!("wasm_dispatch_overflow");
+        event["payload_size"] = json!(32);
+        event["payload"] = json!(hex::encode(bytes));
+        let scope = artifact(&event);
+        let output = read(&scope, &module(), std::slice::from_ref(&event));
+        assert_eq!((output.count, output.invalid, output.rows.len()), (0, 0, 0));
+    }
+    #[test]
     fn native_wasm_exact_site_and_scope() {
         let event = event(u32::MAX);
         let artifact = artifact(&event);

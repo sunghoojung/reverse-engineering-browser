@@ -115,6 +115,8 @@ EVENT_TYPES = {
     "wasm_guest_dispatch",
     "wasm_guest_invocation",
     "wasm_indirect_observation",
+    "wasm_dispatch_overflow",
+    "wasm_indirect_overflow",
 }
 UINT64_MAX = (1 << 64) - 1
 INT64_MIN = -(1 << 63)
@@ -341,6 +343,51 @@ def wasm_context_invalid(payload: bytes, version: int, new_version: int, offset:
             or not valid_invocation_context(state, invocation))
 
 
+def valid_wasm_overflow(event: dict, payload: bytes, indirect: bool) -> bool:
+    size = 40 if indirect else 32
+    if (
+        event["protocol_version"] != 3
+        or event["category"] != "vm"
+        or event["flags"] != 0
+        or event["payload_truncated"]
+        or event["parent_event_id"] != "0"
+        or any(event[key] == "0" for key in (
+            "session_id", "sequence_number", "monotonic_time_ns", "frame_id"
+        ))
+        or not 1 <= event["process_id"] <= 0xFFFFFFFF
+        or not 1 <= event["thread_id"] <= 0xFFFFFFFF
+        or len(payload) != size
+        or int.from_bytes(payload[0:2], "little") != 1
+        or int.from_bytes(payload[2:4], "little") != size
+        or payload[5] != 0
+    ):
+        return False
+    if indirect:
+        if int.from_bytes(payload[32:40], "little") != 0:
+            return False
+    elif int.from_bytes(payload[28:32], "little") != 0:
+        return False
+    kind = payload[4]
+    ring = int.from_bytes(payload[6:8], "little")
+    omitted_at = 28 if indirect else 24
+    omitted = int.from_bytes(payload[omitted_at:omitted_at + 4], "little")
+    limit = 16 * 1024 * 1024
+    if kind == 2:
+        return ring == 0 and omitted >= 1 and not any(payload[8:omitted_at])
+    if kind != 1 or omitted != 0 or ring >= 32:
+        return False
+    function_index = int.from_bytes(payload[8:12], "little")
+    offset = int.from_bytes(payload[12:16], "little")
+    if function_index >= limit or not 8 <= offset < limit:
+        return False
+    if not indirect:
+        return int.from_bytes(payload[20:24], "little") < limit
+    return (
+        int.from_bytes(payload[16:20], "little") < limit
+        and int.from_bytes(payload[24:28], "little") < 5
+    )
+
+
 def validate_event(event: object, line_number: int) -> None:
     if not isinstance(event, dict):
         raise ValueError(f"line {line_number}: event must be a JSON object")
@@ -457,6 +504,10 @@ def validate_event(event: object, line_number: int) -> None:
         or any(payload[40:])
     ):
         raise ValueError(f"line {line_number}: native Wasm call_indirect observation is invalid")
+    if event["type"] in ("wasm_dispatch_overflow", "wasm_indirect_overflow") and not valid_wasm_overflow(
+        event, payload, event["type"] == "wasm_indirect_overflow"
+    ):
+        raise ValueError(f"line {line_number}: native Wasm overflow identity is invalid")
     if event["type"] == "js_dispatch_observation" and not valid_js_dispatch(event, payload):
         raise ValueError(f"line {line_number}: native JavaScript dispatch observation is invalid")
     if event["type"] == "request_body" and not valid_request_body(event, payload):

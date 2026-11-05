@@ -74,6 +74,8 @@ bool IsKnownType(const EventType type) noexcept {
     case EventType::kJsInvocationStart:
     case EventType::kJsInvocationSettle:
     case EventType::kJsInvocationRequest:
+    case EventType::kWasmDispatchOverflow:
+    case EventType::kWasmIndirectOverflow:
       return true;
     case EventType::kUnknown:
       return false;
@@ -160,6 +162,10 @@ bool IsValidEvent(const EventRecord& event) noexcept {
   if (event.header.type == EventType::kJsInvocationSettle && !IsValidJsInvocationSettle(event))
     return false;
   if (event.header.type == EventType::kJsInvocationRequest && !IsValidJsInvocationRequest(event))
+    return false;
+  if (event.header.type == EventType::kWasmDispatchOverflow && !IsValidWasmDispatchOverflow(event))
+    return false;
+  if (event.header.type == EventType::kWasmIndirectOverflow && !IsValidWasmIndirectOverflow(event))
     return false;
   return event.header.protocol_version == kEventProtocolVersion &&
          event.header.header_size == sizeof(EventHeader) &&
@@ -335,6 +341,10 @@ std::string_view EventTypeName(const EventType type) noexcept {
       return "js_invocation_settle";
     case EventType::kJsInvocationRequest:
       return "js_invocation_request";
+    case EventType::kWasmDispatchOverflow:
+      return "wasm_dispatch_overflow";
+    case EventType::kWasmIndirectOverflow:
+      return "wasm_indirect_overflow";
     case EventType::kUnknown:
       return "unknown";
   }

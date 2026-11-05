@@ -1183,6 +1183,8 @@ void NativeProbeSink::SetEmitters(const NativeRendererProbeEmitter emitter,
   // replacement session must opt in again.
   PublishVmDispatchBudgetGap();
   PublishNativeJsInvocationGaps(config_generation_.load(std::memory_order_acquire));
+  PublishNativeWasmOverflow(native_wasm_overflow_, NativeProbeType::kWasmDispatchOverflow);
+  PublishNativeWasmOverflow(native_wasm_indirect_overflow_, NativeProbeType::kWasmIndirectOverflow);
   DisableOwnedRegisterSampling();
   DisablePageGuestSampling();
   // SetEmitters is serialized by NativeProbeTransport's bound sequence. Stop
@@ -2300,12 +2302,167 @@ void IngestOwnedRegisterStepThunk(const std::uint32_t instruction_pointer,
                                                                operand_count, sample_index);
 }
 
+void NativeProbeSink::RememberNativeWasmOverflowScope(NativeWasmOverflowAccount& account,
+                                                      const VmAdmission& admission) noexcept {
+  account.session_id.store(admission.session_id, std::memory_order_relaxed);
+  account.monotonic_time_ns.store(admission.monotonic_time_ns, std::memory_order_relaxed);
+  account.frame_id.store(admission.frame_id, std::memory_order_relaxed);
+  account.process_id.store(admission.process_id, std::memory_order_relaxed);
+  account.thread_id.store(admission.thread_id, std::memory_order_relaxed);
+  account.generation.store(admission.generation, std::memory_order_release);
+}
+
+void NativeProbeSink::NoteNativeWasmOverflowOmitted(NativeWasmOverflowAccount& account,
+                                                    const VmAdmission& admission,
+                                                    std::atomic<std::uint64_t>& capped) noexcept {
+  auto count = account.omitted.load(std::memory_order_acquire);
+  while (count < std::numeric_limits<std::uint32_t>::max()) {
+    if (account.omitted.compare_exchange_weak(count, count + 1, std::memory_order_acq_rel)) {
+      // Saturation stops the hook so the count cannot wrap to zero.
+      if (count + 1 == std::numeric_limits<std::uint32_t>::max()) {
+        auto previous = capped.load(std::memory_order_acquire);
+        while (previous < admission.generation &&
+               !capped.compare_exchange_weak(previous, admission.generation,
+                                             std::memory_order_acq_rel)) {
+        }
+      }
+      return;
+    }
+  }
+}
+
+void NativeProbeSink::PublishNativeWasmOverflow(NativeWasmOverflowAccount& account,
+                                                const NativeProbeType type) noexcept {
+  // One cumulative snapshot. A retirement that cannot enqueue it drops the
+  // count here; carrying it into the next session would name the wrong one.
+  // A concurrent increment after this exchange can be missed. Several
+  // snapshots, if a race emits more than one, are not a sum.
+  const auto omitted = account.omitted.exchange(0, std::memory_order_acq_rel);
+  if (omitted == 0) {
+    return;
+  }
+  const auto generation = account.generation.load(std::memory_order_acquire);
+  const auto session = account.session_id.load(std::memory_order_relaxed);
+  const auto time = account.monotonic_time_ns.load(std::memory_order_relaxed);
+  const auto frame = account.frame_id.load(std::memory_order_relaxed);
+  const auto process = account.process_id.load(std::memory_order_relaxed);
+  const auto thread = account.thread_id.load(std::memory_order_relaxed);
+  if (generation == 0 || (generation & 1U) != 0 || session == 0 || time == 0 || frame == 0 ||
+      process == 0 || thread == 0) {
+    return;
+  }
+  NativeProbeEvent event{};
+  event.header.category = NativeProbeCategory::kVm;
+  event.header.type = type;
+  event.header.sequence_number = next_sequence_.fetch_add(1, std::memory_order_relaxed);
+  event.header.monotonic_time_ns = time;
+  event.header.session_id = session;
+  event.header.process_id = process;
+  event.header.thread_id = thread;
+  event.header.frame_id = frame;
+  if (type == NativeProbeType::kWasmIndirectOverflow) {
+    NativeWasmIndirectOverflowPayload payload;
+    payload.kind = kNativeWasmOverflowKindOmitted;
+    payload.omitted_count = omitted;
+    const auto bytes = EncodeNativeWasmIndirectOverflowPayload(payload);
+    event.header.payload_size = static_cast<std::uint32_t>(bytes.size());
+    std::copy(bytes.begin(), bytes.end(), event.inline_payload.begin());
+  } else {
+    NativeWasmDispatchOverflowPayload payload;
+    payload.kind = kNativeWasmOverflowKindOmitted;
+    payload.omitted_count = omitted;
+    const auto bytes = EncodeNativeWasmDispatchOverflowPayload(payload);
+    event.header.payload_size = static_cast<std::uint32_t>(bytes.size());
+    std::copy(bytes.begin(), bytes.end(), event.inline_payload.begin());
+  }
+  static_cast<void>(EmitStatus(event, generation));
+}
+
+NativeProbeSink::WasmOverflowStore NativeProbeSink::StoreNativeWasmDispatchOverflow(
+    const VmAdmission& admission,
+    const NativeWasmDispatchObservation& observation) noexcept {
+  for (std::size_t index = 0; index < native_wasm_overflow_slots_.size(); ++index) {
+    auto& slot = native_wasm_overflow_slots_[index];
+    auto previous = slot.load(std::memory_order_acquire);
+    while (previous < admission.generation) {
+      if (slot.compare_exchange_weak(previous, admission.generation, std::memory_order_acq_rel)) {
+        NativeWasmDispatchOverflowPayload payload;
+        payload.ring_index = static_cast<std::uint16_t>(index);
+        payload.function_index = observation.function_index;
+        payload.module_byte_offset = observation.module_byte_offset;
+        payload.selector = observation.selector;
+        payload.arm_count = observation.table_count;
+        const auto bytes = EncodeNativeWasmDispatchOverflowPayload(payload);
+        NativeProbeEvent event{};
+        event.header.category = NativeProbeCategory::kVm;
+        event.header.type = NativeProbeType::kWasmDispatchOverflow;
+        event.header.sequence_number = next_sequence_.fetch_add(1, std::memory_order_relaxed);
+        event.header.monotonic_time_ns = admission.monotonic_time_ns;
+        event.header.session_id = admission.session_id;
+        event.header.process_id = admission.process_id;
+        event.header.thread_id = admission.thread_id;
+        event.header.frame_id = admission.frame_id;
+        event.header.payload_size = static_cast<std::uint32_t>(bytes.size());
+        std::copy(bytes.begin(), bytes.end(), event.inline_payload.begin());
+        if (EmitStatus(event, admission.generation) != NativeProbeEmitStatus::kAdmitted) {
+          auto claimed = admission.generation;
+          slot.compare_exchange_strong(claimed, previous, std::memory_order_acq_rel);
+          return WasmOverflowStore::kRejected;
+        }
+        return WasmOverflowStore::kStored;
+      }
+    }
+  }
+  return WasmOverflowStore::kRingFull;
+}
+
+NativeProbeSink::WasmOverflowStore NativeProbeSink::StoreNativeWasmIndirectOverflow(
+    const VmAdmission& admission,
+    const NativeWasmIndirectObservation& observation) noexcept {
+  for (std::size_t index = 0; index < native_wasm_indirect_overflow_slots_.size(); ++index) {
+    auto& slot = native_wasm_indirect_overflow_slots_[index];
+    auto previous = slot.load(std::memory_order_acquire);
+    while (previous < admission.generation) {
+      if (slot.compare_exchange_weak(previous, admission.generation, std::memory_order_acq_rel)) {
+        NativeWasmIndirectOverflowPayload payload;
+        payload.ring_index = static_cast<std::uint16_t>(index);
+        payload.function_index = observation.function_index;
+        payload.module_byte_offset = observation.module_byte_offset;
+        payload.table_index = observation.table_index;
+        payload.slot = observation.slot;
+        payload.resolution = static_cast<std::uint32_t>(observation.resolution);
+        const auto bytes = EncodeNativeWasmIndirectOverflowPayload(payload);
+        NativeProbeEvent event{};
+        event.header.category = NativeProbeCategory::kVm;
+        event.header.type = NativeProbeType::kWasmIndirectOverflow;
+        event.header.sequence_number = next_sequence_.fetch_add(1, std::memory_order_relaxed);
+        event.header.monotonic_time_ns = admission.monotonic_time_ns;
+        event.header.session_id = admission.session_id;
+        event.header.process_id = admission.process_id;
+        event.header.thread_id = admission.thread_id;
+        event.header.frame_id = admission.frame_id;
+        event.header.payload_size = static_cast<std::uint32_t>(bytes.size());
+        std::copy(bytes.begin(), bytes.end(), event.inline_payload.begin());
+        if (EmitStatus(event, admission.generation) != NativeProbeEmitStatus::kAdmitted) {
+          auto claimed = admission.generation;
+          slot.compare_exchange_strong(claimed, previous, std::memory_order_acq_rel);
+          return WasmOverflowStore::kRejected;
+        }
+        return WasmOverflowStore::kStored;
+      }
+    }
+  }
+  return WasmOverflowStore::kRingFull;
+}
+
 void NativeProbeSink::SetNativeWasmDispatchEmitter(NativeWasmDispatchEmitter emitter) noexcept {
   native_wasm_emitter_.store(emitter, std::memory_order_release);
 }
 bool NativeProbeSink::IsNativeWasmDispatchEnabled() const noexcept {
   // Called by V8 before handle allocation/frame walking. Do not invoke the
-  // frame-id provider here: its Blink implementation re-enters V8.
+  // frame-id provider here: its Blink implementation re-enters V8. The
+  // 16-observation cap does not clear this; later executions are identified
+  // until the omitted counter saturates.
   const auto generation = config_generation_.load(std::memory_order_acquire);
   if (generation == 0 || (generation & 1U) != 0 ||
       native_wasm_capped_generation_.load(std::memory_order_acquire) >= generation ||
@@ -2403,12 +2560,13 @@ void NativeProbeSink::RecordNativeWasmDispatch(std::uint64_t execution_context_i
       }
     }
   }
-  if (NoteNativeWasmDispatchOmission(admission, NativeWasmOmission::kBudget)) {
-    auto previous = native_wasm_capped_generation_.load(std::memory_order_acquire);
-    while (previous < admission.generation &&
-           !native_wasm_capped_generation_.compare_exchange_weak(previous, admission.generation,
-                                                                 std::memory_order_acq_rel)) {
-    }
+  // The 16 full observations stay capped. This execution keeps a compact
+  // identity, or, past the ring, increments the omitted count. It is not
+  // another observation and it does not invent a parent or artifact.
+  NoteNativeWasmDispatchOmission(admission, NativeWasmOmission::kBudget);
+  RememberNativeWasmOverflowScope(native_wasm_overflow_, admission);
+  if (StoreNativeWasmDispatchOverflow(admission, observation) == WasmOverflowStore::kRingFull) {
+    NoteNativeWasmOverflowOmitted(native_wasm_overflow_, admission, native_wasm_capped_generation_);
   }
 }
 
@@ -2417,7 +2575,8 @@ void NativeProbeSink::SetNativeWasmIndirectEmitter(NativeWasmIndirectEmitter emi
 }
 bool NativeProbeSink::IsNativeWasmIndirectEnabled() const noexcept {
   // Called by V8 before handle allocation/frame walking, like the br_table
-  // predicate. Do not invoke the frame-id provider here.
+  // predicate. Do not invoke the frame-id provider here. The 16-record cap
+  // does not clear this; later calls are identified until saturation.
   const auto generation = config_generation_.load(std::memory_order_acquire);
   if (generation == 0 || (generation & 1U) != 0 ||
       native_wasm_indirect_capped_generation_.load(std::memory_order_acquire) >= generation ||
@@ -2498,12 +2657,11 @@ void NativeProbeSink::RecordNativeWasmIndirect(NativeWasmIndirectObservation obs
       }
     }
   }
-  if (NoteNativeWasmIndirectOmission(admission, NativeWasmOmission::kBudget)) {
-    auto previous = native_wasm_indirect_capped_generation_.load(std::memory_order_acquire);
-    while (previous < admission.generation &&
-           !native_wasm_indirect_capped_generation_.compare_exchange_weak(
-               previous, admission.generation, std::memory_order_acq_rel)) {
-    }
+  NoteNativeWasmIndirectOmission(admission, NativeWasmOmission::kBudget);
+  RememberNativeWasmOverflowScope(native_wasm_indirect_overflow_, admission);
+  if (StoreNativeWasmIndirectOverflow(admission, observation) == WasmOverflowStore::kRingFull) {
+    NoteNativeWasmOverflowOmitted(native_wasm_indirect_overflow_, admission,
+                                  native_wasm_indirect_capped_generation_);
   }
 }
 

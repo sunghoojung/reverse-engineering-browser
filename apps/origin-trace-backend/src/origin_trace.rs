@@ -112,6 +112,90 @@ fn invocation_value(value: &Value) -> Option<String> {
         _ => None,
     }
 }
+fn overflow_u32(bytes: &[u8], offset: usize) -> u32 {
+    u32::from_le_bytes(
+        bytes[offset..offset + 4]
+            .try_into()
+            .expect("fixed overflow field"),
+    )
+}
+/// Compact identity past a 16-record Wasm budget. None is a malformed record,
+/// which the caller rejects instead of showing the bytes as text.
+fn overflow_summary(value: &Value) -> Option<String> {
+    let kind = value["type"].as_str()?;
+    let indirect = kind == "wasm_indirect_overflow";
+    if !indirect && kind != "wasm_dispatch_overflow" {
+        return None;
+    }
+    let payload = value["payload"].as_str()?;
+    let bytes = hex::decode(payload).ok()?;
+    let size = if indirect { 40 } else { 32 };
+    if bytes.len() != size
+        || value["payload_size"] != size
+        || u16::from_le_bytes(bytes[0..2].try_into().ok()?) != 1
+        || u16::from_le_bytes(bytes[2..4].try_into().ok()?) != size as u16
+        || bytes[5] != 0
+    {
+        return None;
+    }
+    if indirect {
+        if u64::from_le_bytes(bytes[32..40].try_into().ok()?) != 0 {
+            return None;
+        }
+    } else if overflow_u32(&bytes, 28) != 0 {
+        return None;
+    }
+    let record_kind = bytes[4];
+    let ring = u16::from_le_bytes(bytes[6..8].try_into().ok()?);
+    let omitted_at = if indirect { 28 } else { 24 };
+    let omitted = overflow_u32(&bytes, omitted_at);
+    let label = if indirect {
+        "call_indirect"
+    } else {
+        "br_table"
+    };
+    if record_kind == 2 {
+        if ring != 0 || omitted == 0 || bytes[8..omitted_at].iter().any(|byte| *byte != 0) {
+            return None;
+        }
+        return Some(format!(
+            "Wasm {label} overflow omitted {omitted} identities past the ring. Not a full observation."
+        ));
+    }
+    let limit = 16 * 1024 * 1024;
+    let function = overflow_u32(&bytes, 8);
+    let offset = overflow_u32(&bytes, 12);
+    if record_kind != 1
+        || omitted != 0
+        || ring >= 32
+        || function >= limit
+        || offset < 8
+        || offset >= limit
+    {
+        return None;
+    }
+    if !indirect {
+        let selector = overflow_u32(&bytes, 16);
+        let arms = overflow_u32(&bytes, 20);
+        if arms >= limit {
+            return None;
+        }
+        return Some(format!(
+            "Wasm br_table overflow identity: function {function}, byte {offset}, selector {selector}, arms {arms}, ring {ring}. Not a full observation."
+        ));
+    }
+    let table = overflow_u32(&bytes, 16);
+    let slot = overflow_u32(&bytes, 20);
+    let resolution = overflow_u32(&bytes, 24);
+    let name =
+        ["resolved", "null", "out-of-bounds", "foreign", "unresolved"].get(resolution as usize)?;
+    if table >= limit {
+        return None;
+    }
+    Some(format!(
+        "Wasm call_indirect overflow identity: caller {function}, byte {offset}, table {table}, slot {slot}, resolution {name}, ring {ring}. Not a full observation."
+    ))
+}
 fn step(value: &Value, relation: &str, confidence: &str) -> Result<Value> {
     let (session, pid, sequence) = reference(value)?;
     if !matches!(value["protocol_version"].as_u64(), Some(2 | 3))
@@ -138,6 +222,8 @@ fn step(value: &Value, relation: &str, confidence: &str) -> Result<Value> {
     }
     let text = match value["type"].as_str() {
         Some(kind) if kind.starts_with("js_invocation_") => invocation_value(value)
+            .ok_or_else(|| Error::bad("Origin trace input contains a malformed event payload"))?,
+        Some("wasm_dispatch_overflow" | "wasm_indirect_overflow") => overflow_summary(value)
             .ok_or_else(|| Error::bad("Origin trace input contains a malformed event payload"))?,
         _ => binary_record_summary(value, decoded.len())
             .unwrap_or_else(|| String::from_utf8_lossy(&decoded).into_owned()),
@@ -990,5 +1076,29 @@ mod tests {
             relations(&trace(&events, &edges, &bodies)),
             ["trace_target", "request_initiator"]
         );
+    }
+
+    #[test]
+    fn wasm_overflow_identity_is_text_and_malformed_bytes_are_rejected() {
+        let mut bytes = [0u8; 32];
+        bytes[0] = 1;
+        bytes[2] = 32;
+        bytes[4] = 1;
+        bytes[8..12].copy_from_slice(&9u32.to_le_bytes());
+        bytes[12..16].copy_from_slice(&47u32.to_le_bytes());
+        bytes[16..20].copy_from_slice(&1000u32.to_le_bytes());
+        bytes[20..24].copy_from_slice(&2u32.to_le_bytes());
+        let mut event = network("wasm_dispatch_overflow", 3, 7, 0, (0, 0));
+        event["category"] = json!("vm");
+        event["payload_size"] = json!(32);
+        event["payload"] = json!(hex::encode(bytes));
+        let built = step(&event, "request_lifecycle", "observed").unwrap();
+        assert_eq!(
+            built["value"],
+            "Wasm br_table overflow identity: function 9, byte 47, selector 1000, arms 2, ring 0. Not a full observation."
+        );
+        bytes[4] = 9;
+        event["payload"] = json!(hex::encode(bytes));
+        assert!(step(&event, "request_lifecycle", "observed").is_err());
     }
 }

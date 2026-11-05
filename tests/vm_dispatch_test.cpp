@@ -92,6 +92,91 @@ int main() {
         return 1;
     }
   }
+  {
+    static_assert(static_cast<std::uint16_t>(reb::EventType::kWasmDispatchOverflow) ==
+                  static_cast<std::uint16_t>(reb::NativeProbeType::kWasmDispatchOverflow));
+    static_assert(static_cast<std::uint16_t>(reb::EventType::kWasmIndirectOverflow) ==
+                  static_cast<std::uint16_t>(reb::NativeProbeType::kWasmIndirectOverflow));
+    static_assert(reb::kWasmOverflowRingLimit == reb::kNativeWasmOverflowRingLimit);
+    reb::NativeWasmDispatchOverflowPayload native;
+    native.function_index = 7;
+    native.module_byte_offset = 47;
+    native.selector = UINT32_MAX;
+    native.arm_count = 2;
+    native.ring_index = 3;
+    const auto encoded = reb::EncodeNativeWasmDispatchOverflowPayload(native);
+    reb::WasmDispatchOverflowPayload decoded;
+    auto event =
+        reb::MakeEvent(reb::EventCategory::kVm, reb::EventType::kWasmDispatchOverflow, 1, 2, 3);
+    event.header.process_id = 4;
+    event.header.thread_id = 5;
+    event.header.frame_id = 6;
+    if (!Check(reb::DecodeWasmDispatchOverflowPayload(encoded, decoded) &&
+                   decoded.function_index == 7 && decoded.selector == UINT32_MAX &&
+                   decoded.arm_count == 2 && decoded.ring_index == 3 &&
+                   reb::EncodeWasmDispatchOverflowPayload(decoded) == encoded,
+               "dispatch overflow encoder parity") ||
+        !Check(reb::SetInlinePayload(event, encoded) && reb::IsValidEvent(event),
+               "dispatch overflow identity rejected"))
+      return 1;
+    event.inline_payload[32] = std::byte{1};
+    if (!Check(!reb::IsValidEvent(event), "dispatch overflow trailing byte accepted"))
+      return 1;
+    decoded.kind = 9;
+    auto bad = reb::EncodeWasmDispatchOverflowPayload(decoded);
+    if (!Check(reb::SetInlinePayload(event, bad) && !reb::IsValidEvent(event),
+               "dispatch overflow kind accepted"))
+      return 1;
+    decoded.kind = reb::kWasmOverflowKindIdentity;
+    decoded.omitted_count = 1;
+    bad = reb::EncodeWasmDispatchOverflowPayload(decoded);
+    if (!Check(reb::SetInlinePayload(event, bad) && !reb::IsValidEvent(event),
+               "dispatch overflow identity with a count accepted"))
+      return 1;
+    decoded = {};
+    decoded.kind = reb::kWasmOverflowKindOmitted;
+    decoded.function_index = 1;
+    decoded.omitted_count = 3;
+    bad = reb::EncodeWasmDispatchOverflowPayload(decoded);
+    if (!Check(reb::SetInlinePayload(event, bad) && !reb::IsValidEvent(event),
+               "dispatch overflow omitted record with an identity accepted"))
+      return 1;
+    decoded = {};
+    decoded.kind = reb::kWasmOverflowKindOmitted;
+    decoded.omitted_count = 3;
+    bad = reb::EncodeWasmDispatchOverflowPayload(decoded);
+    if (!Check(reb::SetInlinePayload(event, bad) && reb::IsValidEvent(event),
+               "dispatch overflow omitted count rejected"))
+      return 1;
+    reb::NativeWasmIndirectOverflowPayload native_indirect;
+    native_indirect.function_index = 4;
+    native_indirect.module_byte_offset = 11;
+    native_indirect.table_index = 1;
+    native_indirect.slot = UINT32_MAX;
+    native_indirect.resolution =
+        static_cast<std::uint32_t>(reb::NativeWasmIndirectResolution::kResolved);
+    native_indirect.ring_index = 2;
+    const auto indirect_encoded = reb::EncodeNativeWasmIndirectOverflowPayload(native_indirect);
+    reb::WasmIndirectOverflowPayload indirect_decoded;
+    if (!Check(reb::DecodeWasmIndirectOverflowPayload(indirect_encoded, indirect_decoded) &&
+                   indirect_decoded.function_index == 4 && indirect_decoded.slot == UINT32_MAX &&
+                   indirect_decoded.resolution == native_indirect.resolution &&
+                   reb::EncodeWasmIndirectOverflowPayload(indirect_decoded) == indirect_encoded,
+               "indirect overflow encoder parity"))
+      return 1;
+    event.header.type = reb::EventType::kWasmIndirectOverflow;
+    if (!Check(reb::SetInlinePayload(event, indirect_encoded) && reb::IsValidEvent(event),
+               "indirect overflow identity rejected"))
+      return 1;
+    indirect_decoded.resolution = 5;
+    const auto indirect_bad = reb::EncodeWasmIndirectOverflowPayload(indirect_decoded);
+    if (!Check(reb::SetInlinePayload(event, indirect_bad) && !reb::IsValidEvent(event),
+               "indirect overflow unknown resolution accepted"))
+      return 1;
+    if (!Check(!reb::DecodeWasmDispatchOverflowPayload(std::span(encoded).first(16), decoded),
+               "dispatch overflow truncation accepted"))
+      return 1;
+  }
   // Model a reader paused after policy validation, then a replacement config.
   // This is the same reservation state used by NativeProbeSink, not a copy of
   // its algorithm. No timing sleeps or native browser are required.

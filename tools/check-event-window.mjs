@@ -26,7 +26,7 @@ const state = {
 let notice;
 const elements = {networkNotice: {hidden: true, dataset: {}}};
 const api = runInNewContext(
-  `${failedNoticeHelpers}\n${models}\n${app.slice(start, end)};({isBrokerResponse,acceptEventWindow,captureWideTotal,countSequenceGaps,countReportedQueueDrops,requestsFromEvents,shownSequenceGaps,shownQueueDrops,shownNamedGaps,namedGapsFromEvents,namedGapsIn,namedGapNotice,eventGapLabel,fingerprintCoverageNotice,renderNetworkNotice,fingerprintSignalCategories,vmGapCategories})`,
+  `${failedNoticeHelpers}\n${models}\n${app.slice(start, end)};({isBrokerResponse,isBrokerEvent,decodePayload,acceptEventWindow,captureWideTotal,countSequenceGaps,countReportedQueueDrops,requestsFromEvents,shownSequenceGaps,shownQueueDrops,shownNamedGaps,namedGapsFromEvents,namedGapsIn,namedGapNotice,eventGapLabel,fingerprintCoverageNotice,renderNetworkNotice,fingerprintSignalCategories,vmGapCategories})`,
   {
     state,
     TextEncoder,
@@ -259,7 +259,24 @@ assert.equal(elements.networkNotice.hidden, true);
 assert.equal(api.namedGapsIn(api.shownNamedGaps(), api.fingerprintSignalCategories).length, 0, 'a vm budget leaves Fingerprinting complete');
 const vmNotice = api.namedGapNotice(api.namedGapsIn(api.shownNamedGaps(), api.vmGapCategories), 'the stored capture');
 assert.equal(vmNotice, 'Sampling budget reached in the stored capture for Wasm br_table dispatch (native_wasm_dispatch_budget_incomplete); ' +
-  'Wasm call_indirect dispatch (native_wasm_indirect_budget_incomplete). Retained observations are exact; later ones were not sampled.');
+  'Wasm call_indirect dispatch (native_wasm_indirect_budget_incomplete). Retained observations are exact; later ones were not sampled. ' +
+  'Wasm executions past that cap keep a compact identity in an overflow record, up to the ring; identities past the ring are a count on that record, not another full observation.');
+const overflowBytes = Buffer.alloc(32);
+overflowBytes.writeUInt16LE(1, 0);
+overflowBytes.writeUInt16LE(32, 2);
+overflowBytes[4] = 1;
+overflowBytes.writeUInt32LE(9, 8);
+overflowBytes.writeUInt32LE(47, 12);
+overflowBytes.writeUInt32LE(1000, 16);
+overflowBytes.writeUInt32LE(2, 20);
+const overflowEvent = {...request(8, 'wasm_dispatch_overflow'), category: 'vm', payload_size: 32, payload: overflowBytes.toString('hex')};
+assert.equal(api.isBrokerEvent(overflowEvent), true);
+assert.equal(api.decodePayload(overflowEvent),
+  'Wasm br_table overflow identity: function 9, byte 47, selector 1000, arms 2, ring 0. Not a full observation.');
+overflowBytes[4] = 9;
+assert.equal(api.isBrokerEvent({...overflowEvent, payload: overflowBytes.toString('hex')}), false);
+const jsBudget = api.namedGapNotice([{category: 'vm', reason: 'native_js_dispatch_budget_incomplete', count: 1n}], 'the stored capture');
+assert.equal(jsBudget, 'Sampling budget reached in the stored capture for JavaScript dispatch (native_js_dispatch_budget_incomplete). Retained observations are exact; later ones were not sampled.');
 console.log('PASS named vm sampling budgets are scoped capture limits, not queue drops or Traffic/Fingerprinting loss');
 
 // Numeric gap payloads remain queue drops beside named markers in the same total.

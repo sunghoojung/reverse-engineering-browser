@@ -19,7 +19,7 @@ boundaries.
 
 | Goal | Current route | Limit |
 | --- | --- | --- |
-| Use the complete packaged product | [macOS release and setup](../../README.md#how-to-use-it) | Apple silicon app pair |
+| Use the complete packaged product | [macOS release and setup](../../README.md#quick-start) | Apple silicon app pair |
 | Develop native helpers, backend, or shared web UI on Linux | [Linux instructions below](#linux-and-wsl-2-development-workflow) | CI covers Linux tools/backend; rendered UI acceptance runs only in the macOS app |
 | Explore the same development UI from Windows 11 | WSL 2, then the Linux instructions | Linux processes inside WSL; this specific setup is unverified |
 | Run native Windows Origin Trace or capture from a Windows custom Brave | [Porting work below](#what-a-native-windows-port-needs) | No supported build, installer, or Windows CI job yet |

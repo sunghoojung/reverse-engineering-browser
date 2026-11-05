@@ -10,7 +10,7 @@ namespace reb {
 namespace {
 // Authored adjustment variant; not the verified public QuickJS adapter.
 constexpr std::string_view kRecipe =
-    R"({"bytecode":{"base":{"kind":"memory-chain","local_index":10,"memory_index":0,"offsets":[1708,20],"value_type":"i32"},"length":{"kind":"memory-chain","local_index":10,"memory_index":0,"offsets":[1708,24],"value_type":"i32"},"memory_index":0},"dispatch_module_offset":132727,"function_index":414,"import_call_offsets":[150000],"module_sha256":"0000000000000000000000000000000000000000000000000000000000000000","opcode":{"endian":"little","width":1},"pc":{"adjustment":"-1","local_index":320,"subtract_memory_base":true,"value_type":"i32"},"sample_limit":256,"version":1})";
+    R"({"bytecode":{"base":{"kind":"memory-chain","local_index":10,"memory_index":0,"offsets":[1708,20],"value_type":"i32"},"length":{"kind":"memory-chain","local_index":10,"memory_index":0,"offsets":[1708,24],"value_type":"i32"},"memory_index":0},"dispatch_module_offset":132727,"function_index":414,"import_call_offsets":[150000],"module_sha256":"0000000000000000000000000000000000000000000000000000000000000000","opcode":{"endian":"little","width":1},"pc":{"adjustment":"-1","local_index":320,"subtract_memory_base":true,"value_type":"i32"},"sample_limit":500,"version":1})";
 TEST(NativeWasmGuestAdapter, ExactTypedRecipe) {
   const auto recipe = ParseNativeWasmGuestAdapter(kRecipe);
   ASSERT_TRUE(recipe);
@@ -18,7 +18,7 @@ TEST(NativeWasmGuestAdapter, ExactTypedRecipe) {
   const auto& site = recipe->sites[0];
   EXPECT_EQ(site.function_index, 414U);
   EXPECT_EQ(site.pc_local_index, 320U);
-  EXPECT_EQ(recipe->sample_limit, 256U);
+  EXPECT_EQ(recipe->sample_limit, 500U);
   EXPECT_EQ(site.memory_base.chain_count, 2);
   EXPECT_EQ(site.pc_adjustment, -1);
   EXPECT_EQ(site.memory_length.offsets[1], 24U);
@@ -29,9 +29,9 @@ TEST(NativeWasmGuestAdapter, RejectsAmbiguityAndUnsupportedInputs) {
   EXPECT_FALSE(ParseNativeWasmGuestAdapter(std::string(kRecipe) + "\n"));
   EXPECT_FALSE(ParseNativeWasmGuestAdapter(
       "{" + std::string(kRecipe).substr(1, kRecipe.size() - 2) + ",\"version\":1}"));
-  for (const auto replacement : {"0", "257", "-1", "1.0", "\"16\""}) {
+  for (const auto replacement : {"0", "501", "-1", "1.0", "\"16\""}) {
     std::string text(kRecipe);
-    const auto at = text.find("\"sample_limit\":256");
+    const auto at = text.find("\"sample_limit\":500");
     text.replace(at + 15, 3, replacement);
     EXPECT_FALSE(ParseNativeWasmGuestAdapter(text));
   }
@@ -87,7 +87,7 @@ TEST(NativeWasmGuestAdapter, RejectsMalformedVersionTwo) {
            Recipe({Site(20, 40), Site(20, 40)}),                // Duplicate site.
            Recipe({Site(20, 40), Site(20, 90)}),                // Two sites of one dispatcher.
            Recipe({Site(30, 90), Site(20, 40)}),                // Not in canonical order.
-           Recipe({Site(20, 40)}, "257"),                       // Budget over the limit.
+           Recipe({Site(20, 40)}, "501"),                       // Budget over the limit.
            Recipe({Site(20, 40)}, "0"), Recipe({Site(20, 4)}),  // Not a module code offset.
        })
     EXPECT_FALSE(ParseNativeWasmGuestAdapter(text)) << text;

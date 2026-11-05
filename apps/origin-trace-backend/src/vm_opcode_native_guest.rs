@@ -12,6 +12,8 @@ const MAX_ADAPTER_BYTES: usize = 8192;
 const MAX_SNAPSHOT_BYTES: usize = 65536;
 // Match kNativeGuestSiteLimit: dispatch sites one adapter recipe configures.
 const MAX_SITES: usize = 8;
+// Match kNativeGuestSampleLimit. Shared by every site of one adapter.
+const MAX_SAMPLES: u32 = 500;
 #[derive(Default)]
 pub(super) struct Samples {
     pub rows: Vec<Value>,
@@ -232,7 +234,7 @@ fn read_recipe(
         || sites.len() > MAX_SITES
         || recipe["sample_limit"]
             .as_u64()
-            .is_none_or(|n| n == 0 || n > 256)
+            .is_none_or(|n| n == 0 || n > u64::from(MAX_SAMPLES))
         || recipe["module_sha256"] != module["sha256"]
     {
         return None;
@@ -300,7 +302,7 @@ fn resolve(
     let recipe_sha = hex::encode(&p[96..]);
     if instance == 0
         || invocation == 0
-        || index >= 256
+        || index >= MAX_SAMPLES
         || length == 0
         || length as usize > MAX_SNAPSHOT_BYTES
         || base.checked_add(length as u64).is_none()
@@ -764,7 +766,7 @@ mod tests {
         let mut per_site = site.clone();
         per_site["sample_limit"] = json!(16);
         let mut over = with(vec![site.clone()]);
-        over["sample_limit"] = json!(257);
+        over["sample_limit"] = json!(MAX_SAMPLES + 1);
         let mut mixed = with(vec![site.clone()]);
         mixed["function_index"] = json!(0);
         // Each marker names the site that would otherwise match the sample.
@@ -814,7 +816,7 @@ mod tests {
         for (path, value) in [
             ("/version", json!(2)),
             ("/sample_limit", json!(0)),
-            ("/sample_limit", json!(257)),
+            ("/sample_limit", json!(MAX_SAMPLES + 1)),
             ("/pc/local_index", json!(999)),
             ("/pc/value_type", json!("i64")),
             ("/pc/adjustment", json!("-0")),
@@ -943,12 +945,22 @@ mod tests {
         // The version 2 schema states the same site bound and shared budget,
         // and accepts a recipe this reader admits.
         assert!(header.contains(&format!("kNativeGuestSiteLimit = {MAX_SITES};")));
+        assert!(header.contains(&format!("kNativeGuestSampleLimit = {MAX_SAMPLES};")));
+        let core = include_str!("../../../include/reb/wasm_guest.hpp");
+        assert!(core.contains(&format!("kWasmGuestSampleBudget = {MAX_SAMPLES};")));
         let v2: Value = serde_json::from_str(include_str!(
             "../../../protocol/native-wasm-guest-adapter-v2.schema.json"
         ))
         .unwrap();
         assert_eq!(v2["properties"]["sites"]["maxItems"], MAX_SITES);
-        assert_eq!(v2["properties"]["sample_limit"]["maximum"], 256);
+        assert_eq!(
+            v2["properties"]["sample_limit"]["maximum"].as_u64(),
+            Some(u64::from(MAX_SAMPLES))
+        );
+        assert_eq!(
+            schema["properties"]["sample_limit"]["maximum"].as_u64(),
+            Some(u64::from(MAX_SAMPLES))
+        );
         assert!(
             v2["$defs"]["site"]["properties"]
                 .get("sample_limit")
@@ -958,6 +970,11 @@ mod tests {
         let hash = Fixture::new().module["sha256"].clone();
         let mut shared = two_sites(&hash);
         assert!(validator.is_valid(&shared));
+        let mut at_limit = shared.clone();
+        at_limit["sample_limit"] = json!(MAX_SAMPLES);
+        assert!(validator.is_valid(&at_limit));
+        at_limit["sample_limit"] = json!(MAX_SAMPLES + 1);
+        assert!(!validator.is_valid(&at_limit));
         let site = shared["sites"][0].clone();
         shared["sites"] = json!(vec![site; MAX_SITES + 1]);
         assert!(!validator.is_valid(&shared));

@@ -1352,10 +1352,10 @@ void NativeWasmRuntimeAdmission() {
                           refused.header.payload_size) ==
              "native_wasm_dispatch_transport_unavailable");
   native_wasm_accept = true;
-  for (unsigned i = 0; i < 16; ++i)
+  for (std::size_t i = 0; i < reb::kNativeWasmDispatchSampleBudget; ++i)
     record();
   const auto initial_drain = Drain(queue);
-  assert(native_wasm_retained == 16 && initial_drain == 0);
+  assert(native_wasm_retained == reb::kNativeWasmDispatchSampleBudget && initial_drain == 0);
   Fill(queue);
   record();  // A full ring must NOT permanently suppress the cap omission.
   assert(sink.IsNativeWasmDispatchEnabled());
@@ -1366,7 +1366,7 @@ void NativeWasmRuntimeAdmission() {
                           gap.header.payload_size) == "native_wasm_dispatch_budget_incomplete");
   assert(!sink.IsNativeWasmDispatchEnabled());
   record();
-  assert(native_wasm_retained == 16 && Drain(queue) == 0);
+  assert(native_wasm_retained == reb::kNativeWasmDispatchSampleBudget && Drain(queue) == 0);
   Configure(queue);
   sink.SetNativeWasmDispatchEmitter(&CaptureNativeWasm);  // Same session, fresh policy generation.
   native_wasm_retained = 0;

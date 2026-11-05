@@ -8932,7 +8932,7 @@
               "sample_index": {
                 "type": "integer",
                 "minimum": 0,
-                "maximum": 15
+                "maximum": 499
               },
               "selected_arm": {
                 "type": "integer",
@@ -9296,7 +9296,7 @@
               "sample_index": {
                 "type": "integer",
                 "minimum": 0,
-                "maximum": 255
+                "maximum": 499
               },
               "instruction_pointer": {
                 "type": "integer",

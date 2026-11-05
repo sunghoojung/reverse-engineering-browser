@@ -443,8 +443,9 @@ existing omission reason.
 
 Rebuilt browsers can record physical `br_table` operands with
 `REB_NATIVE_WASM_DISPATCH=1` through the native launcher, or manually with
-`--js-flags=--reb-wasm-br-table-dispatch`. This is Liftoff-only instrumentation,
-not arbitrary interpreter guest-PC recovery. See
+`--js-flags=--reb-wasm-br-table-dispatch`. One configuration retains 500
+observations; further executions become one coalesced gap. This is Liftoff-only
+instrumentation, not arbitrary interpreter guest-PC recovery. See
 [wire contract and verification limits](../../../protocol/native-wasm-dispatch-v1.md).
 
 `call_indirect` and `return_call_indirect` dispatch has a separate opt-in:
@@ -461,7 +462,7 @@ each `br_table`; without it, physical dispatch observation alone pays neither
 cost. While capture is enabled, each guest activation also walks at most 128
 Wasm frames once, at its first selected dispatch, to name its parent
 activation and exact outer dispatch. A version 2 adapter configures up to
-eight dispatcher functions under one shared sample budget, so an inner
+eight dispatcher functions under one shared sample budget of at most 500, so an inner
 interpreter at one site links to its outer handler at another; the walk then
 treats an untracked frame of any configured dispatcher as a possible parent.
 See [native guest observations](../../../protocol/native-wasm-guest-v1.md).

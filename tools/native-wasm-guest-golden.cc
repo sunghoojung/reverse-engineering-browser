@@ -107,7 +107,7 @@ int main(int argc, char** argv) {
     sample.memory_base = std::numeric_limits<std::uint64_t>::max();
     valid_sample = false;
   } else if (mode == "sample-limit") {
-    sample.sample_index = 256;
+    sample.sample_index = reb::kWasmGuestSampleBudget;
     valid_sample = false;
   } else if (mode == "digest") {
     sample.recipe_sha256.fill(std::byte{0});

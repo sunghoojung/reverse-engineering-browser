@@ -34,7 +34,7 @@ The browser captures the module through the artifact receiver and emits the
 observation only after accepted ACK. Stale navigation/configuration callbacks
 are rejected. Observations of the same module in the same document share one
 module artifact; each is emitted once that artifact is accepted (or at once if
-it already was). Capture is capped at 16 observations per configuration and
+it already was). Capture is capped at 500 observations per configuration and
 16 MiB per module. A lost observation becomes a `gap` in its own renderer
 sequence slot. Queue, transport and budget losses are explicit incompleteness,
 never invented samples. Every observation the browser refuses, whether
@@ -60,7 +60,7 @@ The payload is exactly128bytes, explicitly little-endian:
 |8|module instruction offset|u32|
 |12|unsigned selector|u32|
 |16|explicit table arm count|u32|
-|20|sample index (0–15)|u32|
+|20|sample index (0–499)|u32|
 |24|reserved, all zero|104bytes|
 
 Version 2 replaces the first 8 reserved bytes with the JavaScript invocation

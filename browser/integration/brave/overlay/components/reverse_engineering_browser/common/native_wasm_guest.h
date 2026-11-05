@@ -20,11 +20,11 @@
 #include "native_wasm_guest_wire.h"
 namespace reb {
 inline constexpr std::size_t kNativeGuestSnapshotLimit = 65536;
-inline constexpr std::size_t kNativeGuestSampleLimit = 256;
+inline constexpr std::size_t kNativeGuestSampleLimit = 500;
 inline constexpr std::size_t kNativeGuestAdapterLimit = 8192;
 // Dispatch sites per adapter. Every site draws on the one shared sample limit,
-// so the snapshot budget (sample limit x snapshot limit, at most 16 MiB) and
-// the 128 sampled activations are never multiplied per site.
+// so the snapshot budget (500 snapshots of 65536 bytes, 31.25 MiB) and the 128
+// sampled activations are never multiplied per site.
 inline constexpr std::size_t kNativeGuestSiteLimit = 8;
 // Host events per capture configuration that may travel the parent-binding
 // path. Later hosts stay on the ordinary bounded queue, unparented, after one

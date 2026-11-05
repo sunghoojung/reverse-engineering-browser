@@ -6,9 +6,11 @@
 #define BRAVE_COMPONENTS_REVERSE_ENGINEERING_BROWSER_COMMON_NATIVE_ARTIFACT_QUEUE_LIMITS_H_
 #include <cstddef>
 namespace reb {
-// 256 snapshots and 16 module/adapter pairs, still bounded by the same 32 MiB.
-inline constexpr std::size_t kNativeArtifactMaxQueuedCount = 288;
-inline constexpr std::size_t kNativeArtifactMaxQueuedBytes = 32U * 1024U * 1024U;
+// One in-flight slot per guest sample (kNativeGuestSampleLimit) plus 16
+// module/adapter pairs. Bytes cover those snapshots at kNativeGuestSnapshotLimit
+// plus the 16 MiB the old 32 MiB cap left beside 256 full snapshots.
+inline constexpr std::size_t kNativeArtifactMaxQueuedCount = 532;
+inline constexpr std::size_t kNativeArtifactMaxQueuedBytes = 500U * 65536U + 16U * 1024U * 1024U;
 [[nodiscard]] constexpr bool CanQueueNativeArtifact(std::size_t count,
                                                     std::size_t bytes,
                                                     std::size_t incoming) noexcept {

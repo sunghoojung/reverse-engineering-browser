@@ -13,6 +13,8 @@
 namespace reb {
 // Dispatch sites one adapter recipe may configure.
 inline constexpr std::uint32_t kWasmGuestSiteLimit = 8;
+// Matches kNativeGuestSampleLimit. One shared budget for every site.
+inline constexpr std::uint32_t kWasmGuestSampleBudget = 500;
 // Adapter-interpreted values from an actual native execution. Semantics require
 // a separately validated adapter and retained module/bytecode artifacts.
 namespace wasm_guest_detail {
@@ -279,8 +281,8 @@ static_assert(offsetof(WasmGuestInvocationPayload, recipe_sha256) == 32);
          value.protocol_version == 1 && value.payload_size == 128 &&
          value.function_index < 16U * 1024U * 1024U && value.module_byte_offset >= 8 &&
          value.module_byte_offset < 16U * 1024U * 1024U &&
-         value.table_count < 16U * 1024U * 1024U && value.sample_index < 256 && value.instance_id &&
-         value.invocation_id && value.bytecode_artifact_id &&
+         value.table_count < 16U * 1024U * 1024U && value.sample_index < kWasmGuestSampleBudget &&
+         value.instance_id && value.invocation_id && value.bytecode_artifact_id &&
          value.bytecode_artifact_id != event.header.artifact_id && value.memory_length &&
          value.memory_length <= 65536 && value.guest_pc < value.memory_length &&
          value.memory_base <= std::numeric_limits<std::uint64_t>::max() - value.memory_length &&

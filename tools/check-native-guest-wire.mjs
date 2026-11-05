@@ -27,7 +27,7 @@ const links = JSON.parse(fs.readFileSync(path+'.host-links.json','utf8'));
 if(row.interpretation === 'verified-dataflow') assert.equal(links.workspaces[0].links[0].guest_position.instruction_pointer,1);
 else assert.equal(links.workspaces[0].links[0].guest_position,null,'explicit adapter does not prove guest semantics');
 assert(model.isVmHostLinksDocument(links,doc),'shipped UI preserves verified versus explicit-adapter host semantics');
-for (const [key,value] of Object.entries({monotonic_time_ns:'01',instruction_pointer:4,instruction_pointer_units:'instruction-index',raw_pc_bits:257,instance_id:'0',sample_index:256,memory_length:65537,pc_adjustment:'9223372036854775808',module_byte_offset:7,adapter_sha256:'bad',opcode_width:3,interpretation:'unknown'})) {
+for (const [key,value] of Object.entries({monotonic_time_ns:'01',instruction_pointer:4,instruction_pointer_units:'instruction-index',raw_pc_bits:257,instance_id:'0',sample_index:500,memory_length:65537,pc_adjustment:'9223372036854775808',module_byte_offset:7,adapter_sha256:'bad',opcode_width:3,interpretation:'unknown'})) {
  const bad=structuredClone(doc); bad.workspaces[0].native_guest_samples[0][key]=value;
  assert.equal(model.isVmOpcodeWorkspaceDocument(bad),false,key);
 }

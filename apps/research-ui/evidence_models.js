@@ -376,7 +376,7 @@
           selector:view.getUint32(12,true),table_count:view.getUint32(16,true),sample_index:view.getUint32(20,true),
           ...nativeInvocationRow(context)};
         return row.function_index < 16777216 && row.module_byte_offset >= 8 && row.module_byte_offset < 16777216 &&
-          row.table_count < 16777216 && row.sample_index < 16 ? row : null;
+          row.table_count < 16777216 && row.sample_index < 500 ? row : null;
       }
 
       // Physical call_indirect: function, offset, table, slot, callee, resolution, sample.
@@ -2016,7 +2016,7 @@
         if (!vmWorkspaceExact(row, vmNativeRowKeys(row, ['event','function_index','module_byte_offset','selector','table_count','sample_index','selected_arm','is_default'])) ||
           !vmSampleEvent(row.event) || !vmNativeRowTimeValid(row) || !isSafeIntegerInRange(row.function_index,0,16777215) ||
           !isSafeIntegerInRange(row.module_byte_offset,8,16777215) || !isSafeIntegerInRange(row.selector,0,0xffffffff) ||
-          !isSafeIntegerInRange(row.table_count,0,16777215) || !isSafeIntegerInRange(row.sample_index,0,15) ||
+          !isSafeIntegerInRange(row.table_count,0,16777215) || !isSafeIntegerInRange(row.sample_index,0,499) ||
           row.selected_arm !== Math.min(row.selector,row.table_count) || row.is_default !== (row.selector >= row.table_count)) return false;
         const site = workspace.dispatch_inventory?.candidates.find(site => site.byte_offset === row.module_byte_offset);
         return site ? site.kind === 'br_table' && site.function_index === row.function_index && site.arm_count === row.table_count
@@ -2133,7 +2133,7 @@
           !['i32','i64'].includes(row.pc_value_type) || typeof row.pc_subtract_memory_base !== 'boolean' ||
           !['pc_local_index','memory_index','selector','opcode'].every(k => isSafeIntegerInRange(row[k],0,0xffffffff)) ||
           !isSafeIntegerInRange(row.function_index,0,16777215) || !isSafeIntegerInRange(row.module_byte_offset,8,16777215) ||
-          !isSafeIntegerInRange(row.table_count,0,16777215) || !isSafeIntegerInRange(row.sample_index,0,255) ||
+          !isSafeIntegerInRange(row.table_count,0,16777215) || !isSafeIntegerInRange(row.sample_index,0,499) ||
           row.selected_arm !== Math.min(row.selector,row.table_count) || row.is_default !== (row.selector >= row.table_count) ||
           !isSafeIntegerInRange(row.memory_length,1,65536) || !isSafeIntegerInRange(row.instruction_pointer,0,65535) ||
           row.instruction_pointer_units !== 'byte-offset' || ![1,2,4].includes(row.opcode_width) ||

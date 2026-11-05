@@ -160,9 +160,15 @@ void Put(Runtime& s, std::size_t offset, std::uint32_t value) {
     s.memory[offset + i] = static_cast<std::uint8_t>(value >> (8 * i));
 }
 int main() {
-  static_assert(reb::CanQueueNativeArtifact(287, 0, 32U * 1024U * 1024U));
-  static_assert(!reb::CanQueueNativeArtifact(288, 0, 1));
-  static_assert(!reb::CanQueueNativeArtifact(0, 32U * 1024U * 1024U, 1));
+  static_assert(reb::kWasmGuestSampleBudget == reb::kNativeGuestSampleLimit);
+  static_assert(reb::kNativeArtifactMaxQueuedCount == reb::kNativeGuestSampleLimit + 32);
+  static_assert(reb::kNativeArtifactMaxQueuedBytes ==
+                reb::kNativeGuestSampleLimit * reb::kNativeGuestSnapshotLimit +
+                    16U * 1024U * 1024U);
+  static_assert(reb::CanQueueNativeArtifact(reb::kNativeArtifactMaxQueuedCount - 1, 0,
+                                            reb::kNativeArtifactMaxQueuedBytes));
+  static_assert(!reb::CanQueueNativeArtifact(reb::kNativeArtifactMaxQueuedCount, 0, 1));
+  static_assert(!reb::CanQueueNativeArtifact(0, reb::kNativeArtifactMaxQueuedBytes, 1));
   static_assert(!reb::CanQueueNativeArtifact(0, SIZE_MAX, 1));
   static_assert(!reb::CanQueueNativeArtifact(0, 1, SIZE_MAX));
   Runtime runtime;

@@ -14,6 +14,10 @@ pub(super) struct Observations {
     counts: BTreeMap<(u32, Option<u32>), u64>,
 }
 
+/// Physical `br_table` samples kept per configuration. Matches
+/// `kNativeWasmDispatchSampleBudget`. `call_indirect` stays at 16.
+const DISPATCH_SAMPLE_BUDGET: u32 = 500;
+
 /// Envelope rules shared by both physical streams: exact artifact scope, no
 /// caller provenance or parent, and canonical native identities.
 fn envelope(event: &Value, artifact: &Value) -> bool {
@@ -55,7 +59,7 @@ fn observation(event: &Value, artifact: &Value, module: &mut Module<'_>) -> Opti
     if function >= 16 * 1024 * 1024
         || !(8..16 * 1024 * 1024).contains(&offset)
         || count >= 16 * 1024 * 1024
-        || index >= 16
+        || index >= DISPATCH_SAMPLE_BUDGET
         || module
             .function(function)
             .is_none_or(|facts| facts.br_tables.get(&offset) != Some(&count))
@@ -381,13 +385,24 @@ pub(super) mod tests {
             bad[field] = json!("2");
             assert_eq!(read(&artifact, &module(), &[bad]).count, 0);
         }
-        for (offset, value) in [(4, 1u32), (8, 46), (16, 3), (20, 16), (24, 1)] {
+        for (offset, value) in [
+            (4, 1u32),
+            (8, 46),
+            (16, 3),
+            (20, DISPATCH_SAMPLE_BUDGET),
+            (24, 1),
+        ] {
             let mut bad = event.clone();
             let mut bytes = hex::decode(bad["payload"].as_str().unwrap()).unwrap();
             bytes[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
             bad["payload"] = json!(hex::encode(bytes));
             assert_eq!(read(&artifact, &module(), &[bad]).count, 0);
         }
+        let mut high = event.clone();
+        let mut high_bytes = hex::decode(high["payload"].as_str().unwrap()).unwrap();
+        high_bytes[20..24].copy_from_slice(&(DISPATCH_SAMPLE_BUDGET - 1).to_le_bytes());
+        high["payload"] = json!(hex::encode(high_bytes));
+        assert_eq!(read(&artifact, &module(), &[high]).count, 1);
         let mut handlers = vec![
             json!({"source":{"byte_offset":47},"opcode":null,"label":"br_table default","sample_count":0}),
             json!({"source":{"byte_offset":70},"opcode":null,"label":"br_table default","sample_count":0}),

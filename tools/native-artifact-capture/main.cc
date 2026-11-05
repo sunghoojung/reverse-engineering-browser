@@ -619,30 +619,34 @@ void NativeWasmDispatch(reb::ArtifactReceiver& receiver) {
   observation.table_count = 1;
   Configure();
   const auto before_budget = count();
-  for (unsigned i = 0; i < 17; ++i) {
+  for (std::size_t i = 0; i < reb::kNativeWasmDispatchSampleBudget + 1; ++i) {
     observation.header.sequence_number = 2000 + i;
     sink.CaptureWasmDispatch(observation, mojo_base::BigBuffer(module), [] { return true; });
   }
-  Check(transfers.size() == 1, "Sixteen observations of one module share one artifact");
+  Check(transfers.size() == 1, "Budget observations of one module share one artifact");
   Check(Payload(events.back()) == "native_wasm_dispatch_browser_budget_incomplete" &&
-            events.back().header.sequence_number == 2016 && events.back().header.process_id == 123,
+            events.back().header.sequence_number == 2000 + reb::kNativeWasmDispatchSampleBudget &&
+            events.back().header.process_id == 123,
         "Cross-renderer browser budget fills the refused observation's own slot");
   const auto after_budget_gap = events.size();
-  observation.header.sequence_number = 2017;
+  observation.header.sequence_number = 2001 + reb::kNativeWasmDispatchSampleBudget;
   sink.CaptureWasmDispatch(observation, mojo_base::BigBuffer(module), [] { return true; });
-  Check(events.size() == after_budget_gap + 1 && events.back().header.sequence_number == 2017,
+  Check(events.size() == after_budget_gap + 1 &&
+            events.back().header.sequence_number == 2001 + reb::kNativeWasmDispatchSampleBudget,
         "Every observation past the browser budget fills its own slot");
   while (!transfers.empty())
     Receive(receiver, transfers.begin()->first);
-  Check(count() == before_budget + 16, "Every admitted observation is published after one ACK");
+  Check(count() == before_budget +
+                       static_cast<decltype(before_budget)>(reb::kNativeWasmDispatchSampleBudget),
+        "Every admitted observation is published after one ACK");
   Configure();
   NativeArtifactSocketClient::Get().connected = false;
-  observation.header.sequence_number = 2100;
+  observation.header.sequence_number = 2002 + reb::kNativeWasmDispatchSampleBudget;
   sink.CaptureWasmDispatch(observation, mojo_base::BigBuffer(module), [] { return true; });
   NativeArtifactSocketClient::Get().connected = true;
   Check(transfers.empty() &&
             Payload(events.back()) == "native_wasm_dispatch_artifact_unavailable" &&
-            events.back().header.sequence_number == 2100,
+            events.back().header.sequence_number == 2002 + reb::kNativeWasmDispatchSampleBudget,
         "A lost artifact channel fills the observation's own slot");
   Configure(kSession, reb::NativeProbeCategoryMask(reb::NativeProbeCategory::kArtifact));
   sink.CaptureWasmDispatch(observation, mojo_base::BigBuffer(module), [] { return true; });

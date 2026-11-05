@@ -66,7 +66,9 @@ static_assert(offsetof(NativeWasmDispatchObservationPayload, reserved) == 32);
   std::copy(value.reserved.begin(), value.reserved.end(), out.begin() + 32);
   return out;
 }
-inline constexpr std::size_t kNativeWasmDispatchSampleBudget = 16;
+// One capture configuration. The probe queue holds 8192 records, so this
+// stays well under the ring. call_indirect has its own budget.
+inline constexpr std::size_t kNativeWasmDispatchSampleBudget = 500;
 struct NativeWasmDispatchObservation final {
   NativeProbeHeader header{};
   std::uint64_t execution_context_id = 0;

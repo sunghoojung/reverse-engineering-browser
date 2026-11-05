@@ -39,10 +39,10 @@ spelling, and makes every activation belong to exactly one site, so its parent
 walk and host attribution stay unambiguous. Two dispatch loops in one function
 are not supported.
 
-All sites share one `sample_limit` (at most 256), the renderer's 128 tracked
-activations and its 16 document bindings. The 16 MiB snapshot budget is therefore
-never multiplied per site: it stays at most 256 snapshots of 65536 bytes. When
-the shared limit is reached the next sample at any site records
+All sites share one `sample_limit` (at most 500), the renderer's 128 tracked
+activations and its 16 document bindings. The snapshot budget is therefore
+never multiplied per site: it stays at most 500 snapshots of 65536 bytes
+(31.25 MiB). When the shared limit is reached the next sample at any site records
 `native_guest_sample_limit`, as with one site. The browser's session parser
 refuses a malformed version 2 adapter (too large, 0 or more than 8 sites, a
 duplicate or out-of-order site, a per-site or over-limit budget, or version 1
@@ -72,8 +72,9 @@ Numeric local indices include parameters and are not limited to the first 32
 locals. Compiler metadata and active-frame checks control access; reference
 values and host addresses are never exposed. Memory snapshots reject shared
 memory and out-of-bounds/overflowing ranges. A snapshot is at most 65536 bytes;
-adapter sample limit is 1–256, with a 16 MiB aggregate bytecode-snapshot budget
-(module and adapter artifacts are additional). Each renderer thread tracks at
+adapter sample limit is 1–500, with an aggregate bytecode-snapshot budget of
+500 snapshots of 65536 bytes (31.25 MiB; module and adapter artifacts are
+additional). Each renderer thread tracks at
 most 128 sampled activations at once. Activations have no exit callback, so a
 full table reclaims the least recently sampled activation that is not an
 ancestor of the one being sampled, following the engine's resolved parent

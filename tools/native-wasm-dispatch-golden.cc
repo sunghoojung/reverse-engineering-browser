@@ -76,7 +76,7 @@ int main(int argc, char** argv) {
     native.header.payload_size = 127;
     syntactically_valid = false;
   } else if (mode == "sample-index") {
-    payload.sample_index = 16;
+    payload.sample_index = reb::kNativeWasmDispatchSampleBudget;
     syntactically_valid = false;
   } else if (mode == "flags") {
     native.header.flags = 1;

@@ -29,7 +29,7 @@ encodings and duplicate keys.
 VM Lab must show retained exact module/adapter/bytecode identities and byte-offset
 PCs, plus retained direct dispatch parents for Canvas host rows. A successful page
 result alone is not native capture proof. Missing patches, exhausted budgets and
-missing parents remain explicit omissions. Limit256 samples,64KiB per snapshot.
+missing parents remain explicit omissions. Limit500 samples,64KiB per snapshot.
 Workers/shared memory/async callbacks/cross-process network ancestry are not
 established. Failed initial module/adapter admission requires a new capture
 configuration; IPC enqueue is not delivery and no automatic retry is promised.

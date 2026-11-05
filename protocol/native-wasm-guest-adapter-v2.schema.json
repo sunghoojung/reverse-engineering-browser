@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://reverse-engineering-browser.local/protocol/native-wasm-guest-adapter-v2.schema.json",
   "title": "Native Wasm guest adapter v2",
-  "description": "Digest-bound interpretation of native numeric locals and bounded memory at 1 to 8 dispatch sites of one module. Admission additionally requires exact compact canonical JSON, at most 8192 UTF-8 bytes, strictly increasing site function_index (each site is a distinct dispatcher function, so duplicate sites are rejected), supported non-shared Wasm32 memory, verified local types and sites. All sites share one sample_limit and therefore one snapshot budget of at most 256 samples of 65536 bytes; no budget is multiplied per site. Version 1 adapters remain valid as one-site adapters. Schema validation alone does not prove interpreter semantics.",
+  "description": "Digest-bound interpretation of native numeric locals and bounded memory at 1 to 8 dispatch sites of one module. Admission additionally requires exact compact canonical JSON, at most 8192 UTF-8 bytes, strictly increasing site function_index (each site is a distinct dispatcher function, so duplicate sites are rejected), supported non-shared Wasm32 memory, verified local types and sites. All sites share one sample_limit and therefore one snapshot budget of at most 500 samples of 65536 bytes (31.25 MiB); no budget is multiplied per site. Version 1 adapters remain valid as one-site adapters. Schema validation alone does not prove interpreter semantics.",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -18,7 +18,7 @@
     "sample_limit": {
       "type": "integer",
       "minimum": 1,
-      "maximum": 256,
+      "maximum": 500,
       "description": "Shared by every site: the renderer and browser count one sample budget for the whole adapter."
     },
     "module_sha256": {

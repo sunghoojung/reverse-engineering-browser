@@ -61,6 +61,8 @@ static_assert(offsetof(WasmDispatchObservationPayload, reserved) == 32);
   std::copy(value.reserved.begin(), value.reserved.end(), out.begin() + 32);
   return out;
 }
+// Matches kNativeWasmDispatchSampleBudget. call_indirect keeps its own budget.
+inline constexpr std::uint32_t kWasmDispatchSampleBudget = 500;
 [[nodiscard]] inline bool DecodeWasmDispatchObservationPayload(
     std::span<const std::byte> bytes,
     WasmDispatchObservationPayload& value) noexcept {
@@ -99,7 +101,8 @@ static_assert(offsetof(WasmDispatchObservationPayload, reserved) == 32);
          (value.protocol_version == 1 || value.protocol_version == 2) &&
          value.payload_size == 128 && value.function_index < 16U * 1024U * 1024U &&
          value.table_count < 16U * 1024U * 1024U && value.module_byte_offset >= 8 &&
-         value.module_byte_offset < 16U * 1024U * 1024U && value.sample_index < 16 &&
+         value.module_byte_offset < 16U * 1024U * 1024U &&
+         value.sample_index < kWasmDispatchSampleBudget &&
          // Version 1 reserved the context bytes, so it can only be not_observed.
          (value.protocol_version == 2 ||
           (value.js_invocation_state == 0 && value.js_invocation_id == 0)) &&

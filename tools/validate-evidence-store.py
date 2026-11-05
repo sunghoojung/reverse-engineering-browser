@@ -427,7 +427,7 @@ def validate_event(event: object, line_number: int) -> None:
         or int.from_bytes(payload[4:8], "little") >= 16777216
         or not 8 <= int.from_bytes(payload[8:12], "little") < 16777216
         or int.from_bytes(payload[16:20], "little") >= 16777216
-        or int.from_bytes(payload[20:24], "little") >= 16
+        or int.from_bytes(payload[20:24], "little") >= 500
         or wasm_context_invalid(payload, payload[0], 2, 24)
         or any(payload[32:])
     ):
@@ -495,7 +495,7 @@ def validate_event(event: object, line_number: int) -> None:
         else:
             invalid |= (not 0 < int(event["parent_event_id"]) < int(event["sequence_number"])
                         or not 8 <= at(8, 4) < 16777216 or at(16, 4) >= 16777216
-                        or at(20, 4) >= 256 or at(24, 8) == 0 or at(32, 8) == 0
+                        or at(20, 4) >= 500 or at(24, 8) == 0 or at(32, 8) == 0
                         or at(56, 8) == 0 or at(56, 8) == int(event["artifact_id"])
                         or not 0 < at(72, 4) <= 65536 or at(40, 8) >= at(72, 4)
                         or at(64, 8) + at(72, 4) > 0xFFFFFFFFFFFFFFFF or not any(payload[96:]))

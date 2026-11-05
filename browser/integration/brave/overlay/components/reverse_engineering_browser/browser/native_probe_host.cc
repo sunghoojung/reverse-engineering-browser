@@ -184,11 +184,12 @@ void NativeProbeHost::CaptureWasmDispatch(const std::uint64_t capture_epoch,
     session_->Emit(RendererGap(NativeProbeEvent{.header = observation.header}, reason));
   };
   if (!monotonic_time_ns || monotonic_time_ns > now || !thread_id || !frame_id ||
-      !execution_context_id || sample_index >= 16 || content.size() > 16U * 1024U * 1024U) {
+      !execution_context_id || sample_index >= kNativeWasmDispatchSampleBudget ||
+      content.size() > 16U * 1024U * 1024U) {
     refuse("native_wasm_dispatch_limit_or_invalid");
     return;
   }
-  if (wasm_capture_count_ >= 16) {
+  if (wasm_capture_count_ >= kNativeWasmDispatchSampleBudget) {
     refuse("native_wasm_dispatch_browser_budget_incomplete");
     return;
   }

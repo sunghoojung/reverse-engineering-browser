@@ -23,7 +23,7 @@
     "sample_limit": {
       "type": "integer",
       "minimum": 1,
-      "maximum": 256
+      "maximum": 500
     },
     "module_sha256": {
       "type": "string",

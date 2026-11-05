@@ -142,6 +142,10 @@ keeps its own drop count, and a 32-step walk that has not halted counts one
 extra loss. Reconfigure clears every opt-in. Ignition, Liftoff, and TurboFan
 are not sampled. A rebuilt browser still needs the Wasm patch applied and a
 live page run before those program counters are browser evidence.
+`wasm_execution_outcome` (event 27) is the trap or still-executing follow-up
+for one host-visible call. The five-second deadline records the call; only
+an explicit interrupt traps it. See
+[execution outcomes](../../../../../../protocol/native-wasm-dispatch-v1.md#execution-outcomes).
 See the [capability boundary and acceptance gates](../../../../../../protocol/vm-opcode-workspace-v2.md#native-browser-capability-boundary).
 The VM category also permits 32-byte through 16-MiB snapshots of runtime-created
 `ArrayBuffer`, `Uint8Array`, `Uint16Array`, and `Uint32Array` data. The V8 hook

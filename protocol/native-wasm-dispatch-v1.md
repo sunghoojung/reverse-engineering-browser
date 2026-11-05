@@ -212,13 +212,137 @@ module with a `br_table` or `call_indirect` inside a loop. A module whose only
 dispatch is a loop-free `return_call_indirect` chain has no workspace, so its
 rows stay in the event store without rows or claims in VM Lab.
 
+## Execution outcomes
+
+A dispatch record is the instruction that was about to run. It does not say
+whether that call returned, trapped, or is still inside the function. This
+record is the follow-up for one host-visible Wasm call. It does not change
+the `call_indirect` resolution enum: that enum is only the table entry.
+A signature mismatch on a resolved entry stays `resolved` and adds a trap
+with reason `signature_mismatch`. It is never stored as resolution `null`.
+
+### What is known
+
+The engine's own trap message is the reason. This record does not re-check
+the signature, so a legal subtype is not reported as a mismatch. The named
+reasons are `signature_mismatch`, `unreachable`, `out_of_bounds`,
+`null_entry` (`null function` only, not a null dereference), and `interrupt`.
+Any other Wasm trap message is reason `unknown`. That value means the engine
+trapped and this record does not name the message. On a still-executing
+record the reason is `unknown` because it is not a trap.
+
+`out_of_bounds` may name `table`, `memory`, `data_segment`,
+`element_segment`, `array`, or `string`. Other reasons leave bounds at 0.
+Bounds 0 on an out-of-bounds trap means the class was not one of those names.
+
+The function index and module offset are separate known bits. A clear bit
+stores integer 0, and that 0 is not an index or an offset. Function index 0
+with the bit set is the real import at index 0. A trap's index and offset
+come from the Liftoff frame when that frame's position is a function-body
+offset inside the function and the resulting module offset lies in the wire
+bytes at or after byte 8. A function-body offset of 0 is left unknown: the
+prologue stack check uses position 0 and is not an instruction. A non-Liftoff
+frame leaves both unknown. The offset is not copied from the last sample.
+
+A still-executing record and an interrupt, when this call has taken an
+instrumented sample, name that sample's function and offset. That is the
+last instrumented instruction, not a recovered trap program counter. The
+related sample index and stream (`br_table` or `call_indirect`) point at it.
+A call that has taken no instrumented instruction does not emit
+still-executing.
+
+### Deadline and interrupt
+
+The deadline is five seconds of monotonic time from host-call entry, or from
+the first instrumented instruction if entry was not reported. Reaching it
+emits one `still_executing` record and leaves the call open. A second check
+does not emit another. A call that returns emits neither a trap nor a
+still-executing record. The deadline does not trap and does not end the
+session.
+
+Interrupt is separate and explicit. `RequestWasmExecutionInterrupt` sets a
+process-wide flag. The next Liftoff stack check on a tracked call emits one
+trap with reason `interrupt`, keeps the samples already emitted, closes the
+call, and returns the call to the host as an uncatchable Wasm trap
+(`execution interrupted`). It does not terminate the isolate, so a later call
+in the same document can run. A flag with no open call is discarded. One
+flag applies to the first tracked call whose stack check runs. Ending the
+session still works; it is not the only way to regain the host.
+
+There is no browser-process or UI control for the flag in this change. The
+renderer's mojo pipe is bound to the thread that is inside Wasm, so it
+cannot deliver the request while that call is stuck. The in-process stack
+check is what the portable test exercises.
+
+### Wire contract
+
+Event type `wasm_execution_outcome` (numeric 27), category `vm`, protocol 3.
+The payload is exactly 128 bytes, little-endian, version 1. Version 1
+already carries the JavaScript invocation context.
+
+| Offset | Field | Type |
+| --- | --- | --- |
+| 0 | version (1) | u16 |
+| 2 | size (128) | u16 |
+| 4 | kind: trap 0, still_executing 1 | u8 |
+| 5 | reason (0 to 5) | u8 |
+| 6 | bounds (0 to 6; only for out_of_bounds) | u8 |
+| 7 | known bits: function 1, module offset 2 | u8 |
+| 8 | function index, or 0 when unknown | u32 |
+| 12 | module offset, or 0 when unknown | u32 |
+| 16 | invocation id, nonzero | u32 |
+| 20 | related sample index, or `0xffffffff` when none | u32 |
+| 24 | related stream: none 0, br_table 1, call_indirect 2 | u8 |
+| 25 | reserved, zero | 3 bytes |
+| 28 | JavaScript invocation state | u8 |
+| 29 | reserved, zero | 3 bytes |
+| 32 | JavaScript invocation id | u32 |
+| 36 | reserved, zero | 92 bytes |
+
+The invocation id is assigned by the renderer for one host-visible call,
+including across an outermost `return_call`. A trap with no open host call
+emits nothing. The outcome budget is 16 records per configuration, separate
+from `br_table` and `call_indirect`. Renderer gaps are
+`native_wasm_execution_input_unavailable`,
+`native_wasm_execution_budget_incomplete`, and
+`native_wasm_execution_transport_unavailable`. Browser gaps are
+`native_wasm_execution_browser_budget_incomplete`,
+`native_wasm_execution_limit_or_invalid`,
+`native_wasm_execution_document_unavailable`,
+`native_wasm_execution_artifact_unavailable`,
+`native_wasm_execution_module_unavailable` (no module for that document),
+and `native_wasm_execution_module_unresolved` (more than one, so none is
+chosen). A record that still has module bytes shares the module artifact
+with the other Wasm streams. A still-executing or interrupt record carries
+no module bytes; the browser attaches the one module already captured for
+that document. A pending module uses the same ACK queue and, if it is lost,
+the existing `native_wasm_dispatch_artifact_or_document_lost` gap.
+
+### Named omissions
+
+- No live browser-process or UI interrupt control. The stack check honors
+  `RequestWasmExecutionInterrupt`. A rebuilt Brave is required before a live
+  session emits these records. The portable tests do not execute V8.
+- Opcode workspace rows are not projected for this event. The event remains
+  in the evidence store and decodes in the viewer.
+- Workers and non-Liftoff frames are not given a function index or module
+  offset. A trap message this record does not name stays reason `unknown`.
+  A message that is not a Wasm trap is not reported.
+- A call with no instrumented instruction does not emit still-executing.
+- The ledger is one host call per thread. A catchable exception, or Wasm
+  that calls JavaScript which calls Wasm again, does not emit a trap. The
+  next outermost entry drops the previous call without a record.
+
 ### Validation boundary
 
 `make check` runs the C++ golden producer through the Rust reader and workspace,
 the portable renderer and browser component tests (disabled, expired,
 malformed, transport loss, the 16-record limit, full rings, document loss and
-expiry), and the shipped viewer. The six `RebNativeCallIndirect*` cctests run in
-the native V8 runtime workflow. None of these is a rebuilt-Brave run: live
-acceptance still needs the pinned browser build and an owned interpreter whose
-table is filled at run time, including navigation, disable, expiry and
-transport loss.
+expiry), and the shipped viewer. `NativeWasmExecutionOutcomes` in the renderer
+admission test and the artifact-capture test cover a signature-mismatch trap
+distinct from resolution `null`, a still-executing record while the call is
+open, an interrupt that leaves a later call able to run, and a normal return
+that emits neither. The six `RebNativeCallIndirect*` cctests run in the native
+V8 runtime workflow. None of these is a rebuilt-Brave run: live acceptance
+still needs the pinned browser build. The new Liftoff hooks are not executed
+by the portable tests.

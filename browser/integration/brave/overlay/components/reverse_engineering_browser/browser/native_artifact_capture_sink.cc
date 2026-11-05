@@ -148,6 +148,7 @@ void NativeArtifactCaptureSink::SetEmitter(const NativeProbeEmitter emitter,
   wasm_dispatch_modules_.clear();
   wasm_dispatch_count_ = 0;
   wasm_indirect_count_ = 0;
+  wasm_execution_count_ = 0;
   runtime_typed_array_count_.store(0, std::memory_order_relaxed);
   allocating_scripts_.clear();
   emitter_.store(emitter, std::memory_order_release);
@@ -957,6 +958,101 @@ void NativeArtifactCaptureSink::PublishAfterWasmModule(NativeProbeEvent event,
   event.header.artifact_id = artifact_id;
   wasm_dispatch_modules_[module_key] = {artifact_id, false};
   found->second.wasm_observations.emplace_back(event, std::move(is_current_document));
+}
+
+void NativeArtifactCaptureSink::CaptureWasmExecution(
+    const NativeWasmExecutionObservation& observation,
+    mojo_base::BigBuffer content,
+    std::function<bool()> is_current_document) {
+  if (!emitter_.load(std::memory_order_acquire) ||
+      observation.header.session_id != session_id_.load(std::memory_order_relaxed))
+    return;
+  const auto gap = [&](std::string_view reason) {
+    EmitRendererGap(NativeProbeEvent{.header = observation.header}, reason);
+  };
+  if (!IsEnabledFor(NativeProbeCategory::kVm) || !IsEnabled()) {
+    gap("native_wasm_execution_artifact_unavailable");
+    return;
+  }
+  if (!is_current_document || !is_current_document()) {
+    gap("native_wasm_execution_document_unavailable");
+    return;
+  }
+  if (wasm_execution_count_ >= kNativeWasmExecutionBudget) {
+    gap("native_wasm_execution_browser_budget_incomplete");
+    return;
+  }
+  ++wasm_execution_count_;
+  if (content.size() > kNativeArtifactMaxContentBytes || !observation.header.sequence_number ||
+      !observation.header.monotonic_time_ns || !observation.header.process_id ||
+      !observation.header.thread_id) {
+    gap("native_wasm_execution_limit_or_invalid");
+    return;
+  }
+  std::vector<std::uint8_t> bytes(content.begin(), content.end());
+  auto checked = observation;
+  checked.module_bytes = bytes;
+  if (!IsValidNativeWasmExecutionInput(checked)) {
+    gap("native_wasm_execution_limit_or_invalid");
+    return;
+  }
+  NativeProbeEvent event;
+  event.header = observation.header;
+  event.header.category = NativeProbeCategory::kVm;
+  event.header.type = NativeProbeType::kWasmExecutionOutcome;
+  event.header.parent_event_id = 0;
+  event.header.payload_size = 128;
+  const NativeWasmExecutionOutcomePayload sample{
+      .kind = static_cast<std::uint8_t>(observation.kind),
+      .reason = static_cast<std::uint8_t>(observation.reason),
+      .bounds = static_cast<std::uint8_t>(observation.bounds),
+      .known = observation.known,
+      .function_index = observation.function_index,
+      .module_byte_offset = observation.module_byte_offset,
+      .invocation_id = observation.invocation_id,
+      .related_sample_index = observation.related_sample_index,
+      .related_stream = static_cast<std::uint8_t>(observation.related_stream),
+      .js_invocation_state = observation.js_invocation_state,
+      .js_invocation_id = observation.js_invocation_id};
+  event.inline_payload = EncodeNativeWasmExecutionOutcomePayload(sample);
+  if (!bytes.empty()) {
+    PublishAfterWasmModule(event, bytes, observation.execution_context_id,
+                           observation.document_token_high, observation.document_token_low,
+                           observation.source_url, std::move(is_current_document));
+    return;
+  }
+  WasmModuleKey matched{};
+  int matches = 0;
+  for (const auto& entry : wasm_dispatch_modules_) {
+    const auto& key = entry.first;
+    if (std::get<0>(key) != event.header.process_id || std::get<1>(key) != event.header.frame_id ||
+        std::get<2>(key) != observation.execution_context_id ||
+        std::get<3>(key) != observation.document_token_high ||
+        std::get<4>(key) != observation.document_token_low)
+      continue;
+    matched = key;
+    ++matches;
+  }
+  if (matches == 0) {
+    gap("native_wasm_execution_module_unavailable");
+    return;
+  }
+  if (matches != 1) {
+    gap("native_wasm_execution_module_unresolved");
+    return;
+  }
+  const auto known = wasm_dispatch_modules_.find(matched);
+  event.header.artifact_id = known->second.first;
+  if (known->second.second) {
+    if (const auto emitter = emitter_.load(std::memory_order_acquire))
+      emitter(event);
+    return;
+  }
+  if (const auto pending = pending_.find(known->second.first); pending != pending_.end()) {
+    pending->second.wasm_observations.emplace_back(event, std::move(is_current_document));
+    return;
+  }
+  gap("native_wasm_execution_module_unavailable");
 }
 
 std::uint64_t NativeArtifactCaptureSink::CaptureGeneratedArtifact(

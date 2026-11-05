@@ -454,6 +454,15 @@ module, the callee it was about to run; arguments and memory are never read.
 It has its own 16-record budget and shares the module artifact and transport.
 See [call_indirect observations](../../../protocol/native-wasm-dispatch-v1.md#call_indirect-observations).
 
+A trap after an instrumented instruction, and a call that is still inside
+after five seconds, are `wasm_execution_outcome` records on that same host
+call. The deadline does not trap. An explicit interrupt flushes the samples
+already taken and returns the stuck call as a trap so a later call in the
+document can run. While either dispatch flag is on, Liftoff also emits a
+call at function entry, ordinary return, and tail call so that host call can
+be closed. Both need the same rebuilt browser as the dispatch flags.
+See [execution outcomes](../../../protocol/native-wasm-dispatch-v1.md#execution-outcomes).
+
 Guest-state capture additionally needs `REB_NATIVE_WASM_GUEST_ADAPTER`, which
 makes the launcher add `--reb-wasm-guest-capture`. That flag compiles a call on
 every Wasm function entry (frame identity) and numeric-local descriptors for

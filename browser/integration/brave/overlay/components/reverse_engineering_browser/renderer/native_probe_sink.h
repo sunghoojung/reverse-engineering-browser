@@ -220,6 +220,33 @@ class COMPONENT_EXPORT(REB_NATIVE_PROBE_SINK) NativeProbeSink final {
   void SetNativeWasmIndirectEmitter(NativeWasmIndirectEmitter emitter) noexcept;
   [[nodiscard]] bool IsNativeWasmIndirectEnabled() const noexcept;
   void RecordNativeWasmIndirect(NativeWasmIndirectObservation observation) noexcept;
+  // Host-visible Wasm call ledger. Entry and exit stay paired after the
+  // 16-record outcome budget is spent; that budget only refuses records.
+  // These never call the frame-id provider or allocate V8 handles.
+  void SetNativeWasmExecutionEmitter(NativeWasmExecutionEmitter emitter) noexcept;
+  [[nodiscard]] bool IsNativeWasmExecutionEnabled() const noexcept;
+  void NoteWasmHostCallEntered(bool outermost,
+                               bool function_known,
+                               std::uint32_t function_index) noexcept;
+  void NoteWasmHostCallReturned() noexcept;
+  void NoteWasmTailCall() noexcept;
+  [[nodiscard]] NativeWasmExecutionHeartbeat PollWasmExecutionHeartbeat() noexcept;
+  // Any thread may set this. The Wasm thread's stack check consumes it.
+  void RequestWasmExecutionInterrupt() noexcept;
+  // Closes the open host call. Unknown function or offset must be passed
+  // with the known flag clear and the integer 0; a nonzero unknown is refused.
+  void ReportWasmTrap(NativeWasmExecutionReason reason,
+                      NativeWasmExecutionBounds bounds,
+                      bool function_known,
+                      std::uint32_t function_index,
+                      bool offset_known,
+                      std::uint32_t module_byte_offset,
+                      std::uint64_t execution_context_id,
+                      std::uint64_t frame_id,
+                      std::string_view source_url,
+                      std::uint64_t document_token_high,
+                      std::uint64_t document_token_low,
+                      std::span<const std::uint8_t> module_bytes) noexcept;
   // Native JavaScript dispatch at armed static sites. The browser keeps the
   // site list immutable for its lifetime; a different list is refused with an
   // input gap. Configure after SetEmitters, which disarms the previous list.
@@ -498,6 +525,42 @@ class COMPONENT_EXPORT(REB_NATIVE_PROBE_SINK) NativeProbeSink final {
       native_wasm_indirect_slots_{};
   std::array<std::atomic<std::uint64_t>, 2> native_wasm_indirect_gap_generations_{};
   std::atomic<std::uint64_t> native_wasm_indirect_capped_generation_{0};
+  [[nodiscard]] bool SnapshotWasmExecutionAdmission(VmAdmission& admission) const noexcept;
+  bool NoteNativeWasmExecutionOmission(const VmAdmission& admission, std::size_t reason) noexcept;
+  void NoteWasmInstrumentedSite(std::uint64_t generation,
+                                std::uint64_t execution_context_id,
+                                std::uint64_t frame_id,
+                                std::string_view source_url,
+                                std::uint64_t document_token_high,
+                                std::uint64_t document_token_low,
+                                std::uint32_t function_index,
+                                std::uint32_t module_byte_offset,
+                                std::uint32_t sample_index,
+                                NativeWasmExecutionStream stream,
+                                std::uint8_t js_state,
+                                std::uint32_t js_id) noexcept;
+  bool EmitWasmExecution(NativeWasmExecutionKind kind,
+                         NativeWasmExecutionReason reason,
+                         NativeWasmExecutionBounds bounds,
+                         bool function_known,
+                         std::uint32_t function_index,
+                         bool offset_known,
+                         std::uint32_t module_byte_offset,
+                         NativeWasmExecutionStream stream,
+                         std::uint32_t related_sample,
+                         std::uint64_t execution_context_id,
+                         std::uint64_t frame_id,
+                         std::string_view source_url,
+                         std::uint64_t document_token_high,
+                         std::uint64_t document_token_low,
+                         std::uint8_t js_state,
+                         std::uint32_t js_id,
+                         std::span<const std::uint8_t> module_bytes) noexcept;
+  std::atomic<NativeWasmExecutionEmitter> native_wasm_execution_emitter_{nullptr};
+  std::array<std::atomic<std::uint64_t>, kNativeWasmExecutionBudget> native_wasm_execution_slots_{};
+  std::array<std::atomic<std::uint64_t>, 2> native_wasm_execution_gap_generations_{};
+  std::atomic<std::uint64_t> native_wasm_execution_capped_generation_{0};
+  std::atomic<bool> wasm_execution_interrupt_{false};
   std::atomic<NativeRendererProbeEmitter> emitter_{nullptr};
   std::atomic<NativeProbeFrameIdProvider> frame_id_provider_{nullptr};
   std::atomic<NativeGeneratedArtifactEmitter> artifact_emitter_{nullptr};

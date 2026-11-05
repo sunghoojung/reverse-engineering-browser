@@ -66,6 +66,9 @@ enum class EventType : std::uint16_t {
   kJsInvocationStart = 24,
   kJsInvocationSettle = 25,
   kJsInvocationRequest = 26,
+  // Trap or still-executing follow-up for one host-visible Wasm call.
+  // See protocol/native-wasm-dispatch-v1.md.
+  kWasmExecutionOutcome = 27,
 };
 
 enum class EventFlag : std::uint16_t {

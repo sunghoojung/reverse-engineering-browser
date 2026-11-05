@@ -245,6 +245,33 @@ void NativeProbeHostGuestBoundary(reb::ArtifactReceiver& receiver) {
                              e.header.sequence_number == 604 && e.header.tab_id == 1;
                     }),
         "The host keeps the observation's own sequence and tab");
+  host.CaptureWasmExecution(epoch, kSession, 610, 100, 123, 7, frame_id, 10, 11, 12, 4, 9, 8, 0, 0,
+                            1, 0, 3, 2, 0, 0, "fixture://host-indirect",
+                            mojo_base::BigBuffer(indirect_module));
+  const auto trap = std::find_if(events.begin(), events.end(), [](const auto& event) {
+    return event.header.type == reb::NativeProbeType::kWasmExecutionOutcome &&
+           event.header.sequence_number == 610;
+  });
+  reb::WasmExecutionOutcomePayload trap_payload;
+  Check(trap != events.end() &&
+            reb::DecodeWasmExecutionOutcomePayload(trap->inline_payload, trap_payload) &&
+            trap_payload.reason ==
+                static_cast<std::uint8_t>(reb::WasmExecutionReason::kSignatureMismatch) &&
+            trap_payload.function_index == 9,
+        "The host publishes a signature-mismatch trap for a resolved entry");
+  host.CaptureWasmExecution(epoch, kSession, 611, 100, 123, 7, frame_id, 10, 11, 12, 5, 1, 8, 0, 1,
+                            0, 0, 3, 2, 0, 0, "fixture://host-indirect",
+                            mojo_base::BigBuffer(std::span<const std::uint8_t>{}));
+  const auto still = std::find_if(events.begin(), events.end(), [](const auto& event) {
+    return event.header.sequence_number == 611;
+  });
+  reb::WasmExecutionOutcomePayload still_payload;
+  Check(still != events.end() && still->header.artifact_id == trap->header.artifact_id &&
+            reb::DecodeWasmExecutionOutcomePayload(still->inline_payload, still_payload) &&
+            still_payload.kind ==
+                static_cast<std::uint8_t>(reb::WasmExecutionKind::kStillExecuting) &&
+            still_payload.reason == 0,
+        "An empty still-executing record binds the document's one module");
   host.Disable();
   session.active = false;
   session.emitted = {};

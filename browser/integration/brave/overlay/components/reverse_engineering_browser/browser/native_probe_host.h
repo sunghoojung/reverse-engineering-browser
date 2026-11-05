@@ -75,6 +75,29 @@ class NativeProbeHost final : public mojom::NativeProbeHost {
                            std::uint32_t js_invocation_id,
                            const std::string& source_url,
                            mojo_base::BigBuffer content) override;
+  void CaptureWasmExecution(std::uint64_t capture_epoch,
+                            std::uint64_t session_id,
+                            std::uint64_t sequence_number,
+                            std::uint64_t monotonic_time_ns,
+                            std::uint32_t process_id,
+                            std::uint32_t thread_id,
+                            std::uint64_t frame_id,
+                            std::uint64_t execution_context_id,
+                            std::uint64_t document_token_high,
+                            std::uint64_t document_token_low,
+                            std::uint32_t invocation_id,
+                            std::uint32_t function_index,
+                            std::uint32_t module_byte_offset,
+                            std::uint32_t related_sample_index,
+                            std::uint8_t kind,
+                            std::uint8_t reason,
+                            std::uint8_t bounds,
+                            std::uint8_t known,
+                            std::uint8_t related_stream,
+                            std::uint8_t js_invocation_state,
+                            std::uint32_t js_invocation_id,
+                            const std::string& source_url,
+                            mojo_base::BigBuffer content) override;
   void CaptureNativeGuest(std::uint64_t capture_epoch,
                           const std::vector<std::uint8_t>& invocation_record,
                           const std::vector<std::uint8_t>& dispatch_record,
@@ -123,6 +146,7 @@ class NativeProbeHost final : public mojom::NativeProbeHost {
   std::uint64_t wasm_capture_epoch_ = 0;
   std::uint32_t wasm_capture_count_ = 0;
   std::uint32_t wasm_indirect_capture_count_ = 0;
+  std::uint32_t wasm_execution_capture_count_ = 0;
   std::uint32_t guest_capture_count_ = 0;
   // One marker for host records naming another identity, whose sequence
   // slots are not this renderer's to fill. Every other refusal fills its own.

@@ -1,0 +1,107 @@
+diff --git a/third_party/blink/renderer/bindings/core/v8/v8_initializer.cc b/third_party/blink/renderer/bindings/core/v8/v8_initializer.cc
+--- a/third_party/blink/renderer/bindings/core/v8/v8_initializer.cc
++++ b/third_party/blink/renderer/bindings/core/v8/v8_initializer.cc
+@@ -1800,7 +1800,93 @@ reb::NativeJsInvocationContext CurrentJsInvocation() noexcept {
+   result.script_on_stack = isolate->InContext();
+   return result;
+ }
+ 
++std::uint8_t PollNativeWasmExecution() {
++  // No V8 handles and no document walk. The stack check calls this.
++  return static_cast<std::uint8_t>(
++      reb::NativeProbeSink::Get().PollWasmExecutionHeartbeat());
++}
++
++bool NativeWasmExecutionEnabled() {
++  return reb::NativeProbeSink::Get().IsNativeWasmExecutionEnabled();
++}
++
++void NoteWasmExecutionEntered(bool outermost,
++                              bool function_known,
++                              std::uint32_t function_index) {
++  reb::NativeProbeSink::Get().NoteWasmHostCallEntered(
++      outermost, function_known, function_index);
++}
++
++void NoteWasmExecutionExited(bool tail) {
++  auto& sink = reb::NativeProbeSink::Get();
++  if (tail) {
++    sink.NoteWasmTailCall();
++  } else {
++    sink.NoteWasmHostCallReturned();
++  }
++}
++
++// Always reports, including a worker or a missing document, so the host call
++// closes. An empty URL leaves the stashed document when the sample had one.
++void CaptureWasmExecutionTrap(v8::Local<v8::Context> context,
++                              const std::uint8_t* module_bytes,
++                              size_t module_size,
++                              std::uint8_t reason,
++                              std::uint8_t bounds,
++                              bool function_known,
++                              std::uint32_t function_index,
++                              bool offset_known,
++                              std::uint32_t module_byte_offset) {
++  if (!function_known) function_index = 0;
++  if (!offset_known) module_byte_offset = 0;
++  auto mapped_reason = reb::NativeWasmExecutionReason::kUnknown;
++  if (reason < reb::kNativeWasmExecutionReasonCount) {
++    mapped_reason = static_cast<reb::NativeWasmExecutionReason>(reason);
++  }
++  auto mapped_bounds = reb::NativeWasmExecutionBounds::kNone;
++  if (bounds < reb::kNativeWasmExecutionBoundsCount) {
++    mapped_bounds = static_cast<reb::NativeWasmExecutionBounds>(bounds);
++  }
++  std::span<const std::uint8_t> bytes;
++  if (module_bytes != nullptr && module_size >= 8 &&
++      module_size <= reb::kNativeArtifactMaxContentBytes &&
++      module_bytes[0] == 0 && module_bytes[1] == 'a' &&
++      module_bytes[2] == 's' && module_bytes[3] == 'm') {
++    bytes = UNSAFE_BUFFERS(base::span(module_bytes, module_size));
++  }
++  std::uint64_t execution_context_id = 0;
++  std::uint64_t frame_id = 0;
++  std::uint64_t document_token_high = 0;
++  std::uint64_t document_token_low = 0;
++  std::string source_url;
++  if (!context.IsEmpty()) {
++    ExecutionContext* execution_context = ToExecutionContext(context);
++    if (execution_context && !execution_context->IsContextDestroyed()) {
++      auto* window = DynamicTo<LocalDOMWindow>(execution_context);
++      if (window && window->GetFrame() && window->document()) {
++        execution_context_id = StableExecutionContextId(*execution_context);
++        frame_id = StableFrameId(*execution_context);
++        const String& url = execution_context->Url().GetString();
++        if (!url.empty() && url.length() <= reb::kNativeArtifactMaxUrlBytes) {
++          source_url = url.Utf8();
++          if (source_url.size() > reb::kNativeArtifactMaxUrlBytes) {
++            source_url.clear();
++          }
++        }
++        const base::UnguessableToken& document_token =
++            window->document()->Token().value();
++        document_token_high = document_token.GetHighForSerialization();
++        document_token_low = document_token.GetLowForSerialization();
++      }
++    }
++  }
++  reb::NativeProbeSink::Get().ReportWasmTrap(
++      mapped_reason, mapped_bounds, function_known, function_index,
++      offset_known, module_byte_offset, execution_context_id, frame_id,
++      source_url, document_token_high, document_token_low, bytes);
++}
++
+ void CaptureWasmModuleBytes(v8::Local<v8::Context> context,
+                             const v8::WasmModuleBytesOrigin origin,
+                             const std::uint8_t* bytes,
+@@ -1810,5 +1940,9 @@ void V8Initializer::InitializeV8Common(v8::Isolate* isolate) {
+   reb::NativeProbeSink::Get().SetNativeWasmGuestRuntime(CurrentNativeWasmGuest,
+                                                         ResetNativeWasmGuest);
++  isolate->SetWasmExecutionCallbacks(
++      NoteWasmExecutionEntered, NoteWasmExecutionExited,
++      PollNativeWasmExecution, CaptureWasmExecutionTrap,
++      NativeWasmExecutionEnabled);
+   if (IsMainThread()) {
+     // Document-only: worker isolates never arm JavaScript dispatch sites, so
+     // their bytecode and optimization stay unchanged.

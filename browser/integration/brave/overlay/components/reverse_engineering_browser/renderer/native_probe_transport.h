@@ -71,6 +71,8 @@ class NativeProbeTransport final : public mojom::NativeProbeClient {
                                std::uint64_t generation) noexcept;
   static bool EmitWasmIndirect(const NativeWasmIndirectObservation& observation,
                                std::uint64_t generation) noexcept;
+  static bool EmitWasmExecution(const NativeWasmExecutionObservation& observation,
+                                std::uint64_t generation) noexcept;
   static void EmitArtifact(NativeArtifactKind kind,
                            NativeArtifactCaptureOrigin capture_origin,
                            std::uint64_t creator_event_id,

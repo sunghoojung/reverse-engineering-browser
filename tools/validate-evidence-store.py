@@ -114,6 +114,7 @@ EVENT_TYPES = {
     "wasm_dispatch_observation",
     "wasm_guest_dispatch",
     "wasm_guest_invocation",
+    "wasm_execution_outcome",
     "wasm_indirect_observation",
 }
 UINT64_MAX = (1 << 64) - 1
@@ -457,6 +458,45 @@ def validate_event(event: object, line_number: int) -> None:
         or any(payload[40:])
     ):
         raise ValueError(f"line {line_number}: native Wasm call_indirect observation is invalid")
+    if event["type"] == "wasm_execution_outcome":
+        version = payload[0] if len(payload) > 0 else 0
+        kind = payload[4] if len(payload) > 4 else 0
+        reason = payload[5] if len(payload) > 5 else 0
+        bounds = payload[6] if len(payload) > 6 else 0
+        known = payload[7] if len(payload) > 7 else 0
+        function_index = int.from_bytes(payload[8:12], "little") if len(payload) >= 12 else 0
+        module_offset = int.from_bytes(payload[12:16], "little") if len(payload) >= 16 else 0
+        invocation = int.from_bytes(payload[16:20], "little") if len(payload) >= 20 else 0
+        sample = int.from_bytes(payload[20:24], "little") if len(payload) >= 24 else 0
+        stream = payload[24] if len(payload) > 24 else 0
+        if (
+            protocol_version != 3
+            or event["category"] != "vm"
+            or event["flags"] != 0
+            or event["payload_truncated"]
+            or event["parent_event_id"] != "0"
+            or any(event[key] == "0" for key in (
+                "session_id", "sequence_number", "monotonic_time_ns", "frame_id", "artifact_id"
+            ))
+            or not 1 <= event["process_id"] <= 0xFFFFFFFF
+            or not 1 <= event["thread_id"] <= 0xFFFFFFFF
+            or len(payload) != 128
+            or version != 1
+            or payload[1:4] != bytes((0, 128, 0))
+            or (known & ~3) != 0
+            or kind > 1
+            or stream > 2
+            or invocation == 0
+            or (function_index >= 16777216 if known & 1 else function_index != 0)
+            or (module_offset < 8 or module_offset >= 16777216 if known & 2 else module_offset != 0)
+            or (reason != 0 or bounds != 0 if kind == 1 else reason >= 6)
+            or (bounds >= 7 if reason == 3 else bounds != 0)
+            or (sample != 0xFFFFFFFF if stream == 0 else sample >= 16)
+            or any(payload[25:28])
+            or wasm_context_invalid(payload, version, 1, 28)
+            or any(payload[36:])
+        ):
+            raise ValueError(f"line {line_number}: native Wasm execution outcome is invalid")
     if event["type"] == "js_dispatch_observation" and not valid_js_dispatch(event, payload):
         raise ValueError(f"line {line_number}: native JavaScript dispatch observation is invalid")
     if event["type"] == "request_body" and not valid_request_body(event, payload):

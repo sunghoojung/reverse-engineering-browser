@@ -69,6 +69,33 @@ context: `js_invocation_state` (u8 at 24), 3 zero bytes and
 decodes, as not observed. See
 [invocation context of Wasm records](native-js-invocation-v1.md#invocation-context-of-wasm-records).
 
+Version 3 keeps that context and stores the direct caller in the next 8 bytes:
+
+| Offset | Field | Type |
+| --- | --- | --- |
+| 32 | caller kind | u8 |
+| 33 | reserved, all zero | 3 bytes |
+| 36 | caller function index | u32 |
+| 40 | reserved, all zero | 88 bytes |
+
+Caller kind 0 is `unknown`: the host, another instance, or a frame that is not
+a function of this module. The index is then 0 and is not function index 0.
+Kind 1 is `same-instance`: the index is that function in this module, imports
+included, and may be 0. Kind 2 and above is rejected. Versions 1 and 2 still
+decode. Their caller bytes stay zero, which means the caller was **not
+observed**. That is not kind 0. A rebuilt browser is required before a live
+session writes version 3. This build does not invent samples a rebuilt browser
+has not produced.
+
+The caller is only the live frame immediately above the `br_table`, and only
+when that frame is a Liftoff function of the same instance. The walk does not
+skip a host or foreign frame to an older same-instance frame. Each observation
+is one activation: two instances do not share a stack, and arrival order is
+not a caller. A multi-frame stack is not reconstructed. `return_call` replaces
+the caller frame, so the record names the frame that is live, not the function
+that executed the `return_call`. Parent event and navigation IDs stay zero
+unless a real parent event exists. This caller is not that parent.
+
 Offsets start at8 and are below16MiB. Function index and count are below16MiB.
 Any u32 selector is legal; selector>=count denotes the default arm. Scope IDs,
 sequence and monotonic time are required; wide identities remain decimal strings.
@@ -86,9 +113,11 @@ also produces a `wasm_guest_dispatch` record, so workspace counts for the two
 streams overlap and are never summed. Each function body is decoded at most once,
 when a record names it, within the 16 MiB module bound. A module whose sections
 do not decode keeps its records visible as `native-wasm-module-undecodable` with
-their counts instead of dropping them. The viewer labels guest PC unknown. Context
-links can be correlated, but host-call causality and guest positions remain
-unproven without genuine parent/invocation evidence.
+their counts instead of dropping them. The viewer labels guest PC unknown. A version 3 same-instance caller is the
+live frame the runtime walked. A version 3 unknown caller is an explicit host,
+foreign, or unreadable frame, not a guessed index. Versions 1 and 2 omit the
+caller because they did not walk one. Parent event id stays zero: the caller
+field is not a parent edge, and guest positions remain unproven.
 
 ## Validation boundary
 

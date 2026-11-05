@@ -427,6 +427,8 @@ class NativeProbeHost {
                                    std::uint32_t,
                                    std::uint32_t,
                                    std::uint32_t,
+                                   std::uint8_t,
+                                   std::uint32_t,
                                    std::uint32_t,
                                    std::uint8_t,
                                    std::uint32_t,

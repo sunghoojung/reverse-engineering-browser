@@ -2072,7 +2072,7 @@ invocationSitesPanel.refresh();
       function renderNativeWasmObservations(workspace) {
         const panel = document.createElement('section'); panel.className = 'vm-workspace-card';
         panel.append(textElement('h4', '', 'Native Wasm dispatch observations'),
-          textElement('p', 'vm-workspace-notice', 'Physical module offsets and selectors are not guest-interpreter PCs or recovered guest opcodes. No host causality is inferred from physical-only rows.'));
+          textElement('p', 'vm-workspace-notice', 'Physical module offsets and selectors are not guest-interpreter PCs or recovered guest opcodes. A direct caller is the live same-instance frame when the record walked the stack; a host or other-instance caller is unknown. The parent event id stays unset.'));
         const nativeRow = (row, position) => {
           const item = document.createElement('details'); item.className = 'vm-effect-row';
           const summary = document.createElement('summary');

@@ -15,7 +15,8 @@ pub(super) struct Observations {
 }
 
 /// Envelope rules shared by both physical streams: exact artifact scope, no
-/// caller provenance or parent, and canonical native identities.
+/// parent event, and canonical native identities. A walked direct caller lives
+/// in the dispatch payload. It is not parent_event_id.
 fn envelope(event: &Value, artifact: &Value) -> bool {
     !(event["protocol_version"] != 3
         || event["payload_size"] != 128
@@ -40,13 +41,31 @@ fn observation(event: &Value, artifact: &Value, module: &mut Module<'_>) -> Opti
         return None;
     }
     // Version 2 adds the JavaScript invocation context at bytes 24..32.
-    let bytes = super::event_payload_versions(event, "wasm_dispatch_observation", &[1, 2])?;
+    // Version 3 adds the direct caller at bytes 32..40. Older versions reserve
+    // those bytes: a zero there means the caller was not observed, not unknown.
+    let bytes = super::event_payload_versions(event, "wasm_dispatch_observation", &[1, 2, 3])?;
     let (state, invocation) = crate::js_invocation::wasm_context(&bytes, 2, 24)?;
-    if bytes[32..].iter().any(|v| *v != 0) {
-        return None;
-    }
     let at =
         |offset| u32::from_le_bytes(bytes[offset..offset + 4].try_into().expect("fixed payload"));
+    let caller_index = at(36);
+    let direct_caller = if bytes[0] < 3 {
+        if bytes[32..].iter().any(|byte| *byte != 0) {
+            return None;
+        }
+        None
+    } else if bytes[33..36].iter().any(|byte| *byte != 0)
+        || bytes[40..].iter().any(|byte| *byte != 0)
+    {
+        return None;
+    } else {
+        match bytes[32] {
+            0 if caller_index == 0 => Some(json!({"kind":"unknown","function_index":null})),
+            1 if (caller_index as usize) < module.function_count() => {
+                Some(json!({"kind":"same-instance","function_index":caller_index}))
+            }
+            _ => return None,
+        }
+    };
     let function = at(4);
     let offset = at(8);
     let selector = at(12);
@@ -66,6 +85,9 @@ fn observation(event: &Value, artifact: &Value, module: &mut Module<'_>) -> Opti
         "selector":selector,"table_count":count,"sample_index":index,"selected_arm":selector.min(count),"is_default":selector >= count});
     if let Some(context) = crate::js_invocation::context_row(state, invocation) {
         row["js_invocation"] = context;
+    }
+    if let Some(caller) = direct_caller {
+        row["direct_caller"] = caller;
     }
     Some(row)
 }
@@ -460,6 +482,104 @@ pub(super) mod tests {
         );
     }
     #[test]
+    fn native_wasm_direct_caller_names_the_calling_function() {
+        let bytes = wat::parse_str(
+            r#"(module
+                (func (result i32) (call 1))
+                (func (result i32)
+                  (block (result i32)
+                    (br_table 0 0 (i32.const 0)))))"#,
+        )
+        .unwrap();
+        let mut parsed = Module::parse(&bytes).unwrap();
+        assert_eq!(parsed.function_count(), 2);
+        let (offset, count) = parsed
+            .function(1)
+            .unwrap()
+            .br_tables
+            .iter()
+            .map(|(site, arms)| (*site, *arms))
+            .next()
+            .unwrap();
+        let event = |version: u8, kind: u8, caller: u32, sequence: &str| {
+            let mut payload = [0u8; 128];
+            payload[0] = version;
+            payload[2] = 128;
+            payload[4..8].copy_from_slice(&1u32.to_le_bytes());
+            payload[8..12].copy_from_slice(&offset.to_le_bytes());
+            payload[16..20].copy_from_slice(&count.to_le_bytes());
+            payload[32] = kind;
+            payload[36..40].copy_from_slice(&caller.to_le_bytes());
+            json!({"protocol_version":3,"session_id":"1","sequence_number":sequence,"process_id":1,"thread_id":1,"monotonic_time_ns":"1","navigation_id":"1","frame_id":"1","artifact_id":"1","parent_event_id":"0","flags":0,"payload_size":128,"payload_encoding":"hex","payload_truncated":false,"category":"vm","type":"wasm_dispatch_observation","payload":hex::encode(payload)})
+        };
+        let artifact = artifact(&event(3, 1, 0, "1"));
+        let same = event(3, 1, 0, "1");
+        let output = read(&artifact, &bytes, std::slice::from_ref(&same));
+        assert_eq!(output.count, 1);
+        assert_eq!(output.rows[0]["function_index"], 1);
+        assert_eq!(
+            output.rows[0]["direct_caller"],
+            json!({"kind":"same-instance","function_index":0})
+        );
+        assert_eq!(same["parent_event_id"], "0");
+        let unknown = event(3, 0, 0, "2");
+        let output = read(&artifact, &bytes, std::slice::from_ref(&unknown));
+        assert_eq!(
+            output.rows[0]["direct_caller"],
+            json!({"kind":"unknown","function_index":null})
+        );
+        let unwalked = event(1, 0, 0, "3");
+        let output = read(&artifact, &bytes, std::slice::from_ref(&unwalked));
+        assert!(output.rows[0].get("direct_caller").is_none());
+        for (version, kind, caller) in [(3u8, 0u8, 1u32), (3, 1, 2), (3, 2, 0), (2, 1, 0)] {
+            let bad = event(version, kind, caller, "4");
+            assert_eq!(
+                read(&artifact, &bytes, std::slice::from_ref(&bad)).count,
+                0,
+                "version {version} kind {kind} caller {caller}"
+            );
+        }
+        let both = [event(3, 1, 0, "5"), event(3, 1, 1, "6")];
+        let output = read(&artifact, &bytes, &both);
+        assert_eq!(output.count, 2);
+        assert_eq!(output.rows[0]["direct_caller"]["function_index"], 0);
+        assert_eq!(output.rows[1]["direct_caller"]["function_index"], 1);
+        let imported = wat::parse_str(
+            r#"(module
+                (import "m" "f" (func))
+                (func (result i32)
+                  (block (result i32)
+                    (br_table 0 0 (i32.const 0)))))"#,
+        )
+        .unwrap();
+        let mut imported_module = Module::parse(&imported).unwrap();
+        assert!(imported_module.function(0).is_none());
+        assert_eq!(imported_module.function_count(), 2);
+        let (import_offset, import_count) = imported_module
+            .function(1)
+            .unwrap()
+            .br_tables
+            .iter()
+            .map(|(site, arms)| (*site, *arms))
+            .next()
+            .unwrap();
+        let mut payload = [0u8; 128];
+        payload[0] = 3;
+        payload[2] = 128;
+        payload[4..8].copy_from_slice(&1u32.to_le_bytes());
+        payload[8..12].copy_from_slice(&import_offset.to_le_bytes());
+        payload[16..20].copy_from_slice(&import_count.to_le_bytes());
+        payload[32] = 1;
+        let mut import_event = event(3, 1, 0, "7");
+        import_event["payload"] = json!(hex::encode(payload));
+        let output = read(&artifact, &imported, std::slice::from_ref(&import_event));
+        assert_eq!(output.count, 1, "an imported function is a real caller");
+        assert_eq!(
+            output.rows[0]["direct_caller"],
+            json!({"kind":"same-instance","function_index":0})
+        );
+    }
+    #[test]
     #[ignore = "requires actual C++ producer; make check supplies REB_NATIVE_WASM_GOLDEN"]
     fn native_wasm_cpp_golden() {
         let exe = std::env::var("REB_NATIVE_WASM_GOLDEN").expect("actual C++ producer required");
@@ -484,6 +604,11 @@ pub(super) mod tests {
             "invocation",
             "invocation-legacy",
             "invocation-mismatch",
+            "caller-same-instance",
+            "caller-unknown",
+            "caller-unknown-index",
+            "caller-kind",
+            "caller-v2",
         ] {
             let process = std::process::Command::new(&exe)
                 .args(["--case", case])
@@ -498,7 +623,13 @@ pub(super) mod tests {
             let output = read(&artifact(&event), &module(), std::slice::from_ref(&event));
             let accepted = matches!(
                 case,
-                "default" | "arm" | "wide-identities" | "legacy-v1" | "invocation"
+                "default"
+                    | "arm"
+                    | "wide-identities"
+                    | "legacy-v1"
+                    | "invocation"
+                    | "caller-same-instance"
+                    | "caller-unknown"
             );
             assert_eq!(output.count, u64::from(accepted), "C++ case {case}");
             if accepted {
@@ -511,8 +642,24 @@ pub(super) mod tests {
                         .as_ref(),
                     "C++ case {case}"
                 );
+                let caller = match case {
+                    "caller-same-instance" => {
+                        Some(json!({"kind":"same-instance","function_index":0}))
+                    }
+                    "caller-unknown" => Some(json!({"kind":"unknown","function_index":null})),
+                    _ => None,
+                };
+                assert_eq!(
+                    output.rows[0].get("direct_caller"),
+                    caller.as_ref(),
+                    "C++ case {case}"
+                );
+                assert_eq!(event["parent_event_id"], "0", "C++ case {case}");
             }
-            if matches!(case, "default" | "arm" | "wide-identities") {
+            if matches!(
+                case,
+                "default" | "arm" | "wide-identities" | "caller-same-instance" | "caller-unknown"
+            ) {
                 use sha2::{Digest, Sha256};
                 let root = tempfile::tempdir().unwrap();
                 let bytes = module();

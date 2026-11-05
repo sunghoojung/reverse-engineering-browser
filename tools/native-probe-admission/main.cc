@@ -14,6 +14,7 @@
 #include <string>
 #include <string_view>
 #include <thread>
+#include <utility>
 #include <vector>
 
 #include "brave/components/reverse_engineering_browser/common/native_probe_queue.h"
@@ -1282,6 +1283,11 @@ std::uint64_t NativeWasmFrameLookup() noexcept {
 std::size_t native_wasm_retained = 0;
 bool native_wasm_accept = true;
 std::uint64_t native_wasm_attempted = 0, native_indirect_attempted = 0;
+std::uint8_t expect_caller_kind = reb::kWasmDirectCallerUnknown;
+std::uint32_t expect_caller_index = 0;
+bool expect_caller_observed = false;
+std::vector<std::pair<std::uint8_t, std::uint32_t>> seen_callers;
+bool record_callers = false;
 bool CaptureNativeWasm(const reb::NativeWasmDispatchObservation& observation,
                        std::uint64_t generation) noexcept {
   native_wasm_attempted = observation.header.sequence_number;
@@ -1292,6 +1298,12 @@ bool CaptureNativeWasm(const reb::NativeWasmDispatchObservation& observation,
   assert(observation.document_token_high == 9 && observation.document_token_low == 10);
   assert(observation.module_byte_offset == 8 && observation.selector == UINT32_MAX);
   assert(observation.table_count == 2 && observation.sample_index == native_wasm_retained);
+  assert(observation.caller_observed == expect_caller_observed);
+  assert(observation.caller_kind == expect_caller_kind);
+  assert(observation.caller_function_index == expect_caller_index);
+  assert(observation.header.parent_event_id == 0);
+  if (record_callers)
+    seen_callers.emplace_back(observation.caller_kind, observation.caller_function_index);
   if (!native_wasm_accept)
     return false;
   ++native_wasm_retained;
@@ -1323,6 +1335,23 @@ void NativeWasmRuntimeAdmission() {
   assert(!reb::IsValidNativeWasmDispatchInput(input));
   input.module_bytes = std::span(module).first(9);
   assert(!reb::IsValidNativeWasmDispatchInput(input));
+  input.module_bytes = module;
+  input.caller_observed = true;
+  input.caller_function_index = 5;
+  assert(!reb::IsValidNativeWasmDispatchInput(input));
+  input.caller_function_index = 0;
+  input.caller_kind = reb::kWasmDirectCallerSameInstance;
+  input.caller_function_index = 4;
+  assert(reb::IsValidNativeWasmDispatchInput(input));
+  input.caller_kind = 2;
+  assert(!reb::IsValidNativeWasmDispatchInput(input));
+  input.caller_observed = false;
+  input.caller_kind = reb::kWasmDirectCallerSameInstance;
+  input.caller_function_index = 4;
+  assert(!reb::IsValidNativeWasmDispatchInput(input));
+  input.caller_kind = reb::kWasmDirectCallerUnknown;
+  input.caller_function_index = 0;
+  assert(reb::IsValidNativeWasmDispatchInput(input));
   const auto record = [&] {
     sink.RecordNativeWasmDispatch(7, 8, "https://owned.test/module.wasm", module, 0, 8, UINT32_MAX,
                                   2, 9, 10);
@@ -1373,6 +1402,40 @@ void NativeWasmRuntimeAdmission() {
   assert(sink.IsNativeWasmDispatchEnabled());
   record();
   assert(native_wasm_retained == 1);
+  // Each observation carries the caller from its own walk. Two instances do
+  // not share one stack, and a host caller is unknown rather than an index.
+  record_callers = true;
+  expect_caller_observed = true;
+  expect_caller_kind = reb::kWasmDirectCallerSameInstance;
+  expect_caller_index = 4;
+  sink.RecordNativeWasmDispatch(7, 8, "https://owned.test/module.wasm", module, 1, 8, UINT32_MAX, 2,
+                                9, 10, reb::kWasmDirectCallerSameInstance, 4, true);
+  expect_caller_index = 7;
+  sink.RecordNativeWasmDispatch(7, 8, "https://owned.test/module.wasm", module, 3, 8, UINT32_MAX, 2,
+                                9, 10, reb::kWasmDirectCallerSameInstance, 7, true);
+  expect_caller_kind = reb::kWasmDirectCallerUnknown;
+  expect_caller_index = 0;
+  sink.RecordNativeWasmDispatch(7, 8, "https://owned.test/module.wasm", module, 3, 8, UINT32_MAX, 2,
+                                9, 10, reb::kWasmDirectCallerUnknown, 0, true);
+  assert(seen_callers.size() == 3);
+  assert((seen_callers[0] ==
+          std::pair<std::uint8_t, std::uint32_t>{reb::kWasmDirectCallerSameInstance, 4}));
+  assert((seen_callers[1] ==
+          std::pair<std::uint8_t, std::uint32_t>{reb::kWasmDirectCallerSameInstance, 7}));
+  assert((seen_callers[2] ==
+          std::pair<std::uint8_t, std::uint32_t>{reb::kWasmDirectCallerUnknown, 0}));
+  const auto retained_after_callers = native_wasm_retained;
+  sink.RecordNativeWasmDispatch(7, 8, "https://owned.test/module.wasm", module, 3, 8, UINT32_MAX, 2,
+                                9, 10, reb::kWasmDirectCallerUnknown, 5, true);
+  const auto guessed = One(queue);
+  assert(guessed.header.type == reb::NativeProbeType::kGap &&
+         std::string_view(reinterpret_cast<const char*>(guessed.inline_payload.data()),
+                          guessed.header.payload_size) == "native_wasm_dispatch_input_unavailable");
+  assert(native_wasm_retained == retained_after_callers);
+  record_callers = false;
+  expect_caller_observed = false;
+  expect_caller_kind = reb::kWasmDirectCallerUnknown;
+  expect_caller_index = 0;
   sink.SetEmitters(&AcceptRuntimeEvent, &CaptureRuntimeMetadata, 42,
                    reb::kAllNativeProbeCategoryMask, kForever, false, &NativeWasmFrameLookup);
   assert(sink.IsNativeWasmDispatchEnabled());

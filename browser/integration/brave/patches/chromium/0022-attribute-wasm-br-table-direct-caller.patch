@@ -1,0 +1,26 @@
+diff --git a/third_party/blink/renderer/bindings/core/v8/v8_initializer.cc b/third_party/blink/renderer/bindings/core/v8/v8_initializer.cc
+--- a/third_party/blink/renderer/bindings/core/v8/v8_initializer.cc
++++ b/third_party/blink/renderer/bindings/core/v8/v8_initializer.cc
+@@ -1,8 +1,10 @@
+ void CaptureWasmBrTableDispatch(v8::Local<v8::Context> context,
+                                const std::uint8_t* module_bytes,
+                                const std::size_t module_size,
+                                const std::uint32_t function_index,
+                                const std::uint32_t module_byte_offset,
+                                const std::uint32_t selector,
+-                               const std::uint32_t table_count) {
++                               const std::uint32_t table_count,
++                               const v8::WasmDirectCaller caller,
++                               const std::uint32_t caller_function_index) {
+   reb::NativeProbeSink& sink = reb::NativeProbeSink::Get();
+@@ -1,7 +1,9 @@
+   sink.RecordNativeWasmDispatch(
+       execution_context_id, frame_id, source_url,
+       UNSAFE_BUFFERS(base::span(module_bytes, module_size)), function_index,
+       module_byte_offset, selector, table_count,
+       document_token.GetHighForSerialization(),
+-      document_token.GetLowForSerialization());
++      document_token.GetLowForSerialization(),
++      static_cast<std::uint8_t>(caller), caller_function_index,
++      /*caller_observed=*/true);
+ }

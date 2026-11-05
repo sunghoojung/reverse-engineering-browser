@@ -595,6 +595,18 @@ nativeWorkspace.handlers[0].state = 'observed';
 assert(validateModule(nativeDocument), 'exact native site can confirm one repeated selector');
 assert.equal(nativeWorkspace.handlers[2].sample_count,0);
 assert(runInNewContext(`${model}\nvmOpcodeSamplePositions(value)[0]`,{value:[nativeRow],TextEncoder}).includes('guest PC unknown'));
+const directCallerDocument = structuredClone(nativeDocument);
+directCallerDocument.workspaces[0].native_wasm_observations = [{...nativeRow, direct_caller:{kind:'same-instance', function_index:0}}];
+assert(validateModule(directCallerDocument), 'function 0 is a real same-instance caller');
+const unknownDirectCallerDocument = structuredClone(nativeDocument);
+unknownDirectCallerDocument.workspaces[0].native_wasm_observations = [{...nativeRow, direct_caller:{kind:'unknown', function_index:null}}];
+assert(validateModule(unknownDirectCallerDocument), 'a host caller is unknown');
+const guessedDirectCaller = structuredClone(unknownDirectCallerDocument);
+guessedDirectCaller.workspaces[0].native_wasm_observations[0].direct_caller.function_index = 0;
+assert(!validateModule(guessedDirectCaller), 'unknown cannot carry function index 0');
+assert(runInNewContext(`${model}\nvmNativeWasmPositionText(row)`,{row:directCallerDocument.workspaces[0].native_wasm_observations[0],TextEncoder}).includes('caller function 0'));
+assert(runInNewContext(`${model}\nvmNativeWasmPositionText(row)`,{row:unknownDirectCallerDocument.workspaces[0].native_wasm_observations[0],TextEncoder}).includes('caller unknown'));
+assert(runInNewContext(`${model}\nvmNativeWasmPositionText(row)`,{row:nativeRow,TextEncoder}).includes('guest PC unknown'));
 for (const mutate of [
   doc=>{doc.workspaces[0].native_wasm_observations[0].module_byte_offset=70;},
   doc=>{doc.workspaces[0].native_wasm_observations[0].function_index=1;},

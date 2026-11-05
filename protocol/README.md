@@ -388,8 +388,10 @@ use the names.
 | 25 | `js_invocation_settle` | `include/reb/js_invocation.hpp` | [native JavaScript invocation](native-js-invocation-v1.md) |
 | 26 | `js_invocation_request` | `include/reb/js_invocation.hpp` | [native JavaScript invocation](native-js-invocation-v1.md) |
 
-`wasm_dispatch_observation` and `wasm_indirect_observation` payloads are
-version 2 and `wasm_guest_invocation` version 4: each adds the JavaScript
-invocation context in previously reserved bytes, and older versions remain
-readable as not observed. See
+`wasm_indirect_observation` payloads are version 2 and `wasm_guest_invocation`
+version 4: each adds the JavaScript invocation context in previously reserved
+bytes, and older versions remain readable as not observed.
+`wasm_dispatch_observation` payload version 3 adds the direct-call caller in
+the next reserved bytes. Versions 1 and 2 stay readable as a caller that was
+not observed, which is distinct from an unknown host caller. See
 [invocation context of Wasm records](native-js-invocation-v1.md#invocation-context-of-wasm-records).

@@ -94,6 +94,8 @@ and the [`reb-api-workflow` skill](../../.agents/skills/reb-api-workflow/SKILL.m
 See [native-wasm-dispatch-v1](../../protocol/native-wasm-dispatch-v1.md). Runtime
 sampling stays C++; Rust validates exact artifacts and physical dispatch sites,
 and the viewer displays native observations without calling them guest PCs.
+`get_events` also returns `wasm_observation` decoded from the event payload
+alone, including for a module that has no opcode workspace.
 Physical observations and adapter guest samples can describe the same br_table
 execution, so workspaces count them separately and never add them.
 A rebuilt browser is required. Portable tests are not a full native browser build.

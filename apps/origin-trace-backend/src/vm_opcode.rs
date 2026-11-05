@@ -18,6 +18,25 @@ pub(crate) mod native_js;
 mod native_module;
 #[path = "vm_opcode_native_wasm.rs"]
 mod native_wasm;
+
+/// Puts `wasm_observation` beside the raw payload of a native Wasm dispatch or
+/// call_indirect event. Other events are left alone. A payload the shared
+/// decoder rejects is `{status: invalid}` with no fields, not a partial row.
+pub(crate) fn annotate_wasm_observations(events: &mut [Value]) {
+    for event in events {
+        if !matches!(
+            event.get("type").and_then(Value::as_str),
+            Some("wasm_dispatch_observation" | "wasm_indirect_observation")
+        ) {
+            continue;
+        }
+        let decoded =
+            native_wasm::query_observation(event).unwrap_or_else(|| json!({"status": "invalid"}));
+        if let Some(object) = event.as_object_mut() {
+            object.insert("wasm_observation".to_owned(), decoded);
+        }
+    }
+}
 #[path = "vm_opcode_observed.rs"]
 mod observed;
 #[path = "vm_opcode_wasm.rs"]

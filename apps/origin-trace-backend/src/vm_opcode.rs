@@ -20,21 +20,27 @@ mod native_module;
 mod native_wasm;
 
 /// Puts `wasm_observation` beside the raw payload of a native Wasm dispatch or
-/// call_indirect event. Other events are left alone. A record the shared
-/// decoder rejects, including an unknown payload version, is `{status: invalid}`
-/// with no fields, not a partial row.
+/// call_indirect event, and `wasm_overflow` beside an overflow identity. Other
+/// events are left alone. A record the shared decoder rejects, including an
+/// unknown payload version, is `{status: invalid}` with no fields, not a
+/// partial row.
 pub(crate) fn annotate_wasm_observations(events: &mut [Value]) {
     for event in events {
-        if !matches!(
-            event.get("type").and_then(Value::as_str),
-            Some("wasm_dispatch_observation" | "wasm_indirect_observation")
-        ) {
-            continue;
-        }
-        let decoded =
-            native_wasm::query_observation(event).unwrap_or_else(|| json!({"status": "invalid"}));
+        let kind = event.get("type").and_then(Value::as_str);
+        let (field, decoded) = match kind {
+            Some("wasm_dispatch_observation" | "wasm_indirect_observation") => (
+                "wasm_observation",
+                native_wasm::query_observation(event)
+                    .unwrap_or_else(|| json!({"status": "invalid"})),
+            ),
+            Some("wasm_dispatch_overflow" | "wasm_indirect_overflow") => (
+                "wasm_overflow",
+                native_wasm::query_overflow(event).unwrap_or_else(|| json!({"status": "invalid"})),
+            ),
+            _ => continue,
+        };
         if let Some(object) = event.as_object_mut() {
-            object.insert("wasm_observation".to_owned(), decoded);
+            object.insert(field.to_owned(), decoded);
         }
     }
 }

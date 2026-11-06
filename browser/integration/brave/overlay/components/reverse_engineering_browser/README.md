@@ -150,6 +150,12 @@ that interrupt on the current mojo pipe. The engine edits are V8 patch
 `0013-record-wasm-execution-outcomes` and Chromium patch
 `0023-record-wasm-execution-outcomes`. See
 [execution outcomes](../../../../../../protocol/native-wasm-dispatch-v1.md#execution-outcomes).
+`wasm_dispatch_overflow` (event 28) and `wasm_indirect_overflow` (event 29)
+are compact identities for a sample a function, module, call-site, or the
+16-record stream budget refused. The renderer hook stays enabled past that
+cap until the omitted counter saturates. `reset_wasm_sample_budgets` publishes
+the pending omitted count and starts a new ring. See
+[overflow identities](../../../../../../protocol/native-wasm-dispatch-v1.md#overflow-identities).
 See the [capability boundary and acceptance gates](../../../../../../protocol/vm-opcode-workspace-v2.md#native-browser-capability-boundary).
 The VM category also permits 32-byte through 16-MiB snapshots of runtime-created
 `ArrayBuffer`, `Uint8Array`, `Uint16Array`, and `Uint32Array` data. The V8 hook

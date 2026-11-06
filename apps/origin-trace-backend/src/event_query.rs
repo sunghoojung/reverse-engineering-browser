@@ -8,7 +8,8 @@
 //! returned until its newline arrives, so a cursor never splits a record.
 //! Stored records are not rewritten; a filter only selects them. Responses add
 //! `wasm_observation` beside the hex payload of native Wasm dispatch and
-//! call_indirect events. That decode reads the payload only.
+//! call_indirect events, and `wasm_overflow` beside an overflow identity.
+//! That decode reads the payload only.
 use crate::{
     app::{Query, validate_event},
     error::{Code, Error, Result},

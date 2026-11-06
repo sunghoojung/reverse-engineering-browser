@@ -319,6 +319,92 @@ pub(super) fn query_observation(event: &Value) -> Option<Value> {
     }
 }
 
+/// Decoded `wasm_overflow` for an event query. `None` means the record is not
+/// a valid compact identity; the caller reports that as invalid and does not
+/// fill any field. This does not open a module. Artifact id and parent event
+/// id must be zero: this record does not invent either.
+pub(super) fn query_overflow(event: &Value) -> Option<Value> {
+    let indirect = event["type"] == "wasm_indirect_overflow";
+    if event["type"] != "wasm_dispatch_overflow" && !indirect {
+        return None;
+    }
+    let size = if indirect { 40 } else { 32 };
+    if event["protocol_version"] != 3
+        || event["category"] != "vm"
+        || event["flags"].as_u64() != Some(0)
+        || event["payload_encoding"] != "hex"
+        || event["payload_size"] != size
+        || event["payload_truncated"] != false
+        || event["artifact_id"] != "0"
+        || event["parent_event_id"] != "0"
+    {
+        return None;
+    }
+    let text = event["payload"].as_str()?;
+    if text.len() != size * 2 {
+        return None;
+    }
+    let bytes = hex::decode(text).ok()?;
+    if bytes.len() != size
+        || u16::from_le_bytes(bytes[0..2].try_into().ok()?) != 1
+        || u16::from_le_bytes(bytes[2..4].try_into().ok()?) != size as u16
+        || bytes[5] != 0
+    {
+        return None;
+    }
+    if indirect {
+        if u64::from_le_bytes(bytes[32..40].try_into().ok()?) != 0 {
+            return None;
+        }
+    } else if u32::from_le_bytes(bytes[28..32].try_into().ok()?) != 0 {
+        return None;
+    }
+    let record_kind = bytes[4];
+    let ring = u16::from_le_bytes(bytes[6..8].try_into().ok()?);
+    let omitted_at = if indirect { 28 } else { 24 };
+    let omitted = u32::from_le_bytes(bytes[omitted_at..omitted_at + 4].try_into().ok()?);
+    if record_kind == 2 {
+        if ring != 0 || omitted == 0 || bytes[8..omitted_at].iter().any(|byte| *byte != 0) {
+            return None;
+        }
+        return Some(json!({"status":"decoded","kind":"omitted","omitted_count":omitted}));
+    }
+    let limit = 16 * 1024 * 1024;
+    let function = u32::from_le_bytes(bytes[8..12].try_into().ok()?);
+    let offset = u32::from_le_bytes(bytes[12..16].try_into().ok()?);
+    if record_kind != 1
+        || omitted != 0
+        || ring >= 32
+        || function >= limit
+        || !(8..limit).contains(&offset)
+    {
+        return None;
+    }
+    if !indirect {
+        let selector = u32::from_le_bytes(bytes[16..20].try_into().ok()?);
+        let arms = u32::from_le_bytes(bytes[20..24].try_into().ok()?);
+        if arms >= limit {
+            return None;
+        }
+        return Some(
+            json!({"status":"decoded","kind":"identity","ring_index":ring,
+            "function_index":function,"module_byte_offset":offset,"selector":selector,"arm_count":arms}),
+        );
+    }
+    let table = u32::from_le_bytes(bytes[16..20].try_into().ok()?);
+    let slot = u32::from_le_bytes(bytes[20..24].try_into().ok()?);
+    let resolution = u32::from_le_bytes(bytes[24..28].try_into().ok()?);
+    let name =
+        ["resolved", "null", "out-of-bounds", "foreign", "unresolved"].get(resolution as usize)?;
+    if table >= limit {
+        return None;
+    }
+    Some(
+        json!({"status":"decoded","kind":"identity","ring_index":ring,"function_index":function,
+        "module_byte_offset":offset,"table_index":table,"slot":slot,"resolution":name}),
+    )
+}
+
 pub(super) fn collect_indirect(
     artifact: &Value,
     mut module: Option<&mut Module<'_>>,
@@ -512,6 +598,90 @@ pub(super) mod tests {
         bytes[12..16].copy_from_slice(&selector.to_le_bytes());
         bytes[16..20].copy_from_slice(&2u32.to_le_bytes());
         json!({"protocol_version":3,"session_id":"1","sequence_number":"1","process_id":1,"thread_id":1,"monotonic_time_ns":"1","navigation_id":"1","frame_id":"1","artifact_id":"1","parent_event_id":"0","flags":0,"payload_size":128,"payload_encoding":"hex","payload_truncated":false,"category":"vm","type":"wasm_dispatch_observation","payload":hex::encode(bytes)})
+    }
+    #[test]
+    fn overflow_identities_are_not_observations() {
+        let mut event = event(0);
+        let mut bytes = [0u8; 32];
+        bytes[0] = 1;
+        bytes[2] = 32;
+        bytes[4] = 1;
+        bytes[8..12].copy_from_slice(&3u32.to_le_bytes());
+        bytes[12..16].copy_from_slice(&47u32.to_le_bytes());
+        bytes[16..20].copy_from_slice(&1u32.to_le_bytes());
+        bytes[20..24].copy_from_slice(&2u32.to_le_bytes());
+        event["type"] = json!("wasm_dispatch_overflow");
+        event["payload_size"] = json!(32);
+        event["payload"] = json!(hex::encode(bytes));
+        let scope = artifact(&event);
+        let output = read(&scope, &module(), std::slice::from_ref(&event));
+        assert_eq!((output.count, output.invalid, output.rows.len()), (0, 0, 0));
+    }
+    #[test]
+    fn query_overflow_decodes_identities_and_rejects_an_artifact_id() {
+        let mut bytes = [0u8; 32];
+        bytes[0] = 1;
+        bytes[2] = 32;
+        bytes[4] = 1;
+        bytes[6] = 3;
+        bytes[8..12].copy_from_slice(&9u32.to_le_bytes());
+        bytes[12..16].copy_from_slice(&47u32.to_le_bytes());
+        bytes[16..20].copy_from_slice(&1000u32.to_le_bytes());
+        bytes[20..24].copy_from_slice(&2u32.to_le_bytes());
+        let mut event = event(0);
+        event["type"] = json!("wasm_dispatch_overflow");
+        event["artifact_id"] = json!("0");
+        event["payload_size"] = json!(32);
+        event["payload"] = json!(hex::encode(bytes));
+        assert_eq!(
+            query_overflow(&event),
+            Some(
+                json!({"status":"decoded","kind":"identity","ring_index":3,"function_index":9,
+                "module_byte_offset":47,"selector":1000,"arm_count":2})
+            )
+        );
+        event["artifact_id"] = json!("1");
+        assert!(query_overflow(&event).is_none());
+        let mut events = vec![event];
+        events[0]["artifact_id"] = json!("0");
+        super::super::annotate_wasm_observations(&mut events);
+        assert_eq!(events[0]["wasm_overflow"]["kind"], "identity");
+        assert!(events[0].get("wasm_observation").is_none());
+        events[0]["artifact_id"] = json!("1");
+        super::super::annotate_wasm_observations(&mut events);
+        assert_eq!(events[0]["wasm_overflow"], json!({"status":"invalid"}));
+        let mut omitted = [0u8; 32];
+        omitted[0] = 1;
+        omitted[2] = 32;
+        omitted[4] = 2;
+        omitted[24..28].copy_from_slice(&4u32.to_le_bytes());
+        events[0]["artifact_id"] = json!("0");
+        events[0]["payload"] = json!(hex::encode(omitted));
+        assert_eq!(
+            query_overflow(&events[0]),
+            Some(json!({"status":"decoded","kind":"omitted","omitted_count":4}))
+        );
+        let mut indirect = [0u8; 40];
+        indirect[0] = 1;
+        indirect[2] = 40;
+        indirect[4] = 1;
+        indirect[6] = 1;
+        indirect[8..12].copy_from_slice(&4u32.to_le_bytes());
+        indirect[12..16].copy_from_slice(&10u32.to_le_bytes());
+        indirect[20..24].copy_from_slice(&5u32.to_le_bytes());
+        indirect[24..28].copy_from_slice(&1u32.to_le_bytes());
+        events[0]["type"] = json!("wasm_indirect_overflow");
+        events[0]["payload_size"] = json!(40);
+        events[0]["payload"] = json!(hex::encode(indirect));
+        assert_eq!(
+            query_overflow(&events[0]),
+            Some(
+                json!({"status":"decoded","kind":"identity","ring_index":1,"function_index":4,
+                "module_byte_offset":10,"table_index":0,"slot":5,"resolution":"null"})
+            )
+        );
+        events[0]["parent_event_id"] = json!("9");
+        assert!(query_overflow(&events[0]).is_none());
     }
     #[test]
     fn native_wasm_exact_site_and_scope() {

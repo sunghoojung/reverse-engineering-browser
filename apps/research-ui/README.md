@@ -710,8 +710,13 @@ categories in Fingerprinting. The configured sampling budgets
 `native_js_dispatch_budget_incomplete`, `native_js_dispatch_site_budget_incomplete`,
 `native_guest_sample_limit` and `native_guest_browser_sample_budget`) read as
 "Sampling budget reached": retained observations are exact and later ones were not
-sampled. That includes the per-function and per-call-site Wasm budgets. Filter
-reasons (`native_wasm_dispatch_filtered`, `native_wasm_indirect_filtered`,
+sampled. That includes the per-function and per-call-site Wasm budgets. A
+function, module, call-site, or stream refusal also keeps a compact overflow
+identity up to a ring of 32, and identities past the ring are a count; those
+records are not full observations. `reset_wasm_sample_budgets` publishes that
+count and starts both rings again. See
+[overflow identities](../../protocol/native-wasm-dispatch-v1.md#overflow-identities).
+Filter reasons (`native_wasm_dispatch_filtered`, `native_wasm_indirect_filtered`,
 and their `_browser_` counterparts) are sample-policy exclusions: the
 execution was not sampled and did not consume a sample slot. The notice and
 footer count them separately from sampling budgets and from reported losses.

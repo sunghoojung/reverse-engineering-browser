@@ -126,27 +126,36 @@ not advance the sample index. The same controls apply to `call_indirect`,
 which also has a maximum per caller function and module byte offset. The two
 streams keep independent counters. `session_action`
 `reset_wasm_sample_budgets` restarts both sample indexes at 0 in the same
-browser session; it does not change the policy, the session id, or the
-capture configuration. The browser notices the reset file on its writer wake,
-about 250ms later, and only when the generation is greater than the last one
-it applied. The backend replaces that file by rename under an exclusive lock,
-so a reader sees a whole decimal and two overlapping resets cannot publish
-the same generation. Executions before that wake still belong to the previous
-epoch. A rebuilt Brave is required before a live session honors
-the policy or the reset. `sample_index` remains the configuration slot, 0
-through 15, not a per-function index and not an interpreter guest PC.
+browser session and starts a new overflow ring for each stream. It first
+publishes each stream's pending omitted count for the epoch being closed.
+The next retained sample is index 0, and the next overflow identity may reuse
+ring index 0. It does not change the policy, the session id, or the capture
+configuration, and it does not invent a sample, a caller, or a parent. The
+browser notices the reset file on its writer wake, about 250ms later, and
+only when the generation is greater than the last one it applied. The backend
+replaces that file by rename under an exclusive lock, so a reader sees a
+whole decimal and two overlapping resets cannot publish the same generation.
+Executions before that wake still belong to the previous epoch. A rebuilt
+Brave is required before a live session honors the policy, the reset, or the
+overflow records. `sample_index` remains the configuration slot, 0 through
+15, not a per-function index and not an interpreter guest PC.
 
 A filtered record is an exclusion, not a capacity loss. The renderer coalesces
 it once per budget epoch into `native_wasm_dispatch_filtered`. A new
-configuration and `reset_wasm_sample_budgets` each start an epoch. A per-function refusal
-is `native_wasm_dispatch_function_budget_incomplete`. The browser names the
-same cases `native_wasm_dispatch_browser_filtered` and
+configuration and `reset_wasm_sample_budgets` each start an epoch. A
+per-function refusal is
+`native_wasm_dispatch_function_budget_incomplete`. The browser names the same
+cases `native_wasm_dispatch_browser_filtered` and
 `native_wasm_dispatch_browser_function_budget_incomplete` on each refused
 record. The global 16 still coalesces into
-`native_wasm_dispatch_budget_incomplete` and then disables that stream only.
-These gaps do not carry the dropped function, offset, or selector; that
-identity remains the open omission in issue 409. A lost observation becomes a
-`gap` in its own renderer
+`native_wasm_dispatch_budget_incomplete`. None of these refusals disables the
+stream: the admission predicate stays true so a later execution can keep a
+compact identity in the [overflow ring](#overflow-identities). The predicate
+turns false when that ring's omitted counter saturates or the budget epoch is
+resetting. A per-function, per-module, or per-site refusal leaves the other
+functions able to take a remaining full-observation slot. These gaps do not
+carry the dropped function, offset, or selector; the overflow identity does.
+A lost observation becomes a `gap` in its own renderer
 sequence slot. Queue, transport and budget losses are explicit incompleteness,
 never invented samples. A malformed module and a missing document are refused
 before a sample slot is taken. The artifact sink releases the slot if the
@@ -238,7 +247,8 @@ not decoded as a version-2 prefix. The record must also be protocol 3,
 category `vm`, and flags 0. This decode does not build an opcode workspace or
 open the module, so a module the detector never admits still has rows here.
 It does not recover a guest PC or invent a sample. Workspace rows remain a
-separate, module-checked view.
+separate, module-checked view. Overflow identities are a separate
+`wasm_overflow` object; see [overflow identities](#overflow-identities).
 See [filtered event reads](http-api.md#filtered-and-paged-reads).
 
 ## Reader and viewer
@@ -323,9 +333,12 @@ Blink, the renderer sink, the browser host and the artifact sink apply the same
 document, session, generation, category and expiry rules as `br_table`
 observations, through the same bounded transport. A separate budget allows 16
 records per configuration in the renderer and in the browser, so one stream
-never starves the other. The sample-budget policy in the `br_table` section
-applies here independently, including the per-call-site maximum. A filtered
-record is `native_wasm_indirect_filtered` in the renderer and
+never starves the other. Executions that a budget refuses keep compact identities
+in the same [overflow ring](#overflow-identities). The 16 full records stay
+the cap, and the stream stays enabled past that cap until the omitted counter
+saturates. The sample-budget policy in the `br_table` section applies here
+independently, including the per-call-site maximum. A filtered record is
+`native_wasm_indirect_filtered` in the renderer and
 `native_wasm_indirect_browser_filtered` in the browser. A per-function refusal
 is `native_wasm_indirect_function_budget_incomplete` or
 `native_wasm_indirect_browser_function_budget_incomplete`. A per-call-site
@@ -580,3 +593,121 @@ that emits neither. The six `RebNativeCallIndirect*` cctests run in the native
 V8 runtime workflow. None of these is a rebuilt-Brave run: live acceptance
 still needs the pinned browser build. The new Liftoff hooks are not executed
 by the portable tests.
+
+## Overflow identities
+
+Full observations stay capped at 16 per stream per budget epoch. An execution
+that a budget refuses is not discarded without a trace. The refusal can be
+the module allowlist, the function allow or deny list, the per-function
+maximum, the per-call-site maximum on `call_indirect`, or the 16-record
+stream cap. The renderer keeps a fixed ring of 32 compact identities per
+stream per budget epoch. Thirty-two is twice the full-observation cap: a
+fixed renderer array, large enough to name the sites that ran after a budget
+refused them, and not another 128-byte module transfer. The ring is not a
+full observation. It has no parent event and no module artifact id. The
+renderer does not assign those, and this record does not invent them.
+
+`wasm_dispatch_overflow` (numeric 28) and `wasm_indirect_overflow` (numeric
+29), category `vm`, protocol 3. Parent event id is 0. Artifact id is 0. The
+payload is little-endian and exactly 32 bytes for `br_table` or 40 bytes for
+`call_indirect`. Version is 1. `wasm_execution_outcome` keeps numeric 27.
+
+`br_table` payload:
+
+| Offset | Field | Type |
+| --- | --- | --- |
+| 0 | version (1) | u16 |
+| 2 | size (32) | u16 |
+| 4 | kind (1 identity, 2 omitted) | u8 |
+| 5 | reserved (0) | u8 |
+| 6 | ring index | u16 |
+| 8 | function index | u32 |
+| 12 | module instruction offset | u32 |
+| 16 | unsigned selector | u32 |
+| 20 | explicit arm count | u32 |
+| 24 | omitted count | u32 |
+| 28 | reserved (0) | u32 |
+
+`call_indirect` payload:
+
+| Offset | Field | Type |
+| --- | --- | --- |
+| 0 | version (1) | u16 |
+| 2 | size (40) | u16 |
+| 4 | kind (1 identity, 2 omitted) | u8 |
+| 5 | reserved (0) | u8 |
+| 6 | ring index | u16 |
+| 8 | caller function index | u32 |
+| 12 | module instruction offset | u32 |
+| 16 | table index | u32 |
+| 20 | dynamic slot | u32 |
+| 24 | resolution (0 to 4) | u32 |
+| 28 | omitted count | u32 |
+| 32 | reserved (0) | u64 |
+
+Kind 1 is one identity that fit in the ring. Its omitted count is 0 and its
+ring index is below 32. Function, arm and table indexes are below 16 Mi, and
+the offset is at least 8 and below 16 Mi, the same bounds as a full
+observation. Any u32 selector or slot is legal. Kind 2 is the count of valid
+executions that did not fit. Its identity fields, ring index and resolution
+are 0, and the omitted count is at least 1. A resolved indirect identity does
+not carry a callee; that index exists only on a full
+`wasm_indirect_observation`.
+
+The ring index is a slot in this budget epoch's ring, not an execution
+counter. Sequence number orders the records. A reused index after a new
+configuration or `reset_wasm_sample_budgets` is not a drop.
+
+Unknown versions, the wrong size, a kind other than 1 or 2, a nonzero reserved
+field, an identity that also carries an omitted count, an omitted record that
+also carries an identity, a ring index past 31, an out-of-range index or
+offset, an unknown resolution, or a nonzero artifact id or parent event id are
+invalid. C++, Rust, Python, JavaScript and the Swift trace builder reject
+them. They are not partial observations. Bytes past the payload in the
+inline record must be zero.
+
+The budget gap is unchanged and still marks the refusal. The ring does not
+replace it. Each identity is written when the execution is seen. The omitted
+record is one cumulative snapshot of one budget epoch, written when that
+epoch closes: `reset_wasm_sample_budgets`, or when the configuration retires
+(the renderer emitter is replaced or cleared). If several omitted records
+exist, the count is the maximum, not the sum. The count saturates at 2^32−1
+and does not wrap; at that point the hook stops for that epoch. A later reset
+starts a new epoch, so saturation does not keep the next epoch disabled. The
+omitted record's session, time, frame, process and thread are one admission.
+The count is not incremented until that admission is visible, so the record
+cannot mix two executions or name an older epoch. The counter word is tagged
+with that admission's budget epoch. Installing a later epoch's scope stores a
+new tag and a zero count, so a late increment cannot be added to the next
+epoch. A probe queue that cannot take the coalesced budget gap does not also
+push the identity; that execution is one queue drop, and it does not consume
+a ring slot. A probe queue that cannot take an identity does not consume a
+ring slot either; that loss stays a queue drop. A probe queue that cannot
+take the omitted record when the epoch closes leaves the count unpublished.
+A crash before that close loses the omitted count; the budget gap and any
+identities already enqueued remain. A late increment after the snapshot is
+read and before the emitter is cleared can be missed.
+
+The admission predicate stays true after the 16 full observations and after a
+per-function, per-module, or per-site refusal, so V8 still walks a frame for
+later executions and those executions can be named or counted. Other functions
+can still take a remaining full-observation slot. The predicate turns false
+when the omitted counter saturates or the budget epoch is resetting.
+
+`get_events` and `wait_for_events` leave `payload` as the hex and add
+`wasm_overflow` beside it. `status` is `decoded` or `invalid`. Invalid carries
+no fields. A decoded identity has `kind` `identity`, `ring_index`,
+`function_index` and `module_byte_offset`. A `br_table` identity also has
+`selector` and `arm_count`. A `call_indirect` identity also has `table_index`,
+`slot` and `resolution` (`resolved`, `null`, `out-of-bounds`, `foreign`,
+`unresolved`). An omitted record has `kind` `omitted` and `omitted_count`,
+and no site. This decode does not build an opcode workspace or open a module.
+
+Opcode workspaces do not copy these identities into
+`native_wasm_observations` or `native_wasm_indirect_observations` and do not
+match them to static arms. That would claim a module artifact the record does
+not carry. They stay event-store records.
+
+A rebuilt Brave is required before a live session emits these records. The
+in-process sink test is not a live browser run, and it does not invent a
+sample the browser has not produced.

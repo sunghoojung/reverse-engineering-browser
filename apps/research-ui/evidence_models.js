@@ -33,7 +33,8 @@
           'request_completed', 'request_failed', 'vm_finding',
           'vm_dispatch_sample', 'wasm_dispatch_observation', 'wasm_guest_dispatch', 'wasm_guest_invocation',
           'wasm_indirect_observation', 'wasm_execution_outcome', 'js_dispatch_observation', 'js_invocation_start', 'js_invocation_settle',
-          'js_invocation_request', 'artifact_captured', 'artifact_capture_failed', 'request_body', 'request_target'
+          'js_invocation_request', 'wasm_dispatch_overflow', 'wasm_indirect_overflow',
+          'artifact_captured', 'artifact_capture_failed', 'request_body', 'request_target'
         ])
       };
       const uint64Fields = [
@@ -131,6 +132,9 @@
       }
 
       function decodePayload(event) {
+        if (event?.type === 'wasm_dispatch_overflow' || event?.type === 'wasm_indirect_overflow') {
+          return decodeWasmOverflow(event) || '';
+        }
         return new TextDecoder().decode(bytesFromHex(event.payload));
       }
 
@@ -270,6 +274,10 @@
         }
         if (budgets.length) {
           messages.push(`Sampling budget reached in ${scope} for ${namedGapItems(budgets, gap => `${samplingBudgetGapLabels.get(gap.reason)} (${gap.reason})`)}. Retained observations are exact; later ones were not sampled.`);
+          if (budgets.some(gap => gap.reason === 'native_wasm_dispatch_budget_incomplete' ||
+              gap.reason === 'native_wasm_indirect_budget_incomplete')) {
+            messages.push('Wasm executions past that cap keep a compact identity in an overflow record, up to the ring; identities past the ring are a count on that record, not another full observation.');
+          }
         }
         return messages.join(' ');
       }
@@ -380,6 +388,53 @@
       function nativeInvocationRow(context) {
         const state = ['', 'none', 'inside', 'unknown'][context.state];
         return state ? {js_invocation: {state, invocation_id: String(context.id)}} : {};
+      }
+
+      // Compact identity past a 16-record Wasm budget. Null is malformed, not a
+      // partial observation. The callee index is not in an indirect identity.
+      function decodeWasmOverflow(event) {
+        const indirect = event?.type === 'wasm_indirect_overflow';
+        if (event?.type !== 'wasm_dispatch_overflow' && !indirect) return null;
+        if (event.protocol_version !== 3 || event.category !== 'vm' || event.flags !== 0 ||
+            event.payload_truncated === true || event.artifact_id !== '0' ||
+            event.parent_event_id !== '0' ||
+            event.payload_encoding !== 'hex' || typeof event.payload !== 'string') return null;
+        if (!['session_id', 'sequence_number', 'monotonic_time_ns', 'frame_id'].every(field =>
+          isCanonicalInteger(event[field], 1n, uint64Max))) return null;
+        if (!['process_id', 'thread_id'].every(field => isSafeIntegerInRange(event[field], 1, 0xffffffff))) return null;
+        const size = indirect ? 40 : 32;
+        if (event.payload_size !== size || event.payload.length !== size * 2 || !/^[0-9a-f]+$/i.test(event.payload)) return null;
+        const bytes = Uint8Array.from(event.payload.match(/../g), byte => Number.parseInt(byte, 16));
+        if (bytes.length !== size || bytes.some(byte => Number.isNaN(byte))) return null;
+        const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+        if (view.getUint16(0, true) !== 1 || view.getUint16(2, true) !== size || bytes[5] !== 0) return null;
+        if (indirect ? view.getBigUint64(32, true) !== 0n : view.getUint32(28, true) !== 0) return null;
+        const kind = bytes[4];
+        const ring = view.getUint16(6, true);
+        const omitted = view.getUint32(indirect ? 28 : 24, true);
+        const limit = 16 * 1024 * 1024;
+        const label = indirect ? 'call_indirect' : 'br_table';
+        if (kind === 2) {
+          const identityEnd = indirect ? 28 : 24;
+          if (ring !== 0 || omitted < 1 || bytes.slice(8, identityEnd).some(byte => byte !== 0)) return null;
+          return `Wasm ${label} overflow omitted ${omitted} identities past the ring. Not a full observation.`;
+        }
+        if (kind !== 1 || omitted !== 0 || ring >= 32) return null;
+        const functionIndex = view.getUint32(8, true);
+        const offset = view.getUint32(12, true);
+        if (functionIndex >= limit || offset < 8 || offset >= limit) return null;
+        if (!indirect) {
+          const selector = view.getUint32(16, true);
+          const arms = view.getUint32(20, true);
+          if (arms >= limit) return null;
+          return `Wasm br_table overflow identity: function ${functionIndex}, byte ${offset}, selector ${selector}, arms ${arms}, ring ${ring}. Not a full observation.`;
+        }
+        const table = view.getUint32(16, true);
+        const slot = view.getUint32(20, true);
+        const resolution = view.getUint32(24, true);
+        const names = ['resolved', 'null', 'out-of-bounds', 'foreign', 'unresolved'];
+        if (table >= limit || resolution >= names.length) return null;
+        return `Wasm call_indirect overflow identity: caller ${functionIndex}, byte ${offset}, table ${table}, slot ${slot}, resolution ${names[resolution]}, ring ${ring}. Not a full observation.`;
       }
 
       function decodeNativeWasmObservation(event) {
@@ -746,6 +801,8 @@
           (event.type !== 'wasm_dispatch_observation' || decodeNativeWasmObservation(event) !== null) &&
           (event.type !== 'wasm_indirect_observation' || decodeNativeWasmIndirectObservation(event) !== null) &&
           (event.type !== 'wasm_execution_outcome' || decodeNativeWasmExecutionOutcome(event) !== null) &&
+          (event.type !== 'wasm_dispatch_overflow' && event.type !== 'wasm_indirect_overflow' ||
+            decodeWasmOverflow(event) !== null) &&
           (event.type !== 'js_dispatch_observation' || decodeNativeJsObservation(event) !== null) &&
           (!event.type.startsWith('js_invocation_') || decodeNativeJsInvocation(event) !== null) &&
           (!['wasm_guest_dispatch','wasm_guest_invocation'].includes(event.type) || decodeNativeGuestRecord(event) !== null);

@@ -242,6 +242,9 @@ Dispatch payload version 3 keeps the invocation context at 24..32 and uses
 32..40 for the direct caller. See
 [native Wasm dispatch](native-wasm-dispatch-v1.md). Earlier versions reserved
 those bytes and still decode, as not observed.
+`wasm_dispatch_overflow` (28) and `wasm_indirect_overflow` (29) do not carry
+this context or a caller. They name an execution a budget refused and are not
+observations.
 Guest dispatch records stay version 1; each names its guest invocation, which
 carries the context. VM Lab rows show the context as
 `js_invocation: {state, invocation_id}` and omit it when not observed.

@@ -392,6 +392,8 @@ use the names.
 | 25 | `js_invocation_settle` | `include/reb/js_invocation.hpp` | [native JavaScript invocation](native-js-invocation-v1.md) |
 | 26 | `js_invocation_request` | `include/reb/js_invocation.hpp` | [native JavaScript invocation](native-js-invocation-v1.md) |
 | 27 | `wasm_execution_outcome` | `include/reb/wasm_dispatch.hpp` | [native Wasm execution outcomes](native-wasm-dispatch-v1.md#execution-outcomes) |
+| 28 | `wasm_dispatch_overflow` | `include/reb/wasm_dispatch.hpp` | [native Wasm overflow identities](native-wasm-dispatch-v1.md#overflow-identities) |
+| 29 | `wasm_indirect_overflow` | `include/reb/wasm_dispatch.hpp` | [native Wasm overflow identities](native-wasm-dispatch-v1.md#overflow-identities) |
 
 `wasm_indirect_observation` payloads are version 2 and `wasm_guest_invocation`
 version 4: each adds the JavaScript invocation context in previously reserved
@@ -401,5 +403,9 @@ the next reserved bytes. Versions 1 and 2 stay readable as a caller that was
 not observed, which is distinct from an unknown host caller. See
 [invocation context of Wasm records](native-js-invocation-v1.md#invocation-context-of-wasm-records).
 `get_events` and `wait_for_events` return the two Wasm observation payloads
-decoded as `wasm_observation` beside the hex. See
+decoded as `wasm_observation` beside the hex, and the overflow payloads
+decoded as `wasm_overflow`. See
 [event queries](native-wasm-dispatch-v1.md#event-queries).
+`wasm_dispatch_overflow` and `wasm_indirect_overflow` are version 1 and do not
+carry invocation or caller context: they are compact identities for samples a
+budget refused, not full observations.

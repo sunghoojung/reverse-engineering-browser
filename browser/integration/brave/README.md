@@ -461,9 +461,14 @@ It has its own 16-record budget and shares the module artifact and transport.
 A session can also restrict either budget by module digest, function index,
 and a per-function or per-call-site maximum, and
 `reset_wasm_sample_budgets` restarts both sample indexes without a new
-configuration. Those controls do not raise the global 16. A rebuilt Brave is
-required before a live session honors them.
-See [call_indirect observations](../../../protocol/native-wasm-dispatch-v1.md#call_indirect-observations).
+configuration. Those controls do not raise the global 16. A sample refused by
+any of those budgets, including the 16-record stream cap, keeps a compact
+overflow identity, up to a ring, and then a count. The stream stays enabled
+past that cap so later executions can be named; reset publishes the pending
+count and starts the ring again. A rebuilt Brave is required before a live
+session emits those records or honors the policy. See
+[overflow identities](../../../protocol/native-wasm-dispatch-v1.md#overflow-identities)
+and [call_indirect observations](../../../protocol/native-wasm-dispatch-v1.md#call_indirect-observations).
 
 A trap after an instrumented instruction, and a call that is still inside
 after five seconds, are `wasm_execution_outcome` records on that same host

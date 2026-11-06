@@ -27,6 +27,7 @@ TEST_NAMES = [
     "RebNativeBrTableAdmissionPredicate",
     "RebNativeBrTablePreservesLiveValues",
     "RebNativeBrTableDisabledCompilation",
+    "RebNativeBrTableDirectCaller",
     "RebNativeBrTableLeftLiftoff",
     "RebNativeBrTableFlagOffTurbofanHasNoScopeGap",
     "RebNativeBrTableJitlessUnsupported",
@@ -181,6 +182,29 @@ def self_test():
     assert cctest_name("test-api/RebNativeJsDispatchSelectorKinds") == "test-api/RebNativeJsDispatchSelectorKinds"
     assert len({cctest_name(name) for name in TEST_NAMES}) == len(TEST_NAMES)
     assert all(re.fullmatch(r"(?:[a-z0-9-]+/)?Reb[A-Za-z0-9]+", name) for name in TEST_NAMES)
+    v8_patches = ROOT / "browser/integration/brave/patches/v8"
+    chromium_patches = ROOT / "browser/integration/brave/patches/chromium"
+    scope_patch = (v8_patches / "0014-report-wasm-dispatch-scope-gaps.patch").read_text()
+    for name in (
+        "RebNativeBrTableLeftLiftoff",
+        "RebNativeBrTableFlagOffTurbofanHasNoScopeGap",
+        "RebNativeBrTableJitlessUnsupported",
+        "RebNativeBrTableJitlessFlagOffHasNoScopeGap",
+    ):
+        assert f"TEST({name})" in scope_patch, name
+        assert name in TEST_NAMES
+    attribute = (v8_patches / "0012-attribute-wasm-br-table-direct-caller.patch").read_text()
+    assert "TEST(RebNativeBrTableDirectCaller)" in attribute
+    assert "RebNativeBrTableDirectCaller" in TEST_NAMES
+    assert not (v8_patches / "0012-report-wasm-dispatch-scope-gaps.patch").exists()
+    assert not (chromium_patches / "0022-report-wasm-dispatch-scope-gaps.patch").exists()
+    assert "IsWorkletGlobalScope" in (
+        chromium_patches / "0017-observe-native-wasm-dispatch.patch"
+    ).read_text()
+    assert (chromium_patches / "0024-report-wasm-dispatch-scope-gaps.patch").is_file()
+    assert "WasmDirectCaller" in (
+        chromium_patches / "0022-attribute-wasm-br-table-direct-caller.patch"
+    ).read_text()
     assert binary_dependencies("deps={'tool':{'dep_type':'gcs'},'src':'git','gn':{'dep_type':'cipd'}}") == {
         "v8/tool": None, "v8/gn": None,
     }
@@ -331,9 +355,9 @@ def main():
         cache_config = work / "ccache.conf"
         cache_config.write_text("")
         env.update(CCACHE_DIR=str(cache_dir), CCACHE_CONFIGPATH=str(cache_config),
-                   CCACHE_COMPILERCHECK="content", CCACHE_MAXSIZE="2G",
+                   CCACHE_COMPILERCHECK="content", CCACHE_MAXSIZE="6G",
                    CCACHE_BASEDIR=str(work), CCACHE_COMPRESS="true")
-        receipt["compiler_cache"] = {"path": str(cache_dir), "max_size": "2G",
+        receipt["compiler_cache"] = {"path": str(cache_dir), "max_size": "6G",
                                      "compiler_check": "content", "sloppiness": "none"}
     env.update(DEPOT_TOOLS_UPDATE="0", DEPOT_TOOLS_METRICS="0", CC="clang-23", CXX="clang++-23")
 
@@ -348,12 +372,14 @@ def main():
             return result
         process = subprocess.Popen(command, cwd=cwd, env=env, start_new_session=True)
         try:
-            deadline = time.monotonic() + 5400
+            # A cold -j2 V8 cctest compile was 1650/1981 objects at 90 minutes.
+            # The job timeout is 180 minutes and leaves room for the tests.
+            deadline = time.monotonic() + 140 * 60
             while process.poll() is None:
                 if shutil.disk_usage(work).free < 1024 ** 3:
                     raise RuntimeError("Stopped owned build before exhausting disk")
                 if time.monotonic() > deadline:
-                    raise TimeoutError("Owned build stage exceeded 90 minutes")
+                    raise TimeoutError("Owned build stage exceeded 140 minutes")
                 try:
                     process.wait(timeout=0.25)
                 except subprocess.TimeoutExpired:

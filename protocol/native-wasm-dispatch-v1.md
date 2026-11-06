@@ -91,6 +91,16 @@ coalescing, a scope notice after the sample cap, a full-ring retry, and the
 session-start probe. A rebuilt Brave is required before a live session shows
 any of this. These tests are not a live browser run.
 
+The V8 checks are
+`browser/integration/brave/patches/v8/0014-report-wasm-dispatch-scope-gaps.patch`,
+replayed after `0012-attribute-wasm-br-table-direct-caller.patch`. A non-Liftoff
+`br_table` returns before that patch's caller walk, so the gap does not invent
+a caller. Chromium `0017-observe-native-wasm-dispatch.patch` names a worker or
+worklet before a selector or slot is copied. `0022-attribute-wasm-br-table-direct-caller.patch`
+adds the caller arguments and uses them only on the document observation.
+`0024-report-wasm-dispatch-scope-gaps.patch` installs the jitless and
+left-Liftoff callback after `0022`.
+
 ## Producer and identity
 
 The compiler inserts a C++ builtin/runtime call before an executing `br_table`.
@@ -140,6 +150,34 @@ context: `js_invocation_state` (u8 at 24), 3 zero bytes and
 decodes, as not observed. See
 [invocation context of Wasm records](native-js-invocation-v1.md#invocation-context-of-wasm-records).
 
+Version 3 keeps that context and stores the direct caller in the next 8 bytes:
+
+| Offset | Field | Type |
+| --- | --- | --- |
+| 32 | caller kind | u8 |
+| 33 | reserved, all zero | 3 bytes |
+| 36 | caller function index | u32 |
+| 40 | reserved, all zero | 88 bytes |
+
+Caller kind 0 is `unknown`: the host, another instance, a frame that is not
+a Liftoff function of this module, or a frame whose code could not be read.
+The index is then 0 and is not function index 0.
+Kind 1 is `same-instance`: the index is that function in this module, imports
+included, and may be 0. Kind 2 and above is rejected. Versions 1 and 2 still
+decode. Their caller bytes stay zero, which means the caller was **not
+observed**. That is not kind 0. A rebuilt browser is required before a live
+session writes version 3. This build does not invent samples a rebuilt browser
+has not produced.
+
+The caller is only the live frame immediately above the `br_table`, and only
+when that frame is a Liftoff function of the same instance. The walk does not
+skip a host or foreign frame to an older same-instance frame. Each observation
+is one activation: two instances do not share a stack, and arrival order is
+not a caller. A multi-frame stack is not reconstructed. `return_call` replaces
+the caller frame, so the record names the frame that is live, not the function
+that executed the `return_call`. Parent event and navigation IDs stay zero
+unless a real parent event exists. This caller is not that parent.
+
 Offsets start at8 and are below16MiB. Function index and count are below16MiB.
 Any u32 selector is legal; selector>=count denotes the default arm. Scope IDs,
 sequence and monotonic time are required; wide identities remain decimal strings.
@@ -152,21 +190,22 @@ envelope flags are rejected consistently by C++, Rust and JavaScript.
 `wasm_observation` beside it. The field map is the one the opcode-workspace
 reader uses. A decoded dispatch object has `function_index`,
 `module_byte_offset`, `selector`, `table_count`, `sample_index`,
-`js_invocation_state` and `js_invocation_id`. An indirect object has the caller
-fields `function_index`, `module_byte_offset`, `sample_index`,
-`js_invocation_state` and `js_invocation_id`, plus `table_index`, `slot`,
-`callee_function_index` and `resolution` (`resolved`, `null`, `out-of-bounds`,
-`foreign`, `unresolved`). `js_invocation_state` is the stored integer (0 not
-observed, 1 none, 2 inside, 3 unknown). Version 1 decodes as not observed.
-`callee_function_index` is the stored index, 0 unless `resolution` is
-`resolved`. `status` is `decoded` or `invalid`. Invalid carries no fields.
-A payload version other than 1 or 2 is invalid in full. It is not decoded as
-a version-2 prefix: a later version stores new fields in bytes version 2
-reserves, and a zero there is not the same as "not observed". The record
-must also be protocol 3, category `vm`, and flags 0. This decode does not
-build an opcode workspace or open the module, so a module
-the detector never admits still has rows here. It does not recover a guest PC
-or invent a sample. Workspace rows remain a separate, module-checked view.
+`js_invocation_state` and `js_invocation_id`. Payload version 3 also has
+`direct_caller` (`kind` and `function_index`). Versions 1 and 2 omit it: those
+bytes were not a caller. An indirect object has `function_index`,
+`module_byte_offset`, `sample_index`, `js_invocation_state` and
+`js_invocation_id`, plus `table_index`, `slot`, `callee_function_index` and
+`resolution` (`resolved`, `null`, `out-of-bounds`, `foreign`, `unresolved`).
+`js_invocation_state` is the stored integer (0 not observed, 1 none, 2 inside,
+3 unknown). Version 1 decodes as not observed. `callee_function_index` is the
+stored index, 0 unless `resolution` is `resolved`. `status` is `decoded` or
+`invalid`. Invalid carries no fields. Dispatch accepts payload versions 1, 2,
+and 3. Indirect accepts 1 and 2. Any other version is invalid in full and is
+not decoded as a version-2 prefix. The record must also be protocol 3,
+category `vm`, and flags 0. This decode does not build an opcode workspace or
+open the module, so a module the detector never admits still has rows here.
+It does not recover a guest PC or invent a sample. Workspace rows remain a
+separate, module-checked view.
 See [filtered event reads](http-api.md#filtered-and-paged-reads).
 
 ## Reader and viewer
@@ -180,9 +219,11 @@ also produces a `wasm_guest_dispatch` record, so workspace counts for the two
 streams overlap and are never summed. Each function body is decoded at most once,
 when a record names it, within the 16 MiB module bound. A module whose sections
 do not decode keeps its records visible as `native-wasm-module-undecodable` with
-their counts instead of dropping them. The viewer labels guest PC unknown. Context
-links can be correlated, but host-call causality and guest positions remain
-unproven without genuine parent/invocation evidence.
+their counts instead of dropping them. The viewer labels guest PC unknown. A version 3 same-instance caller is the
+live Liftoff frame the runtime walked. A version 3 unknown caller is an explicit host,
+other instance, non-Liftoff frame, or unreadable frame, not a guessed index. Versions 1 and 2 omit the
+caller because they did not walk one. Parent event id stays zero: the caller
+field is not a parent edge, and guest positions remain unproven.
 
 ## Validation boundary
 

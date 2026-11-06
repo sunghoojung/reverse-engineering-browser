@@ -332,6 +332,21 @@ def valid_js_invocation(event: dict, payload: bytes) -> bool:
     return False
 
 
+def wasm_direct_caller_invalid(payload: bytes) -> bool:
+    """Version 3 stores the direct caller at bytes 32..40. Older versions reserve them."""
+    if payload[0] < 3:
+        return any(payload[32:])
+    kind = payload[32]
+    index = int.from_bytes(payload[36:40], "little")
+    if any(payload[33:36]) or any(payload[40:]):
+        return True
+    if kind == 0:
+        return index != 0
+    if kind == 1:
+        return index >= 16 * 1024 * 1024
+    return True
+
+
 def wasm_context_invalid(payload: bytes, version: int, new_version: int, offset: int) -> bool:
     """Version new_version stores the invocation context at offset; older ones reserve it."""
     state = payload[offset]
@@ -422,14 +437,14 @@ def validate_event(event: object, line_number: int) -> None:
         or not 1 <= event["process_id"] <= 0xFFFFFFFF
         or not 1 <= event["thread_id"] <= 0xFFFFFFFF
         or len(payload) != 128
-        or payload[0] not in (1, 2)
+        or payload[0] not in (1, 2, 3)
         or payload[1:4] != bytes((0, 128, 0))
         or int.from_bytes(payload[4:8], "little") >= 16777216
         or not 8 <= int.from_bytes(payload[8:12], "little") < 16777216
         or int.from_bytes(payload[16:20], "little") >= 16777216
         or int.from_bytes(payload[20:24], "little") >= 16
         or wasm_context_invalid(payload, payload[0], 2, 24)
-        or any(payload[32:])
+        or wasm_direct_caller_invalid(payload)
     ):
         raise ValueError(f"line {line_number}: native Wasm dispatch observation is invalid")
     if event["type"] == "wasm_indirect_observation" and (

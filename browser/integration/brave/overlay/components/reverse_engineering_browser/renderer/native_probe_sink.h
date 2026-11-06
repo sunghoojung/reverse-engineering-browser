@@ -204,6 +204,8 @@ class COMPONENT_EXPORT(REB_NATIVE_PROBE_SINK) NativeProbeSink final {
   // Native-only runtime callback; no page JS registration and no inferred guest PC.
   void SetNativeWasmDispatchEmitter(NativeWasmDispatchEmitter emitter) noexcept;
   [[nodiscard]] bool IsNativeWasmDispatchEnabled() const noexcept;
+  // caller_observed is true only when the runtime walked this activation.
+  // kind 0 with a nonzero index is refused rather than stored as a function.
   void RecordNativeWasmDispatch(std::uint64_t execution_context_id,
                                 std::uint64_t frame_id,
                                 std::string_view source_url,
@@ -213,7 +215,10 @@ class COMPONENT_EXPORT(REB_NATIVE_PROBE_SINK) NativeProbeSink final {
                                 std::uint32_t selector,
                                 std::uint32_t table_count,
                                 std::uint64_t document_token_high,
-                                std::uint64_t document_token_low) noexcept;
+                                std::uint64_t document_token_low,
+                                std::uint8_t caller_kind = kWasmDirectCallerUnknown,
+                                std::uint32_t caller_function_index = 0,
+                                bool caller_observed = false) noexcept;
   // Physical call_indirect observations share the br_table admission rules
   // with their own emitter, 16-record budget and coalesced omission gaps. The
   // caller fills identity, site, slot and resolution; the sink fills the rest.

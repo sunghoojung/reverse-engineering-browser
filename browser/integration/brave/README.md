@@ -446,7 +446,12 @@ Rebuilt browsers can record physical `br_table` operands with
 `--js-flags=--reb-wasm-br-table-dispatch`. This is Liftoff-only instrumentation
 in document contexts, not arbitrary interpreter guest-PC recovery. A worker,
 worklet, jitless, or TurboFan execution is a named scope gap rather than a
-missing sample. See
+missing sample. The scope-gap V8 patch is
+`patches/v8/0014-report-wasm-dispatch-scope-gaps.patch`, replayed after the
+direct-caller patch `0012`. Chromium `0017` names the worker or worklet
+before a selector or slot is copied; `0022` adds the direct-caller arguments
+on the document observation; `0024` installs the jitless and left-Liftoff
+callback after `0022`. See
 [wire contract and verification limits](../../../protocol/native-wasm-dispatch-v1.md).
 
 `call_indirect` and `return_call_indirect` dispatch has a separate opt-in:

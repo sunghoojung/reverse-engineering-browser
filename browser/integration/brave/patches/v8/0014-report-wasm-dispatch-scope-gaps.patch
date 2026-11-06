@@ -1,14 +1,21 @@
 diff --git a/BUILD.gn b/BUILD.gn
+index bab3883..18b7b13 100644
 --- a/BUILD.gn
 +++ b/BUILD.gn
-@@ -4918,2 +4918,3 @@
+@@ -4919,6 +4919,7 @@ v8_header_set("v8_internal_headers") {
+       "src/wasm/module-instantiate.h",
+       "src/wasm/names-provider.h",
        "src/wasm/pgo.h",
 +      "src/wasm/reb-wasm-dispatch-scope.h",
        "src/wasm/signature-hashing.h",
+       "src/wasm/stacks.h",
+       "src/wasm/std-object-sizes.h",
 diff --git a/include/v8-callbacks.h b/include/v8-callbacks.h
+index 4cb5e6d..f9fb8b8 100644
 --- a/include/v8-callbacks.h
 +++ b/include/v8-callbacks.h
-@@ -354,3 +354,10 @@
+@@ -364,6 +364,13 @@ using WasmBrTableDispatchCallback = void (*)(
+ // into V8. Null means enabled; embedders should reject inactive/capped captures.
  using WasmBrTableDispatchEnabledCallback = bool (*)();
  
 +// An execution the Liftoff document hooks did not cover. The callback names
@@ -19,10 +26,14 @@ diff --git a/include/v8-callbacks.h b/include/v8-callbacks.h
 +                                           bool call_indirect);
 +
  // The nearest enclosing guest activation, resolved by one bounded stack walk
+ // at an activation's first selected boundary. kUnresolved never names a
+ // guessed ancestor; kNone means no enclosing activation is on the stack.
 diff --git a/include/v8-isolate.h b/include/v8-isolate.h
+index 06f9c6e..333c99f 100644
 --- a/include/v8-isolate.h
 +++ b/include/v8-isolate.h
-@@ -1770,3 +1770,16 @@
+@@ -1793,6 +1793,19 @@ class V8_EXPORT Isolate {
+       WasmBrTableDispatchCallback callback,
        WasmBrTableDispatchEnabledCallback enabled_callback = nullptr);
  
 +  // Names an execution outside Liftoff document code. Null disables delivery.
@@ -39,16 +50,21 @@ diff --git a/include/v8-isolate.h b/include/v8-isolate.h
 +                                           bool call_indirect);
 +
    void SetWasmGuestDispatchCallback(
+       WasmGuestDispatchCallback callback,
+       WasmBrTableDispatchEnabledCallback enabled,
 diff --git a/src/api/api.cc b/src/api/api.cc
+index 4794a8e..f1e2e72 100644
 --- a/src/api/api.cc
 +++ b/src/api/api.cc
-@@ -164,3 +164,4 @@
+@@ -165,6 +165,7 @@
+ #include "src/wasm/wasm-result.h"
  #include "src/wasm/wasm-serialization.h"
  #include "src/wasm/wasm-tracing.h"
 +#include "src/wasm/reb-wasm-dispatch-scope.h"
  #endif  // V8_ENABLE_WEBASSEMBLY
-@@ -11021,5 +11022,36 @@
-   i_isolate->set_wasm_br_table_dispatch_enabled_callback(enabled_callback);
+ 
+ #ifdef V8_INTL_SUPPORT
+@@ -11041,6 +11042,37 @@ void Isolate::SetWasmBrTableDispatchCallback(
    i_isolate->set_wasm_br_table_dispatch_callback(callback);
  }
  
@@ -84,15 +100,118 @@ diff --git a/src/api/api.cc b/src/api/api.cc
 +}
 +
  void Isolate::SetWasmGuestDispatchCallback(
+     WasmGuestDispatchCallback callback,
+     WasmBrTableDispatchEnabledCallback enabled,
 diff --git a/src/execution/isolate.h b/src/execution/isolate.h
+index 98e06bf..21235fd 100644
 --- a/src/execution/isolate.h
 +++ b/src/execution/isolate.h
-@@ -511,2 +511,3 @@
+@@ -513,6 +513,7 @@ using DebugObjectCache = std::vector<Handle<HeapObject>>;
+   V(WasmBrTableDispatchEnabledCallback,                                    \
+     wasm_br_table_dispatch_enabled_callback, nullptr)                      \
    V(WasmBrTableDispatchCallback, wasm_br_table_dispatch_callback, nullptr) \
 +  V(WasmDispatchScopeCallback, wasm_dispatch_scope_callback, nullptr)      \
    V(WasmGuestCaptureEpochCallback, wasm_guest_epoch_callback, nullptr)      \
+   V(WasmGuestModuleAdmissionCallback, wasm_guest_module_admission, nullptr) \
+   V(WasmGuestDispatchSiteCallback, wasm_guest_selected_site, nullptr)       \
+diff --git a/src/runtime/runtime-wasm.cc b/src/runtime/runtime-wasm.cc
+index b254052..b99dfb3 100644
+--- a/src/runtime/runtime-wasm.cc
++++ b/src/runtime/runtime-wasm.cc
+@@ -45,6 +45,7 @@
+ #include "src/wasm/wasm-subtyping.h"
+ #include "src/wasm/wasm-value.h"
+ #include "src/wasm/wasm-tracing.h"
++#include "src/wasm/reb-wasm-dispatch-scope.h"
+ 
+ #if V8_ENABLE_WEBASSEMBLY && V8_ENABLE_DRUMBRAKE
+ #include "src/wasm/interpreter/wasm-interpreter.h"
+@@ -446,8 +447,12 @@ RUNTIME_FUNCTION(Runtime_WasmRebTraceBrTable) {
+   wasm::WasmCodeRefScope code_scope;
+   FrameFinder<WasmFrame> frame_finder(isolate);
+   WasmFrame* frame = frame_finder.frame();
+-  if (frame->wasm_code()->tier() != wasm::ExecutionTier::kLiftoff)
++  if (frame->wasm_code()->tier() != wasm::ExecutionTier::kLiftoff) {
++    // Left the instrumented compiler. Name the scope; do not read a selector.
++    wasm::NotifyRebWasmDispatchScope(isolate, v8::WasmDispatchScope::kLeftLiftoff,
++                                     wasm::RebDispatchStream::kBrTable);
+     return ReadOnlyRoots(isolate).undefined_value();
++  }
+   if (info->is_entry) {
+     if (guest_enabled) wasm::EnterGuestFrame(isolate, frame);
+     return ReadOnlyRoots(isolate).undefined_value();
+@@ -569,6 +574,9 @@ RUNTIME_FUNCTION(Runtime_WasmRebTraceCallIndirect) {
+   FrameFinder<WasmFrame> frame_finder(isolate);
+   WasmFrame* frame = frame_finder.frame();
+   if (frame->wasm_code()->tier() != wasm::ExecutionTier::kLiftoff) {
++    wasm::NotifyRebWasmDispatchScope(isolate,
++                                     v8::WasmDispatchScope::kLeftLiftoff,
++                                     wasm::RebDispatchStream::kCallIndirect);
+     return ReadOnlyRoots(isolate).undefined_value();
+   }
+   const int function_index = frame->GetInnermostFunctionIndex();
+diff --git a/src/wasm/interpreter/wasm-interpreter-runtime.cc b/src/wasm/interpreter/wasm-interpreter-runtime.cc
+index 90ecc3d..36535de 100644
+--- a/src/wasm/interpreter/wasm-interpreter-runtime.cc
++++ b/src/wasm/interpreter/wasm-interpreter-runtime.cc
+@@ -19,6 +19,7 @@
+ #include "src/wasm/wasm-arguments.h"
+ #include "src/wasm/wasm-objects-inl.h"
+ #include "src/wasm/wasm-opcodes-inl.h"
++#include "src/wasm/reb-wasm-dispatch-scope.h"
+ #include "src/wasm/wasm-subtyping.h"
+ 
+ namespace v8 {
+@@ -1909,6 +1910,10 @@ void WasmInterpreterRuntime::ExecuteIndirectCall(
+     uint32_t entry_index, uint32_t stack_pos, uint32_t* sp,
+     uint32_t ref_stack_fp_offset, uint32_t slot_offset,
+     uint32_t return_slot_offset, bool is_tail_call) {
++  if (V8_UNLIKELY(v8_flags.reb_wasm_call_indirect_dispatch)) {
++    NotifyRebWasmDispatchScope(isolate_, v8::WasmDispatchScope::kJitless,
++                               RebDispatchStream::kCallIndirect);
++  }
+   DCHECK_LT(table_index, indirect_call_tables_.size());
+ 
+   IndirectCallTable& table = indirect_call_tables_[table_index];
+diff --git a/src/wasm/interpreter/wasm-interpreter.cc b/src/wasm/interpreter/wasm-interpreter.cc
+index 68db78c..5be2f8c 100644
+--- a/src/wasm/interpreter/wasm-interpreter.cc
++++ b/src/wasm/interpreter/wasm-interpreter.cc
+@@ -22,6 +22,7 @@
+ #include "src/wasm/interpreter/wasm-interpreter-runtime-inl.h"
+ #include "src/wasm/wasm-objects-inl.h"
+ #include "src/wasm/wasm-opcodes-inl.h"
++#include "src/wasm/reb-wasm-dispatch-scope.h"
+ #include "src/zone/zone.h"
+ 
+ // Include this after all other object headers.
+@@ -3264,6 +3265,11 @@ class Handlers : public HandlersBase {
+   INSTRUCTION_HANDLER_FUNC r2s_BrTable(const uint8_t* code, uint32_t* sp,
+                                        WasmInterpreterRuntime* wasm_runtime,
+                                        int64_t r0, double fp0) {
++    if (V8_UNLIKELY(v8_flags.reb_wasm_br_table_dispatch)) {
++      NotifyRebWasmDispatchScope(wasm_runtime->GetIsolate(),
++                                 v8::WasmDispatchScope::kJitless,
++                                 RebDispatchStream::kBrTable);
++    }
+     uint32_t cond = static_cast<int32_t>(r0);
+ 
+     uint32_t table_length = Read<int32_t>(code);
+@@ -3279,6 +3285,11 @@ class Handlers : public HandlersBase {
+   INSTRUCTION_HANDLER_FUNC s2s_BrTable(const uint8_t* code, uint32_t* sp,
+                                        WasmInterpreterRuntime* wasm_runtime,
+                                        int64_t r0, double fp0) {
++    if (V8_UNLIKELY(v8_flags.reb_wasm_br_table_dispatch)) {
++      NotifyRebWasmDispatchScope(wasm_runtime->GetIsolate(),
++                                 v8::WasmDispatchScope::kJitless,
++                                 RebDispatchStream::kBrTable);
++    }
+     uint32_t cond = pop<uint32_t>(sp, code, wasm_runtime);
+ 
+     uint32_t table_length = Read<int32_t>(code);
 diff --git a/src/wasm/reb-wasm-dispatch-scope.h b/src/wasm/reb-wasm-dispatch-scope.h
 new file mode 100644
+index 0000000..fa20247
 --- /dev/null
 +++ b/src/wasm/reb-wasm-dispatch-scope.h
 @@ -0,0 +1,114 @@
@@ -210,84 +329,22 @@ new file mode 100644
 +}  // namespace v8::internal::wasm
 +
 +#endif  // V8_WASM_REB_WASM_DISPATCH_SCOPE_H_
-diff --git a/src/runtime/runtime-wasm.cc b/src/runtime/runtime-wasm.cc
---- a/src/runtime/runtime-wasm.cc
-+++ b/src/runtime/runtime-wasm.cc
-@@ -43,3 +43,4 @@
- #include "src/wasm/wasm-tracing.h"
-+#include "src/wasm/reb-wasm-dispatch-scope.h"
- 
- #if V8_ENABLE_WEBASSEMBLY && V8_ENABLE_DRUMBRAKE
-diff --git a/src/runtime/runtime-wasm.cc b/src/runtime/runtime-wasm.cc
---- a/src/runtime/runtime-wasm.cc
-+++ b/src/runtime/runtime-wasm.cc
-@@ -557,3 +558,7 @@
--  if (frame->wasm_code()->tier() != wasm::ExecutionTier::kLiftoff)
--    return ReadOnlyRoots(isolate).undefined_value();
-+  if (frame->wasm_code()->tier() != wasm::ExecutionTier::kLiftoff) {
-+    // Left the instrumented compiler. Name the scope; do not read a selector.
-+    wasm::NotifyRebWasmDispatchScope(isolate, v8::WasmDispatchScope::kLeftLiftoff,
-+                                     wasm::RebDispatchStream::kBrTable);
-+    return ReadOnlyRoots(isolate).undefined_value();
-+  }
-   if (info->is_entry) {
-diff --git a/src/runtime/runtime-wasm.cc b/src/runtime/runtime-wasm.cc
---- a/src/runtime/runtime-wasm.cc
-+++ b/src/runtime/runtime-wasm.cc
-@@ -260,7 +266,10 @@
-   if (frame->wasm_code()->tier() != wasm::ExecutionTier::kLiftoff) {
--    return ReadOnlyRoots(isolate).undefined_value();
-+    wasm::NotifyRebWasmDispatchScope(isolate,
-+                                     v8::WasmDispatchScope::kLeftLiftoff,
-+                                     wasm::RebDispatchStream::kCallIndirect);
-+    return ReadOnlyRoots(isolate).undefined_value();
-   }
-   const int function_index = frame->GetInnermostFunctionIndex();
-   const auto instance = frame->trusted_instance_data();
-   const auto* module = instance->module();
-   if (!instance->has_native_context() || function_index < 0 ||
 diff --git a/src/wasm/wasm-code-manager.cc b/src/wasm/wasm-code-manager.cc
+index abb4ad1..1981b39 100644
 --- a/src/wasm/wasm-code-manager.cc
 +++ b/src/wasm/wasm-code-manager.cc
-@@ -43,2 +43,3 @@
+@@ -41,6 +41,7 @@
+ #include "src/wasm/module-compiler.h"
+ #include "src/wasm/names-provider.h"
  #include "src/wasm/pgo.h"
 +#include "src/wasm/reb-wasm-dispatch-scope.h"
  #include "src/wasm/std-object-sizes.h"
-diff --git a/src/wasm/wasm-code-manager.cc b/src/wasm/wasm-code-manager.cc
---- a/src/wasm/wasm-code-manager.cc
-+++ b/src/wasm/wasm-code-manager.cc
-@@ -1436,34 +1436,61 @@
+ #include "src/wasm/wasm-builtin-list.h"
+ #include "src/wasm/wasm-code-coverage.h"
+@@ -1444,12 +1445,35 @@ std::unique_ptr<WasmCode> NativeModule::AddCodeWithCodeSpace(
    return unique_code;
  }
  
--WasmCode* NativeModule::PublishCode(UnpublishedWasmCode unpublished_code) {
--  TRACE_EVENT(TRACE_DISABLED_BY_DEFAULT("v8.wasm.detailed"),
--              "wasm.PublishCode");
--  base::RecursiveMutexGuard lock(&allocation_mutex_);
--  return PublishCodeLocked(std::move(unpublished_code.code),
--                           unpublished_code.assumptions.get());
--}
--
--std::vector<WasmCode*> NativeModule::PublishCode(
--    base::Vector<UnpublishedWasmCode> unpublished_codes) {
--  TRACE_EVENT(TRACE_DISABLED_BY_DEFAULT("v8.wasm.detailed"), "wasm.PublishCode",
--              "number", unpublished_codes.size());
--  std::vector<WasmCode*> published_code;
--  published_code.reserve(unpublished_codes.size());
--  base::RecursiveMutexGuard lock(&allocation_mutex_);
--  // The published code is put into the top-most surrounding {WasmCodeRefScope}.
--  for (auto& unpublished_code : unpublished_codes) {
--    WasmCode* code = PublishCodeLocked(std::move(unpublished_code.code),
--                                       unpublished_code.assumptions.get());
--    if (code == nullptr) {
--      // There were invalid assumptions in the code.
--      DCHECK_NOT_NULL(unpublished_code.assumptions);
--      continue;
--    }
--    published_code.push_back(code);
--  }
--  return published_code;
--}
 +namespace {
 +// Called only after allocation_mutex_ is released. A TurboFan wasm function
 +// left Liftoff. Jitless publication is the same kind of notice. Neither reads
@@ -306,9 +363,12 @@ diff --git a/src/wasm/wasm-code-manager.cc b/src/wasm/wasm-code-manager.cc
 +}
 +}  // namespace
 +
-+WasmCode* NativeModule::PublishCode(UnpublishedWasmCode unpublished_code) {
-+  TRACE_EVENT(TRACE_DISABLED_BY_DEFAULT("v8.wasm.detailed"),
-+              "wasm.PublishCode");
+ WasmCode* NativeModule::PublishCode(UnpublishedWasmCode unpublished_code) {
+   TRACE_EVENT(TRACE_DISABLED_BY_DEFAULT("v8.wasm.detailed"),
+               "wasm.PublishCode");
+-  base::RecursiveMutexGuard lock(&allocation_mutex_);
+-  return PublishCodeLocked(std::move(unpublished_code.code),
+-                           unpublished_code.assumptions.get());
 +  WasmCode* code;
 +  {
 +    base::RecursiveMutexGuard lock(&allocation_mutex_);
@@ -317,13 +377,23 @@ diff --git a/src/wasm/wasm-code-manager.cc b/src/wasm/wasm-code-manager.cc
 +  }
 +  NoteRebWasmDispatchForPublishedCode(code);
 +  return code;
-+}
-+
-+std::vector<WasmCode*> NativeModule::PublishCode(
-+    base::Vector<UnpublishedWasmCode> unpublished_codes) {
-+  TRACE_EVENT(TRACE_DISABLED_BY_DEFAULT("v8.wasm.detailed"), "wasm.PublishCode",
-+              "number", unpublished_codes.size());
-+  std::vector<WasmCode*> published_code;
+ }
+ 
+ std::vector<WasmCode*> NativeModule::PublishCode(
+@@ -1457,18 +1481,22 @@ std::vector<WasmCode*> NativeModule::PublishCode(
+   TRACE_EVENT(TRACE_DISABLED_BY_DEFAULT("v8.wasm.detailed"), "wasm.PublishCode",
+               "number", unpublished_codes.size());
+   std::vector<WasmCode*> published_code;
+-  published_code.reserve(unpublished_codes.size());
+-  base::RecursiveMutexGuard lock(&allocation_mutex_);
+-  // The published code is put into the top-most surrounding {WasmCodeRefScope}.
+-  for (auto& unpublished_code : unpublished_codes) {
+-    WasmCode* code = PublishCodeLocked(std::move(unpublished_code.code),
+-                                       unpublished_code.assumptions.get());
+-    if (code == nullptr) {
+-      // There were invalid assumptions in the code.
+-      DCHECK_NOT_NULL(unpublished_code.assumptions);
+-      continue;
 +  {
 +    base::RecursiveMutexGuard lock(&allocation_mutex_);
 +    // The published code is put into the top-most surrounding {WasmCodeRefScope}.
@@ -336,90 +406,52 @@ diff --git a/src/wasm/wasm-code-manager.cc b/src/wasm/wasm-code-manager.cc
 +        continue;
 +      }
 +      published_code.push_back(code);
-+    }
+     }
+-    published_code.push_back(code);
 +  }
 +  for (WasmCode* code : published_code) {
 +    NoteRebWasmDispatchForPublishedCode(code);
-+  }
-+  return published_code;
-+}
- 
- void NativeModule::UpdateWellKnownImports(
-     base::Vector<WellKnownImport> entries) {
+   }
+   return published_code;
+ }
 diff --git a/src/wasm/wasm-engine.cc b/src/wasm/wasm-engine.cc
+index af6a0b7..3704880 100644
 --- a/src/wasm/wasm-engine.cc
 +++ b/src/wasm/wasm-engine.cc
-@@ -33,2 +33,3 @@
+@@ -31,6 +31,7 @@
+ #include "src/wasm/module-instantiate.h"
+ #include "src/wasm/names-provider.h"
  #include "src/wasm/pgo.h"
 +#include "src/wasm/reb-wasm-dispatch-scope.h"
  #include "src/wasm/stacks.h"
-diff --git a/src/wasm/wasm-engine.cc b/src/wasm/wasm-engine.cc
---- a/src/wasm/wasm-engine.cc
-+++ b/src/wasm/wasm-engine.cc
-@@ -678,2 +679,6 @@
+ #include "src/wasm/std-object-sizes.h"
+ #include "src/wasm/streaming-decoder.h"
+@@ -676,6 +677,10 @@ MaybeDirectHandle<WasmModuleObject> WasmEngine::SyncCompile(
+     base::Vector<const char> source_url) {
+   int compilation_id = next_compilation_id_.fetch_add(1);
    TRACE_EVENT("v8.wasm", "wasm.SyncCompile", "id", compilation_id);
 +  if (V8_UNLIKELY(v8_flags.jitless || v8_flags.wasm_jitless)) {
 +    NotifyRebWasmDispatchScope(isolate, v8::WasmDispatchScope::kJitless,
 +                               RebDispatchStream::kBoth);
 +  }
    v8::metrics::Recorder::ContextId context_id =
-diff --git a/src/wasm/interpreter/wasm-interpreter.cc b/src/wasm/interpreter/wasm-interpreter.cc
---- a/src/wasm/interpreter/wasm-interpreter.cc
-+++ b/src/wasm/interpreter/wasm-interpreter.cc
-@@ -24,2 +24,3 @@
- #include "src/wasm/wasm-opcodes-inl.h"
-+#include "src/wasm/reb-wasm-dispatch-scope.h"
- #include "src/zone/zone.h"
-diff --git a/src/wasm/interpreter/wasm-interpreter.cc b/src/wasm/interpreter/wasm-interpreter.cc
---- a/src/wasm/interpreter/wasm-interpreter.cc
-+++ b/src/wasm/interpreter/wasm-interpreter.cc
-@@ -3266,2 +3267,7 @@
-                                        int64_t r0, double fp0) {
-+    if (V8_UNLIKELY(v8_flags.reb_wasm_br_table_dispatch)) {
-+      NotifyRebWasmDispatchScope(wasm_runtime->GetIsolate(),
-+                                 v8::WasmDispatchScope::kJitless,
-+                                 RebDispatchStream::kBrTable);
-+    }
-     uint32_t cond = static_cast<int32_t>(r0);
-diff --git a/src/wasm/interpreter/wasm-interpreter.cc b/src/wasm/interpreter/wasm-interpreter.cc
---- a/src/wasm/interpreter/wasm-interpreter.cc
-+++ b/src/wasm/interpreter/wasm-interpreter.cc
-@@ -3281,2 +3287,7 @@
-                                        int64_t r0, double fp0) {
-+    if (V8_UNLIKELY(v8_flags.reb_wasm_br_table_dispatch)) {
-+      NotifyRebWasmDispatchScope(wasm_runtime->GetIsolate(),
-+                                 v8::WasmDispatchScope::kJitless,
-+                                 RebDispatchStream::kBrTable);
-+    }
-     uint32_t cond = pop<uint32_t>(sp, code, wasm_runtime);
-diff --git a/src/wasm/interpreter/wasm-interpreter-runtime.cc b/src/wasm/interpreter/wasm-interpreter-runtime.cc
---- a/src/wasm/interpreter/wasm-interpreter-runtime.cc
-+++ b/src/wasm/interpreter/wasm-interpreter-runtime.cc
-@@ -21,2 +21,3 @@
- #include "src/wasm/wasm-opcodes-inl.h"
-+#include "src/wasm/reb-wasm-dispatch-scope.h"
- #include "src/wasm/wasm-subtyping.h"
-diff --git a/src/wasm/interpreter/wasm-interpreter-runtime.cc b/src/wasm/interpreter/wasm-interpreter-runtime.cc
---- a/src/wasm/interpreter/wasm-interpreter-runtime.cc
-+++ b/src/wasm/interpreter/wasm-interpreter-runtime.cc
-@@ -1911,2 +1912,6 @@
-     uint32_t return_slot_offset, bool is_tail_call) {
-+  if (V8_UNLIKELY(v8_flags.reb_wasm_call_indirect_dispatch)) {
-+    NotifyRebWasmDispatchScope(isolate_, v8::WasmDispatchScope::kJitless,
-+                               RebDispatchStream::kCallIndirect);
-+  }
-   DCHECK_LT(table_index, indirect_call_tables_.size());
+       isolate->GetOrRegisterRecorderContextId(isolate->native_context());
+   std::shared_ptr<WasmModule> module;
 diff --git a/test/cctest/wasm/test-run-wasm.cc b/test/cctest/wasm/test-run-wasm.cc
+index 14614ad..88b81b0 100644
 --- a/test/cctest/wasm/test-run-wasm.cc
 +++ b/test/cctest/wasm/test-run-wasm.cc
-@@ -18,4 +18,6 @@
+@@ -16,7 +16,9 @@
+ #include "src/wasm/code-space-access.h"
+ #include "src/wasm/compilation-environment-inl.h"
  #include "src/wasm/decoder.h"
 +#include "src/wasm/wasm-engine.h"
  #include "src/wasm/wasm-opcodes-inl.h"
 +#include "src/wasm/wasm-result.h"
  #include "src/wasm/wasm-tracing.h"
  #include "test/cctest/cctest.h"
-@@ -5902,4 +5904,186 @@
+ #include "test/cctest/heap/heap-utils.h"
+@@ -6008,6 +6010,188 @@ TEST(RebNativePublicQuickJSGuestState) {
    public_quickjs_bytes.clear();
  }
  
@@ -606,3 +638,5 @@ diff --git a/test/cctest/wasm/test-run-wasm.cc b/test/cctest/wasm/test-run-wasm.
 +  api->SetWasmDispatchScopeCallback(nullptr);
 +}
  #undef B1
+ #undef B2
+ #undef RET

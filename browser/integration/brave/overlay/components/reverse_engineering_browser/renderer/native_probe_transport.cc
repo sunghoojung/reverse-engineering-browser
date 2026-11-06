@@ -179,7 +179,8 @@ bool NativeProbeTransport::EmitWasmDispatch(const NativeWasmDispatchObservation&
       event.header.process_id, event.header.thread_id, event.header.frame_id,
       observation.execution_context_id, observation.document_token_high,
       observation.document_token_low, observation.function_index, observation.module_byte_offset,
-      observation.selector, observation.table_count, observation.sample_index,
+      observation.selector, observation.table_count, observation.caller_observed,
+      observation.caller_kind, observation.caller_function_index, observation.sample_index,
       observation.js_invocation_state, observation.js_invocation_id,
       std::string(observation.source_url), mojo_base::BigBuffer(observation.module_bytes));
   return true;

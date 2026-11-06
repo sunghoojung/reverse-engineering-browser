@@ -15,7 +15,8 @@ pub(super) struct Observations {
 }
 
 /// Envelope rules shared by both physical streams: exact artifact scope, no
-/// caller provenance or parent, and canonical native identities.
+/// parent event, and canonical native identities. A walked direct caller lives
+/// in the dispatch payload. It is not parent_event_id.
 fn envelope(event: &Value, artifact: &Value) -> bool {
     !(event["protocol_version"] != 3
         || event["payload_size"] != 128
@@ -46,6 +47,24 @@ struct DispatchPayload {
     sample_index: u32,
     js_invocation_state: u8,
     js_invocation_id: u32,
+    /// `None` on payload versions 1 and 2: those bytes were reserved, so the
+    /// caller was not observed. Version 3 always sets this.
+    direct_caller: Option<DirectCaller>,
+}
+
+#[derive(Clone, Copy)]
+enum DirectCaller {
+    Unknown,
+    SameInstance(u32),
+}
+
+fn direct_caller_value(caller: DirectCaller) -> Value {
+    match caller {
+        DirectCaller::Unknown => json!({"kind":"unknown","function_index":null}),
+        DirectCaller::SameInstance(index) => {
+            json!({"kind":"same-instance","function_index":index})
+        }
+    }
 }
 
 struct IndirectPayload {
@@ -65,10 +84,9 @@ fn u32_at(bytes: &[u8], offset: usize) -> u32 {
 }
 
 /// Little-endian version of a 128-byte observation whose size field is 128.
-/// Only versions 1 and 2 are known. Any other version is wholly invalid: a
-/// later version stores new fields in bytes version 2 reserves, so reading it
-/// as a version-2 prefix would drop those fields or treat an explicit zero as
-/// "not observed".
+/// Indirect observations know versions 1 and 2. Dispatch version 3 is decoded
+/// by `decode_dispatch_payload` and is not a version-2 prefix: a zero caller
+/// there is unknown, which versions 1 and 2 do not record.
 fn supported_observation_version(bytes: &[u8]) -> Option<u16> {
     if bytes.len() != 128 {
         return None;
@@ -83,13 +101,34 @@ fn supported_observation_version(bytes: &[u8]) -> Option<u16> {
 /// `None` rejects the bytes: unknown version, nonzero reserved bytes, a broken
 /// invocation context, or a bound the wire contract refuses. No module is read.
 fn decode_dispatch_payload(bytes: &[u8]) -> Option<DispatchPayload> {
-    supported_observation_version(bytes)?;
+    if bytes.len() != 128 {
+        return None;
+    }
+    let version = u16::from_le_bytes([bytes[0], bytes[1]]);
+    let size = u16::from_le_bytes([bytes[2], bytes[3]]);
+    if size != 128 || !matches!(version, 1..=3) {
+        return None;
+    }
     // Version 2 stores the JavaScript invocation context at bytes 24..32.
     // Version 1 reserved those bytes and decodes as not observed.
     let (state, invocation) = crate::js_invocation::wasm_context(bytes, 2, 24)?;
-    if bytes[32..].iter().any(|byte| *byte != 0) {
+    let direct_caller = if version < 3 {
+        if bytes[32..].iter().any(|byte| *byte != 0) {
+            return None;
+        }
+        None
+    } else if bytes[33..36].iter().any(|byte| *byte != 0)
+        || bytes[40..].iter().any(|byte| *byte != 0)
+    {
         return None;
-    }
+    } else {
+        let index = u32_at(bytes, 36);
+        match bytes[32] {
+            0 if index == 0 => Some(DirectCaller::Unknown),
+            1 if index < LIMIT => Some(DirectCaller::SameInstance(index)),
+            _ => return None,
+        }
+    };
     let fields = DispatchPayload {
         function_index: u32_at(bytes, 4),
         module_byte_offset: u32_at(bytes, 8),
@@ -98,6 +137,7 @@ fn decode_dispatch_payload(bytes: &[u8]) -> Option<DispatchPayload> {
         sample_index: u32_at(bytes, 20),
         js_invocation_state: state,
         js_invocation_id: invocation,
+        direct_caller,
     };
     (fields.function_index < LIMIT
         && (8..LIMIT).contains(&fields.module_byte_offset)
@@ -142,11 +182,16 @@ fn observation(event: &Value, artifact: &Value, module: &mut Module<'_>) -> Opti
     if !envelope(event, artifact) {
         return None;
     }
-    let bytes = super::event_payload_versions(event, "wasm_dispatch_observation", &[1, 2])?;
+    let bytes = super::event_payload_versions(event, "wasm_dispatch_observation", &[1, 2, 3])?;
     let fields = decode_dispatch_payload(&bytes)?;
     if module.function(fields.function_index).is_none_or(|facts| {
         facts.br_tables.get(&fields.module_byte_offset) != Some(&fields.table_count)
     }) {
+        return None;
+    }
+    if let Some(DirectCaller::SameInstance(index)) = fields.direct_caller
+        && index as usize >= module.function_count()
+    {
         return None;
     }
     let mut row = json!({"event":super::event_reference(event),"monotonic_time_ns":event["monotonic_time_ns"],"function_index":fields.function_index,"module_byte_offset":fields.module_byte_offset,
@@ -155,6 +200,9 @@ fn observation(event: &Value, artifact: &Value, module: &mut Module<'_>) -> Opti
         crate::js_invocation::context_row(fields.js_invocation_state, fields.js_invocation_id)
     {
         row["js_invocation"] = context;
+    }
+    if let Some(caller) = fields.direct_caller {
+        row["direct_caller"] = direct_caller_value(caller);
     }
     Some(row)
 }
@@ -253,9 +301,13 @@ pub(super) fn query_observation(event: &Value) -> Option<Value> {
     let bytes = hex::decode(text).ok()?;
     match event["type"].as_str()? {
         "wasm_dispatch_observation" => decode_dispatch_payload(&bytes).map(|fields| {
-            json!({"status":"decoded","function_index":fields.function_index,"module_byte_offset":fields.module_byte_offset,
+            let mut row = json!({"status":"decoded","function_index":fields.function_index,"module_byte_offset":fields.module_byte_offset,
                 "selector":fields.selector,"table_count":fields.table_count,"sample_index":fields.sample_index,
-                "js_invocation_state":fields.js_invocation_state,"js_invocation_id":fields.js_invocation_id})
+                "js_invocation_state":fields.js_invocation_state,"js_invocation_id":fields.js_invocation_id});
+            if let Some(caller) = fields.direct_caller {
+                row["direct_caller"] = direct_caller_value(caller);
+            }
+            row
         }),
         "wasm_indirect_observation" => decode_indirect_payload(&bytes).map(|fields| {
             json!({"status":"decoded","function_index":fields.function_index,"module_byte_offset":fields.module_byte_offset,
@@ -573,6 +625,104 @@ pub(super) mod tests {
         );
     }
     #[test]
+    fn native_wasm_direct_caller_names_the_calling_function() {
+        let bytes = wat::parse_str(
+            r#"(module
+                (func (result i32) (call 1))
+                (func (result i32)
+                  (block (result i32)
+                    (br_table 0 0 (i32.const 0)))))"#,
+        )
+        .unwrap();
+        let mut parsed = Module::parse(&bytes).unwrap();
+        assert_eq!(parsed.function_count(), 2);
+        let (offset, count) = parsed
+            .function(1)
+            .unwrap()
+            .br_tables
+            .iter()
+            .map(|(site, arms)| (*site, *arms))
+            .next()
+            .unwrap();
+        let event = |version: u8, kind: u8, caller: u32, sequence: &str| {
+            let mut payload = [0u8; 128];
+            payload[0] = version;
+            payload[2] = 128;
+            payload[4..8].copy_from_slice(&1u32.to_le_bytes());
+            payload[8..12].copy_from_slice(&offset.to_le_bytes());
+            payload[16..20].copy_from_slice(&count.to_le_bytes());
+            payload[32] = kind;
+            payload[36..40].copy_from_slice(&caller.to_le_bytes());
+            json!({"protocol_version":3,"session_id":"1","sequence_number":sequence,"process_id":1,"thread_id":1,"monotonic_time_ns":"1","navigation_id":"1","frame_id":"1","artifact_id":"1","parent_event_id":"0","flags":0,"payload_size":128,"payload_encoding":"hex","payload_truncated":false,"category":"vm","type":"wasm_dispatch_observation","payload":hex::encode(payload)})
+        };
+        let artifact = artifact(&event(3, 1, 0, "1"));
+        let same = event(3, 1, 0, "1");
+        let output = read(&artifact, &bytes, std::slice::from_ref(&same));
+        assert_eq!(output.count, 1);
+        assert_eq!(output.rows[0]["function_index"], 1);
+        assert_eq!(
+            output.rows[0]["direct_caller"],
+            json!({"kind":"same-instance","function_index":0})
+        );
+        assert_eq!(same["parent_event_id"], "0");
+        let unknown = event(3, 0, 0, "2");
+        let output = read(&artifact, &bytes, std::slice::from_ref(&unknown));
+        assert_eq!(
+            output.rows[0]["direct_caller"],
+            json!({"kind":"unknown","function_index":null})
+        );
+        let unwalked = event(1, 0, 0, "3");
+        let output = read(&artifact, &bytes, std::slice::from_ref(&unwalked));
+        assert!(output.rows[0].get("direct_caller").is_none());
+        for (version, kind, caller) in [(3u8, 0u8, 1u32), (3, 1, 2), (3, 2, 0), (2, 1, 0)] {
+            let bad = event(version, kind, caller, "4");
+            assert_eq!(
+                read(&artifact, &bytes, std::slice::from_ref(&bad)).count,
+                0,
+                "version {version} kind {kind} caller {caller}"
+            );
+        }
+        let both = [event(3, 1, 0, "5"), event(3, 1, 1, "6")];
+        let output = read(&artifact, &bytes, &both);
+        assert_eq!(output.count, 2);
+        assert_eq!(output.rows[0]["direct_caller"]["function_index"], 0);
+        assert_eq!(output.rows[1]["direct_caller"]["function_index"], 1);
+        let imported = wat::parse_str(
+            r#"(module
+                (import "m" "f" (func))
+                (func (result i32)
+                  (block (result i32)
+                    (br_table 0 0 (i32.const 0)))))"#,
+        )
+        .unwrap();
+        let mut imported_module = Module::parse(&imported).unwrap();
+        assert!(imported_module.function(0).is_none());
+        assert_eq!(imported_module.function_count(), 2);
+        let (import_offset, import_count) = imported_module
+            .function(1)
+            .unwrap()
+            .br_tables
+            .iter()
+            .map(|(site, arms)| (*site, *arms))
+            .next()
+            .unwrap();
+        let mut payload = [0u8; 128];
+        payload[0] = 3;
+        payload[2] = 128;
+        payload[4..8].copy_from_slice(&1u32.to_le_bytes());
+        payload[8..12].copy_from_slice(&import_offset.to_le_bytes());
+        payload[16..20].copy_from_slice(&import_count.to_le_bytes());
+        payload[32] = 1;
+        let mut import_event = event(3, 1, 0, "7");
+        import_event["payload"] = json!(hex::encode(payload));
+        let output = read(&artifact, &imported, std::slice::from_ref(&import_event));
+        assert_eq!(output.count, 1, "an imported function is a real caller");
+        assert_eq!(
+            output.rows[0]["direct_caller"],
+            json!({"kind":"same-instance","function_index":0})
+        );
+    }
+    #[test]
     #[ignore = "requires actual C++ producer; make check supplies REB_NATIVE_WASM_GOLDEN"]
     fn native_wasm_cpp_golden() {
         let exe = std::env::var("REB_NATIVE_WASM_GOLDEN").expect("actual C++ producer required");
@@ -597,6 +747,11 @@ pub(super) mod tests {
             "invocation",
             "invocation-legacy",
             "invocation-mismatch",
+            "caller-same-instance",
+            "caller-unknown",
+            "caller-unknown-index",
+            "caller-kind",
+            "caller-v2",
         ] {
             let process = std::process::Command::new(&exe)
                 .args(["--case", case])
@@ -611,7 +766,13 @@ pub(super) mod tests {
             let output = read(&artifact(&event), &module(), std::slice::from_ref(&event));
             let accepted = matches!(
                 case,
-                "default" | "arm" | "wide-identities" | "legacy-v1" | "invocation"
+                "default"
+                    | "arm"
+                    | "wide-identities"
+                    | "legacy-v1"
+                    | "invocation"
+                    | "caller-same-instance"
+                    | "caller-unknown"
             );
             assert_eq!(output.count, u64::from(accepted), "C++ case {case}");
             if accepted {
@@ -624,8 +785,24 @@ pub(super) mod tests {
                         .as_ref(),
                     "C++ case {case}"
                 );
+                let caller = match case {
+                    "caller-same-instance" => {
+                        Some(json!({"kind":"same-instance","function_index":0}))
+                    }
+                    "caller-unknown" => Some(json!({"kind":"unknown","function_index":null})),
+                    _ => None,
+                };
+                assert_eq!(
+                    output.rows[0].get("direct_caller"),
+                    caller.as_ref(),
+                    "C++ case {case}"
+                );
+                assert_eq!(event["parent_event_id"], "0", "C++ case {case}");
             }
-            if matches!(case, "default" | "arm" | "wide-identities") {
+            if matches!(
+                case,
+                "default" | "arm" | "wide-identities" | "caller-same-instance" | "caller-unknown"
+            ) {
                 use sha2::{Digest, Sha256};
                 let root = tempfile::tempdir().unwrap();
                 let bytes = module();
@@ -798,6 +975,23 @@ pub(super) mod tests {
         .unwrap();
         assert_eq!(older["js_invocation_state"], 0);
         assert_eq!(older["js_invocation_id"], 0);
+        assert!(older.get("direct_caller").is_none());
+        let walked = query_observation(&payload_event(
+            "wasm_dispatch_observation",
+            &dispatch_bytes(3, 0, 0),
+        ))
+        .unwrap();
+        assert_eq!(
+            walked["direct_caller"],
+            json!({"kind":"unknown","function_index":null})
+        );
+        assert_eq!(walked["function_index"], 7);
+        let mut named = dispatch_bytes(3, 0, 0);
+        named[32] = 1;
+        assert_eq!(
+            query_observation(&payload_event("wasm_dispatch_observation", &named)).unwrap()["direct_caller"],
+            json!({"kind":"same-instance","function_index":0})
+        );
         let stored = event(5);
         let shared = query_observation(&stored).unwrap();
         let workspace = read(&artifact(&stored), &module(), std::slice::from_ref(&stored));
@@ -905,13 +1099,21 @@ pub(super) mod tests {
     #[test]
     fn query_observation_rejects_malformed_payloads_without_partial_fields() {
         let mut rejected: Vec<(&str, Vec<u8>)> = Vec::new();
-        // Version 3 is otherwise a valid version-2 body. It must not come back
-        // as that prefix: the bytes version 2 reserves are where a later
-        // version stores new fields.
-        rejected.push((
-            "wasm_dispatch_observation",
-            dispatch_bytes(3, 0, 0).to_vec(),
-        ));
+        // Version 3 with kind 0 and index 0 is an observed unknown caller.
+        // A guessed index, another kind, or a reserved byte is not that caller.
+        let mut guessed = dispatch_bytes(3, 0, 0);
+        put_u32(&mut guessed, 36, 9);
+        rejected.push(("wasm_dispatch_observation", guessed.to_vec()));
+        let mut other_kind = dispatch_bytes(3, 0, 0);
+        other_kind[32] = 2;
+        rejected.push(("wasm_dispatch_observation", other_kind.to_vec()));
+        let mut caller_reserved = dispatch_bytes(3, 0, 0);
+        caller_reserved[33] = 1;
+        rejected.push(("wasm_dispatch_observation", caller_reserved.to_vec()));
+        let mut huge_caller = dispatch_bytes(3, 0, 0);
+        huge_caller[32] = 1;
+        put_u32(&mut huge_caller, 36, LIMIT);
+        rejected.push(("wasm_dispatch_observation", huge_caller.to_vec()));
         rejected.push((
             "wasm_dispatch_observation",
             dispatch_bytes(0, 0, 0).to_vec(),

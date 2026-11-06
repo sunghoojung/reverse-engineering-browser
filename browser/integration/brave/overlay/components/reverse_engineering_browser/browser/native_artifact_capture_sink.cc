@@ -846,14 +846,18 @@ void NativeArtifactCaptureSink::CaptureWasmDispatch(
   event.header.type = NativeProbeType::kWasmDispatchObservation;
   event.header.parent_event_id = 0;
   event.header.payload_size = 128;
+  // Version 3 is the walked caller. Version 2 means the walk did not run.
   const NativeWasmDispatchObservationPayload sample{
+      .protocol_version = static_cast<std::uint16_t>(observation.caller_observed ? 3 : 2),
       .function_index = observation.function_index,
       .module_byte_offset = observation.module_byte_offset,
       .selector = observation.selector,
       .table_count = observation.table_count,
       .sample_index = observation.sample_index,
       .js_invocation_state = observation.js_invocation_state,
-      .js_invocation_id = observation.js_invocation_id};
+      .js_invocation_id = observation.js_invocation_id,
+      .caller_kind = observation.caller_kind,
+      .caller_function_index = observation.caller_function_index};
   event.inline_payload = EncodeNativeWasmDispatchObservationPayload(sample);
   PublishAfterWasmModule(event, bytes, observation.execution_context_id,
                          observation.document_token_high, observation.document_token_low,

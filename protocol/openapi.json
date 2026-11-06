@@ -1435,7 +1435,7 @@
       "get": {
         "operationId": "get_events",
         "summary": "Read native events, optionally filtered and paged",
-        "description": "Without filters this is the Origin Trace UI polling window: the newest events of the last 64 MiB plus an independent network window. With any filter or cursor it scans complete records from the cursor (default: newest first), returns up to limit matches unchanged, and adds a query object with next_before and next_after cursors. Filters combine with AND. Gap fields then describe only the scanned byte range, and network_events is empty: select network records with category=network. Network requests: request_body (22) gives each body's length, type and digest, and request_target (23) the path and query only when the session retains request content; select one request with request_id. Invocation sites: js_invocation_start (24), js_invocation_settle (25) and js_invocation_request (26) give armed calls and the requests made inside them. Payloads are hex. Unknown parameters are rejected. Use a small limit through MCP and page with query.next_before.",
+        "description": "Without filters this is the Origin Trace UI polling window: the newest events of the last 64 MiB plus an independent network window. With any filter or cursor it scans complete records from the cursor (default: newest first), returns up to limit matches, and adds a query object with next_before and next_after cursors. Filters combine with AND. Gap fields then describe only the scanned byte range, and network_events is empty: select network records with category=network. Network requests: request_body (22) gives each body's length, type and digest, and request_target (23) the path and query only when the session retains request content; select one request with request_id. Invocation sites: js_invocation_start (24), js_invocation_settle (25) and js_invocation_request (26) give armed calls and the requests made inside them. Payloads stay hex. wasm_dispatch_observation and wasm_indirect_observation also include wasm_observation beside that hex, decoded without an opcode workspace. status decoded names function_index, module_byte_offset, sample_index, js_invocation_state, and js_invocation_id. A dispatch object also has selector and table_count. An indirect object also has table_index, slot, callee_function_index, and resolution named resolved, null, out-of-bounds, foreign, or unresolved. callee_function_index is 0 unless resolution is resolved. status invalid carries no fields. Version 1 decodes as not observed. Any other payload version is invalid with no fields, not a version-2 prefix. The record is protocol 3, category vm, and flags 0. Unknown parameters are rejected. Use a small limit through MCP and page with query.next_before.",
         "tags": [
           "events"
         ],
@@ -1690,7 +1690,7 @@
       "get": {
         "operationId": "wait_for_events",
         "summary": "Wait for matching events",
-        "description": "Waits up to timeout_ms for the first events after a cursor that match the same filters as get_events, then returns them in the filtered get_events shape plus a wait object. Without after, only events written after the call count, so take a cursor first (timeout_ms 1) and then act: session_action open_url or click, or a Console evaluate. On timeout it returns no events, wait.timed_out true and query.next_after for the next wait. Waiting does not change the browser or the stores. At most eight waits run at once.",
+        "description": "Waits up to timeout_ms for the first events after a cursor that match the same filters as get_events, then returns them in the filtered get_events shape plus a wait object. wasm_dispatch_observation and wasm_indirect_observation include wasm_observation. status decoded names function_index, module_byte_offset, sample_index, js_invocation_state, and js_invocation_id. A dispatch object also has selector and table_count. An indirect object also has table_index, slot, callee_function_index, and resolution named resolved, null, out-of-bounds, foreign, or unresolved. status invalid has no fields. A payload version other than 1 or 2 is invalid in full. The record is protocol 3, category vm, and flags 0. Without after, only events written after the call count, so take a cursor first (timeout_ms 1) and then act: session_action open_url or click, or a Console evaluate. On timeout it returns no events, wait.timed_out true and query.next_after for the next wait. Waiting does not change the browser or the stores. At most eight waits run at once.",
         "tags": [
           "events"
         ],
@@ -13451,10 +13451,157 @@
           "capture_state"
         ]
       },
+      "WasmObservationDecode": {
+        "description": "Read-path decode of one wasm_dispatch_observation or wasm_indirect_observation, placed beside the unchanged payload hex by get_events and wait_for_events. status invalid means the record was rejected and no field is returned: the envelope is not protocol 3, category vm, and flags 0; the payload version is not 1 or 2 (a later version is not returned as a version-2 prefix); or the 128-byte payload failed a wire check (nonzero reserved bytes, a broken invocation context, an unknown resolution, a callee on an unresolved entry, or any other bound). Decoding reads that record only: it does not open an opcode workspace or the module, and it does not invent a guest PC, a sample, or a caller. js_invocation_state is the stored integer: 0 not observed, 1 none, 2 inside, 3 unknown. Version 1 decodes as not observed (0, 0). js_invocation_id is nonzero exactly when the state is 2. callee_function_index is the stored index and is 0 unless resolution is resolved; that 0 is not a function index. See protocol/native-wasm-dispatch-v1.md.",
+        "oneOf": [
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "status",
+              "function_index",
+              "module_byte_offset",
+              "selector",
+              "table_count",
+              "sample_index",
+              "js_invocation_state",
+              "js_invocation_id"
+            ],
+            "properties": {
+              "status": {
+                "const": "decoded"
+              },
+              "function_index": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 16777215
+              },
+              "module_byte_offset": {
+                "type": "integer",
+                "minimum": 8,
+                "maximum": 16777215
+              },
+              "selector": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 4294967295
+              },
+              "table_count": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 16777215
+              },
+              "sample_index": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 15
+              },
+              "js_invocation_state": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 3
+              },
+              "js_invocation_id": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 4294967295
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "status",
+              "function_index",
+              "module_byte_offset",
+              "table_index",
+              "slot",
+              "callee_function_index",
+              "resolution",
+              "sample_index",
+              "js_invocation_state",
+              "js_invocation_id"
+            ],
+            "properties": {
+              "status": {
+                "const": "decoded"
+              },
+              "function_index": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 16777215
+              },
+              "module_byte_offset": {
+                "type": "integer",
+                "minimum": 8,
+                "maximum": 16777215
+              },
+              "table_index": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 16777215
+              },
+              "slot": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 4294967295
+              },
+              "callee_function_index": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 16777215
+              },
+              "resolution": {
+                "type": "string",
+                "enum": [
+                  "resolved",
+                  "null",
+                  "out-of-bounds",
+                  "foreign",
+                  "unresolved"
+                ]
+              },
+              "sample_index": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 15
+              },
+              "js_invocation_state": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 3
+              },
+              "js_invocation_id": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 4294967295
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "status"
+            ],
+            "properties": {
+              "status": {
+                "const": "invalid"
+              }
+            }
+          }
+        ]
+      },
       "Event": {
         "type": "object",
         "additionalProperties": true,
-        "description": "Native event record validated before HTTP delivery for protocol version, canonical identifiers, process ID, and bounded hexadecimal payload consistency. Additional native record fields remain extensible; see protocol/README.md. This schema does not yet describe every native event field."
+        "description": "Native event record validated before HTTP delivery for protocol version, canonical identifiers, process ID, and bounded hexadecimal payload consistency. Additional native record fields remain extensible; see protocol/README.md. This schema does not yet describe every native event field. wasm_dispatch_observation and wasm_indirect_observation responses from get_events and wait_for_events include wasm_observation. The payload hex remains.",
+        "properties": {
+          "wasm_observation": {
+            "$ref": "#/components/schemas/WasmObservationDecode"
+          }
+        }
       },
       "Events": {
         "type": "object",

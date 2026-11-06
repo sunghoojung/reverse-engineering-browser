@@ -35,36 +35,125 @@ fn envelope(event: &Value, artifact: &Value) -> bool {
         || !crate::evidence::canonical(&event["artifact_id"], 64, true))
 }
 
+const LIMIT: u32 = 16 * 1024 * 1024;
+const RESOLUTIONS: [&str; 5] = ["resolved", "null", "out-of-bounds", "foreign", "unresolved"];
+
+struct DispatchPayload {
+    function_index: u32,
+    module_byte_offset: u32,
+    selector: u32,
+    table_count: u32,
+    sample_index: u32,
+    js_invocation_state: u8,
+    js_invocation_id: u32,
+}
+
+struct IndirectPayload {
+    function_index: u32,
+    module_byte_offset: u32,
+    table_index: u32,
+    slot: u32,
+    callee_function_index: u32,
+    resolution: &'static str,
+    sample_index: u32,
+    js_invocation_state: u8,
+    js_invocation_id: u32,
+}
+
+fn u32_at(bytes: &[u8], offset: usize) -> u32 {
+    u32::from_le_bytes(bytes[offset..offset + 4].try_into().expect("fixed payload"))
+}
+
+/// Little-endian version of a 128-byte observation whose size field is 128.
+/// Only versions 1 and 2 are known. Any other version is wholly invalid: a
+/// later version stores new fields in bytes version 2 reserves, so reading it
+/// as a version-2 prefix would drop those fields or treat an explicit zero as
+/// "not observed".
+fn supported_observation_version(bytes: &[u8]) -> Option<u16> {
+    if bytes.len() != 128 {
+        return None;
+    }
+    let version = u16::from_le_bytes([bytes[0], bytes[1]]);
+    let size = u16::from_le_bytes([bytes[2], bytes[3]]);
+    (size == 128 && matches!(version, 1 | 2)).then_some(version)
+}
+
+/// Field map of a `wasm_dispatch_observation` payload. The opcode workspace and
+/// event queries both use this function, so the offsets stay in one place.
+/// `None` rejects the bytes: unknown version, nonzero reserved bytes, a broken
+/// invocation context, or a bound the wire contract refuses. No module is read.
+fn decode_dispatch_payload(bytes: &[u8]) -> Option<DispatchPayload> {
+    supported_observation_version(bytes)?;
+    // Version 2 stores the JavaScript invocation context at bytes 24..32.
+    // Version 1 reserved those bytes and decodes as not observed.
+    let (state, invocation) = crate::js_invocation::wasm_context(bytes, 2, 24)?;
+    if bytes[32..].iter().any(|byte| *byte != 0) {
+        return None;
+    }
+    let fields = DispatchPayload {
+        function_index: u32_at(bytes, 4),
+        module_byte_offset: u32_at(bytes, 8),
+        selector: u32_at(bytes, 12),
+        table_count: u32_at(bytes, 16),
+        sample_index: u32_at(bytes, 20),
+        js_invocation_state: state,
+        js_invocation_id: invocation,
+    };
+    (fields.function_index < LIMIT
+        && (8..LIMIT).contains(&fields.module_byte_offset)
+        && fields.table_count < LIMIT
+        && fields.sample_index < 16)
+        .then_some(fields)
+}
+
+/// Field map of a `wasm_indirect_observation` payload. Same rejection rules as
+/// `decode_dispatch_payload`, plus an unknown resolution or a callee on an
+/// entry that did not resolve. `resolution` is the enum name.
+fn decode_indirect_payload(bytes: &[u8]) -> Option<IndirectPayload> {
+    supported_observation_version(bytes)?;
+    // Version 2 stores the JavaScript invocation context at bytes 32..40.
+    let (state, invocation) = crate::js_invocation::wasm_context(bytes, 2, 32)?;
+    if bytes[40..].iter().any(|byte| *byte != 0) {
+        return None;
+    }
+    let resolution = *RESOLUTIONS.get(u32_at(bytes, 24) as usize)?;
+    let fields = IndirectPayload {
+        function_index: u32_at(bytes, 4),
+        module_byte_offset: u32_at(bytes, 8),
+        table_index: u32_at(bytes, 12),
+        slot: u32_at(bytes, 16),
+        callee_function_index: u32_at(bytes, 20),
+        resolution,
+        sample_index: u32_at(bytes, 28),
+        js_invocation_state: state,
+        js_invocation_id: invocation,
+    };
+    let resolved = fields.resolution == "resolved";
+    (fields.function_index < LIMIT
+        && (8..LIMIT).contains(&fields.module_byte_offset)
+        && fields.table_index < LIMIT
+        && fields.callee_function_index < LIMIT
+        && fields.sample_index < 16
+        && (resolved || fields.callee_function_index == 0))
+        .then_some(fields)
+}
+
 fn observation(event: &Value, artifact: &Value, module: &mut Module<'_>) -> Option<Value> {
     if !envelope(event, artifact) {
         return None;
     }
-    // Version 2 adds the JavaScript invocation context at bytes 24..32.
     let bytes = super::event_payload_versions(event, "wasm_dispatch_observation", &[1, 2])?;
-    let (state, invocation) = crate::js_invocation::wasm_context(&bytes, 2, 24)?;
-    if bytes[32..].iter().any(|v| *v != 0) {
+    let fields = decode_dispatch_payload(&bytes)?;
+    if module.function(fields.function_index).is_none_or(|facts| {
+        facts.br_tables.get(&fields.module_byte_offset) != Some(&fields.table_count)
+    }) {
         return None;
     }
-    let at =
-        |offset| u32::from_le_bytes(bytes[offset..offset + 4].try_into().expect("fixed payload"));
-    let function = at(4);
-    let offset = at(8);
-    let selector = at(12);
-    let count = at(16);
-    let index = at(20);
-    if function >= 16 * 1024 * 1024
-        || !(8..16 * 1024 * 1024).contains(&offset)
-        || count >= 16 * 1024 * 1024
-        || index >= 16
-        || module
-            .function(function)
-            .is_none_or(|facts| facts.br_tables.get(&offset) != Some(&count))
+    let mut row = json!({"event":super::event_reference(event),"monotonic_time_ns":event["monotonic_time_ns"],"function_index":fields.function_index,"module_byte_offset":fields.module_byte_offset,
+        "selector":fields.selector,"table_count":fields.table_count,"sample_index":fields.sample_index,"selected_arm":fields.selector.min(fields.table_count),"is_default":fields.selector >= fields.table_count});
+    if let Some(context) =
+        crate::js_invocation::context_row(fields.js_invocation_state, fields.js_invocation_id)
     {
-        return None;
-    }
-    let mut row = json!({"event":super::event_reference(event),"monotonic_time_ns":event["monotonic_time_ns"],"function_index":function,"module_byte_offset":offset,
-        "selector":selector,"table_count":count,"sample_index":index,"selected_arm":selector.min(count),"is_default":selector >= count});
-    if let Some(context) = crate::js_invocation::context_row(state, invocation) {
         row["js_invocation"] = context;
     }
     Some(row)
@@ -113,45 +202,69 @@ pub(super) struct IndirectObservations {
     pub undecodable: u64,
 }
 
-const RESOLUTIONS: [&str; 5] = ["resolved", "null", "out-of-bounds", "foreign", "unresolved"];
-
 fn indirect_observation(event: &Value, artifact: &Value, module: &mut Module<'_>) -> Option<Value> {
     if !envelope(event, artifact) {
         return None;
     }
-    // Version 2 adds the JavaScript invocation context at bytes 32..40.
     let bytes = super::event_payload_versions(event, "wasm_indirect_observation", &[1, 2])?;
-    let (state, invocation) = crate::js_invocation::wasm_context(&bytes, 2, 32)?;
-    if bytes[40..].iter().any(|v| *v != 0) {
+    let fields = decode_indirect_payload(&bytes)?;
+    let resolved = fields.resolution == "resolved";
+    if resolved && fields.callee_function_index as usize >= module.function_count() {
         return None;
     }
-    let at =
-        |offset| u32::from_le_bytes(bytes[offset..offset + 4].try_into().expect("fixed payload"));
-    let (function, offset, table, slot, callee, resolution, index) =
-        (at(4), at(8), at(12), at(16), at(20), at(24), at(28));
-    let resolution = *RESOLUTIONS.get(resolution as usize)?;
-    let resolved = resolution == "resolved";
-    let functions = module.function_count();
-    if function >= 16 * 1024 * 1024
-        || !(8..16 * 1024 * 1024).contains(&offset)
-        || index >= 16
-        || (!resolved && callee != 0)
-        || (resolved && callee as usize >= functions)
-    {
-        return None;
-    }
-    let &(site_table, tail) = module.function(function)?.call_indirects.get(&offset)?;
-    if site_table != table {
+    let &(site_table, tail) = module
+        .function(fields.function_index)?
+        .call_indirects
+        .get(&fields.module_byte_offset)?;
+    if site_table != fields.table_index {
         return None;
     }
     let mut row = json!({"event":super::event_reference(event),"monotonic_time_ns":event["monotonic_time_ns"],
-        "function_index":function,"module_byte_offset":offset,
-        "instruction":if tail {"return_call_indirect"} else {"call_indirect"},"table_index":table,"slot":slot,
-        "resolution":resolution,"callee_function_index":resolved.then_some(callee),"sample_index":index});
-    if let Some(context) = crate::js_invocation::context_row(state, invocation) {
+        "function_index":fields.function_index,"module_byte_offset":fields.module_byte_offset,
+        "instruction":if tail {"return_call_indirect"} else {"call_indirect"},"table_index":fields.table_index,"slot":fields.slot,
+        "resolution":fields.resolution,"callee_function_index":resolved.then_some(fields.callee_function_index),"sample_index":fields.sample_index});
+    if let Some(context) =
+        crate::js_invocation::context_row(fields.js_invocation_state, fields.js_invocation_id)
+    {
         row["js_invocation"] = context;
     }
     Some(row)
+}
+
+/// Decoded `wasm_observation` for an event query. `None` means the record is
+/// not a complete observation; the caller reports that as invalid and does not
+/// fill any field. This does not open a module or an opcode workspace. The
+/// envelope checks are the ones C++, Python and JavaScript apply before the
+/// payload: these records are protocol 3, category `vm`, and flags 0.
+pub(super) fn query_observation(event: &Value) -> Option<Value> {
+    if event["protocol_version"] != 3
+        || event["category"] != "vm"
+        || event["flags"].as_u64() != Some(0)
+        || event["payload_encoding"] != "hex"
+        || event["payload_size"] != 128
+        || event["payload_truncated"] != false
+    {
+        return None;
+    }
+    let text = event["payload"].as_str()?;
+    if text.len() != 256 {
+        return None;
+    }
+    let bytes = hex::decode(text).ok()?;
+    match event["type"].as_str()? {
+        "wasm_dispatch_observation" => decode_dispatch_payload(&bytes).map(|fields| {
+            json!({"status":"decoded","function_index":fields.function_index,"module_byte_offset":fields.module_byte_offset,
+                "selector":fields.selector,"table_count":fields.table_count,"sample_index":fields.sample_index,
+                "js_invocation_state":fields.js_invocation_state,"js_invocation_id":fields.js_invocation_id})
+        }),
+        "wasm_indirect_observation" => decode_indirect_payload(&bytes).map(|fields| {
+            json!({"status":"decoded","function_index":fields.function_index,"module_byte_offset":fields.module_byte_offset,
+                "table_index":fields.table_index,"slot":fields.slot,"callee_function_index":fields.callee_function_index,
+                "resolution":fields.resolution,"sample_index":fields.sample_index,
+                "js_invocation_state":fields.js_invocation_state,"js_invocation_id":fields.js_invocation_id})
+        }),
+        _ => None,
+    }
 }
 
 pub(super) fn collect_indirect(
@@ -626,5 +739,288 @@ pub(super) mod tests {
                     .unwrap();
             }
         }
+    }
+    fn put_u32(bytes: &mut [u8], at: usize, value: u32) {
+        bytes[at..at + 4].copy_from_slice(&value.to_le_bytes());
+    }
+    fn versioned(version: u8, state_at: usize, state: u8, id: u32) -> [u8; 128] {
+        let mut bytes = [0u8; 128];
+        bytes[0] = version;
+        bytes[2] = 128;
+        bytes[state_at] = state;
+        put_u32(&mut bytes, state_at + 4, id);
+        bytes
+    }
+    fn dispatch_bytes(version: u8, state: u8, id: u32) -> [u8; 128] {
+        let mut bytes = versioned(version, 24, state, id);
+        put_u32(&mut bytes, 4, 7);
+        put_u32(&mut bytes, 8, 40);
+        put_u32(&mut bytes, 12, u32::MAX);
+        put_u32(&mut bytes, 16, 3);
+        put_u32(&mut bytes, 20, 4);
+        bytes
+    }
+    fn indirect_bytes(resolution: u32, callee: u32, state: u8, id: u32) -> [u8; 128] {
+        let mut bytes = versioned(2, 32, state, id);
+        put_u32(&mut bytes, 4, 1);
+        put_u32(&mut bytes, 8, 80);
+        put_u32(&mut bytes, 12, 2);
+        put_u32(&mut bytes, 16, 6);
+        put_u32(&mut bytes, 20, callee);
+        put_u32(&mut bytes, 24, resolution);
+        put_u32(&mut bytes, 28, 2);
+        bytes
+    }
+    fn payload_event(kind: &str, bytes: &[u8]) -> Value {
+        let mut record = event(0);
+        record["type"] = json!(kind);
+        record["payload"] = json!(hex::encode(bytes));
+        record["payload_size"] = json!(bytes.len());
+        record
+    }
+    #[test]
+    fn query_observation_decodes_without_a_module_and_names_resolution() {
+        // No Module::parse and no workspace: the payload is the only input.
+        let row = query_observation(&payload_event(
+            "wasm_dispatch_observation",
+            &dispatch_bytes(2, 2, 11),
+        ))
+        .unwrap();
+        assert_eq!(
+            row,
+            json!({"status":"decoded","function_index":7,"module_byte_offset":40,"selector":u32::MAX,
+                "table_count":3,"sample_index":4,"js_invocation_state":2,"js_invocation_id":11})
+        );
+        let older = query_observation(&payload_event(
+            "wasm_dispatch_observation",
+            &dispatch_bytes(1, 0, 0),
+        ))
+        .unwrap();
+        assert_eq!(older["js_invocation_state"], 0);
+        assert_eq!(older["js_invocation_id"], 0);
+        let stored = event(5);
+        let shared = query_observation(&stored).unwrap();
+        let workspace = read(&artifact(&stored), &module(), std::slice::from_ref(&stored));
+        for key in [
+            "function_index",
+            "module_byte_offset",
+            "selector",
+            "table_count",
+            "sample_index",
+        ] {
+            assert_eq!(shared[key], workspace.rows[0][key], "{key}");
+        }
+        let names = ["resolved", "null", "out-of-bounds", "foreign", "unresolved"];
+        for (value, name) in names.iter().enumerate() {
+            let callee = u32::from(value == 0);
+            let row = query_observation(&payload_event(
+                "wasm_indirect_observation",
+                &indirect_bytes(value as u32, callee, 1, 0),
+            ))
+            .unwrap();
+            assert_eq!(row["resolution"], *name);
+            assert!(row["resolution"].is_string(), "{name}");
+            assert_eq!(row["callee_function_index"], callee);
+            assert_eq!(row["table_index"], 2);
+            assert_eq!(row["slot"], 6);
+            assert_eq!(row["function_index"], 1);
+            assert_eq!(row["module_byte_offset"], 80);
+            assert_eq!(row["sample_index"], 2);
+            assert_eq!(row["js_invocation_state"], 1);
+            assert_eq!(row["js_invocation_id"], 0);
+            assert!(row.get("selector").is_none());
+        }
+        let indirect = indirect_event(1, 2, 0);
+        let named = query_observation(&indirect).unwrap();
+        let rows = collect_indirect(
+            &artifact(&indirect),
+            Module::parse(&wat::parse_str(INDIRECT_MODULE).unwrap()).as_mut(),
+            std::slice::from_ref(&indirect),
+        );
+        assert_eq!(named["resolution"], rows.rows[0]["resolution"]);
+        assert_eq!(named["resolution"], "out-of-bounds");
+        assert_eq!(named["slot"], rows.rows[0]["slot"]);
+        assert_eq!(named["callee_function_index"], 0);
+        // Legal extremes stay the stored integers. Nothing here is clamped
+        // into a default arm, a guest sample, or a caller.
+        let mut edge = dispatch_bytes(2, 1, 0);
+        put_u32(&mut edge, 4, LIMIT - 1);
+        put_u32(&mut edge, 8, 8);
+        put_u32(&mut edge, 16, LIMIT - 1);
+        put_u32(&mut edge, 20, 15);
+        let row = query_observation(&payload_event("wasm_dispatch_observation", &edge)).unwrap();
+        assert_eq!(
+            row,
+            json!({"status":"decoded","function_index":LIMIT - 1,"module_byte_offset":8,
+                "selector":u32::MAX,"table_count":LIMIT - 1,"sample_index":15,
+                "js_invocation_state":1,"js_invocation_id":0})
+        );
+        let mut far = dispatch_bytes(2, 0, 0);
+        put_u32(&mut far, 8, LIMIT - 1);
+        assert_eq!(
+            query_observation(&payload_event("wasm_dispatch_observation", &far)).unwrap()["module_byte_offset"],
+            LIMIT - 1
+        );
+        let mut indirect_edge = indirect_bytes(0, LIMIT - 1, 0, 0);
+        put_u32(&mut indirect_edge, 12, LIMIT - 1);
+        put_u32(&mut indirect_edge, 16, u32::MAX);
+        let row =
+            query_observation(&payload_event("wasm_indirect_observation", &indirect_edge)).unwrap();
+        assert_eq!(row["resolution"], "resolved");
+        assert_eq!(row["table_index"], LIMIT - 1);
+        assert_eq!(row["slot"], u32::MAX);
+        assert_eq!(row["callee_function_index"], LIMIT - 1);
+        assert!(row.get("instruction").is_none());
+        // Callee 0 with resolution resolved is the stored function index 0.
+        let row = query_observation(&payload_event(
+            "wasm_indirect_observation",
+            &indirect_bytes(0, 0, 0, 0),
+        ))
+        .unwrap();
+        assert_eq!(row["resolution"], "resolved");
+        assert_eq!(row["callee_function_index"], 0);
+        let mut older_indirect = indirect_bytes(4, 0, 0, 0);
+        older_indirect[0] = 1;
+        let row = query_observation(&payload_event("wasm_indirect_observation", &older_indirect))
+            .unwrap();
+        assert_eq!(row["resolution"], "unresolved");
+        assert_eq!(row["callee_function_index"], 0);
+        assert_eq!(row["js_invocation_state"], 0);
+        assert_eq!(row["js_invocation_id"], 0);
+    }
+    fn assert_rejected(kind: &str, bytes: &[u8]) {
+        let mut events = vec![payload_event(kind, bytes)];
+        let payload = events[0]["payload"].clone();
+        assert!(
+            query_observation(&events[0]).is_none(),
+            "{kind} {}",
+            hex::encode(bytes)
+        );
+        super::super::annotate_wasm_observations(&mut events);
+        let observation = &events[0]["wasm_observation"];
+        assert_eq!(observation, &json!({"status": "invalid"}), "{kind}");
+        assert_eq!(observation.as_object().unwrap().len(), 1, "{kind}");
+        assert_eq!(events[0]["payload"], payload);
+    }
+    #[test]
+    fn query_observation_rejects_malformed_payloads_without_partial_fields() {
+        let mut rejected: Vec<(&str, Vec<u8>)> = Vec::new();
+        // Version 3 is otherwise a valid version-2 body. It must not come back
+        // as that prefix: the bytes version 2 reserves are where a later
+        // version stores new fields.
+        rejected.push((
+            "wasm_dispatch_observation",
+            dispatch_bytes(3, 0, 0).to_vec(),
+        ));
+        rejected.push((
+            "wasm_dispatch_observation",
+            dispatch_bytes(0, 0, 0).to_vec(),
+        ));
+        let mut high = dispatch_bytes(2, 0, 0);
+        high[1] = 1;
+        rejected.push(("wasm_dispatch_observation", high.to_vec()));
+        rejected.push((
+            "wasm_dispatch_observation",
+            dispatch_bytes(1, 2, 9).to_vec(),
+        ));
+        let mut reserved = dispatch_bytes(2, 2, 11);
+        reserved[32] = 1;
+        rejected.push(("wasm_dispatch_observation", reserved.to_vec()));
+        let mut padding = dispatch_bytes(2, 2, 11);
+        padding[25] = 1;
+        rejected.push(("wasm_dispatch_observation", padding.to_vec()));
+        let mut offset = dispatch_bytes(2, 0, 0);
+        put_u32(&mut offset, 8, 7);
+        rejected.push(("wasm_dispatch_observation", offset.to_vec()));
+        let mut far = dispatch_bytes(2, 0, 0);
+        put_u32(&mut far, 8, LIMIT);
+        rejected.push(("wasm_dispatch_observation", far.to_vec()));
+        let mut function = dispatch_bytes(2, 0, 0);
+        put_u32(&mut function, 4, LIMIT);
+        rejected.push(("wasm_dispatch_observation", function.to_vec()));
+        let mut count = dispatch_bytes(2, 0, 0);
+        put_u32(&mut count, 16, LIMIT);
+        rejected.push(("wasm_dispatch_observation", count.to_vec()));
+        let mut sample = dispatch_bytes(2, 0, 0);
+        put_u32(&mut sample, 20, 16);
+        rejected.push(("wasm_dispatch_observation", sample.to_vec()));
+        rejected.push((
+            "wasm_dispatch_observation",
+            dispatch_bytes(2, 2, 0).to_vec(),
+        ));
+        rejected.push((
+            "wasm_dispatch_observation",
+            dispatch_bytes(2, 3, 1).to_vec(),
+        ));
+        let mut indirect_v3 = indirect_bytes(0, 1, 0, 0);
+        indirect_v3[0] = 3;
+        rejected.push(("wasm_indirect_observation", indirect_v3.to_vec()));
+        rejected.push((
+            "wasm_indirect_observation",
+            indirect_bytes(5, 0, 0, 0).to_vec(),
+        ));
+        rejected.push((
+            "wasm_indirect_observation",
+            indirect_bytes(1, 4, 0, 0).to_vec(),
+        ));
+        let mut table = indirect_bytes(0, 1, 0, 0);
+        put_u32(&mut table, 12, LIMIT);
+        rejected.push(("wasm_indirect_observation", table.to_vec()));
+        let mut callee = indirect_bytes(0, 1, 0, 0);
+        put_u32(&mut callee, 20, LIMIT);
+        rejected.push(("wasm_indirect_observation", callee.to_vec()));
+        let mut indirect_reserved = indirect_bytes(0, 1, 0, 0);
+        indirect_reserved[40] = 1;
+        rejected.push(("wasm_indirect_observation", indirect_reserved.to_vec()));
+        let mut indirect_pad = indirect_bytes(0, 1, 2, 4);
+        indirect_pad[33] = 1;
+        rejected.push(("wasm_indirect_observation", indirect_pad.to_vec()));
+        let mut version1_context = indirect_bytes(1, 0, 0, 0);
+        version1_context[0] = 1;
+        version1_context[32] = 1;
+        rejected.push(("wasm_indirect_observation", version1_context.to_vec()));
+        let mut size = indirect_bytes(0, 1, 0, 0);
+        size[2] = 127;
+        rejected.push(("wasm_indirect_observation", size.to_vec()));
+        let mut size_high = indirect_bytes(0, 1, 0, 0);
+        size_high[3] = 1;
+        rejected.push(("wasm_indirect_observation", size_high.to_vec()));
+        let mut short = dispatch_bytes(2, 0, 0).to_vec();
+        short.pop();
+        rejected.push(("wasm_dispatch_observation", short));
+        for (kind, bytes) in &rejected {
+            assert_rejected(kind, bytes);
+        }
+        let mut events = vec![payload_event("module_compiled", &reserved)];
+        super::super::annotate_wasm_observations(&mut events);
+        assert!(events[0].get("wasm_observation").is_none());
+        let good = payload_event("wasm_dispatch_observation", &dispatch_bytes(2, 0, 0));
+        for (field, value) in [
+            ("protocol_version", json!(2)),
+            ("category", json!("wasm")),
+            ("flags", json!(1)),
+            ("payload_encoding", json!("utf8")),
+        ] {
+            let mut event = good.clone();
+            event[field] = value;
+            let payload = event["payload"].clone();
+            assert!(query_observation(&event).is_none(), "{field}");
+            let mut events = vec![event];
+            super::super::annotate_wasm_observations(&mut events);
+            assert_eq!(
+                events[0]["wasm_observation"],
+                json!({"status": "invalid"}),
+                "{field}"
+            );
+            assert_eq!(events[0]["wasm_observation"].as_object().unwrap().len(), 1);
+            assert_eq!(events[0]["payload"], payload);
+        }
+        let mut truncated = good.clone();
+        truncated["payload_truncated"] = json!(true);
+        assert!(query_observation(&truncated).is_none());
+        let mut events = vec![truncated];
+        super::super::annotate_wasm_observations(&mut events);
+        assert_eq!(events[0]["wasm_observation"], json!({"status": "invalid"}));
+        assert_eq!(events[0]["wasm_observation"].as_object().unwrap().len(), 1);
     }
 }

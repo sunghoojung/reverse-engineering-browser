@@ -645,7 +645,9 @@ impl App {
                 });
                 // json! serializes borrowed values; move the retained window instead
                 // of allocating a second complete evidence tree on every refresh.
-                result["events"] = Value::Array(window.events);
+                let mut events = window.events;
+                crate::vm_opcode::annotate_wasm_observations(&mut events);
+                result["events"] = Value::Array(events);
                 result["network_events"] = Value::Array(window.network_events);
                 self.event_state(&mut result, capture);
                 if capture.mode == CaptureMode::Demo {

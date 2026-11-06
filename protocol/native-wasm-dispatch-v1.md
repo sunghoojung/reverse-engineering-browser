@@ -75,6 +75,29 @@ sequence and monotonic time are required; wide identities remain decimal strings
 Unknown versions, nonzero reserved bytes, malformed length/encoding and invalid
 envelope flags are rejected consistently by C++, Rust and JavaScript.
 
+### Event queries
+
+`get_events` and `wait_for_events` leave `payload` as the 128-byte hex and add
+`wasm_observation` beside it. The field map is the one the opcode-workspace
+reader uses. A decoded dispatch object has `function_index`,
+`module_byte_offset`, `selector`, `table_count`, `sample_index`,
+`js_invocation_state` and `js_invocation_id`. An indirect object has the caller
+fields `function_index`, `module_byte_offset`, `sample_index`,
+`js_invocation_state` and `js_invocation_id`, plus `table_index`, `slot`,
+`callee_function_index` and `resolution` (`resolved`, `null`, `out-of-bounds`,
+`foreign`, `unresolved`). `js_invocation_state` is the stored integer (0 not
+observed, 1 none, 2 inside, 3 unknown). Version 1 decodes as not observed.
+`callee_function_index` is the stored index, 0 unless `resolution` is
+`resolved`. `status` is `decoded` or `invalid`. Invalid carries no fields.
+A payload version other than 1 or 2 is invalid in full. It is not decoded as
+a version-2 prefix: a later version stores new fields in bytes version 2
+reserves, and a zero there is not the same as "not observed". The record
+must also be protocol 3, category `vm`, and flags 0. This decode does not
+build an opcode workspace or open the module, so a module
+the detector never admits still has rows here. It does not recover a guest PC
+or invent a sample. Workspace rows remain a separate, module-checked view.
+See [filtered event reads](http-api.md#filtered-and-paged-reads).
+
 ## Reader and viewer
 
 Rust verifies artifact digest and exact session/frame/artifact scope, then parses
@@ -195,7 +218,9 @@ Version 2 adds the JavaScript invocation context at bytes 32..40, as for
 Function, table and callee indexes are below 16 Mi and the offset is at least 8
 and below 16 Mi. Any u32 slot is legal. C++, Python, Rust and JavaScript reject
 unknown versions, nonzero reserved bytes, a callee on an unresolved entry, an
-unknown resolution and invalid envelope flags alike.
+unknown resolution and invalid envelope flags alike. Event queries return this
+payload as `wasm_observation` with `resolution` named, as described
+[above](#event-queries). The hex payload remains.
 
 ### Reader
 

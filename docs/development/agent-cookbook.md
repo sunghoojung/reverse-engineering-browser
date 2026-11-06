@@ -83,7 +83,16 @@ get_events {"type": "wasm_dispatch_observation,wasm_guest_dispatch,wasm_guest_in
 ```
 
 Good: the samples in file order, each with `sequence_number`,
-`monotonic_time_ns`, `artifact_id` (the module) and a hex `payload`. The
+`monotonic_time_ns`, `artifact_id` (the module), the hex `payload`, and
+`wasm_observation` when the type is `wasm_dispatch_observation` or
+`wasm_indirect_observation`. `status` `decoded` names `function_index`,
+`module_byte_offset`, `sample_index`, `js_invocation_state`, and
+`js_invocation_id`. A dispatch object also has `selector` and `table_count`.
+An indirect object also has `table_index`, `slot`, `callee_function_index`,
+and `resolution` (`resolved`, `null`, `out-of-bounds`, `foreign`,
+`unresolved`). `status` `invalid` has no fields. A payload version other than
+1 or 2 is invalid in full, not a version-2 prefix. The hex remains, and the
+decode does not need an opcode workspace for that module. The
 payload layouts are in
 [native Wasm dispatch](../../protocol/native-wasm-dispatch-v1.md#wire-contract)
 (event 17, and event 20 for `call_indirect`) and

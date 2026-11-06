@@ -397,3 +397,6 @@ version 2 and `wasm_guest_invocation` version 4: each adds the JavaScript
 invocation context in previously reserved bytes, and older versions remain
 readable as not observed. See
 [invocation context of Wasm records](native-js-invocation-v1.md#invocation-context-of-wasm-records).
+`get_events` and `wait_for_events` return the two Wasm observation payloads
+decoded as `wasm_observation` beside the hex. See
+[event queries](native-wasm-dispatch-v1.md#event-queries).

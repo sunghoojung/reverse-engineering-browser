@@ -651,6 +651,118 @@ void NativeWasmDispatch(reb::ArtifactReceiver& receiver) {
                "retirement and bounds\n";
 }
 
+void NativeWasmDirectCaller(reb::ArtifactReceiver& receiver) {
+  using reb::WasmDirectCallerFrame;
+  const WasmDirectCallerFrame direct_call[] = {{1, 1, true}, {1, 0, true}};
+  const auto caller = reb::ResolveWasmDirectCaller(1, 2, direct_call);
+  Check(caller.kind == reb::kWasmDirectCallerSameInstance && caller.function_index == 0,
+        "Direct call from function 0 into function 1 names caller 0");
+  const WasmDirectCallerFrame function_zero[] = {{1, 4, true}, {1, 0, true}};
+  const auto zero = reb::ResolveWasmDirectCaller(1, 5, function_zero);
+  Check(zero.kind == reb::kWasmDirectCallerSameInstance && zero.function_index == 0,
+        "Function index 0 is a real caller, not the unknown sentinel");
+  const WasmDirectCallerFrame host_call[] = {{1, 0, true}, {0, -1, false}};
+  const auto host = reb::ResolveWasmDirectCaller(1, 2, host_call);
+  Check(host.kind == reb::kWasmDirectCallerUnknown && host.function_index == 0,
+        "A host frame is unknown rather than a guessed index");
+  const WasmDirectCallerFrame host_between[] = {{1, 2, true}, {0, -1, false}, {1, 9, true}};
+  const auto hidden = reb::ResolveWasmDirectCaller(1, 16, host_between);
+  Check(hidden.kind == reb::kWasmDirectCallerUnknown && hidden.function_index == 0,
+        "An older same-instance frame behind the host is not the caller");
+  const WasmDirectCallerFrame foreign[] = {{1, 2, true}, {2, 9, true}};
+  const auto other = reb::ResolveWasmDirectCaller(1, 16, foreign);
+  Check(other.kind == reb::kWasmDirectCallerUnknown,
+        "Another instance is not this module's caller");
+  const WasmDirectCallerFrame tier[] = {{1, 2, true}, {1, 3, false}};
+  Check(reb::ResolveWasmDirectCaller(1, 16, tier).kind == reb::kWasmDirectCallerUnknown,
+        "A non-Liftoff caller is unknown");
+  const WasmDirectCallerFrame past[] = {{1, 2, true}, {1, 16, true}};
+  Check(reb::ResolveWasmDirectCaller(1, 16, past).kind == reb::kWasmDirectCallerUnknown,
+        "An index past the module's function count is unknown");
+  const WasmDirectCallerFrame instance_a[] = {{1, 1, true}, {1, 4, true}};
+  const WasmDirectCallerFrame instance_b[] = {{2, 1, true}, {2, 7, true}};
+  const auto a = reb::ResolveWasmDirectCaller(1, 8, instance_a);
+  const auto b = reb::ResolveWasmDirectCaller(2, 8, instance_b);
+  Check(a.kind == reb::kWasmDirectCallerSameInstance && a.function_index == 4 &&
+            b.kind == reb::kWasmDirectCallerSameInstance && b.function_index == 7,
+        "Two instances keep the caller from their own activation");
+  const WasmDirectCallerFrame mixed[] = {{1, 1, true}, {2, 7, true}, {1, 4, true}};
+  const auto interleaved = reb::ResolveWasmDirectCaller(1, 8, mixed);
+  Check(interleaved.kind == reb::kWasmDirectCallerUnknown && interleaved.function_index == 0,
+        "A foreign frame between two same-instance frames is not skipped");
+
+  record_corpus = false;
+  Configure();
+  auto& sink = NativeArtifactCaptureSink::Get();
+  auto& transfers = NativeArtifactSocketClient::Get().transfers;
+  const std::vector<std::uint8_t> module{0, 97, 115, 109, 1, 0, 0, 0, 0x0e, 1, 0, 0};
+  reb::NativeWasmDispatchObservation observation;
+  observation.header.session_id = kSession;
+  observation.header.frame_id = kFrame;
+  observation.header.sequence_number = 5000;
+  observation.header.monotonic_time_ns = 99;
+  observation.header.process_id = 123;
+  observation.header.thread_id = 7;
+  observation.execution_context_id = 81;
+  observation.document_token_high = 72;
+  observation.document_token_low = 90;
+  observation.function_index = 1;
+  observation.module_byte_offset = 8;
+  observation.table_count = 1;
+  observation.source_url = "fixture://native-wasm-caller";
+  observation.caller_observed = true;
+  observation.caller_kind = reb::kWasmDirectCallerSameInstance;
+  observation.caller_function_index = 0;
+  sink.CaptureWasmDispatch(observation, mojo_base::BigBuffer(module), [] { return true; });
+  Check(transfers.size() == 1, "Caller-bearing dispatch still transfers its module");
+  Receive(receiver, transfers.begin()->first);
+  const auto dispatch = [](std::uint64_t sequence) {
+    return std::find_if(events.begin(), events.end(), [&](const auto& event) {
+      return event.header.type == NativeProbeType::kWasmDispatchObservation &&
+             event.header.sequence_number == sequence;
+    });
+  };
+  const auto same = dispatch(5000);
+  Check(same != events.end() && !same->header.parent_event_id,
+        "Direct caller is not a parent event");
+  reb::WasmDispatchObservationPayload payload;
+  Check(reb::DecodeWasmDispatchObservationPayload(same->inline_payload, payload),
+        "Same-instance caller payload decodes");
+  Check(payload.protocol_version == 3 && payload.function_index == 1 &&
+            payload.caller_kind == reb::kWasmDirectCallerSameInstance &&
+            payload.caller_function_index == 0,
+        "Function B's br_table names direct caller A, including function index 0");
+  observation.header.sequence_number = 5001;
+  observation.caller_kind = reb::kWasmDirectCallerUnknown;
+  observation.caller_function_index = 0;
+  sink.CaptureWasmDispatch(observation, mojo_base::BigBuffer(module), [] { return true; });
+  const auto unknown = dispatch(5001);
+  Check(unknown != events.end() &&
+            reb::DecodeWasmDispatchObservationPayload(unknown->inline_payload, payload) &&
+            payload.protocol_version == 3 && payload.caller_kind == reb::kWasmDirectCallerUnknown &&
+            payload.caller_function_index == 0 && payload.function_index == 1,
+        "A host caller stays unknown and does not reuse the previous function index");
+  observation.header.sequence_number = 5002;
+  observation.caller_function_index = 9;
+  sink.CaptureWasmDispatch(observation, mojo_base::BigBuffer(module), [] { return true; });
+  Check(dispatch(5002) == events.end() &&
+            Payload(events.back()) == "native_wasm_dispatch_module_invalid" &&
+            events.back().header.sequence_number == 5002,
+        "Unknown with a guessed index is a gap, not function 9");
+  observation.header.sequence_number = 5003;
+  observation.caller_observed = false;
+  observation.caller_kind = reb::kWasmDirectCallerUnknown;
+  observation.caller_function_index = 0;
+  sink.CaptureWasmDispatch(observation, mojo_base::BigBuffer(module), [] { return true; });
+  const auto unwalked = dispatch(5003);
+  Check(unwalked != events.end() &&
+            reb::DecodeWasmDispatchObservationPayload(unwalked->inline_payload, payload) &&
+            payload.protocol_version == 2 && payload.caller_kind == 0 &&
+            payload.caller_function_index == 0,
+        "An unwalked record stays version 2 and is not a host caller");
+  std::cout << "PASS direct-call caller on br_table, host unknown, and separate instance walks\n";
+}
+
 void NativeWasmIndirect(reb::ArtifactReceiver& receiver) {
   record_corpus = false;
   Configure();
@@ -711,9 +823,10 @@ void NativeWasmIndirect(reb::ArtifactReceiver& receiver) {
   reb::WasmIndirectObservationPayload payload;
   Check(reb::DecodeWasmIndirectObservationPayload(found->inline_payload, payload),
         "Indirect payload decodes");
-  Check(payload.function_index == 1 && payload.module_byte_offset == 12 &&
-            payload.table_index == 0 && payload.slot == 3 && payload.callee_function_index == 2 &&
-            payload.resolution == 0 && payload.sample_index == 0,
+  Check(payload.protocol_version == 2 && payload.function_index == 1 &&
+            payload.module_byte_offset == 12 && payload.table_index == 0 && payload.slot == 3 &&
+            payload.callee_function_index == 2 && payload.resolution == 0 &&
+            payload.sample_index == 0,
         "Explicit little endian call_indirect fields retained");
   Check(reb::IsValidWasmIndirectObservation(std::bit_cast<reb::EventRecord>(*found)),
         "Broker accepts the produced record");
@@ -959,6 +1072,7 @@ int main(int argc, char** argv) {
     Admission(output);
     NativeWasmDispatch(receiver);
     NativeWasmIndirect(receiver);
+    NativeWasmDirectCaller(receiver);
     NativeWasmExecutionOutcomes(receiver);
     NativeGuestDependencies(receiver);
     NativeProbeHostGuestBoundary(receiver);

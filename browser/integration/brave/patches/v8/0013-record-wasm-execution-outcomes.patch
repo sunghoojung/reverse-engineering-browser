@@ -1,7 +1,9 @@
 diff --git a/include/v8-callbacks.h b/include/v8-callbacks.h
+index 4cb5e6d..040e17a 100644
 --- a/include/v8-callbacks.h
 +++ b/include/v8-callbacks.h
-@@ -397,5 +397,21 @@ using WasmGuestDispatchCallback = void (*)(Local<Context>, const uint8_t*,
+@@ -407,6 +407,22 @@ using WasmGuestModuleAdmissionCallback = WasmGuestModuleAdmission (*)(
+ using WasmGuestDispatchCallback = void (*)(Local<Context>, const uint8_t*,
                                             size_t, const WasmGuestStateView&);
  
 +// Host-visible Wasm call boundaries. Enter and the heartbeat run only while
@@ -24,9 +26,10 @@ diff --git a/include/v8-callbacks.h b/include/v8-callbacks.h
    kCompile,
    kModule,
 diff --git a/include/v8-isolate.h b/include/v8-isolate.h
+index 06f9c6e..c7bfe12 100644
 --- a/include/v8-isolate.h
 +++ b/include/v8-isolate.h
-@@ -1787,6 +1787,14 @@ class V8_EXPORT Isolate {
+@@ -1808,6 +1808,14 @@ class V8_EXPORT Isolate {
                                    WasmGuestContext* result);
    void ResetWasmGuestCapture();
  
@@ -42,9 +45,10 @@ diff --git a/include/v8-isolate.h b/include/v8-isolate.h
  
    void SetRuntimeBufferCallback(RuntimeBufferCallback callback);
 diff --git a/src/api/api.cc b/src/api/api.cc
+index 4794a8e..5055709 100644
 --- a/src/api/api.cc
 +++ b/src/api/api.cc
-@@ -11055,6 +11055,19 @@ void Isolate::ResetWasmGuestCapture() {
+@@ -11077,6 +11077,19 @@ void Isolate::ResetWasmGuestCapture() {
    i::wasm::ResetRebGuestCapture(reinterpret_cast<i::Isolate*>(this));
  #endif
  }
@@ -65,6 +69,7 @@ diff --git a/src/api/api.cc b/src/api/api.cc
                  wasm_module_bytes_callback)
  
 diff --git a/src/builtins/builtins-definitions.h b/src/builtins/builtins-definitions.h
+index c8da883..5f9a378 100644
 --- a/src/builtins/builtins-definitions.h
 +++ b/src/builtins/builtins-definitions.h
 @@ -1408,6 +1408,9 @@ constexpr int kGearboxGenericBuiltinIdOffset = -2;
@@ -78,9 +83,10 @@ diff --git a/src/builtins/builtins-definitions.h b/src/builtins/builtins-definit
    IF_WASM(TFC, WasmFloat64ToNumber, WasmFloat64ToTagged)                       \
    IF_WASM(TFC, WasmFloat64ToString, WasmFloat64ToTagged)                       \
 diff --git a/src/builtins/builtins-wasm-gen.cc b/src/builtins/builtins-wasm-gen.cc
+index 5b7313f..ea6bdeb 100644
 --- a/src/builtins/builtins-wasm-gen.cc
 +++ b/src/builtins/builtins-wasm-gen.cc
-@@ -146,6 +146,24 @@ TF_BUILTIN(WasmRebTraceCallIndirect, WasmBuiltinsAssembler) {
+@@ -147,6 +147,24 @@ TF_BUILTIN(WasmRebTraceCallIndirect, WasmBuiltinsAssembler) {
                    info);
  }
  
@@ -106,9 +112,10 @@ diff --git a/src/builtins/builtins-wasm-gen.cc b/src/builtins/builtins-wasm-gen.
    auto val = UncheckedParameter<Float32T>(Descriptor::kValue);
    Return(ChangeFloat32ToTagged(val));
 diff --git a/src/common/message-template.h b/src/common/message-template.h
+index 4480bd4..5e578a3 100644
 --- a/src/common/message-template.h
 +++ b/src/common/message-template.h
-@@ -788,7 +788,8 @@ namespace internal {
+@@ -789,7 +789,8 @@ namespace internal {
    T(SuppressedErrorDuringDisposal, "An error was suppressed during disposal")  \
    T(ExpectAnObjectWithUsing,                                                   \
      "An object is expected with `using` "                                      \
@@ -119,9 +126,11 @@ diff --git a/src/common/message-template.h b/src/common/message-template.h
  enum class MessageTemplate {
  #define TEMPLATE(NAME, STRING) k##NAME,
 diff --git a/src/execution/isolate.h b/src/execution/isolate.h
+index 98e06bf..c669a39 100644
 --- a/src/execution/isolate.h
 +++ b/src/execution/isolate.h
-@@ -519,5 +519,11 @@ using DebugObjectCache = std::vector<Handle<HeapObject>>;
+@@ -521,6 +521,12 @@ using DebugObjectCache = std::vector<Handle<HeapObject>>;
+   V(WasmGuestDispatchCallback, wasm_guest_dispatch_callback, nullptr)       \
    V(WasmBrTableDispatchEnabledCallback,                                     \
      wasm_guest_enabled_callback, nullptr)                                   \
 +  V(WasmExecutionEnterCallback, wasm_execution_enter_callback, nullptr)     \
@@ -134,9 +143,10 @@ diff --git a/src/execution/isolate.h b/src/execution/isolate.h
    V(SharedArrayBufferConstructorEnabledCallback,                            \
      sharedarraybuffer_constructor_enabled_callback, nullptr)                \
 diff --git a/src/runtime/runtime-wasm.cc b/src/runtime/runtime-wasm.cc
+index b254052..1558af5 100644
 --- a/src/runtime/runtime-wasm.cc
 +++ b/src/runtime/runtime-wasm.cc
-@@ -94,9 +94,179 @@ class FrameFinder {
+@@ -99,9 +99,175 @@ class FrameFinder {
    StackFrameIterator frame_iterator_;
  };
  
@@ -229,8 +239,8 @@ diff --git a/src/runtime/runtime-wasm.cc b/src/runtime/runtime-wasm.cc
 +  uint32_t module_offset = 0;
 +  const uint8_t* bytes = nullptr;
 +  size_t size = 0;
-+  Tagged<Context> native_context{};
-+  bool have_context = false;
++  HandleScope scope(isolate);
++  v8::Local<v8::Context> context;
 +  {
 +    wasm::WasmCodeRefScope code_scope;
 +    for (StackFrameIterator it(isolate); !it.done(); it.Advance()) {
@@ -280,16 +290,12 @@ diff --git a/src/runtime/runtime-wasm.cc b/src/runtime/runtime-wasm.cc
 +        size = wire.size();
 +      }
 +      if (instance->has_native_context()) {
-+        native_context = instance->native_context();
-+        have_context = true;
++        // ToLocal needs the NativeContext returned by native_context().
++        context = Utils::ToLocal(
++            direct_handle(instance->native_context(), isolate));
 +      }
 +      break;
 +    }
-+  }
-+  HandleScope scope(isolate);
-+  v8::Local<v8::Context> context;
-+  if (have_context) {
-+    context = Utils::ToLocal(direct_handle(native_context, isolate));
 +  }
 +  callback(context, bytes, size, reason, bounds, function_known, function_index,
 +           offset_known, module_offset);
@@ -316,7 +322,7 @@ diff --git a/src/runtime/runtime-wasm.cc b/src/runtime/runtime-wasm.cc
  #if V8_ENABLE_DRUMBRAKE
    if (v8_flags.wasm_jitless) {
      // Store the trap reason to be retrieved later when the interpreter will
-@@ -316,6 +500,11 @@ RUNTIME_FUNCTION(Runtime_WasmReThrow) {
+@@ -814,6 +980,11 @@ RUNTIME_FUNCTION(Runtime_WasmReThrow) {
  }
  
  RUNTIME_FUNCTION(Runtime_WasmStackGuard) {
@@ -328,7 +334,7 @@ diff --git a/src/runtime/runtime-wasm.cc b/src/runtime/runtime-wasm.cc
    SealHandleScope shs(isolate);
    DCHECK_EQ(1, args.length());
    TRACE_EVENT("v8.execute", "V8.StackGuard");
-@@ -339,6 +521,14 @@ RUNTIME_FUNCTION(Runtime_WasmStackGuard) {
+@@ -837,6 +1008,14 @@ RUNTIME_FUNCTION(Runtime_WasmStackGuard) {
  // To properly fix that, we should implement lazy-deopt support for Wasm.
  RUNTIME_FUNCTION(Runtime_WasmStackGuardLoop) {
    DCHECK_EQ(0, args.length());
@@ -343,7 +349,7 @@ diff --git a/src/runtime/runtime-wasm.cc b/src/runtime/runtime-wasm.cc
    SealHandleScope shs(isolate);
    TRACE_EVENT("v8.execute", "V8.StackGuard");
  
-@@ -346,6 +537,72 @@ RUNTIME_FUNCTION(Runtime_WasmStackGuardLoop) {
+@@ -844,6 +1023,72 @@ RUNTIME_FUNCTION(Runtime_WasmStackGuardLoop) {
        StackGuard::InterruptLevel::kNoHeapWrites);
  }
  
@@ -416,7 +422,9 @@ diff --git a/src/runtime/runtime-wasm.cc b/src/runtime/runtime-wasm.cc
  RUNTIME_FUNCTION(Runtime_WasmCompileLazy) {
    SealHandleScope shs(isolate);
    DCHECK_EQ(2, args.length());
-@@ -1117,4 +1284,10 @@ RUNTIME_FUNCTION(Runtime_WasmTriggerTierUp) {
+@@ -1149,6 +1394,12 @@ RUNTIME_FUNCTION(Runtime_TierUpWasmToJSWrapper) {
+ }
+ 
  RUNTIME_FUNCTION(Runtime_WasmTriggerTierUp) {
 +  // Liftoff with dynamic tiering checks interrupts here, when the tiering
 +  // budget runs out, instead of in WasmStackGuard. Poll before the seal.
@@ -428,9 +436,10 @@ diff --git a/src/runtime/runtime-wasm.cc b/src/runtime/runtime-wasm.cc
  
    {
 diff --git a/src/runtime/runtime.h b/src/runtime/runtime.h
+index 6e6dc91..df7e075 100644
 --- a/src/runtime/runtime.h
 +++ b/src/runtime/runtime.h
-@@ -716,6 +716,9 @@ constexpr bool CanTriggerGC(T... properties) {
+@@ -719,6 +719,9 @@ constexpr bool CanTriggerGC(T... properties) {
    FOR_EACH_INTRINSIC_WASM_DRUMBRAKE(F, I)                        \
    F(WasmRebTraceBrTable, 1, 1)                                  \
    F(WasmRebTraceCallIndirect, 1, 1)                             \
@@ -441,9 +450,10 @@ diff --git a/src/runtime/runtime.h b/src/runtime/runtime.h
    F(ThrowWasmFXSuspendError, 0, 1)                               \
    F(ThrowWasmError, 1, 1)                                        \
 diff --git a/src/wasm/baseline/liftoff-compiler.cc b/src/wasm/baseline/liftoff-compiler.cc
+index 6c6ea3c..88122b5 100644
 --- a/src/wasm/baseline/liftoff-compiler.cc
 +++ b/src/wasm/baseline/liftoff-compiler.cc
-@@ -1315,6 +1315,10 @@ class LiftoffCompiler {
+@@ -1317,6 +1317,10 @@ class LiftoffCompiler {
      if (V8_UNLIKELY(v8_flags.reb_wasm_guest_capture)) {
        TraceRebBrTable(decoder, 0, true);
      }
@@ -454,7 +464,7 @@ diff --git a/src/wasm/baseline/liftoff-compiler.cc b/src/wasm/baseline/liftoff-c
      if (V8_UNLIKELY(v8_flags.trace_wasm)) TraceFunctionEntry(decoder);
  
      if (EnableCompilationHintsInfrastructure()) {
-@@ -3407,6 +3412,10 @@ class LiftoffCompiler {
+@@ -3410,6 +3414,10 @@ class LiftoffCompiler {
    }
  
    void ReturnImpl(FullDecoder* decoder) {
@@ -465,7 +475,7 @@ diff --git a/src/wasm/baseline/liftoff-compiler.cc b/src/wasm/baseline/liftoff-c
      std::optional<TraceFunctionExit> trace_exit;
      if (V8_UNLIKELY(v8_flags.trace_wasm)) {
        trace_exit.emplace(this, decoder);
-@@ -3918,6 +3927,18 @@ class LiftoffCompiler {
+@@ -3978,6 +3986,18 @@ class LiftoffCompiler {
      __ DeallocateStackSlot(sizeof(RebCallIndirectTracingInfo));
    }
  
@@ -484,7 +494,7 @@ diff --git a/src/wasm/baseline/liftoff-compiler.cc b/src/wasm/baseline/liftoff-c
    void BrTable(FullDecoder* decoder, const BranchTableImmediate& imm,
                 const Value& key) {
      if (V8_UNLIKELY(v8_flags.reb_wasm_br_table_dispatch)) {
-@@ -4826,6 +4850,10 @@ class LiftoffCompiler {
+@@ -4943,6 +4963,10 @@ class LiftoffCompiler {
  
    void ReturnCall(FullDecoder* decoder, const CallFunctionImmediate& imm,
                    const Value args[]) {
@@ -495,9 +505,7 @@ diff --git a/src/wasm/baseline/liftoff-compiler.cc b/src/wasm/baseline/liftoff-c
      TierupCheckOnTailCall(decoder);
      CallDirect(decoder, imm, args, nullptr, CallJumpMode::kTailCall);
    }
-@@ -4834,8 +4862,12 @@ class LiftoffCompiler {
-                           const CallIndirectImmediate& imm,
-                           const Value args[]) {
+@@ -4953,12 +4977,20 @@ class LiftoffCompiler {
      if (V8_UNLIKELY(v8_flags.reb_wasm_call_indirect_dispatch)) {
        TraceRebCallIndirect(decoder, imm);
      }
@@ -508,7 +516,7 @@ diff --git a/src/wasm/baseline/liftoff-compiler.cc b/src/wasm/baseline/liftoff-c
      TierupCheckOnTailCall(decoder);
      CallIndirectImpl(decoder, imm, CallJumpMode::kTailCall);
    }
-@@ -4839,5 +4871,9 @@ class LiftoffCompiler {
+ 
    void ReturnCallRef(FullDecoder* decoder, const Value& func_ref,
                       const FunctionSig* sig, const Value args[]) {
 +    if (V8_UNLIKELY(v8_flags.reb_wasm_br_table_dispatch ||
@@ -519,9 +527,11 @@ diff --git a/src/wasm/baseline/liftoff-compiler.cc b/src/wasm/baseline/liftoff-c
      CallRefImpl(decoder, func_ref.type, sig, CallJumpMode::kTailCall);
    }
 diff --git a/src/wasm/wasm-builtin-list.h b/src/wasm/wasm-builtin-list.h
+index 586ad06..e705892 100644
 --- a/src/wasm/wasm-builtin-list.h
 +++ b/src/wasm/wasm-builtin-list.h
-@@ -62,5 +62,8 @@ namespace v8::internal::wasm {
+@@ -62,6 +62,9 @@ namespace v8::internal::wasm {
+   V(WasmTraceExit)                                                             \
    V(WasmRebTraceBrTable)                                                       \
    V(WasmRebTraceCallIndirect)                                                  \
 +  V(WasmRebTraceExecutionEnter)                                                \

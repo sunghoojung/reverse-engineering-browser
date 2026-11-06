@@ -146,7 +146,9 @@ live page run before those program counters are browser evidence.
 for one host-visible call. The five-second deadline records the call. The
 main isolate is nudged with `RequestInterrupt`, which does not terminate it.
 An explicit in-process interrupt traps the call. The browser UI cannot send
-that interrupt on the current mojo pipe. See
+that interrupt on the current mojo pipe. The engine edits are V8 patch
+`0013-record-wasm-execution-outcomes` and Chromium patch
+`0023-record-wasm-execution-outcomes`. See
 [execution outcomes](../../../../../../protocol/native-wasm-dispatch-v1.md#execution-outcomes).
 See the [capability boundary and acceptance gates](../../../../../../protocol/vm-opcode-workspace-v2.md#native-browser-capability-boundary).
 The VM category also permits 32-byte through 16-MiB snapshots of runtime-created

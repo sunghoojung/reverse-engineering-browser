@@ -11,6 +11,7 @@ use crate::{
     event_query, event_window, evidence, evidence_comparison, evidence_package, float32,
     js_invocation_sites,
     live_browser::LiveBrowser,
+    live_wasm::LiveWasm,
     native_console::NativeConsole,
     origin_trace,
     owned_vm_debugger::OwnedVmDebugger,
@@ -113,6 +114,7 @@ pub struct App {
     /// Process-lifetime identity for `/api/health` and `X-REB-Expected-Instance`.
     instance_id: String,
     native_console: NativeConsole,
+    live_wasm: LiveWasm,
     owned_vm_debugger: OwnedVmDebugger,
     vm_experiments: crate::vm_experiment::Experiments,
     /// The live capture lifecycle; `capture` serializes stop and clear.
@@ -158,6 +160,7 @@ impl App {
     }
     pub async fn new(options: Options, port: u16) -> Arc<Self> {
         let native_console = NativeConsole::new(&options);
+        let live_wasm = LiveWasm::new(options.live_wasm_socket.clone());
         let invocation_sites = Arc::new(js_invocation_sites::Store::new(
             options.js_invocation_site_store.clone(),
         ));
@@ -192,6 +195,7 @@ impl App {
                     .as_nanos()
             ),
             native_console,
+            live_wasm,
             owned_vm_debugger: OwnedVmDebugger::new(options.worker(
                 &options.owned_vm_fixture,
                 "OriginTraceOwnedVmFixture",
@@ -411,6 +415,12 @@ impl App {
             }
             "/api/analysis/catalog" => analysis_catalog::catalog()?,
             "/api/decoder" => self.decoder.state(),
+            "/api/live-wasm" => {
+                if !q.0.is_empty() {
+                    return Err(Error::bad("Live Wasm state takes no query parameters"));
+                }
+                self.live_wasm.state()?
+            }
             "/api/native-console" => self.native_console.state().await,
             "/api/native-console/document-start" => {
                 if q.0.keys().any(|key| key != "after_sequence") {
@@ -635,7 +645,9 @@ impl App {
                 });
                 // json! serializes borrowed values; move the retained window instead
                 // of allocating a second complete evidence tree on every refresh.
-                result["events"] = Value::Array(window.events);
+                let mut events = window.events;
+                crate::vm_opcode::annotate_wasm_observations(&mut events);
+                result["events"] = Value::Array(events);
                 result["network_events"] = Value::Array(window.network_events);
                 self.event_state(&mut result, capture);
                 if capture.mode == CaptureMode::Demo {
@@ -1321,6 +1333,7 @@ impl App {
                 }
                 _ => Err(Error::bad("Analyst workspace action is invalid")),
             },
+            "/api/live-wasm/actions" => self.live_wasm.action(value),
             "/api/native-console/actions" => self.native_console.action(value).await,
             "/api/js-invocation-sites/actions" => {
                 validation::schema("JsInvocationSiteAction", value, 400)?;

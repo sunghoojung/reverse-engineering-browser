@@ -16,9 +16,20 @@
 #include "native_js_invocation.h"
 #include "native_probe_event.h"
 namespace reb {
+// Immediate live caller of a br_table. kUnknown is the host, another instance,
+// a non-Liftoff frame, or a frame whose code could not be read; the index is
+// then 0 and is not function 0. Versions 1 and 2 reserved these bytes (not
+// observed).
+// include/reb/wasm_dispatch.hpp defines the same values for the portable reader.
+#ifndef REB_WASM_DIRECT_CALLER_KIND_DEFINED
+#define REB_WASM_DIRECT_CALLER_KIND_DEFINED
+inline constexpr std::uint8_t kWasmDirectCallerUnknown = 0;
+inline constexpr std::uint8_t kWasmDirectCallerSameInstance = 1;
+#endif
 // Physical Wasm br_table execution, not an interpreter guest program counter.
 // Version 2 adds the JavaScript invocation context the instruction ran in
 // (protocol/native-js-invocation-v1.md); version 1 reserved those bytes.
+// Version 3 records the direct caller walked from the live stack.
 struct NativeWasmDispatchObservationPayload final {
   std::uint16_t protocol_version = 2;
   std::uint16_t payload_size = 128;
@@ -30,7 +41,10 @@ struct NativeWasmDispatchObservationPayload final {
   std::uint8_t js_invocation_state = 0;
   std::array<std::byte, 3> js_invocation_reserved{};
   std::uint32_t js_invocation_id = 0;
-  std::array<std::byte, 96> reserved{};
+  std::uint8_t caller_kind = kWasmDirectCallerUnknown;
+  std::array<std::byte, 3> caller_reserved{};
+  std::uint32_t caller_function_index = 0;
+  std::array<std::byte, 88> reserved{};
 };
 static_assert(sizeof(NativeWasmDispatchObservationPayload) == 128);
 static_assert(std::is_standard_layout_v<NativeWasmDispatchObservationPayload>);
@@ -44,7 +58,9 @@ static_assert(offsetof(NativeWasmDispatchObservationPayload, table_count) == 16)
 static_assert(offsetof(NativeWasmDispatchObservationPayload, sample_index) == 20);
 static_assert(offsetof(NativeWasmDispatchObservationPayload, js_invocation_state) == 24);
 static_assert(offsetof(NativeWasmDispatchObservationPayload, js_invocation_id) == 28);
-static_assert(offsetof(NativeWasmDispatchObservationPayload, reserved) == 32);
+static_assert(offsetof(NativeWasmDispatchObservationPayload, caller_kind) == 32);
+static_assert(offsetof(NativeWasmDispatchObservationPayload, caller_function_index) == 36);
+static_assert(offsetof(NativeWasmDispatchObservationPayload, reserved) == 40);
 [[nodiscard]] inline std::array<std::byte, 128> EncodeNativeWasmDispatchObservationPayload(
     const NativeWasmDispatchObservationPayload& value) noexcept {
   std::array<std::byte, 128> out{};
@@ -63,7 +79,10 @@ static_assert(offsetof(NativeWasmDispatchObservationPayload, reserved) == 32);
   std::copy(value.js_invocation_reserved.begin(), value.js_invocation_reserved.end(),
             out.begin() + 25);
   put(28, value.js_invocation_id, 4);
-  std::copy(value.reserved.begin(), value.reserved.end(), out.begin() + 32);
+  put(32, value.caller_kind, 1);
+  std::copy(value.caller_reserved.begin(), value.caller_reserved.end(), out.begin() + 33);
+  put(36, value.caller_function_index, 4);
+  std::copy(value.reserved.begin(), value.reserved.end(), out.begin() + 40);
   return out;
 }
 inline constexpr std::size_t kNativeWasmDispatchSampleBudget = 16;
@@ -80,6 +99,11 @@ struct NativeWasmDispatchObservation final {
   // The current JavaScript invocation, read by the renderer sink.
   std::uint8_t js_invocation_state = 0;
   std::uint32_t js_invocation_id = 0;
+  // True only after the runtime walked this activation's stack. False keeps
+  // payload version 2: the caller was not observed, which is not kUnknown.
+  bool caller_observed = false;
+  std::uint8_t caller_kind = kWasmDirectCallerUnknown;
+  std::uint32_t caller_function_index = 0;
   std::string_view source_url;
   std::span<const std::uint8_t> module_bytes;
 };
@@ -98,6 +122,16 @@ using NativeWasmDispatchEmitter = bool (*)(const NativeWasmDispatchObservation&,
       value.module_byte_offset >= bytes.size() || bytes[value.module_byte_offset] != 0x0e ||
       value.sample_index >= kNativeWasmDispatchSampleBudget ||
       !IsValidNativeJsInvocationContext(value.js_invocation_state, value.js_invocation_id))
+    return false;
+  // A walked caller is either unknown (index 0, not a function index) or one
+  // function of this module. An unwalked record cannot carry either.
+  bool caller_ok =
+      value.caller_kind == kWasmDirectCallerUnknown && value.caller_function_index == 0;
+  if (value.caller_observed) {
+    caller_ok = caller_ok || (value.caller_kind == kWasmDirectCallerSameInstance &&
+                              value.caller_function_index < 16U * 1024U * 1024U);
+  }
+  if (!caller_ok)
     return false;
   // Match V8's immediate, including overflow rejection. This is not a Wasm interpreter.
   std::size_t offset = static_cast<std::size_t>(value.module_byte_offset) + 1;

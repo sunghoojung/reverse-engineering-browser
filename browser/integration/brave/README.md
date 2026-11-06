@@ -465,6 +465,8 @@ Origin Trace sends that interrupt: the renderer client pipe is bound to the
 thread inside Wasm. While either dispatch flag is on, Liftoff also emits a
 call at function entry, ordinary return, and tail call so that host call can
 be closed. Both need the same rebuilt browser as the dispatch flags.
+Those changes are V8 patch `0013-record-wasm-execution-outcomes` and
+Chromium patch `0023-record-wasm-execution-outcomes`.
 See [execution outcomes](../../../protocol/native-wasm-dispatch-v1.md#execution-outcomes).
 
 Guest-state capture additionally needs `REB_NATIVE_WASM_GUEST_ADAPTER`, which

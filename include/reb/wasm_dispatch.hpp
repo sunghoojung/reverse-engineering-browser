@@ -10,10 +10,22 @@
 #include "reb/event.hpp"
 #include "reb/js_invocation.hpp"
 namespace reb {
+// Immediate live caller of a br_table, walked from that activation's stack.
+// kUnknown is the host, another instance, a non-Liftoff frame, or a frame
+// whose code could not be read. The index is then 0 and is not function 0.
+// Versions 1
+// and 2 reserved these bytes: the caller was not observed, which is neither
+// kUnknown nor a guessed index. The overlay header defines the same values;
+// the guard keeps a translation unit that includes both well-formed.
+#ifndef REB_WASM_DIRECT_CALLER_KIND_DEFINED
+#define REB_WASM_DIRECT_CALLER_KIND_DEFINED
+inline constexpr std::uint8_t kWasmDirectCallerUnknown = 0;
+inline constexpr std::uint8_t kWasmDirectCallerSameInstance = 1;
+#endif
 // Physical Wasm br_table execution, not an interpreter guest program counter.
 // Version 2 records the JavaScript invocation context the instruction ran in
 // (protocol/native-js-invocation-v1.md); version 1 reserved those bytes and
-// still decodes, as state not_observed.
+// still decodes, as state not_observed. Version 3 records the direct caller.
 struct WasmDispatchObservationPayload final {
   std::uint16_t protocol_version = 2;
   std::uint16_t payload_size = 128;
@@ -25,7 +37,10 @@ struct WasmDispatchObservationPayload final {
   std::uint8_t js_invocation_state = 0;
   std::array<std::byte, 3> js_invocation_reserved{};
   std::uint32_t js_invocation_id = 0;
-  std::array<std::byte, 96> reserved{};
+  std::uint8_t caller_kind = kWasmDirectCallerUnknown;
+  std::array<std::byte, 3> caller_reserved{};
+  std::uint32_t caller_function_index = 0;
+  std::array<std::byte, 88> reserved{};
 };
 static_assert(sizeof(WasmDispatchObservationPayload) == 128);
 static_assert(std::is_standard_layout_v<WasmDispatchObservationPayload>);
@@ -39,7 +54,9 @@ static_assert(offsetof(WasmDispatchObservationPayload, table_count) == 16);
 static_assert(offsetof(WasmDispatchObservationPayload, sample_index) == 20);
 static_assert(offsetof(WasmDispatchObservationPayload, js_invocation_state) == 24);
 static_assert(offsetof(WasmDispatchObservationPayload, js_invocation_id) == 28);
-static_assert(offsetof(WasmDispatchObservationPayload, reserved) == 32);
+static_assert(offsetof(WasmDispatchObservationPayload, caller_kind) == 32);
+static_assert(offsetof(WasmDispatchObservationPayload, caller_function_index) == 36);
+static_assert(offsetof(WasmDispatchObservationPayload, reserved) == 40);
 [[nodiscard]] inline std::array<std::byte, 128> EncodeWasmDispatchObservationPayload(
     const WasmDispatchObservationPayload& value) noexcept {
   std::array<std::byte, 128> out{};
@@ -58,7 +75,10 @@ static_assert(offsetof(WasmDispatchObservationPayload, reserved) == 32);
   std::copy(value.js_invocation_reserved.begin(), value.js_invocation_reserved.end(),
             out.begin() + 25);
   put(28, value.js_invocation_id, 4);
-  std::copy(value.reserved.begin(), value.reserved.end(), out.begin() + 32);
+  put(32, value.caller_kind, 1);
+  std::copy(value.caller_reserved.begin(), value.caller_reserved.end(), out.begin() + 33);
+  put(36, value.caller_function_index, 4);
+  std::copy(value.reserved.begin(), value.reserved.end(), out.begin() + 40);
   return out;
 }
 [[nodiscard]] inline bool DecodeWasmDispatchObservationPayload(
@@ -82,7 +102,10 @@ static_assert(offsetof(WasmDispatchObservationPayload, reserved) == 32);
   value.js_invocation_state = static_cast<std::uint8_t>(get(24, 1));
   std::copy(bytes.begin() + 25, bytes.begin() + 28, value.js_invocation_reserved.begin());
   value.js_invocation_id = get(28, 4);
-  std::copy(bytes.begin() + 32, bytes.end(), value.reserved.begin());
+  value.caller_kind = static_cast<std::uint8_t>(get(32, 1));
+  std::copy(bytes.begin() + 33, bytes.begin() + 36, value.caller_reserved.begin());
+  value.caller_function_index = get(36, 4);
+  std::copy(bytes.begin() + 40, bytes.end(), value.reserved.begin());
   return true;
 }
 [[nodiscard]] inline bool IsValidWasmDispatchObservation(const EventRecord& event) noexcept {
@@ -96,18 +119,60 @@ static_assert(offsetof(WasmDispatchObservationPayload, reserved) == 32);
          event.header.monotonic_time_ns != 0 && event.header.frame_id != 0 &&
          event.header.artifact_id != 0 && event.header.parent_event_id == 0 &&
          DecodeWasmDispatchObservationPayload(event.inline_payload, value) &&
-         (value.protocol_version == 1 || value.protocol_version == 2) &&
+         (value.protocol_version == 1 || value.protocol_version == 2 ||
+          value.protocol_version == 3) &&
          value.payload_size == 128 && value.function_index < 16U * 1024U * 1024U &&
          value.table_count < 16U * 1024U * 1024U && value.module_byte_offset >= 8 &&
          value.module_byte_offset < 16U * 1024U * 1024U && value.sample_index < 16 &&
          // Version 1 reserved the context bytes, so it can only be not_observed.
-         (value.protocol_version == 2 ||
+         (value.protocol_version >= 2 ||
           (value.js_invocation_state == 0 && value.js_invocation_id == 0)) &&
          IsValidJsInvocationContext(value.js_invocation_state, value.js_invocation_id) &&
          std::all_of(value.js_invocation_reserved.begin(), value.js_invocation_reserved.end(),
                      [](std::byte b) { return b == std::byte{0}; }) &&
+         std::all_of(value.caller_reserved.begin(), value.caller_reserved.end(),
+                     [](std::byte b) { return b == std::byte{0}; }) &&
          std::all_of(value.reserved.begin(), value.reserved.end(),
-                     [](std::byte b) { return b == std::byte{0}; });
+                     [](std::byte b) { return b == std::byte{0}; }) &&
+         // Versions 1 and 2 did not walk a caller. A zero kind there is not a
+         // host caller, and a nonzero caller byte is a reserved-byte violation.
+         ((value.protocol_version < 3 && value.caller_kind == 0 &&
+           value.caller_function_index == 0) ||
+          (value.protocol_version == 3 &&
+           ((value.caller_kind == kWasmDirectCallerUnknown && value.caller_function_index == 0) ||
+            (value.caller_kind == kWasmDirectCallerSameInstance &&
+             value.caller_function_index < 16U * 1024U * 1024U))));
+}
+// One activation's frames, callee first. instance_id 0 is not a Wasm instance
+// (the host, or a frame whose instance was not read). A negative function
+// index was not read. The direct caller is only the frame immediately above
+// the br_table. A host, foreign, non-Liftoff, or unreadable frame stops the
+// walk; an older same-instance frame behind it is not the caller. Each call
+// is one activation: two instances do not share a stack.
+struct WasmDirectCallerFrame {
+  std::uint64_t instance_id = 0;
+  int function_index = -1;
+  bool liftoff = false;
+};
+struct WasmDirectCaller {
+  std::uint8_t kind = kWasmDirectCallerUnknown;
+  std::uint32_t function_index = 0;
+};
+[[nodiscard]] inline WasmDirectCaller ResolveWasmDirectCaller(
+    std::uint64_t instance_id,
+    std::uint32_t function_count,
+    std::span<const WasmDirectCallerFrame> frames_outward) noexcept {
+  WasmDirectCaller unknown;
+  if (instance_id == 0 || function_count == 0 || frames_outward.size() < 2 ||
+      frames_outward[0].instance_id != instance_id)
+    return unknown;
+  const WasmDirectCallerFrame& caller = frames_outward[1];
+  if (!caller.liftoff || caller.instance_id != instance_id || caller.function_index < 0)
+    return unknown;
+  const auto index = static_cast<std::uint32_t>(caller.function_index);
+  if (index >= function_count)
+    return unknown;
+  return WasmDirectCaller{kWasmDirectCallerSameInstance, index};
 }
 // Physical Wasm call_indirect or return_call_indirect execution. The slot is
 // the dynamic table index, not a guest opcode or program counter.

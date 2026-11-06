@@ -2353,7 +2353,10 @@ void NativeProbeSink::RecordNativeWasmDispatch(std::uint64_t execution_context_i
                                                std::uint32_t selector,
                                                std::uint32_t table_count,
                                                std::uint64_t document_token_high,
-                                               std::uint64_t document_token_low) noexcept {
+                                               std::uint64_t document_token_low,
+                                               std::uint8_t caller_kind,
+                                               std::uint32_t caller_function_index,
+                                               bool caller_observed) noexcept {
   if (!IsNativeWasmDispatchEnabled())
     return;
   VmAdmission admission;
@@ -2377,6 +2380,9 @@ void NativeProbeSink::RecordNativeWasmDispatch(std::uint64_t execution_context_i
   observation.module_byte_offset = module_byte_offset;
   observation.selector = selector;
   observation.table_count = table_count;
+  observation.caller_observed = caller_observed;
+  observation.caller_kind = caller_kind;
+  observation.caller_function_index = caller_function_index;
   observation.source_url = source_url;
   observation.module_bytes = module_bytes;
   // The JavaScript invocation this instruction ran in, or not observed.

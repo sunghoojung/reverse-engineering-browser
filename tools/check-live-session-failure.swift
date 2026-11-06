@@ -71,6 +71,7 @@ enum LiveSessionFailureChecks {
       ("0", nil), ("4096", nil), ("0x", nil), ("0x0", nil), ("0x1000", nil), ("+1280", nil),
       ("-1", nil), (" 1280", nil), ("1280 ", nil), ("1+1", nil), ("abc", nil), ("1e3", nil),
       ("0b11", nil), ("12345678901", nil), ("0x123456789", nil), ("\u{FF11}\u{FF12}", nil),
+      ("0x\u{FF11}\u{FF12}", nil), ("0x\u{FF41}", nil),
       ("a[$(touch /tmp/x)]", nil),
     ]
     for (value, expected) in masks {

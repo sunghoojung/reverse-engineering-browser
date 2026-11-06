@@ -28,12 +28,17 @@ TEST_NAMES = [
     "RebNativeBrTablePreservesLiveValues",
     "RebNativeBrTableDisabledCompilation",
     "RebNativeBrTableDirectCaller",
+    "RebNativeBrTableLeftLiftoff",
+    "RebNativeBrTableFlagOffTurbofanHasNoScopeGap",
+    "RebNativeBrTableJitlessUnsupported",
+    "RebNativeBrTableJitlessFlagOffHasNoScopeGap",
     "RebNativeCallIndirectRuntimeDispatch",
     "RebNativeCallIndirectAdmissionPredicate",
     "RebNativeCallIndirectNullAndOutOfBounds",
     "RebNativeCallIndirectReturnCall",
     "RebNativeCallIndirectPreservesLiveValues",
     "RebNativeCallIndirectDisabledCompilation",
+    "RebNativeCallIndirectLeftLiftoff",
     "RebNativeBrTablePhysicalOnlyHasNoGuestMetadata",
     "RebNativeGuestLargeLocalIndexAndMemory",
     "RebNativeGuestHelperImportAndExceptionScope",
@@ -177,6 +182,38 @@ def self_test():
     assert cctest_name("test-api/RebNativeJsDispatchSelectorKinds") == "test-api/RebNativeJsDispatchSelectorKinds"
     assert len({cctest_name(name) for name in TEST_NAMES}) == len(TEST_NAMES)
     assert all(re.fullmatch(r"(?:[a-z0-9-]+/)?Reb[A-Za-z0-9]+", name) for name in TEST_NAMES)
+    v8_patches = ROOT / "browser/integration/brave/patches/v8"
+    chromium_patches = ROOT / "browser/integration/brave/patches/chromium"
+    scope_patch = (v8_patches / "0014-report-wasm-dispatch-scope-gaps.patch").read_text()
+    for name in (
+        "RebNativeBrTableLeftLiftoff",
+        "RebNativeBrTableFlagOffTurbofanHasNoScopeGap",
+        "RebNativeBrTableJitlessUnsupported",
+        "RebNativeBrTableJitlessFlagOffHasNoScopeGap",
+    ):
+        assert f"TEST({name})" in scope_patch, name
+        assert name in TEST_NAMES
+    attribute = (v8_patches / "0012-attribute-wasm-br-table-direct-caller.patch").read_text()
+    assert "TEST(RebNativeBrTableDirectCaller)" in attribute
+    assert "RebNativeBrTableDirectCaller" in TEST_NAMES
+    assert not (v8_patches / "0012-report-wasm-dispatch-scope-gaps.patch").exists()
+    assert not (chromium_patches / "0022-report-wasm-dispatch-scope-gaps.patch").exists()
+    v8_names = [patch.name for patch in patches]
+    assert v8_names.index("0013-record-wasm-execution-outcomes.patch") < v8_names.index(
+        "0014-report-wasm-dispatch-scope-gaps.patch")
+    chromium_names = sorted(patch.name for patch in chromium_patches.glob("*.patch"))
+    assert chromium_names.index("0023-record-wasm-execution-outcomes.patch") < chromium_names.index(
+        "0024-report-wasm-dispatch-scope-gaps.patch")
+    chromium_scope = (chromium_patches / "0024-report-wasm-dispatch-scope-gaps.patch").read_text()
+    assert "CaptureWasmExecutionTrap" in chromium_scope
+    assert "SetWasmDispatchScopeCallback" in chromium_scope
+    assert "IsWorkletGlobalScope" in (
+        chromium_patches / "0017-observe-native-wasm-dispatch.patch"
+    ).read_text()
+    assert (chromium_patches / "0024-report-wasm-dispatch-scope-gaps.patch").is_file()
+    assert "WasmDirectCaller" in (
+        chromium_patches / "0022-attribute-wasm-br-table-direct-caller.patch"
+    ).read_text()
     assert binary_dependencies("deps={'tool':{'dep_type':'gcs'},'src':'git','gn':{'dep_type':'cipd'}}") == {
         "v8/tool": None, "v8/gn": None,
     }

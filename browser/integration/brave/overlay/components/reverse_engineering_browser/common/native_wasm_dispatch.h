@@ -148,6 +148,15 @@ using NativeWasmDispatchEmitter = bool (*)(const NativeWasmDispatchObservation&,
   }
   return false;
 }
+// An execution the Liftoff document hooks did not cover. The gap names that
+// scope only: it is not a dispatch observation and carries no function index,
+// offset, selector, slot, or sample. Values match the sink's reason tables.
+enum class NativeWasmScopeGap : std::uint8_t {
+  kWorker = 0,
+  kJitless = 1,
+  kLeftLiftoff = 2,
+  kWorklet = 3,
+};
 // Physical Wasm call_indirect or return_call_indirect execution. The slot is
 // the dynamic table index, not a guest opcode or program counter. Only
 // kResolved names a callee in the calling module's function index space.

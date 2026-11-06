@@ -16,9 +16,90 @@ activate capture: the session must be active, connected and unexpired.
 
 The diagnostic flag forces Liftoff-only compilation and disables native-module
 cache reuse/deserialization. It is not a performance-neutral profiler. Only
-executing `br_table` instructions in document contexts are supported; workers
-and jitless execution are not implemented. `call_indirect` has its own flag and
-record, described [below](#call_indirect-observations).
+executing `br_table` instructions in document Liftoff code are sampled.
+`call_indirect` has its own flag and record, described
+[below](#call_indirect-observations). A worker, worklet, jitless, or
+non-Liftoff execution is a named scope gap, not an observation and not
+silence; see [unsupported scope](#unsupported-scope).
+
+## Unsupported scope
+
+Forcing Liftoff stays the disclosed diagnostic mode. Each dispatch flag implies
+`liftoff_only` and refuses native-module cache reuse, so a module compiled for
+that diagnostic does not tier up out of the instrumented compiler. With the
+flag off, Liftoff emits no hook instruction and no scope notice is delivered.
+
+Until other compilers and realms are instrumented, an execution outside
+document Liftoff code is a coalesced `gap`, once per configuration per reason.
+It is not a `wasm_dispatch_observation` or a `wasm_indirect_observation`. The
+payload is only the reason. There is no function index, module offset,
+selector, slot, or sample.
+
+| Reason | When |
+| --- | --- |
+| `native_wasm_dispatch_worker_unsupported` | A Liftoff `br_table` hook ran in a worker global scope. |
+| `native_wasm_dispatch_worklet_unsupported` | A Liftoff `br_table` hook ran in a worklet global scope. |
+| `native_wasm_dispatch_jitless_unsupported` | A capture session starts, or `SyncCompile` runs, while `jitless` or `wasm_jitless` is set and the `br_table` flag is on. |
+| `native_wasm_dispatch_left_liftoff` | A Wasm function is published at TurboFan, or the `br_table` runtime is entered from a non-Liftoff frame, while the `br_table` flag is on. |
+| `native_wasm_indirect_worker_unsupported` | The worker case for `call_indirect`. |
+| `native_wasm_indirect_worklet_unsupported` | The worklet case for `call_indirect`. |
+| `native_wasm_indirect_jitless_unsupported` | The jitless case for `call_indirect`. |
+| `native_wasm_indirect_left_liftoff` | The non-Liftoff case for `call_indirect`. |
+
+A worker or worklet gap means the hook ran and the realm was that scope. The
+selector or table slot is not copied into a document observation. The Liftoff
+admission predicate goes false once that stream's 16-observation budget is
+full, and the hook does not run again, so a worker or worklet execution after
+the budget is not visited. A scope notice that does arrive is still recorded;
+the budget gap does not consume the scope slot. A full ring does not mark the
+scope gap sent.
+
+Jitless on this desktop pin does not execute Wasm. `--jitless` does not imply
+`wasm_jitless` except on tvOS, where DrumBrake exists. Without DrumBrake,
+`wasm_jitless` is a readonly false, and `WasmCodeManager::TryAllocate`
+DCHECKs `!jitless`, so a cctest must not allocate Wasm code with that flag set.
+`SyncCompile` notifies before decoding, so a module that fails decoding still
+names the mode and never maps code. Where DrumBrake is compiled in, an
+interpreter `br_table` or `call_indirect` records the same jitless reason for
+that stream only, still without a sample. A notice the embedder cannot admit,
+including a TurboFan publication on a thread with no current isolate, is
+remembered and drained on the next isolate-thread drain, including session
+start. The first session that can admit a left-Liftoff notice records it. A
+later session does not repeat it unless another publication or non-Liftoff
+runtime entry happens. Jitless is read from the process flags at every session
+start. The notice names the scope. It does not claim that a particular
+instruction ran.
+
+A realm that is neither a document, a worker global scope, nor a worklet
+global scope still produces no observation and no named gap.
+
+`RebNativeBrTableDisabledCompilation` and
+`RebNativeCallIndirectDisabledCompilation` compile Liftoff with the flag off
+and never reach a callback. `RebNativeBrTableFlagOffTurbofanHasNoScopeGap`
+does the same for TurboFan, including the scope callback.
+`RebNativeBrTableLeftLiftoff` and `RebNativeCallIndirectLeftLiftoff` compile
+with the flag on at TurboFan. `FlagScope` does not apply the `liftoff_only`
+implication, so the function can leave Liftoff; the tests require the scope
+notice and zero observations while the indirect call still returns its real
+result. `RebNativeBrTableJitlessUnsupported` sets `jitless` and both dispatch
+flags, then `SyncCompile`s one invalid byte. Decode fails before
+`TryAllocate`. The test requires one jitless notice on each stream, zero
+observations, and that a repeated unadmitted left-Liftoff notice drains once.
+`RebNativeBrTableJitlessFlagOffHasNoScopeGap` is that compile with both flags
+off and requires no notice. `NativeWasmScopeGaps` requires each reason string,
+coalescing, a scope notice after the sample cap, a full-ring retry, and the
+session-start probe. A rebuilt Brave is required before a live session shows
+any of this. These tests are not a live browser run.
+
+The V8 checks are
+`browser/integration/brave/patches/v8/0014-report-wasm-dispatch-scope-gaps.patch`,
+replayed after `0013-record-wasm-execution-outcomes.patch`. A non-Liftoff
+`br_table` returns before the direct-caller walk from `0012`, so the gap does
+not invent a caller. Chromium `0017-observe-native-wasm-dispatch.patch` names a
+worker or worklet before a selector or slot is copied. `0022-attribute-wasm-br-table-direct-caller.patch`
+adds the caller arguments and uses them only on the document observation.
+`0024-report-wasm-dispatch-scope-gaps.patch` installs the jitless and
+left-Liftoff callback after `0023-record-wasm-execution-outcomes.patch`.
 
 ## Producer and identity
 

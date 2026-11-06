@@ -72,10 +72,12 @@ readonly active_endpoint_file="${REB_ACTIVE_ENDPOINT_FILE:-${HOME:?HOME is requi
 # the packaged app: 1 to 10 decimal digits, or 0x and 1 to 8 hex digits, naming
 # only known categories (1 to 4095). It is parsed here once, never by Bash
 # arithmetic on the raw text, and the broker and Brave, which read decimal
-# only, receive the normalized value.
-if [[ "${category_mask_setting}" =~ ^[0-9]{1,10}$ ]]; then
+# only, receive the normalized value. The classes list ASCII digits: in a
+# UTF-8 locale Bash's [0-9] and [a-f] ranges follow collation and match
+# fullwidth digits, and $((10#...)) then aborts under set -e.
+if [[ "${category_mask_setting}" =~ ^[0123456789]{1,10}$ ]]; then
   category_mask=$((10#${category_mask_setting}))
-elif [[ "${category_mask_setting}" =~ ^0[xX][0-9a-fA-F]{1,8}$ ]]; then
+elif [[ "${category_mask_setting}" =~ ^0[xX][0123456789abcdefABCDEF]{1,8}$ ]]; then
   category_mask=$((16#${category_mask_setting:2}))
 else
   category_mask=0

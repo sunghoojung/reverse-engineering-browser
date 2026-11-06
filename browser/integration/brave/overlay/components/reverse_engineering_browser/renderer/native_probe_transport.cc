@@ -6,6 +6,7 @@
 #include "brave/components/reverse_engineering_browser/renderer/native_probe_transport.h"
 
 #include <array>
+#include <atomic>
 #include <bit>
 #include <memory>
 #include <utility>
@@ -19,6 +20,13 @@
 #include "brave/components/reverse_engineering_browser/renderer/native_probe_sink.h"
 #include "mojo/public/cpp/base/big_buffer.h"
 #include "third_party/blink/public/web/web_local_frame.h"
+
+namespace {
+std::atomic<reb::NativeProbeTransport::NativeWasmLimitProbe>& NativeWasmLimitProbeSlot() noexcept {
+  static std::atomic<reb::NativeProbeTransport::NativeWasmLimitProbe> probe{nullptr};
+  return probe;
+}
+}  // namespace
 
 namespace reb {
 
@@ -60,6 +68,10 @@ void NativeProbeTransport::Connect(mojo::PendingRemote<mojom::NativeProbeHost> p
       base::BindOnce(&NativeProbeTransport::Disable, base::Unretained(this)),
       base::SequencedTaskRunner::GetCurrentDefault());
   host_->BindClient(receiver_.BindNewPipeAndPassRemote());
+}
+
+void NativeProbeTransport::SetNativeWasmLimitProbe(const NativeWasmLimitProbe probe) noexcept {
+  NativeWasmLimitProbeSlot().store(probe, std::memory_order_release);
 }
 
 void NativeProbeTransport::Configure(const std::uint64_t session_id,
@@ -118,6 +130,11 @@ void NativeProbeTransport::Configure(const std::uint64_t session_id,
     NativeProbeSink::Get().ConfigureNativeJsInvocation(
         std::span<const NativeJsInvocationSite>(sites.data(), count ? count : 1),
         js_invocation_digests);
+  }
+  // After emitters, so a jitless notice can be admitted. Disable does not
+  // clear the probe; it is a process flag, not session state.
+  if (const auto probe = NativeWasmLimitProbeSlot().load(std::memory_order_acquire)) {
+    probe();
   }
 }
 

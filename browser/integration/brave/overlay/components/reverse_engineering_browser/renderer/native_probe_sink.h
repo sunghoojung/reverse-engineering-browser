@@ -225,6 +225,13 @@ class COMPONENT_EXPORT(REB_NATIVE_PROBE_SINK) NativeProbeSink final {
   void SetNativeWasmIndirectEmitter(NativeWasmIndirectEmitter emitter) noexcept;
   [[nodiscard]] bool IsNativeWasmIndirectEnabled() const noexcept;
   void RecordNativeWasmIndirect(NativeWasmIndirectObservation observation) noexcept;
+  // Coalesced once per configuration. A notice that arrives is kept after the
+  // 16-sample cap. The Liftoff admission predicate itself goes false at that
+  // cap, so a later worker or worklet execution is not visited. Not an
+  // observation: no selector, offset, or function index is stored. False means
+  // it was not retained and was not already retained, so the caller can retry.
+  bool NoteNativeWasmDispatchScope(NativeWasmScopeGap gap) noexcept;
+  bool NoteNativeWasmIndirectScope(NativeWasmScopeGap gap) noexcept;
   // Host-visible Wasm call ledger. Entry and exit stay paired after the
   // 16-record outcome budget is spent; that budget only refuses records.
   // These never call the frame-id provider or allocate V8 handles.
@@ -537,6 +544,12 @@ class COMPONENT_EXPORT(REB_NATIVE_PROBE_SINK) NativeProbeSink final {
   std::array<std::atomic<std::uint64_t>, kNativeWasmDispatchSampleBudget> native_wasm_slots_{};
   std::array<std::atomic<std::uint64_t>, 2> native_wasm_gap_generations_{};
   std::atomic<std::uint64_t> native_wasm_capped_generation_{0};
+  bool NoteNativeWasmScopeGap(bool call_indirect, NativeWasmScopeGap gap) noexcept;
+  static constexpr std::size_t kNativeWasmScopeGapCount = 4;
+  std::array<std::atomic<std::uint64_t>, kNativeWasmScopeGapCount>
+      native_wasm_scope_gap_generations_{};
+  std::array<std::atomic<std::uint64_t>, kNativeWasmScopeGapCount>
+      native_wasm_indirect_scope_gap_generations_{};
   bool NoteNativeWasmIndirectOmission(const VmAdmission& admission,
                                       NativeWasmOmission reason) noexcept;
   std::atomic<NativeWasmIndirectEmitter> native_wasm_indirect_emitter_{nullptr};

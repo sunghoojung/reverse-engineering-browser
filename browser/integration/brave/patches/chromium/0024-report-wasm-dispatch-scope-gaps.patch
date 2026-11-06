@@ -1,0 +1,68 @@
+diff --git a/third_party/blink/renderer/bindings/core/v8/v8_initializer.cc b/third_party/blink/renderer/bindings/core/v8/v8_initializer.cc
+index efc4ff8..56496ac 100644
+--- a/third_party/blink/renderer/bindings/core/v8/v8_initializer.cc
++++ b/third_party/blink/renderer/bindings/core/v8/v8_initializer.cc
+@@ -49,6 +49,7 @@
+ #include "base/time/time.h"
+ #include "brave/components/reverse_engineering_browser/common/native_runtime_snapshot_queue.h"
+ #include "brave/components/reverse_engineering_browser/renderer/native_probe_sink.h"
++#include "brave/components/reverse_engineering_browser/renderer/native_probe_transport.h"
+ #include "build/build_config.h"
+ #include "components/crash/core/common/crash_key.h"
+ #include "services/metrics/public/cpp/ukm_builders.h"
+@@ -917,6 +918,44 @@ void CaptureWasmExecutionTrap(v8::Local<v8::Context> context,
+       source_url, document_token_high, document_token_low, bytes);
+ }
+ 
++// Scope only: no function index, offset, selector, or sample.
++void NoteWasmDispatchScope(v8::WasmDispatchScope scope, bool call_indirect) {
++  reb::NativeWasmScopeGap gap = reb::NativeWasmScopeGap::kWorker;
++  switch (scope) {
++    case v8::WasmDispatchScope::kJitless:
++      gap = reb::NativeWasmScopeGap::kJitless;
++      break;
++    case v8::WasmDispatchScope::kLeftLiftoff:
++      gap = reb::NativeWasmScopeGap::kLeftLiftoff;
++      break;
++    default:
++      return;
++  }
++  const bool recorded =
++      call_indirect
++          ? reb::NativeProbeSink::Get().NoteNativeWasmIndirectScope(gap)
++          : reb::NativeProbeSink::Get().NoteNativeWasmDispatchScope(gap);
++  // A drain before the session can admit this notice must not drop it.
++  if (!recorded) v8::Isolate::RememberRebWasmDispatchScope(scope, call_indirect);
++}
++
++void ProbeWasmDispatchLimits() noexcept {
++  // A TurboFan publication on a thread with no current isolate is remembered
++  // until this isolate thread can deliver it. Nothing here is a sample.
++  v8::Isolate::DrainRebWasmDispatchScope();
++  if (!v8::Isolate::IsRebWasmJitless()) {
++    return;
++  }
++  if (v8::Isolate::IsRebWasmBrTableDispatch()) {
++    reb::NativeProbeSink::Get().NoteNativeWasmDispatchScope(
++        reb::NativeWasmScopeGap::kJitless);
++  }
++  if (v8::Isolate::IsRebWasmCallIndirectDispatch()) {
++    reb::NativeProbeSink::Get().NoteNativeWasmIndirectScope(
++        reb::NativeWasmScopeGap::kJitless);
++  }
++}
++
+ void CaptureWasmModuleBytes(v8::Local<v8::Context> context,
+                             const v8::WasmModuleBytesOrigin origin,
+                             const std::uint8_t* bytes,
+@@ -1989,6 +2028,10 @@ void V8Initializer::InitializeV8Common(v8::Isolate* isolate) {
+     reb::NativeProbeSink::Get().SetNativeJsInvocationContextProvider(
+         CurrentJsInvocation);
+   }
++  // Every isolate, including workers. The worker br_table gap is recorded
++  // from the dispatch callback; this one names jitless and left-Liftoff.
++  isolate->SetWasmDispatchScopeCallback(NoteWasmDispatchScope);
++  reb::NativeProbeTransport::SetNativeWasmLimitProbe(ProbeWasmDispatchLimits);
+   isolate->SetRuntimeBufferCallback(CaptureRuntimeBuffer);
+   isolate->SetWasmCustomDescriptorsEnabledCallback(
+       WasmCustomDescriptorsEnabledCallback);

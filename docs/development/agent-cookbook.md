@@ -391,13 +391,15 @@ this backend has no command socket. A current Brave build does not serve one.
 That response is not an empty inventory: `budget` is null and `attachments`
 is empty. Do not invent memory bytes or a return value from it.
 
-`read_memory` and `write_memory` name a memory and a 1 to 4096 byte slice.
-`call_export` and `call_function` take `{type, bits}` arguments. `bits` is the
-unsigned bit pattern. `status` stays one of `unknown_export`,
-`signature_mismatch`, `trap`, or `did_not_return`. A mismatch has
-`entered: false`. A trap or a call that did not return has `entered: true`
-and no `results`. A stale document or a different instance is refused and
-does not change memory. These commands do not replace dispatch capture.
+`read_memory` and `write_memory` name a memory and a 1 to 4096 byte slice. A
+slice past the end is `out_of_bounds` and is not clipped. `call_export` and
+`call_function` take `{type, bits}` arguments. `bits` is the unsigned bit
+pattern, so i32 `-1` is `4294967295`. `ok` returns `memory` or `results`.
+`unknown_export`, `unknown_function`, `unknown_memory`, `signature_mismatch`,
+`stale_document`, and `instance_mismatch` have `entered: false`. A mismatch
+does not enter. `trap` and `did_not_return` have `entered: true` and no
+`results`. A stale document or a different instance is refused and does not
+change memory. These commands do not replace dispatch capture.
 Details: [live Wasm instance commands](../../protocol/live-wasm-instance-v1.md).
 
 ## Response shapes at a glance

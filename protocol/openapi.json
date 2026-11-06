@@ -15619,46 +15619,72 @@
         }
       },
       "LiveWasmObservation": {
-        "type": "object",
-        "additionalProperties": false,
-        "required": [
-          "source",
-          "kind",
-          "reason",
-          "instance_id",
-          "document_token_high",
-          "document_token_low",
-          "document_epoch",
-          "function_index",
-          "module_byte_offset",
-          "selector",
-          "table_count",
-          "sample_index"
-        ],
-        "properties": {
-          "source": { "type": "string", "enum": ["page_script", "live_call"] },
-          "kind": { "type": "string", "enum": ["sample", "gap"] },
-          "reason": {
-            "anyOf": [
-              { "type": "null" },
-              { "type": "string", "const": "native_wasm_dispatch_budget_incomplete" }
-            ]
+        "oneOf": [
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "source",
+              "kind",
+              "reason",
+              "instance_id",
+              "document_token_high",
+              "document_token_low",
+              "document_epoch",
+              "function_index",
+              "module_byte_offset",
+              "selector",
+              "table_count",
+              "sample_index"
+            ],
+            "properties": {
+              "source": { "type": "string", "enum": ["page_script", "live_call"] },
+              "kind": { "type": "string", "const": "sample" },
+              "reason": { "type": "null" },
+              "instance_id": { "$ref": "#/components/schemas/NonzeroUint64String" },
+              "document_token_high": { "$ref": "#/components/schemas/Uint64String" },
+              "document_token_low": { "$ref": "#/components/schemas/Uint64String" },
+              "document_epoch": { "$ref": "#/components/schemas/NonzeroUint64String" },
+              "function_index": { "type": "integer", "minimum": 0, "maximum": 16777215 },
+              "module_byte_offset": { "type": "integer", "minimum": 8, "maximum": 65535 },
+              "selector": { "type": "integer", "minimum": 0, "maximum": 4294967295 },
+              "table_count": { "type": "integer", "minimum": 0, "maximum": 16777215 },
+              "sample_index": { "type": "integer", "minimum": 0, "maximum": 15 }
+            }
           },
-          "instance_id": { "$ref": "#/components/schemas/NonzeroUint64String" },
-          "document_token_high": { "$ref": "#/components/schemas/Uint64String" },
-          "document_token_low": { "$ref": "#/components/schemas/Uint64String" },
-          "document_epoch": { "$ref": "#/components/schemas/NonzeroUint64String" },
-          "function_index": { "type": "integer", "minimum": 0, "maximum": 16777215 },
-          "module_byte_offset": { "type": "integer", "minimum": 0, "maximum": 65535 },
-          "selector": { "type": "integer", "minimum": 0, "maximum": 4294967295 },
-          "table_count": { "type": "integer", "minimum": 0, "maximum": 4294967295 },
-          "sample_index": {
-            "anyOf": [
-              { "type": "integer", "minimum": 0, "maximum": 15 },
-              { "type": "null" }
-            ]
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "source",
+              "kind",
+              "reason",
+              "instance_id",
+              "document_token_high",
+              "document_token_low",
+              "document_epoch",
+              "function_index",
+              "module_byte_offset",
+              "selector",
+              "table_count",
+              "sample_index"
+            ],
+            "properties": {
+              "source": { "type": "string", "enum": ["page_script", "live_call"] },
+              "kind": { "type": "string", "const": "gap" },
+              "reason": { "type": "string", "const": "native_wasm_dispatch_budget_incomplete" },
+              "instance_id": { "$ref": "#/components/schemas/NonzeroUint64String" },
+              "document_token_high": { "$ref": "#/components/schemas/Uint64String" },
+              "document_token_low": { "$ref": "#/components/schemas/Uint64String" },
+              "document_epoch": { "$ref": "#/components/schemas/NonzeroUint64String" },
+              "function_index": { "type": "integer", "minimum": 0, "maximum": 16777215 },
+              "module_byte_offset": { "type": "integer", "minimum": 8, "maximum": 65535 },
+              "selector": { "type": "integer", "minimum": 0, "maximum": 4294967295 },
+              "table_count": { "type": "integer", "minimum": 0, "maximum": 16777215 },
+              "sample_index": { "type": "null" }
+            }
           }
-        }
+        ]
       },
       "LiveWasmFunction": {
         "type": "object",

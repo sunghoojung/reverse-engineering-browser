@@ -42,14 +42,17 @@ hooks record samples. This API must not synthesize them.
 
 `budget` is 16, the same cap as `kNativeWasmDispatchSampleBudget`.
 `dispatch_samples_used` and `dispatch_gaps` are that shared counter.
-`observations` keeps at most 32 rows. The counters stay exact when the window
-drops older rows, and `observations_truncated` is then true. An observation
-is `page_script` or `live_call`, `sample` or `gap`. A gap has
+`observations` keeps the newest 32 rows. The counters stay exact when an
+older row is dropped, and `observations_truncated` is then true. An
+observation is `page_script` or `live_call`, and exactly one of `sample` or
+`gap`. A sample has `reason: null` and `sample_index` 0 through 15. A gap has
 `reason: native_wasm_dispatch_budget_incomplete` and `sample_index: null`.
 A sample carries the instance, document token, document epoch, function
-index, and module byte offset of the real `br_table` opcode. Page script and
-a live call share one counter. The 17th observation is a gap and does not
-invent sample index 16.
+index, and module byte offset of the real `br_table` opcode. The offset is at
+least 8 and the byte there is `0x0e`. `table_count` is that instruction's arm
+count immediate, not including the default label. Page script and a live call
+share one counter. The 17th observation is a gap and does not invent sample
+index 16.
 
 This is the attached instance, not a heap scan of every Wasm object.
 
@@ -111,11 +114,19 @@ samples consumed, gap flag, payload length, reserved 0. The payload is JSON
 for a result and empty for a framing reject. Header and JSON must agree on
 status, entered, samples consumed, and the gap flag.
 
-This peer also refuses a start function, data segments, more than 64
-functions, and more than 16 memories. It does not apply data segments, so a
-module whose initial memory is not the memory under test is the wrong module
-to attach. The interpreter covers the numeric operations the contract tests
-use. A body it cannot execute is `unsupported` and is not entered.
+This peer validates the module before attaching it. It also refuses a start
+function, data segments, more than 64 functions, and more than 16 memories.
+It does not apply data segments, so a module whose initial memory is not the
+memory under test is not attached as a zeroed substitute. The JSON schema
+allows at most 64 functions, 16 memories, 1 MiB per memory, and module byte
+offsets through 65535. A peer does not truncate a function list, a memory
+length, or a module offset to satisfy those bounds. The interpreter covers
+the numeric operations the contract tests use. A value block type names
+results and has no parameters, so a branch to a loop does not consume the
+loop result, and a branch to the function carries every result. A `br_table`
+is executable only when its module byte is `0x0e` and the arm-count immediate
+matches the label vector. A body this peer cannot execute is `unsupported`
+and is not entered.
 
 ## What this does not do
 

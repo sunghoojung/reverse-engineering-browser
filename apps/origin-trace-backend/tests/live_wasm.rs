@@ -209,6 +209,67 @@ async fn confirmed_write_is_visible_to_a_later_confirmed_read() {
     assert_eq!(read["memory"]["bytes"], json!([1, 2, 255]));
     assert_eq!(read["memory"]["byte_length"], 65536);
     assert_eq!(read["memory"]["shared"], false);
+    let (status, bounds) = server
+        .post(&with_identity(
+            json!({
+                "action": "read_memory",
+                "memory": "memory",
+                "offset": 65535,
+                "length": 2
+            }),
+            "7",
+            "1",
+        ))
+        .await;
+    assert_eq!(status, 200, "{bounds}");
+    assert_eq!(bounds["status"], "out_of_bounds");
+    assert_eq!(bounds["entered"], false);
+    assert!(bounds["memory"].is_null());
+    let (status, clipped) = server
+        .post(&with_identity(
+            json!({
+                "action": "write_memory",
+                "memory": "memory",
+                "offset": 65535,
+                "bytes": [9, 9]
+            }),
+            "7",
+            "1",
+        ))
+        .await;
+    assert_eq!(status, 200, "{clipped}");
+    assert_eq!(clipped["status"], "out_of_bounds");
+    assert!(clipped["memory"].is_null());
+    let (status, tail) = server
+        .post(&with_identity(
+            json!({
+                "action": "read_memory",
+                "memory": "memory",
+                "offset": 65535,
+                "length": 1
+            }),
+            "7",
+            "1",
+        ))
+        .await;
+    assert_eq!(status, 200, "{tail}");
+    assert_eq!(tail["memory"]["bytes"], json!([0]));
+    let (status, missing) = server
+        .post(&with_identity(
+            json!({
+                "action": "read_memory",
+                "memory": "other",
+                "offset": 0,
+                "length": 1
+            }),
+            "7",
+            "1",
+        ))
+        .await;
+    assert_eq!(status, 200, "{missing}");
+    assert_eq!(missing["status"], "unknown_memory");
+    assert_eq!(missing["entered"], false);
+    assert!(missing["memory"].is_null());
 }
 
 #[tokio::test]
@@ -234,6 +295,41 @@ async fn confirmed_export_call_returns_result_or_trap() {
     assert_eq!(add["entered"], true);
     assert_eq!(add["results"], json!([{"type": "i32", "bits": "42"}]));
     assert_eq!(add["function_index"], 0);
+    let (status, negative) = server
+        .post(&with_identity(
+            json!({
+                "action": "call_export",
+                "export": "add",
+                "arguments": [
+                    {"type": "i32", "bits": "4294967295"},
+                    {"type": "i32", "bits": "0"}
+                ]
+            }),
+            "7",
+            "1",
+        ))
+        .await;
+    assert_eq!(status, 200, "{negative}");
+    assert_eq!(
+        negative["results"],
+        json!([{"type": "i32", "bits": "4294967295"}])
+    );
+    let (status, wrapped) = server
+        .post(&with_identity(
+            json!({
+                "action": "call_export",
+                "export": "add",
+                "arguments": [
+                    {"type": "i32", "bits": "4294967295"},
+                    {"type": "i32", "bits": "1"}
+                ]
+            }),
+            "7",
+            "1",
+        ))
+        .await;
+    assert_eq!(status, 200, "{wrapped}");
+    assert_eq!(wrapped["results"], json!([{"type": "i32", "bits": "0"}]));
     let (status, trap) = server
         .post(&with_identity(
             json!({"action": "call_export", "export": "trap", "arguments": []}),
@@ -338,6 +434,37 @@ async fn confirmed_function_index_call_enters_only_when_the_type_matches() {
     assert_eq!(status, 200, "{unknown}");
     assert_eq!(unknown["status"], "unknown_function");
     assert_eq!(unknown["entered"], false);
+    let (status, wide) = server
+        .post(&with_identity(
+            json!({
+                "action": "call_function",
+                "function_index": 16777215,
+                "arguments": []
+            }),
+            "7",
+            "1",
+        ))
+        .await;
+    assert_eq!(status, 200, "{wide}");
+    assert_eq!(wide["status"], "unknown_function");
+    assert_eq!(wide["entered"], false);
+    assert_eq!(wide["function_index"], 16777215);
+    let (status, wider) = server
+        .post(&with_identity(
+            json!({
+                "action": "call_function",
+                "function_index": 16777216,
+                "arguments": []
+            }),
+            "7",
+            "1",
+        ))
+        .await;
+    assert_eq!(status, 400, "{wider}");
+    let (status, state) = server.get("/api/live-wasm").await;
+    assert_eq!(status, 200, "{state}");
+    assert_eq!(state["dispatch_samples_used"], used);
+    assert_eq!(state["observations"].as_array().unwrap().len(), 1);
 }
 
 #[tokio::test]
@@ -506,6 +633,44 @@ async fn unconfirmed_action_does_not_reach_the_peer() {
         .await;
     assert_eq!(status, 400, "{error}");
     assert_eq!(error["code"], "invalid_request");
+    let mut denied = with_identity(
+        json!({
+            "action": "write_memory",
+            "memory": "memory",
+            "offset": 0,
+            "bytes": [9]
+        }),
+        "7",
+        "1",
+    );
+    denied["confirmed"] = json!(false);
+    let (status, error) = server.post(&denied).await;
+    assert_eq!(status, 400, "{error}");
+    let (status, error) = server
+        .post(&with_identity(
+            json!({
+                "action": "read_memory",
+                "memory": "memory",
+                "offset": 0,
+                "length": 4097
+            }),
+            "7",
+            "1",
+        ))
+        .await;
+    assert_eq!(status, 400, "{error}");
+    let (status, error) = server
+        .post(&with_identity(
+            json!({
+                "action": "call_export",
+                "export": "add",
+                "arguments": [{"type": "i32", "bits": "4294967296"}]
+            }),
+            "7",
+            "1",
+        ))
+        .await;
+    assert_eq!(status, 400, "{error}");
     let (status, read) = server
         .post(&with_identity(
             json!({

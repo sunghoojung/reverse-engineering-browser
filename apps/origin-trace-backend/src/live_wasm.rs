@@ -45,6 +45,8 @@ const MAX_NAME_BYTES: usize = 64;
 const MAX_ARGS: usize = 16;
 const MAX_PAYLOAD: usize = 8_192;
 const MEMORY_SLICE: u32 = 4_096;
+/// Newest dispatch rows kept on the attachment. Counters stay exact past this.
+const OBSERVATION_WINDOW: usize = 32;
 const REQUEST_HEADER: usize = 56;
 const RESPONSE_HEADER: usize = 32;
 const MAGIC: u32 = 0x3157_4C52;
@@ -317,6 +319,11 @@ impl Engine {
         if attachment.instance_id == 0 || attachment.document_epoch == 0 {
             return Err("attachment identity must be nonzero".into());
         }
+        // An invalid module is not attached. Executing it could return a value
+        // the binary does not define.
+        wasmparser::Validator::new()
+            .validate_all(bytes)
+            .map_err(|error| error.to_string())?;
         let mut signatures = Vec::new();
         let mut functions = Vec::new();
         let mut memories = Vec::new();
@@ -371,7 +378,7 @@ impl Engine {
                         let import = import.map_err(|error| error.to_string())?;
                         match import.ty {
                             TypeRef::Func(index) => {
-                                let (params, results, numeric) = signature(&signatures, index)?;
+                                let (params, results, _numeric) = signature(&signatures, index)?;
                                 functions.push(Func {
                                     params,
                                     results,
@@ -383,7 +390,6 @@ impl Engine {
                                     imported: true,
                                 });
                                 imported_functions += 1;
-                                let _ = numeric;
                             }
                             TypeRef::Memory(_) => {
                                 return Err(
@@ -473,7 +479,7 @@ impl Engine {
                     let func = functions
                         .get_mut(index)
                         .ok_or_else(|| "code entry has no function".to_owned())?;
-                    parse_body(func, &body).map_err(|error| error.to_string())?;
+                    parse_body(func, &body, bytes).map_err(|error| error.to_string())?;
                 }
                 Payload::StartSection { .. } => {
                     return Err("this peer does not run a start function".into());
@@ -628,10 +634,11 @@ impl Engine {
     }
 
     fn push_observation(&mut self, value: Value) {
-        // The counters above stay exact. The retained log is only a window.
-        if self.observations.len() < 32 {
-            self.observations.push(value);
+        // The counters above stay exact. The retained log is the newest rows.
+        if self.observations.len() == OBSERVATION_WINDOW {
+            self.observations.remove(0);
         }
+        self.observations.push(value);
     }
 
     fn state_json(&self) -> Value {
@@ -689,8 +696,9 @@ impl Engine {
             "budget": DISPATCH_BUDGET,
             "dispatch_samples_used": self.samples_used,
             "dispatch_gaps": self.gaps,
-            "observations_truncated": self.observations.len() == 32
-                && (self.samples_used as usize + self.gaps as usize) > self.observations.len(),
+            "observations_truncated": (self.samples_used as usize)
+                .saturating_add(self.gaps as usize)
+                > self.observations.len(),
             "observations": self.observations,
             "attachments": [{
                 "instance_id": dec(self.attachment.instance_id),
@@ -796,7 +804,9 @@ impl Engine {
             start: 0,
             end: ops.len().saturating_sub(1),
             height: 0,
-            result: (results.len() == 1).then_some(results[0]),
+            // A branch to the function produces every result, not only the
+            // first. A zero-result function has an empty label.
+            label: results.to_vec(),
         }];
         let mut recorded = empty_record();
         let mut ip = 0;
@@ -854,12 +864,20 @@ impl Engine {
                     let Some(end) = ends.get(ip).copied().flatten() else {
                         return Run::Status(Status::Unsupported, recorded);
                     };
+                    // A value block type names the result and has no parameters.
+                    // Branching to a loop uses those parameters, so the label
+                    // is empty. Branching to a block uses the result.
+                    let label = if kind == CtrlKind::Loop {
+                        Vec::new()
+                    } else {
+                        (*result).into_iter().collect()
+                    };
                     ctrl.push(Ctrl {
                         kind,
                         start: ip,
                         end,
                         height: stack.len(),
-                        result: *result,
+                        label,
                     });
                     ip += 1;
                 }
@@ -892,13 +910,14 @@ impl Engine {
                         return Run::Status(Status::Unsupported, recorded);
                     };
                     let selector = selector.bits() as u32;
-                    let effect = self.record(
-                        source,
-                        function_index,
-                        *offset,
-                        selector,
-                        u32::try_from(labels.len()).unwrap_or(u32::MAX),
-                    );
+                    // The arm count was checked against the opcode immediate
+                    // before entry. A count that no longer fits is not recorded
+                    // as u32::MAX.
+                    let Some(table_count) = u32::try_from(labels.len()).ok() else {
+                        return Run::Status(Status::Unsupported, recorded);
+                    };
+                    let effect =
+                        self.record(source, function_index, *offset, selector, table_count);
                     recorded.samples.extend(effect.samples);
                     recorded.gap |= effect.gap;
                     let depth = labels.get(selector as usize).copied().unwrap_or(*default);
@@ -936,7 +955,9 @@ struct Ctrl {
     start: usize,
     end: usize,
     height: usize,
-    result: Option<NumType>,
+    /// Values a branch to this label produces, in stack order. Loop labels are
+    /// empty because the accepted block types have no parameters.
+    label: Vec<NumType>,
 }
 
 fn branch(depth: u32, ctrl: &mut Vec<Ctrl>, stack: &mut Vec<Val>, ip: &mut usize) -> bool {
@@ -949,22 +970,20 @@ fn branch(depth: u32, ctrl: &mut Vec<Ctrl>, stack: &mut Vec<Val>, ip: &mut usize
     let target_end = ctrl[index].end;
     let target_start = ctrl[index].start;
     let height = ctrl[index].height;
-    let result = ctrl[index].result;
-    let produced = if let Some(ty) = result {
-        let Some(value) = pop(stack, ty) else {
+    let label = ctrl[index].label.clone();
+    let mut produced = Vec::with_capacity(label.len());
+    for ty in label.iter().rev() {
+        let Some(value) = pop(stack, *ty) else {
             return false;
         };
-        Some(value)
-    } else {
-        None
-    };
+        produced.push(value);
+    }
+    produced.reverse();
     if stack.len() < height {
         return false;
     }
     stack.truncate(height);
-    if let Some(value) = produced {
-        stack.push(value);
-    }
+    stack.extend(produced);
     if target_kind == CtrlKind::Loop {
         ctrl.truncate(index + 1);
         *ip = target_start + 1;
@@ -993,6 +1012,7 @@ fn signature(
 fn parse_body(
     func: &mut Func,
     body: &wasmparser::FunctionBody<'_>,
+    module: &[u8],
 ) -> std::result::Result<(), String> {
     let mut reader = body
         .get_locals_reader()
@@ -1044,8 +1064,50 @@ fn parse_body(
     }
     if !stack.is_empty() {
         func.executable = false;
+        return Ok(());
+    }
+    // A dispatch sample is the physical br_table. The opcode byte and the arm
+    // count immediate have to match the decoded instruction before entry.
+    for op in &func.ops {
+        let Inst::BrTable { labels, offset, .. } = op else {
+            continue;
+        };
+        let Some(count) = declared_br_table_arms(module, *offset) else {
+            func.executable = false;
+            func.ops.clear();
+            return Ok(());
+        };
+        if usize::try_from(count).ok() != Some(labels.len()) {
+            func.executable = false;
+            func.ops.clear();
+            return Ok(());
+        }
     }
     Ok(())
+}
+
+/// Arm count immediate of a `br_table`, matching native dispatch admission.
+/// The byte at `offset` must be the opcode `0x0e`, and it must sit past the
+/// 8-byte module header. The count does not include the default label.
+fn declared_br_table_arms(module: &[u8], offset: u32) -> Option<u32> {
+    let mut cursor = usize::try_from(offset).ok()?;
+    if cursor < 8 || module.get(cursor).copied() != Some(0x0e) {
+        return None;
+    }
+    cursor += 1;
+    let mut count = 0u32;
+    for i in 0..5 {
+        let byte = *module.get(cursor)?;
+        cursor += 1;
+        if i == 4 && byte & 0xf0 != 0 {
+            return None;
+        }
+        count |= u32::from(byte & 0x7f) << (7 * i);
+        if byte & 0x80 == 0 {
+            return Some(count);
+        }
+    }
+    None
 }
 
 fn decode_operator(op: Operator<'_>, offset: usize) -> Option<Inst> {
@@ -1817,7 +1879,9 @@ fn encode_action(action: &str, value: &Value) -> Result<(u16, Vec<u8>)> {
             let mut payload = Vec::new();
             push_name(&mut payload, value["memory"].as_str().unwrap_or(""))?;
             push_u32(&mut payload, field_u32(value, "offset")?);
-            push_u32(&mut payload, u32::try_from(raw.len()).unwrap_or(0));
+            let len = u32::try_from(raw.len())
+                .map_err(|_| Error::bad("Memory length must be 1 to 4096"))?;
+            push_u32(&mut payload, len);
             payload.extend_from_slice(&raw);
             Ok((OP_WRITE, payload))
         }
@@ -1865,7 +1929,8 @@ fn push_args(payload: &mut Vec<u8>, value: &Value) -> Result<()> {
     if args.len() > MAX_ARGS {
         return Err(Error::bad("Wasm calls accept at most 16 arguments"));
     }
-    let count = u16::try_from(args.len()).unwrap_or(0);
+    let count = u16::try_from(args.len())
+        .map_err(|_| Error::bad("Wasm calls accept at most 16 arguments"))?;
     payload.extend_from_slice(&count.to_le_bytes());
     payload.extend_from_slice(&0u16.to_le_bytes());
     for arg in args {
@@ -1975,6 +2040,18 @@ fn exchange(
         )
     })?;
     if op == OP_LIST {
+        // A list does not enter a function or consume a sample. A header that
+        // says otherwise is not an attachment inventory.
+        if response.status != Status::Ok
+            || response.entered
+            || response.gap
+            || response.samples != 0
+        {
+            return Err(uncertain(
+                Cause::InvalidReply,
+                "The live Wasm command peer reply did not match the list command. Whether it ran is unknown.",
+            ));
+        }
         return Ok(value);
     }
     if value["status"] != response.status.as_str()
@@ -2058,20 +2135,6 @@ fn trusted_socket(path: &Path) -> Result<()> {
     Ok(())
 }
 
-pub fn unsupported_state() -> Value {
-    json!({
-        "protocol_version": 1,
-        "availability": "unsupported",
-        "reason": "browser_command_unsupported",
-        "budget": Value::Null,
-        "dispatch_samples_used": Value::Null,
-        "dispatch_gaps": Value::Null,
-        "observations_truncated": false,
-        "observations": [],
-        "attachments": [],
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2124,6 +2187,10 @@ mod tests {
         assert_eq!(live["source"], "live_call");
         assert_eq!(page["sample_index"], 0);
         assert_eq!(live["sample_index"], 1);
+        assert_eq!(page["table_count"], 1);
+        assert_eq!(live["table_count"], 1);
+        assert!(page["reason"].is_null());
+        assert!(live["reason"].is_null());
         for field in [
             "instance_id",
             "document_token_high",
@@ -2240,6 +2307,14 @@ mod tests {
         let (status, _, _, _) = dispatch(&mut engine, &wrong, &payload);
         assert_eq!(status, Status::InstanceMismatch);
         assert_eq!(engine.memory("memory").unwrap(), before);
+        // A wrong document wins over a wrong instance. Neither is a write.
+        let mut both = wrong;
+        both.epoch = FIXTURE_DOCUMENT_EPOCH;
+        both.instance = FIXTURE_INSTANCE + 1;
+        let (status, entered, _, _) = dispatch(&mut engine, &both, &payload);
+        assert_eq!(status, Status::StaleDocument);
+        assert!(!entered);
+        assert_eq!(engine.memory("memory").unwrap(), before);
     }
 
     #[test]
@@ -2258,5 +2333,198 @@ mod tests {
         assert!(engine.observations.iter().any(|row| {
             row["kind"] == "gap" && row["source"] == "live_call" && row["sample_index"].is_null()
         }));
+    }
+
+    #[test]
+    fn br_table_sample_requires_the_real_opcode_and_arm_count() {
+        let bytes = wat::parse_str(FIXTURE_WAT).unwrap();
+        let offsets = bytes
+            .iter()
+            .enumerate()
+            .filter_map(|(index, byte)| (*byte == 0x0e).then_some(index))
+            .collect::<Vec<_>>();
+        assert_eq!(offsets.len(), 1);
+        let offset = offsets[0];
+        assert!(offset >= 8);
+        assert_eq!(&bytes[offset..offset + 4], &[0x0e, 0x01, 0x00, 0x01]);
+        let mut patched = bytes.clone();
+        patched[offset + 1] = 2;
+        assert!(
+            Engine::load(&patched, fixture_attachment()).is_err(),
+            "a br_table whose arm count immediate was rewritten must not attach"
+        );
+    }
+
+    #[test]
+    fn out_of_bounds_is_refused_without_clipping_or_writing() {
+        let mut engine = engine();
+        let before = engine.memory("memory").unwrap();
+        assert_eq!(before.len(), 65_536);
+        let (status, entered, _, memory, _, _, _) = perform(
+            &mut engine,
+            Parsed::Read {
+                name: "memory".into(),
+                offset: 65_535,
+                length: 2,
+            },
+        );
+        assert_eq!(status, Status::OutOfBounds);
+        assert!(!entered);
+        assert!(memory.is_null());
+        let (status, _, _, memory, _, _, _) = perform(
+            &mut engine,
+            Parsed::Write {
+                name: "memory".into(),
+                offset: 65_535,
+                bytes: vec![9, 9],
+            },
+        );
+        assert_eq!(status, Status::OutOfBounds);
+        assert!(memory.is_null());
+        assert_eq!(engine.memory("memory").unwrap(), before);
+        assert_eq!(engine.writes(), 0);
+        let (status, _, _, memory, _, _, _) = perform(
+            &mut engine,
+            Parsed::Read {
+                name: "memory".into(),
+                offset: 65_535,
+                length: 1,
+            },
+        );
+        assert_eq!(status, Status::Ok);
+        assert_eq!(memory["bytes"], json!([0]));
+        let (status, _, _, memory, _, _, _) = perform(
+            &mut engine,
+            Parsed::Read {
+                name: "other".into(),
+                offset: 0,
+                length: 1,
+            },
+        );
+        assert_eq!(status, Status::UnknownMemory);
+        assert!(memory.is_null());
+    }
+
+    #[test]
+    fn the_observation_window_drops_the_oldest_row_and_keeps_the_counters() {
+        let mut engine = engine();
+        let index = engine.br_table_function().unwrap();
+        for _ in 0..OBSERVATION_WINDOW + 1 {
+            engine.run_page_script(index, &[Val::I32(0)]);
+        }
+        assert_eq!(engine.samples_used(), DISPATCH_BUDGET);
+        assert_eq!(engine.gaps, DISPATCH_BUDGET + 1);
+        let state = engine.state_json();
+        assert_eq!(state["observations_truncated"], true);
+        assert_eq!(state["dispatch_samples_used"], DISPATCH_BUDGET);
+        assert_eq!(state["dispatch_gaps"], DISPATCH_BUDGET + 1);
+        let observations = state["observations"].as_array().unwrap();
+        assert_eq!(observations.len(), OBSERVATION_WINDOW);
+        assert_eq!(observations[0]["kind"], "sample");
+        assert_eq!(observations[0]["sample_index"], 1);
+        let last = observations.last().unwrap();
+        assert_eq!(last["kind"], "gap");
+        assert_eq!(last["reason"], "native_wasm_dispatch_budget_incomplete");
+        assert!(last["sample_index"].is_null());
+        assert!(observations.iter().all(|row| match row["kind"].as_str() {
+            Some("sample") => row["reason"].is_null() && row["sample_index"].as_u64().is_some(),
+            Some("gap") => {
+                row["reason"] == "native_wasm_dispatch_budget_incomplete"
+                    && row["sample_index"].is_null()
+            }
+            _ => false,
+        }));
+        assert!(
+            observations
+                .iter()
+                .all(|row| row["sample_index"].as_u64().is_none_or(|index| index < 16))
+        );
+        crate::validation::schema("LiveWasmState", &state, 500).unwrap();
+    }
+
+    #[test]
+    fn loop_and_multi_result_branches_follow_the_label_types() {
+        let mut engine = load_wat(
+            r#"(module
+                (func (export "spin") (result i32)
+                  (loop (result i32)
+                    br 0))
+                (func (export "pair") (result i32 i64)
+                  i32.const 3
+                  i64.const 4
+                  br 0)
+              )"#,
+        );
+        let spin = export_index(&engine, "spin");
+        let (status, entered, results, _) = engine.call(spin, &[], Source::LiveCall);
+        assert_eq!(status, Status::DidNotReturn);
+        assert!(entered);
+        assert!(results.is_none());
+        let pair = export_index(&engine, "pair");
+        let (status, entered, results, _) = engine.call(pair, &[], Source::LiveCall);
+        assert_eq!(status, Status::Ok);
+        assert!(entered);
+        assert_eq!(results.unwrap(), vec![Val::I32(3), Val::I64(4)]);
+    }
+
+    #[test]
+    fn an_import_or_an_unimplemented_body_is_not_entered() {
+        let mut engine = load_wat(
+            r#"(module
+                (func (import "env" "f") (param i32) (result i32))
+                (func (export "sub") (param i32 i32) (result i32)
+                  local.get 0
+                  local.get 1
+                  i32.sub)
+                (memory (export "memory") 1)
+              )"#,
+        );
+        let before = engine.entries();
+        let (status, entered, results, recorded) = engine.call(0, &[Val::I32(1)], Source::LiveCall);
+        assert_eq!(status, Status::Unsupported);
+        assert!(!entered);
+        assert!(results.is_none());
+        assert!(recorded.samples.is_empty());
+        let sub = export_index(&engine, "sub");
+        let (status, entered, _, _) =
+            engine.call(sub, &[Val::I32(1), Val::I32(2)], Source::LiveCall);
+        assert_eq!(status, Status::Unsupported);
+        assert!(!entered);
+        assert_eq!(engine.entries(), before);
+        assert_eq!(engine.samples_used(), 0);
+    }
+
+    #[test]
+    fn a_data_segment_or_invalid_module_is_not_attached() {
+        let data = wat::parse_str(
+            r#"(module
+                (memory (export "memory") 1)
+                (data (i32.const 0) "hi"))"#,
+        )
+        .unwrap();
+        assert!(Engine::load(&data, fixture_attachment()).is_err());
+        assert!(Engine::load(&[0x00, 0x61, 0x73, 0x6d], fixture_attachment()).is_err());
+    }
+
+    fn fixture_attachment() -> Attachment {
+        Attachment {
+            instance_id: FIXTURE_INSTANCE,
+            document_token_high: FIXTURE_DOCUMENT_HIGH,
+            document_token_low: FIXTURE_DOCUMENT_LOW,
+            document_epoch: FIXTURE_DOCUMENT_EPOCH,
+        }
+    }
+
+    fn load_wat(text: &str) -> Engine {
+        let bytes = wat::parse_str(text).unwrap();
+        Engine::load(&bytes, fixture_attachment()).unwrap()
+    }
+
+    fn export_index(engine: &Engine, name: &str) -> u32 {
+        engine
+            .functions
+            .iter()
+            .position(|func| func.export_name.as_deref() == Some(name))
+            .unwrap() as u32
     }
 }

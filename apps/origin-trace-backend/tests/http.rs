@@ -1400,6 +1400,142 @@ async fn filtered_event_pages_select_exact_records_and_reject_unknown_filters() 
 }
 
 #[tokio::test]
+async fn get_events_returns_decoded_wasm_observations_without_a_workspace() {
+    let server = Server::start().await;
+    let mut dispatch = [0u8; 128];
+    dispatch[0] = 2;
+    dispatch[2] = 128;
+    for (at, value) in [(4, 3u32), (8, 48), (12, 9), (16, 2), (20, 7), (28, 99)] {
+        dispatch[at..at + 4].copy_from_slice(&value.to_le_bytes());
+    }
+    dispatch[24] = 2;
+    let mut indirect = [0u8; 128];
+    indirect[0] = 2;
+    indirect[2] = 128;
+    for (at, value) in [(4, 4u32), (8, 64), (12, 1), (16, 13), (24, 2), (28, 1)] {
+        indirect[at..at + 4].copy_from_slice(&value.to_le_bytes());
+    }
+    indirect[32] = 3;
+    let mut malformed = dispatch;
+    malformed[80] = 1;
+    let dispatch_hex = hex::encode(dispatch);
+    let indirect_hex = hex::encode(indirect);
+    let malformed_hex = hex::encode(malformed);
+    let observation = |sequence, kind: &str, payload: &[u8]| {
+        let mut event = metadata_event(sequence);
+        event["category"] = json!("vm");
+        event["type"] = json!(kind);
+        event["artifact_id"] = json!("9");
+        event["request_id"] = json!("0");
+        event["payload"] = json!(hex::encode(payload));
+        event["payload_size"] = json!(payload.len());
+        event
+    };
+    server.file(
+        "events.jsonl",
+        &jsonl(&[
+            observation(1, "wasm_dispatch_observation", &dispatch),
+            observation(2, "wasm_indirect_observation", &indirect),
+            observation(3, "wasm_dispatch_observation", &malformed),
+            window_event(4, "vm", "module_compiled", ""),
+        ]),
+    );
+    assert!(!server.root.path().join("artifacts/manifest.jsonl").exists());
+    assert!(!server.root.path().join("analysis").exists());
+    let response = server
+        .get("/api/events?type=wasm_dispatch_observation,wasm_indirect_observation&limit=10")
+        .await;
+    let bytes = assert_contract_response(response, "get", "/api/events", 200).await;
+    let page: Value = serde_json::from_slice(&bytes).unwrap();
+    let by_sequence = |sequence: &str| {
+        page["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|event| event["sequence_number"] == sequence)
+            .unwrap()
+            .clone()
+    };
+    let decoded = by_sequence("1");
+    assert_eq!(decoded["payload"], dispatch_hex);
+    assert_eq!(
+        decoded["wasm_observation"],
+        json!({"status":"decoded","function_index":3,"module_byte_offset":48,"selector":9,
+            "table_count":2,"sample_index":7,"js_invocation_state":2,"js_invocation_id":99})
+    );
+    let named = by_sequence("2");
+    assert_eq!(named["payload"], indirect_hex);
+    assert_eq!(named["wasm_observation"]["resolution"], "out-of-bounds");
+    assert!(named["wasm_observation"]["resolution"].is_string());
+    assert_eq!(
+        named["wasm_observation"],
+        json!({"status":"decoded","function_index":4,"module_byte_offset":64,"table_index":1,
+            "slot":13,"callee_function_index":0,"resolution":"out-of-bounds","sample_index":1,
+            "js_invocation_state":3,"js_invocation_id":0})
+    );
+    let invalid = by_sequence("3");
+    assert_eq!(invalid["payload"], malformed_hex);
+    assert_eq!(invalid["wasm_observation"], json!({"status": "invalid"}));
+    assert_eq!(invalid["wasm_observation"].as_object().unwrap().len(), 1);
+    let window: Value = server
+        .get("/api/events?limit=10")
+        .await
+        .json()
+        .await
+        .unwrap();
+    let find = |sequence: &str| {
+        window["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|event| event["sequence_number"] == sequence)
+            .unwrap()
+    };
+    assert_eq!(find("2")["wasm_observation"], named["wasm_observation"]);
+    assert_eq!(find("3")["wasm_observation"], json!({"status": "invalid"}));
+    assert_eq!(find("3")["wasm_observation"].as_object().unwrap().len(), 1);
+    assert!(find("4").get("wasm_observation").is_none());
+    let response = server
+        .get("/api/events/wait?type=wasm_dispatch_observation,wasm_indirect_observation&after=0&timeout_ms=1&limit=10")
+        .await;
+    let bytes = assert_contract_response(response, "get", "/api/events/wait", 200).await;
+    let waited: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(waited["wait"]["timed_out"], false);
+    let waited_event = |sequence: &str| {
+        waited["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|event| event["sequence_number"] == sequence)
+            .unwrap()
+    };
+    assert_eq!(
+        waited_event("1")["wasm_observation"],
+        decoded["wasm_observation"]
+    );
+    assert_eq!(
+        waited_event("2")["wasm_observation"],
+        named["wasm_observation"]
+    );
+    assert_eq!(
+        waited_event("3")["wasm_observation"],
+        json!({"status": "invalid"})
+    );
+    assert_eq!(
+        waited_event("3")["wasm_observation"]
+            .as_object()
+            .unwrap()
+            .len(),
+        1
+    );
+    assert!(waited["events"].as_array().unwrap().iter().all(|event| {
+        event["type"] == "wasm_dispatch_observation" || event["type"] == "wasm_indirect_observation"
+    }));
+    assert!(!server.root.path().join("artifacts/manifest.jsonl").exists());
+    assert!(!server.root.path().join("analysis").exists());
+}
+
+#[tokio::test]
 async fn filtered_artifacts_select_by_kind_frame_host_and_digest() {
     let server = Server::start().await;
     let hash = |n: u64| format!("{:064x}", n);

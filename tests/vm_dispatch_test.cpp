@@ -93,6 +93,9 @@ int main() {
     }
   }
   {
+    static_assert(static_cast<std::uint16_t>(reb::EventType::kWasmExecutionOutcome) == 27);
+    static_assert(static_cast<std::uint16_t>(reb::EventType::kWasmDispatchOverflow) == 28);
+    static_assert(static_cast<std::uint16_t>(reb::EventType::kWasmIndirectOverflow) == 29);
     static_assert(static_cast<std::uint16_t>(reb::EventType::kWasmDispatchOverflow) ==
                   static_cast<std::uint16_t>(reb::NativeProbeType::kWasmDispatchOverflow));
     static_assert(static_cast<std::uint16_t>(reb::EventType::kWasmIndirectOverflow) ==

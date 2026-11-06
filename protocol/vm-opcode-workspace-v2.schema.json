@@ -1964,6 +1964,59 @@
         "is_default": {
           "type": "boolean"
         },
+        "direct_caller": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "function_index"
+          ],
+          "description": "The live frame immediately above this br_table, when payload version 3 walked the stack. unknown is the host, another instance, a non-Liftoff frame, or a frame whose code could not be read; function_index is then null and is not function 0. same-instance is that Liftoff function's index in this module, imports included. Absent on payload versions 1 and 2, which did not walk a caller. This is one frame, not a parent event and not a multi-frame stack.",
+          "properties": {
+            "kind": {
+              "enum": [
+                "unknown",
+                "same-instance"
+              ]
+            },
+            "function_index": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "minimum": 0,
+              "maximum": 16777215
+            }
+          },
+          "allOf": [
+            {
+              "if": {
+                "properties": {
+                  "kind": {
+                    "const": "unknown"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              },
+              "then": {
+                "properties": {
+                  "function_index": {
+                    "type": "null"
+                  }
+                }
+              },
+              "else": {
+                "properties": {
+                  "function_index": {
+                    "type": "integer"
+                  }
+                }
+              }
+            }
+          ]
+        },
         "js_invocation": {
           "type": "object",
           "additionalProperties": false,

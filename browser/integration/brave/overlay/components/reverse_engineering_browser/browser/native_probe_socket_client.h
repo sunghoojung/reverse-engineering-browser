@@ -8,6 +8,7 @@
 
 #include <atomic>
 #include <cstdint>
+#include <string>
 
 #include "base/memory/scoped_refptr.h"
 #include "base/no_destructor.h"
@@ -44,6 +45,7 @@ class NativeProbeSocketClient final {
   void Enqueue(const NativeProbeEvent& event) noexcept;
   [[nodiscard]] NativeProbeEvent MakeTransportGap(std::uint64_t dropped) const noexcept;
   void Run();
+  void PollWasmBudgetReset();
   void HandleDisconnect();
 
   NativeProbeQueue queue_;
@@ -56,6 +58,10 @@ class NativeProbeSocketClient final {
   // writer reads it until it posts HandleDisconnect() and returns, so the
   // descriptor is closed only after the writer has stopped using it.
   int socket_descriptor_ = -1;
+  // Written before the writer starts. Only the writer reads and advances it.
+  // Empty means this launch has no reset file.
+  std::string wasm_budget_reset_file_;
+  std::uint64_t applied_wasm_budget_reset_ = 0;
   std::uint64_t session_id_ = 0;
   // Category of the most recent record this queue dropped. Every queued record
   // passed the session's category filter, so a gap that names it is admitted.

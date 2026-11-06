@@ -568,14 +568,15 @@
             "wasm_guest_dispatch",
             "wasm_guest_invocation",
             "wasm_indirect_observation",
-            "wasm_dispatch_overflow",
-            "wasm_indirect_overflow",
             "js_dispatch_observation",
             "request_body",
             "request_target",
             "js_invocation_start",
             "js_invocation_settle",
-            "js_invocation_request"
+            "js_invocation_request",
+            "wasm_execution_outcome",
+            "wasm_dispatch_overflow",
+            "wasm_indirect_overflow"
           ]
         },
         "status_code": {

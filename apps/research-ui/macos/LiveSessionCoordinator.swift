@@ -558,8 +558,9 @@ final class LiveSessionCoordinator {
     let hex = bytes.count > 2 && bytes[0] == UInt8(ascii: "0")
       && (bytes[1] == UInt8(ascii: "x") || bytes[1] == UInt8(ascii: "X"))
     let digits = hex ? bytes[2...] : bytes[...]
-    // Explicit ASCII: Swift's integer parser also takes a sign, Character
-    // digit tests take non-ASCII digits, and Bash takes neither.
+    // Explicit ASCII bytes. Swift's integer parser also takes a sign, and both
+    // Character digit tests and Bash [0-9]/[a-f] ranges in a UTF-8 locale match
+    // fullwidth digits. The launcher lists the same ASCII digits.
     let isDigit: (UInt8) -> Bool = { byte in
       (UInt8(ascii: "0")...UInt8(ascii: "9")).contains(byte)
         || (hex && ((UInt8(ascii: "a")...UInt8(ascii: "f")).contains(byte)

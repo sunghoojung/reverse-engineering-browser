@@ -20,6 +20,7 @@
 #include <vector>
 #include "brave/components/reverse_engineering_browser/common/native_wasm_dispatch.h"
 #include "brave/components/reverse_engineering_browser/common/native_wasm_guest.h"
+#include "brave/components/reverse_engineering_browser/common/native_wasm_sample_budget.h"
 
 #include "base/no_destructor.h"
 #include "brave/components/reverse_engineering_browser/browser/native_artifact_socket_client.h"
@@ -67,6 +68,17 @@ class NativeArtifactCaptureSink final {
   void CaptureWasmIndirect(const NativeWasmIndirectObservation& observation,
                            mojo_base::BigBuffer content,
                            std::function<bool()> is_current_document);
+  // Replaces the filters used by later observations. A new SetEmitter restores
+  // the unrestricted policy. Invalid policies are ignored.
+  void SetWasmSampleBudgetPolicy(const NativeWasmSampleBudgetPolicy& policy) noexcept;
+  // Zeros both stream counters without dropping pending module transfers or
+  // changing the session. The next observation of each stream is index 0.
+  void ResetWasmSampleBudgets() noexcept;
+  // Empty content binds the single module artifact already stored for this
+  // document. Zero or several matches are explicit gaps, never a guess.
+  void CaptureWasmExecution(const NativeWasmExecutionObservation& observation,
+                            mojo_base::BigBuffer content,
+                            std::function<bool()> is_current_document);
   // module_status receives the browser verdict for module bytes this capture
   // carried (accepted once module and adapter artifacts are both accepted).
   void CaptureNativeGuest(const NativeGuestCapture& capture,
@@ -258,6 +270,12 @@ class NativeArtifactCaptureSink final {
                                    std::array<std::uint8_t, 32>>;
   std::map<WasmModuleKey, std::pair<std::uint64_t, bool>> wasm_dispatch_modules_;
   std::size_t wasm_indirect_count_ = 0;
+  std::uint64_t wasm_budget_epoch_ = 2;
+  NativeWasmSampleBudgetPolicy wasm_sample_budget_{};
+  std::array<NativeWasmBudgetKeySlot, kNativeWasmBudgetKeySlots> wasm_dispatch_function_keys_{};
+  std::array<NativeWasmBudgetKeySlot, kNativeWasmBudgetKeySlots> wasm_indirect_function_keys_{};
+  std::array<NativeWasmBudgetKeySlot, kNativeWasmBudgetKeySlots> wasm_indirect_site_keys_{};
+  std::size_t wasm_execution_count_ = 0;
   // Only the browser assigns artifact IDs. Never key this relation by URL.
   using ScriptKey = std::tuple<int, std::uint64_t, std::uint64_t, std::uint64_t>;
   std::map<ScriptKey, std::uint64_t> allocating_scripts_;

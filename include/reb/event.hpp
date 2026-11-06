@@ -66,10 +66,13 @@ enum class EventType : std::uint16_t {
   kJsInvocationStart = 24,
   kJsInvocationSettle = 25,
   kJsInvocationRequest = 26,
-  // Compact identities past the 16-record Wasm budgets. Not full observations.
+  // Trap or still-executing follow-up for one host-visible Wasm call.
   // See protocol/native-wasm-dispatch-v1.md.
-  kWasmDispatchOverflow = 27,
-  kWasmIndirectOverflow = 28,
+  kWasmExecutionOutcome = 27,
+  // Compact identities for Wasm samples a budget refused. Not full observations.
+  // See protocol/native-wasm-dispatch-v1.md.
+  kWasmDispatchOverflow = 28,
+  kWasmIndirectOverflow = 29,
 };
 
 enum class EventFlag : std::uint16_t {

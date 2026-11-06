@@ -44,6 +44,11 @@ readonly open_command="${REB_OPEN_COMMAND:-open}"
 readonly native_quiet_mode="${REB_NATIVE_QUIET_MODE:-0}"
 readonly native_wasm_dispatch="${REB_NATIVE_WASM_DISPATCH:-0}"
 readonly native_wasm_call_indirect="${REB_NATIVE_WASM_CALL_INDIRECT:-0}"
+readonly native_wasm_samples_per_function="${REB_NATIVE_WASM_SAMPLES_PER_FUNCTION:-}"
+readonly native_wasm_samples_per_indirect_site="${REB_NATIVE_WASM_SAMPLES_PER_INDIRECT_SITE:-}"
+readonly native_wasm_function_allow="${REB_NATIVE_WASM_FUNCTION_ALLOW:-}"
+readonly native_wasm_function_deny="${REB_NATIVE_WASM_FUNCTION_DENY:-}"
+readonly native_wasm_module_allowlist="${REB_NATIVE_WASM_MODULE_ALLOWLIST:-}"
 readonly native_guest_adapter="${REB_NATIVE_WASM_GUEST_ADAPTER:-}"
 readonly native_js_dispatch_sites="${REB_NATIVE_JS_DISPATCH_SITES:-}"
 readonly native_js_invocation_sites="${REB_NATIVE_JS_INVOCATION_SITES:-}"
@@ -72,10 +77,12 @@ readonly active_endpoint_file="${REB_ACTIVE_ENDPOINT_FILE:-${HOME:?HOME is requi
 # the packaged app: 1 to 10 decimal digits, or 0x and 1 to 8 hex digits, naming
 # only known categories (1 to 4095). It is parsed here once, never by Bash
 # arithmetic on the raw text, and the broker and Brave, which read decimal
-# only, receive the normalized value.
-if [[ "${category_mask_setting}" =~ ^[0-9]{1,10}$ ]]; then
+# only, receive the normalized value. The classes list ASCII digits: in a
+# UTF-8 locale Bash's [0-9] and [a-f] ranges follow collation and match
+# fullwidth digits, and $((10#...)) then aborts under set -e.
+if [[ "${category_mask_setting}" =~ ^[0123456789]{1,10}$ ]]; then
   category_mask=$((10#${category_mask_setting}))
-elif [[ "${category_mask_setting}" =~ ^0[xX][0-9a-fA-F]{1,8}$ ]]; then
+elif [[ "${category_mask_setting}" =~ ^0[xX][0123456789abcdefABCDEF]{1,8}$ ]]; then
   category_mask=$((16#${category_mask_setting:2}))
 else
   category_mask=0
@@ -104,6 +111,62 @@ fi
 if [[ "${native_wasm_call_indirect}" == 1 ]] &&
    (( (category_mask & 512) == 0 || (category_mask & 1024) == 0 )); then
   fail_live_session 2 "REB_NATIVE_WASM_CALL_INDIRECT requires VM and Artifact capture categories."
+fi
+validate_wasm_count() {
+  local name="$1" text="$2"
+  if [[ -z "${text}" ]]; then
+    return 0
+  fi
+  if [[ ! "${text}" =~ ^[0-9]+$ ]] || (( ${#text} > 2 || 10#${text} < 1 || 10#${text} > 16 )); then
+    fail_live_session 2 "${name} must be from 1 to 16."
+  fi
+}
+validate_wasm_function_list() {
+  local name="$1" text="$2"
+  if [[ -z "${text}" ]]; then
+    return 0
+  fi
+  if [[ ! "${text}" =~ ^[0-9]+(,[0-9]+)*$ ]]; then
+    fail_live_session 2 "${name} must be a comma-separated list of function indexes."
+  fi
+  local IFS=','
+  local -a items=()
+  read -r -a items <<< "${text}"
+  if (( ${#items[@]} > 32 )); then
+    fail_live_session 2 "${name} accepts at most 32 function indexes."
+  fi
+  local seen="|" item value
+  for item in "${items[@]}"; do
+    if (( ${#item} > 8 )); then
+      fail_live_session 2 "${name} indexes must be below 16777216."
+    fi
+    value=$((10#${item}))
+    if (( value >= 16777216 )); then
+      fail_live_session 2 "${name} indexes must be below 16777216."
+    fi
+    if [[ "${seen}" == *"|${value}|"* ]]; then
+      fail_live_session 2 "${name} indexes must be unique."
+    fi
+    seen+="${value}|"
+  done
+}
+validate_wasm_count "REB_NATIVE_WASM_SAMPLES_PER_FUNCTION" "${native_wasm_samples_per_function}"
+validate_wasm_count "REB_NATIVE_WASM_SAMPLES_PER_INDIRECT_SITE" "${native_wasm_samples_per_indirect_site}"
+validate_wasm_function_list "REB_NATIVE_WASM_FUNCTION_ALLOW" "${native_wasm_function_allow}"
+validate_wasm_function_list "REB_NATIVE_WASM_FUNCTION_DENY" "${native_wasm_function_deny}"
+if [[ -n "${native_wasm_module_allowlist}" ]]; then
+  if [[ "${native_wasm_module_allowlist}" != /* || ! -f "${native_wasm_module_allowlist}" ||
+        ! -r "${native_wasm_module_allowlist}" ]]; then
+    fail_live_session 2 "REB_NATIVE_WASM_MODULE_ALLOWLIST must name a readable absolute regular file."
+  fi
+  module_allowlist_bytes="$(wc -c < "${native_wasm_module_allowlist}")"
+  if (( module_allowlist_bytes < 1 || module_allowlist_bytes > 1024 )); then
+    fail_live_session 2 "REB_NATIVE_WASM_MODULE_ALLOWLIST must contain between 1 and 1024 bytes."
+  fi
+fi
+if [[ -n "${native_wasm_samples_per_function}${native_wasm_samples_per_indirect_site}${native_wasm_function_allow}${native_wasm_function_deny}${native_wasm_module_allowlist}" ]] &&
+   [[ "${native_wasm_dispatch}" != 1 && "${native_wasm_call_indirect}" != 1 ]]; then
+  fail_live_session 2 "Wasm sample budget options require REB_NATIVE_WASM_DISPATCH=1 or REB_NATIVE_WASM_CALL_INDIRECT=1."
 fi
 if [[ -n "${native_guest_adapter}" ]]; then
   if [[ "${native_wasm_dispatch}" != 1 ]]; then
@@ -189,6 +252,9 @@ fi
 
 mkdir -p "${session_directory}" "${artifact_store_path}" "${profile_path}" "${native_console_directory}"
 chmod 700 "${session_directory}" "${artifact_store_path}" "${profile_path}" "${native_console_directory}"
+readonly wasm_budget_reset_file="${session_directory}/wasm-sample-budget-reset"
+printf '0\n' > "${wasm_budget_reset_file}"
+chmod 600 "${wasm_budget_reset_file}"
 if [[ -n "${brave_cache_root}" ]]; then
   readonly brave_cache_profile="${brave_cache_root}/${session_id}/brave-profile"
   mkdir -p "${brave_cache_profile}"
@@ -638,6 +704,7 @@ ui_arguments=(
   --brave-binary "${brave_binary}"
   --brave-profile "${profile_path}"
   --launcher-pid "$$"
+  --wasm-budget-reset-file "${wasm_budget_reset_file}"
 )
 
 ui_arguments+=(--native-console-live-directory "${native_console_directory}")
@@ -722,6 +789,26 @@ if [[ ${#native_js_flags[@]} -gt 0 ]]; then
 fi
 if [[ -n "${native_guest_adapter}" ]]; then
   brave_arguments+=("--reb-wasm-guest-adapter=${native_guest_adapter}")
+fi
+# Absent options are unset in the extracted launch slice, which runs under
+# set -u. An empty value is the historical unrestricted budget.
+if [[ -n "${native_wasm_samples_per_function:-}" ]]; then
+  brave_arguments+=("--reb-wasm-samples-per-function=${native_wasm_samples_per_function}")
+fi
+if [[ -n "${native_wasm_samples_per_indirect_site:-}" ]]; then
+  brave_arguments+=("--reb-wasm-samples-per-indirect-site=${native_wasm_samples_per_indirect_site}")
+fi
+if [[ -n "${native_wasm_function_allow:-}" ]]; then
+  brave_arguments+=("--reb-wasm-function-allow=${native_wasm_function_allow}")
+fi
+if [[ -n "${native_wasm_function_deny:-}" ]]; then
+  brave_arguments+=("--reb-wasm-function-deny=${native_wasm_function_deny}")
+fi
+if [[ -n "${native_wasm_module_allowlist:-}" ]]; then
+  brave_arguments+=("--reb-wasm-module-allowlist=${native_wasm_module_allowlist}")
+fi
+if [[ -n "${wasm_budget_reset_file:-}" ]]; then
+  brave_arguments+=("--reb-wasm-budget-reset-file=${wasm_budget_reset_file}")
 fi
 if [[ -n "${native_js_dispatch_sites:-}" ]]; then
   brave_arguments+=("--reb-js-dispatch-sites=${native_js_dispatch_sites}")
@@ -826,6 +913,7 @@ else
   echo "Console document-start scripts: not permitted; set REB_CONSOLE_DOCUMENT_START=1 to permit them for one session"
 fi
 echo "Native switches: quiet=${native_quiet_mode} wasm_br_table=${native_wasm_dispatch} wasm_call_indirect=${native_wasm_call_indirect} wasm_guest=$([[ -n "${native_guest_adapter}" ]] && echo 1 || echo 0) js_dispatch=$([[ -n "${native_js_dispatch_sites}" ]] && echo 1 || echo 0) js_invocation=$([[ "${js_invocation_session_state}" == armed ]] && echo 1 || echo 0)"
+echo "Wasm sample budgets: per_function=${native_wasm_samples_per_function:-unset} per_indirect_site=${native_wasm_samples_per_indirect_site:-unset} function_allow=${native_wasm_function_allow:-unset} function_deny=${native_wasm_function_deny:-unset} module_allowlist=$([[ -n "${native_wasm_module_allowlist:-}" ]] && echo 1 || echo 0) reset_file=${wasm_budget_reset_file:-unset}"
 if [[ "${js_invocation_session_state}" == browser_unsupported ]]; then
   echo "JavaScript invocation tracking: unavailable; Brave at ${brave_binary} does not define --reb-js-invocation-capture, so this session started without the saved invocation sites and records no invocation evidence"
 elif [[ "${js_invocation_session_state}" == armed && "${native_js_invocation_digests}" == 1 ]]; then

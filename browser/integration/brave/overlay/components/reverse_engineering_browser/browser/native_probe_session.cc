@@ -12,6 +12,7 @@
 #include "base/command_line.h"
 #include "base/files/file_util.h"
 #include "base/no_destructor.h"
+#include "base/strings/string_number_conversions.h"
 #include "base/time/time.h"
 #include "brave/components/reverse_engineering_browser/browser/native_artifact_capture_sink.h"
 #include "brave/components/reverse_engineering_browser/browser/native_network_capture_sink.h"
@@ -23,6 +24,59 @@
 #include "mojo/public/cpp/bindings/self_owned_receiver.h"
 
 namespace reb {
+
+namespace {
+
+bool ReadNativeWasmSampleBudget(const base::CommandLine& command_line,
+                                const std::uint64_t category_mask,
+                                NativeWasmSampleBudgetPolicy& policy) {
+  policy = {};
+  const bool present = command_line.HasSwitch("reb-wasm-samples-per-function") ||
+                       command_line.HasSwitch("reb-wasm-samples-per-indirect-site") ||
+                       command_line.HasSwitch("reb-wasm-function-allow") ||
+                       command_line.HasSwitch("reb-wasm-function-deny") ||
+                       command_line.HasSwitch("reb-wasm-module-allowlist");
+  if (!present)
+    return true;
+  constexpr auto required = NativeProbeCategoryMask(NativeProbeCategory::kVm) |
+                            NativeProbeCategoryMask(NativeProbeCategory::kArtifact);
+  if ((category_mask & required) != required)
+    return false;
+  if (command_line.HasSwitch("reb-wasm-samples-per-function")) {
+    unsigned value = 0;
+    if (!base::StringToUint(command_line.GetSwitchValueASCII("reb-wasm-samples-per-function"),
+                            &value) ||
+        value < 1 || value > kNativeWasmDispatchSampleBudget)
+      return false;
+    policy.samples_per_function = value;
+  }
+  if (command_line.HasSwitch("reb-wasm-samples-per-indirect-site")) {
+    unsigned value = 0;
+    if (!base::StringToUint(command_line.GetSwitchValueASCII("reb-wasm-samples-per-indirect-site"),
+                            &value) ||
+        value < 1 || value > kNativeWasmIndirectSampleBudget)
+      return false;
+    policy.samples_per_indirect_site = value;
+  }
+  if (command_line.HasSwitch("reb-wasm-function-allow") &&
+      !ParseNativeWasmFunctionList(command_line.GetSwitchValueASCII("reb-wasm-function-allow"),
+                                   policy.function_allow, policy.function_allow_count))
+    return false;
+  if (command_line.HasSwitch("reb-wasm-function-deny") &&
+      !ParseNativeWasmFunctionList(command_line.GetSwitchValueASCII("reb-wasm-function-deny"),
+                                   policy.function_deny, policy.function_deny_count))
+    return false;
+  if (command_line.HasSwitch("reb-wasm-module-allowlist")) {
+    const auto path = command_line.GetSwitchValuePath("reb-wasm-module-allowlist");
+    std::string text;
+    if (path.empty() || !base::ReadFileToStringWithMaxSize(path, &text, 1024) || text.empty() ||
+        text.size() > 1024 || !ParseNativeWasmModuleAllowlist(text, policy))
+      return false;
+  }
+  return IsValidNativeWasmSampleBudgetPolicy(policy);
+}
+
+}  // namespace
 
 NativeProbeSession& NativeProbeSession::Get() {
   static base::NoDestructor<NativeProbeSession> session;
@@ -125,6 +179,15 @@ bool NativeProbeSession::StartSession(const std::uint64_t session_id,
     // only with a visible sensitive-capture label.
     js_invocation_digests_ = command_line->HasSwitch("reb-js-invocation-digests");
   }
+  NativeWasmSampleBudgetPolicy budget;
+  if (!ReadNativeWasmSampleBudget(*command_line, category_mask, budget)) {
+    guest_adapter_json_.clear();
+    js_dispatch_sites_.clear();
+    js_invocation_sites_.clear();
+    js_invocation_digests_ = false;
+    return false;
+  }
+  wasm_sample_budget_ = budget;
   category_mask_.store(category_mask, std::memory_order_relaxed);
   expires_at_monotonic_ns_.store(expires_at_monotonic_ns, std::memory_order_relaxed);
   capture_canvas_images_.store(capture_canvas_images, std::memory_order_relaxed);
@@ -142,10 +205,20 @@ bool NativeProbeSession::StartSession(const std::uint64_t session_id,
                                              capture_request_content_.load());
   NativeArtifactCaptureSink::Get().SetEmitter(&NativeProbeSession::EmitBrowserEvent, session_id,
                                               category_mask, expires_at_monotonic_ns);
+  // SetEmitter restores the unrestricted policy. Publish this session's copy.
+  NativeArtifactCaptureSink::Get().SetWasmSampleBudgetPolicy(wasm_sample_budget_);
   for (NativeProbeHost* const host : hosts_) {
     host->Configure(session_id, category_mask, expires_at_monotonic_ns, capture_canvas_images);
   }
   return true;
+}
+
+void NativeProbeSession::ResetWasmSampleBudgets() noexcept {
+  if (!IsActive())
+    return;
+  NativeArtifactCaptureSink::Get().ResetWasmSampleBudgets();
+  for (NativeProbeHost* const host : hosts_)
+    host->ResetWasmSampleBudgets();
 }
 
 void NativeProbeSession::StopSession() noexcept {
@@ -153,6 +226,7 @@ void NativeProbeSession::StopSession() noexcept {
   js_dispatch_sites_.clear();
   js_invocation_sites_.clear();
   js_invocation_digests_ = false;
+  wasm_sample_budget_ = {};
   // Hosts drain records their renderers already queued, and the artifact sink
   // turns unresolved work into gaps, while the session can still record them.
   for (NativeProbeHost* const host : hosts_) {

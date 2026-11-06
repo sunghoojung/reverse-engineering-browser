@@ -18,6 +18,32 @@ pub(crate) mod native_js;
 mod native_module;
 #[path = "vm_opcode_native_wasm.rs"]
 mod native_wasm;
+
+/// Puts `wasm_observation` beside the raw payload of a native Wasm dispatch or
+/// call_indirect event, and `wasm_overflow` beside an overflow identity. Other
+/// events are left alone. A record the shared decoder rejects, including an
+/// unknown payload version, is `{status: invalid}` with no fields, not a
+/// partial row.
+pub(crate) fn annotate_wasm_observations(events: &mut [Value]) {
+    for event in events {
+        let kind = event.get("type").and_then(Value::as_str);
+        let (field, decoded) = match kind {
+            Some("wasm_dispatch_observation" | "wasm_indirect_observation") => (
+                "wasm_observation",
+                native_wasm::query_observation(event)
+                    .unwrap_or_else(|| json!({"status": "invalid"})),
+            ),
+            Some("wasm_dispatch_overflow" | "wasm_indirect_overflow") => (
+                "wasm_overflow",
+                native_wasm::query_overflow(event).unwrap_or_else(|| json!({"status": "invalid"})),
+            ),
+            _ => continue,
+        };
+        if let Some(object) = event.as_object_mut() {
+            object.insert(field.to_owned(), decoded);
+        }
+    }
+}
 #[path = "vm_opcode_observed.rs"]
 mod observed;
 #[path = "vm_opcode_wasm.rs"]

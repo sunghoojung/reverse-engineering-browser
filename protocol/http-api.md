@@ -2,7 +2,11 @@
 
 [`openapi.json`](openapi.json) describes the Rust loopback backend in
 `apps/origin-trace-backend`, including the [native console](native-console-v2.md)
-state and action routes.
+state and action routes and the
+[live Wasm instance commands](live-wasm-instance-v1.md). Those commands are
+confirmed reads, writes, and calls on an already attached instance. They do
+not restore the retired `/api/debugger` routes. Without a command peer they
+report the command unavailable and invent no memory bytes or return values.
 It is OpenAPI 3.1 with JSON Schema 2020-12. Stable `operationId` values drive the
 included Rust CLI. The routes and stored evidence contracts are unchanged by
 the implementation migration.
@@ -346,6 +350,14 @@ backend belongs to. Both actions refuse with 409 `idle_backend` unless
   record reaches the session's store within 10 seconds. False means nothing
   was recorded, for example because the configured browser is not a capture
   build. It never runs page JavaScript.
+- `{"action":"reset_wasm_sample_budgets"}` increments the session's Wasm
+  sample-budget reset file. The capture browser restarts both sample indexes
+  at 0 without closing the profile or replacing the capture configuration.
+  It needs recording capture, `--wasm-budget-reset-file`, and a live process
+  holding the profile, and otherwise returns 409. The browser applies the new
+  generation on its writer wake, about 250ms later. A rebuilt Brave is
+  required before a live browser honors the file. The response is
+  `{"ok":true,"action":"reset_wasm_sample_budgets","generation":N}`.
 - `{"action":"end","confirm":true}` replies, then about 300 ms later sends
   SIGTERM to the backend's `--launcher-pid`, which must be its parent. The
   launcher closes the capture browser and stops every helper, including the
@@ -389,7 +401,11 @@ returns 409 `dependency_unavailable` for these actions.
 `duration_seconds`, `localhost_only`, `canvas_images`, `request_content`,
 `document_start`, `js_invocation_sites`, `js_invocation_saved_sites`,
 `js_invocation_digests`, `confirm_sensitive_capture`,
-`publish_canonical_endpoint`, `brave_binary` and `timeout_seconds`. Every
+`publish_canonical_endpoint`, `brave_binary`, `timeout_seconds`,
+`wasm_samples_per_function`, `wasm_samples_per_indirect_site`,
+`wasm_function_allow`, `wasm_function_deny` and `wasm_module_allowlist`.
+The Wasm budget options require `wasm_dispatch` or `wasm_call_indirect` and
+do not raise the 16-record cap. Every
 capture switch is off unless named; an inherited capture switch, site file,
 browser profile or embedded-session variable is ignored, so an inherited
 `REB_CAPTURE_REQUEST_CONTENT`, `REB_CONSOLE_DOCUMENT_START`,
@@ -404,6 +420,11 @@ reaches an agent session.
 | `js_invocation_saved_sites` | `REB_NATIVE_JS_INVOCATION_SITES` | Arms the agent sessions' own saved set, `~/.config/origin-trace/agent-sessions/js-invocation-sites-v1.json`, which `js_invocation_site_action` edits in an agent session. Never the app's set. Refused when empty. Not with `js_invocation_sites`. |
 | `js_invocation_digests` | `REB_NATIVE_JS_INVOCATION_DIGESTS=1` | Sensitive: needs named sites and `confirm_sensitive_capture`. |
 | `canvas_images` | `REB_CAPTURE_CANVAS_IMAGES=1` | Sensitive: needs `confirm_sensitive_capture`. |
+| `wasm_samples_per_function` | `REB_NATIVE_WASM_SAMPLES_PER_FUNCTION` | 1..16 retained samples of each function on each Wasm stream. Needs `wasm_dispatch` or `wasm_call_indirect`. |
+| `wasm_samples_per_indirect_site` | `REB_NATIVE_WASM_SAMPLES_PER_INDIRECT_SITE` | 1..16 retained `call_indirect` samples of each caller and module offset. |
+| `wasm_function_allow` | `REB_NATIVE_WASM_FUNCTION_ALLOW` | Up to 32 function indexes. Other functions do not consume either sample index. Deny wins. |
+| `wasm_function_deny` | `REB_NATIVE_WASM_FUNCTION_DENY` | Up to 32 function indexes to exclude. |
+| `wasm_module_allowlist` | `REB_NATIVE_WASM_MODULE_ALLOWLIST` | Up to 8 SHA-256 digests, written to a private file. Other modules do not advance either sample index. |
 
 An agent sets `confirm_sensitive_capture` only on the researcher's
 authorization for that content and target. Named invocation sites are strict:
@@ -499,7 +520,7 @@ check has a `code`, a `severity` of `info` or `warning`, and a plain message:
 | `artifact_capture_failed` | Some artifact bodies were not stored. |
 | `queue_drops` | Records lost to a full queue, beyond named gap markers. |
 | `sequence_gaps` | Sequence numbers missing inside the scanned events. |
-| `named_gap` | A producer named why it stopped, with `category`, `reason` and `count`. A reason containing `budget` or `limit` means a sampling budget filled. |
+| `named_gap` | A producer named why it stopped, with `category`, `reason` and `count`. A reason containing `budget` or `limit` means a sampling budget filled. A Wasm reason ending in `filtered` is a sample-policy exclusion: that execution was not sampled and did not take a slot. |
 | `bounded_scope` | Only the newest 64 MiB of events were summarized. |
 
 The summary scans the same newest 64 MiB as the polling window and the newest
@@ -908,7 +929,7 @@ visible-window-only.
 ### Filtered and paged reads
 
 Any filter or cursor parameter turns `GET /api/events` into a filtered read
-that bypasses the polling cache. The unfiltered window above is unchanged.
+that bypasses the polling cache. The unfiltered route remains that polling window.
 Filters combine with AND and compare stored fields exactly:
 
 - `type` and `category`: comma-separated lowercase names, at most 16;
@@ -917,7 +938,28 @@ Filters combine with AND and compare stored fields exactly:
 - `since_ns` (inclusive) and `until_ns` (exclusive) on `monotonic_time_ns`.
 
 Without a cursor the read starts at the last complete record and returns the
-newest `limit` matches in file order. `before=OFFSET` continues backward and
+newest `limit` matches in file order. Stored records are not rewritten.
+`wasm_dispatch_observation` and `wasm_indirect_observation` also include
+`wasm_observation` beside the hex `payload`. `status` `decoded` carries the
+payload fields. A dispatch object has `function_index`, `module_byte_offset`,
+`selector`, `table_count`, `sample_index`, `js_invocation_state` and
+`js_invocation_id`. An indirect object has the caller fields
+`function_index`, `module_byte_offset`, `sample_index`, `js_invocation_state`
+and `js_invocation_id`, plus `table_index`, `slot`, `callee_function_index`
+and `resolution` (`resolved`, `null`, `out-of-bounds`, `foreign`,
+`unresolved`). `js_invocation_state` is the stored integer: 0 not observed,
+1 none, 2 inside, 3 unknown. Version 1 decodes as not observed.
+`callee_function_index` is the stored index and is 0 unless `resolution` is
+`resolved`; that 0 is not a function index. `status` `invalid` carries no
+fields. A payload version other than 1 or 2 is invalid in full, not returned
+as a version-2 prefix: a later version stores new fields in bytes version 2
+reserves. The same `{status: invalid}` object is used when the record is not
+protocol 3, category `vm`, and flags 0, or when any other payload check
+fails. The decode reads that record only. It does not build an opcode
+workspace or open the module, so a module the detector never admits still
+has rows here. It does not recover a
+guest PC or a sample the payload does not store. The unfiltered polling
+window adds the same object. `before=OFFSET` continues backward and
 `after=OFFSET` reads forward from a record boundary. Each response adds `query`
 with the applied `filters`, `direction`, `returned`, `store_end`, `limited`,
 `budget_exhausted`, `next_before` (null at the start of the store) and

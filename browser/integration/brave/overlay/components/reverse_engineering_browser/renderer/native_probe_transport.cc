@@ -6,6 +6,7 @@
 #include "brave/components/reverse_engineering_browser/renderer/native_probe_transport.h"
 
 #include <array>
+#include <atomic>
 #include <bit>
 #include <memory>
 #include <utility>
@@ -19,6 +20,13 @@
 #include "brave/components/reverse_engineering_browser/renderer/native_probe_sink.h"
 #include "mojo/public/cpp/base/big_buffer.h"
 #include "third_party/blink/public/web/web_local_frame.h"
+
+namespace {
+std::atomic<reb::NativeProbeTransport::NativeWasmLimitProbe>& NativeWasmLimitProbeSlot() noexcept {
+  static std::atomic<reb::NativeProbeTransport::NativeWasmLimitProbe> probe{nullptr};
+  return probe;
+}
+}  // namespace
 
 namespace reb {
 
@@ -62,6 +70,10 @@ void NativeProbeTransport::Connect(mojo::PendingRemote<mojom::NativeProbeHost> p
   host_->BindClient(receiver_.BindNewPipeAndPassRemote());
 }
 
+void NativeProbeTransport::SetNativeWasmLimitProbe(const NativeWasmLimitProbe probe) noexcept {
+  NativeWasmLimitProbeSlot().store(probe, std::memory_order_release);
+}
+
 void NativeProbeTransport::Configure(const std::uint64_t session_id,
                                      const std::uint64_t category_mask,
                                      const std::uint64_t expires_at_monotonic_ns,
@@ -96,6 +108,7 @@ void NativeProbeTransport::Configure(const std::uint64_t session_id,
   wasm_capture_epoch_.store(wasm_capture_epoch, std::memory_order_release);
   NativeProbeSink::Get().SetNativeWasmDispatchEmitter(&EmitWasmDispatch);
   NativeProbeSink::Get().SetNativeWasmIndirectEmitter(&EmitWasmIndirect);
+  NativeProbeSink::Get().SetNativeWasmExecutionEmitter(&EmitWasmExecution);
   NativeProbeSink::Get().SetEmitters(
       &NativeProbeTransport::EmitStatus, &NativeProbeTransport::EmitArtifact, session_id,
       category_mask, expires_at_monotonic_ns, capture_canvas_images, &CurrentFrameId);
@@ -118,6 +131,22 @@ void NativeProbeTransport::Configure(const std::uint64_t session_id,
         std::span<const NativeJsInvocationSite>(sites.data(), count ? count : 1),
         js_invocation_digests);
   }
+  // After emitters, so a jitless notice can be admitted. Disable does not
+  // clear the probe; it is a process flag, not session state.
+  if (const auto probe = NativeWasmLimitProbeSlot().load(std::memory_order_acquire)) {
+    probe();
+  }
+}
+
+void NativeProbeTransport::SetWasmSampleBudget(const std::vector<std::uint8_t>& policy) {
+  NativeWasmSampleBudgetPolicy decoded;
+  if (!DecodeNativeWasmSampleBudgetPolicy(policy, decoded))
+    return;
+  NativeProbeSink::Get().SetNativeWasmSampleBudgetPolicy(decoded);
+}
+
+void NativeProbeTransport::ResetWasmSampleBudgets() {
+  NativeProbeSink::Get().ResetNativeWasmSampleBudgets();
 }
 
 void NativeProbeTransport::Disable() {
@@ -125,6 +154,7 @@ void NativeProbeTransport::Disable() {
   // Wasm callbacks then fail their first enabled check, not a later one.
   NativeProbeSink::Get().SetNativeWasmDispatchEmitter(nullptr);
   NativeProbeSink::Get().SetNativeWasmIndirectEmitter(nullptr);
+  NativeProbeSink::Get().SetNativeWasmExecutionEmitter(nullptr);
   NativeProbeSink::Get().SetEmitters(nullptr, nullptr, 0, 0, 0, false);
   queue_.store(nullptr, std::memory_order_release);
 }
@@ -162,7 +192,8 @@ bool NativeProbeTransport::EmitWasmDispatch(const NativeWasmDispatchObservation&
       event.header.process_id, event.header.thread_id, event.header.frame_id,
       observation.execution_context_id, observation.document_token_high,
       observation.document_token_low, observation.function_index, observation.module_byte_offset,
-      observation.selector, observation.table_count, observation.sample_index,
+      observation.selector, observation.table_count, observation.caller_observed,
+      observation.caller_kind, observation.caller_function_index, observation.sample_index,
       observation.js_invocation_state, observation.js_invocation_id,
       std::string(observation.source_url), mojo_base::BigBuffer(observation.module_bytes));
   return true;
@@ -189,6 +220,32 @@ bool NativeProbeTransport::EmitWasmIndirect(const NativeWasmIndirectObservation&
       static_cast<std::uint32_t>(observation.resolution), observation.sample_index,
       observation.js_invocation_state, observation.js_invocation_id,
       std::string(observation.source_url), mojo_base::BigBuffer(observation.module_bytes));
+  return true;
+}
+
+bool NativeProbeTransport::EmitWasmExecution(const NativeWasmExecutionObservation& observation,
+                                             const std::uint64_t generation) noexcept {
+  auto& transport = Get();
+  const auto epoch = transport.wasm_capture_epoch_.load(std::memory_order_acquire);
+  NativeProbeEvent event;
+  event.header = observation.header;
+  if (!epoch || !NativeProbeSink::Get().CanAdmitEvent(event, generation))
+    return false;
+  auto* host = transport.HostForCurrentSequence();
+  if (!*host || !NativeProbeSink::Get().CanAdmitEvent(event, generation) ||
+      epoch != transport.wasm_capture_epoch_.load(std::memory_order_acquire))
+    return false;
+  (*host)->CaptureWasmExecution(
+      epoch, event.header.session_id, event.header.sequence_number, event.header.monotonic_time_ns,
+      event.header.process_id, event.header.thread_id, event.header.frame_id,
+      observation.execution_context_id, observation.document_token_high,
+      observation.document_token_low, observation.invocation_id, observation.function_index,
+      observation.module_byte_offset, observation.related_sample_index,
+      static_cast<std::uint8_t>(observation.kind), static_cast<std::uint8_t>(observation.reason),
+      static_cast<std::uint8_t>(observation.bounds), observation.known,
+      static_cast<std::uint8_t>(observation.related_stream), observation.js_invocation_state,
+      observation.js_invocation_id, std::string(observation.source_url),
+      mojo_base::BigBuffer(observation.module_bytes));
   return true;
 }
 

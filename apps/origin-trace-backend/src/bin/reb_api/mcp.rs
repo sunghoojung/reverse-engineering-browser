@@ -1016,9 +1016,10 @@ const INSTRUCTIONS: &str = "Origin Trace tools are OpenAPI operationId values an
 3. Console in a chosen frame (needs --allow-effects): get_native_console lists documents with id, frame (top or child), origin, url, top_relation and out_of_process. There is no parent link, so choose by frame, origin and url. native_console_action connect_live (binding_id, target_id, confirm_live true) selects one document, a cross-site child included, and returns session_id; evaluate (session_id, target_id, source) runs JavaScript there and returns bounded text; runtime with command poll reads its console messages. Evaluate location.ancestorOrigins to confirm a frame's parents. stale_target or selection stale means the document navigated: stop, then connect_live with a current id. Switch frames the same way. \
 4. Document-start for child frames: when capture_options.document_start is permitted and get_native_console reports document_start_supported, arm_document_start while connected, with one rule per exact origin and frame child for an iframe, then reload the page and read get_native_console_document_start with after_sequence. Records carry document_id (a Console target id) and frame_id (a get_events filter). clear_document_start when done. \
 5. Invocation sites: get_artifacts kind javascript, resolve_js_invocation_site, then js_invocation_site_action add. Saved sites arm only in a later session, never the open page. \
+Live Wasm on the attached instance (needs --allow-effects): get_live_wasm, then live_wasm_action read_memory, write_memory, call_export, or call_function with confirmed and the instance_id, document_token_high, document_token_low, and document_epoch from that state. unknown_export, unknown_function, signature_mismatch, trap, and did_not_return stay distinct. A missing peer leaves availability unsupported and invents nothing. \
 The default list is the read-only projection. Binary responses are not inlined. A 304 is a status object, not a body. JSON larger than the inline limit returns a structural summary and omits source, bytecode, and long strings. Recipes are in docs/development/agent-cookbook.md.";
 
-const SESSION_INSTRUCTIONS: &str = "6. Session: start_live_session starts a visibly labeled live capture for an authorized target and moves this connection to it; until then other tools refuse without a request. Every option is off unless named: document_start permits step 4; request_content and js_invocation_digests are sensitive and need confirm_sensitive_capture; js_invocation_sites (a site file) or js_invocation_saved_sites (the agent sessions' own saved set from step 5) arm invocation sites. session_action open_url opens a page; capture_observed false means nothing was recorded. End with native_console_action stop when connected, then session_action end with confirm true.";
+const SESSION_INSTRUCTIONS: &str = "6. Session: start_live_session starts a visibly labeled live capture for an authorized target and moves this connection to it; until then other tools refuse without a request. Every option is off unless named: document_start permits step 4; request_content and js_invocation_digests are sensitive and need confirm_sensitive_capture; js_invocation_sites (a site file) or js_invocation_saved_sites (the agent sessions' own saved set from step 5) arm invocation sites. wasm_samples_per_function, wasm_samples_per_indirect_site, wasm_function_allow, wasm_function_deny and wasm_module_allowlist restrict the 16-record Wasm budgets and need wasm_dispatch or wasm_call_indirect. session_action open_url opens a page; capture_observed false means nothing was recorded. session_action reset_wasm_sample_budgets restarts both Wasm sample indexes without a new session. End with native_console_action stop when connected, then session_action end with confirm true.";
 
 fn instructions(session_start: bool) -> String {
     if !session_start {
@@ -1578,6 +1579,26 @@ mod tests {
             "js_invocation_saved_sites",
             "open_url",
             "capture_observed",
+            "wasm_samples_per_function",
+            "wasm_samples_per_indirect_site",
+            "wasm_function_allow",
+            "wasm_function_deny",
+            "wasm_module_allowlist",
+            "wasm_dispatch",
+            "wasm_call_indirect",
+            "reset_wasm_sample_budgets",
+            "read_memory",
+            "write_memory",
+            "call_export",
+            "call_function",
+            "instance_id",
+            "document_token_high",
+            "document_token_low",
+            "document_epoch",
+            "unknown_export",
+            "unknown_function",
+            "signature_mismatch",
+            "did_not_return",
         ];
         let text = super::instructions(true);
         let mut tools = std::collections::BTreeSet::new();

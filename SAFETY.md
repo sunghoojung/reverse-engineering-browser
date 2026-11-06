@@ -128,12 +128,19 @@ it.
 
 - Probes remain disabled by default and observational. A visibly enabled
   experiment and an explicit researcher action are required for browser
-  mutation.
+  mutation. A Wasm execution deadline only records that an instrumented call
+  is still running. Interrupting that call is a separate explicit action: it
+  traps the call so the host can continue. The deadline does not do that.
 - Origin Trace has no Chrome DevTools Protocol path. The browser debugger,
-  runtime hooks, live objects, element screenshots and live Wasm inspection used
-  it and were removed with it; their retired contracts remain only as history.
-  Wasm evidence comes from native capture and stored artifacts. The owned VM
-  debugger controls only the project's own native fixture helper.
+  runtime hooks, live objects, element screenshots and the CDP live Wasm
+  inspection routes used it and were removed with it; those retired contracts
+  remain only as history. Confirmed live Wasm memory and call commands are a
+  separate local socket (`get_live_wasm`, `live_wasm_action`). They stay behind
+  the existing effect and confirmation gates, do not replace dispatch capture,
+  and report the command unavailable when no peer is configured. They do not
+  invent memory bytes or return values. A current Brave build does not implement
+  that peer. Other Wasm evidence comes from native capture and stored artifacts.
+  The owned VM debugger controls only the project's own native fixture helper.
 - An agent starts, drives and ends a live capture session only through the
   session tools: `start_live_session` or `reb-api session start`, and
   `session_action` with `open_url` or `end`. They stay hidden until the

@@ -710,10 +710,17 @@ categories in Fingerprinting. The configured sampling budgets
 `native_js_dispatch_budget_incomplete`, `native_js_dispatch_site_budget_incomplete`,
 `native_guest_sample_limit` and `native_guest_browser_sample_budget`) read as
 "Sampling budget reached": retained observations are exact and later ones were not
-sampled. For the two Wasm renderer budgets, executions past the cap also keep a
-compact overflow identity up to a ring of 32, and identities past the ring are a
-count; those records are not full observations. See
-[overflow identities](../../protocol/native-wasm-dispatch-v1.md#overflow-identities). Every other reason, including transport, input, document, module, expiry,
+sampled. That includes the per-function and per-call-site Wasm budgets. A
+function, module, call-site, or stream refusal also keeps a compact overflow
+identity up to a ring of 32, and identities past the ring are a count; those
+records are not full observations. `reset_wasm_sample_budgets` publishes that
+count and starts both rings again. See
+[overflow identities](../../protocol/native-wasm-dispatch-v1.md#overflow-identities).
+Filter reasons (`native_wasm_dispatch_filtered`, `native_wasm_indirect_filtered`,
+and their `_browser_` counterparts) are sample-policy exclusions: the
+execution was not sampled and did not consume a sample slot. The notice and
+footer count them separately from sampling budgets and from reported losses.
+Every other reason, including transport, input, document, module, expiry,
 compiled-before-arming, capacity and parent-link reasons and any reason this
 build does not know, reads as reported lost evidence with its raw reason as text.
 The Swift stored-evidence reader uses the same newest-general and
@@ -1035,8 +1042,8 @@ both controls are withdrawn until a valid poll reports them again. Canvas artifa
 remain on disk. Detailed identifiers stay behind a disclosure. The
 captured-tab buttons are historical evidence, not an open-tab count. The footer separates missing per-process sequence IDs from
 reported queue drops, since a gap report can describe the same missing IDs. It
-counts named sampling budgets and reported capture losses separately, with their
-categories, and never adds them to queue drops.
+counts named sampling budgets, sample-policy exclusions, and reported capture
+losses separately, with their categories, and never adds them to queue drops.
 The custom browser observes generated Web IDL callbacks for a selected native
 allowlist across all eight families, in addition to the lower-level Canvas,
 WebGL, and Web Audio hooks needed by internal Blink paths and selected V8 Math,

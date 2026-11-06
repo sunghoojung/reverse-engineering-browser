@@ -6,7 +6,10 @@
 //! request reads at most one scan budget of complete, newline-terminated
 //! records from an explicit byte cursor. A record still being written is not
 //! returned until its newline arrives, so a cursor never splits a record.
-//! Stored records are returned unchanged; a filter only selects them.
+//! Stored records are not rewritten; a filter only selects them. Responses add
+//! `wasm_observation` beside the hex payload of native Wasm dispatch and
+//! call_indirect events, and `wasm_overflow` beside an overflow identity.
+//! That decode reads the payload only.
 use crate::{
     app::{Query, validate_event},
     error::{Code, Error, Result},
@@ -578,7 +581,9 @@ pub fn events_document(
         "network_events": [],
     });
     tally.write(&mut document);
-    document["events"] = Value::Array(page.records.clone());
+    let mut events = page.records.clone();
+    crate::vm_opcode::annotate_wasm_observations(&mut events);
+    document["events"] = Value::Array(events);
     document
 }
 

@@ -20,6 +20,7 @@
 #include "brave/components/reverse_engineering_browser/common/native_artifact_header.h"
 #include "brave/components/reverse_engineering_browser/common/native_probe_event.h"
 #include "brave/components/reverse_engineering_browser/common/native_wasm_guest.h"
+#include "brave/components/reverse_engineering_browser/common/native_wasm_sample_budget.h"
 #include "network_request_body_stub.h"
 
 namespace base {
@@ -282,6 +283,7 @@ class NativeProbeSession {
   const std::vector<std::uint8_t>& js_dispatch_sites() const { return js_sites; }
   const std::vector<std::uint8_t>& js_invocation_sites() const { return invocation_sites; }
   bool js_invocation_digests() const { return invocation_digests; }
+  const NativeWasmSampleBudgetPolicy& wasm_sample_budget() const { return wasm_budget; }
   void Emit(const NativeProbeEvent& event) const {
     if (emitted)
       emitted(event);
@@ -294,6 +296,7 @@ class NativeProbeSession {
   std::vector<std::uint8_t> js_sites;
   std::vector<std::uint8_t> invocation_sites;
   bool invocation_digests = false;
+  NativeWasmSampleBudgetPolicy wasm_budget{};
   std::function<void(const NativeProbeEvent&)> emitted;
 
  private:
@@ -405,6 +408,8 @@ class NativeProbeClient {
                          const std::vector<std::uint8_t>&,
                          const std::vector<std::uint8_t>&,
                          bool) = 0;
+  virtual void SetWasmSampleBudget(const std::vector<std::uint8_t>&) = 0;
+  virtual void ResetWasmSampleBudgets() = 0;
   virtual void Disable() = 0;
   virtual void NativeGuestModuleStatus(std::uint64_t, std::uint64_t, bool) = 0;
 };
@@ -426,6 +431,9 @@ class NativeProbeHost {
                                    std::uint32_t,
                                    std::uint32_t,
                                    std::uint32_t,
+                                   std::uint32_t,
+                                   bool,
+                                   std::uint8_t,
                                    std::uint32_t,
                                    std::uint32_t,
                                    std::uint8_t,
@@ -453,6 +461,29 @@ class NativeProbeHost {
                                    std::uint32_t,
                                    const std::string&,
                                    mojo_base::BigBuffer) = 0;
+  virtual void CaptureWasmExecution(std::uint64_t,
+                                    std::uint64_t,
+                                    std::uint64_t,
+                                    std::uint64_t,
+                                    std::uint32_t,
+                                    std::uint32_t,
+                                    std::uint64_t,
+                                    std::uint64_t,
+                                    std::uint64_t,
+                                    std::uint64_t,
+                                    std::uint32_t,
+                                    std::uint32_t,
+                                    std::uint32_t,
+                                    std::uint32_t,
+                                    std::uint8_t,
+                                    std::uint8_t,
+                                    std::uint8_t,
+                                    std::uint8_t,
+                                    std::uint8_t,
+                                    std::uint8_t,
+                                    std::uint32_t,
+                                    const std::string&,
+                                    mojo_base::BigBuffer) = 0;
   virtual void CaptureNativeGuest(std::uint64_t,
                                   const std::vector<std::uint8_t>&,
                                   const std::vector<std::uint8_t>&,

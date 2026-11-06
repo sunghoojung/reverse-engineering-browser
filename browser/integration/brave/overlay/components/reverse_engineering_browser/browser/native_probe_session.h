@@ -15,6 +15,7 @@
 #include "base/no_destructor.h"
 #include "brave/components/reverse_engineering_browser/common/native_probe_event.h"
 #include "brave/components/reverse_engineering_browser/common/native_probe_transport.mojom.h"
+#include "brave/components/reverse_engineering_browser/common/native_wasm_sample_budget.h"
 
 namespace reb {
 
@@ -56,6 +57,13 @@ class NativeProbeSession final {
   // --reb-js-invocation-digests: the session's sensitive opt-in for
   // settled-value digests. Only meaningful with invocation sites.
   [[nodiscard]] bool js_invocation_digests() const noexcept { return js_invocation_digests_; }
+  // Empty lists and zero caps are the historical 16-record stream budgets.
+  [[nodiscard]] const NativeWasmSampleBudgetPolicy& wasm_sample_budget() const noexcept {
+    return wasm_sample_budget_;
+  }
+  // Restarts both sample indexes in this browser session. The profile, the
+  // session id, and the capture configuration stay.
+  void ResetWasmSampleBudgets() noexcept;
   [[nodiscard]] bool IsActive() const noexcept;
   [[nodiscard]] std::uint64_t session_id() const noexcept;
   [[nodiscard]] std::uint64_t category_mask() const noexcept;
@@ -82,6 +90,7 @@ class NativeProbeSession final {
   std::string js_invocation_startup_sites_json_;
   std::vector<std::uint8_t> js_invocation_sites_;
   bool js_invocation_digests_ = false;
+  NativeWasmSampleBudgetPolicy wasm_sample_budget_{};
   std::vector<raw_ptr<NativeProbeHost>> hosts_;
   std::atomic<NativeProbeEmitter> downstream_{nullptr};
   std::atomic<std::uint64_t> session_id_{0};

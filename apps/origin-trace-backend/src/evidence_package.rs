@@ -1740,6 +1740,7 @@ mod tests {
             "js_invocation_start",
             "js_invocation_settle",
             "js_invocation_request",
+            "wasm_execution_outcome",
             "wasm_dispatch_overflow",
             "wasm_indirect_overflow",
         ] {

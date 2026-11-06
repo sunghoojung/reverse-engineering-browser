@@ -19,6 +19,7 @@ pub mod evidence_package;
 pub mod float32;
 mod js_invocation;
 mod js_invocation_sites;
+pub mod live_wasm;
 mod native_console;
 mod native_guest_binding;
 mod origin_trace;

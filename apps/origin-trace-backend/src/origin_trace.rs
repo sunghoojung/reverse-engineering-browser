@@ -119,8 +119,8 @@ fn overflow_u32(bytes: &[u8], offset: usize) -> u32 {
             .expect("fixed overflow field"),
     )
 }
-/// Compact identity past a 16-record Wasm budget. None is a malformed record,
-/// which the caller rejects instead of showing the bytes as text.
+/// Compact identity for a Wasm sample a budget refused. None is a malformed
+/// record, which the caller rejects instead of showing the bytes as text.
 fn overflow_summary(value: &Value) -> Option<String> {
     let kind = value["type"].as_str()?;
     let indirect = kind == "wasm_indirect_overflow";

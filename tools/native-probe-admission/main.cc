@@ -14,6 +14,7 @@
 #include <string>
 #include <string_view>
 #include <thread>
+#include <utility>
 #include <vector>
 
 #include "brave/components/reverse_engineering_browser/common/native_probe_queue.h"
@@ -1309,6 +1310,11 @@ std::uint64_t NativeWasmFrameLookup() noexcept {
 std::size_t native_wasm_retained = 0;
 bool native_wasm_accept = true;
 std::uint64_t native_wasm_attempted = 0, native_indirect_attempted = 0;
+std::uint8_t expect_caller_kind = reb::kWasmDirectCallerUnknown;
+std::uint32_t expect_caller_index = 0;
+bool expect_caller_observed = false;
+std::vector<std::pair<std::uint8_t, std::uint32_t>> seen_callers;
+bool record_callers = false;
 bool CaptureNativeWasm(const reb::NativeWasmDispatchObservation& observation,
                        std::uint64_t generation) noexcept {
   native_wasm_attempted = observation.header.sequence_number;
@@ -1319,6 +1325,12 @@ bool CaptureNativeWasm(const reb::NativeWasmDispatchObservation& observation,
   assert(observation.document_token_high == 9 && observation.document_token_low == 10);
   assert(observation.module_byte_offset == 8 && observation.selector == UINT32_MAX);
   assert(observation.table_count == 2 && observation.sample_index == native_wasm_retained);
+  assert(observation.caller_observed == expect_caller_observed);
+  assert(observation.caller_kind == expect_caller_kind);
+  assert(observation.caller_function_index == expect_caller_index);
+  assert(observation.header.parent_event_id == 0);
+  if (record_callers)
+    seen_callers.emplace_back(observation.caller_kind, observation.caller_function_index);
   if (!native_wasm_accept)
     return false;
   ++native_wasm_retained;
@@ -1350,6 +1362,23 @@ void NativeWasmRuntimeAdmission() {
   assert(!reb::IsValidNativeWasmDispatchInput(input));
   input.module_bytes = std::span(module).first(9);
   assert(!reb::IsValidNativeWasmDispatchInput(input));
+  input.module_bytes = module;
+  input.caller_observed = true;
+  input.caller_function_index = 5;
+  assert(!reb::IsValidNativeWasmDispatchInput(input));
+  input.caller_function_index = 0;
+  input.caller_kind = reb::kWasmDirectCallerSameInstance;
+  input.caller_function_index = 4;
+  assert(reb::IsValidNativeWasmDispatchInput(input));
+  input.caller_kind = 2;
+  assert(!reb::IsValidNativeWasmDispatchInput(input));
+  input.caller_observed = false;
+  input.caller_kind = reb::kWasmDirectCallerSameInstance;
+  input.caller_function_index = 4;
+  assert(!reb::IsValidNativeWasmDispatchInput(input));
+  input.caller_kind = reb::kWasmDirectCallerUnknown;
+  input.caller_function_index = 0;
+  assert(reb::IsValidNativeWasmDispatchInput(input));
   const auto record = [&] {
     sink.RecordNativeWasmDispatch(7, 8, "https://owned.test/module.wasm", module, 0, 8, UINT32_MAX,
                                   2, 9, 10);
@@ -1425,6 +1454,40 @@ void NativeWasmRuntimeAdmission() {
   assert(sink.IsNativeWasmDispatchEnabled());
   record();
   assert(native_wasm_retained == 1);
+  // Each observation carries the caller stored on that record. The sink does
+  // not reuse a previous index. This does not walk a V8 stack.
+  record_callers = true;
+  expect_caller_observed = true;
+  expect_caller_kind = reb::kWasmDirectCallerSameInstance;
+  expect_caller_index = 4;
+  sink.RecordNativeWasmDispatch(7, 8, "https://owned.test/module.wasm", module, 1, 8, UINT32_MAX, 2,
+                                9, 10, reb::kWasmDirectCallerSameInstance, 4, true);
+  expect_caller_index = 7;
+  sink.RecordNativeWasmDispatch(7, 8, "https://owned.test/module.wasm", module, 3, 8, UINT32_MAX, 2,
+                                9, 10, reb::kWasmDirectCallerSameInstance, 7, true);
+  expect_caller_kind = reb::kWasmDirectCallerUnknown;
+  expect_caller_index = 0;
+  sink.RecordNativeWasmDispatch(7, 8, "https://owned.test/module.wasm", module, 3, 8, UINT32_MAX, 2,
+                                9, 10, reb::kWasmDirectCallerUnknown, 0, true);
+  assert(seen_callers.size() == 3);
+  assert((seen_callers[0] ==
+          std::pair<std::uint8_t, std::uint32_t>{reb::kWasmDirectCallerSameInstance, 4}));
+  assert((seen_callers[1] ==
+          std::pair<std::uint8_t, std::uint32_t>{reb::kWasmDirectCallerSameInstance, 7}));
+  assert((seen_callers[2] ==
+          std::pair<std::uint8_t, std::uint32_t>{reb::kWasmDirectCallerUnknown, 0}));
+  const auto retained_after_callers = native_wasm_retained;
+  sink.RecordNativeWasmDispatch(7, 8, "https://owned.test/module.wasm", module, 3, 8, UINT32_MAX, 2,
+                                9, 10, reb::kWasmDirectCallerUnknown, 5, true);
+  const auto guessed = One(queue);
+  assert(guessed.header.type == reb::NativeProbeType::kGap &&
+         std::string_view(reinterpret_cast<const char*>(guessed.inline_payload.data()),
+                          guessed.header.payload_size) == "native_wasm_dispatch_input_unavailable");
+  assert(native_wasm_retained == retained_after_callers);
+  record_callers = false;
+  expect_caller_observed = false;
+  expect_caller_kind = reb::kWasmDirectCallerUnknown;
+  expect_caller_index = 0;
   sink.SetEmitters(&AcceptRuntimeEvent, &CaptureRuntimeMetadata, 42,
                    reb::kAllNativeProbeCategoryMask, kForever, false, &NativeWasmFrameLookup);
   assert(sink.IsNativeWasmDispatchEnabled());
@@ -1599,6 +1662,565 @@ void NativeWasmIndirectAdmission() {
                "separate 16-record budget, full-ring cap retry and overflow identities\n";
 }
 
+std::vector<std::uint32_t> budget_dispatch_indexes;
+std::vector<std::uint32_t> budget_indirect_indexes;
+bool CaptureBudgetDispatch(const reb::NativeWasmDispatchObservation& observation,
+                           std::uint64_t) noexcept {
+  budget_dispatch_indexes.push_back(observation.sample_index);
+  return true;
+}
+bool CaptureBudgetIndirect(const reb::NativeWasmIndirectObservation& observation,
+                           std::uint64_t) noexcept {
+  budget_indirect_indexes.push_back(observation.sample_index);
+  return true;
+}
+std::string_view BudgetGap(const NativeProbeEvent& event) {
+  return {reinterpret_cast<const char*>(event.inline_payload.data()), event.header.payload_size};
+}
+void NativeWasmSampleBudgetControls() {
+  std::array<reb::NativeWasmBudgetKeySlot, reb::kNativeWasmBudgetKeySlots> reused{};
+  const auto first =
+      reb::RetainWasmBudgetKey(reused, 2, reb::NativeWasmBudgetKeyKind::kFunction, 7, 0, 1);
+  assert(first.status == reb::NativeWasmBudgetRetain::kRetained);
+  reb::ReleaseWasmBudgetKey(reused[first.slot], 2, first.incarnation);
+  const auto other =
+      reb::RetainWasmBudgetKey(reused, 2, reb::NativeWasmBudgetKeyKind::kFunction, 8, 0, 1);
+  assert(other.status == reb::NativeWasmBudgetRetain::kRetained);
+  const auto again =
+      reb::RetainWasmBudgetKey(reused, 2, reb::NativeWasmBudgetKeyKind::kFunction, 7, 0, 1);
+  assert(again.status == reb::NativeWasmBudgetRetain::kRetained);
+  const auto capped =
+      reb::RetainWasmBudgetKey(reused, 2, reb::NativeWasmBudgetKeyKind::kFunction, 7, 0, 1);
+  assert(capped.status == reb::NativeWasmBudgetRetain::kCapped);
+
+  std::array<std::uint32_t, reb::kNativeWasmFunctionFilterLimit> functions{};
+  std::uint8_t count = 0;
+  assert(reb::ParseNativeWasmFunctionList("1,2,15", functions, count) && count == 3 &&
+         functions[0] == 1 && functions[1] == 2 && functions[2] == 15);
+  assert(!reb::ParseNativeWasmFunctionList("1,1", functions, count));
+  assert(!reb::ParseNativeWasmFunctionList("16777216", functions, count));
+  reb::NativeWasmSampleBudgetPolicy parsed;
+  assert(reb::ParseNativeWasmModuleAllowlist(std::string("# note\n") + std::string(64, 'a') + "\n",
+                                             parsed) &&
+         parsed.module_allow_count == 1 && parsed.module_allow[0][0] == 0xaa);
+  assert(!reb::ParseNativeWasmModuleAllowlist(std::string(64, 'a') + "\n" + std::string(64, 'a'),
+                                              parsed));
+  assert(reb::ParseNativeWasmBudgetResetGeneration("0\n") == 0);
+  assert(reb::ParseNativeWasmBudgetResetGeneration("1\n") == 1);
+  assert(!reb::ParseNativeWasmBudgetResetGeneration("x"));
+
+  const auto owned_queue = std::make_unique<NativeProbeQueue>();
+  NativeProbeQueue& queue = *owned_queue;
+  constexpr std::array<std::uint8_t, 16> allowed{0,    97, 115,  109, 1, 0,    0, 0,
+                                                 0x0e, 2,  0x11, 0,   0, 0x11, 0, 0};
+  constexpr std::array<std::uint8_t, 17> blocked{0, 97,   115, 109, 1,    0, 0, 0,   0x0e,
+                                                 2, 0x11, 0,   0,   0x11, 0, 0, 0x7f};
+  constexpr std::string_view url = "https://owned.test/module.wasm";
+  reb::NativeWasmSampleBudgetPolicy policy;
+  policy.samples_per_function = 2;
+  policy.module_allow_count = 1;
+  policy.module_allow[0] = reb::NativeGuestDigest(allowed);
+  sink.SetNativeWasmSampleBudgetPolicy(policy);
+  Configure(queue);
+  sink.SetNativeWasmDispatchEmitter(&CaptureBudgetDispatch);
+  sink.SetNativeWasmIndirectEmitter(&CaptureBudgetIndirect);
+  budget_dispatch_indexes.clear();
+  budget_indirect_indexes.clear();
+  const auto dispatch = [&](std::span<const std::uint8_t> module, std::uint32_t function) {
+    sink.RecordNativeWasmDispatch(7, 8, url, module, function, 8, 0, 2, 9, 10);
+  };
+  reb::NativeWasmIndirectObservation indirect;
+  indirect.header.frame_id = 8;
+  indirect.execution_context_id = 7;
+  indirect.document_token_high = 9;
+  indirect.document_token_low = 10;
+  indirect.source_url = url;
+  indirect.table_index = 0;
+  indirect.resolution = reb::NativeWasmIndirectResolution::kOutOfBounds;
+  indirect.module_bytes = blocked;
+  indirect.module_byte_offset = 10;
+  indirect.function_index = 4;
+  const auto pop = [&] {
+    NativeProbeEvent event;
+    assert(queue.TryPop(event));
+    return event;
+  };
+  sink.RecordNativeWasmIndirect(indirect);
+  dispatch(blocked, 0);
+  assert(budget_dispatch_indexes.empty() && budget_indirect_indexes.empty());
+  assert(BudgetGap(pop()) == "native_wasm_indirect_filtered");
+  auto indirect_filtered = ReadIndirectOverflow(pop());
+  assert(indirect_filtered.kind == reb::kWasmOverflowKindIdentity &&
+         indirect_filtered.function_index == 4 && indirect_filtered.ring_index == 0 &&
+         indirect_filtered.module_byte_offset == 10);
+  assert(BudgetGap(pop()) == "native_wasm_dispatch_filtered");
+  auto dispatch_filtered = ReadDispatchOverflow(pop());
+  assert(dispatch_filtered.kind == reb::kWasmOverflowKindIdentity &&
+         dispatch_filtered.function_index == 0 && dispatch_filtered.ring_index == 0);
+  assert(Drain(queue) == 0);
+  assert(sink.IsNativeWasmDispatchEnabled() && sink.IsNativeWasmIndirectEnabled());
+  dispatch(allowed, 0);
+  dispatch(allowed, 0);
+  dispatch(allowed, 0);
+  dispatch(allowed, 1);
+  indirect.module_bytes = allowed;
+  indirect.function_index = 3;
+  sink.RecordNativeWasmIndirect(indirect);
+  assert((budget_dispatch_indexes == std::vector<std::uint32_t>{0, 1, 2}));
+  assert((budget_indirect_indexes == std::vector<std::uint32_t>{0}));
+  assert(BudgetGap(pop()) == "native_wasm_dispatch_function_budget_incomplete");
+  // The filtered identity already took ring slot 0 in this epoch.
+  auto function_capped = ReadDispatchOverflow(pop());
+  assert(function_capped.kind == reb::kWasmOverflowKindIdentity &&
+         function_capped.ring_index == 1 && function_capped.function_index == 0);
+  assert(Drain(queue) == 0);
+  assert(sink.IsNativeWasmDispatchEnabled());
+  sink.ResetNativeWasmSampleBudgets();
+  dispatch(allowed, 0);
+  sink.RecordNativeWasmIndirect(indirect);
+  assert(budget_dispatch_indexes.back() == 0 && budget_indirect_indexes.back() == 0);
+  // Reset published no omitted count (the ring was not full) and freed it.
+  dispatch(allowed, 0);
+  dispatch(allowed, 0);
+  assert(BudgetGap(pop()) == "native_wasm_dispatch_function_budget_incomplete");
+  auto reset_identity = ReadDispatchOverflow(pop());
+  assert(reset_identity.kind == reb::kWasmOverflowKindIdentity && reset_identity.ring_index == 0 &&
+         reset_identity.function_index == 0);
+  assert(Drain(queue) == 0);
+  assert(sink.IsNativeWasmDispatchEnabled());
+
+  Configure(queue);
+  sink.SetNativeWasmDispatchEmitter(&CaptureBudgetDispatch);
+  sink.SetNativeWasmIndirectEmitter(&CaptureBudgetIndirect);
+  budget_dispatch_indexes.clear();
+  budget_indirect_indexes.clear();
+  for (std::uint32_t function = 0; function < 8; ++function) {
+    dispatch(allowed, function);
+    dispatch(allowed, function);
+  }
+  assert(budget_dispatch_indexes.size() == 16);
+  dispatch(allowed, 8);
+  // The 16-record stream cap refuses a full observation and keeps the hook
+  // enabled so the refused execution can be named. Other streams stay open.
+  assert(sink.IsNativeWasmDispatchEnabled());
+  assert(BudgetGap(pop()) == "native_wasm_dispatch_budget_incomplete");
+  auto stream_identity = ReadDispatchOverflow(pop());
+  assert(stream_identity.kind == reb::kWasmOverflowKindIdentity &&
+         stream_identity.function_index == 8 && stream_identity.ring_index == 0);
+  indirect.function_index = 9;
+  sink.RecordNativeWasmIndirect(indirect);
+  assert(sink.IsNativeWasmIndirectEnabled() &&
+         budget_indirect_indexes == std::vector<std::uint32_t>{0});
+  sink.ResetNativeWasmSampleBudgets();
+  assert(sink.IsNativeWasmDispatchEnabled() && sink.IsNativeWasmIndirectEnabled());
+  dispatch(allowed, 0);
+  sink.RecordNativeWasmIndirect(indirect);
+  assert(budget_dispatch_indexes.back() == 0 && budget_indirect_indexes.back() == 0);
+
+  policy = {};
+  policy.samples_per_indirect_site = 1;
+  sink.SetNativeWasmSampleBudgetPolicy(policy);
+  Configure(queue);
+  sink.SetNativeWasmDispatchEmitter(&CaptureBudgetDispatch);
+  sink.SetNativeWasmIndirectEmitter(&CaptureBudgetIndirect);
+  budget_dispatch_indexes.clear();
+  budget_indirect_indexes.clear();
+  indirect.module_bytes = allowed;
+  indirect.function_index = 1;
+  indirect.module_byte_offset = 10;
+  sink.RecordNativeWasmIndirect(indirect);
+  sink.RecordNativeWasmIndirect(indirect);
+  indirect.module_byte_offset = 13;
+  sink.RecordNativeWasmIndirect(indirect);
+  dispatch(allowed, 1);
+  assert((budget_indirect_indexes == std::vector<std::uint32_t>{0, 1}));
+  assert((budget_dispatch_indexes == std::vector<std::uint32_t>{0}));
+  assert(BudgetGap(pop()) == "native_wasm_indirect_site_budget_incomplete");
+  auto site_identity = ReadIndirectOverflow(pop());
+  assert(site_identity.kind == reb::kWasmOverflowKindIdentity && site_identity.ring_index == 0 &&
+         site_identity.function_index == 1 && site_identity.module_byte_offset == 10);
+  assert(Drain(queue) == 0);
+  assert(sink.IsNativeWasmIndirectEnabled());
+
+  policy = {};
+  policy.function_allow_count = 1;
+  policy.function_allow[0] = 1;
+  policy.function_deny_count = 1;
+  policy.function_deny[0] = 1;
+  sink.SetNativeWasmSampleBudgetPolicy(policy);
+  Configure(queue);
+  sink.SetNativeWasmDispatchEmitter(&CaptureBudgetDispatch);
+  budget_dispatch_indexes.clear();
+  dispatch(allowed, 1);
+  assert(budget_dispatch_indexes.empty());
+  assert(BudgetGap(pop()) == "native_wasm_dispatch_filtered");
+  auto denied = ReadDispatchOverflow(pop());
+  assert(denied.kind == reb::kWasmOverflowKindIdentity && denied.function_index == 1 &&
+         denied.ring_index == 0);
+  assert(Drain(queue) == 0);
+  policy.function_deny_count = 0;
+  policy.function_deny[0] = 0;
+  sink.SetNativeWasmSampleBudgetPolicy(policy);
+  Configure(queue);
+  sink.SetNativeWasmDispatchEmitter(&CaptureBudgetDispatch);
+  budget_dispatch_indexes.clear();
+  dispatch(allowed, 2);
+  dispatch(allowed, 1);
+  assert((budget_dispatch_indexes == std::vector<std::uint32_t>{0}));
+  assert(BudgetGap(pop()) == "native_wasm_dispatch_filtered");
+  auto excluded = ReadDispatchOverflow(pop());
+  assert(excluded.kind == reb::kWasmOverflowKindIdentity && excluded.function_index == 2 &&
+         excluded.ring_index == 0);
+  assert(Drain(queue) == 0);
+
+  sink.SetNativeWasmSampleBudgetPolicy({});
+  transport.Disable();
+  std::cout << "PASS native Wasm sample budgets; per function, per call site, module allowlist, "
+               "deny-wins and reset\n";
+}
+
+std::string ScopeGapReason(const NativeProbeEvent& event) {
+  assert(event.header.type == reb::NativeProbeType::kGap);
+  assert(event.header.type != reb::NativeProbeType::kWasmDispatchObservation);
+  return std::string(reinterpret_cast<const char*>(event.inline_payload.data()),
+                     event.header.payload_size);
+}
+int native_wasm_limit_probes = 0;
+void ProbeNativeWasmLimits() noexcept {
+  ++native_wasm_limit_probes;
+  sink.NoteNativeWasmDispatchScope(reb::NativeWasmScopeGap::kJitless);
+  sink.NoteNativeWasmIndirectScope(reb::NativeWasmScopeGap::kJitless);
+}
+void NativeWasmScopeGaps() {
+  NativeProbeQueue queue;
+  const auto retained_before = native_wasm_retained;
+  transport.SetNativeWasmLimitProbe(nullptr);
+  Configure(queue);
+  assert(sink.NoteNativeWasmDispatchScope(reb::NativeWasmScopeGap::kWorker));
+  assert(ScopeGapReason(One(queue)) == "native_wasm_dispatch_worker_unsupported");
+  assert(sink.NoteNativeWasmDispatchScope(reb::NativeWasmScopeGap::kWorker));
+  assert(Drain(queue) == 0);
+  assert(sink.NoteNativeWasmDispatchScope(reb::NativeWasmScopeGap::kWorklet));
+  assert(ScopeGapReason(One(queue)) == "native_wasm_dispatch_worklet_unsupported");
+  assert(sink.NoteNativeWasmDispatchScope(reb::NativeWasmScopeGap::kWorklet));
+  assert(Drain(queue) == 0);
+  sink.NoteNativeWasmDispatchScope(reb::NativeWasmScopeGap::kJitless);
+  assert(ScopeGapReason(One(queue)) == "native_wasm_dispatch_jitless_unsupported");
+  sink.NoteNativeWasmDispatchScope(reb::NativeWasmScopeGap::kLeftLiftoff);
+  assert(ScopeGapReason(One(queue)) == "native_wasm_dispatch_left_liftoff");
+  assert(sink.NoteNativeWasmIndirectScope(reb::NativeWasmScopeGap::kWorker));
+  assert(ScopeGapReason(One(queue)) == "native_wasm_indirect_worker_unsupported");
+  assert(sink.NoteNativeWasmIndirectScope(reb::NativeWasmScopeGap::kWorklet));
+  assert(ScopeGapReason(One(queue)) == "native_wasm_indirect_worklet_unsupported");
+  assert(sink.NoteNativeWasmIndirectScope(reb::NativeWasmScopeGap::kWorklet));
+  assert(Drain(queue) == 0);
+  sink.NoteNativeWasmIndirectScope(reb::NativeWasmScopeGap::kJitless);
+  assert(ScopeGapReason(One(queue)) == "native_wasm_indirect_jitless_unsupported");
+  sink.NoteNativeWasmIndirectScope(reb::NativeWasmScopeGap::kLeftLiftoff);
+  assert(ScopeGapReason(One(queue)) == "native_wasm_indirect_left_liftoff");
+  sink.NoteNativeWasmIndirectScope(reb::NativeWasmScopeGap::kLeftLiftoff);
+  assert(Drain(queue) == 0);
+  assert(native_wasm_retained == retained_before);
+
+  // The sink still accepts a scope notice after the sample budget. The
+  // admission predicate stays true so later executions can be named; this
+  // checks the sink, not that a later worker execution is visited.
+  Configure(queue, 43);
+  sink.SetNativeWasmDispatchEmitter(&CaptureNativeWasm);
+  native_wasm_retained = 0;
+  native_wasm_accept = true;
+  constexpr std::array<std::uint8_t, 12> module{0, 97, 115, 109, 1, 0, 0, 0, 0x0e, 2, 0, 0};
+  for (int index = 0; index < 17; ++index) {
+    sink.RecordNativeWasmDispatch(7, 8, "https://owned.test/module.wasm", module, 0, 8, UINT32_MAX,
+                                  2, 9, 10);
+  }
+  assert(native_wasm_retained == 16);
+  assert(sink.IsNativeWasmDispatchEnabled());
+  assert(ScopeGapReason(Pop(queue)) == "native_wasm_dispatch_budget_incomplete");
+  auto budget_identity = ReadDispatchOverflow(Pop(queue));
+  assert(budget_identity.kind == reb::kWasmOverflowKindIdentity && budget_identity.ring_index == 0);
+  sink.NoteNativeWasmDispatchScope(reb::NativeWasmScopeGap::kLeftLiftoff);
+  assert(ScopeGapReason(One(queue)) == "native_wasm_dispatch_left_liftoff");
+  assert(sink.NoteNativeWasmDispatchScope(reb::NativeWasmScopeGap::kWorker));
+  assert(ScopeGapReason(One(queue)) == "native_wasm_dispatch_worker_unsupported");
+  assert(sink.NoteNativeWasmDispatchScope(reb::NativeWasmScopeGap::kWorklet));
+  assert(ScopeGapReason(One(queue)) == "native_wasm_dispatch_worklet_unsupported");
+  assert(Drain(queue) == 0);
+  native_wasm_retained = 0;
+
+  sink.SetNativeWasmDispatchEmitter(nullptr);
+  assert(!sink.NoteNativeWasmDispatchScope(reb::NativeWasmScopeGap::kWorker));
+  assert(!sink.NoteNativeWasmDispatchScope(reb::NativeWasmScopeGap::kWorklet));
+  assert(Drain(queue) == 0);
+  sink.NoteNativeWasmIndirectScope(reb::NativeWasmScopeGap::kWorker);
+  assert(ScopeGapReason(One(queue)) == "native_wasm_indirect_worker_unsupported");
+  sink.SetNativeWasmIndirectEmitter(nullptr);
+  assert(!sink.NoteNativeWasmIndirectScope(reb::NativeWasmScopeGap::kJitless));
+  assert(!sink.NoteNativeWasmIndirectScope(reb::NativeWasmScopeGap::kWorklet));
+  assert(Drain(queue) == 0);
+
+  Configure(queue, 44, kForever, reb::NativeProbeCategoryMask(reb::NativeProbeCategory::kVm));
+  sink.NoteNativeWasmDispatchScope(reb::NativeWasmScopeGap::kJitless);
+  sink.NoteNativeWasmIndirectScope(reb::NativeWasmScopeGap::kLeftLiftoff);
+  assert(Drain(queue) == 0);
+
+  transport.SetNativeWasmLimitProbe(&ProbeNativeWasmLimits);
+  Configure(queue, 45);
+  assert(native_wasm_limit_probes == 1);
+  NativeProbeEvent first;
+  NativeProbeEvent second;
+  assert(queue.TryPop(first) && queue.TryPop(second));
+  assert(ScopeGapReason(first) == "native_wasm_dispatch_jitless_unsupported");
+  assert(ScopeGapReason(second) == "native_wasm_indirect_jitless_unsupported");
+  assert(Drain(queue) == 0);
+  Configure(queue, 46);
+  assert(native_wasm_limit_probes == 2);
+  assert(Drain(queue) == 2);
+  transport.SetNativeWasmLimitProbe(nullptr);
+  Configure(queue, 47);
+  assert(native_wasm_limit_probes == 2);
+  assert(Drain(queue) == 0);
+  // A full ring refuses the gap and must not mark it sent.
+  Configure(queue, 48);
+  Fill(queue);
+  assert(!sink.NoteNativeWasmDispatchScope(reb::NativeWasmScopeGap::kWorklet));
+  assert(Drain(queue) == reb::kNativeProbeQueueCapacity);
+  assert(sink.NoteNativeWasmDispatchScope(reb::NativeWasmScopeGap::kWorklet));
+  assert(ScopeGapReason(One(queue)) == "native_wasm_dispatch_worklet_unsupported");
+  Fill(queue);
+  assert(!sink.NoteNativeWasmIndirectScope(reb::NativeWasmScopeGap::kWorklet));
+  assert(Drain(queue) == reb::kNativeProbeQueueCapacity);
+  assert(sink.NoteNativeWasmIndirectScope(reb::NativeWasmScopeGap::kWorklet));
+  assert(ScopeGapReason(One(queue)) == "native_wasm_indirect_worklet_unsupported");
+  transport.Disable();
+  std::cout << "PASS native Wasm scope gaps; worker, worklet, jitless, left Liftoff, cap, "
+               "full ring, and session probe\n";
+}
+
+struct ExecutionSeen {
+  std::uint8_t kind = 0;
+  std::uint8_t reason = 0;
+  std::uint8_t known = 0;
+  std::uint8_t stream = 0;
+  std::uint32_t function = 0;
+  std::uint32_t offset = 0;
+  std::uint32_t invocation = 0;
+  std::uint32_t sample = 0;
+  bool module_empty = true;
+};
+std::vector<ExecutionSeen> execution_seen;
+unsigned execution_indirect_records = 0;
+std::uint32_t execution_resolution = 99;
+
+bool CaptureExecutionIndirect(const reb::NativeWasmIndirectObservation& observation,
+                              std::uint64_t) noexcept {
+  execution_resolution = static_cast<std::uint32_t>(observation.resolution);
+  assert(observation.callee_function_index == 2);
+  ++execution_indirect_records;
+  return true;
+}
+unsigned execution_nudges = 0;
+void CountExecutionNudge() noexcept {
+  ++execution_nudges;
+}
+bool CaptureExecutionOutcome(const reb::NativeWasmExecutionObservation& observation,
+                             std::uint64_t) noexcept {
+  execution_seen.push_back(
+      {static_cast<std::uint8_t>(observation.kind), static_cast<std::uint8_t>(observation.reason),
+       observation.known, static_cast<std::uint8_t>(observation.related_stream),
+       observation.function_index, observation.module_byte_offset, observation.invocation_id,
+       observation.related_sample_index, observation.module_bytes.empty()});
+  return true;
+}
+std::string_view GapText(const NativeProbeEvent& event) {
+  return {reinterpret_cast<const char*>(event.inline_payload.data()), event.header.payload_size};
+}
+void NativeWasmExecutionOutcomes() {
+  const auto owned_queue = std::make_unique<NativeProbeQueue>();
+  NativeProbeQueue& queue = *owned_queue;
+  const auto saved_now = base::test_now_ns.load();
+  constexpr std::array<std::uint8_t, 24> module{0, 97, 115, 109, 1, 0, 0, 0, 0x11, 0, 0, 0,
+                                                0, 0,  0,   0,   0, 0, 0, 0, 0,    0, 0, 0};
+  reb::NativeWasmIndirectObservation input;
+  input.header.frame_id = 8;
+  input.execution_context_id = 7;
+  input.document_token_high = 9;
+  input.document_token_low = 10;
+  input.source_url = "https://owned.test/module.wasm";
+  input.module_bytes = module;
+  input.module_byte_offset = 8;
+  input.function_index = 1;
+  input.slot = 1;
+  input.callee_function_index = 2;
+  input.resolution = reb::NativeWasmIndirectResolution::kResolved;
+  const auto deadline = reb::kNativeWasmExecutionDeadlineNs;
+  const auto trap = [&](bool function_known, std::uint32_t function, bool offset_known,
+                        std::uint32_t offset) {
+    sink.ReportWasmTrap(reb::NativeWasmExecutionReason::kSignatureMismatch,
+                        reb::NativeWasmExecutionBounds::kNone, function_known, function,
+                        offset_known, offset, input.execution_context_id, input.header.frame_id,
+                        input.source_url, input.document_token_high, input.document_token_low,
+                        module);
+  };
+  Configure(queue);
+  sink.SetNativeWasmIndirectEmitter(&CaptureExecutionIndirect);
+  sink.SetNativeWasmExecutionEmitter(&CaptureExecutionOutcome);
+  sink.SetNativeWasmExecutionNudge(&CountExecutionNudge);
+  execution_nudges = 0;
+  execution_seen.clear();
+  trap(true, 4, true, 20);
+  assert(execution_seen.empty());  // No host call, so no invented invocation.
+  base::test_now_ns = 1000;
+  assert(sink.NoteWasmHostCallEntered(true, true, 4));
+  assert(!sink.NoteWasmHostCallEntered(false, true, 5));
+  sink.NoteWasmHostCallReturned();
+  sink.RecordNativeWasmIndirect(input);
+  assert(execution_resolution ==
+         static_cast<std::uint32_t>(reb::NativeWasmIndirectResolution::kResolved));
+  assert(execution_resolution !=
+         static_cast<std::uint32_t>(reb::NativeWasmIndirectResolution::kNull));
+  assert(execution_seen.empty());
+  trap(true, 4, true, 20);
+  assert(execution_seen.size() == 1);
+  const auto& mismatch = execution_seen[0];
+  assert(mismatch.kind == static_cast<std::uint8_t>(reb::NativeWasmExecutionKind::kTrap));
+  assert(mismatch.reason ==
+         static_cast<std::uint8_t>(reb::NativeWasmExecutionReason::kSignatureMismatch));
+  assert(mismatch.function == 4 && mismatch.offset == 20 &&
+         mismatch.offset != input.module_byte_offset);
+  assert((mismatch.known & reb::kNativeWasmExecutionFunctionKnown) != 0);
+  assert((mismatch.known & reb::kNativeWasmExecutionOffsetKnown) != 0);
+  assert(mismatch.stream ==
+         static_cast<std::uint8_t>(reb::NativeWasmExecutionStream::kCallIndirect));
+  assert(mismatch.sample == 0 && mismatch.invocation != 0 && !mismatch.module_empty);
+  base::test_now_ns = static_cast<std::int64_t>(1000 + deadline + 5);
+  assert(sink.PollWasmExecutionHeartbeat() == reb::NativeWasmExecutionHeartbeat::kContinue);
+  assert(execution_seen.size() == 1);  // The trap closed the call.
+  // A nonzero function with the known bit clear is refused, not stored as unknown.
+  Drain(queue);
+  execution_seen.clear();
+  sink.NoteWasmHostCallEntered(true, true, 4);
+  sink.RecordNativeWasmIndirect(input);
+  trap(false, 9, false, 0);
+  assert(execution_seen.empty());
+  const auto refused = One(queue);
+  assert(refused.header.type == reb::NativeProbeType::kGap);
+  assert(GapText(refused) == "native_wasm_execution_input_unavailable");
+  base::test_now_ns = 2000;
+  execution_seen.clear();
+  sink.NoteWasmHostCallEntered(true, true, 1);
+  const auto indirect_before_hang = execution_indirect_records;
+  sink.RecordNativeWasmIndirect(input);
+  assert(sink.WasmExecutionNudgeDelayNs() == deadline);
+  base::test_now_ns = static_cast<std::int64_t>(2000 + deadline - 1);
+  assert(sink.WasmExecutionNudgeDelayNs() == 1);
+  assert(sink.PollWasmExecutionHeartbeat() == reb::NativeWasmExecutionHeartbeat::kContinue);
+  assert(execution_seen.empty());
+  base::test_now_ns = static_cast<std::int64_t>(2000 + deadline);
+  assert(sink.WasmExecutionNudgeDelayNs() == 50'000'000ULL);
+  assert(sink.PollWasmExecutionHeartbeat() == reb::NativeWasmExecutionHeartbeat::kContinue);
+  assert(sink.WasmExecutionNudgeDelayNs() == reb::kNativeWasmExecutionNoNudge);
+  assert(execution_seen.size() == 1);
+  assert(execution_seen[0].kind ==
+         static_cast<std::uint8_t>(reb::NativeWasmExecutionKind::kStillExecuting));
+  assert(execution_seen[0].reason ==
+         static_cast<std::uint8_t>(reb::NativeWasmExecutionReason::kUnknown));
+  assert(execution_seen[0].function == input.function_index);
+  assert(execution_seen[0].offset == input.module_byte_offset);
+  assert(execution_seen[0].module_empty);
+  assert(sink.PollWasmExecutionHeartbeat() == reb::NativeWasmExecutionHeartbeat::kContinue);
+  assert(execution_seen.size() == 1);  // Still inside; one event.
+  sink.NoteWasmHostCallReturned();
+  base::test_now_ns = static_cast<std::int64_t>(2000 + deadline * 2);
+  assert(sink.PollWasmExecutionHeartbeat() == reb::NativeWasmExecutionHeartbeat::kContinue);
+  assert(execution_seen.size() == 1);
+  static_cast<void>(indirect_before_hang);
+  execution_seen.clear();
+  base::test_now_ns = 3000;
+  sink.NoteWasmHostCallEntered(true, true, 3);
+  sink.RecordNativeWasmIndirect(input);
+  const auto records_before_later = execution_indirect_records;
+  execution_nudges = 0;
+  sink.RequestWasmExecutionInterrupt();
+  assert(execution_nudges == 1);
+  assert(sink.PollWasmExecutionHeartbeat() == reb::NativeWasmExecutionHeartbeat::kInterrupt);
+  assert(execution_seen.size() == 1);
+  assert(execution_seen[0].kind == static_cast<std::uint8_t>(reb::NativeWasmExecutionKind::kTrap));
+  assert(execution_seen[0].reason ==
+         static_cast<std::uint8_t>(reb::NativeWasmExecutionReason::kInterrupt));
+  assert(execution_seen[0].function == input.function_index);
+  assert(execution_seen[0].offset == input.module_byte_offset);
+  sink.NoteWasmHostCallEntered(true, true, 3);
+  sink.RecordNativeWasmIndirect(input);
+  assert(execution_indirect_records == records_before_later + 1);
+  assert(sink.PollWasmExecutionHeartbeat() == reb::NativeWasmExecutionHeartbeat::kContinue);
+  assert(execution_seen.size() == 1);  // The flag was consumed.
+  sink.NoteWasmHostCallReturned();
+  execution_seen.clear();
+  base::test_now_ns = 4000;
+  sink.NoteWasmHostCallEntered(true, true, 1);
+  sink.RecordNativeWasmIndirect(input);
+  sink.NoteWasmHostCallReturned();
+  base::test_now_ns = static_cast<std::int64_t>(4000 + deadline * 2);
+  assert(sink.PollWasmExecutionHeartbeat() == reb::NativeWasmExecutionHeartbeat::kContinue);
+  assert(execution_seen.empty());
+  // A return does not consume the request. The next tracked call does.
+  base::test_now_ns = 4500;
+  assert(sink.NoteWasmHostCallEntered(true, true, 1));
+  sink.RecordNativeWasmIndirect(input);
+  sink.RequestWasmExecutionInterrupt();
+  sink.NoteWasmHostCallReturned();
+  assert(sink.PollWasmExecutionHeartbeat() == reb::NativeWasmExecutionHeartbeat::kContinue);
+  assert(execution_seen.empty());
+  assert(sink.NoteWasmHostCallEntered(true, true, 1));
+  sink.RecordNativeWasmIndirect(input);
+  assert(sink.PollWasmExecutionHeartbeat() == reb::NativeWasmExecutionHeartbeat::kInterrupt);
+  assert(execution_seen.size() == 1);
+  assert(execution_seen[0].reason ==
+         static_cast<std::uint8_t>(reb::NativeWasmExecutionReason::kInterrupt));
+  sink.NoteWasmHostCallEntered(true, true, 1);
+  sink.RecordNativeWasmIndirect(input);
+  assert(sink.PollWasmExecutionHeartbeat() == reb::NativeWasmExecutionHeartbeat::kContinue);
+  assert(execution_seen.size() == 1);
+  sink.NoteWasmHostCallReturned();
+  execution_seen.clear();
+  // Replacing the configuration drops a request aimed at the previous one.
+  base::test_now_ns = 4600;
+  assert(sink.NoteWasmHostCallEntered(true, true, 1));
+  sink.RecordNativeWasmIndirect(input);
+  sink.RequestWasmExecutionInterrupt();
+  sink.SetEmitters(&AcceptRuntimeEvent, &CaptureRuntimeMetadata, 42,
+                   reb::kAllNativeProbeCategoryMask, kForever, false, &NativeWasmFrameLookup);
+  sink.SetNativeWasmIndirectEmitter(&CaptureExecutionIndirect);
+  sink.SetNativeWasmExecutionEmitter(&CaptureExecutionOutcome);
+  assert(sink.PollWasmExecutionHeartbeat() == reb::NativeWasmExecutionHeartbeat::kContinue);
+  assert(execution_seen.empty());
+  assert(sink.NoteWasmHostCallEntered(true, true, 1));
+  sink.RecordNativeWasmIndirect(input);
+  assert(sink.PollWasmExecutionHeartbeat() == reb::NativeWasmExecutionHeartbeat::kContinue);
+  assert(execution_seen.empty());
+  sink.NoteWasmHostCallReturned();
+  sink.SetEmitters(&AcceptRuntimeEvent, &CaptureRuntimeMetadata, 42,
+                   reb::kAllNativeProbeCategoryMask, kForever, false, &NativeWasmFrameLookup);
+  native_wasm_frame_lookups = 0;
+  assert(sink.IsNativeWasmExecutionEnabled());
+  sink.NoteWasmHostCallEntered(true, false, 0);
+  assert(sink.PollWasmExecutionHeartbeat() == reb::NativeWasmExecutionHeartbeat::kContinue);
+  assert(native_wasm_frame_lookups == 0);
+  sink.NoteWasmHostCallReturned();
+  transport.Disable();
+  sink.NoteWasmHostCallEntered(true, true, 1);
+  const auto nudges_while_disabled = execution_nudges;
+  sink.RequestWasmExecutionInterrupt();
+  assert(execution_nudges == nudges_while_disabled);
+  assert(sink.PollWasmExecutionHeartbeat() == reb::NativeWasmExecutionHeartbeat::kContinue);
+  assert(execution_seen.empty());
+  sink.SetNativeWasmExecutionNudge(nullptr);
+  base::test_now_ns = saved_now;
+  std::cout << "PASS native Wasm execution outcomes; signature trap distinct from null, "
+               "still-executing while inside, interrupt then a later call, quiet return\n";
+}
+
 #include "guest_sampler_tests.h"
 #include "js_dispatch_tests.h"
 #include "js_invocation_tests.h"
@@ -1623,6 +2245,9 @@ int main() {
   Run<&NativeGuestModuleVerdictOverflow>();
   Run<&NativeWasmRuntimeAdmission>();
   Run<&NativeWasmIndirectAdmission>();
+  Run<&NativeWasmSampleBudgetControls>();
+  Run<&NativeWasmScopeGaps>();
+  Run<&NativeWasmExecutionOutcomes>();
   Run<&NativeJsDispatchWire>();
   Run<&NativeJsDispatchAdmission>();
   Run<&NativeJsInvocationAdmission>();

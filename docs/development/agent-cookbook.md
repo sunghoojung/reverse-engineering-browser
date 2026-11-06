@@ -83,7 +83,16 @@ get_events {"type": "wasm_dispatch_observation,wasm_guest_dispatch,wasm_guest_in
 ```
 
 Good: the samples in file order, each with `sequence_number`,
-`monotonic_time_ns`, `artifact_id` (the module) and a hex `payload`. The
+`monotonic_time_ns`, `artifact_id` (the module), the hex `payload`, and
+`wasm_observation` when the type is `wasm_dispatch_observation` or
+`wasm_indirect_observation`. `status` `decoded` names `function_index`,
+`module_byte_offset`, `sample_index`, `js_invocation_state`, and
+`js_invocation_id`. A dispatch object also has `selector` and `table_count`.
+An indirect object also has `table_index`, `slot`, `callee_function_index`,
+and `resolution` (`resolved`, `null`, `out-of-bounds`, `foreign`,
+`unresolved`). `status` `invalid` has no fields. A payload version other than
+1 or 2 is invalid in full, not a version-2 prefix. The hex remains, and the
+decode does not need an opcode workspace for that module. The
 payload layouts are in
 [native Wasm dispatch](../../protocol/native-wasm-dispatch-v1.md#wire-contract)
 (event 17, and event 20 for `call_indirect`) and
@@ -125,17 +134,40 @@ identifiers, for example:
 
 | Reason | Meaning |
 | --- | --- |
-| `native_wasm_dispatch_budget_incomplete` | The 16-observation `br_table` budget filled. Later executions are `wasm_dispatch_overflow` identities up to the ring, then one omitted count. |
+| `native_wasm_dispatch_budget_incomplete` | The 16-observation `br_table` stream budget filled. Later executions are `wasm_dispatch_overflow` identities up to the ring, then one omitted count. The stream stays enabled. |
+| `native_wasm_dispatch_function_budget_incomplete` | That function's own `br_table` maximum was reached. Other functions can still be recorded. The refused execution is a `wasm_dispatch_overflow` identity. |
+| `native_wasm_indirect_function_budget_incomplete` | That function's own `call_indirect` maximum was reached. The refused call is a `wasm_indirect_overflow` identity. |
+| `native_wasm_indirect_site_budget_incomplete` | That `call_indirect` site's maximum was reached. The refused call is a `wasm_indirect_overflow` identity. |
+| `native_wasm_dispatch_filtered` | The module or function was excluded. It did not consume a sample index. The research UI labels this as a sample-policy exclusion, not a loss. The excluded execution still keeps an overflow identity. |
+| `native_wasm_dispatch_worker_unsupported` | A `br_table` ran in a worker, which is not sampled. |
+| `native_wasm_dispatch_worklet_unsupported` | A `br_table` ran in a worklet, which is not sampled. |
+| `native_wasm_dispatch_jitless_unsupported` | Jitless Wasm is outside the Liftoff hooks. |
+| `native_wasm_dispatch_left_liftoff` | A Wasm function was published outside Liftoff. |
+| `native_wasm_indirect_worker_unsupported` | A `call_indirect` ran in a worker, which is not sampled. |
+| `native_wasm_indirect_worklet_unsupported` | A `call_indirect` ran in a worklet, which is not sampled. |
+| `native_wasm_indirect_jitless_unsupported` | Jitless `call_indirect` is outside the Liftoff hooks. |
+| `native_wasm_indirect_left_liftoff` | A `call_indirect` function was published outside Liftoff. |
 | `native_guest_sample_limit` | The guest adapter's `sample_limit` was reached. |
 | `native_guest_parent_unresolved` | A guest record's parent invocation was not linked. |
 | `..._transport_unavailable`, `..._document_unavailable` | A capture stage was not available. |
 
-A full budget is evidence too: the capture saw more than it kept. For Wasm
-`br_table` and `call_indirect`, `get_events` with `type` `wasm_dispatch_overflow`
-or `wasm_indirect_overflow` reads the compact identities past the 16 full
-observations. Those records are not full observations and have no parent edge
-or artifact id.
-To sample something else, start a new session with narrower capture options.
+A full budget is evidence too: the capture saw more than it kept. A session
+start can keep N samples of one function, exclude functions, or admit only
+modules whose SHA-256 is listed (`wasm_samples_per_function`,
+`wasm_samples_per_indirect_site`, `wasm_function_allow`,
+`wasm_function_deny`, `wasm_module_allowlist`).
+`session_action` `reset_wasm_sample_budgets` restarts both sample indexes
+without a new session and starts a new overflow ring. It publishes each
+stream's pending omitted count first. The browser applies that reset on its
+next writer wake, about 250ms later. A live browser needs a rebuild before it
+honors either control.
+For Wasm `br_table` and `call_indirect`, `get_events` with `type`
+`wasm_dispatch_overflow` (28) or `wasm_indirect_overflow` (29) reads the
+compact identities for samples a function, module, call-site, or stream
+budget refused. The response adds `wasm_overflow` beside the hex. Those
+records are not full observations and have no parent edge or artifact id.
+To sample something else, start a new session with narrower capture options
+or reset the budgets.
 
 ## 7. Wait for the browser to produce something
 
@@ -384,6 +416,28 @@ lacked `document_start` or the Brave lacks the Native Console v3 overlay
 and `stop` before `session_action` `end`. Details:
 [document-start Console scripts](console-document-start-scripts.md).
 
+## 20. Read or call the attached Wasm instance
+
+`get_live_wasm` and `live_wasm_action` need `--allow-effects`. Copy
+`instance_id`, `document_token_high`, `document_token_low`, and
+`document_epoch` from the attachment, and send `confirmed: true`.
+
+`availability: unsupported` with `reason: browser_command_unsupported` means
+this backend has no command socket. A current Brave build does not serve one.
+That response is not an empty inventory: `budget` is null and `attachments`
+is empty. Do not invent memory bytes or a return value from it.
+
+`read_memory` and `write_memory` name a memory and a 1 to 4096 byte slice. A
+slice past the end is `out_of_bounds` and is not clipped. `call_export` and
+`call_function` take `{type, bits}` arguments. `bits` is the unsigned bit
+pattern, so i32 `-1` is `4294967295`. `ok` returns `memory` or `results`.
+`unknown_export`, `unknown_function`, `unknown_memory`, `signature_mismatch`,
+`stale_document`, and `instance_mismatch` have `entered: false`. A mismatch
+does not enter. `trap` and `did_not_return` have `entered: true` and no
+`results`. A stale document or a different instance is refused and does not
+change memory. These commands do not replace dispatch capture.
+Details: [live Wasm instance commands](../../protocol/live-wasm-instance-v1.md).
+
 ## Response shapes at a glance
 
 | Tool | Look at |
@@ -398,3 +452,5 @@ and `stop` before `session_action` `end`. Details:
 | `get_native_console` | `binding_id`, `targets` (`frame`, `origin`, `top_relation`, `out_of_process`), `selection` |
 | `native_console_action` `evaluate` | `status`, `type`, `text`, `truncated` |
 | `get_native_console_document_start` | `document_start.scripts`, `pending_renderer_processes`, `output.records` |
+| `get_live_wasm` | `availability`, `reason`, `attachments`, `budget`, `observations` |
+| `live_wasm_action` | `status`, `entered`, `memory`, `results` |

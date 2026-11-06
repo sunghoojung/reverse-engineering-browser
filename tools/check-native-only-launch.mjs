@@ -43,13 +43,35 @@ const section = (start, end) => {
 const flagsCode = section('native_js_flags=()', 'locate_brave_v8_image() {') +
   section('js_invocation_session_state=""', 'if [[ ${#native_js_flags[@]} -gt 0 ]]; then\n  require_brave_v8_flags') +
   section('if [[ ${#native_js_flags[@]} -gt 0 ]]; then\n  brave_arguments+=', 'if [[ "${capture_canvas_images}"');
+// Budget options are absent here: the variables are not declared, and the
+// slice runs under set -u. That must not add a switch or abort.
 for (const quiet of [0, 1]) for (const dispatch of [0, 1]) for (const indirect of [0, 1]) {
   const result = spawnSync(shell, ['-c', `set -eu; brave_arguments=(); native_quiet_mode=${quiet}; native_wasm_dispatch=${dispatch}; native_wasm_call_indirect=${indirect}; native_guest_adapter=""; ${flagsCode}
 printf '%s' "${'${brave_arguments[*]-}'}"`], {encoding:'utf8'});
   assert.equal(result.status, 0, result.stderr);
-  const expected = [quiet ? '--reb-ignore-debugger-statements' : '', dispatch ? '--reb-wasm-br-table-dispatch' : '',
+  const flags = [quiet ? '--reb-ignore-debugger-statements' : '', dispatch ? '--reb-wasm-br-table-dispatch' : '',
     indirect ? '--reb-wasm-call-indirect-dispatch' : ''].filter(Boolean);
-  assert.equal(result.stdout, expected.length ? '--js-flags=' + expected.join(' ') : '');
+  assert.equal(result.stdout, flags.length ? '--js-flags=' + flags.join(' ') : '');
+  assert.doesNotMatch(result.stdout, /--reb-wasm-(?:samples|function|module-allowlist|budget-reset)/);
+}
+{
+  const result = spawnSync(shell, ['-c', `set -eu; brave_arguments=(); native_quiet_mode=0; native_wasm_dispatch=0; native_wasm_call_indirect=0; native_guest_adapter=""; wasm_budget_reset_file=/tmp/reset; ${flagsCode}
+printf '%s' "${'${brave_arguments[*]-}'}"`], {encoding:'utf8'});
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.stdout, '--reb-wasm-budget-reset-file=/tmp/reset');
+}
+{
+  const result = spawnSync(shell, ['-c', `set -eu; brave_arguments=(); native_quiet_mode=0; native_wasm_dispatch=1; native_wasm_call_indirect=1; native_guest_adapter=""; native_wasm_samples_per_function=2; native_wasm_samples_per_indirect_site=3; native_wasm_function_allow=1,2; native_wasm_function_deny=9; native_wasm_module_allowlist=/tmp/mods.txt; wasm_budget_reset_file=/tmp/reset; ${flagsCode}
+printf '%s\\n' "${'${brave_arguments[@]}'}"`], {encoding:'utf8'});
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(result.stdout.trimEnd().split('\n'), [
+    '--js-flags=--reb-wasm-br-table-dispatch --reb-wasm-call-indirect-dispatch',
+    '--reb-wasm-samples-per-function=2',
+    '--reb-wasm-samples-per-indirect-site=3',
+    '--reb-wasm-function-allow=1,2',
+    '--reb-wasm-function-deny=9',
+    '--reb-wasm-module-allowlist=/tmp/mods.txt',
+    '--reb-wasm-budget-reset-file=/tmp/reset']);
 }
 for (const [variable, options] of [['REB_NATIVE_WASM_DISPATCH', {REB_NATIVE_WASM_DISPATCH:'invalid'}],
   ['REB_NATIVE_WASM_DISPATCH', {REB_NATIVE_WASM_DISPATCH:'1',REB_CAPTURE_CATEGORY_MASK:'1'}],
@@ -58,6 +80,17 @@ for (const [variable, options] of [['REB_NATIVE_WASM_DISPATCH', {REB_NATIVE_WASM
   const result = spawnSync(shell, [join(root,'scripts/run-live-session.sh')], {env:{...process.env,...options},encoding:'utf8'});
   assert.equal(result.status,2,result.stderr);
   assert.match(result.stderr,new RegExp(variable));
+}
+for (const [options, pattern] of [
+  [{REB_NATIVE_WASM_SAMPLES_PER_FUNCTION:'99', REB_NATIVE_WASM_DISPATCH:'1'}, /must be from 1 to 16/],
+  [{REB_NATIVE_WASM_SAMPLES_PER_FUNCTION:'2'}, /require REB_NATIVE_WASM_DISPATCH/],
+  [{REB_NATIVE_WASM_FUNCTION_ALLOW:'1,1', REB_NATIVE_WASM_DISPATCH:'1'}, /unique/],
+  [{REB_NATIVE_WASM_FUNCTION_ALLOW:'16777216', REB_NATIVE_WASM_DISPATCH:'1'}, /16777216/],
+  [{REB_NATIVE_WASM_MODULE_ALLOWLIST:'relative.txt', REB_NATIVE_WASM_DISPATCH:'1'}, /REB_NATIVE_WASM_MODULE_ALLOWLIST/],
+]) {
+  const result = spawnSync(shell, [join(root,'scripts/run-live-session.sh')], {env:{...process.env, REB_NATIVE_WASM_DISPATCH:'0', REB_NATIVE_WASM_CALL_INDIRECT:'0', ...options}, encoding:'utf8'});
+  assert.equal(result.status, 2, result.stderr);
+  assert.match(result.stderr, pattern);
 }
 console.log('PASS native Wasm launch is explicit opt-in, category-gated, and composes with quiet mode');
 
@@ -119,7 +152,7 @@ try {
     const result = spawnSync(shell,['-c',`set -eu; brave_arguments=(); native_quiet_mode=${quiet}; native_wasm_dispatch=0; native_wasm_call_indirect=0; native_guest_adapter=""; native_js_dispatch_sites="$TEST_SITES"; ${flagsCode}
       printf '%s\\n' "${'${brave_arguments[@]-}'}"`],{env:{...process.env,TEST_SITES:sitesPath},encoding:'utf8'});
     assert.equal(result.status,0,result.stderr);
-    assert.deepEqual(result.stdout.trimEnd().split('\n'), [expected,'--reb-js-dispatch-sites='+sitesPath]);
+    assert.deepEqual(result.stdout.trimEnd().split('\n'), [expected, '--reb-js-dispatch-sites='+sitesPath]);
   }
   const combined = spawnSync(shell,['-c',`set -eu; brave_arguments=(); native_quiet_mode=1; native_wasm_dispatch=1; native_wasm_call_indirect=0; native_guest_adapter="$TEST_SITES"; native_js_dispatch_sites="$TEST_SITES"; ${flagsCode}
     printf '%s\\n' "${'${brave_arguments[@]-}'}"`],{env:{...process.env,TEST_SITES:sitesPath},encoding:'utf8'});
@@ -430,6 +463,7 @@ printf '%s\\n' "${'${brave_arguments[@]-}'}"`], {env:{...process.env, TEST_SOCKE
     ['0', null], ['4096', null], ['0x', null], ['0x0', null], ['0x1000', null], ['+1280', null],
     ['-1', null], [' 1280', null], ['1280 ', null], ['1+1', null], ['abc', null], ['1e3', null],
     ['0b11', null], ['12345678901', null], ['0x123456789', null], ['１２', null],
+    ['0x１２', null], ['0xａ', null],
     [`a[$(touch ${injected})]`, null]];
   const maskCode = section('# One category mask grammar', 'if [[ "${native_quiet_mode}"');
   for (const [value, expected] of maskVectors) {

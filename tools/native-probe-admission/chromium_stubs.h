@@ -113,6 +113,8 @@ struct NativeProbeClient {
                          const std::vector<std::uint8_t>&,
                          const std::vector<std::uint8_t>&,
                          bool) = 0;
+  virtual void SetWasmSampleBudget(const std::vector<std::uint8_t>&) = 0;
+  virtual void ResetWasmSampleBudgets() = 0;
   virtual void Disable() = 0;
   virtual void NativeGuestModuleStatus(std::uint64_t, std::uint64_t, bool) = 0;
 };
@@ -127,6 +129,10 @@ struct NativeProbeHost {
   }
   template <class... Args>
   void CaptureWasmIndirect(Args&&...) {
+    ++artifacts;
+  }
+  template <class... Args>
+  void CaptureWasmExecution(Args&&...) {
     ++artifacts;
   }
   template <class... Args>

@@ -82,9 +82,11 @@ enum class NativeProbeType : std::uint16_t {
   kJsInvocationStart = 24,
   kJsInvocationSettle = 25,
   kJsInvocationRequest = 26,
-  // Compact identities past the 16-record Wasm budgets. Not full observations.
-  kWasmDispatchOverflow = 27,
-  kWasmIndirectOverflow = 28,
+  // Trap or still-executing follow-up. See protocol/native-wasm-dispatch-v1.md.
+  kWasmExecutionOutcome = 27,
+  // Compact identities for Wasm samples a budget refused. Not full observations.
+  kWasmDispatchOverflow = 28,
+  kWasmIndirectOverflow = 29,
 };
 
 enum class NativeProbeFlag : std::uint16_t {

@@ -697,7 +697,7 @@ fn openapi_references_and_native_only_operations_are_consistent() {
             assert!(ids.insert(id), "Duplicate operation ID: {id}");
         }
     }
-    assert_eq!(ids.len(), 42, "Review route coverage when the API changes");
+    assert_eq!(ids.len(), 44, "Review route coverage when the API changes");
     assert!(
         ids.contains("get_js_invocation_sites")
             && ids.contains("resolve_js_invocation_site")
@@ -785,7 +785,7 @@ fn execution_metadata_covers_operations_actions_and_dispatch_without_safe_defaul
             operation_count += 1;
         }
     }
-    assert_eq!(operation_count, 42);
+    assert_eq!(operation_count, 44);
     let schemas = &spec["components"]["schemas"];
     let mut action_count = 0;
     for name in [
@@ -797,6 +797,7 @@ fn execution_metadata_covers_operations_actions_and_dispatch_without_safe_defaul
         "OwnedVmDebuggerAction",
         "SessionAction",
         "JsInvocationSiteAction",
+        "LiveWasmAction",
     ] {
         let variants = schemas[name]["oneOf"]
             .as_array()
@@ -838,7 +839,7 @@ fn execution_metadata_covers_operations_actions_and_dispatch_without_safe_defaul
         }
     }
     // Only retained native and offline actions are advertised after CDP removal.
-    assert_eq!(action_count, 35);
+    assert_eq!(action_count, 39);
     // Source checks intentionally follow the dispatch syntax. If it changes,
     // audit the new handler before updating this narrow test helper.
     fn arms<'a>(source: &'a str, start: &str, end: &str, indent: usize) -> BTreeSet<&'a str> {
@@ -1048,6 +1049,7 @@ async fn openapi_responses_match_live_local_http_and_conditional_reads() {
         "/api/local-analyst",
         "/api/local-analyst/runner",
         "/api/native-console",
+        "/api/live-wasm",
         "/api/events",
         "/api/artifacts",
         "/api/analysis/vm",

@@ -9,6 +9,9 @@ inspection and its original-byte coordinates.
 
 [Live Wasm inspection v1](live-wasm-inspection-v1.md) (retired with CDP) defined
 confirmed Object Lab and attached-page memory inspection.
+[Live Wasm instance commands v1](live-wasm-instance-v1.md) is the separate
+confirmed socket for a bounded memory read or write and for calling an export
+or function index on the instance dispatch capture is already attached to.
 
 [Paused import-object map v1](paused-import-object-v1.md) (retired with CDP)
 defined the getProperties-only host import map.
@@ -358,7 +361,8 @@ Executable CDP APIs/transport have been removed. Legacy schemas may describe
 historical saved records, not supported runtime operations. Retired contracts
 kept as historical records: [API observation catalog v1](api-observation-catalog-v1.md),
 [Element screenshot v1](element-screenshot-v1.md),
-[Live Wasm inspection v1](live-wasm-inspection-v1.md),
+[Live Wasm inspection v1](live-wasm-inspection-v1.md)
+(successor for attached-instance commands: [live Wasm instance commands v1](live-wasm-instance-v1.md)),
 [Paused import-object map v1](paused-import-object-v1.md) and
 [WebSocket capture v1](websocket-capture-v1.md).
 [Native Wasm dispatch observations](native-wasm-dispatch-v1.md) use a separate

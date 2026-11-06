@@ -1193,6 +1193,9 @@ void NativeProbeSink::SetEmitters(const NativeRendererProbeEmitter emitter,
   // generation.
   emitter_.store(nullptr, std::memory_order_release);
   artifact_emitter_.store(nullptr, std::memory_order_release);
+  // A request belongs to one configuration. The next session must not
+  // inherit an interrupt aimed at the one being replaced.
+  wasm_execution_interrupt_generation_.store(0, std::memory_order_release);
   // Claims rely on generation ordering. Fail closed instead of ever reusing a
   // generation if the serialized control sequence exhausts the counter.
   if (config_generation_.load(std::memory_order_relaxed) >=
@@ -2656,7 +2659,7 @@ bool NativeProbeSink::NoteNativeWasmExecutionOmission(const VmAdmission& admissi
   return previous == admission.generation;
 }
 
-void NativeProbeSink::NoteWasmHostCallEntered(const bool outermost,
+bool NativeProbeSink::NoteWasmHostCallEntered(const bool outermost,
                                               const bool function_known,
                                               std::uint32_t function_index) noexcept {
   auto& call = HostCall();
@@ -2664,27 +2667,30 @@ void NativeProbeSink::NoteWasmHostCallEntered(const bool outermost,
   if (call.depth != 0 && call.generation != generation)
     CloseHostCall(call);
   if (!IsNativeWasmExecutionEnabled())
-    return;
+    return false;
   if (!function_known)
     function_index = 0;
   if (!outermost) {
-    if (call.depth == 0)
+    if (call.depth == 0) {
       OpenHostCall(call, generation, MonotonicTimeNs(), function_known, function_index);
-    else if (call.depth != 0xffffffffu) {
+      return true;
+    }
+    if (call.depth != 0xffffffffu) {
       ++call.depth;
       call.tail_pending = false;
     }
-    return;
+    return false;
   }
   // A tail call replaced the outermost frame. The callee's prologue sees a
   // non-Wasm caller while this host call is still the one that entered.
   if (call.depth != 0 && call.tail_pending) {
     call.tail_pending = false;
-    return;
+    return false;
   }
   if (call.depth != 0)
     CloseHostCall(call);
   OpenHostCall(call, generation, MonotonicTimeNs(), function_known, function_index);
+  return true;
 }
 
 void NativeProbeSink::NoteWasmHostCallReturned() noexcept {
@@ -2880,30 +2886,58 @@ void NativeProbeSink::ReportWasmTrap(const NativeWasmExecutionReason reason,
   CloseHostCall(call);
 }
 
+std::uint64_t NativeProbeSink::WasmExecutionNudgeDelayNs() const noexcept {
+  constexpr std::uint64_t kRetryNs = 50'000'000ULL;
+  const auto& call = HostCall();
+  if (call.depth == 0 || !call.has_site || call.still_emitted || call.url_size == 0)
+    return kNativeWasmExecutionNoNudge;
+  const auto generation = config_generation_.load(std::memory_order_acquire);
+  if (call.generation != generation || !IsNativeWasmExecutionEnabled())
+    return kNativeWasmExecutionNoNudge;
+  const auto now = MonotonicTimeNs();
+  if (now < call.opened_at_ns)
+    return kNativeWasmExecutionNoNudge;
+  const auto elapsed = now - call.opened_at_ns;
+  if (elapsed >= kNativeWasmExecutionDeadlineNs)
+    return kRetryNs;
+  return kNativeWasmExecutionDeadlineNs - elapsed;
+}
+
+void NativeProbeSink::SetNativeWasmExecutionNudge(const NativeWasmExecutionNudge nudge) noexcept {
+  native_wasm_execution_nudge_.store(nudge, std::memory_order_release);
+}
+
 NativeWasmExecutionHeartbeat NativeProbeSink::PollWasmExecutionHeartbeat() noexcept {
   auto& call = HostCall();
-  const bool interrupt = wasm_execution_interrupt_.exchange(false, std::memory_order_acq_rel);
   const auto generation = config_generation_.load(std::memory_order_acquire);
   if (call.depth != 0 && call.generation != generation)
     CloseHostCall(call);
-  if (interrupt && call.depth != 0 && call.generation == generation) {
-    const bool function_known = call.has_site || call.entry_function_known;
-    const std::uint32_t function = call.has_site ? call.site_function : call.entry_function;
-    const bool offset_known = call.has_site;
-    const std::uint32_t offset = offset_known ? call.site_offset : 0;
-    const auto stream = call.has_site ? call.site_stream : NativeWasmExecutionStream::kNone;
-    const auto sample = call.has_site ? call.site_sample : kNativeWasmExecutionNoSample;
-    if (call.url_size != 0) {
-      static_cast<void>(
-          EmitWasmExecution(NativeWasmExecutionKind::kTrap, NativeWasmExecutionReason::kInterrupt,
-                            NativeWasmExecutionBounds::kNone, function_known, function,
-                            offset_known, offset, stream, sample, call.execution_context_id,
-                            call.frame_id, std::string_view(call.url.data(), call.url_size),
-                            call.document_token_high, call.document_token_low,
-                            call.has_site ? call.js_state : 0, call.has_site ? call.js_id : 0, {}));
+  // Consume only on a thread that is inside the requested configuration's
+  // call. Another isolate's stack check must not drop the request.
+  const auto requested = wasm_execution_interrupt_generation_.load(std::memory_order_acquire);
+  if (requested != 0 && requested == generation && call.depth != 0 &&
+      call.generation == generation) {
+    auto expected = requested;
+    if (wasm_execution_interrupt_generation_.compare_exchange_strong(expected, 0,
+                                                                     std::memory_order_acq_rel)) {
+      const bool function_known = call.has_site || call.entry_function_known;
+      const std::uint32_t function = call.has_site ? call.site_function : call.entry_function;
+      const bool offset_known = call.has_site;
+      const std::uint32_t offset = offset_known ? call.site_offset : 0;
+      const auto stream = call.has_site ? call.site_stream : NativeWasmExecutionStream::kNone;
+      const auto sample = call.has_site ? call.site_sample : kNativeWasmExecutionNoSample;
+      if (call.url_size != 0) {
+        static_cast<void>(EmitWasmExecution(
+            NativeWasmExecutionKind::kTrap, NativeWasmExecutionReason::kInterrupt,
+            NativeWasmExecutionBounds::kNone, function_known, function, offset_known, offset,
+            stream, sample, call.execution_context_id, call.frame_id,
+            std::string_view(call.url.data(), call.url_size), call.document_token_high,
+            call.document_token_low, call.has_site ? call.js_state : 0,
+            call.has_site ? call.js_id : 0, {}));
+      }
+      CloseHostCall(call);
+      return NativeWasmExecutionHeartbeat::kInterrupt;
     }
-    CloseHostCall(call);
-    return NativeWasmExecutionHeartbeat::kInterrupt;
   }
   if (call.depth == 0 || !call.has_site || call.still_emitted || call.url_size == 0 ||
       !IsNativeWasmExecutionEnabled())
@@ -2923,7 +2957,14 @@ NativeWasmExecutionHeartbeat NativeProbeSink::PollWasmExecutionHeartbeat() noexc
 }
 
 void NativeProbeSink::RequestWasmExecutionInterrupt() noexcept {
-  wasm_execution_interrupt_.store(true, std::memory_order_release);
+  const auto generation = config_generation_.load(std::memory_order_acquire);
+  if (generation == 0 || (generation & 1U) != 0 || !IsNativeWasmExecutionEnabled())
+    return;
+  wasm_execution_interrupt_generation_.store(generation, std::memory_order_release);
+  // After the store, so the forced stack check observes the request.
+  // The nudge asks V8 to enter the runtime; it does not terminate the isolate.
+  if (const auto nudge = native_wasm_execution_nudge_.load(std::memory_order_acquire))
+    nudge();
 }
 
 void NativeProbeSink::ConfigureNativeJsDispatch(

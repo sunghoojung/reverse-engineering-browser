@@ -253,26 +253,71 @@ still-executing.
 
 ### Deadline and interrupt
 
-The deadline is five seconds of monotonic time from host-call entry, or from
-the first instrumented instruction if entry was not reported. Reaching it
-emits one `still_executing` record and leaves the call open. A second check
-does not emit another. A call that returns emits neither a trap nor a
-still-executing record. The deadline does not trap and does not end the
-session.
+The deadline is five seconds of `base::TimeTicks` from host-call entry, or
+from the first instrumented instruction if entry was not reported. The
+renderer posts that wait only when a new host-visible call opens on the main
+isolate. The task calls `v8::Isolate::RequestInterrupt`. That is not
+`TerminateExecution`. It sets V8's no-heap-write interrupt byte and lowers
+the stack limit so the next check enters the runtime.
 
-Interrupt is separate and explicit. `RequestWasmExecutionInterrupt` sets a
-process-wide flag. The next Liftoff stack check on a tracked call emits one
-trap with reason `interrupt`, keeps the samples already emitted, closes the
-call, and returns the call to the host as an uncatchable Wasm trap
-(`execution interrupted`). It does not terminate the isolate, so a later call
-in the same document can run. A flag with no open call is discarded. One
-flag applies to the first tracked call whose stack check runs. Ending the
-session still works; it is not the only way to regain the host.
+Where that check runs depends on the tier:
 
-There is no browser-process or UI control for the flag in this change. The
-renderer's mojo pipe is bound to the thread that is inside Wasm, so it
-cannot deliver the request while that call is stuck. The in-process stack
-check is what the portable test exercises.
+- Liftoff with dynamic tiering, the default when TurboFan is enabled, does
+  not put a stack check in the loop. It polls when the tiering budget runs
+  out, in `Runtime_WasmTriggerTierUp`.
+- An optimized loop polls in `Runtime_WasmStackGuardLoop`, and only after
+  that interrupt byte is set.
+- A real stack overflow, or the lowered limit, polls in
+  `Runtime_WasmStackGuard`.
+
+Each of those runtimes calls the heartbeat before `SealHandleScope`. The
+heartbeat allocates no V8 handles. When five seconds have passed and this
+call has an instrumented sample, it emits one `still_executing` record and
+leaves the call open. A second check does not emit another. One delayed
+task is in flight at a time. If it runs for a call that has not yet reached
+five seconds, the interrupt callback posts the time still remaining instead
+of queueing another task per call. A due deadline whose check did not poll
+retries after 50ms. A call that has already returned leaves that one
+interrupt as a no-op. A call blocked inside a host import does not hit a
+Wasm loop or a tier-up check until it returns to Wasm.
+
+A call that returns emits neither a trap nor a still-executing record. The
+deadline does not trap and does not end the session. A nested frame and an
+outermost tail callee do not arm another task.
+
+Interrupt is separate. `RequestWasmExecutionInterrupt` stores the current
+configuration generation and then, when the renderer has installed the
+nudge, calls the same `RequestInterrupt` on the main isolate. The next
+stack check on a thread that has an open host call for that generation emits
+one trap with reason `interrupt`, keeps the samples already emitted, closes
+the call, and returns `ThrowWasmError` for the uncatchable message
+`execution interrupted`. It does not terminate the isolate, so a later call
+in the same document can run. A stack check with no open host call leaves
+the request. Replacing the configuration clears it. A disabled configuration
+does not accept a request. A request that arrives after the target call has
+already returned applies to the next tracked call of that configuration
+whose stack check runs.
+
+### Where the interrupt can be reached
+
+`NativeProbeClient` is bound to the renderer main sequence in
+`NativeProbeTransport::Connect`. A stuck main-thread Wasm call cannot pump
+that pipe, so a method on it cannot deliver an interrupt. The browser socket
+in `native_probe_ipc.h` is an authenticated hello plus disconnect-to-stop.
+It has no command the UI or `reb-api` can send to set the flag. An IO-thread
+receiver whose only method stored the generation and called
+`RequestInterrupt` would be thread-safe, but nothing in the browser process,
+the session socket, or Origin Trace invokes such a method. That
+cross-process control is not in this change. It would be a new mojom, a
+browser remote, a socket or API command, and a UI control, and it cannot be
+proven without a rebuilt Brave. What a rebuilt browser honors is the
+in-process stack check and the main-isolate `RequestInterrupt` above.
+
+Workers are not given an isolate pointer. A worker isolate is not
+process-lifetime, and a delayed task must not keep it. A worker call to
+`RequestWasmExecutionInterrupt` still nudges the main isolate, because that
+pointer is process-wide. Portable tests do not execute V8. They call the
+heartbeat directly.
 
 ### Wire contract
 
@@ -320,9 +365,14 @@ the existing `native_wasm_dispatch_artifact_or_document_lost` gap.
 
 ### Named omissions
 
-- No live browser-process or UI interrupt control. The stack check honors
-  `RequestWasmExecutionInterrupt`. A rebuilt Brave is required before a live
-  session emits these records. The portable tests do not execute V8.
+- No browser-process, session-socket, or Origin Trace control sets the
+  interrupt. See [where the interrupt can be reached](#where-the-interrupt-can-be-reached).
+  A rebuilt Brave is required before a live session emits these records.
+  The portable tests do not execute V8.
+- The five-second `RequestInterrupt` is installed for the main isolate only.
+  A call blocked in a host import is not observed until execution returns
+  to Wasm. A returned call can still leave one already-posted interrupt,
+  and that check does not emit a record.
 - Opcode workspace rows are not projected for this event. The event remains
   in the evidence store and decodes in the viewer.
 - Workers and non-Liftoff frames are not given a function index or module

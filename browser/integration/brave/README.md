@@ -456,9 +456,13 @@ See [call_indirect observations](../../../protocol/native-wasm-dispatch-v1.md#ca
 
 A trap after an instrumented instruction, and a call that is still inside
 after five seconds, are `wasm_execution_outcome` records on that same host
-call. The deadline does not trap. An explicit interrupt flushes the samples
+call. The deadline does not trap. On the main isolate the renderer forces
+the next Wasm stack check with `v8::Isolate::RequestInterrupt`, which does
+not terminate the isolate. An in-process interrupt flushes the samples
 already taken and returns the stuck call as a trap so a later call in the
-document can run. While either dispatch flag is on, Liftoff also emits a
+document can run. Nothing in the browser process, the session socket, or
+Origin Trace sends that interrupt: the renderer client pipe is bound to the
+thread inside Wasm. While either dispatch flag is on, Liftoff also emits a
 call at function entry, ordinary return, and tail call so that host call can
 be closed. Both need the same rebuilt browser as the dispatch flags.
 See [execution outcomes](../../../protocol/native-wasm-dispatch-v1.md#execution-outcomes).

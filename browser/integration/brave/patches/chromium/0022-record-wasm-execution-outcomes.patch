@@ -1,7 +1,18 @@
 diff --git a/third_party/blink/renderer/bindings/core/v8/v8_initializer.cc b/third_party/blink/renderer/bindings/core/v8/v8_initializer.cc
 --- a/third_party/blink/renderer/bindings/core/v8/v8_initializer.cc
 +++ b/third_party/blink/renderer/bindings/core/v8/v8_initializer.cc
-@@ -1800,7 +1800,93 @@ reb::NativeJsInvocationContext CurrentJsInvocation() noexcept {
+@@ -40,8 +40,10 @@
+ #include "base/containers/span.h"
+ #include "base/debug/crash_logging.h"
++#include "base/functional/bind.h"
+ #include "base/location.h"
+ #include "base/memory/scoped_refptr.h"
+ #include "base/metrics/histogram_functions.h"
+ #include "base/system/sys_info.h"
+ #include "base/task/single_thread_task_runner.h"
++#include "base/task/thread_pool.h"
+ #include "base/time/time.h"
+@@ -1800,7 +1802,143 @@ reb::NativeJsInvocationContext CurrentJsInvocation() noexcept {
    result.script_on_stack = isolate->InContext();
    return result;
  }
@@ -16,11 +27,61 @@ diff --git a/third_party/blink/renderer/bindings/core/v8/v8_initializer.cc b/thi
 +  return reb::NativeProbeSink::Get().IsNativeWasmExecutionEnabled();
 +}
 +
++// Main isolate only. A worker isolate is not process-lifetime, so a delayed
++// task must not keep its pointer. RequestInterrupt is not
++// TerminateExecution. One posted task is enough: a later call reschedules
++// it from the interrupt callback instead of queueing a task per call.
++std::atomic<v8::Isolate*> g_reb_main_wasm_isolate{nullptr};
++std::atomic<bool> g_reb_wasm_deadline_posted{false};
++
++void RequestMainIsolateStackCheck() noexcept;
++void FireWasmDeadline() noexcept;
++
++void PostWasmDeadline(base::TimeDelta delay) {
++  if (g_reb_wasm_deadline_posted.exchange(true, std::memory_order_acq_rel)) {
++    return;
++  }
++  base::ThreadPool::PostDelayedTask(FROM_HERE, base::BindOnce(&FireWasmDeadline),
++                                    delay);
++}
++
++void ReconsiderWasmDeadline(v8::Isolate*, void*) {
++  // Runs on the isolate thread after the stack-guard runtime has polled.
++  // No V8 handles. The delay is the time still left on this thread's call.
++  const auto delay = reb::NativeProbeSink::Get().WasmExecutionNudgeDelayNs();
++  if (delay == reb::kNativeWasmExecutionNoNudge) {
++    return;
++  }
++  PostWasmDeadline(base::Nanoseconds(static_cast<int64_t>(delay)));
++}
++
++void RequestMainIsolateStackCheck() noexcept {
++  v8::Isolate* isolate =
++      g_reb_main_wasm_isolate.load(std::memory_order_acquire);
++  if (isolate == nullptr) {
++    return;
++  }
++  isolate->RequestInterrupt(&ReconsiderWasmDeadline, nullptr);
++}
++
++void FireWasmDeadline() noexcept {
++  g_reb_wasm_deadline_posted.store(false, std::memory_order_release);
++  RequestMainIsolateStackCheck();
++}
++
++void ArmWasmDeadlineNudge() { PostWasmDeadline(base::Seconds(5)); }
++
 +void NoteWasmExecutionEntered(bool outermost,
 +                              bool function_known,
 +                              std::uint32_t function_index) {
-+  reb::NativeProbeSink::Get().NoteWasmHostCallEntered(
-+      outermost, function_known, function_index);
++  if (!reb::NativeProbeSink::Get().NoteWasmHostCallEntered(
++          outermost, function_known, function_index)) {
++    return;
++  }
++  if (v8::Isolate::GetCurrent() ==
++      g_reb_main_wasm_isolate.load(std::memory_order_acquire)) {
++    ArmWasmDeadlineNudge();
++  }
 +}
 +
 +void NoteWasmExecutionExited(bool tail) {
@@ -95,7 +156,7 @@ diff --git a/third_party/blink/renderer/bindings/core/v8/v8_initializer.cc b/thi
  void CaptureWasmModuleBytes(v8::Local<v8::Context> context,
                              const v8::WasmModuleBytesOrigin origin,
                              const std::uint8_t* bytes,
-@@ -1810,5 +1940,9 @@ void V8Initializer::InitializeV8Common(v8::Isolate* isolate) {
+@@ -1810,6 +1928,13 @@ void V8Initializer::InitializeV8Common(v8::Isolate* isolate) {
    reb::NativeProbeSink::Get().SetNativeWasmGuestRuntime(CurrentNativeWasmGuest,
                                                          ResetNativeWasmGuest);
 +  isolate->SetWasmExecutionCallbacks(
@@ -105,3 +166,7 @@ diff --git a/third_party/blink/renderer/bindings/core/v8/v8_initializer.cc b/thi
    if (IsMainThread()) {
      // Document-only: worker isolates never arm JavaScript dispatch sites, so
      // their bytecode and optimization stay unchanged.
++    g_reb_main_wasm_isolate.store(isolate, std::memory_order_release);
++    reb::NativeProbeSink::Get().SetNativeWasmExecutionNudge(
++        &RequestMainIsolateStackCheck);
+     v8::JsDispatchCallbacks js_dispatch;

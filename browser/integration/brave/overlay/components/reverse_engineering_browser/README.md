@@ -143,8 +143,10 @@ extra loss. Reconfigure clears every opt-in. Ignition, Liftoff, and TurboFan
 are not sampled. A rebuilt browser still needs the Wasm patch applied and a
 live page run before those program counters are browser evidence.
 `wasm_execution_outcome` (event 27) is the trap or still-executing follow-up
-for one host-visible call. The five-second deadline records the call; only
-an explicit interrupt traps it. See
+for one host-visible call. The five-second deadline records the call. The
+main isolate is nudged with `RequestInterrupt`, which does not terminate it.
+An explicit in-process interrupt traps the call. The browser UI cannot send
+that interrupt on the current mojo pipe. See
 [execution outcomes](../../../../../../protocol/native-wasm-dispatch-v1.md#execution-outcomes).
 See the [capability boundary and acceptance gates](../../../../../../protocol/vm-opcode-workspace-v2.md#native-browser-capability-boundary).
 The VM category also permits 32-byte through 16-MiB snapshots of runtime-created

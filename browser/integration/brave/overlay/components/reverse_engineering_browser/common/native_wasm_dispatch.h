@@ -247,6 +247,10 @@ using NativeWasmIndirectEmitter = bool (*)(const NativeWasmIndirectObservation&,
 // Five seconds from host-call entry. A returning call finishes before it.
 // Reaching it records that the call is still inside; it does not trap.
 inline constexpr std::uint64_t kNativeWasmExecutionDeadlineNs = 5'000'000'000ULL;
+// WasmExecutionNudgeDelayNs returns this when this thread has no open call
+// waiting on the deadline. Otherwise it returns the remaining time, or 50ms
+// when the deadline is already due and still-executing has not been emitted.
+inline constexpr std::uint64_t kNativeWasmExecutionNoNudge = ~std::uint64_t{0};
 inline constexpr std::size_t kNativeWasmExecutionBudget = 16;
 enum class NativeWasmExecutionKind : std::uint8_t { kTrap = 0, kStillExecuting = 1 };
 enum class NativeWasmExecutionReason : std::uint8_t {
@@ -335,6 +339,9 @@ struct NativeWasmExecutionObservation final {
 };
 using NativeWasmExecutionEmitter = bool (*)(const NativeWasmExecutionObservation&,
                                             std::uint64_t) noexcept;
+// Installed by the renderer. Forces the main isolate into its next Wasm
+// stack check. It must not call TerminateExecution.
+using NativeWasmExecutionNudge = void (*)() noexcept;
 [[nodiscard]] inline bool IsValidNativeWasmExecutionInput(
     const NativeWasmExecutionObservation& value) noexcept {
   constexpr std::array<std::uint8_t, 8> magic{0, 97, 115, 109, 1, 0, 0, 0};

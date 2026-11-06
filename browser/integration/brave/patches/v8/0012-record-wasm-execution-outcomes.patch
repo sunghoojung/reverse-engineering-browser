@@ -136,7 +136,7 @@ diff --git a/src/execution/isolate.h b/src/execution/isolate.h
 diff --git a/src/runtime/runtime-wasm.cc b/src/runtime/runtime-wasm.cc
 --- a/src/runtime/runtime-wasm.cc
 +++ b/src/runtime/runtime-wasm.cc
-@@ -94,9 +94,167 @@ class FrameFinder {
+@@ -94,9 +94,179 @@ class FrameFinder {
    StackFrameIterator frame_iterator_;
  };
  
@@ -295,6 +295,18 @@ diff --git a/src/runtime/runtime-wasm.cc b/src/runtime/runtime-wasm.cc
 +           offset_known, module_offset);
 +}
 +
++// The heartbeat emits still-executing as a side effect and returns 1 only
++// when this call should trap. That trap is an uncatchable Wasm exception,
++// not Isolate::TerminateExecution.
++bool RebWasmExecutionInterruptRequested(Isolate* isolate) {
++  if (!v8_flags.reb_wasm_br_table_dispatch &&
++      !v8_flags.reb_wasm_call_indirect_dispatch) {
++    return false;
++  }
++  auto heartbeat = isolate->wasm_execution_heartbeat_callback();
++  return heartbeat != nullptr && heartbeat() == 1;
++}
++
  Tagged<Object> ThrowWasmError(
      Isolate* isolate, MessageTemplate message,
      std::initializer_list<DirectHandle<Object>> args = {}) {
@@ -304,19 +316,14 @@ diff --git a/src/runtime/runtime-wasm.cc b/src/runtime/runtime-wasm.cc
  #if V8_ENABLE_DRUMBRAKE
    if (v8_flags.wasm_jitless) {
      // Store the trap reason to be retrieved later when the interpreter will
-@@ -316,6 +488,16 @@ RUNTIME_FUNCTION(Runtime_WasmReThrow) {
+@@ -316,6 +500,11 @@ RUNTIME_FUNCTION(Runtime_WasmReThrow) {
  }
  
  RUNTIME_FUNCTION(Runtime_WasmStackGuard) {
-+  // Before the seal: the heartbeat must not allocate V8 handles. An
-+  // interrupt becomes an uncatchable trap and does not terminate the isolate.
-+  if (v8_flags.reb_wasm_br_table_dispatch ||
-+      v8_flags.reb_wasm_call_indirect_dispatch) {
-+    auto heartbeat = isolate->wasm_execution_heartbeat_callback();
-+    if (heartbeat != nullptr && heartbeat() == 1) {
-+      HandleScope interrupt_scope(isolate);
-+      return ThrowWasmError(isolate, MessageTemplate::kWasmTrapRebInterrupt);
-+    }
++  // Before the seal: the heartbeat must not allocate V8 handles.
++  if (RebWasmExecutionInterruptRequested(isolate)) {
++    HandleScope interrupt_scope(isolate);
++    return ThrowWasmError(isolate, MessageTemplate::kWasmTrapRebInterrupt);
 +  }
    SealHandleScope shs(isolate);
    DCHECK_EQ(1, args.length());
@@ -325,13 +332,13 @@ diff --git a/src/runtime/runtime-wasm.cc b/src/runtime/runtime-wasm.cc
  // To properly fix that, we should implement lazy-deopt support for Wasm.
  RUNTIME_FUNCTION(Runtime_WasmStackGuardLoop) {
    DCHECK_EQ(0, args.length());
-+  if (v8_flags.reb_wasm_br_table_dispatch ||
-+      v8_flags.reb_wasm_call_indirect_dispatch) {
-+    auto heartbeat = isolate->wasm_execution_heartbeat_callback();
-+    if (heartbeat != nullptr && heartbeat() == 1) {
-+      HandleScope interrupt_scope(isolate);
-+      return ThrowWasmError(isolate, MessageTemplate::kWasmTrapRebInterrupt);
-+    }
++  // Optimized loops enter here only after the no-heap-write interrupt byte
++  // is set. The embedder's RequestInterrupt sets that byte and does not
++  // terminate the isolate. The returned trap uses the same exception path
++  // as HandleInterrupts.
++  if (RebWasmExecutionInterruptRequested(isolate)) {
++    HandleScope interrupt_scope(isolate);
++    return ThrowWasmError(isolate, MessageTemplate::kWasmTrapRebInterrupt);
 +  }
    SealHandleScope shs(isolate);
    TRACE_EVENT("v8.execute", "V8.StackGuard");
@@ -409,6 +416,17 @@ diff --git a/src/runtime/runtime-wasm.cc b/src/runtime/runtime-wasm.cc
  RUNTIME_FUNCTION(Runtime_WasmCompileLazy) {
    SealHandleScope shs(isolate);
    DCHECK_EQ(2, args.length());
+@@ -1117,4 +1284,10 @@ RUNTIME_FUNCTION(Runtime_WasmTriggerTierUp) {
+ RUNTIME_FUNCTION(Runtime_WasmTriggerTierUp) {
++  // Liftoff with dynamic tiering checks interrupts here, when the tiering
++  // budget runs out, instead of in WasmStackGuard. Poll before the seal.
++  if (RebWasmExecutionInterruptRequested(isolate)) {
++    HandleScope interrupt_scope(isolate);
++    return ThrowWasmError(isolate, MessageTemplate::kWasmTrapRebInterrupt);
++  }
+   SealHandleScope shs(isolate);
+ 
+   {
 diff --git a/src/runtime/runtime.h b/src/runtime/runtime.h
 --- a/src/runtime/runtime.h
 +++ b/src/runtime/runtime.h

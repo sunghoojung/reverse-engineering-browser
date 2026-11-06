@@ -1530,6 +1530,10 @@ bool CaptureExecutionIndirect(const reb::NativeWasmIndirectObservation& observat
   ++execution_indirect_records;
   return true;
 }
+unsigned execution_nudges = 0;
+void CountExecutionNudge() noexcept {
+  ++execution_nudges;
+}
 bool CaptureExecutionOutcome(const reb::NativeWasmExecutionObservation& observation,
                              std::uint64_t) noexcept {
   execution_seen.push_back(
@@ -1572,11 +1576,15 @@ void NativeWasmExecutionOutcomes() {
   Configure(queue);
   sink.SetNativeWasmIndirectEmitter(&CaptureExecutionIndirect);
   sink.SetNativeWasmExecutionEmitter(&CaptureExecutionOutcome);
+  sink.SetNativeWasmExecutionNudge(&CountExecutionNudge);
+  execution_nudges = 0;
   execution_seen.clear();
   trap(true, 4, true, 20);
   assert(execution_seen.empty());  // No host call, so no invented invocation.
   base::test_now_ns = 1000;
-  sink.NoteWasmHostCallEntered(true, true, 4);
+  assert(sink.NoteWasmHostCallEntered(true, true, 4));
+  assert(!sink.NoteWasmHostCallEntered(false, true, 5));
+  sink.NoteWasmHostCallReturned();
   sink.RecordNativeWasmIndirect(input);
   assert(execution_resolution ==
          static_cast<std::uint32_t>(reb::NativeWasmIndirectResolution::kResolved));
@@ -1614,11 +1622,15 @@ void NativeWasmExecutionOutcomes() {
   sink.NoteWasmHostCallEntered(true, true, 1);
   const auto indirect_before_hang = execution_indirect_records;
   sink.RecordNativeWasmIndirect(input);
+  assert(sink.WasmExecutionNudgeDelayNs() == deadline);
   base::test_now_ns = static_cast<std::int64_t>(2000 + deadline - 1);
+  assert(sink.WasmExecutionNudgeDelayNs() == 1);
   assert(sink.PollWasmExecutionHeartbeat() == reb::NativeWasmExecutionHeartbeat::kContinue);
   assert(execution_seen.empty());
   base::test_now_ns = static_cast<std::int64_t>(2000 + deadline);
+  assert(sink.WasmExecutionNudgeDelayNs() == 50'000'000ULL);
   assert(sink.PollWasmExecutionHeartbeat() == reb::NativeWasmExecutionHeartbeat::kContinue);
+  assert(sink.WasmExecutionNudgeDelayNs() == reb::kNativeWasmExecutionNoNudge);
   assert(execution_seen.size() == 1);
   assert(execution_seen[0].kind ==
          static_cast<std::uint8_t>(reb::NativeWasmExecutionKind::kStillExecuting));
@@ -1639,7 +1651,9 @@ void NativeWasmExecutionOutcomes() {
   sink.NoteWasmHostCallEntered(true, true, 3);
   sink.RecordNativeWasmIndirect(input);
   const auto records_before_later = execution_indirect_records;
+  execution_nudges = 0;
   sink.RequestWasmExecutionInterrupt();
+  assert(execution_nudges == 1);
   assert(sink.PollWasmExecutionHeartbeat() == reb::NativeWasmExecutionHeartbeat::kInterrupt);
   assert(execution_seen.size() == 1);
   assert(execution_seen[0].kind == static_cast<std::uint8_t>(reb::NativeWasmExecutionKind::kTrap));
@@ -1661,6 +1675,42 @@ void NativeWasmExecutionOutcomes() {
   base::test_now_ns = static_cast<std::int64_t>(4000 + deadline * 2);
   assert(sink.PollWasmExecutionHeartbeat() == reb::NativeWasmExecutionHeartbeat::kContinue);
   assert(execution_seen.empty());
+  // A return does not consume the request. The next tracked call does.
+  base::test_now_ns = 4500;
+  assert(sink.NoteWasmHostCallEntered(true, true, 1));
+  sink.RecordNativeWasmIndirect(input);
+  sink.RequestWasmExecutionInterrupt();
+  sink.NoteWasmHostCallReturned();
+  assert(sink.PollWasmExecutionHeartbeat() == reb::NativeWasmExecutionHeartbeat::kContinue);
+  assert(execution_seen.empty());
+  assert(sink.NoteWasmHostCallEntered(true, true, 1));
+  sink.RecordNativeWasmIndirect(input);
+  assert(sink.PollWasmExecutionHeartbeat() == reb::NativeWasmExecutionHeartbeat::kInterrupt);
+  assert(execution_seen.size() == 1);
+  assert(execution_seen[0].reason ==
+         static_cast<std::uint8_t>(reb::NativeWasmExecutionReason::kInterrupt));
+  sink.NoteWasmHostCallEntered(true, true, 1);
+  sink.RecordNativeWasmIndirect(input);
+  assert(sink.PollWasmExecutionHeartbeat() == reb::NativeWasmExecutionHeartbeat::kContinue);
+  assert(execution_seen.size() == 1);
+  sink.NoteWasmHostCallReturned();
+  execution_seen.clear();
+  // Replacing the configuration drops a request aimed at the previous one.
+  base::test_now_ns = 4600;
+  assert(sink.NoteWasmHostCallEntered(true, true, 1));
+  sink.RecordNativeWasmIndirect(input);
+  sink.RequestWasmExecutionInterrupt();
+  sink.SetEmitters(&AcceptRuntimeEvent, &CaptureRuntimeMetadata, 42,
+                   reb::kAllNativeProbeCategoryMask, kForever, false, &NativeWasmFrameLookup);
+  sink.SetNativeWasmIndirectEmitter(&CaptureExecutionIndirect);
+  sink.SetNativeWasmExecutionEmitter(&CaptureExecutionOutcome);
+  assert(sink.PollWasmExecutionHeartbeat() == reb::NativeWasmExecutionHeartbeat::kContinue);
+  assert(execution_seen.empty());
+  assert(sink.NoteWasmHostCallEntered(true, true, 1));
+  sink.RecordNativeWasmIndirect(input);
+  assert(sink.PollWasmExecutionHeartbeat() == reb::NativeWasmExecutionHeartbeat::kContinue);
+  assert(execution_seen.empty());
+  sink.NoteWasmHostCallReturned();
   sink.SetEmitters(&AcceptRuntimeEvent, &CaptureRuntimeMetadata, 42,
                    reb::kAllNativeProbeCategoryMask, kForever, false, &NativeWasmFrameLookup);
   native_wasm_frame_lookups = 0;
@@ -1671,9 +1721,12 @@ void NativeWasmExecutionOutcomes() {
   sink.NoteWasmHostCallReturned();
   transport.Disable();
   sink.NoteWasmHostCallEntered(true, true, 1);
+  const auto nudges_while_disabled = execution_nudges;
   sink.RequestWasmExecutionInterrupt();
+  assert(execution_nudges == nudges_while_disabled);
   assert(sink.PollWasmExecutionHeartbeat() == reb::NativeWasmExecutionHeartbeat::kContinue);
   assert(execution_seen.empty());
+  sink.SetNativeWasmExecutionNudge(nullptr);
   base::test_now_ns = saved_now;
   std::cout << "PASS native Wasm execution outcomes; signature trap distinct from null, "
                "still-executing while inside, interrupt then a later call, quiet return\n";

@@ -133,7 +133,8 @@ identifiers, for example:
 A full budget is evidence too: the capture saw more than it kept. For Wasm
 `br_table` and `call_indirect`, `get_events` with `type` `wasm_dispatch_overflow`
 or `wasm_indirect_overflow` reads the compact identities past the 16 full
-observations. Those records are not full observations and have no parent edge.
+observations. Those records are not full observations and have no parent edge
+or artifact id.
 To sample something else, start a new session with narrower capture options.
 
 ## 7. Wait for the browser to produce something

@@ -1384,8 +1384,11 @@ void NativeWasmRuntimeAdmission() {
   const auto initial_drain = Drain(queue);
   assert(native_wasm_retained == 16 && initial_drain == 0);
   Fill(queue);
+  const auto drops_before = queue.DroppedCount();
   record();  // A full ring must NOT permanently suppress the cap omission.
   assert(sink.IsNativeWasmDispatchEnabled());
+  // The refused budget gap is the one drop. The identity is not pushed too.
+  assert(queue.DroppedCount() == drops_before + 1);
   assert(Drain(queue) == reb::kNativeProbeQueueCapacity);
   record();
   const auto gap = Pop(queue);
@@ -1412,9 +1415,11 @@ void NativeWasmRuntimeAdmission() {
   transport.Disable();
   identity = ReadDispatchOverflow(One(queue));
   assert(identity.kind == reb::kWasmOverflowKindOmitted && identity.omitted_count == 3 &&
-         identity.ring_index == 0 && identity.function_index == 0 && identity.selector == 0 &&
-         identity.arm_count == 0);
+         identity.ring_index == 0 && identity.function_index == 0 &&
+         identity.module_byte_offset == 0 && identity.selector == 0 && identity.arm_count == 0);
   Configure(queue);
+  // Retirement already took the count. The next configuration must not emit it again.
+  assert(Drain(queue) == 0);
   sink.SetNativeWasmDispatchEmitter(&CaptureNativeWasm);  // Same session, fresh policy generation.
   native_wasm_retained = 0;
   assert(sink.IsNativeWasmDispatchEnabled());
@@ -1527,8 +1532,10 @@ void NativeWasmIndirectAdmission() {
   const auto initial_drain = Drain(queue);
   assert(native_indirect_retained == 16 && initial_drain == 0);
   Fill(queue);
+  const auto drops_before = queue.DroppedCount();
   record();  // A full ring must NOT permanently suppress the cap omission.
   assert(sink.IsNativeWasmIndirectEnabled());
+  assert(queue.DroppedCount() == drops_before + 1);
   assert(Drain(queue) == reb::kNativeProbeQueueCapacity);
   record();
   gap = Pop(queue);
@@ -1570,9 +1577,11 @@ void NativeWasmIndirectAdmission() {
   transport.Disable();
   identity = ReadIndirectOverflow(One(queue));
   assert(identity.kind == reb::kWasmOverflowKindOmitted && identity.omitted_count == 3 &&
-         identity.ring_index == 0 && identity.function_index == 0 && identity.slot == 0 &&
+         identity.ring_index == 0 && identity.function_index == 0 &&
+         identity.module_byte_offset == 0 && identity.table_index == 0 && identity.slot == 0 &&
          identity.resolution == 0);
   Configure(queue);
+  assert(Drain(queue) == 0);
   sink.SetNativeWasmIndirectEmitter(&CaptureNativeIndirect);  // Fresh policy generation.
   native_indirect_retained = 0;
   assert(sink.IsNativeWasmIndirectEnabled());

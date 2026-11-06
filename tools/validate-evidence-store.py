@@ -350,6 +350,7 @@ def valid_wasm_overflow(event: dict, payload: bytes, indirect: bool) -> bool:
         or event["category"] != "vm"
         or event["flags"] != 0
         or event["payload_truncated"]
+        or event["artifact_id"] != "0"
         or event["parent_event_id"] != "0"
         or any(event[key] == "0" for key in (
             "session_id", "sequence_number", "monotonic_time_ns", "frame_id"

@@ -127,6 +127,10 @@ fn overflow_summary(value: &Value) -> Option<String> {
     if !indirect && kind != "wasm_dispatch_overflow" {
         return None;
     }
+    // An artifact id or a parent would present this identity as a full observation.
+    if value["artifact_id"] != "0" || value["parent_event_id"] != "0" {
+        return None;
+    }
     let payload = value["payload"].as_str()?;
     let bytes = hex::decode(payload).ok()?;
     let size = if indirect { 40 } else { 32 };
@@ -1097,8 +1101,59 @@ mod tests {
             built["value"],
             "Wasm br_table overflow identity: function 9, byte 47, selector 1000, arms 2, ring 0. Not a full observation."
         );
+        bytes[6] = 31;
+        event["payload"] = json!(hex::encode(bytes));
+        assert!(
+            step(&event, "request_lifecycle", "observed").unwrap()["value"]
+                .as_str()
+                .unwrap()
+                .contains("ring 31")
+        );
+        bytes[6] = 32;
+        event["payload"] = json!(hex::encode(bytes));
+        assert!(step(&event, "request_lifecycle", "observed").is_err());
+        bytes[6] = 0;
+        event["payload"] = json!(hex::encode(bytes));
+        event["artifact_id"] = json!("1");
+        assert!(step(&event, "request_lifecycle", "observed").is_err());
+        event["artifact_id"] = json!("0");
+        event["parent_event_id"] = json!("4");
+        assert!(step(&event, "request_lifecycle", "observed").is_err());
+        event["parent_event_id"] = json!("0");
         bytes[4] = 9;
         event["payload"] = json!(hex::encode(bytes));
+        assert!(step(&event, "request_lifecycle", "observed").is_err());
+        let mut omitted = [0u8; 32];
+        omitted[0] = 1;
+        omitted[2] = 32;
+        omitted[4] = 2;
+        omitted[24..28].copy_from_slice(&3u32.to_le_bytes());
+        event["payload"] = json!(hex::encode(omitted));
+        assert_eq!(
+            step(&event, "request_lifecycle", "observed").unwrap()["value"],
+            "Wasm br_table overflow omitted 3 identities past the ring. Not a full observation."
+        );
+        omitted[8] = 1;
+        event["payload"] = json!(hex::encode(omitted));
+        assert!(step(&event, "request_lifecycle", "observed").is_err());
+        let mut indirect = [0u8; 40];
+        indirect[0] = 1;
+        indirect[2] = 40;
+        indirect[4] = 1;
+        indirect[6] = 2;
+        indirect[8..12].copy_from_slice(&4u32.to_le_bytes());
+        indirect[12..16].copy_from_slice(&11u32.to_le_bytes());
+        indirect[20..24].copy_from_slice(&u32::MAX.to_le_bytes());
+        indirect[24..28].copy_from_slice(&2u32.to_le_bytes());
+        event["type"] = json!("wasm_indirect_overflow");
+        event["payload_size"] = json!(40);
+        event["payload"] = json!(hex::encode(indirect));
+        assert_eq!(
+            step(&event, "request_lifecycle", "observed").unwrap()["value"],
+            "Wasm call_indirect overflow identity: caller 4, byte 11, table 0, slot 4294967295, resolution out-of-bounds, ring 2. Not a full observation."
+        );
+        indirect[24] = 5;
+        event["payload"] = json!(hex::encode(indirect));
         assert!(step(&event, "request_lifecycle", "observed").is_err());
     }
 }

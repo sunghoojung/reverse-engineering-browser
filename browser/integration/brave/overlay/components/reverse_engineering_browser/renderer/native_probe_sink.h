@@ -397,18 +397,30 @@ class COMPONENT_EXPORT(REB_NATIVE_PROBE_SINK) NativeProbeSink final {
   // Coalesced per configuration. A refused transport emit is not: it fills
   // the sequence slot its record took.
   enum class NativeWasmOmission : std::size_t { kInput, kBudget };
-  bool NoteNativeWasmDispatchOmission(const VmAdmission& admission,
-                                      NativeWasmOmission reason) noexcept;
-  // Scope copied from a real admission. The omitted count is one snapshot
-  // published when the configuration retires, not one event per execution.
+  // kRecorded: this configuration's gap is already in the queue, or this call
+  // just enqueued it. kBusy: another thread holds the in-flight claim. kRefused:
+  // the emit was refused, or a newer configuration already owns the slot.
+  enum class NativeWasmGapClaim : std::uint8_t { kRecorded, kBusy, kRefused };
+  NativeWasmGapClaim NoteNativeWasmDispatchOmission(const VmAdmission& admission,
+                                                    NativeWasmOmission reason) noexcept;
+  // One admission's scope, not a mix of frames or threads. writing is 1 while
+  // a thread owns the snapshot. scope_sequence is a seqlock: odd while fields
+  // are changing, even once generation and the fields are one snapshot.
+  // omitted is one word: the high 32 bits are the low 32 bits of that
+  // admission's generation, and the low 32 bits are the count. An increment
+  // commits to that admission. Installing a later scope stores a new tag and
+  // count 0, so a late increment cannot join the next configuration. The tag
+  // repeats only after 2^31 configuration steps.
   struct NativeWasmOverflowAccount {
+    std::atomic<std::uint64_t> writing{0};
+    std::atomic<std::uint64_t> scope_sequence{0};
     std::atomic<std::uint64_t> generation{0};
     std::atomic<std::uint64_t> session_id{0};
     std::atomic<std::uint64_t> monotonic_time_ns{0};
     std::atomic<std::uint64_t> frame_id{0};
     std::atomic<std::uint32_t> process_id{0};
     std::atomic<std::uint32_t> thread_id{0};
-    std::atomic<std::uint32_t> omitted{0};
+    std::atomic<std::uint64_t> omitted{0};
   };
   enum class WasmOverflowStore : std::uint8_t { kStored, kRingFull, kRejected };
   void RememberNativeWasmOverflowScope(NativeWasmOverflowAccount& account,
@@ -520,8 +532,8 @@ class COMPONENT_EXPORT(REB_NATIVE_PROBE_SINK) NativeProbeSink final {
   std::array<std::atomic<std::uint64_t>, kNativeWasmOverflowRingLimit>
       native_wasm_overflow_slots_{};
   NativeWasmOverflowAccount native_wasm_overflow_{};
-  bool NoteNativeWasmIndirectOmission(const VmAdmission& admission,
-                                      NativeWasmOmission reason) noexcept;
+  NativeWasmGapClaim NoteNativeWasmIndirectOmission(const VmAdmission& admission,
+                                                    NativeWasmOmission reason) noexcept;
   std::atomic<NativeWasmIndirectEmitter> native_wasm_indirect_emitter_{nullptr};
   std::array<std::atomic<std::uint64_t>, kNativeWasmIndirectSampleBudget>
       native_wasm_indirect_slots_{};

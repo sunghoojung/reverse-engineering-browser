@@ -119,6 +119,28 @@ int main() {
         !Check(reb::SetInlinePayload(event, encoded) && reb::IsValidEvent(event),
                "dispatch overflow identity rejected"))
       return 1;
+    event.header.artifact_id = 1;
+    if (!Check(!reb::IsValidEvent(event), "dispatch overflow with an artifact id accepted"))
+      return 1;
+    event.header.artifact_id = 0;
+    event.header.parent_event_id = 1;
+    if (!Check(!reb::IsValidEvent(event), "dispatch overflow with a parent accepted"))
+      return 1;
+    event.header.parent_event_id = 0;
+    decoded.ring_index = 31;
+    auto ring = reb::EncodeWasmDispatchOverflowPayload(decoded);
+    if (!Check(reb::SetInlinePayload(event, ring) && reb::IsValidEvent(event),
+               "dispatch overflow ring index 31 rejected"))
+      return 1;
+    decoded.ring_index = 32;
+    ring = reb::EncodeWasmDispatchOverflowPayload(decoded);
+    if (!Check(reb::SetInlinePayload(event, ring) && !reb::IsValidEvent(event),
+               "dispatch overflow ring index 32 accepted"))
+      return 1;
+    decoded.ring_index = 3;
+    if (!Check(reb::SetInlinePayload(event, encoded) && reb::IsValidEvent(event),
+               "dispatch overflow identity rejected after bounds checks"))
+      return 1;
     event.inline_payload[32] = std::byte{1};
     if (!Check(!reb::IsValidEvent(event), "dispatch overflow trailing byte accepted"))
       return 1;
@@ -168,6 +190,16 @@ int main() {
     if (!Check(reb::SetInlinePayload(event, indirect_encoded) && reb::IsValidEvent(event),
                "indirect overflow identity rejected"))
       return 1;
+    event.header.artifact_id = 9;
+    if (!Check(!reb::IsValidEvent(event), "indirect overflow with an artifact id accepted"))
+      return 1;
+    event.header.artifact_id = 0;
+    indirect_decoded.ring_index = 32;
+    const auto indirect_ring = reb::EncodeWasmIndirectOverflowPayload(indirect_decoded);
+    if (!Check(reb::SetInlinePayload(event, indirect_ring) && !reb::IsValidEvent(event),
+               "indirect overflow ring index 32 accepted"))
+      return 1;
+    indirect_decoded.ring_index = 2;
     indirect_decoded.resolution = 5;
     const auto indirect_bad = reb::EncodeWasmIndirectOverflowPayload(indirect_decoded);
     if (!Check(reb::SetInlinePayload(event, indirect_bad) && !reb::IsValidEvent(event),

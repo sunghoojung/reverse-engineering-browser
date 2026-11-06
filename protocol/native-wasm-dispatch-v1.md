@@ -291,8 +291,9 @@ configuration is not a drop.
 Unknown versions, the wrong size, a kind other than 1 or 2, a nonzero reserved
 field, an identity that also carries an omitted count, an omitted record that
 also carries an identity, a ring index past 31, an out-of-range index or
-offset, or an unknown resolution are invalid. C++, Rust, Python and JavaScript
-reject them. They are not partial observations. Bytes past the payload in the
+offset, an unknown resolution, or a nonzero artifact id or parent event id are
+invalid. C++, Rust, Python, JavaScript and the Swift trace builder reject
+them. They are not partial observations. Bytes past the payload in the
 inline record must be zero.
 
 The budget gap is unchanged and still marks the cap. The ring does not replace
@@ -300,8 +301,16 @@ it. Each identity is written when the execution is seen. The omitted record is
 one cumulative snapshot written when the configuration retires (the renderer
 emitter is replaced or cleared). If several omitted records exist, the count
 is the maximum, not the sum. The count saturates at 2^32−1 and does not wrap;
-at that point the hook stops. A probe queue that cannot take an identity does
-not consume a ring slot; that loss stays a queue drop. A probe queue that
+at that point the hook stops. The omitted record's session, time, frame,
+process and thread are one admission. The count is not incremented until that
+admission is visible, so the record cannot mix two executions or name an older
+configuration. The counter word is tagged with that admission's generation.
+Installing a later admission's scope stores a new tag and a zero count, so a
+late increment cannot be added to the next configuration. A probe queue that
+cannot take the coalesced budget gap does not also push the identity; that
+execution is one queue drop, and it does not
+consume a ring slot. A probe queue that cannot take an identity does not
+consume a ring slot either; that loss stays a queue drop. A probe queue that
 cannot take the omitted record at retirement leaves the count unpublished.
 A crash before retirement loses the omitted count; the budget gap and any
 identities already enqueued remain. A late increment after the retirement

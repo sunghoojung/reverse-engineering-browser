@@ -398,7 +398,8 @@ static_assert(offsetof(WasmIndirectOverflowPayload, reserved1) == 32);
       event.header.flags == 0 && event.header.session_id != 0 &&
       event.header.sequence_number != 0 && event.header.process_id != 0 &&
       event.header.thread_id != 0 && event.header.monotonic_time_ns != 0 &&
-      event.header.frame_id != 0 && event.header.parent_event_id == 0 &&
+      event.header.frame_id != 0 && event.header.artifact_id == 0 &&
+      event.header.parent_event_id == 0 &&
       DecodeWasmDispatchOverflowPayload(std::span(event.inline_payload).first(32), value) &&
       OverflowTailIsZero(event, 32) && value.protocol_version == 1 && value.payload_size == 32 &&
       value.reserved0 == 0 && value.reserved1 == 0;
@@ -423,7 +424,8 @@ static_assert(offsetof(WasmIndirectOverflowPayload, reserved1) == 32);
       event.header.flags == 0 && event.header.session_id != 0 &&
       event.header.sequence_number != 0 && event.header.process_id != 0 &&
       event.header.thread_id != 0 && event.header.monotonic_time_ns != 0 &&
-      event.header.frame_id != 0 && event.header.parent_event_id == 0 &&
+      event.header.frame_id != 0 && event.header.artifact_id == 0 &&
+      event.header.parent_event_id == 0 &&
       DecodeWasmIndirectOverflowPayload(std::span(event.inline_payload).first(40), value) &&
       OverflowTailIsZero(event, 40) && value.protocol_version == 1 && value.payload_size == 40 &&
       value.reserved0 == 0 && value.reserved1 == 0;

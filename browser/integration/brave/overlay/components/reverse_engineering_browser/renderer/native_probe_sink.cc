@@ -2302,53 +2302,149 @@ void IngestOwnedRegisterStepThunk(const std::uint32_t instruction_pointer,
                                                                operand_count, sample_index);
 }
 
+// High half is the admission tag. Low half is the count. One CAS commits both.
+constexpr std::uint64_t WasmOverflowOmittedWord(const std::uint64_t generation,
+                                                const std::uint32_t count) noexcept {
+  return (static_cast<std::uint64_t>(static_cast<std::uint32_t>(generation)) << 32) | count;
+}
+
 void NativeProbeSink::RememberNativeWasmOverflowScope(NativeWasmOverflowAccount& account,
                                                       const VmAdmission& admission) noexcept {
-  account.session_id.store(admission.session_id, std::memory_order_relaxed);
-  account.monotonic_time_ns.store(admission.monotonic_time_ns, std::memory_order_relaxed);
-  account.frame_id.store(admission.frame_id, std::memory_order_relaxed);
-  account.process_id.store(admission.process_id, std::memory_order_relaxed);
-  account.thread_id.store(admission.thread_id, std::memory_order_relaxed);
-  account.generation.store(admission.generation, std::memory_order_release);
+  const auto published = account.scope_sequence.load(std::memory_order_relaxed);
+  std::atomic_thread_fence(std::memory_order_acquire);
+  if ((published & 1U) == 0 &&
+      account.generation.load(std::memory_order_relaxed) == admission.generation) {
+    std::atomic_thread_fence(std::memory_order_acquire);
+    if (account.scope_sequence.load(std::memory_order_relaxed) == published)
+      return;
+  }
+  // One writer fills every field. A newer admission waits rather than
+  // storing into the same snapshot. The even sequence publishes that writer's
+  // frame, thread, and time together with a zero count tagged for it.
+  std::uint64_t held = 0;
+  if (!account.writing.compare_exchange_strong(held, 1, std::memory_order_acq_rel)) {
+    return;
+  }
+  const auto current = account.scope_sequence.load(std::memory_order_relaxed);
+  std::atomic_thread_fence(std::memory_order_acquire);
+  if ((current & 1U) != 0 ||
+      account.generation.load(std::memory_order_relaxed) != admission.generation) {
+    const auto sequence = account.scope_sequence.load(std::memory_order_relaxed);
+    // An odd sequence here means a previous writer stopped before publishing.
+    // Step from the last even value so this publish ends even.
+    const auto even = sequence & ~std::uint64_t{1};
+    account.scope_sequence.store(even + 1, std::memory_order_relaxed);
+    std::atomic_thread_fence(std::memory_order_release);
+    account.session_id.store(admission.session_id, std::memory_order_relaxed);
+    account.monotonic_time_ns.store(admission.monotonic_time_ns, std::memory_order_relaxed);
+    account.frame_id.store(admission.frame_id, std::memory_order_relaxed);
+    account.process_id.store(admission.process_id, std::memory_order_relaxed);
+    account.thread_id.store(admission.thread_id, std::memory_order_relaxed);
+    account.omitted.store(WasmOverflowOmittedWord(admission.generation, 0),
+                          std::memory_order_relaxed);
+    std::atomic_thread_fence(std::memory_order_release);
+    account.generation.store(admission.generation, std::memory_order_relaxed);
+    std::atomic_thread_fence(std::memory_order_release);
+    account.scope_sequence.store(even + 2, std::memory_order_relaxed);
+  }
+  account.writing.store(0, std::memory_order_release);
 }
 
 void NativeProbeSink::NoteNativeWasmOverflowOmitted(NativeWasmOverflowAccount& account,
                                                     const VmAdmission& admission,
                                                     std::atomic<std::uint64_t>& capped) noexcept {
-  auto count = account.omitted.load(std::memory_order_acquire);
-  while (count < std::numeric_limits<std::uint32_t>::max()) {
-    if (account.omitted.compare_exchange_weak(count, count + 1, std::memory_order_acq_rel)) {
-      // Saturation stops the hook so the count cannot wrap to zero.
-      if (count + 1 == std::numeric_limits<std::uint32_t>::max()) {
-        auto previous = capped.load(std::memory_order_acquire);
-        while (previous < admission.generation &&
-               !capped.compare_exchange_weak(previous, admission.generation,
-                                             std::memory_order_acq_rel)) {
-        }
+  // The count is not incremented until this admission's scope is visible and
+  // the counter word is tagged with it. A torn or older tag is left alone.
+  const auto tag = static_cast<std::uint32_t>(admission.generation);
+  for (int attempt = 0; attempt < 64; ++attempt) {
+    const auto sequence = account.scope_sequence.load(std::memory_order_relaxed);
+    std::atomic_thread_fence(std::memory_order_acquire);
+    if ((sequence & 1U) != 0 ||
+        account.generation.load(std::memory_order_relaxed) != admission.generation) {
+      RememberNativeWasmOverflowScope(account, admission);
+      continue;
+    }
+    auto word = account.omitted.load(std::memory_order_acquire);
+    std::atomic_thread_fence(std::memory_order_acquire);
+    if (account.scope_sequence.load(std::memory_order_relaxed) != sequence)
+      continue;
+    if (static_cast<std::uint32_t>(word >> 32) != tag)
+      continue;
+    const auto count = static_cast<std::uint32_t>(word);
+    if (count == std::numeric_limits<std::uint32_t>::max()) {
+      auto previous = capped.load(std::memory_order_acquire);
+      while (previous < admission.generation &&
+             !capped.compare_exchange_weak(previous, admission.generation,
+                                           std::memory_order_acq_rel)) {
       }
       return;
     }
+    const auto next = WasmOverflowOmittedWord(admission.generation, count + 1);
+    if (!account.omitted.compare_exchange_weak(word, next, std::memory_order_acq_rel))
+      continue;
+    // Saturation stops the hook so the count cannot wrap to zero.
+    if (count + 1 == std::numeric_limits<std::uint32_t>::max()) {
+      auto previous = capped.load(std::memory_order_acquire);
+      while (previous < admission.generation &&
+             !capped.compare_exchange_weak(previous, admission.generation,
+                                           std::memory_order_acq_rel)) {
+      }
+    }
+    return;
   }
 }
 
 void NativeProbeSink::PublishNativeWasmOverflow(NativeWasmOverflowAccount& account,
                                                 const NativeProbeType type) noexcept {
-  // One cumulative snapshot. A retirement that cannot enqueue it drops the
-  // count here; carrying it into the next session would name the wrong one.
-  // A concurrent increment after this exchange can be missed. Several
-  // snapshots, if a race emits more than one, are not a sum.
-  const auto omitted = account.omitted.exchange(0, std::memory_order_acq_rel);
-  if (omitted == 0) {
+  // One cumulative snapshot of one admission. A queue that cannot take the
+  // record leaves that count unpublished. A late increment after the exchange
+  // can be missed. An unstable snapshot stays in place; the next scope
+  // installation clears it rather than retagging it. Several snapshots, if a
+  // race emits more than one, are not a sum.
+  std::uint64_t generation = 0;
+  std::uint64_t session = 0;
+  std::uint64_t time = 0;
+  std::uint64_t frame = 0;
+  std::uint32_t process = 0;
+  std::uint32_t thread = 0;
+  bool stable = false;
+  for (int attempt = 0; attempt < 8 && !stable; ++attempt) {
+    const auto sequence = account.scope_sequence.load(std::memory_order_relaxed);
+    std::atomic_thread_fence(std::memory_order_acquire);
+    if ((sequence & 1U) != 0) {
+      continue;
+    }
+    generation = account.generation.load(std::memory_order_relaxed);
+    session = account.session_id.load(std::memory_order_relaxed);
+    time = account.monotonic_time_ns.load(std::memory_order_relaxed);
+    frame = account.frame_id.load(std::memory_order_relaxed);
+    process = account.process_id.load(std::memory_order_relaxed);
+    thread = account.thread_id.load(std::memory_order_relaxed);
+    std::atomic_thread_fence(std::memory_order_acquire);
+    stable = account.scope_sequence.load(std::memory_order_relaxed) == sequence;
+  }
+  if (!stable) {
+    // Same scope may be published by a later retirement. The next admission's
+    // scope installation clears the word, so this count is not retagged.
     return;
   }
-  const auto generation = account.generation.load(std::memory_order_acquire);
-  const auto session = account.session_id.load(std::memory_order_relaxed);
-  const auto time = account.monotonic_time_ns.load(std::memory_order_relaxed);
-  const auto frame = account.frame_id.load(std::memory_order_relaxed);
-  const auto process = account.process_id.load(std::memory_order_relaxed);
-  const auto thread = account.thread_id.load(std::memory_order_relaxed);
   if (generation == 0 || (generation & 1U) != 0 || session == 0 || time == 0 || frame == 0 ||
       process == 0 || thread == 0) {
+    // No usable scope. Drop the count so a later session cannot claim it.
+    account.omitted.store(0, std::memory_order_release);
+    return;
+  }
+  const auto word =
+      account.omitted.exchange(WasmOverflowOmittedWord(generation, 0), std::memory_order_acq_rel);
+  if (static_cast<std::uint32_t>(word >> 32) != static_cast<std::uint32_t>(generation)) {
+    // The word names another admission. Put it back unless a newer increment
+    // already replaced the zero word this exchange wrote.
+    auto restored = WasmOverflowOmittedWord(generation, 0);
+    account.omitted.compare_exchange_strong(restored, word, std::memory_order_acq_rel);
+    return;
+  }
+  const auto omitted = static_cast<std::uint32_t>(word);
+  if (omitted == 0) {
     return;
   }
   NativeProbeEvent event{};
@@ -2478,8 +2574,9 @@ bool NativeProbeSink::IsNativeWasmDispatchEnabled() const noexcept {
   std::atomic_thread_fence(std::memory_order_acquire);
   return active && config_generation_.load(std::memory_order_acquire) == generation;
 }
-bool NativeProbeSink::NoteNativeWasmDispatchOmission(const VmAdmission& admission,
-                                                     NativeWasmOmission reason) noexcept {
+NativeProbeSink::NativeWasmGapClaim NativeProbeSink::NoteNativeWasmDispatchOmission(
+    const VmAdmission& admission,
+    NativeWasmOmission reason) noexcept {
   auto& slot = native_wasm_gap_generations_[static_cast<std::size_t>(reason)];
   auto previous = slot.load(std::memory_order_acquire);
   // Odd generation is an in-flight claim; never overwrite a newer configuration.
@@ -2493,10 +2590,16 @@ bool NativeProbeSink::NoteNativeWasmDispatchOmission(const VmAdmission& admissio
       auto claimed = admission.generation - 1;
       slot.compare_exchange_strong(claimed, retained ? admission.generation : previous,
                                    std::memory_order_acq_rel);
-      return retained;
+      return retained ? NativeWasmGapClaim::kRecorded : NativeWasmGapClaim::kRefused;
     }
   }
-  return previous == admission.generation;
+  if (previous == admission.generation) {
+    return NativeWasmGapClaim::kRecorded;
+  }
+  if (previous == admission.generation - 1) {
+    return NativeWasmGapClaim::kBusy;
+  }
+  return NativeWasmGapClaim::kRefused;
 }
 void NativeProbeSink::RecordNativeWasmDispatch(std::uint64_t execution_context_id,
                                                std::uint64_t frame_id,
@@ -2563,7 +2666,12 @@ void NativeProbeSink::RecordNativeWasmDispatch(std::uint64_t execution_context_i
   // The 16 full observations stay capped. This execution keeps a compact
   // identity, or, past the ring, increments the omitted count. It is not
   // another observation and it does not invent a parent or artifact.
-  NoteNativeWasmDispatchOmission(admission, NativeWasmOmission::kBudget);
+  // A refused gap emit already took one sequence. Pushing the identity in
+  // that same call would count the execution a second time.
+  if (NoteNativeWasmDispatchOmission(admission, NativeWasmOmission::kBudget) ==
+      NativeWasmGapClaim::kRefused) {
+    return;
+  }
   RememberNativeWasmOverflowScope(native_wasm_overflow_, admission);
   if (StoreNativeWasmDispatchOverflow(admission, observation) == WasmOverflowStore::kRingFull) {
     NoteNativeWasmOverflowOmitted(native_wasm_overflow_, admission, native_wasm_capped_generation_);
@@ -2592,8 +2700,9 @@ bool NativeProbeSink::IsNativeWasmIndirectEnabled() const noexcept {
   std::atomic_thread_fence(std::memory_order_acquire);
   return active && config_generation_.load(std::memory_order_acquire) == generation;
 }
-bool NativeProbeSink::NoteNativeWasmIndirectOmission(const VmAdmission& admission,
-                                                     NativeWasmOmission reason) noexcept {
+NativeProbeSink::NativeWasmGapClaim NativeProbeSink::NoteNativeWasmIndirectOmission(
+    const VmAdmission& admission,
+    NativeWasmOmission reason) noexcept {
   auto& slot = native_wasm_indirect_gap_generations_[static_cast<std::size_t>(reason)];
   auto previous = slot.load(std::memory_order_acquire);
   // Odd generation is an in-flight claim; never overwrite a newer configuration.
@@ -2607,10 +2716,16 @@ bool NativeProbeSink::NoteNativeWasmIndirectOmission(const VmAdmission& admissio
       auto claimed = admission.generation - 1;
       slot.compare_exchange_strong(claimed, retained ? admission.generation : previous,
                                    std::memory_order_acq_rel);
-      return retained;
+      return retained ? NativeWasmGapClaim::kRecorded : NativeWasmGapClaim::kRefused;
     }
   }
-  return previous == admission.generation;
+  if (previous == admission.generation) {
+    return NativeWasmGapClaim::kRecorded;
+  }
+  if (previous == admission.generation - 1) {
+    return NativeWasmGapClaim::kBusy;
+  }
+  return NativeWasmGapClaim::kRefused;
 }
 void NativeProbeSink::RecordNativeWasmIndirect(NativeWasmIndirectObservation observation) noexcept {
   if (!IsNativeWasmIndirectEnabled())
@@ -2657,7 +2772,11 @@ void NativeProbeSink::RecordNativeWasmIndirect(NativeWasmIndirectObservation obs
       }
     }
   }
-  NoteNativeWasmIndirectOmission(admission, NativeWasmOmission::kBudget);
+  // Same one-drop rule as br_table: a refused budget gap is the loss.
+  if (NoteNativeWasmIndirectOmission(admission, NativeWasmOmission::kBudget) ==
+      NativeWasmGapClaim::kRefused) {
+    return;
+  }
   RememberNativeWasmOverflowScope(native_wasm_indirect_overflow_, admission);
   if (StoreNativeWasmIndirectOverflow(admission, observation) == WasmOverflowStore::kRingFull) {
     NoteNativeWasmOverflowOmitted(native_wasm_indirect_overflow_, admission,

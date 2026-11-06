@@ -273,6 +273,14 @@ const overflowEvent = {...request(8, 'wasm_dispatch_overflow'), category: 'vm', 
 assert.equal(api.isBrokerEvent(overflowEvent), true);
 assert.equal(api.decodePayload(overflowEvent),
   'Wasm br_table overflow identity: function 9, byte 47, selector 1000, arms 2, ring 0. Not a full observation.');
+overflowBytes.writeUInt16LE(31, 6);
+assert.equal(api.isBrokerEvent({...overflowEvent, payload: overflowBytes.toString('hex')}), true);
+assert.match(api.decodePayload({...overflowEvent, payload: overflowBytes.toString('hex')}), /ring 31/);
+overflowBytes.writeUInt16LE(32, 6);
+assert.equal(api.isBrokerEvent({...overflowEvent, payload: overflowBytes.toString('hex')}), false);
+overflowBytes.writeUInt16LE(0, 6);
+assert.equal(api.isBrokerEvent({...overflowEvent, artifact_id: '1'}), false);
+assert.equal(api.isBrokerEvent({...overflowEvent, parent_event_id: '4'}), false);
 overflowBytes[4] = 9;
 assert.equal(api.isBrokerEvent({...overflowEvent, payload: overflowBytes.toString('hex')}), false);
 const jsBudget = api.namedGapNotice([{category: 'vm', reason: 'native_js_dispatch_budget_incomplete', count: 1n}], 'the stored capture');

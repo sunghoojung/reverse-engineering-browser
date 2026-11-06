@@ -473,6 +473,7 @@ enum OriginTraceDocumentBuilder {
   private static func wasmOverflowSummary(_ event: [String: Any]) -> String? {
     guard let operation = event["type"] as? String,
       operation == "wasm_dispatch_overflow" || operation == "wasm_indirect_overflow",
+      event["artifact_id"] as? String == "0", event["parent_event_id"] as? String == "0",
       let payload = event["payload"] as? String,
       payload.count.isMultiple(of: 2),
       event["payload_encoding"] as? String == "hex",

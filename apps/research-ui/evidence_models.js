@@ -373,7 +373,8 @@
         const indirect = event?.type === 'wasm_indirect_overflow';
         if (event?.type !== 'wasm_dispatch_overflow' && !indirect) return null;
         if (event.protocol_version !== 3 || event.category !== 'vm' || event.flags !== 0 ||
-            event.payload_truncated === true || event.parent_event_id !== '0' ||
+            event.payload_truncated === true || event.artifact_id !== '0' ||
+            event.parent_event_id !== '0' ||
             event.payload_encoding !== 'hex' || typeof event.payload !== 'string') return null;
         if (!['session_id', 'sequence_number', 'monotonic_time_ns', 'frame_id'].every(field =>
           isCanonicalInteger(event[field], 1n, uint64Max))) return null;

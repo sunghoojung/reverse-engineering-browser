@@ -838,7 +838,8 @@ fn execution_metadata_covers_operations_actions_and_dispatch_without_safe_defaul
         }
     }
     // Only retained native and offline actions are advertised after CDP removal.
-    assert_eq!(action_count, 35);
+    // reset_wasm_sample_budgets is the extra SessionAction.
+    assert_eq!(action_count, 36);
     // Source checks intentionally follow the dispatch syntax. If it changes,
     // audit the new handler before updating this narrow test helper.
     fn arms<'a>(source: &'a str, start: &str, end: &str, indent: usize) -> BTreeSet<&'a str> {

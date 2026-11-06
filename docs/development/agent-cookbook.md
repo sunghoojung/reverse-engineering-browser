@@ -83,7 +83,16 @@ get_events {"type": "wasm_dispatch_observation,wasm_guest_dispatch,wasm_guest_in
 ```
 
 Good: the samples in file order, each with `sequence_number`,
-`monotonic_time_ns`, `artifact_id` (the module) and a hex `payload`. The
+`monotonic_time_ns`, `artifact_id` (the module), the hex `payload`, and
+`wasm_observation` when the type is `wasm_dispatch_observation` or
+`wasm_indirect_observation`. `status` `decoded` names `function_index`,
+`module_byte_offset`, `sample_index`, `js_invocation_state`, and
+`js_invocation_id`. A dispatch object also has `selector` and `table_count`.
+An indirect object also has `table_index`, `slot`, `callee_function_index`,
+and `resolution` (`resolved`, `null`, `out-of-bounds`, `foreign`,
+`unresolved`). `status` `invalid` has no fields. A payload version other than
+1 or 2 is invalid in full, not a version-2 prefix. The hex remains, and the
+decode does not need an opcode workspace for that module. The
 payload layouts are in
 [native Wasm dispatch](../../protocol/native-wasm-dispatch-v1.md#wire-contract)
 (event 17, and event 20 for `call_indirect`) and
@@ -380,6 +389,28 @@ lacked `document_start` or the Brave lacks the Native Console v3 overlay
 and `stop` before `session_action` `end`. Details:
 [document-start Console scripts](console-document-start-scripts.md).
 
+## 20. Read or call the attached Wasm instance
+
+`get_live_wasm` and `live_wasm_action` need `--allow-effects`. Copy
+`instance_id`, `document_token_high`, `document_token_low`, and
+`document_epoch` from the attachment, and send `confirmed: true`.
+
+`availability: unsupported` with `reason: browser_command_unsupported` means
+this backend has no command socket. A current Brave build does not serve one.
+That response is not an empty inventory: `budget` is null and `attachments`
+is empty. Do not invent memory bytes or a return value from it.
+
+`read_memory` and `write_memory` name a memory and a 1 to 4096 byte slice. A
+slice past the end is `out_of_bounds` and is not clipped. `call_export` and
+`call_function` take `{type, bits}` arguments. `bits` is the unsigned bit
+pattern, so i32 `-1` is `4294967295`. `ok` returns `memory` or `results`.
+`unknown_export`, `unknown_function`, `unknown_memory`, `signature_mismatch`,
+`stale_document`, and `instance_mismatch` have `entered: false`. A mismatch
+does not enter. `trap` and `did_not_return` have `entered: true` and no
+`results`. A stale document or a different instance is refused and does not
+change memory. These commands do not replace dispatch capture.
+Details: [live Wasm instance commands](../../protocol/live-wasm-instance-v1.md).
+
 ## Response shapes at a glance
 
 | Tool | Look at |
@@ -394,3 +425,5 @@ and `stop` before `session_action` `end`. Details:
 | `get_native_console` | `binding_id`, `targets` (`frame`, `origin`, `top_relation`, `out_of_process`), `selection` |
 | `native_console_action` `evaluate` | `status`, `type`, `text`, `truncated` |
 | `get_native_console_document_start` | `document_start.scripts`, `pending_renderer_processes`, `output.records` |
+| `get_live_wasm` | `availability`, `reason`, `attachments`, `budget`, `observations` |
+| `live_wasm_action` | `status`, `entered`, `memory`, `results` |

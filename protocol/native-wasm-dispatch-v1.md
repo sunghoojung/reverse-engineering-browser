@@ -103,6 +103,30 @@ sequence and monotonic time are required; wide identities remain decimal strings
 Unknown versions, nonzero reserved bytes, malformed length/encoding and invalid
 envelope flags are rejected consistently by C++, Rust and JavaScript.
 
+### Event queries
+
+`get_events` and `wait_for_events` leave `payload` as the 128-byte hex and add
+`wasm_observation` beside it. The field map is the one the opcode-workspace
+reader uses. A decoded dispatch object has `function_index`,
+`module_byte_offset`, `selector`, `table_count`, `sample_index`,
+`js_invocation_state` and `js_invocation_id`. Payload version 3 also has
+`direct_caller` (`kind` and `function_index`). Versions 1 and 2 omit it: those
+bytes were not a caller. An indirect object has `function_index`,
+`module_byte_offset`, `sample_index`, `js_invocation_state` and
+`js_invocation_id`, plus `table_index`, `slot`, `callee_function_index` and
+`resolution` (`resolved`, `null`, `out-of-bounds`, `foreign`, `unresolved`).
+`js_invocation_state` is the stored integer (0 not observed, 1 none, 2 inside,
+3 unknown). Version 1 decodes as not observed. `callee_function_index` is the
+stored index, 0 unless `resolution` is `resolved`. `status` is `decoded` or
+`invalid`. Invalid carries no fields. Dispatch accepts payload versions 1, 2,
+and 3. Indirect accepts 1 and 2. Any other version is invalid in full and is
+not decoded as a version-2 prefix. The record must also be protocol 3,
+category `vm`, and flags 0. This decode does not build an opcode workspace or
+open the module, so a module the detector never admits still has rows here.
+It does not recover a guest PC or invent a sample. Workspace rows remain a
+separate, module-checked view.
+See [filtered event reads](http-api.md#filtered-and-paged-reads).
+
 ## Reader and viewer
 
 Rust verifies artifact digest and exact session/frame/artifact scope, then parses
@@ -115,8 +139,8 @@ streams overlap and are never summed. Each function body is decoded at most once
 when a record names it, within the 16 MiB module bound. A module whose sections
 do not decode keeps its records visible as `native-wasm-module-undecodable` with
 their counts instead of dropping them. The viewer labels guest PC unknown. A version 3 same-instance caller is the
-live frame the runtime walked. A version 3 unknown caller is an explicit host,
-foreign, or unreadable frame, not a guessed index. Versions 1 and 2 omit the
+live Liftoff frame the runtime walked. A version 3 unknown caller is an explicit host,
+other instance, non-Liftoff frame, or unreadable frame, not a guessed index. Versions 1 and 2 omit the
 caller because they did not walk one. Parent event id stays zero: the caller
 field is not a parent edge, and guest positions remain unproven.
 
@@ -225,7 +249,9 @@ Version 2 adds the JavaScript invocation context at bytes 32..40, as for
 Function, table and callee indexes are below 16 Mi and the offset is at least 8
 and below 16 Mi. Any u32 slot is legal. C++, Python, Rust and JavaScript reject
 unknown versions, nonzero reserved bytes, a callee on an unresolved entry, an
-unknown resolution and invalid envelope flags alike.
+unknown resolution and invalid envelope flags alike. Event queries return this
+payload as `wasm_observation` with `resolution` named, as described
+[above](#event-queries). The hex payload remains.
 
 ### Reader
 

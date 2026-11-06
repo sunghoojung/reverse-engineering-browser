@@ -1508,6 +1508,96 @@ void NativeWasmIndirectAdmission() {
                "separate 16-record budget and full-ring cap retry\n";
 }
 
+std::string ScopeGapReason(const NativeProbeEvent& event) {
+  assert(event.header.type == reb::NativeProbeType::kGap);
+  assert(event.header.type != reb::NativeProbeType::kWasmDispatchObservation);
+  return std::string(reinterpret_cast<const char*>(event.inline_payload.data()),
+                     event.header.payload_size);
+}
+int native_wasm_limit_probes = 0;
+void ProbeNativeWasmLimits() noexcept {
+  ++native_wasm_limit_probes;
+  sink.NoteNativeWasmDispatchScope(reb::NativeWasmScopeGap::kJitless);
+  sink.NoteNativeWasmIndirectScope(reb::NativeWasmScopeGap::kJitless);
+}
+void NativeWasmScopeGaps() {
+  NativeProbeQueue queue;
+  const auto retained_before = native_wasm_retained;
+  transport.SetNativeWasmLimitProbe(nullptr);
+  Configure(queue);
+  sink.NoteNativeWasmDispatchScope(reb::NativeWasmScopeGap::kWorker);
+  assert(ScopeGapReason(One(queue)) == "native_wasm_dispatch_worker_unsupported");
+  sink.NoteNativeWasmDispatchScope(reb::NativeWasmScopeGap::kWorker);
+  assert(Drain(queue) == 0);
+  sink.NoteNativeWasmDispatchScope(reb::NativeWasmScopeGap::kJitless);
+  assert(ScopeGapReason(One(queue)) == "native_wasm_dispatch_jitless_unsupported");
+  sink.NoteNativeWasmDispatchScope(reb::NativeWasmScopeGap::kLeftLiftoff);
+  assert(ScopeGapReason(One(queue)) == "native_wasm_dispatch_left_liftoff");
+  sink.NoteNativeWasmIndirectScope(reb::NativeWasmScopeGap::kWorker);
+  assert(ScopeGapReason(One(queue)) == "native_wasm_indirect_worker_unsupported");
+  sink.NoteNativeWasmIndirectScope(reb::NativeWasmScopeGap::kJitless);
+  assert(ScopeGapReason(One(queue)) == "native_wasm_indirect_jitless_unsupported");
+  sink.NoteNativeWasmIndirectScope(reb::NativeWasmScopeGap::kLeftLiftoff);
+  assert(ScopeGapReason(One(queue)) == "native_wasm_indirect_left_liftoff");
+  sink.NoteNativeWasmIndirectScope(reb::NativeWasmScopeGap::kLeftLiftoff);
+  assert(Drain(queue) == 0);
+  assert(native_wasm_retained == retained_before);
+
+  // The observation budget must not hide a scope the hooks did not cover.
+  Configure(queue, 43);
+  sink.SetNativeWasmDispatchEmitter(&CaptureNativeWasm);
+  native_wasm_retained = 0;
+  native_wasm_accept = true;
+  constexpr std::array<std::uint8_t, 12> module{0, 97, 115, 109, 1, 0, 0, 0, 0x0e, 2, 0, 0};
+  for (int index = 0; index < 17; ++index) {
+    sink.RecordNativeWasmDispatch(7, 8, "https://owned.test/module.wasm", module, 0, 8, UINT32_MAX,
+                                  2, 9, 10);
+  }
+  assert(native_wasm_retained == 16);
+  assert(!sink.IsNativeWasmDispatchEnabled());
+  assert(ScopeGapReason(One(queue)) == "native_wasm_dispatch_budget_incomplete");
+  sink.NoteNativeWasmDispatchScope(reb::NativeWasmScopeGap::kLeftLiftoff);
+  assert(ScopeGapReason(One(queue)) == "native_wasm_dispatch_left_liftoff");
+  sink.NoteNativeWasmDispatchScope(reb::NativeWasmScopeGap::kWorker);
+  assert(ScopeGapReason(One(queue)) == "native_wasm_dispatch_worker_unsupported");
+  assert(Drain(queue) == 0);
+  native_wasm_retained = 0;
+
+  sink.SetNativeWasmDispatchEmitter(nullptr);
+  sink.NoteNativeWasmDispatchScope(reb::NativeWasmScopeGap::kWorker);
+  assert(Drain(queue) == 0);
+  sink.NoteNativeWasmIndirectScope(reb::NativeWasmScopeGap::kWorker);
+  assert(ScopeGapReason(One(queue)) == "native_wasm_indirect_worker_unsupported");
+  sink.SetNativeWasmIndirectEmitter(nullptr);
+  sink.NoteNativeWasmIndirectScope(reb::NativeWasmScopeGap::kJitless);
+  assert(Drain(queue) == 0);
+
+  Configure(queue, 44, kForever, reb::NativeProbeCategoryMask(reb::NativeProbeCategory::kVm));
+  sink.NoteNativeWasmDispatchScope(reb::NativeWasmScopeGap::kJitless);
+  sink.NoteNativeWasmIndirectScope(reb::NativeWasmScopeGap::kLeftLiftoff);
+  assert(Drain(queue) == 0);
+
+  transport.SetNativeWasmLimitProbe(&ProbeNativeWasmLimits);
+  Configure(queue, 45);
+  assert(native_wasm_limit_probes == 1);
+  NativeProbeEvent first;
+  NativeProbeEvent second;
+  assert(queue.TryPop(first) && queue.TryPop(second));
+  assert(ScopeGapReason(first) == "native_wasm_dispatch_jitless_unsupported");
+  assert(ScopeGapReason(second) == "native_wasm_indirect_jitless_unsupported");
+  assert(Drain(queue) == 0);
+  Configure(queue, 46);
+  assert(native_wasm_limit_probes == 2);
+  assert(Drain(queue) == 2);
+  transport.SetNativeWasmLimitProbe(nullptr);
+  Configure(queue, 47);
+  assert(native_wasm_limit_probes == 2);
+  assert(Drain(queue) == 0);
+  transport.Disable();
+  std::cout << "PASS native Wasm scope gaps; worker, jitless, left Liftoff, cap, and "
+               "session probe\n";
+}
+
 #include "guest_sampler_tests.h"
 #include "js_dispatch_tests.h"
 #include "js_invocation_tests.h"
@@ -1532,6 +1622,7 @@ int main() {
   Run<&NativeGuestModuleVerdictOverflow>();
   Run<&NativeWasmRuntimeAdmission>();
   Run<&NativeWasmIndirectAdmission>();
+  Run<&NativeWasmScopeGaps>();
   Run<&NativeJsDispatchWire>();
   Run<&NativeJsDispatchAdmission>();
   Run<&NativeJsInvocationAdmission>();

@@ -135,6 +135,12 @@ identifiers, for example:
 | Reason | Meaning |
 | --- | --- |
 | `native_wasm_dispatch_budget_incomplete` | The 16-observation `br_table` budget filled. |
+| `native_wasm_dispatch_worker_unsupported` | A `br_table` ran in a worker, which is not sampled. |
+| `native_wasm_dispatch_jitless_unsupported` | Jitless Wasm is outside the Liftoff hooks. |
+| `native_wasm_dispatch_left_liftoff` | A Wasm function was published outside Liftoff. |
+| `native_wasm_indirect_worker_unsupported` | A `call_indirect` ran in a worker, which is not sampled. |
+| `native_wasm_indirect_jitless_unsupported` | Jitless `call_indirect` is outside the Liftoff hooks. |
+| `native_wasm_indirect_left_liftoff` | A `call_indirect` function was published outside Liftoff. |
 | `native_guest_sample_limit` | The guest adapter's `sample_limit` was reached. |
 | `native_guest_parent_unresolved` | A guest record's parent invocation was not linked. |
 | `..._transport_unavailable`, `..._document_unavailable` | A capture stage was not available. |

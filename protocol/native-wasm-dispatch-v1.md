@@ -16,9 +16,64 @@ activate capture: the session must be active, connected and unexpired.
 
 The diagnostic flag forces Liftoff-only compilation and disables native-module
 cache reuse/deserialization. It is not a performance-neutral profiler. Only
-executing `br_table` instructions in document contexts are supported; workers
-and jitless execution are not implemented. `call_indirect` has its own flag and
-record, described [below](#call_indirect-observations).
+executing `br_table` instructions in document Liftoff code are sampled.
+`call_indirect` has its own flag and record, described
+[below](#call_indirect-observations). A worker, jitless, or non-Liftoff
+execution is a named scope gap, not an observation and not silence; see
+[unsupported scope](#unsupported-scope).
+
+## Unsupported scope
+
+Forcing Liftoff stays the disclosed diagnostic mode. Each dispatch flag implies
+`liftoff_only` and refuses native-module cache reuse, so a module compiled for
+that diagnostic does not tier up out of the instrumented compiler. With the
+flag off, Liftoff emits no hook instruction and no scope notice is delivered.
+
+Until other compilers and realms are instrumented, an execution outside
+document Liftoff code is a coalesced `gap`, once per configuration per reason.
+It is not a `wasm_dispatch_observation` or a `wasm_indirect_observation`. The
+payload is only the reason. There is no function index, module offset,
+selector, slot, or sample, and a full 16-observation budget does not suppress
+it.
+
+| Reason | When |
+| --- | --- |
+| `native_wasm_dispatch_worker_unsupported` | A Liftoff `br_table` hook ran in a worker global scope. |
+| `native_wasm_dispatch_jitless_unsupported` | A capture session starts, or a module is compiled, while `jitless` or `wasm_jitless` is set and the `br_table` flag is on. |
+| `native_wasm_dispatch_left_liftoff` | A Wasm function is published at TurboFan, or the `br_table` runtime is entered from a non-Liftoff frame, while the `br_table` flag is on. |
+| `native_wasm_indirect_worker_unsupported` | The worker case for `call_indirect`. |
+| `native_wasm_indirect_jitless_unsupported` | The jitless case for `call_indirect`. |
+| `native_wasm_indirect_left_liftoff` | The non-Liftoff case for `call_indirect`. |
+
+A worker gap means the hook ran and the realm was a worker. The selector or
+table slot is not copied into a document observation. Jitless on desktop builds
+does not execute Wasm: `--jitless` does not imply `wasm_jitless` except on
+tvOS, `WasmCodeManager::TryAllocate` rejects `jitless`, and the DrumBrake
+interpreter is not compiled into desktop or the native V8 cctest build. The
+notice is recorded when a capture session starts. Where DrumBrake is compiled
+in, an interpreter `br_table` or `call_indirect` records the same jitless
+reason for that stream only, still without a sample. A TurboFan publication on
+a thread with no current isolate is remembered and delivered on the next
+isolate-thread drain, including session start. That notice names the compiler
+the function left. It does not claim that a particular instruction ran.
+
+Worklets and other realms that are neither a document nor a worker global scope
+still produce no observation and no named gap.
+
+`RebNativeBrTableDisabledCompilation` and
+`RebNativeCallIndirectDisabledCompilation` compile Liftoff with the flag off
+and never reach a callback. `RebNativeBrTableFlagOffTurbofanHasNoScopeGap`
+does the same for TurboFan, including the scope callback.
+`RebNativeBrTableLeftLiftoff` and `RebNativeCallIndirectLeftLiftoff` compile
+with the flag on at TurboFan. `FlagScope` does not apply the `liftoff_only`
+implication, so the function can leave Liftoff; the tests require the scope
+notice and zero observations while the indirect call still returns its real
+result. `RebNativeBrTableJitlessUnsupported` checks the jitless query and that
+installing callbacks does not create an observation; it does not compile,
+because this pin will not map Wasm code in jitless mode. `NativeWasmScopeGaps`
+requires each reason string, coalescing, the sample cap not hiding a scope
+gap, and the session-start probe. A rebuilt Brave is required before a live
+session shows any of this. These tests are not a live browser run.
 
 ## Producer and identity
 

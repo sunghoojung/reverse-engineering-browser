@@ -2453,6 +2453,59 @@ bool NativeProbeSink::NoteNativeWasmIndirectOmission(const VmAdmission& admissio
   }
   return previous == admission.generation;
 }
+void NativeProbeSink::NoteNativeWasmDispatchScope(const NativeWasmScopeGap gap) noexcept {
+  NoteNativeWasmScopeGap(false, gap);
+}
+void NativeProbeSink::NoteNativeWasmIndirectScope(const NativeWasmScopeGap gap) noexcept {
+  NoteNativeWasmScopeGap(true, gap);
+}
+bool NativeProbeSink::NoteNativeWasmScopeGap(const bool call_indirect,
+                                             const NativeWasmScopeGap gap) noexcept {
+  const auto index = static_cast<std::size_t>(gap);
+  if (index >= kNativeWasmScopeGapCount) {
+    return false;
+  }
+  const bool emitter_installed =
+      call_indirect ? native_wasm_indirect_emitter_.load(std::memory_order_acquire) != nullptr
+                    : native_wasm_emitter_.load(std::memory_order_acquire) != nullptr;
+  if (!emitter_installed) {
+    return false;
+  }
+  VmAdmission admission;
+  if (!SnapshotVmAdmission(admission) ||
+      (category_mask_.load(std::memory_order_relaxed) &
+       NativeProbeCategoryMask(NativeProbeCategory::kArtifact)) == 0) {
+    return false;
+  }
+  // Same claim as an input/budget omission, including a retry when the ring
+  // refuses the gap. The 16-sample cap does not apply: a scope the hooks did
+  // not cover must stay visible after the observation budget is full.
+  auto& slots = call_indirect ? native_wasm_indirect_scope_gap_generations_
+                              : native_wasm_scope_gap_generations_;
+  auto& slot = slots[index];
+  auto previous = slot.load(std::memory_order_acquire);
+  while (previous < admission.generation - 1) {
+    if (slot.compare_exchange_weak(previous, admission.generation - 1, std::memory_order_acq_rel)) {
+      static constexpr std::array<std::string_view, kNativeWasmScopeGapCount> kDispatch{
+          "native_wasm_dispatch_worker_unsupported", "native_wasm_dispatch_jitless_unsupported",
+          "native_wasm_dispatch_left_liftoff"};
+      static constexpr std::array<std::string_view, kNativeWasmScopeGapCount> kIndirect{
+          "native_wasm_indirect_worker_unsupported", "native_wasm_indirect_jitless_unsupported",
+          "native_wasm_indirect_left_liftoff"};
+      static_assert(static_cast<std::size_t>(NativeWasmScopeGap::kWorker) == 0);
+      static_assert(static_cast<std::size_t>(NativeWasmScopeGap::kJitless) == 1);
+      static_assert(static_cast<std::size_t>(NativeWasmScopeGap::kLeftLiftoff) == 2);
+      const bool retained = RecordRuntimeBufferEvent(NativeProbeType::kGap, admission.frame_id,
+                                                     (call_indirect ? kIndirect : kDispatch)[index],
+                                                     admission.generation) != 0;
+      auto claimed = admission.generation - 1;
+      slot.compare_exchange_strong(claimed, retained ? admission.generation : previous,
+                                   std::memory_order_acq_rel);
+      return retained;
+    }
+  }
+  return previous == admission.generation;
+}
 void NativeProbeSink::RecordNativeWasmIndirect(NativeWasmIndirectObservation observation) noexcept {
   if (!IsNativeWasmIndirectEnabled())
     return;

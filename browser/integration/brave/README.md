@@ -443,8 +443,10 @@ existing omission reason.
 
 Rebuilt browsers can record physical `br_table` operands with
 `REB_NATIVE_WASM_DISPATCH=1` through the native launcher, or manually with
-`--js-flags=--reb-wasm-br-table-dispatch`. This is Liftoff-only instrumentation,
-not arbitrary interpreter guest-PC recovery. See
+`--js-flags=--reb-wasm-br-table-dispatch`. This is Liftoff-only instrumentation
+in document contexts, not arbitrary interpreter guest-PC recovery. A worker,
+jitless, or TurboFan execution is a named scope gap rather than a missing
+sample. See
 [wire contract and verification limits](../../../protocol/native-wasm-dispatch-v1.md).
 
 `call_indirect` and `return_call_indirect` dispatch has a separate opt-in:

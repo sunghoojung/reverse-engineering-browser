@@ -908,7 +908,7 @@ visible-window-only.
 ### Filtered and paged reads
 
 Any filter or cursor parameter turns `GET /api/events` into a filtered read
-that bypasses the polling cache. A filtered read does not replace that polling route.
+that bypasses the polling cache. The unfiltered route remains that polling window.
 Filters combine with AND and compare stored fields exactly:
 
 - `type` and `category`: comma-separated lowercase names, at most 16;
@@ -930,10 +930,13 @@ and `resolution` (`resolved`, `null`, `out-of-bounds`, `foreign`,
 1 none, 2 inside, 3 unknown. Version 1 decodes as not observed.
 `callee_function_index` is the stored index and is 0 unless `resolution` is
 `resolved`; that 0 is not a function index. `status` `invalid` carries no
-fields: an unknown version, a nonzero reserved byte, or any other payload
-rejection is not returned as a partial row. The decode reads the event
-payload only. It does not build an opcode workspace or open the module, so a
-module the detector never admits still has rows here. It does not recover a
+fields. A payload version other than 1 or 2 is invalid in full, not returned
+as a version-2 prefix: a later version stores new fields in bytes version 2
+reserves. The same `{status: invalid}` object is used when the record is not
+protocol 3, category `vm`, and flags 0, or when any other payload check
+fails. The decode reads that record only. It does not build an opcode
+workspace or open the module, so a module the detector never admits still
+has rows here. It does not recover a
 guest PC or a sample the payload does not store. The unfiltered polling
 window adds the same object. `before=OFFSET` continues backward and
 `after=OFFSET` reads forward from a record boundary. Each response adds `query`

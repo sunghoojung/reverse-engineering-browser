@@ -90,7 +90,8 @@ Good: the samples in file order, each with `sequence_number`,
 `js_invocation_id`. A dispatch object also has `selector` and `table_count`.
 An indirect object also has `table_index`, `slot`, `callee_function_index`,
 and `resolution` (`resolved`, `null`, `out-of-bounds`, `foreign`,
-`unresolved`). `status` `invalid` has no fields. The hex remains, and the
+`unresolved`). `status` `invalid` has no fields. A payload version other than
+1 or 2 is invalid in full, not a version-2 prefix. The hex remains, and the
 decode does not need an opcode workspace for that module. The
 payload layouts are in
 [native Wasm dispatch](../../protocol/native-wasm-dispatch-v1.md#wire-contract)

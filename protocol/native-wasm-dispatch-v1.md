@@ -89,7 +89,11 @@ fields `function_index`, `module_byte_offset`, `sample_index`,
 observed, 1 none, 2 inside, 3 unknown). Version 1 decodes as not observed.
 `callee_function_index` is the stored index, 0 unless `resolution` is
 `resolved`. `status` is `decoded` or `invalid`. Invalid carries no fields.
-This decode does not build an opcode workspace or open the module, so a module
+A payload version other than 1 or 2 is invalid in full. It is not decoded as
+a version-2 prefix: a later version stores new fields in bytes version 2
+reserves, and a zero there is not the same as "not observed". The record
+must also be protocol 3, category `vm`, and flags 0. This decode does not
+build an opcode workspace or open the module, so a module
 the detector never admits still has rows here. It does not recover a guest PC
 or invent a sample. Workspace rows remain a separate, module-checked view.
 See [filtered event reads](http-api.md#filtered-and-paged-reads).

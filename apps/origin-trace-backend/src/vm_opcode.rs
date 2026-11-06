@@ -20,8 +20,9 @@ mod native_module;
 mod native_wasm;
 
 /// Puts `wasm_observation` beside the raw payload of a native Wasm dispatch or
-/// call_indirect event. Other events are left alone. A payload the shared
-/// decoder rejects is `{status: invalid}` with no fields, not a partial row.
+/// call_indirect event. Other events are left alone. A record the shared
+/// decoder rejects, including an unknown payload version, is `{status: invalid}`
+/// with no fields, not a partial row.
 pub(crate) fn annotate_wasm_observations(events: &mut [Value]) {
     for event in events {
         if !matches!(

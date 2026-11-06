@@ -516,7 +516,7 @@ check has a `code`, a `severity` of `info` or `warning`, and a plain message:
 | `artifact_capture_failed` | Some artifact bodies were not stored. |
 | `queue_drops` | Records lost to a full queue, beyond named gap markers. |
 | `sequence_gaps` | Sequence numbers missing inside the scanned events. |
-| `named_gap` | A producer named why it stopped, with `category`, `reason` and `count`. A reason containing `budget` or `limit` means a sampling budget filled. |
+| `named_gap` | A producer named why it stopped, with `category`, `reason` and `count`. A reason containing `budget` or `limit` means a sampling budget filled. A Wasm reason ending in `filtered` is a sample-policy exclusion: that execution was not sampled and did not take a slot. |
 | `bounded_scope` | Only the newest 64 MiB of events were summarized. |
 
 The summary scans the same newest 64 MiB as the polling window and the newest

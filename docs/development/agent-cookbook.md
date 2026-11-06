@@ -129,7 +129,7 @@ identifiers, for example:
 | `native_wasm_dispatch_function_budget_incomplete` | That function's own `br_table` maximum was reached. Other functions can still be recorded. |
 | `native_wasm_indirect_function_budget_incomplete` | That function's own `call_indirect` maximum was reached. |
 | `native_wasm_indirect_site_budget_incomplete` | That `call_indirect` site's maximum was reached. |
-| `native_wasm_dispatch_filtered` | The module or function was excluded. It did not consume a sample index. The research UI currently groups this reason with losses. |
+| `native_wasm_dispatch_filtered` | The module or function was excluded. It did not consume a sample index. The research UI labels this as a sample-policy exclusion, not a loss. |
 | `native_guest_sample_limit` | The guest adapter's `sample_limit` was reached. |
 | `native_guest_parent_unresolved` | A guest record's parent invocation was not linked. |
 | `..._transport_unavailable`, `..._document_unavailable` | A capture stage was not available. |

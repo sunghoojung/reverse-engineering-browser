@@ -47,7 +47,11 @@ streams keep independent counters. `session_action`
 `reset_wasm_sample_budgets` restarts both sample indexes at 0 in the same
 browser session; it does not change the policy, the session id, or the
 capture configuration. The browser notices the reset file on its writer wake,
-about 250ms later. A rebuilt Brave is required before a live session honors
+about 250ms later, and only when the generation is greater than the last one
+it applied. The backend replaces that file by rename under an exclusive lock,
+so a reader sees a whole decimal and two overlapping resets cannot publish
+the same generation. Executions before that wake still belong to the previous
+epoch. A rebuilt Brave is required before a live session honors
 the policy or the reset. `sample_index` remains the configuration slot, 0
 through 15, not a per-function index and not an interpreter guest PC.
 
@@ -63,7 +67,10 @@ These gaps do not carry the dropped function, offset, or selector; that
 identity remains the open omission in issue 409. A lost observation becomes a
 `gap` in its own renderer
 sequence slot. Queue, transport and budget losses are explicit incompleteness,
-never invented samples. Every observation the browser refuses, whether
+never invented samples. A malformed module and a missing document are refused
+before a sample slot is taken. The artifact sink releases the slot if the
+private copy fails validation after the claim, so a later valid execution of
+that function can still be kept. Every observation the browser refuses, whether
 malformed, over the host or browser budget, without its owning document or
 without the artifact channel, fills its own slot with a gap, not only the first
 one. A record still waiting for its module when the capture ends becomes

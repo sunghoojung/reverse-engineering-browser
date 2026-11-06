@@ -184,8 +184,33 @@ void NativeProbeHost::CaptureWasmDispatch(const std::uint64_t capture_epoch,
     session_->Emit(RendererGap(NativeProbeEvent{.header = observation.header}, reason));
   };
   if (!monotonic_time_ns || monotonic_time_ns > now || !thread_id || !frame_id ||
-      !execution_context_id || sample_index >= 16 || content.size() > 16U * 1024U * 1024U) {
+      !execution_context_id || sample_index >= 16 || content.size() > 16U * 1024U * 1024U ||
+      function_index >= kNativeWasmFunctionIndexLimit ||
+      table_count >= kNativeWasmFunctionIndexLimit) {
     refuse("native_wasm_dispatch_limit_or_invalid");
+    return;
+  }
+  observation.execution_context_id = execution_context_id;
+  observation.document_token_high = document_token_high;
+  observation.document_token_low = document_token_low;
+  observation.function_index = function_index;
+  observation.module_byte_offset = module_byte_offset;
+  observation.selector = selector;
+  observation.table_count = table_count;
+  observation.sample_index = sample_index;
+  observation.js_invocation_state = js_invocation_state;
+  observation.js_invocation_id = js_invocation_id;
+  observation.source_url = source_url;
+  // The Mojo buffer is already a copy. Reject it before any sample slot is taken.
+  observation.module_bytes = std::span<const std::uint8_t>(content.data(), content.size());
+  if (!IsValidNativeWasmDispatchInput(observation)) {
+    refuse("native_wasm_dispatch_module_invalid");
+    return;
+  }
+  content::RenderFrameHost* owner =
+      ActiveDocumentOwner(*process, frame_id, document_token_high, document_token_low);
+  if (!owner) {
+    refuse("native_wasm_dispatch_document_unavailable");
     return;
   }
   std::array<std::uint8_t, 32> module_digest{};
@@ -209,29 +234,12 @@ void NativeProbeHost::CaptureWasmDispatch(const std::uint64_t capture_epoch,
     return;
   }
   ++wasm_capture_count_;
-  content::RenderFrameHost* owner =
-      ActiveDocumentOwner(*process, frame_id, document_token_high, document_token_low);
-  if (!owner) {
-    refuse("native_wasm_dispatch_document_unavailable");
-    return;
-  }
+  observation.module_bytes = {};
   auto* contents = content::WebContents::FromRenderFrameHost(owner);
   auto* main_frame = contents ? contents->GetPrimaryMainFrame() : nullptr;
   if (main_frame)
     observation.header.tab_id =
         static_cast<std::uint32_t>(main_frame->GetFrameTreeNodeId().value());
-  observation.execution_context_id = execution_context_id;
-  observation.document_token_high = document_token_high;
-  observation.document_token_low = document_token_low;
-  observation.function_index = function_index;
-  observation.module_byte_offset = module_byte_offset;
-  observation.selector = selector;
-  observation.table_count = table_count;
-  observation.sample_index = sample_index;
-  // The artifact sink refuses an inconsistent context as invalid input.
-  observation.js_invocation_state = js_invocation_state;
-  observation.js_invocation_id = js_invocation_id;
-  observation.source_url = source_url;
   const auto document = owner->GetWeakDocumentPtr();
   const std::weak_ptr<const std::uint64_t> lifetime = wasm_epoch_lifetime_;
   NativeArtifactCaptureSink::Get().CaptureWasmDispatch(
@@ -290,14 +298,41 @@ void NativeProbeHost::CaptureWasmIndirect(const std::uint64_t capture_epoch,
   if (!monotonic_time_ns || monotonic_time_ns > now || !thread_id || !frame_id ||
       !execution_context_id || sample_index >= kNativeWasmIndirectSampleBudget ||
       resolution >= kNativeWasmIndirectResolutionCount ||
-      content.size() > kNativeArtifactMaxContentBytes) {
+      content.size() > kNativeArtifactMaxContentBytes ||
+      function_index >= kNativeWasmFunctionIndexLimit ||
+      table_index >= kNativeWasmFunctionIndexLimit || slot >= kNativeWasmFunctionIndexLimit ||
+      callee_function_index >= kNativeWasmFunctionIndexLimit) {
     refuse("native_wasm_indirect_limit_or_invalid");
+    return;
+  }
+  observation.execution_context_id = execution_context_id;
+  observation.document_token_high = document_token_high;
+  observation.document_token_low = document_token_low;
+  observation.function_index = function_index;
+  observation.module_byte_offset = module_byte_offset;
+  observation.table_index = table_index;
+  observation.slot = slot;
+  observation.callee_function_index = callee_function_index;
+  observation.resolution = static_cast<NativeWasmIndirectResolution>(resolution);
+  observation.sample_index = sample_index;
+  observation.js_invocation_state = js_invocation_state;
+  observation.js_invocation_id = js_invocation_id;
+  observation.source_url = source_url;
+  observation.module_bytes = std::span<const std::uint8_t>(content.data(), content.size());
+  if (!IsValidNativeWasmIndirectInput(observation)) {
+    refuse("native_wasm_indirect_module_invalid");
+    return;
+  }
+  content::RenderFrameHost* owner =
+      ActiveDocumentOwner(*process, frame_id, document_token_high, document_token_low);
+  if (!owner) {
+    refuse("native_wasm_indirect_document_unavailable");
     return;
   }
   std::array<std::uint8_t, 32> module_digest{};
   const std::uint8_t* module_digest_bytes = nullptr;
   const auto& policy = session_->wasm_sample_budget();
-  if (policy.module_allow_count != 0 && content.size() <= 16U * 1024U * 1024U) {
+  if (policy.module_allow_count != 0) {
     module_digest =
         NativeGuestDigest(std::span<const std::uint8_t>(content.data(), content.size()));
     module_digest_bytes = module_digest.data();
@@ -316,31 +351,12 @@ void NativeProbeHost::CaptureWasmIndirect(const std::uint64_t capture_epoch,
     return;
   }
   ++wasm_indirect_capture_count_;
-  content::RenderFrameHost* owner =
-      ActiveDocumentOwner(*process, frame_id, document_token_high, document_token_low);
-  if (!owner) {
-    refuse("native_wasm_indirect_document_unavailable");
-    return;
-  }
+  observation.module_bytes = {};
   auto* contents = content::WebContents::FromRenderFrameHost(owner);
   auto* main_frame = contents ? contents->GetPrimaryMainFrame() : nullptr;
   if (main_frame)
     observation.header.tab_id =
         static_cast<std::uint32_t>(main_frame->GetFrameTreeNodeId().value());
-  observation.execution_context_id = execution_context_id;
-  observation.document_token_high = document_token_high;
-  observation.document_token_low = document_token_low;
-  observation.function_index = function_index;
-  observation.module_byte_offset = module_byte_offset;
-  observation.table_index = table_index;
-  observation.slot = slot;
-  observation.callee_function_index = callee_function_index;
-  observation.resolution = static_cast<NativeWasmIndirectResolution>(resolution);
-  observation.sample_index = sample_index;
-  // The artifact sink refuses an inconsistent context as invalid input.
-  observation.js_invocation_state = js_invocation_state;
-  observation.js_invocation_id = js_invocation_id;
-  observation.source_url = source_url;
   const auto document = owner->GetWeakDocumentPtr();
   const std::weak_ptr<const std::uint64_t> lifetime = wasm_epoch_lifetime_;
   NativeArtifactCaptureSink::Get().CaptureWasmIndirect(

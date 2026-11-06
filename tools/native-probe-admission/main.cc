@@ -1524,6 +1524,21 @@ std::string_view BudgetGap(const NativeProbeEvent& event) {
   return {reinterpret_cast<const char*>(event.inline_payload.data()), event.header.payload_size};
 }
 void NativeWasmSampleBudgetControls() {
+  std::array<reb::NativeWasmBudgetKeySlot, reb::kNativeWasmBudgetKeySlots> reused{};
+  const auto first =
+      reb::RetainWasmBudgetKey(reused, 2, reb::NativeWasmBudgetKeyKind::kFunction, 7, 0, 1);
+  assert(first.status == reb::NativeWasmBudgetRetain::kRetained);
+  reb::ReleaseWasmBudgetKey(reused[first.slot], 2, first.incarnation);
+  const auto other =
+      reb::RetainWasmBudgetKey(reused, 2, reb::NativeWasmBudgetKeyKind::kFunction, 8, 0, 1);
+  assert(other.status == reb::NativeWasmBudgetRetain::kRetained);
+  const auto again =
+      reb::RetainWasmBudgetKey(reused, 2, reb::NativeWasmBudgetKeyKind::kFunction, 7, 0, 1);
+  assert(again.status == reb::NativeWasmBudgetRetain::kRetained);
+  const auto capped =
+      reb::RetainWasmBudgetKey(reused, 2, reb::NativeWasmBudgetKeyKind::kFunction, 7, 0, 1);
+  assert(capped.status == reb::NativeWasmBudgetRetain::kCapped);
+
   std::array<std::uint32_t, reb::kNativeWasmFunctionFilterLimit> functions{};
   std::uint8_t count = 0;
   assert(reb::ParseNativeWasmFunctionList("1,2,15", functions, count) && count == 3 &&

@@ -945,6 +945,34 @@ void NativeWasmSampleBudget(reb::ArtifactReceiver& receiver) {
             indirect_count() == reset_indirect + 17 &&
             events.back().header.type == NativeProbeType::kWasmIndirectObservation,
         "Reset accepts both streams again without a new configuration or transfer");
+
+  Configure();
+  policy = {};
+  policy.samples_per_function = 1;
+  sink.SetWasmSampleBudgetPolicy(policy);
+  const auto invalid_dispatch = dispatch_count();
+  const auto invalid_indirect = indirect_count();
+  dispatch.function_index = 4;
+  dispatch.header.sequence_number = 6500;
+  const std::vector<std::uint8_t> invalid_module{1, 2, 3, 4};
+  sink.CaptureWasmDispatch(dispatch, mojo_base::BigBuffer(invalid_module), [] { return true; });
+  Check(transfers.empty() && Payload(events.back()) == "native_wasm_dispatch_limit_or_invalid",
+        "A short module is an explicit br_table limit gap and does not transfer");
+  dispatch.header.sequence_number = 6501;
+  sink.CaptureWasmDispatch(dispatch, mojo_base::BigBuffer(allowed), [] { return true; });
+  Check(transfers.size() == 1, "The valid module still transfers after the invalid one");
+  Receive(receiver, transfers.begin()->first);
+  Check(dispatch_count() == invalid_dispatch + 1,
+        "An invalid module did not consume the per-function br_table budget");
+  indirect.function_index = 4;
+  indirect.header.sequence_number = 6502;
+  sink.CaptureWasmIndirect(indirect, mojo_base::BigBuffer(invalid_module), [] { return true; });
+  Check(transfers.empty() && Payload(events.back()) == "native_wasm_indirect_limit_or_invalid",
+        "A short module is an explicit call_indirect limit gap and does not transfer");
+  indirect.header.sequence_number = 6503;
+  sink.CaptureWasmIndirect(indirect, mojo_base::BigBuffer(allowed), [] { return true; });
+  Check(indirect_count() == invalid_indirect + 1 && transfers.empty(),
+        "An invalid module did not consume the per-function call_indirect budget");
   std::cout << "PASS native Wasm sample budget controls; per function, module allowlist, "
                "independent streams and reset\n";
 }

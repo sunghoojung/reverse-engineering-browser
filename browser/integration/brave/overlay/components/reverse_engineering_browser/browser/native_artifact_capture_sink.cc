@@ -858,12 +858,19 @@ void NativeArtifactCaptureSink::CaptureWasmDispatch(
     return;
   }
   ++wasm_dispatch_count_;
+  // A refused record is not a retained sample. Put the slot and the per-function
+  // count back so a later valid execution of that function can still be kept.
+  const auto abandon = [&](std::string_view reason) {
+    --wasm_dispatch_count_;
+    ReleaseNativeWasmBudgetAdmission(budget, wasm_dispatch_function_keys_, {}, wasm_budget_epoch_);
+    gap(reason);
+  };
   if (content.size() < 8 || content.size() > 16U * 1024U * 1024U ||
       !observation.header.sequence_number || !observation.header.monotonic_time_ns ||
       !observation.header.process_id || !observation.header.thread_id ||
       observation.function_index >= 16U * 1024U * 1024U ||
       observation.table_count >= 16U * 1024U * 1024U) {
-    gap("native_wasm_dispatch_limit_or_invalid");
+    abandon("native_wasm_dispatch_limit_or_invalid");
     return;
   }
   // Renderer shared memory remains writable: validate a private immutable copy.
@@ -871,7 +878,7 @@ void NativeArtifactCaptureSink::CaptureWasmDispatch(
   auto checked = observation;
   checked.module_bytes = bytes;
   if (!IsValidNativeWasmDispatchInput(checked)) {
-    gap("native_wasm_dispatch_module_invalid");
+    abandon("native_wasm_dispatch_module_invalid");
     return;
   }
   NativeProbeEvent event;
@@ -936,10 +943,17 @@ void NativeArtifactCaptureSink::CaptureWasmIndirect(
     return;
   }
   ++wasm_indirect_count_;
+  // Same as br_table: validation that fails after the claim must not spend it.
+  const auto abandon = [&](std::string_view reason) {
+    --wasm_indirect_count_;
+    ReleaseNativeWasmBudgetAdmission(budget, wasm_indirect_function_keys_, wasm_indirect_site_keys_,
+                                     wasm_budget_epoch_);
+    gap(reason);
+  };
   if (content.size() < 8 || content.size() > kNativeArtifactMaxContentBytes ||
       !observation.header.sequence_number || !observation.header.monotonic_time_ns ||
       !observation.header.process_id || !observation.header.thread_id) {
-    gap("native_wasm_indirect_limit_or_invalid");
+    abandon("native_wasm_indirect_limit_or_invalid");
     return;
   }
   // Renderer shared memory remains writable: validate a private immutable copy.
@@ -947,7 +961,7 @@ void NativeArtifactCaptureSink::CaptureWasmIndirect(
   auto checked = observation;
   checked.module_bytes = bytes;
   if (!IsValidNativeWasmIndirectInput(checked)) {
-    gap("native_wasm_indirect_module_invalid");
+    abandon("native_wasm_indirect_module_invalid");
     return;
   }
   NativeProbeEvent event;

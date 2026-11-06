@@ -179,8 +179,12 @@ EncodeNativeWasmSampleBudgetPolicy(const NativeWasmSampleBudgetPolicy& policy) n
 }
 
 // One atomic word owns the count so a release and a reuse cannot both update it.
-// Layout: epoch in the high bits, bit 15 set while the key is being published,
-// and the retained count in the low 15 bits once the key is visible.
+// Layout, low to high: 15-bit count, publish bit, 16-bit incarnation, 32-bit
+// epoch. A count of zero keeps the key visible so the same function can be
+// claimed again. Reuse for a different key advances the incarnation. A release
+// decrements only that incarnation, so it cannot land on a key that took the
+// slot later. An epoch does not fit in 32 bits only after far more resets than
+// a browser process performs; admission then fails closed.
 struct NativeWasmBudgetKeySlot final {
   std::atomic<std::uint64_t> stamp{0};
   std::atomic<std::uint32_t> kind{0};
@@ -191,10 +195,29 @@ struct NativeWasmBudgetKeySlot final {
 enum class NativeWasmBudgetKeyKind : std::uint32_t { kFunction = 0, kSite = 1 };
 
 inline constexpr std::uint64_t kNativeWasmBudgetPublishBit = 0x8000ULL;
+inline constexpr std::uint64_t kNativeWasmBudgetCountMask = 0x7fffULL;
+inline constexpr std::uint64_t kNativeWasmBudgetIncarnationShift = 16;
+inline constexpr std::uint64_t kNativeWasmBudgetIncarnationMask = 0xffffULL;
+inline constexpr std::uint64_t kNativeWasmBudgetEpochShift = 32;
+
+[[nodiscard]] inline std::uint64_t NativeWasmBudgetEpochOf(std::uint64_t stamp) noexcept {
+  return stamp >> kNativeWasmBudgetEpochShift;
+}
+
+[[nodiscard]] inline std::uint32_t NativeWasmBudgetIncarnationOf(std::uint64_t stamp) noexcept {
+  return static_cast<std::uint32_t>((stamp >> kNativeWasmBudgetIncarnationShift) &
+                                    kNativeWasmBudgetIncarnationMask);
+}
+
+[[nodiscard]] inline std::uint32_t NativeWasmBudgetCountOf(std::uint64_t stamp) noexcept {
+  return static_cast<std::uint32_t>(stamp & kNativeWasmBudgetCountMask);
+}
 
 [[nodiscard]] inline std::uint64_t NativeWasmBudgetStamp(std::uint64_t epoch,
+                                                         std::uint32_t incarnation,
                                                          std::uint32_t count) noexcept {
-  return (epoch << 16U) | count;
+  return (epoch << kNativeWasmBudgetEpochShift) |
+         (static_cast<std::uint64_t>(incarnation) << kNativeWasmBudgetIncarnationShift) | count;
 }
 
 enum class NativeWasmBudgetRetain : std::uint8_t { kRetained = 0, kCapped = 1 };
@@ -202,12 +225,14 @@ enum class NativeWasmBudgetRetain : std::uint8_t { kRetained = 0, kCapped = 1 };
 struct NativeWasmBudgetRetainResult final {
   NativeWasmBudgetRetain status = NativeWasmBudgetRetain::kCapped;
   std::size_t slot = 0;
+  std::uint32_t incarnation = 0;
 };
 
-[[nodiscard]] inline bool NativeWasmBudgetStampMatches(std::uint64_t stamp,
+// Visible includes a zero count. A publish bit hides the key until its fields
+// are stored. Callers must not treat a publish bit from any epoch as free.
+[[nodiscard]] inline bool NativeWasmBudgetStampVisible(std::uint64_t stamp,
                                                        std::uint64_t epoch) noexcept {
-  return stamp >> 16U == epoch && (stamp & kNativeWasmBudgetPublishBit) == 0 &&
-         (stamp & 0x7fffULL) != 0;
+  return NativeWasmBudgetEpochOf(stamp) == epoch && (stamp & kNativeWasmBudgetPublishBit) == 0;
 }
 
 [[nodiscard]] inline bool NativeWasmBudgetKeyMatches(const NativeWasmBudgetKeySlot& slot,
@@ -215,7 +240,7 @@ struct NativeWasmBudgetRetainResult final {
                                                      NativeWasmBudgetKeyKind kind,
                                                      std::uint32_t primary,
                                                      std::uint32_t secondary) noexcept {
-  if (!NativeWasmBudgetStampMatches(slot.stamp.load(std::memory_order_acquire), epoch))
+  if (!NativeWasmBudgetStampVisible(slot.stamp.load(std::memory_order_acquire), epoch))
     return false;
   if (slot.kind.load(std::memory_order_relaxed) != static_cast<std::uint32_t>(kind) ||
       slot.primary.load(std::memory_order_relaxed) != primary)
@@ -224,12 +249,14 @@ struct NativeWasmBudgetRetainResult final {
          slot.secondary.load(std::memory_order_relaxed) == secondary;
 }
 
-inline void ReleaseWasmBudgetKey(NativeWasmBudgetKeySlot& slot, std::uint64_t epoch) noexcept {
+inline void ReleaseWasmBudgetKey(NativeWasmBudgetKeySlot& slot,
+                                 std::uint64_t epoch,
+                                 std::uint32_t incarnation) noexcept {
   auto stamp = slot.stamp.load(std::memory_order_acquire);
-  while (NativeWasmBudgetStampMatches(stamp, epoch)) {
-    const auto count = static_cast<std::uint32_t>(stamp & 0x7fffULL);
-    const auto next = count == 1 ? std::uint64_t{0} : stamp - 1;
-    if (slot.stamp.compare_exchange_weak(stamp, next, std::memory_order_acq_rel,
+  while (NativeWasmBudgetStampVisible(stamp, epoch) &&
+         NativeWasmBudgetIncarnationOf(stamp) == incarnation &&
+         NativeWasmBudgetCountOf(stamp) != 0) {
+    if (slot.stamp.compare_exchange_weak(stamp, stamp - 1, std::memory_order_acq_rel,
                                          std::memory_order_acquire))
       return;
   }
@@ -239,6 +266,8 @@ inline void ReleaseWasmBudgetKey(NativeWasmBudgetKeySlot& slot, std::uint64_t ep
 // new key in one instant can each hold a slot until the later publisher sees
 // the earlier one; a thread that has already returned is not pulled back.
 // The stream's 16-slot global budget still bounds how many records are kept.
+// A publish bit from any epoch is busy: a reset must not steal the slot and
+// let the older publisher overwrite the new count.
 [[nodiscard]] inline NativeWasmBudgetRetainResult RetainWasmBudgetKey(
     std::span<NativeWasmBudgetKeySlot> slots,
     std::uint64_t epoch,
@@ -247,8 +276,8 @@ inline void ReleaseWasmBudgetKey(NativeWasmBudgetKeySlot& slot, std::uint64_t ep
     std::uint32_t secondary,
     std::uint32_t limit) noexcept {
   NativeWasmBudgetRetainResult capped;
-  if (slots.empty() || limit == 0 || limit > 0x7fffU || epoch < 2 || (epoch & 1U) != 0 ||
-      epoch >= (std::uint64_t{1} << 48U))
+  if (slots.empty() || limit == 0 || limit > kNativeWasmBudgetCountMask || epoch < 2 ||
+      (epoch & 1U) != 0 || epoch >= (std::uint64_t{1} << kNativeWasmBudgetEpochShift))
     return capped;
   const auto kind_bits = static_cast<std::uint32_t>(kind);
   const auto start = static_cast<std::size_t>(
@@ -260,26 +289,35 @@ inline void ReleaseWasmBudgetKey(NativeWasmBudgetKeySlot& slot, std::uint64_t ep
       auto& slot = slots[index];
       if (NativeWasmBudgetKeyMatches(slot, epoch, kind, primary, secondary)) {
         auto stamp = slot.stamp.load(std::memory_order_acquire);
-        while (NativeWasmBudgetStampMatches(stamp, epoch)) {
-          const auto count = static_cast<std::uint32_t>(stamp & 0x7fffULL);
+        while (NativeWasmBudgetStampVisible(stamp, epoch) &&
+               NativeWasmBudgetKeyMatches(slot, epoch, kind, primary, secondary)) {
+          const auto count = NativeWasmBudgetCountOf(stamp);
           if (count >= limit)
             return capped;
           if (slot.stamp.compare_exchange_weak(stamp, stamp + 1, std::memory_order_acq_rel,
                                                std::memory_order_acquire))
-            return {NativeWasmBudgetRetain::kRetained, index};
+            return {NativeWasmBudgetRetain::kRetained, index, NativeWasmBudgetIncarnationOf(stamp)};
         }
         retry = true;
         break;
       }
       const auto stamp = slot.stamp.load(std::memory_order_acquire);
-      if ((stamp & kNativeWasmBudgetPublishBit) != 0 && stamp >> 16U == epoch) {
+      if ((stamp & kNativeWasmBudgetPublishBit) != 0) {
         retry = true;
         break;
       }
-      const bool free = stamp == 0 || stamp >> 16U != epoch;
-      if (!free)
+      const bool live = NativeWasmBudgetEpochOf(stamp) == epoch &&
+                        NativeWasmBudgetCountOf(stamp) != 0 && stamp != 0;
+      if (live)
         continue;
-      const auto publishing = NativeWasmBudgetStamp(epoch, 0) | kNativeWasmBudgetPublishBit;
+      auto incarnation = NativeWasmBudgetEpochOf(stamp) == epoch
+                             ? NativeWasmBudgetIncarnationOf(stamp)
+                             : std::uint32_t{0};
+      if (incarnation == kNativeWasmBudgetIncarnationMask)
+        continue;
+      ++incarnation;
+      const auto publishing =
+          NativeWasmBudgetStamp(epoch, incarnation, 0) | kNativeWasmBudgetPublishBit;
       auto observed = stamp;
       if (!slot.stamp.compare_exchange_strong(observed, publishing, std::memory_order_acq_rel,
                                               std::memory_order_acquire)) {
@@ -289,27 +327,41 @@ inline void ReleaseWasmBudgetKey(NativeWasmBudgetKeySlot& slot, std::uint64_t ep
       slot.kind.store(kind_bits, std::memory_order_relaxed);
       slot.primary.store(primary, std::memory_order_relaxed);
       slot.secondary.store(secondary, std::memory_order_relaxed);
-      slot.stamp.store(NativeWasmBudgetStamp(epoch, 1), std::memory_order_release);
+      auto published = publishing;
+      if (!slot.stamp.compare_exchange_strong(
+              published, NativeWasmBudgetStamp(epoch, incarnation, 1), std::memory_order_acq_rel,
+              std::memory_order_acquire)) {
+        retry = true;
+        break;
+      }
       for (std::size_t earlier = 0; earlier < probe; ++earlier) {
         auto& prior = slots[(start + earlier) % slots.size()];
+        const auto prior_stamp = prior.stamp.load(std::memory_order_acquire);
+        if ((prior_stamp & kNativeWasmBudgetPublishBit) != 0 &&
+            NativeWasmBudgetEpochOf(prior_stamp) == epoch) {
+          ReleaseWasmBudgetKey(slot, epoch, incarnation);
+          retry = true;
+          break;
+        }
         if (!NativeWasmBudgetKeyMatches(prior, epoch, kind, primary, secondary))
           continue;
-        ReleaseWasmBudgetKey(slot, epoch);
-        auto prior_stamp = prior.stamp.load(std::memory_order_acquire);
-        while (NativeWasmBudgetStampMatches(prior_stamp, epoch)) {
-          if (static_cast<std::uint32_t>(prior_stamp & 0x7fffULL) >= limit)
+        ReleaseWasmBudgetKey(slot, epoch, incarnation);
+        auto prior_seen = prior.stamp.load(std::memory_order_acquire);
+        while (NativeWasmBudgetStampVisible(prior_seen, epoch) &&
+               NativeWasmBudgetKeyMatches(prior, epoch, kind, primary, secondary)) {
+          if (NativeWasmBudgetCountOf(prior_seen) >= limit)
             return capped;
-          if (prior.stamp.compare_exchange_weak(prior_stamp, prior_stamp + 1,
-                                                std::memory_order_acq_rel,
-                                                std::memory_order_acquire))
-            return {NativeWasmBudgetRetain::kRetained, (start + earlier) % slots.size()};
+          if (prior.stamp.compare_exchange_weak(
+                  prior_seen, prior_seen + 1, std::memory_order_acq_rel, std::memory_order_acquire))
+            return {NativeWasmBudgetRetain::kRetained, (start + earlier) % slots.size(),
+                    NativeWasmBudgetIncarnationOf(prior_seen)};
         }
         retry = true;
         break;
       }
       if (retry)
         break;
-      return {NativeWasmBudgetRetain::kRetained, index};
+      return {NativeWasmBudgetRetain::kRetained, index, incarnation};
     }
     if (!retry)
       return capped;
@@ -329,6 +381,8 @@ struct NativeWasmBudgetAdmission final {
   bool site_claimed = false;
   std::size_t function_slot = 0;
   std::size_t site_slot = 0;
+  std::uint32_t function_incarnation = 0;
+  std::uint32_t site_incarnation = 0;
 };
 
 // module_digest is required only when the allowlist is non-empty. An empty
@@ -357,6 +411,7 @@ struct NativeWasmBudgetAdmission final {
     }
     result.function_claimed = true;
     result.function_slot = retained.slot;
+    result.function_incarnation = retained.incarnation;
   }
   if (!site_slots.empty() && policy.samples_per_indirect_site != 0) {
     const auto retained =
@@ -364,13 +419,15 @@ struct NativeWasmBudgetAdmission final {
                             site_offset, policy.samples_per_indirect_site);
     if (retained.status != NativeWasmBudgetRetain::kRetained) {
       if (result.function_claimed)
-        ReleaseWasmBudgetKey(function_slots[result.function_slot], epoch);
+        ReleaseWasmBudgetKey(function_slots[result.function_slot], epoch,
+                             result.function_incarnation);
       result.function_claimed = false;
       result.status = NativeWasmBudgetAdmission::Status::kSiteBudget;
       return result;
     }
     result.site_claimed = true;
     result.site_slot = retained.slot;
+    result.site_incarnation = retained.incarnation;
   }
   return result;
 }
@@ -380,9 +437,10 @@ inline void ReleaseNativeWasmBudgetAdmission(const NativeWasmBudgetAdmission& ad
                                              std::span<NativeWasmBudgetKeySlot> site_slots,
                                              std::uint64_t epoch) noexcept {
   if (admission.function_claimed && admission.function_slot < function_slots.size())
-    ReleaseWasmBudgetKey(function_slots[admission.function_slot], epoch);
+    ReleaseWasmBudgetKey(function_slots[admission.function_slot], epoch,
+                         admission.function_incarnation);
   if (admission.site_claimed && admission.site_slot < site_slots.size())
-    ReleaseWasmBudgetKey(site_slots[admission.site_slot], epoch);
+    ReleaseWasmBudgetKey(site_slots[admission.site_slot], epoch, admission.site_incarnation);
 }
 
 [[nodiscard]] inline int NativeWasmHexValue(char character) noexcept {

@@ -247,6 +247,33 @@ void NativeProbeHostGuestBoundary(reb::ArtifactReceiver& receiver) {
                              e.header.sequence_number == 604 && e.header.tab_id == 1;
                     }),
         "The host keeps the observation's own sequence and tab");
+  // Function 9 has not been claimed. A missing document and a module that is
+  // not a call_indirect must not take its one sample.
+  session.wasm_budget = {};
+  session.wasm_budget.samples_per_function = 1;
+  const auto capture_indirect = [&](std::uint64_t sequence,
+                                    const std::vector<std::uint8_t>& bytes) {
+    host.CaptureWasmIndirect(epoch, kSession, sequence, 100, 123, 7, frame_id, 10, 11, 12, 9, 8, 0,
+                             4, 2, 0, 0, 0, 0, "fixture://host-indirect",
+                             mojo_base::BigBuffer(bytes));
+  };
+  frame.document = {11, 99};
+  capture_indirect(605, indirect_module);
+  Check(gap_for(605, "native_wasm_indirect_document_unavailable") && transfers.empty(),
+        "A missing document is refused before the per-function budget");
+  frame.document = {11, 12};
+  capture_indirect(606, std::vector<std::uint8_t>{1, 2, 3, 4});
+  Check(gap_for(606, "native_wasm_indirect_module_invalid") && transfers.empty(),
+        "An invalid module is refused before the per-function budget");
+  capture_indirect(607, indirect_module);
+  Check(std::any_of(events.begin(), events.end(),
+                    [](const auto& e) {
+                      return e.header.type == NativeProbeType::kWasmIndirectObservation &&
+                             e.header.sequence_number == 607;
+                    }) &&
+            !gap_for(607, "native_wasm_indirect_browser_function_budget_incomplete"),
+        "Refusals did not consume function 9's host sample");
+  session.wasm_budget = {};
   host.Disable();
   session.active = false;
   session.emitted = {};

@@ -788,22 +788,26 @@ fi
 if [[ -n "${native_guest_adapter}" ]]; then
   brave_arguments+=("--reb-wasm-guest-adapter=${native_guest_adapter}")
 fi
-if [[ -n "${native_wasm_samples_per_function}" ]]; then
+# Absent options are unset in the extracted launch slice, which runs under
+# set -u. An empty value is the historical unrestricted budget.
+if [[ -n "${native_wasm_samples_per_function:-}" ]]; then
   brave_arguments+=("--reb-wasm-samples-per-function=${native_wasm_samples_per_function}")
 fi
-if [[ -n "${native_wasm_samples_per_indirect_site}" ]]; then
+if [[ -n "${native_wasm_samples_per_indirect_site:-}" ]]; then
   brave_arguments+=("--reb-wasm-samples-per-indirect-site=${native_wasm_samples_per_indirect_site}")
 fi
-if [[ -n "${native_wasm_function_allow}" ]]; then
+if [[ -n "${native_wasm_function_allow:-}" ]]; then
   brave_arguments+=("--reb-wasm-function-allow=${native_wasm_function_allow}")
 fi
-if [[ -n "${native_wasm_function_deny}" ]]; then
+if [[ -n "${native_wasm_function_deny:-}" ]]; then
   brave_arguments+=("--reb-wasm-function-deny=${native_wasm_function_deny}")
 fi
-if [[ -n "${native_wasm_module_allowlist}" ]]; then
+if [[ -n "${native_wasm_module_allowlist:-}" ]]; then
   brave_arguments+=("--reb-wasm-module-allowlist=${native_wasm_module_allowlist}")
 fi
-brave_arguments+=("--reb-wasm-budget-reset-file=${wasm_budget_reset_file}")
+if [[ -n "${wasm_budget_reset_file:-}" ]]; then
+  brave_arguments+=("--reb-wasm-budget-reset-file=${wasm_budget_reset_file}")
+fi
 if [[ -n "${native_js_dispatch_sites:-}" ]]; then
   brave_arguments+=("--reb-js-dispatch-sites=${native_js_dispatch_sites}")
 fi
@@ -907,7 +911,7 @@ else
   echo "Console document-start scripts: not permitted; set REB_CONSOLE_DOCUMENT_START=1 to permit them for one session"
 fi
 echo "Native switches: quiet=${native_quiet_mode} wasm_br_table=${native_wasm_dispatch} wasm_call_indirect=${native_wasm_call_indirect} wasm_guest=$([[ -n "${native_guest_adapter}" ]] && echo 1 || echo 0) js_dispatch=$([[ -n "${native_js_dispatch_sites}" ]] && echo 1 || echo 0) js_invocation=$([[ "${js_invocation_session_state}" == armed ]] && echo 1 || echo 0)"
-echo "Wasm sample budgets: per_function=${native_wasm_samples_per_function:-unset} per_indirect_site=${native_wasm_samples_per_indirect_site:-unset} function_allow=${native_wasm_function_allow:-unset} function_deny=${native_wasm_function_deny:-unset} module_allowlist=$([[ -n "${native_wasm_module_allowlist}" ]] && echo 1 || echo 0) reset_file=${wasm_budget_reset_file}"
+echo "Wasm sample budgets: per_function=${native_wasm_samples_per_function:-unset} per_indirect_site=${native_wasm_samples_per_indirect_site:-unset} function_allow=${native_wasm_function_allow:-unset} function_deny=${native_wasm_function_deny:-unset} module_allowlist=$([[ -n "${native_wasm_module_allowlist:-}" ]] && echo 1 || echo 0) reset_file=${wasm_budget_reset_file:-unset}"
 if [[ "${js_invocation_session_state}" == browser_unsupported ]]; then
   echo "JavaScript invocation tracking: unavailable; Brave at ${brave_binary} does not define --reb-js-invocation-capture, so this session started without the saved invocation sites and records no invocation evidence"
 elif [[ "${js_invocation_session_state}" == armed && "${native_js_invocation_digests}" == 1 ]]; then

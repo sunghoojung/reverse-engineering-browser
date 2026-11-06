@@ -270,8 +270,32 @@ impl LiveBrowser {
 
 /// Writes the next generation beside the file and renames it into place. The
 /// browser applies a generation only when it is greater than the last one it
-/// saw, on its writer wake of about 250ms.
+/// saw, on its writer wake of about 250ms. An exclusive lock covers the
+/// read-modify-rename so two resets cannot publish the same generation or
+/// overwrite a newer one. The rename itself is what the browser reads, so it
+/// never observes a torn decimal.
 pub fn bump_wasm_budget_reset(path: &Path) -> Result<u64> {
+    let lock_path = path.with_extension("lock");
+    let lock = {
+        use std::os::unix::fs::OpenOptionsExt;
+        std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(&lock_path)
+            .map_err(|_| {
+                Error::conflict("The Wasm sample-budget reset file could not be updated.")
+                    .with_code(Code::DependencyUnavailable)
+            })?
+    };
+    lock_wasm_budget_reset(&lock)?;
+    let result = bump_wasm_budget_reset_locked(path);
+    unlock_wasm_budget_reset(&lock);
+    result
+}
+
+fn bump_wasm_budget_reset_locked(path: &Path) -> Result<u64> {
     let text = std::fs::read_to_string(path).map_err(|_| {
         Error::conflict("The Wasm sample-budget reset file could not be read.")
             .with_code(Code::DependencyUnavailable)
@@ -302,12 +326,35 @@ pub fn bump_wasm_budget_reset(path: &Path) -> Result<u64> {
             Error::conflict("The Wasm sample-budget reset file could not be updated.")
                 .with_code(Code::DependencyUnavailable)
         })?;
+        file.sync_all().map_err(|_| {
+            Error::conflict("The Wasm sample-budget reset file could not be updated.")
+                .with_code(Code::DependencyUnavailable)
+        })?;
     }
     std::fs::rename(&temporary, path).map_err(|_| {
         Error::conflict("The Wasm sample-budget reset file could not be updated.")
             .with_code(Code::DependencyUnavailable)
     })?;
     Ok(next)
+}
+
+fn lock_wasm_budget_reset(file: &std::fs::File) -> Result<()> {
+    use std::os::unix::io::AsRawFd;
+    // Blocking is safe: each critical section is one small read and rename.
+    let status = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) };
+    if status == 0 {
+        Ok(())
+    } else {
+        Err(
+            Error::conflict("The Wasm sample-budget reset file could not be updated.")
+                .with_code(Code::DependencyUnavailable),
+        )
+    }
+}
+
+fn unlock_wasm_budget_reset(file: &std::fs::File) {
+    use std::os::unix::io::AsRawFd;
+    unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_UN) };
 }
 
 fn parse_wasm_budget_generation(text: &str) -> Option<u64> {
@@ -363,5 +410,22 @@ mod tests {
         assert!(bump_wasm_budget_reset(&directory.path().join("missing")).is_err());
         std::fs::write(&path, "x\n").unwrap();
         assert!(bump_wasm_budget_reset(&path).is_err());
+    }
+
+    #[test]
+    fn bump_wasm_budget_reset_serializes_concurrent_increments() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("wasm-sample-budget-reset");
+        std::fs::write(&path, "0\n").unwrap();
+        std::thread::scope(|scope| {
+            for _ in 0..4 {
+                scope.spawn(|| {
+                    for _ in 0..25 {
+                        bump_wasm_budget_reset(&path).unwrap();
+                    }
+                });
+            }
+        });
+        assert_eq!(std::fs::read_to_string(&path).unwrap().trim(), "100");
     }
 }

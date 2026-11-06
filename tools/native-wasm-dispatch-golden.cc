@@ -53,7 +53,29 @@ int main(int argc, char** argv) {
     payload.reserved[0] = std::byte{1};
     syntactically_valid = false;
   } else if (mode == "version") {
+    payload.protocol_version = 4;
+    syntactically_valid = false;
+  } else if (mode == "caller-same-instance") {
+    // Function 0 is the only function in the golden module, and a real caller.
     payload.protocol_version = 3;
+    payload.caller_kind = reb::kWasmDirectCallerSameInstance;
+    payload.caller_function_index = 0;
+  } else if (mode == "caller-unknown") {
+    payload.protocol_version = 3;
+    payload.caller_kind = reb::kWasmDirectCallerUnknown;
+    payload.caller_function_index = 0;
+  } else if (mode == "caller-unknown-index") {
+    payload.protocol_version = 3;
+    payload.caller_kind = reb::kWasmDirectCallerUnknown;
+    payload.caller_function_index = 1;
+    syntactically_valid = false;
+  } else if (mode == "caller-kind") {
+    payload.protocol_version = 3;
+    payload.caller_kind = 2;
+    syntactically_valid = false;
+  } else if (mode == "caller-v2") {
+    // Version 2 reserved the caller bytes. A caller there is not a host caller.
+    payload.caller_kind = reb::kWasmDirectCallerSameInstance;
     syntactically_valid = false;
   } else if (mode == "legacy-v1") {
     // Version 1 reserved the invocation context bytes and still decodes.

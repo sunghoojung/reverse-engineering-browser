@@ -2,7 +2,11 @@
 
 [`openapi.json`](openapi.json) describes the Rust loopback backend in
 `apps/origin-trace-backend`, including the [native console](native-console-v2.md)
-state and action routes.
+state and action routes and the
+[live Wasm instance commands](live-wasm-instance-v1.md). Those commands are
+confirmed reads, writes, and calls on an already attached instance. They do
+not restore the retired `/api/debugger` routes. Without a command peer they
+report the command unavailable and invent no memory bytes or return values.
 It is OpenAPI 3.1 with JSON Schema 2020-12. Stable `operationId` values drive the
 included Rust CLI. The routes and stored evidence contracts are unchanged by
 the implementation migration.
@@ -925,7 +929,7 @@ visible-window-only.
 ### Filtered and paged reads
 
 Any filter or cursor parameter turns `GET /api/events` into a filtered read
-that bypasses the polling cache. The unfiltered window above is unchanged.
+that bypasses the polling cache. The unfiltered route remains that polling window.
 Filters combine with AND and compare stored fields exactly:
 
 - `type` and `category`: comma-separated lowercase names, at most 16;
@@ -934,7 +938,28 @@ Filters combine with AND and compare stored fields exactly:
 - `since_ns` (inclusive) and `until_ns` (exclusive) on `monotonic_time_ns`.
 
 Without a cursor the read starts at the last complete record and returns the
-newest `limit` matches in file order. `before=OFFSET` continues backward and
+newest `limit` matches in file order. Stored records are not rewritten.
+`wasm_dispatch_observation` and `wasm_indirect_observation` also include
+`wasm_observation` beside the hex `payload`. `status` `decoded` carries the
+payload fields. A dispatch object has `function_index`, `module_byte_offset`,
+`selector`, `table_count`, `sample_index`, `js_invocation_state` and
+`js_invocation_id`. An indirect object has the caller fields
+`function_index`, `module_byte_offset`, `sample_index`, `js_invocation_state`
+and `js_invocation_id`, plus `table_index`, `slot`, `callee_function_index`
+and `resolution` (`resolved`, `null`, `out-of-bounds`, `foreign`,
+`unresolved`). `js_invocation_state` is the stored integer: 0 not observed,
+1 none, 2 inside, 3 unknown. Version 1 decodes as not observed.
+`callee_function_index` is the stored index and is 0 unless `resolution` is
+`resolved`; that 0 is not a function index. `status` `invalid` carries no
+fields. A payload version other than 1 or 2 is invalid in full, not returned
+as a version-2 prefix: a later version stores new fields in bytes version 2
+reserves. The same `{status: invalid}` object is used when the record is not
+protocol 3, category `vm`, and flags 0, or when any other payload check
+fails. The decode reads that record only. It does not build an opcode
+workspace or open the module, so a module the detector never admits still
+has rows here. It does not recover a
+guest PC or a sample the payload does not store. The unfiltered polling
+window adds the same object. `before=OFFSET` continues backward and
 `after=OFFSET` reads forward from a record boundary. Each response adds `query`
 with the applied `filters`, `direction`, `returned`, `store_end`, `limited`,
 `budget_exhausted`, `next_before` (null at the start of the store) and

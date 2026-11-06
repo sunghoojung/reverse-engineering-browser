@@ -234,10 +234,14 @@ exactly with state 2):
 | Event | Version | Context bytes | Reserved after |
 | --- | --- | --- | --- |
 | `wasm_dispatch_observation` (17) | 2 | 24..32 | 32..128 |
+| `wasm_dispatch_observation` (17) | 3 | 24..32 | 40..128 |
 | `wasm_indirect_observation` (20) | 2 | 32..40 | 40..128 |
 | `wasm_guest_invocation` (19) | 4 | 84..92 | 92..128 |
 
-Earlier versions reserved those bytes and still decode, as not observed.
+Dispatch payload version 3 keeps the invocation context at 24..32 and uses
+32..40 for the direct caller. See
+[native Wasm dispatch](native-wasm-dispatch-v1.md). Earlier versions reserved
+those bytes and still decode, as not observed.
 Guest dispatch records stay version 1; each names its guest invocation, which
 carries the context. VM Lab rows show the context as
 `js_invocation: {state, invocation_id}` and omit it when not observed.

@@ -9,6 +9,9 @@ inspection and its original-byte coordinates.
 
 [Live Wasm inspection v1](live-wasm-inspection-v1.md) (retired with CDP) defined
 confirmed Object Lab and attached-page memory inspection.
+[Live Wasm instance commands v1](live-wasm-instance-v1.md) is the separate
+confirmed socket for a bounded memory read or write and for calling an export
+or function index on the instance dispatch capture is already attached to.
 
 [Paused import-object map v1](paused-import-object-v1.md) (retired with CDP)
 defined the getProperties-only host import map.
@@ -358,7 +361,8 @@ Executable CDP APIs/transport have been removed. Legacy schemas may describe
 historical saved records, not supported runtime operations. Retired contracts
 kept as historical records: [API observation catalog v1](api-observation-catalog-v1.md),
 [Element screenshot v1](element-screenshot-v1.md),
-[Live Wasm inspection v1](live-wasm-inspection-v1.md),
+[Live Wasm inspection v1](live-wasm-inspection-v1.md)
+(successor for attached-instance commands: [live Wasm instance commands v1](live-wasm-instance-v1.md)),
 [Paused import-object map v1](paused-import-object-v1.md) and
 [WebSocket capture v1](websocket-capture-v1.md).
 [Native Wasm dispatch observations](native-wasm-dispatch-v1.md) use a separate
@@ -387,9 +391,15 @@ use the names.
 | 24 | `js_invocation_start` | `include/reb/js_invocation.hpp` | [native JavaScript invocation](native-js-invocation-v1.md) |
 | 25 | `js_invocation_settle` | `include/reb/js_invocation.hpp` | [native JavaScript invocation](native-js-invocation-v1.md) |
 | 26 | `js_invocation_request` | `include/reb/js_invocation.hpp` | [native JavaScript invocation](native-js-invocation-v1.md) |
+| 27 | `wasm_execution_outcome` | `include/reb/wasm_dispatch.hpp` | [native Wasm execution outcomes](native-wasm-dispatch-v1.md#execution-outcomes) |
 
-`wasm_dispatch_observation` and `wasm_indirect_observation` payloads are
-version 2 and `wasm_guest_invocation` version 4: each adds the JavaScript
-invocation context in previously reserved bytes, and older versions remain
-readable as not observed. See
+`wasm_indirect_observation` payloads are version 2 and `wasm_guest_invocation`
+version 4: each adds the JavaScript invocation context in previously reserved
+bytes, and older versions remain readable as not observed.
+`wasm_dispatch_observation` payload version 3 adds the direct-call caller in
+the next reserved bytes. Versions 1 and 2 stay readable as a caller that was
+not observed, which is distinct from an unknown host caller. See
 [invocation context of Wasm records](native-js-invocation-v1.md#invocation-context-of-wasm-records).
+`get_events` and `wait_for_events` return the two Wasm observation payloads
+decoded as `wasm_observation` beside the hex. See
+[event queries](native-wasm-dispatch-v1.md#event-queries).

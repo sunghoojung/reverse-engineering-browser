@@ -573,7 +573,8 @@
             "request_target",
             "js_invocation_start",
             "js_invocation_settle",
-            "js_invocation_request"
+            "js_invocation_request",
+            "wasm_execution_outcome"
           ]
         },
         "status_code": {

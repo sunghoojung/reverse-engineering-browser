@@ -1435,7 +1435,7 @@
       "get": {
         "operationId": "get_events",
         "summary": "Read native events, optionally filtered and paged",
-        "description": "Without filters this is the Origin Trace UI polling window: the newest events of the last 64 MiB plus an independent network window. With any filter or cursor it scans complete records from the cursor (default: newest first), returns up to limit matches unchanged, and adds a query object with next_before and next_after cursors. Filters combine with AND. Gap fields then describe only the scanned byte range, and network_events is empty: select network records with category=network. Network requests: request_body (22) gives each body's length, type and digest, and request_target (23) the path and query only when the session retains request content; select one request with request_id. Invocation sites: js_invocation_start (24), js_invocation_settle (25) and js_invocation_request (26) give armed calls and the requests made inside them. Payloads are hex. Unknown parameters are rejected. Use a small limit through MCP and page with query.next_before.",
+        "description": "Without filters this is the Origin Trace UI polling window: the newest events of the last 64 MiB plus an independent network window. With any filter or cursor it scans complete records from the cursor (default: newest first), returns up to limit matches unchanged, and adds a query object with next_before and next_after cursors. Filters combine with AND. Gap fields then describe only the scanned byte range, and network_events is empty: select network records with category=network. Network requests: request_body (22) gives each body's length, type and digest, and request_target (23) the path and query only when the session retains request content; select one request with request_id. Invocation sites: js_invocation_start (24), js_invocation_settle (25) and js_invocation_request (26) give armed calls and the requests made inside them. wasm_execution_outcome (27) records a trap or that an instrumented Wasm call is still executing. Payloads stay hex. wasm_dispatch_observation and wasm_indirect_observation also include wasm_observation beside that hex, decoded without an opcode workspace. status decoded names function_index, module_byte_offset, sample_index, js_invocation_state, and js_invocation_id. A dispatch object also has selector and table_count. An indirect object also has table_index, slot, callee_function_index, and resolution named resolved, null, out-of-bounds, foreign, or unresolved. callee_function_index is 0 unless resolution is resolved. status invalid carries no fields. Version 1 decodes as not observed. Any other payload version is invalid with no fields, not a version-2 prefix. The record is protocol 3, category vm, and flags 0. Unknown parameters are rejected. Use a small limit through MCP and page with query.next_before.",
         "tags": [
           "events"
         ],
@@ -1527,7 +1527,7 @@
             "name": "type",
             "in": "query",
             "required": false,
-            "description": "Comma-separated event types to keep, at most 16 exact names: api_call, property_read, module_compiled, module_instantiated, request_started, request_initiated, request_redirected, response_started, response_completed, request_completed, request_failed, request_body, request_target, artifact_captured, artifact_capture_failed, vm_finding, vm_dispatch_sample, wasm_dispatch_observation, wasm_indirect_observation, wasm_guest_dispatch, wasm_guest_invocation, js_dispatch_observation, js_invocation_start, js_invocation_settle, js_invocation_request, gap. An unknown name matches nothing.",
+            "description": "Comma-separated event types to keep, at most 16 exact names: api_call, property_read, module_compiled, module_instantiated, request_started, request_initiated, request_redirected, response_started, response_completed, request_completed, request_failed, request_body, request_target, artifact_captured, artifact_capture_failed, vm_finding, vm_dispatch_sample, wasm_dispatch_observation, wasm_indirect_observation, wasm_guest_dispatch, wasm_guest_invocation, js_dispatch_observation, js_invocation_start, js_invocation_settle, js_invocation_request, wasm_execution_outcome, gap. An unknown name matches nothing.",
             "schema": {
               "type": "string",
               "maxLength": 1040
@@ -1690,7 +1690,7 @@
       "get": {
         "operationId": "wait_for_events",
         "summary": "Wait for matching events",
-        "description": "Waits up to timeout_ms for the first events after a cursor that match the same filters as get_events, then returns them in the filtered get_events shape plus a wait object. Without after, only events written after the call count, so take a cursor first (timeout_ms 1) and then act: session_action open_url or click, or a Console evaluate. On timeout it returns no events, wait.timed_out true and query.next_after for the next wait. Waiting does not change the browser or the stores. At most eight waits run at once.",
+        "description": "Waits up to timeout_ms for the first events after a cursor that match the same filters as get_events, then returns them in the filtered get_events shape plus a wait object. wasm_dispatch_observation and wasm_indirect_observation include wasm_observation. status decoded names function_index, module_byte_offset, sample_index, js_invocation_state, and js_invocation_id. A dispatch object also has selector and table_count. An indirect object also has table_index, slot, callee_function_index, and resolution named resolved, null, out-of-bounds, foreign, or unresolved. status invalid has no fields. A payload version other than 1 or 2 is invalid in full. The record is protocol 3, category vm, and flags 0. Without after, only events written after the call count, so take a cursor first (timeout_ms 1) and then act: session_action open_url or click, or a Console evaluate. On timeout it returns no events, wait.timed_out true and query.next_after for the next wait. Waiting does not change the browser or the stores. At most eight waits run at once.",
         "tags": [
           "events"
         ],
@@ -1723,7 +1723,7 @@
             "name": "type",
             "in": "query",
             "required": false,
-            "description": "Comma-separated event types to keep, at most 16 exact names: api_call, property_read, module_compiled, module_instantiated, request_started, request_initiated, request_redirected, response_started, response_completed, request_completed, request_failed, request_body, request_target, artifact_captured, artifact_capture_failed, vm_finding, vm_dispatch_sample, wasm_dispatch_observation, wasm_indirect_observation, wasm_guest_dispatch, wasm_guest_invocation, js_dispatch_observation, js_invocation_start, js_invocation_settle, js_invocation_request, gap. An unknown name matches nothing.",
+            "description": "Comma-separated event types to keep, at most 16 exact names: api_call, property_read, module_compiled, module_instantiated, request_started, request_initiated, request_redirected, response_started, response_completed, request_completed, request_failed, request_body, request_target, artifact_captured, artifact_capture_failed, vm_finding, vm_dispatch_sample, wasm_dispatch_observation, wasm_indirect_observation, wasm_guest_dispatch, wasm_guest_invocation, js_dispatch_observation, js_invocation_start, js_invocation_settle, js_invocation_request, wasm_execution_outcome, gap. An unknown name matches nothing.",
             "schema": {
               "type": "string",
               "maxLength": 1040
@@ -3293,6 +3293,232 @@
             {
               "path": "apps/origin-trace-backend/src/wasm.rs",
               "symbol": "load"
+            }
+          ]
+        },
+        "x-reb-execution-schema": {
+          "$ref": "#/components/schemas/RebExecutionMetadata"
+        }
+      }
+    },
+    "/api/live-wasm": {
+      "get": {
+        "operationId": "get_live_wasm",
+        "summary": "Read the live Wasm command attachment, or that it is unavailable",
+        "description": "Reports the one instance the command peer is attached to: document identity, named memories, exports, function signatures, the shared dispatch budget, and the retained dispatch observations. availability unsupported with reason browser_command_unsupported means this backend has no command socket. peer_unavailable means the socket could not be used. Neither is an empty inventory, and neither invents memory bytes or return values. A current Brave build does not serve this socket. This read does not replace dispatch capture.",
+        "tags": [
+          "live-wasm"
+        ],
+        "responses": {
+          "200": {
+            "description": "Attachment state, or an explicit unsupported reason.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LiveWasmState"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Unexpected query.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Local origin rejected.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "408": {
+            "description": "The command peer did not finish a reply. Whether a command ran is unknown.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "The command peer reply did not match the socket contract. Whether a command ran is unknown.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Local failure.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "x-source": "apps/origin-trace-backend/src/live_wasm.rs",
+        "x-reb-execution": {
+          "kind": "operation",
+          "effects": [],
+          "state_dependent_effects": [
+            {
+              "effects": [
+                "browser-control"
+              ],
+              "when": "A live Wasm command socket is configured. The read sends one list command to that peer. No memory is written and no function is entered."
+            }
+          ],
+          "uncertainties": [
+            "A missing or unusable peer is availability unsupported. That is not an empty live inventory, and no memory bytes, return values, or dispatch samples are invented."
+          ],
+          "prerequisites": [
+            {
+              "id": "local-request",
+              "condition": "Host must name the exact loopback listening port; cross-site Sec-Fetch-Site is rejected; an optional Origin must pass App::trusted."
+            }
+          ],
+          "confirmations": [],
+          "notes": "Does not restore the retired /api/debugger live Wasm routes. The command peer is separate from dispatch capture. Rebuilding the current Brave pins does not make a capture browser serve this socket; see protocol/live-wasm-instance-v1.md.",
+          "sources": [
+            {
+              "path": "apps/origin-trace-backend/src/live_wasm.rs",
+              "symbol": "LiveWasm::state"
+            }
+          ]
+        },
+        "x-reb-execution-schema": {
+          "$ref": "#/components/schemas/RebExecutionMetadata"
+        }
+      }
+    },
+    "/api/live-wasm/actions": {
+      "post": {
+        "operationId": "live_wasm_action",
+        "summary": "Read or write live Wasm memory, or call an export or function index",
+        "description": "Confirmed commands on the instance the command peer is attached to. read_memory and write_memory use a named memory and a 1 to 4096 byte slice that is refused rather than clipped. call_export and call_function take typed numeric arguments. A signature mismatch is refused before the function is entered. status distinguishes unknown_export, unknown_memory, unknown_function, signature_mismatch, trap, did_not_return, stale_document, and instance_mismatch. These commands do not replace dispatch capture. Without a peer the response is 503 and nothing is sent.",
+        "tags": [
+          "live-wasm"
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LiveWasmAction"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Command result. A trap, a call that did not return, and a refusal are statuses here, not collapsed into page-script text.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LiveWasmResult"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid or unconfirmed input. Nothing was sent.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Local origin rejected.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "408": {
+            "description": "The command was sent and the peer did not finish. Whether it ran is unknown.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "The command was sent and the reply did not match the socket contract. Whether it ran is unknown.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Local failure before a command was sent, or a result that failed its schema.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "No command peer is configured or the socket could not be used. Nothing was sent.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "x-max-body-bytes": 65536,
+        "x-source": "apps/origin-trace-backend/src/live_wasm.rs",
+        "x-reb-execution": {
+          "kind": "action-dependent",
+          "effects": null,
+          "state_dependent_effects": [],
+          "uncertainties": [],
+          "prerequisites": [
+            {
+              "id": "local-request",
+              "condition": "Host must name the exact loopback listening port; cross-site Sec-Fetch-Site is rejected; an optional Origin must pass App::trusted."
+            },
+            {
+              "id": "bounded-json-object",
+              "condition": "POST requires one valid Content-Length, no Transfer-Encoding, and a JSON object within x-max-body-bytes and the body deadline."
+            }
+          ],
+          "confirmations": [],
+          "notes": "Resolve the exact request action and combine its prerequisites with these common operation guards. No action inherits a default effect classification. An unconfirmed body is rejected before a socket connect.",
+          "sources": [
+            {
+              "path": "apps/origin-trace-backend/src/app.rs",
+              "symbol": "App::post"
             }
           ]
         },
@@ -13225,10 +13451,157 @@
           "capture_state"
         ]
       },
+      "WasmObservationDecode": {
+        "description": "Read-path decode of one wasm_dispatch_observation or wasm_indirect_observation, placed beside the unchanged payload hex by get_events and wait_for_events. status invalid means the record was rejected and no field is returned: the envelope is not protocol 3, category vm, and flags 0; the payload version is not 1 or 2 (a later version is not returned as a version-2 prefix); or the 128-byte payload failed a wire check (nonzero reserved bytes, a broken invocation context, an unknown resolution, a callee on an unresolved entry, or any other bound). Decoding reads that record only: it does not open an opcode workspace or the module, and it does not invent a guest PC, a sample, or a caller. js_invocation_state is the stored integer: 0 not observed, 1 none, 2 inside, 3 unknown. Version 1 decodes as not observed (0, 0). js_invocation_id is nonzero exactly when the state is 2. callee_function_index is the stored index and is 0 unless resolution is resolved; that 0 is not a function index. See protocol/native-wasm-dispatch-v1.md.",
+        "oneOf": [
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "status",
+              "function_index",
+              "module_byte_offset",
+              "selector",
+              "table_count",
+              "sample_index",
+              "js_invocation_state",
+              "js_invocation_id"
+            ],
+            "properties": {
+              "status": {
+                "const": "decoded"
+              },
+              "function_index": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 16777215
+              },
+              "module_byte_offset": {
+                "type": "integer",
+                "minimum": 8,
+                "maximum": 16777215
+              },
+              "selector": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 4294967295
+              },
+              "table_count": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 16777215
+              },
+              "sample_index": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 15
+              },
+              "js_invocation_state": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 3
+              },
+              "js_invocation_id": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 4294967295
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "status",
+              "function_index",
+              "module_byte_offset",
+              "table_index",
+              "slot",
+              "callee_function_index",
+              "resolution",
+              "sample_index",
+              "js_invocation_state",
+              "js_invocation_id"
+            ],
+            "properties": {
+              "status": {
+                "const": "decoded"
+              },
+              "function_index": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 16777215
+              },
+              "module_byte_offset": {
+                "type": "integer",
+                "minimum": 8,
+                "maximum": 16777215
+              },
+              "table_index": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 16777215
+              },
+              "slot": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 4294967295
+              },
+              "callee_function_index": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 16777215
+              },
+              "resolution": {
+                "type": "string",
+                "enum": [
+                  "resolved",
+                  "null",
+                  "out-of-bounds",
+                  "foreign",
+                  "unresolved"
+                ]
+              },
+              "sample_index": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 15
+              },
+              "js_invocation_state": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 3
+              },
+              "js_invocation_id": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 4294967295
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "status"
+            ],
+            "properties": {
+              "status": {
+                "const": "invalid"
+              }
+            }
+          }
+        ]
+      },
       "Event": {
         "type": "object",
         "additionalProperties": true,
-        "description": "Native event record validated before HTTP delivery for protocol version, canonical identifiers, process ID, and bounded hexadecimal payload consistency. Additional native record fields remain extensible; see protocol/README.md. This schema does not yet describe every native event field."
+        "description": "Native event record validated before HTTP delivery for protocol version, canonical identifiers, process ID, and bounded hexadecimal payload consistency. Additional native record fields remain extensible; see protocol/README.md. This schema does not yet describe every native event field. wasm_dispatch_observation and wasm_indirect_observation responses from get_events and wait_for_events include wasm_observation. The payload hex remains.",
+        "properties": {
+          "wasm_observation": {
+            "$ref": "#/components/schemas/WasmObservationDecode"
+          }
+        }
       },
       "Events": {
         "type": "object",
@@ -15360,6 +15733,575 @@
             "unknown"
           ]
         }
+      },
+      "LiveWasmNumeric": {
+        "type": "string",
+        "enum": ["i32", "i64", "f32", "f64"]
+      },
+      "LiveWasmArgument": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["type", "bits"],
+        "properties": {
+          "type": { "$ref": "#/components/schemas/LiveWasmNumeric" },
+          "bits": { "$ref": "#/components/schemas/Uint64String" }
+        }
+      },
+      "LiveWasmMemorySlice": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "offset", "length", "byte_length", "shared", "bytes"],
+        "properties": {
+          "name": { "type": "string", "minLength": 1, "maxLength": 64 },
+          "offset": { "type": "integer", "minimum": 0, "maximum": 4294967295 },
+          "length": { "type": "integer", "minimum": 1, "maximum": 4096 },
+          "byte_length": { "type": "integer", "minimum": 0, "maximum": 1048576 },
+          "shared": { "const": false },
+          "bytes": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 4096,
+            "items": { "type": "integer", "minimum": 0, "maximum": 255 }
+          }
+        }
+      },
+      "LiveWasmObservation": {
+        "oneOf": [
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "source",
+              "kind",
+              "reason",
+              "instance_id",
+              "document_token_high",
+              "document_token_low",
+              "document_epoch",
+              "function_index",
+              "module_byte_offset",
+              "selector",
+              "table_count",
+              "sample_index"
+            ],
+            "properties": {
+              "source": { "type": "string", "enum": ["page_script", "live_call"] },
+              "kind": { "type": "string", "const": "sample" },
+              "reason": { "type": "null" },
+              "instance_id": { "$ref": "#/components/schemas/NonzeroUint64String" },
+              "document_token_high": { "$ref": "#/components/schemas/Uint64String" },
+              "document_token_low": { "$ref": "#/components/schemas/Uint64String" },
+              "document_epoch": { "$ref": "#/components/schemas/NonzeroUint64String" },
+              "function_index": { "type": "integer", "minimum": 0, "maximum": 16777215 },
+              "module_byte_offset": { "type": "integer", "minimum": 8, "maximum": 65535 },
+              "selector": { "type": "integer", "minimum": 0, "maximum": 4294967295 },
+              "table_count": { "type": "integer", "minimum": 0, "maximum": 16777215 },
+              "sample_index": { "type": "integer", "minimum": 0, "maximum": 15 }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "source",
+              "kind",
+              "reason",
+              "instance_id",
+              "document_token_high",
+              "document_token_low",
+              "document_epoch",
+              "function_index",
+              "module_byte_offset",
+              "selector",
+              "table_count",
+              "sample_index"
+            ],
+            "properties": {
+              "source": { "type": "string", "enum": ["page_script", "live_call"] },
+              "kind": { "type": "string", "const": "gap" },
+              "reason": { "type": "string", "const": "native_wasm_dispatch_budget_incomplete" },
+              "instance_id": { "$ref": "#/components/schemas/NonzeroUint64String" },
+              "document_token_high": { "$ref": "#/components/schemas/Uint64String" },
+              "document_token_low": { "$ref": "#/components/schemas/Uint64String" },
+              "document_epoch": { "$ref": "#/components/schemas/NonzeroUint64String" },
+              "function_index": { "type": "integer", "minimum": 0, "maximum": 16777215 },
+              "module_byte_offset": { "type": "integer", "minimum": 8, "maximum": 65535 },
+              "selector": { "type": "integer", "minimum": 0, "maximum": 4294967295 },
+              "table_count": { "type": "integer", "minimum": 0, "maximum": 16777215 },
+              "sample_index": { "type": "null" }
+            }
+          }
+        ]
+      },
+      "LiveWasmFunction": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["index", "params", "results", "export"],
+        "properties": {
+          "index": { "type": "integer", "minimum": 0, "maximum": 63 },
+          "params": {
+            "type": "array",
+            "maxItems": 16,
+            "items": { "$ref": "#/components/schemas/LiveWasmNumeric" }
+          },
+          "results": {
+            "type": "array",
+            "maxItems": 16,
+            "items": { "$ref": "#/components/schemas/LiveWasmNumeric" }
+          },
+          "export": {
+            "anyOf": [
+              { "type": "string", "minLength": 1, "maxLength": 64 },
+              { "type": "null" }
+            ]
+          }
+        }
+      },
+      "LiveWasmExport": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "kind", "params", "results"],
+        "properties": {
+          "name": { "type": "string", "minLength": 1, "maxLength": 64 },
+          "kind": { "type": "string", "enum": ["function", "memory"] },
+          "params": {
+            "type": "array",
+            "maxItems": 16,
+            "items": { "$ref": "#/components/schemas/LiveWasmNumeric" }
+          },
+          "results": {
+            "type": "array",
+            "maxItems": 16,
+            "items": { "$ref": "#/components/schemas/LiveWasmNumeric" }
+          }
+        }
+      },
+      "LiveWasmMemoryInfo": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "byte_length", "shared"],
+        "properties": {
+          "name": { "type": "string", "minLength": 1, "maxLength": 64 },
+          "byte_length": { "type": "integer", "minimum": 0, "maximum": 1048576 },
+          "shared": { "type": "boolean" }
+        }
+      },
+      "LiveWasmAttachment": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "instance_id",
+          "document_token_high",
+          "document_token_low",
+          "document_epoch",
+          "memories",
+          "exports",
+          "functions"
+        ],
+        "properties": {
+          "instance_id": { "$ref": "#/components/schemas/NonzeroUint64String" },
+          "document_token_high": { "$ref": "#/components/schemas/Uint64String" },
+          "document_token_low": { "$ref": "#/components/schemas/Uint64String" },
+          "document_epoch": { "$ref": "#/components/schemas/NonzeroUint64String" },
+          "memories": {
+            "type": "array",
+            "maxItems": 16,
+            "items": { "$ref": "#/components/schemas/LiveWasmMemoryInfo" }
+          },
+          "exports": {
+            "type": "array",
+            "maxItems": 80,
+            "items": { "$ref": "#/components/schemas/LiveWasmExport" }
+          },
+          "functions": {
+            "type": "array",
+            "maxItems": 64,
+            "items": { "$ref": "#/components/schemas/LiveWasmFunction" }
+          }
+        }
+      },
+      "LiveWasmState": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "protocol_version",
+          "availability",
+          "reason",
+          "budget",
+          "dispatch_samples_used",
+          "dispatch_gaps",
+          "observations_truncated",
+          "observations",
+          "attachments"
+        ],
+        "properties": {
+          "protocol_version": { "const": 1 },
+          "availability": { "type": "string", "enum": ["ready", "unsupported"] },
+          "reason": {
+            "anyOf": [
+              { "type": "null" },
+              {
+                "type": "string",
+                "enum": ["browser_command_unsupported", "peer_unavailable"]
+              }
+            ]
+          },
+          "budget": {
+            "anyOf": [{ "const": 16 }, { "type": "null" }]
+          },
+          "dispatch_samples_used": {
+            "anyOf": [
+              { "type": "integer", "minimum": 0, "maximum": 16 },
+              { "type": "null" }
+            ]
+          },
+          "dispatch_gaps": {
+            "anyOf": [
+              { "$ref": "#/components/schemas/SafeInteger" },
+              { "type": "null" }
+            ]
+          },
+          "observations_truncated": { "type": "boolean" },
+          "observations": {
+            "type": "array",
+            "maxItems": 32,
+            "items": { "$ref": "#/components/schemas/LiveWasmObservation" }
+          },
+          "attachments": {
+            "type": "array",
+            "maxItems": 1,
+            "items": { "$ref": "#/components/schemas/LiveWasmAttachment" }
+          }
+        }
+      },
+      "LiveWasmResultValue": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["type", "bits"],
+        "properties": {
+          "type": { "$ref": "#/components/schemas/LiveWasmNumeric" },
+          "bits": { "$ref": "#/components/schemas/Uint64String" }
+        }
+      },
+      "LiveWasmResult": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "protocol_version",
+          "action",
+          "status",
+          "entered",
+          "instance_id",
+          "document_token_high",
+          "document_token_low",
+          "document_epoch",
+          "samples_consumed",
+          "sample_indexes",
+          "budget_gap",
+          "memory",
+          "results",
+          "export",
+          "function_index"
+        ],
+        "properties": {
+          "protocol_version": { "const": 1 },
+          "action": {
+            "type": "string",
+            "enum": ["read_memory", "write_memory", "call_export", "call_function"]
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "ok",
+              "stale_document",
+              "instance_mismatch",
+              "unknown_export",
+              "unknown_memory",
+              "unknown_function",
+              "signature_mismatch",
+              "trap",
+              "did_not_return",
+              "out_of_bounds",
+              "unavailable",
+              "unsupported"
+            ]
+          },
+          "entered": { "type": "boolean" },
+          "instance_id": { "$ref": "#/components/schemas/NonzeroUint64String" },
+          "document_token_high": { "$ref": "#/components/schemas/Uint64String" },
+          "document_token_low": { "$ref": "#/components/schemas/Uint64String" },
+          "document_epoch": { "$ref": "#/components/schemas/NonzeroUint64String" },
+          "samples_consumed": { "type": "integer", "minimum": 0, "maximum": 16 },
+          "sample_indexes": {
+            "type": "array",
+            "maxItems": 16,
+            "items": { "type": "integer", "minimum": 0, "maximum": 15 }
+          },
+          "budget_gap": { "type": "boolean" },
+          "memory": {
+            "anyOf": [
+              { "$ref": "#/components/schemas/LiveWasmMemorySlice" },
+              { "type": "null" }
+            ]
+          },
+          "results": {
+            "anyOf": [
+              {
+                "type": "array",
+                "maxItems": 16,
+                "items": { "$ref": "#/components/schemas/LiveWasmResultValue" }
+              },
+              { "type": "null" }
+            ]
+          },
+          "export": {
+            "anyOf": [
+              { "type": "string", "minLength": 1, "maxLength": 64 },
+              { "type": "null" }
+            ]
+          },
+          "function_index": {
+            "anyOf": [
+              { "type": "integer", "minimum": 0, "maximum": 16777215 },
+              { "type": "null" }
+            ]
+          }
+        }
+      },
+      "LiveWasmAction": {
+        "oneOf": [
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "action",
+              "confirmed",
+              "instance_id",
+              "document_token_high",
+              "document_token_low",
+              "document_epoch",
+              "memory",
+              "offset",
+              "length"
+            ],
+            "properties": {
+              "action": { "const": "read_memory", "type": "string" },
+              "confirmed": { "const": true, "type": "boolean" },
+              "instance_id": { "$ref": "#/components/schemas/NonzeroUint64String" },
+              "document_token_high": { "$ref": "#/components/schemas/Uint64String" },
+              "document_token_low": { "$ref": "#/components/schemas/Uint64String" },
+              "document_epoch": { "$ref": "#/components/schemas/NonzeroUint64String" },
+              "memory": { "type": "string", "minLength": 1, "maxLength": 64 },
+              "offset": { "type": "integer", "minimum": 0, "maximum": 4294967295 },
+              "length": { "type": "integer", "minimum": 1, "maximum": 4096 }
+            },
+            "x-reb-execution": {
+              "kind": "action",
+              "effects": ["browser-control", "sensitive-capture"],
+              "state_dependent_effects": [],
+              "uncertainties": [],
+              "prerequisites": [
+                {
+                  "id": "configured-command-peer",
+                  "condition": "live_wasm_socket must name a private same-user socket. Otherwise the action returns 503 and sends nothing."
+                },
+                {
+                  "id": "attached-identity",
+                  "condition": "instance_id, document_token_high, document_token_low, and document_epoch must be the attachment from get_live_wasm. A different document is stale_document. The same document and a different instance is instance_mismatch. Neither reads memory."
+                }
+              ],
+              "confirmations": [
+                { "field": "confirmed", "value": true, "when": {} }
+              ],
+              "notes": "Reads one named linear memory. The slice is 1 to 4096 bytes and is refused, not clipped, when it passes the end. Shared and memory64 memories are not sliced. This does not replace dispatch capture.",
+              "sources": [
+                {
+                  "path": "apps/origin-trace-backend/src/live_wasm.rs",
+                  "symbol": "LiveWasm::action"
+                }
+              ]
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "action",
+              "confirmed",
+              "instance_id",
+              "document_token_high",
+              "document_token_low",
+              "document_epoch",
+              "memory",
+              "offset",
+              "bytes"
+            ],
+            "properties": {
+              "action": { "const": "write_memory", "type": "string" },
+              "confirmed": { "const": true, "type": "boolean" },
+              "instance_id": { "$ref": "#/components/schemas/NonzeroUint64String" },
+              "document_token_high": { "$ref": "#/components/schemas/Uint64String" },
+              "document_token_low": { "$ref": "#/components/schemas/Uint64String" },
+              "document_epoch": { "$ref": "#/components/schemas/NonzeroUint64String" },
+              "memory": { "type": "string", "minLength": 1, "maxLength": 64 },
+              "offset": { "type": "integer", "minimum": 0, "maximum": 4294967295 },
+              "bytes": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 4096,
+                "items": { "type": "integer", "minimum": 0, "maximum": 255 }
+              }
+            },
+            "x-reb-execution": {
+              "kind": "action",
+              "effects": ["browser-control", "live-target-mutation"],
+              "state_dependent_effects": [],
+              "uncertainties": [],
+              "prerequisites": [
+                {
+                  "id": "configured-command-peer",
+                  "condition": "live_wasm_socket must name a private same-user socket. Otherwise the action returns 503 and sends nothing."
+                },
+                {
+                  "id": "attached-identity",
+                  "condition": "instance_id, document_token_high, document_token_low, and document_epoch must be the attachment from get_live_wasm. A stale document or a different instance is refused before any byte is written."
+                }
+              ],
+              "confirmations": [
+                { "field": "confirmed", "value": true, "when": {} }
+              ],
+              "notes": "Writes one named linear memory. The slice is 1 to 4096 bytes and is refused, not clipped, when it passes the end. A successful result reads those bytes back. This does not replace dispatch capture.",
+              "sources": [
+                {
+                  "path": "apps/origin-trace-backend/src/live_wasm.rs",
+                  "symbol": "LiveWasm::action"
+                }
+              ]
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "action",
+              "confirmed",
+              "instance_id",
+              "document_token_high",
+              "document_token_low",
+              "document_epoch",
+              "export",
+              "arguments"
+            ],
+            "properties": {
+              "action": { "const": "call_export", "type": "string" },
+              "confirmed": { "const": true, "type": "boolean" },
+              "instance_id": { "$ref": "#/components/schemas/NonzeroUint64String" },
+              "document_token_high": { "$ref": "#/components/schemas/Uint64String" },
+              "document_token_low": { "$ref": "#/components/schemas/Uint64String" },
+              "document_epoch": { "$ref": "#/components/schemas/NonzeroUint64String" },
+              "export": { "type": "string", "minLength": 1, "maxLength": 64 },
+              "arguments": {
+                "type": "array",
+                "maxItems": 16,
+                "items": { "$ref": "#/components/schemas/LiveWasmArgument" }
+              }
+            },
+            "x-reb-execution": {
+              "kind": "action",
+              "effects": ["browser-control", "live-target-mutation", "code-execution"],
+              "state_dependent_effects": [
+                {
+                  "effects": ["network-access"],
+                  "when": "The callee invokes an import that can navigate, fetch, or mutate the page. This peer refuses an imported function before entry and does not promise that an export body is side-effect free."
+                }
+              ],
+              "uncertainties": [
+                "An export body can reach host imports. A trap, a call that does not return, an unknown export, and a signature mismatch stay separate statuses and are not page-script text."
+              ],
+              "prerequisites": [
+                {
+                  "id": "configured-command-peer",
+                  "condition": "live_wasm_socket must name a private same-user socket. Otherwise the action returns 503 and sends nothing."
+                },
+                {
+                  "id": "attached-identity",
+                  "condition": "instance_id, document_token_high, document_token_low, and document_epoch must be the attachment from get_live_wasm. A stale document or a different instance is refused before the export is entered."
+                }
+              ],
+              "confirmations": [
+                { "field": "confirmed", "value": true, "when": {} }
+              ],
+              "notes": "Calls one exported function by name. The argument types are checked against the declared signature before entry. status ok returns results. status trap means the function was entered and trapped. status did_not_return means it was entered and was still running after this peer's step limit. unknown_export and signature_mismatch do not enter. Dispatch samples from the call share the page-script budget. This does not replace dispatch capture.",
+              "sources": [
+                {
+                  "path": "apps/origin-trace-backend/src/live_wasm.rs",
+                  "symbol": "LiveWasm::action"
+                }
+              ]
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "action",
+              "confirmed",
+              "instance_id",
+              "document_token_high",
+              "document_token_low",
+              "document_epoch",
+              "function_index",
+              "arguments"
+            ],
+            "properties": {
+              "action": { "const": "call_function", "type": "string" },
+              "confirmed": { "const": true, "type": "boolean" },
+              "instance_id": { "$ref": "#/components/schemas/NonzeroUint64String" },
+              "document_token_high": { "$ref": "#/components/schemas/Uint64String" },
+              "document_token_low": { "$ref": "#/components/schemas/Uint64String" },
+              "document_epoch": { "$ref": "#/components/schemas/NonzeroUint64String" },
+              "function_index": { "type": "integer", "minimum": 0, "maximum": 16777215 },
+              "arguments": {
+                "type": "array",
+                "maxItems": 16,
+                "items": { "$ref": "#/components/schemas/LiveWasmArgument" }
+              }
+            },
+            "x-reb-execution": {
+              "kind": "action",
+              "effects": ["browser-control", "live-target-mutation", "code-execution"],
+              "state_dependent_effects": [
+                {
+                  "effects": ["network-access"],
+                  "when": "The callee invokes an import that can navigate, fetch, or mutate the page. This peer refuses an imported or non-executable function before entry."
+                }
+              ],
+              "uncertainties": [
+                "A function index is not a page-script name. unknown_function, signature_mismatch, trap, and did_not_return stay separate, and a mismatch does not enter or spend a dispatch sample."
+              ],
+              "prerequisites": [
+                {
+                  "id": "configured-command-peer",
+                  "condition": "live_wasm_socket must name a private same-user socket. Otherwise the action returns 503 and sends nothing."
+                },
+                {
+                  "id": "attached-identity",
+                  "condition": "instance_id, document_token_high, document_token_low, and document_epoch must be the attachment from get_live_wasm. A stale document or a different instance is refused before the function is entered."
+                }
+              ],
+              "confirmations": [
+                { "field": "confirmed", "value": true, "when": {} }
+              ],
+              "notes": "Calls one function by index, exported or not. The argument types are checked against that function's declared signature before entry. A mismatch does not enter and does not spend a dispatch sample. An entered call uses the same 16-sample dispatch budget and the same instance, document, function, and module-byte identity as a page-script observation. This does not replace dispatch capture.",
+              "sources": [
+                {
+                  "path": "apps/origin-trace-backend/src/live_wasm.rs",
+                  "symbol": "LiveWasm::action"
+                }
+              ]
+            }
+          }
+        ]
       },
       "NativeConsoleState": {
         "type": "object",
@@ -18292,7 +19234,8 @@
               "request_target",
               "js_invocation_start",
               "js_invocation_settle",
-              "js_invocation_request"
+              "js_invocation_request",
+              "wasm_execution_outcome"
             ]
           },
           "status_code": {

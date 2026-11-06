@@ -199,6 +199,8 @@ fn gap_meaning(reason: &str) -> &'static str {
         || reason.contains("unbound")
     {
         "Linkage for these observations could not be established, so they are recorded without it."
+    } else if reason.contains("unsupported") || reason.contains("left_liftoff") {
+        "This execution was outside document Liftoff code, so it was named and not sampled."
     } else {
         "The capture refused or dropped these observations for this reason."
     }
@@ -422,6 +424,21 @@ mod tests {
         assert_eq!(summary["artifacts"]["total"], "0");
         let text = summary.to_string();
         assert!(!text.contains(&hex::encode("native_wasm")));
+    }
+
+    #[test]
+    fn scope_gaps_are_named_incompleteness_not_drops() {
+        for reason in [
+            "native_wasm_dispatch_worker_unsupported",
+            "native_wasm_dispatch_worklet_unsupported",
+            "native_wasm_indirect_jitless_unsupported",
+            "native_wasm_dispatch_left_liftoff",
+        ] {
+            let meaning = gap_meaning(reason);
+            assert!(meaning.contains("not sampled"), "{reason}: {meaning}");
+            assert!(!meaning.contains("dropped"), "{reason}: {meaning}");
+        }
+        assert!(gap_meaning("native_wasm_dispatch_budget_incomplete").contains("budget"));
     }
 
     #[test]

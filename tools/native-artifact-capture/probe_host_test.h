@@ -274,6 +274,77 @@ void NativeProbeHostGuestBoundary(reb::ArtifactReceiver& receiver) {
             !gap_for(607, "native_wasm_indirect_browser_function_budget_incomplete"),
         "Refusals did not consume function 9's host sample");
   session.wasm_budget = {};
+  host.CaptureWasmExecution(epoch, kSession, 610, 100, 123, 7, frame_id, 10, 11, 12, 4, 9, 8, 0, 0,
+                            1, 0, 3, 2, 0, 0, "fixture://host-indirect",
+                            mojo_base::BigBuffer(indirect_module));
+  const auto trap = std::find_if(events.begin(), events.end(), [](const auto& event) {
+    return event.header.type == reb::NativeProbeType::kWasmExecutionOutcome &&
+           event.header.sequence_number == 610;
+  });
+  reb::WasmExecutionOutcomePayload trap_payload;
+  Check(trap != events.end() &&
+            reb::DecodeWasmExecutionOutcomePayload(trap->inline_payload, trap_payload) &&
+            trap_payload.reason ==
+                static_cast<std::uint8_t>(reb::WasmExecutionReason::kSignatureMismatch) &&
+            trap_payload.function_index == 9,
+        "The host publishes a signature-mismatch trap for a resolved entry");
+  host.CaptureWasmExecution(epoch, kSession, 611, 100, 123, 7, frame_id, 10, 11, 12, 5, 1, 8, 0, 1,
+                            0, 0, 3, 2, 0, 0, "fixture://host-indirect",
+                            mojo_base::BigBuffer(std::span<const std::uint8_t>{}));
+  const auto still = std::find_if(events.begin(), events.end(), [](const auto& event) {
+    return event.header.sequence_number == 611;
+  });
+  reb::WasmExecutionOutcomePayload still_payload;
+  Check(still != events.end() && still->header.artifact_id == trap->header.artifact_id &&
+            reb::DecodeWasmExecutionOutcomePayload(still->inline_payload, still_payload) &&
+            still_payload.kind ==
+                static_cast<std::uint8_t>(reb::WasmExecutionKind::kStillExecuting) &&
+            still_payload.reason == 0,
+        "An empty still-executing record binds the document's one module");
+
+  // caller_observed crosses the host. An unwalked record stays version 2.
+  // Zero caller bytes are not an observed host, and a named index on an
+  // unwalked record is refused instead of being dropped or published.
+  const std::vector<std::uint8_t> dispatch_module{0, 97, 115, 109, 1, 0, 0, 0, 0x0e, 1, 0, 0};
+  const auto wasm_dispatch = [&](std::uint64_t sequence, bool observed, std::uint8_t kind,
+                                 std::uint32_t caller_index) {
+    host.CaptureWasmDispatch(epoch, kSession, sequence, 100, 123, 7, frame_id, 10, 11, 12, 1, 8, 0,
+                             1, observed, kind, caller_index, 0, 0, 0, "fixture://host-dispatch",
+                             mojo_base::BigBuffer(dispatch_module));
+  };
+  const auto published = [&](std::uint64_t sequence) {
+    return std::find_if(events.begin(), events.end(), [&](const auto& event) {
+      return event.header.type == NativeProbeType::kWasmDispatchObservation &&
+             event.header.sequence_number == sequence;
+    });
+  };
+  wasm_dispatch(700, false, reb::kWasmDirectCallerUnknown, 0);
+  Check(transfers.size() == 1, "An unwalked dispatch still transfers its module");
+  Receive(receiver, transfers.begin()->first);
+  reb::WasmDispatchObservationPayload host_payload;
+  const auto unwalked = published(700);
+  Check(unwalked != events.end() &&
+            reb::DecodeWasmDispatchObservationPayload(unwalked->inline_payload, host_payload) &&
+            host_payload.protocol_version == 2 && host_payload.caller_kind == 0 &&
+            host_payload.caller_function_index == 0,
+        "The host keeps an unwalked record at version 2");
+  wasm_dispatch(701, true, reb::kWasmDirectCallerUnknown, 0);
+  // The module artifact is already bound, so this observation is published
+  // without a second transfer.
+  if (!transfers.empty())
+    Receive(receiver, transfers.begin()->first);
+  const auto host_unknown = published(701);
+  Check(host_unknown != events.end() &&
+            reb::DecodeWasmDispatchObservationPayload(host_unknown->inline_payload, host_payload) &&
+            host_payload.protocol_version == 3 &&
+            host_payload.caller_kind == reb::kWasmDirectCallerUnknown &&
+            host_payload.caller_function_index == 0,
+        "An observed host caller is version 3 unknown, not function 0");
+  const auto before_unwalked_index = events.size();
+  wasm_dispatch(702, false, reb::kWasmDirectCallerSameInstance, 4);
+  Check(transfers.empty() && gap_for(702, "native_wasm_dispatch_limit_or_invalid") &&
+            events.size() == before_unwalked_index + 1,
+        "A function index on an unwalked record is a gap, not a dropped caller");
   host.Disable();
   session.active = false;
   session.emitted = {};

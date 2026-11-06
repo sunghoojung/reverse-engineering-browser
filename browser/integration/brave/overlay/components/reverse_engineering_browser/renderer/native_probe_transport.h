@@ -52,6 +52,10 @@ class NativeProbeTransport final : public mojom::NativeProbeClient {
   void SetWasmSampleBudget(const std::vector<std::uint8_t>& policy) override;
   void ResetWasmSampleBudgets() override;
   void Disable() override;
+  // Session-start probe for limits V8 can see without a guest execution, such
+  // as jitless. Not cleared by Disable: it reads process flags, not the session.
+  using NativeWasmLimitProbe = void (*)() noexcept;
+  static void SetNativeWasmLimitProbe(NativeWasmLimitProbe probe) noexcept;
   void NativeGuestModuleStatus(std::uint64_t wasm_capture_epoch,
                                std::uint64_t module_token,
                                bool accepted) override;
@@ -73,6 +77,8 @@ class NativeProbeTransport final : public mojom::NativeProbeClient {
                                std::uint64_t generation) noexcept;
   static bool EmitWasmIndirect(const NativeWasmIndirectObservation& observation,
                                std::uint64_t generation) noexcept;
+  static bool EmitWasmExecution(const NativeWasmExecutionObservation& observation,
+                                std::uint64_t generation) noexcept;
   static void EmitArtifact(NativeArtifactKind kind,
                            NativeArtifactCaptureOrigin capture_origin,
                            std::uint64_t creator_event_id,

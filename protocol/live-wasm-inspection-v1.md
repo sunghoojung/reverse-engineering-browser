@@ -1,6 +1,6 @@
 # Live Wasm inspection v1
 
-> **Retired.** Live Wasm inspection ran helper JavaScript through `POST /api/debugger/actions`. Native capture replaces it with captured-page Wasm evidence; see [native Wasm guest v1](native-wasm-guest-v1.md). CDP and the `/api/debugger` routes were removed; every `/api/debugger` route now returns 410 `debugger_unavailable`, and no operation or schema in [openapi.json](openapi.json) implements this contract. This page is kept as a historical record for reading earlier captures and notes.
+> **Retired.** Live Wasm inspection ran helper JavaScript through `POST /api/debugger/actions`. Native capture replaces it with captured-page Wasm evidence; see [native Wasm guest v1](native-wasm-guest-v1.md). CDP and the `/api/debugger` routes were removed; every `/api/debugger` route now returns 410 `debugger_unavailable`, and no operation or schema in [openapi.json](openapi.json) implements this contract. Confirmed memory reads, writes, and export or function-index calls are a separate socket, specified in [live Wasm instance commands v1](live-wasm-instance-v1.md). They do not restore `list_live_wasm_objects` or `read_live_wasm_memory`. This page is kept as a historical record for reading earlier captures and notes.
 
 The removed `POST /api/debugger/actions` surface added
 `list_live_wasm_objects` and `read_live_wasm_memory`. These are explicit,

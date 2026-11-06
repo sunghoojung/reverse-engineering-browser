@@ -32,7 +32,7 @@
           'request_initiated', 'request_redirected', 'response_started',
           'request_completed', 'request_failed', 'vm_finding',
           'vm_dispatch_sample', 'wasm_dispatch_observation', 'wasm_guest_dispatch', 'wasm_guest_invocation',
-          'wasm_indirect_observation', 'js_dispatch_observation', 'js_invocation_start', 'js_invocation_settle',
+          'wasm_indirect_observation', 'wasm_execution_outcome', 'js_dispatch_observation', 'js_invocation_start', 'js_invocation_settle',
           'js_invocation_request', 'artifact_captured', 'artifact_capture_failed', 'request_body', 'request_target'
         ])
       };
@@ -393,11 +393,18 @@
         const view = new DataView(bytes.buffer);
         const version = view.getUint16(0,true);
         const context = nativeInvocationContext(bytes, version, 2, 24);
-        if (![1, 2].includes(version) || view.getUint16(2,true) !== 128 || context === null ||
-          bytes.slice(32).some(byte => byte !== 0)) return null;
+        if (![1, 2, 3].includes(version) || view.getUint16(2,true) !== 128 || context === null) return null;
+        const callerIndex = view.getUint32(36, true);
+        let directCaller = null;
+        if (version < 3) {
+          if (bytes.slice(32).some(byte => byte !== 0)) return null;
+        } else if (bytes.slice(33, 36).some(byte => byte !== 0) || bytes.slice(40).some(byte => byte !== 0)) return null;
+        else if (bytes[32] === 0 && callerIndex === 0) directCaller = {kind: 'unknown', function_index: null};
+        else if (bytes[32] === 1 && callerIndex < 16777216) directCaller = {kind: 'same-instance', function_index: callerIndex};
+        else return null;
         const row = {function_index:view.getUint32(4,true),module_byte_offset:view.getUint32(8,true),
           selector:view.getUint32(12,true),table_count:view.getUint32(16,true),sample_index:view.getUint32(20,true),
-          ...nativeInvocationRow(context)};
+          ...nativeInvocationRow(context), ...(directCaller ? {direct_caller: directCaller} : {})};
         return row.function_index < 16777216 && row.module_byte_offset >= 8 && row.module_byte_offset < 16777216 &&
           row.table_count < 16777216 && row.sample_index < 16 ? row : null;
       }
@@ -422,6 +429,36 @@
         return row.function_index < 16777216 && row.module_byte_offset >= 8 && row.module_byte_offset < 16777216 &&
           row.table_index < 16777216 && row.callee_function_index < 16777216 && row.resolution < 5 &&
           (row.resolution === 0 || row.callee_function_index === 0) && row.sample_index < 16 ? row : null;
+      }
+
+      // Trap or still-executing follow-up. A clear known bit stores 0, which is
+      // not a function index or a module offset. Still-executing has no trap reason.
+      function decodeNativeWasmExecutionOutcome(event) {
+        if (event?.type !== 'wasm_execution_outcome' || event.protocol_version !== 3 || event.category !== 'vm' ||
+          event.payload_size !== 128 || event.payload_encoding !== 'hex' || event.payload_truncated !== false ||
+          event.flags !== 0 || event.parent_event_id !== '0' ||
+          !['session_id','sequence_number','monotonic_time_ns','frame_id','artifact_id'].every(key => isCanonicalInteger(event[key], 1n, uint64Max)) ||
+          !['process_id','thread_id'].every(key => isSafeIntegerInRange(event[key], 1, 0xffffffff)) ||
+          typeof event.payload !== 'string' || !/^[0-9a-f]{256}$/i.test(event.payload)) return null;
+        const bytes = Uint8Array.from(event.payload.match(/../g), byte => Number.parseInt(byte, 16));
+        const view = new DataView(bytes.buffer);
+        const version = view.getUint16(0, true);
+        const context = nativeInvocationContext(bytes, version, 1, 28);
+        if (version !== 1 || view.getUint16(2, true) !== 128 || context === null ||
+          bytes.slice(25, 28).some(byte => byte !== 0) || bytes.slice(36).some(byte => byte !== 0)) return null;
+        const row = {kind: bytes[4], reason: bytes[5], bounds: bytes[6], known: bytes[7],
+          function_index: view.getUint32(8, true), module_byte_offset: view.getUint32(12, true),
+          invocation_id: view.getUint32(16, true), related_sample_index: view.getUint32(20, true),
+          related_stream: bytes[24], ...nativeInvocationRow(context)};
+        const functionKnown = (row.known & 1) !== 0;
+        const offsetKnown = (row.known & 2) !== 0;
+        if ((row.known & ~3) !== 0 || row.kind > 1 || row.related_stream > 2 || row.invocation_id === 0) return null;
+        if (functionKnown ? row.function_index >= 16777216 : row.function_index !== 0) return null;
+        if (offsetKnown ? row.module_byte_offset < 8 || row.module_byte_offset >= 16777216 : row.module_byte_offset !== 0) return null;
+        if (row.kind === 1 ? row.reason !== 0 || row.bounds !== 0 : row.reason >= 6) return null;
+        if (row.reason === 3 ? row.bounds >= 7 : row.bounds !== 0) return null;
+        if (row.related_stream === 0 ? row.related_sample_index !== 0xffffffff : row.related_sample_index >= 16) return null;
+        return row;
       }
       // Native JavaScript dispatch, protocol/native-js-dispatch-v1.md: a
       // renderer record with full identity and no artifact, navigation,
@@ -708,6 +745,7 @@
         return event.payload_truncated === Boolean(event.flags & 1) &&
           (event.type !== 'wasm_dispatch_observation' || decodeNativeWasmObservation(event) !== null) &&
           (event.type !== 'wasm_indirect_observation' || decodeNativeWasmIndirectObservation(event) !== null) &&
+          (event.type !== 'wasm_execution_outcome' || decodeNativeWasmExecutionOutcome(event) !== null) &&
           (event.type !== 'js_dispatch_observation' || decodeNativeJsObservation(event) !== null) &&
           (!event.type.startsWith('js_invocation_') || decodeNativeJsInvocation(event) !== null) &&
           (!['wasm_guest_dispatch','wasm_guest_invocation'].includes(event.type) || decodeNativeGuestRecord(event) !== null);
@@ -2035,9 +2073,29 @@
       function vmNativeRowTimeValid(row) {
         return row.monotonic_time_ns === undefined || isCanonicalInteger(row.monotonic_time_ns, 0n, uint64Max);
       }
+      function vmNativeInvocationValid(row) {
+        if (row.js_invocation === undefined) return true;
+        const context = row.js_invocation;
+        return isPlainObject(context) && Object.keys(context).length === 2 &&
+          ['none', 'inside', 'unknown'].includes(context.state) && typeof context.invocation_id === 'string' &&
+          (context.state === 'inside' ? /^[1-9][0-9]{0,9}$/.test(context.invocation_id)
+            : context.invocation_id === '0');
+      }
+      function vmNativeDirectCallerValid(row) {
+        if (row.direct_caller === undefined) return true;
+        const caller = row.direct_caller;
+        if (!isPlainObject(caller) || Object.keys(caller).length !== 2 ||
+          !['unknown', 'same-instance'].includes(caller.kind)) return false;
+        return caller.kind === 'unknown' ? caller.function_index === null
+          : isSafeIntegerInRange(caller.function_index, 0, 16777215);
+      }
       function isNativeWasmObservation(row, workspace) {
-        if (!vmWorkspaceExact(row, vmNativeRowKeys(row, ['event','function_index','module_byte_offset','selector','table_count','sample_index','selected_arm','is_default'])) ||
-          !vmSampleEvent(row.event) || !vmNativeRowTimeValid(row) || !isSafeIntegerInRange(row.function_index,0,16777215) ||
+        const keys = ['event','function_index','module_byte_offset','selector','table_count','sample_index','selected_arm','is_default'];
+        if (row?.js_invocation !== undefined) keys.push('js_invocation');
+        if (row?.direct_caller !== undefined) keys.push('direct_caller');
+        if (!vmWorkspaceExact(row, vmNativeRowKeys(row, keys)) ||
+          !vmSampleEvent(row.event) || !vmNativeRowTimeValid(row) || !vmNativeInvocationValid(row) ||
+          !vmNativeDirectCallerValid(row) || !isSafeIntegerInRange(row.function_index,0,16777215) ||
           !isSafeIntegerInRange(row.module_byte_offset,8,16777215) || !isSafeIntegerInRange(row.selector,0,0xffffffff) ||
           !isSafeIntegerInRange(row.table_count,0,16777215) || !isSafeIntegerInRange(row.sample_index,0,15) ||
           row.selected_arm !== Math.min(row.selector,row.table_count) || row.is_default !== (row.selector >= row.table_count)) return false;
@@ -2650,7 +2708,9 @@
       }
 
       function vmNativeWasmPositionText(row) {
-        return `Native Wasm byte ${row.module_byte_offset} · function ${row.function_index} · selector ${row.selector} · ${row.is_default ? 'default arm' : `arm ${row.selected_arm}`} · guest PC unknown`;
+        const caller = row?.direct_caller?.kind === 'same-instance' ? `caller function ${row.direct_caller.function_index}`
+          : row?.direct_caller?.kind === 'unknown' ? 'caller unknown' : '';
+        return `Native Wasm byte ${row.module_byte_offset} · function ${row.function_index} · selector ${row.selector} · ${row.is_default ? 'default arm' : `arm ${row.selected_arm}`}${caller ? ` · ${caller}` : ''} · guest PC unknown`;
       }
       function vmNativeWasmIndirectPositionText(row) {
         const callee = row.callee_function_index === null ? `no callee (${row.resolution})` : `callee function ${row.callee_function_index}`;

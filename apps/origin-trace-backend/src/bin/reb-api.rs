@@ -1403,6 +1403,8 @@ mod tests {
             "native_console_action",
             "replace_api_collection",
             "get_native_console",
+            "get_live_wasm",
+            "live_wasm_action",
             "get_vm_analysis",
             "get_source_facts",
             "get_deobfuscation",

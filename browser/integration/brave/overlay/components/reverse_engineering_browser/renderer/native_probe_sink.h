@@ -205,6 +205,8 @@ class COMPONENT_EXPORT(REB_NATIVE_PROBE_SINK) NativeProbeSink final {
   // Native-only runtime callback; no page JS registration and no inferred guest PC.
   void SetNativeWasmDispatchEmitter(NativeWasmDispatchEmitter emitter) noexcept;
   [[nodiscard]] bool IsNativeWasmDispatchEnabled() const noexcept;
+  // caller_observed is true only when the runtime walked this activation.
+  // kind 0 with a nonzero index is refused rather than stored as a function.
   void RecordNativeWasmDispatch(std::uint64_t execution_context_id,
                                 std::uint64_t frame_id,
                                 std::string_view source_url,
@@ -214,7 +216,10 @@ class COMPONENT_EXPORT(REB_NATIVE_PROBE_SINK) NativeProbeSink final {
                                 std::uint32_t selector,
                                 std::uint32_t table_count,
                                 std::uint64_t document_token_high,
-                                std::uint64_t document_token_low) noexcept;
+                                std::uint64_t document_token_low,
+                                std::uint8_t caller_kind = kWasmDirectCallerUnknown,
+                                std::uint32_t caller_function_index = 0,
+                                bool caller_observed = false) noexcept;
   // Physical call_indirect observations share the br_table admission rules
   // with their own emitter, 16-record budget and coalesced omission gaps. The
   // caller fills identity, site, slot and resolution; the sink fills the rest.
@@ -227,6 +232,54 @@ class COMPONENT_EXPORT(REB_NATIVE_PROBE_SINK) NativeProbeSink final {
   // Restarts both sample-index ranges in this configuration. It does not
   // change the session, the emitters, or the capture generation.
   void ResetNativeWasmSampleBudgets() noexcept;
+  // Coalesced once per configuration. A notice that arrives is kept after the
+  // 16-sample cap. The Liftoff admission predicate itself goes false at that
+  // cap, so a later worker or worklet execution is not visited. Not an
+  // observation: no selector, offset, or function index is stored. False means
+  // it was not retained and was not already retained, so the caller can retry.
+  bool NoteNativeWasmDispatchScope(NativeWasmScopeGap gap) noexcept;
+  bool NoteNativeWasmIndirectScope(NativeWasmScopeGap gap) noexcept;
+  // Host-visible Wasm call ledger. Entry and exit stay paired after the
+  // 16-record outcome budget is spent; that budget only refuses records.
+  // These never call the frame-id provider or allocate V8 handles.
+  void SetNativeWasmExecutionEmitter(NativeWasmExecutionEmitter emitter) noexcept;
+  [[nodiscard]] bool IsNativeWasmExecutionEnabled() const noexcept;
+  // True when this call opened a new host-visible ledger entry. A nested
+  // frame or an outermost tail callee returns false.
+  bool NoteWasmHostCallEntered(bool outermost,
+                               bool function_known,
+                               std::uint32_t function_index) noexcept;
+  void NoteWasmHostCallReturned() noexcept;
+  void NoteWasmTailCall() noexcept;
+  [[nodiscard]] NativeWasmExecutionHeartbeat PollWasmExecutionHeartbeat() noexcept;
+  // Nanoseconds until this thread's open call should be forced into a stack
+  // check, or kNativeWasmExecutionNoNudge when it has nothing pending.
+  // A due deadline returns 50ms so a check that did not poll can try again.
+  // No V8 handles.
+  [[nodiscard]] std::uint64_t WasmExecutionNudgeDelayNs() const noexcept;
+  // Asks V8 to enter the stack-guard runtime on the main isolate. Null
+  // until the renderer installs it. The callback must not terminate the
+  // isolate; the stack guard throws only when the poll returns interrupt.
+  void SetNativeWasmExecutionNudge(NativeWasmExecutionNudge nudge) noexcept;
+  // Any thread may set this for the current even configuration. The nudge,
+  // when installed, runs after the store. A stack check with no open host
+  // call leaves the request for a thread that has one. Replacing the
+  // configuration clears it.
+  void RequestWasmExecutionInterrupt() noexcept;
+  // Closes the open host call. Unknown function or offset must be passed
+  // with the known flag clear and the integer 0; a nonzero unknown is refused.
+  void ReportWasmTrap(NativeWasmExecutionReason reason,
+                      NativeWasmExecutionBounds bounds,
+                      bool function_known,
+                      std::uint32_t function_index,
+                      bool offset_known,
+                      std::uint32_t module_byte_offset,
+                      std::uint64_t execution_context_id,
+                      std::uint64_t frame_id,
+                      std::string_view source_url,
+                      std::uint64_t document_token_high,
+                      std::uint64_t document_token_low,
+                      std::span<const std::uint8_t> module_bytes) noexcept;
   // Native JavaScript dispatch at armed static sites. The browser keeps the
   // site list immutable for its lifetime; a different list is refused with an
   // input gap. Configure after SetEmitters, which disarms the previous list.
@@ -515,6 +568,12 @@ class COMPONENT_EXPORT(REB_NATIVE_PROBE_SINK) NativeProbeSink final {
   std::array<NativeWasmBudgetKeySlot, kNativeWasmBudgetKeySlots>
       native_wasm_indirect_function_keys_{};
   std::array<NativeWasmBudgetKeySlot, kNativeWasmBudgetKeySlots> native_wasm_indirect_site_keys_{};
+  bool NoteNativeWasmScopeGap(bool call_indirect, NativeWasmScopeGap gap) noexcept;
+  static constexpr std::size_t kNativeWasmScopeGapCount = 4;
+  std::array<std::atomic<std::uint64_t>, kNativeWasmScopeGapCount>
+      native_wasm_scope_gap_generations_{};
+  std::array<std::atomic<std::uint64_t>, kNativeWasmScopeGapCount>
+      native_wasm_indirect_scope_gap_generations_{};
   bool NoteNativeWasmIndirectOmission(const VmAdmission& admission,
                                       NativeWasmOmission reason,
                                       std::uint64_t budget_epoch) noexcept;
@@ -523,6 +582,46 @@ class COMPONENT_EXPORT(REB_NATIVE_PROBE_SINK) NativeProbeSink final {
       native_wasm_indirect_slots_{};
   std::array<std::atomic<std::uint64_t>, 5> native_wasm_indirect_gap_epochs_{};
   std::atomic<std::uint64_t> native_wasm_indirect_capped_epoch_{0};
+  [[nodiscard]] bool SnapshotWasmExecutionAdmission(VmAdmission& admission) const noexcept;
+  bool NoteNativeWasmExecutionOmission(const VmAdmission& admission, std::size_t reason) noexcept;
+  void NoteWasmInstrumentedSite(std::uint64_t generation,
+                                std::uint64_t execution_context_id,
+                                std::uint64_t frame_id,
+                                std::string_view source_url,
+                                std::uint64_t document_token_high,
+                                std::uint64_t document_token_low,
+                                std::uint32_t function_index,
+                                std::uint32_t module_byte_offset,
+                                std::uint32_t sample_index,
+                                NativeWasmExecutionStream stream,
+                                std::uint8_t js_state,
+                                std::uint32_t js_id) noexcept;
+  bool EmitWasmExecution(NativeWasmExecutionKind kind,
+                         NativeWasmExecutionReason reason,
+                         NativeWasmExecutionBounds bounds,
+                         bool function_known,
+                         std::uint32_t function_index,
+                         bool offset_known,
+                         std::uint32_t module_byte_offset,
+                         NativeWasmExecutionStream stream,
+                         std::uint32_t related_sample,
+                         std::uint64_t execution_context_id,
+                         std::uint64_t frame_id,
+                         std::string_view source_url,
+                         std::uint64_t document_token_high,
+                         std::uint64_t document_token_low,
+                         std::uint8_t js_state,
+                         std::uint32_t js_id,
+                         std::span<const std::uint8_t> module_bytes) noexcept;
+  std::atomic<NativeWasmExecutionEmitter> native_wasm_execution_emitter_{nullptr};
+  std::atomic<NativeWasmExecutionNudge> native_wasm_execution_nudge_{nullptr};
+  std::array<std::atomic<std::uint64_t>, kNativeWasmExecutionBudget> native_wasm_execution_slots_{};
+  std::array<std::atomic<std::uint64_t>, 2> native_wasm_execution_gap_generations_{};
+  std::atomic<std::uint64_t> native_wasm_execution_capped_generation_{0};
+  // Configuration generation to interrupt, or 0 when no request is waiting.
+  // A stack check consumes it only when that thread has an open host call
+  // for the same generation.
+  std::atomic<std::uint64_t> wasm_execution_interrupt_generation_{0};
   std::atomic<NativeRendererProbeEmitter> emitter_{nullptr};
   std::atomic<NativeProbeFrameIdProvider> frame_id_provider_{nullptr};
   std::atomic<NativeGeneratedArtifactEmitter> artifact_emitter_{nullptr};

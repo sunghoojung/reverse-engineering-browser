@@ -411,6 +411,7 @@ class NativeProbeSession {
     downstream_.store(emitter);
     return true;
   }
+  void ResetWasmSampleBudgets() noexcept {}
   void StopSession() noexcept {
     downstream_.store(nullptr);
     session_id_ = 0;

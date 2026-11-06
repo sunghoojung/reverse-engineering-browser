@@ -138,6 +138,17 @@ void NativeProbeTransport::Configure(const std::uint64_t session_id,
   }
 }
 
+void NativeProbeTransport::SetWasmSampleBudget(const std::vector<std::uint8_t>& policy) {
+  NativeWasmSampleBudgetPolicy decoded;
+  if (!DecodeNativeWasmSampleBudgetPolicy(policy, decoded))
+    return;
+  NativeProbeSink::Get().SetNativeWasmSampleBudgetPolicy(decoded);
+}
+
+void NativeProbeTransport::ResetWasmSampleBudgets() {
+  NativeProbeSink::Get().ResetNativeWasmSampleBudgets();
+}
+
 void NativeProbeTransport::Disable() {
   wasm_capture_epoch_.store(0, std::memory_order_release);
   // Wasm callbacks then fail their first enabled check, not a later one.

@@ -185,7 +185,11 @@ fn check(code: &str, severity: &str, message: impl Into<String>) -> Value {
 /// Plain-language meaning of a producer gap reason, from its shape. The reason
 /// itself stays in the check, so an unfamiliar one is never hidden.
 fn gap_meaning(reason: &str) -> &'static str {
-    if reason.contains("budget") || reason.contains("limit") || reason.contains("capped") {
+    if reason.contains("filtered") {
+        "A sample policy excluded these observations before a sample slot was taken. Retained observations are unchanged."
+    } else if reason.contains("limit_or_invalid") || reason.contains("module_invalid") {
+        "The record was malformed or outside a structural bound, so it was refused before a sample slot was taken."
+    } else if reason.contains("budget") || reason.contains("limit") || reason.contains("capped") {
         "A sampling budget or limit was reached, so later occurrences were not sampled. Sample fewer sites, or start a new session for a fresh budget."
     } else if reason.contains("unavailable") || reason.contains("lost") {
         "A capture stage was unavailable, so these observations were not recorded."
@@ -348,6 +352,18 @@ pub fn build(store: &Path, artifacts: &Path, state: &CaptureState<'_>) -> Result
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn filtered_wasm_gap_is_a_policy_exclusion() {
+        let filtered = gap_meaning("native_wasm_dispatch_browser_filtered");
+        assert!(filtered.contains("excluded"));
+        assert!(!filtered.contains("sampling budget"));
+        assert!(gap_meaning("native_wasm_dispatch_function_budget_incomplete").contains("budget"));
+        let malformed = gap_meaning("native_wasm_dispatch_limit_or_invalid");
+        assert!(malformed.contains("malformed"));
+        assert!(!malformed.contains("sampling budget"));
+        assert!(gap_meaning("native_guest_sample_limit").contains("budget"));
+    }
 
     fn event(sequence: u64, category: &str, kind: &str, frame: u64, payload: &str) -> Value {
         json!({"protocol_version":3,"session_id":"9","sequence_number":sequence.to_string(),

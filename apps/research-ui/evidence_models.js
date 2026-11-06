@@ -187,16 +187,31 @@
       const namedGapLimit = 64;
       // Configured per-configuration sampling caps in the native dispatch and
       // guest contracts: retained observations stay exact and later ones were
-      // not sampled. Every other reason, known or not, is reported as lost.
+      // not sampled. Filter reasons are policy exclusions. Every other reason,
+      // known or not, is reported as lost.
       const samplingBudgetGapLabels = new Map([
         ['native_wasm_dispatch_budget_incomplete', 'Wasm br_table dispatch'],
         ['native_wasm_dispatch_browser_budget_incomplete', 'Wasm br_table dispatch (browser)'],
         ['native_wasm_indirect_budget_incomplete', 'Wasm call_indirect dispatch'],
         ['native_wasm_indirect_browser_budget_incomplete', 'Wasm call_indirect dispatch (browser)'],
+        ['native_wasm_dispatch_function_budget_incomplete', 'Wasm br_table per function'],
+        ['native_wasm_dispatch_browser_function_budget_incomplete', 'Wasm br_table per function (browser)'],
+        ['native_wasm_indirect_function_budget_incomplete', 'Wasm call_indirect per function'],
+        ['native_wasm_indirect_browser_function_budget_incomplete', 'Wasm call_indirect per function (browser)'],
+        ['native_wasm_indirect_site_budget_incomplete', 'Wasm call_indirect per call site'],
+        ['native_wasm_indirect_browser_site_budget_incomplete', 'Wasm call_indirect per call site (browser)'],
         ['native_js_dispatch_budget_incomplete', 'JavaScript dispatch'],
         ['native_js_dispatch_site_budget_incomplete', 'JavaScript dispatch per site'],
         ['native_guest_sample_limit', 'Wasm guest samples'],
         ['native_guest_browser_sample_budget', 'Wasm guest samples (browser)']
+      ]);
+      // Allow and deny decisions. They are not capacity losses and they do not
+      // spend a sample slot. The reason string stays in the sentence.
+      const samplePolicyFilterGapLabels = new Map([
+        ['native_wasm_dispatch_filtered', 'Wasm br_table'],
+        ['native_wasm_indirect_filtered', 'Wasm call_indirect'],
+        ['native_wasm_dispatch_browser_filtered', 'Wasm br_table (browser)'],
+        ['native_wasm_indirect_browser_filtered', 'Wasm call_indirect (browser)']
       ]);
 
       function namedGapOf(event) {
@@ -243,11 +258,15 @@
       // Scoped coverage sentences; the raw reason is always shown as text.
       function namedGapNotice(gaps, scope) {
         const budgets = gaps.filter(gap => samplingBudgetGapLabels.has(gap.reason));
-        const losses = gaps.filter(gap => !samplingBudgetGapLabels.has(gap.reason));
+        const filters = gaps.filter(gap => samplePolicyFilterGapLabels.has(gap.reason));
+        const losses = gaps.filter(gap => !samplingBudgetGapLabels.has(gap.reason) && !samplePolicyFilterGapLabels.has(gap.reason));
         const messages = [];
         if (losses.length) {
           const categories = [...new Set(losses.map(gap => gap.category))].join('/');
           messages.push(`Capture reported lost ${categories} evidence in ${scope}: ${namedGapItems(losses, gap => gap.reason)}.`);
+        }
+        if (filters.length) {
+          messages.push(`Sample policy excluded observations in ${scope}: ${namedGapItems(filters, gap => `${samplePolicyFilterGapLabels.get(gap.reason)} (${gap.reason})`)}. Those executions were not sampled and did not consume a sample slot.`);
         }
         if (budgets.length) {
           messages.push(`Sampling budget reached in ${scope} for ${namedGapItems(budgets, gap => `${samplingBudgetGapLabels.get(gap.reason)} (${gap.reason})`)}. Retained observations are exact; later ones were not sampled.`);
@@ -257,11 +276,13 @@
 
       function namedGapStatusLabel(gaps) {
         const parts = [];
-        for (const [budget, singular, plural] of [[true, 'sampling budget reached', 'sampling budgets reached'], [false, 'reported capture loss', 'reported capture losses']]) {
-          const matching = gaps.filter(gap => samplingBudgetGapLabels.has(gap.reason) === budget);
+        const push = (matching, singular, plural) => {
           const total = namedGapTotal(matching);
           if (total > 0n) parts.push(`${total} ${total === 1n ? singular : plural} (${[...new Set(matching.map(gap => gap.category))].join('/')})`);
-        }
+        };
+        push(gaps.filter(gap => samplingBudgetGapLabels.has(gap.reason)), 'sampling budget reached', 'sampling budgets reached');
+        push(gaps.filter(gap => samplePolicyFilterGapLabels.has(gap.reason)), 'sample policy exclusion', 'sample policy exclusions');
+        push(gaps.filter(gap => !samplingBudgetGapLabels.has(gap.reason) && !samplePolicyFilterGapLabels.has(gap.reason)), 'reported capture loss', 'reported capture losses');
         return parts.map(part => ` · ${part}`).join('');
       }
 
@@ -325,9 +346,11 @@
         if (scope === 'the scanned tail') limits.push('only the newest 64 MiB is scanned');
         if (gapCount > 0n) limits.push(`${state.sequenceGapsSaturated ? 'at least ' : ''}${gapCount} sequence-gap IDs were observed in ${scope}`);
         if (reportedDrops > 0n) limits.push(`${state.queueDropsSaturated ? 'at least ' : ''}${reportedDrops} queue drops were reported in ${scope} (may overlap sequence gaps)`);
-        const losses = namedGaps.filter(gap => !samplingBudgetGapLabels.has(gap.reason));
+        const filters = namedGaps.filter(gap => samplePolicyFilterGapLabels.has(gap.reason));
+        const losses = namedGaps.filter(gap => !samplingBudgetGapLabels.has(gap.reason) && !samplePolicyFilterGapLabels.has(gap.reason));
         const budgets = namedGaps.filter(gap => samplingBudgetGapLabels.has(gap.reason));
         if (losses.length) limits.push(`capture reported lost evidence in ${scope}: ${namedGapItems(losses, gap => `${gap.category} ${gap.reason}`)}`);
+        if (filters.length) limits.push(`a sample policy excluded observations in ${scope}: ${namedGapItems(filters, gap => gap.reason)}`);
         if (budgets.length) limits.push(`a sampling budget was reached in ${scope}: ${namedGapItems(budgets, gap => gap.reason)}`);
         return `Fingerprint activity is visible with partial coverage: ${limits.join('; ')}.`;
       }

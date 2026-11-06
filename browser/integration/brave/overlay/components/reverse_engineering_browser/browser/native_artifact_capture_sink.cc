@@ -148,6 +148,10 @@ void NativeArtifactCaptureSink::SetEmitter(const NativeProbeEmitter emitter,
   wasm_dispatch_modules_.clear();
   wasm_dispatch_count_ = 0;
   wasm_indirect_count_ = 0;
+  wasm_sample_budget_ = {};
+  if ((wasm_budget_epoch_ & 1U) == 0 &&
+      wasm_budget_epoch_ <= std::numeric_limits<std::uint64_t>::max() - 2)
+    wasm_budget_epoch_ += 2;
   wasm_execution_count_ = 0;
   runtime_typed_array_count_.store(0, std::memory_order_relaxed);
   allocating_scripts_.clear();
@@ -801,6 +805,21 @@ void NativeArtifactCaptureSink::FlushPendingWork(const std::string_view guest_re
   }
 }
 
+void NativeArtifactCaptureSink::SetWasmSampleBudgetPolicy(
+    const NativeWasmSampleBudgetPolicy& policy) noexcept {
+  if (!IsValidNativeWasmSampleBudgetPolicy(policy))
+    return;
+  wasm_sample_budget_ = policy;
+}
+
+void NativeArtifactCaptureSink::ResetWasmSampleBudgets() noexcept {
+  wasm_dispatch_count_ = 0;
+  wasm_indirect_count_ = 0;
+  if ((wasm_budget_epoch_ & 1U) == 0 &&
+      wasm_budget_epoch_ <= std::numeric_limits<std::uint64_t>::max() - 2)
+    wasm_budget_epoch_ += 2;
+}
+
 void NativeArtifactCaptureSink::CaptureWasmDispatch(
     const NativeWasmDispatchObservation& observation,
     mojo_base::BigBuffer content,
@@ -820,17 +839,39 @@ void NativeArtifactCaptureSink::CaptureWasmDispatch(
     gap("native_wasm_dispatch_document_unavailable");
     return;
   }
+  std::array<std::uint8_t, 32> module_digest{};
+  const std::uint8_t* module_digest_bytes = nullptr;
+  if (wasm_sample_budget_.module_allow_count != 0 && content.size() <= 16U * 1024U * 1024U) {
+    module_digest =
+        NativeGuestDigest(std::span<const std::uint8_t>(content.data(), content.size()));
+    module_digest_bytes = module_digest.data();
+  }
+  const auto budget = AdmitNativeWasmBudgetKeys(wasm_sample_budget_, wasm_dispatch_function_keys_,
+                                                {}, wasm_budget_epoch_, observation.function_index,
+                                                0, module_digest_bytes);
+  if (const char* reason = NativeWasmBrowserBudgetReason(budget.status, false)) {
+    gap(reason);
+    return;
+  }
   if (wasm_dispatch_count_ >= kNativeWasmDispatchSampleBudget) {
+    ReleaseNativeWasmBudgetAdmission(budget, wasm_dispatch_function_keys_, {}, wasm_budget_epoch_);
     gap("native_wasm_dispatch_browser_budget_incomplete");
     return;
   }
   ++wasm_dispatch_count_;
+  // A refused record is not a retained sample. Put the slot and the per-function
+  // count back so a later valid execution of that function can still be kept.
+  const auto abandon = [&](std::string_view reason) {
+    --wasm_dispatch_count_;
+    ReleaseNativeWasmBudgetAdmission(budget, wasm_dispatch_function_keys_, {}, wasm_budget_epoch_);
+    gap(reason);
+  };
   if (content.size() < 8 || content.size() > 16U * 1024U * 1024U ||
       !observation.header.sequence_number || !observation.header.monotonic_time_ns ||
       !observation.header.process_id || !observation.header.thread_id ||
       observation.function_index >= 16U * 1024U * 1024U ||
       observation.table_count >= 16U * 1024U * 1024U) {
-    gap("native_wasm_dispatch_limit_or_invalid");
+    abandon("native_wasm_dispatch_limit_or_invalid");
     return;
   }
   // Renderer shared memory remains writable: validate a private immutable copy.
@@ -838,7 +879,7 @@ void NativeArtifactCaptureSink::CaptureWasmDispatch(
   auto checked = observation;
   checked.module_bytes = bytes;
   if (!IsValidNativeWasmDispatchInput(checked)) {
-    gap("native_wasm_dispatch_module_invalid");
+    abandon("native_wasm_dispatch_module_invalid");
     return;
   }
   NativeProbeEvent event;
@@ -884,16 +925,40 @@ void NativeArtifactCaptureSink::CaptureWasmIndirect(
     gap("native_wasm_indirect_document_unavailable");
     return;
   }
+  std::array<std::uint8_t, 32> module_digest{};
+  const std::uint8_t* module_digest_bytes = nullptr;
+  if (wasm_sample_budget_.module_allow_count != 0 && content.size() <= 16U * 1024U * 1024U) {
+    module_digest =
+        NativeGuestDigest(std::span<const std::uint8_t>(content.data(), content.size()));
+    module_digest_bytes = module_digest.data();
+  }
   // A budget separate from br_table: one stream never starves the other.
+  const auto budget = AdmitNativeWasmBudgetKeys(
+      wasm_sample_budget_, wasm_indirect_function_keys_, wasm_indirect_site_keys_,
+      wasm_budget_epoch_, observation.function_index, observation.module_byte_offset,
+      module_digest_bytes);
+  if (const char* reason = NativeWasmBrowserBudgetReason(budget.status, true)) {
+    gap(reason);
+    return;
+  }
   if (wasm_indirect_count_ >= kNativeWasmIndirectSampleBudget) {
+    ReleaseNativeWasmBudgetAdmission(budget, wasm_indirect_function_keys_, wasm_indirect_site_keys_,
+                                     wasm_budget_epoch_);
     gap("native_wasm_indirect_browser_budget_incomplete");
     return;
   }
   ++wasm_indirect_count_;
+  // Same as br_table: validation that fails after the claim must not spend it.
+  const auto abandon = [&](std::string_view reason) {
+    --wasm_indirect_count_;
+    ReleaseNativeWasmBudgetAdmission(budget, wasm_indirect_function_keys_, wasm_indirect_site_keys_,
+                                     wasm_budget_epoch_);
+    gap(reason);
+  };
   if (content.size() < 8 || content.size() > kNativeArtifactMaxContentBytes ||
       !observation.header.sequence_number || !observation.header.monotonic_time_ns ||
       !observation.header.process_id || !observation.header.thread_id) {
-    gap("native_wasm_indirect_limit_or_invalid");
+    abandon("native_wasm_indirect_limit_or_invalid");
     return;
   }
   // Renderer shared memory remains writable: validate a private immutable copy.
@@ -901,7 +966,7 @@ void NativeArtifactCaptureSink::CaptureWasmIndirect(
   auto checked = observation;
   checked.module_bytes = bytes;
   if (!IsValidNativeWasmIndirectInput(checked)) {
-    gap("native_wasm_indirect_module_invalid");
+    abandon("native_wasm_indirect_module_invalid");
     return;
   }
   NativeProbeEvent event;

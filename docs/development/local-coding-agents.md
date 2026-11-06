@@ -147,7 +147,9 @@ scripts/reb-api-mcp.sh --allow-effects --allow-session-start
 The server then lists `start_live_session` and starts even when no live
 endpoint exists yet. Until a session is bound, other tools refuse without
 sending a request. `start_live_session` takes named capture options (`url`,
-`wasm_dispatch`, `wasm_call_indirect`, `guest_adapter`, `js_dispatch_sites`,
+`wasm_dispatch`, `wasm_call_indirect`, `wasm_samples_per_function`,
+`wasm_samples_per_indirect_site`, `wasm_function_allow`,
+`wasm_function_deny`, `wasm_module_allowlist`, `guest_adapter`, `js_dispatch_sites`,
 `quiet`, `category_mask`, `duration_seconds`, `localhost_only`,
 `document_start`, `request_content`, `js_invocation_sites`,
 `js_invocation_saved_sites`, `js_invocation_digests` and others; all off
@@ -157,7 +159,8 @@ with an Origin Trace window, and moves this connection to that exact session.
 `get_session_context` then reports the session's `capture_options`, and
 `get_native_console` lists its documents and frames for the Console
 ([recipes 18 and 19](agent-cookbook.md#18-run-javascript-in-one-frame-including-a-cross-site-iframe)).
-`session_action` then opens a URL in the session's capture browser or ends
+`session_action` then opens a URL in the session's capture browser, resets
+both Wasm sample indexes with `reset_wasm_sample_budgets`, or ends
 it. It acts only on a session this connection started, never on the
 researcher's own session, and it is hidden without `--allow-session-start`.
 `open_url` reports `capture_observed`; false means the page was not recorded.

@@ -25,6 +25,7 @@
 #include "brave/components/reverse_engineering_browser/common/native_vm_dispatch_emit.h"
 #include "brave/components/reverse_engineering_browser/common/native_vm_finding.h"
 #include "brave/components/reverse_engineering_browser/common/native_wasm_dispatch.h"
+#include "brave/components/reverse_engineering_browser/common/native_wasm_sample_budget.h"
 
 namespace reb {
 
@@ -225,6 +226,12 @@ class COMPONENT_EXPORT(REB_NATIVE_PROBE_SINK) NativeProbeSink final {
   void SetNativeWasmIndirectEmitter(NativeWasmIndirectEmitter emitter) noexcept;
   [[nodiscard]] bool IsNativeWasmIndirectEnabled() const noexcept;
   void RecordNativeWasmIndirect(NativeWasmIndirectObservation observation) noexcept;
+  // Published by the next SetEmitters. Empty lists and zero caps keep the
+  // historical 16-record stream budgets. Invalid policies are ignored.
+  void SetNativeWasmSampleBudgetPolicy(const NativeWasmSampleBudgetPolicy& policy) noexcept;
+  // Restarts both sample-index ranges in this configuration. It does not
+  // change the session, the emitters, or the capture generation.
+  void ResetNativeWasmSampleBudgets() noexcept;
   // Coalesced once per configuration. A notice that arrives is kept after the
   // 16-sample cap. The Liftoff admission predicate itself goes false at that
   // cap, so a later worker or worklet execution is not visited. Not an
@@ -447,11 +454,19 @@ class COMPONENT_EXPORT(REB_NATIVE_PROBE_SINK) NativeProbeSink final {
                           std::uint32_t thread_id,
                           std::uint64_t interpreter_artifact_id) noexcept;
 
-  // Coalesced per configuration. A refused transport emit is not: it fills
-  // the sequence slot its record took.
-  enum class NativeWasmOmission : std::size_t { kInput, kBudget };
+  // Coalesced per budget epoch. A refused transport emit is not: it fills
+  // the sequence slot its record took. A filter or per-key cap does not stop
+  // the rest of the stream; only kBudget does.
+  enum class NativeWasmOmission : std::size_t {
+    kInput,
+    kBudget,
+    kFiltered,
+    kFunctionBudget,
+    kSiteBudget
+  };
   bool NoteNativeWasmDispatchOmission(const VmAdmission& admission,
-                                      NativeWasmOmission reason) noexcept;
+                                      NativeWasmOmission reason,
+                                      std::uint64_t budget_epoch) noexcept;
   // Coalesced JS dispatch gaps: budget, site budget, transport, input, then
   // one compiled-before-arming reason per site slot.
   static constexpr std::size_t kNativeJsBudgetGap = 0, kNativeJsSiteBudgetGap = 1,
@@ -542,8 +557,17 @@ class COMPONENT_EXPORT(REB_NATIVE_PROBE_SINK) NativeProbeSink final {
   std::atomic<NativeJsInvocationContextProvider> native_invocation_context_provider_{nullptr};
   std::atomic<NativeWasmDispatchEmitter> native_wasm_emitter_{nullptr};
   std::array<std::atomic<std::uint64_t>, kNativeWasmDispatchSampleBudget> native_wasm_slots_{};
-  std::array<std::atomic<std::uint64_t>, 2> native_wasm_gap_generations_{};
-  std::atomic<std::uint64_t> native_wasm_capped_generation_{0};
+  std::array<std::atomic<std::uint64_t>, 5> native_wasm_gap_epochs_{};
+  std::atomic<std::uint64_t> native_wasm_capped_epoch_{0};
+  // Even values are stable. SetEmitters and Reset each advance it by two so
+  // the next claimed slot is sample index 0. Odd is the in-flight reset.
+  std::atomic<std::uint64_t> native_wasm_budget_epoch_{2};
+  NativeWasmSampleBudgetPolicy native_wasm_budget_policy_{};
+  NativeWasmSampleBudgetPolicy native_wasm_budget_policy_pending_{};
+  std::array<NativeWasmBudgetKeySlot, kNativeWasmBudgetKeySlots> native_wasm_function_keys_{};
+  std::array<NativeWasmBudgetKeySlot, kNativeWasmBudgetKeySlots>
+      native_wasm_indirect_function_keys_{};
+  std::array<NativeWasmBudgetKeySlot, kNativeWasmBudgetKeySlots> native_wasm_indirect_site_keys_{};
   bool NoteNativeWasmScopeGap(bool call_indirect, NativeWasmScopeGap gap) noexcept;
   static constexpr std::size_t kNativeWasmScopeGapCount = 4;
   std::array<std::atomic<std::uint64_t>, kNativeWasmScopeGapCount>
@@ -551,12 +575,13 @@ class COMPONENT_EXPORT(REB_NATIVE_PROBE_SINK) NativeProbeSink final {
   std::array<std::atomic<std::uint64_t>, kNativeWasmScopeGapCount>
       native_wasm_indirect_scope_gap_generations_{};
   bool NoteNativeWasmIndirectOmission(const VmAdmission& admission,
-                                      NativeWasmOmission reason) noexcept;
+                                      NativeWasmOmission reason,
+                                      std::uint64_t budget_epoch) noexcept;
   std::atomic<NativeWasmIndirectEmitter> native_wasm_indirect_emitter_{nullptr};
   std::array<std::atomic<std::uint64_t>, kNativeWasmIndirectSampleBudget>
       native_wasm_indirect_slots_{};
-  std::array<std::atomic<std::uint64_t>, 2> native_wasm_indirect_gap_generations_{};
-  std::atomic<std::uint64_t> native_wasm_indirect_capped_generation_{0};
+  std::array<std::atomic<std::uint64_t>, 5> native_wasm_indirect_gap_epochs_{};
+  std::atomic<std::uint64_t> native_wasm_indirect_capped_epoch_{0};
   [[nodiscard]] bool SnapshotWasmExecutionAdmission(VmAdmission& admission) const noexcept;
   bool NoteNativeWasmExecutionOmission(const VmAdmission& admission, std::size_t reason) noexcept;
   void NoteWasmInstrumentedSite(std::uint64_t generation,

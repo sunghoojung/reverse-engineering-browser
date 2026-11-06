@@ -134,7 +134,11 @@ identifiers, for example:
 
 | Reason | Meaning |
 | --- | --- |
-| `native_wasm_dispatch_budget_incomplete` | The 16-observation `br_table` budget filled. |
+| `native_wasm_dispatch_budget_incomplete` | The 16-observation `br_table` budget filled. A larger global cap does not stop one hot function from filling it. |
+| `native_wasm_dispatch_function_budget_incomplete` | That function's own `br_table` maximum was reached. Other functions can still be recorded. |
+| `native_wasm_indirect_function_budget_incomplete` | That function's own `call_indirect` maximum was reached. |
+| `native_wasm_indirect_site_budget_incomplete` | That `call_indirect` site's maximum was reached. |
+| `native_wasm_dispatch_filtered` | The module or function was excluded. It did not consume a sample index. The research UI labels this as a sample-policy exclusion, not a loss. |
 | `native_wasm_dispatch_worker_unsupported` | A `br_table` ran in a worker, which is not sampled. |
 | `native_wasm_dispatch_worklet_unsupported` | A `br_table` ran in a worklet, which is not sampled. |
 | `native_wasm_dispatch_jitless_unsupported` | Jitless Wasm is outside the Liftoff hooks. |
@@ -147,8 +151,15 @@ identifiers, for example:
 | `native_guest_parent_unresolved` | A guest record's parent invocation was not linked. |
 | `..._transport_unavailable`, `..._document_unavailable` | A capture stage was not available. |
 
-A full budget is evidence too: the capture saw more than it kept. To sample
-something else, start a new session with narrower capture options.
+A full budget is evidence too: the capture saw more than it kept. A session
+start can keep N samples of one function, exclude functions, or admit only
+modules whose SHA-256 is listed (`wasm_samples_per_function`,
+`wasm_samples_per_indirect_site`, `wasm_function_allow`,
+`wasm_function_deny`, `wasm_module_allowlist`).
+`session_action` `reset_wasm_sample_budgets` restarts both sample indexes
+without a new session. The browser applies that reset on its next writer
+wake, about 250ms later. A live browser needs a rebuild before it honors
+either control.
 
 ## 7. Wait for the browser to produce something
 

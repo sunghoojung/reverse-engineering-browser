@@ -119,6 +119,21 @@ enum SessionCommand {
         /// Sample Wasm call_indirect targets.
         #[arg(long)]
         wasm_call_indirect: bool,
+        /// Keep at most this many samples of each function on each Wasm stream (1..16).
+        #[arg(long)]
+        wasm_samples_per_function: Option<u32>,
+        /// Keep at most this many call_indirect samples of each call site (1..16).
+        #[arg(long)]
+        wasm_samples_per_indirect_site: Option<u32>,
+        /// Function indexes to admit. Empty admits every function that is not denied.
+        #[arg(long, value_delimiter = ',')]
+        wasm_function_allow: Vec<u32>,
+        /// Function indexes to exclude. Deny wins over allow.
+        #[arg(long, value_delimiter = ',')]
+        wasm_function_deny: Vec<u32>,
+        /// SHA-256 module digests to admit. Other modules do not consume either budget.
+        #[arg(long, value_delimiter = ',')]
+        wasm_module_allowlist: Vec<String>,
         /// Absolute path of a native Wasm guest adapter recipe. Needs --wasm-dispatch.
         #[arg(long, value_name = "FILE")]
         guest_adapter: Option<PathBuf>,
@@ -1216,6 +1231,11 @@ async fn run_session(command: SessionCommand) -> Result<i32, Box<dyn std::error:
         url,
         wasm_dispatch,
         wasm_call_indirect,
+        wasm_samples_per_function,
+        wasm_samples_per_indirect_site,
+        wasm_function_allow,
+        wasm_function_deny,
+        wasm_module_allowlist,
         guest_adapter,
         js_dispatch_sites,
         quiet,
@@ -1238,6 +1258,12 @@ async fn run_session(command: SessionCommand) -> Result<i32, Box<dyn std::error:
         url,
         wasm_dispatch,
         wasm_call_indirect,
+        wasm_samples_per_function,
+        wasm_samples_per_indirect_site,
+        wasm_function_allow,
+        wasm_function_deny,
+        wasm_module_allowlist,
+        wasm_budget_malformed: false,
         guest_adapter,
         js_dispatch_sites,
         quiet,

@@ -458,6 +458,11 @@ is copied; `0022` adds the direct-caller arguments on the document observation;
 Each record names the table slot and, when the entry is a function of the same
 module, the callee it was about to run; arguments and memory are never read.
 It has its own 16-record budget and shares the module artifact and transport.
+A session can also restrict either budget by module digest, function index,
+and a per-function or per-call-site maximum, and
+`reset_wasm_sample_budgets` restarts both sample indexes without a new
+configuration. Those controls do not raise the global 16. A rebuilt Brave is
+required before a live session honors them.
 See [call_indirect observations](../../../protocol/native-wasm-dispatch-v1.md#call_indirect-observations).
 
 A trap after an instrumented instruction, and a call that is still inside

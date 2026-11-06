@@ -47,7 +47,7 @@
         "start"
       ],
       "title": "Start a live capture session",
-      "description": "Starts a new visibly labeled live capture session with named capture options: the capture browser, an Origin Trace window and every helper. When it is ready this connection moves to that session; other endpoint changes still retire the connection. Starting again first ends the session this connection started. Every option is off unless named and none is inherited from the environment. document_start permits document-start Console scripts (arming is a separate Console action). Sensitive capture needs confirm_sensitive_capture: canvas_images, request_content (request paths, queries and bodies) and js_invocation_digests. js_invocation_sites (a site file) or js_invocation_saved_sites (the agent sessions' own saved set) arm invocation sites. The result options and get_session_context capture_options show what the session runs with. With url, the result reports capture_observed; false means nothing was recorded, so end the session. Next: get_session_context, then get_session_summary; get_native_console for the Console. Start only for an authorized target. session_action, listed with this tool, acts only on a session this connection started.",
+      "description": "Starts a new visibly labeled live capture session with named capture options: the capture browser, an Origin Trace window and every helper. When it is ready this connection moves to that session; other endpoint changes still retire the connection. Starting again first ends the session this connection started. Every option is off unless named and none is inherited from the environment. document_start permits document-start Console scripts (arming is a separate Console action). Sensitive capture needs confirm_sensitive_capture: canvas_images, request_content (request paths, queries and bodies) and js_invocation_digests. js_invocation_sites (a site file) or js_invocation_saved_sites (the agent sessions' own saved set) arm invocation sites. wasm_samples_per_function, wasm_samples_per_indirect_site, wasm_function_allow, wasm_function_deny and wasm_module_allowlist restrict the 16-record Wasm sample budgets and require wasm_dispatch or wasm_call_indirect. The result options and get_session_context capture_options show what the session runs with. With url, the result reports capture_observed; false means nothing was recorded, so end the session. Next: get_session_context, then get_session_summary; get_native_console for the Console. Start only for an authorized target. session_action, listed with this tool, acts only on a session this connection started. reset_wasm_sample_budgets restarts both Wasm sample indexes without a new session.",
       "input": {
         "$ref": "#/components/schemas/LiveSessionStart"
       },
@@ -373,8 +373,8 @@
     "/api/session/actions": {
       "post": {
         "operationId": "session_action",
-        "summary": "Open a URL in, send input to, or end this live capture session",
-        "description": "Drives the live session this backend belongs to. open_url opens a page in a new tab of the session's capture browser while its capture broker runs, and reports capture_observed. list_inputs, click, type, press and scroll send trusted macOS input to the capture browser's page, including cross-origin frames; they need Accessibility for the app that started the session. end closes the capture browser and stops the session; it stays available after capture expires; stop any Console connection first so armed document-start scripts are cleared and confirmed. Take a wait_for_events cursor before open_url or input, then wait. To run JavaScript in the page or one of its frames, use get_native_console and native_console_action. Through MCP it is listed only with --allow-session-start and acts only on a session started by that connection with start_live_session.",
+        "summary": "Open a URL in, send input to, reset Wasm sample budgets, or end this live capture session",
+        "description": "Drives the live session this backend belongs to. open_url opens a page in a new tab of the session's capture browser while its capture broker runs, and reports capture_observed. list_inputs, click, type, press and scroll send trusted macOS input to the capture browser's page, including cross-origin frames; they need Accessibility for the app that started the session. reset_wasm_sample_budgets restarts both Wasm sample indexes without closing the browser or starting a new capture configuration; the browser notices the reset file on its writer wake, about 250ms later. end closes the capture browser and stops the session; it stays available after capture expires; stop any Console connection first so armed document-start scripts are cleared and confirmed. Take a wait_for_events cursor before open_url or input, then wait. To run JavaScript in the page or one of its frames, use get_native_console and native_console_action. Through MCP it is listed only with --allow-session-start and acts only on a session started by that connection with start_live_session.",
         "tags": [
           "capture"
         ],
@@ -26394,6 +26394,44 @@
                 }
               ]
             }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "action"
+            ],
+            "properties": {
+              "action": {
+                "const": "reset_wasm_sample_budgets",
+                "type": "string"
+              }
+            },
+            "x-reb-execution": {
+              "kind": "action",
+              "effects": [
+                "local-state-write",
+                "browser-control"
+              ],
+              "state_dependent_effects": [],
+              "uncertainties": [
+                "The browser applies the new generation on its writer wake, about 250ms after the file changes. This response does not mean a later execution has already been sampled."
+              ],
+              "prerequisites": [
+                {
+                  "id": "live-capture-session",
+                  "condition": "capture_mode is live, the broker is connected, capture is not stopped, the backend was started with --wasm-budget-reset-file, and a live process holds the session's --brave-profile."
+                }
+              ],
+              "confirmations": [],
+              "notes": "Increments the session's Wasm sample-budget reset file. The capture browser restarts both sample indexes at 0 without closing the profile, changing the session id, or replacing the capture configuration. It does not change the module, function, or per-key policy. A rebuilt Brave with this overlay is required before a live browser honors the file.",
+              "sources": [
+                {
+                  "path": "apps/origin-trace-backend/src/live_browser.rs",
+                  "symbol": "bump_wasm_budget_reset"
+                }
+              ]
+            }
           }
         ]
       },
@@ -26698,6 +26736,30 @@
                 "type": "integer"
               }
             }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "ok",
+              "action",
+              "generation"
+            ],
+            "properties": {
+              "ok": {
+                "const": true,
+                "type": "boolean"
+              },
+              "action": {
+                "const": "reset_wasm_sample_budgets",
+                "type": "string"
+              },
+              "generation": {
+                "type": "integer",
+                "minimum": 1,
+                "description": "The generation written to the reset file. The browser applies it when the value is greater than the last one it applied."
+              }
+            }
           }
         ]
       },
@@ -26715,12 +26777,59 @@
           "wasm_dispatch": {
             "type": "boolean",
             "default": false,
-            "description": "Sample Wasm br_table dispatch, at most 16 observations per configuration. Needs category bits 512 and 1024."
+            "description": "Sample Wasm br_table dispatch. The configuration keeps at most 16 observations; a hot function can be limited with the sample budget options instead of raising that cap. Needs category bits 512 and 1024."
           },
           "wasm_call_indirect": {
             "type": "boolean",
             "default": false,
-            "description": "Sample Wasm call_indirect targets. Needs category bits 512 and 1024."
+            "description": "Sample Wasm call_indirect targets. Needs category bits 512 and 1024. Each stream still keeps at most 16 observations per configuration; sample budget options below restrict which of those 16 are kept."
+          },
+          "wasm_samples_per_function": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 16,
+            "description": "Keep at most this many samples of each function on each Wasm stream. Requires wasm_dispatch or wasm_call_indirect. The global cap stays 16."
+          },
+          "wasm_samples_per_indirect_site": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 16,
+            "description": "Keep at most this many call_indirect samples of each caller function and module byte offset. Requires wasm_dispatch or wasm_call_indirect."
+          },
+          "wasm_function_allow": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 32,
+            "uniqueItems": true,
+            "items": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 16777215
+            },
+            "description": "Function indexes to admit. Other functions are excluded and do not consume either sample index. Requires wasm_dispatch or wasm_call_indirect."
+          },
+          "wasm_function_deny": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 32,
+            "uniqueItems": true,
+            "items": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 16777215
+            },
+            "description": "Function indexes to exclude. A denied index is excluded even when it is also allowed. Requires wasm_dispatch or wasm_call_indirect."
+          },
+          "wasm_module_allowlist": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 8,
+            "uniqueItems": true,
+            "items": {
+              "type": "string",
+              "pattern": "^[0-9a-fA-F]{64}$"
+            },
+            "description": "SHA-256 digests of Wasm modules to admit. A module whose digest is not listed does not advance either sample index. Requires wasm_dispatch or wasm_call_indirect."
           },
           "guest_adapter": {
             "type": "string",

@@ -131,6 +131,7 @@ static_library("renderer") {
     "common/native_wasm_guest.h",
     "common/native_wasm_guest_adapter.h",
     "common/native_wasm_guest_wire.h",
+    "common/native_wasm_sample_budget.h",
     "renderer/native_console_agent.cc",
     "renderer/native_console_agent.h",
     "renderer/native_console_deadline.cc",
@@ -204,6 +205,7 @@ source_set("browser") {
     "common/native_wasm_guest.h",
     "common/native_wasm_guest_adapter.h",
     "common/native_wasm_guest_wire.h",
+    "common/native_wasm_sample_budget.h",
   ]
 
   deps = [

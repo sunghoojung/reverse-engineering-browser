@@ -22,6 +22,18 @@ pub struct StartOptions {
     pub url: Option<String>,
     pub wasm_dispatch: bool,
     pub wasm_call_indirect: bool,
+    /// At most this many retained samples of each function, on each stream.
+    pub wasm_samples_per_function: Option<u32>,
+    /// At most this many retained call_indirect samples of each call site.
+    pub wasm_samples_per_indirect_site: Option<u32>,
+    /// Function indexes to admit. Empty admits every function not denied.
+    pub wasm_function_allow: Vec<u32>,
+    /// Function indexes to exclude. A denied index is excluded even if allowed.
+    pub wasm_function_deny: Vec<u32>,
+    /// Lowercase SHA-256 digests. Empty admits every module.
+    pub wasm_module_allowlist: Vec<String>,
+    /// Set when a budget field was present but not the documented shape.
+    pub wasm_budget_malformed: bool,
     pub guest_adapter: Option<PathBuf>,
     pub js_dispatch_sites: Option<PathBuf>,
     pub quiet: bool,
@@ -53,10 +65,73 @@ impl StartOptions {
     pub fn from_json(value: &Value) -> Self {
         let flag = |key: &str| value[key].as_bool().unwrap_or(false);
         let path = |key: &str| value[key].as_str().map(PathBuf::from);
+        let mut wasm_budget_malformed = false;
+        let cap = |key: &str, malformed: &mut bool| match &value[key] {
+            Value::Null => None,
+            Value::Number(number) => match number.as_u64() {
+                Some(number) if number <= u64::from(u32::MAX) => Some(number as u32),
+                _ => {
+                    *malformed = true;
+                    None
+                }
+            },
+            _ => {
+                *malformed = true;
+                None
+            }
+        };
+        let indexes = |key: &str, malformed: &mut bool| match &value[key] {
+            Value::Null => Vec::new(),
+            Value::Array(items) => items
+                .iter()
+                .filter_map(|item| match item.as_u64() {
+                    Some(number) if number < 16_777_216 => Some(number as u32),
+                    _ => {
+                        *malformed = true;
+                        None
+                    }
+                })
+                .collect(),
+            _ => {
+                *malformed = true;
+                Vec::new()
+            }
+        };
+        let digests = |key: &str, malformed: &mut bool| match &value[key] {
+            Value::Null => Vec::new(),
+            Value::Array(items) => items
+                .iter()
+                .map(|item| match item.as_str() {
+                    Some(text)
+                        if text.len() == 64
+                            && text.bytes().all(|byte| byte.is_ascii_hexdigit()) =>
+                    {
+                        text.to_ascii_lowercase()
+                    }
+                    _ => {
+                        *malformed = true;
+                        String::new()
+                    }
+                })
+                .collect(),
+            _ => {
+                *malformed = true;
+                Vec::new()
+            }
+        };
         Self {
             url: value["url"].as_str().map(str::to_owned),
             wasm_dispatch: flag("wasm_dispatch"),
             wasm_call_indirect: flag("wasm_call_indirect"),
+            wasm_samples_per_function: cap("wasm_samples_per_function", &mut wasm_budget_malformed),
+            wasm_samples_per_indirect_site: cap(
+                "wasm_samples_per_indirect_site",
+                &mut wasm_budget_malformed,
+            ),
+            wasm_function_allow: indexes("wasm_function_allow", &mut wasm_budget_malformed),
+            wasm_function_deny: indexes("wasm_function_deny", &mut wasm_budget_malformed),
+            wasm_module_allowlist: digests("wasm_module_allowlist", &mut wasm_budget_malformed),
+            wasm_budget_malformed,
             guest_adapter: path("guest_adapter"),
             js_dispatch_sites: path("js_dispatch_sites"),
             quiet: flag("quiet"),
@@ -103,6 +178,68 @@ impl StartOptions {
         if self.guest_adapter.is_some() && !self.wasm_dispatch {
             return Err("guest_adapter requires wasm_dispatch".into());
         }
+        if self.wasm_budget_malformed {
+            return Err("Wasm sample budget options must be integers, function indexes below 16777216, and 64-character hex module digests".into());
+        }
+        let wasm_budget = self.wasm_samples_per_function.is_some()
+            || self.wasm_samples_per_indirect_site.is_some()
+            || !self.wasm_function_allow.is_empty()
+            || !self.wasm_function_deny.is_empty()
+            || !self.wasm_module_allowlist.is_empty();
+        if wasm_budget && !(self.wasm_dispatch || self.wasm_call_indirect) {
+            return Err(
+                "Wasm sample budget options require wasm_dispatch or wasm_call_indirect".into(),
+            );
+        }
+        if self
+            .wasm_samples_per_function
+            .is_some_and(|limit| !(1..=16).contains(&limit))
+        {
+            return Err("wasm_samples_per_function must be from 1 to 16".into());
+        }
+        if self
+            .wasm_samples_per_indirect_site
+            .is_some_and(|limit| !(1..=16).contains(&limit))
+        {
+            return Err("wasm_samples_per_indirect_site must be from 1 to 16".into());
+        }
+        for (name, indexes) in [
+            ("wasm_function_allow", &self.wasm_function_allow),
+            ("wasm_function_deny", &self.wasm_function_deny),
+        ] {
+            if indexes.len() > 32 || indexes.iter().any(|index| *index >= 16_777_216) {
+                return Err(format!(
+                    "{name} accepts at most 32 function indexes, each below 16777216"
+                ));
+            }
+            if indexes.len()
+                != indexes
+                    .iter()
+                    .collect::<std::collections::BTreeSet<_>>()
+                    .len()
+            {
+                return Err(format!("{name} indexes must be unique"));
+            }
+        }
+        let digests = self
+            .wasm_module_allowlist
+            .iter()
+            .map(|digest| digest.to_ascii_lowercase())
+            .collect::<Vec<_>>();
+        if digests.len() > 8
+            || digests.iter().any(|digest| {
+                digest.len() != 64 || !digest.bytes().all(|byte| byte.is_ascii_hexdigit())
+            })
+            || digests.len()
+                != digests
+                    .iter()
+                    .collect::<std::collections::BTreeSet<_>>()
+                    .len()
+        {
+            return Err(
+                "wasm_module_allowlist accepts at most 8 unique 64-character hex digests".into(),
+            );
+        }
         if self.canvas_images && !self.confirm_sensitive_capture {
             return Err(
                 "canvas_images stores page content and requires confirm_sensitive_capture".into(),
@@ -142,6 +279,9 @@ impl StartOptions {
                     .into(),
             );
         }
+        if wasm_budget && mask & (512 | 1024) != (512 | 1024) {
+            return Err("Wasm sample budget options need the VM and Artifact category bits (512 and 1024) in category_mask".into());
+        }
         if self
             .duration_seconds
             .is_some_and(|seconds| !(60..=3600).contains(&seconds))
@@ -162,6 +302,11 @@ impl StartOptions {
         let mut value = json!({
             "wasm_dispatch": self.wasm_dispatch,
             "wasm_call_indirect": self.wasm_call_indirect,
+            "wasm_samples_per_function": self.wasm_samples_per_function,
+            "wasm_samples_per_indirect_site": self.wasm_samples_per_indirect_site,
+            "wasm_function_allow": self.wasm_function_allow,
+            "wasm_function_deny": self.wasm_function_deny,
+            "wasm_module_allowlist": self.wasm_module_allowlist,
             "quiet": self.quiet,
             "category_mask": self.category_mask.unwrap_or(4095),
             "duration_seconds": self.duration_seconds.unwrap_or(3600),
@@ -400,6 +545,17 @@ fn with_option_names(cause: &str) -> String {
         ("REB_NATIVE_WASM_GUEST_ADAPTER", "guest_adapter"),
         ("REB_NATIVE_WASM_DISPATCH", "wasm_dispatch"),
         ("REB_NATIVE_WASM_CALL_INDIRECT", "wasm_call_indirect"),
+        (
+            "REB_NATIVE_WASM_SAMPLES_PER_FUNCTION",
+            "wasm_samples_per_function",
+        ),
+        (
+            "REB_NATIVE_WASM_SAMPLES_PER_INDIRECT_SITE",
+            "wasm_samples_per_indirect_site",
+        ),
+        ("REB_NATIVE_WASM_FUNCTION_ALLOW", "wasm_function_allow"),
+        ("REB_NATIVE_WASM_FUNCTION_DENY", "wasm_function_deny"),
+        ("REB_NATIVE_WASM_MODULE_ALLOWLIST", "wasm_module_allowlist"),
         ("REB_NATIVE_QUIET_MODE", "quiet"),
         ("REB_CAPTURE_CANVAS_IMAGES", "canvas_images"),
         ("REB_CAPTURE_CATEGORY_MASK", "category_mask"),
@@ -428,6 +584,35 @@ fn with_option_names(cause: &str) -> String {
 /// with `js_invocation_saved_sites`.
 pub fn agent_site_store(home: &Path) -> PathBuf {
     home.join(".config/origin-trace/agent-sessions/js-invocation-sites-v1.json")
+}
+
+/// One lowercase digest per line. Brave reads this file; an empty list is not
+/// written, which leaves every module admissible.
+fn wasm_module_allowlist_file(
+    options: &StartOptions,
+    agent: &Path,
+) -> Result<Option<PathBuf>, String> {
+    if options.wasm_module_allowlist.is_empty() {
+        return Ok(None);
+    }
+    let path = agent.join("wasm-module-allowlist");
+    let text = options
+        .wasm_module_allowlist
+        .iter()
+        .map(|digest| format!("{}\n", digest.to_ascii_lowercase()))
+        .collect::<String>();
+    use std::os::unix::fs::OpenOptionsExt;
+    std::fs::OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .mode(0o600)
+        .open(&path)
+        .and_then(|mut file| {
+            use std::io::Write;
+            file.write_all(text.as_bytes())
+        })
+        .map_err(|error| format!("Cannot write the Wasm module allowlist: {error}"))?;
+    Ok(Some(path))
 }
 
 /// The site file this session arms, as a private copy nothing changes while
@@ -564,6 +749,9 @@ pub async fn launch(options: &StartOptions) -> Result<Started, String> {
     let armed_sites = invocation_sites(options, &home, &agent).inspect_err(|_| {
         let _ = std::fs::remove_dir_all(&agent);
     })?;
+    let module_allowlist = wasm_module_allowlist_file(options, &agent).inspect_err(|_| {
+        let _ = std::fs::remove_dir_all(&agent);
+    })?;
     // An explicit root wins, then the operator's REB_LIVE_SESSION_ROOT, as
     // for make live, then the build's own default.
     let sessions_root = options
@@ -613,6 +801,11 @@ pub async fn launch(options: &StartOptions) -> Result<Started, String> {
         "REB_SESSION_OWNER_PID",
         "REB_BRAVE_PROFILE",
         "REB_NATIVE_WASM_GUEST_ADAPTER",
+        "REB_NATIVE_WASM_SAMPLES_PER_FUNCTION",
+        "REB_NATIVE_WASM_SAMPLES_PER_INDIRECT_SITE",
+        "REB_NATIVE_WASM_FUNCTION_ALLOW",
+        "REB_NATIVE_WASM_FUNCTION_DENY",
+        "REB_NATIVE_WASM_MODULE_ALLOWLIST",
         "REB_NATIVE_JS_DISPATCH_SITES",
         // Invocation sites arm only from a named option, never from the
         // researcher's file or saved set. A named set is strict: a Brave
@@ -669,6 +862,40 @@ pub async fn launch(options: &StartOptions) -> Result<Started, String> {
         );
     if let Some(path) = &options.guest_adapter {
         command.env("REB_NATIVE_WASM_GUEST_ADAPTER", path);
+    }
+    if let Some(limit) = options.wasm_samples_per_function {
+        command.env("REB_NATIVE_WASM_SAMPLES_PER_FUNCTION", limit.to_string());
+    }
+    if let Some(limit) = options.wasm_samples_per_indirect_site {
+        command.env(
+            "REB_NATIVE_WASM_SAMPLES_PER_INDIRECT_SITE",
+            limit.to_string(),
+        );
+    }
+    if !options.wasm_function_allow.is_empty() {
+        command.env(
+            "REB_NATIVE_WASM_FUNCTION_ALLOW",
+            options
+                .wasm_function_allow
+                .iter()
+                .map(u32::to_string)
+                .collect::<Vec<_>>()
+                .join(","),
+        );
+    }
+    if !options.wasm_function_deny.is_empty() {
+        command.env(
+            "REB_NATIVE_WASM_FUNCTION_DENY",
+            options
+                .wasm_function_deny
+                .iter()
+                .map(u32::to_string)
+                .collect::<Vec<_>>()
+                .join(","),
+        );
+    }
+    if let Some(path) = &module_allowlist {
+        command.env("REB_NATIVE_WASM_MODULE_ALLOWLIST", path);
     }
     if let Some(path) = &options.js_dispatch_sites {
         command.env("REB_NATIVE_JS_DISPATCH_SITES", path);
@@ -826,12 +1053,41 @@ mod tests {
                 "not both",
             ),
             (json!({"js_invocation_sites":"s.json"}), "absolute"),
+            (
+                json!({"wasm_samples_per_function":2}),
+                "require wasm_dispatch",
+            ),
+            (
+                json!({"wasm_samples_per_function":0,"wasm_dispatch":true}),
+                "from 1 to 16",
+            ),
+            (
+                json!({"wasm_function_allow":[1,1],"wasm_dispatch":true}),
+                "unique",
+            ),
+            (
+                json!({"wasm_function_allow":[16777216],"wasm_dispatch":true}),
+                "16777216",
+            ),
+            (
+                json!({"wasm_module_allowlist":["abcd"],"wasm_call_indirect":true}),
+                "64-character",
+            ),
+            (
+                json!({"wasm_samples_per_function":2,"wasm_dispatch":true,"category_mask":512}),
+                "Artifact category",
+            ),
         ] {
             let error = StartOptions::from_json(&value).validate().unwrap_err();
             assert!(error.contains(message), "{value}: {error}");
         }
         let effective = StartOptions::from_json(&json!({"quiet":true})).effective();
         assert_eq!(effective["wasm_dispatch"], false);
+        assert!(effective["wasm_samples_per_function"].is_null());
+        assert!(effective["wasm_samples_per_indirect_site"].is_null());
+        assert_eq!(effective["wasm_function_allow"], json!([]));
+        assert_eq!(effective["wasm_function_deny"], json!([]));
+        assert_eq!(effective["wasm_module_allowlist"], json!([]));
         assert_eq!(effective["category_mask"], 4095);
         assert_eq!(effective["timeout_seconds"], 180);
         assert!(effective.get("url").is_none());
@@ -852,6 +1108,29 @@ mod tests {
         assert_eq!(effective["document_start"], true);
         assert_eq!(effective["js_invocation_sites"], "/tmp/s.json");
         assert_eq!(effective["js_invocation_digests"], true);
+        let budget = StartOptions::from_json(&json!({
+            "wasm_dispatch": true,
+            "wasm_samples_per_function": 2,
+            "wasm_function_allow": [1, 2],
+            "wasm_module_allowlist": ["AA"],
+        }));
+        assert!(budget.validate().is_err());
+        let digest = "ab".repeat(32);
+        let budget = StartOptions::from_json(&json!({
+            "wasm_call_indirect": true,
+            "wasm_samples_per_indirect_site": 1,
+            "wasm_function_deny": [4],
+            "wasm_module_allowlist": [digest],
+        }));
+        assert!(
+            budget.validate().is_ok(),
+            "{}",
+            budget.validate().unwrap_err()
+        );
+        let effective = budget.effective();
+        assert_eq!(effective["wasm_samples_per_indirect_site"], 1);
+        assert_eq!(effective["wasm_function_deny"], json!([4]));
+        assert_eq!(effective["wasm_module_allowlist"][0], digest);
     }
 
     #[test]

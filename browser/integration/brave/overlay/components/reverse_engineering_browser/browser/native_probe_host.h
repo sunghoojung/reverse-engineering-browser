@@ -49,6 +49,7 @@ class NativeProbeHost final : public mojom::NativeProbeHost {
                            std::uint32_t module_byte_offset,
                            std::uint32_t selector,
                            std::uint32_t table_count,
+                           bool caller_observed,
                            std::uint8_t caller_kind,
                            std::uint32_t caller_function_index,
                            std::uint32_t sample_index,

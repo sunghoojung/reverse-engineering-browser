@@ -152,6 +152,7 @@ void NativeProbeHost::CaptureWasmDispatch(const std::uint64_t capture_epoch,
                                           const std::uint32_t module_byte_offset,
                                           const std::uint32_t selector,
                                           const std::uint32_t table_count,
+                                          const bool caller_observed,
                                           const std::uint8_t caller_kind,
                                           const std::uint32_t caller_function_index,
                                           const std::uint32_t sample_index,
@@ -185,11 +186,12 @@ void NativeProbeHost::CaptureWasmDispatch(const std::uint64_t capture_epoch,
   const auto refuse = [&](std::string_view reason) {
     session_->Emit(RendererGap(NativeProbeEvent{.header = observation.header}, reason));
   };
-  // Kind 0 with an index would publish a guessed function. The mojo call is
-  // the walk result, so an inconsistent pair is invalid input.
-  const bool caller_ok =
-      (caller_kind == kWasmDirectCallerUnknown && caller_function_index == 0) ||
-      (caller_kind == kWasmDirectCallerSameInstance && caller_function_index < 16U * 1024U * 1024U);
+  // Kind 0 with an index would publish a guessed function. An unwalked
+  // record stays version 2: zero caller bytes are not an observed host.
+  const bool caller_clear = caller_kind == kWasmDirectCallerUnknown && caller_function_index == 0;
+  const bool caller_named =
+      caller_kind == kWasmDirectCallerSameInstance && caller_function_index < 16U * 1024U * 1024U;
+  const bool caller_ok = caller_observed ? (caller_clear || caller_named) : caller_clear;
   if (!monotonic_time_ns || monotonic_time_ns > now || !thread_id || !frame_id ||
       !execution_context_id || sample_index >= 16 || !caller_ok ||
       content.size() > 16U * 1024U * 1024U) {
@@ -219,7 +221,7 @@ void NativeProbeHost::CaptureWasmDispatch(const std::uint64_t capture_epoch,
   observation.module_byte_offset = module_byte_offset;
   observation.selector = selector;
   observation.table_count = table_count;
-  observation.caller_observed = true;
+  observation.caller_observed = caller_observed;
   observation.caller_kind = caller_kind;
   observation.caller_function_index = caller_function_index;
   observation.sample_index = sample_index;

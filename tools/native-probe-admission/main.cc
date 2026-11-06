@@ -1402,8 +1402,8 @@ void NativeWasmRuntimeAdmission() {
   assert(sink.IsNativeWasmDispatchEnabled());
   record();
   assert(native_wasm_retained == 1);
-  // Each observation carries the caller from its own walk. Two instances do
-  // not share one stack, and a host caller is unknown rather than an index.
+  // Each observation carries the caller stored on that record. The sink does
+  // not reuse a previous index. This does not walk a V8 stack.
   record_callers = true;
   expect_caller_observed = true;
   expect_caller_kind = reb::kWasmDirectCallerSameInstance;

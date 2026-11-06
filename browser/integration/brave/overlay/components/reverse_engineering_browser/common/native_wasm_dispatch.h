@@ -17,8 +17,9 @@
 #include "native_probe_event.h"
 namespace reb {
 // Immediate live caller of a br_table. kUnknown is the host, another instance,
-// or a frame that is not a function index of this module; the index is then 0
-// and is not function 0. Versions 1 and 2 reserved these bytes (not observed).
+// a non-Liftoff frame, or a frame whose code could not be read; the index is
+// then 0 and is not function 0. Versions 1 and 2 reserved these bytes (not
+// observed).
 // include/reb/wasm_dispatch.hpp defines the same values for the portable reader.
 #ifndef REB_WASM_DIRECT_CALLER_KIND_DEFINED
 #define REB_WASM_DIRECT_CALLER_KIND_DEFINED

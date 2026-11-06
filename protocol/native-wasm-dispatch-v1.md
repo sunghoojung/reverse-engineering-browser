@@ -78,8 +78,9 @@ Version 3 keeps that context and stores the direct caller in the next 8 bytes:
 | 36 | caller function index | u32 |
 | 40 | reserved, all zero | 88 bytes |
 
-Caller kind 0 is `unknown`: the host, another instance, or a frame that is not
-a function of this module. The index is then 0 and is not function index 0.
+Caller kind 0 is `unknown`: the host, another instance, a frame that is not
+a Liftoff function of this module, or a frame whose code could not be read.
+The index is then 0 and is not function index 0.
 Kind 1 is `same-instance`: the index is that function in this module, imports
 included, and may be 0. Kind 2 and above is rejected. Versions 1 and 2 still
 decode. Their caller bytes stay zero, which means the caller was **not

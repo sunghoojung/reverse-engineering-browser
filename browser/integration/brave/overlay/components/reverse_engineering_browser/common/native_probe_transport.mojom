@@ -52,10 +52,14 @@ interface NativeProbeHost {
                       uint32 module_byte_offset,
                       uint32 selector,
                       uint32 table_count,
-                      // Immediate live caller. Kind 0 is unknown (host, another
-                      // instance, or not a function of this module) and the
-                      // index is then 0. Kind 1 is a function of this module.
-                      // protocol/native-wasm-dispatch-v1.md.
+                      // Immediate live caller. caller_observed is true only
+                      // after this activation was walked. Kind 0 is unknown
+                      // (host, another instance, a non-Liftoff frame, or a
+                      // frame whose code could not be read) and the index is
+                      // then 0. Kind 1 is a Liftoff function of this module.
+                      // An unwalked record keeps kind 0 and index 0 and is not
+                      // unknown. protocol/native-wasm-dispatch-v1.md.
+                      bool caller_observed,
                       uint8 caller_kind,
                       uint32 caller_function_index,
                       uint32 sample_index,

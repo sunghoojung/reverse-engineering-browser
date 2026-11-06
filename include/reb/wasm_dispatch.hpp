@@ -11,8 +11,9 @@
 #include "reb/js_invocation.hpp"
 namespace reb {
 // Immediate live caller of a br_table, walked from that activation's stack.
-// kUnknown is the host, another instance, or a frame that is not a function
-// index of this module. The index is then 0 and is not function 0. Versions 1
+// kUnknown is the host, another instance, a non-Liftoff frame, or a frame
+// whose code could not be read. The index is then 0 and is not function 0.
+// Versions 1
 // and 2 reserved these bytes: the caller was not observed, which is neither
 // kUnknown nor a guessed index. The overlay header defines the same values;
 // the guard keeps a translation unit that includes both well-formed.
@@ -145,9 +146,9 @@ static_assert(offsetof(WasmDispatchObservationPayload, reserved) == 40);
 // One activation's frames, callee first. instance_id 0 is not a Wasm instance
 // (the host, or a frame whose instance was not read). A negative function
 // index was not read. The direct caller is only the frame immediately above
-// the br_table. A host or foreign frame stops the walk; an older same-instance
-// frame behind it is not the caller. Each call is one activation: two
-// instances do not share a stack.
+// the br_table. A host, foreign, non-Liftoff, or unreadable frame stops the
+// walk; an older same-instance frame behind it is not the caller. Each call
+// is one activation: two instances do not share a stack.
 struct WasmDirectCallerFrame {
   std::uint64_t instance_id = 0;
   int function_index = -1;

@@ -1,7 +1,7 @@
 diff --git a/third_party/blink/renderer/bindings/core/v8/v8_initializer.cc b/third_party/blink/renderer/bindings/core/v8/v8_initializer.cc
 --- a/third_party/blink/renderer/bindings/core/v8/v8_initializer.cc
 +++ b/third_party/blink/renderer/bindings/core/v8/v8_initializer.cc
-@@ -1,8 +1,10 @@
+@@ -317,8 +317,10 @@
  void CaptureWasmBrTableDispatch(v8::Local<v8::Context> context,
                                 const std::uint8_t* module_bytes,
                                 const std::size_t module_size,
@@ -13,7 +13,7 @@ diff --git a/third_party/blink/renderer/bindings/core/v8/v8_initializer.cc b/thi
 +                               const v8::WasmDirectCaller caller,
 +                               const std::uint32_t caller_function_index) {
    reb::NativeProbeSink& sink = reb::NativeProbeSink::Get();
-@@ -1,7 +1,9 @@
+@@ -356,7 +356,9 @@
    sink.RecordNativeWasmDispatch(
        execution_context_id, frame_id, source_url,
        UNSAFE_BUFFERS(base::span(module_bytes, module_size)), function_index,

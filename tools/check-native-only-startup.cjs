@@ -100,7 +100,7 @@ async function main() {
   assert(text.includes('guest PC unknown'));
   assert(text.includes('4294967295'));
   assert(text.includes('default arm'));
-  assert(text.includes('a host or other-instance caller is unknown'));
+  assert(text.includes('a host, other-instance, or non-Liftoff caller is unknown'));
   assert(text.includes('The parent event id stays unset'));
   context.nativeGuestStartupFixture = {native_guest_sample_count: 2, native_guest_samples: [{
     event: {session_id: '101', process_id: 3, sequence_number: '105'},

@@ -1,16 +1,16 @@
 diff --git a/include/v8-callbacks.h b/include/v8-callbacks.h
+index 82afcfff..4cb5e6d4 100644
 --- a/include/v8-callbacks.h
 +++ b/include/v8-callbacks.h
-@@ -345,11 +345,21 @@ using WasmCallIndirectDispatchEnabledCallback = bool (*)();
- // Synchronous observation immediately before a compiled br_table dispatch.
+@@ -346,10 +346,20 @@ using WasmCallIndirectDispatchEnabledCallback = bool (*)();
  // Module offsets are Wasm instruction addresses, not guest-interpreter PCs.
  // Bytes are borrowed only during this call. Do not execute JS, allocate V8
  // heap objects, retain raw pointers, block, or perform I/O in the callback.
 +// The caller is the live frame immediately above the br_table. kUnknown is
-+// the host, another instance, or a frame that is not a function of this
-+// module; caller_function_index is then 0 and is not function index 0.
-+// kSameInstance names that function in this module. Do not infer a caller
-+// from another activation.
++// the host, another instance, a frame that is not a Liftoff function of this
++// module, or a frame whose code could not be read. caller_function_index is
++// then 0 and is not function index 0. kSameInstance names that function in
++// this module. Do not infer a caller from another activation.
 +enum class WasmDirectCaller : uint8_t {
 +  kUnknown = 0,
 +  kSameInstance = 1,
@@ -25,34 +25,39 @@ diff --git a/include/v8-callbacks.h b/include/v8-callbacks.h
  // into V8. Null means enabled; embedders should reject inactive/capped captures.
  using WasmBrTableDispatchEnabledCallback = bool (*)();
 diff --git a/src/runtime/runtime-wasm.cc b/src/runtime/runtime-wasm.cc
+index 0907ef25..b254052f 100644
 --- a/src/runtime/runtime-wasm.cc
 +++ b/src/runtime/runtime-wasm.cc
-@@ -1,7 +1,33 @@
+@@ -483,10 +483,39 @@ RUNTIME_FUNCTION(Runtime_WasmRebTraceBrTable) {
+   HandleScope scope(isolate);
    auto context =
        Utils::ToLocal(direct_handle(instance->native_context(), isolate));
 +  v8::WasmDirectCaller caller = v8::WasmDirectCaller::kUnknown;
 +  uint32_t caller_function_index = 0;
 +  if (physical_enabled) {
-+    // Only the frame immediately above this br_table, and only when it is a
-+    // Liftoff function of this instance. A host or foreign frame is unknown.
-+    // Do not skip it: an older same-instance frame is not the direct caller.
-+    // This walk is this activation only. It is not a shared caller stack.
++    // One activation only: the frame immediately above this br_table. A host,
++    // foreign, non-Liftoff, or unreadable frame is unknown. Do not skip it.
++    // An older same-instance frame behind it is not the direct caller.
 +    StackFrameIterator it(isolate);
 +    while (!it.done() && it.frame()->fp() != frame->fp()) it.Advance();
-+    if (!it.done()) {
-+      for (it.Advance(); !it.done(); it.Advance()) {
-+        if (!it.frame()->is_wasm()) break;
-+        auto* caller_frame = static_cast<WasmFrame*>(it.frame());
-+        if (caller_frame->wasm_code()->tier() != wasm::ExecutionTier::kLiftoff)
-+          break;
-+        if (caller_frame->trusted_instance_data() != instance) break;
-+        const int caller_index = caller_frame->GetInnermostFunctionIndex();
-+        if (caller_index < 0 ||
-+            static_cast<size_t>(caller_index) >= module->functions.size())
-+          break;
-+        caller = v8::WasmDirectCaller::kSameInstance;
-+        caller_function_index = static_cast<uint32_t>(caller_index);
-+        break;
++    if (!it.done()) it.Advance();
++    if (!it.done() && it.frame()->is_wasm()
++#if V8_ENABLE_DRUMBRAKE
++        && !it.frame()->is_wasm_interpreter_entry()
++#endif  // V8_ENABLE_DRUMBRAKE
++    ) {
++      auto* caller_frame = static_cast<WasmFrame*>(it.frame());
++      // Liftoff does not inline. The code object's index is the function that
++      // executed the call. Null code is not a function index.
++      wasm::WasmCode* code = caller_frame->wasm_code();
++      if (code != nullptr && code->is_liftoff() &&
++          caller_frame->trusted_instance_data() == instance) {
++        const int caller_index = code->index();
++        if (caller_index >= 0 &&
++            static_cast<size_t>(caller_index) < module->functions.size()) {
++          caller = v8::WasmDirectCaller::kSameInstance;
++          caller_function_index = static_cast<uint32_t>(caller_index);
++        }
 +      }
 +    }
 +  }
@@ -62,10 +67,13 @@ diff --git a/src/runtime/runtime-wasm.cc b/src/runtime/runtime-wasm.cc
 -             info->table_count);
 +             info->table_count, caller, caller_function_index);
    // Physical observers may replace or revoke the guest callback/policy.
+   // Recheck before accessing guest state so setter, epoch and disable
+   // invalidation take effect at this boundary, not just the next dispatch.
 diff --git a/test/cctest/wasm/test-run-wasm.cc b/test/cctest/wasm/test-run-wasm.cc
+index 30eb46b7..14614ada 100644
 --- a/test/cctest/wasm/test-run-wasm.cc
 +++ b/test/cctest/wasm/test-run-wasm.cc
-@@ -1,6 +1,10 @@
+@@ -1523,9 +1523,13 @@ bool AdmitRebBrTable() {
  void ObserveRebBrTable(v8::Local<v8::Context> context, const uint8_t* bytes,
                         size_t size, uint32_t function_index,
                         uint32_t module_byte_offset, uint32_t selector,
@@ -77,17 +85,20 @@ diff --git a/test/cctest/wasm/test-run-wasm.cc b/test/cctest/wasm/test-run-wasm.
 +  // These observations are the export the host called. A guessed index fails.
 +  CHECK(caller == v8::WasmDirectCaller::kUnknown);
 +  CHECK_EQ(0, caller_function_index);
-@@ -1,4 +1,5 @@
+   CHECK_LT(module_byte_offset, size);
+   CHECK_EQ(kExprBrTable, bytes[module_byte_offset]);
+   CHECK_EQ(1, table_count);
+@@ -1848,7 +1852,8 @@ void ObserveReplacementGuest(v8::Local<v8::Context> context,
+ }
  void MutateGuestCallbackFromPhysical(v8::Local<v8::Context>, const uint8_t*,
                                       size_t, uint32_t function, uint32_t,
 -                                     uint32_t, uint32_t) {
 +                                     uint32_t, uint32_t, v8::WasmDirectCaller,
 +                                     uint32_t) {
    ++guest_mutation_physical_calls;
-@@ -1,9 +1,88 @@
-       CHECK_EQ(v8::WasmGuestParent::kNone, nested_activations[0].state);
-     }
-     isolate->SetWasmGuestDispatchCallback(nullptr, nullptr);
+   if (guest_callback_mutation == GuestCallbackMutation::kNone) return;
+   auto* isolate = v8::Isolate::GetCurrent();
+@@ -2650,6 +2655,107 @@ TEST(RebNativeGuestParentWalkNeedsEnabledCapture) {
    }
  }
  
@@ -134,7 +145,8 @@ diff --git a/test/cctest/wasm/test-run-wasm.cc b/test/cctest/wasm/test-run-wasm.
 +    CHECK(reb_caller_observation.caller == v8::WasmDirectCaller::kUnknown);
 +    CHECK_EQ(0, reb_caller_observation.caller_function_index);
 +  }
-+  // Function A calls function B. B's br_table names A, from this stack only.
++  // Function 0 calls function 1. The br_table in function 1 names function 0
++  // from this stack only. Index 0 is that function, not the unknown sentinel.
 +  {
 +    WasmRunner<int32_t> r(TestExecutionTier::kLiftoff);
 +    WasmFunctionCompiler& callee = r.NewFunction<int32_t, int32_t>();
@@ -142,6 +154,7 @@ diff --git a/test/cctest/wasm/test-run-wasm.cc b/test/cctest/wasm/test-run-wasm.
 +                  WASM_I32V_1(5)});
 +    r.Build({WASM_RETURN(WASM_CALL_FUNCTION(callee.function_index(),
 +                                            WASM_I32V_1(0)))});
++    CHECK_EQ(0, r.function_index());
 +    CHECK_NE(callee.function_index(), r.function_index());
 +    auto* api = reinterpret_cast<v8::Isolate*>(r.isolate());
 +    reb_caller_observation = {};
@@ -154,7 +167,27 @@ diff --git a/test/cctest/wasm/test-run-wasm.cc b/test/cctest/wasm/test-run-wasm.
 +          v8::WasmDirectCaller::kSameInstance);
 +    CHECK_EQ(r.function_index(), reb_caller_observation.caller_function_index);
 +  }
-+  // A later instance called from the host must not keep the previous caller.
++  // return_call replaces the caller's frame. The record names the frame that
++  // is live (the host), not the function that executed the return_call.
++  {
++    WasmRunner<int32_t> r(TestExecutionTier::kLiftoff);
++    WasmFunctionCompiler& callee = r.NewFunction<int32_t>();
++    callee.Build({B1(B1(WASM_BR_TABLE(WASM_I32V_1(0), 0, BR_TARGET(0)))),
++                  WASM_I32V_1(11)});
++    r.Build({WASM_RETURN_CALL_FUNCTION0(callee.function_index())});
++    CHECK_NE(callee.function_index(), r.function_index());
++    auto* api = reinterpret_cast<v8::Isolate*>(r.isolate());
++    reb_caller_observation = {};
++    api->SetWasmBrTableDispatchCallback(&ObserveRebBrTableCaller);
++    CHECK_EQ(11, r.Call());
++    api->SetWasmBrTableDispatchCallback(nullptr);
++    CHECK_EQ(1, reb_caller_observation.count);
++    CHECK_EQ(callee.function_index(), reb_caller_observation.function_index);
++    CHECK(reb_caller_observation.caller == v8::WasmDirectCaller::kUnknown);
++    CHECK_EQ(0, reb_caller_observation.caller_function_index);
++  }
++  // A later call on this same isolate must not keep the previous activation's
++  // caller. Both runners share CcTest's isolate; nothing is stored globally.
 +  {
 +    WasmRunner<int32_t, int32_t> r(TestExecutionTier::kLiftoff);
 +    r.Build({B1(B1(WASM_BR_TABLE(WASM_LOCAL_GET(0), 0, BR_TARGET(0)))),

@@ -27,6 +27,7 @@ TEST_NAMES = [
     "RebNativeBrTableAdmissionPredicate",
     "RebNativeBrTablePreservesLiveValues",
     "RebNativeBrTableDisabledCompilation",
+    "RebNativeBrTableDirectCaller",
     "RebNativeCallIndirectRuntimeDispatch",
     "RebNativeCallIndirectAdmissionPredicate",
     "RebNativeCallIndirectNullAndOutOfBounds",

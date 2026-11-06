@@ -1,8 +1,8 @@
 diff --git a/third_party/blink/renderer/bindings/core/v8/v8_initializer.cc b/third_party/blink/renderer/bindings/core/v8/v8_initializer.cc
-index e4b3189..9066c1c 100644
+index efc4ff8..56496ac 100644
 --- a/third_party/blink/renderer/bindings/core/v8/v8_initializer.cc
 +++ b/third_party/blink/renderer/bindings/core/v8/v8_initializer.cc
-@@ -47,6 +47,7 @@
+@@ -49,6 +49,7 @@
  #include "base/time/time.h"
  #include "brave/components/reverse_engineering_browser/common/native_runtime_snapshot_queue.h"
  #include "brave/components/reverse_engineering_browser/renderer/native_probe_sink.h"
@@ -10,8 +10,8 @@ index e4b3189..9066c1c 100644
  #include "build/build_config.h"
  #include "components/crash/core/common/crash_key.h"
  #include "services/metrics/public/cpp/ukm_builders.h"
-@@ -779,6 +780,44 @@ reb::NativeJsInvocationContext CurrentJsInvocation() noexcept {
-   return result;
+@@ -917,6 +918,44 @@ void CaptureWasmExecutionTrap(v8::Local<v8::Context> context,
+       source_url, document_token_high, document_token_low, bytes);
  }
  
 +// Scope only: no function index, offset, selector, or sample.
@@ -55,7 +55,7 @@ index e4b3189..9066c1c 100644
  void CaptureWasmModuleBytes(v8::Local<v8::Context> context,
                              const v8::WasmModuleBytesOrigin origin,
                              const std::uint8_t* bytes,
-@@ -1844,6 +1883,10 @@ void V8Initializer::InitializeV8Common(v8::Isolate* isolate) {
+@@ -1989,6 +2028,10 @@ void V8Initializer::InitializeV8Common(v8::Isolate* isolate) {
      reb::NativeProbeSink::Get().SetNativeJsInvocationContextProvider(
          CurrentJsInvocation);
    }

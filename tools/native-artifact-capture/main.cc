@@ -928,6 +928,124 @@ void NativeWasmIndirect(reb::ArtifactReceiver& receiver) {
 #include "probe_host_test.h"
 }  // namespace
 
+void NativeWasmExecutionOutcomes(reb::ArtifactReceiver& receiver) {
+  record_corpus = false;
+  Configure();
+  static_assert(static_cast<std::uint16_t>(reb::EventType::kWasmExecutionOutcome) == 27);
+  static_assert(static_cast<std::uint16_t>(reb::EventType::kWasmExecutionOutcome) ==
+                static_cast<std::uint16_t>(reb::NativeProbeType::kWasmExecutionOutcome));
+  auto& sink = NativeArtifactCaptureSink::Get();
+  auto& transfers = NativeArtifactSocketClient::Get().transfers;
+  const std::vector<std::uint8_t> module{0, 97, 115, 109, 1, 0, 0, 0, 0x11, 0, 0};
+  reb::NativeWasmIndirectObservation observation;
+  observation.header.session_id = kSession;
+  observation.header.frame_id = kFrame;
+  observation.header.sequence_number = 3200;
+  observation.header.monotonic_time_ns = 99;
+  observation.header.process_id = 123;
+  observation.header.thread_id = 7;
+  observation.execution_context_id = 81;
+  observation.document_token_high = 72;
+  observation.document_token_low = 73;
+  observation.function_index = 1;
+  observation.module_byte_offset = 8;
+  observation.callee_function_index = 2;
+  observation.resolution = reb::NativeWasmIndirectResolution::kResolved;
+  observation.source_url = "fixture://native-wasm-execution";
+  sink.CaptureWasmIndirect(observation, mojo_base::BigBuffer(module), [] { return true; });
+  Check(transfers.size() == 1, "Execution fixture transfers its module");
+  const auto id = transfers.begin()->first;
+  Receive(receiver, id);
+  observation.header.sequence_number = 3201;
+  observation.resolution = reb::NativeWasmIndirectResolution::kNull;
+  observation.callee_function_index = 0;
+  sink.CaptureWasmIndirect(observation, mojo_base::BigBuffer(module), [] { return true; });
+  reb::NativeWasmExecutionObservation outcome;
+  outcome.header.session_id = kSession;
+  outcome.header.frame_id = kFrame;
+  outcome.header.sequence_number = 3202;
+  outcome.header.monotonic_time_ns = 99;
+  outcome.header.process_id = 123;
+  outcome.header.thread_id = 7;
+  outcome.execution_context_id = 81;
+  outcome.document_token_high = 72;
+  outcome.document_token_low = 73;
+  outcome.invocation_id = 11;
+  outcome.function_index = 9;
+  outcome.module_byte_offset = 8;
+  outcome.related_sample_index = 0;
+  outcome.kind = reb::NativeWasmExecutionKind::kTrap;
+  outcome.reason = reb::NativeWasmExecutionReason::kSignatureMismatch;
+  outcome.known = reb::kNativeWasmExecutionFunctionKnown | reb::kNativeWasmExecutionOffsetKnown;
+  outcome.related_stream = reb::NativeWasmExecutionStream::kCallIndirect;
+  outcome.source_url = observation.source_url;
+  sink.CaptureWasmExecution(outcome, mojo_base::BigBuffer(module), [] { return true; });
+  const auto find = [](NativeProbeType type, std::uint64_t sequence) {
+    return std::find_if(events.begin(), events.end(), [&](const auto& event) {
+      return event.header.type == type && event.header.sequence_number == sequence;
+    });
+  };
+  const auto resolved = find(NativeProbeType::kWasmIndirectObservation, 3200);
+  const auto null_entry = find(NativeProbeType::kWasmIndirectObservation, 3201);
+  const auto trap = find(NativeProbeType::kWasmExecutionOutcome, 3202);
+  Check(resolved != events.end() && null_entry != events.end() && trap != events.end(),
+        "Resolved, null and signature-mismatch records are all retained");
+  reb::WasmIndirectObservationPayload resolved_payload;
+  reb::WasmIndirectObservationPayload null_payload;
+  reb::WasmExecutionOutcomePayload trap_payload;
+  Check(reb::DecodeWasmIndirectObservationPayload(resolved->inline_payload, resolved_payload) &&
+            reb::DecodeWasmIndirectObservationPayload(null_entry->inline_payload, null_payload) &&
+            reb::DecodeWasmExecutionOutcomePayload(trap->inline_payload, trap_payload),
+        "Execution fixture payloads decode");
+  Check(resolved_payload.resolution == 0 && null_payload.resolution == 1 &&
+            trap_payload.reason ==
+                static_cast<std::uint8_t>(reb::WasmExecutionReason::kSignatureMismatch) &&
+            trap_payload.kind == static_cast<std::uint8_t>(reb::WasmExecutionKind::kTrap) &&
+            trap_payload.function_index == 9 && trap->header.artifact_id == id &&
+            reb::IsValidWasmExecutionOutcome(std::bit_cast<reb::EventRecord>(*trap)),
+        "Signature mismatch is a trap record, not resolution null");
+  outcome.header.sequence_number = 3203;
+  outcome.invocation_id = 12;
+  outcome.kind = reb::NativeWasmExecutionKind::kStillExecuting;
+  outcome.reason = reb::NativeWasmExecutionReason::kUnknown;
+  outcome.function_index = 1;
+  sink.CaptureWasmExecution(outcome, mojo_base::BigBuffer(std::span<const std::uint8_t>{}),
+                            [] { return true; });
+  const auto still = find(NativeProbeType::kWasmExecutionOutcome, 3203);
+  Check(still != events.end() && still->header.artifact_id == id,
+        "Still-executing binds the one module");
+  reb::WasmExecutionOutcomePayload still_payload;
+  Check(reb::DecodeWasmExecutionOutcomePayload(still->inline_payload, still_payload) &&
+            still_payload.kind ==
+                static_cast<std::uint8_t>(reb::WasmExecutionKind::kStillExecuting) &&
+            still_payload.reason == 0,
+        "Still-executing carries no trap reason");
+  outcome.header.sequence_number = 3204;
+  outcome.document_token_low = 99;
+  outcome.invocation_id = 13;
+  sink.CaptureWasmExecution(outcome, mojo_base::BigBuffer(std::span<const std::uint8_t>{}),
+                            [] { return true; });
+  Check(Payload(events.back()) == "native_wasm_execution_module_unavailable",
+        "No module for the document is an explicit gap");
+  outcome.document_token_low = 73;
+  std::vector<std::uint8_t> other = module;
+  other.push_back(1);
+  observation.header.sequence_number = 3205;
+  observation.resolution = reb::NativeWasmIndirectResolution::kResolved;
+  observation.callee_function_index = 2;
+  observation.document_token_low = 73;
+  sink.CaptureWasmIndirect(observation, mojo_base::BigBuffer(other), [] { return true; });
+  Check(transfers.size() == 1, "A second module is its own artifact");
+  Receive(receiver, transfers.begin()->first);
+  outcome.header.sequence_number = 3206;
+  outcome.invocation_id = 14;
+  sink.CaptureWasmExecution(outcome, mojo_base::BigBuffer(std::span<const std::uint8_t>{}),
+                            [] { return true; });
+  Check(Payload(events.back()) == "native_wasm_execution_module_unresolved",
+        "Two modules for one document are not guessed");
+  std::cout << "PASS native Wasm execution outcome artifact binding\n";
+}
+
 int main(int argc, char** argv) {
   try {
     Check(argc == 3, "Usage: native-artifact-capture OUTPUT AUTHORED_SOURCE");
@@ -955,6 +1073,7 @@ int main(int argc, char** argv) {
     NativeWasmDispatch(receiver);
     NativeWasmIndirect(receiver);
     NativeWasmDirectCaller(receiver);
+    NativeWasmExecutionOutcomes(receiver);
     NativeGuestDependencies(receiver);
     NativeProbeHostGuestBoundary(receiver);
     NativeProbeHostJsDispatchForwarding();

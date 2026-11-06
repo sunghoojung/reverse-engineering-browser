@@ -198,6 +198,15 @@ def self_test():
     assert "RebNativeBrTableDirectCaller" in TEST_NAMES
     assert not (v8_patches / "0012-report-wasm-dispatch-scope-gaps.patch").exists()
     assert not (chromium_patches / "0022-report-wasm-dispatch-scope-gaps.patch").exists()
+    v8_names = [patch.name for patch in patches]
+    assert v8_names.index("0013-record-wasm-execution-outcomes.patch") < v8_names.index(
+        "0014-report-wasm-dispatch-scope-gaps.patch")
+    chromium_names = sorted(patch.name for patch in chromium_patches.glob("*.patch"))
+    assert chromium_names.index("0023-record-wasm-execution-outcomes.patch") < chromium_names.index(
+        "0024-report-wasm-dispatch-scope-gaps.patch")
+    chromium_scope = (chromium_patches / "0024-report-wasm-dispatch-scope-gaps.patch").read_text()
+    assert "CaptureWasmExecutionTrap" in chromium_scope
+    assert "SetWasmDispatchScopeCallback" in chromium_scope
     assert "IsWorkletGlobalScope" in (
         chromium_patches / "0017-observe-native-wasm-dispatch.patch"
     ).read_text()

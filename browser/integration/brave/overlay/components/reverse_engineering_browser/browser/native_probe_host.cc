@@ -329,6 +329,99 @@ void NativeProbeHost::CaptureWasmIndirect(const std::uint64_t capture_epoch,
       });
 }
 
+void NativeProbeHost::CaptureWasmExecution(const std::uint64_t capture_epoch,
+                                           const std::uint64_t session_id,
+                                           const std::uint64_t sequence_number,
+                                           const std::uint64_t monotonic_time_ns,
+                                           const std::uint32_t process_id,
+                                           const std::uint32_t thread_id,
+                                           const std::uint64_t frame_id,
+                                           const std::uint64_t execution_context_id,
+                                           const std::uint64_t document_token_high,
+                                           const std::uint64_t document_token_low,
+                                           const std::uint32_t invocation_id,
+                                           const std::uint32_t function_index,
+                                           const std::uint32_t module_byte_offset,
+                                           const std::uint32_t related_sample_index,
+                                           const std::uint8_t kind,
+                                           const std::uint8_t reason,
+                                           const std::uint8_t bounds,
+                                           const std::uint8_t known,
+                                           const std::uint8_t related_stream,
+                                           const std::uint8_t js_invocation_state,
+                                           const std::uint32_t js_invocation_id,
+                                           const std::string& source_url,
+                                           mojo_base::BigBuffer content) {
+  constexpr auto mask = NativeProbeCategoryMask(NativeProbeCategory::kVm) |
+                        NativeProbeCategoryMask(NativeProbeCategory::kArtifact);
+  const auto now =
+      static_cast<std::uint64_t>(base::TimeTicks::Now().since_origin().InNanoseconds());
+  if (!queue_ || !wasm_epoch_lifetime_ || capture_epoch != wasm_capture_epoch_ ||
+      !session_->IsActive() || session_id != session_->session_id() ||
+      (session_->category_mask() & mask) != mask || now >= session_->expires_at_monotonic_ns())
+    return;
+  auto* process = content::RenderProcessHost::FromID(renderer_process_id_);
+  if (!process || process_id != static_cast<std::uint32_t>(process->GetProcess().Pid()) ||
+      !sequence_number)
+    return;
+  NativeWasmExecutionObservation observation;
+  observation.header.category = NativeProbeCategory::kVm;
+  observation.header.type = NativeProbeType::kWasmExecutionOutcome;
+  observation.header.session_id = session_id;
+  observation.header.sequence_number = sequence_number;
+  observation.header.monotonic_time_ns = monotonic_time_ns;
+  observation.header.process_id = process_id;
+  observation.header.thread_id = thread_id;
+  observation.header.frame_id = frame_id;
+  const auto refuse = [&](std::string_view reason_name) {
+    session_->Emit(RendererGap(NativeProbeEvent{.header = observation.header}, reason_name));
+  };
+  if (!monotonic_time_ns || monotonic_time_ns > now || !thread_id || !frame_id ||
+      !execution_context_id || !invocation_id || kind > 1 ||
+      reason >= kNativeWasmExecutionReasonCount ||
+      content.size() > kNativeArtifactMaxContentBytes) {
+    refuse("native_wasm_execution_limit_or_invalid");
+    return;
+  }
+  if (wasm_execution_capture_count_ >= kNativeWasmExecutionBudget) {
+    refuse("native_wasm_execution_browser_budget_incomplete");
+    return;
+  }
+  ++wasm_execution_capture_count_;
+  content::RenderFrameHost* owner =
+      ActiveDocumentOwner(*process, frame_id, document_token_high, document_token_low);
+  if (!owner) {
+    refuse("native_wasm_execution_document_unavailable");
+    return;
+  }
+  auto* contents = content::WebContents::FromRenderFrameHost(owner);
+  auto* main_frame = contents ? contents->GetPrimaryMainFrame() : nullptr;
+  if (main_frame)
+    observation.header.tab_id =
+        static_cast<std::uint32_t>(main_frame->GetFrameTreeNodeId().value());
+  observation.execution_context_id = execution_context_id;
+  observation.document_token_high = document_token_high;
+  observation.document_token_low = document_token_low;
+  observation.invocation_id = invocation_id;
+  observation.function_index = function_index;
+  observation.module_byte_offset = module_byte_offset;
+  observation.related_sample_index = related_sample_index;
+  observation.kind = static_cast<NativeWasmExecutionKind>(kind);
+  observation.reason = static_cast<NativeWasmExecutionReason>(reason);
+  observation.bounds = static_cast<NativeWasmExecutionBounds>(bounds);
+  observation.known = known;
+  observation.related_stream = static_cast<NativeWasmExecutionStream>(related_stream);
+  observation.js_invocation_state = js_invocation_state;
+  observation.js_invocation_id = js_invocation_id;
+  observation.source_url = source_url;
+  const auto document = owner->GetWeakDocumentPtr();
+  const std::weak_ptr<const std::uint64_t> lifetime = wasm_epoch_lifetime_;
+  NativeArtifactCaptureSink::Get().CaptureWasmExecution(
+      observation, std::move(content), [document, lifetime]() {
+        return !lifetime.expired() && document.AsRenderFrameHostIfValid() != nullptr;
+      });
+}
+
 void NativeProbeHost::CaptureNativeGuest(const std::uint64_t capture_epoch,
                                          const std::vector<std::uint8_t>& invocation_record,
                                          const std::vector<std::uint8_t>& dispatch_record,
@@ -601,6 +694,7 @@ void NativeProbeHost::Disable() {
     ++wasm_capture_epoch_;
   wasm_capture_count_ = 0;
   wasm_indirect_capture_count_ = 0;
+  wasm_execution_capture_count_ = 0;
   guest_capture_count_ = 0;
   guest_host_malformed_gap_emitted_ = false;
   if (client_.is_bound()) {

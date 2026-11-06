@@ -447,11 +447,10 @@ Rebuilt browsers can record physical `br_table` operands with
 in document contexts, not arbitrary interpreter guest-PC recovery. A worker,
 worklet, jitless, or TurboFan execution is a named scope gap rather than a
 missing sample. The scope-gap V8 patch is
-`patches/v8/0014-report-wasm-dispatch-scope-gaps.patch`, replayed after the
-direct-caller patch `0012`. Chromium `0017` names the worker or worklet
-before a selector or slot is copied; `0022` adds the direct-caller arguments
-on the document observation; `0024` installs the jitless and left-Liftoff
-callback after `0022`. See
+`patches/v8/0014-report-wasm-dispatch-scope-gaps.patch`, replayed after
+`0013`. Chromium `0017` names the worker or worklet before a selector or slot
+is copied; `0022` adds the direct-caller arguments on the document observation;
+`0024` installs the jitless and left-Liftoff callback after `0023`. See
 [wire contract and verification limits](../../../protocol/native-wasm-dispatch-v1.md).
 
 `call_indirect` and `return_call_indirect` dispatch has a separate opt-in:
@@ -460,6 +459,21 @@ Each record names the table slot and, when the entry is a function of the same
 module, the callee it was about to run; arguments and memory are never read.
 It has its own 16-record budget and shares the module artifact and transport.
 See [call_indirect observations](../../../protocol/native-wasm-dispatch-v1.md#call_indirect-observations).
+
+A trap after an instrumented instruction, and a call that is still inside
+after five seconds, are `wasm_execution_outcome` records on that same host
+call. The deadline does not trap. On the main isolate the renderer forces
+the next Wasm stack check with `v8::Isolate::RequestInterrupt`, which does
+not terminate the isolate. An in-process interrupt flushes the samples
+already taken and returns the stuck call as a trap so a later call in the
+document can run. Nothing in the browser process, the session socket, or
+Origin Trace sends that interrupt: the renderer client pipe is bound to the
+thread inside Wasm. While either dispatch flag is on, Liftoff also emits a
+call at function entry, ordinary return, and tail call so that host call can
+be closed. Both need the same rebuilt browser as the dispatch flags.
+Those changes are V8 patch `0013-record-wasm-execution-outcomes` and
+Chromium patch `0023-record-wasm-execution-outcomes`.
+See [execution outcomes](../../../protocol/native-wasm-dispatch-v1.md#execution-outcomes).
 
 Guest-state capture additionally needs `REB_NATIVE_WASM_GUEST_ADAPTER`, which
 makes the launcher add `--reb-wasm-guest-capture`. That flag compiles a call on

@@ -11,7 +11,7 @@ index bab3883..18b7b13 100644
        "src/wasm/stacks.h",
        "src/wasm/std-object-sizes.h",
 diff --git a/include/v8-callbacks.h b/include/v8-callbacks.h
-index 4cb5e6d..f9fb8b8 100644
+index 040e17a..5f71801 100644
 --- a/include/v8-callbacks.h
 +++ b/include/v8-callbacks.h
 @@ -364,6 +364,13 @@ using WasmBrTableDispatchCallback = void (*)(
@@ -29,7 +29,7 @@ index 4cb5e6d..f9fb8b8 100644
  // at an activation's first selected boundary. kUnresolved never names a
  // guessed ancestor; kNone means no enclosing activation is on the stack.
 diff --git a/include/v8-isolate.h b/include/v8-isolate.h
-index 06f9c6e..333c99f 100644
+index c7bfe12..366dd2a 100644
 --- a/include/v8-isolate.h
 +++ b/include/v8-isolate.h
 @@ -1793,6 +1793,19 @@ class V8_EXPORT Isolate {
@@ -53,7 +53,7 @@ index 06f9c6e..333c99f 100644
        WasmGuestDispatchCallback callback,
        WasmBrTableDispatchEnabledCallback enabled,
 diff --git a/src/api/api.cc b/src/api/api.cc
-index 4794a8e..f1e2e72 100644
+index 5055709..ac1c8d0 100644
 --- a/src/api/api.cc
 +++ b/src/api/api.cc
 @@ -165,6 +165,7 @@
@@ -103,7 +103,7 @@ index 4794a8e..f1e2e72 100644
      WasmGuestDispatchCallback callback,
      WasmBrTableDispatchEnabledCallback enabled,
 diff --git a/src/execution/isolate.h b/src/execution/isolate.h
-index 98e06bf..21235fd 100644
+index c669a39..cc6f4b3 100644
 --- a/src/execution/isolate.h
 +++ b/src/execution/isolate.h
 @@ -513,6 +513,7 @@ using DebugObjectCache = std::vector<Handle<HeapObject>>;
@@ -115,7 +115,7 @@ index 98e06bf..21235fd 100644
    V(WasmGuestModuleAdmissionCallback, wasm_guest_module_admission, nullptr) \
    V(WasmGuestDispatchSiteCallback, wasm_guest_selected_site, nullptr)       \
 diff --git a/src/runtime/runtime-wasm.cc b/src/runtime/runtime-wasm.cc
-index b254052..b99dfb3 100644
+index 1558af5..435cd36 100644
 --- a/src/runtime/runtime-wasm.cc
 +++ b/src/runtime/runtime-wasm.cc
 @@ -45,6 +45,7 @@
@@ -126,7 +126,7 @@ index b254052..b99dfb3 100644
  
  #if V8_ENABLE_WEBASSEMBLY && V8_ENABLE_DRUMBRAKE
  #include "src/wasm/interpreter/wasm-interpreter.h"
-@@ -446,8 +447,12 @@ RUNTIME_FUNCTION(Runtime_WasmRebTraceBrTable) {
+@@ -612,8 +613,12 @@ RUNTIME_FUNCTION(Runtime_WasmRebTraceBrTable) {
    wasm::WasmCodeRefScope code_scope;
    FrameFinder<WasmFrame> frame_finder(isolate);
    WasmFrame* frame = frame_finder.frame();
@@ -140,7 +140,7 @@ index b254052..b99dfb3 100644
    if (info->is_entry) {
      if (guest_enabled) wasm::EnterGuestFrame(isolate, frame);
      return ReadOnlyRoots(isolate).undefined_value();
-@@ -569,6 +574,9 @@ RUNTIME_FUNCTION(Runtime_WasmRebTraceCallIndirect) {
+@@ -735,6 +740,9 @@ RUNTIME_FUNCTION(Runtime_WasmRebTraceCallIndirect) {
    FrameFinder<WasmFrame> frame_finder(isolate);
    WasmFrame* frame = frame_finder.frame();
    if (frame->wasm_code()->tier() != wasm::ExecutionTier::kLiftoff) {

@@ -82,6 +82,8 @@ enum class NativeProbeType : std::uint16_t {
   kJsInvocationStart = 24,
   kJsInvocationSettle = 25,
   kJsInvocationRequest = 26,
+  // Trap or still-executing follow-up. See protocol/native-wasm-dispatch-v1.md.
+  kWasmExecutionOutcome = 27,
 };
 
 enum class NativeProbeFlag : std::uint16_t {

@@ -93,6 +93,32 @@ interface NativeProbeHost {
                       uint32 js_invocation_id,
                       string source_url,
                       mojo_base.mojom.BigBuffer content);
+  // Trap or still-executing follow-up for one host-visible Wasm call.
+  // content may be empty: the browser then binds the one module already
+  // captured for this document, or records an explicit gap.
+  CaptureWasmExecution(uint64 capture_epoch,
+                       uint64 session_id,
+                       uint64 sequence_number,
+                       uint64 monotonic_time_ns,
+                       uint32 process_id,
+                       uint32 thread_id,
+                       uint64 frame_id,
+                       uint64 execution_context_id,
+                       uint64 document_token_high,
+                       uint64 document_token_low,
+                       uint32 invocation_id,
+                       uint32 function_index,
+                       uint32 module_byte_offset,
+                       uint32 related_sample_index,
+                       uint8 kind,
+                       uint8 reason,
+                       uint8 bounds,
+                       uint8 known,
+                       uint8 related_stream,
+                       uint8 js_invocation_state,
+                       uint32 js_invocation_id,
+                       string source_url,
+                       mojo_base.mojom.BigBuffer content);
   CaptureNativeGuest(uint64 capture_epoch,
                      array<uint8> invocation_record,
                      array<uint8> dispatch_record,

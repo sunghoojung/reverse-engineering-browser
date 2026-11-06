@@ -1,0 +1,542 @@
+diff --git a/include/v8-callbacks.h b/include/v8-callbacks.h
+index 4cb5e6d..040e17a 100644
+--- a/include/v8-callbacks.h
++++ b/include/v8-callbacks.h
+@@ -407,6 +407,22 @@ using WasmGuestModuleAdmissionCallback = WasmGuestModuleAdmission (*)(
+ using WasmGuestDispatchCallback = void (*)(Local<Context>, const uint8_t*,
+                                            size_t, const WasmGuestStateView&);
+ 
++// Host-visible Wasm call boundaries. Enter and the heartbeat run only while
++// the embedder's enabled predicate is true. Exit and trap are reported even
++// then so a call opened earlier can be closed. The heartbeat must not
++// allocate V8 handles: 0 continues, 1 asks V8 to trap this call.
++using WasmExecutionEnterCallback = void (*)(bool outermost, bool function_known,
++                                            uint32_t function_index);
++using WasmExecutionExitCallback = void (*)(bool tail);
++using WasmExecutionHeartbeatCallback = uint8_t (*)();
++using WasmExecutionTrapCallback = void (*)(Local<Context>, const uint8_t*,
++                                           size_t, uint8_t reason,
++                                           uint8_t bounds, bool function_known,
++                                           uint32_t function_index,
++                                           bool offset_known,
++                                           uint32_t module_byte_offset);
++using WasmExecutionEnabledCallback = bool (*)();
++
+ enum class WasmModuleBytesOrigin {
+   kCompile,
+   kModule,
+diff --git a/include/v8-isolate.h b/include/v8-isolate.h
+index 06f9c6e..c7bfe12 100644
+--- a/include/v8-isolate.h
++++ b/include/v8-isolate.h
+@@ -1808,6 +1808,14 @@ class V8_EXPORT Isolate {
+                                   WasmGuestContext* result);
+   void ResetWasmGuestCapture();
+ 
++  // Liftoff entry, return, tail call, stack check, and engine trap. Null
++  // callbacks disable that path. The heartbeat must not allocate handles.
++  void SetWasmExecutionCallbacks(WasmExecutionEnterCallback enter,
++                                 WasmExecutionExitCallback exit,
++                                 WasmExecutionHeartbeatCallback heartbeat,
++                                 WasmExecutionTrapCallback trap,
++                                 WasmExecutionEnabledCallback enabled);
++
+   void SetWasmStreamingCallback(WasmStreamingCallback callback);
+ 
+   void SetRuntimeBufferCallback(RuntimeBufferCallback callback);
+diff --git a/src/api/api.cc b/src/api/api.cc
+index 4794a8e..5055709 100644
+--- a/src/api/api.cc
++++ b/src/api/api.cc
+@@ -11077,6 +11077,19 @@ void Isolate::ResetWasmGuestCapture() {
+   i::wasm::ResetRebGuestCapture(reinterpret_cast<i::Isolate*>(this));
+ #endif
+ }
++
++void Isolate::SetWasmExecutionCallbacks(WasmExecutionEnterCallback enter,
++                                        WasmExecutionExitCallback exit,
++                                        WasmExecutionHeartbeatCallback heartbeat,
++                                        WasmExecutionTrapCallback trap,
++                                        WasmExecutionEnabledCallback enabled) {
++  i::Isolate* isolate = reinterpret_cast<i::Isolate*>(this);
++  isolate->set_wasm_execution_enter_callback(enter);
++  isolate->set_wasm_execution_exit_callback(exit);
++  isolate->set_wasm_execution_heartbeat_callback(heartbeat);
++  isolate->set_wasm_execution_trap_callback(trap);
++  isolate->set_wasm_execution_enabled_callback(enabled);
++}
+ CALLBACK_SETTER(WasmModuleBytesCallback, WasmModuleBytesCallback,
+                 wasm_module_bytes_callback)
+ 
+diff --git a/src/builtins/builtins-definitions.h b/src/builtins/builtins-definitions.h
+index c8da883..5f9a378 100644
+--- a/src/builtins/builtins-definitions.h
++++ b/src/builtins/builtins-definitions.h
+@@ -1408,6 +1408,9 @@ constexpr int kGearboxGenericBuiltinIdOffset = -2;
+   IF_WASM(ASM, WasmHandleStackOverflow, WasmHandleStackOverflow)               \
+   IF_WASM(TFC, WasmRebTraceBrTable, WasmTraceMemory)             \
+   IF_WASM(TFC, WasmRebTraceCallIndirect, WasmTraceMemory)        \
++  IF_WASM(TFC, WasmRebTraceExecutionEnter, WasmTraceMemory)      \
++  IF_WASM(TFC, WasmRebTraceExecutionReturn, WasmTraceMemory)     \
++  IF_WASM(TFC, WasmRebTraceExecutionTail, WasmTraceMemory)       \
+   IF_WASM(TFC, WasmFloat32ToNumber, WasmFloat32ToNumber)                       \
+   IF_WASM(TFC, WasmFloat64ToNumber, WasmFloat64ToTagged)                       \
+   IF_WASM(TFC, WasmFloat64ToString, WasmFloat64ToTagged)                       \
+diff --git a/src/builtins/builtins-wasm-gen.cc b/src/builtins/builtins-wasm-gen.cc
+index 5b7313f..ea6bdeb 100644
+--- a/src/builtins/builtins-wasm-gen.cc
++++ b/src/builtins/builtins-wasm-gen.cc
+@@ -147,6 +147,24 @@ TF_BUILTIN(WasmRebTraceCallIndirect, WasmBuiltinsAssembler) {
+                   info);
+ }
+ 
++TF_BUILTIN(WasmRebTraceExecutionEnter, WasmBuiltinsAssembler) {
++  auto info = Parameter<Smi>(Descriptor::kInfo);
++  TailCallRuntime(Runtime::kWasmRebTraceExecutionEnter, NoContextConstant(),
++                  info);
++}
++
++TF_BUILTIN(WasmRebTraceExecutionReturn, WasmBuiltinsAssembler) {
++  auto info = Parameter<Smi>(Descriptor::kInfo);
++  TailCallRuntime(Runtime::kWasmRebTraceExecutionReturn, NoContextConstant(),
++                  info);
++}
++
++TF_BUILTIN(WasmRebTraceExecutionTail, WasmBuiltinsAssembler) {
++  auto info = Parameter<Smi>(Descriptor::kInfo);
++  TailCallRuntime(Runtime::kWasmRebTraceExecutionTail, NoContextConstant(),
++                  info);
++}
++
+ TF_BUILTIN(WasmFloat32ToNumber, WasmBuiltinsAssembler) {
+   auto val = UncheckedParameter<Float32T>(Descriptor::kValue);
+   Return(ChangeFloat32ToTagged(val));
+diff --git a/src/common/message-template.h b/src/common/message-template.h
+index 4480bd4..5e578a3 100644
+--- a/src/common/message-template.h
++++ b/src/common/message-template.h
+@@ -789,7 +789,8 @@ namespace internal {
+   T(SuppressedErrorDuringDisposal, "An error was suppressed during disposal")  \
+   T(ExpectAnObjectWithUsing,                                                   \
+     "An object is expected with `using` "                                      \
+-    "declarations")
++    "declarations")                                                            \
++  T(WasmTrapRebInterrupt, "execution interrupted")
+ 
+ enum class MessageTemplate {
+ #define TEMPLATE(NAME, STRING) k##NAME,
+diff --git a/src/execution/isolate.h b/src/execution/isolate.h
+index 98e06bf..c669a39 100644
+--- a/src/execution/isolate.h
++++ b/src/execution/isolate.h
+@@ -521,6 +521,12 @@ using DebugObjectCache = std::vector<Handle<HeapObject>>;
+   V(WasmGuestDispatchCallback, wasm_guest_dispatch_callback, nullptr)       \
+   V(WasmBrTableDispatchEnabledCallback,                                     \
+     wasm_guest_enabled_callback, nullptr)                                   \
++  V(WasmExecutionEnterCallback, wasm_execution_enter_callback, nullptr)     \
++  V(WasmExecutionExitCallback, wasm_execution_exit_callback, nullptr)       \
++  V(WasmExecutionHeartbeatCallback, wasm_execution_heartbeat_callback,       \
++    nullptr)                                                                \
++  V(WasmExecutionTrapCallback, wasm_execution_trap_callback, nullptr)       \
++  V(WasmExecutionEnabledCallback, wasm_execution_enabled_callback, nullptr) \
+   V(WasmModuleBytesCallback, wasm_module_bytes_callback, nullptr)           \
+   V(SharedArrayBufferConstructorEnabledCallback,                            \
+     sharedarraybuffer_constructor_enabled_callback, nullptr)                \
+diff --git a/src/runtime/runtime-wasm.cc b/src/runtime/runtime-wasm.cc
+index b254052..1558af5 100644
+--- a/src/runtime/runtime-wasm.cc
++++ b/src/runtime/runtime-wasm.cc
+@@ -99,9 +99,175 @@ class FrameFinder {
+   StackFrameIterator frame_iterator_;
+ };
+ 
++bool RebSkipExecutionFrame(StackFrame::Type type) {
++  return type == StackFrame::EXIT || type == StackFrame::STUB ||
++         type == StackFrame::BUILTIN || type == StackFrame::BUILTIN_EXIT ||
++         type == StackFrame::INTERNAL || type == StackFrame::WASM_EXIT ||
++         type == StackFrame::WASM_LIFTOFF_SETUP ||
++         type == StackFrame::WASM_DEBUG_BREAK ||
++         type == StackFrame::WASM_STACK_EXIT ||
++         type == StackFrame::C_WASM_ENTRY;
++}
++
++// Named Wasm traps only. Anything else, including a non-trap Wasm message,
++// is not an execution outcome. reason 0 is a Wasm trap this record does not
++// name; it is not a stand-in for a signature mismatch.
++bool RebWasmTrapReason(MessageTemplate message, uint8_t* reason,
++                       uint8_t* bounds) {
++  *reason = 0;
++  *bounds = 0;
++  switch (message) {
++    case MessageTemplate::kWasmTrapFuncSigMismatch:
++      *reason = 1;
++      return true;
++    case MessageTemplate::kWasmTrapUnreachable:
++      *reason = 2;
++      return true;
++    case MessageTemplate::kWasmTrapTableOutOfBounds:
++      *reason = 3;
++      *bounds = 1;
++      return true;
++    case MessageTemplate::kWasmTrapMemOutOfBounds:
++      *reason = 3;
++      *bounds = 2;
++      return true;
++    case MessageTemplate::kWasmTrapDataSegmentOutOfBounds:
++      *reason = 3;
++      *bounds = 3;
++      return true;
++    case MessageTemplate::kWasmTrapElementSegmentOutOfBounds:
++      *reason = 3;
++      *bounds = 4;
++      return true;
++    case MessageTemplate::kWasmTrapArrayOutOfBounds:
++      *reason = 3;
++      *bounds = 5;
++      return true;
++    case MessageTemplate::kWasmTrapStringOffsetOutOfBounds:
++      *reason = 3;
++      *bounds = 6;
++      return true;
++    case MessageTemplate::kWasmTrapNullFunc:
++      *reason = 4;
++      return true;
++    case MessageTemplate::kWasmTrapRebInterrupt:
++      *reason = 5;
++      return true;
++    case MessageTemplate::kWasmTrapUnalignedAccess:
++    case MessageTemplate::kWasmTrapDivByZero:
++    case MessageTemplate::kWasmTrapDivUnrepresentable:
++    case MessageTemplate::kWasmTrapRemByZero:
++    case MessageTemplate::kWasmTrapFloatUnrepresentable:
++    case MessageTemplate::kWasmTrapMultiReturnLengthMismatch:
++    case MessageTemplate::kWasmTrapJSTypeError:
++    case MessageTemplate::kWasmTrapRethrowNull:
++    case MessageTemplate::kWasmTrapNullDereference:
++    case MessageTemplate::kWasmTrapIllegalCast:
++    case MessageTemplate::kWasmTrapArrayTooLarge:
++    case MessageTemplate::kWasmTrapStringInvalidUtf8:
++    case MessageTemplate::kWasmTrapStringInvalidWtf8:
++    case MessageTemplate::kWasmTrapResume:
++    case MessageTemplate::kWasmTrapSuspend:
++    case MessageTemplate::kWasmTrapSwitch:
++    case MessageTemplate::kWasmTrapStringIsolatedSurrogate:
++      return true;
++    default:
++      return false;
++  }
++}
++
++void ReportRebWasmTrap(Isolate* isolate, MessageTemplate message) {
++  uint8_t reason = 0;
++  uint8_t bounds = 0;
++  if (!RebWasmTrapReason(message, &reason, &bounds)) return;
++  auto callback = isolate->wasm_execution_trap_callback();
++  if (callback == nullptr) return;
++  bool function_known = false;
++  uint32_t function_index = 0;
++  bool offset_known = false;
++  uint32_t module_offset = 0;
++  const uint8_t* bytes = nullptr;
++  size_t size = 0;
++  HandleScope scope(isolate);
++  v8::Local<v8::Context> context;
++  {
++    wasm::WasmCodeRefScope code_scope;
++    for (StackFrameIterator it(isolate); !it.done(); it.Advance()) {
++      if (RebSkipExecutionFrame(it.frame()->type())) continue;
++      if (!it.frame()->is_wasm()) break;
++#ifdef V8_ENABLE_DRUMBRAKE
++      if (it.frame()->is_wasm_interpreter_entry()) break;
++#endif
++      auto* frame = WasmFrame::cast(it.frame());
++      auto* code = frame->wasm_code();
++      if (code == nullptr || !code->is_liftoff()) break;
++      const int index = code->index();
++      auto instance = frame->trusted_instance_data();
++      const auto* module = instance->module();
++      if (index < 0 ||
++          static_cast<uint32_t>(index) >= module->functions.size() ||
++          static_cast<uint32_t>(index) >= 16u * 1024u * 1024u) {
++        break;
++      }
++      function_known = true;
++      function_index = static_cast<uint32_t>(index);
++      const auto& function = module->functions[function_index];
++      auto wire = frame->native_module()->wire_bytes();
++      if (frame->pc() >= code->instruction_start()) {
++        const auto raw = frame->pc() - code->instruction_start();
++        if (raw <= static_cast<Address>(kMaxInt)) {
++          SourcePosition pos =
++              code->GetSourcePositionBefore(static_cast<int>(raw));
++          // Position 0 is the prologue stack check, not an instruction.
++          // An inlined position is not this frame's body offset.
++          if (!pos.isInlined() && pos.ScriptOffset() > 0) {
++            const auto script = static_cast<uint32_t>(pos.ScriptOffset());
++            if (script < function.code.length()) {
++              const auto sum =
++                  static_cast<uint64_t>(function.code.offset()) + script;
++              if (sum >= 8 && sum < wire.size() &&
++                  sum < 16ull * 1024ull * 1024ull) {
++                offset_known = true;
++                module_offset = static_cast<uint32_t>(sum);
++              }
++            }
++          }
++        }
++      }
++      if (!wire.empty()) {
++        bytes = wire.data();
++        size = wire.size();
++      }
++      if (instance->has_native_context()) {
++        // ToLocal needs the NativeContext returned by native_context().
++        context = Utils::ToLocal(
++            direct_handle(instance->native_context(), isolate));
++      }
++      break;
++    }
++  }
++  callback(context, bytes, size, reason, bounds, function_known, function_index,
++           offset_known, module_offset);
++}
++
++// The heartbeat emits still-executing as a side effect and returns 1 only
++// when this call should trap. That trap is an uncatchable Wasm exception,
++// not Isolate::TerminateExecution.
++bool RebWasmExecutionInterruptRequested(Isolate* isolate) {
++  if (!v8_flags.reb_wasm_br_table_dispatch &&
++      !v8_flags.reb_wasm_call_indirect_dispatch) {
++    return false;
++  }
++  auto heartbeat = isolate->wasm_execution_heartbeat_callback();
++  return heartbeat != nullptr && heartbeat() == 1;
++}
++
+ Tagged<Object> ThrowWasmError(
+     Isolate* isolate, MessageTemplate message,
+     std::initializer_list<DirectHandle<Object>> args = {}) {
++  // The interrupt heartbeat emits its own record and closes the call before
++  // this throw, so a second report finds no open host call.
++  ReportRebWasmTrap(isolate, message);
+ #if V8_ENABLE_DRUMBRAKE
+   if (v8_flags.wasm_jitless) {
+     // Store the trap reason to be retrieved later when the interpreter will
+@@ -814,6 +980,11 @@ RUNTIME_FUNCTION(Runtime_WasmReThrow) {
+ }
+ 
+ RUNTIME_FUNCTION(Runtime_WasmStackGuard) {
++  // Before the seal: the heartbeat must not allocate V8 handles.
++  if (RebWasmExecutionInterruptRequested(isolate)) {
++    HandleScope interrupt_scope(isolate);
++    return ThrowWasmError(isolate, MessageTemplate::kWasmTrapRebInterrupt);
++  }
+   SealHandleScope shs(isolate);
+   DCHECK_EQ(1, args.length());
+   TRACE_EVENT("v8.execute", "V8.StackGuard");
+@@ -837,6 +1008,14 @@ RUNTIME_FUNCTION(Runtime_WasmStackGuard) {
+ // To properly fix that, we should implement lazy-deopt support for Wasm.
+ RUNTIME_FUNCTION(Runtime_WasmStackGuardLoop) {
+   DCHECK_EQ(0, args.length());
++  // Optimized loops enter here only after the no-heap-write interrupt byte
++  // is set. The embedder's RequestInterrupt sets that byte and does not
++  // terminate the isolate. The returned trap uses the same exception path
++  // as HandleInterrupts.
++  if (RebWasmExecutionInterruptRequested(isolate)) {
++    HandleScope interrupt_scope(isolate);
++    return ThrowWasmError(isolate, MessageTemplate::kWasmTrapRebInterrupt);
++  }
+   SealHandleScope shs(isolate);
+   TRACE_EVENT("v8.execute", "V8.StackGuard");
+ 
+@@ -844,6 +1023,72 @@ RUNTIME_FUNCTION(Runtime_WasmStackGuardLoop) {
+       StackGuard::InterruptLevel::kNoHeapWrites);
+ }
+ 
++RUNTIME_FUNCTION(Runtime_WasmRebTraceExecutionEnter) {
++  auto callback = isolate->wasm_execution_enter_callback();
++  if (callback == nullptr) return ReadOnlyRoots(isolate).undefined_value();
++  auto enabled = isolate->wasm_execution_enabled_callback();
++  if (enabled != nullptr && !enabled()) {
++    return ReadOnlyRoots(isolate).undefined_value();
++  }
++  CHECK(v8_flags.reb_wasm_br_table_dispatch ||
++        v8_flags.reb_wasm_call_indirect_dispatch);
++  CHECK_EQ(1, args.length());
++  CHECK(IsSmi(args[0]));
++  bool outermost = true;
++  bool function_known = false;
++  uint32_t function_index = 0;
++  int wasm_frames = 0;
++  {
++    wasm::WasmCodeRefScope code_scope;
++    for (StackFrameIterator it(isolate); !it.done(); it.Advance()) {
++      if (RebSkipExecutionFrame(it.frame()->type())) continue;
++      if (!it.frame()->is_wasm()) break;
++      WasmFrame* frame = nullptr;
++#ifdef V8_ENABLE_DRUMBRAKE
++      if (!it.frame()->is_wasm_interpreter_entry())
++#endif
++        frame = WasmFrame::cast(it.frame());
++      if (wasm_frames == 0 && frame != nullptr && frame->wasm_code() != nullptr &&
++          frame->wasm_code()->is_liftoff()) {
++        const int index = frame->wasm_code()->index();
++        const auto* module = frame->trusted_instance_data()->module();
++        if (index >= 0 &&
++            static_cast<uint32_t>(index) < module->functions.size() &&
++            static_cast<uint32_t>(index) < 16u * 1024u * 1024u) {
++          function_known = true;
++          function_index = static_cast<uint32_t>(index);
++        }
++      }
++      if (++wasm_frames == 2) {
++        outermost = false;
++        break;
++      }
++    }
++  }
++  callback(outermost, function_known, function_index);
++  return ReadOnlyRoots(isolate).undefined_value();
++}
++
++RUNTIME_FUNCTION(Runtime_WasmRebTraceExecutionReturn) {
++  CHECK(v8_flags.reb_wasm_br_table_dispatch ||
++        v8_flags.reb_wasm_call_indirect_dispatch);
++  CHECK_EQ(1, args.length());
++  CHECK(IsSmi(args[0]));
++  auto callback = isolate->wasm_execution_exit_callback();
++  if (callback != nullptr) callback(false);
++  return ReadOnlyRoots(isolate).undefined_value();
++}
++
++RUNTIME_FUNCTION(Runtime_WasmRebTraceExecutionTail) {
++  CHECK(v8_flags.reb_wasm_br_table_dispatch ||
++        v8_flags.reb_wasm_call_indirect_dispatch);
++  CHECK_EQ(1, args.length());
++  CHECK(IsSmi(args[0]));
++  auto callback = isolate->wasm_execution_exit_callback();
++  if (callback != nullptr) callback(true);
++  return ReadOnlyRoots(isolate).undefined_value();
++}
++
+ RUNTIME_FUNCTION(Runtime_WasmCompileLazy) {
+   SealHandleScope shs(isolate);
+   DCHECK_EQ(2, args.length());
+@@ -1149,6 +1394,12 @@ RUNTIME_FUNCTION(Runtime_TierUpWasmToJSWrapper) {
+ }
+ 
+ RUNTIME_FUNCTION(Runtime_WasmTriggerTierUp) {
++  // Liftoff with dynamic tiering checks interrupts here, when the tiering
++  // budget runs out, instead of in WasmStackGuard. Poll before the seal.
++  if (RebWasmExecutionInterruptRequested(isolate)) {
++    HandleScope interrupt_scope(isolate);
++    return ThrowWasmError(isolate, MessageTemplate::kWasmTrapRebInterrupt);
++  }
+   SealHandleScope shs(isolate);
+ 
+   {
+diff --git a/src/runtime/runtime.h b/src/runtime/runtime.h
+index 6e6dc91..df7e075 100644
+--- a/src/runtime/runtime.h
++++ b/src/runtime/runtime.h
+@@ -719,6 +719,9 @@ constexpr bool CanTriggerGC(T... properties) {
+   FOR_EACH_INTRINSIC_WASM_DRUMBRAKE(F, I)                        \
+   F(WasmRebTraceBrTable, 1, 1)                                  \
+   F(WasmRebTraceCallIndirect, 1, 1)                             \
++  F(WasmRebTraceExecutionEnter, 1, 1)                           \
++  F(WasmRebTraceExecutionReturn, 1, 1)                          \
++  F(WasmRebTraceExecutionTail, 1, 1)                            \
+   F(ThrowWasmJSPISuspendError, 0, 1)                             \
+   F(ThrowWasmFXSuspendError, 0, 1)                               \
+   F(ThrowWasmError, 1, 1)                                        \
+diff --git a/src/wasm/baseline/liftoff-compiler.cc b/src/wasm/baseline/liftoff-compiler.cc
+index 6c6ea3c..88122b5 100644
+--- a/src/wasm/baseline/liftoff-compiler.cc
++++ b/src/wasm/baseline/liftoff-compiler.cc
+@@ -1317,6 +1317,10 @@ class LiftoffCompiler {
+     if (V8_UNLIKELY(v8_flags.reb_wasm_guest_capture)) {
+       TraceRebBrTable(decoder, 0, true);
+     }
++    if (V8_UNLIKELY(v8_flags.reb_wasm_br_table_dispatch ||
++                    v8_flags.reb_wasm_call_indirect_dispatch)) {
++      TraceRebExecutionBoundary(decoder, Builtin::kWasmRebTraceExecutionEnter);
++    }
+     if (V8_UNLIKELY(v8_flags.trace_wasm)) TraceFunctionEntry(decoder);
+ 
+     if (EnableCompilationHintsInfrastructure()) {
+@@ -3410,6 +3414,10 @@ class LiftoffCompiler {
+   }
+ 
+   void ReturnImpl(FullDecoder* decoder) {
++    if (V8_UNLIKELY(v8_flags.reb_wasm_br_table_dispatch ||
++                    v8_flags.reb_wasm_call_indirect_dispatch)) {
++      TraceRebExecutionBoundary(decoder, Builtin::kWasmRebTraceExecutionReturn);
++    }
+     std::optional<TraceFunctionExit> trace_exit;
+     if (V8_UNLIKELY(v8_flags.trace_wasm)) {
+       trace_exit.emplace(this, decoder);
+@@ -3978,6 +3986,18 @@ class LiftoffCompiler {
+     __ DeallocateStackSlot(sizeof(RebCallIndirectTracingInfo));
+   }
+ 
++  // Dummy Smi. The runtime reads the frame, not this value.
++  void TraceRebExecutionBoundary(FullDecoder* decoder, Builtin builtin) {
++    __ SpillAllRegisters();
++    WasmTraceMemoryDescriptor descriptor;
++    Register param_reg = descriptor.GetRegisterParameter(0);
++    __ LoadConstant(LiftoffRegister(param_reg), WasmValue(uint32_t{0}));
++    source_position_table_builder_.AddPosition(
++        __ pc_offset(), SourcePosition(decoder->position()), false);
++    __ CallBuiltin(builtin);
++    DefineSafepoint();
++  }
++
+   void BrTable(FullDecoder* decoder, const BranchTableImmediate& imm,
+                const Value& key) {
+     if (V8_UNLIKELY(v8_flags.reb_wasm_br_table_dispatch)) {
+@@ -4943,6 +4963,10 @@ class LiftoffCompiler {
+ 
+   void ReturnCall(FullDecoder* decoder, const CallFunctionImmediate& imm,
+                   const Value args[]) {
++    if (V8_UNLIKELY(v8_flags.reb_wasm_br_table_dispatch ||
++                    v8_flags.reb_wasm_call_indirect_dispatch)) {
++      TraceRebExecutionBoundary(decoder, Builtin::kWasmRebTraceExecutionTail);
++    }
+     TierupCheckOnTailCall(decoder);
+     CallDirect(decoder, imm, args, nullptr, CallJumpMode::kTailCall);
+   }
+@@ -4953,12 +4977,20 @@ class LiftoffCompiler {
+     if (V8_UNLIKELY(v8_flags.reb_wasm_call_indirect_dispatch)) {
+       TraceRebCallIndirect(decoder, imm);
+     }
++    if (V8_UNLIKELY(v8_flags.reb_wasm_br_table_dispatch ||
++                    v8_flags.reb_wasm_call_indirect_dispatch)) {
++      TraceRebExecutionBoundary(decoder, Builtin::kWasmRebTraceExecutionTail);
++    }
+     TierupCheckOnTailCall(decoder);
+     CallIndirectImpl(decoder, imm, CallJumpMode::kTailCall);
+   }
+ 
+   void ReturnCallRef(FullDecoder* decoder, const Value& func_ref,
+                      const FunctionSig* sig, const Value args[]) {
++    if (V8_UNLIKELY(v8_flags.reb_wasm_br_table_dispatch ||
++                    v8_flags.reb_wasm_call_indirect_dispatch)) {
++      TraceRebExecutionBoundary(decoder, Builtin::kWasmRebTraceExecutionTail);
++    }
+     TierupCheckOnTailCall(decoder);
+     CallRefImpl(decoder, func_ref.type, sig, CallJumpMode::kTailCall);
+   }
+diff --git a/src/wasm/wasm-builtin-list.h b/src/wasm/wasm-builtin-list.h
+index 586ad06..e705892 100644
+--- a/src/wasm/wasm-builtin-list.h
++++ b/src/wasm/wasm-builtin-list.h
+@@ -62,6 +62,9 @@ namespace v8::internal::wasm {
+   V(WasmTraceExit)                                                             \
+   V(WasmRebTraceBrTable)                                                       \
+   V(WasmRebTraceCallIndirect)                                                  \
++  V(WasmRebTraceExecutionEnter)                                                \
++  V(WasmRebTraceExecutionReturn)                                               \
++  V(WasmRebTraceExecutionTail)                                                 \
+   V(WasmTraceMemory)                                                           \
+   V(WasmTraceGlobal)                                                           \
+   V(BigIntToI32Pair)                                                           \

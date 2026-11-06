@@ -128,7 +128,9 @@ it.
 
 - Probes remain disabled by default and observational. A visibly enabled
   experiment and an explicit researcher action are required for browser
-  mutation.
+  mutation. A Wasm execution deadline only records that an instrumented call
+  is still running. Interrupting that call is a separate explicit action: it
+  traps the call so the host can continue. The deadline does not do that.
 - Origin Trace has no Chrome DevTools Protocol path. The browser debugger,
   runtime hooks, live objects, element screenshots and the CDP live Wasm
   inspection routes used it and were removed with it; those retired contracts

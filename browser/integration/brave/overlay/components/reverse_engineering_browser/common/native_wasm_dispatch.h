@@ -278,5 +278,153 @@ using NativeWasmIndirectEmitter = bool (*)(const NativeWasmIndirectObservation&,
   return ReadNativeWasmU32(bytes, offset, type_index) &&
          ReadNativeWasmU32(bytes, offset, table_index) && table_index == value.table_index;
 }
+// Five seconds from host-call entry. A returning call finishes before it.
+// Reaching it records that the call is still inside; it does not trap.
+inline constexpr std::uint64_t kNativeWasmExecutionDeadlineNs = 5'000'000'000ULL;
+// WasmExecutionNudgeDelayNs returns this when this thread has no open call
+// waiting on the deadline. Otherwise it returns the remaining time, or 50ms
+// when the deadline is already due and still-executing has not been emitted.
+inline constexpr std::uint64_t kNativeWasmExecutionNoNudge = ~std::uint64_t{0};
+inline constexpr std::size_t kNativeWasmExecutionBudget = 16;
+enum class NativeWasmExecutionKind : std::uint8_t { kTrap = 0, kStillExecuting = 1 };
+enum class NativeWasmExecutionReason : std::uint8_t {
+  kUnknown = 0,
+  kSignatureMismatch = 1,
+  kUnreachable = 2,
+  kOutOfBounds = 3,
+  kNullEntry = 4,
+  kInterrupt = 5,
+};
+inline constexpr std::uint8_t kNativeWasmExecutionReasonCount = 6;
+enum class NativeWasmExecutionBounds : std::uint8_t {
+  kNone = 0,
+  kTable = 1,
+  kMemory = 2,
+  kDataSegment = 3,
+  kElementSegment = 4,
+  kArray = 5,
+  kString = 6,
+};
+inline constexpr std::uint8_t kNativeWasmExecutionBoundsCount = 7;
+inline constexpr std::uint8_t kNativeWasmExecutionFunctionKnown = 1U;
+inline constexpr std::uint8_t kNativeWasmExecutionOffsetKnown = 2U;
+enum class NativeWasmExecutionStream : std::uint8_t {
+  kNone = 0,
+  kBrTable = 1,
+  kCallIndirect = 2,
+};
+inline constexpr std::uint32_t kNativeWasmExecutionNoSample = 0xffffffffu;
+enum class NativeWasmExecutionHeartbeat : std::uint8_t { kContinue = 0, kInterrupt = 1 };
+struct NativeWasmExecutionOutcomePayload final {
+  std::uint8_t kind = 0;
+  std::uint8_t reason = 0;
+  std::uint8_t bounds = 0;
+  std::uint8_t known = 0;
+  std::uint32_t function_index = 0;
+  std::uint32_t module_byte_offset = 0;
+  std::uint32_t invocation_id = 0;
+  std::uint32_t related_sample_index = kNativeWasmExecutionNoSample;
+  std::uint8_t related_stream = 0;
+  std::uint8_t js_invocation_state = 0;
+  std::uint32_t js_invocation_id = 0;
+};
+[[nodiscard]] inline std::array<std::byte, 128> EncodeNativeWasmExecutionOutcomePayload(
+    const NativeWasmExecutionOutcomePayload& value) noexcept {
+  std::array<std::byte, 128> out{};
+  const auto put = [&out](std::size_t offset, std::uint32_t v, std::size_t width) {
+    for (std::size_t i = 0; i < width; ++i)
+      out[offset + i] = static_cast<std::byte>((v >> (8U * i)) & 255U);
+  };
+  put(0, 1, 2);
+  put(2, 128, 2);
+  put(4, value.kind, 1);
+  put(5, value.reason, 1);
+  put(6, value.bounds, 1);
+  put(7, value.known, 1);
+  put(8, value.function_index, 4);
+  put(12, value.module_byte_offset, 4);
+  put(16, value.invocation_id, 4);
+  put(20, value.related_sample_index, 4);
+  put(24, value.related_stream, 1);
+  put(28, value.js_invocation_state, 1);
+  put(32, value.js_invocation_id, 4);
+  return out;
+}
+struct NativeWasmExecutionObservation final {
+  NativeProbeHeader header{};
+  std::uint64_t execution_context_id = 0;
+  std::uint64_t document_token_high = 0;
+  std::uint64_t document_token_low = 0;
+  std::uint32_t invocation_id = 0;
+  std::uint32_t function_index = 0;
+  std::uint32_t module_byte_offset = 0;
+  std::uint32_t related_sample_index = kNativeWasmExecutionNoSample;
+  NativeWasmExecutionKind kind = NativeWasmExecutionKind::kTrap;
+  NativeWasmExecutionReason reason = NativeWasmExecutionReason::kUnknown;
+  NativeWasmExecutionBounds bounds = NativeWasmExecutionBounds::kNone;
+  std::uint8_t known = 0;
+  NativeWasmExecutionStream related_stream = NativeWasmExecutionStream::kNone;
+  std::uint8_t js_invocation_state = 0;
+  std::uint32_t js_invocation_id = 0;
+  std::string_view source_url;
+  // Empty when the record has no borrowed module bytes. The browser then
+  // attaches the one module already captured for this document, or gaps.
+  std::span<const std::uint8_t> module_bytes;
+};
+using NativeWasmExecutionEmitter = bool (*)(const NativeWasmExecutionObservation&,
+                                            std::uint64_t) noexcept;
+// Installed by the renderer. Forces the main isolate into its next Wasm
+// stack check. It must not call TerminateExecution.
+using NativeWasmExecutionNudge = void (*)() noexcept;
+[[nodiscard]] inline bool IsValidNativeWasmExecutionInput(
+    const NativeWasmExecutionObservation& value) noexcept {
+  constexpr std::array<std::uint8_t, 8> magic{0, 97, 115, 109, 1, 0, 0, 0};
+  constexpr std::uint32_t kLimit = 16U * 1024U * 1024U;
+  const auto bytes = value.module_bytes;
+  const auto reason = static_cast<std::uint8_t>(value.reason);
+  const auto bounds = static_cast<std::uint8_t>(value.bounds);
+  const bool function_known = (value.known & kNativeWasmExecutionFunctionKnown) != 0;
+  const bool offset_known = (value.known & kNativeWasmExecutionOffsetKnown) != 0;
+  if (!value.execution_context_id || !value.header.frame_id || !value.invocation_id ||
+      !(value.document_token_high || value.document_token_low) || value.source_url.empty() ||
+      value.source_url.size() > kNativeArtifactMaxUrlBytes || (value.known & ~3U) != 0 ||
+      static_cast<std::uint8_t>(value.kind) > 1 ||
+      static_cast<std::uint8_t>(value.related_stream) > 2 ||
+      !IsValidNativeJsInvocationContext(value.js_invocation_state, value.js_invocation_id))
+    return false;
+  if (function_known) {
+    if (value.function_index >= kLimit)
+      return false;
+  } else if (value.function_index != 0) {
+    return false;
+  }
+  if (offset_known) {
+    if (value.module_byte_offset < 8 || value.module_byte_offset >= kLimit)
+      return false;
+  } else if (value.module_byte_offset != 0) {
+    return false;
+  }
+  if (!bytes.empty()) {
+    if (bytes.size() < magic.size() || bytes.size() > kNativeArtifactMaxContentBytes ||
+        !std::equal(magic.begin(), magic.end(), bytes.begin()) ||
+        (offset_known && value.module_byte_offset >= bytes.size()))
+      return false;
+  }
+  if (value.kind == NativeWasmExecutionKind::kStillExecuting) {
+    if (reason != 0 || bounds != 0)
+      return false;
+  } else if (reason >= kNativeWasmExecutionReasonCount) {
+    return false;
+  }
+  if (reason == static_cast<std::uint8_t>(NativeWasmExecutionReason::kOutOfBounds)) {
+    if (bounds >= kNativeWasmExecutionBoundsCount)
+      return false;
+  } else if (bounds != 0) {
+    return false;
+  }
+  if (value.related_stream == NativeWasmExecutionStream::kNone)
+    return value.related_sample_index == kNativeWasmExecutionNoSample;
+  return value.related_sample_index < kNativeWasmIndirectSampleBudget;
+}
 }  // namespace reb
 #endif

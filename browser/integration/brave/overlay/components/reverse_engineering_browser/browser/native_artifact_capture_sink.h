@@ -67,6 +67,11 @@ class NativeArtifactCaptureSink final {
   void CaptureWasmIndirect(const NativeWasmIndirectObservation& observation,
                            mojo_base::BigBuffer content,
                            std::function<bool()> is_current_document);
+  // Empty content binds the single module artifact already stored for this
+  // document. Zero or several matches are explicit gaps, never a guess.
+  void CaptureWasmExecution(const NativeWasmExecutionObservation& observation,
+                            mojo_base::BigBuffer content,
+                            std::function<bool()> is_current_document);
   // module_status receives the browser verdict for module bytes this capture
   // carried (accepted once module and adapter artifacts are both accepted).
   void CaptureNativeGuest(const NativeGuestCapture& capture,
@@ -258,6 +263,7 @@ class NativeArtifactCaptureSink final {
                                    std::array<std::uint8_t, 32>>;
   std::map<WasmModuleKey, std::pair<std::uint64_t, bool>> wasm_dispatch_modules_;
   std::size_t wasm_indirect_count_ = 0;
+  std::size_t wasm_execution_count_ = 0;
   // Only the browser assigns artifact IDs. Never key this relation by URL.
   using ScriptKey = std::tuple<int, std::uint64_t, std::uint64_t, std::uint64_t>;
   std::map<ScriptKey, std::uint64_t> allocating_scripts_;

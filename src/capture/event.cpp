@@ -74,6 +74,7 @@ bool IsKnownType(const EventType type) noexcept {
     case EventType::kJsInvocationStart:
     case EventType::kJsInvocationSettle:
     case EventType::kJsInvocationRequest:
+    case EventType::kWasmExecutionOutcome:
       return true;
     case EventType::kUnknown:
       return false;
@@ -160,6 +161,8 @@ bool IsValidEvent(const EventRecord& event) noexcept {
   if (event.header.type == EventType::kJsInvocationSettle && !IsValidJsInvocationSettle(event))
     return false;
   if (event.header.type == EventType::kJsInvocationRequest && !IsValidJsInvocationRequest(event))
+    return false;
+  if (event.header.type == EventType::kWasmExecutionOutcome && !IsValidWasmExecutionOutcome(event))
     return false;
   return event.header.protocol_version == kEventProtocolVersion &&
          event.header.header_size == sizeof(EventHeader) &&
@@ -335,6 +338,8 @@ std::string_view EventTypeName(const EventType type) noexcept {
       return "js_invocation_settle";
     case EventType::kJsInvocationRequest:
       return "js_invocation_request";
+    case EventType::kWasmExecutionOutcome:
+      return "wasm_execution_outcome";
     case EventType::kUnknown:
       return "unknown";
   }

@@ -1193,6 +1193,9 @@ void NativeProbeSink::SetEmitters(const NativeRendererProbeEmitter emitter,
   // generation.
   emitter_.store(nullptr, std::memory_order_release);
   artifact_emitter_.store(nullptr, std::memory_order_release);
+  // A request belongs to one configuration. The next session must not
+  // inherit an interrupt aimed at the one being replaced.
+  wasm_execution_interrupt_generation_.store(0, std::memory_order_release);
   // Claims rely on generation ordering. Fail closed instead of ever reusing a
   // generation if the serialized control sequence exhausts the counter.
   if (config_generation_.load(std::memory_order_relaxed) >=
@@ -2404,6 +2407,12 @@ void NativeProbeSink::RecordNativeWasmDispatch(std::uint64_t execution_context_i
           slot.compare_exchange_strong(claimed, previous, std::memory_order_acq_rel);
           FillSequenceGap(observation.header, "native_wasm_dispatch_transport_unavailable",
                           admission.generation);
+        } else {
+          NoteWasmInstrumentedSite(admission.generation, execution_context_id, frame_id, source_url,
+                                   document_token_high, document_token_low, function_index,
+                                   module_byte_offset, observation.sample_index,
+                                   NativeWasmExecutionStream::kBrTable,
+                                   observation.js_invocation_state, observation.js_invocation_id);
         }
         return;
       }
@@ -2499,6 +2508,13 @@ void NativeProbeSink::RecordNativeWasmIndirect(NativeWasmIndirectObservation obs
           slot.compare_exchange_strong(claimed, previous, std::memory_order_acq_rel);
           FillSequenceGap(observation.header, "native_wasm_indirect_transport_unavailable",
                           admission.generation);
+        } else {
+          NoteWasmInstrumentedSite(admission.generation, observation.execution_context_id, frame_id,
+                                   observation.source_url, observation.document_token_high,
+                                   observation.document_token_low, observation.function_index,
+                                   observation.module_byte_offset, observation.sample_index,
+                                   NativeWasmExecutionStream::kCallIndirect,
+                                   observation.js_invocation_state, observation.js_invocation_id);
         }
         return;
       }
@@ -2511,6 +2527,450 @@ void NativeProbeSink::RecordNativeWasmIndirect(NativeWasmIndirectObservation obs
                previous, admission.generation, std::memory_order_acq_rel)) {
     }
   }
+}
+
+namespace {
+
+struct WasmHostCall {
+  std::uint64_t generation = 0;
+  std::uint32_t depth = 0;
+  std::uint32_t invocation_id = 0;
+  std::uint64_t opened_at_ns = 0;
+  bool still_emitted = false;
+  bool tail_pending = false;
+  bool has_site = false;
+  bool entry_function_known = false;
+  std::uint32_t entry_function = 0;
+  std::uint32_t site_function = 0;
+  std::uint32_t site_offset = 0;
+  std::uint32_t site_sample = 0;
+  NativeWasmExecutionStream site_stream = NativeWasmExecutionStream::kNone;
+  std::uint8_t js_state = 0;
+  std::uint32_t js_id = 0;
+  std::uint64_t execution_context_id = 0;
+  std::uint64_t frame_id = 0;
+  std::uint64_t document_token_high = 0;
+  std::uint64_t document_token_low = 0;
+  std::array<char, kNativeArtifactMaxUrlBytes> url{};
+  std::uint32_t url_size = 0;
+};
+
+WasmHostCall& HostCall() noexcept {
+  thread_local WasmHostCall call;
+  return call;
+}
+
+std::uint32_t& NextWasmInvocationId() noexcept {
+  thread_local std::uint32_t next = 1;
+  return next;
+}
+
+void CloseHostCall(WasmHostCall& call) noexcept {
+  // Field clears, not a value assignment: this runs on the Wasm thread.
+  call.depth = 0;
+  call.invocation_id = 0;
+  call.still_emitted = false;
+  call.tail_pending = false;
+  call.has_site = false;
+  call.entry_function_known = false;
+  call.entry_function = 0;
+  call.url_size = 0;
+}
+
+void OpenHostCall(WasmHostCall& call,
+                  const std::uint64_t generation,
+                  const std::uint64_t now,
+                  const bool function_known,
+                  const std::uint32_t function_index) noexcept {
+  auto& next = NextWasmInvocationId();
+  const std::uint32_t id = next == 0 ? 1U : next;
+  next = id == 0xffffffffu ? 1U : id + 1U;
+  CloseHostCall(call);
+  call.generation = generation;
+  call.depth = 1;
+  call.invocation_id = id;
+  call.opened_at_ns = now;
+  call.entry_function_known = function_known;
+  call.entry_function = function_known ? function_index : 0;
+}
+
+}  // namespace
+
+void NativeProbeSink::SetNativeWasmExecutionEmitter(NativeWasmExecutionEmitter emitter) noexcept {
+  native_wasm_execution_emitter_.store(emitter, std::memory_order_release);
+}
+
+bool NativeProbeSink::IsNativeWasmExecutionEnabled() const noexcept {
+  // Entry and exit keep using this after the outcome budget is spent, so the
+  // depth stays paired. The budget is enforced when a record is emitted.
+  // Do not call the frame-id provider: Blink's implementation re-enters V8.
+  const auto generation = config_generation_.load(std::memory_order_acquire);
+  if (generation == 0 || (generation & 1U) != 0 ||
+      !native_wasm_execution_emitter_.load(std::memory_order_acquire))
+    return false;
+  const auto categories = category_mask_.load(std::memory_order_relaxed);
+  constexpr auto required = NativeProbeCategoryMask(NativeProbeCategory::kVm) |
+                            NativeProbeCategoryMask(NativeProbeCategory::kArtifact);
+  const bool active = (categories & required) == required &&
+                      session_id_.load(std::memory_order_relaxed) != 0 &&
+                      emitter_.load(std::memory_order_relaxed) != nullptr &&
+                      MonotonicTimeNs() < expires_at_monotonic_ns_.load(std::memory_order_relaxed);
+  std::atomic_thread_fence(std::memory_order_acquire);
+  return active && config_generation_.load(std::memory_order_acquire) == generation;
+}
+
+bool NativeProbeSink::SnapshotWasmExecutionAdmission(VmAdmission& admission) const noexcept {
+  admission = {};
+  const std::uint64_t generation = config_generation_.load(std::memory_order_acquire);
+  if (generation == 0 || (generation & 1U) != 0 || !emitter_.load(std::memory_order_acquire) ||
+      !native_wasm_execution_emitter_.load(std::memory_order_acquire))
+    return false;
+  const std::uint64_t monotonic_time_ns = MonotonicTimeNs();
+  const std::uint64_t category_mask = category_mask_.load(std::memory_order_relaxed);
+  const std::uint64_t expires_at = expires_at_monotonic_ns_.load(std::memory_order_relaxed);
+  const std::uint64_t session_id = session_id_.load(std::memory_order_relaxed);
+  const NativeRendererProbeEmitter emitter = emitter_.load(std::memory_order_relaxed);
+  constexpr auto required = NativeProbeCategoryMask(NativeProbeCategory::kVm) |
+                            NativeProbeCategoryMask(NativeProbeCategory::kArtifact);
+  std::atomic_thread_fence(std::memory_order_acquire);
+  if (config_generation_.load(std::memory_order_acquire) != generation || emitter == nullptr ||
+      session_id == 0 || (category_mask & required) != required || monotonic_time_ns >= expires_at)
+    return false;
+  admission.generation = generation;
+  admission.session_id = session_id;
+  admission.monotonic_time_ns = monotonic_time_ns;
+  admission.process_id = static_cast<std::uint32_t>(base::GetCurrentProcId());
+  admission.thread_id = static_cast<std::uint32_t>(base::PlatformThread::CurrentId().raw());
+  return true;
+}
+
+bool NativeProbeSink::NoteNativeWasmExecutionOmission(const VmAdmission& admission,
+                                                      const std::size_t reason) noexcept {
+  if (reason >= native_wasm_execution_gap_generations_.size())
+    return false;
+  auto& slot = native_wasm_execution_gap_generations_[reason];
+  auto previous = slot.load(std::memory_order_acquire);
+  while (previous < admission.generation - 1) {
+    if (slot.compare_exchange_weak(previous, admission.generation - 1, std::memory_order_acq_rel)) {
+      constexpr std::array<std::string_view, 2> reasons{"native_wasm_execution_input_unavailable",
+                                                        "native_wasm_execution_budget_incomplete"};
+      const bool retained = RecordRuntimeBufferEvent(NativeProbeType::kGap, admission.frame_id,
+                                                     reasons[reason], admission.generation) != 0;
+      auto claimed = admission.generation - 1;
+      slot.compare_exchange_strong(claimed, retained ? admission.generation : previous,
+                                   std::memory_order_acq_rel);
+      return retained;
+    }
+  }
+  return previous == admission.generation;
+}
+
+bool NativeProbeSink::NoteWasmHostCallEntered(const bool outermost,
+                                              const bool function_known,
+                                              std::uint32_t function_index) noexcept {
+  auto& call = HostCall();
+  const auto generation = config_generation_.load(std::memory_order_acquire);
+  if (call.depth != 0 && call.generation != generation)
+    CloseHostCall(call);
+  if (!IsNativeWasmExecutionEnabled())
+    return false;
+  if (!function_known)
+    function_index = 0;
+  if (!outermost) {
+    if (call.depth == 0) {
+      OpenHostCall(call, generation, MonotonicTimeNs(), function_known, function_index);
+      return true;
+    }
+    if (call.depth != 0xffffffffu) {
+      ++call.depth;
+      call.tail_pending = false;
+    }
+    return false;
+  }
+  // A tail call replaced the outermost frame. The callee's prologue sees a
+  // non-Wasm caller while this host call is still the one that entered.
+  if (call.depth != 0 && call.tail_pending) {
+    call.tail_pending = false;
+    return false;
+  }
+  if (call.depth != 0)
+    CloseHostCall(call);
+  OpenHostCall(call, generation, MonotonicTimeNs(), function_known, function_index);
+  return true;
+}
+
+void NativeProbeSink::NoteWasmHostCallReturned() noexcept {
+  if (!IsNativeWasmExecutionEnabled())
+    return;
+  auto& call = HostCall();
+  const auto generation = config_generation_.load(std::memory_order_acquire);
+  if (call.generation != generation) {
+    CloseHostCall(call);
+    return;
+  }
+  if (call.depth == 0)
+    return;
+  --call.depth;
+  call.tail_pending = false;
+  if (call.depth == 0)
+    CloseHostCall(call);
+}
+
+void NativeProbeSink::NoteWasmTailCall() noexcept {
+  if (!IsNativeWasmExecutionEnabled())
+    return;
+  auto& call = HostCall();
+  const auto generation = config_generation_.load(std::memory_order_acquire);
+  if (call.generation != generation) {
+    CloseHostCall(call);
+    return;
+  }
+  if (call.depth > 1) {
+    --call.depth;
+    return;
+  }
+  if (call.depth == 1)
+    call.tail_pending = true;
+}
+
+void NativeProbeSink::NoteWasmInstrumentedSite(const std::uint64_t generation,
+                                               const std::uint64_t execution_context_id,
+                                               const std::uint64_t frame_id,
+                                               const std::string_view source_url,
+                                               const std::uint64_t document_token_high,
+                                               const std::uint64_t document_token_low,
+                                               const std::uint32_t function_index,
+                                               const std::uint32_t module_byte_offset,
+                                               const std::uint32_t sample_index,
+                                               const NativeWasmExecutionStream stream,
+                                               const std::uint8_t js_state,
+                                               const std::uint32_t js_id) noexcept {
+  if (!IsNativeWasmExecutionEnabled() || source_url.empty() ||
+      source_url.size() > kNativeArtifactMaxUrlBytes)
+    return;
+  auto& call = HostCall();
+  if (call.depth != 0 && call.generation != generation)
+    CloseHostCall(call);
+  // No prologue was reported. The deadline starts at this instruction.
+  if (call.depth == 0 || call.generation != generation)
+    OpenHostCall(call, generation, MonotonicTimeNs(), true, function_index);
+  call.has_site = true;
+  call.site_function = function_index;
+  call.site_offset = module_byte_offset;
+  call.site_sample = sample_index;
+  call.site_stream = stream;
+  call.js_state = js_state;
+  call.js_id = js_id;
+  call.execution_context_id = execution_context_id;
+  call.frame_id = frame_id;
+  call.document_token_high = document_token_high;
+  call.document_token_low = document_token_low;
+  std::memcpy(call.url.data(), source_url.data(), source_url.size());
+  call.url_size = static_cast<std::uint32_t>(source_url.size());
+}
+
+bool NativeProbeSink::EmitWasmExecution(const NativeWasmExecutionKind kind,
+                                        const NativeWasmExecutionReason reason,
+                                        const NativeWasmExecutionBounds bounds,
+                                        const bool function_known,
+                                        const std::uint32_t function_index,
+                                        const bool offset_known,
+                                        const std::uint32_t module_byte_offset,
+                                        const NativeWasmExecutionStream stream,
+                                        const std::uint32_t related_sample,
+                                        const std::uint64_t execution_context_id,
+                                        const std::uint64_t frame_id,
+                                        const std::string_view source_url,
+                                        const std::uint64_t document_token_high,
+                                        const std::uint64_t document_token_low,
+                                        const std::uint8_t js_state,
+                                        const std::uint32_t js_id,
+                                        const std::span<const std::uint8_t> module_bytes) noexcept {
+  VmAdmission admission;
+  if (!SnapshotWasmExecutionAdmission(admission))
+    return false;
+  admission.frame_id = frame_id;
+  const auto& call = HostCall();
+  if (call.invocation_id == 0 || call.generation != admission.generation)
+    return false;
+  NativeWasmExecutionObservation observation;
+  observation.header.category = NativeProbeCategory::kVm;
+  observation.header.type = NativeProbeType::kWasmExecutionOutcome;
+  observation.header.payload_size = 128;
+  observation.header.session_id = admission.session_id;
+  observation.header.monotonic_time_ns = admission.monotonic_time_ns;
+  observation.header.process_id = admission.process_id;
+  observation.header.thread_id = admission.thread_id;
+  observation.header.frame_id = frame_id;
+  observation.execution_context_id = execution_context_id;
+  observation.document_token_high = document_token_high;
+  observation.document_token_low = document_token_low;
+  observation.invocation_id = call.invocation_id;
+  observation.function_index = function_index;
+  observation.module_byte_offset = module_byte_offset;
+  observation.related_sample_index = related_sample;
+  observation.kind = kind;
+  observation.reason = reason;
+  observation.bounds = bounds;
+  observation.known =
+      static_cast<std::uint8_t>((function_known ? kNativeWasmExecutionFunctionKnown : 0U) |
+                                (offset_known ? kNativeWasmExecutionOffsetKnown : 0U));
+  observation.related_stream = stream;
+  observation.js_invocation_state = js_state;
+  observation.js_invocation_id = js_id;
+  observation.source_url = source_url;
+  observation.module_bytes = module_bytes;
+  if (!IsValidNativeWasmExecutionInput(observation)) {
+    NoteNativeWasmExecutionOmission(admission, 0);
+    return false;
+  }
+  if (native_wasm_execution_capped_generation_.load(std::memory_order_acquire) >=
+      admission.generation) {
+    NoteNativeWasmExecutionOmission(admission, 1);
+    return false;
+  }
+  for (std::size_t i = 0; i < native_wasm_execution_slots_.size(); ++i) {
+    auto& slot = native_wasm_execution_slots_[i];
+    auto previous = slot.load(std::memory_order_acquire);
+    while (previous < admission.generation) {
+      if (slot.compare_exchange_weak(previous, admission.generation, std::memory_order_acq_rel)) {
+        observation.header.sequence_number = next_sequence_.fetch_add(1, std::memory_order_relaxed);
+        const auto emitter = native_wasm_execution_emitter_.load(std::memory_order_acquire);
+        if (config_generation_.load(std::memory_order_acquire) != admission.generation ||
+            !emitter || !emitter(observation, admission.generation)) {
+          auto claimed = admission.generation;
+          slot.compare_exchange_strong(claimed, previous, std::memory_order_acq_rel);
+          FillSequenceGap(observation.header, "native_wasm_execution_transport_unavailable",
+                          admission.generation);
+          return false;
+        }
+        return true;
+      }
+    }
+  }
+  if (NoteNativeWasmExecutionOmission(admission, 1)) {
+    auto previous = native_wasm_execution_capped_generation_.load(std::memory_order_acquire);
+    while (previous < admission.generation &&
+           !native_wasm_execution_capped_generation_.compare_exchange_weak(
+               previous, admission.generation, std::memory_order_acq_rel)) {
+    }
+  }
+  return false;
+}
+
+void NativeProbeSink::ReportWasmTrap(const NativeWasmExecutionReason reason,
+                                     const NativeWasmExecutionBounds bounds,
+                                     const bool function_known,
+                                     const std::uint32_t function_index,
+                                     const bool offset_known,
+                                     const std::uint32_t module_byte_offset,
+                                     const std::uint64_t execution_context_id,
+                                     const std::uint64_t frame_id,
+                                     const std::string_view source_url,
+                                     const std::uint64_t document_token_high,
+                                     const std::uint64_t document_token_low,
+                                     const std::span<const std::uint8_t> module_bytes) noexcept {
+  auto& call = HostCall();
+  const auto generation = config_generation_.load(std::memory_order_acquire);
+  if (call.depth == 0 || call.generation != generation) {
+    if (call.generation != generation)
+      CloseHostCall(call);
+    return;
+  }
+  const bool stashed = call.url_size != 0;
+  const auto stream = call.has_site ? call.site_stream : NativeWasmExecutionStream::kNone;
+  const auto sample = call.has_site ? call.site_sample : kNativeWasmExecutionNoSample;
+  static_cast<void>(EmitWasmExecution(
+      NativeWasmExecutionKind::kTrap, reason, bounds, function_known, function_index, offset_known,
+      module_byte_offset, stream, sample,
+      stashed ? call.execution_context_id : execution_context_id,
+      stashed ? call.frame_id : frame_id,
+      stashed ? std::string_view(call.url.data(), call.url_size) : source_url,
+      stashed ? call.document_token_high : document_token_high,
+      stashed ? call.document_token_low : document_token_low, call.has_site ? call.js_state : 0,
+      call.has_site ? call.js_id : 0, module_bytes));
+  CloseHostCall(call);
+}
+
+std::uint64_t NativeProbeSink::WasmExecutionNudgeDelayNs() const noexcept {
+  constexpr std::uint64_t kRetryNs = 50'000'000ULL;
+  const auto& call = HostCall();
+  if (call.depth == 0 || !call.has_site || call.still_emitted || call.url_size == 0)
+    return kNativeWasmExecutionNoNudge;
+  const auto generation = config_generation_.load(std::memory_order_acquire);
+  if (call.generation != generation || !IsNativeWasmExecutionEnabled())
+    return kNativeWasmExecutionNoNudge;
+  const auto now = MonotonicTimeNs();
+  if (now < call.opened_at_ns)
+    return kNativeWasmExecutionNoNudge;
+  const auto elapsed = now - call.opened_at_ns;
+  if (elapsed >= kNativeWasmExecutionDeadlineNs)
+    return kRetryNs;
+  return kNativeWasmExecutionDeadlineNs - elapsed;
+}
+
+void NativeProbeSink::SetNativeWasmExecutionNudge(const NativeWasmExecutionNudge nudge) noexcept {
+  native_wasm_execution_nudge_.store(nudge, std::memory_order_release);
+}
+
+NativeWasmExecutionHeartbeat NativeProbeSink::PollWasmExecutionHeartbeat() noexcept {
+  auto& call = HostCall();
+  const auto generation = config_generation_.load(std::memory_order_acquire);
+  if (call.depth != 0 && call.generation != generation)
+    CloseHostCall(call);
+  // Consume only on a thread that is inside the requested configuration's
+  // call. Another isolate's stack check must not drop the request.
+  const auto requested = wasm_execution_interrupt_generation_.load(std::memory_order_acquire);
+  if (requested != 0 && requested == generation && call.depth != 0 &&
+      call.generation == generation) {
+    auto expected = requested;
+    if (wasm_execution_interrupt_generation_.compare_exchange_strong(expected, 0,
+                                                                     std::memory_order_acq_rel)) {
+      const bool function_known = call.has_site || call.entry_function_known;
+      const std::uint32_t function = call.has_site ? call.site_function : call.entry_function;
+      const bool offset_known = call.has_site;
+      const std::uint32_t offset = offset_known ? call.site_offset : 0;
+      const auto stream = call.has_site ? call.site_stream : NativeWasmExecutionStream::kNone;
+      const auto sample = call.has_site ? call.site_sample : kNativeWasmExecutionNoSample;
+      if (call.url_size != 0) {
+        static_cast<void>(EmitWasmExecution(
+            NativeWasmExecutionKind::kTrap, NativeWasmExecutionReason::kInterrupt,
+            NativeWasmExecutionBounds::kNone, function_known, function, offset_known, offset,
+            stream, sample, call.execution_context_id, call.frame_id,
+            std::string_view(call.url.data(), call.url_size), call.document_token_high,
+            call.document_token_low, call.has_site ? call.js_state : 0,
+            call.has_site ? call.js_id : 0, {}));
+      }
+      CloseHostCall(call);
+      return NativeWasmExecutionHeartbeat::kInterrupt;
+    }
+  }
+  if (call.depth == 0 || !call.has_site || call.still_emitted || call.url_size == 0 ||
+      !IsNativeWasmExecutionEnabled())
+    return NativeWasmExecutionHeartbeat::kContinue;
+  const auto now = MonotonicTimeNs();
+  if (now < call.opened_at_ns || now - call.opened_at_ns < kNativeWasmExecutionDeadlineNs)
+    return NativeWasmExecutionHeartbeat::kContinue;
+  static_cast<void>(EmitWasmExecution(
+      NativeWasmExecutionKind::kStillExecuting, NativeWasmExecutionReason::kUnknown,
+      NativeWasmExecutionBounds::kNone, true, call.site_function, true, call.site_offset,
+      call.site_stream, call.site_sample, call.execution_context_id, call.frame_id,
+      std::string_view(call.url.data(), call.url_size), call.document_token_high,
+      call.document_token_low, call.js_state, call.js_id, {}));
+  // One attempt. A refused record already filled its gap or its sequence slot.
+  call.still_emitted = true;
+  return NativeWasmExecutionHeartbeat::kContinue;
+}
+
+void NativeProbeSink::RequestWasmExecutionInterrupt() noexcept {
+  const auto generation = config_generation_.load(std::memory_order_acquire);
+  if (generation == 0 || (generation & 1U) != 0 || !IsNativeWasmExecutionEnabled())
+    return;
+  wasm_execution_interrupt_generation_.store(generation, std::memory_order_release);
+  // After the store, so the forced stack check observes the request.
+  // The nudge asks V8 to enter the runtime; it does not terminate the isolate.
+  if (const auto nudge = native_wasm_execution_nudge_.load(std::memory_order_acquire))
+    nudge();
 }
 
 void NativeProbeSink::ConfigureNativeJsDispatch(

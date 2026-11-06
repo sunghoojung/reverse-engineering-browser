@@ -8,7 +8,7 @@ diff --git a/third_party/blink/renderer/bindings/core/v8/v8_initializer.cc b/thi
 +#include "brave/components/reverse_engineering_browser/renderer/native_probe_transport.h"
  #include "build/build_config.h"
  #include "components/crash/core/common/crash_key.h"
-@@ -1798,7 +1799,44 @@ v8::JsInvocationContext CurrentJsInvocation() {
+@@ -1798,7 +1799,45 @@ v8::JsInvocationContext CurrentJsInvocation() {
    result.script_on_stack = isolate->InContext();
    return result;
  }
@@ -26,11 +26,12 @@ diff --git a/third_party/blink/renderer/bindings/core/v8/v8_initializer.cc b/thi
 +    default:
 +      return;
 +  }
-+  if (call_indirect) {
-+    reb::NativeProbeSink::Get().NoteNativeWasmIndirectScope(gap);
-+  } else {
-+    reb::NativeProbeSink::Get().NoteNativeWasmDispatchScope(gap);
-+  }
++  const bool recorded =
++      call_indirect
++          ? reb::NativeProbeSink::Get().NoteNativeWasmIndirectScope(gap)
++          : reb::NativeProbeSink::Get().NoteNativeWasmDispatchScope(gap);
++  // A drain before the session can admit this notice must not drop it.
++  if (!recorded) v8::Isolate::RememberRebWasmDispatchScope(scope, call_indirect);
 +}
 +
 +void ProbeWasmDispatchLimits() noexcept {

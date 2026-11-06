@@ -30,6 +30,7 @@ TEST_NAMES = [
     "RebNativeBrTableLeftLiftoff",
     "RebNativeBrTableFlagOffTurbofanHasNoScopeGap",
     "RebNativeBrTableJitlessUnsupported",
+    "RebNativeBrTableJitlessFlagOffHasNoScopeGap",
     "RebNativeCallIndirectRuntimeDispatch",
     "RebNativeCallIndirectAdmissionPredicate",
     "RebNativeCallIndirectNullAndOutOfBounds",

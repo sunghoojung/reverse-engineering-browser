@@ -10,7 +10,7 @@ index b96abad357e8f18ee7ee165d7b89992a7713dc1b..7dedb733ba60fb319c246e476066eaf7
  #include "third_party/blink/renderer/core/execution_context/agent.h"
  #include "third_party/blink/renderer/core/execution_context/execution_context.h"
  #include "third_party/blink/renderer/core/frame/csp/content_security_policy.h"
-@@ -244,6 +245,138 @@ void CaptureDynamicJavaScript(v8::Local<v8::Context> context,
+@@ -244,6 +245,146 @@ void CaptureDynamicJavaScript(v8::Local<v8::Context> context,
                           content);
  }
  
@@ -39,10 +39,14 @@ index b96abad357e8f18ee7ee165d7b89992a7713dc1b..7dedb733ba60fb319c246e476066eaf7
 +  if (!execution_context || execution_context->IsContextDestroyed()) {
 +    return;
 +  }
-+  // The Liftoff hook ran in a worker. Name that context; do not copy the
-+  // slot into a document observation. Worklets stay unnamed.
++  // The Liftoff hook ran outside a document. Name that realm; do not copy the
++  // slot into a document observation.
 +  if (execution_context->IsWorkerGlobalScope()) {
 +    sink.NoteNativeWasmIndirectScope(reb::NativeWasmScopeGap::kWorker);
++    return;
++  }
++  if (execution_context->IsWorkletGlobalScope()) {
++    sink.NoteNativeWasmIndirectScope(reb::NativeWasmScopeGap::kWorklet);
 +    return;
 +  }
 +  if (!sink.IsNativeWasmIndirectEnabled() || module_bytes == nullptr ||
@@ -106,10 +110,14 @@ index b96abad357e8f18ee7ee165d7b89992a7713dc1b..7dedb733ba60fb319c246e476066eaf7
 +  if (!execution_context || execution_context->IsContextDestroyed()) {
 +    return;
 +  }
-+  // The Liftoff hook ran in a worker. Name that context; do not copy the
-+  // selector into a document observation. Worklets stay unnamed.
++  // The Liftoff hook ran outside a document. Name that realm; do not copy the
++  // selector into a document observation.
 +  if (execution_context->IsWorkerGlobalScope()) {
 +    sink.NoteNativeWasmDispatchScope(reb::NativeWasmScopeGap::kWorker);
++    return;
++  }
++  if (execution_context->IsWorkletGlobalScope()) {
++    sink.NoteNativeWasmDispatchScope(reb::NativeWasmScopeGap::kWorklet);
 +    return;
 +  }
 +  if (!sink.IsNativeWasmDispatchEnabled() || module_bytes == nullptr ||

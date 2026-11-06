@@ -136,9 +136,11 @@ identifiers, for example:
 | --- | --- |
 | `native_wasm_dispatch_budget_incomplete` | The 16-observation `br_table` budget filled. |
 | `native_wasm_dispatch_worker_unsupported` | A `br_table` ran in a worker, which is not sampled. |
+| `native_wasm_dispatch_worklet_unsupported` | A `br_table` ran in a worklet, which is not sampled. |
 | `native_wasm_dispatch_jitless_unsupported` | Jitless Wasm is outside the Liftoff hooks. |
 | `native_wasm_dispatch_left_liftoff` | A Wasm function was published outside Liftoff. |
 | `native_wasm_indirect_worker_unsupported` | A `call_indirect` ran in a worker, which is not sampled. |
+| `native_wasm_indirect_worklet_unsupported` | A `call_indirect` ran in a worklet, which is not sampled. |
 | `native_wasm_indirect_jitless_unsupported` | Jitless `call_indirect` is outside the Liftoff hooks. |
 | `native_wasm_indirect_left_liftoff` | A `call_indirect` function was published outside Liftoff. |
 | `native_guest_sample_limit` | The guest adapter's `sample_limit` was reached. |

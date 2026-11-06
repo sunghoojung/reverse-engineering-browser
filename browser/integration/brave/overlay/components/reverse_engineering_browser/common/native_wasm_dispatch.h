@@ -121,6 +121,7 @@ enum class NativeWasmScopeGap : std::uint8_t {
   kWorker = 0,
   kJitless = 1,
   kLeftLiftoff = 2,
+  kWorklet = 3,
 };
 // Physical Wasm call_indirect or return_call_indirect execution. The slot is
 // the dynamic table index, not a guest opcode or program counter. Only

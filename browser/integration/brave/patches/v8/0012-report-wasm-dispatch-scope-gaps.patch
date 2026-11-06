@@ -22,7 +22,7 @@ diff --git a/include/v8-callbacks.h b/include/v8-callbacks.h
 diff --git a/include/v8-isolate.h b/include/v8-isolate.h
 --- a/include/v8-isolate.h
 +++ b/include/v8-isolate.h
-@@ -1770,3 +1770,12 @@
+@@ -1770,3 +1770,16 @@
        WasmBrTableDispatchEnabledCallback enabled_callback = nullptr);
  
 +  // Names an execution outside Liftoff document code. Null disables delivery.
@@ -31,8 +31,12 @@ diff --git a/include/v8-isolate.h b/include/v8-isolate.h
 +  static bool IsRebWasmJitless();
 +  static bool IsRebWasmBrTableDispatch();
 +  static bool IsRebWasmCallIndirectDispatch();
-+  // Delivers scope notices recorded where no isolate was current.
++  // Delivers scope notices recorded where no isolate was current, or which
++  // the embedder put back because it could not admit them.
 +  static void DrainRebWasmDispatchScope();
++  // Remembers a notice the embedder could not admit. Does not deliver it.
++  static void RememberRebWasmDispatchScope(WasmDispatchScope scope,
++                                           bool call_indirect);
 +
    void SetWasmGuestDispatchCallback(
 diff --git a/src/api/api.cc b/src/api/api.cc
@@ -43,7 +47,7 @@ diff --git a/src/api/api.cc b/src/api/api.cc
  #include "src/wasm/wasm-tracing.h"
 +#include "src/wasm/reb-wasm-dispatch-scope.h"
  #endif  // V8_ENABLE_WEBASSEMBLY
-@@ -11021,5 +11022,27 @@
+@@ -11021,5 +11022,36 @@
    i_isolate->set_wasm_br_table_dispatch_enabled_callback(enabled_callback);
    i_isolate->set_wasm_br_table_dispatch_callback(callback);
  }
@@ -69,6 +73,15 @@ diff --git a/src/api/api.cc b/src/api/api.cc
 +  i::wasm::DrainRebWasmDispatchScope();
 +#endif
 +}
++void Isolate::RememberRebWasmDispatchScope(WasmDispatchScope scope,
++                                           bool call_indirect) {
++#if V8_ENABLE_WEBASSEMBLY
++  i::wasm::RememberRebWasmDispatchScope(scope, call_indirect);
++#else
++  (void)scope;
++  (void)call_indirect;
++#endif
++}
 +
  void Isolate::SetWasmGuestDispatchCallback(
 diff --git a/src/execution/isolate.h b/src/execution/isolate.h
@@ -82,7 +95,7 @@ diff --git a/src/wasm/reb-wasm-dispatch-scope.h b/src/wasm/reb-wasm-dispatch-sco
 new file mode 100644
 --- /dev/null
 +++ b/src/wasm/reb-wasm-dispatch-scope.h
-@@ -0,0 +1,103 @@
+@@ -0,0 +1,114 @@
 +// Copyright 2026 the V8 project authors. All rights reserved.
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -168,7 +181,18 @@ new file mode 100644
 +}
 +
 +// No function index, offset, or selector. Flag-off adds no bits. A null
-+// isolate only remembers the notice; the embedder is not called off-thread.
++// callback or a null isolate only remembers the notice. If the embedder
++// cannot admit a delivered notice, it calls RememberRebWasmDispatchScope so
++// the next drain still has it.
++inline void RememberRebWasmDispatchScope(v8::WasmDispatchScope scope,
++                                         bool call_indirect) {
++  const auto stream = call_indirect ? RebDispatchStream::kCallIndirect
++                                    : RebDispatchStream::kBrTable;
++  const uint8_t bits = RebDispatchScopeBits(scope, stream);
++  if (bits == 0) return;
++  RebWasmDispatchScopePendingBits().fetch_or(bits, std::memory_order_release);
++}
++
 +inline void NotifyRebWasmDispatchScope(Isolate* isolate,
 +                                       v8::WasmDispatchScope scope,
 +                                       RebDispatchStream streams) {
@@ -388,7 +412,14 @@ diff --git a/src/wasm/interpreter/wasm-interpreter-runtime.cc b/src/wasm/interpr
 diff --git a/test/cctest/wasm/test-run-wasm.cc b/test/cctest/wasm/test-run-wasm.cc
 --- a/test/cctest/wasm/test-run-wasm.cc
 +++ b/test/cctest/wasm/test-run-wasm.cc
-@@ -5900,4 +5900,119 @@
+@@ -18,4 +18,6 @@
+ #include "src/wasm/decoder.h"
++#include "src/wasm/wasm-engine.h"
+ #include "src/wasm/wasm-opcodes-inl.h"
++#include "src/wasm/wasm-result.h"
+ #include "src/wasm/wasm-tracing.h"
+ #include "test/cctest/cctest.h"
+@@ -5902,4 +5904,186 @@
    public_quickjs_bytes.clear();
  }
  
@@ -459,23 +490,90 @@ diff --git a/test/cctest/wasm/test-run-wasm.cc b/test/cctest/wasm/test-run-wasm.
 +  api->SetWasmDispatchScopeCallback(nullptr);
 +}
 +
++namespace {
++void CompileInvalidModuleUnderJitless() {
++  // TryAllocate DCHECK(!v8_flags.jitless). A module that fails decoding still
++  // enters SyncCompile, which notifies before decode and never allocates code.
++  // Desktop wasm_jitless is readonly false, so this does not execute Wasm.
++  ErrorThrower thrower(CcTest::i_isolate(), "reb-jitless-scope");
++  const uint8_t raw[] = {0x00};
++  auto compiled = GetWasmEngine()->SyncCompile(
++      CcTest::i_isolate(), WasmEnabledFeatures::None(), {}, &thrower,
++      base::OwnedCopyOf(raw));
++  CHECK(compiled.is_null());
++  CHECK(thrower.error());
++  thrower.Reset();
++}
++}  // namespace
++
 +TEST(RebNativeBrTableJitlessUnsupported) {
-+  // TryAllocate DCHECK(!v8_flags.jitless) on this pin, and desktop --jitless
-+  // does not execute Wasm. Do not compile. The named gap is the session probe;
-+  // this only proves the mode is visible and creates no observation.
++  CcTest::InitializeVM();
++  auto* api = CcTest::isolate();
++  v8::HandleScope handles(api);
++  auto context = v8::Context::New(api);
++  v8::Context::Scope context_scope(context);
 +  FlagScope<bool> sampling(&v8_flags.reb_wasm_br_table_dispatch, true);
++  FlagScope<bool> indirect(&v8_flags.reb_wasm_call_indirect_dispatch, true);
 +  FlagScope<bool> jitless(&v8_flags.jitless, true);
 +  CHECK(v8::Isolate::IsRebWasmJitless());
 +  CHECK(v8::Isolate::IsRebWasmBrTableDispatch());
-+  CHECK(!v8::Isolate::IsRebWasmCallIndirectDispatch());
-+  auto* api = CcTest::isolate();
++  CHECK(v8::Isolate::IsRebWasmCallIndirectDispatch());
 +  api->SetWasmDispatchScopeCallback(&ObserveRebScope);
 +  api->SetWasmBrTableDispatchCallback(&ObserveRebBrTable);
++  api->SetWasmCallIndirectDispatchCallback(&ObserveRebCallIndirect);
++  v8::Isolate::DrainRebWasmDispatchScope();
 +  reb_scope_notices = {};
 +  reb_dispatch_observation = {};
-+  CHECK_EQ(0, reb_scope_notices.br_jitless);
++  reb_indirect_observation = {};
++  CompileInvalidModuleUnderJitless();
++  CHECK_EQ(1, reb_scope_notices.br_jitless);
++  CHECK_EQ(1, reb_scope_notices.indirect_jitless);
++  CHECK_EQ(0, reb_scope_notices.br_left);
++  CHECK_EQ(0, reb_scope_notices.indirect_left);
 +  CHECK_EQ(0, reb_dispatch_observation.count);
++  CHECK_EQ(0, reb_indirect_observation.count);
++  // Bits from a notice the embedder could not admit collapse to one delivery.
++  reb_scope_notices = {};
++  v8::Isolate::RememberRebWasmDispatchScope(v8::WasmDispatchScope::kLeftLiftoff,
++                                           false);
++  v8::Isolate::RememberRebWasmDispatchScope(v8::WasmDispatchScope::kLeftLiftoff,
++                                           false);
++  v8::Isolate::DrainRebWasmDispatchScope();
++  CHECK_EQ(1, reb_scope_notices.br_left);
++  CHECK_EQ(0, reb_scope_notices.indirect_left);
++  CHECK_EQ(0, reb_scope_notices.br_jitless);
++  v8::Isolate::DrainRebWasmDispatchScope();
++  CHECK_EQ(1, reb_scope_notices.br_left);
 +  api->SetWasmBrTableDispatchCallback(nullptr);
++  api->SetWasmCallIndirectDispatchCallback(nullptr);
++  api->SetWasmDispatchScopeCallback(nullptr);
++}
++
++TEST(RebNativeBrTableJitlessFlagOffHasNoScopeGap) {
++  CcTest::InitializeVM();
++  auto* api = CcTest::isolate();
++  v8::HandleScope handles(api);
++  auto context = v8::Context::New(api);
++  v8::Context::Scope context_scope(context);
++  FlagScope<bool> sampling(&v8_flags.reb_wasm_br_table_dispatch, false);
++  FlagScope<bool> indirect(&v8_flags.reb_wasm_call_indirect_dispatch, false);
++  FlagScope<bool> jitless(&v8_flags.jitless, true);
++  CHECK(v8::Isolate::IsRebWasmJitless());
++  CHECK(!v8::Isolate::IsRebWasmBrTableDispatch());
++  CHECK(!v8::Isolate::IsRebWasmCallIndirectDispatch());
++  api->SetWasmDispatchScopeCallback(&ObserveRebScope);
++  v8::Isolate::DrainRebWasmDispatchScope();
++  reb_scope_notices = {};
++  CompileInvalidModuleUnderJitless();
++  v8::Isolate::RememberRebWasmDispatchScope(v8::WasmDispatchScope::kJitless,
++                                           false);
++  v8::Isolate::RememberRebWasmDispatchScope(v8::WasmDispatchScope::kJitless,
++                                           true);
++  v8::Isolate::DrainRebWasmDispatchScope();
++  CHECK_EQ(0, reb_scope_notices.br_jitless);
++  CHECK_EQ(0, reb_scope_notices.indirect_jitless);
++  CHECK_EQ(0, reb_scope_notices.br_left);
++  CHECK_EQ(0, reb_scope_notices.indirect_left);
 +  api->SetWasmDispatchScopeCallback(nullptr);
 +}
 +

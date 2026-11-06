@@ -2453,11 +2453,11 @@ bool NativeProbeSink::NoteNativeWasmIndirectOmission(const VmAdmission& admissio
   }
   return previous == admission.generation;
 }
-void NativeProbeSink::NoteNativeWasmDispatchScope(const NativeWasmScopeGap gap) noexcept {
-  NoteNativeWasmScopeGap(false, gap);
+bool NativeProbeSink::NoteNativeWasmDispatchScope(const NativeWasmScopeGap gap) noexcept {
+  return NoteNativeWasmScopeGap(false, gap);
 }
-void NativeProbeSink::NoteNativeWasmIndirectScope(const NativeWasmScopeGap gap) noexcept {
-  NoteNativeWasmScopeGap(true, gap);
+bool NativeProbeSink::NoteNativeWasmIndirectScope(const NativeWasmScopeGap gap) noexcept {
+  return NoteNativeWasmScopeGap(true, gap);
 }
 bool NativeProbeSink::NoteNativeWasmScopeGap(const bool call_indirect,
                                              const NativeWasmScopeGap gap) noexcept {
@@ -2488,13 +2488,14 @@ bool NativeProbeSink::NoteNativeWasmScopeGap(const bool call_indirect,
     if (slot.compare_exchange_weak(previous, admission.generation - 1, std::memory_order_acq_rel)) {
       static constexpr std::array<std::string_view, kNativeWasmScopeGapCount> kDispatch{
           "native_wasm_dispatch_worker_unsupported", "native_wasm_dispatch_jitless_unsupported",
-          "native_wasm_dispatch_left_liftoff"};
+          "native_wasm_dispatch_left_liftoff", "native_wasm_dispatch_worklet_unsupported"};
       static constexpr std::array<std::string_view, kNativeWasmScopeGapCount> kIndirect{
           "native_wasm_indirect_worker_unsupported", "native_wasm_indirect_jitless_unsupported",
-          "native_wasm_indirect_left_liftoff"};
+          "native_wasm_indirect_left_liftoff", "native_wasm_indirect_worklet_unsupported"};
       static_assert(static_cast<std::size_t>(NativeWasmScopeGap::kWorker) == 0);
       static_assert(static_cast<std::size_t>(NativeWasmScopeGap::kJitless) == 1);
       static_assert(static_cast<std::size_t>(NativeWasmScopeGap::kLeftLiftoff) == 2);
+      static_assert(static_cast<std::size_t>(NativeWasmScopeGap::kWorklet) == 3);
       const bool retained = RecordRuntimeBufferEvent(NativeProbeType::kGap, admission.frame_id,
                                                      (call_indirect ? kIndirect : kDispatch)[index],
                                                      admission.generation) != 0;

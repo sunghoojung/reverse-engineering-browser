@@ -1525,16 +1525,24 @@ void NativeWasmScopeGaps() {
   const auto retained_before = native_wasm_retained;
   transport.SetNativeWasmLimitProbe(nullptr);
   Configure(queue);
-  sink.NoteNativeWasmDispatchScope(reb::NativeWasmScopeGap::kWorker);
+  assert(sink.NoteNativeWasmDispatchScope(reb::NativeWasmScopeGap::kWorker));
   assert(ScopeGapReason(One(queue)) == "native_wasm_dispatch_worker_unsupported");
-  sink.NoteNativeWasmDispatchScope(reb::NativeWasmScopeGap::kWorker);
+  assert(sink.NoteNativeWasmDispatchScope(reb::NativeWasmScopeGap::kWorker));
+  assert(Drain(queue) == 0);
+  assert(sink.NoteNativeWasmDispatchScope(reb::NativeWasmScopeGap::kWorklet));
+  assert(ScopeGapReason(One(queue)) == "native_wasm_dispatch_worklet_unsupported");
+  assert(sink.NoteNativeWasmDispatchScope(reb::NativeWasmScopeGap::kWorklet));
   assert(Drain(queue) == 0);
   sink.NoteNativeWasmDispatchScope(reb::NativeWasmScopeGap::kJitless);
   assert(ScopeGapReason(One(queue)) == "native_wasm_dispatch_jitless_unsupported");
   sink.NoteNativeWasmDispatchScope(reb::NativeWasmScopeGap::kLeftLiftoff);
   assert(ScopeGapReason(One(queue)) == "native_wasm_dispatch_left_liftoff");
-  sink.NoteNativeWasmIndirectScope(reb::NativeWasmScopeGap::kWorker);
+  assert(sink.NoteNativeWasmIndirectScope(reb::NativeWasmScopeGap::kWorker));
   assert(ScopeGapReason(One(queue)) == "native_wasm_indirect_worker_unsupported");
+  assert(sink.NoteNativeWasmIndirectScope(reb::NativeWasmScopeGap::kWorklet));
+  assert(ScopeGapReason(One(queue)) == "native_wasm_indirect_worklet_unsupported");
+  assert(sink.NoteNativeWasmIndirectScope(reb::NativeWasmScopeGap::kWorklet));
+  assert(Drain(queue) == 0);
   sink.NoteNativeWasmIndirectScope(reb::NativeWasmScopeGap::kJitless);
   assert(ScopeGapReason(One(queue)) == "native_wasm_indirect_jitless_unsupported");
   sink.NoteNativeWasmIndirectScope(reb::NativeWasmScopeGap::kLeftLiftoff);
@@ -1543,7 +1551,9 @@ void NativeWasmScopeGaps() {
   assert(Drain(queue) == 0);
   assert(native_wasm_retained == retained_before);
 
-  // The observation budget must not hide a scope the hooks did not cover.
+  // The sink still accepts a scope notice after the sample budget. The Liftoff
+  // admission predicate goes false at that budget, so the hook itself does not
+  // run again; this checks the sink, not that later worker execution is visited.
   Configure(queue, 43);
   sink.SetNativeWasmDispatchEmitter(&CaptureNativeWasm);
   native_wasm_retained = 0;
@@ -1558,18 +1568,22 @@ void NativeWasmScopeGaps() {
   assert(ScopeGapReason(One(queue)) == "native_wasm_dispatch_budget_incomplete");
   sink.NoteNativeWasmDispatchScope(reb::NativeWasmScopeGap::kLeftLiftoff);
   assert(ScopeGapReason(One(queue)) == "native_wasm_dispatch_left_liftoff");
-  sink.NoteNativeWasmDispatchScope(reb::NativeWasmScopeGap::kWorker);
+  assert(sink.NoteNativeWasmDispatchScope(reb::NativeWasmScopeGap::kWorker));
   assert(ScopeGapReason(One(queue)) == "native_wasm_dispatch_worker_unsupported");
+  assert(sink.NoteNativeWasmDispatchScope(reb::NativeWasmScopeGap::kWorklet));
+  assert(ScopeGapReason(One(queue)) == "native_wasm_dispatch_worklet_unsupported");
   assert(Drain(queue) == 0);
   native_wasm_retained = 0;
 
   sink.SetNativeWasmDispatchEmitter(nullptr);
-  sink.NoteNativeWasmDispatchScope(reb::NativeWasmScopeGap::kWorker);
+  assert(!sink.NoteNativeWasmDispatchScope(reb::NativeWasmScopeGap::kWorker));
+  assert(!sink.NoteNativeWasmDispatchScope(reb::NativeWasmScopeGap::kWorklet));
   assert(Drain(queue) == 0);
   sink.NoteNativeWasmIndirectScope(reb::NativeWasmScopeGap::kWorker);
   assert(ScopeGapReason(One(queue)) == "native_wasm_indirect_worker_unsupported");
   sink.SetNativeWasmIndirectEmitter(nullptr);
-  sink.NoteNativeWasmIndirectScope(reb::NativeWasmScopeGap::kJitless);
+  assert(!sink.NoteNativeWasmIndirectScope(reb::NativeWasmScopeGap::kJitless));
+  assert(!sink.NoteNativeWasmIndirectScope(reb::NativeWasmScopeGap::kWorklet));
   assert(Drain(queue) == 0);
 
   Configure(queue, 44, kForever, reb::NativeProbeCategoryMask(reb::NativeProbeCategory::kVm));
@@ -1593,9 +1607,21 @@ void NativeWasmScopeGaps() {
   Configure(queue, 47);
   assert(native_wasm_limit_probes == 2);
   assert(Drain(queue) == 0);
+  // A full ring refuses the gap and must not mark it sent.
+  Configure(queue, 48);
+  Fill(queue);
+  assert(!sink.NoteNativeWasmDispatchScope(reb::NativeWasmScopeGap::kWorklet));
+  assert(Drain(queue) == reb::kNativeProbeQueueCapacity);
+  assert(sink.NoteNativeWasmDispatchScope(reb::NativeWasmScopeGap::kWorklet));
+  assert(ScopeGapReason(One(queue)) == "native_wasm_dispatch_worklet_unsupported");
+  Fill(queue);
+  assert(!sink.NoteNativeWasmIndirectScope(reb::NativeWasmScopeGap::kWorklet));
+  assert(Drain(queue) == reb::kNativeProbeQueueCapacity);
+  assert(sink.NoteNativeWasmIndirectScope(reb::NativeWasmScopeGap::kWorklet));
+  assert(ScopeGapReason(One(queue)) == "native_wasm_indirect_worklet_unsupported");
   transport.Disable();
-  std::cout << "PASS native Wasm scope gaps; worker, jitless, left Liftoff, cap, and "
-               "session probe\n";
+  std::cout << "PASS native Wasm scope gaps; worker, worklet, jitless, left Liftoff, cap, "
+               "full ring, and session probe\n";
 }
 
 #include "guest_sampler_tests.h"

@@ -245,6 +245,50 @@ void NativeProbeHostGuestBoundary(reb::ArtifactReceiver& receiver) {
                              e.header.sequence_number == 604 && e.header.tab_id == 1;
                     }),
         "The host keeps the observation's own sequence and tab");
+
+  // caller_observed crosses the host. An unwalked record stays version 2.
+  // Zero caller bytes are not an observed host, and a named index on an
+  // unwalked record is refused instead of being dropped or published.
+  const std::vector<std::uint8_t> dispatch_module{0, 97, 115, 109, 1, 0, 0, 0, 0x0e, 1, 0, 0};
+  const auto wasm_dispatch = [&](std::uint64_t sequence, bool observed, std::uint8_t kind,
+                                 std::uint32_t caller_index) {
+    host.CaptureWasmDispatch(epoch, kSession, sequence, 100, 123, 7, frame_id, 10, 11, 12, 1, 8, 0,
+                             1, observed, kind, caller_index, 0, 0, 0, "fixture://host-dispatch",
+                             mojo_base::BigBuffer(dispatch_module));
+  };
+  const auto published = [&](std::uint64_t sequence) {
+    return std::find_if(events.begin(), events.end(), [&](const auto& event) {
+      return event.header.type == NativeProbeType::kWasmDispatchObservation &&
+             event.header.sequence_number == sequence;
+    });
+  };
+  wasm_dispatch(700, false, reb::kWasmDirectCallerUnknown, 0);
+  Check(transfers.size() == 1, "An unwalked dispatch still transfers its module");
+  Receive(receiver, transfers.begin()->first);
+  reb::WasmDispatchObservationPayload host_payload;
+  const auto unwalked = published(700);
+  Check(unwalked != events.end() &&
+            reb::DecodeWasmDispatchObservationPayload(unwalked->inline_payload, host_payload) &&
+            host_payload.protocol_version == 2 && host_payload.caller_kind == 0 &&
+            host_payload.caller_function_index == 0,
+        "The host keeps an unwalked record at version 2");
+  wasm_dispatch(701, true, reb::kWasmDirectCallerUnknown, 0);
+  // The module artifact is already bound, so this observation is published
+  // without a second transfer.
+  if (!transfers.empty())
+    Receive(receiver, transfers.begin()->first);
+  const auto host_unknown = published(701);
+  Check(host_unknown != events.end() &&
+            reb::DecodeWasmDispatchObservationPayload(host_unknown->inline_payload, host_payload) &&
+            host_payload.protocol_version == 3 &&
+            host_payload.caller_kind == reb::kWasmDirectCallerUnknown &&
+            host_payload.caller_function_index == 0,
+        "An observed host caller is version 3 unknown, not function 0");
+  const auto before_unwalked_index = events.size();
+  wasm_dispatch(702, false, reb::kWasmDirectCallerSameInstance, 4);
+  Check(transfers.empty() && gap_for(702, "native_wasm_dispatch_limit_or_invalid") &&
+            events.size() == before_unwalked_index + 1,
+        "A function index on an unwalked record is a gap, not a dropped caller");
   host.Disable();
   session.active = false;
   session.emitted = {};

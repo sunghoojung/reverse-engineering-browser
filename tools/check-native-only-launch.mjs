@@ -430,6 +430,7 @@ printf '%s\\n' "${'${brave_arguments[@]-}'}"`], {env:{...process.env, TEST_SOCKE
     ['0', null], ['4096', null], ['0x', null], ['0x0', null], ['0x1000', null], ['+1280', null],
     ['-1', null], [' 1280', null], ['1280 ', null], ['1+1', null], ['abc', null], ['1e3', null],
     ['0b11', null], ['12345678901', null], ['0x123456789', null], ['１２', null],
+    ['0x１２', null], ['0xａ', null],
     [`a[$(touch ${injected})]`, null]];
   const maskCode = section('# One category mask grammar', 'if [[ "${native_quiet_mode}"');
   for (const [value, expected] of maskVectors) {

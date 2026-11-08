@@ -2225,6 +2225,7 @@ void NativeWasmExecutionOutcomes() {
 #include "js_dispatch_tests.h"
 #include "js_invocation_tests.h"
 #include "network_scope_tests.h"
+#include "script_cookie_tests.h"
 
 // Each test keeps a multi-megabyte ring on its own stack. Inlining every test
 // into main can exceed the default 8 MiB main-thread stack, so each runs in
@@ -2267,6 +2268,7 @@ int main() {
   Run<&BrowserInternalExclusion>();
   Run<&RendererAnsweredRequests>();
   Run<&RendererFetchOwners>();
+  Run<&ScriptCookieAccess>();
   Run<&CanvasCreatorAdmission>();
   Run<&RuntimeCreatorAdmission>();
   Run<&RuntimeScriptProvenance>();

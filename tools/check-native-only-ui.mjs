@@ -116,12 +116,12 @@ for (const id of ['screen-traffic', 'screen-sources', 'screen-vm', 'investigatio
 for (const button of document.querySelectorAll('nav button, .nav-button')) {
   assert(!removedFeature.test(reachable(button)), `navigation exposes a removed CDP feature: ${reachable(button)}`);
 }
-// Traffic offers only what native rows carry: Preview and Response from native
-// response_body records and artifacts (protocol/native-network-v3.md), no
-// header tabs, Compare, content search or field trace. Removed globals are
-// absent, not stubbed.
+// Traffic offers only what native rows carry: Headers and Cookies from native
+// header and cookie records, Preview and Response from native response_body
+// records and artifacts (protocol/native-network-v3.md), no Compare, content
+// search or field trace. Removed globals are absent, not stubbed.
 assert.deepEqual([...document.querySelectorAll('#screen-traffic .inspector-tab')].map(tab => tab.dataset.inspectorTab),
-  ['general', 'preview', 'response', 'initiator', 'timing', 'signals', 'evidence']);
+  ['general', 'headers', 'preview', 'response', 'cookies', 'initiator', 'timing', 'signals', 'evidence']);
 for (const control of document.getElementById('screen-traffic').querySelectorAll('button, summary, [role="tab"], label, select, option')) {
   assert(!/\bCompare\b|baseline|Include headers and bodies|\bPayload\b|Field trace/i.test(reachable(control)),
     `Traffic exposes a CDP-only control: ${reachable(control).slice(0, 160)}`);
@@ -137,7 +137,7 @@ runInContext(`state.requests = [{id: 'legacy', path: 'legacy.invalid', method: '
   state.selectedRequestId = 'legacy'; state.trafficDetailOpen = true; state.inspectorTab = 'payload'; renderInspector();`, context);
 assert.equal(runInContext('state.inspectorTab', context), 'general', 'unknown restored tabs fall back to General');
 const general = document.getElementById('exchange-inspector').textContent;
-assert.match(general, /Request and response headers are not captured\. Response bodies are on the Response tab\./);
+assert.match(general, /Response bodies are on the Response tab\./);
 assert.doesNotMatch(general, /cdp-body-needle|cdp-header-needle/);
 // Response and Preview read native records only, never a CDP exchange.
 for (const tab of ['response', 'preview']) {
@@ -148,8 +148,23 @@ for (const tab of ['response', 'preview']) {
   assert.match(panel.textContent, /recorded no response for this request/);
   assert.doesNotMatch(panel.textContent, /cdp-body-needle|cdp-header-needle/);
 }
+// The Headers tab reads native header records only, never a CDP exchange.
+runInContext(`state.inspectorTab = 'headers'; renderInspector();`, context);
+const headersPanel = document.getElementById('headers-inspector');
+assert.equal(headersPanel.hidden, false);
+assert.match(headersPanel.textContent, /This row has no native header record/);
+assert.doesNotMatch(headersPanel.textContent, /cdp-header-needle/);
+// The Cookies tab reads native cookie records only.
+runInContext(`state.inspectorTab = 'cookies'; renderInspector();`, context);
+const cookiesPanel = document.getElementById('cookies-inspector');
+assert.equal(cookiesPanel.hidden, false);
+assert.equal(headersPanel.hidden, true);
+assert.match(cookiesPanel.textContent, /This row has no native cookie record/);
+assert.doesNotMatch(cookiesPanel.textContent, /cdp-header-needle/);
 runInContext(`state.inspectorTab = 'general'; renderInspector();`, context);
 assert.equal(document.getElementById('response-inspector').hidden, true);
+assert.equal(headersPanel.hidden, true);
+assert.equal(cookiesPanel.hidden, true);
 assert.equal(runInContext("trafficSearchRequests(state.requests, 'cdp-body-needle').matches.size", context), 0);
 // Guest bytecode buffers are binary: hex view, never decoded text.
 assert.equal(runInContext("sourceHexArtifact({kind: 'bytecode_buffer'}) && sourceHexArtifact({kind: 'wasm'}) && !sourceHexArtifact({kind: 'wasm_guest_adapter'})", context), true);
@@ -169,7 +184,7 @@ const shell = (mode, requestContent, canvasImages) => runInContext(`state.sessio
 shell('live', true, true);
 assert.equal(contentLabel.hidden, false);
 assert.equal(contentLabel.textContent, 'Content capture');
-assert.match(contentLabel.getAttribute('title'), /request paths, queries and bodies, and response bodies, up to 16 MiB each and Canvas images/);
+assert.match(contentLabel.getAttribute('title'), /request paths, queries and bodies, and response bodies, up to 16 MiB each, request and response headers, cookies and Canvas images/);
 shell('live', false, true);
 assert.equal(contentLabel.hidden, false);
 assert.match(contentLabel.getAttribute('aria-label'), /^Content capture: Canvas images$/);
@@ -180,4 +195,4 @@ assert.equal(contentLabel.hidden, true, 'only a live session is labeled');
 assert.deepEqual(forbidden, [], 'startup/navigation must not attempt CDP transport');
 assert.deepEqual(asyncErrors, [], 'all asynchronous startup failures must be handled');
 release();
-console.log(`PASS native-only behavior: ${screens.length} screens rendered from shipped scripts without removed state reads or CDP controls; Traffic General plus native Preview and Response, no exchange/search/compare, guest bytecode hex (offline DOM model; no rendered layout claimed)`);
+console.log(`PASS native-only behavior: ${screens.length} screens rendered from shipped scripts without removed state reads or CDP controls; Traffic General plus native Headers, Preview, Response and Cookies, no exchange/search/compare, guest bytecode hex (offline DOM model; no rendered layout claimed)`);

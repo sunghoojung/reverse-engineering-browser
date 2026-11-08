@@ -73,6 +73,11 @@ enum class EventType : std::uint16_t {
   // See protocol/native-wasm-dispatch-v1.md.
   kWasmDispatchOverflow = 28,
   kWasmIndirectOverflow = 29,
+  // Header block summaries, see protocol/native-network-v3.md.
+  kRequestHeaders = 30,
+  kResponseHeaders = 31,
+  // Cookie records, see "Cookies" in protocol/native-network-v3.md.
+  kCookieList = 32,
   // What happened to a response body, see protocol/native-network-v3.md.
   kResponseBody = 33,
   // Counted browser-internal exclusion; see protocol/native-network-v3.md.
@@ -80,6 +85,7 @@ enum class EventType : std::uint16_t {
   // Worker client tabs and the request that names them; same contract.
   kTabSet = 37,
   kRequestTabLink = 38,
+  kScriptCookie = 39,
 };
 
 enum class EventFlag : std::uint16_t {

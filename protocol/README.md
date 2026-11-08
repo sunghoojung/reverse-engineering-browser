@@ -103,8 +103,8 @@ cookies, and bodies require a separate visibly enabled sensitive-capture mode.
 types 22 `request_body` (always, with Network: body length, normalized content
 type, SHA-256, kind and capture state) and 23 `request_target` (only with
 request content capture: path and query), both exact children of a lifecycle
-record, plus the sensitive `request_body` artifact kind for at most 256 KiB of
-body bytes. Fragments and credentials are still not recorded.
+record, plus the sensitive `request_body` and `request_target` artifact kinds
+for body bytes up to 16 MiB and full targets. Fragments and URL credentials are still not recorded.
 [Native network v3](native-network-v3.md) adds the envelope's `scheme_class`
 byte on request records, type 36 `capture_exclusion` for counted
 browser-internal exclusions, and renderer completions for requests the browser
@@ -112,7 +112,11 @@ proxy never sees. It also adds the `loader_kind` byte, type 37 `tab_set` and
 type 38 `request_tab_link`, which link every request to the tab that caused it.
 In content sessions it adds type 33 `response_body`, the child of
 `response_started` that names a sensitive `response_body` artifact or says why
-none exists.
+none exists; types 30 `request_headers` and 31 `response_headers` and their
+sensitive header block artifacts, one per hop and source; type 32
+`cookie_list` (sent and received cookies per hop with inclusion status, and
+the sensitive `cookie_list` artifact); and type 39 `script_cookie`
+(`document.cookie` and Cookie Store API calls).
 
 Renderer-to-browser delivery uses exact 320-byte `EventRecord` objects in a
 bounded shared-memory queue. Mojo carries session lifecycle and coalesced

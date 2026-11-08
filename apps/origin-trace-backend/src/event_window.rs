@@ -311,6 +311,9 @@ fn is_network(event: &Value) -> bool {
                     | "tab_set"
                     | "request_tab_link"
                     | "response_body"
+                    | "request_headers"
+                    | "response_headers"
+                    | "cookie_list"
             )
         )
 }

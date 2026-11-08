@@ -89,8 +89,8 @@ synthetic checks do not launch a browser, enable capture, or prove performance
 inside a built Brave application.
 
 Payload capture is limited to a bounded metadata prefix. Network request
-prefixes contain only the method and destination host. Fragments, credentials,
-authorization headers, and cookies are never captured. Every admitted request
+prefixes contain only the method and destination host. Fragments and URL
+credentials are never captured. Every admitted request
 also gets a `request_body` child record from `browser/native_network_capture_sink.cc`
 with the body's kind, length, normalized content type and a SHA-256 of
 in-memory bytes up to 4 MiB. Only with `--reb-capture-request-content` does the
@@ -122,6 +122,21 @@ feeds `NativeTabResolver` from the dedicated, shared and service worker
 services; the drain links worker requests to `tab_set` records with one
 `request_tab_link` each. See
 [request owners and tabs](../../../../../../protocol/native-network-v3.md#request-owners-and-tabs).
+
+Content sessions also record header blocks
+([Native network v3](../../../../../../protocol/native-network-v3.md)): the
+provisional `ResourceRequest` headers at start, the response head's headers at
+every redirect and response, and, through `common/native_network_headers_hook.h`,
+the headers the network stack sent and 103 Early Hints. The proxy gives a
+request without a DevTools ID `reb-<request_id>` so the network service reports
+them, and Chromium patch `0025-forward-native-network-headers` forwards content's DevToolsObserver calls to the
+`network_headers_hook` component before DevTools dispatch. The same calls carry
+the sent and received cookie lists with each cookie's inclusion status; the
+sink records one `cookie_list` per hop and direction. In the renderer,
+`renderer/native_script_cookie_sink.h` records `document.cookie` and Cookie
+Store API calls from Chromium patch `0028-record-script-cookie-access`, enabled only by the content gate
+`NativeProbeClient::Configure` carries, with the innermost script frame from
+`renderer/native_script_position.h`; reads are aggregated per key.
 
 Large artifact bytes use the separate 128-byte framed contract and 32-byte
 acknowledgment in `common/native_artifact_header.h`. Only the browser-process

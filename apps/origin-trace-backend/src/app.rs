@@ -15,7 +15,8 @@ use crate::{
     native_console::NativeConsole,
     origin_trace,
     owned_vm_debugger::OwnedVmDebugger,
-    session_context, session_summary, source_facts, validation, vm, wasm,
+    request_cookies, request_headers, session_context, session_summary, source_facts, validation,
+    vm, wasm,
     workspace::{Kind, Store},
 };
 use axum::{
@@ -35,7 +36,7 @@ use std::{
 };
 use tokio::sync::{Mutex, OwnedMutexGuard, OwnedSemaphorePermit, Semaphore, TryAcquireError};
 
-const UI_ASSETS: [&str; 36] = [
+const UI_ASSETS: [&str; 38] = [
     "index.html",
     "app.css",
     "command_palette.js",
@@ -55,6 +56,8 @@ const UI_ASSETS: [&str; 36] = [
     "network_scope.js",
     "request_tabs.js",
     "traffic_response.js",
+    "traffic_headers.js",
+    "traffic_cookies.js",
     "captured_client.js",
     "captured_export_formats.js",
     "vm_semantics.js",
@@ -810,6 +813,129 @@ impl App {
                         sequence.as_deref(),
                         Some(&options.artifacts),
                     )
+                })
+                .await?
+            }
+            "/api/request-headers" => {
+                q.only(&["session_id", "request_id"], &[])?;
+                let session = q.required("session_id")?.to_owned();
+                let request = q.required("request_id")?.to_owned();
+                for key in ["session_id", "request_id"] {
+                    q.number(key, None, 64, true)?;
+                }
+                let filter = event_query::event_filter(&q)?;
+                let options = self.options.clone();
+                etag = Some(evidence::resource_etag(
+                    &options.store,
+                    &format!(
+                        "{}:{session}:{request}",
+                        evidence::resource_etag(&options.artifacts.join("manifest.jsonl"), "")
+                    ),
+                ));
+                if matches_etag(headers, etag.as_deref()) {
+                    return Ok(not_modified(etag.as_deref().unwrap()));
+                }
+                self.blocking(move || {
+                    let mut tally = event_query::Tally::default();
+                    let page = event_query::read_page(
+                        &options.store,
+                        event_query::Cursor::Tail,
+                        1024,
+                        event_query::SCAN_BYTES,
+                        event_query::EVENT_RECORD_BYTES,
+                        event_query::event_visitor(&filter, &mut tally),
+                    )?;
+                    let artifacts = evidence::artifacts(&options.artifacts, 10000)?;
+                    Ok(request_headers::build(
+                        &page.records,
+                        &artifacts,
+                        &options.artifacts,
+                        &session,
+                        &request,
+                    ))
+                })
+                .await?
+            }
+            "/api/request-cookies" => {
+                q.only(&["session_id", "request_id"], &[])?;
+                let session = q.required("session_id")?.to_owned();
+                let request = q.required("request_id")?.to_owned();
+                for key in ["session_id", "request_id"] {
+                    q.number(key, None, 64, true)?;
+                }
+                let filter = event_query::event_filter(&q)?;
+                let options = self.options.clone();
+                etag = Some(evidence::resource_etag(
+                    &options.store,
+                    &format!(
+                        "cookies:{}:{session}:{request}",
+                        evidence::resource_etag(&options.artifacts.join("manifest.jsonl"), "")
+                    ),
+                ));
+                if matches_etag(headers, etag.as_deref()) {
+                    return Ok(not_modified(etag.as_deref().unwrap()));
+                }
+                self.blocking(move || {
+                    let mut tally = event_query::Tally::default();
+                    let page = event_query::read_page(
+                        &options.store,
+                        event_query::Cursor::Tail,
+                        1024,
+                        event_query::SCAN_BYTES,
+                        event_query::EVENT_RECORD_BYTES,
+                        event_query::event_visitor(&filter, &mut tally),
+                    )?;
+                    let artifacts = evidence::artifacts(&options.artifacts, 10000)?;
+                    Ok(request_cookies::build(
+                        &page.records,
+                        &artifacts,
+                        &options.artifacts,
+                        &session,
+                        &request,
+                    ))
+                })
+                .await?
+            }
+            "/api/cookie-provenance" => {
+                q.only(&["session_id", "name"], &[])?;
+                let session = q.required("session_id")?.to_owned();
+                q.number("session_id", None, 64, true)?;
+                let name = q.required("name")?.to_owned();
+                if name.len() > 4096 {
+                    return Err(Error::bad("name is longer than 4096 bytes"));
+                }
+                let filter = event_query::event_filter(&Query::new(&format!(
+                    "session_id={session}&category=network"
+                )))?;
+                let options = self.options.clone();
+                etag = Some(evidence::resource_etag(
+                    &options.store,
+                    &format!(
+                        "provenance:{}:{session}:{name}",
+                        evidence::resource_etag(&options.artifacts.join("manifest.jsonl"), "")
+                    ),
+                ));
+                if matches_etag(headers, etag.as_deref()) {
+                    return Ok(not_modified(etag.as_deref().unwrap()));
+                }
+                self.blocking(move || {
+                    let mut tally = event_query::Tally::default();
+                    let page = event_query::read_page(
+                        &options.store,
+                        event_query::Cursor::Tail,
+                        5000,
+                        event_query::SCAN_BYTES,
+                        event_query::EVENT_RECORD_BYTES,
+                        event_query::event_visitor(&filter, &mut tally),
+                    )?;
+                    let artifacts = evidence::artifacts(&options.artifacts, 10000)?;
+                    Ok(request_cookies::provenance(
+                        &page.records,
+                        &artifacts,
+                        &options.artifacts,
+                        &session,
+                        &name,
+                    ))
                 })
                 .await?
             }

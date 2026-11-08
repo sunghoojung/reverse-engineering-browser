@@ -1,6 +1,8 @@
 #include "reb/event.hpp"
 #include "reb/js_dispatch.hpp"
 #include "reb/js_invocation.hpp"
+#include "reb/network_cookies.hpp"
+#include "reb/network_headers.hpp"
 #include "reb/network_request.hpp"
 #include "reb/network_response_body.hpp"
 #include "reb/network_scope.hpp"
@@ -80,6 +82,10 @@ bool IsKnownType(const EventType type) noexcept {
     case EventType::kWasmExecutionOutcome:
     case EventType::kWasmDispatchOverflow:
     case EventType::kWasmIndirectOverflow:
+    case EventType::kRequestHeaders:
+    case EventType::kResponseHeaders:
+    case EventType::kCookieList:
+    case EventType::kScriptCookie:
     case EventType::kResponseBody:
     case EventType::kCaptureExclusion:
     case EventType::kTabSet:
@@ -176,6 +182,14 @@ bool IsValidEvent(const EventRecord& event) noexcept {
   if (event.header.type == EventType::kWasmDispatchOverflow && !IsValidWasmDispatchOverflow(event))
     return false;
   if (event.header.type == EventType::kWasmIndirectOverflow && !IsValidWasmIndirectOverflow(event))
+    return false;
+  if ((event.header.type == EventType::kRequestHeaders ||
+       event.header.type == EventType::kResponseHeaders) &&
+      !IsValidHeaderBlockEvent(event))
+    return false;
+  if (event.header.type == EventType::kCookieList && !IsValidCookieListEvent(event))
+    return false;
+  if (event.header.type == EventType::kScriptCookie && !IsValidScriptCookieEvent(event))
     return false;
   if (event.header.type == EventType::kResponseBody && !IsValidResponseBodyEvent(event))
     return false;
@@ -378,6 +392,14 @@ std::string_view EventTypeName(const EventType type) noexcept {
       return "wasm_dispatch_overflow";
     case EventType::kWasmIndirectOverflow:
       return "wasm_indirect_overflow";
+    case EventType::kRequestHeaders:
+      return "request_headers";
+    case EventType::kResponseHeaders:
+      return "response_headers";
+    case EventType::kCookieList:
+      return "cookie_list";
+    case EventType::kScriptCookie:
+      return "script_cookie";
     case EventType::kResponseBody:
       return "response_body";
     case EventType::kCaptureExclusion:

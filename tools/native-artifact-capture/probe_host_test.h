@@ -385,6 +385,7 @@ void NativeProbeHostJsDispatchForwarding() {
   const auto invocation_record = reb::EncodeNativeJsInvocationSite(invocation_site);
   session.invocation_sites.assign(invocation_record.begin(), invocation_record.end());
   session.invocation_digests = true;
+  session.request_content = true;
   session.emitted = [](const NativeProbeEvent& event) { Emit(event); };
   Configure(kSession, kMask);
   events.clear();
@@ -401,6 +402,7 @@ void NativeProbeHostJsDispatchForwarding() {
         "Renderer configuration carries the session's JS dispatch site records");
   Check(client.invocation_sites == session.invocation_sites && client.invocation_digests,
         "Renderer configuration carries the invocation sites and the digest opt-in");
+  Check(client.request_content, "Renderer configuration carries the request-content gate");
 
   reb::NativeJsDispatchObservationPayload payload;
   payload.shape = 2;
@@ -462,6 +464,7 @@ void NativeProbeHostJsDispatchForwarding() {
   session.js_sites.clear();
   session.invocation_sites.clear();
   session.invocation_digests = false;
+  session.request_content = false;
   session.emitted = {};
   process.frames.clear();
   std::cout << "PASS production NativeProbeHost forwards JS dispatch site records and type 21 "

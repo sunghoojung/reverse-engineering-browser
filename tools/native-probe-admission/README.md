@@ -16,6 +16,13 @@ sibling collectors, and allocation-free disabled calls. Looping/waiting in the f
 probe calls make one claim CAS and one TryPush call. The existing queue is
 lock-free, not wait-free; its internal contention retries are unchanged.
 
+Script cookie cases (`script_cookie_tests.h`) drive the renderer cookie sink
+with a fixture script frame in place of the V8 provider: metadata-only calls
+are allocation-free and record nothing; writes carry name, value digest,
+lengths, frame and position; reads aggregate at powers of two with the
+configuration-end remainder; and a full table and the Network category stay
+visible.
+
 Native JavaScript dispatch cases check the byte-exact 128-byte payload and every
 validation rule, the 44-byte site records, the inactive epoch, expiry and VM
 category refusal, the 64-per-site and 256-per-configuration budgets with their

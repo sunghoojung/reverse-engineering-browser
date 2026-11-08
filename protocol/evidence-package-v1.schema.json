@@ -577,10 +577,14 @@
             "wasm_execution_outcome",
             "wasm_dispatch_overflow",
             "wasm_indirect_overflow",
+            "request_headers",
+            "response_headers",
+            "cookie_list",
             "response_body",
             "capture_exclusion",
             "tab_set",
-            "request_tab_link"
+            "request_tab_link",
+            "script_cookie"
           ]
         },
         "status_code": {
@@ -794,7 +798,10 @@
             "bytecode_buffer",
             "wasm_guest_adapter",
             "request_body",
-            "request_target"
+            "request_target",
+            "request_headers",
+            "response_headers",
+            "cookie_list"
           ]
         },
         "byte_size": {

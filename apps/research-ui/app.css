@@ -2159,6 +2159,37 @@ var(--panel);
       .traffic-response-image img { display: block; max-width: 100%; max-height: 60vh; border: 1px solid var(--line); border-radius: 4px;
         background: repeating-conic-gradient(var(--panel-2) 0 25%, var(--panel) 0 50%) 0 0 / 16px 16px; }
       .traffic-response-image figcaption { margin-top: 6px; color: var(--muted); font: 12px var(--sans); }
+      .traffic-headers-section { padding: 8px 12px; border-bottom: 1px solid var(--line); }
+      .traffic-headers-section > summary { cursor: pointer; font: 600 12px/20px var(--sans); }
+      .traffic-headers-section > summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+      .traffic-headers-count { margin-left: 6px; color: var(--muted); font-weight: 400; }
+      .traffic-headers-note { margin: 6px 0 0; color: var(--muted); font: 12px/1.5 var(--sans); }
+      .traffic-headers-tools { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 6px 0; }
+      .traffic-headers-status { color: var(--muted); font: 11px var(--sans); }
+      .traffic-header-row { display: grid; grid-template-columns: minmax(80px, 30%) minmax(0, 1fr) auto; gap: 8px; align-items: start; padding: 3px 0; border-bottom: 1px solid var(--line-soft); font: 11px/16px var(--mono); }
+      .traffic-header-name { color: var(--muted); overflow-wrap: anywhere; }
+      .traffic-header-value { max-height: 96px; overflow: auto; overflow-wrap: anywhere; white-space: pre-wrap; }
+      .traffic-header-copy { padding: 0 6px; border: 1px solid var(--line); border-radius: 4px; background: none; color: var(--muted); font: 11px/16px var(--sans); }
+      .traffic-header-copy:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+      .traffic-headers-raw { max-height: 320px; margin: 0; padding: 8px; overflow: auto; border: 1px solid var(--line); border-radius: 4px; font: 11px/1.5 var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; }
+      .traffic-headers-raw:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+      .traffic-cookie-filter { display: flex; align-items: center; gap: 6px; margin: 6px 0; font: 12px var(--sans); }
+      .traffic-cookie-table-wrap { max-width: 100%; overflow-x: auto; }
+      .traffic-cookie-table { border-collapse: collapse; min-width: 100%; font: 11px/16px var(--mono); }
+      .traffic-cookie-table th, .traffic-cookie-table td { padding: 2px 6px; border-bottom: 1px solid var(--line-soft); text-align: left; white-space: nowrap; }
+      .traffic-cookie-table td { max-width: 220px; overflow: hidden; text-overflow: ellipsis; }
+      .traffic-cookie-table .traffic-cookie-col-value { max-width: 280px; }
+      .traffic-cookie-table .traffic-cookie-blocked td { color: var(--amber); }
+      .traffic-cookie-sort, .traffic-cookie-name, .traffic-cookie-request { padding: 0; border: 0; background: none; color: inherit; font: inherit; text-align: left; cursor: pointer; }
+      .traffic-cookie-sort { font: 600 11px/16px var(--sans); }
+      .traffic-cookie-name { color: var(--accent); text-decoration: underline; }
+      .traffic-cookie-request { color: var(--accent); }
+      .traffic-cookie-sort:focus-visible, .traffic-cookie-name:focus-visible, .traffic-cookie-request:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+      .traffic-cookie-provenance { padding: 8px 12px; border-bottom: 1px solid var(--line); }
+      .traffic-cookie-provenance-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+      .traffic-cookie-provenance h2 { margin: 0; font: 600 12px/20px var(--sans); overflow-wrap: anywhere; }
+      .traffic-cookie-provenance h3 { margin: 8px 0 2px; color: var(--muted); font: 600 11px/16px var(--sans); }
+      .traffic-cookie-provenance-list { margin: 0; padding-left: 16px; font: 11px/16px var(--mono); overflow-wrap: anywhere; }
       @media (max-width: 1100px) {
         #screen-traffic .traffic-grid { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, 50%) minmax(0, 1fr); overflow: hidden; }
         .request-pane { border-right: 0; border-bottom: 1px solid var(--line); }

@@ -75,7 +75,8 @@ URLs, hosts and timing never substitute for it. Rows whose events carry no
 request ID stay visible but cannot open traces, signal profiles or Related VM
 candidates. Native network metadata retains the method, URL or host and
 lifecycle status only; the inspector states that headers and bodies were not
-captured instead of showing empty panes.
+captured instead of showing empty panes. Content capture sessions add header
+blocks and cookie lists, which the **Headers** and **Cookies** tabs show.
 
 Traffic selection updates only the mounted rows and selection summary when the
 retained snapshot, filters, ordering and page are unchanged. Keyboard navigation
@@ -202,7 +203,7 @@ for the identity boundary, retained limits and integration points.
 
 The passive security report is an offline command for one saved exact-request
 API response (`tools/report-passive-security.mjs`, library
-`tools/passive-security.cjs`). Live native Traffic retains no headers or bodies,
+`tools/passive-security.cjs`). Live native Traffic retains no response bodies,
 so Origin Trace has no in-app report. See
 [Passive security report v1](../../docs/product/passive-security-report-v1.md)
 for the schema, rules, bounds and commands.
@@ -673,15 +674,17 @@ has no newer events.
 
 Traffic uses a compact network ledger with visible resource-type filters and
 sortable Name, Status, Type, Method, and Time columns. **Capture order** restores
-the evidence order. The selected request opens General, Preview, Response,
+the evidence order. The selected request opens General, Headers, Preview,
+Response, Cookies,
 Initiator, Timing, Signals and Evidence beside the ledger above 1100 px, or below it in narrow
 windows. Both panes stay within the available workspace height; the request
 ledger and inspector body scroll independently. Captured-tab and domain filters
 share a compact row at narrow widths. Native capture records the method, host,
 status and lifecycle timing of each request, and the request body's length,
 type and SHA-256. Content capture sessions add the path and query and bounded
-request body bytes, which General shows as text, and response bodies
-([native network v3](../../protocol/native-network-v3.md)). Response
+request body bytes, which General shows as text, response bodies, and request
+and response header blocks ([native network v3](../../protocol/native-network-v3.md)).
+Response
 (`traffic_response.js`) shows a body's capture state, codings, lengths and
 digest, then its bytes as syntax-colored text with pretty print, wrap, find,
 copy and hex, read 2 MiB at a time and rechecked by SHA-256. Preview shows a
@@ -689,9 +692,21 @@ bounded JSON tree, a raster image whose signature matches its bytes, or text;
 HTML and SVG stay source and are never rendered. Script and Wasm responses show
 their Sources artifact in any session. A request with no body record says why:
 metadata-only session, redirect, or never seen by the browser proxy (service
-worker, memory cache). Request and response headers are not captured, so
-Traffic has no header, comparison or content-search views.
+worker, memory cache).
 `tools/check-traffic-response-ui.mjs` covers both tabs in a DOM model.
+**Headers** shows General (URL, method, status, remote address, referrer
+policy), then response and request headers per redirect hop, newest first.
+Each section collapses and has **Raw** and **Copy all**; each header has
+**Copy**. A hop the network stack never reported reads "Provisional headers
+are shown". Blocks load after a size and SHA-256 check and are inserted as
+text. **Cookies** shows each hop's Response cookies (every attribute and the
+reason a `Set-Cookie` was blocked) and Request cookies, with **Show filtered out
+request cookies** for excluded ones and their reasons. Columns sort, values
+truncate with the full value as a tooltip, and each row has **Copy**. A name
+opens its provenance: the responses that set it, the `document.cookie` and
+Cookie Store calls that used it with their script position, and the requests
+that sent it, linked by value digest to the script write. Traffic has no
+comparison or content-search views; General states the capture coverage.
 Missing initiators and timing phases stay explicitly unavailable.
 Request signal profiles are owned by the exact selected session, request and root
 event. Late responses cannot replace a newer selection or refresh. Malformed or
@@ -857,6 +872,8 @@ policy and trace assertions; it is not evidence of native lifecycle behavior.
 | `traffic_view.js` | Native request ledger rows, ordering, paging and URL/method/status/name search, the General coverage view, and the saved-capture export document |
 | `network_scope.js` | Counted browser-internal exclusions and the reversible browser-internal view filter |
 | `request_tabs.js` | Each Traffic row's tabs from tab sets and request tab links, tab page names and rows without a tab |
+| `traffic_headers.js` | The Headers tab: hops from native header records, checked block reads, Raw and copy |
+| `traffic_cookies.js` | The Cookies tab: checked cookie list reads, request and response tables, filtered-out cookies, sort, copy and name provenance |
 | `evidence_names.js` | Researcher names: exact identities, the closed names document, its Analyst-library store, the inline rename editor and the command palette provider |
 | `captured_client.js`, `captured_export_formats.js` | Saved-capture identity, local export dialog, and the client-project/HAR/SDL generators shared with offline commands |
 | `source_search.js` | Search all files: the literal matcher on the Find index, the bounded and cancellable search, partial-result notes and the results panel; `app.js` supplies the artifact reader and the open path |
@@ -930,10 +947,14 @@ window and the enforced 760×560 minimum it checks:
 - VM: the opcode workspace for the guest artifact shows the native guest row
   with its wide instance identity, and the physical artifact never claims a
   guest PC;
-- native-only coverage: Traffic offers only General, Preview, Response,
-  Initiator, Timing, Signals and Evidence with no content search or Compare;
-  a retained response body is inert colored text on Response, pretty prints,
-  and is a JSON tree on Preview, reached by arrow key; Export offers only local-file
+- native-only coverage: Traffic offers only General, Headers, Preview, Response,
+  Cookies, Initiator, Timing, Signals and Evidence with no content search or
+  Compare; a retained response body is inert colored text on Response, pretty
+  prints, and is a JSON tree on Preview, reached by arrow key; Headers shows a
+  content-session request's retained blocks, Raw view and markup as text, and
+  says why a metadata-only request has none; Cookies shows its response and
+  request cookies, a blocked cookie's reason, filtered-out cookies on request
+  and a name's provenance to its script write; Export offers only local-file
   SDL and says why; golden and hostile guest bytecode render as an inert hex
   view with an unclipped kind icon;
 - keyboard order and visible focus for 30 stops (Option+Tab when Full Keyboard

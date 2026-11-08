@@ -92,6 +92,7 @@ EVENT_TYPES = {
     "api_call",
     "artifact_capture_failed",
     "artifact_captured",
+    "cookie_list",
     "capture_exclusion",
     "gap",
     "js_dispatch_observation",
@@ -104,15 +105,18 @@ EVENT_TYPES = {
     "request_body",
     "request_completed",
     "request_failed",
+    "request_headers",
     "request_initiated",
     "request_redirected",
     "request_started",
     "request_target",
     "response_body",
     "response_completed",
+    "response_headers",
     "response_started",
     "request_tab_link",
     "tab_set",
+    "script_cookie",
     "vm_finding",
     "vm_dispatch_sample",
     "wasm_dispatch_observation",
@@ -302,6 +306,114 @@ def valid_response_body(event: dict, payload: bytes) -> bool:
         11: not retained,
         12: not retained,
     }[state]
+
+
+HEADER_BLOCK_LIMIT = 320 * 1024
+
+
+def valid_header_block(event: dict, payload: bytes) -> bool:
+    """Every rule of the native-network-v3.md header record, mirrored from the C++ core."""
+    if not valid_request_child(event, payload):
+        return False
+
+    def at(offset: int, size: int) -> int:
+        return int.from_bytes(payload[offset:offset + size], "little")
+
+    source, state, policy, family = payload[4], payload[5], payload[6], payload[7]
+    count, length, status, port = at(8, 4), at(12, 4), at(20, 2), at(22, 2)
+    address, digest = payload[24:40], payload[48:80]
+    if not 1 <= state <= 8 or any(payload[44:48]) or any(payload[80:]):
+        return False
+    addressed = family != 0
+    if event["type"] == "response_headers":
+        if policy != 0:
+            return False
+        if source == 1:
+            if status > 999 or 0 < status < 100:
+                return False
+        elif source != 3 or status != 103 or addressed:
+            return False
+    elif (status != 0 or addressed
+          or (source == 1 and not 1 <= policy <= 8)
+          or (source != 1 and (source != 2 or policy != 0))):
+        return False
+    if (family not in (0, 4, 6) or (not addressed and (port or any(address)))
+            or (family == 4 and any(address[4:]))):
+        return False
+    empty, limited = state == 3, state == 4
+    if ((count == 0) != empty or (length == 0) != empty or length < 5 * count
+            or limited != (length > HEADER_BLOCK_LIMIT) or (not any(digest)) != limited):
+        return False
+    return (event["artifact_id"] != "0") == (state in (1, 2))
+
+
+COOKIE_LIST_LIMIT = 2 * 1024 * 1024
+
+
+def valid_cookie_list(event: dict, payload: bytes) -> bool:
+    """The native-network-v3.md cookie_list record, mirrored from the C++ core."""
+    if not valid_request_child(event, payload):
+        return False
+
+    def at(offset: int, size: int) -> int:
+        return int.from_bytes(payload[offset:offset + size], "little")
+
+    direction, state = payload[4], payload[5]
+    count, blocked, length = at(8, 4), at(12, 4), at(16, 4)
+    digest = payload[32:64]
+    if (direction not in (1, 2) or not 1 <= state <= 8 or any(payload[6:8])
+            or any(payload[28:32]) or any(payload[64:]) or blocked > count):
+        return False
+    empty, limited = state == 3, state == 4
+    if ((count == 0) != empty or (length == 0) != empty
+            or (not empty and length < 16 + 64 * count)
+            or limited != (length > COOKIE_LIST_LIMIT) or (not any(digest)) != limited):
+        return False
+    return (event["artifact_id"] != "0") == (state in (1, 2))
+
+
+def valid_script_cookie(event: dict, payload: bytes) -> bool:
+    """The native-network-v3.md script_cookie renderer record."""
+    if not (event["protocol_version"] == 3 and event["category"] == "network"
+            and event["flags"] == 0 and not event["payload_truncated"] and len(payload) == 128
+            and payload[:4] == bytes((1, 0, 128, 0))
+            and event["session_id"] != "0" and event["sequence_number"] != "0"
+            and 1 <= event["process_id"] <= 0xFFFFFFFF
+            and all(event[key] == "0" for key in ("parent_event_id", "request_id", "artifact_id",
+                                                  "navigation_id", "encoded_data_length",
+                                                  "decoded_body_length"))
+            and event["status_code"] == 0 and event["error_code"] == 0
+            and event["resource_type"] == 0):
+        return False
+
+    def at(offset: int, size: int) -> int:
+        return int.from_bytes(payload[offset:offset + size], "little")
+
+    api, flags = payload[4], payload[5]
+    count, name_length, value_length, string_length = at(8, 4), at(12, 4), at(16, 4), at(20, 4)
+    kind, frame_flags, combinator, script_id = payload[24], payload[25], at(26, 2), at(28, 4)
+    stack, value_digest, prefix = payload[40:72], payload[72:104], payload[104:128]
+    if not 1 <= api <= 6 or flags & ~0x0F or any(payload[6:8]) or count == 0:
+        return False
+    write = api in (1, 3, 6)
+    truncated = name_length > 24
+    if truncated != bool(flags & 1) or (not truncated and any(prefix[name_length:])):
+        return False
+    if write:
+        if count != 1 or not any(value_digest) or flags & 8:
+            return False
+    elif value_length != 0 or any(value_digest):
+        return False
+    if api == 1:
+        if string_length < name_length + value_length:
+            return False
+    elif api != 2 and string_length != 0:
+        return False
+    framed = kind in (1, 2) and script_id != 0 and combinator == 0 and not frame_flags & ~0x03
+    recorded, stacked = bool(flags & 2), bool(flags & 4)
+    if not framed if recorded else any(payload[24:40]):
+        return False
+    return stacked == any(stack) and (not stacked or recorded)
 
 
 def valid_invocation_context(state: int, invocation_id: int) -> bool:
@@ -707,6 +819,14 @@ def validate_event(event: object, line_number: int) -> None:
         raise ValueError(f"line {line_number}: request tab link record is invalid")
     if event["type"] == "response_body" and not valid_response_body(event, payload):
         raise ValueError(f"line {line_number}: native response body record is invalid")
+    if event["type"] in ("request_headers", "response_headers") and not valid_header_block(
+        event, payload
+    ):
+        raise ValueError(f"line {line_number}: native header block record is invalid")
+    if event["type"] == "cookie_list" and not valid_cookie_list(event, payload):
+        raise ValueError(f"line {line_number}: native cookie list record is invalid")
+    if event["type"] == "script_cookie" and not valid_script_cookie(event, payload):
+        raise ValueError(f"line {line_number}: native script cookie record is invalid")
     if event["type"].startswith("js_invocation_") and not valid_js_invocation(event, payload):
         raise ValueError(f"line {line_number}: native JavaScript invocation record is invalid")
     if event["type"] in ("wasm_guest_dispatch", "wasm_guest_invocation"):

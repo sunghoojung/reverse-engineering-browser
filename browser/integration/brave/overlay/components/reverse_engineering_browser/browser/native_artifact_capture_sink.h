@@ -137,6 +137,16 @@ class NativeArtifactCaptureSink final {
   // UI sequence. Copies off it; later losses are events parented to the creator.
   [[nodiscard]] NativeRequestContentAdmission CaptureRequestContent(NativeRequestContent content,
                                                                     std::uint64_t& artifact_id);
+  // Queues one header block (text/plain) or cookie list
+  // (application/x-reb-cookie-list) as a sensitive artifact within the
+  // in-flight pool. Returns its ID, or zero when nothing was queued; the caller
+  // records that outcome (protocol/native-network-v3.md).
+  [[nodiscard]] std::uint64_t CaptureHeaderBlock(NativeArtifactKind kind,
+                                                 std::uint64_t request_id,
+                                                 std::uint64_t frame_id,
+                                                 std::uint64_t creator_event_id,
+                                                 std::string url,
+                                                 std::vector<std::uint8_t> content);
 
   static void TransferCompleted(std::uint64_t artifact_id,
                                 NativeArtifactReceiveStatus status) noexcept;

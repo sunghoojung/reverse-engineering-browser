@@ -1282,7 +1282,7 @@ invocationSitesPanel.refresh();
               : 'Deterministic developer evidence is loaded.';
         // Sensitive capture is labeled for the whole session, not only in the
         // rows it fills, because the packaged app turns it on without a dialog.
-        const retained = [state.requestContentCaptureEnabled && 'request paths, queries and bodies, and response bodies, up to 16 MiB each',
+        const retained = [state.requestContentCaptureEnabled && 'request paths, queries and bodies, and response bodies, up to 16 MiB each, request and response headers, cookies',
           state.canvasImageCaptureEnabled && 'Canvas images'].filter(Boolean);
         elements.sessionContent.hidden = !live || !retained.length;
         // The launch turned these on; a browser built before them ignores the
@@ -3384,11 +3384,22 @@ invocationSitesPanel.refresh();
         document.querySelector('.detail-pane').classList.toggle('showing-exchange', showingGeneral);
         const responseInspector = document.querySelector('#response-inspector');
         responseInspector.hidden = showingGeneral || !['response', 'preview'].includes(state.inspectorTab);
+        const headersInspector = document.querySelector('#headers-inspector');
+        headersInspector.hidden = showingGeneral || state.inspectorTab !== 'headers';
+        const cookiesInspector = document.querySelector('#cookies-inspector');
+        cookiesInspector.hidden = showingGeneral || state.inspectorTab !== 'cookies';
         if (!responseInspector.hidden) {
           responseInspector.setAttribute('aria-labelledby', `inspector-tab-${state.inspectorTab}`);
           elements.requestInspector.hidden = true;
           document.querySelector('.detail-pane').classList.add('showing-exchange');
           trafficResponse.render(responseInspector, request, state.inspectorTab);
+          return;
+        }
+        if (!headersInspector.hidden || !cookiesInspector.hidden) {
+          elements.requestInspector.hidden = true;
+          document.querySelector('.detail-pane').classList.add('showing-exchange');
+          if (!headersInspector.hidden) renderTrafficHeaders(headersInspector, request, renderInspector);
+          else renderTrafficCookies(cookiesInspector, request, renderInspector, {requests: state.requests, events: state.events, selectRequest});
           return;
         }
         if (showingGeneral) {
@@ -6001,11 +6012,12 @@ invocationSitesPanel.refresh();
       }
 
       // The one Sources exclusion rule. Canvas images belong to Fingerprinting;
-      // request bodies and full targets are sensitive network evidence shown with
-      // their Traffic row (protocol/native-network-v2.md). None is listed, opened
-      // or loaded as a source file.
+      // request bodies, full targets, header blocks and cookie lists are
+      // sensitive network evidence shown with their Traffic row
+      // (protocol/native-network-v2.md and v3). None is listed, opened or loaded
+      // as a source file.
       function isSourceArtifact(artifact) {
-        return Boolean(artifact) && !['canvas_data_url', 'request_body', 'request_target'].includes(artifact.kind);
+        return Boolean(artifact) && !['canvas_data_url', 'request_body', 'request_target', 'request_headers', 'response_headers', 'cookie_list'].includes(artifact.kind);
       }
 
       function sourceIsCurrent(source) {
@@ -7543,8 +7555,8 @@ invocationSitesPanel.refresh();
       async function loadArtifactContent(artifact, {retry = false, canvasOwner = null} = {}) {
         if (artifact?.kind === 'canvas_data_url' && (!canvasOwner ||
             state.canvasPreviewOwners?.get(sourceIdentity(artifact)) !== canvasOwner || !canvasGalleryVisible() || state.artifactReceiverError)) return;
-        // Request content is read only by the Traffic views.
-        if (['request_body', 'request_target'].includes(artifact?.kind)) return;
+        // Request content, header blocks and cookie lists are read only by their Traffic views.
+        if (['request_body', 'request_target', 'request_headers', 'response_headers', 'cookie_list'].includes(artifact?.kind)) return;
         if (!sourceIsCurrent(artifact) || artifact.content !== undefined || artifact.loading || (artifact.loadError && !retry)) return;
         const identity = sourceIdentity(artifact);
         const controller = new AbortController();
@@ -7682,10 +7694,8 @@ invocationSitesPanel.refresh();
         const artifact = matches[0];
         if (!isSourceArtifact(artifact)) {
           state.sourceNoticeKind = 'warning';
-          state.sourceNotice = artifact.kind === 'request_body'
-            ? 'Request bodies are shown with their request in Traffic. No source was opened.'
-            : artifact.kind === 'request_target'
-            ? 'Full request targets are shown with their request in Traffic. No source was opened.'
+          state.sourceNotice = artifact.kind !== 'canvas_data_url'
+            ? `${{request_body: 'Request bodies are', request_target: 'Full request targets are', cookie_list: 'Cookie lists are'}[artifact.kind] ?? 'Header blocks are'} shown with their request in Traffic. No source was opened.`
             : 'Canvas images are shown in Fingerprinting. No source was opened.';
           renderSourceHealth();
           return false;

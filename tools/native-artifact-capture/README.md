@@ -106,6 +106,13 @@ exhaustion, a receiver refusal refund, 50 parallel bodies, the shared pool,
 16 MiB truncation, a missing completion, coding order, the capture-end
 partial, media opt-in, metadata-only sessions and tee refusal.
 
+Each content request's provisional header block (protocol/native-network-v3.md)
+takes the same sink path as a sensitive `request_headers` artifact;
+`request-headers.json` names its record, and a receiver without
+`--allow-sensitive` refuses it with an event joined to that record. Cookie
+lists take the same sink path; the production receiver and core validator
+accept the `cookie_list` kind in `tests/network_request_test.cpp`.
+
 ## Socket transport stages
 
 With `--receiver`, the runner also exercises the socket boundary the corpus

@@ -258,6 +258,54 @@ mojo::ScopedDataPipeConsumerHandle NativeArtifactCaptureSink::MaybeCaptureRespon
   return body;
 }
 
+std::uint64_t NativeArtifactCaptureSink::CaptureHeaderBlock(const NativeArtifactKind kind,
+                                                            const std::uint64_t request_id,
+                                                            const std::uint64_t frame_id,
+                                                            const std::uint64_t creator_event_id,
+                                                            std::string url,
+                                                            std::vector<std::uint8_t> content) {
+  if ((kind != NativeArtifactKind::kRequestHeaders &&
+       kind != NativeArtifactKind::kResponseHeaders && kind != NativeArtifactKind::kCookieList) ||
+      !IsEnabled() || creator_event_id == 0 || content.empty() ||
+      content.size() > kMaxArtifactBytes || url.empty() ||
+      url.size() > kNativeArtifactMaxUrlBytes) {
+    return 0;
+  }
+  auto reservation = NativeArtifactReservation::Acquire(memory_pool_, content.size());
+  if (!reservation.is_valid()) {
+    return 0;
+  }
+  std::string mime_type =
+      kind == NativeArtifactKind::kCookieList ? "application/x-reb-cookie-list" : "text/plain";
+  const std::uint64_t session_id = session_id_.load(std::memory_order_relaxed);
+  const std::uint64_t artifact_id = next_artifact_id_.fetch_add(1, std::memory_order_relaxed);
+  auto transfer = std::make_unique<NativeArtifactTransfer>();
+  transfer->header.kind = kind;
+  transfer->header.flags |= kNativeArtifactFlagSensitive;
+  transfer->header.session_id = session_id;
+  transfer->header.frame_id = frame_id;
+  transfer->header.artifact_id = artifact_id;
+  transfer->header.creator_event_id = creator_event_id;
+  transfer->header.capture_origin = NativeArtifactCaptureOrigin::kNetworkRequest;
+  transfer->header.content_size = content.size();
+  transfer->header.url_size = static_cast<std::uint32_t>(url.size());
+  transfer->header.mime_type_size = static_cast<std::uint32_t>(mime_type.size());
+  transfer->url = std::move(url);
+  transfer->mime_type = std::move(mime_type);
+  transfer->content = std::move(content);
+  transfer->reservation = std::move(reservation);
+  if (!NativeArtifactSocketClient::Get().Enqueue(std::move(transfer))) {
+    return 0;
+  }
+  pending_.emplace(artifact_id,
+                   PendingContext{.request_id = request_id,
+                                  .frame_id = frame_id,
+                                  .session_id = session_id,
+                                  .generation = generation_.load(std::memory_order_acquire),
+                                  .parent_event_id = creator_event_id});
+  return artifact_id;
+}
+
 NativeRequestContentAdmission NativeArtifactCaptureSink::CaptureRequestContent(
     NativeRequestContent content,
     std::uint64_t& artifact_id) {

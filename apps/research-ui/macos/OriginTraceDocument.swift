@@ -350,8 +350,8 @@ enum OriginTraceDocumentBuilder {
     ]
   }
 
-  // Request target, request body and response body records are fixed binary
-  // layouts (protocol/native-network-v2.md and v3), not text. A step names the record instead
+  // Request target, body, response body, header and cookie records are fixed
+  // binary layouts (protocol/native-network-v2.md and v3), not text. A step names the record instead
   // of decoding it, so no NUL or control byte reads as captured text; Traffic
   // decodes their fields. Mirrors binary_record_summary in
   // apps/origin-trace-backend/src/origin_trace.rs.
@@ -359,7 +359,10 @@ enum OriginTraceDocumentBuilder {
     category: String, operation: String, event: [String: Any]
   ) -> String? {
     guard category == "network",
-      ["request_target", "request_body", "response_body"].contains(operation),
+      [
+        "request_target", "request_body", "response_body", "request_headers", "response_headers",
+        "cookie_list", "script_cookie",
+      ].contains(operation),
       let payload = event["payload"] as? String
     else { return nil }
     return "Binary \(operation) record, \(payload.count / 2) bytes, not shown as text; Traffic shows its fields"

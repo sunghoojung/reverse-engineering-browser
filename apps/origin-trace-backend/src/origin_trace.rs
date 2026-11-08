@@ -236,16 +236,22 @@ fn step(value: &Value, relation: &str, confidence: &str) -> Result<Value> {
         json!({"event":{"session_id":session,"process_id":pid,"sequence_number":sequence},"monotonic_time_ns":value["monotonic_time_ns"],"category":value["category"],"operation":value["type"],"frame_id":value["frame_id"],"artifact_id":value["artifact_id"],"request_id":value["request_id"],"relation":relation,"confidence":confidence,"value":text}),
     )
 }
-// Request target, request body and response body records are fixed binary
-// layouts (protocol/native-network-v2.md and v3), not text. A step names the
-// record instead of decoding it, so no NUL or control byte reads as captured
+// Request target, body, response body, header and cookie records are fixed
+// binary layouts (protocol/native-network-v2.md and v3), not text. A step names
+// the record instead of decoding it, so no NUL or control byte reads as captured
 // text; Traffic decodes their fields. The Swift builder writes the same summary.
 fn binary_record_summary(value: &Value, size: usize) -> Option<String> {
     let operation = value["type"].as_str()?;
     (value["category"] == "network"
         && matches!(
             operation,
-            "request_target" | "request_body" | "response_body"
+            "request_target"
+                | "request_body"
+                | "response_body"
+                | "request_headers"
+                | "response_headers"
+                | "cookie_list"
+                | "script_cookie"
         ))
     .then(|| {
         format!(

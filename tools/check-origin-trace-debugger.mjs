@@ -942,7 +942,8 @@ const details = new TrafficFixtureNode();
 let selectedTraffic = uiRequest("inspect", {status: 200, hostOnly: true, path: "fixture.invalid"});
 trafficUI.renderTrafficDetails(details, selectedTraffic);
 const generalSection = details.querySelector(".traffic-general");
-assert.match(details.textContent, /Request and response headers are not captured\. Response bodies are on the Response tab\./);
+assert.match(details.textContent, /Response bodies are on the Response tab\./);
+assert.match(details.textContent, /headers and body bytes are recorded only in content capture sessions/);
 assert.match(details.textContent, /host only; path and query not captured/);
 {
   // Request body section: every record state reads as its own sentence and the
@@ -1265,14 +1266,18 @@ const summaryState = {selectedRequestId: "current", requests: [uiRequest("curren
   trafficDetailOpen: true, trafficSelectionNotice: null};
 const summaryElements = {};
 for (const name of ["selectedMethod", "selectedStatus", "selectedUrl", "requestCopyUrl", "requestCollectionPivot", "requestInspector", "requestFilter"]) summaryElements[name] = new TrafficFixtureNode();
-const summaryNodes = new Map(["#exchange-inspector", "#response-inspector", ".traffic-grid", ".detail-pane", "#request-evidence-toggle", "#request-package-entry"].map(key => [key, new TrafficFixtureNode()]));
-let renderedSummaryRequest;
+const summaryNodes = new Map(["#exchange-inspector", "#response-inspector", "#headers-inspector", "#cookies-inspector", ".traffic-grid", ".detail-pane", "#request-evidence-toggle", "#request-package-entry"].map(key => [key, new TrafficFixtureNode()]));
+let renderedSummaryRequest, renderedHeadersRequest, renderedCookiesRequest;
+const summaryTabs = ["general", "headers", "cookies"].map(name => Object.assign(new TrafficFixtureNode("button"), {dataset: {inspectorTab: name}}));
 const summaryInspector = runInNewContext(
   appSection("      function updateSelectionSummary(", "      function selectRequest(") +
   appSection("      function renderInspector()", "      function renderEvidence()") + ";renderInspector", {
     state: summaryState, elements: summaryElements, evidencePackagePanel: {sync() {}}, trafficCaptureExport: {sync() {}}, passiveSecurityPanel: {sync() {}}, capturedClientWorkflow: {sync() {}},
-    document: {querySelectorAll: () => [], querySelector: selector => summaryNodes.get(selector)},
+    document: {querySelectorAll: selector => selector === ".inspector-tab" ? summaryTabs : [], querySelector: selector => summaryNodes.get(selector)},
     renderTrafficDetails: (_container, request) => {renderedSummaryRequest = request;},
+    renderTrafficHeaders: (container, request) => {assert.equal(container, summaryNodes.get("#headers-inspector")); renderedHeadersRequest = request;},
+    renderTrafficCookies: (container, request, _rerender, context) => {assert.equal(container, summaryNodes.get("#cookies-inspector")); renderedCookiesRequest = [request, context];},
+    selectRequest: () => {},
     // Body loading is outside this slice; its states are checked with traffic_view.js.
     requestBodyView: () => null, requestTargetView: () => null, requestContentViewKey: () => '', requestFullUrl: () => null,
   });
@@ -1287,6 +1292,23 @@ summaryState.requests = [{...summaryState.requests[0], method: "POST", path: "ht
 summaryInspector();
 assert.equal(summaryElements.selectedMethod.textContent, "POST");
 assert.equal(summaryElements.selectedUrl.textContent, "https://fixture.invalid/new-path");
+summaryState.inspectorTab = "headers";
+summaryInspector();
+assert.equal(renderedHeadersRequest, summaryState.requests[0]);
+assert.equal(summaryNodes.get("#headers-inspector").hidden, false);
+assert.equal(summaryNodes.get("#exchange-inspector").hidden, true);
+assert.equal(summaryElements.requestInspector.hidden, true);
+summaryState.inspectorTab = "cookies";
+summaryInspector();
+assert.equal(renderedCookiesRequest[0], summaryState.requests[0]);
+assert.equal(renderedCookiesRequest[1].requests, summaryState.requests, "provenance reads the loaded requests");
+assert.equal(summaryNodes.get("#cookies-inspector").hidden, false);
+assert.equal(summaryNodes.get("#headers-inspector").hidden, true);
+assert.equal(summaryElements.requestInspector.hidden, true);
+summaryState.inspectorTab = "general";
+summaryInspector();
+assert.equal(summaryNodes.get("#headers-inspector").hidden, true);
+assert.equal(summaryNodes.get("#cookies-inspector").hidden, true);
 summaryState.requests = []; summaryState.selectedRequestId = null;
 summaryInspector();
 assert.equal(summaryElements.selectedStatus.textContent, "-");

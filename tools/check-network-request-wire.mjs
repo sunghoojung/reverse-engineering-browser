@@ -11,7 +11,8 @@ const exe = process.env.REB_NETWORK_REQUEST_TEST ?? new URL('build/tests/network
 assert(fs.existsSync(exe), `missing ${exe}; build it with make build/tests/network-request-test`);
 const source = fs.readFileSync(new URL('apps/research-ui/evidence_models.js', root), 'utf8');
 const model = new Function(`${source}
-return {decodeRequestBodyRecord, decodeRequestTargetRecord, decodeResponseBodyRecord, requestsFromEvents, isBrokerEvent, isBrokerResponse};`)();
+return {decodeRequestBodyRecord, decodeRequestTargetRecord, decodeResponseBodyRecord, decodeHeaderBlockRecord,
+  decodeCookieListRecord, decodeScriptCookieRecord, requestsFromEvents, isBrokerEvent, isBrokerResponse};`)();
 
 const cases = JSON.parse(execFileSync(exe, ['--golden'], {encoding: 'utf8'}));
 assert(cases.length > 40 && cases.some(item => item.valid) && cases.some(item => !item.valid));
@@ -23,8 +24,10 @@ for event in json.load(sys.stdin):
 const verdicts = execFileSync('python3', ['-c', python, new URL('tools/validate-evidence-store.py', root).pathname],
   {input: JSON.stringify(cases.map(item => item.event)), encoding: 'utf8'}).trim().split('\n').map(value => value === 'true');
 cases.forEach((item, index) => {
-  const decode = item.event.type === 'request_target' ? model.decodeRequestTargetRecord
-    : item.event.type === 'response_body' ? model.decodeResponseBodyRecord : model.decodeRequestBodyRecord;
+  const decode = {request_target: model.decodeRequestTargetRecord, response_body: model.decodeResponseBodyRecord,
+    request_headers: model.decodeHeaderBlockRecord, response_headers: model.decodeHeaderBlockRecord,
+    cookie_list: model.decodeCookieListRecord, script_cookie: model.decodeScriptCookieRecord}[item.event.type] ??
+    model.decodeRequestBodyRecord;
   assert.equal(decode(item.event) !== null, item.valid, `UI decoder: ${item.name}`);
   assert.equal(verdicts[index], item.valid, `Python validator: ${item.name}`);
   // The generic envelope stays acceptable so a malformed child cannot fail a poll.
@@ -124,5 +127,47 @@ assert.equal(row.responseBody, null, 'a body record of another parent is not thi
 [row] = model.requestsFromEvents([start, redirect, hopBody], 'live');
 assert.deepEqual([row.responseStarted, row.responseBody, row.redirectedBody], [null, null, true]);
 
+// Header blocks (native-network-v3.md) join exact lifecycle parents per hop.
+{
+const provisional = Object.assign(golden('request headers browser state 1'), {sequence_number: '15', parent_event_id: '11'});
+const answered = Object.assign(golden('response headers browser state 1'), {sequence_number: '22', parent_event_id: '20'});
+const orphan = Object.assign(golden('response headers browser state 2'), {sequence_number: '23', parent_event_id: '9'});
+const broken = Object.assign(golden('header missing digest'), {sequence_number: '24', parent_event_id: '20'});
+[row] = model.requestsFromEvents([start, target, body, provisional, redirect, answered, orphan, broken], 'live');
+assert.equal(row.headerBlocks.length, 3, 'a block without its exact parent is not attached');
+const [request, response, malformed] = row.headerBlocks;
+assert.equal(request.source, 'browser');
+assert.equal(request.referrerPolicy, 'unsafe-url');
+assert.equal(request.state, 'captured');
+assert.equal(response.kind, 'response');
+assert.equal(response.statusCode, 302);
+assert.equal(response.remoteAddress, '[2020:2020:2020:2020:2020:2020:2020:2020]');
+assert.equal(response.remotePort, 443);
+assert.equal(response.hop, 1);
+assert.deepEqual(malformed, {malformed: true, kind: 'request', sequenceNumber: '24'});
+assert(model.isBrokerEvent(broken), 'a malformed header child cannot fail the poll');
+
+// Cookie lists join the hop start record; script records decode on their own.
+const sentList = Object.assign(golden('cookie list sent state 1'), {sequence_number: '16', parent_event_id: '11'});
+const receivedList = Object.assign(golden('cookie list received state 2'), {sequence_number: '25', parent_event_id: '20'});
+const strayList = Object.assign(golden('cookie list sent state 3'), {sequence_number: '26', parent_event_id: '8'});
+[row] = model.requestsFromEvents([start, target, body, sentList, redirect, receivedList, strayList], 'live');
+assert.equal(row.cookieLists.length, 2, 'a list without its exact parent is not attached');
+assert.equal(row.cookieLists[0].direction, 'sent');
+assert.equal(row.cookieLists[0].blockedCount, 1);
+assert.equal(row.cookieLists[1].direction, 'received');
+assert.equal(row.cookieLists[1].state, 'captured_shared');
+assert.equal(row.cookieLists[1].hop, 2);
+const write = model.decodeScriptCookieRecord(golden('script cookie api 1'));
+assert.equal(write.api, 'document.cookie set');
+assert.equal(write.namePrefix, 'sid');
+assert.equal(write.frame.scriptId, 77);
+assert.equal(write.frame.position, 1234);
+assert.equal(write.valueSha256, '5a'.repeat(32));
+const longName = model.decodeScriptCookieRecord(golden('script cookie long name'));
+assert.equal(longName.nameTruncated, true);
+assert.equal(longName.namePrefix, 'n'.repeat(24));
+}
+
 console.log(`PASS network request wire: ${cases.length} C++ golden records agree with Python and the UI decoders; ` +
-  'rows join exact target/body/response-body children, truncated, metadata-only, malformed, missing, partial and redirect cases');
+  'rows join exact target/body/response-body/header/cookie children, truncated, metadata-only, malformed, missing, partial and redirect cases; script cookie records decode');

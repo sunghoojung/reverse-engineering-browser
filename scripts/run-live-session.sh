@@ -942,7 +942,7 @@ else
   echo "Canvas image capture: disabled; set REB_CAPTURE_CANVAS_IMAGES=1 to enable it for one session"
 fi
 if [[ "${capture_request_content}" == 1 ]]; then
-  echo "Request content capture: enabled for this session; request paths, queries and bodies are retained locally, at most ${request_content_budget_mib} MiB of unique content"
+  echo "Request content capture: enabled for this session; request paths, queries, headers, cookies and bodies are retained locally, at most ${request_content_budget_mib} MiB of unique content"
   echo "Response body capture: enabled for this session; at most ${response_body_budget_mib} MiB of unique response bytes, element media $([[ "${capture_response_media}" == 1 ]] && echo retained || echo skipped)"
 else
   echo "Request content capture: disabled; hosts and body length, type and digest only. Set REB_CAPTURE_REQUEST_CONTENT=1 to retain paths, request bodies and response bodies"

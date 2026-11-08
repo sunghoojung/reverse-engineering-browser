@@ -94,9 +94,11 @@ it.
 
 - Sensitive capture requires an enabled, visibly labeled session. Content mode
   is the default for captures the packaged app starts: for its bounded session
-  it turns on retention of request paths, queries and bodies up to 16 MiB each
-  and of Canvas images, and the titlebar labels that session "Content
-  capture". **Metadata
+  it turns on retention of request paths, queries and bodies up to 16 MiB each,
+  of request and response headers, including `Cookie`, `Set-Cookie` and
+  `Authorization`, of the cookies each request sent and received and the
+  cookie names and value digests page script used, and of Canvas images, and
+  the titlebar labels that session "Content capture". **Metadata
   only** is the opt-out, chosen in **New Live Session…** or with
   `REB_AUTOMATIC_CAPTURE_MODE=metadata`; any other value but `content` also
   selects it. The app saves no choice between launches, and a choice made in the

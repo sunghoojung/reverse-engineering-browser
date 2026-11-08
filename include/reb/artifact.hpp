@@ -41,6 +41,9 @@ enum class ArtifactKind : std::uint16_t {
   kWasmGuestAdapter = 7,
   kRequestBody = 8,
   kRequestTarget = 9,
+  kRequestHeaders = 10,
+  kResponseHeaders = 11,
+  kCookieList = 12,
 };
 
 enum class ArtifactCaptureOrigin : std::uint16_t {

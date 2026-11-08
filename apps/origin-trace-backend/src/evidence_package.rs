@@ -467,13 +467,17 @@ fn identities<'a>(
                 let kind = value["kind"].as_str().unwrap_or("");
                 let origin = value["capture_origin"].as_str().unwrap_or("");
                 let context = unsigned(&value["execution_context_id"], false);
+                let network_request = matches!(
+                    kind,
+                    "request_body"
+                        | "request_target"
+                        | "request_headers"
+                        | "response_headers"
+                        | "cookie_list"
+                );
                 if value["sensitive"].as_bool()
-                    != Some(matches!(
-                        kind,
-                        "response_body" | "canvas_data_url" | "request_body" | "request_target"
-                    ))
-                    || (matches!(kind, "request_body" | "request_target")
-                        != (origin == "network_request"))
+                    != Some(network_request || matches!(kind, "response_body" | "canvas_data_url"))
+                    || (network_request != (origin == "network_request"))
                     || (value["execution_context_id"].is_null() && origin != "unknown")
                     || (origin == "dynamic_javascript"
                         && (kind != "javascript" || context.is_none_or(|id| id == 0)))
@@ -1744,6 +1748,10 @@ mod tests {
             "wasm_execution_outcome",
             "wasm_dispatch_overflow",
             "wasm_indirect_overflow",
+            "request_headers",
+            "response_headers",
+            "cookie_list",
+            "script_cookie",
         ] {
             let mut event: Value = serde_json::from_slice(first).unwrap();
             event["type"] = json!(kind);

@@ -24,7 +24,8 @@ interface NativeProbeClient {
             array<uint8> js_invocation_sites,
             // The session's sensitive opt-in for settled-value digests.
             bool js_invocation_digests,
-            // --reb-capture-request-content: renderer request targets.
+            // --reb-capture-request-content: renderer request targets and
+            // script cookie records (protocol/native-network-v3.md).
             bool capture_request_content,
             // --reb-capture-browser-internal: record internal schemes.
             bool capture_browser_internal);

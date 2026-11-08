@@ -24,6 +24,7 @@
 #include "brave/components/reverse_engineering_browser/common/native_probe_event.h"
 #include "brave/components/reverse_engineering_browser/common/native_wasm_guest.h"
 #include "brave/components/reverse_engineering_browser/common/native_wasm_sample_budget.h"
+#include "network_headers_stub.h"
 #include "network_request_body_stub.h"
 
 template <class T>
@@ -196,13 +197,15 @@ class GURL {
   bool has_query_ = false;
 };
 namespace net {
-struct HttpResponseHeaders {
+class HttpResponseHeaders {
+ public:
   int code = 200;
   std::optional<std::string> content_encoding;
   int response_code() const { return code; }
   std::optional<std::string> GetNormalizedHeader(std::string_view name) const {
     return name == "Content-Encoding" ? content_encoding : std::nullopt;
   }
+  bool EnumerateHeaderLines(std::size_t*, std::string*, std::string*) const { return false; }
 };
 struct RedirectInfo {
   std::string new_method = "GET";
@@ -215,8 +218,11 @@ struct ResourceRequest {
   bool originated_from_service_worker = false;
   std::string method = "GET";
   GURL url;
+  net::ReferrerPolicy referrer_policy = net::ReferrerPolicy::NEVER_CLEAR;
   net::HttpRequestHeaders headers;
+  net::HttpRequestHeaders cors_exempt_headers;
   std::shared_ptr<ResourceRequestBody> request_body;
+  std::optional<std::string> devtools_request_id;
 };
 struct URLLoaderCompletionStatus {
   int error_code = 0;
@@ -227,6 +233,8 @@ namespace mojom {
 class URLResponseHead {
  public:
   std::shared_ptr<net::HttpResponseHeaders> headers = std::make_shared<net::HttpResponseHeaders>();
+  net::IPEndPoint remote_endpoint;
+  bool emitted_extra_info = false;
   std::int64_t content_length = 0;
   std::int64_t encoded_data_length = 0;
   bool was_fetched_via_cache = false;

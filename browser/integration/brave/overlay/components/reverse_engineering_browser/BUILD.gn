@@ -100,6 +100,8 @@ component("renderer_sink") {
   sources = [
     "common/native_js_dispatch.h",
     "common/native_js_invocation.h",
+    "common/native_network_cookies.h",
+    "common/native_network_headers.h",
     "common/native_network_request.h",
     "common/native_network_scope.h",
     "common/native_probe_event.h",
@@ -111,6 +113,8 @@ component("renderer_sink") {
     "renderer/native_fetch_owner.h",
     "renderer/native_probe_sink.h",
     "renderer/native_renderer_request.h",
+    "renderer/native_script_cookie_sink.cc",
+    "renderer/native_script_cookie_sink.h",
     "renderer/native_worker_observation_sink.cc",
     "renderer/native_worker_observation_sink.h",
     "renderer/native_worker_source_sink.cc",
@@ -123,6 +127,22 @@ component("renderer_sink") {
     "//base",
     "//crypto",
   ]
+}
+
+# Linked by content's NetworkServiceDevToolsObserver (Chromium patch 0025) and
+# the browser sink, so one observer slot serves both in component builds.
+component("network_headers_hook") {
+  output_name = "reverse_engineering_browser_network_headers_hook"
+
+  defines = [ "IS_REB_NETWORK_HEADERS_HOOK_IMPL" ]
+
+  sources = [
+    "common/native_network_headers_hook.cc",
+    "common/native_network_headers_hook.h",
+  ]
+
+  public_deps = [ "//services/network/public/mojom" ]
+  deps = [ "//base" ]
 }
 
 static_library("renderer") {
@@ -148,6 +168,8 @@ static_library("renderer") {
     "renderer/native_console_runtime.h",
     "renderer/native_probe_transport.cc",
     "renderer/native_probe_transport.h",
+    "renderer/native_script_position.cc",
+    "renderer/native_script_position.h",
   ]
 
   deps = [
@@ -208,6 +230,8 @@ source_set("browser") {
     "common/native_js_dispatch_sites.h",
     "common/native_js_invocation.h",
     "common/native_js_invocation_sites.h",
+    "common/native_network_cookies.h",
+    "common/native_network_headers.h",
     "common/native_network_lifecycle.h",
     "common/native_network_request.h",
     "common/native_network_response_body.h",
@@ -228,6 +252,7 @@ source_set("browser") {
   deps = [
     ":console_protocol",
     ":mojom",
+    ":network_headers_hook",
     ":queue",
     ":worker_metadata",
     "//base",

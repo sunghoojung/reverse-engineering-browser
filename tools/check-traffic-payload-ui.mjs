@@ -1,8 +1,9 @@
 // The shipped Payload tab (apps/research-ui/traffic_payload.js) with the shipped
-// tokenizer and body record helpers in a DOM model: query parameters, JSON tree
-// and source, form, multipart, text, binary, empty and missing bodies, capture
-// limits, digest and load failures, a 5 MiB JSON body, keyboard, find and copy.
-// Captured markup must stay text. Not rendered QA.
+// tokenizer, shared code view and body record helpers in a DOM model: query
+// parameters, JSON tree and source laid out by Oxc or the in-page layout, raw
+// ranges of laid-out tokens, form, multipart, text, binary, empty and missing
+// bodies, capture limits, digest and load failures, a 5 MiB JSON body,
+// keyboard, find and copy. Captured markup must stay text. Not rendered QA.
 // Requires: npm ci --prefix tools/ui-startup-deps --ignore-scripts --no-audit --no-fund
 import assert from 'node:assert/strict';
 import {readFile} from 'node:fs/promises';
@@ -14,12 +15,17 @@ const {parseHTML} = require('./ui-startup-deps/node_modules/linkedom');
 const ui = new URL('../apps/research-ui/', import.meta.url);
 const {window, document} = parseHTML('<!doctype html><div id="panel"></div>');
 const copied = [];
-const context = createContext({window, document, URL, TextDecoder, TextEncoder, Uint8Array, console,
+const context = createContext({window, document, URL, TextDecoder, TextEncoder, Uint8Array, console, AbortController, setTimeout, clearTimeout,
   navigator: {clipboard: {writeText: async text => {copied.push(text);}}}});
-for (const file of ['source_syntax.js', 'traffic_view.js', 'traffic_payload.js']) {
+for (const file of ['source_syntax.js', 'source_format.js', 'code_view.js', 'traffic_view.js', 'traffic_payload.js']) {
   runInContext(await readFile(new URL(file, ui), 'utf8'), context, {filename: file});
 }
-runInContext('globalThis.api = {renderTrafficPayload, trafficPayloadPairs, trafficPayloadMultipart};', context);
+// get_source_format replies queued by the test; the in-page layout runs without a worker.
+const formatReplies = [], formatReads = [];
+context.formatRequest = async url => {formatReads.push(url); return formatReplies.shift()(url);};
+runInContext(`trafficPayloadLayouts = createCodeLayouts({request: formatRequest, layouts: createSourceLayoutWorker({spawn: null, defer: callback => callback()}),
+  onChange: () => trafficPayloadShown?.relayout?.()});
+globalThis.api = {renderTrafficPayload, trafficPayloadPairs, trafficPayloadMultipart};`, context);
 const {api} = context;
 const panel = document.getElementById('panel');
 // The DOM model has no focus tracking; record what the view focuses.
@@ -132,7 +138,11 @@ render(jsonRequest, ready(json));
 assert.equal(tree(), keptTree, 'an unchanged body is not rebuilt');
 click(button('Source'));
 const sourceLines = () => all('.traffic-payload-lines .traffic-payload-line').map(row => row.textContent);
+assert.deepEqual(sourceLines(), [json], 'the body shows as sent until its layout settles');
+assert.match(text('[data-section="payload"]'), /Formatting…/);
+await settle();
 assert.deepEqual(sourceLines().slice(0, 3), ['{', '  "sitekey": "site-key",', `  "note": ${JSON.stringify(markup)},`]);
+assert.equal(formatReads.length, 0, 'a body without a catalog artifact is laid out in the page');
 assert(panel.querySelector('.traffic-payload-lines .syntax-string'), 'source is syntax-colored');
 assertInert('JSON source');
 assert(panel.querySelector('.traffic-payload-lines').classList.contains('is-wrapped'));
@@ -158,6 +168,7 @@ assert.equal(text('.traffic-payload-tree .is-current'), 'x: "y"', 'Enter reveals
 press(find(), 'Enter', {shiftKey: true});
 assert.equal(text('.traffic-payload-matches'), '1 of 2');
 click(button('Source'));
+await settle();
 assert.equal(text('.traffic-payload-matches'), '1 of 2');
 assert.deepEqual(all('.traffic-payload-lines mark').map(mark => mark.textContent), ['x', 'x']);
 assert.equal(all('.traffic-payload-lines mark.is-current').length, 1);
@@ -165,6 +176,40 @@ press(find(), 'Escape');
 assert.equal(all('.traffic-payload-lines mark').length, 0, 'Escape clears find');
 click(button('Parsed'));
 console.log('PASS Payload find: counts, next and previous, reveals collapsed tree nodes, marks source text, Escape clears');
+
+// A retained JSON body uses the backend Oxc layout, whose tokens map to exact raw ranges; a refused layout falls back with its reason.
+{
+  const sha = 'cd'.repeat(32), body = '{"a":[1,2],"b":{"c":"d"}}', laid = '{ "a": [1, 2], "b": { "c": "d" } }';
+  const artifact = {artifact_id: '902', session_id: '7', kind: 'request_body', mime_type: 'application/json', url: 'https://api.test/collect',
+    sha256: sha, byte_size: body.length};
+  const document = (extra = {}) => url => ({ok: true, status: 200, json: async () => ({schema: 'source-format-v1', mapping: 'whitespace-only',
+    source: {artifact_id: '902', sha256: sha}, language: 'json', ...extra})});
+  formatReplies.push(document({status: 'formatted', text: laid}));
+  const oxcRequest = request(record({artifactId: '902', bodyLength: String(body.length), capturedLength: String(body.length)}));
+  render(oxcRequest, ready(body, {artifact}));
+  click(button('Source'));
+  await settle();
+  assert.match(formatReads.at(-1), /^\/api\/source-format\?session_id=7&artifact_id=902&language=json$/);
+  assert.deepEqual(sourceLines(), [laid]);
+  assert.doesNotMatch(text('[data-section="payload"]'), /Whitespace layout|Formatting/);
+  const token = all('.traffic-payload-lines .syntax-key').find(node => node.textContent === 'c');
+  click(token);
+  const raw = body.indexOf('"c"') + 1;
+  assert.equal(text('.code-view-raw'), `Line 1, Column ${laid.indexOf('"c"') + 2} · raw 1:${raw + 1}–1:${raw + 2} (offsets ${raw}–${raw + 1})`);
+  formatReplies.push(document({status: 'unavailable', reason: 'parse-failed', text: null}));
+  render(request(record({artifactId: '903'})), ready(body, {artifact: {...artifact, artifact_id: '903', sha256: 'ef'.repeat(32)}}));
+  await settle();
+  assert.match(text('[data-section="payload"]'), /Formatter response does not match this artifact/);
+  const refused = {...artifact, artifact_id: '904', sha256: '12'.repeat(32)};
+  formatReplies.push(url => ({ok: true, status: 200, json: async () => ({schema: 'source-format-v1', mapping: 'whitespace-only',
+    source: {artifact_id: '904', sha256: refused.sha256}, status: 'unavailable', reason: 'parse-failed', text: null})}));
+  render(request(record({artifactId: '904'})), ready(body, {artifact: refused}));
+  await settle();
+  assert.match(text('[data-section="payload"]'), /Whitespace layout: Oxc could not parse this file\./);
+  assert.equal(sourceLines()[0], '{', 'the in-page layout is shown instead');
+  click(button('Parsed'));
+}
+console.log('PASS Payload source layout: Oxc layout of a retained JSON body by exact artifact and language, token raw range, failed and refused layouts fall back to the in-page layout with the reason');
 
 // Large containers expand in ranges of at most 100 rows.
 const array = JSON.stringify(Array.from({length: 25000}, (_, index) => index));
@@ -314,6 +359,7 @@ assert.equal(text('.traffic-payload-tree .is-current'), 'needle: "deep-match"');
 assert(panel.querySelectorAll('*').length < 2500, `the DOM stays bounded: ${panel.querySelectorAll('*').length} elements`);
 started = performance.now();
 click(button('Source'));
+await settle();
 const source = performance.now() - started;
 assert(all('.traffic-payload-lines .traffic-payload-line').length <= 400, 'source renders its rows in blocks');
 assert(all('.traffic-payload-lines mark.is-current').length === 1, 'the source match is revealed');

@@ -1,4 +1,4 @@
-// Shipped source_syntax.js, source_format.js and app.css against the Rosé Pine theme and the layout mapping.
+// Shipped source_syntax.js, source_format.js, code_view.js and app.css against the Rosé Pine theme, the layout mapping and paged layouts.
 import assert from 'node:assert/strict';
 import {readFile} from 'node:fs/promises';
 import {join} from 'node:path';
@@ -10,9 +10,11 @@ export async function checkSourceFormatUI(root) {
   const fixture = name => read(`tools/fixtures/source-format/${name}`);
   const timers = [];
   const syntax = await read('apps/research-ui/source_syntax.js'), format = await read('apps/research-ui/source_format.js');
-  const model = runInNewContext(`${syntax}\n${format}
-    ;({createSourceTokenizer, sourceSyntaxTokens, sourceWhitespaceMap, sourceWhitespaceWalker, sourceWhitespaceRange, sourceLayoutTask, createSourceLayoutWorker,
-      createSourceFormatClient, prettyPrintSource, SOURCE_HIGHLIGHT_TOKEN_LIMIT})`,
+  const codeView = await read('apps/research-ui/code_view.js');
+  const model = runInNewContext(`${syntax}\n${format}\n${codeView}
+    ;({createSourceTokenizer, sourceSyntaxTokens, sourceWhitespaceMap, sourceWhitespaceWalker, sourceWhitespaceRange, sourceWhitespaceInverse, sourceLayoutTask, createSourceLayoutWorker,
+      createSourceFormatClient, sourceFormatLanguage, sourceFormatBlock, prettyPrintSource, SOURCE_HIGHLIGHT_TOKEN_LIMIT, sourceDocumentIndex, sourcePageIndex,
+      sourceDocumentWindow, sourceDocumentOffset, sourceDocumentPosition, sourceDocumentMatches, sourceWindowMapping, createSourceHighlighter, codeViewRows})`,
   {URL, AbortController, setTimeout: (callback, delay) => {timers.push({callback, delay}); return timers.length;}, clearTimeout() {}});
 
   const kinds = (source, text) => {
@@ -171,8 +173,101 @@ export async function checkSourceFormatUI(root) {
     await settle();
     assert.equal(client.view(other, original).text, formatted);
   }
+  // Bodies: a request or response body is laid out as its type, or as the language the caller parsed.
+  assert.equal(model.sourceFormatLanguage({kind: 'response_body', mime_type: 'application/problem+json; charset=utf-8'}), 'json');
+  assert.equal(model.sourceFormatLanguage({kind: 'request_body', mime_type: 'text/plain', language: 'json'}), 'json');
+  assert.equal(model.sourceFormatLanguage({kind: 'response_body', mime_type: 'application/x-javascript'}), 'javascript');
+  assert.equal(model.sourceFormatLanguage({kind: 'response_body', mime_type: 'text/css'}), null);
+  assert.equal(model.sourceFormatLanguage({kind: 'request_target', mime_type: 'application/json'}), null);
+  const body = {...source, kind: 'request_body', mime_type: 'text/plain', language: 'json', content: '[1,2]', byte_size: 5, sha256: 'b'.repeat(64)};
+  replies.push(url => ({ok: true, status: 200, json: async () => ({...document({status: 'formatted', text: '[1, 2]'}, body.sha256), url})}));
+  client.view(body, '[1,2]');
+  await settle();
+  assert.equal(client.view(body, '[1,2]').text, '[1, 2]');
+  assert.equal(client.view({...body, byte_size: 5 * 1024 * 1024, sha256: 'c'.repeat(64)}, '[1,2]').notice, 'Oxc lays out bodies up to 4 MiB here');
+
+  // Paged layouts: whole 1,000-line pages, each checked against its slice of the original between two anchors.
+  const unit = 'var a=[1,2],b=function(){return 3};';
+  const big = unit.repeat(900), bigLaid = 'var a = [1, 2],\n  b = function () {\n    return 3\n  };\n'.repeat(900).slice(0, -1);
+  const lines = bigLaid.split('\n'), anchors = [];
+  for (let block = 0; block * 1000 < lines.length; block++) {
+    const before = lines.slice(0, block * 1000).join('\n').replace(/\s/g, '').length;
+    let at = 0, seen = 0;
+    while (seen < before) if (!/\s/.test(big[at++])) seen++;
+    while (at < big.length && /\s/.test(big[at])) at++;
+    anchors.push(at);
+  }
+  const bigSource = {...source, artifact_id: '9', sha256: 'd'.repeat(64), byte_size: big.length, content: big};
+  const pageReply = (block, extra = {}) => url => ({ok: true, status: 200, json: async () => ({schema: 'source-format-v1', mapping: 'whitespace-only',
+    source: {artifact_id: '9', sha256: bigSource.sha256}, status: 'formatted', language: 'javascript', line_count: lines.length,
+    anchors: {lines: 1000, source_utf16: anchors}, window: {start_line: block * 1000 + 1, line_count: Math.min(1000, lines.length - block * 1000)},
+    text: lines.slice(block * 1000, block * 1000 + 1000).join('\n'), url, ...extra})});
+  const paged = model.createSourceFormatClient({request: async url => replies.shift()(url), onChange: () => {},
+    layouts: model.createSourceLayoutWorker({spawn: null, defer: callback => callback()})});
+  replies.push(pageReply(0));
+  assert.equal(paged.page(bigSource, big, 1500).pending, true, 'the first page names the layout before a later one is asked for');
+  await settle();
+  replies.push(pageReply(1));
+  assert.equal(paged.page(bigSource, big, 1500).pending, true);
+  await settle();
+  const second = paged.page(bigSource, big, 1500);
+  assert.deepEqual([second.paged, second.lineBase, second.lineCount, second.base], [true, 1000, lines.length, anchors[1]]);
+  replies.push(pageReply(2));
+  const loading = paged.page(bigSource, big, 2000);
+  assert.equal(loading.pending, true);
+  assert.equal(loading.previous, second, 'the page shown last stays while another loads');
+  await settle();
+  assert.equal(paged.page(bigSource, big, 2999).lineBase, 2000);
+  assert.equal(paged.page(bigSource, big, 999).lineBase, 0, 'a page read before is kept');
+  replies.push(pageReply(3));
+  paged.page(bigSource, big, 99999);
+  await settle();
+  assert.equal(paged.page(bigSource, big, 99999).lineBase, 3000, 'a line past the end shows the last page');
+  assert.equal(model.sourceFormatBlock(anchors, anchors[2] + 5), 2);
+  const wrong = {...bigSource, sha256: 'e'.repeat(64)};
+  replies.push(url => ({...pageReply(0)(url), json: async () => ({...(await pageReply(0)(url).json()), source: {artifact_id: '9', sha256: wrong.sha256},
+    anchors: {lines: 1000, source_utf16: anchors.slice(1)}})}));
+  paged.page(wrong, big, 0);
+  await settle();
+  assert.match(paged.page(wrong, big, 0).notice, /window does not match its layout/);
+
+  // The editor's page index keeps absolute lines and maps every row through the page's anchor.
+  const index = model.sourcePageIndex(second.text, second.lineBase, second.lineCount);
+  const window = model.sourceDocumentWindow(index, 1500, 4);
+  assert.deepEqual([window.start, window.end, window.line, window.rows[0].line], [1000, 2000, 1500, 1000]);
+  assert.equal(model.sourceDocumentOffset(index, 999), null, 'a line of another page is not in this one');
+  assert.equal(model.sourceDocumentPosition(index, model.sourceDocumentOffset(index, 1500)).line, 1500);
+  assert.equal(model.sourceDocumentMatches(index, 'return', 1).matches[0].line, 1002);
+  const mapping = model.sourceWindowMapping(big, big, null, second);
+  const visibleAt = second.text.indexOf('function');
+  const mapped = mapping.position(visibleAt, visibleAt + 1);
+  const originalIndex = model.sourceDocumentIndex(big);
+  assert.deepEqual(mapped, model.sourceDocumentPosition(originalIndex, anchors[1] + second.sourceInput.indexOf('function')));
+  const inverse = model.sourceWhitespaceInverse(second.sourceInput, second.text);
+  const returnAt = second.sourceInput.indexOf('return');
+  assert.equal(inverse(returnAt), second.text.indexOf('return'));
+  assert.equal(inverse(second.sourceInput.indexOf('return', returnAt + 1)), second.text.indexOf('return', second.text.indexOf('return') + 1));
+  assert.equal(inverse(0), second.text.search(/\S/));
+
+  // A page that starts inside a block comment takes the original's lexer state there.
+  const commented = 'var x=1;/*\n' + 'note\n'.repeat(3) + '*/var y=2;';
+  const before = model.createSourceHighlighter({kind: 'javascript'}, model.sourceDocumentIndex(commented));
+  const pageText = 'note\nnote\n*/var y = 2;';
+  const seeded = model.createSourceHighlighter({kind: 'javascript'}, model.sourcePageIndex(pageText, 1000, 1003),
+    {highlighter: before, offset: commented.indexOf('note', commented.indexOf('note') + 1)});
+  const rows = model.sourceDocumentWindow(model.sourcePageIndex(pageText, 1000, 1003), 1000, 0).rows;
+  assert.equal(seeded.ready(rows), false, 'a seeded page waits for the original lexer');
+  while (!seeded.ready(rows)) seeded.advance(1024);
+  assert.equal(seeded.rows(rows).rows[0][0].type, 'comment', 'the page continues the comment');
+  assert.equal(seeded.rows(rows).rows[2].find(token => token.text === 'var').type, 'keyword');
+
+  // Shared code view rows: CR dropped at line ends, long lines continue, no split surrogate.
+  const longLine = 'x'.repeat(4095) + '\u{1f600}' + 'y';
+  const viewRows = model.codeViewRows(`a\r\n${longLine}\n`);
+  assert.equal(JSON.stringify(viewRows.map(row => [row.line, row.columnStart, row.text.length])), '[[0,0,1],[1,0,4095],[1,4095,3],[2,0,0]]');
+
   assert(timers.every(timer => timer.delay === 180000), 'Each request has a deadline');
-  console.log('PASS source format UI: TextMate-scope token kinds for JavaScript, JSON, CSS and HTML fixtures, Rosé Pine Moon/Dawn values and Increase Contrast in app.css, exact whitespace-only map in any lookup order and raw ranges, layout worker reply/fallback/entry, client pending/formatted/fallback/retry (shipped modules, not rendered QA)');
+  console.log('PASS source format UI: TextMate-scope token kinds for JavaScript, JSON, CSS and HTML fixtures, Rosé Pine Moon/Dawn values and Increase Contrast in app.css, exact whitespace-only map in any lookup order and raw ranges, layout worker reply/fallback/entry, client pending/formatted/fallback/retry, body languages and the 4 MiB whole-body bound, paged layouts checked per page against their anchors with the last page kept while another loads, absolute page lines, page-to-original mapping and inverse walk, a page seeded with the original lexer state, shared code view rows (shipped modules, not rendered QA)');
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) await checkSourceFormatUI(fileURLToPath(new URL('..', import.meta.url)));

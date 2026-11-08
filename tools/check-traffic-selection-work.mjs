@@ -75,6 +75,8 @@ function fixture(appSource = app, trafficSource = traffic, count = 5000) {
   };
   const elements = Object.fromEntries(['requestTabScopes', 'requestDomain', 'requestFilter', 'requestRows', 'requestLatest', 'selectedMethod', 'selectedStatus', 'selectedUrl',
     'requestCopyUrl', 'prompt'].map(name => [name, new Node()]));
+  // A 20-row view: 20 rows plus 8 of overscan mount at the top of the list.
+  elements.requestRows.clientHeight = 480; elements.requestRows.dataset.rowHeight = '24';
   const requests = Array.from({length: count}, (_, index) => ({id: `request-${index}`,
     method: index % 3 ? 'GET' : 'POST', path: `https://fixture-${index % 8}.invalid/item-${String(index).padStart(5, '0')}`,
     status: 200, time: index / 10, type: 'xhr', origin: 'demo', tabId: String(index % 8),
@@ -105,14 +107,24 @@ function fixture(appSource = app, trafficSource = traffic, count = 5000) {
   `;
   const api = runInNewContext(trafficSource + '\n' +
     part(appSource, '      function requestDomain(', '      function requestTraceRoot(') + instrument +
-    ';({renderRequests, selectRequest, moveRequestSelection})', context);
+    ';({renderRequests, selectRequest, moveRequestSelection, remountTrafficRows})', context);
   const rows = () => elements.requestRows.querySelectorAll('.request-row');
   return {state, elements, document, stats, clearStats, api, rows, nodes};
 }
 
 {
   const t = fixture(); t.api.renderRequests();
-  assert.equal(t.rows().length, 500); assert.equal(t.state.trafficSearchMatches.size, 625);
+  assert.equal(t.rows().length, 28, 'only the rows in view and the overscan are mounted');
+  assert.equal(t.state.trafficSearchMatches.size, 625);
+  assert.deepEqual([t.rows()[0].getAttribute('aria-posinset'), t.rows()[0].getAttribute('aria-setsize')], ['1', '625']);
+  assert.equal(t.elements.requestRows.children.at(-1).className, 'request-spacer', 'a spacer stands for the unmounted rows');
+  // Scrolling within the overscan mounts nothing; past it, the read block remounts without filtering or sorting again.
+  t.elements.requestRows.scrollTop = 4 * 24; t.clearStats(); t.api.remountTrafficRows(t.elements.requestRows);
+  assert.equal(t.stats.moves, 0);
+  t.elements.requestRows.scrollTop = 30 * 24; t.api.remountTrafficRows(t.elements.requestRows);
+  assert.deepEqual([Number(t.rows()[0].dataset.position), Number(t.rows().at(-1).dataset.position)], [22, 57]);
+  assert.equal(t.stats.searches + t.stats.sorts, 0);
+  t.elements.requestRows.scrollTop = 0; t.api.remountTrafficRows(t.elements.requestRows);
   const first = t.rows()[20], next = t.rows()[21], firstChildren = [...first.children];
   first.focus(); t.elements.requestRows.scrollTop = 360; t.elements.requestRows.scrollLeft = 11;
   t.clearStats(); first.click();
@@ -131,7 +143,7 @@ function fixture(appSource = app, trafficSource = traffic, count = 5000) {
   assert.equal(first.getAttribute('aria-selected'), 'false'); assert.equal(first.tabIndex, -1);
   assert.equal(next.getAttribute('aria-selected'), 'true'); assert.equal(next.tabIndex, 0);
   assert.equal(t.rows().filter(row => row.tabIndex === 0).length, 1);
-  const position = () => t.state.trafficRenderedView.start + t.rows().indexOf(t.document.activeElement);
+  const position = () => Number(t.document.activeElement.dataset.position);
   for (const key of ['Home', 'ArrowDown', 'ArrowUp']) {
     const current = t.document.activeElement;
     t.api.moveRequestSelection({key, currentTarget: current, preventDefault() {}});
@@ -149,15 +161,24 @@ function fixture(appSource = app, trafficSource = traffic, count = 5000) {
   t.api.moveRequestSelection({key: 'Home', currentTarget: t.document.activeElement, preventDefault() {}});
   assert.equal(t.document.activeElement.dataset.requestId, t.state.selectedRequestId);
   assert.equal(position(), 0);
-  // A focused row that leaves the block hands focus to a row in view, not the block's first.
+  // A focused row scrolled out of the mounted rows leaves focus on the list, and takes it back once mounted again.
   t.document.activeElement = t.rows()[20];
+  const focusedId = t.document.activeElement.dataset.requestId;
   t.elements.requestRows.scrollTop = 450 * 24;
   t.api.renderRequests();
   assert(t.state.trafficRenderedView.start > 20);
-  assert.equal(position(), Math.floor(t.elements.requestRows.scrollTop / 24));
-  assert.notEqual(position(), t.state.trafficRenderedView.start);
+  assert.equal(t.document.activeElement, t.elements.requestRows);
+  assert.deepEqual([Number(t.rows()[0].dataset.position), t.rows().length], [450 - 8, 20 + 16]);
+  // The selected row is outside the read block, so the list continues from the first row in view.
+  t.api.moveRequestSelection({key: 'ArrowDown', currentTarget: t.elements.requestRows, preventDefault() {}});
+  assert.equal(position(), 451);
+  t.elements.requestRows.scrollTop = 450 * 24;
+  t.api.renderRequests();
+  t.document.activeElement = t.elements.requestRows;
+  t.elements.requestRows.dataset.focusId = focusedId;
   t.elements.requestRows.scrollTop = 0;
   t.api.renderRequests();
+  assert.equal(t.document.activeElement.dataset.requestId, focusedId);
   const offPage = [...t.state.trafficSearchMatches.keys()].find(id => !t.rows().some(row => row.dataset.requestId === id));
   t.api.selectRequest(offPage);
   assert.doesNotMatch(t.nodes.get('#request-window-status').textContent, /Selection outside filter/,
@@ -200,7 +221,7 @@ for (const change of [
   assert.equal(t.stats.searches, 0); assert.equal(t.state.selectedRequestId, id);
   assert.match(t.nodes.get('#request-window-status').textContent, /Selection outside filter/);
   t.elements.requestFilter.value = ''; t.api.renderRequests();
-  assert.equal(t.rows().length, 500); assert.equal(t.state.selectedRequestId, id);
+  assert.equal(t.rows().length, 28); assert.equal(t.state.selectedRequestId, id);
   t.state.requests = t.state.requests.filter(row => row.id !== id); t.api.renderRequests();
   assert.equal(t.state.selectedRequestId, null, 'Eviction clears rather than reuses selection');
   t.state.requests = []; t.api.renderRequests(); assert.equal(t.rows().length, 0);
@@ -225,7 +246,7 @@ for (const change of [
   state.trafficRenderedView = {requests: oldRequests};
   api.useStandalonePreview(); assert.equal(state.trafficRenderedView, null); assert.equal(state.requests.length, 0);
 }
-console.log('PASS Traffic selection reuses rendered search/sort/window; no geometry reads, remounts or scroll writes; keyboard, focus, filters, exact-identity refusal, mutation refresh, partial/empty/evicted selection (controller/DOM model, not rendered UI)');
+console.log('PASS Traffic selection reuses rendered search/sort/window; only rows in view plus overscan mount with list positions for assistive technology; no geometry reads, remounts or scroll writes on selection; keyboard across unmounted rows, focus hand-off and return, filters, exact-identity refusal, mutation refresh, partial/empty/evicted selection (controller/DOM model, not rendered UI)');
 
 const baseline = process.argv.find(value => value.startsWith('--baseline-ref='))?.slice('--baseline-ref='.length);
 if (baseline) {
@@ -243,7 +264,7 @@ if (baseline) {
       p95_ms: +samples[Math.floor(samples.length * 0.95)].toFixed(3), work: {...t.stats}};
   }
   console.log(JSON.stringify({kind: 'Node controller/DOM-work benchmark, not rendered browser latency', node: process.version,
-    fixture: {retained: 5000, mounted: 500, search: 'URL / method / status literal', sort: 'name'},
+    fixture: {retained: 5000, mounted: '20-row view + 8 overscan', search: 'URL / method / status literal', sort: 'name'},
     baseline, before: measure(prior('apps/research-ui/app.js'), prior('apps/research-ui/traffic_view.js')),
     after: measure(app, traffic)}, null, 2));
 }

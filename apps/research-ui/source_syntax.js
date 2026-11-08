@@ -37,8 +37,14 @@
         }
         return {text, length, anchors, lineCount, complete: length === text.length};
       }
+      // One page of a longer document: absolute lines from lineBase, offsets within the page text.
+      function sourcePageIndex(text, lineBase, lineCount) {
+        const index = sourceDocumentIndex(text);
+        return Object.assign(index, {lineBase, pageLines: index.lineCount, lineCount});
+      }
       function sourceDocumentOffset(index, line) {
-        if (!Number.isSafeInteger(line) || line < 0 || line >= index.lineCount) return null;
+        line -= index.lineBase ?? 0;
+        if (!Number.isSafeInteger(line) || line < 0 || line >= (index.pageLines ?? index.lineCount)) return null;
         let current = Math.floor(line / 128) * 128;
         let offset = index.anchors[Math.floor(line / 128)];
         while (current++ < line) offset = index.text.indexOf('\n', offset) + 1;
@@ -62,7 +68,7 @@
           cursor.start = cursor.newline + 1; cursor.line++;
           cursor.newline = index.text.indexOf('\n', cursor.start);
         }
-        return {line: cursor.line, column: offset - cursor.start};
+        return {line: (index.lineBase ?? 0) + cursor.line, column: offset - cursor.start};
       }
       function sourceDocumentLine(index, line) {
         const start = sourceDocumentOffset(index, line);
@@ -84,7 +90,7 @@
         // Accepted representation bounds normally make this a shared string;
         // an oversized defensive input is explicitly a searched prefix.
         const text = index.complete ? index.text : index.text.slice(0, index.length);
-        let match, line = 0, lineStart = 0, newline = text.indexOf('\n');
+        let match, line = index.lineBase ?? 0, lineStart = 0, newline = text.indexOf('\n');
         while ((match = pattern.exec(text)) !== null) {
           while (newline >= 0 && newline < match.index) {line++; lineStart = newline + 1; newline = text.indexOf('\n', lineStart);}
           if (acceptLine && !acceptLine(line)) continue;
@@ -108,10 +114,11 @@
           text: index.text.slice(bounds.start + start, bounds.start + end)};
       }
       function sourceDocumentWindow(index, line = 0, column = 0) {
-        const target = Math.max(0, Math.min(index.lineCount - 1, Number.isSafeInteger(line) ? line : 0));
+        const base = index.lineBase ?? 0, last = base + (index.pageLines ?? index.lineCount) - 1;
+        const target = Math.max(base, Math.min(last, Number.isSafeInteger(line) ? line : 0));
         column = Math.max(0, Math.min(sourceDocumentLine(index, target).length, Number.isSafeInteger(column) ? column : 0));
-        const start = Math.floor(target / SOURCE_WINDOW_LINES) * SOURCE_WINDOW_LINES;
-        const end = Math.min(index.lineCount, start + SOURCE_WINDOW_LINES);
+        const start = base + Math.floor((target - base) / SOURCE_WINDOW_LINES) * SOURCE_WINDOW_LINES;
+        const end = Math.min(last + 1, start + SOURCE_WINDOW_LINES);
         const rows = [];
         for (let at = start; at < end; at++) rows.push(sourceDocumentExcerpt(index, at, at === target ? column : 0,
           at === target ? SOURCE_WINDOW_COLUMN_LIMIT : SOURCE_WINDOW_OTHER_COLUMNS));
@@ -126,7 +133,9 @@
         const originalIndex = sourceDocumentIndex(original);
         const activeIndex = sourceDocumentIndex(active);
         const derivedSegments = derived ? sourceSegmentsUTF16(original, active, derived.segments ?? [], derived.offset_unit) : null;
-        const layout = formatted?.map ? sourceWhitespaceWalker(formatted.map, active, formatted.text) : null;
+        // A page of a layout maps against its slice of the original, from `base`.
+        const walk = formatted?.map ? sourceWhitespaceWalker(formatted.map, formatted.sourceInput ?? active, formatted.text) : null;
+        const layout = walk && (target => {const at = walk(target); return at === null ? null : at + (formatted.base ?? 0);});
         const firstMapped = (segments, start, end) => {
           let low = 0, high = segments.length;
           while (low < high) {const middle = (low + high) >> 1; if (segments[middle].derived_end <= start) low = middle + 1; else high = middle;}
@@ -212,6 +221,32 @@
           from = 0; to = 0;
           return null;
         };
+      }
+
+      // Formatted offset of an original offset, or of the next character past changed whitespace.
+      function sourceWhitespaceInverse(original, formatted) {
+        let from = 0, to = 0;
+        return target => {
+          if (!Number.isSafeInteger(target) || target < 0 || target > original.length) return null;
+          if (target < from) {from = 0; to = 0;}
+          while (from < target) {
+            if (to < formatted.length && original.charCodeAt(from) === formatted.charCodeAt(to)) {from++; to++; continue;}
+            const skippedFrom = from, skippedTo = to;
+            while (from < original.length && sourceFormatSpace(original.charCodeAt(from))) from++;
+            while (to < formatted.length && sourceFormatSpace(formatted.charCodeAt(to))) to++;
+            if (from === skippedFrom && to === skippedTo) {from = 0; to = 0; return null;}
+          }
+          let at = to;
+          while (at < formatted.length && sourceFormatSpace(formatted.charCodeAt(at)) && formatted.charCodeAt(at) !== original.charCodeAt(from)) at++;
+          return at;
+        };
+      }
+
+      // The page holding an original offset, from each page's first original offset.
+      function sourceFormatBlock(anchors, offset) {
+        let low = 0, high = anchors.length - 1;
+        while (low < high) {const middle = (low + high + 1) >> 1; if (anchors[middle] <= offset) low = middle; else high = middle - 1;}
+        return low;
       }
 
       // Original offsets of a formatted range whose ends are not whitespace.
@@ -1315,12 +1350,13 @@
       // About 10 ms of lexing per background step; a render lexes at most 256 Ki ahead.
       const SOURCE_COLOR_SLICE_UNITS = 64 * 1024;
       const SOURCE_COLOR_SYNC_UNITS = 256 * 1024;
-      function createSourceHighlighter(source, index) {
+      // `prefix` ({highlighter, offset}) seeds a layout page with the original's lexer state where it begins.
+      function createSourceHighlighter(source, index, prefix = null) {
         const language = sourceSyntaxLanguage(source);
         const tokenize = sourceLineTokenizer(language);
         const {text, length} = index;
         const checkpoints = [{offset: 0, lineStart: 0, state: createSourceTokenizer(source)}];
-        const builder = createSourceTokenizer(source);
+        let builder = createSourceTokenizer(source), seeded = !tokenize || !prefix;
         let lineStart = 0, lineText = null, column = 0, frontier = 0, done = !tokenize || length === 0;
         const lineEnd = start => {const end = text.indexOf('\n', start); return end < 0 || end > length ? length : end;};
         const checkpointAt = offset => {
@@ -1330,14 +1366,36 @@
         };
         const ready = rows => {
           const first = rows.find(row => row.fullLength);
-          return done || !first || first.offset + first.columnStart <= frontier;
+          return seeded && (done || !first || first.offset + first.columnStart <= frontier);
         };
         return {
           language,
-          done: () => done,
+          done: () => seeded && done,
           ready,
+          // null while the checkpoints are behind `offset`.
+          stateAt(offset) {
+            if (!tokenize) return createSourceTokenizer(source);
+            if (!seeded || (!done && frontier < offset)) return null;
+            const checkpoint = checkpointAt(offset);
+            const current = sourceTokenizerSnapshot(checkpoint.state);
+            let at = checkpoint.lineStart, position = checkpoint.offset;
+            while (position < offset) {
+              const end = lineEnd(at), stop = Math.min(end, offset);
+              if (position < stop) tokenize(text.slice(at, end), current, position - at, stop - at, null);
+              if (stop < end || end >= length) break;
+              at = end + 1; position = at;
+            }
+            return Object.assign(current, {cursor: 0, clipStart: 0, clipEnd: Infinity, coloredTokens: 0});
+          },
           // Tokenizes about `units` more of the document; true once it reached the end.
           advance(units) {
+            if (!seeded) {
+              const state = prefix.highlighter.stateAt(prefix.offset);
+              if (!state) {prefix.highlighter.advance(units); return false;}
+              checkpoints[0].state = state;
+              builder = sourceTokenizerSnapshot(state);
+              seeded = true;
+            }
             let spent = 0;
             while (!done && spent < units) {
               lineText ??= text.slice(lineStart, lineEnd(lineStart));

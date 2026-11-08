@@ -6,7 +6,7 @@
 const TRAFFIC_RESPONSE_PAGE_BYTES = 2 * 1024 * 1024;
 const TRAFFIC_RESPONSE_CACHE_BYTES = 48 * 1024 * 1024;
 const TRAFFIC_RESPONSE_RETRY_MS = 2000;
-const TRAFFIC_RESPONSE_LINE_LIMIT = 20000;
+const TRAFFIC_RESPONSE_FIND_LIMIT = 1000;
 const TRAFFIC_RESPONSE_HEX_BYTES = 256 * 1024;
 const TRAFFIC_JSON_NODE_LIMIT = 2000;
 const TRAFFIC_RESPONSE_CAP = 16 * 1024 * 1024;
@@ -161,9 +161,12 @@ function trafficJsonTree(value) {
   return root;
 }
 
-function createTrafficResponse({getArtifacts, getEvents, contentSession, readable, onChange}) {
+// `request` and `worker` replace the format client's backend read and layout worker.
+function createTrafficResponse({getArtifacts, getEvents, contentSession, readable, onChange, request, worker}) {
   const views = new Map();
-  const options = {pretty: false, wrap: true, hex: false, query: ''};
+  const options = {pretty: false, wrap: true, hex: false, query: '', current: 0};
+  let generation = 0;
+  const layouts = createCodeLayouts({request, layouts: worker, onChange: () => {generation += 1; onChange();}});
 
   async function load(artifact, key, previous) {
     const controller = new AbortController();
@@ -263,33 +266,24 @@ function createTrafficResponse({getArtifacts, getEvents, contentSession, readabl
     return notes.join(' ') || null;
   }
 
-  function codeView(text, artifact, language) {
-    const code = trafficNodeText('div', `traffic-response-code${options.wrap ? ' wrap' : ''}`);
-    code.tabIndex = 0;
-    code.setAttribute('role', 'region');
-    code.setAttribute('aria-label', 'Response body');
-    const lines = text.split('\n');
-    const tokenizer = createSourceTokenizer({kind: artifact.kind === 'wasm' ? 'wasm' : 'response_body', mime_type: artifact.mime_type, url: artifact.url});
-    const query = options.query.toLowerCase();
-    let matches = 0;
-    const fragment = document.createDocumentFragment();
-    for (const line of lines.slice(0, TRAFFIC_RESPONSE_LINE_LIMIT)) {
-      const row = trafficNodeText('div', 'traffic-response-line');
-      const tokens = language === 'text' ? [{type: 'plain', text: line || ' '}] : sourceSyntaxTokens(line, tokenizer);
-      for (const token of tokens) {
-        row.append(token.type === 'plain' ? document.createTextNode(token.text) : trafficNodeText('span', `syntax-${token.type}`, token.text));
-      }
-      if (query && line.toLowerCase().includes(query)) {
-        row.classList.add('search-match');
-        matches += 1;
-      }
-      fragment.append(row);
-    }
-    code.append(fragment);
-    return {code, matches, hiddenLines: Math.max(0, lines.length - TRAFFIC_RESPONSE_LINE_LIMIT)};
+  function codeView(text, artifact, language, {layout = null, status = null, find = true} = {}) {
+    const syntax = language === 'text' ? {kind: 'plain', mime_type: 'text/plain'}
+      : {kind: artifact.kind === 'wasm' ? 'wasm' : 'response_body', mime_type: artifact.mime_type, url: artifact.url};
+    const rows = codeViewRows(text);
+    const found = find && options.query ? findSourceOccurrences(rows.map(row => row.text), options.query, TRAFFIC_RESPONSE_FIND_LIMIT) : {matches: []};
+    const current = found.matches.length ? options.current % found.matches.length : -1;
+    const marks = new Map();
+    found.matches.forEach((match, index) => {
+      if (!marks.has(match.line)) marks.set(match.line, []);
+      marks.get(match.line).push({column: match.column, length: match.length, match: index});
+    });
+    const view = createCodeView({text, rows, syntax, label: 'Response body', className: 'traffic-response-code', rowClass: 'traffic-response-line',
+      wrap: options.wrap, marks, current, layout: layout?.map ? layout : null, onRaw: status && (raw => {status.textContent = codeViewRawText(raw);})});
+    if (current >= 0) view.reveal(found.matches[current].line);
+    return {code: view.box, view, matches: found.matches.length, truncated: Boolean(found.truncated), current};
   }
 
-  function toolbar(container, binary, prettyable, findCount, text) {
+  function toolbar(container, binary, prettyable, shown, text) {
     const bar = trafficNodeText('div', 'traffic-response-toolbar');
     bar.setAttribute('role', 'toolbar');
     bar.setAttribute('aria-label', 'Response body view');
@@ -316,7 +310,9 @@ function createTrafficResponse({getArtifacts, getEvents, contentSession, readabl
     find.dataset.control = 'find';
     find.setAttribute('aria-label', 'Find in response body');
     bar.append(find);
-    const count = trafficNodeText('span', 'traffic-response-count', options.query ? `${findCount.toLocaleString('en-US')} ${findCount === 1 ? 'line' : 'lines'}` : '');
+    const findCount = shown.matches;
+    const count = trafficNodeText('span', 'traffic-response-count', !options.query ? '' : !findCount ? 'No matches'
+      : `${shown.current + 1} of ${findCount.toLocaleString('en-US')}${shown.truncated ? '+' : ''}`);
     count.setAttribute('aria-live', 'polite');
     bar.append(count);
     bar.addEventListener('click', event => {
@@ -332,19 +328,17 @@ function createTrafficResponse({getArtifacts, getEvents, contentSession, readabl
     });
     find.addEventListener('input', () => {
       options.query = find.value;
+      options.current = 0;
       container.dataset.renderKey = '';
       onChange();
     });
     find.addEventListener('keydown', event => {
-      if (event.key !== 'Enter') return;
-      const matches = [...container.querySelectorAll('.traffic-response-line.search-match')];
-      if (!matches.length) return;
-      const current = matches.findIndex(line => line.classList.contains('current'));
-      matches[current]?.classList.remove('current');
-      const next = matches[current < 0 ? (event.shiftKey ? matches.length - 1 : 0)
-        : (current + (event.shiftKey ? matches.length - 1 : 1)) % matches.length];
-      next.classList.add('current');
-      next.scrollIntoView?.({block: 'center'});
+      if (event.key !== 'Enter' || !findCount) return;
+      event.preventDefault();
+      options.current = (shown.current + (event.shiftKey ? findCount - 1 : 1)) % findCount;
+      container.dataset.renderKey = '';
+      onChange();
+      container.querySelector('.code-view-mark.is-current')?.scrollIntoView?.({block: 'center'});
     });
     return bar;
   }
@@ -360,24 +354,27 @@ function createTrafficResponse({getArtifacts, getEvents, contentSession, readabl
     let shown;
     let value = text;
     let note = null;
+    let layout = null;
+    const raw = trafficNodeText('p', 'traffic-body-note code-view-raw');
+    raw.setAttribute('role', 'status');
     if (binary || options.hex) {
       value = formatWasmHex(bytes.subarray(0, TRAFFIC_RESPONSE_HEX_BYTES));
       shown = codeView(value, artifact, 'text');
       if (bytes.length > TRAFFIC_RESPONSE_HEX_BYTES) note = `Hex shows the first ${trafficResponseBytes(TRAFFIC_RESPONSE_HEX_BYTES)}.`;
     } else {
       if (options.pretty && prettyable && view.complete) {
-        const pretty = prettyPrintSource(source, text);
-        if (pretty.error) note = pretty.error;
-        else value = pretty.text;
+        layout = layouts.layout(artifact, text, source, null);
+        note = codeLayoutNote(layout);
+        if (layout.status === 'ready') value = layout.text;
       } else if (options.pretty && prettyable) {
         note = 'Pretty print waits until every retained byte is shown.';
       }
-      shown = codeView(value, artifact, language);
+      shown = codeView(value, artifact, language, {layout: layout?.status === 'ready' ? layout : null, status: raw});
     }
-    nodes.push(toolbar(container, binary, prettyable, shown.matches, value));
+    nodes.push(toolbar(container, binary, prettyable, shown, value));
     if (note) nodes.push(trafficNodeText('p', 'traffic-body-note', note));
-    if (shown.hiddenLines) nodes.push(trafficNodeText('p', 'traffic-body-note', `${shown.hiddenLines.toLocaleString('en-US')} more lines are not shown.`));
     nodes.push(shown.code);
+    if (layout?.status === 'ready' && layout.map) nodes.push(raw);
     if (!view.complete) {
       const button = trafficNodeText('button', 'secondary-button traffic-body-more', view.loadingMore ? 'Loading…' : 'Show the next 2 MiB');
       button.type = 'button';
@@ -419,7 +416,7 @@ function createTrafficResponse({getArtifacts, getEvents, contentSession, readabl
       }
     }
     if (language === 'markup') {
-      return [trafficNodeText('p', 'traffic-body-note', 'Markup is shown as source and never rendered.'), codeView(text, artifact, 'markup').code];
+      return [trafficNodeText('p', 'traffic-body-note', 'Markup is shown as source and never rendered.'), codeView(text, artifact, 'markup', {find: false}).code];
     }
     const pre = trafficNodeText('pre', 'traffic-body-text', text);
     pre.tabIndex = 0;
@@ -432,7 +429,7 @@ function createTrafficResponse({getArtifacts, getEvents, contentSession, readabl
     const refusal = artifact ? null : refusalOf(request);
     const view = artifact ? viewOf(artifact) : null;
     const key = JSON.stringify([request?.id, request?.origin, tab, record, request?.responseStarted?.sequenceNumber, artifact?.artifact_id,
-      refusal, view && [view.status, view.loaded, view.error, view.moreError, view.loadingMore], options]);
+      refusal, view && [view.status, view.loaded, view.error, view.moreError, view.loadingMore], options, generation]);
     if (container.dataset.renderKey === key) return;
     container.dataset.renderKey = key;
     const active = container.contains(document.activeElement) ? document.activeElement.dataset?.control : null;

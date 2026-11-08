@@ -555,7 +555,7 @@
                   <div class="analyst-form-row"><label>Name<input id="analyst-name" type="text" maxlength="128" autocomplete="off" /></label><label>Folder<select id="analyst-folder"></select></label></div>
                   <div class="analyst-form-row"><label>Type<select id="analyst-kind"><option value="analyst-script">Analyst script</option><option value="scratchpad">Scratchpad</option></select></label><label>Language<select id="analyst-language"><option value="javascript">JavaScript</option><option value="json">JSON</option><option value="markdown">Markdown</option><option value="text">Plain text</option></select></label></div>
                   </details>
-                  <label>Content<textarea id="analyst-content" maxlength="32768" spellcheck="false" placeholder="const events = WB.Node.Evidence.events();&#10;console.info('events', events.length);&#10;return {count: events.length};"></textarea></label>
+                  <label>Content<div class="code-edit"><pre id="analyst-content-colors" class="code-edit-colors" aria-hidden="true"></pre><textarea id="analyst-content" maxlength="32768" spellcheck="false" placeholder="const events = WB.Node.Evidence.events();&#10;console.info('events', events.length);&#10;return {count: events.length};"></textarea></div></label>
                   <div id="analyst-draft-status" class="analyst-draft-status" role="status">Saved locally</div>
                   <div class="analyst-form-actions"><button id="analyst-save" class="trace-button analyst-primary" type="submit">Save file</button><button id="analyst-revert" class="secondary-button" type="button">Discard changes</button><button id="analyst-delete" class="secondary-button" type="button">Delete</button></div>
                 </form>
@@ -825,6 +825,7 @@
     <script src="evidence_comparison.js"></script>
     <script src="source_syntax.js"></script>
     <script src="source_format.js"></script>
+    <script src="code_view.js"></script>
     <script src="source_facts.js"></script>
     <script src="source_search.js"></script>
     <script src="source_tree.js"></script>

@@ -696,8 +696,15 @@ final class OriginTraceRenderedUITests: XCTestCase {
     for size in windowSizes {
       let ui = try await prepare(size)
       try await show(ui, "traffic")
-      let rows = try await ui.value("__rebUiProbe.count('#screen-traffic .request-row') > 0 && document.querySelectorAll('#screen-traffic .request-row').length") as? Int ?? 0
-      XCTAssertGreaterThanOrEqual(rows, expected.requestCount, "\(size.name): retained native requests are listed")
+      try await ui.waitUntil("__rebUiProbe.count('#screen-traffic .request-row') > 0", "no request rows rendered")
+      // Only rows in view and 8 on each side are mounted; every row names its place in the whole list.
+      let list = try await ui.json("""
+        (() => { const rows = [...document.querySelectorAll('#screen-traffic .request-row')];
+          return {mounted: rows.length, size: Number(rows[0].getAttribute('aria-setsize')),
+            view: Math.ceil(document.querySelector('#request-rows').clientHeight / rows[0].offsetHeight)}; })()
+        """)
+      XCTAssertGreaterThanOrEqual(list["size"] as? Int ?? 0, expected.requestCount, "\(size.name): retained native requests are listed: \(list)")
+      XCTAssertLessThanOrEqual(list["mounted"] as? Int ?? .max, (list["view"] as? Int ?? 0) + 17, "\(size.name): only rows near the view are mounted: \(list)")
       // Rows and the footer come from the session request index, not the newest window.
       let indexed = try await ui.value("state.trafficIndex?.answer()?.document.total ?? -1") as? Int ?? -1
       XCTAssertGreaterThanOrEqual(indexed, expected.requestCount, "\(size.name): the request index lists the session")
@@ -717,7 +724,12 @@ final class OriginTraceRenderedUITests: XCTestCase {
       let scroll = try await ui.json("__rebUiProbe.scrollToEnd('#screen-traffic .request-row', '.request-row')")
       XCTAssertEqual(scroll["scrollable"] as? Bool, true, "\(size.name): request list must scroll: \(scroll)")
       XCTAssertEqual(scroll["moved"] as? Bool, true, "\(size.name): request list scroll position must change")
-      XCTAssertEqual(scroll["lastVisible"] as? Bool, true, "\(size.name): last request must be reachable: \(scroll)")
+      try await ui.waitUntil("""
+        (() => { const last = [...document.querySelectorAll('#screen-traffic .request-row')].at(-1);
+          const list = document.querySelector('#request-rows').getBoundingClientRect(), rect = last?.getBoundingClientRect();
+          return Boolean(last) && last.getAttribute('aria-posinset') === last.getAttribute('aria-setsize') &&
+            rect.height > 0 && rect.top >= list.top - 1 && rect.bottom <= list.bottom + 1; })()
+        """, "\(size.name): the last request did not mount at the end of the list")
       try await ui.screenshot("traffic-list-scrolled-\(size.name)")
 
       try await ui.click("#screen-traffic .request-row", containing: "inert.test")
@@ -727,6 +739,17 @@ final class OriginTraceRenderedUITests: XCTestCase {
       try await assertInert(ui, "\(size.name) traffic detail")
       try await assertLayout(ui, "#screen-traffic", "\(size.name) traffic detail")
       try await ui.screenshot("traffic-detail-\(size.name)")
+
+      // End and Home reach the ends of the whole list through unmounted rows; focus follows the selection.
+      let ends: [(UInt16, String, String, String)] = [
+        (119, "\u{F72B}", "document.activeElement.getAttribute('aria-setsize')", "End"), (115, "\u{F729}", "'1'", "Home")]
+      for (code, character, position, name) in ends {
+        try await ui.key(code, character, modifiers: [.function])
+        try await ui.waitUntil("""
+          document.activeElement?.classList.contains('request-row') && document.activeElement.getAttribute('aria-selected') === 'true' &&
+            document.activeElement.getAttribute('aria-posinset') === \(position)
+          """, "\(size.name): \(name) did not select and focus that end of the list")
+      }
     }
   }
 
@@ -1332,6 +1355,12 @@ final class OriginTraceRenderedUITests: XCTestCase {
 
       try await ui.click("#response-inspector [data-control='pretty']")
       try await ui.waitUntil("document.querySelectorAll('#response-inspector .traffic-response-line').length > 3", "pretty print did not split the body")
+      // The shared code view: the backend Oxc layout, and a clicked token names its exact raw range.
+      let notes = try await ui.value("document.querySelector('#response-inspector').innerText") as? String ?? ""
+      XCTAssertFalse(notes.contains("Whitespace layout"), "\(size.name): JSON responses use the Oxc layout: \(notes)")
+      try await ui.click("#response-inspector .traffic-response-code .syntax-key")
+      try await ui.waitUntil("/ · raw \\d+:\\d+–\\d+:\\d+ \\(offsets \\d+–\\d+\\)$/.test(document.querySelector('#response-inspector .code-view-raw')?.textContent ?? '')",
+        "\(size.name): a laid-out token did not report its raw range")
       try await assertInert(ui, "\(size.name) pretty response")
 
       // Left arrow from Response moves to Preview, as on every inspector tab.

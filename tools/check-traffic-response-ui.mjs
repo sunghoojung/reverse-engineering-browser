@@ -1,8 +1,9 @@
 // The shipped Response and Preview tabs (apps/research-ui/traffic_response.js)
 // against decoded response_body records in a DOM model: capture states and
-// reasons, the artifact join, reads checked by size and SHA-256, pretty print,
-// wrap, hex, find and copy, a JSON tree, a signature-checked image, and
-// captured markup inserted as text. Not rendered QA.
+// reasons, the artifact join, reads checked by size and SHA-256, pretty print
+// through the shared Oxc or in-page layout with raw ranges, wrap, hex, find
+// and copy, a JSON tree, a signature-checked image, and captured markup
+// inserted as text. Not rendered QA.
 // Requires: npm ci --prefix tools/ui-startup-deps --ignore-scripts --no-audit --no-fund
 import assert from 'node:assert/strict';
 import {readFile} from 'node:fs/promises';
@@ -30,8 +31,8 @@ const context = createContext({
     return bytes ? new Response(bytes.subarray(Number(offset), Number(offset) + Number(limit))) : new Response('', {status: 404});
   }
 });
-runInContext(`${await ui('source_syntax.js')}\n${await ui('source_facts.js')}\n${await ui('traffic_response.js')}
-globalThis.api = {trafficResponseCapture, trafficResponseArtifact, trafficImageType, trafficJsonTree, createTrafficResponse};`, context);
+runInContext(`${await ui('source_syntax.js')}\n${await ui('source_format.js')}\n${await ui('code_view.js')}\n${await ui('source_facts.js')}\n${await ui('traffic_response.js')}
+globalThis.api = {trafficResponseCapture, trafficResponseArtifact, trafficImageType, trafficJsonTree, createTrafficResponse, createSourceLayoutWorker};`, context);
 const {api} = context;
 const panel = document.getElementById('panel');
 const settle = async () => {for (let i = 0; i < 30; i++) await nextTurn();};
@@ -43,8 +44,12 @@ const until = async (condition, label) => {
 const sha = bytes => createHash('sha256').update(bytes).digest('hex');
 let renders = 0;
 let current = null;
+// get_source_format replies queued by the test; the in-page layout runs without a worker.
+const formatReplies = [], formatReads = [];
 const view = api.createTrafficResponse({getArtifacts: () => state.artifacts, getEvents: () => state.events,
-  contentSession: () => state.content, readable: () => true, onChange: () => {renders += 1; if (current) view.render(panel, ...current);}});
+  contentSession: () => state.content, readable: () => true, onChange: () => {renders += 1; if (current) view.render(panel, ...current);},
+  request: async url => {formatReads.push(url); return formatReplies.shift()(url);},
+  worker: api.createSourceLayoutWorker({spawn: null, defer: callback => callback()})});
 const show = async (request, tab = 'response') => {current = [request, tab]; view.render(panel, request, tab); await settle();};
 
 let nextId = 500;
@@ -102,29 +107,47 @@ assert(panel.querySelector('b') === null, 'captured markup is text');
 assert(panel.querySelector('.traffic-response-code .syntax-string'), 'JSON strings are colored');
 assert.equal(panel.querySelectorAll('.traffic-response-line').length, 1);
 const press = async control => {panel.querySelector(`[data-control="${control}"]`).click(); await settle();};
+// The backend Oxc layout of the retained JSON body; a clicked token names its raw range.
+const laid = '{\n  "challenge": "c1",\n  "answers": [1, 2, { "deep": [true, null] }],\n  "html": "<b>x</b>"\n}';
+formatReplies.push(() => ({ok: true, status: 200, json: async () => ({schema: 'source-format-v1', mapping: 'whitespace-only', language: 'json',
+  source: {artifact_id: jsonArtifact.artifact_id, sha256: jsonArtifact.sha256}, status: 'formatted', text: laid})}));
 await press('pretty');
-assert(panel.querySelectorAll('.traffic-response-line').length > 5, 'pretty print splits the JSON');
+assert.equal(formatReads.at(-1), `/api/source-format?session_id=7&artifact_id=${jsonArtifact.artifact_id}`);
+assert.equal(panel.querySelectorAll('.traffic-response-line').length, 5, 'pretty print shows the Oxc layout');
 assert.equal(panel.querySelector('[data-control="pretty"]').getAttribute('aria-pressed'), 'true');
 assert.match(panel.querySelector('.traffic-response-code').textContent, /"<b>x<\/b>"/);
-assert(panel.querySelector('.traffic-response-code').classList.contains('wrap'));
+assert.doesNotMatch(notes(), /Whitespace layout/);
+[...panel.querySelectorAll('.traffic-response-code .syntax-key')].find(node => node.textContent === 'deep').click();
+assert.equal(panel.querySelector('.code-view-raw').textContent,
+  `Line 3, Column ${laid.split('\n')[2].indexOf('deep') + 1} · raw 1:${json.indexOf('deep') + 1}–1:${json.indexOf('deep') + 5} (offsets ${json.indexOf('deep')}–${json.indexOf('deep') + 4})`);
+assert(panel.querySelector('.traffic-response-code').classList.contains('is-wrapped'));
 await press('wrap');
-assert(!panel.querySelector('.traffic-response-code').classList.contains('wrap'));
+assert(!panel.querySelector('.traffic-response-code').classList.contains('is-wrapped'));
 const find = panel.querySelector('[data-control="find"]');
 find.value = 'deep';
 find.dispatchEvent(new window.Event('input'));
 await settle();
-assert.equal(panel.querySelectorAll('.traffic-response-line.search-match').length, 1);
-assert.match(panel.querySelector('.traffic-response-count').textContent, /^1 line$/);
+assert.deepEqual([...panel.querySelectorAll('.traffic-response-code mark')].map(mark => mark.textContent), ['deep']);
+assert.match(panel.querySelector('.traffic-response-count').textContent, /^1 of 1$/);
 const enter = new window.Event('keydown');
 Object.defineProperty(enter, 'key', {value: 'Enter'});
 panel.querySelector('[data-control="find"]').dispatchEvent(enter);
-assert(panel.querySelector('.traffic-response-line.current'));
+await settle();
+assert(panel.querySelector('.traffic-response-code mark.is-current'));
 await press('copy');
 assert.equal(copied.at(-1).split('\n').length, panel.querySelectorAll('.traffic-response-line').length);
 assert.equal(copied.at(-1).replaceAll(/\s/g, ''), json.replaceAll(/\s/g, ''), 'Copy writes the shown text with its line breaks');
 await press('hex');
 assert.match(panel.querySelector('.traffic-response-code').textContent, /^00000000  7b 22 63 68/);
 await press('hex');
+await press('pretty');
+// A body Oxc refuses is laid out in the page, with the reason.
+const broken = retain('{"a":1,}', 'application/json');
+formatReplies.push(() => ({ok: true, status: 200, json: async () => ({schema: 'source-format-v1', mapping: 'whitespace-only', language: 'json',
+  source: {artifact_id: broken.artifact_id, sha256: broken.sha256}, status: 'unavailable', reason: 'parse-failed', text: null})}));
+await show(request(record(broken)));
+await press('pretty');
+assert.match(notes(), /Whitespace layout: Oxc could not parse this file\./);
 await press('pretty');
 const findAgain = panel.querySelector('[data-control="find"]');
 findAgain.value = '';
@@ -211,6 +234,6 @@ const before = panel.firstChild;
 view.render(panel, ...current);
 assert(panel.firstChild === before, 'an unchanged render keeps its nodes');
 assert(renders > 0);
-console.log(`PASS traffic response UI: every capture state and reason, artifact join, pretty/wrap/find/copy/hex, ` +
+console.log(`PASS traffic response UI: every capture state and reason, artifact join, pretty print by the Oxc layout with token raw ranges or the in-page layout with its reason, wrap/find/copy/hex, ` +
   `JSON tree bound, inert HTML and SVG, signature-checked image, ranged verified reads, integrity and refusal notes ` +
   `(${reads.length} reads; DOM model, not rendered QA)`);

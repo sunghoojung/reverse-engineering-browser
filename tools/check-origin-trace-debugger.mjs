@@ -934,9 +934,10 @@ assert.equal(ledger.children[2], selectedRow);
 assert.equal(ledger.scrollTop, 56, "Retained-window eviction preserves the first visible row anchor");
 assert.equal(trafficDocument.activeElement, selectedRow);
 trafficUI.renderTrafficRows(ledger, retainedTraffic.slice(4, 504), rowOptions);
-// A focused row that leaves the rendered rows hands focus to the first row in view.
-assert.equal(trafficDocument.activeElement, ledger.children[Math.floor(ledger.scrollTop / 28)]);
-assert.equal(ledger.children.length, 500);
+// A focused row that leaves the mounted rows leaves focus on the list, never on a row it did not select.
+assert.equal(trafficDocument.activeElement, ledger);
+assert.equal(ledger.children.length, 2 + 40 + 8 + 1, "Only the rows near the view mount, with a spacer for the rest");
+assert.equal(ledger.children[0].getAttribute("aria-setsize"), "500");
 const details = new TrafficFixtureNode();
 // Native rows carry no headers or response bodies: General shows coverage and
 // the URL, the body is on Payload (check-traffic-payload-ui.mjs), and search
@@ -1416,7 +1417,7 @@ const ownershipFunctionNames = ['sourceIdentity', 'isSourceArtifact', 'sourceIsC
   'sourceDisplayView', 'sourceViewLabel', 'sourceDerivedView', 'loadArtifactContent', 'refreshArtifacts',
   'closeSource',
   'sourceDisplayName', 'sourceKindLabel', 'sourceIcon', 'renderSourceWindowControls', 'revealSourceColumn', 'moveSourceWindow', 'syncSourceDisplayControls', 'renderSourceTabs', 'retrySourcePreview', 'renderSourceContent',
-  'sourceArtifactIdentityMatches', 'selectArtifact', 'sourceFormattedView', 'sourceFormatWanted', 'sourcePositionText', 'syncFloat32Panel', 'textElement', 'deobfuscationRow', 'deobfuscationOwner', 'cancelDeobfuscation', 'retryDeobfuscation', 'retireDeobfuscationReveal',
+  'sourceArtifactIdentityMatches', 'selectArtifact', 'sourceRepresentation', 'sourceWantedLine', 'sourceOriginalHighlighter', 'sourceFormattedView', 'sourceFormatWanted', 'sourcePositionText', 'syncFloat32Panel', 'textElement', 'deobfuscationRow', 'deobfuscationOwner', 'cancelDeobfuscation', 'retryDeobfuscation', 'retireDeobfuscationReveal',
   'discardStaticCleanup', 'toggleStaticCleanupComparison', 'updateDeobfuscationView', 'setDeobfuscationDisclosure', 'revealDeobfuscationChange', 'deobfuscationButton', 'deobfuscationDisclosure', 'renderDeobfuscationReport'];
 const canvasProductionRules=runInNewContext(
   appSection('      const nativeCanvasCaptureDisplayLimit =','      const nativeCanvasDrawingMethods')+
@@ -1736,6 +1737,44 @@ function sourceReviewDOM() {
   ctx.api.moveSourceWindow(1000,3);assert.equal(document.activeElement.dataset.localLine,'1000');
   ctx.state.selectedArtifactId='missing';elements.sourceSearch.value='lateNeedle';ctx.api.applySourceSearch();assert.match(elements.sourcePosition.textContent,/nothing searched/);
   sourceOwnershipReceipt.push({test:'retained_find_20001_line_coverage_notice_exclusion_stale_owner_and_window_boundaries',status:'passed'});
+}
+{
+  // A large Oxc layout is read one 1,000-line page at a time: absolute lines, the next page on request, Find in the evidence across pages.
+  const unit='var a=[1,2],b=function(){return 3};',text=unit.repeat(899)+'var needle=[1,2],b=function(){return 3};';
+  const laid=('var a = [1, 2],\n  b = function () {\n    return 3\n  };\n'.repeat(899)+'var needle = [1, 2],\n  b = function () {\n    return 3\n  };').split('\n');
+  const anchors=[];
+  for(let block=0;block*1000<laid.length;block++){const before=laid.slice(0,block*1000).join('').replace(/\s/g,'').length;let at=0;for(let seen=0;seen<before;at++)if(!/\s/.test(text[at]))seen++;while(/\s/.test(text[at]??''))at++;anchors.push(at);}
+  const artifact={...await ownedArtifact('paged',text),source_type:'artifact',content:text};
+  const {document,elements}=sourceReviewDOM();
+  elements.sourceSearch=document.createElement('input');elements.sourceSearch.value='';elements.sourceSearchStatus=document.createElement('p');
+  const loaded=new Set([0]),asked=[];let shown=0,ctx;
+  const pageOf=block=>{const pageText=laid.slice(block*1000,block*1000+1000).join('\n'),base=anchors[block],input=text.slice(base,anchors[block+1]??text.length);
+    return {paged:true,text:pageText,map:ctx.api.sourceWhitespaceMap(input,pageText),sourceInput:input,base,block,lineBase:block*1000,lineCount:laid.length,anchors,stride:1000,engine:'oxc',offset_unit:'utf-16-code-unit'};};
+  const pages=new Map();
+  const sourceFormatClient={page:(source,value,line)=>{const block=Math.min(anchors.length-1,Math.floor(line/1000));asked.push(block);
+    if(!loaded.has(block))return {pending:true,previous:pages.get(shown)??null};shown=block;if(!pages.has(block))pages.set(block,pageOf(block));return pages.get(block);},forget(){}};
+  ctx=ownedContext({state:{artifacts:[artifact],selectedArtifactId:'paged',sourceFormatted:true,sourceOriginalHighlighter:null,sourcePagedFind:null},document,elements,
+    sourceOccurrenceRange:()=>null,sourceFormatClient,functions:['applySourceSearch','applyPagedSourceSearch','markSourceMatch'],productionExports:['sourceWhitespaceMap'],renderSources(){}});
+  ctx.api.renderSourceContent(ctx.api.selectedSource());
+  const editor=()=>ctx.state.sourceEditorView;
+  assert.equal(editor().index.lineCount,laid.length);assert.equal(elements.sourceCode.children.length,1000,'one page is mounted');
+  assert.equal(elements.sourceCode.children[0].querySelector('.source-gutter').textContent,'1');
+  assert(ctx.api.moveSourceWindow(2500,0),'a line on an unread page is accepted');
+  assert.equal(editor().window.start,0,'the page shown last stays while the next is read');
+  assert.equal(ctx.state.sourceWindow.line,2500);assert.match(elements.sourcePosition.textContent,/reading this part of the layout/);
+  loaded.add(2);ctx.api.renderSourceContent(ctx.api.selectedSource());
+  assert.deepEqual([editor().window.start,editor().window.line],[2000,2500]);
+  const gutter=elements.sourceCode.children[0].querySelector('.source-gutter');
+  assert.equal(gutter.textContent,'2001','the gutter numbers formatted lines of the whole layout');
+  assert.match(gutter.title,/^Original 1:\d+ · show the original source$/);
+  assert.equal(Number(gutter.title.match(/^Original 1:(\d+)/)[1])-1,anchors[2],'each row maps through its page anchor');
+  elements.sourceSearch.value='needle';ctx.api.applySourceSearch();
+  assert.match(elements.sourcePosition.textContent,/1 of 1 matches · original 1:\d+ · reading its part of the layout/);
+  assert.equal(ctx.state.sourceWindow.line,3000);loaded.add(3);
+  ctx.api.renderSourceContent(ctx.api.selectedSource());
+  assert.equal(editor().window.line,laid.length-4,'Find moves to the match once its page is read');
+  assert.match(elements.sourcePosition.textContent,new RegExp(`1 of 1 matches · Line ${laid.length-3}, Column 5`));
+  sourceOwnershipReceipt.push({test:'paged_oxc_layout_absolute_lines_pending_page_find_across_pages',status:'passed'});
 }
 // Live script column selection retired with the CDP source transport.
 {

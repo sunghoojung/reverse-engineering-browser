@@ -47,6 +47,13 @@ No smoke flag or test hook exists in the product, and nothing here uses the
 Chrome DevTools Protocol. The evidence is synthetic; this suite does not
 establish live browser capture.
 
+`test1TrafficRequests` checks that Traffic mounts only the rows near the view,
+that each names its place in the whole list, that the last request mounts once
+the list is scrolled to its end, and that End and Home select and focus both
+ends. [`probes.js`](probes.js) scrolls an unmounted row into view before a click
+finds it. The Response test also checks that pretty print uses the Oxc layout
+and that a clicked token reports its raw range.
+
 `test2SourcesRetainedArtifact` finds tree rows by their `data-artifact-id`,
 since file rows show plain names and the ID only in the meta column. It checks
 the Dynamic and WebAssembly groups, End/Home/type-ahead with visible focus, and

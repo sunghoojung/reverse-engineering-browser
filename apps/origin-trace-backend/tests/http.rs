@@ -6110,6 +6110,86 @@ async fn source_format_lays_out_verified_javascript_with_whitespace_only_changes
     assert_contract_response(server.get(path).await, "get", route, 400).await;
 }
 
+fn put_body_artifact(server: &Server, bytes: &[u8], kind: &str, mime: &str) {
+    let hash = hex::encode(Sha256::digest(bytes));
+    let artifact = json!({
+        "protocol_version":1,"artifact_id":"7","session_id":"11","navigation_id":"0",
+        "frame_id":"17","parent_artifact_id":"0","creator_event_id":"19",
+        "execution_context_id":"0",
+        "capture_origin":if kind == "request_body" {"network_request"} else {"network_response"},
+        "kind":kind,"url":"https://api.example.test/collect","mime_type":mime,
+        "byte_size":bytes.len(),"sha256":hash,"sensitive":true,
+        "content_path":format!("blobs/{hash}.bin")
+    });
+    server.file(&format!("artifacts/blobs/{hash}.bin"), bytes);
+    server.file(
+        "artifacts/manifest.jsonl",
+        format!("{artifact}\n").as_bytes(),
+    );
+}
+
+#[tokio::test]
+async fn source_format_lays_out_json_and_javascript_bodies_with_anchors() {
+    let server = Server::start().await;
+    let route = "/api/source-format";
+    let path = "/api/source-format?session_id=11&artifact_id=7";
+    let body = r#"{"sitekey":"k","list":[1,2,3],"nested":{"a":null}}"#;
+    put_body_artifact(&server, body.as_bytes(), "request_body", "application/json");
+    let bytes = assert_contract_response(server.get(path).await, "get", route, 200).await;
+    let result: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(result["status"], "formatted");
+    assert_eq!(result["language"], "json");
+    assert_eq!(
+        result["text"],
+        r#"{ "sitekey": "k", "list": [1, 2, 3], "nested": { "a": null } }"#
+    );
+    assert_eq!(
+        result["anchors"],
+        json!({"lines": 1000, "source_utf16": [0]})
+    );
+    put_body_artifact(&server, b"[1,2]", "response_body", "text/plain");
+    assert_contract_response(server.get(path).await, "get", route, 400).await;
+    let named = format!("{path}&language=json");
+    let bytes = assert_contract_response(server.get(&named).await, "get", route, 200).await;
+    let result: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(result["text"], "[1, 2]");
+    assert_contract_response(
+        server.get(&format!("{path}&language=css")).await,
+        "get",
+        route,
+        400,
+    )
+    .await;
+    let script = "function f(a){return a}\n".repeat(700);
+    put_body_artifact(
+        &server,
+        script.as_bytes(),
+        "response_body",
+        "application/javascript",
+    );
+    let bytes = assert_contract_response(server.get(path).await, "get", route, 200).await;
+    let result: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(result["language"], "javascript");
+    let lines = result["line_count"].as_u64().unwrap();
+    assert!(lines > 1000);
+    let anchors = result["anchors"]["source_utf16"].as_array().unwrap();
+    assert_eq!(anchors.len() as u64, lines.div_ceil(1000));
+    let (second, third) = (
+        anchors[1].as_u64().unwrap() as usize,
+        anchors[2].as_u64().unwrap() as usize,
+    );
+    let window = format!("{path}&start_line=1001&line_count=1000");
+    let bytes = assert_contract_response(server.get(&window).await, "get", route, 200).await;
+    let result: Value = serde_json::from_slice(&bytes).unwrap();
+    let strip = |value: &str| value.split_whitespace().collect::<String>();
+    assert_eq!(
+        strip(result["text"].as_str().unwrap()),
+        strip(&script[second..third])
+    );
+    put_source_facts_artifact(&server, b"[1]", "javascript");
+    assert_contract_response(server.get(&named).await, "get", route, 400).await;
+}
+
 #[cfg(unix)]
 fn source_facts_worker(directory: &Path, tail: &str) -> std::path::PathBuf {
     use std::os::unix::fs::PermissionsExt;

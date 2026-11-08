@@ -55,6 +55,9 @@ async function controllerFixture(root) {
   const f={state,elements:analystElements,document,server:copy(state.localAnalyst),mode:'ready',calls:[],timers:new Set(),held:[]};
   const context={state,analystElements,document,console,TextEncoder,TextDecoder,Uint8Array,AbortController,Response,
     emptyLocalAnalystWorkspace:empty,location:{protocol:'http:'},formatByteSize:n=>`${n} B`,renderAnalystExecution(){},renderAnalystHistory(){},
+    // The shared code view's editor: the textarea keeps the text, the mirror is colored as its language.
+    mountCodeEditor:(textarea,mirror,syntaxOf)=>{f.colors={textarea,mirror,refreshes:0};return {refresh(){Object.assign(f.colors,{refreshes:f.colors.refreshes+1,syntax:syntaxOf(),text:textarea.value});}};},
+    codeViewSyntax:language=>({language}),
     requestAnimationFrame:fn=>fn(),textElement:(tag,className,text)=>{const node=new Node(tag);node.className=className;node.textContent=text;return node;},
     setTimeout:(callback,delay)=>{const timer=setTimeout(callback,delay);if(delay===15000)f.timers.add({timer,callback});return timer;},
     clearTimeout:timer=>{clearTimeout(timer);for(const entry of f.timers)if(entry.timer===timer)f.timers.delete(entry);},
@@ -90,6 +93,10 @@ async function controllerFixture(root) {
 
 export async function checkAnalystController(root) {
   let f=await controllerFixture(root),{ui,state,elements,document}=f;
+  assert.equal(f.colors.textarea,elements.content);assert.equal(f.colors.mirror,elements.contentColors);
+  assert.equal(f.colors.text,'Saved note 1');assert.equal(f.colors.syntax.language,'text','a note is colored as its saved language');
+  state.analystDraftDirty=true;elements.kind.value='analyst-script';ui.renderLocalAnalyst();assert.equal(f.colors.syntax.language,'javascript','a script draft is colored as JavaScript');
+  state.analystDraftDirty=false;ui.renderLocalAnalyst();assert.equal(f.colors.syntax.language,'text');
   f.edit('Unsaved conclusion');elements.folder.value='3';elements.content.scrollTop=80;
   assert.equal(ui.selectAnalystFile(1),true);assert(state.analystDraftDirty);assert.equal(elements.content.value,'Unsaved conclusion');assert.equal(elements.content.scrollTop,80);
   assert.equal(ui.selectAnalystFile(2),false);assert.equal(ui.selectAnalystFolder(1),false);

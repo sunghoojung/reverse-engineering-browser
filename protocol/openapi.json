@@ -5709,8 +5709,8 @@
     "/api/source-format": {
       "get": {
         "operationId": "get_source_format",
-        "summary": "Get a Prettier-style layout of one JavaScript artifact",
-        "description": "Requires exact session_id and artifact_id for an immutable JavaScript artifact of at most 16 MiB that passes size, SHA256 and strict UTF-8 checks. A contained Oxc worker lays the tokens out at 80 columns with 2-space indentation; every token and comment is printed as its original source slice and only whitespace between them changes, so mapping is whitespace-only: removing ECMAScript whitespace from text and from the original yields identical strings. The worker re-lexes its output and the service repeats the whitespace check before returning or caching (by SHA-256) a result. Source that does not parse, layouts over four times the source size, fidelity failures and the memory ceiling are a successful unavailable result with a reason, never a fallback layout. Optional start_line and line_count return one window of formatted lines; line_count always reports the whole layout.",
+        "summary": "Get a Prettier-style layout of one JavaScript artifact or JavaScript or JSON body",
+        "description": "Requires exact session_id and artifact_id for an immutable JavaScript artifact, or a request_body or response_body artifact whose MIME type (or the optional language) is JavaScript or JSON, of at most 16 MiB that passes size, SHA256 and strict UTF-8 checks. JSON is laid out as one parenthesized expression whose parentheses are removed. A contained Oxc worker lays the tokens out at 80 columns with 2-space indentation; every token and comment is printed as its original source slice and only whitespace between them changes, so mapping is whitespace-only: removing ECMAScript whitespace from text and from the original yields identical strings. The worker re-lexes its output and the service repeats the whitespace check before returning or caching (by SHA-256) a result. Source that does not parse, layouts over four times the source size, fidelity failures and the memory ceiling are a successful unavailable result with a reason, never a fallback layout. Optional start_line and line_count return one window of formatted lines; line_count always reports the whole layout, and anchors name the original UTF-16 offset of every 1000th formatted line so a window of whole anchor blocks maps exactly without the rest of the layout.",
         "tags": [
           "source-format"
         ],
@@ -5750,6 +5750,18 @@
             "description": "Optional number of formatted lines from start_line, at most 10000. Requires start_line.",
             "schema": {
               "$ref": "#/components/schemas/NonzeroUint64String"
+            }
+          },
+          {
+            "name": "language",
+            "in": "query",
+            "required": false,
+            "description": "Optional language of a request or response body, overriding its MIME type. A JavaScript artifact accepts only javascript.",
+            "schema": {
+              "enum": [
+                "javascript",
+                "json"
+              ]
             }
           }
         ],
@@ -5867,7 +5879,7 @@
             },
             {
               "id": "exact-source",
-              "condition": "Exact session_id and artifact_id select one verified immutable UTF-8 JavaScript artifact of at most 16 MiB."
+              "condition": "Exact session_id and artifact_id select one verified immutable UTF-8 JavaScript artifact, or JavaScript or JSON request or response body, of at most 16 MiB."
             },
             {
               "id": "formatter-worker",
@@ -5875,7 +5887,7 @@
             }
           ],
           "confirmations": [],
-          "notes": "Read-only display layout of retained local evidence. No runtime execution, browser control, model call, network request or artifact mutation. Results are cached in memory by SHA-256.",
+          "notes": "Read-only display layout of retained local evidence. Body layouts carry the body's sensitive text, as get_artifact_content does. No runtime execution, browser control, model call, network request or artifact mutation. Results are cached in memory by SHA-256 and language.",
           "sources": [
             {
               "path": "apps/origin-trace-backend/src/app.rs",
@@ -25128,6 +25140,7 @@
           "mapping",
           "line_count",
           "window",
+          "anchors",
           "text",
           "cached",
           "limits"
@@ -25156,7 +25169,8 @@
                   "parse-failed",
                   "output-limit",
                   "fidelity-check-failed",
-                  "memory-limit"
+                  "memory-limit",
+                  "nesting-limit"
                 ]
               }
             ]
@@ -25168,7 +25182,10 @@
             ]
           },
           "language": {
-            "const": "javascript"
+            "enum": [
+              "javascript",
+              "json"
+            ]
           },
           "engine": {
             "type": "string"
@@ -25220,6 +25237,35 @@
                   "line_count": {
                     "type": "integer",
                     "minimum": 0
+                  }
+                }
+              }
+            ]
+          },
+          "anchors": {
+            "description": "Null when unavailable. source_utf16[k] is the UTF-16 offset in the original of the first non-whitespace character at or after formatted line k * lines + 1, or the original's UTF-16 length when none follows; there is one entry per started block of lines.",
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "lines",
+                  "source_utf16"
+                ],
+                "properties": {
+                  "lines": {
+                    "const": 1000
+                  },
+                  "source_utf16": {
+                    "type": "array",
+                    "minItems": 1,
+                    "items": {
+                      "type": "integer",
+                      "minimum": 0
+                    }
                   }
                 }
               }

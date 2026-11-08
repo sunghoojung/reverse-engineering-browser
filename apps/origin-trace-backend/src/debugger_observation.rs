@@ -150,6 +150,9 @@ pub fn decode(event: &Value) -> Option<Value> {
         return None;
     }
     let detail = detail(kind, &payload[80..])?;
+    if payload[..2] != [1, 0] {
+        return None;
+    }
     payload[80..].fill(0);
     let stack = request_stack::decode_record(&payload)?;
     Some(json!({

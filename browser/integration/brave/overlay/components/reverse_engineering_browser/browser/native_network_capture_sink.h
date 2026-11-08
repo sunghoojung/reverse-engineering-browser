@@ -22,6 +22,7 @@
 #include "base/synchronization/lock.h"
 
 #include "brave/components/reverse_engineering_browser/common/native_artifact_header.h"
+#include "brave/components/reverse_engineering_browser/common/native_navigation_initiator_hook.h"
 #include "brave/components/reverse_engineering_browser/common/native_network_cookies.h"
 #include "brave/components/reverse_engineering_browser/common/native_network_headers.h"
 #include "brave/components/reverse_engineering_browser/common/native_network_headers_hook.h"
@@ -123,6 +124,10 @@ class NativeNetworkCaptureSink final {
                             std::string_view devtools_request_id,
                             const std::vector<network::mojom::HttpRawHeaderPairPtr>& headers,
                             NativeNetworkCookies cookies = {}) noexcept;
+  // Keeps a navigation's renderer stack by DevTools ID until its request starts.
+  bool NoteNavigationInitiator(std::string_view devtools_request_id,
+                               std::uint32_t renderer_process_id,
+                               std::uint64_t renderer_sequence) noexcept;
 
  private:
   friend class base::NoDestructor<NativeNetworkCaptureSink>;
@@ -135,6 +140,9 @@ class NativeNetworkCaptureSink final {
                        const NativeProbeHeader& parent,
                        const network::ResourceRequest& request,
                        bool capture_content) noexcept;
+  void EmitNavigationLink(NativeProbeEmitter emitter,
+                          const NativeProbeHeader& parent,
+                          std::string_view devtools_request_id) noexcept;
 
   // One hop of a tracked request: its start record and URL.
   struct HeaderHop final {
@@ -195,6 +203,15 @@ class NativeNetworkCaptureSink final {
   // Hashed DevTools IDs of the newest finished requests, so a late block for one is counted.
   std::array<std::size_t, 256> finished_devtools_ids_{};
   std::size_t finished_devtools_next_ = 0;
+  // Pending navigation links, newest kept.
+  struct NavigationInitiator final {
+    std::string devtools_id;
+    std::uint32_t process_id = 0;
+    std::uint64_t sequence = 0;
+  };
+  base::Lock navigation_lock_;
+  std::array<NavigationInitiator, 64> navigation_initiators_;
+  std::size_t navigation_initiator_next_ = 0;
 };
 
 }  // namespace reb

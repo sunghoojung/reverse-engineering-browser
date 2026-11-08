@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <functional>
 #include <limits>
 #include <string>
@@ -25,6 +26,7 @@
 #include "brave/components/reverse_engineering_browser/common/native_network_request.h"
 #include "brave/components/reverse_engineering_browser/common/native_network_response_body.h"
 #include "brave/components/reverse_engineering_browser/common/native_network_scope.h"
+#include "brave/components/reverse_engineering_browser/common/native_request_stack.h"
 #include "content/public/browser/browser_context.h"
 #include "crypto/hash.h"
 #include "net/cookies/canonical_cookie.h"
@@ -263,6 +265,13 @@ std::uint64_t RequestIdOfHeaderId(const std::string_view id) noexcept {
   return value;
 }
 
+bool ForwardNavigationInitiator(const std::string_view devtools_request_id,
+                                const std::uint32_t renderer_process_id,
+                                const std::uint64_t renderer_sequence) {
+  return NativeNetworkCaptureSink::Get().NoteNavigationInitiator(
+      devtools_request_id, renderer_process_id, renderer_sequence);
+}
+
 void ForwardNetworkHeaders(const NativeNetworkHeadersKind kind,
                            const std::string_view devtools_request_id,
                            const std::vector<network::mojom::HttpRawHeaderPairPtr>& headers,
@@ -441,6 +450,14 @@ void NativeNetworkCaptureSink::SetEmitter(const NativeProbeEmitter emitter,
     finished_devtools_next_ = 0;
   }
   SetNativeNetworkHeadersObserver(emitter && capture_content ? &ForwardNetworkHeaders : nullptr);
+  {
+    base::AutoLock lock(navigation_lock_);
+    navigation_initiators_ = {};
+  }
+  SetNativeNavigationInitiatorObserver(
+      emitter && (category_mask & NativeProbeCategoryMask(NativeProbeCategory::kNetwork)) != 0
+          ? &ForwardNavigationInitiator
+          : nullptr);
   emitter_.store(emitter, std::memory_order_release);
 }
 
@@ -764,6 +781,9 @@ void NativeNetworkCaptureSink::RecordRequestStarted(const std::uint64_t request_
   }
   SetPayload(event, request.method, " ", request.url.host());
   emitter(event);
+  if (loader_kind == NativeLoaderKind::kNavigation && request.devtools_request_id) {
+    EmitNavigationLink(emitter, event.header, *request.devtools_request_id);
+  }
   // Raw path and query are content; the body summary is metadata. Both follow
   // the start record as children so a dropped start cannot leave them unowned.
   const bool capture_content = capture_content_.load(std::memory_order_relaxed);
@@ -795,6 +815,45 @@ void NativeNetworkCaptureSink::RecordRequestStarted(const std::uint64_t request_
     tracked = TrackedHeaders();
     tracked.open = HeaderHop{event.header, 0, std::move(url)};
   }
+}
+
+bool NativeNetworkCaptureSink::NoteNavigationInitiator(
+    const std::string_view devtools_request_id,
+    const std::uint32_t renderer_process_id,
+    const std::uint64_t renderer_sequence) noexcept {
+  if (!emitter_.load(std::memory_order_acquire) || devtools_request_id.empty() ||
+      renderer_process_id == 0 || renderer_sequence == 0) {
+    return false;
+  }
+  base::AutoLock lock(navigation_lock_);
+  NavigationInitiator& slot =
+      navigation_initiators_[navigation_initiator_next_++ % navigation_initiators_.size()];
+  slot = {std::string(devtools_request_id), renderer_process_id, renderer_sequence};
+  return true;
+}
+
+void NativeNetworkCaptureSink::EmitNavigationLink(
+    const NativeProbeEmitter emitter,
+    const NativeProbeHeader& parent,
+    const std::string_view devtools_request_id) noexcept {
+  NativeNavigationLinkPayload payload;
+  {
+    base::AutoLock lock(navigation_lock_);
+    const auto found =
+        std::find_if(navigation_initiators_.begin(), navigation_initiators_.end(),
+                     [&](const NavigationInitiator& entry) {
+                       return entry.sequence != 0 && entry.devtools_id == devtools_request_id;
+                     });
+    if (found == navigation_initiators_.end()) {
+      return;
+    }
+    payload.renderer_process_id = found->process_id;
+    payload.renderer_sequence = found->sequence;
+    *found = {};
+  }
+  NativeProbeEvent event = MakeChildEvent(NativeProbeType::kNavigationInitiatorLink, parent);
+  event.inline_payload = std::bit_cast<decltype(event.inline_payload)>(payload);
+  emitter(event);
 }
 
 void NativeNetworkCaptureSink::AssignNetworkHeadersId(const std::uint64_t request_id,

@@ -254,6 +254,9 @@ fn binary_record_summary(value: &Value, size: usize) -> Option<String> {
                 | "script_cookie"
                 | "request_initiator_stack"
                 | "script_identity"
+                | "navigation_initiator_stack"
+                | "navigation_initiator_link"
+                | "async_task_stack"
                 | "request_watch_match"
         );
     let observation = value["category"] == "runtime"

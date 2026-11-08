@@ -148,6 +148,7 @@ def compile_driver(build: Path) -> Path:
         str(fixture / "main.cc"),
         str(sources / "browser/native_network_capture_sink.cc"),
         str(sources / "common/native_network_headers_hook.cc"),
+        str(sources / "common/native_navigation_initiator_hook.cc"),
         str(sources / "browser/native_artifact_capture_sink.cc"),
         str(sources / "browser/native_response_body_capture.cc"),
         str(sources / "browser/native_probe_host.cc"),

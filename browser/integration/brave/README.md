@@ -455,8 +455,12 @@ the JavaScript and Wasm stack and `await` chain each document request started
 from. The packaged app turns it on when Network and Artifact are captured.
 `patches/v8/0015-capture-native-request-stacks.patch` adds the walker and
 `patches/chromium/0029-record-request-initiator-stacks.patch` the Blink
-provider, the loader call and the Console request watch hook. See
-[Native network v3](../../../protocol/native-network-v3.md).
+provider, the loader call and the Console request watch hook. Chromium `0034`
+records script navigations and async task callers through
+`renderer/native_request_stack_blink.h`: the async task probes, task
+attribution at top-level callbacks, `BeginNavigation`, form scheduling and the
+browser navigation link; V8 `0017` bounds scheduling-time walks to 128 frames.
+See [Native network v3](../../../protocol/native-network-v3.md).
 
 ## Debugger observations
 

@@ -52,7 +52,8 @@ namespace observation_detail {
 [[nodiscard]] inline bool StackSummary(const ObservationPayload& value) noexcept {
   RequestStackPayload prefix = value.stack;
   prefix.reserved1 = {};
-  return IsValidRequestStackPayload(prefix);
+  return prefix.protocol_version == kRequestStackPayloadVersion &&
+         IsValidRequestStackPayload(prefix);
 }
 
 [[nodiscard]] inline bool AsciiName(std::span<const std::uint8_t> bytes,

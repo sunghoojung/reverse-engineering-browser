@@ -100,6 +100,9 @@ bool IsKnownType(const EventType type) noexcept {
     case EventType::kCspViolation:
     case EventType::kExceptionObservation:
     case EventType::kDomMutation:
+    case EventType::kNavigationInitiatorStack:
+    case EventType::kNavigationInitiatorLink:
+    case EventType::kAsyncTaskStack:
       return true;
     case EventType::kUnknown:
       return false;
@@ -196,6 +199,14 @@ bool IsValidEvent(const EventRecord& event) noexcept {
   if (event.header.type == EventType::kRequestInitiatorStack && !IsValidRequestStackEvent(event))
     return false;
   if (event.header.type == EventType::kScriptIdentity && !IsValidScriptIdentityEvent(event))
+    return false;
+  if (event.header.type == EventType::kNavigationInitiatorStack &&
+      !IsValidNavigationStackEvent(event))
+    return false;
+  if (event.header.type == EventType::kNavigationInitiatorLink &&
+      !IsValidNavigationLinkEvent(event))
+    return false;
+  if (event.header.type == EventType::kAsyncTaskStack && !IsValidAsyncTaskStackEvent(event))
     return false;
   if (event.header.type >= EventType::kRequestWatchMatch &&
       event.header.type <= EventType::kDomMutation && !IsValidObservationEvent(event))
@@ -441,6 +452,12 @@ std::string_view EventTypeName(const EventType type) noexcept {
       return "exception_observation";
     case EventType::kDomMutation:
       return "dom_mutation";
+    case EventType::kNavigationInitiatorStack:
+      return "navigation_initiator_stack";
+    case EventType::kNavigationInitiatorLink:
+      return "navigation_initiator_link";
+    case EventType::kAsyncTaskStack:
+      return "async_task_stack";
     case EventType::kUnknown:
       return "unknown";
   }

@@ -39,7 +39,8 @@ sources="$root/browser/integration/brave/overlay/components/reverse_engineering_
 readonly sources
 "${CXX:-c++}" "${flags[@]}" -I"$fixture" -I"$build/stubs" -I"$root/tools/native-test-support" \
   -I"$build/include" -I"$root/include" "$fixture/main.cc" "$sources/browser/native_network_capture_sink.cc" \
-  "$sources/common/native_network_headers_hook.cc" "$sources/common/native_probe_queue.cc" \
+  "$sources/common/native_network_headers_hook.cc" "$sources/common/native_navigation_initiator_hook.cc" \
+  "$sources/common/native_probe_queue.cc" \
   "$root/src/capture/event.cpp" -o "$build/native-network-capture"
 "$build/native-network-capture"
 

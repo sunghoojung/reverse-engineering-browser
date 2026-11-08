@@ -55,6 +55,21 @@ static_assert(offsetof(reb::NativeRequestStackPayload, innermost) ==
 static_assert(offsetof(reb::NativeScriptIdentityPayload, sha256) ==
               offsetof(reb::ScriptIdentityPayload, sha256));
 static_assert(reb::kNativeStackArtifactMaxBytes == reb::kStackArtifactMaxBytes);
+static_assert(static_cast<std::uint16_t>(reb::EventType::kNavigationInitiatorStack) ==
+              static_cast<std::uint16_t>(reb::NativeProbeType::kNavigationInitiatorStack));
+static_assert(static_cast<std::uint16_t>(reb::EventType::kNavigationInitiatorLink) ==
+              static_cast<std::uint16_t>(reb::NativeProbeType::kNavigationInitiatorLink));
+static_assert(static_cast<std::uint16_t>(reb::EventType::kAsyncTaskStack) ==
+              static_cast<std::uint16_t>(reb::NativeProbeType::kAsyncTaskStack));
+static_assert(sizeof(reb::NativeTaskSegment) == sizeof(reb::TaskSegment));
+static_assert(sizeof(reb::NativeAsyncTaskStackPayload) == sizeof(reb::AsyncTaskStackPayload));
+static_assert(sizeof(reb::NativeNavigationLinkPayload) == sizeof(reb::NavigationLinkPayload));
+static_assert(offsetof(reb::NativeAsyncTaskStackPayload, innermost) ==
+              offsetof(reb::AsyncTaskStackPayload, innermost));
+static_assert(offsetof(reb::NativeNavigationStackTail, target_frame_id) ==
+              offsetof(reb::NavigationStackTail, target_frame_id));
+static_assert(reb::kNativeTaskSegmentLimit == reb::kTaskSegmentLimit &&
+              reb::kNativeAsyncTaskFrameLimit == reb::kAsyncTaskFrameLimit);
 
 reb::NativeStackFrame JsFrame(const std::uint32_t script, const std::uint32_t position) {
   reb::NativeStackFrame frame;
@@ -161,7 +176,46 @@ void CheckStackRecords() {
   });
   invalid("unknown flag", [](auto& v) { v.flags |= 0x10; });
   invalid("dirty reserved", [](auto& v) { v.reserved1[3] = 1; });
-  invalid("version", [](auto& v) { v.protocol_version = 2; });
+  invalid("version", [](auto& v) { v.protocol_version = 3; });
+  invalid("task segments in version 1", [](auto& v) {
+    v.task_segments = 1;
+    v.async_segments = 3;
+  });
+  invalid("chain truncated in version 1",
+          [](auto& v) { v.flags |= reb::kNativeRequestStackTaskChainTruncated; });
+
+  // Version 2 carries the task chain: async segments count awaits and tasks.
+  const auto tasks = [](const std::uint16_t count) {
+    auto v = Captured(150, 2);
+    v.protocol_version = reb::kNativeRequestStackTaskPayloadVersion;
+    v.flags = 0;
+    v.task_segments = count;
+    v.async_segments = static_cast<std::uint16_t>(2 + count);
+    return v;
+  };
+  Check(valid(tasks(0)), "version 2 without a task chain");
+  Check(valid(tasks(3)), "version 2 with three task segments");
+  auto chained = tasks(32);
+  chained.flags = reb::kNativeRequestStackTaskChainTruncated | reb::kNativeRequestStackTaskChainCut;
+  Check(valid(chained), "a 32-segment chain that continues");
+  auto v2 = tasks(33);
+  v2.async_segments = 35;
+  Check(!valid(v2), "33 task segments rejected");
+  v2 = tasks(3);
+  v2.async_segments = 3;
+  Check(!valid(v2), "async segments must add awaits and tasks");
+  v2 = tasks(3);
+  v2.flags = reb::kNativeRequestStackTaskChainTruncated;
+  Check(!valid(v2), "chain truncated below 32 segments rejected");
+  v2 = {};
+  v2.protocol_version = reb::kNativeRequestStackTaskPayloadVersion;
+  v2.state = static_cast<std::uint8_t>(reb::NativeRequestStackState::kNoScript);
+  Check(valid(v2), "version 2 parser record");
+  v2.flags = reb::kNativeRequestStackTaskChainCut;
+  Check(!valid(v2), "a version 2 parser record has no chain flags");
+  v2.flags = 0;
+  v2.task_segments = 1;
+  Check(!valid(v2), "a version 2 parser record has no task segments");
 
   auto event = Event(reb::EventType::kRequestInitiatorStack, reb::EventCategory::kNetwork,
                      reb::EncodeNativeRequestStackRecord(Captured(40, 1)));
@@ -180,6 +234,120 @@ void CheckStackRecords() {
   envelope("short payload", [](auto& e) { e.header.payload_size = 64; });
   Check(reb::EventTypeName(reb::EventType::kRequestInitiatorStack) == "request_initiator_stack",
         "stack record name");
+}
+
+reb::EventRecord RendererRecord(const reb::EventType type,
+                                const std::array<std::byte, 128>& payload) {
+  auto event = Event(type, reb::EventCategory::kNetwork, payload);
+  event.header.parent_event_id = 0;
+  event.header.request_id = 0;
+  return event;
+}
+
+void CheckNavigationAndTaskRecords() {
+  const auto check = [](const std::string& name, const reb::EventRecord& event,
+                        const bool expected) {
+    golden.emplace_back(name, event);
+    Check(reb::IsValidEvent(event) == expected, name);
+  };
+  auto stack = Captured(40, 1);
+  stack.protocol_version = reb::kNativeRequestStackTaskPayloadVersion;
+  stack.flags = 0;
+  stack.task_segments = 2;
+  stack.async_segments = 3;
+  reb::NativeNavigationStackTail tail;
+  tail.kind = static_cast<std::uint8_t>(reb::NativeNavigationKind::kWindowOpen);
+  tail.target_frame_id = 0x5151;
+  auto navigation = stack;
+  navigation.reserved1 = std::bit_cast<std::array<std::uint8_t, 48>>(tail);
+  Check(reb::IsValidNativeNavigationStackPayload(navigation), "overlay accepts a navigation stack");
+  const auto record = RendererRecord(reb::EventType::kNavigationInitiatorStack,
+                                     reb::EncodeNativeRequestStackRecord(navigation));
+  check("navigation stack", record, true);
+  const auto variant = [&](const std::string& name, const std::function<void(reb::EventRecord&)>& f,
+                           const bool expected) {
+    auto copy = record;
+    f(copy);
+    check(name, copy, expected);
+  };
+  variant("navigation stack with a parent", [](auto& e) { e.header.parent_event_id = 3; }, false);
+  variant("navigation stack with a request", [](auto& e) { e.header.request_id = 3; }, false);
+  variant("navigation kind 0", [](auto& e) { e.inline_payload[80] = std::byte{0}; }, false);
+  variant("navigation kind 5", [](auto& e) { e.inline_payload[80] = std::byte{5}; }, false);
+  variant(
+      "navigation without a target",
+      [](auto& e) { std::fill_n(e.inline_payload.begin() + 88, 8, std::byte{0}); }, false);
+  variant("navigation dirty tail", [](auto& e) { e.inline_payload[100] = std::byte{1}; }, false);
+  variant("navigation version 1", [](auto& e) { e.inline_payload[0] = std::byte{1}; }, false);
+  variant(
+      "navigation parser state",
+      [](auto& e) {
+        std::fill(e.inline_payload.begin() + 4, e.inline_payload.begin() + 80, std::byte{0});
+        e.inline_payload[4] = std::byte{2};
+      },
+      false);
+  Check(
+      reb::EventTypeName(reb::EventType::kNavigationInitiatorStack) == "navigation_initiator_stack",
+      "navigation stack name");
+
+  reb::NativeAsyncTaskStackPayload task;
+  task.kind = static_cast<std::uint8_t>(reb::NativeAsyncTaskKind::kSetTimeout);
+  task.recorded = 128;
+  task.flags = reb::kNativeTaskSegmentBounded;
+  task.scripts = 2;
+  task.digest.fill(0x33);
+  task.innermost = JsFrame(9, 70);
+  Check(reb::IsValidNativeAsyncTaskStackPayload(task), "overlay accepts an async task stack");
+  const auto scheduled =
+      RendererRecord(reb::EventType::kAsyncTaskStack, reb::EncodeNativeRequestStackRecord(task));
+  check("async task stack", scheduled, true);
+  const auto task_variant = [&](const std::string& name,
+                                const std::function<void(reb::NativeAsyncTaskStackPayload&)>& f) {
+    auto copy = task;
+    f(copy);
+    Check(!reb::IsValidNativeAsyncTaskStackPayload(copy), "overlay rejects " + name);
+    check(
+        name,
+        RendererRecord(reb::EventType::kAsyncTaskStack, reb::EncodeNativeRequestStackRecord(copy)),
+        false);
+  };
+  task_variant("async task microtask kind", [](auto& v) { v.kind = 9; });
+  task_variant("async task bounded below 128", [](auto& v) { v.recorded = 127; });
+  task_variant("async task above 128 frames", [](auto& v) { v.recorded = 129; });
+  task_variant("async task no digest", [](auto& v) { v.digest.fill(0); });
+  task_variant("async task await innermost", [](auto& v) {
+    v.innermost.kind = static_cast<std::uint8_t>(reb::NativeStackFrameKind::kAwait);
+  });
+  auto parented = scheduled;
+  parented.header.parent_event_id = 4;
+  check("async task stack with a parent", parented, false);
+  Check(reb::EventTypeName(reb::EventType::kAsyncTaskStack) == "async_task_stack",
+        "async task stack name");
+
+  reb::NativeNavigationLinkPayload link;
+  link.renderer_process_id = 41;
+  link.renderer_sequence = 9;
+  auto browser = Event(reb::EventType::kNavigationInitiatorLink, reb::EventCategory::kNetwork,
+                       std::bit_cast<std::array<std::byte, 128>>(link));
+  browser.header.tab_id = 4;
+  browser.header.request_id = 300;
+  check("navigation link", browser, true);
+  const auto link_variant = [&](const std::string& name,
+                                const std::function<void(reb::EventRecord&)>& f) {
+    auto copy = browser;
+    f(copy);
+    check(name, copy, false);
+  };
+  link_variant("navigation link without a parent", [](auto& e) { e.header.parent_event_id = 0; });
+  link_variant("navigation link without a request", [](auto& e) { e.header.request_id = 0; });
+  link_variant("navigation link without a renderer",
+               [](auto& e) { std::fill_n(e.inline_payload.begin() + 4, 4, std::byte{0}); });
+  link_variant("navigation link without a sequence",
+               [](auto& e) { std::fill_n(e.inline_payload.begin() + 8, 8, std::byte{0}); });
+  link_variant("navigation link dirty reserved",
+               [](auto& e) { e.inline_payload[64] = std::byte{1}; });
+  Check(reb::EventTypeName(reb::EventType::kNavigationInitiatorLink) == "navigation_initiator_link",
+        "navigation link name");
 }
 
 void CheckScriptIdentities() {
@@ -267,10 +435,56 @@ std::vector<std::byte> StackArtifact(const std::uint32_t total, const std::uint1
   return bytes;
 }
 
+// A version 2 artifact: the frames, then one setTimeout and one microtask segment.
+std::vector<std::byte> TaskArtifact() {
+  auto bytes = StackArtifact(5, 1);
+  reb::NativeStackArtifactHeader header;
+  std::memcpy(&header, bytes.data(), sizeof(header));
+  header.version = reb::kNativeStackArtifactTaskVersion;
+  header.task_segments = 2;
+  header.async_segments = 3;
+  std::memcpy(bytes.data(), &header, sizeof(header));
+  reb::NativeTaskSegment timeout;
+  timeout.kind = static_cast<std::uint8_t>(reb::NativeAsyncTaskKind::kSetTimeout);
+  timeout.state = static_cast<std::uint8_t>(reb::NativeTaskSegmentState::kCaptured);
+  timeout.recorded = 3;
+  timeout.digest.fill(0x44);
+  reb::NativeTaskSegment microtask;
+  microtask.kind = static_cast<std::uint8_t>(reb::NativeAsyncTaskKind::kMicrotask);
+  microtask.state = static_cast<std::uint8_t>(reb::NativeTaskSegmentState::kNotRecorded);
+  for (const auto& segment : {timeout, microtask}) {
+    Check(reb::IsValidNativeTaskSegment(segment), "overlay accepts a task segment");
+    const auto* raw = reinterpret_cast<const std::byte*>(&segment);
+    bytes.insert(bytes.end(), raw, raw + sizeof(segment));
+  }
+  return bytes;
+}
+
 void CheckStackArtifacts() {
   std::array<reb::StackFrame, reb::kRequestStackSyncLimit + reb::kRequestStackAsyncLimit> frames{};
   reb::StackArtifactHeader header;
   std::size_t count = 0;
+  std::array<reb::TaskSegment, reb::kTaskSegmentLimit> chain{};
+  std::size_t segments = 0;
+  const auto task_artifact = TaskArtifact();
+  Check(reb::DecodeStackArtifact(task_artifact, header, frames, count, chain, &segments) &&
+            count == 6 && segments == 2 && chain[0].kind == 1 && chain[0].recorded == 3 &&
+            chain[1].kind == reb::kTaskKindMicrotask,
+        "a version 2 artifact decodes its task chain");
+  Check(!reb::DecodeStackArtifact(task_artifact, header, frames, count),
+        "a task chain needs room for its segments");
+  auto bad_segment = task_artifact;
+  bad_segment[bad_segment.size() - 48] = std::byte{10};
+  Check(!reb::DecodeStackArtifact(bad_segment, header, frames, count, chain, &segments),
+        "an unknown task kind is rejected");
+  auto short_chain = task_artifact;
+  short_chain.resize(short_chain.size() - 48);
+  Check(!reb::DecodeStackArtifact(short_chain, header, frames, count, chain, &segments),
+        "a missing task segment is rejected");
+  auto v1_chain = task_artifact;
+  v1_chain[4] = std::byte{1};
+  Check(!reb::DecodeStackArtifact(v1_chain, header, frames, count, chain, &segments),
+        "version 1 carries no task chain");
   auto deep = StackArtifact(5000, 0);
   Check(reb::DecodeStackArtifact(deep, header, frames, count) && count == 1024 &&
             header.omitted == 3976 && header.total_depth == 5000,
@@ -361,6 +575,7 @@ void CheckStackArtifacts() {
 
 int main(int argc, char** argv) {
   CheckStackRecords();
+  CheckNavigationAndTaskRecords();
   CheckScriptIdentities();
   CheckStackArtifacts();
   if (argc == 2 && std::string_view(argv[1]) == "--golden") {

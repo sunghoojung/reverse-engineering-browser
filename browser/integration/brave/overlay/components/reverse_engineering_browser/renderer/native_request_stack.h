@@ -26,6 +26,10 @@ inline constexpr std::size_t kNativeRequestStackScriptTable = 1024;
 inline constexpr std::uint32_t kNativeRequestStackArtifactBudget = 1024;
 inline constexpr std::uint32_t kNativeRequestStackSourceBudget = 512;
 inline constexpr std::uint64_t kNativeRequestStackSourceBytes = 64ULL * 1024ULL * 1024ULL;
+inline constexpr std::size_t kNativeAsyncTaskRing = 2048;
+inline constexpr std::size_t kNativeTaskAttributionTable = 4096;
+inline constexpr std::uint32_t kNativeAsyncTaskArtifactBudget = 1024;
+inline constexpr std::size_t kNativeFormNavigationTable = 8;
 
 enum class NativeRequestStackWalkResult : std::uint8_t {
   kWalked,
@@ -49,8 +53,22 @@ struct NativeStackScriptSource final {
   std::string_view url;
 };
 
+class NativeProbeSink;
 struct NativeRequestStackTables;
 class NativeRequestStackWalk;
+
+// The kind a Location setter or window.open gives the navigation it starts.
+class COMPONENT_EXPORT(REB_NATIVE_PROBE_SINK) NativeNavigationKindScope final {
+ public:
+  explicit NativeNavigationKindScope(NativeNavigationKind kind) noexcept;
+  ~NativeNavigationKindScope();
+  NativeNavigationKindScope(const NativeNavigationKindScope&) = delete;
+  NativeNavigationKindScope& operator=(const NativeNavigationKindScope&) = delete;
+  [[nodiscard]] static NativeNavigationKind Current() noexcept;
+
+ private:
+  const NativeNavigationKind previous_;
+};
 
 // Blink's walker. It runs on the calling thread and returns kWalked only on
 // the document main thread, after calling FramesReady exactly once.
@@ -81,6 +99,22 @@ class COMPONENT_EXPORT(REB_NATIVE_PROBE_SINK) NativeRequestStackWalk final {
                                 std::uint64_t frame_id,
                                 std::array<std::uint8_t, 32>& digest,
                                 NativeStackFrame& innermost) noexcept;
+  // Whether the provider is installed: one atomic load.
+  [[nodiscard]] static bool Enabled() noexcept;
+  // A navigation_initiator_stack when script runs: its admitted sequence, else 0.
+  [[nodiscard]] static std::uint64_t RecordNavigation(NativeNavigationKind kind,
+                                                      std::uint64_t target_frame_id) noexcept;
+  // Form submissions navigate from a later task, so their stack waits here.
+  static void ScheduleFormNavigation(std::uint64_t target_frame_id) noexcept;
+  [[nodiscard]] static std::uint64_t TakeFormNavigation(std::uint64_t target_frame_id) noexcept;
+  // An async task scheduled now: its segment handle, or 0. Main thread only.
+  [[nodiscard]] static std::uint64_t RecordAsyncTask(NativeAsyncTaskKind kind) noexcept;
+  // The segment of the async task running on this thread, set around its run.
+  [[nodiscard]] static std::uint64_t EnterAsyncTask(std::uint64_t segment) noexcept;
+  static void ExitAsyncTask(std::uint64_t previous) noexcept;
+  [[nodiscard]] static std::uint64_t CurrentAsyncTask() noexcept;
+  // Promise reactions registered under this task attribution ID continue that segment.
+  static void AttributeAsyncTask(std::uint32_t task_attribution, std::uint64_t segment) noexcept;
 
   NativeRequestStackWalk(const NativeRequestStackWalk&) = delete;
   NativeRequestStackWalk& operator=(const NativeRequestStackWalk&) = delete;
@@ -89,6 +123,10 @@ class COMPONENT_EXPORT(REB_NATIVE_PROBE_SINK) NativeRequestStackWalk final {
   [[nodiscard]] std::span<NativeStackFrame> frames() noexcept;
   // The realm the request started in; the stack artifact's execution context.
   void SetExecutionContext(std::uint64_t execution_context_id) noexcept;
+  // Whether a microtask is running, and the current task attribution ID or 0.
+  void SetAsyncContext(bool in_microtask, std::uint32_t task_attribution) noexcept;
+  // A scheduling-time walk: the innermost kNativeAsyncTaskFrameLimit frames, no await chain.
+  [[nodiscard]] bool async_task_walk() const noexcept;
   // Whether a frame's script still needs a description in this configuration.
   [[nodiscard]] bool ScriptNeeded(std::uint32_t script_id) const noexcept;
   // Emits the stack record, and the stack artifact when it is new.
@@ -96,7 +134,8 @@ class COMPONENT_EXPORT(REB_NATIVE_PROBE_SINK) NativeRequestStackWalk final {
                    std::uint32_t recorded,
                    std::uint32_t omitted,
                    std::uint32_t async_frames,
-                   bool async_truncated) noexcept;
+                   bool async_truncated,
+                   bool bounded = false) noexcept;
   // Emits one script_identity child of the stack record and retains the source.
   void DescribeScript(const NativeStackScriptSource& script) noexcept;
 
@@ -109,6 +148,16 @@ class COMPONENT_EXPORT(REB_NATIVE_PROBE_SINK) NativeRequestStackWalk final {
                          NativeProbeType type = NativeProbeType::kRequestInitiatorStack,
                          const std::array<std::uint8_t, 48>& tail = {}) noexcept;
   void Emit(const NativeRequestStackPayload& payload) noexcept;
+  void EmitMalformed() noexcept;
+  void AsyncTaskFramesReady(std::uint32_t recorded, bool bounded) noexcept;
+  [[nodiscard]] std::size_t AppendTaskChain(std::uint8_t* out,
+                                            std::uint16_t& count,
+                                            std::uint8_t& flags) const noexcept;
+  void QueueStackArtifact(NativeProbeSink& sink,
+                          NativeRequestStackTables& state,
+                          std::size_t hash,
+                          const std::array<std::uint8_t, 32>& digest,
+                          std::span<const std::uint8_t> content) noexcept;
 
   NativeRequestStackTables* const state_;
   const std::uint64_t generation_;
@@ -123,6 +172,10 @@ class COMPONENT_EXPORT(REB_NATIVE_PROBE_SINK) NativeRequestStackWalk final {
   std::array<std::uint8_t, 32> digest_{};
   NativeStackFrame innermost_;
   bool frames_ready_ = false;
+  bool in_microtask_ = false;
+  std::uint32_t task_attribution_ = 0;
+  NativeAsyncTaskKind task_kind_ = NativeAsyncTaskKind::kEvent;
+  std::uint64_t segment_ = 0;
 };
 
 }  // namespace reb

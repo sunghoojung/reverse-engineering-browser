@@ -66,8 +66,10 @@ it.
   arms.
 - Request call stacks (`REB_NATIVE_REQUEST_STACKS`, on by default in the
   packaged app when Network and Artifact are captured) record script IDs and
-  positions of the stack that started each document request, never names or
-  values, and retain the source of each script a stack names as an artifact.
+  positions of the stack that started each document request or script
+  navigation, and of the stack that scheduled each async task it came from,
+  never names or values, and retain the source of each script a stack names
+  as an artifact.
   See [Native network v3](protocol/native-network-v3.md).
 - Debugger observation rules (Console `watch`) are off until armed on one
   selected live document and never pause it. They record request matches,

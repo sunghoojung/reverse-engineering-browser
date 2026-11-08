@@ -1151,6 +1151,21 @@ async fn openapi_responses_match_live_local_http_and_conditional_reads() {
             "/api/request-stack",
             200,
         ),
+        (
+            "/api/request-stack?process_id=4&navigation_sequence=9",
+            "/api/request-stack",
+            200,
+        ),
+        (
+            "/api/request-stack?process_id=4&request_id=3&navigation_sequence=9",
+            "/api/request-stack",
+            400,
+        ),
+        (
+            "/api/request-stack?process_id=4&navigation_sequence=0",
+            "/api/request-stack",
+            400,
+        ),
     ] {
         assert_contract_response(server.get(path).await, "get", route, status).await;
     }

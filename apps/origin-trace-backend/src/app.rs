@@ -662,17 +662,42 @@ impl App {
                 .0
             }
             "/api/request-stack" => {
-                q.only(&["session_id", "process_id", "request_id"], &[])?;
+                q.only(
+                    &[
+                        "session_id",
+                        "process_id",
+                        "request_id",
+                        "navigation_sequence",
+                    ],
+                    &[],
+                )?;
                 let session = match q.one("session_id")? {
                     Some(_) => Some(q.number("session_id", None, 64, true)?),
                     None => None,
                 };
                 let process = q.number("process_id", None, 32, true)?;
-                let request = q.number("request_id", None, 64, true)?;
+                let navigation = match q.one("navigation_sequence")? {
+                    Some(_) => Some(q.number("navigation_sequence", None, 64, true)?),
+                    None => None,
+                };
+                let request = match navigation {
+                    Some(_) if q.one("request_id")?.is_some() => {
+                        return Err(Error::bad(
+                            "Specify request_id or navigation_sequence, not both",
+                        ));
+                    }
+                    Some(_) => 0,
+                    None => q.number("request_id", None, 64, true)?,
+                };
                 let (store, artifacts) =
                     (self.options.store.clone(), self.options.artifacts.clone());
-                self.blocking(move || {
-                    crate::request_stack::document(&store, &artifacts, session, process, request)
+                self.blocking(move || match navigation {
+                    Some(sequence) => crate::request_stack::navigation_document(
+                        &store, &artifacts, session, process, sequence,
+                    ),
+                    None => crate::request_stack::document(
+                        &store, &artifacts, session, process, request,
+                    ),
                 })
                 .await?
             }

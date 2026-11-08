@@ -134,14 +134,16 @@ component("renderer_sink") {
   ]
 }
 
-# Linked by content's NetworkServiceDevToolsObserver (Chromium patch 0025) and
-# the browser sink, so one observer slot serves both in component builds.
+# Linked by content (Chromium patches 0025 and 0034) and the browser sink, so
+# one observer slot serves both in component builds.
 component("network_headers_hook") {
   output_name = "reverse_engineering_browser_network_headers_hook"
 
   defines = [ "IS_REB_NETWORK_HEADERS_HOOK_IMPL" ]
 
   sources = [
+    "common/native_navigation_initiator_hook.cc",
+    "common/native_navigation_initiator_hook.h",
     "common/native_network_headers_hook.cc",
     "common/native_network_headers_hook.h",
   ]
@@ -243,6 +245,7 @@ source_set("browser") {
     "common/native_network_scope.h",
     "common/native_probe_event.h",
     "common/native_probe_ipc.h",
+    "common/native_request_stack.h",
     "common/native_runtime_snapshot_queue.h",
     "common/native_tab_link.h",
     "common/native_vm_dispatch.h",

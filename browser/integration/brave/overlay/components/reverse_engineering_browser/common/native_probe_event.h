@@ -109,6 +109,10 @@ enum class NativeProbeType : std::uint16_t {
   kCspViolation = 43,
   kExceptionObservation = 44,
   kDomMutation = 45,
+  // Navigation and async task callers; see protocol/native-network-v3.md.
+  kNavigationInitiatorStack = 46,
+  kNavigationInitiatorLink = 47,
+  kAsyncTaskStack = 48,
 };
 
 enum class NativeProbeFlag : std::uint16_t {

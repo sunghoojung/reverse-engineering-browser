@@ -113,7 +113,8 @@ struct UnguessableToken {
 
 namespace mojo_base {
 struct BigBuffer {
-  explicit BigBuffer(std::span<const std::uint8_t>) {}
+  explicit BigBuffer(std::span<const std::uint8_t> bytes) : data(bytes.begin(), bytes.end()) {}
+  std::vector<std::uint8_t> data;
 };
 }  // namespace mojo_base
 
@@ -162,9 +163,23 @@ struct NativeProbeHost {
   void CaptureNativeGuestHost(Args&&...) {
     ++artifacts;
   }
+  // The newest stack artifact (capture origin 12), for content checks.
+  inline static std::vector<std::uint8_t> generated;
+  inline static std::uint64_t generated_creator = 0;
   template <class... Args>
-  void CaptureGeneratedArtifact(Args&&...) {
+  void CaptureGeneratedArtifact(std::uint16_t,
+                                std::uint16_t origin,
+                                std::uint64_t creator,
+                                std::uint64_t,
+                                std::uint64_t,
+                                std::string,
+                                mojo_base::BigBuffer content,
+                                Args&&...) {
     ++artifacts;
+    if (origin == 12) {
+      generated = std::move(content.data);
+      generated_creator = creator;
+    }
   }
 };
 }  // namespace reb::mojom

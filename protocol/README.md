@@ -428,6 +428,9 @@ use the names.
 | 43 | `csp_violation` | `include/reb/debugger_observation.hpp` | [native debugger observation v1](native-debugger-observation-v1.md) |
 | 44 | `exception_observation` | `include/reb/debugger_observation.hpp` | [native debugger observation v1](native-debugger-observation-v1.md) |
 | 45 | `dom_mutation` | `include/reb/debugger_observation.hpp` | [native debugger observation v1](native-debugger-observation-v1.md) |
+| 46 | `navigation_initiator_stack` | `include/reb/request_stack.hpp` | [native network v3](native-network-v3.md#navigation_initiator_stack-type-46) |
+| 47 | `navigation_initiator_link` | `include/reb/request_stack.hpp` | [native network v3](native-network-v3.md#navigation_initiator_link-type-47) |
+| 48 | `async_task_stack` | `include/reb/request_stack.hpp` | [native network v3](native-network-v3.md#async_task_stack-type-48) |
 
 `wasm_indirect_observation` payloads are version 2 and `wasm_guest_invocation`
 version 4: each adds the JavaScript invocation context in previously reserved

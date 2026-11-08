@@ -21,6 +21,8 @@ stored v1 or v2 meaning. [SAFETY.md](../SAFETY.md) governs capture and export.
 | Event type 37, 38 | `tab_set`, `request_tab_link` | Request scope and tabs |
 | Event type 39 | `script_cookie` | Headers and cookies |
 | Event type 40 to 45 | debugger observations | [Debugger observation v1](native-debugger-observation-v1.md) |
+| Event type 46, 47 | `navigation_initiator_stack`, `navigation_initiator_link` | Navigation and async task callers |
+| Event type 48 | `async_task_stack` | Navigation and async task callers |
 | Envelope byte 140, 141 | `scheme_class`, `loader_kind` | Request scope and tabs |
 | Artifact kind 9 | `request_target` | [Network v2](native-network-v2.md) |
 | Artifact kind 10, 11 | `request_headers`, `response_headers` | Headers and cookies |
@@ -34,6 +36,8 @@ stored v1 or v2 meaning. [SAFETY.md](../SAFETY.md) governs capture and export.
 | Chromium patch 0028 | `record-script-cookie-access` | Headers and cookies |
 | Chromium patch 0029 | `record-request-initiator-stacks` | Request initiator stacks |
 | V8 patch 0015 | `capture-native-request-stacks` | Request initiator stacks |
+| Chromium patch 0034 | `record-navigation-and-async-initiators` | Navigation and async task callers |
+| V8 patch 0017 | `bound-native-async-task-stacks` | Navigation and async task callers |
 
 Traffic detail tabs, in order: General, Headers, Payload, Preview, Response,
 Cookies, Initiator, Timing, Signals, Evidence.
@@ -974,12 +978,10 @@ Still required before declaring this browser-ready:
 ## Request initiator stacks
 
 Defined by #429: the synchronous JavaScript and WebAssembly stack, plus
-V8's `await` chain, that was running when a renderer started a request.
-
-
-The synchronous JavaScript and WebAssembly stack, plus V8's `await` chain, that
-was running when a renderer started a request. Frames are identities only:
-no strings, no values, no debugger.
+V8's `await` chain, that was running when a renderer started a request, and
+from version 2 the async tasks that led there
+([task chain](#navigation-and-async-task-callers)). Frames are identities
+only: no strings, no values, no debugger.
 
 ### Gate
 
@@ -1001,16 +1003,16 @@ frame and renderer `request_id`. Payload 128 bytes, little endian:
 
 | Offset | Size | Field |
 | ---: | ---: | --- |
-| 0 | 2 | payload version, `1` |
+| 0 | 2 | payload version: `2`, or `1` from earlier producers |
 | 2 | 2 | payload size, `128` |
 | 4 | 1 | state |
 | 5 | 1 | flags |
-| 6 | 2 | reserved, zero |
+| 6 | 2 | version 2: task segments, at most 32; version 1: zero |
 | 8 | 4 | total synchronous depth |
 | 12 | 4 | recorded synchronous frames, at most 1,024 |
 | 16 | 4 | omitted synchronous frames |
 | 20 | 2 | async frames, at most 32 |
-| 22 | 2 | async segments |
+| 22 | 2 | async segments: version 1 the async frames, version 2 async frames plus task segments |
 | 24 | 4 | Wasm frames among the recorded ones |
 | 28 | 4 | distinct scripts among the recorded frames |
 | 32 | 32 | stack digest: SHA-256 of the stack artifact content |
@@ -1026,20 +1028,23 @@ frame and renderer `request_id`. Payload 128 bytes, little endian:
 | 5 `not_retained_budget` | Frames walked; this configuration already sent 1,024 stacks |
 
 Flags: bit 0 the stack artifact was queued with this record; bit 1 frames were
-omitted; bit 2 the `await` chain reached 32 frames and may continue; bit 3 task-attributed
-async callers (timers, event listeners, `promise.then` callbacks, message
-handlers) were not captured. Bit 3 is always set in version 1. Other bits are
-zero.
+omitted; bit 2 the `await` chain reached 32 frames and may continue. Bit 3 in
+version 1 (always set): task-attributed callers were not captured; in version
+2: the task chain stops at a caller that was not recorded. Bit 4, version 2
+only: the task chain reached 32 segments and may continue. Other bits are
+zero. Debugger observations keep version 1.
 
 Validation, shared by the C++ core, the Python validator and the backend:
 
 - States 1, 4 and 5 have a nonzero digest, an innermost frame, recorded at
   least 1, `recorded + omitted == total` and `recorded <= 1024`. Omitted is
   nonzero exactly when bit 1 is set, and then recorded is 1,024.
-- States 2 and 3 have every count, the digest and the innermost frame zero, and
-  only bit 3 may be set.
-- Bit 0 only with state 1. Async segments never exceed async frames. Wasm
-  frames and distinct scripts never exceed recorded plus async frames.
+- States 2 and 3 have every count, the digest and the innermost frame zero;
+  only bit 3 may be set, and in version 2 no flag.
+- Bit 0 only with state 1. Version 1: async segments never exceed async
+  frames. Version 2: async segments equal async frames plus task segments, and
+  bit 4 needs 32 task segments. Wasm frames and distinct scripts never exceed
+  recorded plus async frames.
 - The envelope's `artifact_id` is zero: the browser assigns artifact IDs.
 
 ### Frame layout
@@ -1069,21 +1074,23 @@ digest. Content:
 | Offset | Size | Field |
 | ---: | ---: | --- |
 | 0 | 4 | magic `RBSK` (`0x4b534252`) |
-| 4 | 2 | version, `1` |
+| 4 | 2 | version: the record's payload version |
 | 6 | 2 | header size, `32` |
 | 8 | 2 | frame size, `16` |
-| 10 | 2 | record flags bits 1 and 2 |
+| 10 | 2 | record flags bits 1 and 2, and in version 2 bits 3 and 4 |
 | 12 | 4 | total synchronous depth |
 | 16 | 4 | recorded synchronous frames |
 | 20 | 4 | omitted synchronous frames |
 | 24 | 2 | async frames |
 | 26 | 2 | async segments |
-| 28 | 4 | reserved, zero |
+| 28 | 2 | task segments; zero in version 1 |
+| 30 | 2 | reserved, zero |
 | 32 | 16 x n | recorded synchronous frames, then async frames |
+| | 48 x t | version 2: [task segments](#task-segment), nearest first |
 
 A stack deeper than 1,024 keeps the innermost 512 and the outermost 512 frames;
 the omitted frames lie between index 511 and 512. Async frames follow the
-synchronous ones in chain order; in version 1 each async frame is one segment.
+synchronous ones in chain order; each async frame is one segment.
 
 Each renderer remembers 256 digests it sent in the current configuration. A
 repeated stack sends no artifact. A digest that falls out of that table is sent
@@ -1092,9 +1099,9 @@ configuration.
 
 ### `script_identity` (type 35)
 
-Category `network`, `request_id` 0, child of the `request_initiator_stack`
-(or `script_cookie` write) record that first named the script in this
-configuration. Same process, thread and frame. Both records share the Network
+Category `network`, `request_id` 0, child of the `request_initiator_stack`,
+`navigation_initiator_stack`, `async_task_stack` (or `script_cookie` write)
+record that first named the script in this configuration. Same process, thread and frame. Both records share the Network
 and Artifact gate.
 
 | Offset | Size | Field |
@@ -1196,5 +1203,176 @@ Still required before declaring this browser-ready:
 5. Repeated requests from one call site send their stack once.
 6. Measure added time per request at p50 and p99 on a request-heavy page before
    keeping the packaged default on.
-7. Script-initiated navigations (`location`, `form.submit`, `window.open`) and
-   task-attributed async callers are not recorded yet.
+7. Script-initiated navigations and task chains: see
+   [their acceptance](#acceptance-4).
+
+## Navigation and async task callers
+
+Defined by #429: the stack that started a script navigation, and the async
+tasks a request or navigation came from. Both use the
+[request stack gate](#gate) and the stack artifact path; nothing more runs
+without `--reb-request-stacks`.
+
+### Task chain
+
+At scheduling time Blink's async task probes
+(`probe::AsyncTaskContext::Schedule`, the identities DevTools' async stacks
+use) walk the innermost 128 frames when script is on the document main thread.
+`probe::AsyncTask` marks that task's segment current while it runs. Promise
+reactions use Chromium's task attribution: a top-level
+`V8ScriptRunner::CallFunction` inside a task forks the current task state
+(same soft navigation, resource timing and script tool contexts), and V8
+carries that state to every reaction registered in the run. A walk in a
+microtask follows the task attribution ID, never the task that happens to run
+the checkpoint.
+
+| Kind | Scheduled by |
+| ---: | --- |
+| 1 `set_timeout`, 2 `set_interval` | `setTimeout`, `setInterval` |
+| 3 `request_animation_frame`, 4 `request_idle_callback` | `requestAnimationFrame`, `requestIdleCallback` |
+| 5 `post_message` | `window.postMessage` |
+| 6 `xhr_send` | `XMLHttpRequest.send`, for its events |
+| 7 `post_task` | `scheduler.postTask` |
+| 8 `event` | a queued event or observer callback (any other async task name) |
+| 9 `microtask` | a promise reaction or queued microtask; the call that registered it is not recorded |
+
+Not covered: `MessagePort` and worker messages (V8 inspector stack IDs), the
+stack that called `.then()` or `await`, and schedules with no script running.
+
+#### `async_task_stack` (type 48)
+
+Category `network`, renderer, `parent_event_id` 0, `request_id` 0, the
+scheduling document's frame. Emitted only when a scheduling stack is first
+sent in this configuration, with its artifact. Payload 128 bytes:
+
+| Offset | Size | Field |
+| ---: | ---: | --- |
+| 0 | 2 | payload version, `1` |
+| 2 | 2 | payload size, `128` |
+| 4 | 1 | task kind, 1 to 8 |
+| 5 | 1 | flags: bit 0 the walk stopped at 128 frames |
+| 6 | 2 | reserved, zero |
+| 8 | 4 | recorded frames, 1 to 128 (128 with bit 0) |
+| 12 | 4 | Wasm frames |
+| 16 | 4 | distinct scripts |
+| 20 | 12 | reserved, zero |
+| 32 | 32 | stack digest |
+| 64 | 16 | innermost frame |
+| 80 | 48 | reserved, zero |
+
+Its artifact is a version 1 stack artifact of the synchronous frames (total
+depth equal to recorded), kind 13, capture origin 12 `request_stack`, creator
+this record; scripts it names get `script_identity` children. Stacks share the
+256-digest table with request stacks, so a repeated scheduling site sends
+nothing; at most 1,024 scheduling stacks per configuration are sent.
+
+#### Task segment
+
+48 bytes in a version 2 stack artifact, nearest first: the task running now,
+or the one a microtask's attribution names, then the task that scheduled it.
+
+| Offset | Size | Field |
+| ---: | ---: | --- |
+| 0 | 1 | task kind |
+| 1 | 1 | state: 1 captured, 4 not retained (Artifact off), 5 not retained (budget), 6 not recorded (kind 9 only) |
+| 2 | 1 | flags: bit 0 the walk stopped at 128 frames |
+| 3 | 1 | reserved, zero |
+| 4 | 4 | frames in its stack: 1 to 128, or 0 for kind 9 |
+| 8 | 8 | reserved, zero |
+| 16 | 32 | its `async_task_stack` artifact digest; zero for kind 9 |
+
+Each renderer remembers 2,048 segments and 4,096 task attribution IDs per
+configuration. A chain that reaches a forgotten segment, or a microtask whose
+attribution names none, sets bit 3 and stops; 32 segments set bit 4.
+
+### Script navigations
+
+`location` setters, `window.open`, form submission and any other navigation a
+local frame begins while script runs record a `navigation_initiator_stack`
+from `LocalFrameClientImpl::BeginNavigation`. A form submission navigates from
+a later task, so its stack is recorded in `HTMLFormElement::ScheduleFormSubmission`
+and taken by that navigation; a later submission replaces it. Navigations with
+no script on the stack record nothing.
+
+#### `navigation_initiator_stack` (type 46)
+
+Category `network`, renderer, `parent_event_id` 0, `request_id` 0, the
+running script's frame. Bytes 0-79 are a version 2
+[`request_initiator_stack`](#request_initiator_stack-type-34) payload with
+state 1, 4 or 5 and its stack artifact, creator this record. Then:
+
+| Offset | Size | Field |
+| ---: | ---: | --- |
+| 80 | 1 | kind: 1 location, 2 form submission, 3 `window.open`, 4 other script navigation |
+| 81 | 7 | reserved, zero |
+| 88 | 8 | the navigating frame's ID, nonzero |
+| 96 | 32 | reserved, zero |
+
+#### `navigation_initiator_link` (type 47)
+
+The renderer's sequence travels in `BeginNavigationParams`
+(`[MinVersion=1] reb_initiator_stack_sequence`). The navigation loader passes
+it, with the initiator's OS process ID, to `common/native_navigation_initiator_hook.h`
+keyed by the navigation's DevTools ID, which it then assigns to the request
+when DevTools has not. When the browser records that navigation's
+`request_started`, it emits this child: same session, process, thread, tab,
+frame, request ID, BrowserContext and initiator fields, `parent_event_id` the
+start's sequence. Payload 128 bytes:
+
+| Offset | Size | Field |
+| ---: | ---: | --- |
+| 0 | 2 | payload version, `1` |
+| 2 | 2 | payload size, `128` |
+| 4 | 4 | renderer OS process ID, nonzero |
+| 8 | 8 | that renderer's `navigation_initiator_stack` sequence, nonzero |
+| 16 | 112 | reserved, zero |
+
+The browser keeps 64 pending links per configuration and emits each once.
+
+### Resolution and UI
+
+`get_request_stack` adds `task_segments` (kind, state, frames resolved like the
+request's from each `async_task_stack` artifact), `task_chain_cut` and
+`task_chain_truncated`. With `navigation_sequence` instead of `request_id` it
+resolves a navigation stack and adds `navigation.kind`. The Traffic index and
+model read a navigation row with a link as `script`. The Initiator tab shows
+each segment under its separator (`setTimeout`, `Microtask` and so on),
+"Earlier async callers were not recorded" for a cut chain, and lists only
+`MessagePort` and worker messages as not shown.
+
+### Hot path and bounds
+
+- Flag off: one atomic load per scheduling, task run, top-level callback and
+  navigation.
+- Active: a scheduling walk of at most 128 frames, one SHA-256 of at most
+  2,080 bytes, one ring entry, and an artifact only for a new stack. A
+  top-level callback inside a task allocates one task state.
+- Fixed tables allocated with the provider, about 240 KiB: 2,048 segments,
+  4,096 task attribution IDs, 8 pending form submissions.
+
+### Validation
+
+`tests/request_stack_test.cpp` checks both versions, task segments, types 46
+to 48 and their envelopes; `make request-stack-wire-check` compares those
+verdicts with Python and the Initiator decoders and renders segments and a
+navigation stack. `make native-probe-admission-check` drives segments, nested
+and microtask links, cuts, the 32-segment and 128-frame bounds, ring eviction,
+retention, navigation kinds and form submissions through the real sink.
+`make native-network-capture-check` emits and validates the browser link. The
+backend resolves segment frames and navigation stacks.
+
+### Acceptance
+
+Still required before declaring this browser-ready:
+
+1. Replay all stacks and overlays on a disposable initialized pinned checkout
+   and compile, including the `BeginNavigationParams` mojom change.
+2. A `fetch` from `setTimeout`, `requestAnimationFrame`, `window.postMessage`
+   and an XHR `load` handler shows the scheduling stack, matching DevTools'
+   async stack.
+3. A `fetch` in a `.then` callback registered in a timer shows `Microtask`
+   then `setTimeout`.
+4. `location.href`, `form.submit()` and `window.open` show their stacks on the
+   navigation's Traffic row.
+5. Measure added time per scheduled task and per request at p50 and p99 on a
+   timer- and promise-heavy page before keeping the packaged default on.

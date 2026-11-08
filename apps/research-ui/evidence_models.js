@@ -36,7 +36,8 @@
           'js_invocation_request', 'wasm_dispatch_overflow', 'wasm_indirect_overflow',
           'artifact_captured', 'artifact_capture_failed', 'request_body', 'request_target', 'response_body',
           'request_headers', 'response_headers', 'cookie_list', 'script_cookie', 'request_initiator_stack',
-          'script_identity', 'capture_exclusion', 'tab_set', 'request_tab_link'
+          'script_identity', 'capture_exclusion', 'tab_set', 'request_tab_link', 'navigation_initiator_stack',
+          'navigation_initiator_link', 'async_task_stack'
         ])
       };
       // Scheme classes of protocol/native-network-v3.md; absent means 0.
@@ -74,7 +75,7 @@
       // Children of a lifecycle record (protocol/native-network-v2.md and v3).
       // They describe a request; they never advance its lifecycle rank.
       const networkRequestDetailTypes = new Set(['request_target', 'request_body', 'response_body', 'request_headers',
-        'response_headers', 'cookie_list', 'request_initiator_stack']);
+        'response_headers', 'cookie_list', 'request_initiator_stack', 'navigation_initiator_link']);
       // Session-level network records the backend keeps in its network window.
       const networkContextTypes = new Set(['capture_exclusion', 'tab_set', 'request_tab_link']);
       const networkRequestArtifactKinds = new Set(['request_body', 'request_target', 'request_headers', 'response_headers',
@@ -1599,6 +1600,11 @@
         attachRequestDetails(rows, events, browserRequestKeys);
         // A walked initiator stack tells script starts from parser starts (protocol/native-network-v3.md).
         for (const row of rows) {
+          // A navigation script started names its renderer stack.
+          if (row.details.some(event => event.type === 'navigation_initiator_link')) {
+            row.initiator = 'script';
+            continue;
+          }
           if (row.initiator !== 'renderer') continue;
           const stack = row.details.find(event => event.type === 'request_initiator_stack');
           const stackState = typeof stack?.payload === 'string' ? Number.parseInt(stack.payload.slice(8, 10), 16) : 0;

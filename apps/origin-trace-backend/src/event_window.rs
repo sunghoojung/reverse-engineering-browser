@@ -315,6 +315,7 @@ fn is_network(event: &Value) -> bool {
                     | "response_headers"
                     | "cookie_list"
                     | "request_initiator_stack"
+                    | "navigation_initiator_link"
                     | "request_watch_match"
             )
         )

@@ -521,8 +521,11 @@ check has a `code`, a `severity` of `info` or `warning`, and a plain message:
 | `queue_drops` | Records lost to a full queue, beyond named gap markers. |
 | `sequence_gaps` | Sequence numbers missing inside the scanned events. |
 | `named_gap` | A producer named why it stopped, with `category`, `reason` and `count`. A reason containing `budget` or `limit` means a sampling budget filled. A Wasm reason ending in `filtered` is a sample-policy exclusion: that execution was not sampled and did not take a slot. |
+| `browser_internal_excluded` | Capture counted `chrome:`, `devtools:` and other browser-internal requests, or WebUI renderers, instead of recording them; `count` is the requests. Not a gap. |
 | `bounded_scope` | Only the newest 64 MiB of events were summarized. |
 
+`exclusions` lists those counts by class and unit; see
+[native network v3](native-network-v3.md#browser-internal-exclusion).
 The summary scans the same newest 64 MiB as the polling window and the newest
 64 MiB of the manifest. It contains counts, identifiers and origin or
 `wasm://wasm/<hex>` labels only: no payloads, URL paths or queries, source or

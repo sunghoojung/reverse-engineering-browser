@@ -1244,6 +1244,7 @@ int main(int argc, char** argv) {
     NativeGuestDependencies(receiver);
     NativeProbeHostGuestBoundary(receiver);
     NativeProbeHostJsDispatchForwarding();
+    NativeProbeHostBrowserInternalScope();
     RequestBodyPolicy(output);
     event_wire.flush();
     artifact_wire.flush();

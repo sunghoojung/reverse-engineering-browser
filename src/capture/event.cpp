@@ -2,6 +2,7 @@
 #include "reb/js_dispatch.hpp"
 #include "reb/js_invocation.hpp"
 #include "reb/network_request.hpp"
+#include "reb/network_scope.hpp"
 #include "reb/wasm_dispatch.hpp"
 #include "reb/wasm_guest.hpp"
 
@@ -77,6 +78,7 @@ bool IsKnownType(const EventType type) noexcept {
     case EventType::kWasmExecutionOutcome:
     case EventType::kWasmDispatchOverflow:
     case EventType::kWasmIndirectOverflow:
+    case EventType::kCaptureExclusion:
       return true;
     case EventType::kUnknown:
       return false;
@@ -170,10 +172,16 @@ bool IsValidEvent(const EventRecord& event) noexcept {
     return false;
   if (event.header.type == EventType::kWasmIndirectOverflow && !IsValidWasmIndirectOverflow(event))
     return false;
+  if (event.header.type == EventType::kCaptureExclusion && !IsValidCaptureExclusionEvent(event))
+    return false;
+  if (!IsKnownSchemeClass(event.header.scheme_class) ||
+      (event.header.scheme_class != 0 && !CarriesSchemeClass(event.header)))
+    return false;
   return event.header.protocol_version == kEventProtocolVersion &&
          event.header.header_size == sizeof(EventHeader) &&
          event.header.payload_size <= event.inline_payload.size() && event.header.reserved1 == 0 &&
-         IsKnownCategory(event.header.category) && IsKnownType(event.header.type) &&
+         event.header.reserved2 == 0 && IsKnownCategory(event.header.category) &&
+         IsKnownType(event.header.type) &&
          (event.header.flags & static_cast<std::uint16_t>(~kKnownEventFlags)) == 0 &&
          std::ranges::all_of(event.reserved,
                              [](const std::byte value) { return value == std::byte{0}; });
@@ -229,6 +237,11 @@ void WriteEventJson(const EventRecord& event, std::string& output) {
   AppendInteger(output, event.header.initiator_request_id);
   output.append(",\"initiator_process_id\":");
   AppendInteger(output, event.header.initiator_process_id);
+  // Absent means 0, so records without a scheme keep their earlier JSON.
+  if (event.header.scheme_class != 0) {
+    output.append(",\"scheme_class\":");
+    AppendInteger(output, event.header.scheme_class);
+  }
   output.append(",\"payload_truncated\":");
   output.append((event.header.flags & static_cast<std::uint16_t>(EventFlag::kPayloadTruncated)) != 0
                     ? "true"
@@ -350,6 +363,8 @@ std::string_view EventTypeName(const EventType type) noexcept {
       return "wasm_dispatch_overflow";
     case EventType::kWasmIndirectOverflow:
       return "wasm_indirect_overflow";
+    case EventType::kCaptureExclusion:
+      return "capture_exclusion";
     case EventType::kUnknown:
       return "unknown";
   }

@@ -73,6 +73,8 @@ enum class EventType : std::uint16_t {
   // See protocol/native-wasm-dispatch-v1.md.
   kWasmDispatchOverflow = 28,
   kWasmIndirectOverflow = 29,
+  // Counted browser-internal exclusion; see protocol/native-network-v3.md.
+  kCaptureExclusion = 36,
 };
 
 enum class EventFlag : std::uint16_t {
@@ -111,7 +113,10 @@ struct EventHeader final {
   std::uint16_t flags = 0;
   std::uint32_t initiator_request_id = 0;
   std::uint32_t initiator_process_id = 0;
-  std::uint32_t reserved1 = 0;
+  // SchemeClass of a request record (protocol/native-network-v3.md), else 0.
+  std::uint8_t scheme_class = 0;
+  std::uint8_t reserved1 = 0;
+  std::uint16_t reserved2 = 0;
 };
 
 struct alignas(64) EventRecord final {
@@ -154,7 +159,9 @@ REB_ASSERT_EVENT_HEADER_OFFSET(resource_type, 128);
 REB_ASSERT_EVENT_HEADER_OFFSET(flags, 130);
 REB_ASSERT_EVENT_HEADER_OFFSET(initiator_request_id, 132);
 REB_ASSERT_EVENT_HEADER_OFFSET(initiator_process_id, 136);
-REB_ASSERT_EVENT_HEADER_OFFSET(reserved1, 140);
+REB_ASSERT_EVENT_HEADER_OFFSET(scheme_class, 140);
+REB_ASSERT_EVENT_HEADER_OFFSET(reserved1, 141);
+REB_ASSERT_EVENT_HEADER_OFFSET(reserved2, 142);
 #undef REB_ASSERT_EVENT_HEADER_OFFSET
 static_assert(sizeof(EventHeader) == 144);
 static_assert(sizeof(EventRecord) == 320);

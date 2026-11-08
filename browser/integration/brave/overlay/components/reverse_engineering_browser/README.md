@@ -100,6 +100,16 @@ body bytes to `NativeArtifactCaptureSink::CaptureRequestBody` as a sensitive
 password form posts keep neither bytes nor a digest. The wire and limits are in
 [Native network v2](../../../../../../protocol/native-network-v2.md).
 
+Request records carry a scheme class (`common/native_network_scope.h`).
+Renderers count `chrome:`, `devtools:` and other internal-scheme requests in
+the shared queue instead of recording them, and the session does not admit
+WebUI renderer processes; the browser reports both as `capture_exclusion`
+records unless `--reb-capture-browser-internal` is set. Chromium patch
+`0026-finish-renderer-answered-requests` keeps a `renderer/native_renderer_request.h`
+value in Blink's loader so `data:`, `blob:` and service-worker answers get a
+renderer completion. See
+[Native network v3](../../../../../../protocol/native-network-v3.md).
+
 Large artifact bytes use the separate 128-byte framed contract and 32-byte
 acknowledgment in `common/native_artifact_header.h`. Only the browser-process
 bridge owns that receiver connection. JavaScript and WASM response bodies are

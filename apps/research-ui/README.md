@@ -844,6 +844,7 @@ policy and trace assertions; it is not evidence of native lifecycle behavior.
 | `command_palette.js` | The ⌘ / Ctrl + K palette: provider registry, matching, ranking and caps, and its dialog controller; `app.js` supplies the built-in providers |
 | `pane_layout.js` | Shared pointer and keyboard pane resizing, responsive constraints, and local size preferences |
 | `traffic_view.js` | Native request ledger rows, ordering, paging and URL/method/status/name search, the General coverage view, and the saved-capture export document |
+| `network_scope.js` | Counted browser-internal exclusions and the reversible browser-internal view filter |
 | `evidence_names.js` | Researcher names: exact identities, the closed names document, its Analyst-library store, the inline rename editor and the command palette provider |
 | `captured_client.js`, `captured_export_formats.js` | Saved-capture identity, local export dialog, and the client-project/HAR/SDL generators shared with offline commands |
 | `source_search.js` | Search all files: the literal matcher on the Find index, the bounded and cancellable search, partial-result notes and the results panel; `app.js` supplies the artifact reader and the open path |
@@ -862,7 +863,10 @@ Live refresh and DOM updates belong in `app.js`.
 The native scheme handler and packaging script explicitly list shipped assets.
 
 Traffic shows every native request row independently; host, method and time
-never merge or hide rows. Sources reads retained artifact bytes only. A failed
+never merge rows. A row is hidden only by an explicit, counted, reversible
+filter: "Hide browser-internal" in Traffic and Sources covers `chrome:`,
+`devtools:` and other internal schemes ([native network v3](../../protocol/native-network-v3.md)),
+and the footer reports what capture excluded. Sources reads retained artifact bytes only. A failed
 refresh preserves the last valid catalog, and a detached pending load is
 cancelled and cannot restore obsolete source text. Artifact loads have a
 10-second deadline, including body reads; a timed-out load can be retried

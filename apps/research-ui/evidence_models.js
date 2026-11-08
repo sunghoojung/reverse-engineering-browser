@@ -34,9 +34,15 @@
           'vm_dispatch_sample', 'wasm_dispatch_observation', 'wasm_guest_dispatch', 'wasm_guest_invocation',
           'wasm_indirect_observation', 'wasm_execution_outcome', 'js_dispatch_observation', 'js_invocation_start', 'js_invocation_settle',
           'js_invocation_request', 'wasm_dispatch_overflow', 'wasm_indirect_overflow',
-          'artifact_captured', 'artifact_capture_failed', 'request_body', 'request_target'
+          'artifact_captured', 'artifact_capture_failed', 'request_body', 'request_target',
+          'capture_exclusion'
         ])
       };
+      // Scheme classes of protocol/native-network-v3.md; absent means 0.
+      const requestSchemeClassNames = new Map([[1, 'http'], [2, 'https'], [3, 'ws'], [4, 'wss'], [5, 'data'],
+        [6, 'blob'], [7, 'file'], [8, 'chrome-extension'], [15, 'other'], [16, 'chrome'], [17, 'chrome-untrusted'],
+        [18, 'brave'], [19, 'devtools'], [20, 'chrome-search']]);
+      const schemeClassTypes = new Set(['request_initiated', 'request_started', 'request_completed', 'request_failed']);
       const uint64Fields = [
         'session_id', 'sequence_number', 'monotonic_time_ns', 'navigation_id',
         'frame_id', 'artifact_id', 'parent_event_id', 'request_id'
@@ -652,6 +658,16 @@
           const target = targetEvent ? decodeRequestTargetRecord(targetEvent) : null;
           request.targetMalformed = Boolean(targetEvent) && !target;
           if (!target || request.targetKind !== 'host') continue;
+          if (request.schemeOnly) {
+            request.host = request.path;
+            request.target = target.target;
+            request.urlTruncated = target.truncated;
+            request.targetLength = target.targetLength;
+            request.path = `${request.path}${target.target}`;
+            request.targetKind = 'url';
+            request.hostOnly = false;
+            continue;
+          }
           const host = request.path;
           // Rows show these exact captured bytes; the composed URL is for copying.
           request.host = target.port ? `${host}:${target.port}` : host;
@@ -794,6 +810,9 @@
         if (!uint32Fields.every(field => isSafeIntegerInRange(event[field], 0, 0xffffffff))) return false;
         if (!uint16Fields.every(field => isSafeIntegerInRange(event[field], 0, 0xffff))) return false;
         if ((event.flags & ~0x7) !== 0) return false;
+        if (Object.hasOwn(event, 'scheme_class') && (event.protocol_version !== 3 ||
+          !requestSchemeClassNames.has(event.scheme_class) || event.category !== 'network' ||
+          !schemeClassTypes.has(event.type))) return false;
         if (!isSafeIntegerInRange(event.status_code, -0x80000000, 0x7fffffff)) return false;
         if (!isSafeIntegerInRange(event.error_code, -0x80000000, 0x7fffffff)) return false;
         if (typeof event.payload_truncated !== 'boolean') return false;
@@ -1215,13 +1234,23 @@
         return host ? {method: null, value: host, kind: 'host'} : null;
       }
 
+      // Hostless URLs (data:, blob:) and browser schemes name their scheme, so
+      // a row never reads as a bare host of the web.
+      function scopedNetworkTarget(target, payload, event) {
+        const scheme = requestSchemeClassNames.get(event.scheme_class);
+        if (!scheme || event.scheme_class <= 4 || !['request_initiated', 'request_started'].includes(event.type)) return target;
+        if (target?.kind === 'host' && target.method) return {...target, value: `${scheme}://${target.value}`};
+        const method = target ? null : payload.match(/^([A-Z][A-Z0-9!#$%&'*+.^_`|~-]{0,31}) $/)?.[1];
+        return method ? {method, value: `${scheme}:`, kind: 'host', schemeOnly: true} : target;
+      }
+
       function requestsFromEvents(events, origin = 'live') {
         const requests = new Map();
         const lifecycleEvents = events.filter(event => event.category === 'network' && networkLifecycleTypes.has(event.type));
         const browserRequestKeys = buildBrowserRequestKeys(lifecycleEvents);
         lifecycleEvents.forEach(event => {
           const payload = decodePayload(event);
-          const target = networkTargetFromPayload(payload, event.type);
+          const target = scopedNetworkTarget(networkTargetFromPayload(payload, event.type), payload, event);
           const id = requestIdentity(event, browserRequestKeys);
           const previous = requests.get(id);
           const timestamp = integerValue(event, 'monotonic_time_ns');
@@ -1260,6 +1289,9 @@
             origin: ['live', 'demo'].includes(origin) ? origin : 'live',
             targetKind: updatesTarget ? target.kind : previous?.targetKind ?? 'unknown',
             hostOnly: (updatesTarget ? target.kind : previous?.targetKind) === 'host',
+            schemeOnly: updatesTarget ? Boolean(target.schemeOnly) : previous?.schemeOnly ?? false,
+            schemeClass: event.scheme_class > 0 ? event.scheme_class : previous?.schemeClass ?? 0,
+            browserObserved: Boolean(previous?.browserObserved || browserContextToken(event)),
             start: 8,
             mid: Math.min(80, 18 + rank * 11),
             end: Math.min(94, 30 + rank * 12),

@@ -258,7 +258,7 @@
       "get": {
         "operationId": "get_session_summary",
         "summary": "Summarize what this capture recorded",
-        "description": "One call that answers whether a capture worked: capture state, event counts by type, the busiest frames with their event types, session IDs, gap counts and named gap reasons, artifact counts by kind with the newest digests, and checks that name what looks wrong, such as a full sampling budget or Wasm compiled without a stored module. Call it after get_session_context and again after an action. Counts, identifiers and origin labels only: no payloads, source, URLs paths or bodies. Covers the newest 64 MiB of events. Use get_events filters (type, frame_id, request_id) to read the records behind a count.",
+        "description": "One call that answers whether a capture worked: capture state, event counts by type, the busiest frames with their event types, session IDs, gap counts and named gap reasons, artifact counts by kind with the newest digests, counted browser-internal exclusions, and checks that name what looks wrong, such as a full sampling budget or Wasm compiled without a stored module. Call it after get_session_context and again after an action. Counts, identifiers and origin labels only: no payloads, source, URLs paths or bodies. Covers the newest 64 MiB of events. Use get_events filters (type, frame_id, request_id) to read the records behind a count.",
         "tags": [
           "health"
         ],
@@ -1527,7 +1527,7 @@
             "name": "type",
             "in": "query",
             "required": false,
-            "description": "Comma-separated event types to keep, at most 16 exact names: api_call, property_read, module_compiled, module_instantiated, request_started, request_initiated, request_redirected, response_started, response_completed, request_completed, request_failed, request_body, request_target, artifact_captured, artifact_capture_failed, vm_finding, vm_dispatch_sample, wasm_dispatch_observation, wasm_indirect_observation, wasm_guest_dispatch, wasm_guest_invocation, js_dispatch_observation, js_invocation_start, js_invocation_settle, js_invocation_request, wasm_execution_outcome, wasm_dispatch_overflow, wasm_indirect_overflow, gap. An unknown name matches nothing.",
+            "description": "Comma-separated event types to keep, at most 16 exact names: api_call, property_read, module_compiled, module_instantiated, request_started, request_initiated, request_redirected, response_started, response_completed, request_completed, request_failed, request_body, request_target, artifact_captured, artifact_capture_failed, vm_finding, vm_dispatch_sample, wasm_dispatch_observation, wasm_indirect_observation, wasm_guest_dispatch, wasm_guest_invocation, js_dispatch_observation, js_invocation_start, js_invocation_settle, js_invocation_request, wasm_execution_outcome, wasm_dispatch_overflow, wasm_indirect_overflow, capture_exclusion, gap. An unknown name matches nothing.",
             "schema": {
               "type": "string",
               "maxLength": 1040
@@ -1723,7 +1723,7 @@
             "name": "type",
             "in": "query",
             "required": false,
-            "description": "Comma-separated event types to keep, at most 16 exact names: api_call, property_read, module_compiled, module_instantiated, request_started, request_initiated, request_redirected, response_started, response_completed, request_completed, request_failed, request_body, request_target, artifact_captured, artifact_capture_failed, vm_finding, vm_dispatch_sample, wasm_dispatch_observation, wasm_indirect_observation, wasm_guest_dispatch, wasm_guest_invocation, js_dispatch_observation, js_invocation_start, js_invocation_settle, js_invocation_request, wasm_execution_outcome, wasm_dispatch_overflow, wasm_indirect_overflow, gap. An unknown name matches nothing.",
+            "description": "Comma-separated event types to keep, at most 16 exact names: api_call, property_read, module_compiled, module_instantiated, request_started, request_initiated, request_redirected, response_started, response_completed, request_completed, request_failed, request_body, request_target, artifact_captured, artifact_capture_failed, vm_finding, vm_dispatch_sample, wasm_dispatch_observation, wasm_indirect_observation, wasm_guest_dispatch, wasm_guest_invocation, js_dispatch_observation, js_invocation_start, js_invocation_settle, js_invocation_request, wasm_execution_outcome, wasm_dispatch_overflow, wasm_indirect_overflow, capture_exclusion, gap. An unknown name matches nothing.",
             "schema": {
               "type": "string",
               "maxLength": 1040
@@ -19237,7 +19237,8 @@
               "js_invocation_request",
               "wasm_execution_outcome",
               "wasm_dispatch_overflow",
-              "wasm_indirect_overflow"
+              "wasm_indirect_overflow",
+              "capture_exclusion"
             ]
           },
           "status_code": {
@@ -25601,7 +25602,8 @@
           "events",
           "artifacts",
           "checks",
-          "capture_state"
+          "capture_state",
+          "exclusions"
         ],
         "properties": {
           "protocol_version": {
@@ -25863,6 +25865,42 @@
               }
             }
           },
+          "exclusions": {
+            "type": "array",
+            "description": "Browser-internal evidence the capture counted instead of recording, by class, from capture_exclusion records (protocol/native-network-v3.md). Requests are chrome, chrome_untrusted, brave, devtools and chrome_search scheme loads; webui_renderer counts renderer processes that were not admitted. These are named exclusions, never gaps or drops. Empty when nothing was excluded or REB_CAPTURE_BROWSER_INTERNAL=1 recorded it.",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "class",
+                "unit",
+                "count"
+              ],
+              "properties": {
+                "class": {
+                  "type": "string",
+                  "enum": [
+                    "chrome",
+                    "chrome_untrusted",
+                    "brave",
+                    "devtools",
+                    "chrome_search",
+                    "webui_renderer"
+                  ]
+                },
+                "unit": {
+                  "type": "string",
+                  "enum": [
+                    "requests",
+                    "renderer_processes"
+                  ]
+                },
+                "count": {
+                  "$ref": "#/components/schemas/Uint64String"
+                }
+              }
+            }
+          },
           "artifacts": {
             "type": "object",
             "additionalProperties": false,
@@ -25980,6 +26018,7 @@
                     "queue_drops",
                     "sequence_gaps",
                     "named_gap",
+                    "browser_internal_excluded",
                     "bounded_scope"
                   ]
                 },

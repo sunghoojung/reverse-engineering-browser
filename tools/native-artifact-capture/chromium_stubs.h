@@ -10,6 +10,7 @@
 #include <map>
 #include <memory>
 #include <new>
+#include <set>
 #include <span>
 #include <stdexcept>
 #include <string>
@@ -142,6 +143,7 @@ class GURL {
   const std::string& spec() const { return value_; }
   bool is_valid() const { return !scheme_.empty(); }
   bool SchemeIs(std::string_view scheme) const { return scheme_ == scheme; }
+  std::string_view scheme() const { return scheme_; }
   std::string_view host() const { return host_; }
   std::string_view path() const { return path_; }
   bool has_query() const { return has_query_; }
@@ -283,6 +285,12 @@ class NativeProbeSession {
   const std::vector<std::uint8_t>& js_dispatch_sites() const { return js_sites; }
   const std::vector<std::uint8_t>& js_invocation_sites() const { return invocation_sites; }
   bool js_invocation_digests() const { return invocation_digests; }
+  bool capture_request_content() const { return request_content; }
+  bool capture_browser_internal() const { return browser_internal; }
+  void NoteWebUiRendererExcluded() { ++webui_excluded; }
+  void EmitExclusion(std::uint32_t process, std::uint8_t exclusion_class, std::uint64_t count) {
+    exclusions.push_back({process, exclusion_class, count});
+  }
   const NativeWasmSampleBudgetPolicy& wasm_sample_budget() const { return wasm_budget; }
   void Emit(const NativeProbeEvent& event) const {
     if (emitted)
@@ -296,6 +304,14 @@ class NativeProbeSession {
   std::vector<std::uint8_t> js_sites;
   std::vector<std::uint8_t> invocation_sites;
   bool invocation_digests = false;
+  bool request_content = false, browser_internal = false;
+  unsigned webui_excluded = 0;
+  struct Exclusion {
+    std::uint32_t process;
+    std::uint8_t exclusion_class;
+    std::uint64_t count;
+  };
+  std::vector<Exclusion> exclusions;
   NativeWasmSampleBudgetPolicy wasm_budget{};
   std::function<void(const NativeProbeEvent&)> emitted;
 
@@ -407,6 +423,8 @@ class NativeProbeClient {
                          const std::string&,
                          const std::vector<std::uint8_t>&,
                          const std::vector<std::uint8_t>&,
+                         bool,
+                         bool,
                          bool) = 0;
   virtual void SetWasmSampleBudget(const std::vector<std::uint8_t>&) = 0;
   virtual void ResetWasmSampleBudgets() = 0;
@@ -562,7 +580,17 @@ class WebContents {
 };
 struct TestProcess {
   int pid = 0;
+  bool IsValid() const { return pid != 0; }
   int Pid() const { return pid; }
+};
+class ChildProcessSecurityPolicy {
+ public:
+  static ChildProcessSecurityPolicy* GetInstance() {
+    static ChildProcessSecurityPolicy policy;
+    return &policy;
+  }
+  bool HasWebUIBindings(int child_id) const { return webui.contains(child_id); }
+  std::set<int> webui;
 };
 class RenderProcessHost {
  public:

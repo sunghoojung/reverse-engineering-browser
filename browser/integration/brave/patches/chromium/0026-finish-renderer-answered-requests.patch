@@ -1,0 +1,190 @@
+diff --git a/third_party/blink/renderer/platform/loader/fetch/resource_loader.cc b/third_party/blink/renderer/platform/loader/fetch/resource_loader.cc
+index 460cf05..c5a4576 100644
+--- a/third_party/blink/renderer/platform/loader/fetch/resource_loader.cc
++++ b/third_party/blink/renderer/platform/loader/fetch/resource_loader.cc
+@@ -45,6 +45,7 @@
+ #include "base/rand_util.h"
+ #include "base/task/single_thread_task_runner.h"
+ #include "base/unguessable_token.h"
++#include "brave/components/reverse_engineering_browser/renderer/native_probe_sink.h"
+ #include "mojo/public/cpp/bindings/pending_remote.h"
+ #include "net/base/load_flags.h"
+ #include "services/metrics/public/cpp/metrics_utils.h"
+@@ -67,6 +68,7 @@
+ #include "third_party/blink/public/platform/web_security_origin.h"
+ #include "third_party/blink/public/platform/web_url_error.h"
+ #include "third_party/blink/public/platform/web_url_request.h"
++#include "third_party/blink/public/platform/web_url_request_util.h"
+ #include "third_party/blink/public/platform/web_url_response.h"
+ #include "third_party/blink/renderer/platform/back_forward_cache_utils.h"
+ #include "third_party/blink/renderer/platform/exported/wrapped_resource_request.h"
+@@ -111,6 +113,34 @@ namespace blink {
+ 
+ namespace {
+ 
++reb::NativeRendererRequest RecordNativeDataUrlStart(
++    const ResourceRequestHead& request) {
++  if (!reb::NativeProbeSink::Get().IsCaptureArmed()) [[likely]] {
++    return {};
++  }
++  return reb::NativeProbeSink::Get().RecordRequestInitiated(
++      GenerateRequestId(), request.HttpMethod().Utf8(), url::kDataScheme, "");
++}
++
++void FinishNativeDataUrl(reb::NativeRendererRequest& request,
++                         const KURL& url,
++                         int error,
++                         int64_t size) {
++  if (!request.recorded()) {
++    return;
++  }
++  if (error == net::OK) {
++    request.NoteResponse(200, false, false);
++  }
++  // The target is everything after "data:"; only its prefix is copied.
++  const String& spec = url.GetString().GetString();
++  const wtf_size_t offset = std::min<wtf_size_t>(spec.length(), 5);
++  const std::string prefix = spec.subview(offset, 116).Utf8();
++  reb::NativeProbeSink::Get().RecordRendererRequestComplete(
++      request, prefix, spec.length() - offset, -1, error, size, size);
++  request = {};
++}
++
+ enum class RequestOutcome { kSuccess, kFail };
+ 
+ const char* RequestOutcomeToString(RequestOutcome outcome) {
+@@ -1261,6 +1291,9 @@ void ResourceLoader::RequestSynchronously() {
+     auto [result, response, data] = network_utils::ParseDataURL(
+         resource_->Url(), request.HttpMethod(), request.GetUkmSourceId(),
+         fetcher_->UkmRecorder());
++    reb::NativeRendererRequest reb_request = RecordNativeDataUrlStart(request);
++    FinishNativeDataUrl(reb_request, resource_->Url(), result,
++                        data ? static_cast<int64_t>(data->size()) : 0);
+     if (result != net::OK) {
+       error_out = WebURLError(result, resource_->Url());
+     } else {
+@@ -1323,6 +1356,8 @@ void ResourceLoader::RequestAsynchronously() {
+   if (resource_->Url().ProtocolIsData()) {
+     CHECK(!network_resource_request_);
+     CHECK(!loader_);
++    reb_data_url_request_ =
++        RecordNativeDataUrlStart(resource_->GetResourceRequest());
+     // Handle DataURL in another task instead of using |loader_|.
+     GetLoadingTaskRunner()->PostTask(
+         FROM_HERE,
+@@ -1466,6 +1501,8 @@ ResourceLoader::CheckResponseNosniff(
+ 
+ void ResourceLoader::HandleDataUrl() {
+   if (!IsLoading()) {
++    FinishNativeDataUrl(reb_data_url_request_, resource_->Url(),
++                        net::ERR_ABORTED, 0);
+     return;
+   }
+   if (freeze_mode_ != LoaderFreezeMode::kNone) {
+@@ -1482,6 +1519,8 @@ void ResourceLoader::HandleDataUrl() {
+       resource_->Url(), resource_->GetResourceRequest().HttpMethod(),
+       resource_->GetResourceRequest().GetUkmSourceId(),
+       fetcher_->UkmRecorder());
++  FinishNativeDataUrl(reb_data_url_request_, resource_->Url(), result,
++                      data ? static_cast<int64_t>(data->size()) : 0);
+   if (result != net::OK) {
+     HandleError(ResourceError(result, resource_->Url(), std::nullopt));
+     return;
+diff --git a/third_party/blink/renderer/platform/loader/fetch/resource_loader.h b/third_party/blink/renderer/platform/loader/fetch/resource_loader.h
+index 1c0f7d8..9d81f6b 100644
+--- a/third_party/blink/renderer/platform/loader/fetch/resource_loader.h
++++ b/third_party/blink/renderer/platform/loader/fetch/resource_loader.h
+@@ -35,6 +35,7 @@
+ #include "base/containers/span.h"
+ #include "base/task/single_thread_task_runner.h"
+ #include "base/time/time.h"
++#include "brave/components/reverse_engineering_browser/renderer/native_renderer_request.h"
+ #include "mojo/public/cpp/base/big_buffer.h"
+ #include "services/network/public/mojom/fetch_api.mojom-blink-forward.h"
+ #include "third_party/blink/public/mojom/blob/blob_registry.mojom-blink.h"
+@@ -290,6 +291,8 @@ class PLATFORM_EXPORT ResourceLoader final
+   // True if the next call of SetDefersLoading(kNotDeferred) needs to invoke
+   // HandleDataURL().
+   bool defers_handling_data_url_ = false;
++  // data: URLs never reach a URL loader; see protocol/native-network-v3.md.
++  reb::NativeRendererRequest reb_data_url_request_;
+ 
+   HeapTaskRunnerTimer<ResourceLoader> cancel_timer_;
+ 
+diff --git a/third_party/blink/renderer/platform/loader/fetch/url_loader/resource_request_sender.cc b/third_party/blink/renderer/platform/loader/fetch/url_loader/resource_request_sender.cc
+index 1c5faac..b3efcb6 100644
+--- a/third_party/blink/renderer/platform/loader/fetch/url_loader/resource_request_sender.cc
++++ b/third_party/blink/renderer/platform/loader/fetch/url_loader/resource_request_sender.cc
+@@ -278,8 +278,8 @@ int ResourceRequestSender::SendAsync(
+ 
+   // Compute a unique request_id for this renderer process.
+   int request_id = GenerateRequestId();
+-  reb::NativeProbeSink::Get().RecordRequestInitiated(
+-      request_id, request->method, request->url.host());
++  reb_request_ = reb::NativeProbeSink::Get().RecordRequestInitiated(
++      request_id, request->method, request->url.scheme(), request->url.host());
+   // The JavaScript invocation that started this request, when one is
+   // current; see protocol/native-js-invocation-v1.md.
+   reb::NativeProbeSink::Get().RecordNativeJsInvocationRequest(request_id);
+@@ -376,6 +376,13 @@ void ResourceRequestSender::DeletePendingRequest(
+       request_info_->resource_load_info_notifier_wrapper
+           ->NotifyResourceLoadCanceled(request_info_->net_error);
+     }
++    if (reb_request_.AnsweredInRenderer()) {
++      const GURL url(request_info_->url);
++      const std::string_view target = url.PathForRequestPiece();
++      reb::NativeProbeSink::Get().RecordRendererRequestComplete(
++          reb_request_, target, target.size(), url.IntPort(), net::ERR_ABORTED,
++          0, 0);
++    }
+   }
+ 
+   // Cancel loading.
+@@ -490,6 +497,10 @@ void ResourceRequestSender::OnReceivedResponse(
+   request_info_->local_response_start = response_ipc_arrival_time;
+   request_info_->remote_request_start =
+       response_head->load_timing.request_start;
++  reb_request_.NoteResponse(
++      response_head->headers ? response_head->headers->response_code() : 0,
++      response_head->was_fetched_via_service_worker,
++      response_head->was_fetched_via_cache);
+   // Now that response_start has been set, we can properly set the TimeTicks in
+   // the URLResponseHead.
+   base::TimeTicks remote_response_start =
+@@ -611,6 +622,14 @@ void ResourceRequestSender::OnRequestComplete(
+     return;
+   }
+   request_info_->net_error = status.error_code;
++  // Requests the browser proxy never saw finish here.
++  if (reb_request_.AnsweredInRenderer()) {
++    const GURL url(request_info_->url);
++    const std::string_view target = url.PathForRequestPiece();
++    reb::NativeProbeSink::Get().RecordRendererRequestComplete(
++        reb_request_, target, target.size(), url.IntPort(), status.error_code,
++        status.encoded_data_length, status.decoded_body_length);
++  }
+ 
+   request_info_->resource_load_info_notifier_wrapper
+       ->NotifyResourceLoadCompleted(status);
+diff --git a/third_party/blink/renderer/platform/loader/fetch/url_loader/resource_request_sender.h b/third_party/blink/renderer/platform/loader/fetch/url_loader/resource_request_sender.h
+index 44d8ebb..f8d5249 100644
+--- a/third_party/blink/renderer/platform/loader/fetch/url_loader/resource_request_sender.h
++++ b/third_party/blink/renderer/platform/loader/fetch/url_loader/resource_request_sender.h
+@@ -15,6 +15,7 @@
+ #include "base/memory/weak_ptr.h"
+ #include "base/task/sequenced_task_runner.h"
+ #include "base/time/time.h"
++#include "brave/components/reverse_engineering_browser/renderer/native_renderer_request.h"
+ #include "mojo/public/cpp/base/big_buffer.h"
+ #include "mojo/public/cpp/system/data_pipe.h"
+ #include "net/base/host_port_pair.h"
+@@ -249,6 +250,9 @@ class BLINK_PLATFORM_EXPORT ResourceRequestSender {
+   // This is used to prevent OnReceivedResponse from being called twice.
+   bool response_sent_to_client_ = false;
+ 
++  // Native capture state of this request; see protocol/native-network-v3.md.
++  reb::NativeRendererRequest reb_request_;
++
+   scoped_refptr<base::SequencedTaskRunner> loading_task_runner_;
+ 
+   // `pending_tasks_` are queued while waiting for the response from the

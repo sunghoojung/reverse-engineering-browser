@@ -1074,6 +1074,8 @@ var(--panel);
       .source-file-icon.response_body { color: var(--green); }
       .source-file-icon.wasm_guest_adapter, .source-file-icon.bytecode_buffer { color: var(--muted); }
       .source-tree-empty { padding: 22px 14px; color: var(--muted); line-height: 1.6; }
+      .source-internal-toggle { margin-left: 6px; padding: 2px 6px; border: 1px solid var(--line); border-radius: 4px; background: transparent; color: var(--muted); font: inherit; }
+      .source-internal-toggle:hover, .source-internal-toggle[aria-pressed="true"], .request-window #request-hide-internal[aria-pressed="true"] { color: var(--text); }
       .source-health {
         max-height: 96px;
         overflow: auto;

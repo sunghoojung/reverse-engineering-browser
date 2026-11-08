@@ -19,6 +19,7 @@ mojom("mojom") {
 
 source_set("queue") {
   sources = [
+    "common/native_network_scope.h",
     "common/native_probe_queue.cc",
     "common/native_probe_queue.h",
   ]
@@ -99,12 +100,15 @@ component("renderer_sink") {
   sources = [
     "common/native_js_dispatch.h",
     "common/native_js_invocation.h",
+    "common/native_network_request.h",
+    "common/native_network_scope.h",
     "common/native_probe_event.h",
     "common/native_vm_dispatch_emit.h",
     "common/native_worker_source.cc",
     "common/native_worker_source.h",
     "renderer/native_probe_sink.cc",
     "renderer/native_probe_sink.h",
+    "renderer/native_renderer_request.h",
     "renderer/native_worker_observation_sink.cc",
     "renderer/native_worker_observation_sink.h",
     "renderer/native_worker_source_sink.cc",
@@ -196,6 +200,7 @@ source_set("browser") {
     "common/native_js_invocation_sites.h",
     "common/native_network_lifecycle.h",
     "common/native_network_request.h",
+    "common/native_network_scope.h",
     "common/native_probe_event.h",
     "common/native_probe_ipc.h",
     "common/native_runtime_snapshot_queue.h",

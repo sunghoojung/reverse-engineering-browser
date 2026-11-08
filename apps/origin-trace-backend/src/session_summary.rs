@@ -178,6 +178,56 @@ impl ArtifactCounts {
     }
 }
 
+/// Browser-internal evidence the capture counted instead of recording
+/// (protocol/native-network-v3.md). Each record is one producer's cumulative
+/// count for one class, so the newest count per producer is summed.
+#[derive(Default)]
+struct Exclusions(BTreeMap<(u64, u64, u8), u64>);
+impl Exclusions {
+    fn record(&mut self, event: &Value) {
+        if event["category"] != "network" || event["type"] != "capture_exclusion" {
+            return;
+        }
+        let Some(payload) = event["payload"].as_str().and_then(|p| hex::decode(p).ok()) else {
+            return;
+        };
+        if payload.len() != 16 || payload[..4] != [1, 0, 16, 0] || payload[5..8] != [0, 0, 0] {
+            return;
+        }
+        let count = u64::from_le_bytes(payload[8..16].try_into().unwrap());
+        if exclusion_class(payload[4]).is_none() || count == 0 {
+            return;
+        }
+        let key = (
+            event_window::unsigned(&event["session_id"]).unwrap_or(0),
+            event["initiator_process_id"].as_u64().unwrap_or(0),
+            payload[4],
+        );
+        let newest = self.0.entry(key).or_default();
+        *newest = (*newest).max(count);
+    }
+    fn totals(&self) -> BTreeMap<u8, u64> {
+        let mut totals = BTreeMap::new();
+        for ((_, _, class), count) in &self.0 {
+            let total: &mut u64 = totals.entry(*class).or_default();
+            *total = total.saturating_add(*count);
+        }
+        totals
+    }
+}
+
+fn exclusion_class(code: u8) -> Option<(&'static str, &'static str)> {
+    Some(match code {
+        16 => ("chrome", "requests"),
+        17 => ("chrome_untrusted", "requests"),
+        18 => ("brave", "requests"),
+        19 => ("devtools", "requests"),
+        20 => ("chrome_search", "requests"),
+        64 => ("webui_renderer", "renderer_processes"),
+        _ => return None,
+    })
+}
+
 fn check(code: &str, severity: &str, message: impl Into<String>) -> Value {
     json!({"code": code, "severity": severity, "message": message.into()})
 }
@@ -208,6 +258,7 @@ fn gap_meaning(reason: &str) -> &'static str {
 
 pub fn build(store: &Path, artifacts: &Path, state: &CaptureState<'_>) -> Result<Value> {
     let mut events = EventCounts::default();
+    let mut exclusions = Exclusions::default();
     let mut tally = Tally::default();
     let event_page = event_query::read_page(
         store,
@@ -221,6 +272,7 @@ pub fn build(store: &Path, artifacts: &Path, state: &CaptureState<'_>) -> Result
             validate_event(&event)?;
             tally.record(&event)?;
             events.record(&event);
+            exclusions.record(&event);
             Ok(None)
         },
     )?;
@@ -320,6 +372,41 @@ pub fn build(store: &Path, artifacts: &Path, state: &CaptureState<'_>) -> Result
         item["count"] = json!(gap.count.to_string());
         checks.push(item);
     }
+    let excluded = exclusions.totals();
+    let requests: u64 = excluded
+        .iter()
+        .filter(|(class, _)| **class < 64)
+        .fold(0, |sum, (_, count)| sum.saturating_add(*count));
+    let renderers = excluded.get(&64).copied().unwrap_or(0);
+    if requests > 0 || renderers > 0 {
+        let by_class = excluded
+            .iter()
+            .filter(|(class, _)| **class < 64)
+            .map(|(class, count)| format!("{} {count}", exclusion_class(*class).unwrap().0))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let mut parts = Vec::new();
+        if requests > 0 {
+            parts.push(format!(
+                "{requests} browser-internal requests were not recorded ({by_class})"
+            ));
+        }
+        if renderers > 0 {
+            parts.push(format!(
+                "{renderers} WebUI renderer processes were not admitted"
+            ));
+        }
+        let mut item = check(
+            "browser_internal_excluded",
+            "info",
+            format!(
+                "{}. These are named exclusions, not gaps; set REB_CAPTURE_BROWSER_INTERNAL=1 to record them.",
+                parts.join("; ")
+            ),
+        );
+        item["count"] = json!(requests.to_string());
+        checks.push(item);
+    }
     if event_page.exhausted {
         checks.push(check(
             "bounded_scope",
@@ -337,6 +424,10 @@ pub fn build(store: &Path, artifacts: &Path, state: &CaptureState<'_>) -> Result
         "artifact_receiver_configured": state.artifact_receiver_configured,
         "artifact_receiver_connected": state.artifact_receiver_connected,
         "events": events.document(&event_page, &tally),
+        "exclusions": excluded.iter().map(|(class, count)| {
+            let (name, unit) = exclusion_class(*class).unwrap();
+            json!({"class": name, "unit": unit, "count": count.to_string()})
+        }).collect::<Vec<_>>(),
         "artifacts": {
             "scope": artifact_page.scope(),
             "budget_exhausted": artifact_page.exhausted,
@@ -439,6 +530,74 @@ mod tests {
             assert!(!meaning.contains("dropped"), "{reason}: {meaning}");
         }
         assert!(gap_meaning("native_wasm_dispatch_budget_incomplete").contains("budget"));
+    }
+
+    fn exclusion(sequence: u64, producer: u32, class: u8, count: u64) -> Value {
+        let mut payload = vec![1, 0, 16, 0, class, 0, 0, 0];
+        payload.extend(count.to_le_bytes());
+        let mut event = event(sequence, "network", "capture_exclusion", 0, "");
+        event["payload"] = json!(hex::encode(&payload));
+        event["payload_size"] = json!(16);
+        event["initiator_process_id"] = json!(producer);
+        event["frame_id"] = json!("0");
+        event["tab_id"] = json!(0);
+        event
+    }
+
+    #[test]
+    fn browser_internal_exclusions_are_named_counts_not_gaps() {
+        let root = tempfile::tempdir().unwrap();
+        let store = root.path().join("events.jsonl");
+        let artifacts = root.path().join("artifacts");
+        std::fs::create_dir_all(&artifacts).unwrap();
+        let mut lines = [
+            exclusion(1, 40, 16, 3),
+            exclusion(2, 40, 16, 5),
+            exclusion(3, 41, 16, 2),
+            exclusion(4, 41, 19, 1),
+            exclusion(5, 0, 64, 1),
+            exclusion(6, 0, 64, 2),
+        ]
+        .map(|event| event.to_string())
+        .to_vec();
+        let mut dirty = exclusion(7, 42, 16, 9);
+        let mut bytes = hex::decode(dirty["payload"].as_str().unwrap()).unwrap();
+        bytes[5] = 1;
+        dirty["payload"] = json!(hex::encode(bytes));
+        lines.push(dirty.to_string());
+        std::fs::write(&store, lines.join("\n") + "\n").unwrap();
+        let state = CaptureState {
+            instance_id: "1:2",
+            capture_mode: "live",
+            broker_connected: true,
+            capture_stopped: false,
+            artifact_receiver_configured: false,
+            artifact_receiver_connected: false,
+        };
+        let summary = build(&store, &artifacts, &state).unwrap();
+        assert_eq!(
+            summary["exclusions"],
+            json!([
+                {"class": "chrome", "unit": "requests", "count": "7"},
+                {"class": "devtools", "unit": "requests", "count": "1"},
+                {"class": "webui_renderer", "unit": "renderer_processes", "count": "2"},
+            ])
+        );
+        assert_eq!(summary["events"]["sequence_gaps"], "0");
+        let checks = summary["checks"].as_array().unwrap();
+        assert!(checks.iter().all(|check| check["code"] != "named_gap"));
+        let excluded = checks
+            .iter()
+            .find(|check| check["code"] == "browser_internal_excluded")
+            .unwrap();
+        assert_eq!(excluded["severity"], "info");
+        assert_eq!(excluded["count"], "8");
+        let message = excluded["message"].as_str().unwrap();
+        assert!(
+            message
+                .contains("8 browser-internal requests were not recorded (chrome 7, devtools 1)")
+        );
+        assert!(message.contains("2 WebUI renderer processes were not admitted"));
     }
 
     #[test]

@@ -70,6 +70,15 @@ class NativeProbeSession final {
   [[nodiscard]] std::uint64_t expires_at_monotonic_ns() const noexcept;
   [[nodiscard]] bool capture_canvas_images() const noexcept;
   [[nodiscard]] bool capture_request_content() const noexcept;
+  // --reb-capture-browser-internal: admit WebUI renderers and record internal
+  // schemes instead of counting them.
+  [[nodiscard]] bool capture_browser_internal() const noexcept;
+  // One more WebUI renderer process this session does not admit.
+  void NoteWebUiRendererExcluded() noexcept;
+  // Cumulative count of one exclusion class; protocol/native-network-v3.md.
+  void EmitExclusion(std::uint32_t excluded_process_id,
+                     std::uint8_t exclusion_class,
+                     std::uint64_t count) noexcept;
   [[nodiscard]] std::uint64_t NextBrowserSequence() noexcept;
   void Emit(const NativeProbeEvent& event) const noexcept;
 
@@ -98,6 +107,8 @@ class NativeProbeSession final {
   std::atomic<std::uint64_t> expires_at_monotonic_ns_{0};
   std::atomic<bool> capture_canvas_images_{false};
   std::atomic<bool> capture_request_content_{false};
+  std::atomic<bool> capture_browser_internal_{false};
+  std::uint64_t webui_renderers_excluded_ = 0;
   std::atomic<std::uint64_t> next_browser_sequence_{1};
 };
 

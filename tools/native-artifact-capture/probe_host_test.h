@@ -10,7 +10,12 @@ struct RecordingProbeClient final : reb::mojom::NativeProbeClient {
                  const std::string&,
                  const std::vector<std::uint8_t>& js_dispatch_sites,
                  const std::vector<std::uint8_t>& js_invocation_sites,
-                 bool js_invocation_digests) override {
+                 bool js_invocation_digests,
+                 bool capture_request_content,
+                 bool capture_browser_internal) override {
+    ++configured;
+    request_content = capture_request_content;
+    browser_internal = capture_browser_internal;
     configured_epoch = epoch;
     region = std::move(queue_region);
     js_sites = js_dispatch_sites;
@@ -19,7 +24,7 @@ struct RecordingProbeClient final : reb::mojom::NativeProbeClient {
   }
   void SetWasmSampleBudget(const std::vector<std::uint8_t>&) override {}
   void ResetWasmSampleBudgets() override {}
-  void Disable() override {}
+  void Disable() override { ++disabled; }
   void NativeGuestModuleStatus(std::uint64_t epoch, std::uint64_t token, bool accepted) override {
     verdicts.push_back({epoch, token, accepted});
   }
@@ -28,6 +33,8 @@ struct RecordingProbeClient final : reb::mojom::NativeProbeClient {
     bool accepted;
   };
   std::uint64_t configured_epoch = 0;
+  unsigned configured = 0, disabled = 0;
+  bool request_content = false, browser_internal = false;
   std::vector<Verdict> verdicts;
   base::UnsafeSharedMemoryRegion region;
   std::vector<std::uint8_t> js_sites;
@@ -459,4 +466,75 @@ void NativeProbeHostJsDispatchForwarding() {
   process.frames.clear();
   std::cout << "PASS production NativeProbeHost forwards JS dispatch site records and type 21 "
                "ring records with tab attribution\n";
+}
+
+// protocol/native-network-v3.md: queue exclusion counters become cumulative
+// reports, and a renderer granted WebUI bindings leaves with what it queued.
+void NativeProbeHostBrowserInternalScope() {
+  auto& session = reb::NativeProbeSession::Get();
+  session.active = true;
+  session.id = kSession;
+  session.mask = kMask;
+  session.expires = 200;
+  session.request_content = true;
+  session.exclusions.clear();
+  session.webui_excluded = 0;
+  session.emitted = [](const NativeProbeEvent& event) { Emit(event); };
+  Configure(kSession, kMask);
+  events.clear();
+  auto& security = *content::ChildProcessSecurityPolicy::GetInstance();
+  RecordingProbeClient client;
+  reb::NativeProbeHost host(session, 1);
+  host.BindClient({&client});
+  Check(client.configured == 1 && client.request_content && !client.browser_internal,
+        "Renderer configuration carries the request content and browser-internal gates");
+  auto mapping = client.region.Map();
+  auto* queue = static_cast<reb::NativeProbeQueue*>(mapping.memory());
+  queue->CountExclusion(reb::NativeSchemeClass::kChrome);
+  queue->CountExclusion(reb::NativeSchemeClass::kChrome);
+  queue->CountExclusion(reb::NativeSchemeClass::kDevTools);
+  queue->CountExclusion(reb::NativeSchemeClass::kHttps);
+  host.EventsAvailable();
+  host.EventsAvailable();
+  Check(session.exclusions.size() == 2 && session.exclusions[0].process == 123 &&
+            session.exclusions[0].exclusion_class == 16 && session.exclusions[0].count == 2 &&
+            session.exclusions[1].exclusion_class == 19 && session.exclusions[1].count == 1 &&
+            events.empty(),
+        "Each changed class is reported once with its cumulative count, without records");
+  queue->CountExclusion(reb::NativeSchemeClass::kChrome);
+  host.EventsAvailable();
+  Check(session.exclusions.size() == 3 && session.exclusions[2].count == 3,
+        "A later count supersedes the earlier report");
+
+  NativeProbeEvent record;
+  record.header.category = reb::NativeProbeCategory::kNetwork;
+  record.header.type = NativeProbeType::kRequestInitiated;
+  record.header.session_id = kSession;
+  record.header.process_id = 123;
+  record.header.sequence_number = 700;
+  record.header.monotonic_time_ns = 100;
+  Check(queue->TryPush(record), "Renderer ring admits a record before the WebUI grant");
+  security.webui.insert(1);
+  host.EventsAvailable();
+  Check(events.empty() && session.webui_excluded == 1 && client.disabled != 0,
+        "A renderer granted WebUI bindings is detached and its queued records are discarded");
+  host.BindClient({&client});
+  Check(client.configured == 1 && session.webui_excluded == 1,
+        "A detached WebUI renderer is never configured again and counts once");
+  security.webui.clear();
+
+  session.browser_internal = true;
+  security.webui.insert(1);
+  RecordingProbeClient opted;
+  reb::NativeProbeHost admitted(session, 1);
+  admitted.BindClient({&opted});
+  Check(opted.configured == 1 && opted.browser_internal && session.webui_excluded == 1,
+        "--reb-capture-browser-internal keeps WebUI renderers");
+  security.webui.clear();
+  session.browser_internal = false;
+  session.request_content = false;
+  session.active = false;
+  session.emitted = {};
+  std::cout << "PASS production NativeProbeHost reports cumulative exclusions and detaches "
+               "renderers granted WebUI bindings\n";
 }

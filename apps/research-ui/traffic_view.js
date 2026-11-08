@@ -5,7 +5,7 @@
  * capture, so this view never implies or searches them. */
 function trafficTargetParts(request) {
   const target = String(request?.path ?? '').trim();
-  if (request?.hostOnly) return {name: target || 'Unknown host', host: 'Host-only metadata'};
+  if (request?.hostOnly) return {name: target || 'Unknown host', host: request.schemeOnly ? 'Path not captured' : 'Host-only metadata'};
   const more = request?.urlTruncated ? '…' : '';
   // A native target is shown exactly as captured; reparsing would re-escape it.
   if (typeof request?.target === 'string') return {name: `${request.target}${more}`, host: request.host ?? ''};
@@ -292,7 +292,7 @@ function renderTrafficDetails(container, request, notice = '', bodyView = null) 
   }
   if (!request) return;
   renderTrafficBody(container.querySelector('.traffic-body'), request, bodyView);
-  const values = [request.hostOnly ? `${request.path} (host only; path and query not captured)`
+  const values = [request.hostOnly ? `${request.path} (${request.schemeOnly ? 'path' : 'host only; path and query'} not captured)`
     : request.urlTruncated ? `${request.path}… (truncated; the original path and query are ${request.targetLength} bytes)` : request.path,
     request.documentUrl ?? 'Not captured', request.method, request.failed ? 'Failed' : request.status === 'pending'
       ? (Number.isInteger(request.provisionalStatus) ? `Pending · provisional HTTP ${request.provisionalStatus}` : 'Pending')

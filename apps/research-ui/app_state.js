@@ -109,6 +109,8 @@
         requestType: 'all',
         requestTabId: 'all',
         requestDomain: 'all',
+        hideBrowserInternal: false,
+        captureExclusions: null,
         trafficKnownIds: null,
         trafficPendingCount: 0,
         trafficFilterKey: null,

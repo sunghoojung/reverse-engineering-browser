@@ -21,11 +21,13 @@
 #include "brave/components/reverse_engineering_browser/common/native_artifact_header.h"
 #include "brave/components/reverse_engineering_browser/common/native_js_dispatch.h"
 #include "brave/components/reverse_engineering_browser/common/native_js_invocation.h"
+#include "brave/components/reverse_engineering_browser/common/native_network_scope.h"
 #include "brave/components/reverse_engineering_browser/common/native_probe_event.h"
 #include "brave/components/reverse_engineering_browser/common/native_vm_dispatch_emit.h"
 #include "brave/components/reverse_engineering_browser/common/native_vm_finding.h"
 #include "brave/components/reverse_engineering_browser/common/native_wasm_dispatch.h"
 #include "brave/components/reverse_engineering_browser/common/native_wasm_sample_budget.h"
+#include "brave/components/reverse_engineering_browser/renderer/native_renderer_request.h"
 
 namespace reb {
 
@@ -50,6 +52,20 @@ using NativeRendererProbeEmitter =
                               std::uint64_t config_generation) noexcept;
 
 using NativeProbeFrameIdProvider = std::uint64_t (*)() noexcept;
+
+// Counts one browser-internal request the configuration did not record.
+using NativeProbeExclusionCounter = void (*)(NativeSchemeClass scheme_class,
+                                             std::uint64_t session_id,
+                                             std::uint64_t config_generation) noexcept;
+
+// Network gates of one configuration, published by SetEmitters.
+struct NativeNetworkScope final {
+  // --reb-capture-request-content: renderer request targets follow it.
+  bool capture_request_content = false;
+  // --reb-capture-browser-internal: record internal schemes instead of counting.
+  bool capture_browser_internal = false;
+  NativeProbeExclusionCounter exclusion_counter = nullptr;
+};
 
 // Trusted native detector output only. Registration is not exposed to page JS.
 enum class NativeRuntimeScriptObservation : std::uint8_t {
@@ -96,7 +112,8 @@ class COMPONENT_EXPORT(REB_NATIVE_PROBE_SINK) NativeProbeSink final {
                    std::uint64_t category_mask,
                    std::uint64_t expires_at_monotonic_ns,
                    bool capture_canvas_images = false,
-                   NativeProbeFrameIdProvider frame_id_provider = nullptr) noexcept;
+                   NativeProbeFrameIdProvider frame_id_provider = nullptr,
+                   NativeNetworkScope network_scope = {}) noexcept;
   // Called after acquiring the transport queue pointer. A successful check
   // authorizes an in-flight insertion into that retained mapping; Disable does
   // not wait for producers already past this admission check.
@@ -105,6 +122,9 @@ class COMPONENT_EXPORT(REB_NATIVE_PROBE_SINK) NativeProbeSink final {
   [[nodiscard]] bool IsArtifactCaptureEnabled() const noexcept;
   [[nodiscard]] bool IsVmCaptureEnabled() const noexcept;
   [[nodiscard]] bool IsCanvasImageCaptureEnabled() const noexcept;
+  // One atomic load while inactive, for loaders that must convert before
+  // they can record.
+  [[nodiscard]] bool IsCaptureArmed() const noexcept;
   [[nodiscard]] bool RuntimeScriptSourceNeeded(std::uint64_t execution_context_id,
                                                std::uint64_t script_id) const noexcept;
   [[nodiscard]] std::uint64_t RuntimeCaptureGeneration() const noexcept;
@@ -374,9 +394,23 @@ class COMPONENT_EXPORT(REB_NATIVE_PROBE_SINK) NativeProbeSink final {
   void RecordCanvasToDataUrl() noexcept;
   void RecordCanvasToDataUrl(std::string_view data_url) noexcept;
   void RecordWebAudioCall(std::string_view operation) noexcept;
-  void RecordRequestInitiated(std::int32_t request_id,
-                              std::string_view method,
-                              std::string_view url) noexcept;
+  // A browser-internal scheme is counted instead of recorded unless the
+  // configuration opts in. The result is what the loader keeps to finish a
+  // request the browser proxy never sees; see protocol/native-network-v3.md.
+  [[nodiscard]] NativeRendererRequest RecordRequestInitiated(std::int32_t request_id,
+                                                             std::string_view method,
+                                                             std::string_view scheme,
+                                                             std::string_view host) noexcept;
+  // Only for AnsweredInRenderer() requests of the configuration that recorded
+  // them: a content-mode request_target child, then request_completed or
+  // request_failed. target starts the URL's path and query of target_length.
+  void RecordRendererRequestComplete(const NativeRendererRequest& request,
+                                     std::string_view target,
+                                     std::size_t target_length,
+                                     int port,
+                                     std::int32_t error_code,
+                                     std::int64_t encoded_data_length,
+                                     std::int64_t decoded_body_length) noexcept;
   // Copies one guest step the caller already observed. The instruction
   // pointer, opcode, and handler index are not read from V8, Wasm, canvas,
   // or a static handler table. At most kNativeVmDispatchSampleBudget samples
@@ -706,6 +740,9 @@ class COMPONENT_EXPORT(REB_NATIVE_PROBE_SINK) NativeProbeSink final {
   std::atomic<std::uint64_t> category_mask_{0};
   std::atomic<std::uint64_t> expires_at_monotonic_ns_{0};
   std::atomic<bool> capture_canvas_images_{false};
+  std::atomic<bool> capture_request_content_{false};
+  std::atomic<bool> capture_browser_internal_{false};
+  std::atomic<NativeProbeExclusionCounter> exclusion_counter_{nullptr};
   // Monotonic generation claims are never reset: an old capture cannot spend
   // or release a replacement configuration's snapshot quota.
   std::array<std::atomic<std::uint64_t>, kRuntimeTypedArrayMaxSnapshots>

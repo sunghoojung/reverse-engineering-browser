@@ -132,7 +132,9 @@ Origin Trace decoder:
 ### `request_target` (type 23)
 
 Emitted only with request content, immediately after `request_started` and
-after every `request_redirected`, as the child of that record.
+after every `request_redirected`, as the child of that record. A renderer also
+emits one as the child of its own `request_initiated` for a request the proxy
+never sees; see [v3](native-network-v3.md#requests-answered-in-the-renderer).
 
 | Offset | Size | Field |
 | ---: | ---: | --- |

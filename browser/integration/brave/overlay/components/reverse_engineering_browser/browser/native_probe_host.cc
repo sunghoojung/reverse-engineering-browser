@@ -24,6 +24,7 @@
 #include "brave/components/reverse_engineering_browser/browser/native_probe_session.h"
 #include "brave/components/reverse_engineering_browser/common/native_probe_queue.h"
 #include "brave/components/reverse_engineering_browser/common/native_wasm_guest_adapter.h"
+#include "content/public/browser/child_process_security_policy.h"
 #include "content/public/browser/render_frame_host.h"
 #include "content/public/browser/render_process_host.h"
 #include "content/public/browser/web_contents.h"
@@ -705,9 +706,14 @@ void NativeProbeHost::Configure(const std::uint64_t session_id,
                                 const bool capture_canvas_images) {
   Disable();
   if (!client_.is_bound() || session_id == 0 ||
-      wasm_capture_epoch_ == std::numeric_limits<std::uint64_t>::max()) {
+      wasm_capture_epoch_ == std::numeric_limits<std::uint64_t>::max() || IsBrowserInternal()) {
     return;
   }
+  auto* const process = content::RenderProcessHost::FromID(renderer_process_id_);
+  renderer_os_pid_ = process && process->GetProcess().IsValid()
+                         ? static_cast<std::uint32_t>(process->GetProcess().Pid())
+                         : 0;
+  reported_exclusions_ = {};
 
   queue_region_ = base::UnsafeSharedMemoryRegion::Create(sizeof(NativeProbeQueue));
   if (!queue_region_.IsValid()) {
@@ -732,13 +738,16 @@ void NativeProbeHost::Configure(const std::uint64_t session_id,
   client_->Configure(session_id, category_mask, expires_at_monotonic_ns, capture_canvas_images,
                      std::move(renderer_region), wasm_capture_epoch_,
                      session_->guest_adapter_json(), session_->js_dispatch_sites(),
-                     session_->js_invocation_sites(), session_->js_invocation_digests());
+                     session_->js_invocation_sites(), session_->js_invocation_digests(),
+                     session_->capture_request_content(), session_->capture_browser_internal());
 }
 
 void NativeProbeHost::Disable() {
   // Records the renderer already queued, and drops it has not reported, are
   // this configuration's evidence: publish them before the mapping goes.
+  disabling_ = true;
   Drain();
+  disabling_ = false;
   wasm_epoch_lifetime_.reset();
   if (wasm_capture_epoch_ != std::numeric_limits<std::uint64_t>::max())
     ++wasm_capture_epoch_;
@@ -769,8 +778,38 @@ void NativeProbeHost::ResetWasmSampleBudgets() {
     client_->ResetWasmSampleBudgets();
 }
 
+bool NativeProbeHost::IsBrowserInternal() {
+  if (!browser_internal_ && !session_->capture_browser_internal() &&
+      content::ChildProcessSecurityPolicy::GetInstance()->HasWebUIBindings(renderer_process_id_)) {
+    browser_internal_ = true;
+    session_->NoteWebUiRendererExcluded();
+  }
+  return browser_internal_;
+}
+
+void NativeProbeHost::ReportExclusions() {
+  for (std::size_t slot = 0; slot < reported_exclusions_.size(); ++slot) {
+    const std::uint64_t count = queue_->ExclusionCount(slot);
+    if (count > reported_exclusions_[slot]) {
+      reported_exclusions_[slot] = count;
+      session_->EmitExclusion(renderer_os_pid_, static_cast<std::uint8_t>(16 + slot), count);
+    }
+  }
+}
+
 void NativeProbeHost::Drain() {
   if (!queue_) {
+    return;
+  }
+  // The renderer is counted once as excluded; what it queued leaves with it.
+  if (browser_internal_ || IsBrowserInternal()) {
+    NativeProbeEvent discarded;
+    while (queue_->TryPop(discarded)) {
+    }
+    queue_->ClearNotificationPending();
+    if (!disabling_) {
+      Disable();
+    }
     return;
   }
 
@@ -796,6 +835,8 @@ void NativeProbeHost::Drain() {
     }
 
     queue_->ClearNotificationPending();
+    // After the clear, so a later count either is read here or wakes again.
+    ReportExclusions();
     if (queue_->Empty() || !queue_->MarkNotificationPending()) {
       return;
     }

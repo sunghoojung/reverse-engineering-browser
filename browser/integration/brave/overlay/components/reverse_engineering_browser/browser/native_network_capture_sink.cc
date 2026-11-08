@@ -20,6 +20,7 @@
 #include "brave/components/reverse_engineering_browser/browser/native_probe_session.h"
 #include "brave/components/reverse_engineering_browser/common/native_artifact_header.h"
 #include "brave/components/reverse_engineering_browser/common/native_network_request.h"
+#include "brave/components/reverse_engineering_browser/common/native_network_scope.h"
 #include "content/public/browser/browser_context.h"
 #include "crypto/hash.h"
 #include "net/http/http_request_headers.h"
@@ -377,6 +378,7 @@ void NativeNetworkCaptureSink::RecordRequestStarted(
       browser_context_id_low);
   event.header.resource_type =
       static_cast<std::uint16_t>(std::clamp(request.resource_type, 0, 65535));
+  event.header.scheme_class = static_cast<std::uint8_t>(ClassifyNativeScheme(request.url.scheme()));
   if (request.originated_from_service_worker) {
     event.header.flags |= static_cast<std::uint16_t>(NativeProbeFlag::kFromServiceWorker);
   }

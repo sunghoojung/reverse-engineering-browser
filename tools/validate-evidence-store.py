@@ -92,6 +92,7 @@ EVENT_TYPES = {
     "api_call",
     "artifact_capture_failed",
     "artifact_captured",
+    "capture_exclusion",
     "gap",
     "js_dispatch_observation",
     "js_invocation_request",
@@ -119,6 +120,10 @@ EVENT_TYPES = {
     "wasm_dispatch_overflow",
     "wasm_indirect_overflow",
 }
+# protocol/native-network-v3.md, shared with include/reb/network_scope.hpp.
+SCHEME_CLASSES = {*range(0, 9), 15, *range(16, 21)}
+SCHEME_CLASS_TYPES = {"request_initiated", "request_started", "request_completed", "request_failed"}
+EXCLUSION_CLASSES = {*range(16, 21), 64}
 UINT64_MAX = (1 << 64) - 1
 INT64_MIN = -(1 << 63)
 INT64_MAX = (1 << 63) - 1
@@ -405,6 +410,21 @@ def valid_wasm_overflow(event: dict, payload: bytes, indirect: bool) -> bool:
     )
 
 
+def valid_capture_exclusion(event: dict, payload: bytes) -> bool:
+    if (event["protocol_version"] != 3 or event["category"] != "network" or event["flags"] != 0
+            or len(payload) != 16 or payload[:4] != bytes((1, 0, 16, 0)) or any(payload[5:8])
+            or payload[4] not in EXCLUSION_CLASSES or not any(payload[8:16])):
+        return False
+    zero = ("navigation_id", "frame_id", "artifact_id", "parent_event_id", "request_id",
+            "browser_context_id_high", "browser_context_id_low", "encoded_data_length",
+            "decoded_body_length")
+    return (all(event[key] != "0" for key in ("session_id", "sequence_number"))
+            and all(event[key] == "0" for key in zero) and event["process_id"] != 0
+            and event["tab_id"] == 0 and event["status_code"] == 0 and event["error_code"] == 0
+            and event["resource_type"] == 0 and event["initiator_request_id"] == 0
+            and (payload[4] != 64 or event["initiator_process_id"] == 0))
+
+
 def validate_event(event: object, line_number: int) -> None:
     if not isinstance(event, dict):
         raise ValueError(f"line {line_number}: event must be a JSON object")
@@ -412,6 +432,9 @@ def validate_event(event: object, line_number: int) -> None:
     protocol_version = event.get("protocol_version")
     expected_fields = EXPECTED_FIELDS | ({"tab_id"} if protocol_version == 3 else set())
     fields = set(event)
+    # scheme_class is written only when nonzero.
+    if protocol_version == 3 and "scheme_class" in fields:
+        expected_fields = expected_fields | {"scheme_class"}
     if fields != expected_fields:
         missing = sorted(expected_fields - fields)
         unexpected = sorted(fields - expected_fields)
@@ -570,6 +593,14 @@ def validate_event(event: object, line_number: int) -> None:
         raise ValueError(f"line {line_number}: native request body record is invalid")
     if event["type"] == "request_target" and not valid_request_target(event, payload):
         raise ValueError(f"line {line_number}: native request target record is invalid")
+    scheme_class = event.get("scheme_class", 0)
+    if (not isinstance(scheme_class, int) or isinstance(scheme_class, bool)
+            or scheme_class not in SCHEME_CLASSES or ("scheme_class" in event and scheme_class == 0)
+            or (scheme_class and (event["category"] != "network"
+                                  or event["type"] not in SCHEME_CLASS_TYPES))):
+        raise ValueError(f"line {line_number}: scheme class is invalid")
+    if event["type"] == "capture_exclusion" and not valid_capture_exclusion(event, payload):
+        raise ValueError(f"line {line_number}: capture exclusion record is invalid")
     if event["type"].startswith("js_invocation_") and not valid_js_invocation(event, payload):
         raise ValueError(f"line {line_number}: native JavaScript invocation record is invalid")
     if event["type"] in ("wasm_guest_dispatch", "wasm_guest_invocation"):

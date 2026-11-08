@@ -56,6 +56,7 @@ HEADERS = (
     "base/memory/weak_ptr.h",
     "base/memory/shared_memory_mapping.h",
     "base/memory/unsafe_shared_memory_region.h",
+    "content/public/browser/child_process_security_policy.h",
     "content/public/browser/render_frame_host.h",
     "content/public/browser/render_process_host.h",
     "content/public/browser/web_contents.h",

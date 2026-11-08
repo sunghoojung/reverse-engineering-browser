@@ -48,7 +48,9 @@ class NativeProbeTransport final : public mojom::NativeProbeClient {
                  const std::string& guest_adapter_json = {},
                  const std::vector<std::uint8_t>& js_dispatch_sites = {},
                  const std::vector<std::uint8_t>& js_invocation_sites = {},
-                 bool js_invocation_digests = false) override;
+                 bool js_invocation_digests = false,
+                 bool capture_request_content = false,
+                 bool capture_browser_internal = false) override;
   void SetWasmSampleBudget(const std::vector<std::uint8_t>& policy) override;
   void ResetWasmSampleBudgets() override;
   void Disable() override;
@@ -71,6 +73,9 @@ class NativeProbeTransport final : public mojom::NativeProbeClient {
 
   [[nodiscard]] NativeProbeEmitStatus EmitEvent(const NativeProbeEvent& event,
                                                 std::uint64_t config_generation) noexcept;
+  static void CountExclusion(NativeSchemeClass scheme_class,
+                             std::uint64_t session_id,
+                             std::uint64_t config_generation) noexcept;
   static bool EmitNativeGuest(const NativeGuestCapture& capture, std::uint64_t generation) noexcept;
   static bool EmitNativeGuestHost(const NativeProbeEvent& event, std::uint64_t generation) noexcept;
   static bool EmitWasmDispatch(const NativeWasmDispatchObservation& observation,

@@ -2801,14 +2801,15 @@ invocationSitesPanel.refresh();
       }
 
       function trafficRequestFilterKey() {
-        return JSON.stringify([state.requestTabId, state.requestDomain, state.requestType,
+        return JSON.stringify([state.requestTabId, state.requestDomain, state.requestType, state.hideBrowserInternal,
           elements.requestFilter.value.trim().toLowerCase(),
           state.trafficSort, state.trafficSortDirection]);
       }
 
       function renderTrafficWindowStatus(start, rowCount, visibleCount) {
         const selectedFiltered = state.selectedRequestId !== null && !state.trafficSearchMatches.has(state.selectedRequestId);
-        const message = `${visibleCount ? start + 1 : 0}–${start + rowCount} of ${visibleCount} matching · ${state.requests.length} retained${selectedFiltered ? ' · Selection outside filter' : ''}`;
+        const excluded = globalThis.RebNetworkScope?.captureExclusionNotice(state.captureExclusions) ?? '';
+        const message = `${visibleCount ? start + 1 : 0}–${start + rowCount} of ${visibleCount} matching · ${state.requests.length} retained${excluded ? ` · ${excluded}` : ''}${selectedFiltered ? ' · Selection outside filter' : ''}`;
         const status = document.querySelector('#request-window-status');
         if (status.textContent !== message) status.textContent = message;
       }
@@ -2828,7 +2829,11 @@ invocationSitesPanel.refresh();
         state.trafficRenderedView = null;
         renderRequestScopes();
         const needle = elements.requestFilter.value.trim().toLowerCase();
-        const scoped = state.requests.filter(request =>
+        const scope = globalThis.RebNetworkScope;
+        const internal = scope?.browserInternalView(state.requests, scope.isBrowserInternalRequest, state.hideBrowserInternal)
+          ?? {visible: state.requests, internal: 0};
+        scope?.renderBrowserInternalToggle(document.querySelector('#request-hide-internal'), internal.internal, state.hideBrowserInternal);
+        const scoped = internal.visible.filter(request =>
           (state.requestTabId === 'all' ||
             (request.tabId && request.tabId !== '0' ? request.tabId : 'unattributed') === state.requestTabId) &&
           (state.requestDomain === 'all' || requestDomain(request) === state.requestDomain) &&
@@ -6059,7 +6064,8 @@ invocationSitesPanel.refresh();
         const rootKey = JSON.stringify([collection, 'root']);
         const root = {key: rootKey, kind: 'root', label: 'top', depth: 0, parent: null, children: [], count: 0};
         nodes.set(rootKey, root);
-        const limits = {catalog: Math.max(0, catalog.length - SOURCE_TREE_LIMITS.catalog), omitted: 0, deep: 0, ambiguous: 0};
+        const limits = {catalog: Math.max(0, catalog.length - SOURCE_TREE_LIMITS.catalog), omitted: 0, deep: 0, ambiguous: 0, internal: 0};
+        const internalUrl = globalThis.RebNetworkScope?.isBrowserInternalSourceUrl ?? (() => false);
         const files = new Map();
         const branch = (key, label, kind, parent) => {
           if (!nodes.has(key)) {
@@ -6071,6 +6077,10 @@ invocationSitesPanel.refresh();
         for (let index = 0; index < Math.min(catalog.length, SOURCE_TREE_LIMITS.catalog); index++) {
           const raw = catalog[index];
           if (!isSourceArtifact(raw)) continue;
+          if (internalUrl(raw.url)) {
+            limits.internal++;
+            if (state.hideBrowserInternal) continue;
+          }
           // Refuse an overlong path before URL parsing or identity serialization.
           if (typeof raw.url !== 'string' || raw.url.length > SOURCE_TREE_LIMITS.url) {limits.omitted++; continue;}
           const source = {...sourceReference(raw), source_type: 'artifact'};
@@ -6227,10 +6237,19 @@ invocationSitesPanel.refresh();
         return {row, icon, name, raw, researcher, detail, group};
       }
 
+      function sourceInternalToggle() {
+        const toggle = document.createElement('button');
+        toggle.type = 'button'; toggle.className = 'source-internal-toggle';
+        toggle.title = 'Hide chrome:, devtools: and other browser-internal sources; nothing is deleted';
+        toggle.addEventListener('click', () => { state.hideBrowserInternal = !state.hideBrowserInternal; renderRequests(); renderSourceTree(); });
+        return toggle;
+      }
+
       function renderSourceTree(refresh = true) {
         const nav = sourceTreeState(), tree = elements.sourceTree, previous = nav.model;
         const activeKey = document.activeElement?.dataset?.sourceTreeKey;
         const hadFocus = tree.contains(document.activeElement);
+        const toggleFocused = Boolean(nav.internalToggle) && document.activeElement === nav.internalToggle;
         const previousScope = previous && sourceTreeScope(nav, previous.collection);
         let anchor = null;
         if (refresh && previous?.collection === state.sourceCollection && tree.scrollTop > 0 && tree.clientHeight > 0) {
@@ -6299,10 +6318,16 @@ invocationSitesPanel.refresh();
         if (model.limits.omitted) notices.push(`${model.limits.omitted} sources exceed the navigator path, identity or node limit and are not listed.`);
         if (model.limits.ambiguous) notices.push(`${model.limits.ambiguous} duplicate source identities are not shown twice; ambiguous sources cannot be opened.`);
         if (model.limits.deep) notices.push(`${model.limits.deep} paths are shortened after ${SOURCE_TREE_LIMITS.depth} folders; file tooltips retain their full URLs.`);
+        if (model.limits.internal && state.hideBrowserInternal) notices.push(`${model.limits.internal} browser-internal ${model.limits.internal === 1 ? 'source is' : 'sources are'} hidden.`);
+        const internalToggle = model.limits.internal && globalThis.RebNetworkScope ? nav.internalToggle ??= sourceInternalToggle() : null;
         if (limited) notices.push(`Showing the first ${SOURCE_TREE_LIMITS.visible.toLocaleString()} expanded rows. Collapse branches to see later rows, or use Open file.`);
-        if (!visible.length || notices.length) {
+        if (!visible.length || notices.length || internalToggle) {
           nav.notice ??= document.createElement('div'); nav.notice.className = 'source-tree-empty'; nav.notice.setAttribute('role', 'status');
-          nav.notice.textContent = notices.join(' ') || 'No source artifacts captured. Canvas images are shown in Fingerprinting.';
+          nav.notice.textContent = notices.join(' ') || (visible.length ? '' : 'No source artifacts captured. Canvas images are shown in Fingerprinting.');
+          if (internalToggle) {
+            globalThis.RebNetworkScope.renderBrowserInternalToggle(internalToggle, model.limits.internal, state.hideBrowserInternal);
+            nav.notice.append(internalToggle);
+          }
           // Keep limit disclosures above the rows, including when the navigator
           // itself is empty after filtering or rejecting over-limit paths.
           containers.get(tree).unshift(nav.notice);
@@ -6320,7 +6345,8 @@ invocationSitesPanel.refresh();
           const bounds = nav.rows.get(anchor.key).row.getBoundingClientRect();
           tree.scrollTop += bounds.top - tree.getBoundingClientRect().top - anchor.offset;
         }
-        if (hadFocus) {
+        if (toggleFocused && nav.internalToggle.parentElement) nav.internalToggle.focus({preventScroll: true});
+        else if (hadFocus) {
           if (scope.focus) sourceTreeFocus(scope.focus, Boolean(activeKey && activeKey !== scope.focus));
           else tree.focus({preventScroll: true});
         }
@@ -7865,6 +7891,7 @@ invocationSitesPanel.refresh();
           state.malformedVmFindings = vmModel.malformedCount;
           const eventOrigin = state.sessionMode === 'demo' ? 'demo' : 'live';
           state.nativeRequests = requestsFromEvents(body.network_events ?? state.events, eventOrigin);
+          state.captureExclusions = globalThis.RebNetworkScope?.captureExclusionTotals(body.network_events ?? state.events) ?? null;
           rebuildTrafficRequests();
           let selectedRequest = state.requests.find(request => request.id === state.selectedRequestId);
           if (!selectedRequest && state.selectedRequestId !== null) resetRequestSelection();
@@ -8207,6 +8234,12 @@ invocationSitesPanel.refresh();
           elements.requestCopyUrl.textContent = 'Copy unavailable';
         }
         setTimeout(() => { elements.requestCopyUrl.textContent = 'Copy URL'; }, 1800);
+      });
+      // One reversible view filter for Traffic and Sources; evidence is unchanged.
+      document.querySelector('#request-hide-internal').addEventListener('click', () => {
+        state.hideBrowserInternal = !state.hideBrowserInternal;
+        renderRequests();
+        renderSourceTree();
       });
       elements.requestDomain.addEventListener('change', () => {
         state.requestDomain = elements.requestDomain.value;

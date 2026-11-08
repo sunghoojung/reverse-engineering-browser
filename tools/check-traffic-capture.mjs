@@ -106,8 +106,8 @@ console.log('PASS saved reb-traffic-capture-v1 export copy: synthetic credential
 // Native scope buttons label tabs by a known domain, else a positional fallback.
 {
   const app = await readFile(new URL('../apps/research-ui/app.js', import.meta.url), 'utf8');
-  const first = app.indexOf('      function renderRequestScopes()');
-  const last = app.indexOf('      function renderRequests(', first);
+  const first = app.indexOf('      function trafficLocalScopes()');
+  const last = app.indexOf('      function trafficRequestFilterKey(', first);
   class ScopeNode {
     constructor() { this.children=[];this.dataset={}; }
     append(...nodes) { this.children.push(...nodes);for(const node of nodes)node.parent=this; }
@@ -118,9 +118,10 @@ console.log('PASS saved reb-traffic-capture-v1 export copy: synthetic credential
   }
   const state={requests:[{tabId:'worker-a',path:'fixture.test'}],requestTabId:'all',requestDomain:'all'};
   const elements={requestTabScopes:new ScopeNode(),requestDomain:new ScopeNode()};
-  const render=runInNewContext(app.slice(first,last)+';renderRequestScopes',{
+  const scopes=runInNewContext(app.slice(first,last)+';({renderRequestScopes,trafficIndexScopes})',{
     state,elements,document:{activeElement:null,createElement:()=>new ScopeNode()},
     requestTabGroups:()=>[{id:'worker-a',requests:state.requests}],requestDomain:request=>request.path});
+  const render=()=>scopes.renderRequestScopes();
   render();
   assert.equal(elements.requestTabScopes.children[0].children[0].textContent,'All tabs');
   assert.equal(elements.requestTabScopes.children[1].children[0].textContent,'fixture.test');
@@ -130,5 +131,11 @@ console.log('PASS saved reb-traffic-capture-v1 export copy: synthetic credential
     render();
     assert.equal(elements.requestTabScopes.children[1].children[0].textContent,'Tab 1', String(missing));
   }
-  console.log('PASS Traffic tab-scope labels use a known domain, else a Tab fallback (production function; not rendered QA)');
+  // Request index facets count the whole session, not the retained window.
+  scopes.renderRequestScopes(scopes.trafficIndexScopes({through:20000,facets:{tabs:[{tab_id:'7',count:19999,domains:['unknown','late.test']},
+    {tab_id:'0',count:1,domains:['unknown']}],domains:[{domain:'late.test',count:19999},{domain:'unknown',count:1}]}}));
+  assert.deepEqual(elements.requestTabScopes.children.map(button=>[button.children[0].textContent,button.children[1].textContent]),
+    [['All tabs','20000'],['late.test','19999'],['Unattributed','1']]);
+  assert.deepEqual(elements.requestDomain.children.map(option=>option.textContent),['All domains (20000)','late.test (19999)','unknown (1)']);
+  console.log('PASS Traffic tab-scope labels use a known domain, else a Tab fallback; index facets give session-wide counts (production function; not rendered QA)');
 }

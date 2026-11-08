@@ -79,10 +79,9 @@ captured instead of showing empty panes. Content capture sessions add header
 blocks and cookie lists, which the **Headers** and **Cookies** tabs show.
 
 Traffic selection updates only the mounted rows and selection summary when the
-retained snapshot, filters, ordering and page are unchanged. Keyboard navigation
+snapshot, filters, ordering and mounted block are unchanged. Keyboard navigation
 does not repeat search or sorting and does not rebuild rows or reset ledger
-scrolling. A changed snapshot, filter, page or explicit refresh still recomputes
-the whole bounded retained window. `node tools/check-traffic-selection-work.mjs` checks production
+scrolling. A changed snapshot, filter, block or explicit refresh renders again. `node tools/check-traffic-selection-work.mjs` checks production
 controller work and selection invariants. Add `--baseline-ref=<commit>` for a
 reproducible authored 5,000-record/500-row before-and-after Node benchmark. Those
 timings are not rendered browser or native-app latency; the Requests browser
@@ -436,7 +435,7 @@ Keychain storage. **Content (default)** sets `REB_CAPTURE_REQUEST_CONTENT=1`,
 which retains request paths, queries and request bodies up to 16 MiB each, and
 retains Canvas images. While a live session has either turned on, the titlebar
 shows **Content capture** and its tooltip names which; a browser built before
-that capture ignores the switch, and each Traffic row and body still shows what
+that capture ignores the switch, and each Traffic row and Payload tab still shows what
 was actually captured. **Metadata only** is the
 opt-out: Traffic stays host-only and no Canvas image is kept. Every mode records
 each request body's length, type and SHA-256. In Content mode,
@@ -578,16 +577,31 @@ REB_CAPTURE_CANVAS_IMAGES=1 make live
 
 To retain request paths, queries and bounded request bodies with `make live`,
 run `REB_CAPTURE_REQUEST_CONTENT=1 make live`. Traffic then shows each request's
-captured path and query, and its General view shows the request body: capture
-state, content type, length, SHA-256, kind and the retained bytes as text, read
-256 KiB at a time with **Show the next 256 KiB**. A path and query past the
-116-byte row prefix is loaded from its retained full target for the Request URL
-and Copy URL, or General says why it was not retained. Without it, the General view still shows the body's length, type and digest and
-says that content capture was off. File, blob and stream bodies are named, not
-read; password form bodies keep neither bytes nor a digest. A body read that
-times out or gets an error status stays shown with its reason and is read again
-on the next refresh; a size or SHA-256 mismatch is kept with its reason and is
-not reread. Sources never lists or opens request bodies or full targets.
+captured path and query, and its Payload tab shows them parsed:
+
+- **Query String Parameters** from the captured target, decoded or as sent.
+- **Request Payload**, Parsed or Source. JSON is a tree whose containers open
+  100 children or ranges at a time, so any size stays responsive, and its
+  source is pretty-printed and colored. Form bodies are a name/value table and
+  multipart bodies list each part's name, filename, type and size, with the
+  boundary read from the first line. Other text is colored by its type. Binary
+  bytes are only shown as hex. Long sources render in blocks as they scroll.
+- **Find**, **Copy value** and **Copy as JSON** act on the selected row, or on
+  the whole payload. Arrow keys move through, open and close tree rows.
+- **Capture details**, collapsed, holds the state, type, lengths, SHA-256,
+  kind and artifact ID. A body cut at the capture limit or a cut target is
+  noted at the top. Bodies are read 256 KiB at a time; **Show the next 256 KiB**
+  reads on, and the body parses once every byte is read.
+
+Without content capture, Payload still shows the body's length, type and digest
+and says that content capture was off. File, blob and stream bodies are named,
+not read; password form bodies keep neither bytes nor a digest. A body read
+that times out or gets an error status keeps the last read copy and its reason
+and is read again on the next refresh; a size or SHA-256 mismatch shows no bytes
+and is not reread. A path and query past the 116-byte row prefix is loaded from
+its retained full target for General's Request URL and Copy URL, or General
+says why it was not retained. Sources never lists or opens request bodies or
+full targets.
 
 Canvas image capture is disabled by default because rendered output can contain
 page content. Enabled output stays in the local session artifact store, is
@@ -673,10 +687,10 @@ when the last capture arrived while another workspace was open and the backend
 has no newer events.
 
 Traffic uses a compact network ledger with visible resource-type filters and
-sortable Name, Status, Type, Method, and Time columns. **Capture order** restores
-the evidence order. The selected request opens General, Headers, Preview,
-Response, Cookies,
-Initiator, Timing, Signals and Evidence beside the ledger above 1100 px, or below it in narrow
+sortable columns (see [Traffic columns and filters](#traffic-columns-and-filters)).
+**Capture order** restores the evidence order. The selected request opens
+General, Headers, Payload, Preview, Response, Cookies, Initiator, Timing,
+Signals and Evidence beside the ledger above 1100 px, or below it in narrow
 windows. Both panes stay within the available workspace height; the request
 ledger and inspector body scroll independently. Captured-tab and domain filters
 share a compact row at narrow widths. Native capture records the method, host,
@@ -685,10 +699,9 @@ type and SHA-256. Initiator shows the request call stack natively recorded
 when the renderer started the request, innermost first with `await`
 separators and an omitted-frames marker; a frame opens Sources at its
 position, and a request started with no script on the stack reads "Parser".
-Content capture sessions add the path and query and bounded
-request body bytes, which General shows as text, response bodies, and request
-and response header blocks ([native network v3](../../protocol/native-network-v3.md)).
-Response
+Content capture sessions add the path and query and bounded request body
+bytes, which Payload parses, response bodies, and request and response header
+blocks ([native network v3](../../protocol/native-network-v3.md)). Response
 (`traffic_response.js`) shows a body's capture state, codings, lengths and
 digest, then its bytes as syntax-colored text with pretty print, wrap, find,
 copy and hex, read 2 MiB at a time and rechecked by SHA-256. Preview shows a
@@ -716,15 +729,27 @@ Request signal profiles are owned by the exact selected session, request and roo
 event. Late responses cannot replace a newer selection or refresh. Malformed or
 failed refreshes preserve only the last validated profile for that same identity
 and require a full response on retry; changed or ambiguous owners clear it.
-No cache, recording, throttling, or invented waterfall controls are implied.
+No cache, recording or throttling controls are implied, and the waterfall uses
+recorded timestamps only.
 The layout follows familiar [network inspection conventions](https://developer.chrome.com/docs/devtools/network/reference)
 while keeping Origin Trace's own controls and Rosé Pine Moon palette.
 
-The ledger mounts at most 500 fixed-height rows. Previous/Next page through the
-retained window without changing the evidence: the Rust native-event API returns separate newest general and network lifecycle
+Traffic lists every request of the session from the backend request index
+(`get_requests`, [request index v1](../../protocol/request-index-v1.md)). The
+ledger mounts one block of at most 500 fixed-height rows inside padding for the
+rest and moves it as you scroll, so every request is reachable. Counts, the
+`N / M requests` footer, tab chips, domain options, filters and search cover the
+whole session. Newest requests come first; rows that arrive above a scrolled
+viewport do not move it or the selection. Selecting a row whose records are not
+all in the newest event window reads them with `get_events` from the row's first
+byte offset before the inspector opens. While the index is still indexing a large
+store, or counts unreadable or over-limit records, the footer says so. Until it
+first answers, and in the bundled `reb://` workspace, Traffic uses the newest
+network window and labels its counts that way; a later failed read keeps the
+last rows. The Rust native-event API returns separate newest general and network lifecycle
 windows of up to 5,000 events each from at most the newest 64 MiB. Canvas/WebGL activity does not consume
-network slots within that byte budget. Traffic uses the network window, including
-redirect, failed, and response-completed outcomes. Notices distinguish a capped
+network slots within that byte budget. That network window, including
+redirect, failed, and response-completed outcomes, also supplies the inspector. Notices distinguish a capped
 window from the bounded tail and label summary counts by their actual scan scope.
 Sequence-gap counts are arrival-order high-water jumps, not a deduplicated count
 of still-missing IDs after late arrivals, and queue drops may overlap them.
@@ -757,12 +782,12 @@ The Swift stored-evidence reader uses the same newest-general and
 newest-network windows, 64 MiB tail, and summary scope as the Rust endpoint.
 A response that omits those fields is still labeled visible-window-only, and
 no whole-capture count is inferred for it. Filtering
-and sorting cover the whole retained window. Rows and capture-tab controls are
+and sorting cover the whole session through the index. Rows and capture-tab controls are
 reused across refreshes. New arrivals briefly accent the row edge once; pending
 requests use a steady label. Reduced-motion disables animation and transitions.
-Refresh preserves the reading anchor and keyboard focus and never follows the
-bottom automatically. **N new requests** explicitly jumps to the newest capture
-window. Selection survives filters and sorting; its absence from the filter is
+Refresh preserves the reading anchor and keyboard focus. **N new requests**
+counts rows that arrived while the table was scrolled away from the newest, and
+returns to them. Selection survives filters and sorting; its absence from the filter is
 labeled. An actually evicted selection reports that it left the retained window
 instead of silently selecting another request.
 
@@ -771,10 +796,6 @@ Home/End. Escape closes the inspector and returns focus to the ledger. The close
 button has the same behavior. A dismissed inspector stays closed across
 refreshes; selecting a request reopens it. Full URLs remain available in General
 and Copy URL, and host-only metadata never implies a captured path or query.
-
-Traffic search is a literal, case-insensitive match over the URL or host,
-method and status that native rows carry. Tab, domain, and resource filters
-scope it. Search never enables capture or fetches anything.
 
 Collection uses a saved-request library and a template editor; it never sends
 a request. Headers, Body, and Variables are keyboard-accessible request
@@ -864,6 +885,55 @@ dispatch-mode diagnostics and prompt PNGs are retained in `build/native-close-qa
 and uploaded by CI. The `--contract-only` mode checks wiring, sheet/sudden-exit
 policy and trace assertions; it is not evidence of native lifecycle behavior.
 
+### Traffic columns and filters
+
+The columns are Name, Status, Type, Method, Initiator, Size, Time and Waterfall;
+Protocol is available from the header menu.
+
+- **Name** is the last path segment and the query, with the host as a muted
+  sublabel only when the path was captured. The full URL is the tooltip.
+- **Status** colors 3xx, 4xx and 5xx apart. Failed names its net error,
+  Pending has no terminal record, and No loader means only the renderer
+  recorded the request.
+- **Type** comes from the resource type, then the response MIME type when the
+  resource type says only "other". Its tooltip has the MIME type.
+- **Initiator** is coarse: Renderer, Service worker or Browser. Parser and
+  script starts are not told apart without an initiator stack.
+- **Size** is the terminal record's `encoded_data_length` (transferred) and
+  `decoded_body_length` (resource), or (disk cache) and (service worker) from
+  the response flags. Units are decimal; the tooltip has exact bytes.
+- **Waterfall** draws each request from its first to its last record, lighter
+  until `response_started`, over the matching requests or the selected range.
+
+Drag a column edge, or press Shift+Left or Shift+Right on a header, to resize it.
+Right-click the header, or press Shift+F10 on it, to show or hide columns. The
+layout is saved in local storage. A table too narrow for the chosen columns
+drops Protocol, Initiator, Method, Type, Waterfall, Size, Time and Status in
+that order; Name always stays. Every cell with text has a tooltip.
+
+The timing strip above the table counts request starts in 120 buckets. Drag
+across it to filter to that time range; with it focused, Right or Left Arrow
+selects or moves a bucket, Shift+Arrow grows or shrinks the range, and Escape
+or **Clear range** removes it. The footer reads `N / M requests · X transferred
+· Y resources` for the matching requests of the whole session.
+
+The filter box matches the method, URL or host and status as literal,
+case-insensitive text. `-text` excludes rows that contain it. `domain:` (with
+`*` wildcards), `method:`, `status-code:`, `larger-than:` (transferred bytes; `k`
+and `m` are 1,024 multiples) and `mime-type:` match exactly, and a leading `-`
+negates them. Beside the type chips, **Invert** shows what the filter text does
+not match, **Hide internal** hides rows whose recorded scheme class is
+browser-internal, or, recorded before scheme classes, rows only a renderer
+recorded for a single-label host (`chrome://resources`, `newtab`); the footer
+counts them and Sources shares the switch,
+**3rd-party** keeps requests whose site differs from their tab's latest
+top-level document, and **Failed** keeps failed requests. Sites are the last two
+host labels, or three after a short second level and a two-letter country code;
+there is no public suffix list. Tab and domain filters scope everything. The
+request index applies the same rules to the whole session, and
+`make request-index-check` holds the two to one fixture. Filters never enable
+capture, fetch anything or change a row.
+
 ## Code ownership
 
 | Location | Responsibility |
@@ -874,11 +944,16 @@ policy and trace assertions; it is not evidence of native lifecycle behavior.
 | `request_stack.js` | Initiator tab: the native request call stack from `get_request_stack`, opening Sources at a frame, and the initiator chain |
 | `command_palette.js` | The ⌘ / Ctrl + K palette: provider registry, matching, ranking and caps, and its dialog controller; `app.js` supplies the built-in providers |
 | `pane_layout.js` | Shared pointer and keyboard pane resizing, responsive constraints, and local size preferences |
-| `traffic_view.js` | Native request ledger rows, ordering, paging and URL/method/status/name search, the General coverage view, and the saved-capture export document |
+| `traffic_view.js` | Native request ledger rows, ordering, the mounted block and URL/method/status/name search, the General coverage view, request body record wording, and the saved-capture export document |
 | `network_scope.js` | Counted browser-internal exclusions and the reversible browser-internal view filter |
 | `request_tabs.js` | Each Traffic row's tabs from tab sets and request tab links, tab page names and rows without a tab |
 | `traffic_headers.js` | The Headers tab: hops from native header records, checked block reads, Raw and copy |
 | `traffic_cookies.js` | The Cookies tab: checked cookie list reads, request and response tables, filtered-out cookies, sort, copy and name provenance |
+| `traffic_payload.js` | The Payload tab: query parameters, the parsed and source request body, find and copy, and Capture details |
+| `traffic_index.js` | The request index client: the mounted block's rows, totals and facets, and a selected row's records from the event store |
+| `traffic_filter.js` | The filter grammar, Invert, Hide internal, 3rd-party, Failed and the time range over the newest window, mirroring the request index |
+| `traffic_columns.js` | Column widths, hidden columns, the header menu, saved layout and fitting columns to the table width |
+| `traffic_overview.js` | The timing strip and its pointer and keyboard time-range selection |
 | `evidence_names.js` | Researcher names: exact identities, the closed names document, its Analyst-library store, the inline rename editor and the command palette provider |
 | `captured_client.js`, `captured_export_formats.js` | Saved-capture identity, local export dialog, and the client-project/HAR/SDL generators shared with offline commands |
 | `source_search.js` | Search all files: the literal matcher on the Find index, the bounded and cancellable search, partial-result notes and the results panel; `app.js` supplies the artifact reader and the open path |
@@ -898,9 +973,10 @@ The native scheme handler and packaging script explicitly list shipped assets.
 
 Traffic shows every native request row independently; host, method and time
 never merge rows. A row is hidden only by an explicit, counted, reversible
-filter: "Hide browser-internal" in Traffic and Sources covers `chrome:`,
-`devtools:` and other internal schemes ([native network v3](../../protocol/native-network-v3.md)),
-and the footer reports what capture excluded. Sources reads retained artifact bytes only. A failed
+filter: **Hide internal** in Traffic, shared with Sources' "Hide browser-internal",
+covers `chrome:`, `devtools:` and other internal schemes
+([native network v3](../../protocol/native-network-v3.md)), and the footer
+reports what capture excluded. Sources reads retained artifact bytes only. A failed
 refresh preserves the last valid catalog, and a detached pending load is
 cancelled and cannot restore obsolete source text. Artifact loads have a
 10-second deadline, including body reads; a timed-out load can be retried
@@ -945,21 +1021,24 @@ events, and reads layout only through `probes.js`. At the default 1180×790
 window and the enforced 760×560 minimum it checks:
 
 - Traffic: retained rows, list scrolling to the last row, request selection and
-  the detail pane;
+  the detail pane; default and fitted columns, cell tooltips, Size and the
+  waterfall from recorded lengths and timestamps, the timing strip from the
+  keyboard and the column menu from Shift+F10; Payload's query, JSON tree from
+  the keyboard, source and Capture details;
 - Sources: a retained artifact rendered as literal text and scrolled to its end;
 - Investigation navigation: Back appears after a screen change, Alt+Left returns
   to the selected request, and Forward reopens Sources;
 - VM: the opcode workspace for the guest artifact shows the native guest row
   with its wide instance identity, and the physical artifact never claims a
   guest PC;
-- native-only coverage: Traffic offers only General, Headers, Preview, Response,
-  Cookies, Initiator, Timing, Signals and Evidence with no content search or
-  Compare; a retained response body is inert colored text on Response, pretty
-  prints, and is a JSON tree on Preview, reached by arrow key; Headers shows a
-  content-session request's retained blocks, Raw view and markup as text, and
-  says why a metadata-only request has none; Cookies shows its response and
-  request cookies, a blocked cookie's reason, filtered-out cookies on request
-  and a name's provenance to its script write; Export offers only local-file
+- native-only coverage: Traffic offers only General, Headers, Payload, Preview,
+  Response, Cookies, Initiator, Timing, Signals and Evidence with no content
+  search or Compare; a retained response body is inert colored text on
+  Response, pretty prints, and is a JSON tree on Preview, reached by arrow key;
+  Headers shows a content-session request's retained blocks, Raw view and
+  markup as text, and says why a metadata-only request has none; Cookies shows
+  its response and request cookies, a blocked cookie's reason, filtered-out
+  cookies on request and a name's provenance to its script write; Export offers only local-file
   SDL and says why; golden and hostile guest bytecode render as an inert hex
   view with an unclipped kind icon;
 - keyboard order and visible focus for 30 stops (Option+Tab when Full Keyboard

@@ -2205,6 +2205,342 @@
         }
       }
     },
+    "/api/requests": {
+      "get": {
+        "operationId": "get_requests",
+        "summary": "Page through every network request of the session",
+        "description": "One row per request of the whole session, from an index the backend folds incrementally from the event store and keeps beside it (protocol/request-index-v1.md), so counts, filters and search cover every request, not the newest event window. A row is a Traffic row: method, path (URL path and query only when the session retained request content, else the host), status, type, time, tab, domain and the root event that get_origin_trace takes. Default order is capture order, oldest first. Page with offset and limit; pass a previous answer's through to keep paging one snapshot, and since to count rows added after it. total and matching are exact for the indexed bytes; index.complete is false while a large store is still being indexed, and index counts unreadable records and requests past the request limit. Read one request's records with get_events: for each member pass its session_id, process_id and request_id with after=first_offset and limit=records. Each row also carries the recorded transfer and resource sizes, MIME type, protocol, initiator class and response time; the answer adds the matching sizes, hidden_internal and a 120-bucket start timeline. Unknown parameters are rejected. Use a small limit, such as 50, through MCP.",
+        "tags": [
+          "events"
+        ],
+        "x-source": "apps/origin-trace-backend/src/app.rs",
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "description": "Rows to return, clamped to 1..500.",
+            "schema": {
+              "type": "integer",
+              "default": 100
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "required": false,
+            "description": "Position of the first row in the filtered, sorted list.",
+            "schema": {
+              "$ref": "#/components/schemas/Uint64String"
+            }
+          },
+          {
+            "name": "through",
+            "in": "query",
+            "required": false,
+            "description": "Only requests indexed before this count. A previous answer's through keeps later pages in that snapshot.",
+            "schema": {
+              "$ref": "#/components/schemas/Uint64String"
+            }
+          },
+          {
+            "name": "since",
+            "in": "query",
+            "required": false,
+            "description": "Adds added: the matching requests indexed at or after this count.",
+            "schema": {
+              "$ref": "#/components/schemas/Uint64String"
+            }
+          },
+          {
+            "name": "sort",
+            "in": "query",
+            "required": false,
+            "description": "Sort key. size is the transferred size, start the first record's time, initiator and protocol their labels. Rows that tie, and rows without a value, keep capture order; rows without a value sort last.",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "capture",
+                "name",
+                "status",
+                "type",
+                "method",
+                "time",
+                "size",
+                "initiator",
+                "start",
+                "protocol"
+              ],
+              "default": "capture"
+            }
+          },
+          {
+            "name": "order",
+            "in": "query",
+            "required": false,
+            "description": "asc or desc.",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "asc",
+                "desc"
+              ],
+              "default": "asc"
+            }
+          },
+          {
+            "name": "q",
+            "in": "query",
+            "required": false,
+            "description": "Traffic filter text, case-insensitive. Words match method, path and status; -word excludes them. domain:host (* is a wildcard), method:, status-code:, larger-than:N (k and m are 1,024 multiples, of the transferred size) and mime-type: match exactly, and a leading - negates them.",
+            "schema": {
+              "type": "string",
+              "maxLength": 512
+            }
+          },
+          {
+            "name": "tab_id",
+            "in": "query",
+            "required": false,
+            "description": "Requests of one browser tab, or unattributed for requests without one.",
+            "schema": {
+              "type": "string",
+              "pattern": "^(unattributed|[1-9][0-9]{0,9})$"
+            }
+          },
+          {
+            "name": "domain",
+            "in": "query",
+            "required": false,
+            "description": "Requests whose domain, as listed in facets.domains, is exactly this.",
+            "schema": {
+              "type": "string",
+              "maxLength": 512
+            }
+          },
+          {
+            "name": "type",
+            "in": "query",
+            "required": false,
+            "description": "Requests of one Traffic resource type.",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "xhr",
+                "doc",
+                "css",
+                "js",
+                "font",
+                "img",
+                "media",
+                "socket",
+                "wasm",
+                "other"
+              ]
+            }
+          },
+          {
+            "name": "named",
+            "in": "query",
+            "required": false,
+            "description": "Comma-separated session:process:sequence root events, at most 64, that match q as well: researcher names live in the UI, not the index.",
+            "schema": {
+              "type": "string",
+              "maxLength": 4096
+            }
+          },
+          {
+            "name": "locate",
+            "in": "query",
+            "required": false,
+            "description": "Comma-separated row IDs, at most 4. located gives each one's position in this filtered, sorted list, or null.",
+            "schema": {
+              "type": "string",
+              "maxLength": 1024
+            }
+          },
+          {
+            "name": "failed",
+            "in": "query",
+            "required": false,
+            "description": "1 keeps only failed requests.",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "0",
+                "1"
+              ],
+              "default": "0"
+            }
+          },
+          {
+            "name": "invert",
+            "in": "query",
+            "required": false,
+            "description": "1 keeps the requests the q filter does not match; without q it has no effect.",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "0",
+                "1"
+              ],
+              "default": "0"
+            }
+          },
+          {
+            "name": "hide_internal",
+            "in": "query",
+            "required": false,
+            "description": "1 hides browser-internal requests (browser_internal) and counts them in hidden_internal.",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "0",
+                "1"
+              ],
+              "default": "0"
+            }
+          },
+          {
+            "name": "third_party",
+            "in": "query",
+            "required": false,
+            "description": "1 keeps requests whose site differs from their tab's latest top-level document at their start. Sites are the last two host labels, or three after a short second level and a two-letter country code; there is no public suffix list.",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "0",
+                "1"
+              ],
+              "default": "0"
+            }
+          },
+          {
+            "name": "from_ns",
+            "in": "query",
+            "required": false,
+            "description": "Keeps requests whose last record is at or after this monotonic time.",
+            "schema": {
+              "$ref": "#/components/schemas/Uint64String"
+            }
+          },
+          {
+            "name": "to_ns",
+            "in": "query",
+            "required": false,
+            "description": "Keeps requests whose first record is at or before this monotonic time.",
+            "schema": {
+              "$ref": "#/components/schemas/Uint64String"
+            }
+          },
+          {
+            "name": "If-None-Match",
+            "in": "header",
+            "required": false,
+            "description": "Exact server ETag from a previous response.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Requests"
+                }
+              }
+            },
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store",
+                  "type": "string"
+                }
+              },
+              "ETag": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid, duplicate or unknown query parameter.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Host/Origin/Sec-Fetch-Site rejected.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Store, read, validation, or internal failure.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "304": {
+            "description": "ETag unchanged; no response body.",
+            "headers": {
+              "ETag": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store",
+                  "type": "string"
+                }
+              }
+            }
+          }
+        },
+        "x-reb-execution": {
+          "kind": "operation",
+          "effects": [
+            "analysis"
+          ],
+          "state_dependent_effects": [],
+          "uncertainties": [],
+          "prerequisites": [
+            {
+              "id": "local-request",
+              "condition": "Host must name the exact loopback listening port; cross-site Sec-Fetch-Site is rejected; an optional Origin must pass App::trusted."
+            }
+          ],
+          "confirmations": [],
+          "notes": "Folds at most 64 MiB of new records per call into the in-memory index and writes no file: the backend keeps the private sidecar beside the event store itself, every 30 seconds and at shutdown. Stored events are never changed. No browser mutation is requested.",
+          "sources": [
+            {
+              "path": "apps/origin-trace-backend/src/request_index.rs",
+              "symbol": "respond"
+            }
+          ]
+        },
+        "x-reb-execution-schema": {
+          "$ref": "#/components/schemas/RebExecutionMetadata"
+        }
+      }
+    },
     "/api/events/wait": {
       "get": {
         "operationId": "wait_for_events",
@@ -15351,6 +15687,621 @@
           "event_window",
           "capture_state"
         ]
+      },
+      "RequestRow": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "ordinal",
+          "method",
+          "path",
+          "target_kind",
+          "host",
+          "target",
+          "url_truncated",
+          "target_length",
+          "target_malformed",
+          "status",
+          "failed",
+          "interrupted",
+          "time",
+          "duration_ns",
+          "type",
+          "tab_id",
+          "operation",
+          "first_time_ns",
+          "last_time_ns",
+          "domain",
+          "root",
+          "members",
+          "members_limited",
+          "first_offset",
+          "end_offset",
+          "records",
+          "transfer_size",
+          "resource_size",
+          "from_cache",
+          "from_service_worker",
+          "mime_type",
+          "protocol",
+          "response_time_ns",
+          "error_code",
+          "loader_observed",
+          "initiator",
+          "main_frame",
+          "browser_internal"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "maxLength": 256,
+            "description": "The Traffic row identity: the renderer request when one is joined, else the browser loader."
+          },
+          "ordinal": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Capture order: the position at which the index first saw this request."
+          },
+          "method": {
+            "type": "string"
+          },
+          "path": {
+            "type": "string",
+            "description": "scheme://host[:port]/path?query with request content, host[/path] without a scheme, or the host only. Captured text: never interpret it as markup."
+          },
+          "target_kind": {
+            "type": "string",
+            "enum": [
+              "host",
+              "url",
+              "path",
+              "unknown"
+            ]
+          },
+          "host": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "target": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Captured path and query, at most 116 bytes."
+          },
+          "url_truncated": {
+            "type": "boolean"
+          },
+          "target_length": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "target_malformed": {
+            "type": "boolean"
+          },
+          "status": {
+            "oneOf": [
+              {
+                "type": "integer",
+                "minimum": 1
+              },
+              {
+                "type": "string",
+                "enum": [
+                  "pending",
+                  "failed",
+                  "incomplete"
+                ]
+              }
+            ]
+          },
+          "failed": {
+            "type": "boolean"
+          },
+          "interrupted": {
+            "type": "boolean",
+            "description": "Native observation ended (proxy destroyed or redirect handoff); the network outcome is unknown."
+          },
+          "time": {
+            "type": "string",
+            "description": "Milliseconds from the first to the last record, or pending."
+          },
+          "duration_ns": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/Uint64String"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "xhr",
+              "doc",
+              "css",
+              "js",
+              "font",
+              "img",
+              "media",
+              "socket",
+              "wasm",
+              "other"
+            ]
+          },
+          "tab_id": {
+            "$ref": "#/components/schemas/Uint64String"
+          },
+          "operation": {
+            "type": "string"
+          },
+          "first_time_ns": {
+            "$ref": "#/components/schemas/Uint64String"
+          },
+          "last_time_ns": {
+            "$ref": "#/components/schemas/Uint64String"
+          },
+          "domain": {
+            "type": "string"
+          },
+          "root": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "type": "object",
+                "required": [
+                  "session_id",
+                  "process_id",
+                  "sequence_number",
+                  "request_id"
+                ],
+                "additionalProperties": false,
+                "properties": {
+                  "session_id": {
+                    "$ref": "#/components/schemas/Uint64String"
+                  },
+                  "process_id": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 4294967295
+                  },
+                  "sequence_number": {
+                    "$ref": "#/components/schemas/Uint64String"
+                  },
+                  "request_id": {
+                    "$ref": "#/components/schemas/Uint64String"
+                  }
+                }
+              }
+            ],
+            "description": "request_started, else request_initiated, else the first record with a request ID."
+          },
+          "members": {
+            "type": "array",
+            "maxItems": 8,
+            "items": {
+              "type": "object",
+              "required": [
+                "session_id",
+                "process_id",
+                "request_id",
+                "records"
+              ],
+              "additionalProperties": false,
+              "properties": {
+                "session_id": {
+                  "$ref": "#/components/schemas/Uint64String"
+                },
+                "process_id": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 4294967295
+                },
+                "request_id": {
+                  "$ref": "#/components/schemas/Uint64String"
+                },
+                "records": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              }
+            },
+            "description": "Each session, process and request ID whose records form this row, with its record count."
+          },
+          "members_limited": {
+            "type": "boolean"
+          },
+          "first_offset": {
+            "$ref": "#/components/schemas/Uint64String",
+            "description": "Record boundary of the row's first record: get_events after."
+          },
+          "end_offset": {
+            "$ref": "#/components/schemas/Uint64String",
+            "description": "Boundary after its last record."
+          },
+          "records": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "transfer_size": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0,
+            "description": "The last completion or failure record's encoded_data_length: bytes received over the network, headers included."
+          },
+          "resource_size": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0,
+            "description": "The same record's decoded_body_length."
+          },
+          "from_cache": {
+            "type": "boolean",
+            "description": "A response_started record says the response came from the HTTP cache."
+          },
+          "from_service_worker": {
+            "type": "boolean",
+            "description": "A response_started record says a service worker served the response."
+          },
+          "mime_type": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The response MIME type, lowercase, without parameters."
+          },
+          "protocol": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The negotiated ALPN protocol, such as h2."
+          },
+          "response_time_ns": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/Uint64String"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The first response_started record's time."
+          },
+          "error_code": {
+            "type": "integer",
+            "description": "The last non-zero net error code, else 0."
+          },
+          "loader_observed": {
+            "type": "boolean",
+            "description": "A browser loader record joined the request; false when only the renderer recorded it."
+          },
+          "initiator": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "enum": [
+              "renderer",
+              "worker",
+              "browser",
+              null
+            ],
+            "description": "Who started the request: a renderer, a service worker, or the browser process; null without a versioned record."
+          },
+          "main_frame": {
+            "type": "boolean",
+            "description": "A request_started record names a top-level document."
+          },
+          "browser_internal": {
+            "type": "boolean",
+            "description": "Only the renderer recorded it and it names a single-label host other than localhost, as WebUI loads do."
+          }
+        }
+      },
+      "Requests": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "format",
+          "total",
+          "matching",
+          "through",
+          "offset",
+          "limit",
+          "returned",
+          "next_offset",
+          "previous_offset",
+          "failed",
+          "facets",
+          "index",
+          "sizes",
+          "hidden_internal",
+          "timeline",
+          "query",
+          "requests"
+        ],
+        "properties": {
+          "format": {
+            "const": "reb-request-index-v1"
+          },
+          "total": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Requests indexed in this session."
+          },
+          "matching": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Requests of the snapshot that pass the filters and search."
+          },
+          "through": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "The snapshot: requests indexed before this count."
+          },
+          "offset": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 500
+          },
+          "returned": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "next_offset": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "previous_offset": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "added": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "With since: matching requests indexed at or after it."
+          },
+          "located": {
+            "type": "object",
+            "additionalProperties": {
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
+          },
+          "failed": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Failed requests in the snapshot, before filters."
+          },
+          "sizes": {
+            "type": "object",
+            "required": [
+              "transferred",
+              "resources"
+            ],
+            "additionalProperties": false,
+            "description": "Sums over the matching requests of transfer_size and resource_size; a request without one adds nothing.",
+            "properties": {
+              "transferred": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "resources": {
+                "type": "integer",
+                "minimum": 0
+              }
+            }
+          },
+          "hidden_internal": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "With hide_internal: browser-internal requests that every other filter admitted."
+          },
+          "timeline": {
+            "type": "object",
+            "required": [
+              "first_time_ns",
+              "last_time_ns",
+              "buckets"
+            ],
+            "additionalProperties": false,
+            "description": "Request starts of every request the filters admit before the time range, in 120 equal buckets from the first start to the last record.",
+            "properties": {
+              "first_time_ns": {
+                "oneOf": [
+                  {
+                    "$ref": "#/components/schemas/Uint64String"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "last_time_ns": {
+                "oneOf": [
+                  {
+                    "$ref": "#/components/schemas/Uint64String"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "buckets": {
+                "type": "array",
+                "minItems": 120,
+                "maxItems": 120,
+                "items": {
+                  "type": "integer",
+                  "minimum": 0
+                }
+              }
+            }
+          },
+          "facets": {
+            "type": "object",
+            "required": [
+              "tabs",
+              "domains",
+              "domains_truncated"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "tabs": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "required": [
+                    "tab_id",
+                    "count",
+                    "first_time_ns",
+                    "domains",
+                    "domains_truncated"
+                  ],
+                  "additionalProperties": false,
+                  "properties": {
+                    "tab_id": {
+                      "$ref": "#/components/schemas/Uint64String",
+                      "description": "0 is requests without a tab."
+                    },
+                    "count": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "first_time_ns": {
+                      "$ref": "#/components/schemas/Uint64String"
+                    },
+                    "domains": {
+                      "type": "array",
+                      "maxItems": 8,
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "domains_truncated": {
+                      "type": "boolean"
+                    }
+                  }
+                }
+              },
+              "domains": {
+                "type": "array",
+                "description": "Domains within the tab_id filter, with counts; at most 512 plus the domain filter.",
+                "items": {
+                  "type": "object",
+                  "required": [
+                    "domain",
+                    "count"
+                  ],
+                  "additionalProperties": false,
+                  "properties": {
+                    "domain": {
+                      "type": "string"
+                    },
+                    "count": {
+                      "type": "integer",
+                      "minimum": 0
+                    }
+                  }
+                }
+              },
+              "domains_truncated": {
+                "type": "boolean"
+              }
+            }
+          },
+          "index": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "epoch",
+              "indexed_end",
+              "store_end",
+              "complete",
+              "malformed_records",
+              "unindexed_records",
+              "request_limit",
+              "reopened",
+              "persisted",
+              "persist_error"
+            ],
+            "properties": {
+              "epoch": {
+                "type": "string",
+                "description": "Changes when the store is cleared or replaced and the index is rebuilt."
+              },
+              "indexed_end": {
+                "$ref": "#/components/schemas/Uint64String"
+              },
+              "store_end": {
+                "$ref": "#/components/schemas/Uint64String"
+              },
+              "complete": {
+                "type": "boolean"
+              },
+              "malformed_records": {
+                "$ref": "#/components/schemas/Uint64String",
+                "description": "Network records the index could not read."
+              },
+              "unindexed_records": {
+                "$ref": "#/components/schemas/Uint64String",
+                "description": "Records of requests past request_limit."
+              },
+              "request_limit": {
+                "type": "integer"
+              },
+              "reopened": {
+                "type": "boolean",
+                "description": "The index was read from its sidecar, not rebuilt."
+              },
+              "persisted": {
+                "type": "boolean"
+              },
+              "persist_error": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            }
+          },
+          "query": {
+            "type": "object",
+            "additionalProperties": true
+          },
+          "requests": {
+            "type": "array",
+            "maxItems": 500,
+            "items": {
+              "$ref": "#/components/schemas/RequestRow"
+            }
+          }
+        }
       },
       "Artifact": {
         "type": "object",

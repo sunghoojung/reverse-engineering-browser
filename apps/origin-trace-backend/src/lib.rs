@@ -28,6 +28,7 @@ mod origin_trace;
 mod owned_vm_debugger;
 mod request_cookies;
 mod request_headers;
+mod request_index;
 mod request_stack;
 mod request_tabs;
 mod session_context;

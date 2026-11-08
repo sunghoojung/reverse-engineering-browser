@@ -22,7 +22,7 @@ define ignored-rust-test
 		{ echo "Expected exactly one passing ignored test: $(2)" >&2; exit 1; }
 endef
 
-check: native-wasm-golden-check native-js-golden-check network-request-wire-check request-stack-wire-check debugger-observation-wire-check network-scope-wire-check tab-link-wire-check dispatch-shape-check all heap-snapshot-check native-artifact-capture-check native-request-identity-check wire-decoder-check magic-decoder-check native-vm-recorder-check owned-vm-helper-check native-probe-compile native-probe-admission-check native-network-capture-check native-proxy-policy-check native-build-test native-tests workspace-check deob-benchmark vm-lab-check native-only-check
+check: native-wasm-golden-check native-js-golden-check network-request-wire-check request-index-check request-stack-wire-check debugger-observation-wire-check network-scope-wire-check tab-link-wire-check dispatch-shape-check all heap-snapshot-check native-artifact-capture-check native-request-identity-check wire-decoder-check magic-decoder-check native-vm-recorder-check owned-vm-helper-check native-probe-compile native-probe-admission-check native-network-capture-check native-proxy-policy-check native-build-test native-tests workspace-check deob-benchmark vm-lab-check native-only-check
 	cargo test --locked --manifest-path apps/origin-trace-backend/Cargo.toml
 	cargo test --locked --manifest-path apps/deobfuscator-worker/Cargo.toml
 	$(call ignored-rust-test,--lib,owned_vm_debugger::tests::owned_vm_real_helper_control_and_independent_goldens,\
@@ -118,6 +118,7 @@ $(UI_STARTUP_DEPS): tools/ui-startup-deps/package-lock.json
 
 native-only-check: $(UI_STARTUP_DEPS)
 	node tools/check-native-only-ui.mjs
+	node tools/check-traffic-payload-ui.mjs
 	node tools/check-traffic-response-ui.mjs
 	node tools/check-traffic-headers-ui.mjs
 	node tools/check-traffic-cookies-ui.mjs
@@ -171,6 +172,16 @@ request-stack-wire-check: $(REQUEST_STACK_TEST) $(UI_STARTUP_DEPS)
 .PHONY: debugger-observation-wire-check
 debugger-observation-wire-check: $(DEBUGGER_OBSERVATION_TEST)
 	REB_DEBUGGER_OBSERVATION_TEST="$(abspath $(DEBUGGER_OBSERVATION_TEST))" node tools/check-debugger-observation-wire.mjs
+
+# Request index rows, sort orders and search against the shipped Traffic model.
+.PHONY: request-index-check
+REQUEST_INDEX_GOLDEN := $(abspath $(BUILD_DIR)/request-index-golden.json)
+request-index-check:
+	mkdir -p "$(BUILD_DIR)"
+	rm -f "$(REQUEST_INDEX_GOLDEN)"
+	$(call ignored-rust-test,--lib,request_index::tests::request_index_ui_parity_golden,\
+		REB_REQUEST_INDEX_GOLDEN="$(REQUEST_INDEX_GOLDEN)")
+	REB_REQUEST_INDEX_GOLDEN="$(REQUEST_INDEX_GOLDEN)" node tools/check-request-index.mjs
 
 native-proxy-policy-check: $(NATIVE_PROXY_POLICY_TEST)
 	$(NATIVE_PROXY_POLICY_TEST)

@@ -90,6 +90,9 @@ it.
   bytes unless `REB_RESPONSE_BODY_BUDGET_MIB` sets another budget; images,
   audio, video and fonts that page elements load need
   `REB_CAPTURE_RESPONSE_MEDIA=1`. See [Native network v3](protocol/native-network-v3.md).
+  The backend's request index keeps a private derived copy of those paths
+  beside the event store; capture clear removes it
+  ([request index v1](protocol/request-index-v1.md)).
 - Historical captures can include sensitive URLs, headers, bodies and source.
   Removal of CDP does not sanitize previously saved evidence. Only collect and
   disclose data covered by authorization.

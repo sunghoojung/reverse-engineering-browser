@@ -62,7 +62,7 @@
             <div class="traffic-grid" data-detail-open="false">
               <div class="request-pane">
                 <div class="network-tools">
-                  <label class="filter-box"><input id="request-filter" type="search" maxlength="512" placeholder="Search requests" aria-label="Filter requests" /></label>
+                  <label class="filter-box"><input id="request-filter" type="search" maxlength="512" placeholder="Filter: text, -text, domain:, method:, status-code:, larger-than:, mime-type:" aria-label="Filter requests" title="Text matches method, URL and status. -text excludes it. domain: (with * wildcards), method:, status-code:, larger-than: (k and m are 1,024 multiples) and mime-type: match exactly; a leading - negates them." /></label>
                   <div class="request-filters" id="request-filters">
                   <div class="type-filters" aria-label="Resource type filters">
                     <button class="type-filter" type="button" data-filter="all" aria-pressed="true">All</button>
@@ -76,6 +76,12 @@
                     <button class="type-filter" type="button" data-filter="socket" aria-pressed="false">Socket</button>
                     <button class="type-filter" type="button" data-filter="wasm" aria-pressed="false">Wasm</button>
                     <button class="type-filter" type="button" data-filter="other" aria-pressed="false">Other</button>
+                  </div>
+                  <div class="request-flags" role="group" aria-label="Request filters">
+                    <button class="request-flag" type="button" data-flag="invert" aria-pressed="false" title="Show the requests the filter text does not match">Invert</button>
+                    <button class="request-flag" type="button" data-flag="hideInternal" aria-pressed="false" title="Hide browser-internal requests (chrome:, devtools: and other internal schemes); nothing is deleted">Hide internal</button>
+                    <button class="request-flag" type="button" data-flag="thirdParty" aria-pressed="false" title="Only requests whose site differs from their tab's top-level document. Sites are the last two host labels, or three after a short second level and a two-letter country code; there is no public suffix list.">3rd-party</button>
+                    <button class="request-flag" type="button" data-flag="failed" aria-pressed="false" title="Only failed requests">Failed</button>
                   </div>
                   </div>
                 </div>
@@ -91,10 +97,16 @@
                   </label>
                 </div>
 
-                <div class="request-table">
-                  <div class="request-head" role="group" aria-label="Sort requests"><button type="button" data-request-sort="name" aria-pressed="false">Name<span aria-hidden="true"></span></button><button type="button" data-request-sort="status" aria-pressed="false">Status<span aria-hidden="true"></span></button><button type="button" data-request-sort="type" aria-pressed="false">Type<span aria-hidden="true"></span></button><button type="button" data-request-sort="method" aria-pressed="false">Method<span aria-hidden="true"></span></button><button type="button" data-request-sort="time" aria-pressed="false">Time<span aria-hidden="true"></span></button></div>
+                <div id="request-overview" class="request-overview" data-empty="true" data-range="false">
+                  <div class="overview-track" tabindex="0" aria-label="Request starts over time" aria-describedby="request-overview-range"></div>
+                  <span id="request-overview-range" class="overview-range" aria-live="polite">No request timeline yet</span>
+                  <button class="overview-clear" type="button" hidden>Clear range</button>
+                </div>
+
+                <div class="request-table" data-hidden-columns="protocol">
+                  <div class="request-head" role="group" aria-label="Sort requests"><button type="button" data-column="name" data-request-sort="name" aria-pressed="false">Name<span aria-hidden="true"></span></button><button type="button" data-column="status" data-request-sort="status" aria-pressed="false">Status<span aria-hidden="true"></span></button><button type="button" data-column="type" data-request-sort="type" aria-pressed="false">Type<span aria-hidden="true"></span></button><button type="button" data-column="method" data-request-sort="method" aria-pressed="false">Method<span aria-hidden="true"></span></button><button type="button" data-column="protocol" data-request-sort="protocol" aria-pressed="false">Protocol<span aria-hidden="true"></span></button><button type="button" data-column="initiator" data-request-sort="initiator" aria-pressed="false">Initiator<span aria-hidden="true"></span></button><button type="button" data-column="size" data-request-sort="size" aria-pressed="false">Size<span aria-hidden="true"></span></button><button type="button" data-column="time" data-request-sort="time" aria-pressed="false">Time<span aria-hidden="true"></span></button><button type="button" data-column="waterfall" data-request-sort="start" aria-pressed="false">Waterfall<span aria-hidden="true"></span></button></div>
                   <div id="request-rows" class="request-rows" role="listbox" aria-label="Captured requests" tabindex="0"></div>
-                  <div class="request-window"><span id="request-window-status">0 requests</span><button id="request-window-prev" type="button" aria-label="Previous 500 requests">Previous</button><button id="request-window-next" type="button" aria-label="Next 500 requests">Next</button><button id="request-latest" type="button" hidden>New requests</button><button id="request-unresolved" type="button" aria-pressed="false" title="List the requests the capture could not link to a tab" hidden></button><button id="request-hide-internal" type="button" aria-pressed="false" title="Hide chrome:, devtools: and other browser-internal rows; nothing is deleted" hidden>Hide browser-internal</button><button id="request-order" type="button" title="Restore capture order">Capture order</button><button id="open-captured-export" type="button" data-export-open="capture" aria-haspopup="dialog">Export…</button></div>
+                  <div class="request-window"><span id="request-window-status">0 requests</span><button id="request-latest" type="button" hidden>New requests</button><button id="request-unresolved" type="button" aria-pressed="false" title="List the requests the capture could not link to a tab" hidden></button><button id="request-order" type="button" title="Restore capture order, newest first">Capture order</button><button id="open-captured-export" type="button" data-export-open="capture" aria-haspopup="dialog">Export…</button></div>
                 </div>
               </div>
 
@@ -113,6 +125,7 @@
                 <div class="inspector-tabs" role="tablist" aria-label="Request inspector">
                   <button id="inspector-tab-general" class="inspector-tab" type="button" role="tab" data-inspector-tab="general" aria-controls="exchange-inspector" aria-selected="true">General</button>
                   <button id="inspector-tab-headers" class="inspector-tab" type="button" role="tab" data-inspector-tab="headers" aria-controls="headers-inspector" aria-selected="false" tabindex="-1">Headers</button>
+                  <button id="inspector-tab-payload" class="inspector-tab" type="button" role="tab" data-inspector-tab="payload" aria-controls="payload-inspector" aria-selected="false" tabindex="-1">Payload</button>
                   <button id="inspector-tab-preview" class="inspector-tab" type="button" role="tab" data-inspector-tab="preview" aria-controls="response-inspector" aria-selected="false" tabindex="-1">Preview</button>
                   <button id="inspector-tab-response" class="inspector-tab" type="button" role="tab" data-inspector-tab="response" aria-controls="response-inspector" aria-selected="false" tabindex="-1">Response</button>
                   <button id="inspector-tab-cookies" class="inspector-tab" type="button" role="tab" data-inspector-tab="cookies" aria-controls="cookies-inspector" aria-selected="false" tabindex="-1">Cookies</button>
@@ -125,6 +138,7 @@
                 <div hidden id="headers-inspector" class="exchange-inspector traffic-headers" role="tabpanel" aria-labelledby="inspector-tab-headers"></div>
                 <div hidden id="cookies-inspector" class="exchange-inspector traffic-headers" role="tabpanel" aria-labelledby="inspector-tab-cookies"></div>
                 <div hidden id="response-inspector" class="exchange-inspector traffic-response" role="tabpanel" aria-labelledby="inspector-tab-response"></div>
+                <div hidden id="payload-inspector" class="exchange-inspector traffic-payload" role="tabpanel" aria-labelledby="inspector-tab-payload"></div>
                 <div hidden id="request-inspector" class="request-inspector" role="tabpanel" aria-labelledby="inspector-tab-initiator" tabindex="0">
                   <h1 id="request-prompt">Choose a request value and trace where it came from</h1>
                   <div id="request-package-entry" class="package-entry" hidden><button class="secondary-button" type="button" data-screen="evidence">Inspect observations &amp; artifacts</button><span>Recorded links, context correlations and missing evidence</span></div>
@@ -808,6 +822,11 @@
     <script src="traffic_response.js"></script>
     <script src="traffic_headers.js"></script>
     <script src="traffic_cookies.js"></script>
+    <script src="traffic_payload.js"></script>
+    <script src="traffic_index.js"></script>
+    <script src="traffic_filter.js"></script>
+    <script src="traffic_columns.js"></script>
+    <script src="traffic_overview.js"></script>
     <script src="captured_client.js"></script>
     <script src="captured_export_formats.js"></script>
     <script src="vm_debugger.js"></script>

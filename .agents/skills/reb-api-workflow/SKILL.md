@@ -29,6 +29,7 @@ Tool names are OpenAPI operation IDs. The same names work with
 | Which backend and session am I connected to? | `get_session_context` |
 | Did the capture work? What was recorded, what went wrong? | `get_session_summary` |
 | Which events match a type, frame, request or time range? | `get_events` with filters and a small `limit` |
+| Which requests did the session make? | `get_requests` with `q` (Traffic tokens such as `domain:`, `status-code:`, `larger-than:`), `type`, `tab_id`, `domain`, `failed`, `third_party` or `from_ns`/`to_ns`; rows carry sizes, MIME type and initiator class; a row's `members` and `first_offset` read its records with `get_events` |
 | Which scripts and Wasm modules were stored, with digests? | `get_artifacts` with `kind`, `frame_id`, `host`, `sha256` |
 | What does a stored Wasm module contain? | `inspect_wasm` with `artifact_id` and `sections` |
 | Wait until the browser produces something | `wait_for_events` |

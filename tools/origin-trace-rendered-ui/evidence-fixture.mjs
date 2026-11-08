@@ -106,6 +106,8 @@ function timeAdjacentRequest(template, firstSequence, firstTime) {
 }
 
 // Enough native network rows to require list scrolling, one with a hostile URL.
+// Each completion records the lengths Size shows (syntheticTransferSize).
+export const syntheticTransferSize = index => 1000 + index * 10;
 function syntheticRequests(template, firstSequence, firstTime) {
   const events = [];
   let sequence = firstSequence, time = BigInt(firstTime);
@@ -113,13 +115,14 @@ function syntheticRequests(template, firstSequence, firstTime) {
     const requestId = String(1000 + index);
     // Native network payloads carry the method and host only.
     const url = index === 7 ? HOSTILE_URL : `item-${index}.scroll.test`;
+    const lengths = {encoded_data_length: String(syntheticTransferSize(index)), decoded_body_length: String(2000 + index)};
     const steps = [['request_initiated', `GET ${url}`, 0], ['request_started', `GET ${url}`, 0],
-      ['response_started', 'application/json', 200], ['request_completed', 'completed', 200]];
+      ['response_started', 'application/json; protocol=h2', 200], ['request_completed', 'completed', 200, lengths]];
     let parent = '0';
-    for (const [type, text, status] of steps) {
+    for (const [type, text, status, extra = {}] of steps) {
       time += 1000n;
       const event = {...template, sequence_number: String(sequence), monotonic_time_ns: String(time), request_id: requestId,
-        parent_event_id: parent, type, status_code: status, payload_size: Buffer.byteLength(text), payload: hex(text)};
+        parent_event_id: parent, type, status_code: status, payload_size: Buffer.byteLength(text), payload: hex(text), ...extra};
       parent = event.sequence_number;
       sequence += 1;
       events.push(event);
@@ -247,7 +250,7 @@ function requestTargetPayload(target) {
 // target, body record, body artifact and receiver acknowledgment as exact
 // children, and one from a metadata-only session with only its body summary.
 async function requestBodyRequests(template, firstSequence, firstTime, artifactsRoot) {
-  const body = Buffer.from(`{"sitekey":"site-key","note":"${REQUEST_BODY_MARKER}","motionData":"${'m'.repeat(600)}"}`);
+  const body = Buffer.from(JSON.stringify({sitekey: 'site-key', note: REQUEST_BODY_MARKER, motionData: 'm'.repeat(600)}));
   const metadataBody = Buffer.from('v=1&answers=redacted-by-session');
   let sequence = firstSequence, time = BigInt(firstTime);
   const events = [];

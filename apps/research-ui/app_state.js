@@ -115,10 +115,24 @@
         trafficPendingCount: 0,
         trafficFilterKey: null,
         trafficSort: 'capture',
-        trafficSortDirection: 1,
+        // Newest first: new requests arrive at the top.
+        trafficSortDirection: -1,
         trafficWindowStart: 0,
         trafficWindowAnchor: null,
         trafficNewIds: new Set(),
+        trafficFlags: {invert: false, hideInternal: false, thirdParty: false, failed: false},
+        // A selected time range in nanoseconds ({from, to}, BigInt), or null.
+        trafficRange: null,
+        trafficOverview: null,
+        trafficIndex: null,
+        trafficIndexEpoch: null,
+        trafficAppliedAnswer: null,
+        trafficSeenThrough: null,
+        trafficLoaded: new Map(),
+        trafficLoadController: null,
+        trafficLoadingId: null,
+        trafficReloaded: null,
+        trafficScrollFrame: 0,
         trafficDetailOpen: false,
         // Written only by setEventConnection(); broker and eventFailureKind
         // are its projections for existing readers.

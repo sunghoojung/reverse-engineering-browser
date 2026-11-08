@@ -57,7 +57,7 @@ const ids = new Set([...html.matchAll(/\bid="([^"]+)"/g)].map(match => match[1])
 for (const id of ['screen-memory', 'screen-experiments', 'debug-resume', 'watch-form', 'source-tab-page', 'source-hook-pivot',
   'collection-run', 'collection-create-context', 'captured-client-review', 'websocket-inspector', 'runtime-hook-traffic',
   'request-memory-pivot', 'open-api-catalog', 'api-catalog', 'passive-security', 'passive-security-open', 'traffic-capture-export',
-  'request-search-scope', 'request-search-status', 'inspector-tab-payload',
+  'request-search-scope', 'request-search-status',
   'inspector-tab-compare', 'traffic-comparison', 'screen-field-provenance', 'decoder-field-origin', 'decoder-find-sources']) {
   assert(!ids.has(id), `${id} must be removed, not hidden`);
 }
@@ -118,13 +118,14 @@ for (const button of document.querySelectorAll('nav button, .nav-button')) {
   assert(!removedFeature.test(reachable(button)), `navigation exposes a removed CDP feature: ${reachable(button)}`);
 }
 // Traffic offers only what native rows carry: Headers and Cookies from native
-// header and cookie records, Preview and Response from native response_body
-// records and artifacts (protocol/native-network-v3.md), no Compare, content
-// search or field trace. Removed globals are absent, not stubbed.
+// header and cookie records, Payload from the native target and request_body
+// records, Preview and Response from native response_body records and
+// artifacts (protocol/native-network-v3.md), no Compare, content search or
+// field trace. Removed globals are absent, not stubbed.
 assert.deepEqual([...document.querySelectorAll('#screen-traffic .inspector-tab')].map(tab => tab.dataset.inspectorTab),
-  ['general', 'headers', 'preview', 'response', 'cookies', 'initiator', 'timing', 'signals', 'evidence']);
+  ['general', 'headers', 'payload', 'preview', 'response', 'cookies', 'initiator', 'timing', 'signals', 'evidence']);
 for (const control of document.getElementById('screen-traffic').querySelectorAll('button, summary, [role="tab"], label, select, option')) {
-  assert(!/\bCompare\b|baseline|Include headers and bodies|\bPayload\b|Field trace/i.test(reachable(control)),
+  assert(!/\bCompare\b|baseline|Include headers and bodies|Field trace/i.test(reachable(control)),
     `Traffic exposes a CDP-only control: ${reachable(control).slice(0, 160)}`);
 }
 assert.equal(runInContext('typeof renderTrafficRows', context), 'function', 'self-test: shipped globals are visible');
@@ -135,7 +136,7 @@ for (const name of ['trafficExchange', 'renderTrafficComparison', 'openFieldProv
 runInContext(`state.requests = [{id: 'legacy', path: 'legacy.invalid', method: 'GET', status: 200, type: 'xhr', origin: 'live',
   hostOnly: true, tabId: '0', events: [], operation: 'request_completed', time: 1,
   exchange: {response: {state: 'available', text: 'cdp-body-needle', headers: [['x-cdp', 'cdp-header-needle']]}}}];
-  state.selectedRequestId = 'legacy'; state.trafficDetailOpen = true; state.inspectorTab = 'payload'; renderInspector();`, context);
+  state.selectedRequestId = 'legacy'; state.trafficDetailOpen = true; state.inspectorTab = 'compare'; renderInspector();`, context);
 assert.equal(runInContext('state.inspectorTab', context), 'general', 'unknown restored tabs fall back to General');
 const general = document.getElementById('exchange-inspector').textContent;
 assert.match(general, /Response bodies are on the Response tab\./);
@@ -162,7 +163,15 @@ assert.equal(cookiesPanel.hidden, false);
 assert.equal(headersPanel.hidden, true);
 assert.match(cookiesPanel.textContent, /This row has no native cookie record/);
 assert.doesNotMatch(cookiesPanel.textContent, /cdp-header-needle/);
+// Payload reads the native body record and target only, never a CDP exchange.
+runInContext(`state.inspectorTab = 'payload'; renderInspector();`, context);
+const payload = document.getElementById('payload-inspector');
+assert.equal(payload.hidden, false);
+assert.equal(document.getElementById('exchange-inspector').hidden, true);
+assert.match(payload.textContent, /No body record for this request/);
+assert.doesNotMatch(payload.textContent, /cdp-body-needle|cdp-header-needle/);
 runInContext(`state.inspectorTab = 'general'; renderInspector();`, context);
+assert.equal(payload.hidden, true);
 assert.equal(document.getElementById('response-inspector').hidden, true);
 assert.equal(headersPanel.hidden, true);
 assert.equal(cookiesPanel.hidden, true);
@@ -196,4 +205,4 @@ assert.equal(contentLabel.hidden, true, 'only a live session is labeled');
 assert.deepEqual(forbidden, [], 'startup/navigation must not attempt CDP transport');
 assert.deepEqual(asyncErrors, [], 'all asynchronous startup failures must be handled');
 release();
-console.log(`PASS native-only behavior: ${screens.length} screens rendered from shipped scripts without removed state reads or CDP controls; Traffic General plus native Headers, Preview, Response and Cookies, no exchange/search/compare, guest bytecode hex (offline DOM model; no rendered layout claimed)`);
+console.log(`PASS native-only behavior: ${screens.length} screens rendered from shipped scripts without removed state reads or CDP controls; Traffic General plus native Headers, Payload, Preview, Response and Cookies, no exchange/search/compare, guest bytecode hex (offline DOM model; no rendered layout claimed)`);

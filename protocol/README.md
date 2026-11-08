@@ -117,6 +117,9 @@ sensitive header block artifacts, one per hop and source; type 32
 `cookie_list` (sent and received cookies per hop with inclusion status, and
 the sensitive `cookie_list` artifact); and type 39 `script_cookie`
 (`document.cookie` and Cookie Store API calls).
+[Request index v1](request-index-v1.md) defines the backend's one-row-per-request
+index of a whole session, its private sidecar beside the store and
+`GET /api/requests`, which Traffic pages instead of the newest network window.
 
 Renderer-to-browser delivery uses exact 320-byte `EventRecord` objects in a
 bounded shared-memory queue. Mojo carries session lifecycle and coalesced

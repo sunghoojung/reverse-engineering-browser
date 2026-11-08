@@ -434,7 +434,7 @@ Keychain storage. **Content (default)** sets `REB_CAPTURE_REQUEST_CONTENT=1`,
 which retains request paths, queries and request bodies up to 256 KiB each, and
 retains Canvas images. While a live session has either turned on, the titlebar
 shows **Content capture** and its tooltip names which; a browser built before
-that capture ignores the switch, and each Traffic row and body still shows what
+that capture ignores the switch, and each Traffic row and Payload tab still shows what
 was actually captured. **Metadata only** is the
 opt-out: Traffic stays host-only and no Canvas image is kept. Every mode records
 each request body's length, type and SHA-256. In Content mode,
@@ -576,14 +576,27 @@ REB_CAPTURE_CANVAS_IMAGES=1 make live
 
 To retain request paths, queries and bounded request bodies with `make live`,
 run `REB_CAPTURE_REQUEST_CONTENT=1 make live`. Traffic then shows each request's
-captured path and query, and its General view shows the request body: capture
-state, content type, length, SHA-256, kind and the retained bytes as text.
-Without it, the General view still shows the body's length, type and digest and
-says that content capture was off. File, blob and stream bodies are named, not
-read; password form bodies keep neither bytes nor a digest. A body read that
-times out or gets an error status stays shown with its reason and is read again
-on the next refresh; a size or SHA-256 mismatch is kept with its reason and is
-not reread. Sources never lists or opens request bodies.
+captured path and query, and its Payload tab shows them parsed:
+
+- **Query String Parameters** from the captured target, decoded or as sent.
+- **Request Payload**, Parsed or Source. JSON is a tree whose containers open
+  100 children or ranges at a time, so any size stays responsive, and its
+  source is pretty-printed and colored. Form bodies are a name/value table and
+  multipart bodies list each part's name, filename, type and size, with the
+  boundary read from the first line. Other text is colored by its type. Binary
+  bytes are only shown as hex. Long sources render in blocks as they scroll.
+- **Find**, **Copy value** and **Copy as JSON** act on the selected row, or on
+  the whole payload. Arrow keys move through, open and close tree rows.
+- **Capture details**, collapsed, holds the state, type, lengths, SHA-256,
+  kind and artifact ID. A body cut at the capture limit or a cut target is
+  noted at the top.
+
+Without content capture, Payload still shows the body's length, type and digest
+and says that content capture was off. File, blob and stream bodies are named,
+not read; password form bodies keep neither bytes nor a digest. A body read
+that times out or gets an error status keeps the last read copy and its reason
+and is read again on the next refresh; a size or SHA-256 mismatch shows no bytes
+and is not reread. Sources never lists or opens request bodies.
 
 Canvas image capture is disabled by default because rendered output can contain
 page content. Enabled output stays in the local session artifact store, is
@@ -670,14 +683,14 @@ has no newer events.
 
 Traffic uses a compact network ledger with visible resource-type filters and
 sortable columns (see [Traffic columns and filters](#traffic-columns-and-filters)).
-**Capture order** restores the evidence order. The selected request opens General, Initiator, Timing,
+**Capture order** restores the evidence order. The selected request opens General, Payload, Initiator, Timing,
 Signals and Evidence beside the ledger above 1100 px, or below it in narrow
 windows. Both panes stay within the available workspace height; the request
 ledger and inspector body scroll independently. Captured-tab and domain filters
 share a compact row at narrow widths. Native capture records the method, host,
 status and lifecycle timing of each request, and the request body's length,
 type and SHA-256. Content capture sessions add the path and query and bounded
-request body bytes, which General shows as text. Request and response headers
+request body bytes, which Payload parses. Request and response headers
 and response bodies are not captured, so Traffic has no header, response,
 preview, comparison or content-search views; General states that coverage.
 Missing initiators and timing phases stay explicitly unavailable.
@@ -897,7 +910,8 @@ capture, fetch anything or change a row.
 | `invocation_sites.js` | Track calls: the saved invocation site pane, byte offsets of Sources positions and the titlebar tracking chip |
 | `command_palette.js` | The ⌘ / Ctrl + K palette: provider registry, matching, ranking and caps, and its dialog controller; `app.js` supplies the built-in providers |
 | `pane_layout.js` | Shared pointer and keyboard pane resizing, responsive constraints, and local size preferences |
-| `traffic_view.js` | Native request ledger rows, ordering, the mounted block and URL/method/status/name search, the General coverage view, and the saved-capture export document |
+| `traffic_view.js` | Native request ledger rows, ordering, the mounted block and URL/method/status/name search, the General coverage view, request body record wording, and the saved-capture export document |
+| `traffic_payload.js` | The Payload tab: query parameters, the parsed and source request body, find and copy, and Capture details |
 | `traffic_index.js` | The request index client: the mounted block's rows, totals and facets, and a selected row's records from the event store |
 | `traffic_filter.js` | The filter grammar, Invert, Hide internal, 3rd-party, Failed and the time range over the newest window, mirroring the request index |
 | `traffic_columns.js` | Column widths, hidden columns, the header menu, saved layout and fitting columns to the table width |
@@ -967,15 +981,16 @@ window and the enforced 760×560 minimum it checks:
 - Traffic: retained rows, list scrolling to the last row, request selection and
   the detail pane; default and fitted columns, cell tooltips, Size and the
   waterfall from recorded lengths and timestamps, the timing strip from the
-  keyboard and the column menu from Shift+F10;
+  keyboard and the column menu from Shift+F10; Payload's query, JSON tree from
+  the keyboard, source and Capture details;
 - Sources: a retained artifact rendered as literal text and scrolled to its end;
 - Investigation navigation: Back appears after a screen change, Alt+Left returns
   to the selected request, and Forward reopens Sources;
 - VM: the opcode workspace for the guest artifact shows the native guest row
   with its wide instance identity, and the physical artifact never claims a
   guest PC;
-- native-only coverage: Traffic offers only General, Initiator, Timing, Signals
-  and Evidence with no content search or Compare; Export offers only local-file
+- native-only coverage: Traffic offers only General, Payload, Initiator, Timing,
+  Signals and Evidence with no content search or Compare; Export offers only local-file
   SDL and says why; golden and hostile guest bytecode render as an inert hex
   view with an unclipped kind icon;
 - keyboard order and visible focus for 30 stops (Option+Tab when Full Keyboard

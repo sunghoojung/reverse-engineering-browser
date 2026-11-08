@@ -1091,15 +1091,15 @@ final class OriginTraceRenderedUITests: XCTestCase {
     }
     for id in ["websocket-inspector", "runtime-hook-traffic", "request-memory-pivot", "screen-memory", "screen-experiments",
       "open-api-catalog", "api-catalog", "passive-security", "traffic-capture-export", "request-search-scope",
-      "inspector-tab-payload", "inspector-tab-preview", "inspector-tab-response", "inspector-tab-compare", "traffic-comparison",
+      "inspector-tab-preview", "inspector-tab-response", "inspector-tab-compare", "traffic-comparison",
       "screen-field-provenance", "decoder-field-origin"] {
       let count = try await ui.value("document.querySelectorAll('#\(id)').length") as? Int ?? -1
       XCTAssertEqual(count, 0, "#\(id) must be removed, not hidden")
     }
   }
 
-  // Native rows carry no headers or bodies; guest bytecode is binary. Traffic,
-  // Export and Sources must offer only what that evidence supports.
+  // Native rows carry no headers or response bodies; guest bytecode is binary.
+  // Traffic, Export and Sources must offer only what that evidence supports.
   @MainActor
   func test7NativeOnlyTrafficExportAndBytecode() async throws {
     let expected = try Expectations.load()
@@ -1109,7 +1109,7 @@ final class OriginTraceRenderedUITests: XCTestCase {
       try await ui.click("#screen-traffic .request-row", containing: "item-3.scroll.test")
       try await ui.waitUntil("!document.querySelector('#screen-traffic .detail-pane').hidden", "request detail did not open")
       let tabs = try await ui.value("[...document.querySelectorAll('#screen-traffic .inspector-tab')].map(tab => tab.innerText.trim()).join('|')") as? String ?? ""
-      XCTAssertEqual(tabs, "General|Initiator|Timing|Signals|Evidence", "\(size.name): Traffic offers no body, Compare or header-pane tabs")
+      XCTAssertEqual(tabs, "General|Payload|Initiator|Timing|Signals|Evidence", "\(size.name): Traffic offers no response, Compare or header-pane tabs")
       let search = try await ui.value("document.querySelectorAll('#request-search-scope, #request-search-status, #traffic-comparison').length") as? Int ?? -1
       XCTAssertEqual(search, 0, "\(size.name): content search and comparison are removed, not hidden")
       let general = try await ui.value("document.querySelector('#exchange-inspector').innerText") as? String ?? ""
@@ -1170,8 +1170,9 @@ final class OriginTraceRenderedUITests: XCTestCase {
   // A renderer record that no initiator edge reached reads as its own, weaker
   // class: after the gap it did not close, named as having no recorded link,
   // and reported beside coverage rather than inside it.
-  // A content-session POST shows its exact target and retained body as text;
-  // a metadata-only POST says why no bytes exist. Markup in either never runs.
+  // A content-session POST shows its query and retained JSON body on Payload as
+  // a keyboard tree and as source; a metadata-only POST says why no bytes
+  // exist. Markup in either never runs.
   @MainActor
   func test16RequestTargetAndBody() async throws {
     let expected = try Expectations.load()
@@ -1187,33 +1188,70 @@ final class OriginTraceRenderedUITests: XCTestCase {
       XCTAssertTrue(rowText.contains(shortName), "\(size.name): the row shows the captured last segment and query: \(rowText)")
       let nameTitle = try await ui.value("document.querySelector('#screen-traffic .request-row[aria-selected=\"true\"] .request-name')?.title ?? ''") as? String ?? ""
       XCTAssertTrue(nameTitle.contains(expected.requestBodyTarget), "\(size.name): the name tooltip has the full URL: \(nameTitle)")
-      try await ui.waitUntil("document.querySelector('#exchange-inspector .traffic-body-text') !== null", "retained body did not load")
-      let body = try await ui.json("""
-        ({text: document.querySelector('#exchange-inspector .traffic-body-text').innerText,
-          section: document.querySelector('#exchange-inspector .traffic-body').innerText,
-          state: document.querySelector('#exchange-inspector .traffic-body').dataset.state})
+      try await ui.click("#inspector-tab-payload")
+      try await ui.waitUntil("document.querySelector('#payload-inspector .traffic-payload-tree [role=\"treeitem\"]') !== null", "retained body did not load")
+      let payload = try await ui.json("""
+        ({tree: document.querySelector('#payload-inspector .traffic-payload-tree').innerText,
+          query: document.querySelector('#payload-inspector [data-section="query"]').innerText,
+          state: document.querySelector('#payload-inspector [data-section="payload"]').dataset.state,
+          detailsOpen: document.querySelector('#payload-inspector .traffic-payload-details').open})
         """)
-      XCTAssertEqual(body["state"] as? String, "captured", "\(size.name): body record state")
-      XCTAssertTrue((body["text"] as? String ?? "").contains(expected.requestBodyMarker), "\(size.name): captured markup is literal text")
-      let section = body["section"] as? String ?? ""
-      for phrase in ["Retained in full", "application/json", "SHA-256", "In-memory bytes"] {
-        XCTAssertTrue(section.contains(phrase), "\(size.name): body section names \(phrase): \(section)")
+      XCTAssertEqual(payload["state"] as? String, "captured", "\(size.name): body record state")
+      let tree = payload["tree"] as? String ?? ""
+      let markup = expected.requestBodyMarker.components(separatedBy: "\"").first ?? expected.requestBodyMarker
+      XCTAssertTrue(tree.contains("sitekey") && tree.contains(markup), "\(size.name): captured markup is literal text: \(tree)")
+      let query = payload["query"] as? String ?? ""
+      let marker = expected.requestBodyTarget.split(separator: "=", maxSplits: 1).last.map(String.init) ?? ""
+      XCTAssertTrue(query.contains(marker), "\(size.name): the decoded query parameter is literal text: \(query)")
+      XCTAssertEqual(payload["detailsOpen"] as? Bool, false, "\(size.name): Capture details starts collapsed")
+      try await assertInert(ui, "\(size.name) request payload")
+      try await assertLayout(ui, "#screen-traffic .detail-pane", "\(size.name) request payload")
+      try await ui.screenshot("traffic-payload-parsed-\(size.name)")
+
+      // The tree is one Tab stop; arrow keys collapse, expand and move with a visible ring.
+      _ = try await ui.value("document.querySelector('#payload-inspector .traffic-payload-tree [tabindex=\"0\"]').focus({focusVisible:true})")
+      let expanded = "document.activeElement?.getAttribute('aria-expanded') ?? ''"
+      try await ui.key(123, "\u{F702}", modifiers: [.function, .numericPad])
+      let collapsed = try await ui.value(expanded) as? String
+      XCTAssertEqual(collapsed, "false", "\(size.name): Left collapses the root")
+      try await ui.key(124, "\u{F703}", modifiers: [.function, .numericPad])
+      let reopened = try await ui.value(expanded) as? String
+      XCTAssertEqual(reopened, "true", "\(size.name): Right expands the root")
+      try await ui.key(125, "\u{F701}", modifiers: [.function, .numericPad])
+      let focus = try await ui.json("__rebUiProbe.focusState()")
+      let selected = try await ui.value("document.activeElement?.getAttribute('aria-selected') ?? ''") as? String
+      XCTAssertEqual(selected, "true", "\(size.name): Down selects the next row: \(focus)")
+      XCTAssertTrue((focus["element"] as? String ?? "").contains("sitekey"), "\(size.name): Down moves to the first key: \(focus)")
+      XCTAssertEqual(focus["focusVisible"] as? Bool, true, "\(size.name): the tree row shows keyboard focus: \(focus)")
+      XCTAssertNotEqual(focus["indicator"] as? String, "none", "\(size.name): \(focus)")
+      try await ui.screenshot("traffic-payload-keyboard-\(size.name)")
+
+      try await ui.click("#payload-inspector .traffic-payload-details > summary")
+      let details = try await ui.value("document.querySelector('#payload-inspector .traffic-payload-details').innerText") as? String ?? ""
+      for phrase in ["Retained in full", "application/json", "SHA-256", "In-memory bytes", "Artifact ID"] {
+        XCTAssertTrue(details.contains(phrase), "\(size.name): Capture details names \(phrase): \(details)")
       }
-      try await assertInert(ui, "\(size.name) request body")
-      try await assertLayout(ui, "#screen-traffic .detail-pane", "\(size.name) request body")
-      try await ui.screenshot("traffic-request-body-\(size.name)")
+      XCTAssertFalse(details.contains("artifact URL"), "\(size.name): the duplicate URL row is gone: \(details)")
+      try await ui.click("#payload-inspector button", containing: "Source")
+      try await ui.waitUntil("document.querySelector('#payload-inspector .traffic-payload-lines .traffic-payload-line') !== null", "payload source did not render")
+      let source = try await ui.value("document.querySelector('#payload-inspector .traffic-payload-lines').innerText") as? String ?? ""
+      XCTAssertTrue(source.contains("\"sitekey\": \"site-key\""), "\(size.name): Source is pretty-printed: \(source.prefix(200))")
+      try await assertInert(ui, "\(size.name) request payload source")
+      try await assertLayout(ui, "#screen-traffic .detail-pane", "\(size.name) request payload source")
+      try await ui.screenshot("traffic-payload-source-\(size.name)")
+      try await ui.click("#payload-inspector button", containing: "Parsed")
 
       try await ui.click("#screen-traffic .request-row", containing: expected.metadataBodyHost)
       try await ui.waitUntil(
-        "(document.querySelector('#exchange-inspector .traffic-body')?.innerText ?? '').includes('content capture was off')",
+        "(document.querySelector('#payload-inspector [data-section=\"payload\"]')?.innerText ?? '').includes('content capture was off')",
         "metadata-only body state did not render")
-      let metadata = try await ui.value("document.querySelector('#exchange-inspector').innerText") as? String ?? ""
+      let metadata = try await ui.value("document.querySelector('#payload-inspector').innerText") as? String ?? ""
       XCTAssertTrue(metadata.contains("application/x-www-form-urlencoded"), "\(size.name): metadata session keeps the type: \(metadata)")
-      XCTAssertTrue(metadata.contains("host only"), "\(size.name): metadata session stays host-only: \(metadata)")
-      let pre = try await ui.value("document.querySelectorAll('#exchange-inspector .traffic-body-text').length") as? Int ?? -1
-      XCTAssertEqual(pre, 0, "\(size.name): no body text exists for a metadata-only request")
-      try await assertLayout(ui, "#screen-traffic .detail-pane", "\(size.name) metadata-only body")
-      try await ui.screenshot("traffic-request-body-metadata-\(size.name)")
+      XCTAssertTrue(metadata.contains("recorded only in content capture sessions"), "\(size.name): metadata session stays host-only: \(metadata)")
+      let views = try await ui.value("document.querySelectorAll('#payload-inspector .traffic-payload-view').length") as? Int ?? -1
+      XCTAssertEqual(views, 0, "\(size.name): no payload view exists for a metadata-only request")
+      try await assertLayout(ui, "#screen-traffic .detail-pane", "\(size.name) metadata-only payload")
+      try await ui.screenshot("traffic-payload-metadata-\(size.name)")
     }
   }
 

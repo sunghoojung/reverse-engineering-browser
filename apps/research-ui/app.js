@@ -3432,7 +3432,7 @@ invocationSitesPanel.refresh();
 
       // Retained request bodies (protocol/native-network-v2.md) load only for the
       // selected request: at most 256 KiB, checked against the catalog's size and
-      // SHA-256, and decoded to text that is only ever assigned to textContent.
+      // SHA-256, and kept as bytes and decoded text that is only assigned as text.
       const REQUEST_BODY_READ_LIMIT = 256 * 1024;
       // A transient read failure (timeout, HTTP status, transport) stays shown
       // and is retried by the next refresh or selection at least this long
@@ -3491,7 +3491,7 @@ invocationSitesPanel.refresh();
           }
           let lossy = false;
           try {new TextDecoder('utf-8', {fatal: true}).decode(bytes);} catch {lossy = true;}
-          view = {status: 'ready', text: new TextDecoder('utf-8', {fatal: false, ignoreBOM: true}).decode(bytes), lossy, verified};
+          view = {status: 'ready', bytes, text: new TextDecoder('utf-8', {fatal: false, ignoreBOM: true}).decode(bytes), lossy, verified};
         } catch (error) {
           view = {status: 'error', error: controller.signal.aborted ? 'timed out after 10 seconds'
             : String(error?.message ?? error).replace(/\.$/, ''), retryable: error?.integrity !== true, failedAt: Date.now()};
@@ -3514,7 +3514,7 @@ invocationSitesPanel.refresh();
       // views do not re-render the inspector on every poll.
       function refreshSelectedRequestBody() {
         const selected = state.requests.find(request => request.id === state.selectedRequestId);
-        if (state.inspectorTab !== 'general' || !['captured', 'captured_truncated'].includes(selected?.body?.state)) return;
+        if (state.inspectorTab !== 'payload' || !['captured', 'captured_truncated'].includes(selected?.body?.state)) return;
         if (requestBodyViewKey(requestBodyView(selected)) !== state.requestBodyViewKey) renderInspector();
       }
 
@@ -3563,10 +3563,18 @@ invocationSitesPanel.refresh();
         elements.requestCollectionPivot.disabled = !request;
         elements.requestInspector.hidden = showingGeneral;
         document.querySelector('.detail-pane').classList.toggle('showing-exchange', showingGeneral);
-        if (showingGeneral) {
+        const payloadInspector = document.querySelector('#payload-inspector');
+        payloadInspector.hidden = showingGeneral || state.inspectorTab !== 'payload';
+        if (!payloadInspector.hidden) {
+          elements.requestInspector.hidden = true;
+          document.querySelector('.detail-pane').classList.add('showing-exchange');
           const bodyView = requestBodyView(request);
           state.requestBodyViewKey = requestBodyViewKey(bodyView);
-          renderTrafficDetails(exchangeInspector, request, state.trafficSelectionNotice, bodyView);
+          renderTrafficPayload(payloadInspector, request, bodyView);
+          return;
+        }
+        if (showingGeneral) {
+          renderTrafficDetails(exchangeInspector, request, state.trafficSelectionNotice);
           return;
         }
         elements.requestInspector.setAttribute('aria-labelledby', `inspector-tab-${state.inspectorTab}`);

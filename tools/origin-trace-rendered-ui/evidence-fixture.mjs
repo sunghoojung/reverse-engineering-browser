@@ -156,7 +156,7 @@ function requestTargetPayload(target) {
 // target, body record, body artifact and receiver acknowledgment as exact
 // children, and one from a metadata-only session with only its body summary.
 async function requestBodyRequests(template, firstSequence, firstTime, artifactsRoot) {
-  const body = Buffer.from(`{"sitekey":"site-key","note":"${REQUEST_BODY_MARKER}","motionData":"${'m'.repeat(600)}"}`);
+  const body = Buffer.from(JSON.stringify({sitekey: 'site-key', note: REQUEST_BODY_MARKER, motionData: 'm'.repeat(600)}));
   const metadataBody = Buffer.from('v=1&answers=redacted-by-session');
   let sequence = firstSequence, time = BigInt(firstTime);
   const events = [];

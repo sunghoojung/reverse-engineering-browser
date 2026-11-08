@@ -364,7 +364,9 @@ private func isNetwork(_ event: [String: Any]) -> Bool {
   guard event["category"] as? String == "network", let type = event["type"] as? String else { return false }
   return [
     "request_initiated", "request_started", "request_redirected", "response_started",
-    "response_completed", "request_completed", "request_failed",
+    "response_completed", "request_completed", "request_failed", "request_target", "request_body",
+    "capture_exclusion", "tab_set", "request_tab_link", "response_body", "request_headers",
+    "response_headers", "cookie_list", "request_initiator_stack", "request_watch_match",
   ].contains(type)
 }
 

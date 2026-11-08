@@ -3288,24 +3288,29 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         }
       }
 
-      // Positions span the whole filtered list; the mounted block holds only part of it.
+      function trafficRowAt(position) {
+        return [...elements.requestRows.querySelectorAll('.request-row')].find(row => row.dataset.position === String(position)) ?? null;
+      }
+
+      // Positions span the whole filtered list; only rows near the view are mounted.
       function moveRequestSelection(event) {
         if (!['ArrowUp', 'ArrowDown', 'Home', 'End'].includes(event.key)) return;
         const container = elements.requestRows, view = state.trafficRenderedView;
-        const slots = [...container.querySelectorAll('.request-row')];
-        const at = slots.indexOf(event.currentTarget);
-        if (!view || (at < 0 && event.currentTarget !== container)) return;
+        const row = event.currentTarget !== container && container.contains(event.currentTarget) ? event.currentTarget : null;
+        if (!view || (!row?.dataset.position && event.currentTarget !== container)) return;
         event.preventDefault();
-        const from = at >= 0 ? view.start + at
-          : state.trafficFocusPosition ?? Math.floor(container.scrollTop / trafficRowHeight(container));
+        const selected = container.dataset.selectedPosition;
+        const from = row ? Number(row.dataset.position)
+          : state.trafficFocusPosition ?? (selected === undefined ? Math.floor(container.scrollTop / trafficRowHeight(container)) : Number(selected));
         const position = event.key === 'Home' ? 0 : event.key === 'End' ? view.visibleCount - 1
           : from + (event.key === 'ArrowDown' ? 1 : -1);
         focusTrafficPosition(Math.max(0, Math.min(view.visibleCount - 1, position)));
       }
 
       function focusTrafficPosition(position) {
-        const container = elements.requestRows, view = state.trafficRenderedView;
-        const slot = view && container.querySelectorAll('.request-row')[position - view.start];
+        const container = elements.requestRows;
+        const slot = state.trafficRenderedView && trafficRowAt(position);
+        delete container.dataset.focusId;
         if (slot?.dataset.requestId) {
           state.trafficFocusPosition = null;
           selectTrafficRow(slot.dataset.requestId);
@@ -3326,7 +3331,7 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         const position = state.trafficFocusPosition, view = state.trafficRenderedView;
         if (position === null) return;
         if (!view || document.activeElement !== elements.requestRows || position >= view.visibleCount) state.trafficFocusPosition = null;
-        else if (elements.requestRows.querySelectorAll('.request-row')[position - view.start]?.dataset.requestId) focusTrafficPosition(position);
+        else if (trafficRowAt(position)?.dataset.requestId) focusTrafficPosition(position);
       }
 
       function focusRequestRow(id) {
@@ -5356,6 +5361,13 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         analystElements.deleteFolder.dataset.confirm = String(state.analystDeleteFolderId === folder.id);
       }
 
+      let analystCodeEditor = null;
+      function colorAnalystEditor() {
+        analystCodeEditor ??= mountCodeEditor(analystElements.content, analystElements.contentColors,
+          () => codeViewSyntax(analystElements.kind.value === 'analyst-script' ? 'javascript' : analystElements.language.value));
+        analystCodeEditor.refresh();
+      }
+
       function renderAnalystEditor() {
         const file = analystFile();
         analystElements.editorEmpty.hidden = Boolean(file);
@@ -5389,6 +5401,7 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         analystElements.draftStatus.textContent = state.analystDraftDirty
           ? 'Unsaved changes cannot run. Save or discard them before choosing another item or closing the app.'
           : `${formatByteSize(file.content_bytes)} saved · file ${file.id} · ${new Date(file.updated_at_ms).toLocaleString()}`;
+        colorAnalystEditor();
       }
 
       function selectedAnalystArtifact() {
@@ -6390,6 +6403,7 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
           }
         }
         if (state.sourceEditorView?.identity === identity) state.sourceEditorView = null;
+        if (state.sourceOriginalHighlighter?.identity === identity) state.sourceOriginalHighlighter = null;
       }
 
       function boundSourcePreviews(protectedSource = null) {
@@ -6687,6 +6701,10 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
           status(`${coverage}. Find is a case-insensitive, single-line literal; no source is fetched.`);
           return;
         }
+        if (editor.view.formatted?.paged) {
+          applyPagedSourceSearch(editor, source, query, reset, direction, reveal, status);
+          return;
+        }
         if (editor.search?.query !== query) {
           editor.search = {query, ...sourceDocumentMatches(editor.index, query, 1000,
             editor.view.wasmRows ? line => editor.view.wasmRows[line]?.byte_offset != null : null)};
@@ -6730,6 +6748,53 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         elements.sourceCodeWrap.scrollTop += rect.top - viewport.top - viewport.height / 2;
       }
 
+      // A paged layout holds one page, so Find searches the evidence and maps each match to its page.
+      function applyPagedSourceSearch(editor, source, query, reset, direction, reveal, status) {
+        const page = editor.view.formatted, original = editor.view.active;
+        const coverage = 'Complete retained source text; matches are found in the evidence and shown in the layout';
+        const originalIndex = editor.originalIndex ??= sourceDocumentIndex(original);
+        if (editor.search?.query !== query) editor.search = {query, ...sourceDocumentMatches(originalIndex, query, 1000)};
+        const {matches, truncated, error} = editor.search;
+        if (error) {elements.sourcePosition.textContent = error; status(coverage); return;}
+        const pageEnd = page.anchors[page.block + 1] ?? original.length;
+        const inverse = sourceWhitespaceInverse(page.sourceInput, page.text);
+        const shown = match => {
+          if (match.offset < page.base || match.offset >= pageEnd) return null;
+          const start = inverse(match.offset - page.base), last = inverse(match.offset + match.length - 1 - page.base);
+          const at = start === null ? null : sourceDocumentPosition(editor.index, start);
+          return at && {...at, length: Math.max(1, (last ?? start) + 1 - start)};
+        };
+        const placed = matches.map(shown);
+        const lines = new Set(placed.filter(Boolean).map(at => at.line));
+        elements.sourceCode.querySelectorAll('.source-line[data-line]').forEach(row => row.classList.toggle('search-match', lines.has(Number(row.dataset.localLine))));
+        if (!matches.length) {
+          state.sourceSearchIndex = 0;
+          elements.sourcePosition.textContent = '0 matches in complete retained text.';
+          status(coverage);
+          return;
+        }
+        state.sourceSearchIndex = reset ? 0 : (state.sourceSearchIndex + direction + matches.length) % matches.length;
+        const match = matches[state.sourceSearchIndex], count = `${state.sourceSearchIndex + 1} of ${matches.length}${truncated ? '+' : ''} matches`;
+        status(`${coverage}.${truncated ? ' First 1,000 matches; refine Find for later matches.' : ''}`);
+        const at = placed[state.sourceSearchIndex];
+        if (!at) {
+          if (reveal) {
+            state.sourcePagedFind = {identity: editor.identity, query};
+            moveSourceWindow(sourceFormatBlock(page.anchors, match.offset) * page.stride);
+          }
+          elements.sourcePosition.textContent = `${count} · original ${match.line + 1}:${match.column + 1} · reading its part of the layout…`;
+          return;
+        }
+        if (reveal) {
+          renderSourceContent(source, editor.view, {line: at.line, column: at.column, search: false});
+          editor = state.sourceEditorView;
+        }
+        elements.sourcePosition.textContent = `${count} · ${sourcePositionText(editor, at.line, at.column)}`;
+        if (!markSourceMatch(at.line, at.column, at.length) || !reveal) return;
+        const row = elements.sourceCode.querySelector(`[data-line="${at.line + 1}"]`);
+        revealSourceColumn(row, at.column);
+      }
+
       function revealSourceColumn(row, column, focus = false) {
         if (!row) return;
         if (focus) {row.tabIndex = -1; row.focus({preventScroll: true});}
@@ -6755,7 +6820,9 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         if (!editor) {elements.sourceWindow.hidden = true; return;}
         const {window: window, index} = editor;
         const total = `${index.lineCount}${index.complete ? '' : '+'}`;
-        elements.sourceWindowLabel.textContent = `Lines ${window.start + 1}–${window.end} of ${total}`;
+        const loading = editor.view.pageLoadingLine ?? null;
+        elements.sourceWindowLabel.textContent = loading === null ? `Lines ${window.start + 1}–${window.end} of ${total}`
+          : `Lines ${window.start + 1}–${window.end} of ${total} · reading line ${loading + 1}…`;
         elements.sourceWindowPrevious.textContent = window.start ? `↑ Lines ${Math.max(1, window.start - SOURCE_WINDOW_LINES + 1)}–${window.start}` : '';
         elements.sourceWindowNext.textContent = window.end < index.lineCount ? `↓ Lines ${window.end + 1}–${Math.min(index.lineCount, window.end + SOURCE_WINDOW_LINES)} of ${total}` : '';
         if (document.activeElement !== elements.sourceWindowLine) elements.sourceWindowLine.value = String(window.line + 1);
@@ -6765,8 +6832,16 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
 
       function moveSourceWindow(line, column = 0) {
         const editor = state.sourceEditorView, source = selectedSource();
+        const bounds = editor && sourceDocumentLine(editor.index, line), paged = Boolean(editor?.view.formatted?.paged);
         if (!editor || editor.identity !== sourceIdentity(source) || !Number.isSafeInteger(line) || line < 0 || line >= editor.index.lineCount ||
-            !Number.isSafeInteger(column) || column < 0 || column > (sourceDocumentLine(editor.index, line)?.length ?? 0)) return false;
+            !Number.isSafeInteger(column) || column < 0 || column > (bounds?.length ?? (paged ? Infinity : 0))) return false;
+        if (!bounds) {
+          // Another page of a large layout; the editor moves once it is read.
+          state.sourceWindow = {identity: editor.identity, representation: editor.representation, line, column};
+          renderSourceContent(source, sourceDisplayView(source), {line, column, search: false});
+          elements.sourcePosition.textContent = `Line ${line + 1} · reading this part of the layout…`;
+          return true;
+        }
         renderSourceContent(source, editor.view, {line, column, search: false});
         applySourceSearch(false, 0, {reveal: false});
         elements.sourcePosition.textContent = sourcePositionText(state.sourceEditorView, line, column);
@@ -6782,9 +6857,28 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         return `Line ${line + 1}, Column ${column + 1}${original ? ` (original ${original.line + 1}:${original.column + 1})` : ''}`;
       }
 
+      // Each page of a large layout starts from the original's lexer state at its first character.
+      function sourceOriginalHighlighter(source, text) {
+        const identity = sourceIdentity(source), cached = state.sourceOriginalHighlighter;
+        if (cached?.identity === identity && cached.text === text) return cached.highlighter;
+        const highlighter = createSourceHighlighter(source, sourceDocumentIndex(text));
+        state.sourceOriginalHighlighter = {identity, text, highlighter};
+        return highlighter;
+      }
+
+      function sourceRepresentation(source) {
+        return JSON.stringify([sourceIdentity(source), state.sourceWasm, state.sourceDeobfuscated, state.sourceFormatted,
+          state.sourceDeobfuscated ? deobfuscationKey(source) : null]);
+      }
+
+      function sourceWantedLine(source) {
+        const saved = state.sourceWindow;
+        return saved?.identity === sourceIdentity(source) && saved.representation === sourceRepresentation(source) ? saved.line : 0;
+      }
+
       function sourceFormattedView(source, value, variant) {
-        // The backend Oxc layout for JavaScript evidence; otherwise the in-page layout, off the UI thread.
-        const backend = variant === 'original' ? sourceFormatClient.view(source, value) : null;
+        // The backend Oxc layout for JavaScript evidence, read one 1,000-line page at a time; otherwise the in-page layout, off the UI thread.
+        const backend = variant === 'original' ? sourceFormatClient.page(source, value, sourceWantedLine(source)) : null;
         if (backend && !backend.fallback) return backend;
         const key = `${sourceIdentity(source)}|${variant}`, notice = backend?.notice ?? null;
         const prior = state.sourceFormatCache.get(key);
@@ -6819,9 +6913,12 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         const formatResult = state.sourceFormatted
           ? sourceFormattedView(source, active, derived ? `derived:${deobfuscationKey(source)}` : 'original')
           : null;
-        const formatted = formatResult && !formatResult.error && !formatResult.pending ? formatResult : null;
+        // While another page loads, the page shown last stays.
+        const shown = formatResult?.pending ? formatResult.previous ?? null : null;
+        const formatted = shown ?? (formatResult && !formatResult.error && !formatResult.pending ? formatResult : null);
         return {
-          formatPending: Boolean(formatResult?.pending),
+          formatPending: Boolean(formatResult?.pending && !shown),
+          pageLoadingLine: shown ? sourceWantedLine(source) : null,
           formatNotice: formatResult?.notice ?? null,
           original,
           derived,
@@ -6903,22 +7000,25 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         }
         view ??= sourceDisplayView(source);
         const content = view.content;
-        const representation = JSON.stringify([identity, state.sourceWasm, state.sourceDeobfuscated, state.sourceFormatted,
-          state.sourceDeobfuscated ? deobfuscationKey(source) : null]);
+        const representation = sourceRepresentation(source);
+        const page = view.formatted?.paged ? view.formatted : null;
         const mapping = view.wasmRows ? state.wasmCache.get(wasmKey(source)) : view.derived ?? null;
         const formatting = view.formatted ?? null;
         const previous = state.sourceEditorView;
         const sameDocument = previous?.representation === representation && previous.content === content && previous.mapping === mapping && previous.formatting === formatting;
-        const index = sameDocument ? previous.index : sourceDocumentIndex(content);
+        const index = sameDocument ? previous.index : page ? sourcePageIndex(content, page.lineBase, page.lineCount) : sourceDocumentIndex(content);
         const savedWindow = state.sourceWindow?.identity === identity && state.sourceWindow.representation === representation ? state.sourceWindow : null;
         const requestedLine = target.line ?? savedWindow?.line ?? 0;
         const requestedColumn = target.column ?? savedWindow?.column ?? 0;
         const clampedLine = Math.max(0, Math.min(index.lineCount - 1, Number.isSafeInteger(requestedLine) ? requestedLine : 0));
         const window = sameDocument && previous.window.line === clampedLine && previous.window.column === requestedColumn
           ? previous.window : sourceDocumentWindow(index, clampedLine, requestedColumn);
-        state.sourceWindow = {identity, representation, line: window.line, column: window.column};
+        state.sourceWindow = view.pageLoadingLine === null || view.pageLoadingLine === undefined
+          ? {identity, representation, line: window.line, column: window.column}
+          : {identity, representation, line: view.pageLoadingLine, column: target.column ?? savedWindow?.column ?? 0};
         const highlighter = sameDocument && previous.highlighter ? previous.highlighter
-          : createSourceHighlighter(view.wasmRows ? {kind: 'plain', mime_type: 'text/plain'} : source, index);
+          : createSourceHighlighter(view.wasmRows ? {kind: 'plain', mime_type: 'text/plain'} : source, index,
+            page ? {highlighter: sourceOriginalHighlighter(source, view.active), offset: page.base} : null);
         if (!highlighter.ready(window.rows)) highlighter.advance(SOURCE_COLOR_SYNC_UNITS);
         const colored = highlighter.ready(window.rows);
         const sameWindow = sameDocument && previous.window.line === window.line && previous.window.column === window.column && previous.colored === colored;
@@ -7024,7 +7124,11 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         } else {
           elements.sourceCodeWrap.scrollTop = 0;
           elements.sourceCodeWrap.scrollLeft = 0;
-          if (target.search !== false) applySourceSearch(false, 0, {reveal: false});
+          const find = state.sourcePagedFind;
+          if (find?.identity === identity && page && view.pageLoadingLine == null) {
+            state.sourcePagedFind = null;
+            if (elements.sourceSearch.value === find.query) applySourceSearch(false, 0);
+          } else if (target.search !== false) applySourceSearch(false, 0, {reveal: false});
         }
       }
 
@@ -8514,8 +8618,11 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
             state.trafficPendingCount = 0; state.trafficNewIds.clear(); renderTrafficLatest();
           }
           if (trafficBlockStart(elements.requestRows, total, state.trafficWindowStart) !== state.trafficWindowStart) renderRequests();
+          else remountTrafficRows(elements.requestRows);
         });
       }, {passive: true});
+      // A list that gains height, or is shown, mounts the rows that come into view.
+      if (typeof ResizeObserver === 'function') new ResizeObserver(() => remountTrafficRows(elements.requestRows)).observe(elements.requestRows);
       elements.requestCopyUrl.addEventListener('click', async () => {
         const selected = state.requests.find(request => request.id === state.selectedRequestId);
         const fullUrl = selected?.urlTruncated ? requestFullUrl(selected) : null;
@@ -8707,10 +8814,11 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         if (!view?.formatted || view.derived || !token || !row || editor.identity !== sourceIdentity(selectedSource())) return;
         let column = Number(row.dataset.columnStart ?? 0);
         for (let node = token.previousSibling; node; node = node.previousSibling) column += node.textContent.length;
-        const start = sourceDocumentOffset(editor.index, Number(row.dataset.localLine)) + column;
-        const range = sourceWhitespaceRange(view.formatted.map, view.active, view.formatted.text, start, start + token.textContent.length);
-        if (!range) return;
-        const original = sourceDocumentIndex(view.active), from = sourceDocumentPosition(original, range.start), to = sourceDocumentPosition(original, range.end);
+        const start = sourceDocumentOffset(editor.index, Number(row.dataset.localLine)) + column, base = view.formatted.base ?? 0;
+        const local = sourceWhitespaceRange(view.formatted.map, view.formatted.sourceInput ?? view.active, view.formatted.text, start, start + token.textContent.length);
+        if (!local) return;
+        const range = {start: local.start + base, end: local.end + base};
+        const original = editor.originalIndex ??= sourceDocumentIndex(view.active), from = sourceDocumentPosition(original, range.start), to = sourceDocumentPosition(original, range.end);
         if (!from || !to) return;
         // After the caret update that the same click schedules.
         requestAnimationFrame(() => {

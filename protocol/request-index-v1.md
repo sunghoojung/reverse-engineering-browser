@@ -2,8 +2,9 @@
 
 Status: implemented in the Rust backend (`apps/origin-trace-backend/src/request_index.rs`)
 and Traffic (`apps/research-ui/traffic_index.js`). The bundled `reb://`
-stored-evidence workspace does not serve it; Traffic there keeps the newest
-network window.
+stored-evidence workspace answers it, and the filtered `get_events` reads of a
+row, through the bundled backend
+([`StoredEvidenceBackend.swift`](../apps/research-ui/macos/StoredEvidenceBackend.swift)).
 
 ## Why
 

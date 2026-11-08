@@ -158,6 +158,12 @@ enum SessionCommand {
         /// Retain request paths, queries and bounded bodies (sensitive).
         #[arg(long, requires = "confirm_sensitive_capture")]
         request_content: bool,
+        /// MiB of unique request bodies and targets to retain, 1..4096 (default 256).
+        #[arg(long, requires = "request_content")]
+        request_content_budget_mib: Option<u32>,
+        /// Record the JavaScript and Wasm stack that started each renderer request.
+        #[arg(long)]
+        request_stacks: bool,
         /// Permit document-start Console scripts in this capture browser.
         /// Arming one is still a separate confirmed Console action.
         #[arg(long)]
@@ -1244,6 +1250,8 @@ async fn run_session(command: SessionCommand) -> Result<i32, Box<dyn std::error:
         localhost_only,
         canvas_images,
         request_content,
+        request_content_budget_mib,
+        request_stacks,
         document_start,
         js_invocation_sites,
         js_invocation_saved_sites,
@@ -1272,6 +1280,8 @@ async fn run_session(command: SessionCommand) -> Result<i32, Box<dyn std::error:
         localhost_only,
         canvas_images,
         request_content,
+        request_content_budget_mib,
+        request_stacks,
         document_start,
         js_invocation_sites,
         js_invocation_saved_sites,

@@ -3,7 +3,6 @@
  * ever assigned as text; a binary body is shown as hex and never interpreted. */
 const TRAFFIC_PAYLOAD_BLOCK_ROWS = 200;
 const TRAFFIC_PAYLOAD_GROUP = 100;
-const TRAFFIC_PAYLOAD_ROW_UNITS = 4096;
 const TRAFFIC_PAYLOAD_LEAF_UNITS = 1000;
 const TRAFFIC_PAYLOAD_FIELD_BYTES = 64 * 1024;
 const TRAFFIC_PAYLOAD_HEX_BYTES = 1024 * 1024;
@@ -13,6 +12,8 @@ const TRAFFIC_PAYLOAD_BINARY_TYPES = /^(?:image\/(?!svg\+xml$)|audio\/|video\/|f
 // Toggles carry across requests, as in DevTools; the rest belongs to the shown body.
 const trafficPayloadPrefs = {source: false, encoded: false, wrap: true};
 let trafficPayloadShown = null;
+let trafficPayloadLayouts = null;
+const trafficPayloadLayout = () => trafficPayloadLayouts ??= createCodeLayouts({onChange: () => trafficPayloadShown?.relayout?.()});
 
 function trafficPayloadDecode(part) {
   try {
@@ -131,7 +132,8 @@ function trafficPayloadModel(body, view) {
   const bytes = view.bytes ?? new TextEncoder().encode(view.text ?? '');
   const text = view.text ?? new TextDecoder().decode(bytes);
   const type = body.contentType ?? '';
-  const model = {bytes, text, type, binary: trafficPayloadBinary(bytes, type, view.lossy), keys: new WeakMap()};
+  const model = {bytes, text, type, binary: trafficPayloadBinary(bytes, type, view.lossy), keys: new WeakMap(),
+    artifact: view.complete === false || view.lossy ? null : view.artifact ?? null};
   if (type.startsWith('multipart/')) {
     model.parts = trafficPayloadMultipart(bytes);
     if (!model.parts) model.parsedNote = 'The multipart boundary could not be read from the first line.';
@@ -155,40 +157,18 @@ function trafficPayloadModel(body, view) {
   return model;
 }
 
-// Display rows: CR is dropped at line ends and lines longer than one row continue.
-function trafficPayloadRows(text) {
-  const rows = [], continued = [];
-  for (const line of text.split('\n')) {
-    const value = line.endsWith('\r') ? line.slice(0, -1) : line;
-    let at = 0;
-    do {
-      let end = Math.min(value.length, at + TRAFFIC_PAYLOAD_ROW_UNITS);
-      const code = value.charCodeAt(end - 1);
-      if (end < value.length && code >= 0xd800 && code <= 0xdbff) end -= 1;
-      rows.push(value.slice(at, end));
-      continued.push(at > 0);
-      at = end;
-    } while (at < value.length);
-  }
-  return {rows, continued};
-}
-
 function trafficPayloadSourceRows(model) {
-  if (model.sourceRows) return model.sourceRows;
   if (model.binary) {
+    if (model.sourceRows) return model.sourceRows;
     const hex = formatWasmHex(model.bytes.subarray(0, TRAFFIC_PAYLOAD_HEX_BYTES));
-    model.sourceRows = {...trafficPayloadRows(hex), syntax: {kind: 'bytecode_buffer'}, hex: true,
+    return model.sourceRows = {text: hex, rows: codeViewRows(hex), syntax: {kind: 'bytecode_buffer'}, hex: true, layout: null,
       note: model.bytes.length > TRAFFIC_PAYLOAD_HEX_BYTES ? `Hex shows the first 1 MiB of ${trafficByteCount(model.bytes.length)}.` : ''};
-    return model.sourceRows;
   }
-  let text = model.text, note = '';
-  if (model.json) {
-    const pretty = prettyPrintSource({mime_type: 'application/json'}, model.text);
-    if (typeof pretty.text === 'string') text = pretty.text;
-    else note = `${String(pretty.error ?? 'Pretty print failed').replace(/\.$/, '')}; shown as sent.`;
-  }
-  model.sourceRows = {...trafficPayloadRows(text), syntax: model.syntax, hex: false, note};
-  return model.sourceRows;
+  const layout = model.json ? trafficPayloadLayout().layout(model.artifact, model.text, model.syntax, 'json') : null;
+  if (model.sourceRows && model.sourceRows.layout === layout && model.sourceRows.status === layout?.status) return model.sourceRows;
+  const text = layout?.status === 'ready' ? layout.text : model.text;
+  return model.sourceRows = {text, rows: codeViewRows(text), syntax: model.syntax, hex: false, layout, status: layout?.status,
+    note: codeLayoutNote(layout) ?? ''};
 }
 
 // JSON tree. Containers with more than 100 children show ranges of them, so
@@ -382,30 +362,6 @@ function trafficPayloadArea({className, label, role = null, count, makeRow, sele
   return {box, rows, reveal, select, dispose: () => observer?.disconnect()};
 }
 
-// Splits syntax tokens at find matches; every piece is a text node.
-function trafficPayloadPaint(node, tokens, ranges, current) {
-  let offset = 0, index = 0;
-  for (const token of tokens) {
-    const end = offset + token.text.length;
-    for (let at = offset; at < end;) {
-      while (index < ranges.length && ranges[index].column + ranges[index].length <= at) index += 1;
-      const range = ranges[index];
-      const inside = Boolean(range) && range.column <= at;
-      const stop = Math.min(end, range ? (inside ? range.column + range.length : range.column) : end);
-      const piece = token.text.slice(at - offset, stop - offset);
-      let leaf = token.type === 'plain' ? document.createTextNode(piece) : trafficNode('span', `syntax-${token.type}`, piece);
-      if (inside) {
-        const mark = trafficNode('mark', range.match === current ? 'traffic-payload-mark is-current' : 'traffic-payload-mark');
-        mark.append(leaf);
-        leaf = mark;
-      }
-      node.append(leaf);
-      at = stop;
-    }
-    offset = end;
-  }
-}
-
 function trafficPayloadButton(label, className = 'secondary-button') {
   const button = trafficNode('button', className, label);
   button.type = 'button';
@@ -498,18 +454,12 @@ function trafficPayloadPartRow(part, index, marks, current) {
   return row;
 }
 
-function trafficPayloadLinesArea(rows, shown) {
+function trafficPayloadLinesArea(rows, shown, status) {
   const marks = trafficPayloadMatchesBy(shown, 'payload');
-  const tokenizers = new Map();
-  return trafficPayloadArea({className: `traffic-payload-lines${trafficPayloadPrefs.wrap && !rows.hex ? ' is-wrapped' : ''}`,
-    label: rows.hex ? 'Request payload hex' : 'Request payload source', count: rows.rows.length, makeRow: index => {
-      // A tokenizer per block keeps rendering local; a comment across a block edge may lose color, never text.
-      const block = Math.floor(index / TRAFFIC_PAYLOAD_BLOCK_ROWS);
-      if (!tokenizers.has(block)) tokenizers.set(block, createSourceTokenizer(rows.syntax));
-      const row = trafficNode('div', rows.continued[index] ? 'traffic-payload-line is-continued' : 'traffic-payload-line');
-      trafficPayloadPaint(row, sourceSyntaxTokens(rows.rows[index], tokenizers.get(block)), marks.get(index) ?? [], shown.find.current);
-      return row;
-    }});
+  return createCodeView({text: rows.text, rows: rows.rows, syntax: rows.syntax, label: rows.hex ? 'Request payload hex' : 'Request payload source',
+    className: 'traffic-payload-view traffic-payload-lines', rowClass: 'traffic-payload-line', wrap: trafficPayloadPrefs.wrap && !rows.hex,
+    marks, current: shown.find.current, layout: rows.layout?.status === 'ready' && rows.layout.map ? rows.layout : null,
+    onRaw: raw => {status.textContent = codeViewRawText(raw);}});
 }
 
 function trafficPayloadPartsArea(parts, shown) {
@@ -702,17 +652,19 @@ function trafficPayloadBodySection(body, view, shown, panel) {
       const notes = [model.parsedNote, rows?.note, rows?.hex ? 'Binary bytes are shown as hex and never interpreted.' : '',
         !source && model.parts && !model.parts.parts.length ? 'No part precedes the closing boundary.' : '']
         .filter(Boolean).map(text => trafficNode('p', 'traffic-payload-note', text));
-      area = source ? trafficPayloadLinesArea(rows, shown)
+      const raw = trafficNode('p', 'traffic-payload-note code-view-raw');
+      raw.setAttribute('role', 'status');
+      area = source ? trafficPayloadLinesArea(rows, shown, raw)
         : model.json ? trafficPayloadTreeArea(model, shown, () => controller.render({focus: true, keepScroll: true}))
           : model.pairs ? trafficPayloadPairsArea(model.pairs, 'Form fields', 'payload', shown)
             : trafficPayloadPartsArea(model.parts.parts, shown);
-      holder.replaceChildren(...notes, area.box);
+      holder.replaceChildren(...notes, area.box, ...(rows?.layout?.status === 'ready' && rows.layout.map ? [raw] : []));
       area.box.scrollTop = scroll;
       if (focus) area.box.querySelector('[tabindex="0"]')?.focus();
     },
     search(raw, needle) {
       if (sourceMode()) {
-        return findSourceOccurrences(trafficPayloadSourceRows(model).rows, raw, TRAFFIC_PAYLOAD_FIND_LIMIT).matches
+        return findSourceOccurrences(trafficPayloadSourceRows(model).rows.map(row => row.text), raw, TRAFFIC_PAYLOAD_FIND_LIMIT).matches
           .map(({line, column, length}) => ({section: 'payload', row: line, column, length}));
       }
       if (model.json) return trafficPayloadTreeSearch(model, needle);
@@ -742,7 +694,7 @@ function trafficPayloadBodySection(body, view, shown, panel) {
       return {text: asJson ? JSON.stringify(value, null, 2) : value.value ?? value.filename ?? '', what: 'the selected value'};
     },
     copyAll(asJson) {
-      if (!asJson) return {text: model.binary ? trafficPayloadSourceRows(model).rows.join('\n') : model.text, what: model.binary ? 'the payload hex' : 'the payload as sent'};
+      if (!asJson) return {text: model.binary ? trafficPayloadSourceRows(model).text : model.text, what: model.binary ? 'the payload hex' : 'the payload as sent'};
       const value = model.json ? model.json.value : model.pairs ? model.pairs.map(pair => trafficPayloadPair(pair))
         : model.parts ? model.parts.parts.map(trafficPayloadPartJson) : model.binary ? undefined : model.text;
       return value === undefined ? null : {text: JSON.stringify(value, null, 2), what: 'the payload'};
@@ -905,4 +857,9 @@ function renderTrafficPayload(container, request, view) {
   panel.refresh();
   if (refocus) (container.querySelector('.traffic-body-more') ?? container.querySelector('.traffic-payload-view'))?.focus?.();
   shown.dispose = () => panel.sections.forEach(section => section.dispose());
+  shown.relayout = () => {
+    if (container.isConnected === false || !shown.model) return;
+    const body = panel.sections.find(section => section.name === 'payload');
+    if (shown.find.query) {panel.search(); panel.go(0);} else body?.render({keepScroll: true});
+  };
 }

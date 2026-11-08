@@ -43,6 +43,10 @@ pub struct StartOptions {
     pub canvas_images: bool,
     /// Retain request paths, queries and bounded bodies. Sensitive.
     pub request_content: bool,
+    /// MiB of unique request bodies and targets a content session retains.
+    pub request_content_budget_mib: Option<u32>,
+    /// Record the JavaScript and Wasm stack that started each renderer request.
+    pub request_stacks: bool,
     /// Permit document-start Console scripts in this capture browser. Arming
     /// one stays a separate confirmed Console action.
     pub document_start: bool,
@@ -140,6 +144,10 @@ impl StartOptions {
             localhost_only: flag("localhost_only"),
             canvas_images: flag("canvas_images"),
             request_content: flag("request_content"),
+            request_content_budget_mib: value["request_content_budget_mib"]
+                .as_u64()
+                .map(|n| n.min(u64::from(u32::MAX)) as u32),
+            request_stacks: flag("request_stacks"),
             document_start: flag("document_start"),
             js_invocation_sites: path("js_invocation_sites"),
             js_invocation_saved_sites: flag("js_invocation_saved_sites"),
@@ -248,6 +256,14 @@ impl StartOptions {
         if self.request_content && !self.confirm_sensitive_capture {
             return Err("request_content retains request paths, queries and bodies and requires confirm_sensitive_capture".into());
         }
+        if let Some(budget) = self.request_content_budget_mib {
+            if !self.request_content {
+                return Err("request_content_budget_mib requires request_content".into());
+            }
+            if !(1..=4096).contains(&budget) {
+                return Err("request_content_budget_mib must be from 1 to 4096".into());
+            }
+        }
         if self.js_invocation_sites.is_some() && self.js_invocation_saved_sites {
             return Err("Name js_invocation_sites or js_invocation_saved_sites, not both".into());
         }
@@ -272,6 +288,9 @@ impl StartOptions {
         let mask = self.category_mask.unwrap_or(4095);
         if self.request_content && mask & 1280 != 1280 {
             return Err("request_content needs Network and Artifact category bits (256 and 1024) in category_mask".into());
+        }
+        if self.request_stacks && mask & 1280 != 1280 {
+            return Err("request_stacks needs Network and Artifact category bits (256 and 1024) in category_mask".into());
         }
         if invocation && mask & 512 == 0 {
             return Err(
@@ -313,6 +332,8 @@ impl StartOptions {
             "localhost_only": self.localhost_only,
             "canvas_images": self.canvas_images,
             "request_content": self.request_content,
+            "request_content_budget_mib": self.request_content.then(|| self.request_content_budget_mib.unwrap_or(256)),
+            "request_stacks": self.request_stacks,
             "document_start": self.document_start,
             "js_invocation_saved_sites": self.js_invocation_saved_sites,
             "js_invocation_digests": self.js_invocation_digests,
@@ -535,6 +556,11 @@ fn failure(log: &str) -> Option<String> {
 fn with_option_names(cause: &str) -> String {
     let names = [
         ("REB_CAPTURE_REQUEST_CONTENT", "request_content"),
+        (
+            "REB_REQUEST_CONTENT_BUDGET_MIB",
+            "request_content_budget_mib",
+        ),
+        ("REB_NATIVE_REQUEST_STACKS", "request_stacks"),
         ("REB_CONSOLE_DOCUMENT_START", "document_start"),
         (
             "REB_NATIVE_JS_INVOCATION_SITES",
@@ -844,6 +870,8 @@ pub async fn launch(options: &StartOptions) -> Result<Started, String> {
             "REB_CAPTURE_REQUEST_CONTENT",
             switch(options.request_content),
         )
+        // Strict, like named invocation sites: a Brave without the flag refuses.
+        .env("REB_NATIVE_REQUEST_STACKS", switch(options.request_stacks))
         // Browser-internal and extension evidence are debugging opt-ins, never inherited.
         .env("REB_CAPTURE_BROWSER_INTERNAL", "0")
         .env("REB_CAPTURE_EXTENSION_TRAFFIC", "0")
@@ -868,6 +896,9 @@ pub async fn launch(options: &StartOptions) -> Result<Started, String> {
             "REB_CAPTURE_DURATION_SECONDS",
             options.duration_seconds.unwrap_or(3600).to_string(),
         );
+    if let Some(budget) = options.request_content_budget_mib {
+        command.env("REB_REQUEST_CONTENT_BUDGET_MIB", budget.to_string());
+    }
     if let Some(path) = &options.guest_adapter {
         command.env("REB_NATIVE_WASM_GUEST_ADAPTER", path);
     }
@@ -1045,6 +1076,18 @@ mod tests {
                 "256 and 1024",
             ),
             (
+                json!({"request_content_budget_mib":64}),
+                "requires request_content",
+            ),
+            (
+                json!({"request_content":true,"confirm_sensitive_capture":true,"request_content_budget_mib":4097}),
+                "from 1 to 4096",
+            ),
+            (
+                json!({"request_stacks":true,"category_mask":256}),
+                "request_stacks needs Network and Artifact",
+            ),
+            (
                 json!({"js_invocation_saved_sites":true,"category_mask":1024}),
                 "VM category",
             ),
@@ -1098,16 +1141,30 @@ mod tests {
         assert_eq!(effective["wasm_module_allowlist"], json!([]));
         assert_eq!(effective["category_mask"], 4095);
         assert_eq!(effective["timeout_seconds"], 180);
+        assert!(effective["request_content_budget_mib"].is_null());
         assert!(effective.get("url").is_none());
         // Every switch an agent can name is shown, off unless named.
         for key in [
             "request_content",
+            "request_stacks",
             "document_start",
             "js_invocation_saved_sites",
             "js_invocation_digests",
         ] {
             assert_eq!(effective[key], false, "{key}");
         }
+        let content = |extra: Value| {
+            let mut value = json!({"request_content":true,"confirm_sensitive_capture":true});
+            value
+                .as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            let options = StartOptions::from_json(&value);
+            assert!(options.validate().is_ok(), "{value}");
+            options.effective()["request_content_budget_mib"].clone()
+        };
+        assert_eq!(content(json!({})), 256, "the launcher default is shown");
+        assert_eq!(content(json!({"request_content_budget_mib":64})), 64);
         let named = StartOptions::from_json(&json!({"document_start":true,
             "js_invocation_sites":"/tmp/s.json","js_invocation_digests":true,
             "confirm_sensitive_capture":true}));
@@ -1155,6 +1212,11 @@ mod tests {
             "REB_NATIVE_WASM_DISPATCH_EXTRA is unknown"
         );
         assert_eq!(with_option_names("Brave is missing"), "Brave is missing");
+        assert!(
+            with_option_names("turn that capture off with REB_NATIVE_REQUEST_STACKS=0.").ends_with(
+                "(For this start: REB_NATIVE_REQUEST_STACKS is the option request_stacks.)"
+            )
+        );
     }
 
     #[test]

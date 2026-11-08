@@ -37,7 +37,7 @@ use std::{
 };
 use tokio::sync::{Mutex, OwnedMutexGuard, OwnedSemaphorePermit, Semaphore, TryAcquireError};
 
-const UI_ASSETS: [&str; 46] = [
+const UI_ASSETS: [&str; 47] = [
     "index.html",
     "app.css",
     "command_palette.js",
@@ -48,6 +48,7 @@ const UI_ASSETS: [&str; 46] = [
     "evidence_comparison.js",
     "source_syntax.js",
     "source_format.js",
+    "code_view.js",
     "source_facts.js",
     "source_search.js",
     "source_tree.js",
@@ -601,10 +602,17 @@ impl App {
             "/api/source-format" => {
                 q.only(
                     &["session_id", "artifact_id"],
-                    &["start_line", "line_count"],
+                    &["start_line", "line_count", "language"],
                 )?;
                 q.number("session_id", None, 64, false)?;
                 q.number("artifact_id", None, 64, false)?;
+                let language = match q.one("language")? {
+                    None => None,
+                    Some(value) => Some(
+                        source_format::Language::parse(value)
+                            .ok_or_else(|| Error::bad("language must be javascript or json"))?,
+                    ),
+                };
                 let window = match (q.one("start_line")?, q.one("line_count")?) {
                     (None, None) => None,
                     (Some(_), Some(_)) => {
@@ -629,10 +637,12 @@ impl App {
                 let session = q.required("session_id")?.to_owned();
                 let id = q.required("artifact_id")?.to_owned();
                 let root = self.options.artifacts.clone();
-                let (source, identity) = self
-                    .blocking(move || source_format::load(&root, &session, &id))
+                let (source, identity, language) = self
+                    .blocking(move || source_format::load(&root, &session, &id, language))
                     .await?;
-                self.source_format.format(source, identity, window).await?
+                self.source_format
+                    .format(source, identity, language, window)
+                    .await?
             }
             "/api/js-invocation-sites" => {
                 if !q.0.is_empty() {

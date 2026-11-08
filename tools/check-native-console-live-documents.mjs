@@ -87,8 +87,8 @@ async function mount(root, fetch) {
     ResizeObserver: class { observe() {} }, MutationObserver: class { observe() {} }, CustomEvent: class {},
     navigator: {clipboard: {writeText: async () => {}}},
     createNativeConsoleCompletion: () => ({close() {}, keydown() { return false; }}),
-    createSourceTokenizer: () => ({}), SOURCE_HIGHLIGHT_TOKEN_LIMIT: 8192,
-    sourceSyntaxTokens: text => [{type: 'plain', text}], sourcePrettyTokens: () => [], fetch,
+    codeViewColor: (node, text) => { node.append(document.createTextNode(text)); return node; },
+    sourcePrettyTokens: () => [], fetch,
   };
   runInNewContext(source.replace(/\}\)\(\);\s*$/, 'globalThis.testConsole = {initialize, refreshLiveDocuments, runtime, poll, watchSession: typeof watchSession === "function" ? watchSession : undefined};})();'), context);
   const settle = async () => { for (let i = 0; i < 40; i++) await Promise.resolve(); };

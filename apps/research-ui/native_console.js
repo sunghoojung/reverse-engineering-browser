@@ -267,7 +267,7 @@
     checkValue(value);
     if (value.handle && ['object', 'function', 'promise'].includes(value.type) && depth < 8) {
       const disclosure = document.createElement('details'); disclosure.className = 'native-console-object';
-      const summary = document.createElement('summary'); summary.textContent = `${value.text}${value.truncated ? ' …' : ''}`;
+      const summary = document.createElement('summary'); appendCommandColors(summary, `${value.text}${value.truncated ? ' …' : ''}`);
       const children = document.createElement('div'); children.className = 'native-console-properties';
       const actions = document.createElement('div'); actions.className = 'native-console-actions';
       const status = document.createElement('div'); status.className = 'native-console-property-status'; status.setAttribute('role', 'status');
@@ -761,26 +761,7 @@
       poll();
     }
   });
-  function appendCommandColors(container, source) {
-    const tokenizer = createSourceTokenizer({kind: 'javascript'});
-    tokenizer.coloredTokens = SOURCE_HIGHLIGHT_TOKEN_LIMIT - 1024;
-    const fragment = document.createDocumentFragment();
-    let plain = '';
-    const flush = () => { if (plain) fragment.append(document.createTextNode(plain)); plain = ''; };
-    source.slice(0, 8192).split('\n').forEach((line, index) => {
-      if (index) plain += '\n';
-      if (!line) return;
-      for (const token of sourceSyntaxTokens(line, tokenizer)) {
-        if (token.type === 'plain') plain += token.text;
-        else {
-          flush();
-          const span = document.createElement('span'); span.className = `syntax-${token.type}`;
-          span.textContent = token.text; fragment.append(span);
-        }
-      }
-    });
-    plain += source.slice(8192); flush(); container.append(fragment);
-  }
+  function appendCommandColors(container, source) { codeViewColor(container, source, {kind: 'javascript'}); }
   function syncInputMirror() {
     const mirror = element('highlight');
     mirror.style.width = `${controls.source.clientWidth}px`;

@@ -69,7 +69,8 @@ it.
   positions of the stack that started each document request or script
   navigation, and of the stack that scheduled each async task it came from,
   never names or values, and retain the source of each script a stack names
-  as an artifact.
+  as an artifact. Agent-started sessions record them only when the start names
+  `request_stacks`.
   See [Native network v3](protocol/native-network-v3.md).
 - Debugger observation rules (Console `watch`) are off until armed on one
   selected live document and never pause it. They record request matches,

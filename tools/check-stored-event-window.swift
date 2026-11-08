@@ -47,6 +47,17 @@ enum StoredEventWindowChecks {
     precondition(window.queueDrops == 23 * 4)
     precondition(window.coverage["scope"] as? String == "store")
 
+    let children = [
+      "request_target", "request_body", "response_body", "request_headers", "response_headers", "cookie_list",
+      "request_initiator_stack", "request_tab_link", "tab_set", "capture_exclusion", "request_watch_match",
+    ]
+    var family = event(sequence: 1, category: "network", type: "request_started")
+    for (offset, type) in children.enumerated() { family += event(sequence: offset + 2, category: "network", type: type) }
+    for sequence in 20...60 { family += event(sequence: sequence, category: "canvas", type: "api_call") }
+    try family.write(to: path)
+    window = try StoredEventWindowCache().read(path: path.path, limit: children.count + 1)
+    precondition(sequences(window.networkEvents) == Array(1...(children.count + 1)), "request children share the network window")
+
     let canvas = (10...19).map { event(sequence: $0, category: "canvas", type: "api_call") }
     try write(canvas)
     let size = canvas[0].count
@@ -155,6 +166,6 @@ enum StoredEventWindowChecks {
     window = try reopen.read(path: path.path, limit: 2)
     precondition(sequences(window.events) == [10])
     precondition(sequences(window.networkEvents) == [10])
-    print("PASS stored evidence windows keep network rows under a canvas tail, with bounded scan, overlap reuse, saturated summaries, and named gap reasons beside queue drops")
+    print("PASS stored evidence windows keep network rows and their child records under a canvas tail, with bounded scan, overlap reuse, saturated summaries, and named gap reasons beside queue drops")
   }
 }

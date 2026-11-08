@@ -176,6 +176,26 @@ assert.equal(document.getElementById('response-inspector').hidden, true);
 assert.equal(headersPanel.hidden, true);
 assert.equal(cookiesPanel.hidden, true);
 assert.equal(runInContext("trafficSearchRequests(state.requests, 'cdp-body-needle').matches.size", context), 0);
+// One code view: Payload, Response, Native Console and Analyst share the Sources lexer, theme and layouts.
+for (const name of ['createCodeView', 'codeViewColor', 'createCodeLayouts', 'mountCodeEditor']) {
+  assert.equal(runInContext(`typeof ${name}`, context), 'function', `${name} ships`);
+}
+for (const [file, pattern] of [['traffic_payload.js', /createCodeView\(/], ['traffic_response.js', /createCodeView\(/],
+  ['native_console.js', /codeViewColor\(/], ['app.js', /mountCodeEditor\(/]]) {
+  assert(pattern.test(sources.find(([name]) => name === file)[1]), `${file} uses the shared code view`);
+}
+const analystContent = document.getElementById('analyst-content');
+assert.equal(analystContent.tagName, 'TEXTAREA', 'Analyst keeps editing in a textarea');
+assert(analystContent.parentElement.classList.contains('code-edit'));
+assert.equal(document.getElementById('analyst-content-colors').getAttribute('aria-hidden'), 'true', 'the colored mirror is not read twice');
+// Traffic mounts only the rows near the view of the list it reads.
+runInContext(`state.requests = Array.from({length: 300}, (_, index) => ({id: 'row-' + index, path: 'row-' + index + '.invalid', method: 'GET',
+  status: 200, type: 'xhr', origin: 'live', hostOnly: true, tabId: '0', events: [], operation: 'request_completed', time: 1}));
+  state.selectedRequestId = null; showScreen('traffic'); renderRequests();`, context);
+const mountedRows = document.querySelectorAll('#request-rows .request-row').length;
+const listedRows = Number(document.querySelector('#request-rows .request-row')?.getAttribute('aria-setsize') ?? 0);
+assert.equal(listedRows, 300);
+assert(mountedRows > 0 && mountedRows <= runInContext('TRAFFIC_ROW_UNMEASURED + 2 * TRAFFIC_ROW_OVERSCAN', context), `${mountedRows} of ${listedRows} rows mounted`);
 // Guest bytecode buffers are binary: hex view, never decoded text.
 assert.equal(runInContext("sourceHexArtifact({kind: 'bytecode_buffer'}) && sourceHexArtifact({kind: 'wasm'}) && !sourceHexArtifact({kind: 'wasm_guest_adapter'})", context), true);
 assert.equal(runInContext("sourceSyntaxLabel(sourceSyntaxLanguage({kind: 'bytecode_buffer', mime_type: 'application/octet-stream', url: 'fixture://guest'}))", context), 'Guest bytecode hex');
@@ -205,4 +225,4 @@ assert.equal(contentLabel.hidden, true, 'only a live session is labeled');
 assert.deepEqual(forbidden, [], 'startup/navigation must not attempt CDP transport');
 assert.deepEqual(asyncErrors, [], 'all asynchronous startup failures must be handled');
 release();
-console.log(`PASS native-only behavior: ${screens.length} screens rendered from shipped scripts without removed state reads or CDP controls; Traffic General plus native Headers, Payload, Preview, Response and Cookies, no exchange/search/compare, guest bytecode hex (offline DOM model; no rendered layout claimed)`);
+console.log(`PASS native-only behavior: ${screens.length} screens rendered from shipped scripts without removed state reads or CDP controls; Traffic General plus native Headers, Payload, Preview, Response and Cookies, no exchange/search/compare, one shared code view, mounted Traffic rows bounded by the view, guest bytecode hex (offline DOM model; no rendered layout claimed)`);

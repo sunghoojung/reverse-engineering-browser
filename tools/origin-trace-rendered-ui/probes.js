@@ -124,11 +124,27 @@
     };
   }
 
+  // Traffic mounts only rows near the view; scroll to a read row so the next poll finds it mounted.
+  function revealListRow(text) {
+    for (const container of document.querySelectorAll('.request-rows')) {
+      const block = container.trafficBlock;
+      const at = block ? block.requests.findIndex(request => request && `${request.method} ${request.path}`.includes(text)) : -1;
+      if (at < 0) continue;
+      const height = Number(container.dataset.rowHeight) || 28;
+      container.scrollTop = Math.max(0, (block.start + at) * height - container.clientHeight / 2);
+      return true;
+    }
+    return false;
+  }
+
   function center(selector, text, block = 'nearest') {
     const candidates = [...document.querySelectorAll(selector)].filter(rendered)
       .filter(element => !text || element.textContent.replace(/\s+/g, ' ').includes(text));
     const element = candidates[0];
-    if (!element) return null;
+    if (!element) {
+      if (text && selector.includes('.request-row')) revealListRow(text);
+      return null;
+    }
     element.scrollIntoView({block, inline: 'nearest'});
     const visible = visibleRect(element);
     if (visible.width === 0 || visible.height === 0) return null;

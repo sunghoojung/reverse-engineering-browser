@@ -289,8 +289,10 @@ session first. Sensitive Canvas images need `"canvas_images": true` with
 Canvas content for this target; `"request_content": true` (request paths,
 queries, headers, cookies and bodies; read headers with `get_request_headers`
 and cookies with `get_request_cookies` and `get_cookie_provenance`) and `"js_invocation_digests": true` take the same
-confirmation. `"document_start": true` permits document-start Console scripts
-(recipe 19). `"js_invocation_sites": "/absolute/path/sites.json"`, or
+confirmation; `"request_content_budget_mib": 1024` raises the request content
+kept from the default 256 MiB. `"request_stacks": true` records the stack that
+started each renderer request for `get_request_stack`. `"document_start": true`
+permits document-start Console scripts (recipe 19). `"js_invocation_sites": "/absolute/path/sites.json"`, or
 `"js_invocation_saved_sites": true` for the sites agent sessions saved with
 `js_invocation_site_action`, arms invocation tracking. None of these is ever
 taken from the environment; `options` in the result and

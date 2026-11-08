@@ -53,11 +53,13 @@ whole-program budget can still produce facts for one callable. See
 [JavaScript source facts v1](javascript-source-facts-v1.md) for exact-byte ranges,
 limits, `coverage.analyzed_range`, and partial/unavailable coverage semantics.
 
-`get_source_format` returns the same exact artifact laid out like Prettier, with
-only whitespace changed: `reb-api call get_source_format --endpoint-file
-/tmp/reb-api-endpoint --param session_id=1 --param artifact_id=2`. Add
-`start_line` and `line_count` to read one window of a large layout. It runs the
-contained formatter worker, so it is listed only with `--allow-effects`. See
+`get_source_format` returns the same exact JavaScript artifact, or JavaScript or
+JSON body, laid out like Prettier, with only whitespace changed: `reb-api call
+get_source_format --endpoint-file /tmp/reb-api-endpoint --param session_id=1
+--param artifact_id=2`. Add `start_line` and `line_count` to read one window of
+a large layout; `anchors` map whole 1,000-line windows to original offsets. It
+runs the contained formatter worker, so it is listed only with
+`--allow-effects`. See
 [Source format v1](source-format-v1.md).
 
 `spec` prints the complete embedded OpenAPI document for validators and client
@@ -407,7 +409,8 @@ returns 409 `dependency_unavailable` for these actions.
 `LiveSessionStart` options: `url`, `wasm_dispatch`, `wasm_call_indirect`,
 `guest_adapter`, `js_dispatch_sites`, `quiet`, `category_mask`,
 `duration_seconds`, `localhost_only`, `canvas_images`, `request_content`,
-`document_start`, `js_invocation_sites`, `js_invocation_saved_sites`,
+`request_content_budget_mib`, `request_stacks`, `document_start`,
+`js_invocation_sites`, `js_invocation_saved_sites`,
 `js_invocation_digests`, `confirm_sensitive_capture`,
 `publish_canonical_endpoint`, `brave_binary`, `timeout_seconds`,
 `wasm_samples_per_function`, `wasm_samples_per_indirect_site`,
@@ -418,12 +421,14 @@ capture switch is off unless named; an inherited capture switch, site file,
 browser profile or embedded-session variable is ignored, so an inherited
 `REB_CAPTURE_REQUEST_CONTENT`, `REB_CONSOLE_DOCUMENT_START`,
 `REB_NATIVE_JS_INVOCATION_SITES`, `REB_NATIVE_JS_INVOCATION_DIGESTS` or
-`REB_NATIVE_REQUEST_STACKS` never reaches an agent session, which runs without
-request stacks.
+`REB_NATIVE_REQUEST_STACKS` never reaches an agent session, and neither does
+`REB_REQUEST_CONTENT_BUDGET_MIB`.
 
 | Option | Launcher switch | Rule |
 | --- | --- | --- |
 | `request_content` | `REB_CAPTURE_REQUEST_CONTENT=1` | Sensitive: needs `confirm_sensitive_capture` and category bits 256 and 1024. Without it, request body length, type and digest are still recorded, but no path, query or body bytes. |
+| `request_content_budget_mib` | `REB_REQUEST_CONTENT_BUDGET_MIB` | 1..4096 MiB of unique request bodies and full targets, default 256. Needs `request_content`, so it is behind the same confirmation. |
+| `request_stacks` | `REB_NATIVE_REQUEST_STACKS=1` | The stack that started each renderer request, read with `get_request_stack`. Needs category bits 256 and 1024. Strict: `REB_NATIVE_REQUEST_STACKS_IF_SUPPORTED` is removed, so a Brave without `--reb-request-stacks` refuses the start. |
 | `document_start` | `REB_CONSOLE_DOCUMENT_START=1` | Permits document-start Console scripts in this capture browser. Arms nothing: a rule still needs a live Console connection and a confirmed `arm_document_start`. |
 | `js_invocation_sites` | `REB_NATIVE_JS_INVOCATION_SITES` | Absolute path of a `native-js-invocation-sites-v1` file. Checked, then armed from a private copy under the agent session directory. Needs category bit 512. |
 | `js_invocation_saved_sites` | `REB_NATIVE_JS_INVOCATION_SITES` | Arms the agent sessions' own saved set, `~/.config/origin-trace/agent-sessions/js-invocation-sites-v1.json`, which `js_invocation_site_action` edits in an agent session. Never the app's set. Refused when empty. Not with `js_invocation_sites`. |
@@ -1001,7 +1006,8 @@ modules usually have a `wasm://wasm/<hex>` URL, so select them with `kind=wasm`
 or `frame_id`, not `host`.
 
 The Rust backend serves these reads. The native stored-evidence `reb://` reader
-serves only the unfiltered window.
+serves the unfiltered window itself and passes filtered reads to the bundled
+backend.
 
 ### Waiting for events
 
@@ -1031,8 +1037,8 @@ timeline. Each row names its root event and the
 `get_events` with `category=network`, `after=first_offset` and the member's
 `records` as `limit` reads them. The
 contract, bounds and invalidation rules are in
-[request-index-v1.md](request-index-v1.md). The `reb://` stored-evidence reader
-does not serve it.
+[request-index-v1.md](request-index-v1.md). The `reb://` stored-evidence
+workspace answers it through the bundled backend.
 
 ## Exact native Traffic to VM selection
 

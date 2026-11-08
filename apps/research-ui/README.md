@@ -79,11 +79,11 @@ captured instead of showing empty panes. Content capture sessions add header
 blocks and cookie lists, which the **Headers** and **Cookies** tabs show.
 
 Traffic selection updates only the mounted rows and selection summary when the
-snapshot, filters, ordering and mounted block are unchanged. Keyboard navigation
+snapshot, filters, ordering and read block are unchanged. Keyboard navigation
 does not repeat search or sorting and does not rebuild rows or reset ledger
 scrolling. A changed snapshot, filter, block or explicit refresh renders again. `node tools/check-traffic-selection-work.mjs` checks production
 controller work and selection invariants. Add `--baseline-ref=<commit>` for a
-reproducible authored 5,000-record/500-row before-and-after Node benchmark. Those
+reproducible authored 5,000-record before-and-after Node benchmark. Those
 timings are not rendered browser or native-app latency; the Requests browser
 gate separately exercises actual row keyboard selection.
 
@@ -582,7 +582,9 @@ captured path and query, and its Payload tab shows them parsed:
 - **Query String Parameters** from the captured target, decoded or as sent.
 - **Request Payload**, Parsed or Source. JSON is a tree whose containers open
   100 children or ranges at a time, so any size stays responsive, and its
-  source is pretty-printed and colored. Form bodies are a name/value table and
+  source is laid out by the backend Oxc formatter, or by the in-page one with
+  the reason when Oxc refuses it, in the shared code view; clicking a token
+  shows its exact raw range. Form bodies are a name/value table and
   multipart bodies list each part's name, filename, type and size, with the
   boundary read from the first line. Other text is colored by its type. Binary
   bytes are only shown as hex. Long sources render in blocks as they scroll.
@@ -627,6 +629,16 @@ relative to that directory; both Analyst adapters pass its `analyst_runner_core.
 to the bundled native runner. `analyst_runner_node.js` remains available for the
 backend's supported Node fallback. The runners are not public UI routes.
 `OriginTrace.icns` and `run-live-session.sh` stay at the Resources root.
+
+The `reb://` workspace answers what only Rust implements (the request index,
+filtered `get_events` reads, request headers and cookies, cookie provenance,
+request stacks, the Oxc source layout and native debugger state) through the
+bundled `OriginTraceBackend`
+([`StoredEvidenceBackend.swift`](macos/StoredEvidenceBackend.swift)). The first
+such read starts it idle over the same stores on a loopback port only the app
+knows. It exits with the app (`--owner-pid`) and stops when a live workspace
+opens. The unfiltered event window stays in Swift and keeps the network record
+types the Rust window keeps.
 
 To package a new UI module, add its filename once to the explicit asset loop in
 [`build-research-app.sh`](../../scripts/build-research-app.sh). If it is served by
@@ -706,8 +718,10 @@ Content capture sessions add the path and query and bounded request body
 bytes, which Payload parses, response bodies, and request and response header
 blocks ([native network v3](../../protocol/native-network-v3.md)). Response
 (`traffic_response.js`) shows a body's capture state, codings, lengths and
-digest, then its bytes as syntax-colored text with pretty print, wrap, find,
-copy and hex, read 2 MiB at a time and rechecked by SHA-256. Preview shows a
+digest, then its bytes in the shared code view with pretty print (the Oxc
+layout for JavaScript and JSON, else the in-page one with the reason), raw
+ranges of laid-out tokens, wrap, find, copy and hex, read 2 MiB at a time and
+rechecked by SHA-256. Preview shows a
 bounded JSON tree, a raster image whose signature matches its bytes, or text;
 HTML and SVG stay source and are never rendered. Script and Wasm responses show
 their Sources artifact in any session. A request with no body record says why:
@@ -741,17 +755,20 @@ while keeping Origin Trace's own controls and Rosé Pine Moon palette.
 
 Traffic lists every request of the session from the backend request index
 (`get_requests`, [request index v1](../../protocol/request-index-v1.md)). The
-ledger mounts one block of at most 500 fixed-height rows inside padding for the
-rest and moves it as you scroll, so every request is reachable. Counts, the
+ledger reads one 500-row page of the index around the view and mounts only
+the fixed-height rows in view plus 8 on each side, with spacers for the rest,
+so every request is reachable. Each row names its place in the whole list
+(`aria-posinset`, `aria-setsize`); Arrow keys, Home and End move the selection
+through rows that are not mounted yet, and a focused row scrolled away leaves
+focus on the list until it returns. Counts, the
 `N / M requests` footer, tab chips, domain options, filters and search cover the
 whole session. Newest requests come first; rows that arrive above a scrolled
 viewport do not move it or the selection. Selecting a row whose records are not
 all in the newest event window reads them with `get_events` from the row's first
 byte offset before the inspector opens. While the index is still indexing a large
 store, or counts unreadable or over-limit records, the footer says so. Until it
-first answers, and in the bundled `reb://` workspace, Traffic uses the newest
-network window and labels its counts that way; a later failed read keeps the
-last rows. The Rust native-event API returns separate newest general and network lifecycle
+first answers, Traffic uses the newest network window and labels its counts that
+way; a later failed read keeps the last rows. The Rust native-event API returns separate newest general and network lifecycle
 windows of up to 5,000 events each from at most the newest 64 MiB. Canvas/WebGL activity does not consume
 network slots within that byte budget. That network window, including
 redirect, failed, and response-completed outcomes, also supplies the inspector. Notices distinguish a capped
@@ -951,13 +968,13 @@ capture, fetch anything or change a row.
 | `request_stack.js` | Initiator tab: the native request or navigation call stack and task chain from `get_request_stack`, opening Sources at a frame, and the initiator chain |
 | `command_palette.js` | The ⌘ / Ctrl + K palette: provider registry, matching, ranking and caps, and its dialog controller; `app.js` supplies the built-in providers |
 | `pane_layout.js` | Shared pointer and keyboard pane resizing, responsive constraints, and local size preferences |
-| `traffic_view.js` | Native request ledger rows, ordering, the mounted block and URL/method/status/name search, the General coverage view, request body record wording, and the saved-capture export document |
+| `traffic_view.js` | Native request ledger rows, ordering, the read block and its mounted rows and URL/method/status/name search, the General coverage view, request body record wording, and the saved-capture export document |
 | `network_scope.js` | Counted browser-internal exclusions and the reversible browser-internal view filter |
 | `request_tabs.js` | Each Traffic row's tabs from tab sets and request tab links, tab page names and rows without a tab |
 | `traffic_headers.js` | The Headers tab: hops from native header records, checked block reads, Raw and copy |
 | `traffic_cookies.js` | The Cookies tab: checked cookie list reads, request and response tables, filtered-out cookies, sort, copy and name provenance |
 | `traffic_payload.js` | The Payload tab: query parameters, the parsed and source request body, find and copy, and Capture details |
-| `traffic_index.js` | The request index client: the mounted block's rows, totals and facets, and a selected row's records from the event store |
+| `traffic_index.js` | The request index client: the read block's rows, totals and facets, and a selected row's records from the event store |
 | `traffic_filter.js` | The filter grammar, Invert, Hide internal, 3rd-party, Failed and the time range over the newest window, mirroring the request index |
 | `traffic_columns.js` | Column widths, hidden columns, the header menu, saved layout and fitting columns to the table width |
 | `traffic_overview.js` | The timing strip and its pointer and keyboard time-range selection |
@@ -966,7 +983,8 @@ capture, fetch anything or change a row.
 | `source_tree.js` | The Sources navigator: frame, group, origin and folder model, hand-parsed non-special URLs, mounted-window rows, keyboard, type-ahead and filter; `app.js` supplies the catalog and the open path |
 | `source_search.js` | Search all files: the literal matcher on the Find index, the bounded and cancellable search, partial-result notes and the results panel; `app.js` supplies the artifact reader and the open path |
 | `source_syntax.js` | Source names, display formatting, the inert hex view for Wasm and guest bytecode artifacts, and bounded tokenization without DOM or application state |
-| `source_format.js` | The backend JavaScript layout client and its whitespace-only mapping to the displayed evidence |
+| `source_format.js` | The backend layout client (whole bodies and 1,000-line Sources pages) and its whitespace-only mapping to the displayed evidence |
+| `code_view.js` | The code view Payload, Response, Native Console and Analyst share: Sources colors, lazily mounted rows, find marks, layouts with raw ranges and the colored textarea editor |
 | `native_console.js`, `native_console_completion.js` | Disposable browser console controls and local built-in API completion |
 | `../origin-trace-backend/src/app.rs`, `evidence.rs` | Loopback HTTP routing and bounded evidence reads |
 | `../origin-trace-backend/src/workspace.rs`, `analyst.rs`, `workspace_lease.rs` | Workspace contracts, explicit analyst execution, private durable replacement |
@@ -1080,7 +1098,9 @@ color at low strength, while folders, origins and frames stay neutral. Code is t
 Native Console color code like the Rosé Pine Moon VS Code theme (Rosé Pine
 Dawn in light mode), with its token colors, bracket pair colors, editor colors
 and Menlo 12/18 px; the Analyst editor and the Traffic Payload and Response
-code views take the same editor colors and font. With macOS Increase Contrast, comments and
+code views take the same editor colors and font. Payload, Response, Native
+Console and Analyst use one code view (`code_view.js`) with the Sources lexer
+and theme; Analyst colors its text behind the textarea, which keeps editing. With macOS Increase Contrast, comments and
 keywords are brightened. `node tools/check-source-format-ui.mjs` (part of
 `make lint`) pins the token kinds and colors.
 
@@ -1405,10 +1425,14 @@ pretty-printed, shown as **Pretty-printed · Show original**; the choice either
 way is remembered per artifact for the session. The gutter numbers formatted
 lines; its tooltip names the original line and column. A complete JavaScript artifact is laid out by the
 backend's Oxc formatter (`get_source_format`, [Source format v1](../../protocol/source-format-v1.md)):
-Prettier's layout at 80 columns, with every token printed as captured. Its
-text differs from the evidence only in whitespace, so the editor maps every
-character back by walking both texts, and clicking a formatted token shows the
-exact raw range it came from. While it runs the original stays on screen. If
+Prettier's layout at 80 columns, with every token printed as captured. Sources
+reads it one 1,000-line page at a time; each page's anchor names its first
+original offset, so the editor maps every character back by walking that
+page against its slice of the evidence, and clicking a formatted token shows
+the exact raw range it came from. Each page's colors continue the original's
+lexer state where it starts. The page shown stays while the next is read, and
+Find searches the complete evidence text and opens the page that shows each
+match. While the first page is read the original stays on screen. If
 the source does not parse, the backend is unavailable, or the text is derived,
 truncated or another language, the in-page formatter is used and the
 status bar says so. It runs in a Web Worker (on the page, after one task, where
@@ -1749,7 +1773,7 @@ module bytes. A longer module keeps a labeled prefix, and Find covers that prefi
 Deob retains at most eight documents, 16 MiB of original/derived UTF-16 text and
 250,000 map segments and 32 MiB of serialized response data in total. In-page
 formatting retains at most eight layouts and 64 Mi UTF-16 units of input and
-output text; Oxc layouts at most four and 64 Mi units. The newest layout is kept
+output text; Oxc layouts at most four (16 pages each in Sources, or one body of at most 4 MiB) and 64 Mi units. The newest layout is kept
 even when it alone exceeds its budget. These are explicit text/entry
 budgets, not JavaScript heap or process-RSS guarantees. The editor DOM and Facts'
 independently verified original also use memory; no duplicate history of source

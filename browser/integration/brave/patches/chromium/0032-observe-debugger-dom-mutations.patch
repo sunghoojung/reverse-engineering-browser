@@ -1,0 +1,142 @@
+diff --git a/third_party/blink/renderer/core/dom/container_node.cc b/third_party/blink/renderer/core/dom/container_node.cc
+index d33adc4..1519a12 100644
+--- a/third_party/blink/renderer/core/dom/container_node.cc
++++ b/third_party/blink/renderer/core/dom/container_node.cc
+@@ -23,6 +23,7 @@
+ 
+ #include "third_party/blink/renderer/core/dom/container_node.h"
+ 
++#include "brave/components/reverse_engineering_browser/renderer/native_debugger_observation_blink.h"
+ #include "third_party/blink/renderer/bindings/core/v8/v8_get_html_options.h"
+ #include "third_party/blink/renderer/bindings/core/v8/v8_union_sethtmlunsafeoptions_trustedparseroptions.h"
+ #include "third_party/blink/renderer/core/accessibility/ax_object_cache.h"
+@@ -34,6 +35,7 @@
+ #include "third_party/blink/renderer/core/dom/child_frame_disconnector.h"
+ #include "third_party/blink/renderer/core/dom/child_list_mutation_scope.h"
+ #include "third_party/blink/renderer/core/dom/class_collection.h"
++#include "third_party/blink/renderer/core/dom/dom_node_ids.h"
+ #include "third_party/blink/renderer/core/dom/element.h"
+ #include "third_party/blink/renderer/core/dom/element_traversal.h"
+ #include "third_party/blink/renderer/core/dom/events/event_dispatch_forbidden_scope.h"
+@@ -97,6 +99,40 @@ namespace blink {
+ 
+ namespace {
+ 
++// A Console DOM watch; see protocol/native-debugger-observation-v1.md. A
++// removal names the watched node itself, else the nearest watched ancestor.
++void ObserveNativeDomMutation(const ContainerNode& parent,
++                              const Node& child,
++                              bool removal) {
++  const std::uint64_t frame_id = reb::debugger_observation::FrameId(
++      parent.GetDocument().GetExecutionContext());
++  if (!reb::NativeDebuggerWatch::Wants(frame_id, reb::kNativeWatchDom)) {
++    return;
++  }
++  const auto node_type = static_cast<std::uint16_t>(child.getNodeType());
++  if (removal) {
++    const int slot = reb::NativeDebuggerWatch::DomSlot(
++        DOMNodeIds::ExistingIdForNode(&child), reb::kNativeWatchRemoval);
++    if (slot >= 0) {
++      reb::NativeDebuggerWatch::Mutation(frame_id, reb::kNativeWatchRemoval,
++                                         slot, node_type, {});
++      return;
++    }
++  }
++  const Node* ancestor = &parent;
++  for (std::size_t depth = 0;
++       ancestor && depth < reb::kNativeWatchAncestorLimit;
++       ++depth, ancestor = ancestor->parentNode()) {
++    const int slot = reb::NativeDebuggerWatch::DomSlot(
++        DOMNodeIds::ExistingIdForNode(ancestor), reb::kNativeWatchSubtree);
++    if (slot >= 0) {
++      reb::NativeDebuggerWatch::Mutation(frame_id, reb::kNativeWatchSubtree,
++                                         slot, node_type, {});
++      return;
++    }
++  }
++}
++
+ // This class is helpful to detect necessity of
+ // RecheckNodeInsertionStructuralPrereq() after removeChild*() inside
+ // InsertBefore(), AppendChild(), and ReplaceChild().
+@@ -391,6 +427,10 @@ void ContainerNode::InsertNodeVector(
+     const Functor& mutator,
+     NodeVector& post_insertion_notification_targets) {
+   probe::WillInsertDOMNode(this);
++  if (reb::NativeDebuggerWatch::Armed(reb::kNativeWatchDom) &&
++      !targets.empty()) [[unlikely]] {
++    ObserveNativeDomMutation(*this, *targets.front(), false);
++  }
+   {
+     EventDispatchForbiddenScope assert_no_event_dispatch;
+     ScriptForbiddenScope forbid_script;
+@@ -859,6 +899,9 @@ void ContainerNode::WillRemoveChild(Node& child) {
+   ChildListMutationScope(*this).WillRemoveChild(child);
+   child.NotifyMutationObserversNodeWillDetach();
+   probe::WillRemoveDOMNode(&child);
++  if (reb::NativeDebuggerWatch::Armed(reb::kNativeWatchDom)) [[unlikely]] {
++    ObserveNativeDomMutation(*this, child, true);
++  }
+ 
+   // Only disconnect subframes in the non-state-preserving-atomic-move case,
+   // i.e., the traditional case where we intend to *fully* remove a node from
+@@ -900,6 +943,9 @@ void ContainerNode::WillRemoveChildren() {
+     mutation.WillRemoveChild(child);
+     child.NotifyMutationObserversNodeWillDetach();
+     probe::WillRemoveDOMNode(&child);
++    if (reb::NativeDebuggerWatch::Armed(reb::kNativeWatchDom)) [[unlikely]] {
++      ObserveNativeDomMutation(*this, child, true);
++    }
+   }
+ 
+   // Only disconnect subframes in the non-state-preserving-atomic-move case,
+@@ -1083,6 +1129,9 @@ void ContainerNode::ParserRemoveChild(Node& old_child) {
+   old_child.NotifyMutationObserversNodeWillDetach();
+ 
+   probe::WillRemoveDOMNode(&old_child);
++  if (reb::NativeDebuggerWatch::Armed(reb::kNativeWatchDom)) [[unlikely]] {
++    ObserveNativeDomMutation(*this, old_child, true);
++  }
+ 
+   HTMLFrameOwnerElement::PluginDisposeSuspendScope suspend_plugin_dispose;
+   TreeOrderedMap::RemoveScope tree_remove_scope;
+diff --git a/third_party/blink/renderer/core/dom/element.cc b/third_party/blink/renderer/core/dom/element.cc
+index 5227c6b..5c85b35 100644
+--- a/third_party/blink/renderer/core/dom/element.cc
++++ b/third_party/blink/renderer/core/dom/element.cc
+@@ -34,6 +34,7 @@
+ 
+ #include "base/containers/adapters.h"
+ #include "base/feature_list.h"
++#include "brave/components/reverse_engineering_browser/renderer/native_debugger_observation_blink.h"
+ #include "cc/input/snap_selection_strategy.h"
+ #include "components/viz/common/surfaces/tracked_element_rects.h"
+ #include "third_party/blink/public/common/features.h"
+@@ -119,6 +120,7 @@
+ #include "third_party/blink/renderer/core/dom/document.h"
+ #include "third_party/blink/renderer/core/dom/document_fragment.h"
+ #include "third_party/blink/renderer/core/dom/document_lifecycle.h"
++#include "third_party/blink/renderer/core/dom/dom_node_ids.h"
+ #include "third_party/blink/renderer/core/dom/dom_token_list.h"
+ #include "third_party/blink/renderer/core/dom/element_animation_trigger_data.h"
+ #include "third_party/blink/renderer/core/dom/element_data_cache.h"
+@@ -11924,6 +11926,19 @@ void Element::WillModifyAttribute(const QualifiedName& name,
+         MutationRecord::CreateAttributes(this, name, old_value));
+   }
+   probe::WillModifyDOMAttr(this, old_value, new_value);
++  // A Console DOM watch; see protocol/native-debugger-observation-v1.md.
++  if (reb::NativeDebuggerWatch::Armed(reb::kNativeWatchDom)) [[unlikely]] {
++    const int slot = reb::NativeDebuggerWatch::DomSlot(
++        DOMNodeIds::ExistingIdForNode(this), reb::kNativeWatchAttribute);
++    if (slot >= 0) {
++      reb::NativeDebuggerWatch::Mutation(
++          reb::debugger_observation::FrameId(
++              GetDocument().GetExecutionContext()),
++          reb::kNativeWatchAttribute, slot,
++          static_cast<std::uint16_t>(getNodeType()),
++          reb::debugger_observation::Latin1(name.LocalName()));
++    }
++  }
+ }
+ 
+ DISABLE_CFI_PERF

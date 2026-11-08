@@ -117,6 +117,8 @@ struct Session {
     // browser reply that lists no script. A live binding outlives each Console
     // connection, so Stop must not hand it back while this is set.
     document_start_armed: bool,
+    // The document and rules the renderer last confirmed armed through `watch`.
+    watch: Option<(u64, Value)>,
 }
 impl Session {
     async fn stop(mut self) {
@@ -157,6 +159,14 @@ impl Session {
             .flatten()
             .filter_map(|target| target["id"].as_str()?.parse().ok())
             .collect();
+        // Navigation disarms the renderer's rules with the document.
+        if self
+            .watch
+            .as_ref()
+            .is_some_and(|(armed, _)| !self.native_targets.contains(armed))
+        {
+            self.watch = None;
+        }
         if let Some(target) = self
             .live_target
             .filter(|target| !self.native_targets.contains(target))
@@ -182,6 +192,17 @@ impl Session {
         }
     }
     async fn release_live_values(&mut self) -> Result<()> {
+        // Watch rules outlive a listing's agent rebind, so Stop disarms them.
+        if let Some((target, _)) = self.watch.take() {
+            let result = self
+                .exchange(3, target, r#"{"operation":"unwatch"}"#)
+                .await?;
+            if result["runtime"]["status"] != "ok" && result["status"] != "stale_target" {
+                return Err(Error::conflict(
+                    "Watch rules were not confirmed disarmed; restart the capture binding",
+                ));
+            }
+        }
         // Clear only documents used by this console connection. Stale native
         // IDs fail closed; never find a replacement document for cleanup.
         for target in self.accessed_targets.clone() {
@@ -464,6 +485,16 @@ impl NativeConsole {
             .unwrap_or_else(|error| {
                 json!({"contract_version":2,"available":false,"state":"idle","session_id":null,"message":error.message})
             })
+    }
+    /// The confirmed watch rules, `Value::Null` when none, or `None` while an
+    /// action holds the session. Never exchanges with the browser.
+    pub fn watch(&self) -> Option<Value> {
+        let guard = self.inner.session.try_lock().ok()?;
+        Some(guard.as_ref().map_or(Value::Null, |session| {
+            session.watch.as_ref().map_or(Value::Null, |(target, rules)| {
+                json!({"session_id": session.id, "target_id": target.to_string(), "rules": rules})
+            })
+        }))
     }
     pub async fn document_start(&self, after: u64) -> Result<Value> {
         let inner = self.inner.clone();
@@ -981,6 +1012,17 @@ impl Inner {
             session.stale_target = Some(target);
             value["text"] = json!(stale_message(target));
         }
+        let watch = request["command"]["operation"].as_str();
+        if operation == 3 && matches!(watch, Some("watch" | "unwatch")) {
+            // A refused watch leaves nothing armed (renderer/native_console_runtime.cc).
+            session.watch = result
+                .as_ref()
+                .ok()
+                .filter(|value| watch == Some("watch") && value["runtime"]["status"] == "ok")
+                .map(|_| (target, request["command"]["rules"].clone()));
+        } else if session.watch.as_ref().map(|(armed, _)| *armed) == session.stale_target {
+            session.watch = None;
+        }
         if result.is_err() {
             self.end(guard.take().unwrap(), LOST_EXCHANGE).await;
         }
@@ -1219,6 +1261,7 @@ impl BridgeProcess {
             accessed_targets: BTreeSet::new(),
             document_start: false,
             document_start_armed: false,
+            watch: None,
         }
     }
     async fn stop(mut self) {
@@ -2269,6 +2312,7 @@ while True:
             accessed_targets: BTreeSet::new(),
             document_start: false,
             document_start_armed: false,
+            watch: None,
         };
         (session, directory)
     }
@@ -2539,6 +2583,50 @@ while True:
                 .is_err()
         );
         assert_eq!(requests(&directory).len(), before);
+        console.stop().await;
+    }
+    #[tokio::test]
+    async fn live_watch_is_tracked_disarmed_on_stop_and_cleared_by_navigation() {
+        let (console, directory) = live_fixture().await;
+        let identity = connect_fixture(&console, "22").await;
+        let rules = json!({"events":["click"],"exceptions":"uncaught"});
+        let watch = |session: &str, operation: &str| {
+            let mut command = json!({"operation": operation});
+            if operation == "watch" {
+                command["rules"] = rules.clone();
+            }
+            json!({"action":"runtime","session_id":session,"target_id":"22","command":command})
+        };
+        console.action(&watch(&identity, "watch")).await.unwrap();
+        assert_eq!(
+            console.watch().unwrap(),
+            json!({"session_id":identity,"target_id":"22","rules":rules})
+        );
+        console.action(&watch(&identity, "unwatch")).await.unwrap();
+        assert_eq!(console.watch().unwrap(), Value::Null);
+        console.action(&watch(&identity, "watch")).await.unwrap();
+        console
+            .action(&json!({"action":"stop","session_id":identity}))
+            .await
+            .unwrap();
+        let sent: Vec<Value> = requests(&directory)
+            .into_iter()
+            .map(|request| request["source"].clone())
+            .collect();
+        let unwatch = sent.iter().rposition(|s| s == r#"{"operation":"unwatch"}"#);
+        let clear = sent.iter().rposition(|s| s == r#"{"operation":"clear"}"#);
+        assert!(unwatch.unwrap() < clear.unwrap(), "{sent:?}");
+        assert_eq!(console.watch().unwrap(), Value::Null);
+
+        let second = connect_fixture(&console, "22").await;
+        console.action(&watch(&second, "watch")).await.unwrap();
+        std::fs::write(
+            directory.path().join("targets.json"),
+            r#"[{"id":11,"url":"https://same.test/page"}]"#,
+        )
+        .unwrap();
+        console.state().await;
+        assert_eq!(console.watch().unwrap(), Value::Null);
         console.stop().await;
     }
     async fn arm_fixture(console: &NativeConsole, directory: &TempDir) -> String {

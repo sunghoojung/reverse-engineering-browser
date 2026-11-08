@@ -4385,8 +4385,8 @@
     "/api/native-debugger": {
       "get": {
         "operationId": "get_native_debugger",
-        "summary": "Read the pausing native debugger state, or that it is unsupported",
-        "description": "availability unsupported with reason browser_debugger_unsupported means no Brave build serves the native debugger; that is not an empty breakpoint list, and no frames, scopes or values are invented. policy proposed_pending_approval means docs/product/native-debugger-v1.md has not been approved into SAFETY.md. Non-pausing observation rules are the Console watch command; their records arrive through get_events and wait_for_events.",
+        "summary": "Read Phase 1 threads, watch rules and observations, and the pausing debugger state",
+        "description": "Phase 1 is served: threads lists Console documents and recorded workers, watch is what the renderer confirmed armed through the Console watch command, and observations are the newest decoded records; wait on them with wait_for_events. availability unsupported with reason browser_debugger_unsupported means no Brave build serves the pausing debugger; that is not an empty breakpoint list, and no frames, scopes or values are invented. policy proposed_pending_approval means docs/product/native-debugger-v1.md has not been approved into SAFETY.md.",
         "tags": [
           "native-debugger"
         ],
@@ -20513,7 +20513,11 @@
           "lease_limit_ms",
           "lease",
           "paused",
-          "breakpoints"
+          "breakpoints",
+          "threads",
+          "watch",
+          "observations",
+          "observations_malformed"
         ],
         "properties": {
           "contract_version": {
@@ -20585,6 +20589,493 @@
             "items": {
               "type": "object"
             }
+          },
+          "threads": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "console",
+              "frames",
+              "workers"
+            ],
+            "description": "Console documents (frames, including out-of-process frames) and the workers whose requests the renderer recorded. Not a pausable thread list.",
+            "properties": {
+              "console": {
+                "type": "string",
+                "maxLength": 32
+              },
+              "frames": {
+                "type": "array",
+                "maxItems": 256,
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "target_id",
+                    "label",
+                    "origin",
+                    "frame",
+                    "out_of_process"
+                  ],
+                  "properties": {
+                    "target_id": {
+                      "type": "string",
+                      "pattern": "^(0|[1-9][0-9]{0,19})$"
+                    },
+                    "label": {
+                      "type": "string",
+                      "x-max-utf8-bytes": 256
+                    },
+                    "origin": {
+                      "type": "string",
+                      "x-max-utf8-bytes": 512
+                    },
+                    "frame": {
+                      "enum": [
+                        "top",
+                        "child"
+                      ]
+                    },
+                    "out_of_process": {
+                      "type": [
+                        "boolean",
+                        "null"
+                      ]
+                    }
+                  }
+                }
+              },
+              "workers": {
+                "type": "array",
+                "maxItems": 64,
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "kind",
+                    "session_id",
+                    "process_id",
+                    "context_id",
+                    "last_sequence",
+                    "requests"
+                  ],
+                  "properties": {
+                    "kind": {
+                      "enum": [
+                        "dedicated_worker",
+                        "shared_worker",
+                        "service_worker"
+                      ]
+                    },
+                    "session_id": {
+                      "type": "string",
+                      "pattern": "^(0|[1-9][0-9]{0,19})$"
+                    },
+                    "process_id": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 4294967295
+                    },
+                    "context_id": {
+                      "type": "string",
+                      "pattern": "^(0|[1-9][0-9]{0,19})$"
+                    },
+                    "last_sequence": {
+                      "type": "string",
+                      "pattern": "^(0|[1-9][0-9]{0,19})$"
+                    },
+                    "requests": {
+                      "type": "integer",
+                      "minimum": 1,
+                      "maximum": 2048
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "watch": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "state",
+              "armed"
+            ],
+            "description": "Rules the renderer last confirmed armed through the Console watch command. busy means a Console action holds the session; read again.",
+            "properties": {
+              "state": {
+                "enum": [
+                  "none",
+                  "armed",
+                  "busy"
+                ]
+              },
+              "armed": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "session_id",
+                      "target_id",
+                      "rules"
+                    ],
+                    "properties": {
+                      "session_id": {
+                        "type": "string",
+                        "pattern": "^(0|[1-9][0-9]{0,19})$"
+                      },
+                      "target_id": {
+                        "type": "string",
+                        "pattern": "^(0|[1-9][0-9]{0,19})$"
+                      },
+                      "rules": {
+                        "type": "object"
+                      }
+                    }
+                  }
+                ]
+              }
+            }
+          },
+          "observations": {
+            "type": "array",
+            "maxItems": 32,
+            "description": "The newest Phase 1 records, decoded; the same records get_events and wait_for_events return with hex payloads. Identities, kinds, positions and names only.",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "type",
+                "session_id",
+                "process_id",
+                "frame_id",
+                "sequence_number",
+                "parent_event_id",
+                "request_id",
+                "monotonic_time_ns",
+                "stack",
+                "detail"
+              ],
+              "properties": {
+                "type": {
+                  "enum": [
+                    "request_watch_match",
+                    "listener_dispatch",
+                    "timer_observation",
+                    "csp_violation",
+                    "exception_observation",
+                    "dom_mutation"
+                  ]
+                },
+                "session_id": {
+                  "type": "string",
+                  "pattern": "^(0|[1-9][0-9]{0,19})$"
+                },
+                "process_id": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 4294967295
+                },
+                "frame_id": {
+                  "type": "string",
+                  "pattern": "^(0|[1-9][0-9]{0,19})$"
+                },
+                "sequence_number": {
+                  "type": "string",
+                  "pattern": "^(0|[1-9][0-9]{0,19})$"
+                },
+                "parent_event_id": {
+                  "type": "string",
+                  "pattern": "^(0|[1-9][0-9]{0,19})$"
+                },
+                "request_id": {
+                  "type": "string",
+                  "pattern": "^(0|[1-9][0-9]{0,19})$"
+                },
+                "monotonic_time_ns": {
+                  "type": "string",
+                  "pattern": "^(0|[1-9][0-9]{0,19})$"
+                },
+                "stack": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "state",
+                    "total_depth",
+                    "recorded",
+                    "async_frames",
+                    "digest",
+                    "innermost"
+                  ],
+                  "properties": {
+                    "state": {
+                      "enum": [
+                        "captured",
+                        "no_script",
+                        "unsupported_thread",
+                        "not_retained_artifact_unavailable",
+                        "not_retained_budget"
+                      ]
+                    },
+                    "total_depth": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "recorded": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "async_frames": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "digest": {
+                      "type": [
+                        "string",
+                        "null"
+                      ],
+                      "pattern": "^[0-9a-f]{64}$"
+                    },
+                    "innermost": {
+                      "oneOf": [
+                        {
+                          "type": "null"
+                        },
+                        {
+                          "type": "object",
+                          "additionalProperties": false,
+                          "required": [
+                            "kind",
+                            "script_id",
+                            "position",
+                            "detail"
+                          ],
+                          "properties": {
+                            "kind": {
+                              "type": "integer",
+                              "minimum": 1,
+                              "maximum": 2
+                            },
+                            "script_id": {
+                              "type": "integer",
+                              "minimum": 1
+                            },
+                            "position": {
+                              "type": "integer",
+                              "minimum": 0
+                            },
+                            "detail": {
+                              "type": "integer",
+                              "minimum": 0
+                            }
+                          }
+                        }
+                      ]
+                    }
+                  }
+                },
+                "detail": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "rule": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 15
+                    },
+                    "method_matched": {
+                      "type": "boolean"
+                    },
+                    "target": {
+                      "enum": [
+                        "element",
+                        "document",
+                        "window",
+                        "node",
+                        "other"
+                      ]
+                    },
+                    "node_type": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 65535
+                    },
+                    "listener": {
+                      "oneOf": [
+                        {
+                          "type": "null"
+                        },
+                        {
+                          "type": "object",
+                          "additionalProperties": false,
+                          "required": [
+                            "script_id",
+                            "position",
+                            "function_start"
+                          ],
+                          "properties": {
+                            "script_id": {
+                              "type": "integer",
+                              "minimum": 1,
+                              "maximum": 4294967295
+                            },
+                            "position": {
+                              "type": "integer",
+                              "minimum": 0,
+                              "maximum": 4294967295
+                            },
+                            "function_start": {
+                              "type": "integer",
+                              "minimum": 0,
+                              "maximum": 4294967295
+                            }
+                          }
+                        }
+                      ]
+                    },
+                    "callback": {
+                      "oneOf": [
+                        {
+                          "type": "null"
+                        },
+                        {
+                          "type": "object",
+                          "additionalProperties": false,
+                          "required": [
+                            "script_id",
+                            "position",
+                            "function_start"
+                          ],
+                          "properties": {
+                            "script_id": {
+                              "type": "integer",
+                              "minimum": 1,
+                              "maximum": 4294967295
+                            },
+                            "position": {
+                              "type": "integer",
+                              "minimum": 0,
+                              "maximum": 4294967295
+                            },
+                            "function_start": {
+                              "type": "integer",
+                              "minimum": 0,
+                              "maximum": 4294967295
+                            }
+                          }
+                        }
+                      ]
+                    },
+                    "site": {
+                      "oneOf": [
+                        {
+                          "type": "null"
+                        },
+                        {
+                          "type": "object",
+                          "additionalProperties": false,
+                          "required": [
+                            "script_id",
+                            "position",
+                            "function_start"
+                          ],
+                          "properties": {
+                            "script_id": {
+                              "type": "integer",
+                              "minimum": 1,
+                              "maximum": 4294967295
+                            },
+                            "position": {
+                              "type": "integer",
+                              "minimum": 0,
+                              "maximum": 4294967295
+                            },
+                            "function_start": {
+                              "type": "integer",
+                              "minimum": 0,
+                              "maximum": 4294967295
+                            }
+                          }
+                        }
+                      ]
+                    },
+                    "event_type": {
+                      "type": "string",
+                      "pattern": "^[!-~]{1,27}$"
+                    },
+                    "phase": {
+                      "enum": [
+                        "scheduled",
+                        "fired"
+                      ]
+                    },
+                    "kind": {
+                      "enum": [
+                        "timeout",
+                        "interval",
+                        "uncaught",
+                        "caught",
+                        "unhandled_rejection",
+                        "attribute",
+                        "subtree",
+                        "removal"
+                      ]
+                    },
+                    "string_callback": {
+                      "type": "boolean"
+                    },
+                    "timer_id": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 4294967295
+                    },
+                    "delay_ms": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 4294967295
+                    },
+                    "directive": {
+                      "type": "string",
+                      "maxLength": 32
+                    },
+                    "directive_value": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 255
+                    },
+                    "disposition": {
+                      "enum": [
+                        "enforce",
+                        "report"
+                      ]
+                    },
+                    "blocked_host": {
+                      "type": "string",
+                      "pattern": "^[!-~]{0,45}$"
+                    },
+                    "node_slot": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 3
+                    },
+                    "attribute": {
+                      "type": "string",
+                      "pattern": "^[!-~]{0,32}$"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "observations_malformed": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 32,
+            "description": "Newest records the core rules refuse; counted, never shown."
           }
         }
       },

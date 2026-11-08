@@ -12,18 +12,23 @@
 #include <memory>
 #include <set>
 #include <string_view>
+#include <vector>
 
+#include "base/auto_reset.h"
 #include "base/functional/bind.h"
 #include "base/json/json_reader.h"
 #include "base/json/json_writer.h"
 #include "base/strings/string_number_conversions.h"
 #include "base/strings/string_util.h"
 #include "base/time/time.h"
+#include "brave/components/reverse_engineering_browser/renderer/native_debugger_observation.h"
+#include "brave/components/reverse_engineering_browser/renderer/native_script_cookie_sink.h"
 #include "third_party/blink/public/platform/web_string.h"
 #include "third_party/blink/public/web/web_element.h"
 #include "third_party/blink/public/web/web_local_frame.h"
 #include "v8/include/v8-debug.h"
 #include "v8/include/v8-native-console.h"
+#include "v8/include/v8-native-stack.h"
 
 namespace reb {
 namespace {
@@ -107,6 +112,37 @@ bool Identifier(std::string_view name) {
   return std::all_of(name.begin(), name.end(),
                      [&](char c) { return first(c) || base::IsAsciiDigit(c); });
 }
+std::uint64_t FrameId(const blink::WebLocalFrame* frame) {
+  if (!frame) {
+    return 0;
+  }
+  const base::UnguessableToken& token = frame->GetLocalFrameToken().value();
+  return NativeFrameIdOf(token.GetHighForSerialization(), token.GetLowForSerialization());
+}
+// A Console command's own throw is not a page exception.
+bool g_running = false;
+void ObserveThrow(v8::Isolate* isolate) {
+  constexpr std::uint32_t kKinds = kNativeWatchUncaught | kNativeWatchCaught;
+  if (g_running || !NativeDebuggerWatch::Armed(kKinds)) {
+    return;
+  }
+  const std::uint64_t frame_id = FrameId(blink::WebLocalFrame::FrameForCurrentContext());
+  if (!NativeDebuggerWatch::Wants(frame_id, kKinds)) {
+    return;
+  }
+  const v8::NativeThrow thrown = v8::DescribeNativeThrow(isolate);
+  if (thrown.catcher == v8::NativeThrowCatcher::kEmbedder) {
+    return;
+  }
+  NativeStackFrame site;
+  if (thrown.site.kind == v8::NativeStackFrameKind::kJavaScript && thrown.site.script_id != 0) {
+    site = NativeDebuggerWatch::FunctionFrame(static_cast<int>(thrown.site.script_id),
+                                              static_cast<int>(thrown.site.detail),
+                                              static_cast<int>(thrown.site.position));
+  }
+  NativeDebuggerWatch::Exception(frame_id, thrown.catcher == v8::NativeThrowCatcher::kNone ? 1 : 2,
+                                 site);
+}
 base::DictValue Location(v8::Isolate* isolate,
                          v8::Local<v8::Value> resource,
                          int line,
@@ -122,7 +158,9 @@ base::DictValue Location(v8::Isolate* isolate,
 
 NativeConsoleRuntime::NativeConsoleRuntime() = default;
 
-NativeConsoleRuntime::~NativeConsoleRuntime() = default;
+NativeConsoleRuntime::~NativeConsoleRuntime() {
+  Unwatch();
+}
 
 void NativeConsoleRuntime::Reset() {
   for (auto& slot : slots_) {
@@ -133,6 +171,91 @@ void NativeConsoleRuntime::Reset() {
   monitors_.clear();
   last_ = 0;
   messages_.Reset();
+}
+void NativeConsoleRuntime::Unwatch() {
+  if (watch_frame_ != 0) {
+    NativeDebuggerWatch::Disarm(watch_frame_);
+    // Another document's newer Arm keeps the observer it installed.
+    if (!NativeDebuggerWatch::Armed(kNativeWatchUncaught | kNativeWatchCaught))
+      v8::SetNativeThrowObserver(watch_isolate_, nullptr);
+  }
+  watch_frame_ = 0;
+  watch_isolate_ = nullptr;
+}
+base::DictValue NativeConsoleRuntime::Watch(v8::Isolate* isolate,
+                                            blink::WebLocalFrame* frame,
+                                            const base::DictValue& command) {
+  // A refused watch leaves nothing armed, so the caller never guesses.
+  Unwatch();
+  const auto* rules = command.FindDict("rules");
+  if (!rules)
+    return Failure("Watch rules must be an object");
+  static constexpr std::array<std::string_view, 6> kKeys{"requests", "events",     "timers",
+                                                         "csp",      "exceptions", "dom"};
+  for (const auto [key, value] : *rules) {
+    if (std::find(kKeys.begin(), kKeys.end(), key) == kKeys.end())
+      return Failure("Watch rules name an unknown rule");
+  }
+  NativeWatchRules armed;
+  const auto* requests = rules->FindList("requests");
+  for (std::size_t i = 0; requests && i < requests->size(); ++i) {
+    const auto* rule = (*requests)[i].GetIfDict();
+    const auto* url = rule ? rule->FindString("url_contains") : nullptr;
+    const auto* method = rule ? rule->FindString("method") : nullptr;
+    if (!url || !armed.AddRequest(*url, method ? *method : std::string()))
+      return Failure("Request rules are url_contains of 1 to 256 bytes and an uppercase method");
+  }
+  const auto* events = rules->FindList("events");
+  for (std::size_t i = 0; events && i < events->size(); ++i) {
+    if (!(*events)[i].is_string() || !armed.AddEvent((*events)[i].GetString()))
+      return Failure("Event rules are 1 to 27 printable ASCII bytes, each once, at most 16");
+  }
+  armed.timers = rules->FindBool("timers").value_or(false);
+  armed.csp = rules->FindBool("csp").value_or(false);
+  const auto* exceptions = rules->FindString("exceptions");
+  if (exceptions && *exceptions != "off" && *exceptions != "uncaught" && *exceptions != "all")
+    return Failure("exceptions must be off, uncaught or all");
+  armed.uncaught = exceptions && *exceptions != "off";
+  armed.caught = exceptions && *exceptions == "all";
+  const auto* dom = rules->FindList("dom");
+  for (std::size_t i = 0; dom && i < dom->size(); ++i) {
+    const auto* rule = (*dom)[i].GetIfDict();
+    const auto* handle = rule ? rule->FindString("handle") : nullptr;
+    const auto value = handle ? Lookup(isolate, *handle) : v8::Local<v8::Value>();
+    const auto element =
+        value.IsEmpty() ? blink::WebElement() : blink::WebElement::FromV8Value(isolate, value);
+    if (element.IsNull())
+      return Failure("DOM rules need a live Element handle from this document");
+    if (!armed.AddDom(element.GetDomNodeId(), rule->FindBool("attributes").value_or(false),
+                      rule->FindBool("subtree").value_or(false),
+                      rule->FindBool("removal").value_or(false)))
+      return Failure("At most 4 distinct elements, each watching attributes, subtree or removal");
+  }
+  const std::uint64_t frame_id = FrameId(frame);
+  if (!NativeDebuggerWatch::Arm(frame_id, armed))
+    return Failure("No capture session is active in this renderer; nothing was armed");
+  watch_frame_ = frame_id;
+  watch_isolate_ = isolate;
+  if (armed.uncaught)
+    v8::SetNativeThrowObserver(isolate, &ObserveThrow);
+  std::vector<std::string> parts;
+  if (armed.request_count)
+    parts.push_back(base::NumberToString(armed.request_count) + " request rules");
+  if (armed.event_count)
+    parts.push_back(base::NumberToString(armed.event_count) + " event types");
+  if (armed.timers)
+    parts.push_back("timers");
+  if (armed.csp)
+    parts.push_back("CSP violations");
+  if (armed.uncaught)
+    parts.push_back(armed.caught ? "all exceptions" : "uncaught exceptions");
+  if (armed.dom_count)
+    parts.push_back(base::NumberToString(armed.dom_count) + " elements");
+  return base::DictValue()
+      .Set("status", "ok")
+      .Set("text", parts.empty() ? std::string("Watch rules cleared; nothing is armed")
+                                 : "Watching " + base::JoinString(parts, ", ") +
+                                       ". Records arrive through get_events; nothing pauses.");
 }
 void NativeConsoleRuntime::Message(const std::string& text,
                                    const std::string& source,
@@ -527,7 +650,7 @@ std::string NativeConsoleRuntime::Run(v8::Isolate* isolate,
       slot.value.Reset();
       slot.id = 0;
     }
-  static_cast<void>(frame);
+  const base::AutoReset<bool> running(&g_running, true);
   const auto parsed = base::JSONReader::ReadDict(command, base::JSON_PARSE_RFC);
   base::DictValue result;
   const auto* operation = parsed ? parsed->FindString("operation") : nullptr;
@@ -541,7 +664,12 @@ std::string NativeConsoleRuntime::Run(v8::Isolate* isolate,
     result.Set("status", "ok");
   } else if (*operation == "complete")
     result = Complete(isolate, context, *parsed);
-  else if (*operation == "evaluate") {
+  else if (*operation == "watch")
+    result = Watch(isolate, frame, *parsed);
+  else if (*operation == "unwatch") {
+    Unwatch();
+    result.Set("status", "ok").Set("text", "Watch rules disarmed");
+  } else if (*operation == "evaluate") {
     const auto* source = parsed->FindString("source");
     if (!source || source->empty() || source->size() > 8192 ||
         source->find('\0') != std::string::npos)
@@ -619,11 +747,19 @@ std::string NativeConsoleRuntime::Run(v8::Isolate* isolate,
       }
     } else if (*operation == "listeners" || *operation == "monitor" || *operation == "unmonitor") {
       auto node = blink::WebElement::FromV8Value(isolate, value);
-      if (node.IsNull())
-        result = Failure("Select an Element to inspect or monitor its events");
+      auto document = frame->GetDocument();
+      const bool window = *operation == "listeners" && value->StrictEquals(context->Global());
+      const bool global = window || (*operation == "listeners" && node.IsNull() &&
+                                     value->StrictEquals(document.ToV8Value(isolate)));
+      if (node.IsNull() && !global)
+        result = Failure(*operation == "listeners"
+                             ? "Select an Element, document or window to inspect its listeners"
+                             : "Select an Element to monitor its events");
       else if (*operation == "listeners") {
         base::ListValue properties;
-        auto listeners = node.ConsoleEventListeners(isolate, 32);
+        auto listeners = window   ? document.ConsoleWindowEventListeners(isolate, 32)
+                         : global ? document.ConsoleEventListeners(isolate, 32)
+                                  : node.ConsoleEventListeners(isolate, 32);
         for (const auto& listener : listeners) {
           const auto label = WebText(listener.type, 128) + (listener.capture ? " capture" : "") +
                              (listener.passive ? " passive" : "") + (listener.once ? " once" : "");

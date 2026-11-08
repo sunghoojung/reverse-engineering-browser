@@ -195,7 +195,10 @@ label[128], URL[512], reserved u32. Target flag 1 is truncated and flag 2 is top
 frame. Other reserved fields remain zero. Response flag 1 is truncated.
 
 Runtime commands are evaluate, inspect, complete, poll, await, cancel, release,
-store, clear, last, source, listeners, monitor, unmonitor and traffic. Handles
+store, clear, last, source, listeners, monitor, unmonitor, traffic, watch and
+unwatch. `listeners` takes an Element, the `document` or the `window` handle
+(`getEventListeners(window)`); `monitor` takes an Element only. `watch` is
+[native debugger observation v1](native-debugger-observation-v1.md). Handles
 never cross document lifetimes. The [OpenAPI contract](openapi.json) specifies
 HTTP fields, requiredness and response shapes. Runtime status is ok, error,
 exception, pending or rejected, separate from transport status.

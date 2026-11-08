@@ -458,6 +458,16 @@ from. The packaged app turns it on when Network and Artifact are captured.
 provider, the loader call and the Console request watch hook. See
 [Native network v3](../../../protocol/native-network-v3.md).
 
+## Debugger observations
+
+The Console `watch` command arms the Phase 1 hooks for one document.
+Chromium `0030` to `0032` add the listener, timer, CSP, rejection and DOM
+mutation call sites through `renderer/native_debugger_observation_blink.h`;
+`0033` lists window listeners for the Console; V8 `0016` adds the throw
+observer the Console installs only while exceptions are watched. Each hook
+costs one relaxed load while disarmed. See
+[native debugger observation v1](../../../protocol/native-debugger-observation-v1.md).
+
 ## Native Wasm dispatch (opt-in)
 
 Rebuilt browsers can record physical `br_table` operands with

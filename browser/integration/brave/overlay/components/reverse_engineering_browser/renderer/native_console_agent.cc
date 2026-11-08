@@ -154,6 +154,7 @@ void NativeConsoleAgent::DidClearWindowObject() {
 void NativeConsoleAgent::WillReleaseScriptContext(v8::Local<v8::Context> context, int world_id) {
   if (world_id == 0) {
     runtime_.Reset();
+    runtime_.Unwatch();
     document_start_.context = false;
   }
 }

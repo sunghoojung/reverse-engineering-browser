@@ -1,8 +1,9 @@
 # Native debugger v1
 
-Status: Phase 1 is a source candidate. Phases 2 and 3 are a proposal awaiting
-maintainer approval; nothing here changes [SAFETY.md](../../SAFETY.md) until
-that approval lands.
+Status: Phase 1 is a source candidate with every hook patched; the Sources
+sidebar and Threads view are not built yet. Phases 2 and 3 are a proposal
+awaiting maintainer approval; nothing here changes [SAFETY.md](../../SAFETY.md)
+until that approval lands.
 
 ## Phase 1: observe without pausing
 
@@ -20,7 +21,7 @@ value is read, and records carry identities, kinds and positions only.
 | Pause on exceptions | `exception_observation` (uncaught, caught, unhandled rejection) |
 | DOM breakpoints | `dom_mutation` on up to 4 selected elements |
 | Global listeners | Console `listeners` on `window` and `document` |
-| Threads | `get_native_debugger` threads: Console targets and workers |
+| Threads | `get_native_debugger` threads: Console documents, out-of-process frames, and workers that started requests |
 
 ## Phase 2: proposed policy (for maintainer approval)
 

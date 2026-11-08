@@ -459,7 +459,14 @@ impl App {
                         "Native debugger state takes no query parameters",
                     ));
                 }
-                crate::native_debugger::state()?
+                let console = self.native_console.state().await;
+                let watch = self.native_console.watch();
+                let store = self.options.store.clone();
+                tokio::task::spawn_blocking(move || {
+                    crate::native_debugger::state(&store, &console, watch)
+                })
+                .await
+                .map_err(|_| Error::new(500, "Native debugger state read failed"))??
             }
             "/api/native-console" => self.native_console.state().await,
             "/api/native-console/document-start" => {

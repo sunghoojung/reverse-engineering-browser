@@ -417,6 +417,31 @@ fn load_source(
     Ok(source)
 }
 
+fn state_name(state: u8) -> &'static str {
+    match state {
+        1 => "captured",
+        2 => "no_script",
+        3 => "unsupported_thread",
+        4 => "not_retained_artifact_unavailable",
+        _ => "not_retained_budget",
+    }
+}
+
+/// A record's summary without its frames: state, depth, digest and innermost frame.
+pub fn summary(record: &Record) -> Value {
+    let walked = record.state != 2 && record.state != 3;
+    let f = &record.innermost;
+    json!({
+        "state": state_name(record.state),
+        "total_depth": record.total,
+        "recorded": record.recorded,
+        "async_frames": record.async_frames,
+        "digest": walked.then(|| hex::encode(record.digest)),
+        "innermost": walked.then(|| json!({"kind": f.kind, "script_id": f.script_id,
+            "position": f.position, "detail": f.detail})),
+    })
+}
+
 /// The stack document for one decoded record. `read` returns verified
 /// artifact bytes up to a limit.
 pub fn resolve(
@@ -426,13 +451,7 @@ pub fn resolve(
     artifacts: &[Value],
     read: &dyn Fn(&Value, usize) -> Result<Vec<u8>>,
 ) -> Value {
-    let state = match record.state {
-        1 => "captured",
-        2 => "no_script",
-        3 => "unsupported_thread",
-        4 => "not_retained_artifact_unavailable",
-        _ => "not_retained_budget",
-    };
+    let state = state_name(record.state);
     let session = stack_event["session_id"].as_str().unwrap_or("");
     let digest = hex::encode(record.digest);
     let mut document = json!({

@@ -1,0 +1,84 @@
+diff --git a/third_party/blink/renderer/bindings/core/v8/v8_initializer.cc b/third_party/blink/renderer/bindings/core/v8/v8_initializer.cc
+index 699a008..c367ec1 100644
+--- a/third_party/blink/renderer/bindings/core/v8/v8_initializer.cc
++++ b/third_party/blink/renderer/bindings/core/v8/v8_initializer.cc
+@@ -49,6 +49,7 @@
+ #include "base/task/thread_pool.h"
+ #include "base/time/time.h"
+ #include "brave/components/reverse_engineering_browser/common/native_runtime_snapshot_queue.h"
++#include "brave/components/reverse_engineering_browser/renderer/native_debugger_observation.h"
+ #include "brave/components/reverse_engineering_browser/renderer/native_probe_sink.h"
+ #include "brave/components/reverse_engineering_browser/renderer/native_probe_transport.h"
+ #include "brave/components/reverse_engineering_browser/renderer/native_request_stack.h"
+@@ -1594,6 +1595,12 @@ void V8Initializer::PromiseRejectHandlerInMainThread(
+   if (!script_state->ContextIsValid())
+     return;
+ 
++  // A Console exception watch; see protocol/native-debugger-observation-v1.md.
++  if (data.GetEvent() == v8::kPromiseRejectWithNoHandler &&
++      reb::NativeDebuggerWatch::Armed(reb::kNativeWatchUncaught)) [[unlikely]] {
++    reb::NativeDebuggerWatch::Exception(StableFrameId(*window), 3,
++                                        reb::NativeStackFrame{});
++  }
+   RejectedPromises* rejected_promises =
+       &window->GetAgent()->GetRejectedPromises();
+   PromiseRejectHandler(data, *rejected_promises, script_state);
+diff --git a/third_party/blink/renderer/core/frame/csp/execution_context_csp_delegate.cc b/third_party/blink/renderer/core/frame/csp/execution_context_csp_delegate.cc
+index 6117e88..18f5730 100644
+--- a/third_party/blink/renderer/core/frame/csp/execution_context_csp_delegate.cc
++++ b/third_party/blink/renderer/core/frame/csp/execution_context_csp_delegate.cc
+@@ -4,6 +4,7 @@
+ 
+ #include "third_party/blink/renderer/core/frame/csp/execution_context_csp_delegate.h"
+ 
++#include "brave/components/reverse_engineering_browser/renderer/native_debugger_observation_blink.h"
+ #include "services/network/public/cpp/web_sandbox_flags.h"
+ #include "services/network/public/mojom/web_sandbox_flags.mojom-blink.h"
+ #include "third_party/blink/public/common/security_context/insecure_request_policy.h"
+@@ -11,6 +12,7 @@
+ #include "third_party/blink/public/mojom/frame/frame.mojom-blink.h"
+ #include "third_party/blink/public/mojom/security_context/insecure_request_policy.mojom-blink.h"
+ #include "third_party/blink/renderer/bindings/core/v8/capture_source_location.h"
++#include "third_party/blink/renderer/bindings/core/v8/v8_security_policy_violation_event_init.h"
+ #include "third_party/blink/renderer/core/dom/document.h"
+ #include "third_party/blink/renderer/core/events/security_policy_violation_event.h"
+ #include "third_party/blink/renderer/core/execution_context/execution_context.h"
+@@ -34,6 +36,28 @@
+ 
+ namespace blink {
+ 
++namespace {
++
++// A Console CSP watch; see protocol/native-debugger-observation-v1.md.
++void ObserveNativeCspViolation(ExecutionContext* context,
++                               const SecurityPolicyViolationEventInit& data) {
++  const std::uint64_t frame_id = reb::debugger_observation::FrameId(context);
++  if (!reb::NativeDebuggerWatch::Wants(frame_id, reb::kNativeWatchCsp)) {
++    return;
++  }
++  const KURL blocked(data.blockedURI());
++  reb::NativeDebuggerWatch::Csp(
++      frame_id,
++      static_cast<std::uint8_t>(
++          ContentSecurityPolicy::GetDirectiveType(data.effectiveDirective())),
++      data.disposition().AsEnum() ==
++          V8SecurityPolicyViolationEventDisposition::Enum::kReport,
++      reb::debugger_observation::Latin1(blocked.IsValid() ? blocked.Host()
++                                                          : StringView()));
++}
++
++}  // namespace
++
+ ExecutionContextCSPDelegate::ExecutionContextCSPDelegate(
+     ExecutionContext& execution_context)
+     : execution_context_(&execution_context) {}
+@@ -150,6 +174,9 @@ String ExecutionContextCSPDelegate::GetDocumentReferrer() {
+ void ExecutionContextCSPDelegate::DispatchViolationEvent(
+     const SecurityPolicyViolationEventInit& violation_data,
+     Element* element) {
++  if (reb::NativeDebuggerWatch::Armed(reb::kNativeWatchCsp)) [[unlikely]] {
++    ObserveNativeCspViolation(execution_context_.Get(), violation_data);
++  }
+   execution_context_->GetTaskRunner(TaskType::kNetworking)
+       ->PostTask(
+           FROM_HERE,

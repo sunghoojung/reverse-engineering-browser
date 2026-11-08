@@ -6,6 +6,7 @@ mod artifact_lookup;
 mod artifact_query;
 mod capture;
 mod config;
+mod debugger_observation;
 mod debugger_watch;
 mod decoder;
 mod deobfuscation;

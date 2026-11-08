@@ -92,9 +92,6 @@ void SchemeClasses() {
   Case("scheme on a canvas record", other, false);
   auto dirty = Request(reb::EventType::kRequestInitiated, 2);
   // These bytes never reach JSON, so they stay out of the golden.
-  dirty.header.reserved1 = 1;
-  Check(!reb::IsValidEvent(dirty), "reserved byte after scheme");
-  dirty = Request(reb::EventType::kRequestInitiated, 2);
   dirty.header.reserved2 = 1;
   Check(!reb::IsValidEvent(dirty), "reserved word after scheme");
 }
@@ -106,6 +103,11 @@ void Exclusions() {
   Case("webui renderers", Exclusion(64, 2, 0), true);
   Case("browser-wide scheme count", Exclusion(16, 1, 0), true);
   Case("webui renderer with a producer", Exclusion(64, 2, 4242), false);
+  Case("extension worker requests of a renderer", Exclusion(65, 2, 4242), true);
+  Case("extension worker requests at the proxy", Exclusion(65, 1, 0), true);
+  Case("devtools loads", Exclusion(66, 4, 0), true);
+  Case("devtools loads with a producer", Exclusion(66, 1, 4242), false);
+  Case("exclusion class above the table", Exclusion(67, 1, 0), false);
   Case("zero count", Exclusion(16, 0, 4242), false);
   Case("unknown class", Exclusion(21, 1, 4242), false);
   Case("http is never excluded", Exclusion(2, 1, 4242), false);

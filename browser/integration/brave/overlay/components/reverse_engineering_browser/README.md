@@ -22,7 +22,8 @@ changing the surface result.
 
 While capture is active, renderer operations resolve the current Blink frame
 token only after the policy check. The browser-process host maps that token to
-its top-level tab, leaving worker and detached-frame events unattributed. A
+its top-level tab through live frames, then through `browser/native_tab_resolver.h`
+tombstones for frames already gone. A
 local Stop command closes the broker connection; the browser socket client
 detects that disconnect promptly and disables every renderer host and browser
 capture sink. No page script controls probe activation.
@@ -109,6 +110,17 @@ records unless `--reb-capture-browser-internal` is set. Chromium patch
 value in Blink's loader so `data:`, `blob:` and service-worker answers get a
 renderer completion. See
 [Native network v3](../../../../../../protocol/native-network-v3.md).
+
+Each request names the tab that caused it. Brave patch
+`0017-link-requests-to-tab-owners` records a factory's tab when it is created,
+and counts DevTools and extension-worker factories instead of recording them.
+Chromium patch `0027-record-renderer-fetch-owners` scopes the fetch's own
+document or worker (`renderer/native_fetch_owner.h`) around `SendAsync`, so
+`request_initiated` carries a loader kind and that owner. `browser/native_tab_registry.h`
+feeds `NativeTabResolver` from the dedicated, shared and service worker
+services; the drain links worker requests to `tab_set` records with one
+`request_tab_link` each. See
+[request owners and tabs](../../../../../../protocol/native-network-v3.md#request-owners-and-tabs).
 
 Large artifact bytes use the separate 128-byte framed contract and 32-byte
 acknowledgment in `common/native_artifact_header.h`. Only the browser-process

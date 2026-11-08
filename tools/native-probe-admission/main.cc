@@ -2266,6 +2266,7 @@ int main() {
   Run<&RequestInitiatedFrameAttribution>();
   Run<&BrowserInternalExclusion>();
   Run<&RendererAnsweredRequests>();
+  Run<&RendererFetchOwners>();
   Run<&CanvasCreatorAdmission>();
   Run<&RuntimeCreatorAdmission>();
   Run<&RuntimeScriptProvenance>();

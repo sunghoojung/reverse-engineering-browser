@@ -15,6 +15,7 @@
 #include "base/no_destructor.h"
 
 #include "brave/components/reverse_engineering_browser/common/native_probe_event.h"
+#include "brave/components/reverse_engineering_browser/common/native_tab_link.h"
 
 class GURL;
 
@@ -68,7 +69,8 @@ class NativeNetworkCaptureSink final {
                             std::uint64_t frame_id,
                             std::uint64_t browser_context_id_high,
                             std::uint64_t browser_context_id_low,
-                            const network::ResourceRequest& request) noexcept;
+                            const network::ResourceRequest& request,
+                            NativeLoaderKind loader_kind = NativeLoaderKind::kNotRecorded) noexcept;
   void RecordRequestRedirected(std::uint64_t request_id,
                                std::int32_t initiator_request_id,
                                std::uint32_t initiator_process_id,

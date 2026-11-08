@@ -94,7 +94,7 @@
                 <div class="request-table">
                   <div class="request-head" role="group" aria-label="Sort requests"><button type="button" data-request-sort="name" aria-pressed="false">Name<span aria-hidden="true"></span></button><button type="button" data-request-sort="status" aria-pressed="false">Status<span aria-hidden="true"></span></button><button type="button" data-request-sort="type" aria-pressed="false">Type<span aria-hidden="true"></span></button><button type="button" data-request-sort="method" aria-pressed="false">Method<span aria-hidden="true"></span></button><button type="button" data-request-sort="time" aria-pressed="false">Time<span aria-hidden="true"></span></button></div>
                   <div id="request-rows" class="request-rows" role="listbox" aria-label="Captured requests" tabindex="0"></div>
-                  <div class="request-window"><span id="request-window-status">0 requests</span><button id="request-window-prev" type="button" aria-label="Previous 500 requests">Previous</button><button id="request-window-next" type="button" aria-label="Next 500 requests">Next</button><button id="request-latest" type="button" hidden>New requests</button><button id="request-hide-internal" type="button" aria-pressed="false" title="Hide chrome:, devtools: and other browser-internal rows; nothing is deleted" hidden>Hide browser-internal</button><button id="request-order" type="button" title="Restore capture order">Capture order</button><button id="open-captured-export" type="button" data-export-open="capture" aria-haspopup="dialog">Export…</button></div>
+                  <div class="request-window"><span id="request-window-status">0 requests</span><button id="request-window-prev" type="button" aria-label="Previous 500 requests">Previous</button><button id="request-window-next" type="button" aria-label="Next 500 requests">Next</button><button id="request-latest" type="button" hidden>New requests</button><button id="request-unresolved" type="button" aria-pressed="false" title="List the requests the capture could not link to a tab" hidden></button><button id="request-hide-internal" type="button" aria-pressed="false" title="Hide chrome:, devtools: and other browser-internal rows; nothing is deleted" hidden>Hide browser-internal</button><button id="request-order" type="button" title="Restore capture order">Capture order</button><button id="open-captured-export" type="button" data-export-open="capture" aria-haspopup="dialog">Export…</button></div>
                 </div>
               </div>
 
@@ -797,6 +797,7 @@
     <script src="source_search.js"></script>
     <script src="traffic_view.js"></script>
     <script src="network_scope.js"></script>
+    <script src="request_tabs.js"></script>
     <script src="captured_client.js"></script>
     <script src="captured_export_formats.js"></script>
     <script src="vm_debugger.js"></script>

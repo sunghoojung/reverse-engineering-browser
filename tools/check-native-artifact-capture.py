@@ -139,6 +139,7 @@ def compile_driver(build: Path) -> Path:
         str(sources / "browser/native_network_capture_sink.cc"),
         str(sources / "browser/native_artifact_capture_sink.cc"),
         str(sources / "browser/native_probe_host.cc"),
+        str(sources / "browser/native_tab_resolver.cc"),
         str(sources / "common/native_probe_queue.cc"),
         str(ROOT / "src/evidence/artifact.cpp"),
         str(ROOT / "src/capture/event.cpp"),

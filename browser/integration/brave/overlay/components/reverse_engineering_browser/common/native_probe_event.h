@@ -89,6 +89,8 @@ enum class NativeProbeType : std::uint16_t {
   kWasmIndirectOverflow = 29,
   // Counted browser-internal exclusion; see protocol/native-network-v3.md.
   kCaptureExclusion = 36,
+  kTabSet = 37,
+  kRequestTabLink = 38,
 };
 
 enum class NativeProbeFlag : std::uint16_t {
@@ -127,9 +129,10 @@ struct NativeProbeHeader final {
   std::uint16_t flags = 0;
   std::uint32_t initiator_request_id = 0;
   std::uint32_t initiator_process_id = 0;
-  // NativeSchemeClass of a request record (protocol/native-network-v3.md).
+  // NativeSchemeClass and NativeLoaderKind of a request record
+  // (protocol/native-network-v3.md).
   std::uint8_t scheme_class = 0;
-  std::uint8_t reserved1 = 0;
+  std::uint8_t loader_kind = 0;
   std::uint16_t reserved2 = 0;
 };
 
@@ -174,7 +177,7 @@ REB_ASSERT_NATIVE_PROBE_HEADER_OFFSET(flags, 130);
 REB_ASSERT_NATIVE_PROBE_HEADER_OFFSET(initiator_request_id, 132);
 REB_ASSERT_NATIVE_PROBE_HEADER_OFFSET(initiator_process_id, 136);
 REB_ASSERT_NATIVE_PROBE_HEADER_OFFSET(scheme_class, 140);
-REB_ASSERT_NATIVE_PROBE_HEADER_OFFSET(reserved1, 141);
+REB_ASSERT_NATIVE_PROBE_HEADER_OFFSET(loader_kind, 141);
 REB_ASSERT_NATIVE_PROBE_HEADER_OFFSET(reserved2, 142);
 #undef REB_ASSERT_NATIVE_PROBE_HEADER_OFFSET
 static_assert(sizeof(NativeProbeHeader) == 144);

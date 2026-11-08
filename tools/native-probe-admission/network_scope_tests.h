@@ -4,9 +4,11 @@
 
 #include <memory>
 
+#include "brave/components/reverse_engineering_browser/renderer/native_fetch_owner.h"
 #include "reb/event.hpp"
 #include "reb/network_request.hpp"
 #include "reb/network_scope.hpp"
+#include "reb/tab_link.hpp"
 
 namespace {
 
@@ -163,6 +165,44 @@ void RendererAnsweredRequests() {
   assert(allocations == before && Drain(metadata) == 0);
   std::cout << "PASS renderer-answered requests finish with their own target and completion; "
                "proxied, stale, refused and inactive requests add nothing\n";
+}
+
+// protocol/native-network-v3.md "Request owners and tabs": the loader's fetch
+// owner, not the running script, names a request's document or worker.
+void RendererFetchOwners() {
+  NativeProbeQueue queue;
+  ConfigureScope(queue, false, false, 63);
+  reb::EventRecord parser, worker, restored;
+  {
+    const reb::NativeFetchOwnerScope document({reb::NativeLoaderKind::kDocument, 0x1234});
+    static_cast<void>(sink.RecordRequestInitiated(20, "GET", "https", "example.test"));
+    parser = Core(One(queue));
+    {
+      const reb::NativeFetchOwnerScope nested({reb::NativeLoaderKind::kDedicatedWorker, 0x77});
+      static_cast<void>(sink.RecordRequestInitiated(21, "GET", "https", "example.test"));
+      worker = Core(One(queue));
+    }
+    static_cast<void>(sink.RecordRequestInitiated(22, "GET", "https", "example.test"));
+    restored = Core(One(queue));
+  }
+  assert(parser.header.frame_id == 0x1234 && parser.header.loader_kind == 16);
+  assert(worker.header.frame_id == 0x77 && worker.header.loader_kind == 17);
+  assert(restored.header.frame_id == 0x1234 && restored.header.loader_kind == 16);
+  // Without an owner the running script's frame is kept and labelled as such.
+  static_cast<void>(sink.RecordRequestInitiated(23, "GET", "https", "example.test"));
+  const auto script = Core(One(queue));
+  assert(script.header.frame_id == 0 && script.header.loader_kind == 21);
+  // A default owner is a no-op, so inactive loaders touch nothing.
+  {
+    const reb::NativeFetchOwnerScope none({});
+    assert(reb::NativeFetchOwnerScope::Current().kind == reb::NativeLoaderKind::kNotRecorded);
+  }
+  auto mislabelled = parser;
+  mislabelled.header.loader_kind = 3;
+  assert(!reb::IsValidEvent(mislabelled));
+  transport.Disable();
+  std::cout << "PASS request_initiated names its fetch owner's document or worker, falls back "
+               "to the script frame, and validates its loader kind\n";
 }
 
 }  // namespace

@@ -7,7 +7,9 @@ use crate::{
     artifact_query::{self, MANIFEST_RECORD_BYTES},
     error::Result,
     event_query::{self, Cursor, EVENT_RECORD_BYTES, SCAN_BYTES, Tally},
-    event_window, session_context,
+    event_window,
+    request_tabs::RequestTabs,
+    session_context,
 };
 use serde_json::{Value, json};
 use std::{
@@ -224,6 +226,8 @@ fn exclusion_class(code: u8) -> Option<(&'static str, &'static str)> {
         19 => ("devtools", "requests"),
         20 => ("chrome_search", "requests"),
         64 => ("webui_renderer", "renderer_processes"),
+        65 => ("extension_worker", "requests"),
+        66 => ("devtools_load", "requests"),
         _ => return None,
     })
 }
@@ -259,6 +263,7 @@ fn gap_meaning(reason: &str) -> &'static str {
 pub fn build(store: &Path, artifacts: &Path, state: &CaptureState<'_>) -> Result<Value> {
     let mut events = EventCounts::default();
     let mut exclusions = Exclusions::default();
+    let mut request_tabs = RequestTabs::default();
     let mut tally = Tally::default();
     let event_page = event_query::read_page(
         store,
@@ -273,6 +278,7 @@ pub fn build(store: &Path, artifacts: &Path, state: &CaptureState<'_>) -> Result
             tally.record(&event)?;
             events.record(&event);
             exclusions.record(&event);
+            request_tabs.record(&event);
             Ok(None)
         },
     )?;
@@ -372,7 +378,36 @@ pub fn build(store: &Path, artifacts: &Path, state: &CaptureState<'_>) -> Result
         item["count"] = json!(gap.count.to_string());
         checks.push(item);
     }
+    let unresolved = request_tabs.unresolved();
+    if unresolved > 0 {
+        let mut item = check(
+            "network_tab_unresolved",
+            "error",
+            format!(
+                "{unresolved} requests have no tab. This is a capture bug, not a property of the page; request_tabs lists them by process and request id for get_events."
+            ),
+        );
+        item["count"] = json!(unresolved.to_string());
+        checks.insert(0, item);
+    }
     let excluded = exclusions.totals();
+    let no_tab: u64 = [65, 66]
+        .iter()
+        .filter_map(|class| excluded.get(class))
+        .fold(0, |sum, count| sum.saturating_add(*count));
+    if no_tab > 0 {
+        let mut item = check(
+            "no_tab_traffic_excluded",
+            "info",
+            format!(
+                "{no_tab} requests no tab caused were not recorded (extension workers {}, DevTools loads {}). These are named exclusions, not gaps.",
+                excluded.get(&65).copied().unwrap_or(0),
+                excluded.get(&66).copied().unwrap_or(0)
+            ),
+        );
+        item["count"] = json!(no_tab.to_string());
+        checks.push(item);
+    }
     let requests: u64 = excluded
         .iter()
         .filter(|(class, _)| **class < 64)
@@ -424,6 +459,7 @@ pub fn build(store: &Path, artifacts: &Path, state: &CaptureState<'_>) -> Result
         "artifact_receiver_configured": state.artifact_receiver_configured,
         "artifact_receiver_connected": state.artifact_receiver_connected,
         "events": events.document(&event_page, &tally),
+        "request_tabs": request_tabs.document(),
         "exclusions": excluded.iter().map(|(class, count)| {
             let (name, unit) = exclusion_class(*class).unwrap();
             json!({"class": name, "unit": unit, "count": count.to_string()})
@@ -557,9 +593,17 @@ mod tests {
             exclusion(4, 41, 19, 1),
             exclusion(5, 0, 64, 1),
             exclusion(6, 0, 64, 2),
+            exclusion(8, 41, 65, 2),
+            exclusion(9, 0, 66, 1),
         ]
         .map(|event| event.to_string())
         .to_vec();
+        let mut orphan = event(10, "network", "request_started", 0, "GET example.test");
+        orphan["tab_id"] = json!(0);
+        orphan["request_id"] = json!("77");
+        orphan["browser_context_id_high"] = json!("3");
+        orphan["browser_context_id_low"] = json!("4");
+        lines.push(orphan.to_string());
         let mut dirty = exclusion(7, 42, 16, 9);
         let mut bytes = hex::decode(dirty["payload"].as_str().unwrap()).unwrap();
         bytes[5] = 1;
@@ -581,8 +625,22 @@ mod tests {
                 {"class": "chrome", "unit": "requests", "count": "7"},
                 {"class": "devtools", "unit": "requests", "count": "1"},
                 {"class": "webui_renderer", "unit": "renderer_processes", "count": "2"},
+                {"class": "extension_worker", "unit": "requests", "count": "2"},
+                {"class": "devtools_load", "unit": "requests", "count": "1"},
             ])
         );
+        let checks = summary["checks"].as_array().unwrap();
+        assert_eq!(checks[0]["code"], "network_tab_unresolved");
+        assert_eq!(checks[0]["severity"], "error");
+        assert_eq!(
+            summary["request_tabs"]["unresolved_requests"],
+            json!([{"process_id": 7, "request_id": "77"}])
+        );
+        let no_tab = checks
+            .iter()
+            .find(|check| check["code"] == "no_tab_traffic_excluded")
+            .unwrap();
+        assert_eq!(no_tab["count"], "3");
         assert_eq!(summary["events"]["sequence_gaps"], "0");
         let checks = summary["checks"].as_array().unwrap();
         assert!(checks.iter().all(|check| check["code"] != "named_gap"));

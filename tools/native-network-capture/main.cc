@@ -79,7 +79,9 @@ void RequestContent() {
   request.headers.SetHeader("Content-Type", "Application/JSON; charset=UTF-8");
   const std::string json(816, '{');
   request.request_body = BytesBody({Bytes(json.substr(0, 300)), Bytes(json.substr(300))});
-  const auto start = [&] { sink.RecordRequestStarted(172, 0, 0, 4, 5, 11, 12, request); };
+  const auto start = [&] {
+    sink.RecordRequestStarted(172, 0, 0, 4, 5, 11, 12, request, reb::NativeBrowserLoaderKind(2));
+  };
 
   // Metadata-only session: host-only start, body summary without bytes or path.
   events.clear();
@@ -89,7 +91,8 @@ void RequestContent() {
   assert(events.size() == 2 && AllValid());
   assert(events[0].header.type == reb::NativeProbeType::kRequestStarted &&
          Payload(events[0]) == "POST api.hcaptcha.test" && events[0].header.scheme_class == 2 &&
-         events[1].header.scheme_class == 0);
+         events[1].header.scheme_class == 0 && events[0].header.loader_kind == 3 &&
+         events[1].header.loader_kind == 0);
   auto body = Body(events[1]);
   assert(events[1].header.parent_event_id == events[0].header.sequence_number);
   assert(events[1].header.request_id == 172 && events[1].header.tab_id == 4 &&

@@ -9,6 +9,7 @@
 #include "brave/components/reverse_engineering_browser/common/native_network_request.h"
 #include "brave/components/reverse_engineering_browser/common/native_probe_queue.h"
 #include "brave/components/reverse_engineering_browser/common/page_guest_dispatch.h"
+#include "brave/components/reverse_engineering_browser/renderer/native_fetch_owner.h"
 
 #include <algorithm>
 #include <array>
@@ -1164,6 +1165,28 @@ void SetPayload(NativeProbeEvent& event,
 
 }  // namespace
 
+namespace {
+constinit thread_local NativeFetchOwner g_fetch_owner;
+}  // namespace
+
+NativeFetchOwnerScope::NativeFetchOwnerScope(const NativeFetchOwner& owner) noexcept
+    : active_(owner.kind != NativeLoaderKind::kNotRecorded) {
+  if (active_) {
+    previous_ = g_fetch_owner;
+    g_fetch_owner = owner;
+  }
+}
+
+NativeFetchOwnerScope::~NativeFetchOwnerScope() {
+  if (active_) {
+    g_fetch_owner = previous_;
+  }
+}
+
+NativeFetchOwner NativeFetchOwnerScope::Current() noexcept {
+  return g_fetch_owner;
+}
+
 NativeProbeSink::NativeProbeSink() noexcept = default;
 
 NativeProbeSink& NativeProbeSink::Get() {
@@ -1872,12 +1895,18 @@ NativeRendererRequest NativeProbeSink::RecordRequestInitiated(
   event.header.session_id = session_id;
   event.header.process_id = static_cast<std::uint32_t>(base::GetCurrentProcId());
   event.header.thread_id = static_cast<std::uint32_t>(base::PlatformThread::CurrentId().raw());
-  // Same frame attribution the surface-operation path records, so the browser
-  // bridge can map this record onto a tab. A loading caller with no entered
-  // script context leaves the frame unknown, which stays an explicit zero.
-  const NativeProbeFrameIdProvider frame_id_provider =
-      frame_id_provider_.load(std::memory_order_relaxed);
-  event.header.frame_id = frame_id_provider ? frame_id_provider() : 0;
+  // The fetch's own context when the loader named it; otherwise the running
+  // script's frame, which a parser or worker load does not have.
+  if (const NativeFetchOwner owner = NativeFetchOwnerScope::Current();
+      owner.kind != NativeLoaderKind::kNotRecorded) {
+    event.header.frame_id = owner.context_id;
+    event.header.loader_kind = static_cast<std::uint8_t>(owner.kind);
+  } else {
+    const NativeProbeFrameIdProvider frame_id_provider =
+        frame_id_provider_.load(std::memory_order_relaxed);
+    event.header.frame_id = frame_id_provider ? frame_id_provider() : 0;
+    event.header.loader_kind = static_cast<std::uint8_t>(NativeLoaderKind::kScriptContext);
+  }
   event.header.request_id = static_cast<std::uint64_t>(static_cast<std::uint32_t>(request_id));
   event.header.scheme_class = static_cast<std::uint8_t>(scheme_class);
   SetPayload(event, method, " ");

@@ -198,7 +198,8 @@ function renderTrafficRows(container, requests, {selectedId, newIds, onSelect, o
     }
     const researcherName = nameOf(request);
     const key = JSON.stringify([request.path, request.method, request.status, request.time,
-      request.type, request.origin, request.hostOnly, request.failed, request.targetKind, request.operation, researcherName]);
+      request.type, request.origin, request.hostOnly, request.failed, request.targetKind, request.operation, researcherName,
+      request.tabLinkLabel]);
     // Reuse the row itself on lifecycle changes, preserving focus and its single
     // arrival animation. Unchanged rows do not rebuild captured text children.
     if (row.dataset.renderKey !== key) {
@@ -208,11 +209,12 @@ function renderTrafficRows(container, requests, {selectedId, newIds, onSelect, o
       row.dataset.pending = String(request.status === 'pending' && !request.failed);
       const target = trafficTargetParts(request);
       const name = trafficNode('span', 'request-name');
-      name.title = `${trafficOriginLabel(request)} · ${request.method} ${request.path}${request.urlTruncated ? '…' : ''} · network · ${request.operation ?? 'network'} · request ${request.id}${request.hostOnly ? ' · URL path and query not captured' : request.urlTruncated ? ` · path and query truncated from ${request.targetLength} bytes` : ''}`;
+      name.title = `${trafficOriginLabel(request)} · ${request.method} ${request.path}${request.urlTruncated ? '…' : ''} · network · ${request.operation ?? 'network'} · request ${request.id}${request.tabLinkLabel ? ` · ${request.tabLinkLabel}` : ''}${request.hostOnly ? ' · URL path and query not captured' : request.urlTruncated ? ` · path and query truncated from ${request.targetLength} bytes` : ''}`;
       // A researcher name leads the cell; the captured path and host stay visible.
       if (researcherName) name.append(trafficNode('span', 'researcher-name', researcherName));
-      name.append(trafficNode('span', 'request-resource', target.name),
-        trafficNode('span', 'request-host', target.host));
+      const host = trafficNode('span', 'request-host', target.host);
+      if (request.tabLinkLabel) host.append(trafficNode('span', 'request-tab-link', ` · ${request.tabLinkLabel}`));
+      name.append(trafficNode('span', 'request-resource', target.name), host);
       const numericStatus = Number(request.status);
       const status = trafficNode('span', request.failed || numericStatus >= 400 ? 'status-error'
         : numericStatus >= 200 ? 'status-ok' : 'status-neutral', request.failed ? 'Failed' : request.status === 'pending' ? 'Pending' : String(request.status));
@@ -297,18 +299,28 @@ function renderTrafficDetails(container, request, notice = '', bodyView = null) 
     request.documentUrl ?? 'Not captured', request.method, request.failed ? 'Failed' : request.status === 'pending'
       ? (Number.isInteger(request.provisionalStatus) ? `Pending · provisional HTTP ${request.provisionalStatus}` : 'Pending')
       : request.status, trafficOriginLabel(request), request.id,
-    request.tabId && request.tabId !== '0' ? request.tabId : 'Unattributed',
+    trafficTabText(request),
     `${request.hostOnly
       ? 'Native capture recorded method, host, status and lifecycle timing. URL path, query and body bytes are recorded only in content capture sessions.'
       : 'Native capture recorded method, URL path and query, status and lifecycle timing.'} Request and response headers and response bodies are not captured.${request.targetMalformed ? ' The URL target record is malformed and was not interpreted.' : ''}${request.urlTruncated ? ' Request URL truncated.' : ''}${request.documentUrlTruncated ? ' Document URL truncated.' : ''}${request.methodTruncated ? ' Method truncated.' : ''}`];
   // Captured values stay mono; coverage notes read as prose; Source is provenance.
   const kinds = ['value', request.documentUrl ? 'value' : 'prose', 'value', /^\d+$/.test(String(values[3])) ? 'value' : 'prose',
-    'provenance', 'value', request.tabId && request.tabId !== '0' ? 'value' : 'prose', 'prose'];
+    'provenance', 'value', trafficTabs(request).length ? 'value' : 'prose', 'prose'];
   container.querySelector('.traffic-general').querySelectorAll('.traffic-general-value').forEach((node, index) => {
     if (node.textContent !== String(values[index])) node.textContent = String(values[index]);
     node.dataset.kind = kinds[index];
     if (kinds[index] === 'provenance') node.dataset.origin = request.origin ?? 'local';
   });
+}
+
+function trafficTabs(request) {
+  return globalThis.RebRequestTabs?.rowTabs(request) ?? (request.tabId && request.tabId !== '0' ? [request.tabId] : []);
+}
+
+function trafficTabText(request) {
+  const tabs = trafficTabs(request);
+  if (!tabs.length) return request.origin === 'live' ? 'No tab linked. This is a capture error.' : 'Not applicable';
+  return `${tabs.join(', ')}${request.tabLinkLabel ? ` (${request.tabLinkLabel})` : ''}`;
 }
 
 function renderTrafficBody(section, request, view) {

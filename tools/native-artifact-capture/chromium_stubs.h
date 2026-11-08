@@ -574,6 +574,7 @@ class WebContents {
     return &contents;
   }
   RenderFrameHost* GetPrimaryMainFrame() const { return main_; }
+  WebContents* GetOutermostWebContents() { return this; }
 
  private:
   RenderFrameHost* main_ = nullptr;

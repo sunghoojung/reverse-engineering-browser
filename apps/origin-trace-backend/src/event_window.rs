@@ -308,6 +308,8 @@ fn is_network(event: &Value) -> bool {
                     | "request_target"
                     | "request_body"
                     | "capture_exclusion"
+                    | "tab_set"
+                    | "request_tab_link"
             )
         )
 }

@@ -22,6 +22,7 @@
 #include "brave/components/reverse_engineering_browser/common/native_js_dispatch_sites.h"
 #include "brave/components/reverse_engineering_browser/common/native_js_invocation_sites.h"
 #include "brave/components/reverse_engineering_browser/common/native_network_scope.h"
+#include "brave/components/reverse_engineering_browser/common/native_tab_link.h"
 #include "brave/components/reverse_engineering_browser/common/native_wasm_guest_adapter.h"
 #include "content/public/browser/child_process_security_policy.h"
 #include "content/public/browser/render_process_host.h"
@@ -212,6 +213,8 @@ bool NativeProbeSession::StartSession(const std::uint64_t session_id,
   capture_browser_internal_.store(command_line->HasSwitch(kCaptureBrowserInternalSwitch),
                                   std::memory_order_relaxed);
   webui_renderers_excluded_ = 0;
+  extension_requests_excluded_ = 0;
+  devtools_requests_excluded_ = 0;
   next_browser_sequence_.store(1, std::memory_order_relaxed);
   downstream_.store(downstream, std::memory_order_release);
   session_id_.store(session_id, std::memory_order_release);
@@ -291,6 +294,16 @@ void NativeProbeSession::NoteWebUiRendererExcluded() noexcept {
     return;
   }
   EmitExclusion(0, kNativeWebUiRendererExclusion, ++webui_renderers_excluded_);
+}
+
+void NativeProbeSession::NoteBrowserRequestExcluded(const std::uint8_t exclusion_class) noexcept {
+  if (!IsActive()) {
+    return;
+  }
+  std::uint64_t& count = exclusion_class == kNativeExtensionWorkerExclusion
+                             ? extension_requests_excluded_
+                             : devtools_requests_excluded_;
+  EmitExclusion(0, exclusion_class, ++count);
 }
 
 void NativeProbeSession::EmitExclusion(const std::uint32_t excluded_process_id,

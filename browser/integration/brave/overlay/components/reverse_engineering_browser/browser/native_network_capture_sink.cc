@@ -350,15 +350,15 @@ void NativeNetworkCaptureSink::EmitRequestBody(const NativeProbeEmitter emitter,
   emitter(event);
 }
 
-void NativeNetworkCaptureSink::RecordRequestStarted(
-    const std::uint64_t request_id,
-    const std::int32_t initiator_request_id,
-    const std::uint32_t initiator_process_id,
-    const std::uint32_t tab_id,
-    const std::uint64_t frame_id,
-    const std::uint64_t browser_context_id_high,
-    const std::uint64_t browser_context_id_low,
-    const network::ResourceRequest& request) noexcept {
+void NativeNetworkCaptureSink::RecordRequestStarted(const std::uint64_t request_id,
+                                                    const std::int32_t initiator_request_id,
+                                                    const std::uint32_t initiator_process_id,
+                                                    const std::uint32_t tab_id,
+                                                    const std::uint64_t frame_id,
+                                                    const std::uint64_t browser_context_id_high,
+                                                    const std::uint64_t browser_context_id_low,
+                                                    const network::ResourceRequest& request,
+                                                    const NativeLoaderKind loader_kind) noexcept {
   const NativeProbeEmitter emitter = emitter_.load(std::memory_order_acquire);
   if (!emitter) [[likely]] {
     return;
@@ -379,6 +379,7 @@ void NativeNetworkCaptureSink::RecordRequestStarted(
   event.header.resource_type =
       static_cast<std::uint16_t>(std::clamp(request.resource_type, 0, 65535));
   event.header.scheme_class = static_cast<std::uint8_t>(ClassifyNativeScheme(request.url.scheme()));
+  event.header.loader_kind = static_cast<std::uint8_t>(loader_kind);
   if (request.originated_from_service_worker) {
     event.header.flags |= static_cast<std::uint16_t>(NativeProbeFlag::kFromServiceWorker);
   }

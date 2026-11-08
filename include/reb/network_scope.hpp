@@ -35,6 +35,8 @@ enum class ExclusionClass : std::uint8_t {
   kDevTools = 19,
   kChromeSearch = 20,
   kWebUiRenderer = 64,
+  kExtensionWorker = 65,
+  kDevToolsLoad = 66,
 };
 
 inline constexpr std::uint16_t kCaptureExclusionPayloadVersion = 1;
@@ -49,8 +51,7 @@ inline constexpr std::size_t kCaptureExclusionPayloadSize = 16;
 }
 
 [[nodiscard]] constexpr bool IsKnownExclusionClass(const std::uint8_t value) noexcept {
-  return IsBrowserInternalSchemeClass(value) ||
-         value == static_cast<std::uint8_t>(ExclusionClass::kWebUiRenderer);
+  return IsBrowserInternalSchemeClass(value) || (value >= 64 && value <= 66);
 }
 
 // The record types that may name the scheme of their request.
@@ -104,7 +105,8 @@ struct CaptureExclusionPayload final {
          value.size == kCaptureExclusionPayloadSize &&
          IsKnownExclusionClass(value.exclusion_class) &&
          value.reserved == std::array<std::uint8_t, 3>{} && value.count != 0 &&
-         (value.exclusion_class != static_cast<std::uint8_t>(ExclusionClass::kWebUiRenderer) ||
+         ((value.exclusion_class != static_cast<std::uint8_t>(ExclusionClass::kWebUiRenderer) &&
+           value.exclusion_class != static_cast<std::uint8_t>(ExclusionClass::kDevToolsLoad)) ||
           h.initiator_process_id == 0);
 }
 }  // namespace reb

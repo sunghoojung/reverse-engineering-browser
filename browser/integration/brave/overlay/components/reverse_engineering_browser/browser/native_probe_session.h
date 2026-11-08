@@ -75,6 +75,8 @@ class NativeProbeSession final {
   [[nodiscard]] bool capture_browser_internal() const noexcept;
   // One more WebUI renderer process this session does not admit.
   void NoteWebUiRendererExcluded() noexcept;
+  // One more proxy request of a class no tab caused (65 or 66). UI sequence.
+  void NoteBrowserRequestExcluded(std::uint8_t exclusion_class) noexcept;
   // Cumulative count of one exclusion class; protocol/native-network-v3.md.
   void EmitExclusion(std::uint32_t excluded_process_id,
                      std::uint8_t exclusion_class,
@@ -109,6 +111,8 @@ class NativeProbeSession final {
   std::atomic<bool> capture_request_content_{false};
   std::atomic<bool> capture_browser_internal_{false};
   std::uint64_t webui_renderers_excluded_ = 0;
+  std::uint64_t extension_requests_excluded_ = 0;
+  std::uint64_t devtools_requests_excluded_ = 0;
   std::atomic<std::uint64_t> next_browser_sequence_{1};
 };
 

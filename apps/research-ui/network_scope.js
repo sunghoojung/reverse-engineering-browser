@@ -5,6 +5,8 @@
   const INTERNAL_SCHEME_CLASSES = Object.freeze({16: 'chrome', 17: 'chrome-untrusted', 18: 'brave',
     19: 'devtools', 20: 'chrome-search'});
   const WEBUI_RENDERER_CLASS = 64;
+  // Traffic no tab caused (#425): extension workers and DevTools loads.
+  const NO_TAB_CLASSES = Object.freeze({65: 'extension', 66: 'devtools'});
   const INTERNAL_URL = /^(?:brave|chrome|chrome-search|chrome-untrusted|devtools):/i;
 
   // Same rules as include/reb/network_scope.hpp and tools/validate-evidence-store.py.
@@ -23,8 +25,9 @@
     const exclusionClass = bytes[4];
     const count = view.getBigUint64(8, true);
     if (view.getUint16(0, true) !== 1 || view.getUint16(2, true) !== 16 || bytes[5] || bytes[6] || bytes[7] ||
-        count === 0n || !(exclusionClass in INTERNAL_SCHEME_CLASSES || exclusionClass === WEBUI_RENDERER_CLASS) ||
-        (exclusionClass === WEBUI_RENDERER_CLASS && event.initiator_process_id !== 0)) return null;
+        count === 0n || !(exclusionClass in INTERNAL_SCHEME_CLASSES || exclusionClass === WEBUI_RENDERER_CLASS ||
+          exclusionClass in NO_TAB_CLASSES) ||
+        ((exclusionClass === WEBUI_RENDERER_CLASS || exclusionClass === 66) && event.initiator_process_id !== 0)) return null;
     return {exclusionClass, count, producer: `${event.session_id}:${event.initiator_process_id}`};
   }
 
@@ -37,10 +40,14 @@
       const key = `${value.producer}:${value.exclusionClass}`;
       if (!newest.has(key) || newest.get(key).count < value.count) newest.set(key, value);
     }
-    const totals = {requests: 0n, renderers: 0n, byScheme: new Map()};
+    const totals = {requests: 0n, renderers: 0n, byScheme: new Map(), extension: 0n, devtools: 0n};
     for (const {exclusionClass, count} of newest.values()) {
       if (exclusionClass === WEBUI_RENDERER_CLASS) {
         totals.renderers += count;
+        continue;
+      }
+      if (exclusionClass in NO_TAB_CLASSES) {
+        totals[NO_TAB_CLASSES[exclusionClass]] += count;
         continue;
       }
       const scheme = INTERNAL_SCHEME_CLASSES[exclusionClass];
@@ -57,6 +64,12 @@
     }
     if (totals?.renderers > 0n) {
       parts.push(`${totals.renderers} WebUI ${totals.renderers === 1n ? 'renderer' : 'renderers'} not admitted`);
+    }
+    if (totals?.extension > 0n) {
+      parts.push(`${totals.extension} extension worker ${totals.extension === 1n ? 'request' : 'requests'} not recorded`);
+    }
+    if (totals?.devtools > 0n) {
+      parts.push(`${totals.devtools} DevTools ${totals.devtools === 1n ? 'load' : 'loads'} not recorded`);
     }
     return parts.join(' · ');
   }

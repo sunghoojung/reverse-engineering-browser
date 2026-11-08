@@ -845,6 +845,7 @@ policy and trace assertions; it is not evidence of native lifecycle behavior.
 | `pane_layout.js` | Shared pointer and keyboard pane resizing, responsive constraints, and local size preferences |
 | `traffic_view.js` | Native request ledger rows, ordering, paging and URL/method/status/name search, the General coverage view, and the saved-capture export document |
 | `network_scope.js` | Counted browser-internal exclusions and the reversible browser-internal view filter |
+| `request_tabs.js` | Each Traffic row's tabs from tab sets and request tab links, tab page names and rows without a tab |
 | `evidence_names.js` | Researcher names: exact identities, the closed names document, its Analyst-library store, the inline rename editor and the command palette provider |
 | `captured_client.js`, `captured_export_formats.js` | Saved-capture identity, local export dialog, and the client-project/HAR/SDL generators shared with offline commands |
 | `source_search.js` | Search all files: the literal matcher on the Find index, the bounded and cancellable search, partial-result notes and the results panel; `app.js` supplies the artifact reader and the open path |
@@ -1200,10 +1201,15 @@ Dispatch sites panel. Worker execution failures return a retryable API error and
 are never persisted or cached as an analysis. Workspace failures retain the last
 valid workspace and never remove detection findings.
 
-Traffic remains grouped by captured browser tab with an All tabs scope and a
-domain selector. Protocol v3 carries the stable top-level tab identifier; older
-evidence remains Unattributed. Evidence retains the original payload and trace
-actions; General, Initiator and Timing display only recorded observations.
+Traffic is grouped by browser tab with an All tabs scope and a domain
+selector. Each chip is named by its tab's newest main-frame page. A worker
+request linked to several tabs (`request_tabs.js`, from `tab_set` and
+`request_tab_link`) appears in each with a marker such as "Service worker · 2
+tabs"; All tabs counts it once. There is no Unattributed group: a row without a
+tab is a capture error, counted in the footer, whose button lists those rows.
+See [request owners and tabs](../../protocol/native-network-v3.md#request-owners-and-tabs).
+Evidence retains the original payload and trace actions; General, Initiator and
+Timing display only recorded observations.
 
 ## Deobfuscation engines
 

@@ -35,6 +35,8 @@ enum class NativeArtifactKind : std::uint16_t {
   kBytecodeBuffer = 6,
   kWasmGuestAdapter = 7,
   kRequestBody = 8,
+  kRequestHeaders = 9,
+  kResponseHeaders = 10,
 };
 
 enum class NativeArtifactCaptureOrigin : std::uint16_t {

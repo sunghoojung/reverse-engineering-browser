@@ -73,6 +73,9 @@ enum class EventType : std::uint16_t {
   // See protocol/native-wasm-dispatch-v1.md.
   kWasmDispatchOverflow = 28,
   kWasmIndirectOverflow = 29,
+  // Header block summaries, see protocol/native-network-v3.md.
+  kRequestHeaders = 30,
+  kResponseHeaders = 31,
 };
 
 enum class EventFlag : std::uint16_t {

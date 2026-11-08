@@ -697,7 +697,8 @@ fn openapi_references_and_native_only_operations_are_consistent() {
             assert!(ids.insert(id), "Duplicate operation ID: {id}");
         }
     }
-    assert_eq!(ids.len(), 44, "Review route coverage when the API changes");
+    assert_eq!(ids.len(), 45, "Review route coverage when the API changes");
+    assert!(ids.contains("get_request_headers"));
     assert!(
         ids.contains("get_js_invocation_sites")
             && ids.contains("resolve_js_invocation_site")
@@ -785,7 +786,7 @@ fn execution_metadata_covers_operations_actions_and_dispatch_without_safe_defaul
             operation_count += 1;
         }
     }
-    assert_eq!(operation_count, 44);
+    assert_eq!(operation_count, 45);
     let schemas = &spec["components"]["schemas"];
     let mut action_count = 0;
     for name in [
@@ -1090,6 +1091,22 @@ async fn openapi_responses_match_live_local_http_and_conditional_reads() {
             "/api/request-signal-profile",
             "/api/request-signal-profile",
             400,
+        ),
+        ("/api/request-headers", "/api/request-headers", 400),
+        (
+            "/api/request-headers?session_id=1&request_id=0",
+            "/api/request-headers",
+            400,
+        ),
+        (
+            "/api/request-headers?session_id=1&request_id=2&tab_id=3",
+            "/api/request-headers",
+            400,
+        ),
+        (
+            "/api/request-headers?session_id=1&request_id=2",
+            "/api/request-headers",
+            200,
         ),
         ("/api/wasm?artifact_id=missing", "/api/wasm", 400),
         ("/api/wasm?artifact_id=1&sections=exports", "/api/wasm", 400),

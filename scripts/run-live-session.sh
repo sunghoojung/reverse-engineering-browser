@@ -901,7 +901,7 @@ else
   echo "Canvas image capture: disabled; set REB_CAPTURE_CANVAS_IMAGES=1 to enable it for one session"
 fi
 if [[ "${capture_request_content}" == 1 ]]; then
-  echo "Request content capture: enabled for this session; request paths, queries and bodies are retained locally"
+  echo "Request content capture: enabled for this session; request paths, queries, headers and bodies are retained locally"
 else
   echo "Request content capture: disabled; hosts and body length, type and digest only. Set REB_CAPTURE_REQUEST_CONTENT=1 to retain paths and bodies"
 fi

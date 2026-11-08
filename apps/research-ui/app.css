@@ -2127,6 +2127,20 @@ var(--panel);
       .traffic-body-text { max-height: 320px; margin: 8px 0 0; padding: 8px; overflow: auto; border: 1px solid var(--line); border-radius: 4px;
         background: var(--panel-2); font: 11px/1.5 var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; }
       .traffic-body-text:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+      .traffic-headers-section { padding: 8px 12px; border-bottom: 1px solid var(--line); }
+      .traffic-headers-section > summary { cursor: pointer; font: 600 12px/20px var(--sans); }
+      .traffic-headers-section > summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+      .traffic-headers-count { margin-left: 6px; color: var(--muted); font-weight: 400; }
+      .traffic-headers-note { margin: 6px 0 0; color: var(--muted); font: 12px/1.5 var(--sans); }
+      .traffic-headers-tools { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 6px 0; }
+      .traffic-headers-status { color: var(--muted); font: 11px var(--sans); }
+      .traffic-header-row { display: grid; grid-template-columns: minmax(80px, 30%) minmax(0, 1fr) auto; gap: 8px; align-items: start; padding: 3px 0; border-bottom: 1px solid var(--line-soft); font: 11px/16px var(--mono); }
+      .traffic-header-name { color: var(--muted); overflow-wrap: anywhere; }
+      .traffic-header-value { max-height: 96px; overflow: auto; overflow-wrap: anywhere; white-space: pre-wrap; }
+      .traffic-header-copy { padding: 0 6px; border: 1px solid var(--line); border-radius: 4px; background: none; color: var(--muted); font: 11px/16px var(--sans); }
+      .traffic-header-copy:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+      .traffic-headers-raw { max-height: 320px; margin: 0; padding: 8px; overflow: auto; border: 1px solid var(--line); border-radius: 4px; font: 11px/1.5 var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; }
+      .traffic-headers-raw:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
       @media (max-width: 1100px) {
         #screen-traffic .traffic-grid { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, 50%) minmax(0, 1fr); overflow: hidden; }
         .request-pane { border-right: 0; border-bottom: 1px solid var(--line); }

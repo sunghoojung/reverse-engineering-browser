@@ -13,7 +13,7 @@ import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {buildEvidence, HOSTILE_BYTECODE_MARKUP, HOSTILE_SOURCE_MARKER, HOSTILE_SOURCE_URL, HOSTILE_URL, HOSTILE_URL_MARKER, NAMED_GAP_REASONS, SOURCE_LINE_COUNT,
-  SYNTHETIC_REQUEST_COUNT, REQUEST_BODY_HOST, REQUEST_BODY_TARGET, REQUEST_BODY_MARKER, METADATA_BODY_HOST, INVOCATION_ARTIFACT_ID} from './origin-trace-rendered-ui/evidence-fixture.mjs';
+  SYNTHETIC_REQUEST_COUNT, REQUEST_BODY_HOST, REQUEST_BODY_TARGET, REQUEST_BODY_MARKER, METADATA_BODY_HOST, HEADER_VALUE_MARKER, INVOCATION_ARTIFACT_ID} from './origin-trace-rendered-ui/evidence-fixture.mjs';
 
 const root = fileURLToPath(new URL('..', import.meta.url));
 const harness = join(root, 'tools/origin-trace-rendered-ui');
@@ -180,7 +180,7 @@ try {
         hostileSourceMarker: HOSTILE_SOURCE_MARKER, hostileBytecodeMarkup: HOSTILE_BYTECODE_MARKUP,
         requestCount: SYNTHETIC_REQUEST_COUNT, sourceLines: SOURCE_LINE_COUNT, namedGapReasons: NAMED_GAP_REASONS,
         requestBodyHost: REQUEST_BODY_HOST, requestBodyTarget: REQUEST_BODY_TARGET, requestBodyMarker: REQUEST_BODY_MARKER,
-        metadataBodyHost: METADATA_BODY_HOST, invocationArtifactId: INVOCATION_ARTIFACT_ID,
+        metadataBodyHost: METADATA_BODY_HOST, headerValueMarker: HEADER_VALUE_MARKER, invocationArtifactId: INVOCATION_ARTIFACT_ID,
         invocationSiteStore: stores.invocationSites}),
     },
   });

@@ -19,6 +19,7 @@
 #include "brave/components/reverse_engineering_browser/browser/native_artifact_capture_sink.h"
 #include "brave/components/reverse_engineering_browser/browser/native_probe_session.h"
 #include "brave/components/reverse_engineering_browser/common/native_artifact_header.h"
+#include "brave/components/reverse_engineering_browser/common/native_network_headers.h"
 #include "brave/components/reverse_engineering_browser/common/native_network_request.h"
 #include "content/public/browser/browser_context.h"
 #include "crypto/hash.h"
@@ -167,6 +168,73 @@ std::string ArtifactUrlOf(const GURL& url, const NativeRequestTarget& target) {
   return spec;
 }
 
+constexpr std::string_view kHeaderIdPrefix = "reb-";
+
+std::string HeaderIdOf(const std::uint64_t request_id) {
+  constexpr std::string_view kHex = "0123456789abcdef";
+  std::string id(kHeaderIdPrefix);
+  for (int shift = 60; shift >= 0; shift -= 4) {
+    id.push_back(kHex[(request_id >> shift) & 0xfU]);
+  }
+  return id;
+}
+
+// The request ID inside an ID this sink assigned, or 0.
+std::uint64_t RequestIdOfHeaderId(const std::string_view id) noexcept {
+  if (id.size() != kHeaderIdPrefix.size() + 16 || !id.starts_with(kHeaderIdPrefix)) {
+    return 0;
+  }
+  std::uint64_t value = 0;
+  for (const char c : id.substr(kHeaderIdPrefix.size())) {
+    const int digit = c >= '0' && c <= '9' ? c - '0' : c >= 'a' && c <= 'f' ? c - 'a' + 10 : -1;
+    if (digit < 0) {
+      return 0;
+    }
+    value = (value << 4U) | static_cast<std::uint64_t>(digit);
+  }
+  return value;
+}
+
+void ForwardNetworkHeaders(const NativeNetworkHeadersKind kind,
+                           const std::string_view devtools_request_id,
+                           const std::vector<network::mojom::HttpRawHeaderPairPtr>& headers) {
+  NativeNetworkCaptureSink::Get().RecordNetworkHeaders(kind, devtools_request_id, headers);
+}
+
+std::uint8_t ReferrerPolicyCode(const net::ReferrerPolicy policy) noexcept {
+  return static_cast<std::uint8_t>(std::clamp(static_cast<int>(policy), 0, 7) + 1);
+}
+
+void SetRemoteEndpoint(NativeHeaderBlockSummary& summary,
+                       const network::mojom::URLResponseHead& head) noexcept {
+  const auto& address = head.remote_endpoint.address();
+  if (!address.IsIPv4() && !address.IsIPv6()) {
+    return;
+  }
+  summary.address_family = address.IsIPv4() ? 4 : 6;
+  summary.remote_port = head.remote_endpoint.port();
+  const auto& bytes = address.bytes();
+  std::copy_n(bytes.data(), std::min<std::size_t>(bytes.size(), summary.remote_address.size()),
+              summary.remote_address.begin());
+}
+
+// Response header lines in received order, as DevTools enumerates them.
+auto ResponseLines(const net::HttpResponseHeaders& headers) {
+  return [&headers](const auto& visit) {
+    std::size_t iterator = 0;
+    std::string name;
+    std::string value;
+    while (headers.EnumerateHeaderLines(&iterator, &name, &value)) {
+      visit(name, value);
+    }
+  };
+}
+
+std::uint16_t StatusCodeOf(const net::HttpResponseHeaders& headers) noexcept {
+  const int code = headers.response_code();
+  return static_cast<std::uint16_t>(code >= 100 && code <= 999 ? code : 0);
+}
+
 NativeRequestBodyKind KindOf(const network::DataElement& element) noexcept {
   return element.TryAs<network::DataElementBytes>()      ? NativeRequestBodyKind::kBytes
          : element.TryAs<network::DataElementFile>()     ? NativeRequestBodyKind::kFile
@@ -222,7 +290,102 @@ void NativeNetworkCaptureSink::SetEmitter(const NativeProbeEmitter emitter,
   capture_content_.store(emitter && capture_content, std::memory_order_relaxed);
   request_body_count_.store(0, std::memory_order_relaxed);
   request_body_bytes_.store(0, std::memory_order_relaxed);
+  {
+    base::AutoLock lock(header_lock_);
+    tracked_headers_.clear();
+    shared_header_blocks_.clear();
+    header_bytes_ = 0;
+    unattributed_header_blocks_ = 0;
+  }
+  SetNativeNetworkHeadersObserver(emitter && capture_content ? &ForwardNetworkHeaders : nullptr);
   emitter_.store(emitter, std::memory_order_release);
+}
+
+template <class ForEach>
+void NativeNetworkCaptureSink::EmitHeaderBlock(const NativeProbeEmitter emitter,
+                                               const NativeProbeType type,
+                                               const NativeProbeHeader& parent,
+                                               NativeHeaderBlockSummary summary,
+                                               const std::string_view url,
+                                               ForEach for_each) {
+  std::uint64_t length = 0;
+  std::uint32_t count = 0;
+  for_each([&length, &count](const std::string_view name, const std::string_view value) {
+    length += name.size() + value.size() + 4;
+    ++count;
+  });
+  summary.header_count = count;
+  summary.block_length = static_cast<std::uint32_t>(
+      std::min<std::uint64_t>(length, std::numeric_limits<std::uint32_t>::max()));
+  NativeProbeEvent event = MakeChildEvent(type, parent);
+  if (count == 0) {
+    summary.state = NativeHeaderState::kEmpty;
+    crypto::hash::Hasher hasher(crypto::hash::HashKind::kSha256);
+    hasher.Finish(summary.sha256);
+  } else if (length > kNativeHeaderBlockLimitBytes) {
+    summary.state = NativeHeaderState::kNotCapturedBlockLimit;
+  } else {
+    std::vector<std::uint8_t> block;
+    block.reserve(static_cast<std::size_t>(length));
+    for_each([&block](const std::string_view name, const std::string_view value) {
+      block.insert(block.end(), name.begin(), name.end());
+      block.push_back(':');
+      block.push_back(' ');
+      block.insert(block.end(), value.begin(), value.end());
+      block.push_back('\r');
+      block.push_back('\n');
+    });
+    crypto::hash::Hasher hasher(crypto::hash::HashKind::kSha256);
+    hasher.Update(block);
+    hasher.Finish(summary.sha256);
+    const bool response = type == NativeProbeType::kResponseHeaders;
+    std::array<std::uint8_t, 37> key{};
+    key[0] = response ? 1 : 0;
+    for (std::size_t i = 0; i < 4; ++i) {
+      key[1 + i] = static_cast<std::uint8_t>((summary.block_length >> (8U * i)) & 0xffU);
+    }
+    std::copy(summary.sha256.begin(), summary.sha256.end(), key.begin() + 5);
+    auto& artifacts = NativeArtifactCaptureSink::Get();
+    if (const auto shared = shared_header_blocks_.find(key);
+        shared != shared_header_blocks_.end()) {
+      summary.state = NativeHeaderState::kCapturedShared;
+      event.header.artifact_id = shared->second;
+    } else if (!artifacts.IsEnabled()) {
+      summary.state = NativeHeaderState::kNotCapturedArtifactUnavailable;
+    } else if (url.empty() || url.size() > kNativeArtifactMaxUrlBytes) {
+      summary.state = NativeHeaderState::kNotCapturedUrl;
+    } else if (block.size() >
+               kNativeHeaderSessionBytes - std::min(kNativeHeaderSessionBytes, header_bytes_)) {
+      summary.state = NativeHeaderState::kNotCapturedSessionBudget;
+    } else {
+      const std::size_t size = block.size();
+      // The header record is the artifact's creator, as for request bodies.
+      event.header.artifact_id = artifacts.CaptureHeaderBlock(
+          response ? NativeArtifactKind::kResponseHeaders : NativeArtifactKind::kRequestHeaders,
+          parent.request_id, parent.frame_id, event.header.sequence_number, std::string(url),
+          std::move(block));
+      if (event.header.artifact_id == 0) {
+        summary.state = NativeHeaderState::kNotCapturedTransferRefused;
+      } else {
+        summary.state = NativeHeaderState::kCaptured;
+        header_bytes_ += size;
+        if (shared_header_blocks_.size() < kNativeHeaderShareEntries) {
+          shared_header_blocks_.emplace(key, event.header.artifact_id);
+        }
+      }
+    }
+  }
+  summary.unattributed_blocks = unattributed_header_blocks_;
+  event.inline_payload = EncodeNativeHeaderBlockPayload(summary);
+  emitter(event);
+}
+
+void NativeNetworkCaptureSink::EndHeaderHop(TrackedHeaders& tracked,
+                                            const bool emitted_extra_info) {
+  // Chromium follows at most 20 redirects, so at most 21 hops can wait.
+  if (emitted_extra_info && !tracked.open_received && tracked.awaiting.size() < 21) {
+    tracked.awaiting.push_back(tracked.open);
+  }
 }
 
 void NativeNetworkCaptureSink::EmitRequestTarget(const NativeProbeEmitter emitter,
@@ -389,6 +552,48 @@ void NativeNetworkCaptureSink::RecordRequestStarted(
     EmitRequestTarget(emitter, event.header, request.url);
   }
   EmitRequestBody(emitter, event.header, request, capture_content);
+  if (!capture_content) {
+    return;
+  }
+  // Provisional: the headers the page and browser set, before the network
+  // stack adds Cookie, Host and the rest.
+  std::string url = ArtifactUrlOf(request.url, TargetOf(request.url));
+  NativeHeaderBlockSummary summary;
+  summary.referrer_policy = ReferrerPolicyCode(request.referrer_policy);
+  base::AutoLock lock(header_lock_);
+  EmitHeaderBlock(emitter, NativeProbeType::kRequestHeaders, event.header, summary, url,
+                  [&request](const auto& visit) {
+                    for (const auto& header : request.headers.GetHeaderVector()) {
+                      visit(header.key, header.value);
+                    }
+                    for (const auto& header : request.cors_exempt_headers.GetHeaderVector()) {
+                      visit(header.key, header.value);
+                    }
+                  });
+  if (tracked_headers_.size() < kNativeHeaderTrackedRequests ||
+      tracked_headers_.contains(request_id)) {
+    TrackedHeaders& tracked = tracked_headers_[request_id];
+    tracked = TrackedHeaders();
+    tracked.open = HeaderHop{event.header, 0, std::move(url)};
+  }
+}
+
+void NativeNetworkCaptureSink::AssignNetworkHeadersId(const std::uint64_t request_id,
+                                                      network::ResourceRequest& request) noexcept {
+  if (!emitter_.load(std::memory_order_acquire) ||
+      !capture_content_.load(std::memory_order_relaxed)) {
+    return;
+  }
+  base::AutoLock lock(header_lock_);
+  const auto tracked = tracked_headers_.find(request_id);
+  if (tracked == tracked_headers_.end()) {
+    return;
+  }
+  if (request.devtools_request_id) {
+    tracked->second.devtools_id = *request.devtools_request_id;
+  } else {
+    request.devtools_request_id = HeaderIdOf(request_id);
+  }
 }
 
 void NativeNetworkCaptureSink::RecordRequestRedirected(
@@ -422,8 +627,27 @@ void NativeNetworkCaptureSink::RecordRequestRedirected(
   event.header.encoded_data_length = response_head.encoded_data_length;
   SetPayload(event, redirect_info.new_method, " ", redirect_info.new_url.host());
   emitter(event);
-  if (capture_content_.load(std::memory_order_relaxed)) {
-    EmitRequestTarget(emitter, event.header, redirect_info.new_url);
+  if (!capture_content_.load(std::memory_order_relaxed)) {
+    return;
+  }
+  EmitRequestTarget(emitter, event.header, redirect_info.new_url);
+  base::AutoLock lock(header_lock_);
+  const auto tracked = tracked_headers_.find(request_id);
+  TrackedHeaders* const entry = tracked == tracked_headers_.end() ? nullptr : &tracked->second;
+  if (response_head.headers) {
+    NativeHeaderBlockSummary summary;
+    summary.status_code = StatusCodeOf(*response_head.headers);
+    summary.hop = entry ? entry->open.hop : 0;
+    SetRemoteEndpoint(summary, response_head);
+    EmitHeaderBlock(emitter, NativeProbeType::kResponseHeaders, event.header, summary,
+                    entry ? std::string_view(entry->open.url) : std::string_view(),
+                    ResponseLines(*response_head.headers));
+  }
+  if (entry) {
+    EndHeaderHop(*entry, response_head.emitted_extra_info);
+    entry->open = HeaderHop{event.header, entry->open.hop + 1,
+                            ArtifactUrlOf(redirect_info.new_url, TargetOf(redirect_info.new_url))};
+    entry->open_received = false;
   }
 }
 
@@ -436,7 +660,8 @@ std::uint64_t NativeNetworkCaptureSink::RecordResponseStarted(
     const std::uint64_t browser_context_id_high,
     const std::uint64_t browser_context_id_low,
     const network::mojom::URLResponseHead& response_head,
-    const bool synthetic) noexcept {
+    const bool synthetic,
+    const net::HttpResponseHeaders* const network_headers) noexcept {
   const NativeProbeEmitter emitter = emitter_.load(std::memory_order_acquire);
   if (!emitter) [[likely]] {
     return 0;
@@ -469,6 +694,28 @@ std::uint64_t NativeNetworkCaptureSink::RecordResponseStarted(
                "; protocol=", response_head.alpn_negotiated_protocol);
   }
   emitter(event);
+  // A Shields stub is synthetic; its headers were never received.
+  if (synthetic || !capture_content_.load(std::memory_order_relaxed)) {
+    return sequence_number;
+  }
+  // The headers the network sent, before Brave's own response-header rewrite.
+  const net::HttpResponseHeaders* const headers =
+      network_headers ? network_headers : response_head.headers.get();
+  base::AutoLock lock(header_lock_);
+  const auto tracked = tracked_headers_.find(request_id);
+  TrackedHeaders* const entry = tracked == tracked_headers_.end() ? nullptr : &tracked->second;
+  if (headers) {
+    NativeHeaderBlockSummary summary;
+    summary.status_code = StatusCodeOf(*headers);
+    summary.hop = entry ? entry->open.hop : 0;
+    SetRemoteEndpoint(summary, response_head);
+    EmitHeaderBlock(emitter, NativeProbeType::kResponseHeaders, event.header, summary,
+                    entry ? std::string_view(entry->open.url) : std::string_view(),
+                    ResponseLines(*headers));
+  }
+  if (entry) {
+    EndHeaderHop(*entry, response_head.emitted_extra_info);
+  }
   return sequence_number;
 }
 
@@ -485,6 +732,10 @@ void NativeNetworkCaptureSink::RecordRequestCompleted(
   const NativeProbeEmitter emitter = emitter_.load(std::memory_order_acquire);
   if (!emitter) [[likely]] {
     return;
+  }
+  if (capture_content_.load(std::memory_order_relaxed)) {
+    base::AutoLock lock(header_lock_);
+    tracked_headers_.erase(request_id);
   }
   const std::uint64_t monotonic_time_ns =
       static_cast<std::uint64_t>(base::TimeTicks::Now().since_origin().InNanoseconds());
@@ -505,6 +756,68 @@ void NativeNetworkCaptureSink::RecordRequestCompleted(
   SetPayload(event,
              disposition.empty() ? (status.error_code == 0 ? "completed" : "failed") : disposition);
   emitter(event);
+}
+
+void NativeNetworkCaptureSink::RecordNetworkHeaders(
+    const NativeNetworkHeadersKind kind,
+    const std::string_view devtools_request_id,
+    const std::vector<network::mojom::HttpRawHeaderPairPtr>& headers) noexcept {
+  const NativeProbeEmitter emitter = emitter_.load(std::memory_order_acquire);
+  if (!emitter || !capture_content_.load(std::memory_order_relaxed)) {
+    return;
+  }
+  const std::uint64_t monotonic_time_ns =
+      static_cast<std::uint64_t>(base::TimeTicks::Now().since_origin().InNanoseconds());
+  if ((category_mask_.load(std::memory_order_relaxed) &
+       NativeProbeCategoryMask(NativeProbeCategory::kNetwork)) == 0 ||
+      monotonic_time_ns >= expires_at_monotonic_ns_.load(std::memory_order_relaxed)) {
+    return;
+  }
+  base::AutoLock lock(header_lock_);
+  // A DevTools-owned ID is matched by value; any other unknown ID, such as a
+  // CORS preflight's, is not this sink's request.
+  const std::uint64_t own = RequestIdOfHeaderId(devtools_request_id);
+  const auto tracked = own != 0
+                           ? tracked_headers_.find(own)
+                           : std::find_if(tracked_headers_.begin(), tracked_headers_.end(),
+                                          [devtools_request_id](const auto& item) {
+                                            return !item.second.devtools_id.empty() &&
+                                                   item.second.devtools_id == devtools_request_id;
+                                          });
+  if (tracked == tracked_headers_.end()) {
+    if (own != 0 && unattributed_header_blocks_ != std::numeric_limits<std::uint32_t>::max()) {
+      ++unattributed_header_blocks_;
+    }
+    return;
+  }
+  TrackedHeaders& entry = tracked->second;
+  const auto lines = [&headers](const auto& visit) {
+    for (const auto& header : headers) {
+      if (header) {
+        visit(header->key, header->value);
+      }
+    }
+  };
+  NativeHeaderBlockSummary summary;
+  if (kind == NativeNetworkHeadersKind::kEarlyHints) {
+    summary.source = NativeHeaderSource::kEarlyHints;
+    summary.status_code = 103;
+    summary.hop = entry.open.hop;
+    EmitHeaderBlock(emitter, NativeProbeType::kResponseHeaders, entry.open.parent, summary,
+                    entry.open.url, lines);
+    return;
+  }
+  HeaderHop hop;
+  if (!entry.awaiting.empty()) {
+    hop = std::move(entry.awaiting.front());
+    entry.awaiting.erase(entry.awaiting.begin());
+  } else {
+    hop = entry.open;
+    entry.open_received = true;
+  }
+  summary.source = NativeHeaderSource::kNetwork;
+  summary.hop = hop.hop;
+  EmitHeaderBlock(emitter, NativeProbeType::kRequestHeaders, hop.parent, summary, hop.url, lines);
 }
 
 }  // namespace reb

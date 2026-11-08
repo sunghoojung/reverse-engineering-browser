@@ -18,10 +18,12 @@
 #include <unistd.h>
 
 #include "components/reverse_engineering_browser/common/native_artifact_header.h"
+#include "components/reverse_engineering_browser/common/native_network_headers.h"
 #include "components/reverse_engineering_browser/common/native_network_request.h"
 #include "components/reverse_engineering_browser/common/native_probe_event.h"
 #include "reb/artifact.hpp"
 #include "reb/event.hpp"
+#include "reb/network_headers.hpp"
 #include "reb/network_request.hpp"
 
 namespace {
@@ -55,6 +57,19 @@ static_assert(static_cast<std::uint8_t>(reb::RequestBodyKind::kUnknown) ==
 static_assert(reb::kRequestBodyContentTypeOmitted == reb::kNativeRequestBodyContentTypeOmitted);
 static_assert(static_cast<std::uint8_t>(reb::RequestScheme::kWss) ==
               static_cast<std::uint8_t>(reb::NativeRequestScheme::kWss));
+static_assert(static_cast<std::uint16_t>(reb::EventType::kRequestHeaders) ==
+              static_cast<std::uint16_t>(reb::NativeProbeType::kRequestHeaders));
+static_assert(static_cast<std::uint16_t>(reb::EventType::kResponseHeaders) ==
+              static_cast<std::uint16_t>(reb::NativeProbeType::kResponseHeaders));
+static_assert(static_cast<std::uint16_t>(reb::ArtifactKind::kRequestHeaders) ==
+              static_cast<std::uint16_t>(reb::NativeArtifactKind::kRequestHeaders));
+static_assert(static_cast<std::uint16_t>(reb::ArtifactKind::kResponseHeaders) ==
+              static_cast<std::uint16_t>(reb::NativeArtifactKind::kResponseHeaders));
+static_assert(reb::kHeaderBlockLimitBytes == reb::kNativeHeaderBlockLimitBytes);
+static_assert(static_cast<std::uint8_t>(reb::HeaderState::kNotCapturedUrl) ==
+              static_cast<std::uint8_t>(reb::NativeHeaderState::kNotCapturedUrl));
+static_assert(static_cast<std::uint8_t>(reb::HeaderSource::kEarlyHints) ==
+              static_cast<std::uint8_t>(reb::NativeHeaderSource::kEarlyHints));
 
 reb::NativeRequestBodySummary Summary(const reb::NativeRequestBodyKind kind,
                                       const reb::NativeRequestBodyState state,
@@ -391,6 +406,153 @@ void CheckTargets() {
   Check(!reb::IsValidEvent(dirty), "bytes after the recorded target are rejected");
 }
 
+reb::EventRecord HeaderEvent(const bool response,
+                             const reb::NativeHeaderBlockSummary& summary,
+                             const std::uint64_t artifact_id = 0) {
+  auto event = Event(response ? reb::EventType::kResponseHeaders : reb::EventType::kRequestHeaders,
+                     reb::EncodeNativeHeaderBlockPayload(summary));
+  event.header.artifact_id = artifact_id;
+  return event;
+}
+
+// Every state and source of native-network-v3.md, valid and malformed, through
+// the overlay encoder and the core decoder; each joins the golden.
+void CheckHeaderBlocks() {
+  using Source = reb::NativeHeaderSource;
+  using State = reb::NativeHeaderState;
+  const auto block = [](const Source source, const State state) {
+    reb::NativeHeaderBlockSummary value;
+    value.source = source;
+    value.state = state;
+    value.referrer_policy = source == Source::kBrowser ? 4 : 0;
+    value.header_count = state == State::kEmpty ? 0 : 2;
+    value.block_length = state == State::kEmpty                   ? 0
+                         : state == State::kNotCapturedBlockLimit ? 400 * 1024
+                                                                  : 40;
+    if (state != State::kNotCapturedBlockLimit) {
+      value.sha256.fill(0xcd);
+    }
+    value.hop = 1;
+    return value;
+  };
+  const auto response = [&block](const Source source, const State state) {
+    auto value = block(source, state);
+    value.referrer_policy = 0;
+    value.status_code = source == Source::kEarlyHints ? 103 : 302;
+    if (source == Source::kBrowser) {
+      value.address_family = 6;
+      value.remote_port = 443;
+      value.remote_address.fill(0x20);
+    }
+    return value;
+  };
+  const auto add = [](const std::string& name, const reb::EventRecord& event, const bool valid) {
+    golden.emplace_back(name, event);
+    Check(reb::IsValidEvent(event) == valid, "header record verdict: " + name);
+  };
+  for (const State state :
+       {State::kCaptured, State::kCapturedShared, State::kEmpty, State::kNotCapturedBlockLimit,
+        State::kNotCapturedArtifactUnavailable, State::kNotCapturedTransferRefused,
+        State::kNotCapturedSessionBudget, State::kNotCapturedUrl}) {
+    const bool retained = state == State::kCaptured || state == State::kCapturedShared;
+    const std::uint64_t artifact = retained ? 77 : 0;
+    const std::string suffix = std::to_string(static_cast<unsigned>(state));
+    add("request headers browser state " + suffix,
+        HeaderEvent(false, block(Source::kBrowser, state), artifact), true);
+    add("request headers network state " + suffix,
+        HeaderEvent(false, block(Source::kNetwork, state), artifact), true);
+    add("response headers browser state " + suffix,
+        HeaderEvent(true, response(Source::kBrowser, state), artifact), true);
+    add("response headers early hints state " + suffix,
+        HeaderEvent(true, response(Source::kEarlyHints, state), artifact), true);
+    add("header artifact disagrees with state " + suffix,
+        HeaderEvent(false, block(Source::kBrowser, state), retained ? 0 : 77), false);
+  }
+  const auto captured = block(Source::kBrowser, State::kCaptured);
+  const auto answered = response(Source::kBrowser, State::kCaptured);
+  struct Bad {
+    const char* name;
+    bool response;
+    std::function<void(reb::NativeHeaderBlockSummary&)> mutate;
+  };
+  const Bad bad[] = {
+      {"request status", false, [](auto& v) { v.status_code = 200; }},
+      {"request address", false, [](auto& v) { v.address_family = 4; }},
+      {"request early hints source", false, [](auto& v) { v.source = Source::kEarlyHints; }},
+      {"request browser without policy", false, [](auto& v) { v.referrer_policy = 0; }},
+      {"request policy out of range", false, [](auto& v) { v.referrer_policy = 9; }},
+      {"network request with policy", false,
+       [](auto& v) {
+         v.source = Source::kNetwork;
+         v.referrer_policy = 1;
+       }},
+      {"source zero", false, [](auto& v) { v.source = static_cast<Source>(0); }},
+      {"state zero", false, [](auto& v) { v.state = static_cast<State>(0); }},
+      {"state nine", false, [](auto& v) { v.state = static_cast<State>(9); }},
+      {"count without length", false, [](auto& v) { v.block_length = 0; }},
+      {"length below five per header", false, [](auto& v) { v.block_length = 9; }},
+      {"empty with headers", false, [](auto& v) { v.state = State::kEmpty; }},
+      {"limit state under the limit", false,
+       [](auto& v) {
+         v.state = State::kNotCapturedBlockLimit;
+         v.sha256 = {};
+       }},
+      {"over the limit captured", false, [](auto& v) { v.block_length = 400 * 1024; }},
+      {"missing digest", false, [](auto& v) { v.sha256 = {}; }},
+      {"response policy", true, [](auto& v) { v.referrer_policy = 1; }},
+      {"response network source", true, [](auto& v) { v.source = Source::kNetwork; }},
+      {"response status above 999", true, [](auto& v) { v.status_code = 1000; }},
+      {"response status below 100", true, [](auto& v) { v.status_code = 42; }},
+      {"early hints status", true,
+       [](auto& v) {
+         v.source = Source::kEarlyHints;
+         v.address_family = 0;
+         v.remote_port = 0;
+         v.remote_address = {};
+         v.status_code = 200;
+       }},
+      {"early hints address", true,
+       [](auto& v) {
+         v.source = Source::kEarlyHints;
+         v.status_code = 103;
+       }},
+      {"address family five", true, [](auto& v) { v.address_family = 5; }},
+      {"IPv4 tail", true, [](auto& v) { v.address_family = 4; }},
+      {"port without address", true,
+       [](auto& v) {
+         v.address_family = 0;
+         v.remote_address = {};
+       }},
+  };
+  for (const auto& item : bad) {
+    auto value = item.response ? answered : captured;
+    item.mutate(value);
+    add(std::string("header ") + item.name, HeaderEvent(item.response, value, 77), false);
+  }
+  auto unparsed = answered;
+  unparsed.status_code = 0;
+  add("response status unparsed", HeaderEvent(true, unparsed, 77), true);
+  auto ipv4 = answered;
+  ipv4.address_family = 4;
+  ipv4.remote_address = {127, 0, 0, 1};
+  add("response IPv4 endpoint", HeaderEvent(true, ipv4, 77), true);
+  auto event = HeaderEvent(false, captured, 77);
+  event.inline_payload[44] = std::byte{1};
+  add("header reserved word", event, false);
+  event = HeaderEvent(false, captured, 77);
+  event.inline_payload[127] = std::byte{1};
+  add("header reserved tail", event, false);
+  event = HeaderEvent(false, captured, 77);
+  event.header.status_code = 200;
+  add("header envelope status", event, false);
+  event = HeaderEvent(false, captured, 77);
+  event.header.parent_event_id = event.header.sequence_number;
+  add("header parent not earlier", event, false);
+  event = HeaderEvent(false, captured, 77);
+  event.inline_payload[0] = std::byte{2};
+  add("header payload version", event, false);
+}
+
 std::string Frame(const reb::ArtifactHeader& header,
                   const std::string& url,
                   const std::string& mime,
@@ -466,6 +628,43 @@ void CheckArtifacts() {
     Check(reopened.ReceiveOne(duplicate) == reb::ArtifactReceiveStatus::kConflict,
           "reopened store accepted the request body manifest line and kept its identity");
   }
+  // Header blocks share the request-body policy (native-network-v3.md).
+  const std::string text = "Set-Cookie: sid=1\r\n";
+  reb::ArtifactHeader block = header;
+  for (const auto kind :
+       {reb::ArtifactKind::kRequestHeaders, reb::ArtifactKind::kResponseHeaders}) {
+    block = header;
+    block.kind = kind;
+    block.artifact_id = kind == reb::ArtifactKind::kRequestHeaders ? 6 : 7;
+    block.content_size = text.size();
+    block.mime_type_size = 10;
+    Check(reb::IsValidArtifactHeader(block), "header block artifact header is valid");
+    auto plain = block;
+    plain.flags = 0;
+    Check(!reb::IsValidArtifactHeader(plain), "header block artifact must be sensitive");
+    auto other = block;
+    other.capture_origin = reb::ArtifactCaptureOrigin::kNetworkResponse;
+    Check(!reb::IsValidArtifactHeader(other), "header block artifact keeps the request origin");
+    reb::ArtifactReceiver receiver(
+        root / "allowed",
+        {.max_artifact_bytes = 1U << 20, .max_store_bytes = 1U << 22, .allow_sensitive = true});
+    std::istringstream stream(Frame(block, url, "text/plain", text));
+    Check(receiver.ReceiveOne(stream) == reb::ArtifactReceiveStatus::kAccepted,
+          "receiver keeps header blocks: " + receiver.LastError());
+  }
+  {
+    reb::ArtifactReceiver reopened(
+        root / "allowed",
+        {.max_artifact_bytes = 1U << 20, .max_store_bytes = 1U << 22, .allow_sensitive = true});
+    std::istringstream duplicate(Frame(block, url, "text/plain", text));
+    Check(reopened.ReceiveOne(duplicate) == reb::ArtifactReceiveStatus::kConflict,
+          "reopened store accepted the header block manifest lines");
+    std::ifstream lines(root / "allowed" / "manifest.jsonl");
+    const std::string stored{std::istreambuf_iterator<char>(lines), {}};
+    Check(stored.find("\"kind\":\"request_headers\"") != std::string::npos &&
+              stored.find("\"kind\":\"response_headers\"") != std::string::npos,
+          "manifest names both header kinds");
+  }
   std::filesystem::remove_all(root, ignored);
 }
 
@@ -476,6 +675,7 @@ int main(int argc, char** argv) {
   CheckContentTypes();
   CheckBodyStates();
   CheckTargets();
+  CheckHeaderBlocks();
   if (failures != 0) {
     return 1;
   }
@@ -497,6 +697,7 @@ int main(int argc, char** argv) {
     return 1;
   }
   std::cout << "PASS network request wire: overlay/core parity, content types, every body "
-               "state and malformed record, targets, request_body artifact policy\n";
+               "state and malformed record, targets, header blocks, request_body and header "
+               "artifact policy\n";
   return 0;
 }

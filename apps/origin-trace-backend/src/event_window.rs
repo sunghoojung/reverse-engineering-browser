@@ -307,6 +307,8 @@ fn is_network(event: &Value) -> bool {
                     | "request_failed"
                     | "request_target"
                     | "request_body"
+                    | "request_headers"
+                    | "response_headers"
             )
         )
 }

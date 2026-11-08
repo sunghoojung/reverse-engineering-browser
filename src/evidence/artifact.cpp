@@ -344,12 +344,14 @@ bool ParseManifestRecord(const std::string_view line,
   const std::string_view kind = line.substr(position, kind_end - position);
   if (kind != "javascript" && kind != "wasm" && kind != "source_map" && kind != "response_body" &&
       kind != "canvas_data_url" && kind != "bytecode_buffer" && kind != "wasm_guest_adapter" &&
-      kind != "request_body") {
+      kind != "request_body" && kind != "request_headers" && kind != "response_headers") {
     return false;
   }
-  // A request body is created by its browser request_body record and has no
-  // renderer execution context.
-  if ((kind == "request_body") != (capture_origin == "network_request") ||
+  // Request bodies and header blocks are created by one browser network record
+  // and have no renderer execution context.
+  const bool network_request =
+      kind == "request_body" || kind == "request_headers" || kind == "response_headers";
+  if (network_request != (capture_origin == "network_request") ||
       (capture_origin == "network_request" && (execution_context_id != 0 || !creator_event_id))) {
     return false;
   }
@@ -398,8 +400,7 @@ bool ParseManifestRecord(const std::string_view line,
   } else {
     return false;
   }
-  if (sensitive !=
-          (kind == "response_body" || kind == "canvas_data_url" || kind == "request_body") ||
+  if (sensitive != (kind == "response_body" || kind == "canvas_data_url" || network_request) ||
       !ConsumePrefix(line, position, ",\"content_path\":\"blobs/") ||
       line.substr(position, digest.size()) != digest) {
     return false;
@@ -450,6 +451,13 @@ bool TruncateManifest(const int directory, const std::uint64_t size) noexcept {
   return close(descriptor) == 0 && truncated;
 }
 
+// Request bodies and header blocks: sensitive network evidence created by one
+// browser network record (protocol/native-network-v2.md and v3).
+bool IsNetworkRequestArtifact(const ArtifactKind kind) noexcept {
+  return kind == ArtifactKind::kRequestBody || kind == ArtifactKind::kRequestHeaders ||
+         kind == ArtifactKind::kResponseHeaders;
+}
+
 }  // namespace
 
 bool IsValidArtifactHeader(const ArtifactHeader& header) noexcept {
@@ -468,10 +476,10 @@ bool IsValidArtifactHeader(const ArtifactHeader& header) noexcept {
     return false;
   const bool sensitive = (header.flags & kArtifactFlagSensitive) != 0;
   if ((header.kind == ArtifactKind::kResponseBody || header.kind == ArtifactKind::kCanvasDataUrl ||
-       header.kind == ArtifactKind::kRequestBody) != sensitive) {
+       IsNetworkRequestArtifact(header.kind)) != sensitive) {
     return false;
   }
-  if ((header.kind == ArtifactKind::kRequestBody) !=
+  if (IsNetworkRequestArtifact(header.kind) !=
           (header.capture_origin == ArtifactCaptureOrigin::kNetworkRequest) ||
       (header.capture_origin == ArtifactCaptureOrigin::kNetworkRequest &&
        (header.execution_context_id != 0 || header.creator_event_id == 0))) {
@@ -481,7 +489,7 @@ bool IsValidArtifactHeader(const ArtifactHeader& header) noexcept {
       header.kind == ArtifactKind::kJavaScript || header.kind == ArtifactKind::kWasm ||
       header.kind == ArtifactKind::kSourceMap || header.kind == ArtifactKind::kResponseBody ||
       header.kind == ArtifactKind::kCanvasDataUrl || header.kind == ArtifactKind::kBytecodeBuffer ||
-      header.kind == ArtifactKind::kWasmGuestAdapter || header.kind == ArtifactKind::kRequestBody;
+      header.kind == ArtifactKind::kWasmGuestAdapter || IsNetworkRequestArtifact(header.kind);
   const bool valid_origin =
       header.capture_origin == ArtifactCaptureOrigin::kUnknown ||
       header.capture_origin == ArtifactCaptureOrigin::kNetworkResponse ||
@@ -539,6 +547,10 @@ const char* ArtifactKindName(const ArtifactKind kind) noexcept {
       return "wasm_guest_adapter";
     case ArtifactKind::kRequestBody:
       return "request_body";
+    case ArtifactKind::kRequestHeaders:
+      return "request_headers";
+    case ArtifactKind::kResponseHeaders:
+      return "response_headers";
     case ArtifactKind::kUnknown:
       return "unknown";
   }

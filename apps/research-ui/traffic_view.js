@@ -1,8 +1,8 @@
 /* Native Traffic rows carry method, host, status, type and lifecycle timing.
- * Content capture sessions add the URL path and query and a bounded request
- * body (protocol/native-network-v2.md); every session records the body's
- * length, type and digest. Headers and response bodies are not part of native
- * capture, so this view never implies or searches them. */
+ * Content capture sessions add the URL path and query, a bounded request body
+ * (protocol/native-network-v2.md) and header blocks, shown by traffic_headers.js
+ * (v3); every session records the body's length, type and digest. Response
+ * bodies are not part of native capture, and search never reads headers. */
 function trafficTargetParts(request) {
   const target = String(request?.path ?? '').trim();
   if (request?.hostOnly) return {name: target || 'Unknown host', host: 'Host-only metadata'};
@@ -242,8 +242,8 @@ function renderTrafficRows(container, requests, {selectedId, newIds, onSelect, o
   container.tabIndex = rows.length ? -1 : 0;
 }
 
-// Native rows retain no headers; search covers the method, host or URL and
-// status they carry and any researcher name shown beside them.
+// Search covers the method, host or URL and status a row carries and any
+// researcher name shown beside it, never retained headers or bodies.
 function trafficSearchRequests(requests, needle, nameOf = () => null) {
   const matches = new Map();
   for (const request of requests) {
@@ -268,8 +268,8 @@ function trafficOriginLabel(request) {
     : request?.origin === 'live' ? 'Live metadata' : 'Local evidence';
 }
 
-// Native capture has no header or response body record to show. Make that
-// coverage explicit instead of rendering request/response panes that stay empty.
+// Native capture has no response body record to show. Make that coverage
+// explicit instead of rendering a response pane that stays empty.
 function renderTrafficDetails(container, request, notice = '', bodyView = null) {
   const key = JSON.stringify([request?.origin, request?.id, notice]);
   if (container.dataset.selection !== key) {
@@ -299,8 +299,8 @@ function renderTrafficDetails(container, request, notice = '', bodyView = null) 
       : request.status, trafficOriginLabel(request), request.id,
     request.tabId && request.tabId !== '0' ? request.tabId : 'Unattributed',
     `${request.hostOnly
-      ? 'Native capture recorded method, host, status and lifecycle timing. URL path, query and body bytes are recorded only in content capture sessions.'
-      : 'Native capture recorded method, URL path and query, status and lifecycle timing.'} Request and response headers and response bodies are not captured.${request.targetMalformed ? ' The URL target record is malformed and was not interpreted.' : ''}${request.urlTruncated ? ' Request URL truncated.' : ''}${request.documentUrlTruncated ? ' Document URL truncated.' : ''}${request.methodTruncated ? ' Method truncated.' : ''}`];
+      ? 'Native capture recorded method, host, status and lifecycle timing. URL path, query, headers and body bytes are recorded only in content capture sessions.'
+      : 'Native capture recorded method, URL path and query, status and lifecycle timing; the Headers tab shows retained headers.'} Response bodies are not captured.${request.targetMalformed ? ' The URL target record is malformed and was not interpreted.' : ''}${request.urlTruncated ? ' Request URL truncated.' : ''}${request.documentUrlTruncated ? ' Document URL truncated.' : ''}${request.methodTruncated ? ' Method truncated.' : ''}`];
   // Captured values stay mono; coverage notes read as prose; Source is provenance.
   const kinds = ['value', request.documentUrl ? 'value' : 'prose', 'value', /^\d+$/.test(String(values[3])) ? 'value' : 'prose',
     'provenance', 'value', request.tabId && request.tabId !== '0' ? 'value' : 'prose', 'prose'];

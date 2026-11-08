@@ -103,11 +103,13 @@ EVENT_TYPES = {
     "request_body",
     "request_completed",
     "request_failed",
+    "request_headers",
     "request_initiated",
     "request_redirected",
     "request_started",
     "request_target",
     "response_completed",
+    "response_headers",
     "response_started",
     "vm_finding",
     "vm_dispatch_sample",
@@ -241,6 +243,45 @@ def valid_request_body(event: dict, payload: bytes) -> bool:
         10: content and is_bytes and body_length != 0,
         11: True,
     }[state]
+
+
+HEADER_BLOCK_LIMIT = 320 * 1024
+
+
+def valid_header_block(event: dict, payload: bytes) -> bool:
+    """Every rule of the native-network-v3.md header record, mirrored from the C++ core."""
+    if not valid_request_child(event, payload):
+        return False
+
+    def at(offset: int, size: int) -> int:
+        return int.from_bytes(payload[offset:offset + size], "little")
+
+    source, state, policy, family = payload[4], payload[5], payload[6], payload[7]
+    count, length, status, port = at(8, 4), at(12, 4), at(20, 2), at(22, 2)
+    address, digest = payload[24:40], payload[48:80]
+    if not 1 <= state <= 8 or any(payload[44:48]) or any(payload[80:]):
+        return False
+    addressed = family != 0
+    if event["type"] == "response_headers":
+        if policy != 0:
+            return False
+        if source == 1:
+            if status > 999 or 0 < status < 100:
+                return False
+        elif source != 3 or status != 103 or addressed:
+            return False
+    elif (status != 0 or addressed
+          or (source == 1 and not 1 <= policy <= 8)
+          or (source != 1 and (source != 2 or policy != 0))):
+        return False
+    if (family not in (0, 4, 6) or (not addressed and (port or any(address)))
+            or (family == 4 and any(address[4:]))):
+        return False
+    empty, limited = state == 3, state == 4
+    if ((count == 0) != empty or (length == 0) != empty or length < 5 * count
+            or limited != (length > HEADER_BLOCK_LIMIT) or (not any(digest)) != limited):
+        return False
+    return (event["artifact_id"] != "0") == (state in (1, 2))
 
 
 def valid_invocation_context(state: int, invocation_id: int) -> bool:
@@ -570,6 +611,10 @@ def validate_event(event: object, line_number: int) -> None:
         raise ValueError(f"line {line_number}: native request body record is invalid")
     if event["type"] == "request_target" and not valid_request_target(event, payload):
         raise ValueError(f"line {line_number}: native request target record is invalid")
+    if event["type"] in ("request_headers", "response_headers") and not valid_header_block(
+        event, payload
+    ):
+        raise ValueError(f"line {line_number}: native header block record is invalid")
     if event["type"].startswith("js_invocation_") and not valid_js_invocation(event, payload):
         raise ValueError(f"line {line_number}: native JavaScript invocation record is invalid")
     if event["type"] in ("wasm_guest_dispatch", "wasm_guest_invocation"):

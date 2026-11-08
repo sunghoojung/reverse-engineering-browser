@@ -27,6 +27,7 @@ export const REQUEST_BODY_HOST = 'api.body.test';
 export const REQUEST_BODY_TARGET = '/getcaptcha/site-key?s=<svg/onload=window.__rebInjected=5>';
 export const REQUEST_BODY_MARKER = '<img src=x onerror="window.__rebInjected=4">';
 export const METADATA_BODY_HOST = 'api.metadata.test';
+export const HEADER_VALUE_MARKER = '<img src=x onerror="window.__rebInjected=7">';
 // A retained glue script for Track calls: the real window.hsw binder, decoys
 // in a string and a comment that must never match, and two definitions of
 // o.dup that must be refused as ambiguous. Context lines carry markup as text.
@@ -139,6 +140,27 @@ function requestBodyPayload({state, content, bytes, contentType = 'application/j
   return payload.toString('hex');
 }
 
+// protocol/native-network-v3.md: one header record per block.
+function headerBlockPayload({source, block, status = 0, policy = 0, hop = 0}) {
+  const payload = Buffer.alloc(128);
+  payload.writeUInt16LE(1, 0);
+  payload.writeUInt16LE(128, 2);
+  payload[4] = source;
+  payload[5] = 1;
+  payload[6] = policy;
+  payload.writeUInt32LE(block.toString().split('\r\n').length - 1, 8);
+  payload.writeUInt32LE(block.length, 12);
+  payload.writeUInt32LE(hop, 16);
+  payload.writeUInt16LE(status, 20);
+  if (status) {
+    payload[7] = 4;
+    payload.writeUInt16LE(8443, 22);
+    Buffer.from([127, 0, 0, 1]).copy(payload, 24);
+  }
+  createHash('sha256').update(block).digest().copy(payload, 48);
+  return payload.toString('hex');
+}
+
 function requestTargetPayload(target) {
   const payload = Buffer.alloc(128);
   payload.writeUInt16LE(1, 0);
@@ -173,7 +195,13 @@ async function requestBodyRequests(template, firstSequence, firstTime, artifacts
   row(retained, 'request_target', requestTargetPayload(REQUEST_BODY_TARGET), {parent_event_id: start.sequence_number});
   const record = row(retained, 'request_body', requestBodyPayload({state: 4, content: true, bytes: body, captured: body.length}),
     {parent_event_id: start.sequence_number, artifact_id: '320'});
-  row(retained, 'response_started', hex('application/json'), {status_code: 200});
+  const sentBlock = Buffer.from(`:method: POST\r\n:path: /getcaptcha/site-key\r\ncookie: sid=fixture\r\nx-note: ${HEADER_VALUE_MARKER}\r\n`);
+  const receivedBlock = Buffer.from('content-type: application/json\r\nset-cookie: hc=1; Secure; HttpOnly\r\n');
+  const sent = row(retained, 'request_headers', headerBlockPayload({source: 2, block: sentBlock}),
+    {parent_event_id: start.sequence_number, artifact_id: '321'});
+  const response = row(retained, 'response_started', hex('application/json'), {status_code: 200});
+  const received = row(retained, 'response_headers', headerBlockPayload({source: 1, block: receivedBlock, status: 200}),
+    {parent_event_id: response.sequence_number, artifact_id: '322'});
   row(retained, 'request_completed', hex('completed'), {status_code: 200});
   row({...retained, category: 'artifact'}, 'artifact_captured', hex('accepted'),
     {artifact_id: '320', parent_event_id: record.sequence_number});
@@ -187,7 +215,14 @@ async function requestBodyRequests(template, firstSequence, firstTime, artifacts
     frame_id: template.frame_id, creator_event_id: record.sequence_number, execution_context_id: '0',
     capture_origin: 'network_request', kind: 'request_body', mime_type: 'application/json', sensitive: true,
     url: `https://${REQUEST_BODY_HOST}${REQUEST_BODY_TARGET}`}, body);
-  return {events, artifact: bodyArtifact};
+  const headerArtifacts = [];
+  for (const [id, kind, creator, bytes] of [['321', 'request_headers', sent, sentBlock], ['322', 'response_headers', received, receivedBlock]]) {
+    headerArtifacts.push(await artifact(artifactsRoot, {artifact_id: id, session_id: template.session_id, navigation_id: '0',
+      frame_id: template.frame_id, creator_event_id: creator.sequence_number, execution_context_id: '0',
+      capture_origin: 'network_request', kind, mime_type: 'text/plain', sensitive: true,
+      url: `https://${REQUEST_BODY_HOST}${REQUEST_BODY_TARGET}`}, bytes));
+  }
+  return {events, artifact: bodyArtifact, headerArtifacts};
 }
 
 // Like the browser, each gap takes its renderer's own sequence slot, so the
@@ -242,7 +277,7 @@ export async function buildEvidence({root, sessions, guestStore, dispatchStore, 
   // static arm label, and an inner interpreter linked to its outer handler.
   const observed = await goldenEvidence(artifacts, observedStore);
   assert(observed.events.filter(event => event.type === 'wasm_guest_invocation').length === 2, 'observed store holds outer and inner activations');
-  const manifest = [...demoArtifacts, source, bytecode, parseFailure, glue, withBodies.artifact, ...guest.artifacts, ...physical.artifacts, ...observed.artifacts];
+  const manifest = [...demoArtifacts, source, bytecode, parseFailure, glue, withBodies.artifact, ...withBodies.headerArtifacts, ...guest.artifacts, ...physical.artifacts, ...observed.artifacts];
   const retained = [...demoEvents, ...requests, ...guest.events, ...physical.events, ...observed.events];
   const vm = demoEvents.find(event => event.category === 'vm');
   assert(vm, 'demo store must contain a native vm event');

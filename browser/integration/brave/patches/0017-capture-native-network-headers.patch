@@ -1,0 +1,43 @@
+diff --git a/browser/net/brave_proxying_url_loader_factory.cc b/browser/net/brave_proxying_url_loader_factory.cc
+--- a/browser/net/brave_proxying_url_loader_factory.cc
++++ b/browser/net/brave_proxying_url_loader_factory.cc
+@@ -223,6 +223,8 @@ BraveProxyingURLLoaderFactory<T>::InProgressRequest::InProgressRequest(
+         request_id_, native_initiator_request_id_, initiator_process_id_,
+         tab_id_, frame_id_, browser_context_id_high_, browser_context_id_low_,
+         request_);
++    reb::NativeNetworkCaptureSink::Get().AssignNetworkHeadersId(request_id_,
++                                                                request_);
+   }
+   // If there is a client error, clean up the request.
+   target_client_.set_disconnect_handler(base::BindOnce(
+@@ -739,6 +741,11 @@ void BraveProxyingURLLoaderFactory<
+     return;
+   }
+ 
++  // Header capture records what the network sent, not Brave's rewrite.
++  const scoped_refptr<net::HttpResponseHeaders> network_headers =
++      override_headers_ && NativeCaptureIsCurrent()
++          ? current_response_head_->headers
++          : nullptr;
+   if (override_headers_) {
+     current_response_head_->headers = override_headers_;
+     // Since we overrode headers we should reparse them:
+@@ -781,7 +788,7 @@ void BraveProxyingURLLoaderFactory<
+     creator_event_id = network_capture.RecordResponseStarted(
+         request_id_, native_initiator_request_id_, initiator_process_id_,
+         tab_id_, frame_id_, browser_context_id_high_, browser_context_id_low_,
+-        *current_response_head_);
++        *current_response_head_, false, network_headers.get());
+   }
+   auto& artifact_capture = reb::NativeArtifactCaptureSink::Get();
+   if (native_capture_lifecycle_.IsCurrent(network_capture.generation()) &&
+diff --git a/content/browser/sources.gni b/content/browser/sources.gni
+--- a/content/browser/sources.gni
++++ b/content/browser/sources.gni
+@@ -18,5 +18,6 @@ brave_content_browser_deps = [
+   "//brave/components/brave_service_keys",
+   "//brave/components/brave_shields/core/common:mojom",
+   "//brave/components/brave_wallet/common/buildflags",
++  "//brave/components/reverse_engineering_browser:network_headers_hook",
+   "//brave/components/speech_to_text",
+ ]

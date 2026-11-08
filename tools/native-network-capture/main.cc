@@ -6,6 +6,8 @@
 #include <vector>
 #include "brave/components/reverse_engineering_browser/browser/native_network_capture_sink.h"
 #include "brave/components/reverse_engineering_browser/common/native_artifact_header.h"
+#include "brave/components/reverse_engineering_browser/common/native_network_headers.h"
+#include "brave/components/reverse_engineering_browser/common/native_network_headers_hook.h"
 #include "brave/components/reverse_engineering_browser/common/native_network_lifecycle.h"
 #include "brave/components/reverse_engineering_browser/common/native_network_request.h"
 #include "brave/components/reverse_engineering_browser/common/native_probe_queue.h"
@@ -13,6 +15,7 @@
 #include "chromium_stubs.h"
 #include "crypto/hash.h"
 #include "reb/event.hpp"
+#include "reb/network_headers.hpp"
 #include "reb/network_request.hpp"
 namespace {
 std::vector<reb::NativeProbeEvent> events;
@@ -67,6 +70,260 @@ std::string Type(const reb::RequestBodyPayload& body) {
 using State = reb::RequestBodyState;
 using Kind = reb::RequestBodyKind;
 
+reb::HeaderBlockPayload Headers(const reb::NativeProbeEvent& event) {
+  reb::HeaderBlockPayload value;
+  assert(event.header.type == reb::NativeProbeType::kRequestHeaders ||
+         event.header.type == reb::NativeProbeType::kResponseHeaders);
+  assert(reb::DecodeHeaderBlockPayload(event.inline_payload, value));
+  return value;
+}
+std::string Text(const std::vector<std::uint8_t>& bytes) {
+  return {bytes.begin(), bytes.end()};
+}
+std::vector<network::mojom::HttpRawHeaderPairPtr> Raw(
+    std::vector<std::pair<std::string, std::string>> pairs) {
+  std::vector<network::mojom::HttpRawHeaderPairPtr> out;
+  for (auto& [key, value] : pairs) {
+    out.push_back(std::make_unique<network::mojom::HttpRawHeaderPair>(
+        network::mojom::HttpRawHeaderPair{std::move(key), std::move(value)}));
+  }
+  return out;
+}
+std::size_t CountType(reb::NativeProbeType type) {
+  return static_cast<std::size_t>(
+      std::count_if(events.begin(), events.end(),
+                    [type](const auto& event) { return event.header.type == type; }));
+}
+using HeaderState = reb::HeaderState;
+constexpr auto kRaw = reb::NativeNetworkHeadersKind::kRawRequest;
+
+// protocol/native-network-v3.md, through the production sink and hook.
+void HeaderBlocks() {
+  auto& sink = reb::NativeNetworkCaptureSink::Get();
+  auto& artifacts = reb::NativeArtifactCaptureSink::Get();
+  const auto mask = reb::NativeProbeCategoryMask(reb::NativeProbeCategory::kNetwork);
+  base::test_now_ns = 100;
+  network::ResourceRequest request;
+  request.url = GURL("https", "echo.test", "/start", "a=1");
+  request.referrer_policy = net::ReferrerPolicy::NO_REFERRER;
+  request.headers.SetHeader("Accept", "*/*");
+  request.headers.SetHeader("X-Trace", "one: two");
+  request.cors_exempt_headers.SetHeader("Purpose", "prefetch");
+  const auto start = [&](std::uint64_t id) {
+    sink.RecordRequestStarted(id, 0, 0, 4, 5, 11, 12, request);
+    sink.AssignNetworkHeadersId(id, request);
+  };
+  const std::string id = "reb-00000000000001f4";
+
+  // Metadata-only: no header record, no ID and no hook observer.
+  sink.SetEmitter(Emit, 30, mask, 200);
+  events.clear();
+  artifacts.header_calls.clear();
+  start(500);
+  reb::NotifyNativeNetworkHeaders(kRaw, id, Raw({{"cookie", "sid=1"}}));
+  assert(CountType(reb::NativeProbeType::kRequestHeaders) == 0 && !request.devtools_request_id &&
+         artifacts.header_calls.empty());
+
+  // Provisional request headers at start, retained as one block.
+  sink.SetEmitter(Emit, 30, mask, 200, true);
+  events.clear();
+  start(500);
+  assert(request.devtools_request_id == id && AllValid());
+  const auto started = Last(reb::NativeProbeType::kRequestStarted).header;
+  const auto& provisional = Last(reb::NativeProbeType::kRequestHeaders);
+  auto value = Headers(provisional);
+  const std::string provisional_text = "Accept: */*\r\nX-Trace: one: two\r\nPurpose: prefetch\r\n";
+  assert(provisional.header.parent_event_id == started.sequence_number &&
+         value.source == static_cast<std::uint8_t>(reb::HeaderSource::kBrowser) &&
+         value.state == static_cast<std::uint8_t>(HeaderState::kCaptured) &&
+         value.header_count == 3 && value.block_length == provisional_text.size() &&
+         value.referrer_policy == 8 && value.hop == 0 && value.address_family == 0 &&
+         value.sha256 == crypto::hash::Sha256(provisional_text));
+  assert(artifacts.header_calls.size() == 1);
+  const auto& provisional_call = artifacts.header_calls.back();
+  assert(provisional_call.kind == reb::NativeArtifactKind::kRequestHeaders &&
+         provisional_call.creator_event_id == provisional.header.sequence_number &&
+         provisional_call.url == "https://echo.test/start?a=1" &&
+         Text(provisional_call.content) == provisional_text &&
+         provisional.header.artifact_id == artifacts.next_artifact_id - 1);
+
+  // Hop 0: the network stack's headers, pseudo-headers and Cookie included.
+  reb::NotifyNativeNetworkHeaders(
+      kRaw, id, Raw({{":method", "GET"}, {":path", "/start?a=1"}, {"cookie", "sid=1"}}));
+  const auto& sent = events.back();
+  value = Headers(sent);
+  assert(AllValid() && sent.header.parent_event_id == started.sequence_number &&
+         value.source == static_cast<std::uint8_t>(reb::HeaderSource::kNetwork) &&
+         value.referrer_policy == 0 && value.hop == 0 && value.header_count == 3 &&
+         Text(artifacts.header_calls.back().content) ==
+             ":method: GET\r\n:path: /start?a=1\r\ncookie: sid=1\r\n");
+
+  // Hop 0 ends in a 302 with Set-Cookie and a remote endpoint.
+  net::RedirectInfo redirect;
+  redirect.new_url = GURL("https", "echo.test", "/second");
+  network::mojom::URLResponseHead head;
+  head.headers = std::make_shared<net::HttpResponseHeaders>();
+  head.headers->code = 302;
+  head.headers->lines = {{"Location", "/second"}, {"Set-Cookie", "a=b; Secure"}};
+  head.emitted_extra_info = true;
+  head.remote_endpoint.ip.value = {{127, 0, 0, 1}, 4};
+  head.remote_endpoint.port_number = 8443;
+  events.clear();
+  sink.RecordRequestRedirected(500, 0, 0, 4, 5, 11, 12, redirect, head);
+  const auto first_redirect = events.front().header;
+  value = Headers(events.back());
+  assert(AllValid() && events.back().header.type == reb::NativeProbeType::kResponseHeaders &&
+         events.back().header.parent_event_id == first_redirect.sequence_number &&
+         value.status_code == 302 && value.hop == 0 && value.address_family == 4 &&
+         value.remote_port == 8443 && value.remote_address[0] == 127 &&
+         value.remote_address[3] == 1 &&
+         Text(artifacts.header_calls.back().content) ==
+             "Location: /second\r\nSet-Cookie: a=b; Secure\r\n" &&
+         artifacts.header_calls.back().url == "https://echo.test/start?a=1");
+
+  // Hop 1 ends before its raw request arrives; that block still joins hop 1.
+  redirect.new_url = GURL("https", "echo.test", "/final");
+  head.headers->code = 307;
+  head.headers->lines = {{"Location", "/final"}};
+  events.clear();
+  sink.RecordRequestRedirected(500, 0, 0, 4, 5, 11, 12, redirect, head);
+  const auto second_redirect = events.front().header;
+  assert(Headers(events.back()).hop == 1 &&
+         artifacts.header_calls.back().url == "https://echo.test/second");
+  events.clear();
+  reb::NotifyNativeNetworkHeaders(kRaw, id, Raw({{":path", "/second"}}));
+  reb::NotifyNativeNetworkHeaders(kRaw, id, Raw({{":path", "/final"}}));
+  assert(events.size() == 2 && AllValid() &&
+         events[0].header.parent_event_id == first_redirect.sequence_number &&
+         Headers(events[0]).hop == 1 &&
+         events[1].header.parent_event_id == second_redirect.sequence_number &&
+         Headers(events[1]).hop == 2 &&
+         artifacts.header_calls.back().url == "https://echo.test/final");
+
+  // A 103 joins the open hop.
+  events.clear();
+  reb::NotifyNativeNetworkHeaders(reb::NativeNetworkHeadersKind::kEarlyHints, id,
+                                  Raw({{"link", "</app.css>; rel=preload"}}));
+  value = Headers(events.back());
+  assert(AllValid() && events.back().header.type == reb::NativeProbeType::kResponseHeaders &&
+         events.back().header.parent_event_id == second_redirect.sequence_number &&
+         value.source == static_cast<std::uint8_t>(reb::HeaderSource::kEarlyHints) &&
+         value.status_code == 103 && value.hop == 2);
+
+  // A 200 KiB response block is retained whole, before Brave's own rewrite.
+  head.headers->code = 200;
+  head.headers->lines = {{"X-Large", std::string(200 * 1024, 'v')}, {"Set-Cookie", "c=d"}};
+  network::mojom::URLResponseHead rewritten = head;
+  rewritten.headers = std::make_shared<net::HttpResponseHeaders>();
+  rewritten.headers->lines = {{"X-Rewritten", "1"}};
+  events.clear();
+  const auto response_sequence =
+      sink.RecordResponseStarted(500, 0, 0, 4, 5, 11, 12, rewritten, false, head.headers.get());
+  value = Headers(events.back());
+  const std::string large_text =
+      "X-Large: " + std::string(200 * 1024, 'v') + "\r\nSet-Cookie: c=d\r\n";
+  assert(AllValid() && events.back().header.parent_event_id == response_sequence &&
+         value.state == static_cast<std::uint8_t>(HeaderState::kCaptured) && value.hop == 2 &&
+         value.block_length == large_text.size() &&
+         Text(artifacts.header_calls.back().content) == large_text);
+
+  // Completion ends tracking; a later raw block is counted, not attached.
+  network::URLLoaderCompletionStatus status;
+  sink.RecordRequestCompleted(500, 0, 0, 4, 5, 11, 12, status);
+  events.clear();
+  reb::NotifyNativeNetworkHeaders(kRaw, id, Raw({{"cookie", "late"}}));
+  reb::NotifyNativeNetworkHeaders(kRaw, "preflight-token", Raw({{"origin", "x"}}));
+  assert(events.empty());
+
+  // Identical provisional headers are retained once; the count shows the loss.
+  const auto calls = artifacts.header_calls.size();
+  request.devtools_request_id.reset();
+  start(501);
+  value = Headers(Last(reb::NativeProbeType::kRequestHeaders));
+  assert(AllValid() && value.state == static_cast<std::uint8_t>(HeaderState::kCapturedShared) &&
+         Last(reb::NativeProbeType::kRequestHeaders).header.artifact_id ==
+             provisional.header.artifact_id &&
+         value.unattributed_blocks == 1 && artifacts.header_calls.size() == calls);
+
+  // A DevTools-owned ID is kept and matched by value.
+  request.devtools_request_id = "1234.5";
+  start(502);
+  assert(request.devtools_request_id == "1234.5");
+  events.clear();
+  reb::NotifyNativeNetworkHeaders(kRaw, "1234.5", Raw({{"host", "echo.test"}}));
+  assert(events.size() == 1 && Headers(events[0]).hop == 0 && events[0].header.request_id == 502);
+
+  // Beyond 320 KiB: count and length only, no digest, no artifact.
+  head.headers->lines = {{"X-Huge", std::string(reb::kNativeHeaderBlockLimitBytes, 'h')}};
+  events.clear();
+  static_cast<void>(sink.RecordResponseStarted(502, 0, 0, 4, 5, 11, 12, head));
+  value = Headers(events.back());
+  assert(AllValid() &&
+         value.state == static_cast<std::uint8_t>(HeaderState::kNotCapturedBlockLimit) &&
+         value.block_length == reb::kNativeHeaderBlockLimitBytes + 10 && value.header_count == 1 &&
+         events.back().header.artifact_id == 0);
+
+  // Synthetic Shields responses and empty blocks.
+  events.clear();
+  static_cast<void>(sink.RecordResponseStarted(502, 0, 0, 4, 5, 11, 12, head, true));
+  assert(CountType(reb::NativeProbeType::kResponseHeaders) == 0);
+  head.headers->lines.clear();
+  static_cast<void>(sink.RecordResponseStarted(502, 0, 0, 4, 5, 11, 12, head));
+  assert(AllValid() &&
+         Headers(events.back()).state == static_cast<std::uint8_t>(HeaderState::kEmpty));
+
+  // Unavailable, refused and unsupported-URL outcomes.
+  request.devtools_request_id.reset();
+  request.headers.SetHeader("X-Unique", "1");
+  artifacts.enabled = false;
+  start(503);
+  assert(Headers(Last(reb::NativeProbeType::kRequestHeaders)).state ==
+         static_cast<std::uint8_t>(HeaderState::kNotCapturedArtifactUnavailable));
+  artifacts.enabled = true;
+  artifacts.refuse = true;
+  start(503);
+  assert(Headers(Last(reb::NativeProbeType::kRequestHeaders)).state ==
+         static_cast<std::uint8_t>(HeaderState::kNotCapturedTransferRefused));
+  artifacts.refuse = false;
+  request.url = GURL("wss", "socket.test", "/stream");
+  start(503);
+  assert(AllValid() && Headers(Last(reb::NativeProbeType::kRequestHeaders)).state ==
+                           static_cast<std::uint8_t>(HeaderState::kNotCapturedUrl));
+
+  // The per-configuration byte budget ends retention visibly.
+  sink.SetEmitter(Emit, 30, mask, 200, true);
+  request.url = GURL("https", "echo.test", "/beacon");
+  request.headers = {};
+  const std::size_t block = 300 * 1024;
+  std::size_t retained = 0;
+  for (std::size_t i = 0; retained + block <= reb::kNativeHeaderSessionBytes; ++i) {
+    request.headers = {};
+    request.headers.SetHeader("X-Fill", std::string(block - 12, 'f') + std::to_string(i % 10) +
+                                            static_cast<char>('a' + (i / 10) % 26) +
+                                            static_cast<char>('a' + (i / 260) % 26));
+    events.clear();
+    start(600 + i);
+    assert(Headers(Last(reb::NativeProbeType::kRequestHeaders)).state ==
+           static_cast<std::uint8_t>(HeaderState::kCaptured));
+    retained += Headers(Last(reb::NativeProbeType::kRequestHeaders)).block_length;
+  }
+  request.headers.SetHeader("X-Over", "1");
+  events.clear();
+  start(599);
+  assert(AllValid() && Headers(Last(reb::NativeProbeType::kRequestHeaders)).state ==
+                           static_cast<std::uint8_t>(HeaderState::kNotCapturedSessionBudget));
+
+  // Ending the session removes the hook observer.
+  sink.SetEmitter(nullptr, 0, 0, 0, true);
+  events.clear();
+  reb::NotifyNativeNetworkHeaders(kRaw, "reb-0000000000000257", Raw({{"a", "b"}}));
+  assert(events.empty());
+  std::cout << "PASS native header blocks: metadata-only none, provisional/network/response over "
+               "two redirect hops, out-of-order raw request, early hints, pseudo-headers, "
+               "200 KiB retained whole, network headers before rewrite, sharing, unattributed "
+               "count, DevTools-owned ID, block limit, unavailable/refused/URL, session budget\n";
+}
+
 void RequestContent() {
   auto& sink = reb::NativeNetworkCaptureSink::Get();
   auto& artifacts = reb::NativeArtifactCaptureSink::Get();
@@ -102,11 +359,13 @@ void RequestContent() {
   assert(body.sha256 == crypto::hash::Sha256(json));
   assert(artifacts.calls.empty());
 
-  // Content session: raw target, body record and one artifact handoff.
+  // Content session: raw target, body record and one artifact handoff, then
+  // the provisional header block (HeaderBlocks covers it).
   events.clear();
   sink.SetEmitter(Emit, 22, mask, 200, true);
   start();
-  assert(events.size() == 3 && AllValid());
+  assert(events.size() == 4 && AllValid() &&
+         events[3].header.type == reb::NativeProbeType::kRequestHeaders);
   const auto target = Target(events[1]);
   const std::string expected_target =
       "/checksiteconfig?v=1&host=accounts.hcaptcha.test&sitekey=site";
@@ -272,9 +531,10 @@ void RequestContent() {
   head.headers->code = 307;
   events.clear();
   sink.RecordRequestRedirected(172, 0, 0, 4, 5, 11, 12, redirect, head);
-  assert(events.size() == 2 && AllValid() &&
+  assert(events.size() == 3 && AllValid() &&
          events[1].header.parent_event_id == events[0].header.sequence_number &&
-         Target(events[1]).target_length == 18);
+         Target(events[1]).target_length == 18 &&
+         events[2].header.type == reb::NativeProbeType::kResponseHeaders);
 
   // Reconfiguring without content returns to metadata-only.
   sink.SetEmitter(Emit, 22, mask, 200);
@@ -387,4 +647,5 @@ int main() {
       << "PASS native network sink: disabled/expiry/category, owned profile, stable identity, "
          "synthetic/abort provenance, terminal-once/session rollover, truncation/queue loss\n";
   RequestContent();
+  HeaderBlocks();
 }

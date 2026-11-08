@@ -86,7 +86,11 @@ the unchanged artifact sink. The production receiver retains both as sensitive
 digests, target prefixes, `creator_event_id` and the capture event's parent,
 then runs `tools/validate-evidence-store.py` over the broker output. Component
 cases cover a metadata-only session, a receiver started without
-`--allow-sensitive` and a session without the Artifact category.
+`--allow-sensitive` and a session without the Artifact category. Each content
+request's provisional header block (protocol/native-network-v3.md) takes the
+same path as a sensitive `request_headers` artifact; `request-headers.json`
+names its record, and a receiver without `--allow-sensitive` refuses it with an
+event joined to that record.
 
 ## Socket transport stages
 

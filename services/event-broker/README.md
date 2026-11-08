@@ -69,8 +69,9 @@ resolves them when the initiation arrives, emitting up to that capacity of
 additional edges in deterministic reference order. Both endpoints must remain
 retained, and observed duplicate initiation identities fail closed for later
 joins. Missing, zero, ambiguous or evicted identities remain unjoined; host,
-URL and timestamp similarity never supply a link. A `request_target` or
-`request_body` record joins its lifecycle parent only through `parent_event`
+URL and timestamp similarity never supply a link. A `request_target`,
+`request_body`, `request_headers` or `response_headers` record joins its
+lifecycle parent only through `parent_event`
 and never becomes the request's latest lifecycle record, so the next
 `request_lifecycle` edge skips it. Event and edge wire formats
 are unchanged, and the original request IDs stay intact. Existing sidecars are

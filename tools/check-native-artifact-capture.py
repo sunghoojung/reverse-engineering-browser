@@ -46,6 +46,9 @@ HEADERS = (
     "net/http/http_request_headers.h",
     "services/network/public/cpp/data_element.h",
     "services/network/public/cpp/resource_request_body.h",
+    "base/component_export.h",
+    "base/synchronization/lock.h",
+    "services/network/public/mojom/http_raw_headers.mojom.h",
     "brave/components/reverse_engineering_browser/browser/native_artifact_socket_client.h",
     "brave/components/reverse_engineering_browser/browser/native_artifact_body_tee.h",
     "brave/components/reverse_engineering_browser/browser/native_probe_session.h",
@@ -136,6 +139,7 @@ def compile_driver(build: Path) -> Path:
         f"-I{ROOT / 'include'}",
         str(fixture / "main.cc"),
         str(sources / "browser/native_network_capture_sink.cc"),
+        str(sources / "common/native_network_headers_hook.cc"),
         str(sources / "browser/native_artifact_capture_sink.cc"),
         str(sources / "browser/native_probe_host.cc"),
         str(sources / "common/native_probe_queue.cc"),
@@ -398,9 +402,32 @@ def check_stores(output: Path, cases: list[dict]) -> None:
             )
             assert capture["parent_event_id"] == item["creator_event_id"] != "0"
     check_request_bodies(output, artifacts, events)
+    check_request_headers(output, artifacts, events)
     print(
         "PASS production receiver/broker consumed exact native bytes, preserved metadata/hash/uint64 identity"
     )
+
+
+def check_request_headers(output: Path, artifacts: list[dict], events: list[dict]) -> None:
+    """Content-mode header blocks (native-network-v3.md) survive the receiver and broker."""
+    expected = json.loads((output / "request-headers.json").read_text())
+    assert expected, "The corpus must contain header blocks"
+    by_sequence = {item["sequence_number"]: item for item in events}
+    for block in expected:
+        item = next(a for a in artifacts if a["artifact_id"] == block["artifact_id"])
+        assert item["kind"] == "request_headers" and item["capture_origin"] == "network_request"
+        assert item["sensitive"] is True and item["execution_context_id"] == "0"
+        assert item["url"] == block["url"] and item["mime_type"] == "text/plain"
+        assert item["creator_event_id"] == block["header_sequence"]
+        data = (output / "artifacts" / item["content_path"]).read_bytes()
+        assert data == b"Content-Type: application/json;charset=UTF-8\r\n", data
+        record = by_sequence[block["header_sequence"]]
+        assert record["type"] == "request_headers" and record["category"] == "network"
+        assert record["artifact_id"] == block["artifact_id"]
+        assert record["parent_event_id"] == block["start_sequence"]
+        payload = bytes.fromhex(record["payload"])
+        assert payload[48:80].hex() == hashlib.sha256(data).hexdigest()
+        assert int.from_bytes(payload[12:16], "little") == len(data)
 
 
 def check_request_bodies(output: Path, artifacts: list[dict], events: list[dict]) -> None:

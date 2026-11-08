@@ -88,8 +88,8 @@ synthetic checks do not launch a browser, enable capture, or prove performance
 inside a built Brave application.
 
 Payload capture is limited to a bounded metadata prefix. Network request
-prefixes contain only the method and destination host. Fragments, credentials,
-authorization headers, and cookies are never captured. Every admitted request
+prefixes contain only the method and destination host. Fragments and URL
+credentials are never captured. Every admitted request
 also gets a `request_body` child record from `browser/native_network_capture_sink.cc`
 with the body's kind, length, normalized content type and a SHA-256 of
 in-memory bytes up to 4 MiB. Only with `--reb-capture-request-content` does the
@@ -99,6 +99,15 @@ body bytes to `NativeArtifactCaptureSink::CaptureRequestBody` as a sensitive
 `request_body` artifact. File, blob and stream elements are never read, and
 password form posts keep neither bytes nor a digest. The wire and limits are in
 [Native network v2](../../../../../../protocol/native-network-v2.md).
+
+Content sessions also record header blocks
+([Native network v3](../../../../../../protocol/native-network-v3.md)): the
+provisional `ResourceRequest` headers at start, the response head's headers at
+every redirect and response, and, through `common/native_network_headers_hook.h`,
+the headers the network stack sent and 103 Early Hints. The proxy gives a
+request without a DevTools ID `reb-<request_id>` so the network service reports
+them, and Chromium patch `0025` forwards content's DevToolsObserver calls to the
+`network_headers_hook` component before DevTools dispatch.
 
 Large artifact bytes use the separate 128-byte framed contract and 32-byte
 acknowledgment in `common/native_artifact_header.h`. Only the browser-process

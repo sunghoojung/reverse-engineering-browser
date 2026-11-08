@@ -116,12 +116,28 @@ class NativeArtifactCaptureSink final {
                                                  std::string url,
                                                  std::string mime_type,
                                                  std::vector<std::uint8_t> content);
+  // The same handoff for one request_headers or response_headers block
+  // (protocol/native-network-v3.md), always text/plain.
+  [[nodiscard]] std::uint64_t CaptureHeaderBlock(NativeArtifactKind kind,
+                                                 std::uint64_t request_id,
+                                                 std::uint64_t frame_id,
+                                                 std::uint64_t creator_event_id,
+                                                 std::string url,
+                                                 std::vector<std::uint8_t> content);
 
   static void TransferCompleted(std::uint64_t artifact_id,
                                 NativeArtifactReceiveStatus status) noexcept;
 
  private:
   friend class base::NoDestructor<NativeArtifactCaptureSink>;
+
+  [[nodiscard]] std::uint64_t CaptureNetworkRequestArtifact(NativeArtifactKind kind,
+                                                            std::uint64_t request_id,
+                                                            std::uint64_t frame_id,
+                                                            std::uint64_t creator_event_id,
+                                                            std::string url,
+                                                            std::string mime_type,
+                                                            std::vector<std::uint8_t> content);
 
   struct CaptureContext final {
     NativeArtifactHeader header;

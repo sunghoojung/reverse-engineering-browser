@@ -576,7 +576,9 @@
             "js_invocation_request",
             "wasm_execution_outcome",
             "wasm_dispatch_overflow",
-            "wasm_indirect_overflow"
+            "wasm_indirect_overflow",
+            "request_headers",
+            "response_headers"
           ]
         },
         "status_code": {
@@ -789,7 +791,9 @@
             "canvas_data_url",
             "bytecode_buffer",
             "wasm_guest_adapter",
-            "request_body"
+            "request_body",
+            "request_headers",
+            "response_headers"
           ]
         },
         "byte_size": {

@@ -87,6 +87,9 @@ enum class NativeProbeType : std::uint16_t {
   // Compact identities for Wasm samples a budget refused. Not full observations.
   kWasmDispatchOverflow = 28,
   kWasmIndirectOverflow = 29,
+  // Header block summaries; see protocol/native-network-v3.md.
+  kRequestHeaders = 30,
+  kResponseHeaders = 31,
 };
 
 enum class NativeProbeFlag : std::uint16_t {

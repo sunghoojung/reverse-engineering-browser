@@ -47,7 +47,7 @@
         "start"
       ],
       "title": "Start a live capture session",
-      "description": "Starts a new visibly labeled live capture session with named capture options: the capture browser, an Origin Trace window and every helper. When it is ready this connection moves to that session; other endpoint changes still retire the connection. Starting again first ends the session this connection started. Every option is off unless named and none is inherited from the environment. document_start permits document-start Console scripts (arming is a separate Console action). Sensitive capture needs confirm_sensitive_capture: canvas_images, request_content (request paths, queries and bodies) and js_invocation_digests. js_invocation_sites (a site file) or js_invocation_saved_sites (the agent sessions' own saved set) arm invocation sites. wasm_samples_per_function, wasm_samples_per_indirect_site, wasm_function_allow, wasm_function_deny and wasm_module_allowlist restrict the 16-record Wasm sample budgets and require wasm_dispatch or wasm_call_indirect. The result options and get_session_context capture_options show what the session runs with. With url, the result reports capture_observed; false means nothing was recorded, so end the session. Next: get_session_context, then get_session_summary; get_native_console for the Console. Start only for an authorized target. session_action, listed with this tool, acts only on a session this connection started. reset_wasm_sample_budgets restarts both Wasm sample indexes without a new session.",
+      "description": "Starts a new visibly labeled live capture session with named capture options: the capture browser, an Origin Trace window and every helper. When it is ready this connection moves to that session; other endpoint changes still retire the connection. Starting again first ends the session this connection started. Every option is off unless named and none is inherited from the environment. document_start permits document-start Console scripts (arming is a separate Console action). Sensitive capture needs confirm_sensitive_capture: canvas_images, request_content (request paths, queries, headers and bodies) and js_invocation_digests. js_invocation_sites (a site file) or js_invocation_saved_sites (the agent sessions' own saved set) arm invocation sites. wasm_samples_per_function, wasm_samples_per_indirect_site, wasm_function_allow, wasm_function_deny and wasm_module_allowlist restrict the 16-record Wasm sample budgets and require wasm_dispatch or wasm_call_indirect. The result options and get_session_context capture_options show what the session runs with. With url, the result reports capture_observed; false means nothing was recorded, so end the session. Next: get_session_context, then get_session_summary; get_native_console for the Console. Start only for an authorized target. session_action, listed with this tool, acts only on a session this connection started. reset_wasm_sample_budgets restarts both Wasm sample indexes without a new session.",
       "input": {
         "$ref": "#/components/schemas/LiveSessionStart"
       },
@@ -1267,6 +1267,140 @@
         }
       }
     },
+    "/api/request-headers": {
+      "get": {
+        "operationId": "get_request_headers",
+        "summary": "get request headers",
+        "description": "Header blocks of one native request per redirect hop (protocol/native-network-v3.md), from the newest 1024 records of that request within the last 64 MiB of events. Recorded only in sessions that retain request content. Each block gives its source (browser: provisional, before the network stack; network: as sent; early_hints: a 103), state, header count, byte length, SHA-256, and its referrer policy or status and remote endpoint. Retained blocks are read after a size and SHA-256 check and parsed into ordered headers. Values of Authorization, Proxy-Authorization, Cookie and Set-Cookie are withheld as value_withheld with their byte length: like request bodies they stay in the binary artifact. A hop is provisional when it has only browser request blocks.",
+        "tags": [
+          "request-headers"
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RequestHeaders"
+                }
+              }
+            },
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store",
+                  "type": "string"
+                }
+              },
+              "ETag": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Host/Origin/Sec-Fetch-Site rejected.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Store, read, validation, or internal failure.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "304": {
+            "description": "ETag unchanged; no response body.",
+            "headers": {
+              "ETag": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store",
+                  "type": "string"
+                }
+              }
+            }
+          }
+        },
+        "x-source": "apps/origin-trace-backend/src/app.rs",
+        "parameters": [
+          {
+            "name": "session_id",
+            "in": "query",
+            "required": true,
+            "description": "Session of the request.",
+            "schema": {
+              "$ref": "#/components/schemas/NonzeroUint64String"
+            }
+          },
+          {
+            "name": "request_id",
+            "in": "query",
+            "required": true,
+            "description": "Browser request ID of the request records.",
+            "schema": {
+              "$ref": "#/components/schemas/NonzeroUint64String"
+            }
+          },
+          {
+            "name": "If-None-Match",
+            "in": "header",
+            "required": false,
+            "description": "Exact server ETag from a previous response.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "x-reb-execution": {
+          "kind": "operation",
+          "effects": [],
+          "state_dependent_effects": [],
+          "uncertainties": [],
+          "prerequisites": [
+            {
+              "id": "local-request",
+              "condition": "Host must name the exact loopback listening port; cross-site Sec-Fetch-Site is rejected; an optional Origin must pass App::trusted."
+            }
+          ],
+          "confirmations": [],
+          "notes": "Reads local state or stored evidence. No browser mutation is requested by this handler; health/events/artifacts can probe local service sockets. Evidence tails and current state are not stable snapshots.",
+          "sources": [
+            {
+              "path": "apps/origin-trace-backend/src/app.rs",
+              "symbol": "App::get"
+            }
+          ]
+        },
+        "x-reb-execution-schema": {
+          "$ref": "#/components/schemas/RebExecutionMetadata"
+        }
+      }
+    },
     "/api/request-signal-profile": {
       "get": {
         "operationId": "get_request_signal_profile",
@@ -1435,7 +1569,7 @@
       "get": {
         "operationId": "get_events",
         "summary": "Read native events, optionally filtered and paged",
-        "description": "Without filters this is the Origin Trace UI polling window: the newest events of the last 64 MiB plus an independent network window. With any filter or cursor it scans complete records from the cursor (default: newest first), returns up to limit matches unchanged, and adds a query object with next_before and next_after cursors. Filters combine with AND. Gap fields then describe only the scanned byte range, and network_events is empty: select network records with category=network. Network requests: request_body (22) gives each body's length, type and digest, and request_target (23) the path and query only when the session retains request content; select one request with request_id. Invocation sites: js_invocation_start (24), js_invocation_settle (25) and js_invocation_request (26) give armed calls and the requests made inside them. wasm_execution_outcome (27) records a trap or that an instrumented Wasm call is still executing. A sample refused by a function, module, call-site, or the 16-record stream budget is wasm_dispatch_overflow (28) or wasm_indirect_overflow (29): a compact identity, not a full observation. Payloads stay hex. wasm_dispatch_observation and wasm_indirect_observation also include wasm_observation beside that hex, decoded without an opcode workspace. status decoded names function_index, module_byte_offset, sample_index, js_invocation_state, and js_invocation_id. A dispatch object also has selector and table_count. An indirect object also has table_index, slot, callee_function_index, and resolution named resolved, null, out-of-bounds, foreign, or unresolved. callee_function_index is 0 unless resolution is resolved. status invalid carries no fields. Version 1 decodes as not observed. Any other payload version is invalid with no fields, not a version-2 prefix. The record is protocol 3, category vm, and flags 0.  wasm_dispatch_overflow and wasm_indirect_overflow include wasm_overflow beside that hex. status decoded names kind identity or omitted. An identity names ring_index, function_index, and module_byte_offset, plus selector and arm_count, or table_index, slot, and resolution. An omitted record names omitted_count and no site. status invalid carries no fields. Unknown parameters are rejected. Use a small limit through MCP and page with query.next_before.",
+        "description": "Without filters this is the Origin Trace UI polling window: the newest events of the last 64 MiB plus an independent network window. With any filter or cursor it scans complete records from the cursor (default: newest first), returns up to limit matches unchanged, and adds a query object with next_before and next_after cursors. Filters combine with AND. Gap fields then describe only the scanned byte range, and network_events is empty: select network records with category=network. Network requests: request_body (22) gives each body's length, type and digest, and request_target (23) the path and query only when the session retains request content; select one request with request_id. request_headers (30) and response_headers (31) summarize each header block in those sessions; read them with get_request_headers. Invocation sites: js_invocation_start (24), js_invocation_settle (25) and js_invocation_request (26) give armed calls and the requests made inside them. wasm_execution_outcome (27) records a trap or that an instrumented Wasm call is still executing. A sample refused by a function, module, call-site, or the 16-record stream budget is wasm_dispatch_overflow (28) or wasm_indirect_overflow (29): a compact identity, not a full observation. Payloads stay hex. wasm_dispatch_observation and wasm_indirect_observation also include wasm_observation beside that hex, decoded without an opcode workspace. status decoded names function_index, module_byte_offset, sample_index, js_invocation_state, and js_invocation_id. A dispatch object also has selector and table_count. An indirect object also has table_index, slot, callee_function_index, and resolution named resolved, null, out-of-bounds, foreign, or unresolved. callee_function_index is 0 unless resolution is resolved. status invalid carries no fields. Version 1 decodes as not observed. Any other payload version is invalid with no fields, not a version-2 prefix. The record is protocol 3, category vm, and flags 0.  wasm_dispatch_overflow and wasm_indirect_overflow include wasm_overflow beside that hex. status decoded names kind identity or omitted. An identity names ring_index, function_index, and module_byte_offset, plus selector and arm_count, or table_index, slot, and resolution. An omitted record names omitted_count and no site. status invalid carries no fields. Unknown parameters are rejected. Use a small limit through MCP and page with query.next_before.",
         "tags": [
           "events"
         ],
@@ -1527,7 +1661,7 @@
             "name": "type",
             "in": "query",
             "required": false,
-            "description": "Comma-separated event types to keep, at most 16 exact names: api_call, property_read, module_compiled, module_instantiated, request_started, request_initiated, request_redirected, response_started, response_completed, request_completed, request_failed, request_body, request_target, artifact_captured, artifact_capture_failed, vm_finding, vm_dispatch_sample, wasm_dispatch_observation, wasm_indirect_observation, wasm_guest_dispatch, wasm_guest_invocation, js_dispatch_observation, js_invocation_start, js_invocation_settle, js_invocation_request, wasm_execution_outcome, wasm_dispatch_overflow, wasm_indirect_overflow, gap. An unknown name matches nothing.",
+            "description": "Comma-separated event types to keep, at most 16 exact names: api_call, property_read, module_compiled, module_instantiated, request_started, request_initiated, request_redirected, response_started, response_completed, request_completed, request_failed, request_body, request_target, artifact_captured, artifact_capture_failed, vm_finding, vm_dispatch_sample, wasm_dispatch_observation, wasm_indirect_observation, wasm_guest_dispatch, wasm_guest_invocation, js_dispatch_observation, js_invocation_start, js_invocation_settle, js_invocation_request, wasm_execution_outcome, wasm_dispatch_overflow, wasm_indirect_overflow, request_headers, response_headers, gap. An unknown name matches nothing.",
             "schema": {
               "type": "string",
               "maxLength": 1040
@@ -1723,7 +1857,7 @@
             "name": "type",
             "in": "query",
             "required": false,
-            "description": "Comma-separated event types to keep, at most 16 exact names: api_call, property_read, module_compiled, module_instantiated, request_started, request_initiated, request_redirected, response_started, response_completed, request_completed, request_failed, request_body, request_target, artifact_captured, artifact_capture_failed, vm_finding, vm_dispatch_sample, wasm_dispatch_observation, wasm_indirect_observation, wasm_guest_dispatch, wasm_guest_invocation, js_dispatch_observation, js_invocation_start, js_invocation_settle, js_invocation_request, wasm_execution_outcome, wasm_dispatch_overflow, wasm_indirect_overflow, gap. An unknown name matches nothing.",
+            "description": "Comma-separated event types to keep, at most 16 exact names: api_call, property_read, module_compiled, module_instantiated, request_started, request_initiated, request_redirected, response_started, response_completed, request_completed, request_failed, request_body, request_target, artifact_captured, artifact_capture_failed, vm_finding, vm_dispatch_sample, wasm_dispatch_observation, wasm_indirect_observation, wasm_guest_dispatch, wasm_guest_invocation, js_dispatch_observation, js_invocation_start, js_invocation_settle, js_invocation_request, wasm_execution_outcome, wasm_dispatch_overflow, wasm_indirect_overflow, request_headers, response_headers, gap. An unknown name matches nothing.",
             "schema": {
               "type": "string",
               "maxLength": 1040
@@ -6944,6 +7078,216 @@
           }
         },
         "x-source": "protocol/origin-trace-document-v1.schema.json"
+      },
+      "RequestHeaders": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "session_id",
+          "request_id",
+          "hops",
+          "malformed_records",
+          "unattached_records"
+        ],
+        "properties": {
+          "session_id": {
+            "$ref": "#/components/schemas/NonzeroUint64String"
+          },
+          "request_id": {
+            "$ref": "#/components/schemas/NonzeroUint64String"
+          },
+          "hops": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "hop",
+                "provisional",
+                "request",
+                "response"
+              ],
+              "properties": {
+                "hop": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 4294967295
+                },
+                "provisional": {
+                  "type": "boolean",
+                  "description": "Only browser request blocks: headers before the network stack added Cookie, Host and the rest."
+                },
+                "request": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/RequestHeaderBlock"
+                  }
+                },
+                "response": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/RequestHeaderBlock"
+                  }
+                }
+              }
+            }
+          },
+          "malformed_records": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/NonzeroUint64String"
+            }
+          },
+          "unattached_records": {
+            "type": "integer",
+            "minimum": 0
+          }
+        }
+      },
+      "RequestHeaderBlock": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "sequence_number",
+          "parent_event_id",
+          "source",
+          "state",
+          "header_count",
+          "block_bytes",
+          "sha256",
+          "artifact_id",
+          "unattributed_blocks"
+        ],
+        "properties": {
+          "sequence_number": {
+            "$ref": "#/components/schemas/NonzeroUint64String"
+          },
+          "parent_event_id": {
+            "$ref": "#/components/schemas/NonzeroUint64String"
+          },
+          "source": {
+            "type": "string",
+            "enum": [
+              "browser",
+              "network",
+              "early_hints"
+            ]
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "captured",
+              "captured_shared",
+              "empty",
+              "not_captured_block_limit",
+              "not_captured_artifact_unavailable",
+              "not_captured_transfer_refused",
+              "not_captured_session_budget",
+              "not_captured_url"
+            ]
+          },
+          "header_count": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 4294967295
+          },
+          "block_bytes": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 4294967295
+          },
+          "sha256": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "artifact_id": {
+            "$ref": "#/components/schemas/Uint64String"
+          },
+          "unattributed_blocks": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 4294967295,
+            "description": "Network blocks of requests no longer tracked, so far in this configuration."
+          },
+          "referrer_policy": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "status_code": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 999
+          },
+          "remote_address": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "maxLength": 48
+          },
+          "remote_port": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 65535
+          },
+          "artifact": {
+            "type": "string",
+            "enum": [
+              "verified",
+              "missing",
+              "mismatch",
+              "malformed",
+              "unreadable"
+            ],
+            "description": "Present for retained states."
+          },
+          "headers": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RequestHeader"
+            }
+          }
+        }
+      },
+      "RequestHeader": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "name"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "value": {
+            "type": "string"
+          },
+          "value_withheld": {
+            "const": true
+          },
+          "value_bytes": {
+            "type": "integer",
+            "minimum": 0
+          }
+        },
+        "oneOf": [
+          {
+            "required": [
+              "value"
+            ]
+          },
+          {
+            "required": [
+              "value_withheld",
+              "value_bytes"
+            ]
+          }
+        ]
       },
       "SignalProfile": {
         "title": "Request Signal Profile v1",
@@ -13782,7 +14126,9 @@
               "canvas_data_url",
               "bytecode_buffer",
               "wasm_guest_adapter",
-              "request_body"
+              "request_body",
+              "request_headers",
+              "response_headers"
             ]
           },
           "url": {
@@ -18306,7 +18652,7 @@
               },
               "request_content": {
                 "type": "boolean",
-                "description": "Request paths, queries and bodies are retained (request_target events, request_body artifacts)."
+                "description": "Request paths, queries, headers and bodies are retained (request_target, request_headers and response_headers events, request_body and header artifacts)."
               },
               "canvas_images": {
                 "type": "boolean"
@@ -19237,7 +19583,9 @@
               "js_invocation_request",
               "wasm_execution_outcome",
               "wasm_dispatch_overflow",
-              "wasm_indirect_overflow"
+              "wasm_indirect_overflow",
+              "request_headers",
+              "response_headers"
             ]
           },
           "status_code": {
@@ -19450,7 +19798,9 @@
               "canvas_data_url",
               "bytecode_buffer",
               "wasm_guest_adapter",
-              "request_body"
+              "request_body",
+              "request_headers",
+              "response_headers"
             ]
           },
           "byte_size": {
@@ -26877,7 +27227,7 @@
           "request_content": {
             "type": "boolean",
             "default": false,
-            "description": "Retain request paths, queries and bodies (at most 256 KiB each, 1,024 bodies or 64 MiB per session) as request_target events and request_body artifacts. Sensitive capture: requires confirm_sensitive_capture and category bits 256 and 1024. Off, Network capture still records each body's length, type and digest."
+            "description": "Retain request paths, queries and bodies (at most 256 KiB each, 1,024 bodies or 64 MiB per session) as request_target events and request_body artifacts, and request and response headers (at most 64 MiB of blocks per session) as request_headers and response_headers events and artifacts. Sensitive capture: requires confirm_sensitive_capture and category bits 256 and 1024. Off, Network capture still records each body's length, type and digest."
           },
           "document_start": {
             "type": "boolean",

@@ -246,6 +246,32 @@ std::uint64_t NativeArtifactCaptureSink::CaptureRequestBody(const std::uint64_t 
                                                             std::string url,
                                                             std::string mime_type,
                                                             std::vector<std::uint8_t> content) {
+  return CaptureNetworkRequestArtifact(NativeArtifactKind::kRequestBody, request_id, frame_id,
+                                       creator_event_id, std::move(url), std::move(mime_type),
+                                       std::move(content));
+}
+
+std::uint64_t NativeArtifactCaptureSink::CaptureHeaderBlock(const NativeArtifactKind kind,
+                                                            const std::uint64_t request_id,
+                                                            const std::uint64_t frame_id,
+                                                            const std::uint64_t creator_event_id,
+                                                            std::string url,
+                                                            std::vector<std::uint8_t> content) {
+  if (kind != NativeArtifactKind::kRequestHeaders && kind != NativeArtifactKind::kResponseHeaders) {
+    return 0;
+  }
+  return CaptureNetworkRequestArtifact(kind, request_id, frame_id, creator_event_id, std::move(url),
+                                       "text/plain", std::move(content));
+}
+
+std::uint64_t NativeArtifactCaptureSink::CaptureNetworkRequestArtifact(
+    const NativeArtifactKind kind,
+    const std::uint64_t request_id,
+    const std::uint64_t frame_id,
+    const std::uint64_t creator_event_id,
+    std::string url,
+    std::string mime_type,
+    std::vector<std::uint8_t> content) {
   if (!IsEnabled() || creator_event_id == 0 || content.empty() ||
       content.size() > kMaxArtifactBytes || url.empty() ||
       url.size() > kNativeArtifactMaxUrlBytes || mime_type.empty() ||
@@ -255,7 +281,7 @@ std::uint64_t NativeArtifactCaptureSink::CaptureRequestBody(const std::uint64_t 
   const std::uint64_t session_id = session_id_.load(std::memory_order_relaxed);
   const std::uint64_t artifact_id = next_artifact_id_.fetch_add(1, std::memory_order_relaxed);
   auto transfer = std::make_unique<NativeArtifactTransfer>();
-  transfer->header.kind = NativeArtifactKind::kRequestBody;
+  transfer->header.kind = kind;
   transfer->header.flags |= kNativeArtifactFlagSensitive;
   transfer->header.session_id = session_id;
   transfer->header.frame_id = frame_id;

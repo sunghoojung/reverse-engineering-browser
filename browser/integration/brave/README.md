@@ -250,7 +250,12 @@ explicitly present, the browser also records the raw path and query as
 `request_target` children and retains at most 256 KiB of in-memory body bytes
 per request through the artifact channel. The change lives entirely in the
 overlay sink; the existing proxy hooks already pass the full `ResourceRequest`.
-See [Native network v2](../../../protocol/native-network-v2.md).
+See [Native network v2](../../../protocol/native-network-v2.md). Content
+sessions also record request and response header blocks per hop
+([Native network v3](../../../protocol/native-network-v3.md)): patch `0017`
+names each admitted request for the network service's raw header notifications
+and keeps the network's response headers before Brave's rewrite, and Chromium
+patch `0025` forwards those notifications to the overlay.
 Renderer events use a bounded shared-memory queue with Mojo lifecycle control
 and coalesced wake-ups. The browser process
 authenticates to the event broker with a session identifier and a mode-0600

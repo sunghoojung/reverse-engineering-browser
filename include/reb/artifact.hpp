@@ -40,6 +40,8 @@ enum class ArtifactKind : std::uint16_t {
   kBytecodeBuffer = 6,
   kWasmGuestAdapter = 7,
   kRequestBody = 8,
+  kRequestHeaders = 9,
+  kResponseHeaders = 10,
 };
 
 enum class ArtifactCaptureOrigin : std::uint16_t {

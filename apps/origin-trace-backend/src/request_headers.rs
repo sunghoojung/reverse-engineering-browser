@@ -1,0 +1,453 @@
+//! One request's header blocks per hop (protocol/native-network-v3.md), for
+//! `get_request_headers`. Records are validated again here and joined only to
+//! an exact lifecycle parent of the request. Credential values stay in the
+//! binary artifact, which MCP never inlines, like request bodies.
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::Path;
+
+use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
+
+use crate::evidence;
+
+const BLOCK_LIMIT: usize = 320 * 1024;
+const CREDENTIALS: [&str; 4] = [
+    "authorization",
+    "proxy-authorization",
+    "cookie",
+    "set-cookie",
+];
+const SOURCES: [&str; 4] = ["", "browser", "network", "early_hints"];
+const STATES: [&str; 9] = [
+    "",
+    "captured",
+    "captured_shared",
+    "empty",
+    "not_captured_block_limit",
+    "not_captured_artifact_unavailable",
+    "not_captured_transfer_refused",
+    "not_captured_session_budget",
+    "not_captured_url",
+];
+// net::ReferrerPolicy + 1, as Fetch policy names.
+const POLICIES: [&str; 9] = [
+    "",
+    "no-referrer-when-downgrade",
+    "strict-origin-when-cross-origin",
+    "origin-when-cross-origin",
+    "unsafe-url",
+    "origin",
+    "same-origin",
+    "strict-origin",
+    "no-referrer",
+];
+
+struct Block {
+    response: bool,
+    source: u8,
+    state: u8,
+    policy: u8,
+    family: u8,
+    count: u32,
+    length: u32,
+    hop: u32,
+    status: u16,
+    port: u16,
+    address: [u8; 16],
+    unattributed: u32,
+    digest: [u8; 32],
+}
+
+fn le(bytes: &[u8]) -> u64 {
+    bytes
+        .iter()
+        .rev()
+        .fold(0, |value, byte| (value << 8) | u64::from(*byte))
+}
+
+/// The C++ core's rules for the record, envelope included.
+fn decode(event: &Value) -> Option<Block> {
+    let response = event["type"] == "response_headers";
+    if !(response || event["type"] == "request_headers")
+        || event["protocol_version"] != 3
+        || event["category"] != "network"
+        || event["flags"] != 0
+        || event["payload_truncated"] != false
+        || event["payload_size"] != 128
+        || event["payload_encoding"] != "hex"
+        || event["navigation_id"] != "0"
+        || event["status_code"] != 0
+        || event["error_code"] != 0
+        || event["encoded_data_length"] != "0"
+        || event["decoded_body_length"] != "0"
+        || event["resource_type"] != 0
+    {
+        return None;
+    }
+    let sequence: u64 = event["sequence_number"].as_str()?.parse().ok()?;
+    let parent: u64 = event["parent_event_id"].as_str()?.parse().ok()?;
+    if parent == 0 || parent >= sequence {
+        return None;
+    }
+    let bytes = hex::decode(event["payload"].as_str()?).ok()?;
+    if bytes.len() != 128 || le(&bytes[0..2]) != 1 || le(&bytes[2..4]) != 128 {
+        return None;
+    }
+    let block = Block {
+        response,
+        source: bytes[4],
+        state: bytes[5],
+        policy: bytes[6],
+        family: bytes[7],
+        count: le(&bytes[8..12]) as u32,
+        length: le(&bytes[12..16]) as u32,
+        hop: le(&bytes[16..20]) as u32,
+        status: le(&bytes[20..22]) as u16,
+        port: le(&bytes[22..24]) as u16,
+        address: bytes[24..40].try_into().ok()?,
+        unattributed: le(&bytes[40..44]) as u32,
+        digest: bytes[48..80].try_into().ok()?,
+    };
+    let zero = |slice: &[u8]| slice.iter().all(|byte| *byte == 0);
+    let addressed = block.family != 0;
+    let shape = if response {
+        block.policy == 0
+            && if block.source == 1 {
+                block.status <= 999 && (block.status == 0 || block.status >= 100)
+            } else {
+                block.source == 3 && block.status == 103 && !addressed
+            }
+    } else {
+        block.status == 0
+            && !addressed
+            && if block.source == 1 {
+                (1..=8).contains(&block.policy)
+            } else {
+                block.source == 2 && block.policy == 0
+            }
+    };
+    let empty = block.state == 3;
+    let limited = block.state == 4;
+    let valid = shape
+        && (1..=8).contains(&block.state)
+        && zero(&bytes[44..48])
+        && zero(&bytes[80..])
+        && matches!(block.family, 0 | 4 | 6)
+        && (addressed || (block.port == 0 && zero(&block.address)))
+        && (block.family != 4 || zero(&block.address[4..]))
+        && (block.count == 0) == empty
+        && (block.length == 0) == empty
+        && u64::from(block.length) >= 5 * u64::from(block.count)
+        && limited == (block.length as usize > BLOCK_LIMIT)
+        && zero(&block.digest) == limited
+        && (event["artifact_id"] != "0") == matches!(block.state, 1 | 2);
+    valid.then_some(block)
+}
+
+/// `name: value` CRLF lines, split at the first colon after the first byte.
+fn parse(bytes: &[u8], count: u32) -> Option<Vec<(String, String)>> {
+    let text = bytes.strip_suffix(b"\n")?;
+    let mut lines = Vec::new();
+    for line in text.split(|byte| *byte == b'\n') {
+        let line = line.strip_suffix(b"\r")?;
+        let colon = line.iter().skip(1).position(|byte| *byte == b':')? + 1;
+        if line.get(colon + 1) != Some(&b' ') {
+            return None;
+        }
+        lines.push((
+            String::from_utf8_lossy(&line[..colon]).into_owned(),
+            String::from_utf8_lossy(&line[colon + 2..]).into_owned(),
+        ));
+    }
+    (lines.len() == count as usize).then_some(lines)
+}
+
+fn address(block: &Block) -> Value {
+    match block.family {
+        4 => json!(format!(
+            "{}.{}.{}.{}",
+            block.address[0], block.address[1], block.address[2], block.address[3]
+        )),
+        6 => json!(format!("[{}]", std::net::Ipv6Addr::from(block.address))),
+        _ => Value::Null,
+    }
+}
+
+fn headers(lines: Vec<(String, String)>) -> Vec<Value> {
+    lines
+        .into_iter()
+        .map(|(name, value)| {
+            if CREDENTIALS.contains(&name.to_ascii_lowercase().as_str()) {
+                json!({"name": name, "value_withheld": true, "value_bytes": value.len()})
+            } else {
+                json!({"name": name, "value": value})
+            }
+        })
+        .collect()
+}
+
+fn describe(event: &Value, block: &Block, artifacts: &[Value], root: &Path) -> Value {
+    let kind = if block.response {
+        "response_headers"
+    } else {
+        "request_headers"
+    };
+    let digest = hex::encode(block.digest);
+    let mut value = json!({
+        "sequence_number": event["sequence_number"],
+        "parent_event_id": event["parent_event_id"],
+        "source": SOURCES[block.source as usize],
+        "state": STATES[block.state as usize],
+        "header_count": block.count,
+        "block_bytes": block.length,
+        "sha256": if block.state == 4 { Value::Null } else { json!(digest) },
+        "artifact_id": event["artifact_id"],
+        "unattributed_blocks": block.unattributed,
+    });
+    if block.response {
+        value["status_code"] = json!(block.status);
+        value["remote_address"] = address(block);
+        value["remote_port"] = json!(block.port);
+    } else {
+        value["referrer_policy"] = if block.policy == 0 {
+            Value::Null
+        } else {
+            json!(POLICIES[block.policy as usize])
+        };
+    }
+    if !matches!(block.state, 1 | 2) {
+        return value;
+    }
+    // A created block names this record; a shared one an earlier record's.
+    let mut matching = artifacts.iter().filter(|artifact| {
+        artifact["artifact_id"] == event["artifact_id"]
+            && artifact["session_id"] == event["session_id"]
+            && artifact["kind"] == kind
+            && artifact["capture_origin"] == "network_request"
+            && (block.state == 2 || artifact["creator_event_id"] == event["sequence_number"])
+    });
+    let artifact = match (matching.next(), matching.next()) {
+        (Some(artifact), None) => artifact,
+        _ => {
+            value["artifact"] = json!("missing");
+            return value;
+        }
+    };
+    match evidence::content(root, artifact, BLOCK_LIMIT) {
+        Ok(bytes)
+            if bytes.len() == block.length as usize
+                && Sha256::digest(&bytes).as_slice() == block.digest =>
+        {
+            match parse(&bytes, block.count) {
+                Some(lines) => {
+                    value["artifact"] = json!("verified");
+                    value["headers"] = json!(headers(lines));
+                }
+                None => value["artifact"] = json!("malformed"),
+            }
+        }
+        Ok(_) => value["artifact"] = json!("mismatch"),
+        Err(_) => value["artifact"] = json!("unreadable"),
+    }
+    value
+}
+
+/// Header blocks of `request_id` in `session_id`, grouped by hop.
+pub fn build(
+    events: &[Value],
+    artifacts: &[Value],
+    root: &Path,
+    session: &str,
+    request: &str,
+) -> Value {
+    let ours = |event: &Value| {
+        event["session_id"] == session
+            && event["request_id"] == request
+            && event["category"] == "network"
+    };
+    let parents: BTreeSet<(u64, String)> = events
+        .iter()
+        .filter(|event| {
+            ours(event)
+                && matches!(
+                    event["type"].as_str(),
+                    Some("request_started" | "request_redirected" | "response_started")
+                )
+        })
+        .filter_map(|event| {
+            Some((
+                event["process_id"].as_u64()?,
+                event["sequence_number"].as_str()?.to_owned(),
+            ))
+        })
+        .collect();
+    let mut hops: BTreeMap<u32, (Vec<Value>, Vec<Value>)> = BTreeMap::new();
+    let mut malformed = Vec::new();
+    let mut unattached = 0usize;
+    let mut records: Vec<&Value> = events
+        .iter()
+        .filter(|event| {
+            ours(event)
+                && matches!(
+                    event["type"].as_str(),
+                    Some("request_headers" | "response_headers")
+                )
+        })
+        .collect();
+    records.sort_by_key(|event| {
+        event["sequence_number"]
+            .as_str()
+            .and_then(|text| text.parse::<u64>().ok())
+    });
+    for event in records {
+        let parent = (
+            event["process_id"].as_u64().unwrap_or(0),
+            event["parent_event_id"]
+                .as_str()
+                .unwrap_or_default()
+                .to_owned(),
+        );
+        if !parents.contains(&parent) {
+            unattached += 1;
+            continue;
+        }
+        let Some(block) = decode(event) else {
+            malformed.push(event["sequence_number"].clone());
+            continue;
+        };
+        let described = describe(event, &block, artifacts, root);
+        let entry = hops.entry(block.hop).or_default();
+        if block.response {
+            entry.1.push(described);
+        } else {
+            entry.0.push(described);
+        }
+    }
+    let hops: Vec<Value> = hops
+        .into_iter()
+        .map(|(hop, (request, response))| {
+            let provisional = !request.is_empty()
+                && request.iter().all(|block| block["source"] == "browser");
+            json!({"hop": hop, "provisional": provisional, "request": request, "response": response})
+        })
+        .collect();
+    json!({
+        "session_id": session,
+        "request_id": request,
+        "hops": hops,
+        "malformed_records": malformed,
+        "unattached_records": unattached,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn record(kind: &str, sequence: u64, parent: u64, payload: [u8; 128], artifact: &str) -> Value {
+        json!({"protocol_version":3,"session_id":"7","sequence_number":sequence.to_string(),
+            "monotonic_time_ns":"1","process_id":42,"thread_id":1,"tab_id":0,"navigation_id":"0",
+            "frame_id":"0","artifact_id":artifact,"parent_event_id":parent.to_string(),"request_id":"17",
+            "browser_context_id_high":"0","browser_context_id_low":"0","encoded_data_length":"0",
+            "decoded_body_length":"0","status_code":0,"error_code":0,"resource_type":0,"flags":0,
+            "initiator_request_id":0,"initiator_process_id":0,"payload_truncated":false,
+            "category":"network","type":kind,"payload_size":128,"payload_encoding":"hex",
+            "payload":hex::encode(payload)})
+    }
+
+    fn payload(
+        source: u8,
+        state: u8,
+        policy: u8,
+        block: &[u8],
+        hop: u32,
+        status: u16,
+    ) -> [u8; 128] {
+        let mut out = [0u8; 128];
+        out[0] = 1;
+        out[2] = 128;
+        out[4] = source;
+        out[5] = state;
+        out[6] = policy;
+        out[8..12]
+            .copy_from_slice(&(block.iter().filter(|b| **b == b'\n').count() as u32).to_le_bytes());
+        out[12..16].copy_from_slice(&(block.len() as u32).to_le_bytes());
+        out[16..20].copy_from_slice(&hop.to_le_bytes());
+        out[20..22].copy_from_slice(&status.to_le_bytes());
+        out[48..80].copy_from_slice(&Sha256::digest(block));
+        out
+    }
+
+    #[test]
+    fn hops_join_exact_parents_and_withhold_credentials() {
+        let root = std::env::temp_dir().join(format!("reb-request-headers-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("blobs")).unwrap();
+        let sent = b"Accept: */*\r\nCookie: sid=secret\r\n";
+        let got = b"Set-Cookie: a=b\r\nLocation: /next\r\n";
+        let mut artifacts = Vec::new();
+        for (id, creator, kind, bytes) in [
+            ("5", "12", "request_headers", &sent[..]),
+            ("6", "21", "response_headers", &got[..]),
+        ] {
+            let hash = hex::encode(Sha256::digest(bytes));
+            std::fs::write(root.join(format!("blobs/{hash}.bin")), bytes).unwrap();
+            artifacts.push(json!({"artifact_id":id,"session_id":"7","kind":kind,
+                "capture_origin":"network_request","creator_event_id":creator,"byte_size":bytes.len(),
+                "sha256":hash,"content_path":format!("blobs/{hash}.bin")}));
+        }
+        let start = json!({"session_id":"7","request_id":"17","category":"network",
+            "type":"request_started","process_id":42,"sequence_number":"11"});
+        let redirect = json!({"session_id":"7","request_id":"17","category":"network",
+            "type":"request_redirected","process_id":42,"sequence_number":"20"});
+        let events = vec![
+            start,
+            record("request_headers", 12, 11, payload(1, 1, 4, sent, 0, 0), "5"),
+            redirect,
+            record(
+                "response_headers",
+                21,
+                20,
+                payload(1, 1, 0, got, 0, 302),
+                "6",
+            ),
+            record("request_headers", 22, 20, payload(1, 2, 4, sent, 1, 0), "5"),
+            record("request_headers", 23, 9, payload(2, 3, 0, b"", 0, 0), "0"),
+            record("request_headers", 24, 20, payload(1, 1, 0, sent, 1, 0), "5"),
+        ];
+        let result = build(&events, &artifacts, &root, "7", "17");
+        assert_eq!(result["unattached_records"], 1);
+        assert_eq!(result["malformed_records"], json!(["24"]));
+        let hop0 = &result["hops"][0];
+        assert_eq!(hop0["provisional"], true);
+        assert_eq!(hop0["request"][0]["referrer_policy"], "unsafe-url");
+        assert_eq!(hop0["request"][0]["artifact"], "verified");
+        assert_eq!(
+            hop0["request"][0]["headers"],
+            json!([{"name":"Accept","value":"*/*"},
+                {"name":"Cookie","value_withheld":true,"value_bytes":10}])
+        );
+        assert_eq!(hop0["response"][0]["status_code"], 302);
+        assert_eq!(hop0["response"][0]["headers"][0]["value_withheld"], true);
+        assert_eq!(hop0["response"][0]["headers"][1]["value"], "/next");
+        let hop1 = &result["hops"][1];
+        assert_eq!(hop1["request"][0]["state"], "captured_shared");
+        assert_eq!(hop1["request"][0]["artifact"], "verified");
+        assert!(!result.to_string().contains("secret"));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn parse_rejects_blocks_that_disagree_with_their_record() {
+        assert_eq!(
+            parse(b":path: /a?b=c\r\nx: y: z\r\n", 2),
+            Some(vec![
+                (":path".into(), "/a?b=c".into()),
+                ("x".into(), "y: z".into())
+            ])
+        );
+        assert!(parse(b"a: b\r\n", 2).is_none());
+        assert!(parse(b"a: b", 1).is_none());
+        assert!(parse(b"a:b\r\n", 1).is_none());
+    }
+}

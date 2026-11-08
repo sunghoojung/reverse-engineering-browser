@@ -119,6 +119,22 @@ component("renderer_sink") {
   ]
 }
 
+# Linked by content's NetworkServiceDevToolsObserver (Chromium patch 0025) and
+# the browser sink, so one observer slot serves both in component builds.
+component("network_headers_hook") {
+  output_name = "reverse_engineering_browser_network_headers_hook"
+
+  defines = [ "IS_REB_NETWORK_HEADERS_HOOK_IMPL" ]
+
+  sources = [
+    "common/native_network_headers_hook.cc",
+    "common/native_network_headers_hook.h",
+  ]
+
+  public_deps = [ "//services/network/public/mojom" ]
+  deps = [ "//base" ]
+}
+
 static_library("renderer") {
   sources = [
     "common/native_console_messages.cc",
@@ -194,6 +210,7 @@ source_set("browser") {
     "common/native_js_dispatch_sites.h",
     "common/native_js_invocation.h",
     "common/native_js_invocation_sites.h",
+    "common/native_network_headers.h",
     "common/native_network_lifecycle.h",
     "common/native_network_request.h",
     "common/native_probe_event.h",
@@ -211,6 +228,7 @@ source_set("browser") {
   deps = [
     ":console_protocol",
     ":mojom",
+    ":network_headers_hook",
     ":queue",
     ":worker_metadata",
     "//base",

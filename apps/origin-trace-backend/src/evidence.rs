@@ -332,6 +332,13 @@ pub(crate) fn regular_file(path: &Path) -> std::io::Result<File> {
     Ok(file)
 }
 
+fn is_network_request_artifact(artifact: &Value) -> bool {
+    matches!(
+        artifact["kind"].as_str(),
+        Some("request_body" | "request_headers" | "response_headers")
+    )
+}
+
 pub fn validate_artifact(artifact: &mut Value) -> Result<()> {
     let valid = artifact["protocol_version"] == 1
         && [
@@ -353,6 +360,8 @@ pub fn validate_artifact(artifact: &mut Value) -> Result<()> {
             "bytecode_buffer",
             "wasm_guest_adapter",
             "request_body",
+            "request_headers",
+            "response_headers",
         ]
         .contains(&artifact["kind"].as_str().unwrap_or(""))
         && artifact["url"].as_str().is_some_and(|s| !s.is_empty())
@@ -371,7 +380,13 @@ pub fn validate_artifact(artifact: &mut Value) -> Result<()> {
         || artifact["sensitive"]
             != matches!(
                 artifact["kind"].as_str(),
-                Some("response_body" | "canvas_data_url" | "request_body")
+                Some(
+                    "response_body"
+                        | "canvas_data_url"
+                        | "request_body"
+                        | "request_headers"
+                        | "response_headers"
+                )
             )
     {
         return Err(Error::new(
@@ -419,8 +434,9 @@ pub fn validate_artifact(artifact: &mut Value) -> Result<()> {
             || (origin == "runtime_typed_array"
                 && (artifact["kind"] != "bytecode_buffer"
                     || artifact["execution_context_id"] == "0"))
-            // A request body is created by its browser request_body record.
-            || ((artifact["kind"] == "request_body") != (origin == "network_request"))
+            // Request bodies and header blocks are created by one browser
+            // network record (native-network-v2.md and v3).
+            || (is_network_request_artifact(artifact) != (origin == "network_request"))
             || (origin == "network_request"
                 && (artifact["execution_context_id"] != "0"
                     || artifact["creator_event_id"] == "0"))
@@ -431,7 +447,7 @@ pub fn validate_artifact(artifact: &mut Value) -> Result<()> {
             ));
         }
     } else {
-        if artifact["kind"] == "wasm_guest_adapter" || artifact["kind"] == "request_body" {
+        if artifact["kind"] == "wasm_guest_adapter" || is_network_request_artifact(artifact) {
             return Err(Error::new(500, "Native artifact origin is missing"));
         }
         artifact["execution_context_id"] = json!("0");
@@ -1252,15 +1268,20 @@ mod tests {
             "content_path": "blobs/0000000000000000000000000000000000000000000000000000000000000000.bin"
         });
         assert!(validate_artifact(&mut valid.clone()).is_ok());
-        for (field, value) in [
-            ("sensitive", json!(false)),
-            ("capture_origin", json!("network_response")),
-            ("execution_context_id", json!("4")),
-            ("creator_event_id", json!("0")),
-        ] {
-            let mut artifact = valid.clone();
-            artifact[field] = value;
-            assert!(validate_artifact(&mut artifact).is_err(), "{field}");
+        for kind in ["request_body", "request_headers", "response_headers"] {
+            let mut base = valid.clone();
+            base["kind"] = json!(kind);
+            assert!(validate_artifact(&mut base.clone()).is_ok(), "{kind}");
+            for (field, value) in [
+                ("sensitive", json!(false)),
+                ("capture_origin", json!("network_response")),
+                ("execution_context_id", json!("4")),
+                ("creator_event_id", json!("0")),
+            ] {
+                let mut artifact = base.clone();
+                artifact[field] = value;
+                assert!(validate_artifact(&mut artifact).is_err(), "{kind} {field}");
+            }
         }
         let mut other = valid.clone();
         other["kind"] = json!("javascript");

@@ -330,6 +330,7 @@ struct Expectations: Decodable {
   let requestBodyTarget: String
   let requestBodyMarker: String
   let metadataBodyHost: String
+  let headerValueMarker: String
   let invocationArtifactId: String
   let invocationSiteStore: String
 
@@ -681,7 +682,7 @@ final class OriginTraceRenderedUITests: XCTestCase {
         let detail = try await ui.value("\(find)?.textContent ?? ''") as? String ?? ""
         XCTAssertTrue(detail.contains(kind), "\(size.name): \(artifact) names its kind: \(detail)")
       }
-      // The retained request body (artifact 320) is Traffic evidence, never a source file.
+      // The retained request body and header blocks (artifacts 320 to 322) are Traffic evidence, never source files.
       let tree = try await ui.value("document.querySelector('#source-tree')?.textContent ?? ''") as? String ?? ""
       XCTAssertFalse(tree.contains(expected.requestBodyHost), "\(size.name): Sources lists no request body origin: \(tree)")
       XCTAssertFalse(tree.contains("artifact 320"), "\(size.name): Sources lists no request body file")
@@ -1039,8 +1040,8 @@ final class OriginTraceRenderedUITests: XCTestCase {
     }
   }
 
-  // Native rows carry no headers or bodies; guest bytecode is binary. Traffic,
-  // Export and Sources must offer only what that evidence supports.
+  // Native rows carry header records but no response bodies; guest bytecode is
+  // binary. Traffic, Export and Sources offer only what that evidence supports.
   @MainActor
   func test7NativeOnlyTrafficExportAndBytecode() async throws {
     let expected = try Expectations.load()
@@ -1050,11 +1051,11 @@ final class OriginTraceRenderedUITests: XCTestCase {
       try await ui.click("#screen-traffic .request-row", containing: "item-3.scroll.test")
       try await ui.waitUntil("!document.querySelector('#screen-traffic .detail-pane').hidden", "request detail did not open")
       let tabs = try await ui.value("[...document.querySelectorAll('#screen-traffic .inspector-tab')].map(tab => tab.innerText.trim()).join('|')") as? String ?? ""
-      XCTAssertEqual(tabs, "General|Initiator|Timing|Signals|Evidence", "\(size.name): Traffic offers no body, Compare or header-pane tabs")
+      XCTAssertEqual(tabs, "General|Headers|Initiator|Timing|Signals|Evidence", "\(size.name): Traffic offers no response-body or Compare tabs")
       let search = try await ui.value("document.querySelectorAll('#request-search-scope, #request-search-status, #traffic-comparison').length") as? Int ?? -1
       XCTAssertEqual(search, 0, "\(size.name): content search and comparison are removed, not hidden")
       let general = try await ui.value("document.querySelector('#exchange-inspector').innerText") as? String ?? ""
-      XCTAssertTrue(general.contains("Request and response headers and response bodies are not captured"), "\(size.name): native coverage is explicit: \(general)")
+      XCTAssertTrue(general.contains("Response bodies are not captured"), "\(size.name): native coverage is explicit: \(general)")
       let panes = try await ui.value("document.querySelectorAll('#exchange-inspector .exchange-pane').length") as? Int ?? -1
       XCTAssertEqual(panes, 0, "\(size.name): no permanently empty request/response header panes")
       try await assertLayout(ui, "#screen-traffic .detail-pane", "\(size.name) traffic general")
@@ -1150,6 +1151,52 @@ final class OriginTraceRenderedUITests: XCTestCase {
       XCTAssertEqual(pre, 0, "\(size.name): no body text exists for a metadata-only request")
       try await assertLayout(ui, "#screen-traffic .detail-pane", "\(size.name) metadata-only body")
       try await ui.screenshot("traffic-request-body-metadata-\(size.name)")
+    }
+  }
+
+  // protocol/native-network-v3.md: the Headers tab of a content-session request
+  // shows General, response and request headers read from retained blocks;
+  // markup in a value is literal text. A metadata-only request says why none exist.
+  @MainActor
+  func test24RequestHeaders() async throws {
+    let expected = try Expectations.load()
+    for size in windowSizes {
+      let ui = try await prepare(size)
+      try await show(ui, "traffic")
+      try await ui.click("#screen-traffic .request-row", containing: expected.requestBodyHost)
+      try await ui.waitUntil("!document.querySelector('#screen-traffic .detail-pane').hidden", "request detail did not open")
+      try await ui.click("#inspector-tab-headers")
+      try await ui.waitUntil("document.querySelectorAll('#headers-inspector .traffic-header-row').length === 6", "retained header blocks did not load")
+      let headers = try await ui.json("""
+        ({titles: [...document.querySelectorAll('#headers-inspector summary')].map(node => node.firstChild.textContent),
+          text: document.querySelector('#headers-inspector').innerText,
+          selected: document.querySelector('#inspector-tab-headers').getAttribute('aria-selected'),
+          clipped: [...document.querySelectorAll('#headers-inspector .traffic-header-row')].some(row => row.scrollWidth > row.clientWidth + 1)})
+        """)
+      XCTAssertEqual(headers["titles"] as? [String] ?? [], ["General", "Response headers (200)", "Request headers"], "\(size.name): \(headers)")
+      XCTAssertEqual(headers["selected"] as? String, "true", "\(size.name): the Headers tab is selected")
+      XCTAssertEqual(headers["clipped"] as? Bool, false, "\(size.name): header rows are not clipped")
+      let text = headers["text"] as? String ?? ""
+      for phrase in ["127.0.0.1:8443", "set-cookie", ":method", expected.headerValueMarker] {
+        XCTAssertTrue(text.contains(phrase), "\(size.name): Headers shows \(phrase): \(text)")
+      }
+      XCTAssertFalse(text.contains("Provisional headers are shown"), "\(size.name): the network block replaces provisional headers")
+      try await assertInert(ui, "\(size.name) request headers")
+      try await assertLayout(ui, "#screen-traffic .detail-pane", "\(size.name) request headers")
+      try await ui.screenshot("traffic-request-headers-\(size.name)")
+
+      try await ui.click("#headers-inspector .traffic-headers-tools button", containing: "Raw")
+      try await ui.waitUntil("document.querySelector('#headers-inspector .traffic-headers-raw') !== null", "Raw view did not open")
+      let raw = try await ui.value("document.querySelector('#headers-inspector .traffic-headers-raw').innerText") as? String ?? ""
+      XCTAssertTrue(raw.contains("set-cookie: hc=1; Secure; HttpOnly"), "\(size.name): Raw shows the exact block: \(raw)")
+      try await ui.screenshot("traffic-request-headers-raw-\(size.name)")
+
+      try await ui.click("#screen-traffic .request-row", containing: expected.metadataBodyHost)
+      try await ui.waitUntil(
+        "(document.querySelector('#headers-inspector')?.innerText ?? '').includes('recorded only in content capture sessions')",
+        "metadata-only headers state did not render")
+      try await assertLayout(ui, "#screen-traffic .detail-pane", "\(size.name) metadata-only headers")
+      try await ui.click("#inspector-tab-general")
     }
   }
 

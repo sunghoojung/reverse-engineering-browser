@@ -34,7 +34,8 @@
           'vm_dispatch_sample', 'wasm_dispatch_observation', 'wasm_guest_dispatch', 'wasm_guest_invocation',
           'wasm_indirect_observation', 'wasm_execution_outcome', 'js_dispatch_observation', 'js_invocation_start', 'js_invocation_settle',
           'js_invocation_request', 'wasm_dispatch_overflow', 'wasm_indirect_overflow',
-          'artifact_captured', 'artifact_capture_failed', 'request_body', 'request_target'
+          'artifact_captured', 'artifact_capture_failed', 'request_body', 'request_target',
+          'request_headers', 'response_headers'
         ])
       };
       const uint64Fields = [
@@ -58,12 +59,13 @@
         ['request_failed', 5]
       ]);
       const networkLifecycleTypes = new Set(lifecycleRanks.keys());
-      // Children of a lifecycle record (protocol/native-network-v2.md). They
-      // describe a request; they never advance its lifecycle rank.
-      const networkRequestDetailTypes = new Set(['request_target', 'request_body']);
+      // Children of a lifecycle record (protocol/native-network-v2.md and v3).
+      // They describe a request; they never advance its lifecycle rank.
+      const networkRequestDetailTypes = new Set(['request_target', 'request_body', 'request_headers', 'response_headers']);
+      const networkRequestArtifactKinds = new Set(['request_body', 'request_headers', 'response_headers']);
       const artifactKinds = new Set([
         'javascript', 'wasm', 'source_map', 'response_body', 'canvas_data_url',
-        'bytecode_buffer', 'wasm_guest_adapter', 'request_body'
+        'bytecode_buffer', 'wasm_guest_adapter', 'request_body', 'request_headers', 'response_headers'
       ]);
       const artifactCaptureOrigins = new Set([
         'unknown', 'network_response', 'dynamic_javascript', 'webassembly_compile',
@@ -631,6 +633,58 @@
         };
       }
 
+      const headerSources = [null, 'browser', 'network', 'early_hints'];
+      const headerStates = [null, 'captured', 'captured_shared', 'empty', 'not_captured_block_limit',
+        'not_captured_artifact_unavailable', 'not_captured_transfer_refused', 'not_captured_session_budget',
+        'not_captured_url'];
+      // net::ReferrerPolicy + 1, as the Fetch policy names DevTools shows.
+      const referrerPolicies = [null, 'no-referrer-when-downgrade', 'strict-origin-when-cross-origin',
+        'origin-when-cross-origin', 'unsafe-url', 'origin', 'same-origin', 'strict-origin', 'no-referrer'];
+      const HEADER_BLOCK_LIMIT = 320 * 1024;
+
+      // Every rule of the request_headers and response_headers payload
+      // (protocol/native-network-v3.md), shared with the C++ core and the
+      // Python evidence validator through tools/check-network-request-wire.mjs.
+      function decodeHeaderBlockRecord(event) {
+        const response = event?.type === 'response_headers';
+        if (!isRequestChildEnvelope(event, response ? 'response_headers' : 'request_headers') ||
+            !isCanonicalInteger(event.artifact_id, 0n, uint64Max)) return null;
+        const bytes = bytesFromHex(event.payload);
+        const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+        const [source, state, policy, family] = [bytes[4], bytes[5], bytes[6], bytes[7]];
+        const count = view.getUint32(8, true), length = view.getUint32(12, true);
+        const status = view.getUint16(20, true), port = view.getUint16(22, true);
+        const address = bytes.slice(24, 40), digest = bytes.slice(48, 80);
+        const zero = list => list.every(byte => byte === 0);
+        const addressed = family !== 0;
+        if (view.getUint16(0, true) !== 1 || view.getUint16(2, true) !== 128 || state < 1 || state > 8 ||
+            !zero(bytes.slice(44, 48)) || !zero(bytes.slice(80))) return null;
+        if (response ? policy !== 0 || (source === 1 ? status > 999 || (status !== 0 && status < 100)
+          : source !== 3 || status !== 103 || addressed)
+          : status !== 0 || addressed || (source === 1 ? policy < 1 || policy > 8 : source !== 2 || policy !== 0)) return null;
+        if (![0, 4, 6].includes(family) || (!addressed && (port !== 0 || !zero(address))) ||
+            (family === 4 && !zero(address.slice(4)))) return null;
+        const empty = state === 3, limited = state === 4;
+        if ((count === 0) !== empty || (length === 0) !== empty || length < 5 * count ||
+            limited !== (length > HEADER_BLOCK_LIMIT) || zero(digest) !== limited) return null;
+        if ((event.artifact_id !== '0') !== (state === 1 || state === 2)) return null;
+        const hex = list => Array.from(list, byte => byte.toString(16).padStart(2, '0')).join('');
+        let remoteAddress = null;
+        if (family === 4) remoteAddress = Array.from(address.slice(0, 4)).join('.');
+        if (family === 6) {
+          const groups = Array.from({length: 8}, (_, index) => view.getUint16(24 + index * 2, false).toString(16));
+          remoteAddress = `[${groups.join(':').replace(/(^|:)0(:0)+(:|$)/, '::')}]`;
+        }
+        return {
+          kind: response ? 'response' : 'request', source: headerSources[source], state: headerStates[state],
+          headerCount: count, blockLength: length, hop: view.getUint32(16, true), statusCode: status,
+          referrerPolicy: referrerPolicies[policy], remoteAddress, remotePort: port,
+          unattributedBlocks: view.getUint32(40, true), sha256: limited ? null : hex(digest),
+          artifactId: event.artifact_id, sequenceNumber: event.sequence_number, parentEventId: event.parent_event_id,
+          sessionId: event.session_id, processId: event.process_id
+        };
+      }
+
       // A child record joins its exact parent lifecycle record, never by URL.
       function requestChildOf(details, parent, type) {
         return parent ? details.find(event => event.type === type && event.parent_event_id === parent.sequence_number &&
@@ -648,6 +702,13 @@
           const start = request.events.find(event => event.type === 'request_started') ?? null;
           const bodyEvent = requestChildOf(request.details, start, 'request_body');
           request.body = bodyEvent ? decodeRequestBodyRecord(bodyEvent) ?? {malformed: true} : null;
+          // Header blocks join an exact lifecycle parent of this request.
+          const parents = new Set(request.events.map(event => `${event.session_id}:${event.process_id}:${event.sequence_number}`));
+          request.headerBlocks = request.details
+            .filter(event => (event.type === 'request_headers' || event.type === 'response_headers') &&
+              parents.has(`${event.session_id}:${event.process_id}:${event.parent_event_id}`))
+            .map(event => decodeHeaderBlockRecord(event) ?? {malformed: true, kind: event.type === 'response_headers' ? 'response' : 'request',
+              sequenceNumber: event.sequence_number});
           const targetEvent = requestChildOf(request.details, request.targetEvent, 'request_target');
           const target = targetEvent ? decodeRequestTargetRecord(targetEvent) : null;
           request.targetMalformed = Boolean(targetEvent) && !target;
@@ -872,9 +933,9 @@
           return false;
         }
         if (artifact.kind === 'wasm_guest_adapter' && artifact.capture_origin !== 'native_wasm_guest') return false;
-        // A request body is created by its browser request_body record only.
-        if ((artifact.kind === 'request_body') !== (artifact.capture_origin === 'network_request') ||
-          (artifact.kind === 'request_body' && (artifact.execution_context_id !== '0' ||
+        // Request bodies and header blocks are created by one browser network record.
+        if (networkRequestArtifactKinds.has(artifact.kind) !== (artifact.capture_origin === 'network_request') ||
+          (networkRequestArtifactKinds.has(artifact.kind) && (artifact.execution_context_id !== '0' ||
             !isCanonicalInteger(artifact.creator_event_id, 1n, uint64Max)))) return false;
         if (artifact.capture_origin === 'native_wasm_guest' && (!['bytecode_buffer','wasm_guest_adapter'].includes(artifact.kind) ||
           !['frame_id','parent_artifact_id','creator_event_id','execution_context_id'].every(k => isCanonicalInteger(artifact[k],1n,uint64Max)))) return false;
@@ -898,7 +959,8 @@
           isSafeIntegerInRange(artifact.byte_size, 0, Number.MAX_SAFE_INTEGER) &&
           typeof artifact.sha256 === 'string' && /^[0-9a-f]{64}$/.test(artifact.sha256) &&
           typeof artifact.sensitive === 'boolean' &&
-          artifact.sensitive === ['response_body', 'canvas_data_url', 'request_body'].includes(artifact.kind);
+          artifact.sensitive === (['response_body', 'canvas_data_url'].includes(artifact.kind) ||
+            networkRequestArtifactKinds.has(artifact.kind));
       }
 
       function isArtifactResponse(body) {

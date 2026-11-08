@@ -24,6 +24,7 @@
 #include "crypto/hash.h"
 #include "reb/artifact.hpp"
 #include "reb/event.hpp"
+#include "reb/network_headers.hpp"
 #include "reb/network_request.hpp"
 #include "reb/wasm_dispatch.hpp"
 #include "reb/wasm_guest.hpp"
@@ -231,7 +232,10 @@ void RequestBodies(reb::ArtifactReceiver& receiver, const std::filesystem::path&
       {402, "https://api.hcaptcha.test/getcaptcha/site", std::string(300 * 1024, 'm')},
   };
   std::ofstream expected(output / "request-bodies.json");
+  std::ofstream expected_headers(output / "request-headers.json");
+  std::uint64_t first_header_artifact = 0;
   expected << "[";
+  expected_headers << "[";
   for (std::size_t index = 0; index < std::size(bodies); ++index) {
     const auto& body = bodies[index];
     network::ResourceRequest request;
@@ -262,6 +266,34 @@ void RequestBodies(reb::ArtifactReceiver& receiver, const std::filesystem::path&
     const auto digest = crypto::hash::Sha256(body.content);
     Check(payload.sha256 == digest && payload.body_length == body.content.size(),
           "Body record digest and length describe the whole body");
+    // The provisional header block follows the body as its own sensitive
+    // artifact; the second request's identical block names the first one.
+    const NativeProbeEvent headers = LastOf(NativeProbeType::kRequestHeaders);
+    reb::HeaderBlockPayload header_payload;
+    Check(headers.header.parent_event_id == started.header.sequence_number &&
+              reb::IsValidEvent(std::bit_cast<reb::EventRecord>(headers)) &&
+              reb::DecodeHeaderBlockPayload(headers.inline_payload, header_payload),
+          "Request header record is a valid child of the start record");
+    if (index != 0) {
+      Check(header_payload.state == static_cast<std::uint8_t>(reb::HeaderState::kCapturedShared) &&
+                headers.header.artifact_id == first_header_artifact &&
+                !NativeArtifactSocketClient::Get().transfers.contains(headers.header.artifact_id),
+            "An identical header block is retained once and shared by artifact ID");
+    } else {
+      first_header_artifact = headers.header.artifact_id;
+      const auto& header_transfer =
+          *NativeArtifactSocketClient::Get().transfers.at(headers.header.artifact_id);
+      Check(header_transfer.header.kind == reb::NativeArtifactKind::kRequestHeaders &&
+                header_transfer.header.creator_event_id == headers.header.sequence_number &&
+                header_transfer.mime_type == "text/plain" && header_transfer.url == body.url,
+            "Request header artifact names its header record, URL and text type");
+      Receive(receiver, headers.header.artifact_id);
+      CheckCapture(headers.header.artifact_id, headers.header.sequence_number, body.request_id);
+      expected_headers << "\n{\"start_sequence\":\"" << started.header.sequence_number
+                       << "\",\"header_sequence\":\"" << headers.header.sequence_number
+                       << "\",\"artifact_id\":\"" << headers.header.artifact_id << "\",\"url\":\""
+                       << body.url << "\"}";
+    }
     expected << (index ? ",\n" : "\n") << "{\"request_id\":\"" << body.request_id
              << "\",\"start_sequence\":\"" << started.header.sequence_number
              << "\",\"body_sequence\":\"" << record.header.sequence_number
@@ -272,8 +304,10 @@ void RequestBodies(reb::ArtifactReceiver& receiver, const std::filesystem::path&
              << Hex(digest) << "\"}";
   }
   expected << "\n]\n";
-  std::cout << "PASS request bodies: content-mode target/body children, sensitive request_body "
-               "artifacts with full URL, receiver ACK joined to the body record\n";
+  expected_headers << "\n]\n";
+  std::cout << "PASS request bodies: content-mode target/body/header children, sensitive "
+               "request_body and request_headers artifacts with full URL, receiver ACK joined to "
+               "the creating record\n";
 }
 
 void RequestBodyPolicy(const std::filesystem::path& output) {
@@ -284,6 +318,7 @@ void RequestBodyPolicy(const std::filesystem::path& output) {
   network::ResourceRequest request;
   request.method = "POST";
   request.url = GURL("https://api.hcaptcha.test/checkcaptcha/site/key");
+  request.headers.SetHeader("Content-Type", "application/x-www-form-urlencoded");
   request.request_body = BodyOf("answers=1");
   // Metadata-only configuration: no target record and no bytes leave the browser.
   const auto before = events.size();
@@ -307,6 +342,12 @@ void RequestBodyPolicy(const std::filesystem::path& output) {
             events.back().header.parent_event_id == body_sequence &&
             events.back().header.request_id == 502,
         "Receiver refusal of request content is explicit and joined to the body record");
+  const auto header_sequence = LastOf(NativeProbeType::kRequestHeaders).header.sequence_number;
+  Receive(refusing, LastOf(NativeProbeType::kRequestHeaders).header.artifact_id, true,
+          reb::ArtifactReceiveStatus::kSensitiveCaptureDisabled);
+  Check(events.back().header.type == NativeProbeType::kArtifactCaptureFailed &&
+            events.back().header.parent_event_id == header_sequence,
+        "Receiver refusal of a header block is joined to its header record");
   // Artifact category off: the body record says the channel was unavailable.
   Configure(kSession, reb::NativeProbeCategoryMask(reb::NativeProbeCategory::kNetwork));
   network.SetEmitter(Emit, kSession,

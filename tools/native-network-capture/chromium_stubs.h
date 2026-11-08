@@ -5,12 +5,15 @@
 #include <cstdint>
 #include <memory>
 #include <new>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
 #include <utility>
 #include <vector>
+#include "brave/components/reverse_engineering_browser/common/native_artifact_header.h"
 #include "brave/components/reverse_engineering_browser/common/native_probe_event.h"
+#include "network_headers_stub.h"
 #include "network_request_body_stub.h"
 #define BUILDFLAG(flag) (flag)
 #define IS_POSIX 1
@@ -109,10 +112,22 @@ class GURL {
   bool has_query_ = false;
 };
 namespace net {
-struct HttpResponseHeaders {
+// Lines in received order, as EnumerateHeaderLines returns them.
+class HttpResponseHeaders {
+ public:
   int code = 200;
+  std::vector<std::pair<std::string, std::string>> lines;
   int response_code() const { return code; }
+  bool EnumerateHeaderLines(std::size_t* iter, std::string* name, std::string* value) const {
+    if (*iter >= lines.size())
+      return false;
+    *name = lines[*iter].first;
+    *value = lines[*iter].second;
+    ++*iter;
+    return true;
+  }
 };
+
 struct RedirectInfo {
   std::string new_method = "GET";
   GURL new_url;
@@ -124,8 +139,11 @@ struct ResourceRequest {
   bool originated_from_service_worker = false;
   std::string method = "GET";
   GURL url;
+  net::ReferrerPolicy referrer_policy = net::ReferrerPolicy::NEVER_CLEAR;
   net::HttpRequestHeaders headers;
+  net::HttpRequestHeaders cors_exempt_headers;
   std::shared_ptr<ResourceRequestBody> request_body;
+  std::optional<std::string> devtools_request_id;
 };
 struct URLLoaderCompletionStatus {
   int error_code = 0;
@@ -136,6 +154,8 @@ namespace mojom {
 class URLResponseHead {
  public:
   std::shared_ptr<net::HttpResponseHeaders> headers;
+  net::IPEndPoint remote_endpoint;
+  bool emitted_extra_info = false;
   std::int64_t encoded_data_length = 0;
   bool was_fetched_via_cache = false;
   bool was_fetched_via_service_worker = false;
@@ -171,6 +191,26 @@ class NativeArtifactCaptureSink {
                      std::move(content)});
     return next_artifact_id++;
   }
+  // Header blocks are kept apart so body assertions see only bodies.
+  struct HeaderCall {
+    NativeArtifactKind kind = NativeArtifactKind::kUnknown;
+    std::uint64_t request_id = 0, frame_id = 0, creator_event_id = 0;
+    std::string url;
+    std::vector<std::uint8_t> content;
+  };
+  std::uint64_t CaptureHeaderBlock(NativeArtifactKind kind,
+                                   std::uint64_t request_id,
+                                   std::uint64_t frame_id,
+                                   std::uint64_t creator_event_id,
+                                   std::string url,
+                                   std::vector<std::uint8_t> content) {
+    if (refuse)
+      return 0;
+    header_calls.push_back(
+        {kind, request_id, frame_id, creator_event_id, std::move(url), std::move(content)});
+    return next_artifact_id++;
+  }
+  std::vector<HeaderCall> header_calls;
   bool enabled = true;
   bool refuse = false;
   std::uint64_t next_artifact_id = 900;

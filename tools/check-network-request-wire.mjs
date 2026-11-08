@@ -11,7 +11,7 @@ const exe = process.env.REB_NETWORK_REQUEST_TEST ?? new URL('build/tests/network
 assert(fs.existsSync(exe), `missing ${exe}; build it with make build/tests/network-request-test`);
 const source = fs.readFileSync(new URL('apps/research-ui/evidence_models.js', root), 'utf8');
 const model = new Function(`${source}
-return {decodeRequestBodyRecord, decodeRequestTargetRecord, requestsFromEvents, isBrokerEvent, isBrokerResponse};`)();
+return {decodeRequestBodyRecord, decodeRequestTargetRecord, decodeHeaderBlockRecord, requestsFromEvents, isBrokerEvent, isBrokerResponse};`)();
 
 const cases = JSON.parse(execFileSync(exe, ['--golden'], {encoding: 'utf8'}));
 assert(cases.length > 40 && cases.some(item => item.valid) && cases.some(item => !item.valid));
@@ -23,7 +23,8 @@ for event in json.load(sys.stdin):
 const verdicts = execFileSync('python3', ['-c', python, new URL('tools/validate-evidence-store.py', root).pathname],
   {input: JSON.stringify(cases.map(item => item.event)), encoding: 'utf8'}).trim().split('\n').map(value => value === 'true');
 cases.forEach((item, index) => {
-  const decode = item.event.type === 'request_target' ? model.decodeRequestTargetRecord : model.decodeRequestBodyRecord;
+  const decode = item.event.type === 'request_target' ? model.decodeRequestTargetRecord
+    : item.event.type.endsWith('_headers') ? model.decodeHeaderBlockRecord : model.decodeRequestBodyRecord;
   assert.equal(decode(item.event) !== null, item.valid, `UI decoder: ${item.name}`);
   assert.equal(verdicts[index], item.valid, `Python validator: ${item.name}`);
   // The generic envelope stays acceptable so a malformed child cannot fail a poll.
@@ -96,5 +97,24 @@ const redirectTarget = https(Object.assign(golden('short target'), {sequence_num
 assert.equal(row.path, 'https://accounts.hcaptcha.test/ab');
 assert.equal(row.body.state, 'captured', 'the body stays the start record child');
 
+// Header blocks (native-network-v3.md) join exact lifecycle parents per hop.
+const provisional = Object.assign(golden('request headers browser state 1'), {sequence_number: '15', parent_event_id: '11'});
+const answered = Object.assign(golden('response headers browser state 1'), {sequence_number: '22', parent_event_id: '20'});
+const orphan = Object.assign(golden('response headers browser state 2'), {sequence_number: '23', parent_event_id: '9'});
+const broken = Object.assign(golden('header missing digest'), {sequence_number: '24', parent_event_id: '20'});
+[row] = model.requestsFromEvents([start, target, body, provisional, redirect, answered, orphan, broken], 'live');
+assert.equal(row.headerBlocks.length, 3, 'a block without its exact parent is not attached');
+const [request, response, malformed] = row.headerBlocks;
+assert.equal(request.source, 'browser');
+assert.equal(request.referrerPolicy, 'unsafe-url');
+assert.equal(request.state, 'captured');
+assert.equal(response.kind, 'response');
+assert.equal(response.statusCode, 302);
+assert.equal(response.remoteAddress, '[2020:2020:2020:2020:2020:2020:2020:2020]');
+assert.equal(response.remotePort, 443);
+assert.equal(response.hop, 1);
+assert.deepEqual(malformed, {malformed: true, kind: 'request', sequenceNumber: '24'});
+assert(model.isBrokerEvent(broken), 'a malformed header child cannot fail the poll');
+
 console.log(`PASS network request wire: ${cases.length} C++ golden records agree with Python and the UI decoders; ` +
-  'rows join exact target/body children, truncated, metadata-only, malformed, missing and redirect cases');
+  'rows join exact target/body/header children, truncated, metadata-only, malformed, missing and redirect cases');

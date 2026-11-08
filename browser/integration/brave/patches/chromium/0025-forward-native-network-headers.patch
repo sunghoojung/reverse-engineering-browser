@@ -1,0 +1,29 @@
+diff --git a/content/browser/devtools/network_service_devtools_observer.cc b/content/browser/devtools/network_service_devtools_observer.cc
+--- a/content/browser/devtools/network_service_devtools_observer.cc
++++ b/content/browser/devtools/network_service_devtools_observer.cc
+@@ -5,6 +5,7 @@
+ #include "content/browser/devtools/network_service_devtools_observer.h"
+ 
+ #include "base/feature_list.h"
++#include "brave/components/reverse_engineering_browser/common/native_network_headers_hook.h"
+ #include "content/browser/devtools/devtools_agent_host_impl.h"
+ #include "content/browser/devtools/devtools_instrumentation.h"
+ #include "content/browser/devtools/protocol/audits_handler.h"
+@@ -79,6 +80,8 @@ void NetworkServiceDevToolsObserver::OnRawRequest(
+     network::mojom::OtherPartitionInfoPtr other_partition_info,
+     const std::optional<base::UnguessableToken>&
+         applied_network_conditions_id) {
++  reb::NotifyNativeNetworkHeaders(reb::NativeNetworkHeadersKind::kRawRequest,
++                                  devtools_request_id, request_headers);
+   auto* host = GetDevToolsAgentHost();
+   if (!host)
+     return;
+@@ -109,6 +112,8 @@ void NetworkServiceDevToolsObserver::OnRawResponse(
+ void NetworkServiceDevToolsObserver::OnEarlyHintsResponse(
+     const std::string& devtools_request_id,
+     std::vector<network::mojom::HttpRawHeaderPairPtr> headers) {
++  reb::NotifyNativeNetworkHeaders(reb::NativeNetworkHeadersKind::kEarlyHints,
++                                  devtools_request_id, headers);
+   auto* host = GetDevToolsAgentHost();
+   if (!host) {
+     return;

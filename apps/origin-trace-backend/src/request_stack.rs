@@ -1,0 +1,859 @@
+//! Request initiator stacks (protocol/native-network-v3.md). Decodes the stack
+//! record, its frames artifact and the script identities it names, and
+//! resolves each frame only through retained bytes: an unresolved frame keeps
+//! its raw identity and a reason.
+use crate::{
+    error::Result,
+    event_query::{self, Cursor, EventFilter},
+    evidence,
+};
+use serde_json::{Value, json};
+use std::{
+    collections::{BTreeMap, BTreeSet, HashMap},
+    path::Path,
+};
+
+const SYNC_LIMIT: u32 = 1024;
+const ASYNC_LIMIT: u32 = 32;
+const HEADER: usize = 32;
+const FRAME: usize = 16;
+const MAX_ARTIFACT: usize = HEADER + FRAME * (SYNC_LIMIT + ASYNC_LIMIT) as usize;
+const MAX_SOURCE: usize = 16 * 1024 * 1024;
+const IDENTITY_SCAN: usize = 4096;
+const ARTIFACT_SCAN: usize = 4096;
+const ASYNC_NOT_SHOWN: [&str; 4] = [
+    "timers",
+    "event listeners",
+    "promise.then callbacks",
+    "message handlers",
+];
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Frame {
+    kind: u8,
+    flags: u8,
+    combinator: u16,
+    script_id: u32,
+    position: u32,
+    detail: u32,
+}
+
+fn u16_at(bytes: &[u8], at: usize) -> u16 {
+    u16::from_le_bytes([bytes[at], bytes[at + 1]])
+}
+fn u32_at(bytes: &[u8], at: usize) -> u32 {
+    u32::from_le_bytes(bytes[at..at + 4].try_into().unwrap())
+}
+fn u64_at(bytes: &[u8], at: usize) -> u64 {
+    u64::from_le_bytes(bytes[at..at + 8].try_into().unwrap())
+}
+
+impl Frame {
+    fn read(bytes: &[u8]) -> Self {
+        Self {
+            kind: bytes[0],
+            flags: bytes[1],
+            combinator: u16_at(bytes, 2),
+            script_id: u32_at(bytes, 4),
+            position: u32_at(bytes, 8),
+            detail: u32_at(bytes, 12),
+        }
+    }
+    /// The frame rules of include/reb/request_stack.hpp.
+    fn valid(&self, is_async: bool) -> bool {
+        match self.kind {
+            1 => !is_async && self.script_id != 0 && self.combinator == 0 && self.flags & !3 == 0,
+            2 => !is_async && self.script_id != 0 && self.combinator == 0 && self.flags == 0,
+            3 => is_async && self.script_id != 0 && self.combinator == 0 && self.flags & !2 == 0,
+            4 => {
+                is_async
+                    && self.script_id == 0
+                    && (1..=3).contains(&self.combinator)
+                    && self.flags == 0
+                    && self.detail == 0
+            }
+            _ => false,
+        }
+    }
+}
+
+/// The decoded `request_initiator_stack` payload.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Record {
+    state: u8,
+    flags: u8,
+    total: u32,
+    recorded: u32,
+    omitted: u32,
+    async_frames: u32,
+    async_segments: u32,
+    wasm_frames: u32,
+    scripts: u32,
+    digest: [u8; 32],
+    innermost: Frame,
+}
+
+pub fn decode_record(payload: &[u8]) -> Option<Record> {
+    if payload.len() != 128 || payload[..4] != [1, 0, 128, 0] || payload[6..8] != [0, 0] {
+        return None;
+    }
+    if payload[80..].iter().any(|b| *b != 0) || payload[5] & !0x0f != 0 {
+        return None;
+    }
+    let record = Record {
+        state: payload[4],
+        flags: payload[5],
+        total: u32_at(payload, 8),
+        recorded: u32_at(payload, 12),
+        omitted: u32_at(payload, 16),
+        async_frames: u32::from(u16_at(payload, 20)),
+        async_segments: u32::from(u16_at(payload, 22)),
+        wasm_frames: u32_at(payload, 24),
+        scripts: u32_at(payload, 28),
+        digest: payload[32..64].try_into().unwrap(),
+        innermost: Frame::read(&payload[64..80]),
+    };
+    let frames = record.recorded + record.async_frames;
+    let valid = match record.state {
+        2 | 3 => record.flags & !0x08 == 0 && payload[8..80].iter().all(|b| *b == 0),
+        1 | 4 | 5 => {
+            (1..=SYNC_LIMIT).contains(&record.recorded)
+                && u64::from(record.recorded) + u64::from(record.omitted) == u64::from(record.total)
+                && (record.omitted != 0) == (record.flags & 0x02 != 0)
+                && (record.omitted == 0 || record.recorded == SYNC_LIMIT)
+                && record.async_frames <= ASYNC_LIMIT
+                && record.async_segments <= record.async_frames
+                && (record.flags & 0x04 == 0 || record.async_frames == ASYNC_LIMIT)
+                && (record.flags & 0x01 == 0 || record.state == 1)
+                && record.wasm_frames <= frames
+                && record.scripts <= frames
+                && record.digest.iter().any(|b| *b != 0)
+                && record.innermost.valid(false)
+        }
+        _ => false,
+    };
+    valid.then_some(record)
+}
+
+/// Frames of a stack artifact that agrees with its record.
+pub fn decode_artifact(content: &[u8], record: &Record) -> Option<Vec<Frame>> {
+    if content.len() < HEADER || content.len() > MAX_ARTIFACT || u32_at(content, 0) != 0x4b53_4252 {
+        return None;
+    }
+    let count = (record.recorded + record.async_frames) as usize;
+    if u16_at(content, 4) != 1
+        || u16_at(content, 6) as usize != HEADER
+        || u16_at(content, 8) as usize != FRAME
+        || u16_at(content, 10) != u16::from(record.flags & 0x06)
+        || u32_at(content, 12) != record.total
+        || u32_at(content, 16) != record.recorded
+        || u32_at(content, 20) != record.omitted
+        || u32::from(u16_at(content, 24)) != record.async_frames
+        || u32::from(u16_at(content, 26)) != record.async_segments
+        || u32_at(content, 28) != 0
+        || content.len() != HEADER + FRAME * count
+    {
+        return None;
+    }
+    let frames: Vec<Frame> = content[HEADER..]
+        .as_chunks::<FRAME>()
+        .0
+        .iter()
+        .map(|chunk| Frame::read(chunk))
+        .collect();
+    let valid = frames
+        .iter()
+        .enumerate()
+        .all(|(i, frame)| frame.valid(i >= record.recorded as usize))
+        && frames.first() == Some(&record.innermost);
+    valid.then_some(frames)
+}
+
+/// The newest `script_identity` per script ID, from one process's records.
+#[derive(Clone, Debug)]
+pub struct Identity {
+    wasm: bool,
+    eval: bool,
+    retained: bool,
+    start_line: u32,
+    start_column: u32,
+    sha256: Option<String>,
+}
+
+pub fn decode_identity(payload: &[u8]) -> Option<(u32, Identity)> {
+    if payload.len() != 128
+        || payload[..4] != [1, 0, 128, 0]
+        || payload[6..8] != [0, 0]
+        || payload[20..24] != [0; 4]
+        || payload[72..].iter().any(|b| *b != 0)
+    {
+        return None;
+    }
+    let (kind, flags) = (payload[4], payload[5]);
+    let script = u32_at(payload, 8);
+    let length = u64_at(payload, 32);
+    let digest = &payload[40..72];
+    let retention = flags & 0x1e;
+    let shape = script != 0
+        && u64_at(payload, 24) != 0
+        && flags & !0x1f == 0
+        && retention & retention.wrapping_sub(1) == 0
+        && matches!(kind, 1 | 2)
+        && (kind != 2 || flags & !0x0c == 0)
+        && (kind != 1 || retention != 0);
+    let digested = match retention {
+        0x08 => length == 0 && digest.iter().all(|b| *b == 0),
+        0x04 => length > MAX_SOURCE as u64 && digest.iter().all(|b| *b == 0),
+        _ => length != 0 && length <= MAX_SOURCE as u64 && digest.iter().any(|b| *b != 0),
+    };
+    (shape && digested).then(|| {
+        (
+            script,
+            Identity {
+                wasm: kind == 2,
+                eval: flags & 0x01 != 0,
+                retained: flags & 0x02 != 0,
+                start_line: u32_at(payload, 12),
+                start_column: u32_at(payload, 16),
+                sha256: matches!(retention, 0x00 | 0x02 | 0x10).then(|| hex::encode(digest)),
+            },
+        )
+    })
+}
+
+/// One-based LF lines and UTF-16 columns of sorted UTF-16 offsets in text, as
+/// Sources numbers them, with each offset's UTF-8 byte position.
+fn positions(text: &str, offsets: &BTreeSet<u32>) -> HashMap<u32, (usize, u64, u64)> {
+    let mut out = HashMap::new();
+    let mut wanted = offsets.iter().copied().peekable();
+    let (mut unit, mut line, mut column) = (0u64, 1u64, 1u64);
+    for (byte, ch) in text
+        .char_indices()
+        .chain(std::iter::once((text.len(), '\0')))
+    {
+        while let Some(&next) = wanted.peek() {
+            if u64::from(next) < unit {
+                wanted.next();
+            } else if u64::from(next) == unit {
+                out.insert(next, (byte, line, column));
+                wanted.next();
+            } else {
+                break;
+            }
+        }
+        if byte == text.len() || wanted.peek().is_none() {
+            break;
+        }
+        unit += ch.len_utf16() as u64;
+        if ch == '\n' {
+            line += 1;
+            column = 1;
+        } else {
+            column += ch.len_utf16() as u64;
+        }
+    }
+    out
+}
+
+fn identifier_end(bytes: &[u8], mut end: usize) -> Option<(usize, usize)> {
+    let ident = |b: u8| b.is_ascii_alphanumeric() || b == b'_' || b == b'$' || b >= 0x80;
+    while end > 0 && bytes[end - 1].is_ascii_whitespace() {
+        end -= 1;
+    }
+    let mut start = end;
+    while start > 0 && ident(bytes[start - 1]) {
+        start -= 1;
+    }
+    (start < end && !bytes[start].is_ascii_digit()).then_some((start, end))
+}
+
+/// The name the source gives the function starting at byte `start`: the
+/// declaration or method name, or the binding an anonymous function or arrow
+/// is assigned to. None for an anonymous function.
+fn function_name(text: &str, start: usize) -> Option<String> {
+    let bytes = text.as_bytes();
+    let mut cursor = start.min(bytes.len());
+    if let Some((name_start, name_end)) = identifier_end(bytes, cursor) {
+        let name = &text[name_start..name_end];
+        let before = identifier_end(bytes, name_start).map(|(s, e)| &text[s..e]);
+        let keyword = [
+            "function", "async", "get", "set", "static", "if", "for", "while", "switch", "catch",
+            "return", "with",
+        ];
+        if !keyword.contains(&name) {
+            return Some(match before {
+                Some("get" | "set") => format!("{} {name}", before.unwrap()),
+                _ => name.to_owned(),
+            });
+        }
+        if name != "function" && name != "async" {
+            return None;
+        }
+        cursor = name_start;
+        if name == "function"
+            && let Some((s, e)) = identifier_end(bytes, cursor)
+            && &text[s..e] == "async"
+        {
+            cursor = s;
+        }
+    }
+    // `x = function`, `x: (a) =>`, `this.x = function`.
+    while cursor > 0 && bytes[cursor - 1].is_ascii_whitespace() {
+        cursor -= 1;
+    }
+    let operator = *bytes.get(cursor.checked_sub(1)?)?;
+    if operator != b'=' && operator != b':' {
+        return None;
+    }
+    if operator == b'=' && cursor >= 2 && matches!(bytes[cursor - 2], b'=' | b'!' | b'<' | b'>') {
+        return None;
+    }
+    let mut end = cursor - 1;
+    while end > 0 && bytes[end - 1].is_ascii_whitespace() {
+        end -= 1;
+    }
+    if end > 0 && matches!(bytes[end - 1], b'"' | b'\'') {
+        let quote = bytes[end - 1];
+        let open = text[..end - 1].rfind(quote as char)?;
+        return Some(text[open + 1..end - 1].to_owned());
+    }
+    let (mut chain_start, chain_end) = identifier_end(bytes, end)?;
+    while chain_start > 0 && bytes[chain_start - 1] == b'.' {
+        match identifier_end(bytes, chain_start - 1) {
+            Some((s, _)) => chain_start = s,
+            None => break,
+        }
+    }
+    Some(text[chain_start..chain_end].to_owned())
+}
+
+fn wasm_names(bytes: &[u8]) -> HashMap<u32, String> {
+    let mut names = HashMap::new();
+    for payload in wasmparser::Parser::new(0).parse_all(bytes) {
+        let Ok(wasmparser::Payload::CustomSection(section)) = payload else {
+            continue;
+        };
+        if let wasmparser::KnownCustom::Name(reader) = section.as_known() {
+            for name in reader.into_iter().flatten() {
+                if let wasmparser::Name::Function(map) = name {
+                    for naming in map.into_iter().flatten() {
+                        names.insert(naming.index, naming.name.to_owned());
+                    }
+                }
+            }
+        }
+    }
+    names
+}
+
+fn unresolved(reason: &str) -> Value {
+    json!({"status": "unresolved", "reason": reason})
+}
+
+fn frame_kind(frame: &Frame) -> &'static str {
+    match (frame.kind, frame.combinator) {
+        (1, _) => "javascript",
+        (2, _) => "wasm",
+        (3, _) => "await",
+        (_, 1) => "promise_all",
+        (_, 2) => "promise_all_settled",
+        _ => "promise_any",
+    }
+}
+
+struct Source {
+    artifact_id: Value,
+    url: Value,
+    text: Option<String>,
+    names: HashMap<u32, String>,
+    positions: HashMap<u32, (usize, u64, u64)>,
+}
+
+/// The retained bytes a script identity's digest names, or why there are none.
+/// The newest artifact of this session that matches.
+fn newest<'a>(
+    artifacts: &'a [Value],
+    session: &str,
+    matches: impl Fn(&Value) -> bool,
+) -> Option<&'a Value> {
+    artifacts
+        .iter()
+        .rev()
+        .find(|a| a["session_id"].as_str() == Some(session) && matches(a))
+}
+
+fn load_source(
+    identity: Option<&Identity>,
+    offsets: &BTreeSet<u32>,
+    artifacts: &[Value],
+    session: &str,
+    read: &dyn Fn(&Value, usize) -> Result<Vec<u8>>,
+) -> std::result::Result<Source, &'static str> {
+    let identity = identity.ok_or("script_identity_missing")?;
+    let sha = identity.sha256.as_deref().ok_or("source_unavailable")?;
+    let kind = if identity.wasm { "wasm" } else { "javascript" };
+    let artifact = newest(artifacts, session, |a| {
+        a["kind"] == kind && a["sha256"] == sha
+    })
+    .ok_or(if identity.wasm || identity.retained {
+        "source_artifact_missing"
+    } else {
+        "source_not_retained"
+    })?;
+    let bytes = read(artifact, MAX_SOURCE).map_err(|_| "source_artifact_unreadable")?;
+    let mut source = Source {
+        artifact_id: artifact["artifact_id"].clone(),
+        url: artifact["url"].clone(),
+        text: None,
+        names: HashMap::new(),
+        positions: HashMap::new(),
+    };
+    if identity.wasm {
+        source.names = wasm_names(&bytes);
+    } else {
+        let text = String::from_utf8(bytes).map_err(|_| "source_not_utf8")?;
+        source.positions = positions(&text, offsets);
+        source.text = Some(text);
+    }
+    Ok(source)
+}
+
+/// The stack document for one decoded record. `read` returns verified
+/// artifact bytes up to a limit.
+pub fn resolve(
+    stack_event: &Value,
+    record: &Record,
+    identities: &HashMap<u32, Identity>,
+    artifacts: &[Value],
+    read: &dyn Fn(&Value, usize) -> Result<Vec<u8>>,
+) -> Value {
+    let state = match record.state {
+        1 => "captured",
+        2 => "no_script",
+        3 => "unsupported_thread",
+        4 => "not_retained_artifact_unavailable",
+        _ => "not_retained_budget",
+    };
+    let session = stack_event["session_id"].as_str().unwrap_or("");
+    let digest = hex::encode(record.digest);
+    let mut document = json!({
+        "status": "recorded",
+        "request": {
+            "session_id": stack_event["session_id"],
+            "process_id": stack_event["process_id"],
+            "request_id": stack_event["request_id"],
+            "frame_id": stack_event["frame_id"],
+            "sequence_number": stack_event["sequence_number"],
+            "parent_event_id": stack_event["parent_event_id"],
+        },
+        "state": state,
+        "total_depth": record.total,
+        "recorded": record.recorded,
+        "omitted": record.omitted,
+        "omitted_after_index": (record.omitted != 0).then_some(SYNC_LIMIT / 2 - 1),
+        "async_frames": record.async_frames,
+        "async_segments": record.async_segments,
+        "async_truncated": record.flags & 0x04 != 0,
+        "async_callers_not_shown": ASYNC_NOT_SHOWN,
+        "wasm_frames": record.wasm_frames,
+        "digest": (record.state != 2 && record.state != 3).then_some(&digest),
+        "frames_retained": false,
+        "frames": [],
+    });
+    if record.state == 2 || record.state == 3 {
+        return document;
+    }
+    let frames = newest(artifacts, session, |a| {
+        a["kind"] == "stack" && a["sha256"] == digest.as_str()
+    })
+    .and_then(|artifact| read(artifact, MAX_ARTIFACT).ok())
+    .and_then(|content| decode_artifact(&content, record));
+    document["frames_retained"] = json!(frames.is_some());
+    let frames = frames.unwrap_or_else(|| vec![record.innermost]);
+
+    let mut by_script: BTreeMap<u32, BTreeSet<u32>> = BTreeMap::new();
+    for frame in frames.iter().filter(|f| matches!(f.kind, 1 | 3)) {
+        let offsets = by_script.entry(frame.script_id).or_default();
+        offsets.insert(frame.position);
+        offsets.insert(frame.detail);
+    }
+    let mut sources: HashMap<u32, std::result::Result<Source, &'static str>> = HashMap::new();
+    let scripts: BTreeSet<u32> = frames.iter().map(|f| f.script_id).collect();
+    for script in scripts.into_iter().filter(|id| *id != 0) {
+        let offsets = by_script.get(&script).cloned().unwrap_or_default();
+        let source = load_source(identities.get(&script), &offsets, artifacts, session, read);
+        sources.insert(script, source);
+    }
+
+    let out: Vec<Value> = frames
+        .iter()
+        .enumerate()
+        .map(|(index, frame)| {
+            let is_async = index >= record.recorded as usize;
+            let mut value = json!({
+                "index": index,
+                "kind": frame_kind(frame),
+                "async": is_async,
+                "script_id": frame.script_id,
+            });
+            if frame.kind == 4 {
+                value["promise_index"] = json!(frame.position);
+                value["resolution"] = json!({"status": "builtin"});
+                return value;
+            }
+            let source = sources.get(&frame.script_id);
+            if frame.kind == 2 {
+                value["function_index"] = json!(frame.detail);
+                value["module_offset"] = json!(frame.position);
+                value["resolution"] = match source {
+                    Some(Ok(source)) => json!({
+                        "status": "resolved",
+                        "artifact_id": source.artifact_id,
+                        "url": source.url,
+                        "function_name": source.names.get(&frame.detail),
+                    }),
+                    Some(Err(reason)) => unresolved(reason),
+                    None => unresolved("script_identity_missing"),
+                };
+                return value;
+            }
+            value["position"] = json!(frame.position);
+            value["function_position"] = json!(frame.detail);
+            value["constructor"] = json!(frame.flags & 1 != 0);
+            value["top_level"] = json!(frame.flags & 2 != 0);
+            let identity = identities.get(&frame.script_id);
+            value["eval"] = json!(identity.is_some_and(|i| i.eval));
+            value["resolution"] = match source {
+                Some(Ok(source)) => match (
+                    source.positions.get(&frame.position),
+                    source.text.as_deref(),
+                    identity,
+                ) {
+                    (Some(&(_, line, column)), Some(text), Some(identity)) => {
+                        let name = (frame.flags & 2 == 0)
+                            .then(|| source.positions.get(&frame.detail))
+                            .flatten()
+                            .and_then(|&(byte, _, _)| function_name(text, byte));
+                        json!({
+                            "status": "resolved",
+                            "artifact_id": source.artifact_id,
+                            "url": source.url,
+                            "artifact_line": line,
+                            "artifact_column": column,
+                            "line": u64::from(identity.start_line) + line,
+                            "column": if line == 1 {
+                                u64::from(identity.start_column) + column
+                            } else {
+                                column
+                            },
+                            "function_name": name,
+                        })
+                    }
+                    _ => unresolved("position_outside_source"),
+                },
+                Some(Err(reason)) => unresolved(reason),
+                None => unresolved("script_identity_missing"),
+            };
+            value
+        })
+        .collect();
+    document["frames"] = Value::Array(out);
+    document
+}
+
+fn payload(event: &Value) -> Option<Vec<u8>> {
+    hex::decode(event["payload"].as_str()?).ok()
+}
+
+/// Reads the newest stack record of one renderer request and resolves it.
+pub fn document(
+    store: &Path,
+    artifacts_root: &Path,
+    session_id: Option<u64>,
+    process_id: u64,
+    request_id: u64,
+) -> Result<Value> {
+    let mut ids = vec![("process_id", process_id), ("request_id", request_id)];
+    if let Some(session) = session_id {
+        ids.push(("session_id", session));
+    }
+    let scan = |filter: &EventFilter, limit: usize| -> Result<Vec<Value>> {
+        let mut tally = event_query::Tally::default();
+        Ok(event_query::read_page(
+            store,
+            Cursor::Tail,
+            limit,
+            event_query::SCAN_BYTES,
+            event_query::EVENT_RECORD_BYTES,
+            event_query::event_visitor(filter, &mut tally),
+        )?
+        .records)
+    };
+    let Some(stack) = scan(&EventFilter::exact(&["request_initiator_stack"], ids), 1)?.pop() else {
+        return Ok(json!({
+            "status": "not_recorded",
+            "request": {"process_id": process_id, "request_id": request_id.to_string()},
+        }));
+    };
+    let Some(record) = payload(&stack).as_deref().and_then(decode_record) else {
+        return Ok(json!({"status": "malformed", "request": {
+            "session_id": stack["session_id"], "process_id": stack["process_id"],
+            "request_id": stack["request_id"], "sequence_number": stack["sequence_number"]}}));
+    };
+    let session = stack["session_id"]
+        .as_str()
+        .and_then(|s| s.parse::<u64>().ok());
+    let mut identity_ids = vec![("process_id", process_id)];
+    if let Some(session) = session {
+        identity_ids.push(("session_id", session));
+    }
+    let mut identities = HashMap::new();
+    if record.state != 2 && record.state != 3 {
+        let filter = EventFilter::exact(&["script_identity"], identity_ids);
+        for event in scan(&filter, IDENTITY_SCAN)? {
+            if let Some((script, identity)) = payload(&event).as_deref().and_then(decode_identity) {
+                identities.insert(script, identity);
+            }
+        }
+    }
+    let artifacts = match evidence::artifacts(artifacts_root, ARTIFACT_SCAN) {
+        Ok(artifacts) => artifacts,
+        Err(_) if !artifacts_root.join("manifest.jsonl").exists() => Vec::new(),
+        Err(error) => return Err(error),
+    };
+    let root = artifacts_root.to_path_buf();
+    let read = move |artifact: &Value, limit: usize| evidence::content(&root, artifact, limit);
+    Ok(resolve(&stack, &record, &identities, &artifacts, &read))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sha2::{Digest, Sha256};
+
+    fn frame(kind: u8, script: u32, position: u32, detail: u32) -> Vec<u8> {
+        let mut bytes = vec![kind, 0, 0, 0];
+        for value in [script, position, detail] {
+            bytes.extend(value.to_le_bytes());
+        }
+        bytes
+    }
+    fn record_bytes(
+        state: u8,
+        total: u32,
+        recorded: u32,
+        asyncs: u16,
+        digest: [u8; 32],
+    ) -> Vec<u8> {
+        let mut p = vec![1, 0, 128, 0, state, 0x08, 0, 0];
+        let omitted = total - recorded;
+        if omitted != 0 {
+            p[5] |= 0x02;
+        }
+        for value in [total, recorded, omitted] {
+            p.extend(value.to_le_bytes());
+        }
+        p.extend(asyncs.to_le_bytes());
+        p.extend(asyncs.to_le_bytes());
+        p.extend(0u32.to_le_bytes());
+        p.extend(1u32.to_le_bytes());
+        p.extend(digest);
+        p.extend(frame(1, 7, 30, 21));
+        p.resize(128, 0);
+        p
+    }
+    fn artifact_bytes(total: u32, frames: &[Vec<u8>], asyncs: u16) -> Vec<u8> {
+        let recorded = frames.len() as u32 - u32::from(asyncs);
+        let mut a = 0x4b53_4252u32.to_le_bytes().to_vec();
+        a.extend([1, 0, 32, 0, 16, 0]);
+        a.extend(if total > recorded { [2u8, 0] } else { [0, 0] });
+        for value in [total, recorded, total - recorded] {
+            a.extend(value.to_le_bytes());
+        }
+        a.extend(asyncs.to_le_bytes());
+        a.extend(asyncs.to_le_bytes());
+        a.extend(0u32.to_le_bytes());
+        for f in frames {
+            a.extend(f);
+        }
+        a
+    }
+    fn identity_bytes(
+        kind: u8,
+        flags: u8,
+        script: u32,
+        line: u32,
+        column: u32,
+        text: &[u8],
+    ) -> Vec<u8> {
+        let mut p = vec![1, 0, 128, 0, kind, flags, 0, 0];
+        for value in [script, line, column, 0] {
+            p.extend(value.to_le_bytes());
+        }
+        p.extend(99u64.to_le_bytes());
+        p.extend((text.len() as u64).to_le_bytes());
+        p.extend(Sha256::digest(text));
+        p.resize(128, 0);
+        p
+    }
+    fn artifact(id: &str, kind: &str, bytes: &[u8]) -> Value {
+        json!({"artifact_id": id, "session_id": "9", "kind": kind,
+            "url": format!("https://app.example.test/{id}.js"), "sha256": hex::encode(Sha256::digest(bytes))})
+    }
+
+    #[test]
+    fn frames_resolve_through_identities_and_retained_sources() {
+        let inline = "<x>\nfunction send(body) {\n  return fetch('/a', body);\n}\nconst run = () => send(1);\n";
+        let send_at = inline.find('(').unwrap() as u32;
+        let fetch_at = inline.find("fetch").unwrap() as u32;
+        let run_at = inline.find("() =>").unwrap() as u32;
+        let call_at = inline.rfind("send").unwrap() as u32;
+        let evaled = "eval_target()";
+        let mut wasm = b"\0asm\x01\0\0\0".to_vec();
+        // A name section naming function 3 "$encrypt".
+        let names = [vec![1u8], vec![10, 1, 3, 7], b"encrypt".to_vec()].concat();
+        let custom = [vec![4u8], b"name".to_vec(), names].concat();
+        wasm.push(0);
+        wasm.push(custom.len() as u8);
+        wasm.extend(custom);
+        let frames = vec![
+            frame(1, 7, fetch_at, send_at),
+            frame(2, 30, 0x2a1, 3),
+            frame(1, 8, 0, 0),
+            frame(1, 7, call_at, run_at),
+            frame(1, 40, 5, 0),
+            frame(3, 7, call_at, run_at),
+            vec![4, 0, 1, 0, 0, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0],
+        ];
+        let stack = artifact_bytes(6, &frames, 2);
+        let digest: [u8; 32] = Sha256::digest(&stack).into();
+        let mut bytes = record_bytes(1, 5, 5, 2, digest);
+        bytes[64..80].copy_from_slice(&frames[0]);
+        bytes[24..28].copy_from_slice(&1u32.to_le_bytes());
+        let record = decode_record(&bytes).expect("valid record");
+        assert!(
+            decode_artifact(&stack, &record).is_none(),
+            "depth must agree"
+        );
+        let stack = artifact_bytes(5, &frames, 2);
+        let digest: [u8; 32] = Sha256::digest(&stack).into();
+        bytes[32..64].copy_from_slice(&digest);
+        let record = decode_record(&bytes).expect("valid record");
+        let mut identities = HashMap::new();
+        for (script, payload) in [
+            (7, identity_bytes(1, 0x02, 7, 10, 4, inline.as_bytes())),
+            (8, identity_bytes(1, 0x03, 8, 0, 0, evaled.as_bytes())),
+            (30, identity_bytes(2, 0, 30, 0, 0, &wasm)),
+            (40, identity_bytes(1, 0x10, 40, 0, 0, b"not retained")),
+        ] {
+            let (id, identity) = decode_identity(&payload).expect("identity");
+            assert_eq!(id, script);
+            identities.insert(id, identity);
+        }
+        let artifacts = vec![
+            artifact("1", "stack", &stack),
+            artifact("2", "javascript", inline.as_bytes()),
+            artifact("3", "javascript", evaled.as_bytes()),
+            artifact("4", "wasm", &wasm),
+        ];
+        let contents: HashMap<String, Vec<u8>> = [
+            ("1", stack.clone()),
+            ("2", inline.as_bytes().to_vec()),
+            ("3", evaled.as_bytes().to_vec()),
+            ("4", wasm.clone()),
+        ]
+        .into_iter()
+        .map(|(k, v)| (k.to_owned(), v))
+        .collect();
+        let read =
+            |a: &Value, _limit: usize| Ok(contents[a["artifact_id"].as_str().unwrap()].clone());
+        let event = json!({"session_id": "9", "process_id": 4, "request_id": "3",
+            "frame_id": "5", "sequence_number": "12", "parent_event_id": "11"});
+        let doc = resolve(&event, &record, &identities, &artifacts, &read);
+        assert_eq!(doc["state"], "captured");
+        assert_eq!(doc["frames_retained"], true);
+        let f = &doc["frames"];
+        assert_eq!(f[0]["resolution"]["function_name"], "send");
+        assert_eq!(f[0]["resolution"]["artifact_line"], 3);
+        assert_eq!(f[0]["resolution"]["artifact_column"], 10);
+        assert_eq!(
+            f[0]["resolution"]["line"], 13,
+            "document line adds the start line"
+        );
+        assert_eq!(f[1]["kind"], "wasm");
+        assert_eq!(f[1]["resolution"]["function_name"], "encrypt");
+        assert_eq!(f[1]["module_offset"], 0x2a1);
+        assert_eq!(f[2]["eval"], true);
+        assert_eq!(f[2]["resolution"]["artifact_id"], "3");
+        assert_eq!(f[2]["resolution"]["column"], 1);
+        assert_eq!(f[3]["resolution"]["function_name"], "run");
+        assert_eq!(f[4]["resolution"]["reason"], "source_not_retained");
+        assert_eq!(f[5]["kind"], "await");
+        assert_eq!(f[5]["async"], true);
+        assert_eq!(f[6]["kind"], "promise_all");
+        assert_eq!(doc["async_callers_not_shown"][0], "timers");
+
+        // Without the frames artifact only the innermost frame is known.
+        let doc = resolve(&event, &record, &identities, &artifacts[1..], &read);
+        assert_eq!(doc["frames_retained"], false);
+        assert_eq!(doc["frames"].as_array().unwrap().len(), 1);
+        // Without identities nothing is guessed.
+        let doc = resolve(&event, &record, &HashMap::new(), &artifacts, &read);
+        assert_eq!(
+            doc["frames"][0]["resolution"]["reason"],
+            "script_identity_missing"
+        );
+    }
+
+    #[test]
+    fn records_follow_the_shared_rules() {
+        let digest = [7u8; 32];
+        assert!(decode_record(&record_bytes(1, 150, 150, 0, digest)).is_some());
+        let deep = record_bytes(1, 5000, 1024, 0, digest);
+        let record = decode_record(&deep).unwrap();
+        assert_eq!((record.recorded, record.omitted), (1024, 3976));
+        let parser = [vec![1, 0, 128, 0, 2, 8], vec![0; 122]].concat();
+        assert!(decode_record(&parser).is_some());
+        for (at, value) in [(4, 9u8), (5, 0x18), (100, 1), (32, 0)] {
+            let mut bad = record_bytes(1, 150, 150, 0, digest);
+            if at == 32 {
+                bad[32..64].fill(0);
+            } else {
+                bad[at] = value;
+            }
+            assert!(decode_record(&bad).is_none(), "byte {at}");
+        }
+        let mut bad = record_bytes(1, 160, 150, 0, digest);
+        bad[5] &= !0x02;
+        assert!(decode_record(&bad).is_none(), "omitted below the bound");
+    }
+
+    #[test]
+    fn names_come_from_the_source_at_the_function_start() {
+        let cases = [
+            ("function alpha(a) {}", "(", Some("alpha")),
+            ("obj.beta = function (a) {}", "(", Some("obj.beta")),
+            ("const gamma = async (a) => a", "(", Some("gamma")),
+            ("x = { delta(a) {} }", "(", Some("delta")),
+            ("class A { get epsilon() {} }", "(", Some("get epsilon")),
+            ("x = { 'zeta': function() {} }", "(", Some("zeta")),
+            ("[1].map(function (a) {})", "(a", None),
+            ("if (a == function () {}) {}", "() {}", None),
+        ];
+        for (text, anchor, expected) in cases {
+            let at = text.rfind(anchor).unwrap();
+            assert_eq!(function_name(text, at).as_deref(), expected, "{text}");
+        }
+    }
+
+    #[test]
+    fn positions_count_utf16_columns_and_lf_lines() {
+        let text = "a😀b\nc";
+        let wanted: BTreeSet<u32> = [0, 3, 4, 5, 6, 9].into_iter().collect();
+        let got = positions(text, &wanted);
+        assert_eq!(got[&3], (5, 1, 4));
+        assert_eq!(got[&5], (7, 2, 1));
+        assert_eq!(got[&6], (8, 2, 2));
+        assert!(!got.contains_key(&9));
+    }
+}

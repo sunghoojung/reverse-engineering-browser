@@ -35,7 +35,7 @@ use std::{
 };
 use tokio::sync::{Mutex, OwnedMutexGuard, OwnedSemaphorePermit, Semaphore, TryAcquireError};
 
-const UI_ASSETS: [&str; 33] = [
+const UI_ASSETS: [&str; 34] = [
     "index.html",
     "app.css",
     "command_palette.js",
@@ -51,6 +51,7 @@ const UI_ASSETS: [&str; 33] = [
     "investigation_notebook.js",
     "evidence_names.js",
     "invocation_sites.js",
+    "request_stack.js",
     "traffic_view.js",
     "captured_client.js",
     "captured_export_formats.js",
@@ -577,6 +578,21 @@ impl App {
                 )
                 .await?
                 .0
+            }
+            "/api/request-stack" => {
+                q.only(&["session_id", "process_id", "request_id"], &[])?;
+                let session = match q.one("session_id")? {
+                    Some(_) => Some(q.number("session_id", None, 64, true)?),
+                    None => None,
+                };
+                let process = q.number("process_id", None, 32, true)?;
+                let request = q.number("request_id", None, 64, true)?;
+                let (store, artifacts) =
+                    (self.options.store.clone(), self.options.artifacts.clone());
+                self.blocking(move || {
+                    crate::request_stack::document(&store, &artifacts, session, process, request)
+                })
+                .await?
             }
             "/api/deobfuscation" => {
                 let artifact = q.required("artifact_id")?;

@@ -353,6 +353,7 @@ pub fn validate_artifact(artifact: &mut Value) -> Result<()> {
             "bytecode_buffer",
             "wasm_guest_adapter",
             "request_body",
+            "stack",
         ]
         .contains(&artifact["kind"].as_str().unwrap_or(""))
         && artifact["url"].as_str().is_some_and(|s| !s.is_empty())
@@ -394,6 +395,8 @@ pub fn validate_artifact(artifact: &mut Value) -> Result<()> {
                 "runtime_allocating_script",
                 "native_wasm_guest",
                 "network_request",
+                "request_stack",
+                "stack_script",
             ]
             .contains(&origin)
             || (artifact["kind"] == "wasm_guest_adapter" && origin != "native_wasm_guest")
@@ -409,8 +412,15 @@ pub fn validate_artifact(artifact: &mut Value) -> Result<()> {
                 ]
                 .iter()
                 .any(|k| !canonical(&artifact[*k], 64, true))))
-            || (matches!(origin, "dynamic_javascript" | "runtime_allocating_script")
-                && (artifact["kind"] != "javascript" || artifact["execution_context_id"] == "0"))
+            || (matches!(
+                origin,
+                "dynamic_javascript" | "runtime_allocating_script" | "stack_script"
+            ) && (artifact["kind"] != "javascript" || artifact["execution_context_id"] == "0"))
+            // Request stack frames and the sources a stack named, native-network-v3.md.
+            || ((artifact["kind"] == "stack") != (origin == "request_stack"))
+            || (matches!(origin, "request_stack" | "stack_script")
+                && (artifact["execution_context_id"] == "0"
+                    || artifact["creator_event_id"] == "0"))
             || (origin.starts_with("webassembly_")
                 && (artifact["kind"] != "wasm" || artifact["execution_context_id"] == "0"))
             || (origin == "canvas_to_data_url"
@@ -431,7 +441,10 @@ pub fn validate_artifact(artifact: &mut Value) -> Result<()> {
             ));
         }
     } else {
-        if artifact["kind"] == "wasm_guest_adapter" || artifact["kind"] == "request_body" {
+        if artifact["kind"] == "wasm_guest_adapter"
+            || artifact["kind"] == "request_body"
+            || artifact["kind"] == "stack"
+        {
             return Err(Error::new(500, "Native artifact origin is missing"));
         }
         artifact["execution_context_id"] = json!("0");

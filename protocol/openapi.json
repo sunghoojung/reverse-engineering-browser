@@ -1431,6 +1431,121 @@
         }
       }
     },
+    "/api/request-stack": {
+      "get": {
+        "operationId": "get_request_stack",
+        "summary": "Read the JavaScript and Wasm call stack that started one renderer request",
+        "description": "Newest request_initiator_stack record (34) for one renderer request, named by the renderer's process_id and request_id as its request_initiated record carries them, with every recorded frame innermost first. JavaScript frames resolve through their script_identity record (35) and its SHA-256 to a retained JavaScript artifact (network, dynamic_javascript or stack_script), then to one-based line and UTF-16 column, artifact_line and artifact_column for Sources, and the function name the source gives at the function start. Wasm frames name their function index, module byte offset and a name-section name when the module is retained. A frame that does not resolve keeps its raw identity and a reason; nothing is guessed. A stack deeper than 1,024 frames keeps the innermost and outermost 512 with omitted frames after omitted_after_index. Async frames follow the synchronous ones; timers, event listeners, promise.then callbacks and message handlers are not shown. status is not_recorded when no stack record exists. See protocol/native-network-v3.md.",
+        "tags": [
+          "events"
+        ],
+        "x-source": "apps/origin-trace-backend/src/app.rs",
+        "parameters": [
+          {
+            "name": "process_id",
+            "in": "query",
+            "required": true,
+            "description": "Renderer process of the request_initiated record.",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 4294967295
+            }
+          },
+          {
+            "name": "request_id",
+            "in": "query",
+            "required": true,
+            "description": "Renderer request ID of the request_initiated record.",
+            "schema": {
+              "$ref": "#/components/schemas/NonzeroUint64String"
+            }
+          },
+          {
+            "name": "session_id",
+            "in": "query",
+            "required": false,
+            "description": "Restricts the lookup to one session.",
+            "schema": {
+              "$ref": "#/components/schemas/NonzeroUint64String"
+            }
+          }
+        ],
+        "x-reb-execution": {
+          "kind": "operation",
+          "effects": [],
+          "state_dependent_effects": [],
+          "uncertainties": [],
+          "prerequisites": [
+            {
+              "id": "local-request",
+              "condition": "Host must name the exact loopback listening port; cross-site Sec-Fetch-Site is rejected; an optional Origin must pass App::trusted."
+            }
+          ],
+          "confirmations": [],
+          "notes": "Reads stored evidence and verified artifact bytes. No browser mutation is requested by this handler. Evidence tails are not stable snapshots.",
+          "sources": [
+            {
+              "path": "apps/origin-trace-backend/src/request_stack.rs",
+              "symbol": "document"
+            }
+          ]
+        },
+        "x-reb-execution-schema": {
+          "$ref": "#/components/schemas/RebExecutionMetadata"
+        },
+        "responses": {
+          "200": {
+            "description": "The resolved stack, or a not_recorded or malformed status.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RequestStack"
+                }
+              }
+            },
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Host/Origin/Sec-Fetch-Site rejected.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Store, read, validation, or internal failure.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/events": {
       "get": {
         "operationId": "get_events",
@@ -6944,6 +7059,203 @@
           }
         },
         "x-source": "protocol/origin-trace-document-v1.schema.json"
+      },
+      "RequestStack": {
+        "title": "Request initiator stack",
+        "type": "object",
+        "required": [
+          "status",
+          "request"
+        ],
+        "properties": {
+          "status": {
+            "enum": [
+              "recorded",
+              "not_recorded",
+              "malformed"
+            ]
+          },
+          "request": {
+            "type": "object"
+          },
+          "state": {
+            "enum": [
+              "captured",
+              "no_script",
+              "unsupported_thread",
+              "not_retained_artifact_unavailable",
+              "not_retained_budget"
+            ]
+          },
+          "total_depth": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "recorded": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "omitted": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "omitted_after_index": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "async_frames": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "async_segments": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "async_truncated": {
+            "type": "boolean"
+          },
+          "async_callers_not_shown": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "wasm_frames": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "digest": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "frames_retained": {
+            "type": "boolean"
+          },
+          "frames": {
+            "type": "array",
+            "maxItems": 1056,
+            "items": {
+              "type": "object",
+              "required": [
+                "index",
+                "kind",
+                "async",
+                "script_id",
+                "resolution"
+              ],
+              "properties": {
+                "index": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "kind": {
+                  "enum": [
+                    "javascript",
+                    "wasm",
+                    "await",
+                    "promise_all",
+                    "promise_all_settled",
+                    "promise_any"
+                  ]
+                },
+                "async": {
+                  "type": "boolean"
+                },
+                "script_id": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "position": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "function_position": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "function_index": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "module_offset": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "promise_index": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "constructor": {
+                  "type": "boolean"
+                },
+                "top_level": {
+                  "type": "boolean"
+                },
+                "eval": {
+                  "type": "boolean"
+                },
+                "resolution": {
+                  "type": "object",
+                  "required": [
+                    "status"
+                  ],
+                  "properties": {
+                    "status": {
+                      "enum": [
+                        "resolved",
+                        "unresolved",
+                        "builtin"
+                      ]
+                    },
+                    "reason": {
+                      "enum": [
+                        "script_identity_missing",
+                        "source_unavailable",
+                        "source_not_retained",
+                        "source_artifact_missing",
+                        "source_artifact_unreadable",
+                        "source_not_utf8",
+                        "position_outside_source"
+                      ]
+                    },
+                    "artifact_id": {
+                      "$ref": "#/components/schemas/Uint64String"
+                    },
+                    "url": {
+                      "type": "string"
+                    },
+                    "line": {
+                      "type": "integer",
+                      "minimum": 1
+                    },
+                    "column": {
+                      "type": "integer",
+                      "minimum": 1
+                    },
+                    "artifact_line": {
+                      "type": "integer",
+                      "minimum": 1
+                    },
+                    "artifact_column": {
+                      "type": "integer",
+                      "minimum": 1
+                    },
+                    "function_name": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
       },
       "SignalProfile": {
         "title": "Request Signal Profile v1",
@@ -13782,7 +14094,8 @@
               "canvas_data_url",
               "bytecode_buffer",
               "wasm_guest_adapter",
-              "request_body"
+              "request_body",
+              "stack"
             ]
           },
           "url": {
@@ -19237,7 +19550,9 @@
               "js_invocation_request",
               "wasm_execution_outcome",
               "wasm_dispatch_overflow",
-              "wasm_indirect_overflow"
+              "wasm_indirect_overflow",
+              "request_initiator_stack",
+              "script_identity"
             ]
           },
           "status_code": {
@@ -19437,7 +19752,9 @@
               "webassembly_instantiate",
               "canvas_to_data_url",
               "native_wasm_guest",
-              "network_request"
+              "network_request",
+              "request_stack",
+              "stack_script"
             ]
           },
           "kind": {
@@ -19450,7 +19767,8 @@
               "canvas_data_url",
               "bytecode_buffer",
               "wasm_guest_adapter",
-              "request_body"
+              "request_body",
+              "stack"
             ]
           },
           "byte_size": {

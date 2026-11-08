@@ -22,7 +22,7 @@ define ignored-rust-test
 		{ echo "Expected exactly one passing ignored test: $(2)" >&2; exit 1; }
 endef
 
-check: native-wasm-golden-check native-js-golden-check network-request-wire-check dispatch-shape-check all heap-snapshot-check native-artifact-capture-check native-request-identity-check wire-decoder-check magic-decoder-check native-vm-recorder-check owned-vm-helper-check native-probe-compile native-probe-admission-check native-network-capture-check native-proxy-policy-check native-build-test native-tests workspace-check deob-benchmark vm-lab-check native-only-check
+check: native-wasm-golden-check native-js-golden-check network-request-wire-check request-stack-wire-check dispatch-shape-check all heap-snapshot-check native-artifact-capture-check native-request-identity-check wire-decoder-check magic-decoder-check native-vm-recorder-check owned-vm-helper-check native-probe-compile native-probe-admission-check native-network-capture-check native-proxy-policy-check native-build-test native-tests workspace-check deob-benchmark vm-lab-check native-only-check
 	cargo test --locked --manifest-path apps/origin-trace-backend/Cargo.toml
 	cargo test --locked --manifest-path apps/deobfuscator-worker/Cargo.toml
 	$(call ignored-rust-test,--lib,owned_vm_debugger::tests::owned_vm_real_helper_control_and_independent_goldens,\
@@ -148,6 +148,10 @@ native-network-capture-check:
 .PHONY: network-request-wire-check
 network-request-wire-check: $(NETWORK_REQUEST_TEST)
 	REB_NETWORK_REQUEST_TEST="$(abspath $(NETWORK_REQUEST_TEST))" node tools/check-network-request-wire.mjs
+
+.PHONY: request-stack-wire-check
+request-stack-wire-check: $(REQUEST_STACK_TEST) $(UI_STARTUP_DEPS)
+	REB_REQUEST_STACK_TEST="$(abspath $(REQUEST_STACK_TEST))" node tools/check-request-stack-wire.mjs
 
 native-proxy-policy-check: $(NATIVE_PROXY_POLICY_TEST)
 	$(NATIVE_PROXY_POLICY_TEST)

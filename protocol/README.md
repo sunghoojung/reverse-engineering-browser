@@ -394,6 +394,8 @@ use the names.
 | 27 | `wasm_execution_outcome` | `include/reb/wasm_dispatch.hpp` | [native Wasm execution outcomes](native-wasm-dispatch-v1.md#execution-outcomes) |
 | 28 | `wasm_dispatch_overflow` | `include/reb/wasm_dispatch.hpp` | [native Wasm overflow identities](native-wasm-dispatch-v1.md#overflow-identities) |
 | 29 | `wasm_indirect_overflow` | `include/reb/wasm_dispatch.hpp` | [native Wasm overflow identities](native-wasm-dispatch-v1.md#overflow-identities) |
+| 34 | `request_initiator_stack` | `include/reb/request_stack.hpp` | [native network v3](native-network-v3.md#request-initiator-stacks) |
+| 35 | `script_identity` | `include/reb/request_stack.hpp` | [native network v3](native-network-v3.md#script_identity-type-35) |
 
 `wasm_indirect_observation` payloads are version 2 and `wasm_guest_invocation`
 version 4: each adds the JavaScript invocation context in previously reserved

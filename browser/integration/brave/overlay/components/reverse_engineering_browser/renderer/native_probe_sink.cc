@@ -1669,7 +1669,11 @@ void NativeProbeSink::CaptureGeneratedArtifact(
        capture_origin == NativeArtifactCaptureOrigin::kCanvasToDataUrl && creator_event_id != 0 &&
        execution_context_id == 0) ||
       (kind == NativeArtifactKind::kBytecodeBuffer &&
-       capture_origin == NativeArtifactCaptureOrigin::kRuntimeTypedArray);
+       capture_origin == NativeArtifactCaptureOrigin::kRuntimeTypedArray) ||
+      (kind == NativeArtifactKind::kStack &&
+       capture_origin == NativeArtifactCaptureOrigin::kRequestStack && creator_event_id != 0) ||
+      (kind == NativeArtifactKind::kJavaScript &&
+       capture_origin == NativeArtifactCaptureOrigin::kStackScript && creator_event_id != 0);
   if (!valid_kind_and_origin ||
       (kind != NativeArtifactKind::kCanvasDataUrl && execution_context_id == 0)) {
     return;
@@ -1817,15 +1821,15 @@ void NativeProbeSink::RecordWebAudioCall(const std::string_view operation) noexc
   RecordApiCall(NativeProbeCategory::kWebAudio, operation);
 }
 
-void NativeProbeSink::RecordRequestInitiated(const std::int32_t request_id,
-                                             const std::string_view method,
-                                             const std::string_view url) noexcept {
+std::uint64_t NativeProbeSink::RecordRequestInitiated(const std::int32_t request_id,
+                                                      const std::string_view method,
+                                                      const std::string_view url) noexcept {
   if (!emitter_.load(std::memory_order_acquire)) [[likely]] {
-    return;
+    return 0;
   }
   const std::uint64_t config_generation = config_generation_.load(std::memory_order_acquire);
   if ((config_generation & 1U) != 0) {
-    return;
+    return 0;
   }
   const std::uint64_t monotonic_time_ns = MonotonicTimeNs();
   const std::uint64_t category_mask = category_mask_.load(std::memory_order_relaxed);
@@ -1837,7 +1841,7 @@ void NativeProbeSink::RecordRequestInitiated(const std::int32_t request_id,
   if (config_generation_.load(std::memory_order_acquire) != config_generation || !emitter ||
       (category_mask & NativeProbeCategoryMask(NativeProbeCategory::kNetwork)) == 0 ||
       monotonic_time_ns >= expires_at_monotonic_ns) {
-    return;
+    return 0;
   }
 
   NativeProbeEvent event;
@@ -1870,7 +1874,9 @@ void NativeProbeSink::RecordRequestInitiated(const std::int32_t request_id,
       event.header.flags |= static_cast<std::uint16_t>(NativeProbeFlag::kPayloadTruncated);
     }
   }
-  static_cast<void>(emitter(event, config_generation));
+  return emitter(event, config_generation) == NativeProbeEmitStatus::kAdmitted
+             ? event.header.sequence_number
+             : 0;
 }
 
 void NativeProbeSink::NoteVmDispatchLoss(const std::uint64_t generation,

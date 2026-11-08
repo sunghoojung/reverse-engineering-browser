@@ -242,9 +242,16 @@ fn step(value: &Value, relation: &str, confidence: &str) -> Result<Value> {
 // decodes their fields. The Swift builder writes the same summary.
 fn binary_record_summary(value: &Value, size: usize) -> Option<String> {
     let operation = value["type"].as_str()?;
-    (value["category"] == "network" && matches!(operation, "request_target" | "request_body")).then(
-        || format!("Binary {operation} record, {size} bytes, not shown as text; Traffic shows its fields"),
-    )
+    (value["category"] == "network"
+        && matches!(
+            operation,
+            "request_target" | "request_body" | "request_initiator_stack" | "script_identity"
+        ))
+    .then(|| {
+        format!(
+            "Binary {operation} record, {size} bytes, not shown as text; Traffic shows its fields"
+        )
+    })
 }
 fn gap(reason: &str, after: usize, detail: &str) -> Value {
     json!({"reason":reason,"after_step":after,"detail":detail})

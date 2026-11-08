@@ -103,7 +103,8 @@ await nextTurn();
 assert.deepEqual(context.removedReads, [], 'shipped UI must not read removed debugger/live-script state');
 
 const document = window.document;
-const removedFeature = /breakpoint|paused frame|call stack|step over|step into|websocket (?:message|inspector|connection)|websockets ·|cookie import|import cookies|element screenshot|screenshot markup|marker (?:execution|run|fuzz)|run marker|local override|runtime hook|hook pivot|live script|page scripts|find in memory|memory origin/i;
+// "Request call stack" is the native initiator stack (protocol/native-network-v3.md).
+const removedFeature = /breakpoint|paused frame|(?<!request )call stack|step over|step into|websocket (?:message|inspector|connection)|websockets ·|cookie import|import cookies|element screenshot|screenshot markup|marker (?:execution|run|fuzz)|run marker|local override|runtime hook|hook pivot|live script|page scripts|find in memory|memory origin/i;
 const reachable = node => [node.textContent, node.getAttribute('aria-label'), node.getAttribute('title')].filter(Boolean).join(' ');
 for (const id of ['screen-traffic', 'screen-sources', 'screen-vm', 'investigation-navigation']) {
   const screen = document.getElementById(id);

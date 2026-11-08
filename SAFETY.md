@@ -64,6 +64,11 @@ it.
   or `js_invocation_saved_sites`), never inherited, and keep their own saved
   set, so an agent cannot read or change what the researcher's next capture
   arms.
+- Request call stacks (`REB_NATIVE_REQUEST_STACKS`, on by default in the
+  packaged app when Network and Artifact are captured) record script IDs and
+  positions of the stack that started each document request, never names or
+  values, and retain the source of each script a stack names as an artifact.
+  See [Native network v3](protocol/native-network-v3.md).
 - Standalone probes remain inactive without an enabled session. Enabled artifact
   capture retains raw source URLs locally; metadata is not necessarily secret-free.
 - With Network capture on, every native request records its body's length,

@@ -87,6 +87,10 @@ enum class NativeProbeType : std::uint16_t {
   // Compact identities for Wasm samples a budget refused. Not full observations.
   kWasmDispatchOverflow = 28,
   kWasmIndirectOverflow = 29,
+  // Request initiator stack and the script identities it names; see
+  // protocol/native-network-v3.md.
+  kRequestInitiatorStack = 34,
+  kScriptIdentity = 35,
 };
 
 enum class NativeProbeFlag : std::uint16_t {

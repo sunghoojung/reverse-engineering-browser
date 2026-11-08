@@ -3279,7 +3279,11 @@ invocationSitesPanel.refresh();
       }
 
       function renderInspectorDetails(rows) {
-        elements.fieldTree.replaceChildren(...rows.map(detail => {
+        elements.fieldTree.replaceChildren(...inspectorDetailRows(rows));
+      }
+
+      function inspectorDetailRows(rows) {
+        return rows.map(detail => {
           const row = document.createElement('div');
           row.className = 'field-row'; row.dataset.type = detail.type;
           const key = document.createElement('span'); key.className = 'field-key'; key.textContent = detail.key;
@@ -3287,8 +3291,16 @@ invocationSitesPanel.refresh();
           const type = document.createElement('span'); type.className = 'field-type'; type.textContent = detail.type;
           row.append(key, value, type);
           return row;
-        }));
+        });
       }
+
+      const requestStackPanel = createRequestStackPanel({
+        refresh: () => { if (state.inspectorTab === 'initiator') renderInspector(); },
+        open: frame => {
+          if (selectArtifact(frame.resolution.artifact_id, frame.resolution.artifact_line ?? null,
+            {column: frame.resolution.artifact_column ?? 0}) !== false) showScreen('sources');
+        }
+      });
 
       function renderInspector() {
         evidencePackagePanel.sync();
@@ -3402,13 +3414,16 @@ invocationSitesPanel.refresh();
               );
             }
             details.push({ key: 'Frame', value: integerText(source, 'frame_id'), type: 'id' });
-            renderInspectorDetails(details);
+            requestStackPanel.render(elements.fieldTree, request, inspectorDetailRows(details));
           } else {
-            renderInspectorMessage(request?.origin === 'sample'
+            const empty = document.createElement('div');
+            empty.className = 'field-empty';
+            empty.textContent = request?.origin === 'sample'
               ? 'Sample initiator evidence is available in the request field backtrace.'
               : request?.origin === 'demo'
                 ? 'Demo initiator evidence is available in the retained event payload.'
-                : 'No renderer initiator was captured for this browser request.');
+                : 'No renderer initiator was captured for this browser request.';
+            requestStackPanel.render(elements.fieldTree, request, [empty]);
           }
           return;
         }
@@ -5929,7 +5944,8 @@ invocationSitesPanel.refresh();
       // row (protocol/native-network-v2.md). Neither is listed, opened or loaded
       // as a source file.
       function isSourceArtifact(artifact) {
-        return Boolean(artifact) && artifact.kind !== 'canvas_data_url' && artifact.kind !== 'request_body';
+        return Boolean(artifact) && artifact.kind !== 'canvas_data_url' && artifact.kind !== 'request_body' &&
+          artifact.kind !== 'stack';
       }
 
       function sourceIsCurrent(source) {
@@ -7447,7 +7463,7 @@ invocationSitesPanel.refresh();
         if (artifact?.kind === 'canvas_data_url' && (!canvasOwner ||
             state.canvasPreviewOwners?.get(sourceIdentity(artifact)) !== canvasOwner || !canvasGalleryVisible() || state.artifactReceiverError)) return;
         // Request body bytes are read only by the Traffic body view.
-        if (artifact?.kind === 'request_body') return;
+        if (artifact?.kind === 'request_body' || artifact?.kind === 'stack') return;
         if (!sourceIsCurrent(artifact) || artifact.content !== undefined || artifact.loading || (artifact.loadError && !retry)) return;
         const identity = sourceIdentity(artifact);
         const controller = new AbortController();

@@ -1180,6 +1180,12 @@ std::uint64_t NativeArtifactCaptureSink::CaptureGeneratedArtifactInternal(
          capture_origin == NativeArtifactCaptureOrigin::kNativeWasmGuest))) ||
       (kind == NativeArtifactKind::kJavaScript &&
        capture_origin == NativeArtifactCaptureOrigin::kDynamicJavaScript) ||
+      // Request initiator stacks, protocol/native-network-v3.md.
+      (((kind == NativeArtifactKind::kStack &&
+         capture_origin == NativeArtifactCaptureOrigin::kRequestStack) ||
+        (kind == NativeArtifactKind::kJavaScript &&
+         capture_origin == NativeArtifactCaptureOrigin::kStackScript)) &&
+       creator_event_id != 0) ||
       (kind == NativeArtifactKind::kWasm &&
        (capture_origin == NativeArtifactCaptureOrigin::kWebAssemblyCompile ||
         capture_origin == NativeArtifactCaptureOrigin::kWebAssemblyModule ||
@@ -1209,6 +1215,7 @@ std::uint64_t NativeArtifactCaptureSink::CaptureGeneratedArtifactInternal(
   const std::string mime_type = kind == NativeArtifactKind::kJavaScript         ? "text/javascript"
                                 : kind == NativeArtifactKind::kWasm             ? "application/wasm"
                                 : kind == NativeArtifactKind::kWasmGuestAdapter ? "application/json"
+                                : kind == NativeArtifactKind::kStack ? "application/x-reb-stack"
                                 : kind == NativeArtifactKind::kBytecodeBuffer
                                     ? "application/octet-stream"
                                     : "text/plain";

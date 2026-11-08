@@ -29,6 +29,8 @@
 
 namespace reb {
 
+class NativeRequestStackWalk;
+
 // Maximum allocating-script source prefix scanned to admit a runtime buffer.
 // The same bound is the renderer classifier's window.
 inline constexpr std::size_t kRuntimeScriptNoteBytes = 256U * 1024U;
@@ -374,9 +376,11 @@ class COMPONENT_EXPORT(REB_NATIVE_PROBE_SINK) NativeProbeSink final {
   void RecordCanvasToDataUrl() noexcept;
   void RecordCanvasToDataUrl(std::string_view data_url) noexcept;
   void RecordWebAudioCall(std::string_view operation) noexcept;
-  void RecordRequestInitiated(std::int32_t request_id,
-                              std::string_view method,
-                              std::string_view url) noexcept;
+  // Returns the admitted record's sequence, the parent of its initiator stack
+  // record, or 0.
+  std::uint64_t RecordRequestInitiated(std::int32_t request_id,
+                                       std::string_view method,
+                                       std::string_view url) noexcept;
   // Copies one guest step the caller already observed. The instruction
   // pointer, opcode, and handler index are not read from V8, Wasm, canvas,
   // or a static handler table. At most kNativeVmDispatchSampleBudget samples
@@ -420,6 +424,7 @@ class COMPONENT_EXPORT(REB_NATIVE_PROBE_SINK) NativeProbeSink final {
 
  private:
   friend class base::NoDestructor<NativeProbeSink>;
+  friend class NativeRequestStackWalk;
   NativeProbeSink() noexcept;
 
   [[nodiscard]] NativeProbeEmitStatus EmitStatus(const NativeProbeEvent& event,

@@ -35,6 +35,7 @@ enum class NativeArtifactKind : std::uint16_t {
   kBytecodeBuffer = 6,
   kWasmGuestAdapter = 7,
   kRequestBody = 8,
+  kStack = 10,
 };
 
 enum class NativeArtifactCaptureOrigin : std::uint16_t {
@@ -49,6 +50,8 @@ enum class NativeArtifactCaptureOrigin : std::uint16_t {
   kRuntimeAllocatingScript = 8,
   kNativeWasmGuest = 9,
   kNetworkRequest = 10,
+  kRequestStack = 12,
+  kStackScript = 13,
 };
 
 // Transient views: emitters must copy before returning. The script identity is

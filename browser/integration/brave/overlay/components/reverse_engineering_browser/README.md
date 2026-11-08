@@ -185,6 +185,13 @@ invocation through a provider Blink installs, for Wasm `br_table` and
 `call_indirect` observations, guest invocation markers and loader requests.
 See the [contract](../../../../../../protocol/native-js-invocation-v1.md).
 
+Request initiator stacks (`request_initiator_stack` and `script_identity`,
+events 34 and 35) use `common/native_request_stack.h` for the records and
+`renderer/native_request_stack.{h,cc}` for the walk: Blink installs the
+provider only under `--reb-request-stacks`, the sink sends each new stack once
+as a `stack` artifact and each new script's source once. See the
+[contract](../../../../../../protocol/native-network-v3.md).
+
 Renderer code never writes files or sockets directly.
 
 The dedicated-worker source foundation uses a separate, dormant process-wide

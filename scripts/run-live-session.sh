@@ -44,6 +44,8 @@ readonly open_command="${REB_OPEN_COMMAND:-open}"
 readonly native_quiet_mode="${REB_NATIVE_QUIET_MODE:-0}"
 readonly native_wasm_dispatch="${REB_NATIVE_WASM_DISPATCH:-0}"
 readonly native_wasm_call_indirect="${REB_NATIVE_WASM_CALL_INDIRECT:-0}"
+readonly native_request_stacks="${REB_NATIVE_REQUEST_STACKS:-0}"
+readonly native_request_stacks_if_supported="${REB_NATIVE_REQUEST_STACKS_IF_SUPPORTED:-0}"
 readonly native_wasm_samples_per_function="${REB_NATIVE_WASM_SAMPLES_PER_FUNCTION:-}"
 readonly native_wasm_samples_per_indirect_site="${REB_NATIVE_WASM_SAMPLES_PER_INDIRECT_SITE:-}"
 readonly native_wasm_function_allow="${REB_NATIVE_WASM_FUNCTION_ALLOW:-}"
@@ -111,6 +113,13 @@ fi
 if [[ "${native_wasm_call_indirect}" == 1 ]] &&
    (( (category_mask & 512) == 0 || (category_mask & 1024) == 0 )); then
   fail_live_session 2 "REB_NATIVE_WASM_CALL_INDIRECT requires VM and Artifact capture categories."
+fi
+if [[ "${native_request_stacks}" != 0 && "${native_request_stacks}" != 1 ]]; then
+  fail_live_session 2 "REB_NATIVE_REQUEST_STACKS must be 0 or 1."
+fi
+if [[ "${native_request_stacks}" == 1 ]] &&
+   (( (category_mask & 256) == 0 || (category_mask & 1024) == 0 )); then
+  fail_live_session 2 "REB_NATIVE_REQUEST_STACKS requires Network and Artifact capture categories."
 fi
 validate_wasm_count() {
   local name="$1" text="$2"
@@ -505,6 +514,26 @@ if [[ -n "${native_js_invocation_sites:-}" ]]; then
   fi
 fi
 readonly js_invocation_session_state
+# Request initiator stacks (protocol/native-network-v3.md). The packaged
+# app's default drops the flag from a Brave that predates it instead of
+# refusing the session; an explicit request keeps the strict check.
+request_stacks_state=off
+if [[ "${native_request_stacks:-0}" == 1 ]]; then
+  request_stacks_state=on
+  if [[ "${native_request_stacks_if_supported:-0}" == 1 ]] &&
+     stack_image="$(locate_brave_v8_image "${brave_binary}")"; then
+    stack_scan_status=0
+    LC_ALL=C grep -a -q -F -e reb_request_stacks "${stack_image}" || stack_scan_status=$?
+    if (( stack_scan_status == 1 )); then
+      request_stacks_state=browser_unsupported
+    fi
+  fi
+fi
+readonly request_stacks_state
+if [[ "${request_stacks_state}" == on ]]; then
+  add_native_js_flag --reb-request-stacks \
+    REB_NATIVE_REQUEST_STACKS=1 REB_NATIVE_REQUEST_STACKS=0
+fi
 if [[ "${js_invocation_session_state}" == armed ]]; then
   add_native_js_flag --reb-js-invocation-capture \
     REB_NATIVE_JS_INVOCATION_SITES "unset REB_NATIVE_JS_INVOCATION_SITES"
@@ -912,7 +941,10 @@ elif [[ "${console_document_start}" == 1 ]]; then
 else
   echo "Console document-start scripts: not permitted; set REB_CONSOLE_DOCUMENT_START=1 to permit them for one session"
 fi
-echo "Native switches: quiet=${native_quiet_mode} wasm_br_table=${native_wasm_dispatch} wasm_call_indirect=${native_wasm_call_indirect} wasm_guest=$([[ -n "${native_guest_adapter}" ]] && echo 1 || echo 0) js_dispatch=$([[ -n "${native_js_dispatch_sites}" ]] && echo 1 || echo 0) js_invocation=$([[ "${js_invocation_session_state}" == armed ]] && echo 1 || echo 0)"
+if [[ "${request_stacks_state}" == browser_unsupported ]]; then
+  echo "Request call stacks: unavailable; this Brave does not define --reb-request-stacks"
+fi
+echo "Native switches: quiet=${native_quiet_mode} wasm_br_table=${native_wasm_dispatch} wasm_call_indirect=${native_wasm_call_indirect} wasm_guest=$([[ -n "${native_guest_adapter}" ]] && echo 1 || echo 0) js_dispatch=$([[ -n "${native_js_dispatch_sites}" ]] && echo 1 || echo 0) js_invocation=$([[ "${js_invocation_session_state}" == armed ]] && echo 1 || echo 0) request_stacks=$([[ "${request_stacks_state}" == on ]] && echo 1 || echo 0)"
 echo "Wasm sample budgets: per_function=${native_wasm_samples_per_function:-unset} per_indirect_site=${native_wasm_samples_per_indirect_site:-unset} function_allow=${native_wasm_function_allow:-unset} function_deny=${native_wasm_function_deny:-unset} module_allowlist=$([[ -n "${native_wasm_module_allowlist:-}" ]] && echo 1 || echo 0) reset_file=${wasm_budget_reset_file:-unset}"
 if [[ "${js_invocation_session_state}" == browser_unsupported ]]; then
   echo "JavaScript invocation tracking: unavailable; Brave at ${brave_binary} does not define --reb-js-invocation-capture, so this session started without the saved invocation sites and records no invocation evidence"

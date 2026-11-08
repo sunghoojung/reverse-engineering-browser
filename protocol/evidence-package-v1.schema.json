@@ -576,7 +576,9 @@
             "js_invocation_request",
             "wasm_execution_outcome",
             "wasm_dispatch_overflow",
-            "wasm_indirect_overflow"
+            "wasm_indirect_overflow",
+            "request_initiator_stack",
+            "script_identity"
           ]
         },
         "status_code": {
@@ -776,7 +778,9 @@
             "webassembly_instantiate",
             "canvas_to_data_url",
             "native_wasm_guest",
-            "network_request"
+            "network_request",
+            "request_stack",
+            "stack_script"
           ]
         },
         "kind": {
@@ -789,7 +793,8 @@
             "canvas_data_url",
             "bytecode_buffer",
             "wasm_guest_adapter",
-            "request_body"
+            "request_body",
+            "stack"
           ]
         },
         "byte_size": {

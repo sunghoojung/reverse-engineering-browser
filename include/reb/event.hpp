@@ -73,6 +73,10 @@ enum class EventType : std::uint16_t {
   // See protocol/native-wasm-dispatch-v1.md.
   kWasmDispatchOverflow = 28,
   kWasmIndirectOverflow = 29,
+  // Request initiator stack and the script identities it names.
+  // See protocol/native-network-v3.md.
+  kRequestInitiatorStack = 34,
+  kScriptIdentity = 35,
 };
 
 enum class EventFlag : std::uint16_t {

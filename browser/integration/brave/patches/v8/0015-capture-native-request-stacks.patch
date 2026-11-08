@@ -1,0 +1,382 @@
+diff --git a/BUILD.gn b/BUILD.gn
+index 353f6a6..05d0ff5 100644
+--- a/BUILD.gn
++++ b/BUILD.gn
+@@ -3551,6 +3551,7 @@ v8_header_set("v8_headers") {
+     "include/v8-microtask-queue.h",
+     "include/v8-microtask.h",
+     "include/v8-native-console.h",
++    "include/v8-native-stack.h",
+     "include/v8-object.h",
+     "include/v8-persistent-handle.h",
+     "include/v8-primitive-object.h",
+diff --git a/include/v8-native-stack.h b/include/v8-native-stack.h
+new file mode 100644
+index 0000000..0665eec
+--- /dev/null
++++ b/include/v8-native-stack.h
+@@ -0,0 +1,96 @@
++// Copyright (c) 2026 The Brave Authors. All rights reserved.
++// This Source Code Form is subject to the terms of the Mozilla Public
++// License, v. 2.0. If a copy of the MPL was not distributed with this file,
++// You can obtain one at https://mozilla.org/MPL/2.0/.
++
++#ifndef INCLUDE_V8_NATIVE_STACK_H_
++#define INCLUDE_V8_NATIVE_STACK_H_
++
++#include <stddef.h>
++#include <stdint.h>
++
++#include "v8-context.h"
++#include "v8-local-handle.h"
++#include "v8-primitive.h"
++#include "v8config.h"
++
++namespace v8 {
++
++class Isolate;
++
++// REB request initiator stacks. Inactive unless V8 runs with
++// --reb-request-stacks (off by default). Frames are identities only: no
++// strings or values are read from the stack.
++enum class NativeStackFrameKind : uint8_t {
++  kJavaScript = 1,
++  kWasm = 2,
++  kAwait = 3,
++  kPromiseCombinator = 4,
++};
++
++struct NativeStackFrame {
++  NativeStackFrameKind kind;
++  uint8_t flags;  // 1: constructor call, 2: top-level script code.
++  uint16_t combinator;  // 1 Promise.all, 2 allSettled, 3 any; else 0.
++  uint32_t script_id;   // 0 only for a promise combinator.
++  // UTF-16 source position, Wasm module byte offset, or promise index.
++  uint32_t position;
++  // Function start position, Wasm function index, or 0.
++  uint32_t detail;
++};
++
++struct NativeStackCapture {
++  // sync_capacity synchronous frames, then async_capacity async frames.
++  // sync_capacity must be even: a deeper stack keeps the innermost and the
++  // outermost half, in order, in frames[0, sync_capacity).
++  NativeStackFrame* frames = nullptr;
++  uint32_t sync_capacity = 0;
++  uint32_t async_capacity = 0;
++  // Outputs. Synchronous frames are innermost first in frames[0, recorded);
++  // async frames are in chain order at frames[sync_capacity, +async_frames).
++  uint32_t total_depth = 0;
++  uint32_t recorded = 0;
++  uint32_t omitted = 0;
++  uint32_t async_frames = 0;
++  bool async_truncated = false;
++};
++
++// One script a recorded frame names, described at most once per capture.
++struct NativeStackScript {
++  int script_id;
++  bool is_wasm;
++  bool is_eval;
++  int line_offset;
++  int column_offset;
++  Local<Context> context;  // The realm of the frame that named it.
++  Local<Value> name;       // Script name or URL; may be undefined.
++  Local<String> source;    // JavaScript only; may be empty.
++  const uint8_t* wire_bytes;  // Wasm only, borrowed for the call.
++  size_t wire_bytes_size;
++};
++
++// All three run synchronously on the isolate thread with JavaScript execution
++// disallowed and must not call back into JavaScript.
++struct NativeStackCallbacks {
++  void* data = nullptr;
++  // Whether the embedder still needs a description of script_id. Must not
++  // call into V8 or allocate.
++  bool (*script_needed)(void* data, int script_id) = nullptr;
++  // The completed capture, before any script description.
++  void (*frames)(void* data, const NativeStackCapture& capture) = nullptr;
++  void (*script)(void* data, const NativeStackScript& script) = nullptr;
++};
++
++V8_EXPORT bool IsNativeStackCaptureEnabled();
++
++// Walks the current stack as DevTools' detailed stack trace sees it (frames
++// subject to debugging in the current security origin, Wasm included), then
++// the await chain Error.stack would append. Returns false without walking when
++// the flag is off, the arguments are invalid or no context is entered.
++V8_EXPORT bool CaptureNativeStack(Isolate* isolate,
++                                  NativeStackCapture& capture,
++                                  const NativeStackCallbacks& callbacks);
++
++}  // namespace v8
++
++#endif  // INCLUDE_V8_NATIVE_STACK_H_
+diff --git a/src/execution/isolate.cc b/src/execution/isolate.cc
+index d5b352a..9ac20f3 100644
+--- a/src/execution/isolate.cc
++++ b/src/execution/isolate.cc
+@@ -21,6 +21,7 @@
+ #include <utility>
+ 
+ #include "include/v8-callbacks.h"
++#include "include/v8-native-stack.h"
+ #include "include/v8-function.h"
+ #include "include/v8-template.h"
+ #include "src/api/api-arguments-inl.h"
+@@ -1267,8 +1268,10 @@ class CallSiteBuilder {
+   Handle<FixedArray> elements_;
+ };
+ 
++// Also walked by NativeStackBuilder for REB request initiator stacks.
++template <typename AsyncBuilder>
+ void CaptureAsyncStackTrace(Isolate* isolate, DirectHandle<JSPromise> promise,
+-                            CallSiteBuilder* builder) {
++                            AsyncBuilder* builder) {
+   while (!builder->Full()) {
+     // Check that the {promise} is not settled.
+     if (promise->status() != Promise::kPending) return;
+@@ -1692,6 +1695,213 @@ DirectHandle<StackTraceInfo> GetDetailedStackTraceFromCallSiteInfos(
+   return isolate->factory()->NewStackTraceInfo(frames);
+ }
+ 
++// REB request initiator stacks (include/v8-native-stack.h). Visits the frames
++// StackFrameBuilder visits for DevTools and the await chain
++// CaptureSimpleStackTrace appends, writing identities into the embedder's
++// buffer instead of allocating StackFrameInfo objects.
++class NativeStackBuilder {
++ public:
++  NativeStackBuilder(Isolate* isolate, v8::NativeStackCapture& capture,
++                     const v8::NativeStackCallbacks& callbacks)
++      : isolate_(isolate),
++        capture_(capture),
++        callbacks_(callbacks),
++        half_(capture.sync_capacity / 2) {}
++
++  bool Visit(FrameSummary& summary) {
++    if (!summary.is_subject_to_debugging()) return true;
++    v8::NativeStackFrame frame{};
++    if (summary.IsJavaScript()) {
++      const FrameSummary::JavaScriptFrameSummary& js = summary.AsJavaScript();
++      summary.EnsureSourcePositionsAvailable();
++      Tagged<SharedFunctionInfo> shared = js.function()->shared();
++      frame.kind = v8::NativeStackFrameKind::kJavaScript;
++      frame.flags = static_cast<uint8_t>((js.is_constructor() ? 1 : 0) |
++                                         (shared->is_toplevel() ? 2 : 0));
++      frame.position = Unsigned(summary.SourcePosition());
++      frame.detail = Unsigned(shared->StartPosition());
++    } else {
++#if V8_ENABLE_WEBASSEMBLY
++      frame.kind = v8::NativeStackFrameKind::kWasm;
++      frame.position = Unsigned(summary.SourcePosition());
++      frame.detail = WasmFunctionIndex(summary);
++#else
++      return true;
++#endif  // V8_ENABLE_WEBASSEMBLY
++    }
++    Handle<Script> script = Cast<Script>(summary.script());
++    frame.script_id = Unsigned(script->id());
++    NoteScript(script, summary.native_context());
++    const uint32_t index = capture_.total_depth++;
++    capture_.frames[index < half_ ? index : half_ + (index - half_) % half_] =
++        frame;
++    return true;
++  }
++
++  bool Full() const { return capture_.async_frames >= capture_.async_capacity; }
++
++  void AppendAsyncFrame(DirectHandle<JSGeneratorObject> generator_object) {
++    DirectHandle<JSFunction> function(generator_object->function(), isolate_);
++    DirectHandle<SharedFunctionInfo> shared(function->shared(), isolate_);
++    if (!shared->IsSubjectToDebugging() || !IsScript(shared->script()) ||
++        !function->native_context()->HasSameSecurityTokenAs(
++            isolate_->raw_native_context())) {
++      return;
++    }
++    SharedFunctionInfo::EnsureSourcePositionsAvailable(isolate_, shared);
++    v8::NativeStackFrame frame{};
++    frame.kind = v8::NativeStackFrameKind::kAwait;
++    frame.flags = static_cast<uint8_t>(shared->is_toplevel() ? 2 : 0);
++    frame.position = Unsigned(shared->GetBytecodeArray(isolate_)->SourcePosition(
++        GetGeneratorBytecodeOffset(generator_object)));
++    frame.detail = Unsigned(shared->StartPosition());
++    Handle<Script> script(Cast<Script>(shared->script()), isolate_);
++    frame.script_id = Unsigned(script->id());
++    NoteScript(script, direct_handle(function->native_context(), isolate_));
++    AppendAsync(frame);
++  }
++
++  void AppendPromiseCombinatorFrame(DirectHandle<JSFunction> element_function,
++                                    DirectHandle<JSFunction> combinator) {
++    Tagged<NativeContext> context = combinator->native_context();
++    if (!context->HasSameSecurityTokenAs(isolate_->raw_native_context())) {
++      return;
++    }
++    v8::NativeStackFrame frame{};
++    frame.kind = v8::NativeStackFrameKind::kPromiseCombinator;
++    frame.combinator = *combinator == context->promise_all()           ? 1
++                       : *combinator == context->promise_all_settled() ? 2
++                       : *combinator == context->promise_any()         ? 3
++                                                                       : 0;
++    if (frame.combinator == 0) return;
++    // The promise index lives in the element function's hash field, as
++    // CallSiteBuilder::AppendPromiseCombinatorFrame reads it.
++    frame.position = Unsigned(
++        Smi::ToInt(Cast<JSReceiver>(element_function)->GetIdentityHash()) - 1);
++    AppendAsync(frame);
++  }
++
++  void Finish() {
++    const uint32_t capacity = 2 * half_;
++    if (capture_.total_depth <= capacity) {
++      capture_.recorded = capture_.total_depth;
++      return;
++    }
++    v8::NativeStackFrame* ring = capture_.frames + half_;
++    std::rotate(ring, ring + (capture_.total_depth - half_) % half_,
++                ring + half_);
++    capture_.recorded = capacity;
++    capture_.omitted = capture_.total_depth - capacity;
++  }
++
++  void DescribeScripts() {
++    for (size_t i = 0; i < script_count_; ++i) {
++      Handle<Script> script = scripts_[i];
++      v8::NativeStackScript out{};
++      out.script_id = script->id();
++      out.is_eval = script->compilation_type() == Script::CompilationType::kEval;
++      out.line_offset = script->line_offset();
++      out.column_offset = script->column_offset();
++      out.context = Utils::ToLocal(contexts_[i]);
++      out.name = Utils::ToLocal(direct_handle(script->name(), isolate_));
++#if V8_ENABLE_WEBASSEMBLY
++      // Keeps the wire bytes alive for the callback.
++      Managed<wasm::NativeModule>::Ptr module;
++      if (script->type() == Script::Type::kWasm) {
++        out.is_wasm = true;
++        module = script->wasm_native_module();
++        base::Vector<const uint8_t> bytes = module->wire_bytes();
++        out.wire_bytes = bytes.begin();
++        out.wire_bytes_size = bytes.size();
++        callbacks_.script(callbacks_.data, out);
++        continue;
++      }
++#endif  // V8_ENABLE_WEBASSEMBLY
++      if (IsString(script->source())) {
++        out.source = Utils::ToLocal(
++            direct_handle(Cast<String>(script->source()), isolate_));
++      }
++      callbacks_.script(callbacks_.data, out);
++    }
++  }
++
++ private:
++  static uint32_t Unsigned(int value) {
++    return value < 0 ? 0 : static_cast<uint32_t>(value);
++  }
++
++#if V8_ENABLE_WEBASSEMBLY
++  static uint32_t WasmFunctionIndex(const FrameSummary& summary) {
++    if (summary.IsWasm()) return summary.AsWasm().function_index();
++    if (summary.IsWasmInlined()) return summary.AsWasmInlined().function_index();
++#if V8_ENABLE_DRUMBRAKE
++    if (summary.IsWasmInterpreted()) {
++      return summary.AsWasmInterpreted().function_index();
++    }
++#endif  // V8_ENABLE_DRUMBRAKE
++    return 0;
++  }
++#endif  // V8_ENABLE_WEBASSEMBLY
++
++  void AppendAsync(const v8::NativeStackFrame& frame) {
++    capture_.frames[capture_.sync_capacity + capture_.async_frames++] = frame;
++  }
++
++  // Asks once per distinct script per capture; the embedder answers from its
++  // own table without calling into V8.
++  void NoteScript(Handle<Script> script, DirectHandle<NativeContext> context) {
++    const int id = script->id();
++    for (size_t i = 0; i < script_count_; ++i) {
++      if (scripts_[i]->id() == id) return;
++    }
++    if (script_count_ == scripts_.size() ||
++        !callbacks_.script_needed(callbacks_.data, id)) {
++      return;
++    }
++    scripts_[script_count_] = script;
++    contexts_[script_count_] = handle(*context, isolate_);
++    ++script_count_;
++  }
++
++  Isolate* isolate_;
++  v8::NativeStackCapture& capture_;
++  const v8::NativeStackCallbacks& callbacks_;
++  const uint32_t half_;
++  std::array<Handle<Script>, 64> scripts_;
++  std::array<Handle<NativeContext>, 64> contexts_;
++  size_t script_count_ = 0;
++};
++
++bool CaptureNativeStack(Isolate* isolate, v8::NativeStackCapture& capture,
++                        const v8::NativeStackCallbacks& callbacks) {
++  if (!v8_flags.reb_request_stacks || !capture.frames ||
++      capture.sync_capacity < 2 || capture.sync_capacity % 2 != 0 ||
++      !callbacks.script_needed || !callbacks.frames || !callbacks.script ||
++      isolate->context().is_null()) {
++    return false;
++  }
++  HandleScope scope(isolate);
++#if V8_ENABLE_WEBASSEMBLY
++  wasm::WasmCodeRefScope code_ref_scope;
++#endif  // V8_ENABLE_WEBASSEMBLY
++  capture.total_depth = capture.recorded = capture.omitted = 0;
++  capture.async_frames = 0;
++  capture.async_truncated = false;
++  NativeStackBuilder builder(isolate, capture, callbacks);
++  VisitStack(isolate, &builder);
++  builder.Finish();
++  if (v8_flags.async_stack_traces && capture.recorded > 0) {
++    DirectHandle<JSPromise> promise;
++    if (TryGetCurrentTaskPromise(isolate).ToHandle(&promise)) {
++      CaptureAsyncStackTrace(isolate, promise, &builder);
++    }
++    capture.async_truncated = builder.Full();
++  }
++  callbacks.frames(callbacks.data, capture);
++  builder.DescribeScripts();
++  return true;
++}
++
+ }  // namespace
+ 
+ MaybeDirectHandle<JSObject> Isolate::CaptureAndSetErrorStack(
+@@ -8582,4 +8792,16 @@ void Isolate::PrintNumberStringCacheStats(const char* comment,
+ }
+ 
+ }  // namespace internal
++
++bool IsNativeStackCaptureEnabled() {
++  return internal::v8_flags.reb_request_stacks;
++}
++
++bool CaptureNativeStack(Isolate* isolate, NativeStackCapture& capture,
++                        const NativeStackCallbacks& callbacks) {
++  return isolate && internal::CaptureNativeStack(
++                        reinterpret_cast<internal::Isolate*>(isolate), capture,
++                        callbacks);
++}
++
+ }  // namespace v8
+diff --git a/src/flags/flag-definitions.h b/src/flags/flag-definitions.h
+index 40c8ea5..3c5816f 100644
+--- a/src/flags/flag-definitions.h
++++ b/src/flags/flag-definitions.h
+@@ -3443,6 +3443,8 @@ DEFINE_BOOL(sim_abort_on_bad_auth, true,
+ // isolate.cc
+ DEFINE_BOOL(async_stack_traces, true,
+             "include async stack traces in Error.stack")
++DEFINE_BOOL(reb_request_stacks, false,
++            "let the embedder record request initiator stack identities")
+ DEFINE_BOOL(stack_trace_on_illegal, false,
+             "print stack trace when an illegal exception is thrown")
+ DEFINE_BOOL(abort_on_uncaught_exception, false,

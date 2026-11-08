@@ -2224,6 +2224,7 @@ void NativeWasmExecutionOutcomes() {
 #include "guest_sampler_tests.h"
 #include "js_dispatch_tests.h"
 #include "js_invocation_tests.h"
+#include "request_stack_tests.h"
 
 // Each test keeps a multi-megabyte ring on its own stack. Inlining every test
 // into main can exceed the default 8 MiB main-thread stack, so each runs in
@@ -2253,6 +2254,7 @@ int main() {
   Run<&NativeJsInvocationAdmission>();
   Run<&NativeJsInvocationOpenStarts>();
   Run<&NativeJsInvocationBudgetCaps>();
+  Run<&NativeRequestStacks>();
   Run<&DispatchSampleAdmission>();
   Run<&DispatchEmitFailureReleasesBudget>();
   Run<&OwnedRegisterSamplerAdmission>();

@@ -104,11 +104,13 @@ EVENT_TYPES = {
     "request_completed",
     "request_failed",
     "request_initiated",
+    "request_initiator_stack",
     "request_redirected",
     "request_started",
     "request_target",
     "response_completed",
     "response_started",
+    "script_identity",
     "vm_finding",
     "vm_dispatch_sample",
     "wasm_dispatch_observation",
@@ -193,6 +195,73 @@ def valid_request_target(event: dict, payload: bytes) -> bool:
     return (valid_request_child(event, payload) and event["artifact_id"] == "0"
             and payload[8] <= 4 and payload[9] == 0 and 0 not in payload[12:12 + prefix]
             and not any(payload[12 + prefix:]))
+
+
+def valid_stack_frame(frame: bytes, is_async: bool) -> bool:
+    """One 16-byte request stack frame, mirrored from include/reb/request_stack.hpp."""
+    kind, flags = frame[0], frame[1]
+    combinator = int.from_bytes(frame[2:4], "little")
+    script_id = int.from_bytes(frame[4:8], "little")
+    detail = int.from_bytes(frame[12:16], "little")
+    if kind == 1:
+        return not is_async and script_id != 0 and combinator == 0 and flags & ~3 == 0
+    if kind == 2:
+        return not is_async and script_id != 0 and combinator == 0 and flags == 0
+    if kind == 3:
+        return is_async and script_id != 0 and combinator == 0 and flags & ~2 == 0
+    if kind == 4:
+        return is_async and script_id == 0 and 1 <= combinator <= 3 and flags == 0 and detail == 0
+    return False
+
+
+def valid_stack_child(event: dict, payload: bytes) -> bool:
+    """Envelope of request_initiator_stack and script_identity (native-network-v3.md)."""
+    return (valid_request_child(event, payload) and event["artifact_id"] == "0"
+            and event["initiator_request_id"] == 0 and event["initiator_process_id"] == 0
+            and payload[6:8] == b"\0\0")
+
+
+def valid_request_stack(event: dict, payload: bytes) -> bool:
+    if not valid_stack_child(event, payload) or event["request_id"] == "0" or any(payload[80:]):
+        return False
+    state, flags = payload[4], payload[5]
+    total, recorded, omitted = (int.from_bytes(payload[i:i + 4], "little") for i in (8, 12, 16))
+    async_frames = int.from_bytes(payload[20:22], "little")
+    segments = int.from_bytes(payload[22:24], "little")
+    wasm, scripts = (int.from_bytes(payload[i:i + 4], "little") for i in (24, 28))
+    digest, innermost = payload[32:64], payload[64:80]
+    if flags & ~0x0F:
+        return False
+    if state in (2, 3):
+        return flags & ~0x08 == 0 and not any(payload[8:80])
+    if state not in (1, 4, 5):
+        return False
+    return (1 <= recorded <= 1024 and recorded + omitted == total
+            and (omitted != 0) == bool(flags & 0x02) and (omitted == 0 or recorded == 1024)
+            and async_frames <= 32 and segments <= async_frames
+            and (not flags & 0x04 or async_frames == 32) and (not flags & 0x01 or state == 1)
+            and wasm <= recorded + async_frames and scripts <= recorded + async_frames
+            and any(digest) and valid_stack_frame(innermost, False))
+
+
+def valid_script_identity(event: dict, payload: bytes) -> bool:
+    if not valid_stack_child(event, payload) or event["request_id"] != "0" or any(payload[72:]):
+        return False
+    kind, flags = payload[4], payload[5]
+    script_id = int.from_bytes(payload[8:12], "little")
+    context = int.from_bytes(payload[24:32], "little")
+    length = int.from_bytes(payload[32:40], "little")
+    digest = payload[40:72]
+    retention = flags & 0x1E
+    if (any(payload[20:24]) or script_id == 0 or context == 0 or flags & ~0x1F
+            or retention & (retention - 1) or kind not in (1, 2)
+            or (kind == 2 and flags & ~0x0C) or (kind == 1 and retention == 0)):
+        return False
+    if retention == 0x08:
+        return length == 0 and not any(digest)
+    if retention == 0x04:
+        return length > 16 * 1024 * 1024 and not any(digest)
+    return 0 < length <= 16 * 1024 * 1024 and any(digest)
 
 
 def valid_request_body(event: dict, payload: bytes) -> bool:
@@ -570,6 +639,10 @@ def validate_event(event: object, line_number: int) -> None:
         raise ValueError(f"line {line_number}: native request body record is invalid")
     if event["type"] == "request_target" and not valid_request_target(event, payload):
         raise ValueError(f"line {line_number}: native request target record is invalid")
+    if event["type"] == "request_initiator_stack" and not valid_request_stack(event, payload):
+        raise ValueError(f"line {line_number}: native request initiator stack record is invalid")
+    if event["type"] == "script_identity" and not valid_script_identity(event, payload):
+        raise ValueError(f"line {line_number}: native script identity record is invalid")
     if event["type"].startswith("js_invocation_") and not valid_js_invocation(event, payload):
         raise ValueError(f"line {line_number}: native JavaScript invocation record is invalid")
     if event["type"] in ("wasm_guest_dispatch", "wasm_guest_invocation"):

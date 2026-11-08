@@ -23,7 +23,7 @@ use std::{
 pub const SIDECAR_SUFFIX: &str = ".requests-v1";
 const FORMAT: &str = "reb-request-index-v1";
 /// Sidecar row layout; a sidecar of another layout is rebuilt from byte 0.
-const LAYOUT: u32 = 3;
+const LAYOUT: u32 = 4;
 /// Bounds one call; a larger store reports partial coverage and continues next call.
 const SCAN_BYTES: u64 = 64 * 1024 * 1024;
 const RECORD_BYTES: usize = 4096;
@@ -42,6 +42,11 @@ const MAX_NAMED: usize = 64;
 const MAX_LOCATE: usize = 4;
 const MAX_TEXT: usize = 512;
 const TIMELINE_BUCKETS: usize = 120;
+/// Worker tab sets a row links to (protocol/native-network-v3.md `tab_set`).
+const MAX_TAB_SETS: usize = 4096;
+const MAX_SET_TABS: usize = 256;
+/// `script_identity` records kept for the Initiator column's innermost frame.
+const MAX_IDENTITIES: usize = 16_384;
 const UNIDENTIFIED: &str = "Unidentified network event";
 /// Records that belong to a row without changing its lifecycle; a selected
 /// row reads them back by member (protocol/native-network-v2.md and v3).
@@ -187,6 +192,10 @@ struct Row {
     scheme_class: u8,
     /// The renderer's request_initiator_stack state, or 0.
     stack_state: u8,
+    stack_frame: Option<(String, u32, [u8; 16])>,
+    /// The newest `request_tab_link`: its set key, kind and tab count.
+    tab_set: Option<String>,
+    tab_link: (u8, u32),
 }
 
 #[derive(Serialize, Deserialize)]
@@ -202,6 +211,10 @@ struct State {
     unindexed: u64,
     rows: Vec<Row>,
     keys: HashMap<String, String>,
+    /// `session:set_id` to the set's total and the tabs of its parts seen so far.
+    tab_sets: HashMap<String, (u32, Vec<u64>)>,
+    /// `session:process:script_id` to its newest `script_identity` payload.
+    identities: HashMap<String, String>,
     #[serde(skip)]
     by_id: HashMap<String, u32>,
 }
@@ -224,6 +237,8 @@ impl State {
             unindexed: 0,
             rows: Vec::new(),
             keys: HashMap::new(),
+            tab_sets: HashMap::new(),
+            identities: HashMap::new(),
             by_id: HashMap::new(),
         }
     }
@@ -661,6 +676,87 @@ fn short_name(target: &str) -> String {
     };
     format!("{segment}{query}")
 }
+
+fn fold_tab_set(event: &Value, sets: &mut HashMap<String, (u32, Vec<u64>)>) {
+    let Ok(bytes) = hex::decode(event["payload"].as_str().unwrap_or("")) else {
+        return;
+    };
+    if bytes.len() != 128 {
+        return;
+    }
+    let set_id = u64::from_le_bytes(bytes[8..16].try_into().unwrap());
+    let total = u32::from_le_bytes(bytes[16..20].try_into().unwrap());
+    let count = usize::from(u16::from_le_bytes([bytes[20], bytes[21]])).min(26);
+    let key = format!("{}:{set_id}", text(&event["session_id"]));
+    if !sets.contains_key(&key) && sets.len() >= MAX_TAB_SETS {
+        return;
+    }
+    let (_, tabs) = sets.entry(key).or_insert((total, Vec::new()));
+    for slot in bytes[24..24 + 4 * count].as_chunks::<4>().0 {
+        let tab = u64::from(u32::from_le_bytes(*slot));
+        if tab != 0 && tabs.len() < MAX_SET_TABS && !tabs.contains(&tab) {
+            tabs.push(tab);
+        }
+    }
+    tabs.sort_unstable();
+}
+
+fn fold_identity(event: &Value, identities: &mut HashMap<String, String>) {
+    let payload = event["payload"].as_str().unwrap_or("");
+    let Some(script) = hex::decode(payload)
+        .ok()
+        .filter(|bytes| bytes.len() == 128)
+        .map(|bytes| u32::from_le_bytes(bytes[8..12].try_into().unwrap()))
+    else {
+        return;
+    };
+    let key = format!(
+        "{}:{}:{script}",
+        text(&event["session_id"]),
+        number(&event["process_id"])
+    );
+    if identities.contains_key(&key) || identities.len() < MAX_IDENTITIES {
+        identities.insert(key, payload.to_owned());
+    }
+}
+
+fn tab_link(event: &Value) -> Option<(String, (u8, u32))> {
+    let bytes = hex::decode(event["payload"].as_str()?).ok()?;
+    if bytes.len() != 24 || !(1..=4).contains(&bytes[4]) {
+        return None;
+    }
+    let set_id = u64::from_le_bytes(bytes[8..16].try_into().unwrap());
+    let count = u32::from_le_bytes(bytes[16..20].try_into().unwrap());
+    Some((
+        format!("{}:{set_id}", text(&event["session_id"])),
+        (bytes[4], count),
+    ))
+}
+
+/// The row's own tab and its linked set's tabs; empty is a capture error.
+fn row_tabs(row: &Row, sets: &HashMap<String, (u32, Vec<u64>)>) -> Vec<u64> {
+    let mut tabs = row
+        .tab_set
+        .as_ref()
+        .and_then(|key| sets.get(key))
+        .map_or_else(Vec::new, |(_, tabs)| tabs.clone());
+    if row.tab != 0 && !tabs.contains(&row.tab) {
+        tabs.push(row.tab);
+        tabs.sort_unstable();
+    }
+    tabs
+}
+
+/// Tab 0 selects the rows with no tab.
+fn in_tab(row: &Row, sets: &HashMap<String, (u32, Vec<u64>)>, tab: u64) -> bool {
+    let linked = row.tab_set.as_ref().and_then(|key| sets.get(key));
+    if tab == 0 {
+        row.tab == 0 && linked.is_none_or(|(_, tabs)| tabs.is_empty())
+    } else {
+        row.tab == tab || linked.is_some_and(|(_, tabs)| tabs.contains(&tab))
+    }
+}
+
 fn initiator(row: &Row) -> Option<&'static str> {
     if row.worker_started {
         Some("worker")
@@ -1224,16 +1320,37 @@ impl RequestIndex {
             return;
         }
         let Some(incoming) = rank(kind) else {
+            if kind == "tab_set" {
+                fold_tab_set(&event, &mut state.tab_sets);
+                return;
+            }
+            if kind == "script_identity" {
+                fold_identity(&event, &mut state.identities);
+                return;
+            }
             if CHILD_TYPES.contains(&kind) {
                 let id = request_identity(&event, &state.keys);
                 if let Some(&ordinal) = state.by_id.get(&id) {
                     let row = &mut state.rows[ordinal as usize];
                     Self::member(row, &event, start, end);
                     if kind == "request_initiator_stack" {
-                        row.stack_state = hex::decode(event["payload"].as_str().unwrap_or(""))
-                            .ok()
-                            .and_then(|bytes| bytes.get(4).copied())
-                            .unwrap_or(0);
+                        let bytes = hex::decode(event["payload"].as_str().unwrap_or(""))
+                            .unwrap_or_default();
+                        row.stack_state = bytes.get(4).copied().unwrap_or(0);
+                        row.stack_frame = (bytes.len() == 128
+                            && matches!(row.stack_state, 1 | 4 | 5))
+                        .then(|| {
+                            (
+                                text(&event["session_id"]),
+                                number(&event["process_id"]) as u32,
+                                bytes[64..80].try_into().unwrap(),
+                            )
+                        });
+                    }
+                    if kind == "request_tab_link"
+                        && let Some((set, link)) = tab_link(&event)
+                    {
+                        (row.tab_set, row.tab_link) = (Some(set), link);
                     }
                     let parent = (
                         text(&event["session_id"]),
@@ -1303,6 +1420,9 @@ impl RequestIndex {
                     main_frame: false,
                     scheme_class: 0,
                     stack_state: 0,
+                    stack_frame: None,
+                    tab_set: None,
+                    tab_link: (0, 0),
                 });
                 self.views.push(view(state.rows.last().unwrap()));
                 ordinal
@@ -1347,7 +1467,10 @@ impl RequestIndex {
         let versioned = version >= 2;
         let flags = number(&event["flags"]);
         row.versioned |= versioned;
-        if let Some(class) = event["scheme_class"].as_u64().filter(|class| (1..=255).contains(class)) {
+        if let Some(class) = event["scheme_class"]
+            .as_u64()
+            .filter(|class| (1..=255).contains(class))
+        {
             row.scheme_class = class as u8;
         }
         row.loader |= kind != "request_initiated";
@@ -1446,7 +1569,8 @@ impl RequestIndex {
             &self.state.as_ref().unwrap().rows[ordinal],
             &self.views[ordinal],
         );
-        let scoped = query.tab.is_none_or(|tab| row.tab == tab)
+        let sets = &self.state.as_ref().unwrap().tab_sets;
+        let scoped = query.tab.is_none_or(|tab| in_tab(row, sets, tab))
             && query
                 .domain
                 .as_ref()
@@ -1643,7 +1767,7 @@ impl RequestIndex {
             json!({"session_id": member.session, "process_id": member.process,
             "request_id": member.request, "records": member.records})
         };
-        json!({
+        let mut document = json!({
             "id": row.id, "ordinal": ordinal, "method": row.method, "path": view.path,
             "target_kind": view.target_kind, "host": view.host, "target": view.target,
             "url_truncated": view.url_truncated, "target_length": view.target_length,
@@ -1652,6 +1776,12 @@ impl RequestIndex {
             "time": duration(row).map_or_else(|| "pending".to_owned(), milliseconds),
             "duration_ns": duration(row).map(|d| d.to_string()),
             "type": row.resource, "tab_id": row.tab.to_string(), "operation": row.operation,
+            "tab_ids": row_tabs(row, &self.state.as_ref().unwrap().tab_sets).iter().map(u64::to_string).collect::<Vec<_>>(),
+            "tab_link": (row.tab_link.0 != 0).then(|| {
+                let set = row.tab_set.as_ref().and_then(|key| self.state.as_ref().unwrap().tab_sets.get(key));
+                json!({"kind": row.tab_link.0, "count": row.tab_link.1,
+                    "complete": set.is_some_and(|(total, tabs)| tabs.len() == *total as usize)})
+            }),
             "first_time_ns": row.first_ns.to_string(), "last_time_ns": row.last_ns.to_string(),
             "domain": view.domain,
             "root": Self::root(row).map(|root| json!({"session_id": root.session, "process_id": root.process,
@@ -1666,27 +1796,41 @@ impl RequestIndex {
             "response_time_ns": row.response_ns.map(|time| time.to_string()),
             "error_code": row.error, "loader_observed": row.loader, "initiator": initiator(row),
             "main_frame": row.main_frame, "browser_internal": view.internal,
-        })
+        });
+        // Raw; the get_requests handler replaces it with the frame's resolution.
+        document["initiator_frame"] = json!(row.stack_frame.as_ref().map(|(session, process, frame)| {
+            let script = u32::from_le_bytes(frame[4..8].try_into().unwrap());
+            json!({"session_id": session, "process_id": process, "frame": hex::encode(frame),
+                "identity": self.state.as_ref().unwrap().identities.get(&format!("{session}:{process}:{script}"))})
+        }));
+        document
     }
 
     fn facets(&self, query: &RequestQuery, through: usize) -> Value {
-        let rows = &self.state.as_ref().unwrap().rows;
+        let state = self.state.as_ref().unwrap();
+        let (rows, sets) = (&state.rows, &state.tab_sets);
         let mut tabs: BTreeMap<u64, (u64, u64, Vec<String>, bool)> = BTreeMap::new();
         let mut domains: BTreeMap<&str, u64> = BTreeMap::new();
         for (row, view) in rows.iter().zip(&self.views).take(through) {
-            let tab = tabs
-                .entry(row.tab)
-                .or_insert((0, row.first_ns, Vec::new(), false));
-            tab.0 += 1;
-            tab.1 = tab.1.min(row.first_ns);
-            if !tab.2.contains(&view.domain) {
-                if tab.2.len() < TAB_DOMAINS {
-                    tab.2.push(view.domain.clone())
-                } else {
-                    tab.3 = true
+            let mut own = row_tabs(row, sets);
+            if own.is_empty() {
+                own.push(0);
+            }
+            for id in own {
+                let tab = tabs
+                    .entry(id)
+                    .or_insert((0, row.first_ns, Vec::new(), false));
+                tab.0 += 1;
+                tab.1 = tab.1.min(row.first_ns);
+                if !tab.2.contains(&view.domain) {
+                    if tab.2.len() < TAB_DOMAINS {
+                        tab.2.push(view.domain.clone())
+                    } else {
+                        tab.3 = true
+                    }
                 }
             }
-            if query.tab.is_none_or(|tab| row.tab == tab) {
+            if query.tab.is_none_or(|tab| in_tab(row, sets, tab)) {
                 *domains.entry(&view.domain).or_default() += 1;
             }
         }
@@ -2135,8 +2279,20 @@ mod tests {
             events: Vec::new(),
             sequence: 0,
         };
-        store.push(43, 1, "request_initiated", b"GET newtab", json!({"scheme_class": 16}));
-        store.push(43, 2, "request_initiated", b"GET intranet", json!({"scheme_class": 2}));
+        store.push(
+            43,
+            1,
+            "request_initiated",
+            b"GET newtab",
+            json!({"scheme_class": 16}),
+        );
+        store.push(
+            43,
+            2,
+            "request_initiated",
+            b"GET intranet",
+            json!({"scheme_class": 2}),
+        );
         store.push(43, 3, "request_initiated", b"GET resources", json!({}));
         write(&path, &store);
         let mut index = RequestIndex::new(&path);
@@ -2149,6 +2305,119 @@ mod tests {
             .collect();
         assert_eq!(internal, [true, false, true]);
         assert_eq!(page(&mut index, "hide_internal=1")["hidden_internal"], 2);
+    }
+
+    #[test]
+    fn worker_rows_join_every_linked_tab() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("events.jsonl");
+        let mut store = Store {
+            events: Vec::new(),
+            sequence: 0,
+        };
+        let worker = store.push(51, 5, "request_initiated", b"GET sw.test", json!({}));
+        let mut set = vec![0u8; 128];
+        set[0..2].copy_from_slice(&1u16.to_le_bytes());
+        set[2..4].copy_from_slice(&128u16.to_le_bytes());
+        set[4] = 19;
+        set[8..16].copy_from_slice(&77u64.to_le_bytes());
+        set[16..20].copy_from_slice(&2u32.to_le_bytes());
+        set[20..22].copy_from_slice(&2u16.to_le_bytes());
+        set[24..28].copy_from_slice(&3u32.to_le_bytes());
+        set[28..32].copy_from_slice(&5u32.to_le_bytes());
+        let set_sequence = store.push(2, 0, "tab_set", &set, json!({"tab_id": 3}));
+        let mut link = vec![0u8; 24];
+        link[0..2].copy_from_slice(&1u16.to_le_bytes());
+        link[2..4].copy_from_slice(&24u16.to_le_bytes());
+        link[4] = 3;
+        link[8..16].copy_from_slice(&77u64.to_le_bytes());
+        link[16..20].copy_from_slice(&2u32.to_le_bytes());
+        store.push(
+            2,
+            0,
+            "request_tab_link",
+            &link,
+            json!({"initiator_process_id": 51,
+            "initiator_request_id": 5, "parent_event_id": set_sequence}),
+        );
+        store.push(
+            41,
+            1,
+            "request_initiated",
+            b"GET page.test",
+            json!({"tab_id": 3}),
+        );
+        store.push(41, 2, "request_initiated", b"GET lost.test", json!({}));
+        assert_ne!(worker, "0");
+        write(&path, &store);
+        let mut index = RequestIndex::new(&path);
+        let document = page(&mut index, "sort=capture&order=asc");
+        let tabs: Vec<_> = document["facets"]["tabs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|tab| {
+                (
+                    tab["tab_id"].as_str().unwrap().to_owned(),
+                    tab["count"].as_u64().unwrap(),
+                )
+            })
+            .collect();
+        assert_eq!(tabs, [("3".into(), 2), ("5".into(), 1), ("0".into(), 1)]);
+        let row = &document["requests"][0];
+        assert_eq!(row["tab_ids"], json!(["3", "5"]));
+        assert_eq!(
+            row["tab_link"],
+            json!({"kind": 3, "count": 2, "complete": true})
+        );
+        assert_eq!(page(&mut index, "tab_id=5")["matching"], 1);
+        assert_eq!(page(&mut index, "tab_id=3")["matching"], 2);
+        let lost = page(&mut index, "tab_id=unattributed");
+        assert_eq!(
+            (
+                lost["matching"].as_u64(),
+                lost["requests"][0]["tab_ids"].clone()
+            ),
+            (Some(1), json!([]))
+        );
+    }
+
+    #[test]
+    fn script_rows_carry_their_innermost_frame_and_identity() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("events.jsonl");
+        let mut store = Store {
+            events: Vec::new(),
+            sequence: 0,
+        };
+        let initiated = store.push(41, 1, "request_initiated", b"GET api.test", json!({}));
+        let mut stack = vec![0u8; 128];
+        stack[4] = 1;
+        stack[64] = 1;
+        stack[68..72].copy_from_slice(&7u32.to_le_bytes());
+        stack[72..76].copy_from_slice(&30u32.to_le_bytes());
+        store.push(
+            41,
+            1,
+            "request_initiator_stack",
+            &stack,
+            json!({"parent_event_id": initiated}),
+        );
+        let mut identity = vec![0u8; 128];
+        identity[8..12].copy_from_slice(&7u32.to_le_bytes());
+        store.push(41, 0, "script_identity", &identity, json!({}));
+        store.push(41, 2, "request_initiated", b"GET parser.test", json!({}));
+        write(&path, &store);
+        let mut index = RequestIndex::new(&path);
+        let document = page(&mut index, "sort=capture&order=asc");
+        let (script, parser) = (&document["requests"][0], &document["requests"][1]);
+        assert_eq!(script["initiator"], "script");
+        assert_eq!(
+            script["initiator_frame"],
+            json!({"session_id": "1", "process_id": 41, "frame": hex::encode(&stack[64..80]),
+                "identity": hex::encode(&identity)})
+        );
+        assert_eq!(parser["initiator_frame"], Value::Null);
     }
 
     #[test]

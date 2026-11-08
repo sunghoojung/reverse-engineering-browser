@@ -1,7 +1,10 @@
 // Debugger observations through the request stack walker,
 // protocol/native-debugger-observation-v1.md. Runs after NativeRequestStacks,
 // which installs the fixture provider.
+#pragma once
+
 #include "brave/components/reverse_engineering_browser/renderer/native_debugger_observation.h"
+#include "request_stack_tests.h"
 
 namespace {
 
@@ -44,7 +47,8 @@ NativeRequestStackPayload ObservationPayload(const NativeProbeEvent& event) {
   assert(captured.state == 1 && captured.recorded == 2 && captured.reserved1 == ListenerTail());
   Drain(queue);
 
-  const auto initiated = sink.RecordRequestInitiated(7, "POST", "https", "api.example.test").initiated_sequence;
+  const auto initiated =
+      sink.RecordRequestInitiated(7, "POST", "https", "api.example.test").initiated_sequence;
   std::array<std::uint8_t, 48> match{};
   match[1] = 1;
   NativeRequestStackWalk::RecordObservation(NativeProbeType::kRequestWatchMatch, 7, initiated, 3,
@@ -79,12 +83,14 @@ NativeRequestStackPayload ObservationPayload(const NativeProbeEvent& event) {
   assert(reb::NativeDebuggerWatch::Arm(9, rules));
   assert(reb::NativeDebuggerWatch::Armed(reb::kNativeWatchRequests | reb::kNativeWatchListeners));
 
-  const auto hit = sink.RecordRequestInitiated(21, "GET", "https", "api.example.test").initiated_sequence;
+  const auto hit =
+      sink.RecordRequestInitiated(21, "GET", "https", "api.example.test").initiated_sequence;
   reb::NativeDebuggerWatch::Request(21, hit, "GET", "https://api.example.test/api/x?q=1");
   assert(Pop(queue).header.sequence_number == hit);
   assert(Pop(queue).header.type == NativeProbeType::kRequestWatchMatch);
   // A URL the rule does not name emits nothing.
-  const auto miss = sink.RecordRequestInitiated(22, "GET", "https", "api.example.test").initiated_sequence;
+  const auto miss =
+      sink.RecordRequestInitiated(22, "GET", "https", "api.example.test").initiated_sequence;
   reb::NativeDebuggerWatch::Request(22, miss, "GET", "https://api.example.test/other");
   assert(Pop(queue).header.sequence_number == miss && Drain(queue) == 0);
 
@@ -97,8 +103,9 @@ NativeRequestStackPayload ObservationPayload(const NativeProbeEvent& event) {
 
   reb::NativeDebuggerWatch::Disarm(9);
   assert(!reb::NativeDebuggerWatch::Armed(reb::kNativeWatchRequests));
-  reb::NativeDebuggerWatch::Request(23, sink.RecordRequestInitiated(23, "GET", "https", "api.example.test").initiated_sequence,
-                                    "GET", "https://api.example.test/api/x");
+  reb::NativeDebuggerWatch::Request(
+      23, sink.RecordRequestInitiated(23, "GET", "https", "api.example.test").initiated_sequence,
+      "GET", "https://api.example.test/api/x");
   Drain(queue);
 
   transport.Disable();

@@ -7,7 +7,7 @@ const TRAFFIC_DETAIL_PAGES = 16;
 function trafficIndexParameters({sort, direction, needle, tabId, domain, type, named, flags = {}, range = null}) {
   const parameters = new URLSearchParams({sort, order: direction < 0 ? 'desc' : 'asc'});
   if (needle) parameters.set('q', needle);
-  if (tabId !== 'all') parameters.set('tab_id', tabId);
+  if (tabId !== 'all') parameters.set('tab_id', tabId === 'unresolved' ? 'unattributed' : tabId);
   if (domain !== 'all') parameters.set('domain', domain);
   if (type !== 'all') parameters.set('type', type);
   if (named.length) parameters.set('named', named.join(','));

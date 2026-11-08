@@ -86,7 +86,8 @@ class COMPONENT_EXPORT(REB_NATIVE_PROBE_SINK) NativeScriptCookieSink final {
   [[nodiscard]] static std::uint64_t CallingFrameId() noexcept;
   bool Emit(const NativeScriptCookieSummary& summary,
             std::uint64_t frame_id,
-            std::uint64_t generation) noexcept;
+            std::uint64_t generation,
+            std::uint64_t sequence = 0) noexcept;
 
   // The NativeProbeSink generation the gate belongs to, or 0 when disabled.
   std::atomic<std::uint64_t> generation_{0};

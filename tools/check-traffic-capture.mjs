@@ -135,7 +135,9 @@ console.log('PASS saved reb-traffic-capture-v1 export copy: synthetic credential
   scopes.renderRequestScopes(scopes.trafficIndexScopes({through:20000,facets:{tabs:[{tab_id:'7',count:19999,domains:['unknown','late.test']},
     {tab_id:'0',count:1,domains:['unknown']}],domains:[{domain:'late.test',count:19999},{domain:'unknown',count:1}]}}));
   assert.deepEqual(elements.requestTabScopes.children.map(button=>[button.children[0].textContent,button.children[1].textContent]),
-    [['All tabs','20000'],['late.test','19999'],['Unattributed','1']]);
+    [['All tabs','20000'],['late.test','19999']]);
+  assert.equal(scopes.trafficIndexScopes({through:20000,facets:{tabs:[{tab_id:'0',count:1,domains:[]}],domains:[]}}).unresolved,1,
+    'a row without a tab is a footer capture error, not a tab');
   assert.deepEqual(elements.requestDomain.children.map(option=>option.textContent),['All domains (20000)','late.test (19999)','unknown (1)']);
-  console.log('PASS Traffic tab-scope labels use a known domain, else a Tab fallback; index facets give session-wide counts (production function; not rendered QA)');
+  console.log('PASS Traffic tab-scope labels use a known domain, else a Tab fallback; index facets give session-wide counts and no-tab rows stay a footer error (production function; not rendered QA)');
 }

@@ -721,8 +721,10 @@ reason a `Set-Cookie` was blocked) and Request cookies, with **Show filtered out
 request cookies** for excluded ones and their reasons. Columns sort, values
 truncate with the full value as a tooltip, and each row has **Copy**. A name
 opens its provenance: the responses that set it, the `document.cookie` and
-Cookie Store calls that used it with their script position, and the requests
-that sent it, linked by value digest to the script write. Traffic has no
+Cookie Store calls that used it with their script position (file, line and
+function from `get_cookie_provenance`, with **Show in Sources**, when the
+script's source was retained), and the requests that sent it, linked by value
+digest to the script write. Traffic has no
 comparison or content-search views; General states the capture coverage.
 Missing initiators and timing phases stay explicitly unavailable.
 Request signal profiles are owned by the exact selected session, request and root
@@ -897,8 +899,10 @@ Protocol is available from the header menu.
   recorded the request.
 - **Type** comes from the resource type, then the response MIME type when the
   resource type says only "other". Its tooltip has the MIME type.
-- **Initiator** is coarse: Renderer, Service worker or Browser. Parser and
-  script starts are not told apart without an initiator stack.
+- **Initiator** names a script start's innermost frame as `file:line` when the
+  request index resolves it through retained source (tooltip: URL, column and
+  function), else Script or Parser from the initiator stack, Renderer without
+  one, Service worker or Browser.
 - **Size** is the terminal record's `encoded_data_length` (transferred) and
   `decoded_body_length` (resource), or (disk cache) and (service worker) from
   the response flags. Units are decimal; the tooltip has exact bytes.
@@ -1072,7 +1076,8 @@ tint: JavaScript, WebAssembly, JSON, source map and HTML icons take their code
 color at low strength, while folders, origins and frames stay neutral. Code is the exception: Sources and the
 Native Console color code like the Rosé Pine Moon VS Code theme (Rosé Pine
 Dawn in light mode), with its token colors, bracket pair colors, editor colors
-and Menlo 12/18 px; the Analyst editor takes the same editor colors and font. With macOS Increase Contrast, comments and
+and Menlo 12/18 px; the Analyst editor and the Traffic Payload and Response
+code views take the same editor colors and font. With macOS Increase Contrast, comments and
 keywords are brightened. `node tools/check-source-format-ui.mjs` (part of
 `make lint`) pins the token kinds and colors.
 
@@ -1359,8 +1364,10 @@ Traffic is grouped by browser tab with an All tabs scope and a domain
 selector. Each chip is named by its tab's newest main-frame page. A worker
 request linked to several tabs (`request_tabs.js`, from `tab_set` and
 `request_tab_link`) appears in each with a marker such as "Service worker · 2
-tabs"; All tabs counts it once. There is no Unattributed group: a row without a
-tab is a capture error, counted in the footer, whose button lists those rows.
+tabs"; All tabs counts it once. The request index joins the same links, so
+chips, the tab filter and the footer count cover the whole session. There is no
+Unattributed group: a row without a tab is a capture error, counted in the
+footer, whose button lists those rows.
 See [request owners and tabs](../../protocol/native-network-v3.md#request-owners-and-tabs).
 Evidence retains the original payload and trace actions; General, Initiator and
 Timing display only recorded observations.

@@ -34,13 +34,16 @@ std::array<std::uint8_t, 48> Tail() noexcept {
   return {};
 }
 
-void PutFrame(std::array<std::uint8_t, 48>& tail, const std::size_t at,
+void PutFrame(std::array<std::uint8_t, 48>& tail,
+              const std::size_t at,
               const NativeStackFrame& frame) noexcept {
   std::memcpy(tail.data() + at, &frame, sizeof(frame));
 }
 
-void PutName(std::array<std::uint8_t, 48>& tail, const std::size_t length_at,
-             const std::size_t text_at, const std::string_view text,
+void PutName(std::array<std::uint8_t, 48>& tail,
+             const std::size_t length_at,
+             const std::size_t text_at,
+             const std::string_view text,
              const std::size_t limit) noexcept {
   const std::size_t n = std::min(text.size(), limit);
   tail[length_at] = static_cast<std::uint8_t>(n);
@@ -193,7 +196,8 @@ void NativeDebuggerWatch::Timer(const bool fired,
   NativeRequestStackWalk::RecordObservation(NativeProbeType::kTimerObservation, 0, 0, 0, tail);
 }
 
-void NativeDebuggerWatch::Csp(const std::uint8_t directive, const bool report_only,
+void NativeDebuggerWatch::Csp(const std::uint8_t directive,
+                              const bool report_only,
                               const std::string_view host) noexcept {
   if (!Armed(kNativeWatchCsp) || !Charge()) {
     return;
@@ -237,8 +241,8 @@ void NativeDebuggerWatch::Mutation(const std::uint64_t frame_id,
     return;
   }
   const NativeWatchDomNode& node = g_watch.rules.dom[static_cast<std::size_t>(slot)];
-  const bool want = (kind == 1 && node.attributes) || (kind == 2 && node.subtree) ||
-                    (kind == 3 && node.removal);
+  const bool want =
+      (kind == 1 && node.attributes) || (kind == 2 && node.subtree) || (kind == 3 && node.removal);
   if (!want || !Charge()) {
     return;
   }

@@ -6,6 +6,7 @@
 const TRAFFIC_COOKIE_RETRY_MS = 2000;
 const TRAFFIC_COOKIE_PROVENANCE_LISTS = 64;
 const trafficCookieViews = new Map();
+const trafficCookieStacks = new Map();
 const trafficCookieOptions = {showFiltered: false, sort: new Map(), provenance: null};
 
 const trafficCookieExclusions = ['unknown_error', 'http_only', 'secure_only', 'domain_mismatch', 'not_on_path',
@@ -151,6 +152,40 @@ async function trafficLoadCookieList(list, key, rerender) {
   trafficCookieViews.set(key, view);
   while (trafficCookieViews.size > 128) trafficCookieViews.delete(trafficCookieViews.keys().next().value);
   rerender?.();
+}
+
+// Script positions from get_cookie_provenance by process:sequence; a failed read keeps raw positions.
+function trafficCookieCallFrames(sessionId, name, rerender) {
+  if (typeof location === 'object' && location.protocol === 'file:') return null;
+  const key = `${sessionId}:${name}`;
+  const known = trafficCookieStacks.get(key);
+  if (known && !(known.status === 'error' && Date.now() - known.failedAt >= TRAFFIC_COOKIE_RETRY_MS)) return known.frames ?? null;
+  trafficCookieStacks.set(key, {status: 'loading'});
+  void (async () => {
+    let entry;
+    try {
+      const response = await fetch(`/api/cookie-provenance?${new URLSearchParams({session_id: sessionId, name})}`,
+        {cache: 'no-store', signal: AbortSignal.timeout(10000)});
+      if (!response.ok) throw new Error(String(response.status));
+      const frames = new Map();
+      for (const call of (await response.json()).script ?? []) {
+        const top = call.stack?.frames?.[0]?.resolution;
+        if (top?.status === 'resolved') frames.set(`${call.process_id}:${call.sequence_number}`, top);
+      }
+      entry = {status: 'ready', frames};
+    } catch {
+      entry = {status: 'error', failedAt: Date.now()};
+    }
+    trafficCookieStacks.set(key, entry);
+    while (trafficCookieStacks.size > 64) trafficCookieStacks.delete(trafficCookieStacks.keys().next().value);
+    rerender?.();
+  })();
+  return null;
+}
+
+function trafficCookieFrameLabel(frame) {
+  const file = String(frame.url ?? '').split(/[?#]/)[0].split('/').filter(Boolean).pop() || `artifact ${frame.artifact_id}`;
+  return `${file}:${frame.line ?? '?'}:${frame.column ?? '?'}${frame.function_name ? ` (${frame.function_name})` : ''}`;
 }
 
 async function trafficCopyCookie(text, status) {
@@ -311,7 +346,7 @@ function trafficCookieHops(request) {
 // Everything the loaded evidence says about one name: Set-Cookie responses,
 // script calls and the requests that sent it. Lists load on demand, at most
 // TRAFFIC_COOKIE_PROVENANCE_LISTS distinct ones.
-function trafficCookieProvenance(name, {requests = [], events = [], selectRequest} = {}, rerender) {
+function trafficCookieProvenance(name, {requests = [], events = [], selectRequest, openFrame} = {}, rerender) {
   const section = trafficCookieNode('section', 'traffic-cookie-provenance');
   section.setAttribute('aria-label', `Provenance of ${name}`);
   const heading = trafficCookieNode('div', 'traffic-cookie-provenance-head');
@@ -369,10 +404,21 @@ function trafficCookieProvenance(name, {requests = [], events = [], selectReques
   group('Set by responses', setBy.map(({request, list, cookie}) => entry(
     `${where(request, list)}${cookie.blocked ? ` — ${trafficCookieBlockedText(cookie, true)}` : ''}`, request)),
   'No retained response set it.');
-  group('Script access', scripts.map(record => entry(`${record.api}${record.count > 1 ? ` × ${record.count}` : ''} in frame ${record.frameId}` +
-    `${record.frame ? `, script ${record.frame.scriptId} at character ${record.frame.position}` : ', no script position'}` +
-    `${record.stackDigest ? `, stack ${record.stackDigest.slice(0, 12)}` : ''}${record.nameTruncated ? ' (name matched by its first 24 bytes)' : ''}`)),
-  'No recorded document.cookie or Cookie Store call used this name.');
+  const sessionId = scripts.find(record => record.frame)?.sessionId;
+  const frames = sessionId ? trafficCookieCallFrames(sessionId, name, rerender) : null;
+  group('Script access', scripts.map(record => {
+    const resolved = record.frame ? frames?.get(`${record.processId}:${record.sequenceNumber}`) : null;
+    const item = entry(`${record.api}${record.count > 1 ? ` × ${record.count}` : ''} in frame ${record.frameId}` +
+      `${resolved ? ` at ${trafficCookieFrameLabel(resolved)}` : record.frame ? `, script ${record.frame.scriptId} at character ${record.frame.position}` : ', no script position'}` +
+      `${record.stackDigest ? `, stack ${record.stackDigest.slice(0, 12)}` : ''}${record.nameTruncated ? ' (name matched by its first 24 bytes)' : ''}`);
+    if (resolved?.artifact_id && openFrame) {
+      const open = trafficCookieNode('button', 'traffic-cookie-request', 'Show in Sources');
+      open.type = 'button';
+      open.addEventListener('click', () => openFrame(resolved));
+      item.append(' ', open);
+    }
+    return item;
+  }), 'No recorded document.cookie or Cookie Store call used this name.');
   const writes = new Map(scripts.filter(record => record.write).map(record => [record.valueSha256, record]));
   group('Sent with requests', sentWith.map(({request, list, cookie}) => {
     const write = cookie.valueSha256 ? writes.get(cookie.valueSha256) : null;
@@ -383,7 +429,7 @@ function trafficCookieProvenance(name, {requests = [], events = [], selectReques
     unread ? `${unread} cookie list${unread === 1 ? ' was' : 's were'} not read past the ${TRAFFIC_COOKIE_PROVENANCE_LISTS}-list limit.` : '']
     .filter(Boolean);
   if (notes.length) section.append(trafficCookieNode('p', 'traffic-headers-note', notes.join(' ')));
-  return {section, key: JSON.stringify([name, setBy.length, sentWith.length, scripts.length, loading, unread])};
+  return {section, key: JSON.stringify([name, setBy.length, sentWith.length, scripts.length, loading, unread, frames?.size ?? null])};
 }
 
 const trafficCookieRerenders = new WeakMap();

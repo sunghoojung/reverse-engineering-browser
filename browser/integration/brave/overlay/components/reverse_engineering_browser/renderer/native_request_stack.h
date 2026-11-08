@@ -74,6 +74,11 @@ class COMPONENT_EXPORT(REB_NATIVE_PROBE_SINK) NativeRequestStackWalk final {
                                 std::uint64_t parent_sequence,
                                 std::uint64_t frame_id,
                                 const std::array<std::uint8_t, 48>& tail) noexcept;
+  // Walks a cookie write's stack without a stack record; its artifact names `cookie_sequence`.
+  static bool RecordCookieStack(std::uint64_t cookie_sequence,
+                                std::uint64_t frame_id,
+                                std::array<std::uint8_t, 32>& digest,
+                                NativeStackFrame& innermost) noexcept;
 
   NativeRequestStackWalk(const NativeRequestStackWalk&) = delete;
   NativeRequestStackWalk& operator=(const NativeRequestStackWalk&) = delete;
@@ -113,6 +118,8 @@ class COMPONENT_EXPORT(REB_NATIVE_PROBE_SINK) NativeRequestStackWalk final {
   std::uint64_t execution_context_id_ = 0;
   // The admitted stack record, parent of every script_identity of this walk.
   std::uint64_t stack_sequence_ = 0;
+  std::array<std::uint8_t, 32> digest_{};
+  NativeStackFrame innermost_;
   bool frames_ready_ = false;
 };
 

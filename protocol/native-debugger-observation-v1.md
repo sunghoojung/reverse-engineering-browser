@@ -32,7 +32,9 @@ the next refused record leaves one `debugger_observation_budget` gap.
 Hooks check one relaxed atomic bitmask before any other work. Disarmed probes
 cost that load only. Stacks use the [#429 walker](native-network-v3.md) and
 need `--reb-request-stacks`; without it records carry stack state
-`no_script` and a zero digest.
+`no_script` and a zero digest. The request hook runs in
+`ResourceRequestSender::SendAsync` after the request's own stack record
+(Chromium patch 0029); the other hooks' Blink call sites are not patched yet.
 
 ## Common payload
 

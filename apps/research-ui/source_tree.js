@@ -448,7 +448,7 @@ function createSourceTree(options) {
     return {row, twisty, icon, raw, suffix, researcher, detail};
   }
 
-  function focusRow(key, reveal = false) {
+  function focusRow(key, reveal = false, keyboard = false) {
     const index = nav.index.get(key);
     if (index === undefined) return;
     scope().focus = key;
@@ -461,7 +461,7 @@ function createSourceTree(options) {
     paint();
     const entry = nav.rows.get(key);
     for (const [rowKey, value] of nav.rows) value.row.tabIndex = rowKey === key ? 0 : -1;
-    entry.row.focus({preventScroll: true});
+    entry.row.focus(keyboard ? {preventScroll: true, focusVisible: true} : {preventScroll: true});
   }
 
   function toggle(key, expanded = null) {
@@ -522,7 +522,7 @@ function createSourceTree(options) {
     } else if (printable) next = typeahead(event.key, index);
     else return;
     event.preventDefault(); event.stopPropagation();
-    if (next) focusRow(next, true);
+    if (next) focusRow(next, true, true);
   }
 
   tree.addEventListener('scroll', () => {if (nav.model) paint();});
@@ -534,7 +534,7 @@ function createSourceTree(options) {
   });
   filter?.addEventListener('keydown', event => {
     if (event.key === 'Escape' && filter.value) {event.preventDefault(); filter.value = ''; filter.dispatchEvent(new Event('input'));}
-    else if (event.key === 'ArrowDown' && nav.model && scope().focus) {event.preventDefault(); focusRow(scope().focus, true);}
+    else if (event.key === 'ArrowDown' && nav.model && scope().focus) {event.preventDefault(); focusRow(scope().focus, true, true);}
   });
   expand?.addEventListener('click', () => setAll(true));
   collapse?.addEventListener('click', () => setAll(false));

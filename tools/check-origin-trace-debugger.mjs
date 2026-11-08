@@ -1225,7 +1225,7 @@ const summaryInspector = runInNewContext(
     renderTrafficDetails: (_container, request) => {renderedSummaryRequest = request;}, renderTrafficPayload() {},
     renderTrafficHeaders: (container, request) => {assert.equal(container, summaryNodes.get("#headers-inspector")); renderedHeadersRequest = request;},
     renderTrafficCookies: (container, request, _rerender, context) => {assert.equal(container, summaryNodes.get("#cookies-inspector")); renderedCookiesRequest = [request, context];},
-    selectRequest: () => {},
+    selectRequest: () => {}, openResolvedFrame: () => {},
     // Body loading is outside this slice; its states are checked with traffic_view.js and check-traffic-payload-ui.mjs.
     requestBodyView: () => null, requestTargetView: () => null, requestContentViewKey: () => '', requestFullUrl: () => null,
   });

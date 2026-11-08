@@ -561,6 +561,138 @@ pub fn resolve(
     document
 }
 
+/// A `script_cookie` call's walked stack by digest, else its innermost frame alone.
+pub fn resolve_call(
+    event: &Value,
+    innermost: &[u8; FRAME],
+    digest: Option<[u8; 32]>,
+    identities: &HashMap<u32, Identity>,
+    artifacts: &[Value],
+    read: &dyn Fn(&Value, usize) -> Result<Vec<u8>>,
+) -> Value {
+    let mut record = Record {
+        state: 1,
+        flags: 0x08,
+        total: 1,
+        recorded: 1,
+        omitted: 0,
+        async_frames: 0,
+        async_segments: 0,
+        wasm_frames: 0,
+        scripts: 0,
+        digest: digest.unwrap_or_default(),
+        innermost: Frame::read(innermost),
+    };
+    let session = event["session_id"].as_str().unwrap_or("");
+    let header = digest
+        .and_then(|digest| {
+            let sha = hex::encode(digest);
+            newest(artifacts, session, |a| {
+                a["kind"] == "stack" && a["sha256"] == sha.as_str()
+            })
+        })
+        .and_then(|artifact| read(artifact, MAX_ARTIFACT).ok())
+        .filter(|content| content.len() >= HEADER);
+    if let Some(content) = header {
+        record.flags |= content[10] & 0x06;
+        record.total = u32_at(&content, 12);
+        record.recorded = u32_at(&content, 16);
+        record.omitted = u32_at(&content, 20);
+        record.async_frames = u32::from(u16_at(&content, 24));
+        record.async_segments = u32::from(u16_at(&content, 26));
+    }
+    let mut document = resolve(event, &record, identities, artifacts, read);
+    if digest.is_none() {
+        document["digest"] = Value::Null;
+    }
+    document
+}
+
+/// Resolves `get_requests` rows' innermost frames, keeping settled outcomes (protocol/request-index-v1.md).
+#[derive(Default)]
+pub struct InitiatorFrames(HashMap<String, Value>);
+
+impl InitiatorFrames {
+    const KEPT: usize = 4096;
+    const NEW_PER_ANSWER: usize = 64;
+
+    pub fn resolve(&mut self, document: &mut Value, artifacts_root: &Path) {
+        self.resolve_with(document, artifacts_root, || {
+            evidence::artifacts(artifacts_root, ARTIFACT_SCAN).unwrap_or_default()
+        });
+    }
+
+    fn resolve_with(
+        &mut self,
+        document: &mut Value,
+        artifacts_root: &Path,
+        manifest: impl FnOnce() -> Vec<Value>,
+    ) {
+        let mut manifest = Some(manifest);
+        let Some(rows) = document["requests"].as_array_mut() else {
+            return;
+        };
+        let mut artifacts: Option<Vec<Value>> = None;
+        let sources = std::cell::RefCell::new(HashMap::<String, Vec<u8>>::new());
+        let read = |artifact: &Value, limit: usize| -> Result<Vec<u8>> {
+            let key = artifact["sha256"].as_str().unwrap_or("").to_owned();
+            if let Some(bytes) = sources.borrow().get(&key) {
+                return Ok(bytes.clone());
+            }
+            let bytes = evidence::content(artifacts_root, artifact, limit)?;
+            let mut kept = sources.borrow_mut();
+            if kept.values().map(Vec::len).sum::<usize>() + bytes.len() <= 4 * MAX_SOURCE {
+                kept.insert(key, bytes.clone());
+            }
+            Ok(bytes)
+        };
+        let mut fresh = 0;
+        for row in rows {
+            let raw = row["initiator_frame"].take();
+            let (Some(frame), Some(session)) = (
+                raw["frame"]
+                    .as_str()
+                    .and_then(|hex| hex::decode(hex).ok())
+                    .and_then(|bytes| <[u8; FRAME]>::try_from(bytes).ok()),
+                raw["session_id"].as_str(),
+            ) else {
+                continue;
+            };
+            let key = format!("{session}:{}:{}", raw["process_id"], raw["frame"]);
+            if let Some(kept) = self.0.get(&key) {
+                row["initiator_frame"] = kept.clone();
+                continue;
+            }
+            if fresh == Self::NEW_PER_ANSWER {
+                continue;
+            }
+            fresh += 1;
+            let identities: HashMap<u32, Identity> = raw["identity"]
+                .as_str()
+                .and_then(|hex| hex::decode(hex).ok())
+                .and_then(|bytes| decode_identity(&bytes))
+                .into_iter()
+                .collect();
+            let artifacts =
+                artifacts.get_or_insert_with(|| manifest.take().map_or_else(Vec::new, |f| f()));
+            let event = json!({"session_id": session, "process_id": raw["process_id"]});
+            let mut stack = resolve_call(&event, &frame, None, &identities, artifacts, &read);
+            let resolution = stack["frames"][0]["resolution"].take();
+            let pending = matches!(
+                resolution["reason"].as_str(),
+                Some("script_identity_missing" | "source_artifact_missing")
+            );
+            if !pending {
+                if self.0.len() == Self::KEPT {
+                    self.0.clear();
+                }
+                self.0.insert(key, resolution.clone());
+            }
+            row["initiator_frame"] = resolution;
+        }
+    }
+}
+
 fn payload(event: &Value) -> Option<Vec<u8>> {
     hex::decode(event["payload"].as_str()?).ok()
 }
@@ -699,6 +831,49 @@ mod tests {
     fn artifact(id: &str, kind: &str, bytes: &[u8]) -> Value {
         json!({"artifact_id": id, "session_id": "9", "kind": kind,
             "url": format!("https://app.example.test/{id}.js"), "sha256": hex::encode(Sha256::digest(bytes))})
+    }
+
+    #[test]
+    fn initiator_frames_resolve_alone_and_keep_settled_outcomes() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(root.path().join("blobs")).unwrap();
+        let source = "let a = 1;\nfunction load() {\n  fetch('/x');\n}\n";
+        let hash = hex::encode(Sha256::digest(source));
+        std::fs::write(root.path().join(format!("blobs/{hash}.bin")), source).unwrap();
+        let mut script = artifact("21", "javascript", source.as_bytes());
+        script["byte_size"] = json!(source.len());
+        script["content_path"] = json!(format!("blobs/{hash}.bin"));
+        let at = source.find("fetch").unwrap() as u32;
+        let start = source.find("() {").unwrap() as u32;
+        let raw = |identity: Option<Vec<u8>>| {
+            json!({"session_id": "9", "process_id": 41, "frame": hex::encode(frame(1, 7, at, start)),
+                "identity": identity.map(hex::encode)})
+        };
+        let mut document = json!({"requests": [
+            {"initiator_frame": raw(Some(identity_bytes(1, 0x02, 7, 0, 0, source.as_bytes())))},
+            {"initiator_frame": Value::Null},
+        ]});
+        let mut frames = InitiatorFrames::default();
+        frames.resolve_with(&mut document, root.path(), || vec![script.clone()]);
+        let resolved = &document["requests"][0]["initiator_frame"];
+        assert_eq!(
+            (&resolved["status"], &resolved["line"], &resolved["column"]),
+            (&json!("resolved"), &json!(3), &json!(3))
+        );
+        assert_eq!(resolved["function_name"], "load");
+        assert_eq!(document["requests"][1]["initiator_frame"], Value::Null);
+        // The kept outcome answers without the manifest; a missing identity is retried.
+        let mut again = json!({"requests": [{"initiator_frame": raw(None)}]});
+        frames.resolve_with(&mut again, root.path(), Vec::new);
+        assert_eq!(again["requests"][0]["initiator_frame"], *resolved);
+        let mut missing = json!({"requests": [{"initiator_frame": raw(None)}]});
+        missing["requests"][0]["initiator_frame"]["frame"] = json!(hex::encode(frame(1, 8, 1, 0)));
+        frames.resolve_with(&mut missing, root.path(), Vec::new);
+        assert_eq!(
+            missing["requests"][0]["initiator_frame"]["reason"],
+            "script_identity_missing"
+        );
+        assert_eq!(frames.0.len(), 1);
     }
 
     #[test]

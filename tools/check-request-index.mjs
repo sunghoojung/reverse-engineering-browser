@@ -10,8 +10,9 @@ assert(path && fs.existsSync(path), 'set REB_REQUEST_INDEX_GOLDEN to the golden 
 const golden = JSON.parse(fs.readFileSync(path, 'utf8'));
 const load = (files, names) => new Function(`${files.map(file => fs.readFileSync(new URL(file, root), 'utf8')).join('\n')}\nreturn {${names}};`)();
 const {requestsFromEvents} = load(['apps/research-ui/evidence_models.js'], 'requestsFromEvents');
-const view = load(['apps/research-ui/traffic_view.js', 'apps/research-ui/traffic_filter.js'], `trafficSortedRequests, trafficSearchRequests,
-  trafficRequestDomain, trafficIndexRequest, trafficParseFilter, trafficApplyFilter, trafficBrowserInternal, trafficSizeCell, trafficWaterfall`);
+const view = load(['apps/research-ui/request_stack.js', 'apps/research-ui/traffic_view.js', 'apps/research-ui/traffic_filter.js'], `trafficSortedRequests, trafficSearchRequests,
+  trafficRequestDomain, trafficIndexRequest, trafficParseFilter, trafficApplyFilter, trafficBrowserInternal, trafficSizeCell, trafficWaterfall,
+  trafficInitiatorFrame`);
 
 const model = requestsFromEvents(golden.events, 'live');
 assert.equal(golden.rows.length, model.length, 'one index row per Traffic row');
@@ -76,4 +77,9 @@ golden.rows.forEach(row => {
   if (response) assert(Math.abs(bar.left + bar.wait - percent(BigInt(response.monotonic_time_ns))) < 1e-9, `${row.id} response start`);
 });
 assert(measured >= 3, 'the fixture records completion lengths');
-console.log(`PASS request index: ${model.length} rows, ${Object.keys(golden.orders).length} sorts, ${Object.keys(golden.searches).length} searches and ${Object.keys(golden.filters).length} filters match the shipped Traffic model; Size and waterfall follow the recorded lengths and timestamps`);
+// The index resolves a script start's innermost frame; the column names it file:line.
+const scripted = view.trafficIndexRequest({...golden.rows[0], initiator: 'script', initiator_frame: {status: 'resolved', artifact_id: '21',
+  url: 'https://app.test/static/a.js?v=2', line: 3, column: 7, function_name: 'load'}}, 'live');
+assert.deepEqual(view.trafficInitiatorFrame(scripted), {label: 'a.js:3', title: 'https://app.test/static/a.js?v=2:3:7 in load. The Initiator tab shows the call stack.'});
+assert.equal(view.trafficInitiatorFrame({...scripted, initiatorFrame: {status: 'unresolved', reason: 'source_not_retained'}}), null);
+console.log(`PASS request index: ${model.length} rows, ${Object.keys(golden.orders).length} sorts, ${Object.keys(golden.searches).length} searches and ${Object.keys(golden.filters).length} filters match the shipped Traffic model; Size and waterfall follow the recorded lengths and timestamps; a resolved initiator frame reads file:line`);

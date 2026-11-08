@@ -2273,10 +2273,9 @@ var(--panel);
         background: var(--panel-2); color: var(--text); font: 12px var(--sans); }
       .traffic-response-find:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
       .traffic-response-count { color: var(--muted); font: 12px var(--sans); white-space: nowrap; }
-      .traffic-response-code, .traffic-json-tree { max-height: 60vh; padding: 8px; overflow: auto; border: 1px solid var(--line); border-radius: 4px;
-        background: var(--panel-2); font: 11px/1.5 var(--mono); tab-size: 2; }
+      .traffic-response-code, .traffic-json-tree { max-height: 60vh; padding: 8px; overflow: auto; border: 1px solid var(--line); border-radius: 4px; tab-size: 2; }
       .traffic-response-code:focus-visible, .traffic-json-tree:focus-within { outline: 2px solid var(--accent); outline-offset: 1px; }
-      .traffic-response-line { min-height: 1.5em; white-space: pre; }
+      .traffic-response-line { min-height: 18px; white-space: pre; }
       .traffic-response-code.wrap .traffic-response-line { white-space: pre-wrap; overflow-wrap: anywhere; }
       .traffic-response-line.search-match { background: color-mix(in srgb, var(--amber) 13%, transparent); }
       .traffic-response-line.current { box-shadow: inset 2px 0 var(--amber); }
@@ -2346,8 +2345,10 @@ var(--panel);
       .traffic-payload-section .secondary-button[aria-pressed="true"] { position: relative; border-color: var(--accent); background: var(--accent-soft); }
       .traffic-payload-options > .secondary-button { min-height: 24px; padding: 0 8px; }
       .traffic-payload-note { margin: 0 0 8px; color: var(--muted); font: 12px/1.5 var(--sans); }
-      .traffic-payload-view { max-height: max(160px, 55vh); padding: 4px 0; overflow: auto; border: 1px solid var(--line); border-radius: 4px;
-        background: var(--panel-2); font: 11px/18px var(--mono); }
+      .traffic-payload-view { max-height: max(160px, 55vh); padding: 4px 0; overflow: auto; border: 1px solid var(--line); border-radius: 4px; }
+      /* Captured code reads on the Sources editor surface its syntax colors are tuned for. */
+      .traffic-response-code, .traffic-json-tree, .traffic-payload-view { background: var(--code-bg); color: var(--code-text); font: 12px/18px var(--code-font); }
+      :is(.traffic-response-code, .traffic-json-tree, .traffic-payload-view) ::selection { background: var(--code-selection); }
       .traffic-payload-view:focus-visible, .traffic-payload-view [tabindex]:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
       .traffic-payload-line { min-height: 18px; padding: 0 8px; white-space: pre; }
       .traffic-payload-lines.is-wrapped .traffic-payload-line { white-space: pre-wrap; overflow-wrap: anywhere; }
@@ -2356,7 +2357,7 @@ var(--panel);
       .traffic-payload-mark.is-current { background: color-mix(in srgb, var(--amber) 60%, transparent); outline: 1px solid var(--amber); }
       .traffic-payload-pair { display: grid; grid-template-columns: minmax(72px, 32%) minmax(0, 1fr); gap: 12px; padding: 3px 8px;
         border-bottom: 1px solid var(--line-soft); overflow-wrap: anywhere; white-space: pre-wrap; }
-      .traffic-payload-columns { position: sticky; top: 0; z-index: 1; background: var(--panel-2); color: var(--muted); font-family: var(--sans); }
+      .traffic-payload-columns { position: sticky; top: 0; z-index: 1; background: var(--code-bg); color: var(--muted); font-family: var(--sans); }
       .traffic-payload-pair.is-undecodable .traffic-payload-value { color: var(--amber); }
       .traffic-payload-part { padding: 4px 8px; border-bottom: 1px solid var(--line-soft); overflow-wrap: anywhere; }
       .traffic-payload-part-head { display: flex; flex-wrap: wrap; gap: 2px 12px; }

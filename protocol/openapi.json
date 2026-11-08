@@ -8308,61 +8308,64 @@
                   "type": "boolean"
                 },
                 "resolution": {
-                  "type": "object",
-                  "required": [
-                    "status"
-                  ],
-                  "properties": {
-                    "status": {
-                      "enum": [
-                        "resolved",
-                        "unresolved",
-                        "builtin"
-                      ]
-                    },
-                    "reason": {
-                      "enum": [
-                        "script_identity_missing",
-                        "source_unavailable",
-                        "source_not_retained",
-                        "source_artifact_missing",
-                        "source_artifact_unreadable",
-                        "source_not_utf8",
-                        "position_outside_source"
-                      ]
-                    },
-                    "artifact_id": {
-                      "$ref": "#/components/schemas/Uint64String"
-                    },
-                    "url": {
-                      "type": "string"
-                    },
-                    "line": {
-                      "type": "integer",
-                      "minimum": 1
-                    },
-                    "column": {
-                      "type": "integer",
-                      "minimum": 1
-                    },
-                    "artifact_line": {
-                      "type": "integer",
-                      "minimum": 1
-                    },
-                    "artifact_column": {
-                      "type": "integer",
-                      "minimum": 1
-                    },
-                    "function_name": {
-                      "type": [
-                        "string",
-                        "null"
-                      ]
-                    }
-                  }
+                  "$ref": "#/components/schemas/RequestStackResolution"
                 }
               }
             }
+          }
+        }
+      },
+      "RequestStackResolution": {
+        "type": "object",
+        "required": [
+          "status"
+        ],
+        "properties": {
+          "status": {
+            "enum": [
+              "resolved",
+              "unresolved",
+              "builtin"
+            ]
+          },
+          "reason": {
+            "enum": [
+              "script_identity_missing",
+              "source_unavailable",
+              "source_not_retained",
+              "source_artifact_missing",
+              "source_artifact_unreadable",
+              "source_not_utf8",
+              "position_outside_source"
+            ]
+          },
+          "artifact_id": {
+            "$ref": "#/components/schemas/Uint64String"
+          },
+          "url": {
+            "type": "string"
+          },
+          "line": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "column": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "artifact_line": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "artifact_column": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "function_name": {
+            "type": [
+              "string",
+              "null"
+            ]
           }
         }
       },
@@ -8907,6 +8910,7 @@
           "sent_with",
           "lists_read",
           "lists_unread",
+          "stacks_unresolved",
           "malformed_records"
         ],
         "properties": {
@@ -8944,6 +8948,11 @@
             "minimum": 0,
             "description": "Distinct retained lists past the 256 read."
           },
+          "stacks_unresolved": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Script calls not resolved to source because 64 distinct positions already were."
+          },
           "malformed_records": {
             "type": "array",
             "items": {
@@ -8969,7 +8978,8 @@
           "string_bytes",
           "table_full",
           "script_frame",
-          "stack_digest"
+          "stack_digest",
+          "stack"
         ],
         "properties": {
           "sequence_number": {
@@ -9078,7 +9088,18 @@
               "null"
             ],
             "pattern": "^[0-9a-f]{64}$",
-            "description": "The request_initiator_stack digest of this call's stack."
+            "description": "The digest of the stack this write walked (protocol/native-network-v3.md), or null."
+          },
+          "stack": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/RequestStack"
+              }
+            ],
+            "description": "The call's frames resolved to source: the walked stack artifact its digest names, else its innermost frame alone; null without a script frame or past 64 distinct positions per answer."
           }
         }
       },
@@ -15899,6 +15920,8 @@
           "duration_ns",
           "type",
           "tab_id",
+          "tab_ids",
+          "tab_link",
           "operation",
           "first_time_ns",
           "last_time_ns",
@@ -15919,6 +15942,7 @@
           "error_code",
           "loader_observed",
           "initiator",
+          "initiator_frame",
           "main_frame",
           "browser_internal"
         ],
@@ -16029,6 +16053,42 @@
           },
           "tab_id": {
             "$ref": "#/components/schemas/Uint64String"
+          },
+          "tab_ids": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Uint64String"
+            },
+            "description": "Every tab the row belongs to: its own tab_id and the tabs of its newest request_tab_link set (protocol/native-network-v3.md). Empty is a capture error."
+          },
+          "tab_link": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "additionalProperties": false,
+            "required": [
+              "kind",
+              "count",
+              "complete"
+            ],
+            "properties": {
+              "kind": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 4,
+                "description": "request_tab_link kind: 1 dedicated worker, 2 shared worker clients, 3 service worker clients, 4 service worker last clients."
+              },
+              "count": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "complete": {
+                "type": "boolean",
+                "description": "Every tab_set part of the linked set was indexed."
+              }
+            },
+            "description": "The newest request_tab_link naming this row, or null."
           },
           "operation": {
             "type": "string"
@@ -16194,6 +16254,17 @@
               null
             ],
             "description": "Who started the request: script or the parser in a renderer (from its request_initiator_stack), a renderer without a stack record, a service worker, or the browser process; null without a versioned record."
+          },
+          "initiator_frame": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/RequestStackResolution"
+              }
+            ],
+            "description": "The innermost frame of the request_initiator_stack that names this row, resolved like get_request_stack; null without a walked stack, or for a frame past the 64 resolved per answer."
           },
           "main_frame": {
             "type": "boolean",

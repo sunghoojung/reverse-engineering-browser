@@ -18,14 +18,19 @@ const models = await readFile(new URL('../apps/research-ui/evidence_models.js', 
 const {decodeScriptCookieRecord} = new Function(`${models}\nreturn {decodeScriptCookieRecord};`)();
 const {window, document} = parseHTML('<!doctype html><div id="panel"></div>');
 const reads = [], copied = [];
+let provenanceAnswer = null;
 const blobs = new Map();
 const context = createContext({
   window, document, location: {protocol: 'http:'}, console, TextDecoder, TextEncoder, Uint8Array, DataView,
   AbortController, Date, setTimeout, clearTimeout, crypto: globalThis.crypto, CustomEvent: window.CustomEvent,
   state: {events: []}, decodePayload: () => 'sensitive_capture_disabled', decodeScriptCookieRecord,
   navigator: {clipboard: {writeText: async text => {copied.push(text);}}},
+  AbortSignal, URLSearchParams,
   fetch: async url => {
     reads.push(url);
+    if (url.startsWith('/api/cookie-provenance?')) {
+      return provenanceAnswer ? new Response(JSON.stringify(provenanceAnswer)) : new Response('', {status: 503});
+    }
     const id = /artifacts\/(\d+)\//.exec(url)[1];
     return blobs.has(id) ? new Response(blobs.get(id)) : new Response('', {status: 404});
   }
@@ -117,7 +122,9 @@ const request = {id: 'r', origin: 'live', method: 'GET', path: 'https://echo.tes
 const later = {id: 'later', origin: 'live', method: 'POST', path: 'https://echo.test/api', status: 200,
   cookieLists: [record('sent', [sentCookies[0]])]};
 const selected = [];
-const ui = {requests: [request, later], events: [scriptEvent], selectRequest: id => selected.push(id)};
+const opened = [];
+const ui = {requests: [request, later], events: [scriptEvent], selectRequest: id => selected.push(id),
+  openFrame: frame => opened.push(frame.artifact_id)};
 let renders = 0;
 const rerender = () => {renders += 1; api.renderTrafficCookies(panel, request, rerender, ui);};
 api.renderTrafficCookies(panel, request, rerender, ui);
@@ -186,6 +193,18 @@ assert.match(provenance.textContent, /Sent with requests \(2\)/);
 assert.match(provenance.textContent, /POST https:\/\/echo\.test\/api — the value document\.cookie set wrote/);
 [...provenance.querySelectorAll('.traffic-cookie-request')].at(-1).dispatchEvent(new window.Event('click'));
 assert.deepEqual(selected, ['later']);
+// get_cookie_provenance resolves the write's position; a failed read kept the raw one.
+assert(reads.some(url => url === '/api/cookie-provenance?session_id=7&name=sid'));
+provenanceAnswer = {script: [{process_id: 9, sequence_number: '5', stack: {frames: [{resolution: {status: 'resolved',
+  artifact_id: '21', url: 'https://app.test/static/a.js?v=2', line: 3, column: 3, function_name: 'setSid'}}]}}]};
+await new Promise(resolve => setTimeout(resolve, 2100));
+api.renderTrafficCookies(panel, request, rerender, ui);
+await settle();
+const resolved = panel.querySelector('.traffic-cookie-provenance');
+assert.match(resolved.textContent, /document\.cookie set in frame 31 at a\.js:3:3 \(setSid\)/);
+[...resolved.querySelectorAll('.traffic-cookie-request')].find(button => button.textContent === 'Show in Sources')
+  .dispatchEvent(new window.Event('click'));
+assert.deepEqual(opened, ['21']);
 const track = [...panel.querySelectorAll('.traffic-cookie-name')].find(node => node.textContent === 'track');
 track.dispatchEvent(new window.Event('click'));
 await settle();
@@ -217,7 +236,9 @@ api.renderTrafficCookies(panel, {id: 'm', origin: 'live', method: 'GET', path: '
 assert.match(panel.textContent, /recorded only in content capture sessions/);
 api.renderTrafficCookies(panel, {id: 'l', origin: 'sample', method: 'GET', path: 'x', status: 200}, () => {});
 assert.match(panel.textContent, /no native cookie record/);
-assert.equal(reads.length, 4, 'one read per distinct retained list; refused and not-retained lists are not read');
+assert.equal(reads.filter(url => url.startsWith('/api/artifacts/')).length, 4,
+  'one read per distinct retained list; refused and not-retained lists are not read');
+assert.equal(reads.filter(url => url.startsWith('/api/cookie-provenance?')).length, 2, 'a failed position read retries once');
 console.log('PASS Traffic Cookies tab: hops newest first, filtered-out request cookies and reasons, every response attribute ' +
-  'and block reason, unparsed line, sort, tooltip and copy, provenance to response, script write and later request, ' +
+  'and block reason, unparsed line, sort, tooltip and copy, provenance to response, script write at its resolved position and later request, ' +
   'size and SHA-256 checked reads, refusal and not-retained states, metadata-only and legacy rows (DOM model; not rendered QA)');

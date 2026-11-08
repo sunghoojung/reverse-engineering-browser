@@ -6,6 +6,7 @@
 #include "brave/components/reverse_engineering_browser/renderer/native_script_cookie_sink.h"
 #include "reb/event.hpp"
 #include "reb/network_cookies.hpp"
+#include "request_stack_tests.h"
 
 namespace {
 reb::NativeScriptFrame fixture_script_frame{1, 1, 0, 77, 1234, 0};
@@ -47,6 +48,9 @@ void ScriptCookieAccess() {
   auto& cookies = reb::NativeScriptCookieSink::Get();
   NativeProbeQueue queue;
   const std::uint64_t document_frame = reb::NativeFrameIdOf(5, 6);
+  // NativeRequestStacks left its provider installed; walk no script until the stacked write.
+  scenario = StackScenario{};
+  scenario.result = reb::NativeRequestStackWalkResult::kNoScript;
 
   // Metadata-only: one atomic load, no allocation and no record.
   ConfigureCookies(queue, false);
@@ -142,6 +146,45 @@ void ScriptCookieAccess() {
   value = ScriptCookie(One(queue));
   assert(!(value.flags & reb::kScriptCookieTableFull));
 
+  // A stacked write carries the digest and innermost frame; its artifact and identity name it.
+  ConfigureCookies(queue, true);
+  scenario = StackScenario{};
+  scenario.depth = 4;
+  scenario.scripts = 1;
+  scenario.seed = 300;
+  scenario.context = 91;
+  const auto stack_artifacts = reb::mojom::NativeProbeHost::artifacts.load();
+  cookies.RecordDocumentCookieSet("token=abc", document_frame);
+  const auto identity_event = Pop(queue);
+  const auto identity = IdentityPayload(identity_event);
+  event = One(queue);
+  value = ScriptCookie(event);
+  assert(identity.script_id == 10 &&
+         identity_event.header.parent_event_id == event.header.sequence_number &&
+         identity_event.header.sequence_number > event.header.sequence_number);
+  assert((value.flags & reb::kScriptCookieStackRecorded) &&
+         (value.flags & reb::kScriptCookieFrameRecorded) && value.frame.script_id == 10 &&
+         value.frame.position == 300 && value.frame.function_start == 300 &&
+         std::any_of(value.stack_digest.begin(), value.stack_digest.end(),
+                     [](const std::uint8_t byte) { return byte != 0; }));
+  assert(reb::mojom::NativeProbeHost::artifacts == stack_artifacts + 2);
+  const auto first_digest = value.stack_digest;
+  cookies.RecordDocumentCookieSet("token=def", document_frame);
+  value = ScriptCookie(One(queue));
+  assert(value.stack_digest == first_digest &&
+         reb::mojom::NativeProbeHost::artifacts == stack_artifacts + 2);
+  // Reads stay one-frame and aggregated; no script keeps the digest zero.
+  cookies.RecordDocumentCookieGet(9, document_frame);
+  value = ScriptCookie(One(queue));
+  assert(!(value.flags & reb::kScriptCookieStackRecorded));
+  scenario.result = reb::NativeRequestStackWalkResult::kNoScript;
+  cookies.RecordDocumentCookieSet("token=ghi", document_frame);
+  value = ScriptCookie(One(queue));
+  assert(!(value.flags & reb::kScriptCookieStackRecorded) && value.frame.position == 1234);
+  scenario = StackScenario{};
+  transport.Disable();
+  Drain(queue);
+
   // The Network category gates admission too.
   ConfigureCookies(queue, true, reb::NativeProbeCategoryMask(reb::NativeProbeCategory::kCanvas));
   cookies.RecordDocumentCookieSet("a=b", document_frame);
@@ -151,6 +194,7 @@ void ScriptCookieAccess() {
   std::cout << "PASS native script cookies: metadata-only none and allocation-free, write name, "
                "value digest, lengths, frame and position, empty and 24-byte names, calling "
                "frame, missing position, read aggregation at powers of two with the "
-               "configuration-end remainder, full table, category gate\n";
+               "configuration-end remainder, full table, walked write stacks named by "
+               "digest, category gate\n";
 }
 }  // namespace

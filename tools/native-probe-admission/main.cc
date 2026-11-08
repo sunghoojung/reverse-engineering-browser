@@ -2221,13 +2221,13 @@ void NativeWasmExecutionOutcomes() {
                "still-executing while inside, interrupt then a later call, quiet return\n";
 }
 
+#include "debugger_observation_tests.h"
 #include "guest_sampler_tests.h"
 #include "js_dispatch_tests.h"
 #include "js_invocation_tests.h"
 #include "network_scope_tests.h"
-#include "script_cookie_tests.h"
 #include "request_stack_tests.h"
-#include "debugger_observation_tests.h"
+#include "script_cookie_tests.h"
 
 // Each test keeps a multi-megabyte ring on its own stack. Inlining every test
 // into main can exceed the default 8 MiB main-thread stack, so each runs in

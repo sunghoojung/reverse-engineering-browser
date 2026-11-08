@@ -222,8 +222,8 @@ void NativeRequestStackWalk::RecordObservation(const NativeProbeType type,
     resolved_frame = frame_ids ? frame_ids() : 0;
   }
   const NativeRequestStackProvider provider = g_provider.load(std::memory_order_acquire);
-  NativeRequestStackWalk walk(provider ? g_state : nullptr, generation, request_id,
-                              parent_sequence, resolved_frame, type, tail);
+  NativeRequestStackWalk walk(provider ? g_state : nullptr, generation, request_id, parent_sequence,
+                              resolved_frame, type, tail);
   NativeRequestStackWalkResult result = NativeRequestStackWalkResult::kNoScript;
   if (provider) {
     g_walking = true;
@@ -242,6 +242,32 @@ void NativeRequestStackWalk::RecordObservation(const NativeProbeType type,
                                                 : NativeRequestStackState::kUnsupportedThread);
   payload.flags = kNativeRequestStackTaskCallersNotCaptured;
   walk.Emit(payload);
+}
+
+bool NativeRequestStackWalk::RecordCookieStack(const std::uint64_t cookie_sequence,
+                                               const std::uint64_t frame_id,
+                                               std::array<std::uint8_t, 32>& digest,
+                                               NativeStackFrame& innermost) noexcept {
+  const NativeRequestStackProvider provider = g_provider.load(std::memory_order_acquire);
+  if (!provider || cookie_sequence == 0 || g_walking) {
+    return false;
+  }
+  const std::uint64_t generation =
+      NativeProbeSink::Get().config_generation_.load(std::memory_order_acquire);
+  if ((generation & 1U) != 0) {
+    return false;
+  }
+  g_walking = true;
+  NativeRequestStackWalk walk(g_state, generation, 0, cookie_sequence, frame_id,
+                              NativeProbeType::kScriptCookie);
+  const NativeRequestStackWalkResult result = provider(walk);
+  g_walking = false;
+  if (result != NativeRequestStackWalkResult::kWalked || walk.stack_sequence_ == 0) {
+    return false;
+  }
+  digest = walk.digest_;
+  innermost = walk.innermost_;
+  return true;
 }
 
 NativeRequestStackWalk::NativeRequestStackWalk(NativeRequestStackTables* const state,
@@ -291,8 +317,16 @@ void NativeRequestStackWalk::Emit(const NativeRequestStackPayload& payload) noex
     static_cast<void>(sink.EmitStatus(gap, generation_));
     return;
   }
-  NativeProbeEvent event =
-      ChildEvent(type_, sink.session_id_.load(std::memory_order_relaxed), frame_id_, parent_sequence_);
+  if (type_ == NativeProbeType::kScriptCookie) {
+    if (payload.state != static_cast<std::uint8_t>(NativeRequestStackState::kNoScript)) {
+      digest_ = payload.digest;
+      innermost_ = payload.innermost;
+      stack_sequence_ = parent_sequence_;
+    }
+    return;
+  }
+  NativeProbeEvent event = ChildEvent(type_, sink.session_id_.load(std::memory_order_relaxed),
+                                      frame_id_, parent_sequence_);
   if (type_ == NativeProbeType::kRequestInitiatorStack ||
       type_ == NativeProbeType::kRequestWatchMatch) {
     event.header.request_id = static_cast<std::uint64_t>(static_cast<std::uint32_t>(request_id_));

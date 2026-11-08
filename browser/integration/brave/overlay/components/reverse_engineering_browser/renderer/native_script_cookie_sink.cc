@@ -12,6 +12,7 @@
 #include "base/threading/platform_thread.h"
 #include "base/time/time.h"
 #include "brave/components/reverse_engineering_browser/renderer/native_probe_sink.h"
+#include "brave/components/reverse_engineering_browser/renderer/native_request_stack.h"
 #include "crypto/hash.h"
 
 namespace reb {
@@ -154,7 +155,7 @@ std::uint64_t NativeScriptCookieSink::CallingFrameId() noexcept {
 }
 
 void NativeScriptCookieSink::Record(NativeScriptCookieSummary summary,
-                                    const std::uint64_t frame_id,
+                                    std::uint64_t frame_id,
                                     const std::string_view value) noexcept {
   const std::uint64_t generation = generation_.load(std::memory_order_acquire);
   if (generation == 0) {
@@ -162,7 +163,25 @@ void NativeScriptCookieSink::Record(NativeScriptCookieSummary summary,
   }
   summary.count = 1;
   summary.value_sha256 = crypto::hash::Sha256(value);
-  static_cast<void>(Emit(summary, frame_id ? frame_id : CallingFrameId(), generation));
+  frame_id = frame_id ? frame_id : CallingFrameId();
+  // Reserved first so the walked stack's artifact can name this record.
+  const std::uint64_t sequence =
+      NativeProbeSink::Get().next_sequence_.fetch_add(1, std::memory_order_relaxed);
+  NativeStackFrame innermost;
+  if (NativeRequestStackWalk::RecordCookieStack(sequence, frame_id, summary.stack_digest,
+                                                innermost) &&
+      (innermost.kind == 1 || innermost.kind == 2)) {
+    summary.frame = NativeScriptFrame{innermost.kind,
+                                      static_cast<std::uint8_t>(innermost.flags & 0x03U),
+                                      0,
+                                      innermost.script_id,
+                                      innermost.position,
+                                      innermost.detail};
+    summary.flags |= kNativeScriptCookieFrameRecorded | kNativeScriptCookieStackRecorded;
+  } else {
+    summary.stack_digest = {};
+  }
+  static_cast<void>(Emit(summary, frame_id, generation, sequence));
 }
 
 void NativeScriptCookieSink::RecordRead(NativeScriptCookieSummary summary,
@@ -207,12 +226,14 @@ void NativeScriptCookieSink::RecordRead(NativeScriptCookieSummary summary,
 
 bool NativeScriptCookieSink::Emit(const NativeScriptCookieSummary& summary,
                                   const std::uint64_t frame_id,
-                                  const std::uint64_t generation) noexcept {
+                                  const std::uint64_t generation,
+                                  const std::uint64_t sequence) noexcept {
   NativeProbeSink& sink = NativeProbeSink::Get();
   NativeProbeEvent event;
   event.header.category = NativeProbeCategory::kNetwork;
   event.header.type = NativeProbeType::kScriptCookie;
-  event.header.sequence_number = sink.next_sequence_.fetch_add(1, std::memory_order_relaxed);
+  event.header.sequence_number =
+      sequence ? sequence : sink.next_sequence_.fetch_add(1, std::memory_order_relaxed);
   event.header.session_id = sink.session_id_.load(std::memory_order_relaxed);
   event.header.monotonic_time_ns =
       static_cast<std::uint64_t>(base::TimeTicks::Now().since_origin().InNanoseconds());

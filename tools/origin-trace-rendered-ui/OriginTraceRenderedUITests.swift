@@ -1319,7 +1319,9 @@ final class OriginTraceRenderedUITests: XCTestCase {
         """)
       XCTAssertEqual(response["state"] as? String, "captured", "\(size.name): response body record state")
       XCTAssertEqual(response["labelled"] as? String, "inspector-tab-response")
-      XCTAssertTrue((response["text"] as? String ?? "").contains(expected.responseBodyMarker), "\(size.name): captured markup is literal text")
+      // Response shows the JSON source and Preview quotes strings, so the marker's quotes stay escaped.
+      let escapedMarker = expected.responseBodyMarker.replacingOccurrences(of: "\"", with: "\\\"")
+      XCTAssertTrue((response["text"] as? String ?? "").contains(escapedMarker), "\(size.name): captured markup is literal text")
       XCTAssertGreaterThan(response["colored"] as? Int ?? 0, 0, "\(size.name): JSON strings are colored")
       for phrase in ["Retained in full", "application/json", "SHA-256", "Pretty print", "Wrap", "Hex", "Copy"] {
         XCTAssertTrue((response["panel"] as? String ?? "").contains(phrase), "\(size.name): Response names \(phrase)")
@@ -1337,9 +1339,9 @@ final class OriginTraceRenderedUITests: XCTestCase {
       try await ui.key(123, "\u{F702}", modifiers: [.function, .numericPad])
       try await ui.waitUntil("document.activeElement?.id === 'inspector-tab-preview'", "arrow key did not reach Preview")
       try await ui.waitUntil("document.querySelector('#response-inspector .traffic-json-tree') !== null", "JSON preview did not render")
-      let preview = try await ui.value("document.querySelector('#response-inspector .traffic-json-tree').innerText") as? String ?? ""
+      let preview = try await ui.value("document.querySelector('#response-inspector .traffic-json-tree').textContent") as? String ?? ""
       XCTAssertTrue(preview.contains("challenge"), "\(size.name): the tree names its keys: \(preview)")
-      XCTAssertTrue(preview.contains(expected.responseBodyMarker), "\(size.name): tree strings are literal text")
+      XCTAssertTrue(preview.contains(escapedMarker), "\(size.name): tree strings are literal text")
       try await assertInert(ui, "\(size.name) response preview")
       try await assertLayout(ui, "#screen-traffic .detail-pane", "\(size.name) response preview")
       try await ui.screenshot("traffic-preview-\(size.name)")

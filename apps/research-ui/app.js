@@ -2764,15 +2764,18 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         // Rows with no tab are a capture error listed from the footer, not a tab.
         const groups = answer.facets.tabs.filter(tab => tab.tab_id !== '0').map(tab => ({id: tab.tab_id,
           count: tab.count, domains: tab.domains, title: null, page: null}));
-        return {total: answer.through, groups, domains: answer.facets.domains.map(entry => [entry.domain, entry.count]),
-          scopedCount: state.requestTabId === 'all' ? answer.through : groups.find(group => group.id === state.requestTabId)?.count ?? 0};
+        const unresolved = answer.facets.tabs.find(tab => tab.tab_id === '0')?.count ?? 0;
+        return {total: answer.through, groups, unresolved, domains: answer.facets.domains.map(entry => [entry.domain, entry.count]),
+          scopedCount: state.requestTabId === 'all' ? answer.through
+            : state.requestTabId === 'unresolved' ? unresolved : groups.find(group => group.id === state.requestTabId)?.count ?? 0};
       }
 
       function renderRequestScopes(scopes = trafficLocalScopes()) {
         const groups = scopes.groups;
         const availableTabs = new Set(groups.map(group => group.id));
         if (state.requestTabId !== 'all' && !availableTabs.has(state.requestTabId) &&
-            !(state.requestTabId === 'unresolved' && state.requests.some(request => !requestTabsOf(request).length))) state.requestTabId = 'all';
+            !(state.requestTabId === 'unresolved' && (scopes.unresolved === undefined
+              ? state.requests.some(request => !requestTabsOf(request).length) : scopes.unresolved > 0))) state.requestTabId = 'all';
         const oldScopes = new Map([...elements.requestTabScopes.children].map(button => [button.dataset.scopeId, button]));
         const focusedScope = elements.requestTabScopes.contains(document.activeElement) ? document.activeElement : null;
         const buttons = [{id: 'all', label: 'All tabs', count: scopes.total}, ...groups.map((group, index) => {
@@ -2862,7 +2865,7 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
       }
 
       // A null visible count is a query the request index has not answered yet.
-      // `totals` are the matching requests' recorded sizes and the browser-internal rows hidden.
+      // `totals`: the index's matching sizes, hidden browser-internal rows and rows without a tab.
       function renderTrafficWindowStatus(visibleCount, totalCount, outside, note = '', totals = null) {
         const bytes = value => trafficBytesLabel(value).replace(' ', '\u00a0');
         const sizes = totals ? ` · ${bytes(totals.sizes.transferred)} transferred · ${bytes(totals.sizes.resources)} resources` : '';
@@ -2871,7 +2874,7 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         const message = `${visibleCount === null ? '' : `${visibleCount.toLocaleString('en-US')} / `}${totalCount.toLocaleString('en-US')} requests${sizes}${hidden}${excluded ? ` · ${excluded}` : ''}${outside ? ' · Selection outside filter' : ''}${note ? ` · ${note}` : ''}`;
         const status = document.querySelector('#request-window-status');
         if (status.textContent !== message) status.textContent = message;
-        const unresolved = state.requests.filter(request => globalThis.RebRequestTabs?.isUnresolved(request)).length;
+        const unresolved = totals?.unresolved ?? state.requests.filter(request => globalThis.RebRequestTabs?.isUnresolved(request)).length;
         const errors = document.querySelector('#request-unresolved');
         errors.hidden = unresolved === 0;
         errors.textContent = globalThis.RebRequestTabs?.unresolvedNotice(unresolved) ?? '';
@@ -3109,7 +3112,8 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         const located = page.located ?? {};
         const outside = id => id !== null && !mounted.has(id) && Object.hasOwn(located, id) && located[id] === null;
         const note = trafficIndexNote(page, index.error());
-        const totals = {sizes: page.sizes, hiddenInternal: page.hidden_internal};
+        const totals = {sizes: page.sizes, hiddenInternal: page.hidden_internal,
+          unresolved: page.facets.tabs.find(tab => tab.tab_id === '0')?.count ?? 0};
         const timeline = {first: page.timeline.first_time_ns === null ? null : BigInt(page.timeline.first_time_ns),
           last: page.timeline.last_time_ns === null ? null : BigInt(page.timeline.last_time_ns), buckets: page.timeline.buckets};
         state.trafficOverview?.render(timeline, state.trafficRange);
@@ -3629,12 +3633,13 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
       const trafficResponse = createTrafficResponse({getArtifacts: () => state.artifacts, getEvents: () => state.events,
         contentSession: () => state.requestContentCaptureEnabled, readable: () => location.protocol !== 'file:',
         onChange: () => renderInspector()});
+      function openResolvedFrame(resolution) {
+        if (selectArtifact(resolution.artifact_id, resolution.artifact_line ?? null,
+          {column: resolution.artifact_column ?? 0}) !== false) showScreen('sources');
+      }
       const requestStackPanel = createRequestStackPanel({
         refresh: () => { if (state.inspectorTab === 'initiator') renderInspector(); },
-        open: frame => {
-          if (selectArtifact(frame.resolution.artifact_id, frame.resolution.artifact_line ?? null,
-            {column: frame.resolution.artifact_column ?? 0}) !== false) showScreen('sources');
-        }
+        open: frame => openResolvedFrame(frame.resolution)
       });
 
       function renderInspector() {
@@ -3682,7 +3687,8 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
           elements.requestInspector.hidden = true;
           document.querySelector('.detail-pane').classList.add('showing-exchange');
           if (!headersInspector.hidden) renderTrafficHeaders(headersInspector, request, renderInspector);
-          else renderTrafficCookies(cookiesInspector, request, renderInspector, {requests: state.requests, events: state.events, selectRequest});
+          else renderTrafficCookies(cookiesInspector, request, renderInspector, {requests: state.requests, events: state.events, selectRequest,
+            openFrame: openResolvedFrame});
           return;
         }
         if (!payloadInspector.hidden) {

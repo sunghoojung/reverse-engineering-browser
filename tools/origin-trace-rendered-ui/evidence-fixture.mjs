@@ -29,6 +29,7 @@ export const REQUEST_BODY_MARKER = '<img src=x onerror="window.__rebInjected=4">
 export const METADATA_BODY_HOST = 'api.metadata.test';
 // A content-session response body (native-network-v3.md) whose JSON carries markup.
 export const RESPONSE_BODY_HOST = 'api.response.test';
+const FIXTURE_TAB_ID = 1;
 export const RESPONSE_BODY_MARKER = '<img src=x onerror="window.__rebInjected=9">';
 export const HEADER_VALUE_MARKER = '<img src=x onerror="window.__rebInjected=7">';
 export const COOKIE_VALUE_MARKER = '<img src=x onerror="window.__rebInjected=8">';
@@ -346,6 +347,8 @@ export async function buildEvidence({root, sessions, guestStore, dispatchStore, 
   await mkdir(join(artifacts, 'blobs'), {recursive: true});
   for (const name of ['origin-trace.jsonl', 'request-signals.jsonl']) await cp(join(sessions, name), join(root, name));
   const demoEvents = jsonLines(await readFile(join(sessions, 'demo.jsonl'), 'utf8'));
+  // Browser network records carry their tab (protocol/native-network-v3.md); the demo producer's do not.
+  for (const event of demoEvents) if (event.category === 'network') event.tab_id = FIXTURE_TAB_ID;
   const demoArtifacts = jsonLines(await readFile(join(sessions, 'artifacts/manifest.jsonl'), 'utf8'));
   for (const record of demoArtifacts) await cp(join(sessions, 'artifacts', record.content_path), join(artifacts, record.content_path));
   const network = demoEvents.find(event => event.category === 'network');

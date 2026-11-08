@@ -344,7 +344,8 @@ function trafficPayloadArea({className, label, role = null, count, makeRow, sele
   };
   fill(0);
   reveal(focusIndex);
-  const select = (index, focus = true) => {
+  // Keyboard moves keep the focus ring on a row the move just mounted.
+  const select = (index, focus = true, keyboard = true) => {
     if (index < 0 || index >= count) return;
     const previous = rows[focusIndex];
     if (previous) {
@@ -355,7 +356,7 @@ function trafficPayloadArea({className, label, role = null, count, makeRow, sele
     const row = reveal(index);
     row.tabIndex = 0;
     row.setAttribute('aria-selected', 'true');
-    if (focus) row.focus();
+    if (focus) row.focus(keyboard ? {focusVisible: true} : undefined);
     row.scrollIntoView?.({block: 'nearest'});
     onSelect(index);
   };
@@ -373,7 +374,7 @@ function trafficPayloadArea({className, label, role = null, count, makeRow, sele
     });
     box.addEventListener('click', event => {
       const row = event.target.closest?.('[data-index]');
-      if (row && box.contains(row)) select(Number(row.dataset.index));
+      if (row && box.contains(row)) select(Number(row.dataset.index), true, false);
     });
   }
   return {box, rows, reveal, select, dispose: () => observer?.disconnect()};

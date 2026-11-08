@@ -12,10 +12,13 @@ use sha2::{Digest, Sha256};
 
 use crate::evidence;
 use crate::request_headers::{STATES, child_payload, le};
+use crate::request_stack;
 
 const LIST_LIMIT: usize = 2 * 1024 * 1024;
 const NAME_PREFIX: usize = 24;
 const PROVENANCE_LISTS: usize = 256;
+/// Distinct script positions resolved to source per provenance answer.
+const PROVENANCE_STACKS: usize = 64;
 const EXCLUSIONS: [&str; 30] = [
     "unknown_error",
     "http_only",
@@ -530,6 +533,7 @@ fn describe_script(event: &Value, script: &Script) -> Value {
             Value::Null
         },
         "stack_digest": if script.flags & 4 != 0 { json!(hex::encode(script.stack)) } else { Value::Null },
+        "stack": Value::Null,
     })
 }
 
@@ -549,6 +553,26 @@ pub fn provenance(
     let mut malformed = Vec::new();
     let mut lists: HashMap<String, Option<Vec<Cookie>>> = HashMap::new();
     let mut unread = BTreeSet::new();
+    let mut identities: HashMap<u64, HashMap<u32, request_stack::Identity>> = HashMap::new();
+    for event in events
+        .iter()
+        .filter(|event| event["session_id"] == session && event["type"] == "script_identity")
+    {
+        let decoded = event["payload"]
+            .as_str()
+            .and_then(|payload| hex::decode(payload).ok())
+            .and_then(|bytes| request_stack::decode_identity(&bytes));
+        if let (Some((script, identity)), Some(process)) = (decoded, event["process_id"].as_u64()) {
+            identities
+                .entry(process)
+                .or_default()
+                .insert(script, identity);
+        }
+    }
+    let no_identities = HashMap::new();
+    let read = |artifact: &Value, limit: usize| evidence::content(root, artifact, limit);
+    let mut stacks: HashMap<(u64, [u8; 16], [u8; 32]), Value> = HashMap::new();
+    let mut stacks_unresolved = 0u64;
     let mut ordered: Vec<&Value> = events
         .iter()
         .filter(|event| event["session_id"] == session && event["category"] == "network")
@@ -563,7 +587,28 @@ pub fn provenance(
         match event["type"].as_str() {
             Some("script_cookie") => match decode_script(event) {
                 Some(script) if names_match(&script, wanted) => {
-                    scripts.push(describe_script(event, &script))
+                    let mut item = describe_script(event, &script);
+                    if script.flags & 2 != 0 {
+                        let process = event["process_id"].as_u64().unwrap_or(0);
+                        let key = (process, script.frame, script.stack);
+                        if let Some(stack) = stacks.get(&key) {
+                            item["stack"] = stack.clone();
+                        } else if stacks.len() < PROVENANCE_STACKS {
+                            let stack = request_stack::resolve_call(
+                                event,
+                                &script.frame,
+                                (script.flags & 4 != 0).then_some(script.stack),
+                                identities.get(&process).unwrap_or(&no_identities),
+                                artifacts,
+                                &read,
+                            );
+                            item["stack"] = stack.clone();
+                            stacks.insert(key, stack);
+                        } else {
+                            stacks_unresolved += 1;
+                        }
+                    }
+                    scripts.push(item)
                 }
                 Some(_) => {}
                 None => malformed.push(event["sequence_number"].clone()),
@@ -626,6 +671,7 @@ pub fn provenance(
         "sent_with": sent_with,
         "lists_read": lists.len(),
         "lists_unread": unread.len(),
+        "stacks_unresolved": stacks_unresolved,
         "malformed_records": malformed,
     })
 }
@@ -853,6 +899,95 @@ mod tests {
         let none = provenance(&events, &artifacts, &root, "7", "pref");
         assert_eq!(none["sent_with"][0]["blocked"], true);
         assert_eq!(none["script"], json!([]));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn script_writes_resolve_their_walked_stack() {
+        let root = std::env::temp_dir().join(format!("reb-cookie-stacks-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("blobs")).unwrap();
+        let source = "let a = 1;\nfunction setSid() {\n  document.cookie = 'sid=1';\n}\n";
+        let position = source.find("document").unwrap() as u32;
+        let start = source.find("() {").unwrap() as u32;
+        let mut frame = vec![1u8, 0, 0, 0];
+        for value in [77u32, position, start] {
+            frame.extend(value.to_le_bytes());
+        }
+        let mut walked = 0x4b53_4252u32.to_le_bytes().to_vec();
+        walked.extend([1, 0, 32, 0, 16, 0, 0, 0]);
+        walked.extend(1u32.to_le_bytes());
+        walked.extend(1u32.to_le_bytes());
+        walked.extend([0; 12]);
+        walked.extend(&frame);
+        let mut artifacts = Vec::new();
+        for (id, kind, bytes) in [
+            ("20", "stack", walked.as_slice()),
+            ("21", "javascript", source.as_bytes()),
+        ] {
+            let hash = hex::encode(Sha256::digest(bytes));
+            std::fs::write(root.join(format!("blobs/{hash}.bin")), bytes).unwrap();
+            artifacts.push(
+                json!({"artifact_id":id,"session_id":"7","kind":kind,"url":"https://app.test/a.js",
+                "byte_size":bytes.len(),"sha256":hash,"content_path":format!("blobs/{hash}.bin")}),
+            );
+        }
+        let mut write = script_payload(1, b"sid", b"1");
+        write[5] = 2 | 4;
+        write[24..40].copy_from_slice(&frame);
+        write[40..72].copy_from_slice(&Sha256::digest(&walked));
+        let mut identity = vec![0u8; 128];
+        identity[0] = 1;
+        identity[2] = 128;
+        identity[4] = 1;
+        identity[5] = 2;
+        identity[8..12].copy_from_slice(&77u32.to_le_bytes());
+        identity[24..32].copy_from_slice(&9u64.to_le_bytes());
+        identity[32..40].copy_from_slice(&(source.len() as u64).to_le_bytes());
+        identity[40..72].copy_from_slice(&Sha256::digest(source));
+        let mut events = vec![
+            record("script_cookie", 5, 0, &write, "0"),
+            record("script_identity", 6, 5, &identity, "0"),
+        ];
+        events[1]["request_id"] = json!("0");
+        let origin = provenance(&events, &artifacts, &root, "7", "sid");
+        let stack = &origin["script"][0]["stack"];
+        let digest = hex::encode(Sha256::digest(&walked));
+        assert_eq!(
+            (stack["frames_retained"].as_bool(), stack["digest"].as_str()),
+            (Some(true), Some(digest.as_str()))
+        );
+        let resolution = &stack["frames"][0]["resolution"];
+        assert_eq!(
+            (
+                &resolution["status"],
+                &resolution["line"],
+                &resolution["column"],
+                &resolution["function_name"]
+            ),
+            (&json!("resolved"), &json!(3), &json!(3), &json!("setSid"))
+        );
+        // Without a digest the one-frame position still resolves.
+        events[0] = record(
+            "script_cookie",
+            5,
+            0,
+            &{
+                let mut one = write.clone();
+                one[5] = 2;
+                one[40..72].fill(0);
+                one
+            },
+            "0",
+        );
+        let origin = provenance(&events, &artifacts, &root, "7", "sid");
+        let stack = &origin["script"][0]["stack"];
+        assert_eq!(
+            (stack["digest"].clone(), stack["frames_retained"].clone()),
+            (Value::Null, json!(false))
+        );
+        assert_eq!(stack["frames"][0]["resolution"]["line"], 3);
+        assert_eq!(origin["stacks_unresolved"], 0);
         let _ = std::fs::remove_dir_all(&root);
     }
 

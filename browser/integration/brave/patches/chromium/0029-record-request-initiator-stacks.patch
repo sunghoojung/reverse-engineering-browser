@@ -183,24 +183,34 @@ index 56496ac..699a008 100644
    // Every isolate, including workers. The worker br_table gap is recorded
    // from the dispatch callback; this one names jitless and left-Liftoff.
 diff --git a/third_party/blink/renderer/platform/loader/fetch/url_loader/resource_request_sender.cc b/third_party/blink/renderer/platform/loader/fetch/url_loader/resource_request_sender.cc
-index b3efcb6..2a0bdc2 100644
+index b3efcb6..08de5bd 100644
 --- a/third_party/blink/renderer/platform/loader/fetch/url_loader/resource_request_sender.cc
 +++ b/third_party/blink/renderer/platform/loader/fetch/url_loader/resource_request_sender.cc
-@@ -28,6 +28,7 @@
+@@ -27,7 +27,9 @@
+ #include "base/task/thread_pool.h"
  #include "base/time/time.h"
  #include "base/trace_event/trace_event.h"
++#include "brave/components/reverse_engineering_browser/renderer/native_debugger_observation.h"
  #include "brave/components/reverse_engineering_browser/renderer/native_probe_sink.h"
 +#include "brave/components/reverse_engineering_browser/renderer/native_request_stack.h"
  #include "build/build_config.h"
  #include "net/base/load_flags.h"
  #include "net/base/net_errors.h"
-@@ -283,6 +284,9 @@ int ResourceRequestSender::SendAsync(
+@@ -283,6 +285,17 @@ int ResourceRequestSender::SendAsync(
    // The JavaScript invocation that started this request, when one is
    // current; see protocol/native-js-invocation-v1.md.
    reb::NativeProbeSink::Get().RecordNativeJsInvocationRequest(request_id);
 +  // The stack that started it; see protocol/native-network-v3.md.
 +  reb::NativeRequestStackWalk::Record(request_id,
 +                                      reb_request_.initiated_sequence);
++  // A Console request watch; see protocol/native-debugger-observation-v1.md.
++  if (reb_request_.initiated_sequence != 0 &&
++      reb::NativeDebuggerWatch::Armed(reb::kNativeWatchRequests)) {
++    reb::NativeDebuggerWatch::Request(request_id,
++                                      reb_request_.initiated_sequence,
++                                      request->method,
++                                      request->url.possibly_invalid_spec());
++  }
    request_info_ = std::make_unique<PendingRequestInfo>(
        std::move(client), request->destination, KURL(request->url),
        std::move(resource_load_info_notifier_wrapper));

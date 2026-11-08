@@ -200,6 +200,15 @@ const TRAFFIC_INITIATOR_TITLES = Object.freeze({
 function trafficInitiatorLabel(request) {
   return Object.hasOwn(TRAFFIC_INITIATOR_LABELS, request?.initiator ?? '') ? TRAFFIC_INITIATOR_LABELS[request.initiator] : null;
 }
+// A script start's resolved innermost frame (protocol/request-index-v1.md), named file:line as DevTools does.
+function trafficInitiatorFrame(request) {
+  const frame = request?.initiatorFrame;
+  if (frame?.status !== 'resolved') return null;
+  const file = typeof requestStackFile === 'function' ? requestStackFile(frame.url) : String(frame.url ?? '');
+  const line = frame.line ? `:${frame.line}` : '';
+  return {label: `${file}${line}`, title: `${frame.url}${line}${frame.column ? `:${frame.column}` : ''}` +
+    `${frame.function_name ? ` in ${frame.function_name}` : ''}. The Initiator tab shows the call stack.`};
+}
 
 // Verified against net/base/net_error_list.h at the pinned Chromium.
 const TRAFFIC_NET_ERRORS = Object.freeze({'-2': 'FAILED', '-3': 'ABORTED', '-6': 'FILE_NOT_FOUND', '-7': 'TIMED_OUT',
@@ -325,7 +334,8 @@ function trafficBlockStart(container, total, start) {
 function trafficIndexRequest(row, origin) {
   return {id: row.id, path: row.path, method: row.method, status: row.status, time: row.time, type: row.type, origin,
     targetKind: row.target_kind, hostOnly: row.target_kind === 'host', failed: row.failed, interrupted: row.interrupted,
-    tabId: row.tab_id, operation: row.operation, target: row.target, host: row.host, urlTruncated: row.url_truncated,
+    tabId: row.tab_id, tabIds: row.tab_ids, operation: row.operation,
+    tabLink: row.tab_link ?? null, initiatorFrame: row.initiator_frame ?? null, tabLinkLabel: row.tab_link ? globalThis.RebRequestTabs?.linkLabel(row.tab_link) ?? '' : '', target: row.target, host: row.host, urlTruncated: row.url_truncated,
     targetLength: row.target_length, targetMalformed: row.target_malformed,
     firstTimestamp: BigInt(row.first_time_ns), lastTimestamp: BigInt(row.last_time_ns),
     transferSize: row.transfer_size, resourceSize: row.resource_size, fromCache: row.from_cache,
@@ -404,7 +414,7 @@ function renderTrafficRows(container, requests, {start = 0, total = requests.len
     const key = JSON.stringify([request.path, request.method, request.status, request.time,
       request.type, request.origin, request.hostOnly, request.failed, request.targetKind, request.operation, researcherName,
       request.tabLinkLabel, request.transferSize, request.resourceSize, request.fromCache, request.fromServiceWorker, request.mimeType, request.protocol,
-      request.initiator, request.errorCode, request.loaderObserved, time(request.firstTimestamp), time(request.lastTimestamp),
+      request.initiator, trafficInitiatorFrame(request)?.title, request.errorCode, request.loaderObserved, time(request.firstTimestamp), time(request.lastTimestamp),
       time(request.responseTimestamp), scaleKey]);
     // Reuse the row itself on lifecycle changes, preserving focus and its single
     // arrival animation. Unchanged rows do not rebuild captured text children.
@@ -434,8 +444,9 @@ function renderTrafficRows(container, requests, {start = 0, total = requests.len
       const protocol = cell('protocol', 'request-protocol', request.protocol ?? '—',
         request.protocol ? `Negotiated protocol (ALPN): ${request.protocol}` : 'No negotiated protocol recorded.');
       const initiatorLabel = trafficInitiatorLabel(request);
-      const initiator = cell('initiator', 'request-initiator', initiatorLabel ?? '—',
-        initiatorLabel ? TRAFFIC_INITIATOR_TITLES[request.initiator] : 'No versioned lifecycle record says who started this request.');
+      const initiatorFrame = trafficInitiatorFrame(request);
+      const initiator = cell('initiator', 'request-initiator', initiatorFrame?.label ?? initiatorLabel ?? '—',
+        initiatorFrame?.title ?? (initiatorLabel ? TRAFFIC_INITIATOR_TITLES[request.initiator] : 'No versioned lifecycle record says who started this request.'));
       const sizeCell = trafficSizeCell(request);
       const size = cell('size', 'request-size', undefined, sizeCell.title);
       size.append(trafficNode('span', 'size-transfer', sizeCell.transfer));

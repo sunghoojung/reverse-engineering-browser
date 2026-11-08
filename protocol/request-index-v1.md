@@ -36,6 +36,8 @@ Rows also carry what the lifecycle records hold beyond the row model:
 | `error_code` | The last non-zero `error_code` |
 | `loader_observed` | Any lifecycle record other than `request_initiated` |
 | `initiator` | `worker` when `request_started` has flag 4; else, for a `request_initiated` record or a non-zero `initiator_process_id`, `script` when its `request_initiator_stack` walked frames, `parser` when no script was on the stack, else `renderer` ([native network v3](native-network-v3.md#request-initiator-stacks)); else `browser` for a versioned browser record, else null |
+| `initiator_frame` | The innermost frame of that walked stack resolved alone through its `script_identity` and retained source, as `get_request_stack` resolves frames: URL, line, column and function name, or a reason; the index keeps 16,384 identities, the handler resolves at most 64 new frames per answer and keeps settled outcomes, so a later source artifact shows once the index next changes; else null |
+| `tab_ids`, `tab_link` | The row's own `tab_id` plus the tabs of the set its newest `request_tab_link` names, from the `tab_set` parts indexed so far, and that link's kind, tab count and whether every part arrived ([native network v3](native-network-v3.md#request-owners-and-tabs)); at most 4,096 sets of 256 tabs |
 | `main_frame` | `request_started` with resource type 0 |
 | `browser_internal` | The row's scheme class is browser-internal (16 to 20, [native network v3](native-network-v3.md#scheme-class)); without a scheme class, not `loader_observed`, a host-only target and a single-label host other than `localhost`, as WebUI loads are |
 
@@ -99,7 +101,7 @@ Operation `get_requests`, read-only for MCP (`analysis` effect, in memory).
 | `q` | The Traffic filter grammar below |
 | `failed`, `invert`, `hide_internal`, `third_party` | `1` keeps failed rows, inverts `q`, hides `browser_internal` rows, or keeps third-party rows |
 | `from_ns`, `to_ns` | Rows whose first record is at or before `to_ns` and last at or after `from_ns` |
-| `tab_id`, `domain`, `type` | Exact filters; `tab_id=unattributed` is tab 0 |
+| `tab_id`, `domain`, `type` | Exact filters; `tab_id` matches any of a row's `tab_ids`, and `tab_id=unattributed` the rows with none |
 | `named` | At most 64 `session:process:sequence` root events that also match `q` (researcher names) |
 | `locate` | At most 4 row IDs; `located` maps each to its position, or null |
 
@@ -130,7 +132,8 @@ There is no public suffix list, so this is an approximation.
 
 The answer has exact `total`, `matching` and `through`, `failed` (failed
 requests in the snapshot), `facets.tabs` (count, first time and up to 8 domains
-per tab) and `facets.domains` (counts within the `tab_id` filter), `sizes` (the
+per tab, a linked row counted in each of its tabs and a row with none under tab
+`0`) and `facets.domains` (counts within the `tab_id` filter), `sizes` (the
 matching rows' summed `transfer_size` and `resource_size`), `hidden_internal`
 (rows `hide_internal` removed that every other filter admitted), `timeline`
 (first start, last record and 120 equal buckets of starts over the rows every

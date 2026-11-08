@@ -112,7 +112,8 @@ NativeScriptIdentityPayload IdentityPayload(const NativeProbeEvent& event) {
 // One request start: the request_initiated record, then its stack child.
 std::pair<NativeProbeEvent, NativeProbeEvent> Start(NativeProbeQueue& queue,
                                                     const std::int32_t request) {
-  const auto initiated = sink.RecordRequestInitiated(request, "POST", "https", "api.example.test").initiated_sequence;
+  const auto initiated =
+      sink.RecordRequestInitiated(request, "POST", "https", "api.example.test").initiated_sequence;
   assert(initiated != 0);
   NativeRequestStackWalk::Record(request, initiated);
   const auto parent = Pop(queue);
@@ -132,7 +133,8 @@ std::pair<NativeProbeEvent, NativeProbeEvent> Start(NativeProbeQueue& queue,
   // nothing beyond its request_initiated record.
   {
     const auto before = allocations.load();
-    const auto initiated = sink.RecordRequestInitiated(1, "GET", "https", "a.example.test").initiated_sequence;
+    const auto initiated =
+        sink.RecordRequestInitiated(1, "GET", "https", "a.example.test").initiated_sequence;
     NativeRequestStackWalk::Record(1, initiated);
     NativeRequestStackWalk::Record(1, 0);
     assert(allocations.load() == before && scenario.walks == 0 && Drain(queue) == 1);
@@ -142,7 +144,8 @@ std::pair<NativeProbeEvent, NativeProbeEvent> Start(NativeProbeQueue& queue,
   {
     // Inactive session: RecordRequestInitiated admits nothing, so no walk.
     const auto before = allocations.load();
-    NativeRequestStackWalk::Record(2, sink.RecordRequestInitiated(2, "GET", "https", "a.example.test").initiated_sequence);
+    NativeRequestStackWalk::Record(
+        2, sink.RecordRequestInitiated(2, "GET", "https", "a.example.test").initiated_sequence);
     assert(allocations.load() == before && scenario.walks == 0 && Drain(queue) == 0);
   }
 

@@ -547,10 +547,10 @@ binary is refused and oversized JSON returns a structural summary.
   visible sequence gap. The backend keeps it in its network window, and trace
   steps name it instead of decoding it as text.
 - Origin Trace joins the newest record whose parent is the request's final
-  `response_started`. The Traffic tabs are General, Preview, Response,
-  Initiator, Timing, Signals and Evidence. Response shows the state, codings,
-  lengths and digest, then the bytes as syntax-colored text with pretty print,
-  wrap, find, copy and hex (always hex for binary). Preview shows a bounded
+  `response_started` in the Preview and Response tabs (order above). Response
+  shows the state, codings, lengths and digest, then the bytes as
+  syntax-colored text with pretty print, wrap, find, copy and hex (always hex
+  for binary). Preview shows a bounded
   JSON tree, a raster image whose signature matches its bytes, plain text, or
   markup as source. HTML and SVG are never rendered. Reads are ranged 2 MiB at a
   time and rechecked by size and SHA-256.
@@ -846,9 +846,14 @@ read; reserved bytes are zero.
 `document.cookie` set parses the name and value like `ParsedCookie`: up to the
 first `;`, split at the first `=`, whitespace trimmed; no `=` means an empty
 name. The script frame comes from `v8::StackTrace::CurrentStackTrace` (one
-frame): script ID and character position; function start is 0. The stack
-digest is zero until the request stack walker of `request_initiator_stack`
-also runs for cookie calls; integration links the two by that digest.
+frame): script ID and character position; function start is 0. When the
+request stack provider is installed ([gate](#gate)), a write on the document
+main thread also walks the stack the way a request start does, without a
+`request_initiator_stack` record: the write carries the walked innermost frame
+(with its function start) and the stack digest with bit 2. The record's
+sequence is reserved before the walk, so the stack artifact's
+`creator_event_id` and the new `script_identity` records' parent are the
+`script_cookie` record. Reads stay one-frame.
 
 Reads are frequent, so each renderer aggregates them per frame, API, script
 frame and name in a 256-entry table per configuration. A key records its 1st,
@@ -864,7 +869,8 @@ while the table is full is recorded alone with bit 3.
   table and budget.
 - Script cookie records: one per write, at most 2 + log2(reads) per read key,
   and one per read past the table; each is one 320-byte record, one SHA-256 of
-  the value and a one-frame stack capture.
+  the value and a one-frame stack capture. With request stacks on, a write
+  walks its stack instead, inside the request stack bounds.
 
 #### Cookie agent access and UI
 
@@ -873,7 +879,12 @@ returns each hop's sent and received cookies with every attribute, exclusion
 and warning reason. `get_cookie_provenance`
 (`GET /api/cookie-provenance?session_id=&name=`) lists everything in the
 newest records that touched a cookie name: the responses that set it, the
-script writes and reads with their frame, and the requests that sent it.
+script writes and reads with their frame, and the requests that sent it. Each
+script call's `stack` resolves like `get_request_stack`: through
+`script_identity` records in the same window to line, column and function name,
+with every walked frame when its digest names a retained stack artifact; at
+most 64 distinct positions per answer, the rest counted in
+`stacks_unresolved`.
 Cookie values are withheld as `value_withheld: true` with their byte length
 and SHA-256, like credential headers; a script write links to a sent cookie
 when their value digests are equal.
@@ -1044,7 +1055,8 @@ read with the record's `process_id`.
 
 Kind 13 `stack`, capture origin 12 `request_stack`, not sensitive, MIME
 `application/x-reb-stack`, URL `reb-stack:sha256-<hex digest>`,
-`creator_event_id` the record's sequence. Its manifest SHA-256 is the record's
+`creator_event_id` the record's sequence (a `script_cookie` write's, for its
+walked stack). Its manifest SHA-256 is the record's
 digest. Content:
 
 | Offset | Size | Field |
@@ -1074,8 +1086,9 @@ configuration.
 ### `script_identity` (type 35)
 
 Category `network`, `request_id` 0, child of the `request_initiator_stack`
-record that first named the script in this configuration. Same process,
-thread and frame. Both records share the Network and Artifact gate.
+(or `script_cookie` write) record that first named the script in this
+configuration. Same process, thread and frame. Both records share the Network
+and Artifact gate.
 
 | Offset | Size | Field |
 | ---: | ---: | --- |

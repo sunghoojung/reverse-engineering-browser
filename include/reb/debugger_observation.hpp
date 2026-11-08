@@ -43,8 +43,8 @@ namespace observation_detail {
          h.payload_size == kInlinePayloadSize && h.flags == 0 && h.session_id != 0 &&
          h.sequence_number != 0 && h.process_id != 0 &&
          (parent_required ? h.parent_event_id != 0 : true) &&
-         (h.parent_event_id == 0 || h.parent_event_id < h.sequence_number) &&
-         h.artifact_id == 0 && h.navigation_id == 0 && h.status_code == 0 && h.error_code == 0 &&
+         (h.parent_event_id == 0 || h.parent_event_id < h.sequence_number) && h.artifact_id == 0 &&
+         h.navigation_id == 0 && h.status_code == 0 && h.error_code == 0 &&
          h.encoded_data_length == 0 && h.decoded_body_length == 0 && h.resource_type == 0 &&
          h.initiator_request_id == 0 && h.initiator_process_id == 0;
 }
@@ -87,7 +87,8 @@ namespace observation_detail {
     case EventType::kRequestWatchMatch:
       return t[0] < kObservationRequestRules && (t[1] & ~1U) == 0 && AllZero(t.subspan(2));
     case EventType::kListenerDispatch:
-      return t[0] < kObservationEventRules && t[1] >= 1 && t[1] <= 5 && OptionalFrame(t.subspan(4, 16)) &&
+      return t[0] < kObservationEventRules && t[1] >= 1 && t[1] <= 5 &&
+             OptionalFrame(t.subspan(4, 16)) &&
              AsciiName(t.subspan(21, kObservationEventTypeBytes), t[20], true);
     case EventType::kTimerObservation:
       return t[0] >= 1 && t[0] <= 2 && t[1] >= 1 && t[1] <= 2 && t[3] == 0 && (t[2] & ~1U) == 0 &&
@@ -95,8 +96,8 @@ namespace observation_detail {
     case EventType::kCspViolation:
       return t[1] >= 1 && t[1] <= 2 && AsciiName(t.subspan(3, kObservationHostBytes), t[2], false);
     case EventType::kExceptionObservation:
-      return t[0] >= 1 && t[0] <= 3 && AllZero(t.subspan(1, 3)) && OptionalFrame(t.subspan(4, 16)) &&
-             AllZero(t.subspan(20));
+      return t[0] >= 1 && t[0] <= 3 && AllZero(t.subspan(1, 3)) &&
+             OptionalFrame(t.subspan(4, 16)) && AllZero(t.subspan(20));
     case EventType::kDomMutation:
       return t[0] >= 1 && t[0] <= 3 && t[1] < kObservationDomNodes &&
              AsciiName(t.subspan(5, kObservationAttributeBytes), t[4], t[0] == 1) &&
@@ -109,13 +110,14 @@ namespace observation_detail {
 [[nodiscard]] inline bool IsValidObservationEvent(const EventRecord& event) noexcept {
   const EventType type = event.header.type;
   const bool request = type == EventType::kRequestWatchMatch;
-  if (!observation_detail::Envelope(event, request ? EventCategory::kNetwork : EventCategory::kRuntime,
-                                    type, request) ||
+  if (!observation_detail::Envelope(
+          event, request ? EventCategory::kNetwork : EventCategory::kRuntime, type, request) ||
       (request ? event.header.request_id == 0 : event.header.request_id != 0)) {
     return false;
   }
   const auto value = request_stack_detail::Decode<ObservationPayload>(event.inline_payload);
-  return observation_detail::StackSummary(value) && IsValidObservationTail(type, ObservationTail(value));
+  return observation_detail::StackSummary(value) &&
+         IsValidObservationTail(type, ObservationTail(value));
 }
 
 }  // namespace reb

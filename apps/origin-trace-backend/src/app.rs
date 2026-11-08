@@ -141,6 +141,7 @@ pub struct App {
     analysis: Mutex<Option<VmDocumentsCache>>,
     events: Arc<Mutex<event_window::EventWindowCache>>,
     requests: Arc<Mutex<RequestIndex>>,
+    initiator_frames: Arc<std::sync::Mutex<crate::request_stack::InitiatorFrames>>,
     artifact_lookup: Arc<Mutex<ArtifactLookupCache>>,
     /// Bounds concurrent `/api/events/wait` callers; a full pool refuses.
     event_waiters: Arc<Semaphore>,
@@ -232,6 +233,7 @@ impl App {
             live_browser: LiveBrowser::new(&options),
             lifecycle: Capture::new(&options),
             requests: Arc::new(Mutex::new(RequestIndex::new(&options.store))),
+            initiator_frames: Arc::default(),
             invocation_sites,
             invocation_session,
             text_digests: Arc::new(std::sync::Mutex::new(BTreeMap::new())),
@@ -753,8 +755,21 @@ impl App {
                     .and_then(|value| value.to_str().ok())
                     .map(str::to_owned);
                 let mut index = self.requests.clone().lock_owned().await;
+                let (frames, root) = (
+                    self.initiator_frames.clone(),
+                    self.options.artifacts.clone(),
+                );
                 return match self
-                    .blocking(move || index.respond(&query, tag.as_deref()))
+                    .blocking(move || {
+                        let mut answer = index.respond(&query, tag.as_deref())?;
+                        if let request_index::Answer::Document(document, _) = &mut answer {
+                            frames
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                .resolve(document, &root);
+                        }
+                        Ok(answer)
+                    })
                     .await?
                 {
                     request_index::Answer::Unchanged(tag) => Ok(not_modified(&tag)),

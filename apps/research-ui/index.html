@@ -113,6 +113,7 @@
                 <div class="inspector-tabs" role="tablist" aria-label="Request inspector">
                   <button id="inspector-tab-general" class="inspector-tab" type="button" role="tab" data-inspector-tab="general" aria-controls="exchange-inspector" aria-selected="true">General</button>
                   <button id="inspector-tab-headers" class="inspector-tab" type="button" role="tab" data-inspector-tab="headers" aria-controls="headers-inspector" aria-selected="false" tabindex="-1">Headers</button>
+                  <button id="inspector-tab-cookies" class="inspector-tab" type="button" role="tab" data-inspector-tab="cookies" aria-controls="cookies-inspector" aria-selected="false" tabindex="-1">Cookies</button>
                   <button id="inspector-tab-initiator" class="inspector-tab" type="button" role="tab" data-inspector-tab="initiator" aria-controls="request-inspector" aria-selected="false" tabindex="-1">Initiator</button>
                   <button id="inspector-tab-timing" class="inspector-tab" type="button" role="tab" data-inspector-tab="timing" aria-controls="request-inspector" aria-selected="false" tabindex="-1">Timing</button>
                   <button id="inspector-tab-signals" class="inspector-tab" type="button" role="tab" data-inspector-tab="signals" aria-controls="request-inspector" aria-selected="false" tabindex="-1">Signals</button>
@@ -120,6 +121,7 @@
                 </div>
                 <div id="exchange-inspector" class="exchange-inspector" role="tabpanel" aria-labelledby="inspector-tab-general"></div>
                 <div hidden id="headers-inspector" class="exchange-inspector traffic-headers" role="tabpanel" aria-labelledby="inspector-tab-headers"></div>
+                <div hidden id="cookies-inspector" class="exchange-inspector traffic-headers" role="tabpanel" aria-labelledby="inspector-tab-cookies"></div>
                 <div hidden id="request-inspector" class="request-inspector" role="tabpanel" aria-labelledby="inspector-tab-initiator" tabindex="0">
                   <h1 id="request-prompt">Choose a request value and trace where it came from</h1>
                   <div id="request-package-entry" class="package-entry" hidden><button class="secondary-button" type="button" data-screen="evidence">Inspect observations &amp; artifacts</button><span>Recorded links, context correlations and missing evidence</span></div>
@@ -799,6 +801,7 @@
     <script src="source_search.js"></script>
     <script src="traffic_view.js"></script>
     <script src="traffic_headers.js"></script>
+    <script src="traffic_cookies.js"></script>
     <script src="captured_client.js"></script>
     <script src="captured_export_formats.js"></script>
     <script src="vm_debugger.js"></script>

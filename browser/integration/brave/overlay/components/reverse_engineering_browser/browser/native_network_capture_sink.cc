@@ -23,6 +23,11 @@
 #include "brave/components/reverse_engineering_browser/common/native_network_request.h"
 #include "content/public/browser/browser_context.h"
 #include "crypto/hash.h"
+#include "net/cookies/canonical_cookie.h"
+#include "net/cookies/cookie_access_result.h"
+#include "net/cookies/cookie_constants.h"
+#include "net/cookies/cookie_inclusion_status.h"
+#include "net/cookies/cookie_partition_key.h"
 #include "net/http/http_request_headers.h"
 #include "net/http/http_response_headers.h"
 #include "net/url_request/redirect_info.h"
@@ -197,8 +202,82 @@ std::uint64_t RequestIdOfHeaderId(const std::string_view id) noexcept {
 
 void ForwardNetworkHeaders(const NativeNetworkHeadersKind kind,
                            const std::string_view devtools_request_id,
-                           const std::vector<network::mojom::HttpRawHeaderPairPtr>& headers) {
-  NativeNetworkCaptureSink::Get().RecordNetworkHeaders(kind, devtools_request_id, headers);
+                           const std::vector<network::mojom::HttpRawHeaderPairPtr>& headers,
+                           const NativeNetworkCookies cookies) {
+  NativeNetworkCaptureSink::Get().RecordNetworkHeaders(kind, devtools_request_id, headers, cookies);
+}
+
+std::uint8_t SameSiteCode(const net::CookieSameSite same_site) noexcept {
+  switch (same_site) {
+    case net::CookieSameSite::UNSPECIFIED:
+      return 1;
+    case net::CookieSameSite::NO_RESTRICTION:
+      return 2;
+    case net::CookieSameSite::LAX_MODE:
+      return 3;
+    case net::CookieSameSite::STRICT_MODE:
+      return 4;
+  }
+  return 0;
+}
+
+// One cookie as the list artifact records it. Value() and the partition site
+// are copies, so the entry is only valid inside visit.
+template <class Visit>
+void VisitCookie(const net::CanonicalCookie* const cookie,
+                 const net::CookieAccessResult& access,
+                 const std::string_view line,
+                 Visit&& visit) {
+  NativeCookieEntry entry;
+  entry.exclusion_reasons = access.status.exclusion_reasons().ToEnumBitmask();
+  entry.warning_reasons = access.status.warning_reasons().ToEnumBitmask();
+  entry.line = line;
+  std::string value;
+  std::string site;
+  if (cookie) {
+    value = cookie->Value();
+    entry.flags = static_cast<std::uint8_t>(kNativeCookieParsed |
+                                            (cookie->IsHttpOnly() ? kNativeCookieHttpOnly : 0) |
+                                            (cookie->SecureAttribute() ? kNativeCookieSecure : 0) |
+                                            (cookie->IsDomainCookie() ? kNativeCookieDomain : 0));
+    if (const auto& key = cookie->PartitionKey()) {
+      site = key->site().Serialize();
+      entry.flags =
+          static_cast<std::uint8_t>(entry.flags | kNativeCookiePartitioned |
+                                    (key->IsThirdParty() ? kNativeCookieCrossSiteAncestor : 0));
+    }
+    entry.same_site = SameSiteCode(cookie->SameSite());
+    entry.priority = static_cast<std::uint8_t>(static_cast<int>(cookie->Priority()) + 1);
+    entry.effective_same_site =
+        static_cast<std::uint8_t>(static_cast<int>(access.effective_same_site) + 1);
+    entry.source_scheme = static_cast<std::uint8_t>(cookie->SourceScheme());
+    entry.source_port = cookie->SourcePort();
+    entry.expiry_ms =
+        cookie->ExpiryDate().is_null() ? 0 : cookie->ExpiryDate().InMillisecondsSinceUnixEpoch();
+    entry.name = cookie->Name();
+    entry.value = value;
+    entry.domain = cookie->Domain();
+    entry.path = cookie->Path();
+    entry.partition_site = site;
+  }
+  visit(static_cast<const NativeCookieEntry&>(entry));
+}
+
+auto SentCookies(const std::vector<net::CookieWithAccessResult>& list) {
+  return [&list](const auto& visit) {
+    for (const auto& item : list) {
+      VisitCookie(&item.cookie, item.access_result, {}, visit);
+    }
+  };
+}
+
+auto ReceivedCookies(const std::vector<net::CookieAndLineWithAccessResult>& list) {
+  return [&list](const auto& visit) {
+    for (const auto& item : list) {
+      VisitCookie(item.cookie ? &*item.cookie : nullptr, item.access_result, item.cookie_string,
+                  visit);
+    }
+  };
 }
 
 std::uint8_t ReferrerPolicyCode(const net::ReferrerPolicy policy) noexcept {
@@ -296,6 +375,7 @@ void NativeNetworkCaptureSink::SetEmitter(const NativeProbeEmitter emitter,
     shared_header_blocks_.clear();
     header_bytes_ = 0;
     unattributed_header_blocks_ = 0;
+    unattributed_cookie_lists_ = 0;
   }
   SetNativeNetworkHeadersObserver(emitter && capture_content ? &ForwardNetworkHeaders : nullptr);
   emitter_.store(emitter, std::memory_order_release);
@@ -339,44 +419,98 @@ void NativeNetworkCaptureSink::EmitHeaderBlock(const NativeProbeEmitter emitter,
     hasher.Update(block);
     hasher.Finish(summary.sha256);
     const bool response = type == NativeProbeType::kResponseHeaders;
-    std::array<std::uint8_t, 37> key{};
-    key[0] = response ? 1 : 0;
-    for (std::size_t i = 0; i < 4; ++i) {
-      key[1 + i] = static_cast<std::uint8_t>((summary.block_length >> (8U * i)) & 0xffU);
-    }
-    std::copy(summary.sha256.begin(), summary.sha256.end(), key.begin() + 5);
-    auto& artifacts = NativeArtifactCaptureSink::Get();
-    if (const auto shared = shared_header_blocks_.find(key);
-        shared != shared_header_blocks_.end()) {
-      summary.state = NativeHeaderState::kCapturedShared;
-      event.header.artifact_id = shared->second;
-    } else if (!artifacts.IsEnabled()) {
-      summary.state = NativeHeaderState::kNotCapturedArtifactUnavailable;
-    } else if (url.empty() || url.size() > kNativeArtifactMaxUrlBytes) {
-      summary.state = NativeHeaderState::kNotCapturedUrl;
-    } else if (block.size() >
-               kNativeHeaderSessionBytes - std::min(kNativeHeaderSessionBytes, header_bytes_)) {
-      summary.state = NativeHeaderState::kNotCapturedSessionBudget;
-    } else {
-      const std::size_t size = block.size();
-      // The header record is the artifact's creator, as for request bodies.
-      event.header.artifact_id = artifacts.CaptureHeaderBlock(
-          response ? NativeArtifactKind::kResponseHeaders : NativeArtifactKind::kRequestHeaders,
-          parent.request_id, parent.frame_id, event.header.sequence_number, std::string(url),
-          std::move(block));
-      if (event.header.artifact_id == 0) {
-        summary.state = NativeHeaderState::kNotCapturedTransferRefused;
-      } else {
-        summary.state = NativeHeaderState::kCaptured;
-        header_bytes_ += size;
-        if (shared_header_blocks_.size() < kNativeHeaderShareEntries) {
-          shared_header_blocks_.emplace(key, event.header.artifact_id);
-        }
-      }
-    }
+    summary.state = RetainBlock(
+        response ? NativeArtifactKind::kResponseHeaders : NativeArtifactKind::kRequestHeaders,
+        response ? 1 : 0, parent, url, std::move(block), summary.sha256, event);
   }
   summary.unattributed_blocks = unattributed_header_blocks_;
   event.inline_payload = EncodeNativeHeaderBlockPayload(summary);
+  emitter(event);
+}
+
+NativeHeaderState NativeNetworkCaptureSink::RetainBlock(const NativeArtifactKind kind,
+                                                        const std::uint8_t share_kind,
+                                                        const NativeProbeHeader& parent,
+                                                        const std::string_view url,
+                                                        std::vector<std::uint8_t> block,
+                                                        const std::array<std::uint8_t, 32>& sha256,
+                                                        NativeProbeEvent& event) {
+  std::array<std::uint8_t, 37> key{};
+  key[0] = share_kind;
+  for (std::size_t i = 0; i < 4; ++i) {
+    key[1 + i] = static_cast<std::uint8_t>((block.size() >> (8U * i)) & 0xffU);
+  }
+  std::copy(sha256.begin(), sha256.end(), key.begin() + 5);
+  auto& artifacts = NativeArtifactCaptureSink::Get();
+  if (const auto shared = shared_header_blocks_.find(key); shared != shared_header_blocks_.end()) {
+    event.header.artifact_id = shared->second;
+    return NativeHeaderState::kCapturedShared;
+  }
+  if (!artifacts.IsEnabled()) {
+    return NativeHeaderState::kNotCapturedArtifactUnavailable;
+  }
+  if (url.empty() || url.size() > kNativeArtifactMaxUrlBytes) {
+    return NativeHeaderState::kNotCapturedUrl;
+  }
+  if (block.size() >
+      kNativeHeaderSessionBytes - std::min(kNativeHeaderSessionBytes, header_bytes_)) {
+    return NativeHeaderState::kNotCapturedSessionBudget;
+  }
+  const std::size_t size = block.size();
+  // The record is the artifact's creator, as for request bodies.
+  event.header.artifact_id = artifacts.CaptureHeaderBlock(kind, parent.request_id, parent.frame_id,
+                                                          event.header.sequence_number,
+                                                          std::string(url), std::move(block));
+  if (event.header.artifact_id == 0) {
+    return NativeHeaderState::kNotCapturedTransferRefused;
+  }
+  header_bytes_ += size;
+  if (shared_header_blocks_.size() < kNativeHeaderShareEntries) {
+    shared_header_blocks_.emplace(key, event.header.artifact_id);
+  }
+  return NativeHeaderState::kCaptured;
+}
+
+template <class ForEach>
+void NativeNetworkCaptureSink::EmitCookieList(const NativeProbeEmitter emitter,
+                                              const NativeProbeHeader& parent,
+                                              NativeCookieListSummary summary,
+                                              const std::string_view url,
+                                              ForEach for_each) {
+  std::uint64_t length = kNativeCookieListHeaderBytes;
+  std::uint32_t count = 0;
+  std::uint32_t blocked = 0;
+  for_each([&length, &count, &blocked](const NativeCookieEntry& entry) {
+    length += NativeCookieEntrySize(entry);
+    ++count;
+    blocked += entry.exclusion_reasons != 0 ? 1 : 0;
+  });
+  summary.cookie_count = count;
+  summary.blocked_count = blocked;
+  NativeProbeEvent event = MakeChildEvent(NativeProbeType::kCookieList, parent);
+  if (count == 0) {
+    summary.state = NativeHeaderState::kEmpty;
+    crypto::hash::Hasher hasher(crypto::hash::HashKind::kSha256);
+    hasher.Finish(summary.sha256);
+  } else if (length > kNativeCookieListLimitBytes) {
+    summary.list_length = static_cast<std::uint32_t>(
+        std::min<std::uint64_t>(length, std::numeric_limits<std::uint32_t>::max()));
+    summary.state = NativeHeaderState::kNotCapturedBlockLimit;
+  } else {
+    summary.list_length = static_cast<std::uint32_t>(length);
+    std::vector<std::uint8_t> list;
+    list.reserve(static_cast<std::size_t>(length));
+    AppendNativeCookieListHeader(list, summary.direction, count);
+    for_each([&list](const NativeCookieEntry& entry) { AppendNativeCookieEntry(list, entry); });
+    crypto::hash::Hasher hasher(crypto::hash::HashKind::kSha256);
+    hasher.Update(list);
+    hasher.Finish(summary.sha256);
+    summary.state = RetainBlock(NativeArtifactKind::kCookieList,
+                                summary.direction == NativeCookieDirection::kSent ? 2 : 3, parent,
+                                url, std::move(list), summary.sha256, event);
+  }
+  summary.unattributed_lists = unattributed_cookie_lists_;
+  event.inline_payload = EncodeNativeCookieListPayload(summary);
   emitter(event);
 }
 
@@ -761,7 +895,8 @@ void NativeNetworkCaptureSink::RecordRequestCompleted(
 void NativeNetworkCaptureSink::RecordNetworkHeaders(
     const NativeNetworkHeadersKind kind,
     const std::string_view devtools_request_id,
-    const std::vector<network::mojom::HttpRawHeaderPairPtr>& headers) noexcept {
+    const std::vector<network::mojom::HttpRawHeaderPairPtr>& headers,
+    const NativeNetworkCookies cookies) noexcept {
   const NativeProbeEmitter emitter = emitter_.load(std::memory_order_acquire);
   if (!emitter || !capture_content_.load(std::memory_order_relaxed)) {
     return;
@@ -785,12 +920,31 @@ void NativeNetworkCaptureSink::RecordNetworkHeaders(
                                                    item.second.devtools_id == devtools_request_id;
                                           });
   if (tracked == tracked_headers_.end()) {
-    if (own != 0 && unattributed_header_blocks_ != std::numeric_limits<std::uint32_t>::max()) {
-      ++unattributed_header_blocks_;
+    std::uint32_t& unattributed = kind == NativeNetworkHeadersKind::kRawResponse
+                                      ? unattributed_cookie_lists_
+                                      : unattributed_header_blocks_;
+    if (own != 0 && unattributed != std::numeric_limits<std::uint32_t>::max()) {
+      ++unattributed;
     }
     return;
   }
   TrackedHeaders& entry = tracked->second;
+  if (kind == NativeNetworkHeadersKind::kRawResponse) {
+    if (!entry.raw_hop) {
+      if (unattributed_cookie_lists_ != std::numeric_limits<std::uint32_t>::max()) {
+        ++unattributed_cookie_lists_;
+      }
+      return;
+    }
+    if (cookies.received) {
+      NativeCookieListSummary summary;
+      summary.direction = NativeCookieDirection::kReceived;
+      summary.hop = entry.raw_hop->hop;
+      EmitCookieList(emitter, entry.raw_hop->parent, summary, entry.raw_hop->url,
+                     ReceivedCookies(*cookies.received));
+    }
+    return;
+  }
   const auto lines = [&headers](const auto& visit) {
     for (const auto& header : headers) {
       if (header) {
@@ -818,6 +972,12 @@ void NativeNetworkCaptureSink::RecordNetworkHeaders(
   summary.source = NativeHeaderSource::kNetwork;
   summary.hop = hop.hop;
   EmitHeaderBlock(emitter, NativeProbeType::kRequestHeaders, hop.parent, summary, hop.url, lines);
+  if (cookies.sent) {
+    NativeCookieListSummary sent;
+    sent.hop = hop.hop;
+    EmitCookieList(emitter, hop.parent, sent, hop.url, SentCookies(*cookies.sent));
+  }
+  entry.raw_hop = std::move(hop);
 }
 
 }  // namespace reb

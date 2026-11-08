@@ -23,6 +23,8 @@ headers=(
   services/network/public/cpp/resource_request_body.h url/gurl.h
   base/component_export.h base/synchronization/lock.h
   services/network/public/mojom/http_raw_headers.mojom.h
+  net/cookies/canonical_cookie.h net/cookies/cookie_access_result.h net/cookies/cookie_constants.h
+  net/cookies/cookie_inclusion_status.h net/cookies/cookie_partition_key.h
 )
 for header in "${headers[@]}"; do
   mkdir -p "$build/stubs/$(dirname "$header")"

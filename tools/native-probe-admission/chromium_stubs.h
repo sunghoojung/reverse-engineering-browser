@@ -6,6 +6,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <mutex>
 #include <new>
 #include <span>
 #include <string>
@@ -88,6 +89,22 @@ template <class T>
 T* Unretained(T* value) {
   return value;
 }
+class Lock {
+ public:
+  void Acquire() { mutex_.lock(); }
+  void Release() { mutex_.unlock(); }
+
+ private:
+  std::mutex mutex_;
+};
+class AutoLock {
+ public:
+  explicit AutoLock(Lock& lock) : lock_(lock) { lock_.Acquire(); }
+  ~AutoLock() { lock_.Release(); }
+
+ private:
+  Lock& lock_;
+};
 struct UnguessableToken {
   std::uint64_t GetHighForSerialization() const { return 1; }
   std::uint64_t GetLowForSerialization() const { return 2; }
@@ -112,6 +129,7 @@ struct NativeProbeClient {
                          const std::string&,
                          const std::vector<std::uint8_t>&,
                          const std::vector<std::uint8_t>&,
+                         bool,
                          bool) = 0;
   virtual void SetWasmSampleBudget(const std::vector<std::uint8_t>&) = 0;
   virtual void ResetWasmSampleBudgets() = 0;

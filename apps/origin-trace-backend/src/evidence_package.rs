@@ -469,7 +469,7 @@ fn identities<'a>(
                 let context = unsigned(&value["execution_context_id"], false);
                 let network_request = matches!(
                     kind,
-                    "request_body" | "request_headers" | "response_headers"
+                    "request_body" | "request_headers" | "response_headers" | "cookie_list"
                 );
                 if value["sensitive"].as_bool()
                     != Some(network_request || matches!(kind, "response_body" | "canvas_data_url"))
@@ -1746,6 +1746,8 @@ mod tests {
             "wasm_indirect_overflow",
             "request_headers",
             "response_headers",
+            "cookie_list",
+            "script_cookie",
         ] {
             let mut event: Value = serde_json::from_slice(first).unwrap();
             event["type"] = json!(kind);

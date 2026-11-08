@@ -11,7 +11,8 @@ const exe = process.env.REB_NETWORK_REQUEST_TEST ?? new URL('build/tests/network
 assert(fs.existsSync(exe), `missing ${exe}; build it with make build/tests/network-request-test`);
 const source = fs.readFileSync(new URL('apps/research-ui/evidence_models.js', root), 'utf8');
 const model = new Function(`${source}
-return {decodeRequestBodyRecord, decodeRequestTargetRecord, decodeHeaderBlockRecord, requestsFromEvents, isBrokerEvent, isBrokerResponse};`)();
+return {decodeRequestBodyRecord, decodeRequestTargetRecord, decodeHeaderBlockRecord, decodeCookieListRecord,
+  decodeScriptCookieRecord, requestsFromEvents, isBrokerEvent, isBrokerResponse};`)();
 
 const cases = JSON.parse(execFileSync(exe, ['--golden'], {encoding: 'utf8'}));
 assert(cases.length > 40 && cases.some(item => item.valid) && cases.some(item => !item.valid));
@@ -23,8 +24,9 @@ for event in json.load(sys.stdin):
 const verdicts = execFileSync('python3', ['-c', python, new URL('tools/validate-evidence-store.py', root).pathname],
   {input: JSON.stringify(cases.map(item => item.event)), encoding: 'utf8'}).trim().split('\n').map(value => value === 'true');
 cases.forEach((item, index) => {
-  const decode = item.event.type === 'request_target' ? model.decodeRequestTargetRecord
-    : item.event.type.endsWith('_headers') ? model.decodeHeaderBlockRecord : model.decodeRequestBodyRecord;
+  const decode = {request_target: model.decodeRequestTargetRecord, request_headers: model.decodeHeaderBlockRecord,
+    response_headers: model.decodeHeaderBlockRecord, cookie_list: model.decodeCookieListRecord,
+    script_cookie: model.decodeScriptCookieRecord}[item.event.type] ?? model.decodeRequestBodyRecord;
   assert.equal(decode(item.event) !== null, item.valid, `UI decoder: ${item.name}`);
   assert.equal(verdicts[index], item.valid, `Python validator: ${item.name}`);
   // The generic envelope stays acceptable so a malformed child cannot fail a poll.
@@ -116,5 +118,26 @@ assert.equal(response.hop, 1);
 assert.deepEqual(malformed, {malformed: true, kind: 'request', sequenceNumber: '24'});
 assert(model.isBrokerEvent(broken), 'a malformed header child cannot fail the poll');
 
+// Cookie lists join the hop start record; script records decode on their own.
+const sentList = Object.assign(golden('cookie list sent state 1'), {sequence_number: '16', parent_event_id: '11'});
+const receivedList = Object.assign(golden('cookie list received state 2'), {sequence_number: '25', parent_event_id: '20'});
+const strayList = Object.assign(golden('cookie list sent state 3'), {sequence_number: '26', parent_event_id: '8'});
+[row] = model.requestsFromEvents([start, target, body, sentList, redirect, receivedList, strayList], 'live');
+assert.equal(row.cookieLists.length, 2, 'a list without its exact parent is not attached');
+assert.equal(row.cookieLists[0].direction, 'sent');
+assert.equal(row.cookieLists[0].blockedCount, 1);
+assert.equal(row.cookieLists[1].direction, 'received');
+assert.equal(row.cookieLists[1].state, 'captured_shared');
+assert.equal(row.cookieLists[1].hop, 2);
+const write = model.decodeScriptCookieRecord(golden('script cookie api 1'));
+assert.equal(write.api, 'document.cookie set');
+assert.equal(write.namePrefix, 'sid');
+assert.equal(write.frame.scriptId, 77);
+assert.equal(write.frame.position, 1234);
+assert.equal(write.valueSha256, '5a'.repeat(32));
+const longName = model.decodeScriptCookieRecord(golden('script cookie long name'));
+assert.equal(longName.nameTruncated, true);
+assert.equal(longName.namePrefix, 'n'.repeat(24));
+
 console.log(`PASS network request wire: ${cases.length} C++ golden records agree with Python and the UI decoders; ` +
-  'rows join exact target/body/header children, truncated, metadata-only, malformed, missing and redirect cases');
+  'rows join exact target/body/header/cookie children, truncated, metadata-only, malformed, missing and redirect cases; script cookie records decode');

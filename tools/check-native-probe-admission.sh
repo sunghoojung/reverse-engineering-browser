@@ -16,6 +16,7 @@ headers=(
   base/memory/shared_memory_mapping.h base/memory/unsafe_shared_memory_region.h
   base/no_destructor.h base/threading/thread_local.h base/functional/bind.h
   base/task/sequenced_task_runner.h mojo/public/cpp/base/big_buffer.h
+  base/synchronization/lock.h
   mojo/public/cpp/bindings/receiver.h mojo/public/cpp/bindings/shared_remote.h
   third_party/blink/public/web/web_local_frame.h
   brave/components/reverse_engineering_browser/common/native_probe_transport.mojom.h
@@ -40,6 +41,7 @@ readonly sources
   -I"$build/include" -I"$root/include" \
   "$fixture/main.cc" "$sources/renderer/native_probe_sink.cc" \
   "$sources/renderer/native_probe_transport.cc" "$sources/common/native_probe_queue.cc" \
+  "$sources/renderer/native_script_cookie_sink.cc" \
   "$root/src/analysis/owned_vm_guest_sampler.cpp" \
   "$root/src/analysis/owned_vm_fixture.cpp" \
   "$root/src/analysis/native_vm_recorder.cpp" \

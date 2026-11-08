@@ -255,7 +255,9 @@ sessions also record request and response header blocks per hop
 ([Native network v3](../../../protocol/native-network-v3.md)): patch `0017`
 names each admitted request for the network service's raw header notifications
 and keeps the network's response headers before Brave's rewrite, and Chromium
-patch `0025` forwards those notifications to the overlay.
+patch `0025` forwards those notifications, with their sent and received cookie
+lists, to the overlay. Chromium patch `0027` records `document.cookie` and
+Cookie Store API calls in the renderer for the same sessions.
 Renderer events use a bounded shared-memory queue with Mojo lifecycle control
 and coalesced wake-ups. The browser process
 authenticates to the event broker with a session identifier and a mode-0600

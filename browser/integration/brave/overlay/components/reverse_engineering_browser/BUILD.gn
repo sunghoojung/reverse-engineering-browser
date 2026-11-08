@@ -99,12 +99,17 @@ component("renderer_sink") {
   sources = [
     "common/native_js_dispatch.h",
     "common/native_js_invocation.h",
+    "common/native_network_cookies.h",
+    "common/native_network_headers.h",
+    "common/native_network_request.h",
     "common/native_probe_event.h",
     "common/native_vm_dispatch_emit.h",
     "common/native_worker_source.cc",
     "common/native_worker_source.h",
     "renderer/native_probe_sink.cc",
     "renderer/native_probe_sink.h",
+    "renderer/native_script_cookie_sink.cc",
+    "renderer/native_script_cookie_sink.h",
     "renderer/native_worker_observation_sink.cc",
     "renderer/native_worker_observation_sink.h",
     "renderer/native_worker_source_sink.cc",
@@ -158,6 +163,8 @@ static_library("renderer") {
     "renderer/native_console_runtime.h",
     "renderer/native_probe_transport.cc",
     "renderer/native_probe_transport.h",
+    "renderer/native_script_position.cc",
+    "renderer/native_script_position.h",
   ]
 
   deps = [
@@ -210,6 +217,7 @@ source_set("browser") {
     "common/native_js_dispatch_sites.h",
     "common/native_js_invocation.h",
     "common/native_js_invocation_sites.h",
+    "common/native_network_cookies.h",
     "common/native_network_headers.h",
     "common/native_network_lifecycle.h",
     "common/native_network_request.h",

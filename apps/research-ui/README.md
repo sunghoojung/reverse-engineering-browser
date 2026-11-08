@@ -76,7 +76,7 @@ request ID stay visible but cannot open traces, signal profiles or Related VM
 candidates. Native network metadata retains the method, URL or host and
 lifecycle status only; the inspector states that headers and bodies were not
 captured instead of showing empty panes. Content capture sessions add header
-blocks, which the **Headers** tab shows.
+blocks and cookie lists, which the **Headers** and **Cookies** tabs show.
 
 Traffic selection updates only the mounted rows and selection summary when the
 retained snapshot, filters, ordering and page are unchanged. Keyboard navigation
@@ -672,8 +672,8 @@ has no newer events.
 
 Traffic uses a compact network ledger with visible resource-type filters and
 sortable Name, Status, Type, Method, and Time columns. **Capture order** restores
-the evidence order. The selected request opens General, Headers, Initiator,
-Timing, Signals and Evidence beside the ledger above 1100 px, or below it in narrow
+the evidence order. The selected request opens General, Headers, Cookies,
+Initiator, Timing, Signals and Evidence beside the ledger above 1100 px, or below it in narrow
 windows. Both panes stay within the available workspace height; the request
 ledger and inspector body scroll independently. Captured-tab and domain filters
 share a compact row at narrow widths. Native capture records the method, host,
@@ -686,7 +686,13 @@ policy), then response and request headers per redirect hop, newest first.
 Each section collapses and has **Raw** and **Copy all**; each header has
 **Copy**. A hop the network stack never reported reads "Provisional headers
 are shown". Blocks load after a size and SHA-256 check and are inserted as
-text. Response bodies are not captured, so Traffic has no response, preview,
+text. **Cookies** shows each hop's Response cookies (every attribute and the
+reason a `Set-Cookie` was blocked) and Request cookies, with **Show filtered out
+request cookies** for excluded ones and their reasons. Columns sort, values
+truncate with the full value as a tooltip, and each row has **Copy**. A name
+opens its provenance: the responses that set it, the `document.cookie` and
+Cookie Store calls that used it with their script position, and the requests
+that sent it, linked by value digest to the script write. Response bodies are not captured, so Traffic has no response, preview,
 comparison or content-search views; General states that coverage.
 Missing initiators and timing phases stay explicitly unavailable.
 Request signal profiles are owned by the exact selected session, request and root
@@ -852,6 +858,7 @@ policy and trace assertions; it is not evidence of native lifecycle behavior.
 | `pane_layout.js` | Shared pointer and keyboard pane resizing, responsive constraints, and local size preferences |
 | `traffic_view.js` | Native request ledger rows, ordering, paging and URL/method/status/name search, the General coverage view, and the saved-capture export document |
 | `traffic_headers.js` | The Headers tab: hops from native header records, checked block reads, Raw and copy |
+| `traffic_cookies.js` | The Cookies tab: checked cookie list reads, request and response tables, filtered-out cookies, sort, copy and name provenance |
 | `evidence_names.js` | Researcher names: exact identities, the closed names document, its Analyst-library store, the inline rename editor and the command palette provider |
 | `captured_client.js`, `captured_export_formats.js` | Saved-capture identity, local export dialog, and the client-project/HAR/SDL generators shared with offline commands |
 | `source_search.js` | Search all files: the literal matcher on the Find index, the bounded and cancellable search, partial-result notes and the results panel; `app.js` supplies the artifact reader and the open path |
@@ -922,10 +929,12 @@ window and the enforced 760×560 minimum it checks:
 - VM: the opcode workspace for the guest artifact shows the native guest row
   with its wide instance identity, and the physical artifact never claims a
   guest PC;
-- native-only coverage: Traffic offers only General, Headers, Initiator, Timing,
-  Signals and Evidence with no content search or Compare; Headers shows a
-  content-session request's retained blocks, Raw view and markup as text, and
-  says why a metadata-only request has none; Export offers only local-file
+- native-only coverage: Traffic offers only General, Headers, Cookies,
+  Initiator, Timing, Signals and Evidence with no content search or Compare;
+  Headers shows a content-session request's retained blocks, Raw view and
+  markup as text, and says why a metadata-only request has none; Cookies shows
+  its response and request cookies, a blocked cookie's reason, filtered-out
+  cookies on request and a name's provenance to its script write; Export offers only local-file
   SDL and says why; golden and hostile guest bytecode render as an inert hex
   view with an unclipped kind icon;
 - keyboard order and visible focus for 30 stops (Option+Tab when Full Keyboard

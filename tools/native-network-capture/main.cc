@@ -15,6 +15,7 @@
 #include "chromium_stubs.h"
 #include "crypto/hash.h"
 #include "reb/event.hpp"
+#include "reb/network_cookies.hpp"
 #include "reb/network_headers.hpp"
 #include "reb/network_request.hpp"
 namespace {
@@ -552,6 +553,228 @@ void RequestContent() {
                "body handoff, truncation, digest bound, file/blob/stream/mixed kinds, credential "
                "form, unavailable/refused/URL outcomes, count and byte budgets, redirect target\n";
 }
+
+reb::CookieListPayload Cookies(const reb::NativeProbeEvent& event) {
+  reb::CookieListPayload value;
+  assert(event.header.type == reb::NativeProbeType::kCookieList);
+  assert(reb::DecodeCookieListPayload(event.inline_payload, value));
+  return value;
+}
+std::uint64_t Le(const std::vector<std::uint8_t>& bytes, std::size_t offset, std::size_t width) {
+  std::uint64_t value = 0;
+  for (std::size_t i = 0; i < width; ++i) {
+    value |= static_cast<std::uint64_t>(bytes[offset + i]) << (8U * i);
+  }
+  return value;
+}
+// One decoded cookie of a list artifact: fixed fields and the six strings.
+struct ListedCookie {
+  std::uint64_t exclusions = 0;
+  std::uint64_t warnings = 0;
+  std::int64_t expiry = 0;
+  std::uint8_t flags = 0, same_site = 0, priority = 0, effective = 0, scheme = 0;
+  std::int32_t port = 0;
+  std::array<std::string, 6> strings;
+};
+std::vector<ListedCookie> ParseList(const std::vector<std::uint8_t>& bytes,
+                                    std::uint8_t direction) {
+  assert(bytes.size() >= 16 && Text({bytes.begin(), bytes.begin() + 4}) == "RBCK" &&
+         Le(bytes, 4, 2) == 1 && bytes[6] == direction && bytes[7] == 0 && Le(bytes, 12, 4) == 0);
+  std::vector<ListedCookie> out(Le(bytes, 8, 4));
+  std::size_t offset = 16;
+  for (auto& cookie : out) {
+    cookie.exclusions = Le(bytes, offset, 8);
+    cookie.warnings = Le(bytes, offset + 8, 8);
+    cookie.expiry = static_cast<std::int64_t>(Le(bytes, offset + 16, 8));
+    cookie.flags = bytes[offset + 24];
+    cookie.same_site = bytes[offset + 25];
+    cookie.priority = bytes[offset + 26];
+    cookie.effective = bytes[offset + 27];
+    cookie.scheme = bytes[offset + 28];
+    cookie.port = static_cast<std::int32_t>(Le(bytes, offset + 32, 4));
+    std::size_t text = offset + 64;
+    for (std::size_t i = 0; i < 6; ++i) {
+      const auto length = Le(bytes, offset + 36 + 4 * i, 4);
+      cookie.strings[i] = Text({bytes.begin() + static_cast<std::ptrdiff_t>(text),
+                                bytes.begin() + static_cast<std::ptrdiff_t>(text + length)});
+      text += length;
+    }
+    offset = text;
+  }
+  assert(offset == bytes.size());
+  return out;
+}
+
+// "Cookies" in protocol/native-network-v3.md, through the production sink and hook.
+void CookieLists() {
+  auto& sink = reb::NativeNetworkCaptureSink::Get();
+  auto& artifacts = reb::NativeArtifactCaptureSink::Get();
+  const auto mask = reb::NativeProbeCategoryMask(reb::NativeProbeCategory::kNetwork);
+  network::ResourceRequest request;
+  request.url = GURL("https", "echo.test", "/login", "next=1");
+  const auto start = [&](std::uint64_t id) {
+    request.devtools_request_id.reset();
+    sink.RecordRequestStarted(id, 0, 0, 4, 5, 11, 12, request);
+    sink.AssignNetworkHeadersId(id, request);
+  };
+  net::CookieWithAccessResult session;
+  session.cookie.name = "sid";
+  session.cookie.value = "s3cret";
+  session.cookie.domain = ".echo.test";
+  session.cookie.path = "/";
+  session.cookie.secure = true;
+  session.cookie.http_only = true;
+  session.cookie.same_site = net::CookieSameSite::LAX_MODE;
+  session.cookie.priority = net::COOKIE_PRIORITY_HIGH;
+  session.cookie.expiry.ms = 1700000000000;
+  session.cookie.source_scheme = net::CookieSourceScheme::kSecure;
+  session.cookie.source_port = 443;
+  session.cookie.partition_key = net::CookiePartitionKey{{"https://top.test"}, true};
+  session.access_result.effective_same_site = net::CookieEffectiveSameSite::LAX_MODE;
+  net::CookieWithAccessResult strict;
+  strict.cookie.name = "pref";
+  strict.cookie.value = "dark";
+  strict.cookie.domain = "echo.test";
+  strict.cookie.path = "/settings";
+  strict.cookie.same_site = net::CookieSameSite::STRICT_MODE;
+  strict.access_result.status.exclusions = 1U << 5U;  // EXCLUDE_SAMESITE_STRICT
+  strict.access_result.status.warnings = 1U << 0U;
+  strict.access_result.effective_same_site = net::CookieEffectiveSameSite::STRICT_MODE;
+  const std::vector<net::CookieWithAccessResult> sent = {session, strict};
+  const reb::NativeNetworkCookies sent_cookies{.sent = &sent};
+  const std::string id = "reb-00000000000002bc";
+
+  // Metadata-only: no cookie record.
+  sink.SetEmitter(Emit, 31, mask, 200);
+  events.clear();
+  start(700);
+  reb::NotifyNativeNetworkHeaders(kRaw, id, Raw({{"cookie", "sid=s3cret"}}), sent_cookies);
+  assert(CountType(reb::NativeProbeType::kCookieList) == 0);
+
+  // A raw request's sent list joins its hop with the excluded cookie and reasons.
+  sink.SetEmitter(Emit, 31, mask, 200, true);
+  start(700);
+  const auto started = Last(reb::NativeProbeType::kRequestStarted).header;
+  events.clear();
+  reb::NotifyNativeNetworkHeaders(kRaw, id, Raw({{"cookie", "sid=s3cret"}}), sent_cookies);
+  const auto list = Last(reb::NativeProbeType::kCookieList);
+  auto value = Cookies(list);
+  assert(AllValid() && list.header.parent_event_id == started.sequence_number &&
+         list.header.request_id == 700 &&
+         value.direction == static_cast<std::uint8_t>(reb::CookieDirection::kSent) &&
+         value.state == static_cast<std::uint8_t>(reb::HeaderState::kCaptured) &&
+         value.cookie_count == 2 && value.blocked_count == 1 && value.hop == 0);
+  const auto& call = artifacts.header_calls.back();
+  assert(call.kind == reb::NativeArtifactKind::kCookieList &&
+         call.creator_event_id == list.header.sequence_number &&
+         call.url == "https://echo.test/login?next=1" && call.content.size() == value.list_length &&
+         value.sha256 == crypto::hash::Sha256(Text(call.content)) &&
+         list.header.artifact_id == artifacts.next_artifact_id - 1);
+  auto cookies = ParseList(call.content, 1);
+  assert(cookies.size() == 2);
+  assert(cookies[0].exclusions == 0 && cookies[0].flags == 0x3f && cookies[0].same_site == 3 &&
+         cookies[0].priority == 3 && cookies[0].effective == 2 && cookies[0].scheme == 2 &&
+         cookies[0].port == 443 && cookies[0].expiry == 1700000000000 &&
+         (cookies[0].strings ==
+          std::array<std::string, 6>{"sid", "s3cret", ".echo.test", "/", "https://top.test", ""}));
+  assert(cookies[1].exclusions == 32 && cookies[1].warnings == 1 && cookies[1].flags == 1 &&
+         cookies[1].same_site == 4 && cookies[1].priority == 2 && cookies[1].effective == 3 &&
+         cookies[1].port == -1 && cookies[1].expiry == 0 && cookies[1].strings[0] == "pref");
+
+  // The received list follows on the same pipe and joins that hop; an
+  // unparsed line keeps only its reasons and text.
+  net::CookieAndLineWithAccessResult blocked;
+  blocked.cookie = session.cookie;
+  blocked.cookie->name = "track";
+  blocked.cookie->partition_key.reset();
+  blocked.cookie_string = "track=1; SameSite=None";
+  blocked.access_result.status.exclusions = 1U << 8U;  // EXCLUDE_SAMESITE_NONE_INSECURE
+  net::CookieAndLineWithAccessResult unparsed;
+  unparsed.cookie_string = "bad\x01=1";
+  unparsed.access_result.status.exclusions = 1U << 24U;  // EXCLUDE_DISALLOWED_CHARACTER
+  const std::vector<net::CookieAndLineWithAccessResult> received = {blocked, unparsed};
+  events.clear();
+  reb::NotifyNativeNetworkHeaders(reb::NativeNetworkHeadersKind::kRawResponse, id,
+                                  Raw({{"set-cookie", "track=1; SameSite=None"}}),
+                                  {.received = &received});
+  assert(events.size() == 1 && AllValid());
+  value = Cookies(events[0]);
+  assert(events[0].header.parent_event_id == started.sequence_number &&
+         value.direction == static_cast<std::uint8_t>(reb::CookieDirection::kReceived) &&
+         value.cookie_count == 2 && value.blocked_count == 2 && value.hop == 0);
+  cookies = ParseList(artifacts.header_calls.back().content, 2);
+  assert(cookies[0].strings[0] == "track" && cookies[0].strings[5] == "track=1; SameSite=None" &&
+         cookies[0].flags == 0x27 && cookies[0].exclusions == 256);
+  assert(cookies[1].flags == 0 && cookies[1].same_site == 0 && cookies[1].priority == 0 &&
+         cookies[1].effective == 0 && cookies[1].port == 0 &&
+         cookies[1].exclusions == (1U << 24U) &&
+         (cookies[1].strings == std::array<std::string, 6>{"", "", "", "", "", "bad\x01=1"}));
+
+  // An empty list after a redirect is recorded for hop 1, with no artifact.
+  net::RedirectInfo redirect;
+  redirect.new_url = GURL("https", "echo.test", "/home");
+  network::mojom::URLResponseHead head;
+  head.headers = std::make_shared<net::HttpResponseHeaders>();
+  head.headers->code = 302;
+  head.emitted_extra_info = true;
+  sink.RecordRequestRedirected(700, 0, 0, 4, 5, 11, 12, redirect, head);
+  const auto redirected = Last(reb::NativeProbeType::kRequestRedirected).header;
+  const std::vector<net::CookieWithAccessResult> none;
+  events.clear();
+  reb::NotifyNativeNetworkHeaders(kRaw, id, Raw({{":path", "/home"}}), {.sent = &none});
+  value = Cookies(Last(reb::NativeProbeType::kCookieList));
+  assert(AllValid() &&
+         Last(reb::NativeProbeType::kCookieList).header.parent_event_id ==
+             redirected.sequence_number &&
+         value.state == static_cast<std::uint8_t>(reb::HeaderState::kEmpty) && value.hop == 1 &&
+         value.cookie_count == 0 && value.list_length == 0 &&
+         Last(reb::NativeProbeType::kCookieList).header.artifact_id == 0 &&
+         value.sha256 == crypto::hash::Sha256(std::string()));
+
+  // A later request sending the same cookies shares the retained list.
+  const auto calls = artifacts.header_calls.size();
+  start(701);
+  events.clear();
+  reb::NotifyNativeNetworkHeaders(kRaw, "reb-00000000000002bd", Raw({{"cookie", "sid=s3cret"}}),
+                                  sent_cookies);
+  value = Cookies(Last(reb::NativeProbeType::kCookieList));
+  assert(AllValid() &&
+         value.state == static_cast<std::uint8_t>(reb::HeaderState::kCapturedShared) &&
+         Last(reb::NativeProbeType::kCookieList).header.artifact_id == list.header.artifact_id &&
+         artifacts.header_calls.size() == calls);
+
+  // A response with no raw request yet, and one after completion, are counted.
+  start(702);
+  events.clear();
+  reb::NotifyNativeNetworkHeaders(reb::NativeNetworkHeadersKind::kRawResponse,
+                                  "reb-00000000000002be", {}, {.received = &received});
+  network::URLLoaderCompletionStatus status;
+  sink.RecordRequestCompleted(701, 0, 0, 4, 5, 11, 12, status);
+  reb::NotifyNativeNetworkHeaders(reb::NativeNetworkHeadersKind::kRawResponse,
+                                  "reb-00000000000002bd", {}, {.received = &received});
+  assert(CountType(reb::NativeProbeType::kCookieList) == 0);
+  reb::NotifyNativeNetworkHeaders(kRaw, "reb-00000000000002be", Raw({{"a", "b"}}), sent_cookies);
+  assert(Cookies(Last(reb::NativeProbeType::kCookieList)).unattributed_lists == 2);
+
+  // Beyond 2 MiB: counts and length only.
+  std::vector<net::CookieWithAccessResult> huge(520, session);
+  for (auto& item : huge) {
+    item.cookie.value.assign(4000, 'v');
+  }
+  start(703);
+  events.clear();
+  reb::NotifyNativeNetworkHeaders(kRaw, "reb-00000000000002bf", Raw({{"a", "b"}}), {.sent = &huge});
+  value = Cookies(Last(reb::NativeProbeType::kCookieList));
+  assert(AllValid() &&
+         value.state == static_cast<std::uint8_t>(reb::HeaderState::kNotCapturedBlockLimit) &&
+         value.cookie_count == 520 && value.list_length > reb::kCookieListLimitBytes &&
+         Last(reb::NativeProbeType::kCookieList).header.artifact_id == 0);
+  sink.SetEmitter(nullptr, 0, 0, 0, true);
+  std::cout << "PASS native cookie lists: metadata-only none, sent list with excluded cookie and "
+               "reasons, every attribute, received list joined to its raw request's hop, "
+               "unparsed line, empty redirect list, sharing, early and late lists counted, "
+               "2 MiB limit\n";
+}
 }  // namespace
 int main() {
   auto& sink = reb::NativeNetworkCaptureSink::Get();
@@ -648,4 +871,5 @@ int main() {
          "synthetic/abort provenance, terminal-once/session rollover, truncation/queue loss\n";
   RequestContent();
   HeaderBlocks();
+  CookieLists();
 }

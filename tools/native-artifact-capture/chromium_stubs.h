@@ -292,6 +292,7 @@ class NativeProbeSession {
   const std::vector<std::uint8_t>& js_dispatch_sites() const { return js_sites; }
   const std::vector<std::uint8_t>& js_invocation_sites() const { return invocation_sites; }
   bool js_invocation_digests() const { return invocation_digests; }
+  bool capture_request_content() const { return request_content; }
   const NativeWasmSampleBudgetPolicy& wasm_sample_budget() const { return wasm_budget; }
   void Emit(const NativeProbeEvent& event) const {
     if (emitted)
@@ -305,6 +306,7 @@ class NativeProbeSession {
   std::vector<std::uint8_t> js_sites;
   std::vector<std::uint8_t> invocation_sites;
   bool invocation_digests = false;
+  bool request_content = false;
   NativeWasmSampleBudgetPolicy wasm_budget{};
   std::function<void(const NativeProbeEvent&)> emitted;
 
@@ -416,6 +418,7 @@ class NativeProbeClient {
                          const std::string&,
                          const std::vector<std::uint8_t>&,
                          const std::vector<std::uint8_t>&,
+                         bool,
                          bool) = 0;
   virtual void SetWasmSampleBudget(const std::vector<std::uint8_t>&) = 0;
   virtual void ResetWasmSampleBudgets() = 0;

@@ -1255,9 +1255,9 @@ const summaryState = {selectedRequestId: "current", requests: [uiRequest("curren
   trafficDetailOpen: true, trafficSelectionNotice: null};
 const summaryElements = {};
 for (const name of ["selectedMethod", "selectedStatus", "selectedUrl", "requestCopyUrl", "requestCollectionPivot", "requestInspector", "requestFilter"]) summaryElements[name] = new TrafficFixtureNode();
-const summaryNodes = new Map(["#exchange-inspector", "#headers-inspector", ".traffic-grid", ".detail-pane", "#request-evidence-toggle", "#request-package-entry"].map(key => [key, new TrafficFixtureNode()]));
-let renderedSummaryRequest, renderedHeadersRequest;
-const summaryTabs = ["general", "headers"].map(name => Object.assign(new TrafficFixtureNode("button"), {dataset: {inspectorTab: name}}));
+const summaryNodes = new Map(["#exchange-inspector", "#headers-inspector", "#cookies-inspector", ".traffic-grid", ".detail-pane", "#request-evidence-toggle", "#request-package-entry"].map(key => [key, new TrafficFixtureNode()]));
+let renderedSummaryRequest, renderedHeadersRequest, renderedCookiesRequest;
+const summaryTabs = ["general", "headers", "cookies"].map(name => Object.assign(new TrafficFixtureNode("button"), {dataset: {inspectorTab: name}}));
 const summaryInspector = runInNewContext(
   appSection("      function updateSelectionSummary(", "      function selectRequest(") +
   appSection("      function renderInspector()", "      function renderEvidence()") + ";renderInspector", {
@@ -1265,6 +1265,8 @@ const summaryInspector = runInNewContext(
     document: {querySelectorAll: selector => selector === ".inspector-tab" ? summaryTabs : [], querySelector: selector => summaryNodes.get(selector)},
     renderTrafficDetails: (_container, request) => {renderedSummaryRequest = request;},
     renderTrafficHeaders: (container, request) => {assert.equal(container, summaryNodes.get("#headers-inspector")); renderedHeadersRequest = request;},
+    renderTrafficCookies: (container, request, _rerender, context) => {assert.equal(container, summaryNodes.get("#cookies-inspector")); renderedCookiesRequest = [request, context];},
+    selectRequest: () => {},
     // Body loading is outside this slice; its states are checked with traffic_view.js.
     requestBodyView: () => null, requestBodyViewKey: () => '',
   });
@@ -1285,9 +1287,17 @@ assert.equal(renderedHeadersRequest, summaryState.requests[0]);
 assert.equal(summaryNodes.get("#headers-inspector").hidden, false);
 assert.equal(summaryNodes.get("#exchange-inspector").hidden, true);
 assert.equal(summaryElements.requestInspector.hidden, true);
+summaryState.inspectorTab = "cookies";
+summaryInspector();
+assert.equal(renderedCookiesRequest[0], summaryState.requests[0]);
+assert.equal(renderedCookiesRequest[1].requests, summaryState.requests, "provenance reads the loaded requests");
+assert.equal(summaryNodes.get("#cookies-inspector").hidden, false);
+assert.equal(summaryNodes.get("#headers-inspector").hidden, true);
+assert.equal(summaryElements.requestInspector.hidden, true);
 summaryState.inspectorTab = "general";
 summaryInspector();
 assert.equal(summaryNodes.get("#headers-inspector").hidden, true);
+assert.equal(summaryNodes.get("#cookies-inspector").hidden, true);
 summaryState.requests = []; summaryState.selectedRequestId = null;
 summaryInspector();
 assert.equal(summaryElements.selectedStatus.textContent, "-");

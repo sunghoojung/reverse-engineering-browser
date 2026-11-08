@@ -1401,6 +1401,276 @@
         }
       }
     },
+    "/api/request-cookies": {
+      "get": {
+        "operationId": "get_request_cookies",
+        "summary": "get request cookies",
+        "description": "Cookie lists of one native request per redirect hop (\"Cookies\" in protocol/native-network-v3.md), from the newest 1024 records of that request within the last 64 MiB of events. Recorded only in sessions that retain request content. Each hop has the cookies the network service sent with the request, including excluded ones, and the Set-Cookie cookies it received, each with state, counts, byte length and SHA-256. Retained lists are read after a size and SHA-256 check: every cookie has its name, domain, path, expiry, size, HttpOnly, Secure, SameSite, effective SameSite, partition key, priority, source scheme and port, and its exclusion and warning reasons. Values are withheld as value_withheld with their byte length and SHA-256, and a received line as line_withheld with its length: like credential headers they stay in the binary artifact.",
+        "tags": [
+          "request-cookies"
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RequestCookies"
+                }
+              }
+            },
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store",
+                  "type": "string"
+                }
+              },
+              "ETag": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Host/Origin/Sec-Fetch-Site rejected.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Store, read, validation, or internal failure.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "304": {
+            "description": "ETag unchanged; no response body.",
+            "headers": {
+              "ETag": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store",
+                  "type": "string"
+                }
+              }
+            }
+          }
+        },
+        "x-source": "apps/origin-trace-backend/src/app.rs",
+        "parameters": [
+          {
+            "name": "session_id",
+            "in": "query",
+            "required": true,
+            "description": "Session of the request.",
+            "schema": {
+              "$ref": "#/components/schemas/NonzeroUint64String"
+            }
+          },
+          {
+            "name": "request_id",
+            "in": "query",
+            "required": true,
+            "description": "Browser request ID of the request records.",
+            "schema": {
+              "$ref": "#/components/schemas/NonzeroUint64String"
+            }
+          },
+          {
+            "name": "If-None-Match",
+            "in": "header",
+            "required": false,
+            "description": "Exact server ETag from a previous response.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "x-reb-execution": {
+          "kind": "operation",
+          "effects": [],
+          "state_dependent_effects": [],
+          "uncertainties": [],
+          "prerequisites": [
+            {
+              "id": "local-request",
+              "condition": "Host must name the exact loopback listening port; cross-site Sec-Fetch-Site is rejected; an optional Origin must pass App::trusted."
+            }
+          ],
+          "confirmations": [],
+          "notes": "Reads local state or stored evidence. No browser mutation is requested by this handler; health/events/artifacts can probe local service sockets. Evidence tails and current state are not stable snapshots.",
+          "sources": [
+            {
+              "path": "apps/origin-trace-backend/src/app.rs",
+              "symbol": "App::get"
+            }
+          ]
+        },
+        "x-reb-execution-schema": {
+          "$ref": "#/components/schemas/RebExecutionMetadata"
+        }
+      }
+    },
+    "/api/cookie-provenance": {
+      "get": {
+        "operationId": "get_cookie_provenance",
+        "summary": "get cookie provenance",
+        "description": "Everything that touched one cookie name in a session (\"Cookies\" in protocol/native-network-v3.md), from the newest 5000 network records within the last 64 MiB of events and at most 256 distinct retained cookie lists: the responses that set it, with attributes and block reasons; the document.cookie and Cookie Store API calls that wrote or read it, with frame, count, script frame and stack digest; and the requests that sent it. A sent cookie names the script writes whose value SHA-256 equals its own. Values are withheld with their length and SHA-256. A script record keeps 24 name bytes, so a longer name matches by length and prefix.",
+        "tags": [
+          "request-cookies"
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CookieProvenance"
+                }
+              }
+            },
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store",
+                  "type": "string"
+                }
+              },
+              "ETag": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Host/Origin/Sec-Fetch-Site rejected.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Store, read, validation, or internal failure.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "304": {
+            "description": "ETag unchanged; no response body.",
+            "headers": {
+              "ETag": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store",
+                  "type": "string"
+                }
+              }
+            }
+          }
+        },
+        "x-source": "apps/origin-trace-backend/src/app.rs",
+        "parameters": [
+          {
+            "name": "session_id",
+            "in": "query",
+            "required": true,
+            "description": "Session of the cookie records.",
+            "schema": {
+              "$ref": "#/components/schemas/NonzeroUint64String"
+            }
+          },
+          {
+            "name": "name",
+            "in": "query",
+            "required": true,
+            "description": "Cookie name, exact bytes, at most 4096.",
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 4096
+            }
+          },
+          {
+            "name": "If-None-Match",
+            "in": "header",
+            "required": false,
+            "description": "Exact server ETag from a previous response.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "x-reb-execution": {
+          "kind": "operation",
+          "effects": [],
+          "state_dependent_effects": [],
+          "uncertainties": [],
+          "prerequisites": [
+            {
+              "id": "local-request",
+              "condition": "Host must name the exact loopback listening port; cross-site Sec-Fetch-Site is rejected; an optional Origin must pass App::trusted."
+            }
+          ],
+          "confirmations": [],
+          "notes": "Reads local state or stored evidence. No browser mutation is requested by this handler; health/events/artifacts can probe local service sockets. Evidence tails and current state are not stable snapshots.",
+          "sources": [
+            {
+              "path": "apps/origin-trace-backend/src/app.rs",
+              "symbol": "App::get"
+            }
+          ]
+        },
+        "x-reb-execution-schema": {
+          "$ref": "#/components/schemas/RebExecutionMetadata"
+        }
+      }
+    },
     "/api/request-signal-profile": {
       "get": {
         "operationId": "get_request_signal_profile",
@@ -7288,6 +7558,512 @@
             ]
           }
         ]
+      },
+      "RequestCookies": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "session_id",
+          "request_id",
+          "hops",
+          "malformed_records",
+          "unattached_records"
+        ],
+        "properties": {
+          "session_id": {
+            "$ref": "#/components/schemas/NonzeroUint64String"
+          },
+          "request_id": {
+            "$ref": "#/components/schemas/NonzeroUint64String"
+          },
+          "hops": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "hop",
+                "sent",
+                "received"
+              ],
+              "properties": {
+                "hop": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 4294967295
+                },
+                "sent": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/RequestCookieList"
+                  }
+                },
+                "received": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/RequestCookieList"
+                  }
+                }
+              }
+            }
+          },
+          "malformed_records": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/NonzeroUint64String"
+            }
+          },
+          "unattached_records": {
+            "type": "integer",
+            "minimum": 0
+          }
+        }
+      },
+      "RequestCookieList": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "sequence_number",
+          "parent_event_id",
+          "state",
+          "cookie_count",
+          "blocked_count",
+          "list_bytes",
+          "sha256",
+          "artifact_id",
+          "unattributed_lists"
+        ],
+        "properties": {
+          "sequence_number": {
+            "$ref": "#/components/schemas/NonzeroUint64String"
+          },
+          "parent_event_id": {
+            "$ref": "#/components/schemas/NonzeroUint64String"
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "captured",
+              "captured_shared",
+              "empty",
+              "not_captured_block_limit",
+              "not_captured_artifact_unavailable",
+              "not_captured_transfer_refused",
+              "not_captured_session_budget",
+              "not_captured_url"
+            ]
+          },
+          "cookie_count": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 4294967295
+          },
+          "blocked_count": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 4294967295
+          },
+          "list_bytes": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 4294967295
+          },
+          "sha256": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "artifact_id": {
+            "$ref": "#/components/schemas/Uint64String"
+          },
+          "unattributed_lists": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 4294967295,
+            "description": "Received lists of requests no longer tracked or without a raw request, so far in this configuration."
+          },
+          "artifact": {
+            "type": "string",
+            "enum": [
+              "verified",
+              "missing",
+              "mismatch",
+              "malformed",
+              "unreadable"
+            ],
+            "description": "Present for retained lists."
+          },
+          "cookies": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RequestCookie"
+            }
+          }
+        }
+      },
+      "RequestCookie": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "parsed",
+          "blocked",
+          "exclusion_reasons",
+          "warning_reasons"
+        ],
+        "properties": {
+          "parsed": {
+            "type": "boolean",
+            "description": "False for a received line that failed to parse; it has only its reasons and line length."
+          },
+          "blocked": {
+            "type": "boolean"
+          },
+          "exclusion_reasons": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "warning_reasons": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "line_withheld": {
+            "const": true
+          },
+          "line_bytes": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "name": {
+            "type": "string"
+          },
+          "value_withheld": {
+            "const": true
+          },
+          "value_bytes": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "value_sha256": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "size": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "domain": {
+            "type": "string"
+          },
+          "path": {
+            "type": "string"
+          },
+          "expires_ms": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "Milliseconds since the Unix epoch; null for a session cookie."
+          },
+          "http_only": {
+            "type": "boolean"
+          },
+          "secure": {
+            "type": "boolean"
+          },
+          "same_site": {
+            "type": "string",
+            "enum": [
+              "Unspecified",
+              "None",
+              "Lax",
+              "Strict"
+            ]
+          },
+          "effective_same_site": {
+            "type": "string",
+            "enum": [
+              "None",
+              "Lax",
+              "Strict",
+              "Lax-allowing-unsafe",
+              "Undefined"
+            ]
+          },
+          "priority": {
+            "type": "string",
+            "enum": [
+              "Low",
+              "Medium",
+              "High"
+            ]
+          },
+          "partition_key": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "top_level_site",
+                  "cross_site_ancestor"
+                ],
+                "properties": {
+                  "top_level_site": {
+                    "type": "string"
+                  },
+                  "cross_site_ancestor": {
+                    "type": "boolean"
+                  }
+                }
+              }
+            ]
+          },
+          "domain_cookie": {
+            "type": "boolean"
+          },
+          "source_scheme": {
+            "type": "string",
+            "enum": [
+              "unset",
+              "non_secure",
+              "secure"
+            ]
+          },
+          "source_port": {
+            "type": "integer",
+            "minimum": -2147483648,
+            "maximum": 2147483647
+          },
+          "request_id": {
+            "$ref": "#/components/schemas/NonzeroUint64String"
+          },
+          "hop": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 4294967295
+          },
+          "sequence_number": {
+            "$ref": "#/components/schemas/NonzeroUint64String"
+          },
+          "monotonic_time_ns": {
+            "$ref": "#/components/schemas/Uint64String"
+          },
+          "written_by_script": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "process_id",
+                "sequence_number"
+              ],
+              "properties": {
+                "process_id": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 4294967295
+                },
+                "sequence_number": {
+                  "$ref": "#/components/schemas/NonzeroUint64String"
+                }
+              }
+            }
+          }
+        }
+      },
+      "CookieProvenance": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "session_id",
+          "name",
+          "set_by",
+          "script",
+          "sent_with",
+          "lists_read",
+          "lists_unread",
+          "malformed_records"
+        ],
+        "properties": {
+          "session_id": {
+            "$ref": "#/components/schemas/NonzeroUint64String"
+          },
+          "name": {
+            "type": "string"
+          },
+          "set_by": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RequestCookie"
+            }
+          },
+          "script": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ScriptCookieAccess"
+            }
+          },
+          "sent_with": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RequestCookie"
+            }
+          },
+          "lists_read": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 256
+          },
+          "lists_unread": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Distinct retained lists past the 256 read."
+          },
+          "malformed_records": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/NonzeroUint64String"
+            }
+          }
+        }
+      },
+      "ScriptCookieAccess": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "sequence_number",
+          "process_id",
+          "frame_id",
+          "tab_id",
+          "monotonic_time_ns",
+          "api",
+          "count",
+          "name_prefix_only",
+          "value_bytes",
+          "value_sha256",
+          "string_bytes",
+          "table_full",
+          "script_frame",
+          "stack_digest"
+        ],
+        "properties": {
+          "sequence_number": {
+            "$ref": "#/components/schemas/NonzeroUint64String"
+          },
+          "process_id": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 4294967295
+          },
+          "frame_id": {
+            "$ref": "#/components/schemas/Uint64String"
+          },
+          "tab_id": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 4294967295
+          },
+          "monotonic_time_ns": {
+            "$ref": "#/components/schemas/Uint64String"
+          },
+          "api": {
+            "type": "string",
+            "enum": [
+              "document.cookie set",
+              "document.cookie get",
+              "cookieStore.set",
+              "cookieStore.get",
+              "cookieStore.getAll",
+              "cookieStore.delete"
+            ]
+          },
+          "count": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 4294967295,
+            "description": "1 for a write; for a read, the reads since this key's previous record."
+          },
+          "name_prefix_only": {
+            "type": "boolean",
+            "description": "The name is longer than 24 bytes and matched by length and prefix."
+          },
+          "value_bytes": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 4294967295
+          },
+          "value_sha256": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "string_bytes": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 4294967295
+          },
+          "table_full": {
+            "type": "boolean"
+          },
+          "script_frame": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "kind",
+                  "constructor",
+                  "script_id",
+                  "position"
+                ],
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "enum": [
+                      "javascript",
+                      "wasm"
+                    ]
+                  },
+                  "constructor": {
+                    "type": "boolean"
+                  },
+                  "script_id": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 4294967295
+                  },
+                  "position": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 4294967295,
+                    "description": "UTF-16 offset into the script source."
+                  }
+                }
+              }
+            ]
+          },
+          "stack_digest": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "pattern": "^[0-9a-f]{64}$",
+            "description": "The request_initiator_stack digest of this call's stack."
+          }
+        }
       },
       "SignalProfile": {
         "title": "Request Signal Profile v1",
@@ -14128,7 +14904,8 @@
               "wasm_guest_adapter",
               "request_body",
               "request_headers",
-              "response_headers"
+              "response_headers",
+              "cookie_list"
             ]
           },
           "url": {
@@ -19585,7 +20362,9 @@
               "wasm_dispatch_overflow",
               "wasm_indirect_overflow",
               "request_headers",
-              "response_headers"
+              "response_headers",
+              "cookie_list",
+              "script_cookie"
             ]
           },
           "status_code": {
@@ -19800,7 +20579,8 @@
               "wasm_guest_adapter",
               "request_body",
               "request_headers",
-              "response_headers"
+              "response_headers",
+              "cookie_list"
             ]
           },
           "byte_size": {

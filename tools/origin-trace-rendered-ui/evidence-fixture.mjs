@@ -28,6 +28,7 @@ export const REQUEST_BODY_TARGET = '/getcaptcha/site-key?s=<svg/onload=window.__
 export const REQUEST_BODY_MARKER = '<img src=x onerror="window.__rebInjected=4">';
 export const METADATA_BODY_HOST = 'api.metadata.test';
 export const HEADER_VALUE_MARKER = '<img src=x onerror="window.__rebInjected=7">';
+export const COOKIE_VALUE_MARKER = '<img src=x onerror="window.__rebInjected=8">';
 // A retained glue script for Track calls: the real window.hsw binder, decoys
 // in a string and a comment that must never match, and two definitions of
 // o.dup that must be refused as ambiguous. Context lines carry markup as text.
@@ -161,6 +162,60 @@ function headerBlockPayload({source, block, status = 0, policy = 0, hop = 0}) {
   return payload.toString('hex');
 }
 
+// "Cookies" in protocol/native-network-v3.md: an RBCK list, its record and a
+// renderer script_cookie write.
+function cookieListBytes(direction, cookies) {
+  const header = Buffer.alloc(16);
+  header.write('RBCK', 0, 'latin1');
+  header.writeUInt16LE(1, 4);
+  header[6] = direction;
+  header.writeUInt32LE(cookies.length, 8);
+  return Buffer.concat([header, ...cookies.map(({strings, exclusions = 0n, flags = 0x07, sameSite = 3}) => {
+    const fixed = Buffer.alloc(64);
+    fixed.writeBigUInt64LE(exclusions, 0);
+    fixed[24] = flags;
+    fixed[25] = sameSite;
+    fixed[26] = 2;
+    fixed[27] = 2;
+    fixed[28] = 2;
+    fixed.writeInt32LE(443, 32);
+    const parts = strings.map(text => Buffer.from(text));
+    parts.forEach((part, index) => fixed.writeUInt32LE(part.length, 36 + index * 4));
+    return Buffer.concat([fixed, ...parts]);
+  })]);
+}
+
+function cookieListPayload(direction, bytes, count, blocked) {
+  const payload = Buffer.alloc(128);
+  payload.writeUInt16LE(1, 0);
+  payload.writeUInt16LE(128, 2);
+  payload[4] = direction;
+  payload[5] = 1;
+  payload.writeUInt32LE(count, 8);
+  payload.writeUInt32LE(blocked, 12);
+  payload.writeUInt32LE(bytes.length, 16);
+  createHash('sha256').update(bytes).digest().copy(payload, 32);
+  return payload.toString('hex');
+}
+
+function scriptCookiePayload(name, value) {
+  const payload = Buffer.alloc(128);
+  payload.writeUInt16LE(1, 0);
+  payload.writeUInt16LE(128, 2);
+  payload[4] = 1;
+  payload[5] = 2;
+  payload.writeUInt32LE(1, 8);
+  payload.writeUInt32LE(name.length, 12);
+  payload.writeUInt32LE(value.length, 16);
+  payload.writeUInt32LE(name.length + value.length + 8, 20);
+  payload[24] = 1;
+  payload.writeUInt32LE(77, 28);
+  payload.writeUInt32LE(1234, 32);
+  createHash('sha256').update(value).digest().copy(payload, 72);
+  payload.write(name, 104, 'latin1');
+  return payload.toString('hex');
+}
+
 function requestTargetPayload(target) {
   const payload = Buffer.alloc(128);
   payload.writeUInt16LE(1, 0);
@@ -199,9 +254,19 @@ async function requestBodyRequests(template, firstSequence, firstTime, artifacts
   const receivedBlock = Buffer.from('content-type: application/json\r\nset-cookie: hc=1; Secure; HttpOnly\r\n');
   const sent = row(retained, 'request_headers', headerBlockPayload({source: 2, block: sentBlock}),
     {parent_event_id: start.sequence_number, artifact_id: '321'});
+  const sentCookies = cookieListBytes(1, [{strings: ['sid', 'fixture', 'api.body.test', '/', '', '']},
+    {strings: ['pref', 'dark', 'api.body.test', '/settings', '', ''], exclusions: 1n << 5n, flags: 0x01, sameSite: 4}]);
+  const sentList = row(retained, 'cookie_list', cookieListPayload(1, sentCookies, 2, 1),
+    {parent_event_id: start.sequence_number, artifact_id: '323'});
   const response = row(retained, 'response_started', hex('application/json'), {status_code: 200});
   const received = row(retained, 'response_headers', headerBlockPayload({source: 1, block: receivedBlock, status: 200}),
     {parent_event_id: response.sequence_number, artifact_id: '322'});
+  const receivedCookies = cookieListBytes(2, [{strings: ['hc', '1', 'api.body.test', '/', '', 'hc=1; Secure; HttpOnly']},
+    {strings: ['track', COOKIE_VALUE_MARKER, 'api.body.test', '/', '', `track=${COOKIE_VALUE_MARKER}; SameSite=None`],
+      exclusions: 1n << 8n, flags: 0x01, sameSite: 2}]);
+  const receivedList = row(retained, 'cookie_list', cookieListPayload(2, receivedCookies, 2, 1),
+    {parent_event_id: start.sequence_number, artifact_id: '324'});
+  row({request_id: '0'}, 'script_cookie', scriptCookiePayload('sid', 'fixture'));
   row(retained, 'request_completed', hex('completed'), {status_code: 200});
   row({...retained, category: 'artifact'}, 'artifact_captured', hex('accepted'),
     {artifact_id: '320', parent_event_id: record.sequence_number});
@@ -216,11 +281,12 @@ async function requestBodyRequests(template, firstSequence, firstTime, artifacts
     capture_origin: 'network_request', kind: 'request_body', mime_type: 'application/json', sensitive: true,
     url: `https://${REQUEST_BODY_HOST}${REQUEST_BODY_TARGET}`}, body);
   const headerArtifacts = [];
-  for (const [id, kind, creator, bytes] of [['321', 'request_headers', sent, sentBlock], ['322', 'response_headers', received, receivedBlock]]) {
+  for (const [id, kind, creator, bytes] of [['321', 'request_headers', sent, sentBlock], ['322', 'response_headers', received, receivedBlock],
+    ['323', 'cookie_list', sentList, sentCookies], ['324', 'cookie_list', receivedList, receivedCookies]]) {
     headerArtifacts.push(await artifact(artifactsRoot, {artifact_id: id, session_id: template.session_id, navigation_id: '0',
       frame_id: template.frame_id, creator_event_id: creator.sequence_number, execution_context_id: '0',
-      capture_origin: 'network_request', kind, mime_type: 'text/plain', sensitive: true,
-      url: `https://${REQUEST_BODY_HOST}${REQUEST_BODY_TARGET}`}, bytes));
+      capture_origin: 'network_request', kind, mime_type: kind === 'cookie_list' ? 'application/x-reb-cookie-list' : 'text/plain',
+      sensitive: true, url: `https://${REQUEST_BODY_HOST}${REQUEST_BODY_TARGET}`}, bytes));
   }
   return {events, artifact: bodyArtifact, headerArtifacts};
 }

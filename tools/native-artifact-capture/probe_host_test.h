@@ -10,8 +10,10 @@ struct RecordingProbeClient final : reb::mojom::NativeProbeClient {
                  const std::string&,
                  const std::vector<std::uint8_t>& js_dispatch_sites,
                  const std::vector<std::uint8_t>& js_invocation_sites,
-                 bool js_invocation_digests) override {
+                 bool js_invocation_digests,
+                 bool capture_request_content) override {
     configured_epoch = epoch;
+    request_content = capture_request_content;
     region = std::move(queue_region);
     js_sites = js_dispatch_sites;
     invocation_sites = js_invocation_sites;
@@ -33,6 +35,7 @@ struct RecordingProbeClient final : reb::mojom::NativeProbeClient {
   std::vector<std::uint8_t> js_sites;
   std::vector<std::uint8_t> invocation_sites;
   bool invocation_digests = false;
+  bool request_content = false;
 };
 
 void NativeProbeHostGuestBoundary(reb::ArtifactReceiver& receiver) {
@@ -378,6 +381,7 @@ void NativeProbeHostJsDispatchForwarding() {
   const auto invocation_record = reb::EncodeNativeJsInvocationSite(invocation_site);
   session.invocation_sites.assign(invocation_record.begin(), invocation_record.end());
   session.invocation_digests = true;
+  session.request_content = true;
   session.emitted = [](const NativeProbeEvent& event) { Emit(event); };
   Configure(kSession, kMask);
   events.clear();
@@ -394,6 +398,7 @@ void NativeProbeHostJsDispatchForwarding() {
         "Renderer configuration carries the session's JS dispatch site records");
   Check(client.invocation_sites == session.invocation_sites && client.invocation_digests,
         "Renderer configuration carries the invocation sites and the digest opt-in");
+  Check(client.request_content, "Renderer configuration carries the request-content gate");
 
   reb::NativeJsDispatchObservationPayload payload;
   payload.shape = 2;
@@ -455,6 +460,7 @@ void NativeProbeHostJsDispatchForwarding() {
   session.js_sites.clear();
   session.invocation_sites.clear();
   session.invocation_digests = false;
+  session.request_content = false;
   session.emitted = {};
   process.frames.clear();
   std::cout << "PASS production NativeProbeHost forwards JS dispatch site records and type 21 "

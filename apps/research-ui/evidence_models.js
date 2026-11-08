@@ -35,7 +35,7 @@
           'wasm_indirect_observation', 'wasm_execution_outcome', 'js_dispatch_observation', 'js_invocation_start', 'js_invocation_settle',
           'js_invocation_request', 'wasm_dispatch_overflow', 'wasm_indirect_overflow',
           'artifact_captured', 'artifact_capture_failed', 'request_body', 'request_target',
-          'request_headers', 'response_headers'
+          'request_headers', 'response_headers', 'cookie_list', 'script_cookie'
         ])
       };
       const uint64Fields = [
@@ -61,11 +61,11 @@
       const networkLifecycleTypes = new Set(lifecycleRanks.keys());
       // Children of a lifecycle record (protocol/native-network-v2.md and v3).
       // They describe a request; they never advance its lifecycle rank.
-      const networkRequestDetailTypes = new Set(['request_target', 'request_body', 'request_headers', 'response_headers']);
-      const networkRequestArtifactKinds = new Set(['request_body', 'request_headers', 'response_headers']);
+      const networkRequestDetailTypes = new Set(['request_target', 'request_body', 'request_headers', 'response_headers', 'cookie_list']);
+      const networkRequestArtifactKinds = new Set(['request_body', 'request_headers', 'response_headers', 'cookie_list']);
       const artifactKinds = new Set([
         'javascript', 'wasm', 'source_map', 'response_body', 'canvas_data_url',
-        'bytecode_buffer', 'wasm_guest_adapter', 'request_body', 'request_headers', 'response_headers'
+        'bytecode_buffer', 'wasm_guest_adapter', 'request_body', 'request_headers', 'response_headers', 'cookie_list'
       ]);
       const artifactCaptureOrigins = new Set([
         'unknown', 'network_response', 'dynamic_javascript', 'webassembly_compile',
@@ -685,6 +685,80 @@
         };
       }
 
+      const COOKIE_LIST_LIMIT = 2 * 1024 * 1024;
+
+      // The cookie_list record ("Cookies" in protocol/native-network-v3.md),
+      // shared with the C++ core and the Python validator through
+      // tools/check-network-request-wire.mjs.
+      function decodeCookieListRecord(event) {
+        if (!isRequestChildEnvelope(event, 'cookie_list') || !isCanonicalInteger(event.artifact_id, 0n, uint64Max)) return null;
+        const bytes = bytesFromHex(event.payload);
+        const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+        const [direction, state] = [bytes[4], bytes[5]];
+        const count = view.getUint32(8, true), blocked = view.getUint32(12, true), length = view.getUint32(16, true);
+        const digest = bytes.slice(32, 64);
+        const zero = list => list.every(byte => byte === 0);
+        if (view.getUint16(0, true) !== 1 || view.getUint16(2, true) !== 128 || ![1, 2].includes(direction) ||
+            state < 1 || state > 8 || !zero(bytes.slice(6, 8)) || !zero(bytes.slice(28, 32)) || !zero(bytes.slice(64)) ||
+            blocked > count) return null;
+        const empty = state === 3, limited = state === 4;
+        if ((count === 0) !== empty || (length === 0) !== empty || (!empty && length < 16 + 64 * count) ||
+            limited !== (length > COOKIE_LIST_LIMIT) || zero(digest) !== limited) return null;
+        if ((event.artifact_id !== '0') !== (state === 1 || state === 2)) return null;
+        return {
+          direction: direction === 1 ? 'sent' : 'received', state: headerStates[state], cookieCount: count,
+          blockedCount: blocked, listLength: length, hop: view.getUint32(20, true),
+          unattributedLists: view.getUint32(24, true),
+          sha256: limited ? null : Array.from(digest, byte => byte.toString(16).padStart(2, '0')).join(''),
+          artifactId: event.artifact_id, sequenceNumber: event.sequence_number, parentEventId: event.parent_event_id,
+          sessionId: event.session_id, processId: event.process_id
+        };
+      }
+
+      const scriptCookieApis = [null, 'document.cookie set', 'document.cookie get', 'cookieStore.set',
+        'cookieStore.get', 'cookieStore.getAll', 'cookieStore.delete'];
+
+      // The renderer's script_cookie record (protocol/native-network-v3.md).
+      function decodeScriptCookieRecord(event) {
+        if (event?.type !== 'script_cookie' || event.protocol_version !== 3 || event.category !== 'network' ||
+            event.flags !== 0 || event.payload_truncated !== false || event.payload_size !== 128 ||
+            event.payload_encoding !== 'hex' || typeof event.payload !== 'string' || !/^[0-9a-f]{256}$/i.test(event.payload) ||
+            !['session_id', 'sequence_number'].every(key => isCanonicalInteger(event[key], 1n, uint64Max)) ||
+            !isSafeIntegerInRange(event.process_id, 1, 0xffffffff) ||
+            !['parent_event_id', 'request_id', 'artifact_id', 'navigation_id', 'encoded_data_length', 'decoded_body_length']
+              .every(key => event[key] === '0') ||
+            event.status_code !== 0 || event.error_code !== 0 || event.resource_type !== 0) return null;
+        const bytes = bytesFromHex(event.payload);
+        const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+        const [api, flags] = [bytes[4], bytes[5]];
+        const count = view.getUint32(8, true), nameLength = view.getUint32(12, true);
+        const valueLength = view.getUint32(16, true), stringLength = view.getUint32(20, true);
+        const frame = {kind: bytes[24], flags: bytes[25], combinator: view.getUint16(26, true),
+          scriptId: view.getUint32(28, true), position: view.getUint32(32, true), functionStart: view.getUint32(36, true)};
+        const stack = bytes.slice(40, 72), value = bytes.slice(72, 104), prefix = bytes.slice(104, 128);
+        const zero = list => list.every(byte => byte === 0);
+        if (view.getUint16(0, true) !== 1 || view.getUint16(2, true) !== 128 || api < 1 || api > 6 ||
+            (flags & ~0x0f) !== 0 || !zero(bytes.slice(6, 8)) || count === 0) return null;
+        const write = [1, 3, 6].includes(api), truncated = nameLength > 24;
+        if (truncated !== Boolean(flags & 1) || (!truncated && !zero(prefix.slice(nameLength)))) return null;
+        if (write ? count !== 1 || zero(value) || (flags & 8) : valueLength !== 0 || !zero(value)) return null;
+        if (api === 1 ? stringLength < nameLength + valueLength : api !== 2 && stringLength !== 0) return null;
+        const recorded = Boolean(flags & 2), stacked = Boolean(flags & 4);
+        const framed = [1, 2].includes(frame.kind) && frame.scriptId !== 0 && frame.combinator === 0 && (frame.flags & ~3) === 0;
+        if (recorded ? !framed : !zero(bytes.slice(24, 40))) return null;
+        if (stacked === zero(stack) || (stacked && !recorded)) return null;
+        const hex = list => Array.from(list, byte => byte.toString(16).padStart(2, '0')).join('');
+        return {
+          api: scriptCookieApis[api], write, count, nameLength, nameTruncated: truncated,
+          namePrefix: new TextDecoder('utf-8', {fatal: false}).decode(prefix.slice(0, Math.min(nameLength, 24))),
+          namePrefixHex: hex(prefix.slice(0, Math.min(nameLength, 24))),
+          valueLength, stringLength, frame: recorded ? frame : null, stackDigest: stacked ? hex(stack) : null,
+          valueSha256: write ? hex(value) : null, tableFull: Boolean(flags & 8), frameId: event.frame_id,
+          sessionId: event.session_id, processId: event.process_id, sequenceNumber: event.sequence_number,
+          monotonicTimeNs: event.monotonic_time_ns
+        };
+      }
+
       // A child record joins its exact parent lifecycle record, never by URL.
       function requestChildOf(details, parent, type) {
         return parent ? details.find(event => event.type === type && event.parent_event_id === parent.sequence_number &&
@@ -709,6 +783,10 @@
               parents.has(`${event.session_id}:${event.process_id}:${event.parent_event_id}`))
             .map(event => decodeHeaderBlockRecord(event) ?? {malformed: true, kind: event.type === 'response_headers' ? 'response' : 'request',
               sequenceNumber: event.sequence_number});
+          request.cookieLists = request.details
+            .filter(event => event.type === 'cookie_list' &&
+              parents.has(`${event.session_id}:${event.process_id}:${event.parent_event_id}`))
+            .map(event => decodeCookieListRecord(event) ?? {malformed: true, sequenceNumber: event.sequence_number});
           const targetEvent = requestChildOf(request.details, request.targetEvent, 'request_target');
           const target = targetEvent ? decodeRequestTargetRecord(targetEvent) : null;
           request.targetMalformed = Boolean(targetEvent) && !target;

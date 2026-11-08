@@ -42,6 +42,7 @@ enum class ArtifactKind : std::uint16_t {
   kRequestBody = 8,
   kRequestHeaders = 9,
   kResponseHeaders = 10,
+  kCookieList = 11,
 };
 
 enum class ArtifactCaptureOrigin : std::uint16_t {

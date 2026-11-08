@@ -90,7 +90,9 @@ cases cover a metadata-only session, a receiver started without
 request's provisional header block (protocol/native-network-v3.md) takes the
 same path as a sensitive `request_headers` artifact; `request-headers.json`
 names its record, and a receiver without `--allow-sensitive` refuses it with an
-event joined to that record.
+event joined to that record. Cookie lists take the same sink path; the
+production receiver and core validator accept the `cookie_list` kind in
+`tests/network_request_test.cpp`.
 
 ## Socket transport stages
 

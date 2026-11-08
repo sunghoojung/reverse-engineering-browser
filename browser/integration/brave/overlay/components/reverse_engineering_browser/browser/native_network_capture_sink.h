@@ -11,6 +11,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <map>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -20,6 +21,8 @@
 #include "base/no_destructor.h"
 #include "base/synchronization/lock.h"
 
+#include "brave/components/reverse_engineering_browser/common/native_artifact_header.h"
+#include "brave/components/reverse_engineering_browser/common/native_network_cookies.h"
 #include "brave/components/reverse_engineering_browser/common/native_network_headers.h"
 #include "brave/components/reverse_engineering_browser/common/native_network_headers_hook.h"
 #include "brave/components/reverse_engineering_browser/common/native_probe_event.h"
@@ -112,11 +115,12 @@ class NativeNetworkCaptureSink final {
                               std::uint64_t browser_context_id_low,
                               const network::URLLoaderCompletionStatus& status,
                               std::string_view disposition = {}) noexcept;
-  // The network_headers_hook observer while a content session is active.
-  void RecordNetworkHeaders(
-      NativeNetworkHeadersKind kind,
-      std::string_view devtools_request_id,
-      const std::vector<network::mojom::HttpRawHeaderPairPtr>& headers) noexcept;
+  // The network_headers_hook observer while a content session is active:
+  // header blocks and the sent and received cookie lists of each hop.
+  void RecordNetworkHeaders(NativeNetworkHeadersKind kind,
+                            std::string_view devtools_request_id,
+                            const std::vector<network::mojom::HttpRawHeaderPairPtr>& headers,
+                            NativeNetworkCookies cookies = {}) noexcept;
 
  private:
   friend class base::NoDestructor<NativeNetworkCaptureSink>;
@@ -143,6 +147,8 @@ class NativeNetworkCaptureSink final {
     bool open_received = false;
     std::vector<HeaderHop> awaiting;
     std::string devtools_id;
+    // The hop of the latest raw request; its raw response follows on one pipe.
+    std::optional<HeaderHop> raw_hop;
   };
   void EndHeaderHop(TrackedHeaders& tracked, bool emitted_extra_info);
   // Measures, then serializes into an exactly reserved buffer, hashes, shares
@@ -154,6 +160,21 @@ class NativeNetworkCaptureSink final {
                        NativeHeaderBlockSummary summary,
                        std::string_view url,
                        ForEach for_each);
+  template <class ForEach>
+  void EmitCookieList(NativeProbeEmitter emitter,
+                      const NativeProbeHeader& parent,
+                      NativeCookieListSummary summary,
+                      std::string_view url,
+                      ForEach for_each);
+  // Shares an identical block or retains this one as an artifact the event
+  // creates, within the header budget. Requires header_lock_.
+  [[nodiscard]] NativeHeaderState RetainBlock(NativeArtifactKind kind,
+                                              std::uint8_t share_kind,
+                                              const NativeProbeHeader& parent,
+                                              std::string_view url,
+                                              std::vector<std::uint8_t> block,
+                                              const std::array<std::uint8_t, 32>& sha256,
+                                              NativeProbeEvent& event);
 
   base::FilePath owned_profile_path_;
   std::atomic<std::uint64_t> generation_{0};
@@ -171,6 +192,7 @@ class NativeNetworkCaptureSink final {
   std::map<std::array<std::uint8_t, 37>, std::uint64_t> shared_header_blocks_;
   std::size_t header_bytes_ = 0;
   std::uint32_t unattributed_header_blocks_ = 0;
+  std::uint32_t unattributed_cookie_lists_ = 0;
 };
 
 }  // namespace reb

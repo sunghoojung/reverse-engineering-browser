@@ -116,8 +116,8 @@ class NativeArtifactCaptureSink final {
                                                  std::string url,
                                                  std::string mime_type,
                                                  std::vector<std::uint8_t> content);
-  // The same handoff for one request_headers or response_headers block
-  // (protocol/native-network-v3.md), always text/plain.
+  // The same handoff for one header block (text/plain) or cookie list
+  // (application/x-reb-cookie-list), see protocol/native-network-v3.md.
   [[nodiscard]] std::uint64_t CaptureHeaderBlock(NativeArtifactKind kind,
                                                  std::uint64_t request_id,
                                                  std::uint64_t frame_id,

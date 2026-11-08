@@ -2141,6 +2141,23 @@ var(--panel);
       .traffic-header-copy:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
       .traffic-headers-raw { max-height: 320px; margin: 0; padding: 8px; overflow: auto; border: 1px solid var(--line); border-radius: 4px; font: 11px/1.5 var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; }
       .traffic-headers-raw:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+      .traffic-cookie-filter { display: flex; align-items: center; gap: 6px; margin: 6px 0; font: 12px var(--sans); }
+      .traffic-cookie-table-wrap { max-width: 100%; overflow-x: auto; }
+      .traffic-cookie-table { border-collapse: collapse; min-width: 100%; font: 11px/16px var(--mono); }
+      .traffic-cookie-table th, .traffic-cookie-table td { padding: 2px 6px; border-bottom: 1px solid var(--line-soft); text-align: left; white-space: nowrap; }
+      .traffic-cookie-table td { max-width: 220px; overflow: hidden; text-overflow: ellipsis; }
+      .traffic-cookie-table .traffic-cookie-col-value { max-width: 280px; }
+      .traffic-cookie-table .traffic-cookie-blocked td { color: var(--amber); }
+      .traffic-cookie-sort, .traffic-cookie-name, .traffic-cookie-request { padding: 0; border: 0; background: none; color: inherit; font: inherit; text-align: left; cursor: pointer; }
+      .traffic-cookie-sort { font: 600 11px/16px var(--sans); }
+      .traffic-cookie-name { color: var(--accent); text-decoration: underline; }
+      .traffic-cookie-request { color: var(--accent); }
+      .traffic-cookie-sort:focus-visible, .traffic-cookie-name:focus-visible, .traffic-cookie-request:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+      .traffic-cookie-provenance { padding: 8px 12px; border-bottom: 1px solid var(--line); }
+      .traffic-cookie-provenance-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+      .traffic-cookie-provenance h2 { margin: 0; font: 600 12px/20px var(--sans); overflow-wrap: anywhere; }
+      .traffic-cookie-provenance h3 { margin: 8px 0 2px; color: var(--muted); font: 600 11px/16px var(--sans); }
+      .traffic-cookie-provenance-list { margin: 0; padding-left: 16px; font: 11px/16px var(--mono); overflow-wrap: anywhere; }
       @media (max-width: 1100px) {
         #screen-traffic .traffic-grid { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, 50%) minmax(0, 1fr); overflow: hidden; }
         .request-pane { border-right: 0; border-bottom: 1px solid var(--line); }

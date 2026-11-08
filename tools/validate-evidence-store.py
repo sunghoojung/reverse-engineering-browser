@@ -92,6 +92,7 @@ EVENT_TYPES = {
     "api_call",
     "artifact_capture_failed",
     "artifact_captured",
+    "cookie_list",
     "gap",
     "js_dispatch_observation",
     "js_invocation_request",
@@ -111,6 +112,7 @@ EVENT_TYPES = {
     "response_completed",
     "response_headers",
     "response_started",
+    "script_cookie",
     "vm_finding",
     "vm_dispatch_sample",
     "wasm_dispatch_observation",
@@ -282,6 +284,75 @@ def valid_header_block(event: dict, payload: bytes) -> bool:
             or limited != (length > HEADER_BLOCK_LIMIT) or (not any(digest)) != limited):
         return False
     return (event["artifact_id"] != "0") == (state in (1, 2))
+
+
+COOKIE_LIST_LIMIT = 2 * 1024 * 1024
+
+
+def valid_cookie_list(event: dict, payload: bytes) -> bool:
+    """The native-network-v3.md cookie_list record, mirrored from the C++ core."""
+    if not valid_request_child(event, payload):
+        return False
+
+    def at(offset: int, size: int) -> int:
+        return int.from_bytes(payload[offset:offset + size], "little")
+
+    direction, state = payload[4], payload[5]
+    count, blocked, length = at(8, 4), at(12, 4), at(16, 4)
+    digest = payload[32:64]
+    if (direction not in (1, 2) or not 1 <= state <= 8 or any(payload[6:8])
+            or any(payload[28:32]) or any(payload[64:]) or blocked > count):
+        return False
+    empty, limited = state == 3, state == 4
+    if ((count == 0) != empty or (length == 0) != empty
+            or (not empty and length < 16 + 64 * count)
+            or limited != (length > COOKIE_LIST_LIMIT) or (not any(digest)) != limited):
+        return False
+    return (event["artifact_id"] != "0") == (state in (1, 2))
+
+
+def valid_script_cookie(event: dict, payload: bytes) -> bool:
+    """The native-network-v3.md script_cookie renderer record."""
+    if not (event["protocol_version"] == 3 and event["category"] == "network"
+            and event["flags"] == 0 and not event["payload_truncated"] and len(payload) == 128
+            and payload[:4] == bytes((1, 0, 128, 0))
+            and event["session_id"] != "0" and event["sequence_number"] != "0"
+            and 1 <= event["process_id"] <= 0xFFFFFFFF
+            and all(event[key] == "0" for key in ("parent_event_id", "request_id", "artifact_id",
+                                                  "navigation_id", "encoded_data_length",
+                                                  "decoded_body_length"))
+            and event["status_code"] == 0 and event["error_code"] == 0
+            and event["resource_type"] == 0):
+        return False
+
+    def at(offset: int, size: int) -> int:
+        return int.from_bytes(payload[offset:offset + size], "little")
+
+    api, flags = payload[4], payload[5]
+    count, name_length, value_length, string_length = at(8, 4), at(12, 4), at(16, 4), at(20, 4)
+    kind, frame_flags, combinator, script_id = payload[24], payload[25], at(26, 2), at(28, 4)
+    stack, value_digest, prefix = payload[40:72], payload[72:104], payload[104:128]
+    if not 1 <= api <= 6 or flags & ~0x0F or any(payload[6:8]) or count == 0:
+        return False
+    write = api in (1, 3, 6)
+    truncated = name_length > 24
+    if truncated != bool(flags & 1) or (not truncated and any(prefix[name_length:])):
+        return False
+    if write:
+        if count != 1 or not any(value_digest) or flags & 8:
+            return False
+    elif value_length != 0 or any(value_digest):
+        return False
+    if api == 1:
+        if string_length < name_length + value_length:
+            return False
+    elif api != 2 and string_length != 0:
+        return False
+    framed = kind in (1, 2) and script_id != 0 and combinator == 0 and not frame_flags & ~0x03
+    recorded, stacked = bool(flags & 2), bool(flags & 4)
+    if not framed if recorded else any(payload[24:40]):
+        return False
+    return stacked == any(stack) and (not stacked or recorded)
 
 
 def valid_invocation_context(state: int, invocation_id: int) -> bool:
@@ -615,6 +686,10 @@ def validate_event(event: object, line_number: int) -> None:
         event, payload
     ):
         raise ValueError(f"line {line_number}: native header block record is invalid")
+    if event["type"] == "cookie_list" and not valid_cookie_list(event, payload):
+        raise ValueError(f"line {line_number}: native cookie list record is invalid")
+    if event["type"] == "script_cookie" and not valid_script_cookie(event, payload):
+        raise ValueError(f"line {line_number}: native script cookie record is invalid")
     if event["type"].startswith("js_invocation_") and not valid_js_invocation(event, payload):
         raise ValueError(f"line {line_number}: native JavaScript invocation record is invalid")
     if event["type"] in ("wasm_guest_dispatch", "wasm_guest_invocation"):

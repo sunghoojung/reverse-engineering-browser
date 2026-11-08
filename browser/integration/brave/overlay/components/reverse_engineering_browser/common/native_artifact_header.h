@@ -37,6 +37,7 @@ enum class NativeArtifactKind : std::uint16_t {
   kRequestBody = 8,
   kRequestHeaders = 9,
   kResponseHeaders = 10,
+  kCookieList = 11,
 };
 
 enum class NativeArtifactCaptureOrigin : std::uint16_t {

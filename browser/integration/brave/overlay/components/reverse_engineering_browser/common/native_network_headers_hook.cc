@@ -19,10 +19,11 @@ void SetNativeNetworkHeadersObserver(const NativeNetworkHeadersObserver observer
 
 void NotifyNativeNetworkHeaders(const NativeNetworkHeadersKind kind,
                                 const std::string_view devtools_request_id,
-                                const std::vector<network::mojom::HttpRawHeaderPairPtr>& headers) {
+                                const std::vector<network::mojom::HttpRawHeaderPairPtr>& headers,
+                                const NativeNetworkCookies cookies) {
   if (const NativeNetworkHeadersObserver observer = g_observer.load(std::memory_order_acquire))
       [[unlikely]] {
-    observer(kind, devtools_request_id, headers);
+    observer(kind, devtools_request_id, headers, cookies);
   }
 }
 

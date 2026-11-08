@@ -335,7 +335,7 @@ pub(crate) fn regular_file(path: &Path) -> std::io::Result<File> {
 fn is_network_request_artifact(artifact: &Value) -> bool {
     matches!(
         artifact["kind"].as_str(),
-        Some("request_body" | "request_headers" | "response_headers")
+        Some("request_body" | "request_headers" | "response_headers" | "cookie_list")
     )
 }
 
@@ -362,6 +362,7 @@ pub fn validate_artifact(artifact: &mut Value) -> Result<()> {
             "request_body",
             "request_headers",
             "response_headers",
+            "cookie_list",
         ]
         .contains(&artifact["kind"].as_str().unwrap_or(""))
         && artifact["url"].as_str().is_some_and(|s| !s.is_empty())
@@ -386,6 +387,7 @@ pub fn validate_artifact(artifact: &mut Value) -> Result<()> {
                         | "request_body"
                         | "request_headers"
                         | "response_headers"
+                        | "cookie_list"
                 )
             )
     {
@@ -1268,7 +1270,12 @@ mod tests {
             "content_path": "blobs/0000000000000000000000000000000000000000000000000000000000000000.bin"
         });
         assert!(validate_artifact(&mut valid.clone()).is_ok());
-        for kind in ["request_body", "request_headers", "response_headers"] {
+        for kind in [
+            "request_body",
+            "request_headers",
+            "response_headers",
+            "cookie_list",
+        ] {
             let mut base = valid.clone();
             base["kind"] = json!(kind);
             assert!(validate_artifact(&mut base.clone()).is_ok(), "{kind}");

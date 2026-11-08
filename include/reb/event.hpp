@@ -76,6 +76,9 @@ enum class EventType : std::uint16_t {
   // Header block summaries, see protocol/native-network-v3.md.
   kRequestHeaders = 30,
   kResponseHeaders = 31,
+  // Cookie records, see "Cookies" in protocol/native-network-v3.md.
+  kCookieList = 32,
+  kScriptCookie = 37,
 };
 
 enum class EventFlag : std::uint16_t {

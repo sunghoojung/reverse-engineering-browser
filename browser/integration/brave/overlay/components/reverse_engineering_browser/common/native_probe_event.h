@@ -90,6 +90,8 @@ enum class NativeProbeType : std::uint16_t {
   // Header block summaries; see protocol/native-network-v3.md.
   kRequestHeaders = 30,
   kResponseHeaders = 31,
+  kCookieList = 32,
+  kScriptCookie = 37,
 };
 
 enum class NativeProbeFlag : std::uint16_t {

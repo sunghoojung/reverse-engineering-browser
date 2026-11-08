@@ -309,6 +309,7 @@ fn is_network(event: &Value) -> bool {
                     | "request_body"
                     | "request_headers"
                     | "response_headers"
+                    | "cookie_list"
             )
         )
 }

@@ -1,6 +1,7 @@
 #include "reb/event.hpp"
 #include "reb/js_dispatch.hpp"
 #include "reb/js_invocation.hpp"
+#include "reb/network_cookies.hpp"
 #include "reb/network_headers.hpp"
 #include "reb/network_request.hpp"
 #include "reb/wasm_dispatch.hpp"
@@ -80,6 +81,8 @@ bool IsKnownType(const EventType type) noexcept {
     case EventType::kWasmIndirectOverflow:
     case EventType::kRequestHeaders:
     case EventType::kResponseHeaders:
+    case EventType::kCookieList:
+    case EventType::kScriptCookie:
       return true;
     case EventType::kUnknown:
       return false;
@@ -176,6 +179,10 @@ bool IsValidEvent(const EventRecord& event) noexcept {
   if ((event.header.type == EventType::kRequestHeaders ||
        event.header.type == EventType::kResponseHeaders) &&
       !IsValidHeaderBlockEvent(event))
+    return false;
+  if (event.header.type == EventType::kCookieList && !IsValidCookieListEvent(event))
+    return false;
+  if (event.header.type == EventType::kScriptCookie && !IsValidScriptCookieEvent(event))
     return false;
   return event.header.protocol_version == kEventProtocolVersion &&
          event.header.header_size == sizeof(EventHeader) &&
@@ -361,6 +368,10 @@ std::string_view EventTypeName(const EventType type) noexcept {
       return "request_headers";
     case EventType::kResponseHeaders:
       return "response_headers";
+    case EventType::kCookieList:
+      return "cookie_list";
+    case EventType::kScriptCookie:
+      return "script_cookie";
     case EventType::kUnknown:
       return "unknown";
   }

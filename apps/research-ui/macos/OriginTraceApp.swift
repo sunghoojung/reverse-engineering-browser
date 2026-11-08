@@ -170,7 +170,7 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
           try Data(contentsOf: indexURL.deletingLastPathComponent().appendingPathComponent("app.css")),
           "text/css; charset=utf-8", 200, [:]
         )
-      case "/pane_layout.js", "/app.js", "/command_palette.js", "/app_state.js", "/evidence_models.js", "/evidence_package.js", "/float32_inspector.js", "/evidence_comparison.js", "/source_syntax.js", "/source_facts.js", "/source_search.js", "/investigation_navigation.js", "/investigation_notebook.js", "/evidence_names.js", "/invocation_sites.js", "/traffic_view.js", "/traffic_headers.js", "/captured_client.js", "/captured_export_formats.js", "/vm_semantics.js", "/vm_static.js", "/vm_static_view.js", "/vm_analysis_packs.js", "/vm_opcode_ledger.js", "/vm_opcode_ledger_view.js", "/vm_contextual.js", "/vm_contextual_evidence.js", "/vm_contextual_view.js", "/vm_debugger.js", "/vm_program_workspace.js", "/native_console_completion.js", "/native_console.js":
+      case "/pane_layout.js", "/app.js", "/command_palette.js", "/app_state.js", "/evidence_models.js", "/evidence_package.js", "/float32_inspector.js", "/evidence_comparison.js", "/source_syntax.js", "/source_facts.js", "/source_search.js", "/investigation_navigation.js", "/investigation_notebook.js", "/evidence_names.js", "/invocation_sites.js", "/traffic_view.js", "/traffic_headers.js", "/traffic_cookies.js", "/captured_client.js", "/captured_export_formats.js", "/vm_semantics.js", "/vm_static.js", "/vm_static_view.js", "/vm_analysis_packs.js", "/vm_opcode_ledger.js", "/vm_opcode_ledger_view.js", "/vm_contextual.js", "/vm_contextual_evidence.js", "/vm_contextual_view.js", "/vm_debugger.js", "/vm_program_workspace.js", "/native_console_completion.js", "/native_console.js":
         response = (
           try Data(contentsOf: indexURL.deletingLastPathComponent().appendingPathComponent(requestURL.lastPathComponent)),
           "text/javascript; charset=utf-8", 200, [:]
@@ -1770,7 +1770,7 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
       let kind = artifact["kind"] as? String,
       Set([
         "javascript", "wasm", "source_map", "response_body", "canvas_data_url", "request_body",
-        "request_headers", "response_headers",
+        "request_headers", "response_headers", "cookie_list",
       ]).contains(kind),
       let url = artifact["url"] as? String,
       !url.isEmpty,
@@ -1784,8 +1784,10 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
       sha256.range(of: #"^[0-9a-f]{64}$"#, options: .regularExpression) != nil,
       let sensitive = artifact["sensitive"] as? Bool,
       sensitive
-        == ["response_body", "canvas_data_url", "request_body", "request_headers", "response_headers"]
-        .contains(kind),
+        == [
+          "response_body", "canvas_data_url", "request_body", "request_headers", "response_headers",
+          "cookie_list",
+        ].contains(kind),
       artifact["content_path"] as? String == "blobs/\(sha256).bin"
     else {
       return false
@@ -1804,10 +1806,11 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
     guard identifiersValid else { return false }
     let hasExecutionContext = artifact["execution_context_id"] != nil
     let hasCaptureOrigin = artifact["capture_origin"] != nil
-    // Request bodies and header blocks exist only as the native network v2 and
-    // v3 artifacts their browser network record created; validate_artifact in
-    // evidence.rs applies the same rules.
-    let networkRequest = ["request_body", "request_headers", "response_headers"].contains(kind)
+    // Request bodies, header blocks and cookie lists exist only as the native
+    // network v2 and v3 artifacts their browser network record created;
+    // validate_artifact in evidence.rs applies the same rules.
+    let networkRequest = ["request_body", "request_headers", "response_headers", "cookie_list"]
+      .contains(kind)
     guard hasExecutionContext == hasCaptureOrigin, hasCaptureOrigin || !networkRequest else {
       return false
     }

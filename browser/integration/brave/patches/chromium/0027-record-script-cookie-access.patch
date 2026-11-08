@@ -1,0 +1,138 @@
+diff --git a/third_party/blink/renderer/core/loader/cookie_jar.cc b/third_party/blink/renderer/core/loader/cookie_jar.cc
+--- a/third_party/blink/renderer/core/loader/cookie_jar.cc
++++ b/third_party/blink/renderer/core/loader/cookie_jar.cc
+@@ -15,6 +15,7 @@
+ #include "base/strings/strcat.h"
+ #include "base/time/time.h"
+ #include "base/trace_event/trace_event.h"
++#include "brave/components/reverse_engineering_browser/renderer/native_script_cookie_sink.h"
+ #include "mojo/public/cpp/base/shared_memory_version.h"
+ #include "services/network/public/mojom/restricted_cookie_manager.mojom-forward.h"
+ #include "third_party/blink/public/platform/browser_interface_broker_proxy.h"
+@@ -47,6 +48,17 @@ enum class CookieCacheLookupResult {
+ constexpr char kFirstCookieRequestHistogram[] =
+     "Blink.Experimental.Cookies.FirstCookieRequest";
+ 
++// The frame whose cookie jar script used, as every native record names it.
++uint64_t NativeScriptCookieFrameId(const Document& document) {
++  const LocalFrame* const frame = document.GetFrame();
++  if (!frame) {
++    return 0;
++  }
++  const LocalFrameToken token = frame->GetLocalFrameToken();
++  return ::reb::NativeFrameIdOf(token.value().GetHighForSerialization(),
++                                token.value().GetLowForSerialization());
++}
++
+ }  // namespace
+ 
+ // Controls whether we apply an artificial delay to priming the CookieJar access
+@@ -94,6 +106,10 @@ bool CookieJar::SetCookie(const String& value) {
+       document_->GetExecutionContext()->GetStorageAccessApiStatus(),
+       is_ad_tagged, apply_devtools_overrides, value);
+   last_operation_was_set_ = true;
++  if (::reb::NativeScriptCookieSink::Get().IsEnabled()) [[unlikely]] {
++    ::reb::NativeScriptCookieSink::Get().RecordDocumentCookieSet(
++        value.Utf8(), NativeScriptCookieFrameId(*document_));
++  }
+ 
+   base::TimeDelta elapsed = timer.Elapsed();
+   base::UmaHistogramTimes("Blink.SetCookieTime", elapsed);
+@@ -215,6 +231,10 @@ String CookieJar::Cookies() {
+   if (is_first_operation_) {
+     LogFirstCookieRequest(FirstCookieRequest::kFirstOperationWasGet);
+   }
++  if (::reb::NativeScriptCookieSink::Get().IsEnabled()) [[unlikely]] {
++    ::reb::NativeScriptCookieSink::Get().RecordDocumentCookieGet(
++        last_cookies_.Utf8().size(), NativeScriptCookieFrameId(*document_));
++  }
+   return last_cookies_;
+ }
+ 
+diff --git a/third_party/blink/renderer/modules/cookie_store/BUILD.gn b/third_party/blink/renderer/modules/cookie_store/BUILD.gn
+--- a/third_party/blink/renderer/modules/cookie_store/BUILD.gn
++++ b/third_party/blink/renderer/modules/cookie_store/BUILD.gn
+@@ -18,5 +18,8 @@ blink_modules_sources("cookie_store") {
+     "global_cookie_store.h",
+   ]
+ 
+-  deps = [ "//third_party/blink/renderer/platform" ]
++  deps = [
++    "//brave/components/reverse_engineering_browser:renderer_sink",
++    "//third_party/blink/renderer/platform",
++  ]
+ }
+diff --git a/third_party/blink/renderer/modules/cookie_store/cookie_store.cc b/third_party/blink/renderer/modules/cookie_store/cookie_store.cc
+--- a/third_party/blink/renderer/modules/cookie_store/cookie_store.cc
++++ b/third_party/blink/renderer/modules/cookie_store/cookie_store.cc
+@@ -10,6 +10,7 @@
+ #include <optional>
+ #include <utility>
+ 
++#include "brave/components/reverse_engineering_browser/renderer/native_script_cookie_sink.h"
+ #include "net/base/features.h"
+ #include "net/cookies/cookie_inclusion_status.h"
+ #include "net/cookies/cookie_util.h"
+@@ -52,6 +53,17 @@ bool IsHttpWhitespace(UChar c) {
+   return c == ' ' || c == '\t';
+ }
+ 
++// Script cookie access (protocol/native-network-v3.md); one atomic load
++// unless a content-capture session is active.
++void RecordNativeCookieStore(::reb::NativeScriptCookieApi api,
++                             const String& name,
++                             const String& value = String()) {
++  auto& sink = ::reb::NativeScriptCookieSink::Get();
++  if (sink.IsEnabled()) [[unlikely]] {
++    sink.RecordCookieStore(api, name.Utf8(), value.Utf8());
++  }
++}
++
+ String StripHttpWhitespace(const String& str) {
+   if (!RuntimeEnabledFeatures::CookieStoreAPIWhitespaceStrippingEnabled()) {
+     return str;
+@@ -348,6 +360,8 @@ ScriptPromise<IDLSequence<CookieListItem>> CookieStore::getAll(
+     ExceptionState& exception_state) {
+   UseCounter::Count(CurrentExecutionContext(script_state->GetIsolate()),
+                     WebFeature::kCookieStoreAPI);
++  RecordNativeCookieStore(::reb::NativeScriptCookieApi::kCookieStoreGetAll,
++                          options->hasName() ? options->name() : g_empty_string);
+ 
+   auto* resolver =
+       MakeGarbageCollected<ScriptPromiseResolver<IDLSequence<CookieListItem>>>(
+@@ -384,6 +398,8 @@ ScriptPromise<IDLNullable<CookieListItem>> CookieStore::get(
+     exception_state.ThrowTypeError("CookieStoreGetOptions must not be empty");
+     return ScriptPromise<IDLNullable<CookieListItem>>();
+   }
++  RecordNativeCookieStore(::reb::NativeScriptCookieApi::kCookieStoreGet,
++                          options->hasName() ? options->name() : g_empty_string);
+ 
+   auto* resolver =
+       MakeGarbageCollected<ScriptPromiseResolver<IDLNullable<CookieListItem>>>(
+@@ -415,6 +431,8 @@ ScriptPromise<IDLUndefined> CookieStore::set(ScriptState* script_state,
+                                              ExceptionState& exception_state) {
+   UseCounter::Count(CurrentExecutionContext(script_state->GetIsolate()),
+                     WebFeature::kCookieStoreAPI);
++  RecordNativeCookieStore(::reb::NativeScriptCookieApi::kCookieStoreSet,
++                          options->name(), options->value());
+ 
+   return DoWrite(script_state, options, exception_state);
+ }
+@@ -431,6 +449,8 @@ ScriptPromise<IDLUndefined> CookieStore::Delete(
+   set_options->setName(stripped_name);
+   set_options->setValue(stripped_name.empty() ? "deleted" : "");
+   set_options->setExpires(0);
++  RecordNativeCookieStore(::reb::NativeScriptCookieApi::kCookieStoreDelete,
++                          set_options->name(), set_options->value());
+   return DoWrite(script_state, set_options, exception_state);
+ }
+ 
+@@ -447,6 +467,8 @@ ScriptPromise<IDLUndefined> CookieStore::Delete(
+   set_options->setPath(options->path());
+   set_options->setSameSite(V8CookieSameSite::Enum::kStrict);
+   set_options->setPartitioned(options->partitioned());
++  RecordNativeCookieStore(::reb::NativeScriptCookieApi::kCookieStoreDelete,
++                          set_options->name(), set_options->value());
+   return DoWrite(script_state, set_options, exception_state);
+ }
+ 

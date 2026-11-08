@@ -18,6 +18,8 @@
 #include "base/time/time.h"
 #include "brave/components/reverse_engineering_browser/common/native_probe_queue.h"
 #include "brave/components/reverse_engineering_browser/renderer/native_probe_sink.h"
+#include "brave/components/reverse_engineering_browser/renderer/native_script_cookie_sink.h"
+#include "brave/components/reverse_engineering_browser/renderer/native_script_position.h"
 #include "mojo/public/cpp/base/big_buffer.h"
 #include "third_party/blink/public/web/web_local_frame.h"
 
@@ -38,7 +40,7 @@ std::uint64_t CurrentFrameId() noexcept {
     return 0;
   }
   const base::UnguessableToken& token = frame->GetLocalFrameToken().value();
-  return std::rotl(token.GetHighForSerialization(), 17) ^ token.GetLowForSerialization();
+  return NativeFrameIdOf(token.GetHighForSerialization(), token.GetLowForSerialization());
 }
 
 // Fixed-layout probe records cross Mojo as their exact bytes.
@@ -83,7 +85,8 @@ void NativeProbeTransport::Configure(const std::uint64_t session_id,
                                      const std::string& guest_adapter_json,
                                      const std::vector<std::uint8_t>& js_dispatch_sites,
                                      const std::vector<std::uint8_t>& js_invocation_sites,
-                                     const bool js_invocation_digests) {
+                                     const bool js_invocation_digests,
+                                     const bool capture_request_content) {
   Disable();
   const std::uint64_t now =
       static_cast<std::uint64_t>(base::TimeTicks::Now().since_origin().InNanoseconds());
@@ -112,6 +115,7 @@ void NativeProbeTransport::Configure(const std::uint64_t session_id,
   NativeProbeSink::Get().SetEmitters(
       &NativeProbeTransport::EmitStatus, &NativeProbeTransport::EmitArtifact, session_id,
       category_mask, expires_at_monotonic_ns, capture_canvas_images, &CurrentFrameId);
+  NativeScriptCookieSink::Get().Configure(capture_request_content, &CurrentNativeScriptFrame);
   if (!guest_adapter_json.empty())
     NativeProbeSink::Get().ConfigureNativeWasmGuest(ParseNativeWasmGuestAdapter(guest_adapter_json),
                                                     &EmitNativeGuest, &EmitNativeGuestHost);
@@ -150,6 +154,7 @@ void NativeProbeTransport::ResetWasmSampleBudgets() {
 }
 
 void NativeProbeTransport::Disable() {
+  NativeScriptCookieSink::Get().Flush();
   wasm_capture_epoch_.store(0, std::memory_order_release);
   // Wasm callbacks then fail their first enabled check, not a later one.
   NativeProbeSink::Get().SetNativeWasmDispatchEmitter(nullptr);

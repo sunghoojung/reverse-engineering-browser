@@ -732,7 +732,8 @@ void NativeProbeHost::Configure(const std::uint64_t session_id,
   client_->Configure(session_id, category_mask, expires_at_monotonic_ns, capture_canvas_images,
                      std::move(renderer_region), wasm_capture_epoch_,
                      session_->guest_adapter_json(), session_->js_dispatch_sites(),
-                     session_->js_invocation_sites(), session_->js_invocation_digests());
+                     session_->js_invocation_sites(), session_->js_invocation_digests(),
+                     session_->capture_request_content());
 }
 
 void NativeProbeHost::Disable() {

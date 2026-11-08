@@ -281,7 +281,8 @@ continue with recipe 2. Starting again ends this connection's previous
 session first. Sensitive Canvas images need `"canvas_images": true` with
 `"confirm_sensitive_capture": true`, only when the researcher authorized
 Canvas content for this target; `"request_content": true` (request paths,
-queries, headers and bodies; read headers with `get_request_headers`) and `"js_invocation_digests": true` take the same
+queries, headers, cookies and bodies; read headers with `get_request_headers`
+and cookies with `get_request_cookies` and `get_cookie_provenance`) and `"js_invocation_digests": true` take the same
 confirmation. `"document_start": true` permits document-start Console scripts
 (recipe 19). `"js_invocation_sites": "/absolute/path/sites.json"`, or
 `"js_invocation_saved_sites": true` for the sites agent sessions saved with

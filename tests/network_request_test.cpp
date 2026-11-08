@@ -18,11 +18,13 @@
 #include <unistd.h>
 
 #include "components/reverse_engineering_browser/common/native_artifact_header.h"
+#include "components/reverse_engineering_browser/common/native_network_cookies.h"
 #include "components/reverse_engineering_browser/common/native_network_headers.h"
 #include "components/reverse_engineering_browser/common/native_network_request.h"
 #include "components/reverse_engineering_browser/common/native_probe_event.h"
 #include "reb/artifact.hpp"
 #include "reb/event.hpp"
+#include "reb/network_cookies.hpp"
 #include "reb/network_headers.hpp"
 #include "reb/network_request.hpp"
 
@@ -70,6 +72,18 @@ static_assert(static_cast<std::uint8_t>(reb::HeaderState::kNotCapturedUrl) ==
               static_cast<std::uint8_t>(reb::NativeHeaderState::kNotCapturedUrl));
 static_assert(static_cast<std::uint8_t>(reb::HeaderSource::kEarlyHints) ==
               static_cast<std::uint8_t>(reb::NativeHeaderSource::kEarlyHints));
+static_assert(static_cast<std::uint16_t>(reb::EventType::kCookieList) ==
+              static_cast<std::uint16_t>(reb::NativeProbeType::kCookieList));
+static_assert(static_cast<std::uint16_t>(reb::EventType::kScriptCookie) ==
+              static_cast<std::uint16_t>(reb::NativeProbeType::kScriptCookie));
+static_assert(static_cast<std::uint16_t>(reb::ArtifactKind::kCookieList) ==
+              static_cast<std::uint16_t>(reb::NativeArtifactKind::kCookieList));
+static_assert(reb::kCookieListLimitBytes == reb::kNativeCookieListLimitBytes);
+static_assert(reb::kCookieEntryBytes == reb::kNativeCookieEntryBytes);
+static_assert(reb::kScriptCookieNamePrefixBytes == reb::kNativeScriptCookieNamePrefixBytes);
+static_assert(static_cast<std::uint8_t>(reb::ScriptCookieApi::kCookieStoreDelete) ==
+              static_cast<std::uint8_t>(reb::NativeScriptCookieApi::kCookieStoreDelete));
+static_assert(reb::kScriptCookieTableFull == reb::kNativeScriptCookieTableFull);
 
 reb::NativeRequestBodySummary Summary(const reb::NativeRequestBodyKind kind,
                                       const reb::NativeRequestBodyState state,
@@ -553,6 +567,188 @@ void CheckHeaderBlocks() {
   add("header payload version", event, false);
 }
 
+// Cookie lists and script cookie records ("Cookies" in native-network-v3.md),
+// through the overlay encoders and the core decoders; each joins the golden.
+void CheckCookies() {
+  using State = reb::NativeHeaderState;
+  const auto add = [](const std::string& name, const reb::EventRecord& event, const bool valid) {
+    golden.emplace_back(name, event);
+    Check(reb::IsValidEvent(event) == valid, "cookie record verdict: " + name);
+  };
+  const auto list = [](const reb::NativeCookieDirection direction, const State state) {
+    reb::NativeCookieListSummary value;
+    value.direction = direction;
+    value.state = state;
+    value.cookie_count = state == State::kEmpty ? 0 : 2;
+    value.blocked_count = state == State::kEmpty ? 0 : 1;
+    value.list_length = state == State::kEmpty                   ? 0
+                        : state == State::kNotCapturedBlockLimit ? 3U * 1024U * 1024U
+                                                                 : 200;
+    if (state != State::kNotCapturedBlockLimit) {
+      value.sha256.fill(0xab);
+    }
+    value.hop = 2;
+    value.unattributed_lists = 1;
+    return value;
+  };
+  const auto list_event = [](const reb::NativeCookieListSummary& value,
+                             const std::uint64_t artifact) {
+    auto event = Event(reb::EventType::kCookieList, reb::EncodeNativeCookieListPayload(value));
+    event.header.artifact_id = artifact;
+    return event;
+  };
+  for (const State state :
+       {State::kCaptured, State::kCapturedShared, State::kEmpty, State::kNotCapturedBlockLimit,
+        State::kNotCapturedArtifactUnavailable, State::kNotCapturedTransferRefused,
+        State::kNotCapturedSessionBudget, State::kNotCapturedUrl}) {
+    const bool retained = state == State::kCaptured || state == State::kCapturedShared;
+    const std::string suffix = std::to_string(static_cast<unsigned>(state));
+    add("cookie list sent state " + suffix,
+        list_event(list(reb::NativeCookieDirection::kSent, state), retained ? 78 : 0), true);
+    add("cookie list received state " + suffix,
+        list_event(list(reb::NativeCookieDirection::kReceived, state), retained ? 78 : 0), true);
+    add("cookie list artifact disagrees with state " + suffix,
+        list_event(list(reb::NativeCookieDirection::kSent, state), retained ? 0 : 78), false);
+  }
+  const auto captured = list(reb::NativeCookieDirection::kSent, State::kCaptured);
+  struct BadList {
+    const char* name;
+    std::function<void(reb::NativeCookieListSummary&)> mutate;
+  };
+  const BadList bad_lists[] = {
+      {"direction zero", [](auto& v) { v.direction = static_cast<reb::NativeCookieDirection>(0); }},
+      {"direction three",
+       [](auto& v) { v.direction = static_cast<reb::NativeCookieDirection>(3); }},
+      {"state nine", [](auto& v) { v.state = static_cast<State>(9); }},
+      {"blocked above count", [](auto& v) { v.blocked_count = 3; }},
+      {"count without length", [](auto& v) { v.list_length = 0; }},
+      {"length below one entry each", [](auto& v) { v.list_length = 143; }},
+      {"over the limit captured", [](auto& v) { v.list_length = 3U * 1024U * 1024U; }},
+      {"missing digest", [](auto& v) { v.sha256 = {}; }},
+      {"empty with cookies", [](auto& v) { v.state = State::kEmpty; }},
+  };
+  for (const auto& item : bad_lists) {
+    auto value = captured;
+    item.mutate(value);
+    add(std::string("cookie list ") + item.name, list_event(value, 78), false);
+  }
+  auto minimal = captured;
+  minimal.list_length = 144;
+  add("cookie list minimal length", list_event(minimal, 78), true);
+  auto event = list_event(captured, 78);
+  event.inline_payload[6] = std::byte{1};
+  add("cookie list reserved word", event, false);
+  event = list_event(captured, 78);
+  event.inline_payload[127] = std::byte{1};
+  add("cookie list reserved tail", event, false);
+  event = list_event(captured, 78);
+  event.header.parent_event_id = 0;
+  add("cookie list without parent", event, false);
+
+  const auto script = [](const reb::NativeScriptCookieApi api) {
+    reb::NativeScriptCookieSummary value;
+    value.api = api;
+    const bool write = api == reb::NativeScriptCookieApi::kDocumentCookieSet ||
+                       api == reb::NativeScriptCookieApi::kCookieStoreSet ||
+                       api == reb::NativeScriptCookieApi::kCookieStoreDelete;
+    value.name_length = 3;
+    value.name_prefix = {'s', 'i', 'd'};
+    value.value_length = write ? 6 : 0;
+    value.count = write ? 1 : 4;
+    value.string_length = api == reb::NativeScriptCookieApi::kDocumentCookieSet   ? 20
+                          : api == reb::NativeScriptCookieApi::kDocumentCookieGet ? 64
+                                                                                  : 0;
+    if (write) {
+      value.value_sha256.fill(0x5a);
+    }
+    value.frame = {1, 0, 0, 77, 1234, 0};
+    value.flags = reb::kNativeScriptCookieFrameRecorded;
+    return value;
+  };
+  const auto script_event = [](const reb::NativeScriptCookieSummary& value) {
+    auto record = Event(reb::EventType::kScriptCookie, reb::EncodeNativeScriptCookiePayload(value));
+    record.header.request_id = 0;
+    record.header.parent_event_id = 0;
+    record.header.frame_id = 9;
+    return record;
+  };
+  for (const auto api :
+       {reb::NativeScriptCookieApi::kDocumentCookieSet,
+        reb::NativeScriptCookieApi::kDocumentCookieGet, reb::NativeScriptCookieApi::kCookieStoreSet,
+        reb::NativeScriptCookieApi::kCookieStoreGet, reb::NativeScriptCookieApi::kCookieStoreGetAll,
+        reb::NativeScriptCookieApi::kCookieStoreDelete}) {
+    add("script cookie api " + std::to_string(static_cast<unsigned>(api)),
+        script_event(script(api)), true);
+  }
+  const auto set = script(reb::NativeScriptCookieApi::kDocumentCookieSet);
+  const auto get = script(reb::NativeScriptCookieApi::kDocumentCookieGet);
+  auto value = set;
+  value.flags = 0;
+  value.frame = {};
+  add("script cookie without frame", script_event(value), true);
+  value = set;
+  value.name_length = 30;
+  value.string_length = 40;
+  value.name_prefix.fill('n');
+  value.flags |= reb::kNativeScriptCookieNameTruncated;
+  add("script cookie long name", script_event(value), true);
+  value = set;
+  value.stack_digest.fill(0x11);
+  value.flags |= reb::kNativeScriptCookieStackRecorded;
+  add("script cookie with stack", script_event(value), true);
+  value = get;
+  value.flags |= reb::kNativeScriptCookieTableFull;
+  value.count = 1;
+  add("script cookie read table full", script_event(value), true);
+  struct BadScript {
+    const char* name;
+    reb::NativeScriptCookieSummary base;
+    std::function<void(reb::NativeScriptCookieSummary&)> mutate;
+  };
+  const BadScript bad_scripts[] = {
+      {"api zero", set, [](auto& v) { v.api = static_cast<reb::NativeScriptCookieApi>(0); }},
+      {"api seven", set, [](auto& v) { v.api = static_cast<reb::NativeScriptCookieApi>(7); }},
+      {"write count two", set, [](auto& v) { v.count = 2; }},
+      {"read count zero", get, [](auto& v) { v.count = 0; }},
+      {"write without digest", set, [](auto& v) { v.value_sha256 = {}; }},
+      {"read with digest", get, [](auto& v) { v.value_sha256.fill(1); }},
+      {"read with value", get, [](auto& v) { v.value_length = 1; }},
+      {"short set string", set, [](auto& v) { v.string_length = 8; }},
+      {"store string length", script(reb::NativeScriptCookieApi::kCookieStoreSet),
+       [](auto& v) { v.string_length = 9; }},
+      {"long name unmarked", set,
+       [](auto& v) {
+         v.name_length = 30;
+         v.string_length = 40;
+       }},
+      {"short name marked", set, [](auto& v) { v.flags |= reb::kNativeScriptCookieNameTruncated; }},
+      {"name tail dirty", set, [](auto& v) { v.name_prefix[10] = 'x'; }},
+      {"frame flag without frame", set, [](auto& v) { v.frame = {}; }},
+      {"frame without flag", set, [](auto& v) { v.flags = 0; }},
+      {"frame kind three", set, [](auto& v) { v.frame.kind = 3; }},
+      {"frame combinator", set, [](auto& v) { v.frame.combinator = 1; }},
+      {"stack without flag", set, [](auto& v) { v.stack_digest.fill(1); }},
+      {"stack flag without digest", set,
+       [](auto& v) { v.flags |= reb::kNativeScriptCookieStackRecorded; }},
+      {"table full write", set, [](auto& v) { v.flags |= reb::kNativeScriptCookieTableFull; }},
+      {"unknown flag", set, [](auto& v) { v.flags |= 0x10; }},
+  };
+  for (const auto& item : bad_scripts) {
+    value = item.base;
+    item.mutate(value);
+    add(std::string("script cookie ") + item.name, script_event(value), false);
+  }
+  event = script_event(set);
+  event.header.request_id = 17;
+  add("script cookie with request", event, false);
+  event = script_event(set);
+  event.header.parent_event_id = 3;
+  add("script cookie with parent", event, false);
+  event = script_event(set);
+  event.inline_payload[6] = std::byte{1};
+  add("script cookie reserved word", event, false);
+}
+
 std::string Frame(const reb::ArtifactHeader& header,
                   const std::string& url,
                   const std::string& mime,
@@ -665,6 +861,29 @@ void CheckArtifacts() {
               stored.find("\"kind\":\"response_headers\"") != std::string::npos,
           "manifest names both header kinds");
   }
+  {
+    reb::ArtifactHeader list = header;
+    list.kind = reb::ArtifactKind::kCookieList;
+    list.artifact_id = 8;
+    list.content_size = 16;
+    list.mime_type_size = 29;
+    Check(reb::IsValidArtifactHeader(list), "cookie list artifact header is valid");
+    auto plain = list;
+    plain.flags = 0;
+    Check(!reb::IsValidArtifactHeader(plain), "cookie list artifact must be sensitive");
+    reb::ArtifactReceiver receiver(
+        root / "allowed",
+        {.max_artifact_bytes = 1U << 20, .max_store_bytes = 1U << 22, .allow_sensitive = true});
+    std::istringstream stream(
+        Frame(list, url, "application/x-reb-cookie-list",
+              std::string("RBCK\x01\x00\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00", 16)));
+    Check(receiver.ReceiveOne(stream) == reb::ArtifactReceiveStatus::kAccepted,
+          "receiver keeps cookie lists: " + receiver.LastError());
+    std::ifstream lines(root / "allowed" / "manifest.jsonl");
+    const std::string stored{std::istreambuf_iterator<char>(lines), {}};
+    Check(stored.find("\"kind\":\"cookie_list\"") != std::string::npos,
+          "manifest names cookie lists");
+  }
   std::filesystem::remove_all(root, ignored);
 }
 
@@ -676,6 +895,7 @@ int main(int argc, char** argv) {
   CheckBodyStates();
   CheckTargets();
   CheckHeaderBlocks();
+  CheckCookies();
   if (failures != 0) {
     return 1;
   }
@@ -697,7 +917,7 @@ int main(int argc, char** argv) {
     return 1;
   }
   std::cout << "PASS network request wire: overlay/core parity, content types, every body "
-               "state and malformed record, targets, header blocks, request_body and header "
-               "artifact policy\n";
+               "state and malformed record, targets, header blocks, cookie lists and script "
+               "cookie records, request_body, header and cookie list artifact policy\n";
   return 0;
 }

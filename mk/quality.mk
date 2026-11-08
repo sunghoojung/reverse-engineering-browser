@@ -119,6 +119,7 @@ $(UI_STARTUP_DEPS): tools/ui-startup-deps/package-lock.json
 native-only-check: $(UI_STARTUP_DEPS)
 	node tools/check-native-only-ui.mjs
 	node tools/check-traffic-headers-ui.mjs
+	node tools/check-traffic-cookies-ui.mjs
 	node tools/check-source-search.mjs
 	node tools/check-invocation-sites-ui.mjs
 	node tools/check-native-only-startup.cjs

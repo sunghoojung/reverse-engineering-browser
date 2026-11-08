@@ -29,6 +29,8 @@
 
 namespace reb {
 
+class NativeScriptCookieSink;
+
 // Maximum allocating-script source prefix scanned to admit a runtime buffer.
 // The same bound is the renderer classifier's window.
 inline constexpr std::size_t kRuntimeScriptNoteBytes = 256U * 1024U;
@@ -420,6 +422,7 @@ class COMPONENT_EXPORT(REB_NATIVE_PROBE_SINK) NativeProbeSink final {
 
  private:
   friend class base::NoDestructor<NativeProbeSink>;
+  friend class NativeScriptCookieSink;
   NativeProbeSink() noexcept;
 
   [[nodiscard]] NativeProbeEmitStatus EmitStatus(const NativeProbeEvent& event,

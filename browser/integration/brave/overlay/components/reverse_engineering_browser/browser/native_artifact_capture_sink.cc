@@ -257,11 +257,14 @@ std::uint64_t NativeArtifactCaptureSink::CaptureHeaderBlock(const NativeArtifact
                                                             const std::uint64_t creator_event_id,
                                                             std::string url,
                                                             std::vector<std::uint8_t> content) {
-  if (kind != NativeArtifactKind::kRequestHeaders && kind != NativeArtifactKind::kResponseHeaders) {
+  if (kind != NativeArtifactKind::kRequestHeaders && kind != NativeArtifactKind::kResponseHeaders &&
+      kind != NativeArtifactKind::kCookieList) {
     return 0;
   }
-  return CaptureNetworkRequestArtifact(kind, request_id, frame_id, creator_event_id, std::move(url),
-                                       "text/plain", std::move(content));
+  return CaptureNetworkRequestArtifact(
+      kind, request_id, frame_id, creator_event_id, std::move(url),
+      kind == NativeArtifactKind::kCookieList ? "application/x-reb-cookie-list" : "text/plain",
+      std::move(content));
 }
 
 std::uint64_t NativeArtifactCaptureSink::CaptureNetworkRequestArtifact(

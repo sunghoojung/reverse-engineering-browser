@@ -18,7 +18,7 @@ const CREDENTIALS: [&str; 4] = [
     "set-cookie",
 ];
 const SOURCES: [&str; 4] = ["", "browser", "network", "early_hints"];
-const STATES: [&str; 9] = [
+pub(crate) const STATES: [&str; 9] = [
     "",
     "captured",
     "captured_shared",
@@ -58,17 +58,17 @@ struct Block {
     digest: [u8; 32],
 }
 
-fn le(bytes: &[u8]) -> u64 {
+pub(crate) fn le(bytes: &[u8]) -> u64 {
     bytes
         .iter()
         .rev()
         .fold(0, |value, byte| (value << 8) | u64::from(*byte))
 }
 
-/// The C++ core's rules for the record, envelope included.
-fn decode(event: &Value) -> Option<Block> {
-    let response = event["type"] == "response_headers";
-    if !(response || event["type"] == "request_headers")
+/// The 128-byte payload of a `kind` child record of a lifecycle record, after
+/// the C++ core's envelope rules (native-network-v2.md and v3).
+pub(crate) fn child_payload(event: &Value, kind: &str) -> Option<Vec<u8>> {
+    if event["type"] != kind
         || event["protocol_version"] != 3
         || event["category"] != "network"
         || event["flags"] != 0
@@ -90,9 +90,20 @@ fn decode(event: &Value) -> Option<Block> {
         return None;
     }
     let bytes = hex::decode(event["payload"].as_str()?).ok()?;
-    if bytes.len() != 128 || le(&bytes[0..2]) != 1 || le(&bytes[2..4]) != 128 {
-        return None;
-    }
+    (bytes.len() == 128 && le(&bytes[0..2]) == 1 && le(&bytes[2..4]) == 128).then_some(bytes)
+}
+
+/// The C++ core's rules for the record, envelope included.
+fn decode(event: &Value) -> Option<Block> {
+    let response = event["type"] == "response_headers";
+    let bytes = child_payload(
+        event,
+        if response {
+            "response_headers"
+        } else {
+            "request_headers"
+        },
+    )?;
     let block = Block {
         response,
         source: bytes[4],

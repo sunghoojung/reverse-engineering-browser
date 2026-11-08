@@ -238,7 +238,8 @@ for (const [body, pattern] of [
   [record({kind: 'none', state: 'no_body', bodyLength: '0', capturedLength: '0', elementCount: 0, sha256: null, contentType: null, artifactId: '0'}), /No request body/],
   [record({state: 'empty', bodyLength: '0', capturedLength: '0', artifactId: '0'}), /Empty body \(0 bytes\)/],
   [record({state: 'metadata_only', contentCapture: false, capturedLength: '0', artifactId: '0'}), /content capture was off/],
-  [record({kind: 'file', state: 'not_captured_body_kind', lengthPartial: true, sha256: null, capturedLength: '0', artifactId: '0'}), /file upload bodies are never read/],
+  [record({kind: 'file', state: 'not_captured_body_kind', lengthPartial: true, sha256: null, capturedLength: '0', artifactId: '0'}), /file upload parts were described, not read/],
+  [record({kind: 'chunked_data_pipe', state: 'not_captured_read_incomplete', lengthPartial: true, read: true, sha256: null, capturedLength: '0', artifactId: '0'}), /a file, blob or stream part was not read whole/],
 ]) {
   render(body === undefined ? {...request(null), origin: 'sample'} : request(body), null);
   assert.match(text('[data-section="payload"]'), pattern);

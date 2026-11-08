@@ -310,6 +310,7 @@ fn is_network(event: &Value) -> bool {
                     | "capture_exclusion"
                     | "tab_set"
                     | "request_tab_link"
+                    | "request_extension_link"
                     | "response_body"
                     | "request_headers"
                     | "response_headers"

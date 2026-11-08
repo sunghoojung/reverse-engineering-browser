@@ -101,9 +101,9 @@ recorded. Other bits are zero.
 | 3 `metadata_only` | Content capture off for this session |
 | 4 `captured` | The whole body was queued as the named artifact |
 | 5 `captured_truncated` | The first 16 MiB were queued; the length and digest describe the whole body |
-| 6 `not_captured_body_kind` | A file, blob, stream or unknown part; nothing was read |
+| 6 `not_captured_body_kind` | An unknown part, or a file, blob or stream part not read; nothing was read |
 | 7 `not_captured_artifact_unavailable` | Artifact category off, receiver disconnected or session inactive |
-| 8 `not_captured_transfer_refused` | The in-flight pool or the background copy refused it |
+| 8 `not_captured_transfer_refused` | The artifact queue or the background copy refused it |
 | 9 `not_captured_url` | Not HTTP(S). Captures before payload version 2 targets also used it for URLs over 8 KiB |
 | 10 `not_captured_session_budget` | The session's request-content byte budget was used |
 | 11 `not_captured_credential_form` | Chromium marked a password form post; no bytes and no digest |
@@ -128,6 +128,8 @@ Origin Trace decoder:
   nonzero `artifact_id`; every other state has `artifact_id` zero.
 - State 3 has bit 0 clear. States 4 through 10 have bit 0 set. States 7 to 10
   need a nonzero in-memory body.
+- [v3](native-network-v3.md#request-body-reads) adds bit 6 and state 12 for
+  bodies the browser read, and states 7 to 10 for file, blob and stream bodies.
 
 ### `request_target` (type 23)
 
@@ -173,7 +175,7 @@ origin otherwise.
 ## Request content artifacts
 
 Kind 8 `request_body` and kind 9 `request_target`, capture origin 10
-`network_request`, artifact protocol version 1 unchanged. Both are always
+`network_request`. Both are always
 sensitive (flag bit 0), have execution context 0 and a nonzero creator: the
 `request_body` or `request_target` record that names them. No other kind may
 use that origin. A body's MIME type is the normalized content type, or
@@ -195,12 +197,13 @@ neither kind; Traffic shows them with their request.
   element list, a non-allocating `Content-Type` lookup and at most 4 MiB of
   SHA-256 on the browser UI sequence. Bodies above 4 MiB are marked, not hashed.
 - Request content: one more record per start or redirect. A body, and a target
-  past 116 bytes, is charged to the session's byte budget and to the 32 MiB
-  in-flight pool it shares with response tees, then copied and hashed on a
-  background sequence while a reference keeps the immutable body alive. The UI
-  sequence copies only the target string. The pool share travels with the
-  transfer until the artifact writer drops it, so the pool bounds bytes held
-  in the browser rather than requests.
+  past 116 bytes, is charged to the session's byte budget, then copied and
+  hashed on a background sequence while a reference keeps the immutable body
+  alive, and streamed to the receiver in data frames of at most 64 KiB. Each
+  frame holds its share of the 32 MiB in-flight pool it shares with response
+  tees until the writer sends it, so the pool bounds bytes in flight rather
+  than requests. The UI sequence copies only the target string. A pool that
+  refuses a frame is `artifact_capture_failed` with `active_memory_limit`.
 - The budget counts unique bytes: identical content already queued in the
   session configuration is refunded, because the receiver stores one blob per
   SHA-256. It defaults to 256 MiB and is set per session with
@@ -208,8 +211,9 @@ neither kind; Traffic shows them with their request.
   takes from `REB_REQUEST_CONTENT_BUDGET_MIB`. There is no body count; the
   launcher raises a content session's receiver to 65,536 artifacts and
   256 MiB plus the budget. Each refusal is a named state, never silence.
-- The request is never delayed, consumed or altered. File, blob and stream
-  elements are never read, waited on, cloned or moved.
+- The request is never delayed, consumed or altered. Content sessions read
+  file, blob and stream parts as described in
+  [v3](native-network-v3.md#request-body-reads).
 - Queue loss is reported as in v1. A lost child leaves its request with no
   body or target record, which consumers show as "no record", not as no body.
 
@@ -278,4 +282,5 @@ Still required before declaring this browser-ready:
    exists while every body record keeps its length, type and digest.
 
 Response bodies are described in [native network v3](native-network-v3.md).
-File, `Blob` and stream request bodies are still described, not read.
+File, `Blob` and stream request bodies are read in content sessions; see
+[v3](native-network-v3.md#request-body-reads).

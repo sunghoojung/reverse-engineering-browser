@@ -5,6 +5,8 @@
   const INTERNAL_SCHEME_CLASSES = Object.freeze({16: 'chrome', 17: 'chrome-untrusted', 18: 'brave',
     19: 'devtools', 20: 'chrome-search'});
   const WEBUI_RENDERER_CLASS = 64;
+  // Requests a WebUI renderer sent through the browser proxy.
+  const WEBUI_REQUEST_CLASS = 67;
   // Traffic no tab caused (#425): extension workers and DevTools loads.
   const NO_TAB_CLASSES = Object.freeze({65: 'extension', 66: 'devtools'});
   const INTERNAL_URL = /^(?:brave|chrome|chrome-search|chrome-untrusted|devtools):/i;
@@ -26,8 +28,8 @@
     const count = view.getBigUint64(8, true);
     if (view.getUint16(0, true) !== 1 || view.getUint16(2, true) !== 16 || bytes[5] || bytes[6] || bytes[7] ||
         count === 0n || !(exclusionClass in INTERNAL_SCHEME_CLASSES || exclusionClass === WEBUI_RENDERER_CLASS ||
-          exclusionClass in NO_TAB_CLASSES) ||
-        ((exclusionClass === WEBUI_RENDERER_CLASS || exclusionClass === 66) && event.initiator_process_id !== 0)) return null;
+          exclusionClass === WEBUI_REQUEST_CLASS || exclusionClass in NO_TAB_CLASSES) ||
+        ([WEBUI_RENDERER_CLASS, 66, WEBUI_REQUEST_CLASS].includes(exclusionClass) && event.initiator_process_id !== 0)) return null;
     return {exclusionClass, count, producer: `${event.session_id}:${event.initiator_process_id}`};
   }
 
@@ -50,7 +52,7 @@
         totals[NO_TAB_CLASSES[exclusionClass]] += count;
         continue;
       }
-      const scheme = INTERNAL_SCHEME_CLASSES[exclusionClass];
+      const scheme = INTERNAL_SCHEME_CLASSES[exclusionClass] ?? 'webui';
       totals.requests += count;
       totals.byScheme.set(scheme, (totals.byScheme.get(scheme) ?? 0n) + count);
     }

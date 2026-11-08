@@ -82,10 +82,6 @@ NativeProbeEvent Ended(
   return LastOf(NativeProbeType::kResponseBody);
 }
 
-std::vector<std::uint8_t> Bytes(const std::string& text) {
-  return {text.begin(), text.end()};
-}
-
 reb::ResponseBodyState StateOf(const reb::ResponseBodyPayload& payload) {
   return static_cast<reb::ResponseBodyState>(payload.state);
 }
@@ -195,12 +191,18 @@ void ResponseBodies(reb::ArtifactReceiver& receiver, const std::filesystem::path
   // A chunked event stream is retained as it arrives, marked partial until it ends.
   const auto first_events = Bytes("data: one\n\n");
   const auto stream = Respond(705, {.mime = "text/event-stream"});
+  const auto records = [] {
+    return std::ranges::count_if(events, [](const auto& event) {
+      return event.header.type == NativeProbeType::kResponseBody;
+    });
+  };
   NativeArtifactBodyTee::Deliver(stream.pipe, first_events);
-  Check(base::ThreadPool::RunPending() == 0, "No snapshot before a second has passed");
+  const auto before_snapshot = records();
   base::test_now_ns += 2 * kSecond;
   const auto more_events = Bytes("data: two\n\ndata: three\n\n");
   NativeArtifactBodyTee::Deliver(stream.pipe, more_events);
-  Check(base::ThreadPool::RunPending() == 1, "An open stream is snapshotted off the UI sequence");
+  Check(records() == before_snapshot + 1 && base::ThreadPool::pending.empty(),
+        "An open stream is published by a receiver checkpoint; nothing is copied or hashed later");
   std::vector<std::uint8_t> so_far = first_events;
   so_far.insert(so_far.end(), more_events.begin(), more_events.end());
   const auto partial = LastOf(NativeProbeType::kResponseBody);
@@ -213,7 +215,7 @@ void ResponseBodies(reb::ArtifactReceiver& receiver, const std::filesystem::path
   receive(stream, partial);
   base::test_now_ns += 2 * kSecond;
   NativeArtifactBodyTee::Deliver(stream.pipe, Bytes("x"));
-  Check(base::ThreadPool::RunPending() == 0, "A snapshot waits until the body grew by half");
+  Check(records() == before_snapshot + 1, "A snapshot waits until the body grew by half");
   const auto last_events = Bytes("data: four\n\n");
   so_far.push_back('x');
   so_far.insert(so_far.end(), last_events.begin(), last_events.end());
@@ -343,9 +345,9 @@ void ResponseBodyLimits(reb::ArtifactReceiver& receiver, const std::filesystem::
   for (int index = 0; index < 50; ++index) {
     parallel.push_back(Respond(next++));
   }
-  Check(sink.in_flight_bytes() == 50 * reb::kNativeArtifactInitialReservation &&
+  Check(sink.in_flight_bytes() == 0 &&
             std::ranges::all_of(parallel, [](const Response& item) { return item.teed; }),
-        "50 parallel bodies are teed, each holding one chunk");
+        "50 parallel bodies are teed and hold nothing before their bytes arrive");
   std::vector<std::vector<std::uint8_t>> parallel_bytes;
   for (std::size_t index = 0; index < parallel.size(); ++index) {
     parallel_bytes.push_back(Bytes("{\"index\":" + std::to_string(index) + ",\"pad\":\"" +
@@ -358,7 +360,7 @@ void ResponseBodyLimits(reb::ArtifactReceiver& receiver, const std::filesystem::
   }
   base::ThreadPool::RunPending();
   Check(transfers.size() == 50 && sink.in_flight_bytes() <= reb::kNativeArtifactInFlightBytes,
-        "All 50 are queued within the in-flight pool");
+        "All 50 are streamed within the in-flight pool");
   for (std::size_t index = 0; index < parallel.size(); ++index) {
     const auto record = std::find_if(events.rbegin(), events.rend(), [&](const auto& event) {
       return event.header.type == NativeProbeType::kResponseBody &&
@@ -371,14 +373,22 @@ void ResponseBodyLimits(reb::ArtifactReceiver& receiver, const std::filesystem::
   Check(sink.in_flight_bytes() == 0, "Written transfers return their share");
 
   // Browser memory is bounded by the pool; a full pool is a named refusal.
+  {
+    auto held = reb::NativeArtifactReservation::Acquire(
+        sink.memory_pool(), reb::kNativeArtifactInFlightBytes - 32 * kKiB);
+    const auto starved = Respond(next++);
+    const auto starved_record = Ended(starved, std::vector<std::uint8_t>(64 * kKiB, 'z'));
+    Check(starved.teed &&
+              StateOf(ResponseRecord(starved_record)) ==
+                  reb::ResponseBodyState::kNotCapturedTransferRefused &&
+              starved_record.header.artifact_id == 0 &&
+              sink.in_flight_bytes() == reb::kNativeArtifactInFlightBytes - 32 * kKiB,
+          "A full pool refuses the body visibly and keeps nothing of it");
+  }
   const auto big_a = Respond(next++, {.declared = static_cast<std::int64_t>(16 * kMiB)});
   const auto big_b = Respond(next++, {.declared = static_cast<std::int64_t>(16 * kMiB)});
-  const auto starved = Respond(next++);
-  Check(big_a.teed && big_b.teed && !starved.teed &&
-            sink.in_flight_bytes() == reb::kNativeArtifactInFlightBytes &&
-            StateOf(ResponseRecord(LastOf(NativeProbeType::kResponseBody))) ==
-                reb::ResponseBodyState::kNotCapturedTransferRefused,
-        "A full pool refuses the next body visibly");
+  Check(big_a.teed && big_b.teed && sink.in_flight_bytes() == 0,
+        "A declared length reserves nothing");
   // A body past 16 MiB keeps its first 16 MiB and counts every byte.
   std::vector<std::uint8_t> huge(16 * kMiB + 4321);
   for (std::size_t index = 0; index < huge.size(); ++index) {

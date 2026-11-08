@@ -4,6 +4,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <new>
 #include <optional>
@@ -13,9 +14,11 @@
 #include <utility>
 #include <vector>
 #include "brave/components/reverse_engineering_browser/common/native_artifact_header.h"
+#include "brave/components/reverse_engineering_browser/common/native_network_request.h"
 #include "brave/components/reverse_engineering_browser/common/native_probe_event.h"
 #include "network_headers_stub.h"
 #include "network_request_body_stub.h"
+#include "once_callback_stub.h"
 #define BUILDFLAG(flag) (flag)
 #define IS_POSIX 1
 namespace base {
@@ -66,6 +69,16 @@ class FilePath {
  private:
   std::string value_;
 };
+template <class T>
+T* Unretained(T* value) {
+  return value;
+}
+template <class Function, class... Bound>
+auto BindOnce(Function function, Bound... bound) {
+  return [function, ... bound = std::move(bound)](auto&&... rest) mutable -> decltype(auto) {
+    return std::invoke(function, std::move(bound)..., std::forward<decltype(rest)>(rest)...);
+  };
+}
 }  // namespace base
 namespace content {
 class BrowserContext {
@@ -188,6 +201,31 @@ enum class NativeRequestContentAdmission : std::uint8_t {
   kSessionBudget,
   kRefused,
 };
+struct NativeRequestBodyReadOutcome final {
+  NativeRequestBodyState state = NativeRequestBodyState::kNotCapturedReadIncomplete;
+  std::uint64_t artifact_id = 0;
+  std::uint64_t body_length = 0;
+  std::uint64_t captured_length = 0;
+  std::array<std::uint8_t, 32> sha256{};
+};
+using NativeRequestBodyRecorder =
+    base::OnceCallback<std::uint64_t(const NativeRequestBodyReadOutcome&)>;
+class NativeRequestBodyReader {
+ public:
+  static bool CanRead(const network::ResourceRequestBody& body) noexcept {
+    bool readable = false;
+    for (const auto& element : *body.elements()) {
+      if (element.TryAs<network::DataElementFile>() ||
+          element.TryAs<network::DataElementDataPipe>() ||
+          element.TryAs<network::DataElementChunkedDataPipe>()) {
+        readable = true;
+      } else if (!element.TryAs<network::DataElementBytes>()) {
+        return false;
+      }
+    }
+    return readable;
+  }
+};
 // Records what the network sink hands to the artifact channel; the real
 // artifact sink, its budget and pool, and the receiver run in
 // tools/check-native-artifact-capture.py.
@@ -254,6 +292,25 @@ class NativeArtifactCaptureSink {
         {kind, request_id, frame_id, creator_event_id, std::move(url), std::move(content)});
     return next_artifact_id++;
   }
+  struct ReadCall {
+    std::uint64_t request_id = 0, frame_id = 0;
+    std::string url, mime_type;
+    NativeRequestBodyRecorder record;
+  };
+  NativeRequestContentAdmission ReadRequestBody(network::ResourceRequest&,
+                                                std::uint64_t request_id,
+                                                std::uint64_t frame_id,
+                                                std::string url,
+                                                std::string mime_type,
+                                                NativeRequestBodyRecorder record) {
+    if (read_admission != NativeRequestContentAdmission::kQueued)
+      return read_admission;
+    read_calls.push_back(
+        {request_id, frame_id, std::move(url), std::move(mime_type), std::move(record)});
+    return NativeRequestContentAdmission::kQueued;
+  }
+  std::vector<ReadCall> read_calls;
+  NativeRequestContentAdmission read_admission = NativeRequestContentAdmission::kQueued;
   std::vector<HeaderCall> header_calls;
   bool enabled = true;
   bool refuse = false;

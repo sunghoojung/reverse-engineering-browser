@@ -221,6 +221,7 @@ fn body_refusal(state: u8) -> Option<&'static str> {
         9 => "not_captured_url",
         10 => "not_captured_session_budget",
         11 => "not_captured_credential_form",
+        12 => "not_captured_read_incomplete",
         _ => return None,
     })
 }
@@ -263,7 +264,10 @@ fn content_meaning(category: &str, reason: &str, count: u64) -> String {
             "arrived after the session's response body byte budget was used. Start a new session, or raise REB_RESPONSE_BODY_BUDGET_MIB"
         }
         "not_captured_body_kind" => {
-            "were files, blobs or streams, which are described but not read"
+            "had a part the browser does not read, so they are described but not read"
+        }
+        "not_captured_read_incomplete" => {
+            "had a file, blob or stream part that changed, failed or was cancelled before it was read whole"
         }
         "not_captured_credential_form" => {
             "were password form posts, which keep neither bytes nor a digest"
@@ -364,6 +368,7 @@ fn exclusion_class(code: u8) -> Option<(&'static str, &'static str)> {
         64 => ("webui_renderer", "renderer_processes"),
         65 => ("extension_worker", "requests"),
         66 => ("devtools_load", "requests"),
+        67 => ("webui_request", "requests"),
         _ => return None,
     })
 }
@@ -559,15 +564,17 @@ pub fn build(store: &Path, artifacts: &Path, state: &CaptureState<'_>) -> Result
         item["count"] = json!(no_tab.to_string());
         checks.push(item);
     }
+    // Internal-scheme loads and the requests WebUI renderers sent through the proxy.
+    let internal_request = |class: u8| class < 64 || class == 67;
     let requests: u64 = excluded
         .iter()
-        .filter(|(class, _)| **class < 64)
+        .filter(|(class, _)| internal_request(**class))
         .fold(0, |sum, (_, count)| sum.saturating_add(*count));
     let renderers = excluded.get(&64).copied().unwrap_or(0);
     if requests > 0 || renderers > 0 {
         let by_class = excluded
             .iter()
-            .filter(|(class, _)| **class < 64)
+            .filter(|(class, _)| internal_request(**class))
             .map(|(class, count)| format!("{} {count}", exclusion_class(*class).unwrap().0))
             .collect::<Vec<_>>()
             .join(", ");
@@ -746,6 +753,7 @@ mod tests {
             exclusion(6, 0, 64, 2),
             exclusion(8, 41, 65, 2),
             exclusion(9, 0, 66, 1),
+            exclusion(11, 0, 67, 3),
         ]
         .map(|event| event.to_string())
         .to_vec();
@@ -778,6 +786,7 @@ mod tests {
                 {"class": "webui_renderer", "unit": "renderer_processes", "count": "2"},
                 {"class": "extension_worker", "unit": "requests", "count": "2"},
                 {"class": "devtools_load", "unit": "requests", "count": "1"},
+                {"class": "webui_request", "unit": "requests", "count": "3"},
             ])
         );
         let checks = summary["checks"].as_array().unwrap();
@@ -800,12 +809,11 @@ mod tests {
             .find(|check| check["code"] == "browser_internal_excluded")
             .unwrap();
         assert_eq!(excluded["severity"], "info");
-        assert_eq!(excluded["count"], "8");
+        assert_eq!(excluded["count"], "11");
         let message = excluded["message"].as_str().unwrap();
-        assert!(
-            message
-                .contains("8 browser-internal requests were not recorded (chrome 7, devtools 1)")
-        );
+        assert!(message.contains(
+            "11 browser-internal requests were not recorded (chrome 7, devtools 1, webui_request 3)"
+        ));
         assert!(message.contains("2 WebUI renderer processes were not admitted"));
     }
 

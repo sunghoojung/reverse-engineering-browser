@@ -71,12 +71,13 @@ function trafficBodyCapture(body) {
     metadata_only: 'Not retained: content capture was off for this session. Length, type and digest are recorded.',
     captured: 'Retained in full.',
     captured_truncated: `Retained prefix: ${trafficByteCount(body.capturedLength)} of ${trafficByteCount(body.bodyLength)}, truncated at the capture limit.`,
-    not_captured_body_kind: `Not captured: ${kind.toLowerCase()} bodies are never read by native capture.`,
+    not_captured_body_kind: `Not captured: the ${kind.toLowerCase()} parts were described, not read.`,
     not_captured_artifact_unavailable: 'Not captured: the artifact channel was unavailable.',
     not_captured_transfer_refused: 'Not captured: the bounded in-flight memory or artifact transfer queue refused it.',
     not_captured_url: 'Not captured: the URL is not HTTP(S), or in older captures longer than 8 KiB.',
     not_captured_session_budget: 'Not captured: this session had used its request body budget.',
-    not_captured_credential_form: 'Not captured: password form submission. Bytes and digest are withheld.'
+    not_captured_credential_form: 'Not captured: password form submission. Bytes and digest are withheld.',
+    not_captured_read_incomplete: 'Not captured: a file, blob or stream part was not read whole. It changed or failed, the upload was cancelled, or capture ended first.'
   }[body.state] ?? 'Unknown capture state.';
 }
 
@@ -84,13 +85,14 @@ function trafficBodyRows(body) {
   if (!body || body.malformed) return [];
   const digest = body.sha256 ?? (body.state === 'no_body' ? 'No body'
     : body.state === 'not_captured_credential_form' ? 'Withheld for a password form'
-      : body.digestSizeLimit ? 'Not computed: the body exceeds the 4 MiB digest bound'
-        : 'Not computed: file, blob or stream parts are not read');
+      : body.digestSizeLimit ? `Not computed: the body exceeds the ${body.read ? '16' : '4'} MiB digest bound`
+        : body.read ? 'Not computed: the read did not finish'
+          : 'Not computed: file, blob or stream parts were not read');
   return [
     ['Content type', body.contentType ?? (body.contentTypeOmitted ? 'Sent, but not a bounded media type; not recorded' : 'Not sent'),
       body.contentType ? 'value' : 'prose'],
     ['Body length', body.state === 'no_body' ? 'No body'
-      : `${trafficByteCount(body.bodyLength)}${body.lengthPartial ? ' in memory; file, blob and stream parts are not counted' : ''}`,
+      : `${trafficByteCount(body.bodyLength)}${!body.lengthPartial ? '' : body.read ? ' read before the read stopped' : ' in memory; file, blob and stream parts are not counted'}`,
     body.state === 'no_body' ? 'prose' : 'value'],
     ['SHA-256', digest, body.sha256 ? 'value' : 'prose'],
     ['Body kind', `${TRAFFIC_BODY_KIND_LABELS[body.kind] ?? 'Unrecognized part'} · ${body.elementCount} ${body.elementCount === 1 ? 'part' : 'parts'}`, 'value']
@@ -334,7 +336,7 @@ function trafficBlockStart(container, total, start) {
 function trafficIndexRequest(row, origin) {
   return {id: row.id, path: row.path, method: row.method, status: row.status, time: row.time, type: row.type, origin,
     targetKind: row.target_kind, hostOnly: row.target_kind === 'host', failed: row.failed, interrupted: row.interrupted,
-    tabId: row.tab_id, tabIds: row.tab_ids, operation: row.operation,
+    tabId: row.tab_id, tabIds: row.tab_ids, extensionId: row.extension_id ?? null, operation: row.operation,
     tabLink: row.tab_link ?? null, initiatorFrame: row.initiator_frame ?? null, tabLinkLabel: row.tab_link ? globalThis.RebRequestTabs?.linkLabel(row.tab_link) ?? '' : '', target: row.target, host: row.host, urlTruncated: row.url_truncated,
     targetLength: row.target_length, targetMalformed: row.target_malformed,
     firstTimestamp: BigInt(row.first_time_ns), lastTimestamp: BigInt(row.last_time_ns),
@@ -572,7 +574,8 @@ function trafficTabs(request) {
 function trafficTabText(request) {
   const tabs = trafficTabs(request);
   if (!tabs.length) return request.origin === 'live' ? 'No tab linked. This is a capture error.' : 'Not applicable';
-  return `${tabs.join(', ')}${request.tabLinkLabel ? ` (${request.tabLinkLabel})` : ''}`;
+  const names = tabs.map(tab => tab.startsWith('extension:') ? `Extension ${tab.slice(10)}` : tab);
+  return `${names.join(', ')}${request.tabLinkLabel ? ` (${request.tabLinkLabel})` : ''}`;
 }
 
 // Saved-capture record export for the offline generators. Native Traffic rows

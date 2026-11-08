@@ -595,7 +595,8 @@
             "dom_mutation",
             "navigation_initiator_stack",
             "navigation_initiator_link",
-            "async_task_stack"
+            "async_task_stack",
+            "request_extension_link"
           ]
         },
         "status_code": {

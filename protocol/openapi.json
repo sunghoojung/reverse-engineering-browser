@@ -2055,7 +2055,7 @@
             "name": "type",
             "in": "query",
             "required": false,
-            "description": "Comma-separated event types to keep, at most 16 exact names: api_call, property_read, module_compiled, module_instantiated, request_started, request_initiated, request_redirected, response_started, response_completed, request_completed, request_failed, request_body, request_target, artifact_captured, artifact_capture_failed, vm_finding, vm_dispatch_sample, wasm_dispatch_observation, wasm_indirect_observation, wasm_guest_dispatch, wasm_guest_invocation, js_dispatch_observation, js_invocation_start, js_invocation_settle, js_invocation_request, wasm_execution_outcome, wasm_dispatch_overflow, wasm_indirect_overflow, request_headers, response_headers, cookie_list, response_body, request_initiator_stack, script_identity, capture_exclusion, tab_set, request_tab_link, script_cookie, request_watch_match, listener_dispatch, timer_observation, csp_violation, exception_observation, dom_mutation, navigation_initiator_stack, navigation_initiator_link, async_task_stack, gap. An unknown name matches nothing.",
+            "description": "Comma-separated event types to keep, at most 16 exact names: api_call, property_read, module_compiled, module_instantiated, request_started, request_initiated, request_redirected, response_started, response_completed, request_completed, request_failed, request_body, request_target, artifact_captured, artifact_capture_failed, vm_finding, vm_dispatch_sample, wasm_dispatch_observation, wasm_indirect_observation, wasm_guest_dispatch, wasm_guest_invocation, js_dispatch_observation, js_invocation_start, js_invocation_settle, js_invocation_request, wasm_execution_outcome, wasm_dispatch_overflow, wasm_indirect_overflow, request_headers, response_headers, cookie_list, response_body, request_initiator_stack, script_identity, capture_exclusion, tab_set, request_tab_link, script_cookie, request_watch_match, listener_dispatch, timer_observation, csp_violation, exception_observation, dom_mutation, navigation_initiator_stack, navigation_initiator_link, async_task_stack, request_extension_link, gap. An unknown name matches nothing.",
             "schema": {
               "type": "string",
               "maxLength": 1040
@@ -2311,10 +2311,10 @@
             "name": "tab_id",
             "in": "query",
             "required": false,
-            "description": "Requests of one browser tab, or unattributed for requests without one.",
+            "description": "Requests of one browser tab, extension:<id> for the extension traffic one extension made, or unattributed for requests without an owner.",
             "schema": {
               "type": "string",
-              "pattern": "^(unattributed|[1-9][0-9]{0,9})$"
+              "pattern": "^(unattributed|[1-9][0-9]{0,9}|extension:[a-p]{32})$"
             }
           },
           {
@@ -2587,7 +2587,7 @@
             "name": "type",
             "in": "query",
             "required": false,
-            "description": "Comma-separated event types to keep, at most 16 exact names: api_call, property_read, module_compiled, module_instantiated, request_started, request_initiated, request_redirected, response_started, response_completed, request_completed, request_failed, request_body, request_target, artifact_captured, artifact_capture_failed, vm_finding, vm_dispatch_sample, wasm_dispatch_observation, wasm_indirect_observation, wasm_guest_dispatch, wasm_guest_invocation, js_dispatch_observation, js_invocation_start, js_invocation_settle, js_invocation_request, wasm_execution_outcome, wasm_dispatch_overflow, wasm_indirect_overflow, request_headers, response_headers, cookie_list, response_body, request_initiator_stack, script_identity, capture_exclusion, tab_set, request_tab_link, script_cookie, request_watch_match, listener_dispatch, timer_observation, csp_violation, exception_observation, dom_mutation, navigation_initiator_stack, navigation_initiator_link, async_task_stack, gap. An unknown name matches nothing.",
+            "description": "Comma-separated event types to keep, at most 16 exact names: api_call, property_read, module_compiled, module_instantiated, request_started, request_initiated, request_redirected, response_started, response_completed, request_completed, request_failed, request_body, request_target, artifact_captured, artifact_capture_failed, vm_finding, vm_dispatch_sample, wasm_dispatch_observation, wasm_indirect_observation, wasm_guest_dispatch, wasm_guest_invocation, js_dispatch_observation, js_invocation_start, js_invocation_settle, js_invocation_request, wasm_execution_outcome, wasm_dispatch_overflow, wasm_indirect_overflow, request_headers, response_headers, cookie_list, response_body, request_initiator_stack, script_identity, capture_exclusion, tab_set, request_tab_link, script_cookie, request_watch_match, listener_dispatch, timer_observation, csp_violation, exception_observation, dom_mutation, navigation_initiator_stack, navigation_initiator_link, async_task_stack, request_extension_link, gap. An unknown name matches nothing.",
             "schema": {
               "type": "string",
               "maxLength": 1040
@@ -15965,6 +15965,7 @@
           "tab_id",
           "tab_ids",
           "tab_link",
+          "extension_id",
           "operation",
           "first_time_ns",
           "last_time_ns",
@@ -16132,6 +16133,14 @@
               }
             },
             "description": "The newest request_tab_link naming this row, or null."
+          },
+          "extension_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "pattern": "^[a-p]{32}$",
+            "description": "The extension a request_extension_link names: extension traffic recorded with REB_CAPTURE_EXTENSION_TRAFFIC=1 (protocol/native-network-v3.md), else null."
           },
           "operation": {
             "type": "string"
@@ -16492,8 +16501,9 @@
                   "additionalProperties": false,
                   "properties": {
                     "tab_id": {
-                      "$ref": "#/components/schemas/Uint64String",
-                      "description": "0 is requests without a tab."
+                      "type": "string",
+                      "pattern": "^(0|[1-9][0-9]{0,9}|extension:[a-p]{32})$",
+                      "description": "A tab id, extension:<id> for one extension's traffic, or 0 for requests without an owner."
                     },
                     "count": {
                       "type": "integer",
@@ -23841,7 +23851,8 @@
               "dom_mutation",
               "navigation_initiator_stack",
               "navigation_initiator_link",
-              "async_task_stack"
+              "async_task_stack",
+              "request_extension_link"
             ]
           },
           "status_code": {
@@ -30623,9 +30634,10 @@
           "request_tabs": {
             "type": "object",
             "additionalProperties": false,
-            "description": "Whether each request row of the scanned events has a browser tab (protocol/native-network-v3.md). Rows join records as Traffic does; a row is linked when a record has a tab or a request_tab_link names it. An unlinked row is a capture error, reported by the network_tab_unresolved check. Read one with get_events process_id and request_id.",
+            "description": "Whether each request row of the scanned events has a browser tab (protocol/native-network-v3.md). Rows join records as Traffic does; a row is linked when a record has a tab or a request_tab_link or request_extension_link names it. An unlinked row is a capture error, reported by the network_tab_unresolved check. Read one with get_events process_id and request_id.",
             "required": [
               "rows",
+              "extension_rows",
               "unresolved",
               "unresolved_requests",
               "unresolved_omitted",
@@ -30634,6 +30646,10 @@
             "properties": {
               "rows": {
                 "$ref": "#/components/schemas/Uint64String"
+              },
+              "extension_rows": {
+                "$ref": "#/components/schemas/Uint64String",
+                "description": "Rows a request_extension_link names: extension traffic recorded with REB_CAPTURE_EXTENSION_TRAFFIC=1."
               },
               "unresolved": {
                 "$ref": "#/components/schemas/Uint64String"
@@ -30670,7 +30686,7 @@
           },
           "exclusions": {
             "type": "array",
-            "description": "Evidence the capture counted instead of recording, by class, from capture_exclusion records (protocol/native-network-v3.md). Requests are chrome, chrome_untrusted, brave, devtools and chrome_search scheme loads, extension_worker requests of extension workers and devtools_load requests of the DevTools factory; webui_renderer counts renderer processes that were not admitted. These are named exclusions, never gaps or drops. Empty when nothing was excluded or REB_CAPTURE_BROWSER_INTERNAL=1 recorded browser-internal loads.",
+            "description": "Evidence the capture counted instead of recording, by class, from capture_exclusion records (protocol/native-network-v3.md). Requests are chrome, chrome_untrusted, brave, devtools and chrome_search scheme loads, webui_request requests WebUI renderers sent through the browser proxy, extension_worker requests of extension workers and devtools_load requests of the DevTools factory; webui_renderer counts renderer processes with WebUI bindings or a WebUI process lock that were not admitted. These are named exclusions, never gaps or drops. Empty when nothing was excluded or REB_CAPTURE_BROWSER_INTERNAL=1 recorded browser-internal loads.",
             "items": {
               "type": "object",
               "additionalProperties": false,
@@ -30690,7 +30706,8 @@
                     "chrome_search",
                     "webui_renderer",
                     "extension_worker",
-                    "devtools_load"
+                    "devtools_load",
+                    "webui_request"
                   ]
                 },
                 "unit": {

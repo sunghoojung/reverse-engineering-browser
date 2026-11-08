@@ -57,6 +57,8 @@ checks:
   counted, not recorded. Not a loss; see `exclusions`.
 - `network_tab_unresolved` (error): requests without a tab. Read one with
   `get_events` and the `process_id` and `request_id` from `request_tabs`.
+  Extension traffic recorded by opt-in counts as `extension_rows`, not as
+  unresolved.
 
 ## 3. Find a session's Wasm modules
 

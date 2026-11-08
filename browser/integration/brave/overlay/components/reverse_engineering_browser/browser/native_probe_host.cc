@@ -21,12 +21,12 @@
 #include "content/public/browser/weak_document_ptr.h"
 
 #include "brave/components/reverse_engineering_browser/browser/native_artifact_capture_sink.h"
+#include "brave/components/reverse_engineering_browser/browser/native_capture_scope.h"
 #include "brave/components/reverse_engineering_browser/browser/native_probe_session.h"
 #include "brave/components/reverse_engineering_browser/browser/native_tab_of.h"
 #include "brave/components/reverse_engineering_browser/browser/native_tab_resolver.h"
 #include "brave/components/reverse_engineering_browser/common/native_probe_queue.h"
 #include "brave/components/reverse_engineering_browser/common/native_wasm_guest_adapter.h"
-#include "content/public/browser/child_process_security_policy.h"
 #include "content/public/browser/render_frame_host.h"
 #include "content/public/browser/render_process_host.h"
 #include "content/public/browser/web_contents.h"
@@ -776,7 +776,7 @@ void NativeProbeHost::ResetWasmSampleBudgets() {
 
 bool NativeProbeHost::IsBrowserInternal() {
   if (!browser_internal_ && !session_->capture_browser_internal() &&
-      content::ChildProcessSecurityPolicy::GetInstance()->HasWebUIBindings(renderer_process_id_)) {
+      IsNativeBrowserInternalProcess(renderer_process_id_)) {
     browser_internal_ = true;
     session_->NoteWebUiRendererExcluded();
   }
@@ -822,17 +822,18 @@ void NativeProbeHost::EmitWorkerRequest(NativeProbeEvent& event) {
   const NativeTabResolution resolution =
       NativeTabResolver::Get().Resolve(static_cast<NativeLoaderKind>(event.header.loader_kind),
                                        event.header.frame_id, event.header.session_id);
-  if (resolution.status == NativeTabResolution::Status::kExtension) {
+  const bool extension = resolution.status == NativeTabResolution::Status::kExtension;
+  if (extension && !(session_->capture_extension_traffic() && resolution.extension)) {
     excluded_requests_[excluded_next_++ % excluded_requests_.size()] = event.header.request_id;
     session_->EmitExclusion(renderer_os_pid_, kNativeExtensionWorkerExclusion,
                             ++extension_requests_excluded_);
     return;
   }
-  if (resolution.status != NativeTabResolution::Status::kLinked) {
+  if (!extension && resolution.status != NativeTabResolution::Status::kLinked) {
     session_->Emit(event);
     return;
   }
-  if (resolution.tabs.size() == 1) {
+  if (!extension && resolution.tabs.size() == 1) {
     event.header.tab_id = resolution.tabs[0];
   }
   session_->Emit(event);
@@ -841,19 +842,16 @@ void NativeProbeHost::EmitWorkerRequest(NativeProbeEvent& event) {
   identity.monotonic_time_ns = event.header.monotonic_time_ns;
   identity.process_id = static_cast<std::uint32_t>(base::GetCurrentProcId());
   identity.thread_id = static_cast<std::uint32_t>(base::PlatformThread::CurrentId().raw());
-  if (resolution.emit_set) {
-    std::uint64_t previous = 0;
-    for (std::size_t part = 0; part < NativeTabSetParts(resolution.tabs.size()); ++part) {
-      identity.sequence_number = session_->NextBrowserSequence();
-      session_->Emit(MakeNativeTabSetPart(identity, resolution.owner_kind, event.header.frame_id,
-                                          resolution.last_clients, resolution.set_id,
-                                          resolution.tabs, part, previous));
-      previous = identity.sequence_number;
-    }
+  if (extension) {
+    identity.sequence_number = session_->NextBrowserSequence();
+    session_->Emit(MakeNativeRequestExtensionLink(
+        event.header, identity, static_cast<NativeLoaderKind>(event.header.loader_kind),
+        *resolution.extension));
+    return;
   }
-  identity.sequence_number = session_->NextBrowserSequence();
-  session_->Emit(MakeNativeRequestTabLink(event.header, identity, resolution.kind,
-                                          resolution.set_id, resolution.tabs));
+  EmitNativeTabLink(
+      resolution, event.header, false, identity, [this] { return session_->NextBrowserSequence(); },
+      [this](const NativeProbeEvent& record) { session_->Emit(record); });
 }
 
 void NativeProbeHost::Drain() {

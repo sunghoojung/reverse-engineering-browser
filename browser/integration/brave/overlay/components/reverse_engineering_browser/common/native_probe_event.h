@@ -113,6 +113,8 @@ enum class NativeProbeType : std::uint16_t {
   kNavigationInitiatorStack = 46,
   kNavigationInitiatorLink = 47,
   kAsyncTaskStack = 48,
+  // Extension traffic recorded by opt-in; see protocol/native-network-v3.md.
+  kRequestExtensionLink = 50,
 };
 
 enum class NativeProbeFlag : std::uint16_t {

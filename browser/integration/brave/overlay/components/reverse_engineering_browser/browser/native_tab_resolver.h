@@ -10,6 +10,7 @@
 #include <cstdint>
 #include <deque>
 #include <map>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
@@ -33,13 +34,39 @@ struct NativeTabResolution final {
   Status status = Status::kUnresolved;
   NativeTabLinkKind kind = NativeTabLinkKind::kDedicatedWorker;
   NativeLoaderKind owner_kind = NativeLoaderKind::kNotRecorded;
+  std::uint64_t owner_fold = 0;
   bool last_clients = false;
   std::uint64_t set_id = 0;
   // Ascending and distinct; valid until the next resolver call.
   std::span<const std::uint32_t> tabs;
   // True when this session has not received the set yet.
   bool emit_set = false;
+  // kExtension: the owner's extension id, when its origin names a valid one.
+  std::optional<NativeExtensionId> extension;
 };
+
+// The sets this session lacks, then the link (protocol/native-network-v3.md).
+template <class NextSequence, class Emit>
+void EmitNativeTabLink(const NativeTabResolution& resolution,
+                       const NativeProbeHeader& linked,
+                       const bool browser_record,
+                       NativeProbeHeader identity,
+                       NextSequence&& next_sequence,
+                       Emit&& emit) {
+  if (resolution.emit_set) {
+    std::uint64_t previous = 0;
+    for (std::size_t part = 0; part < NativeTabSetParts(resolution.tabs.size()); ++part) {
+      identity.sequence_number = next_sequence();
+      emit(MakeNativeTabSetPart(identity, resolution.owner_kind, resolution.owner_fold,
+                                resolution.last_clients, resolution.set_id, resolution.tabs, part,
+                                previous));
+      previous = identity.sequence_number;
+    }
+  }
+  identity.sequence_number = next_sequence();
+  emit(MakeNativeRequestTabLink(linked, identity, resolution.kind, resolution.set_id,
+                                resolution.tabs, browser_record));
+}
 
 // Browser UI sequence only. Frames and workers are recorded where Chromium
 // names their owner and kept as bounded tombstones after they are destroyed,
@@ -61,17 +88,18 @@ class NativeTabResolver final {
   // 0 when the frame is unknown, or two frame tokens of the process share the fold.
   [[nodiscard]] std::uint32_t FrameTab(int child_id, std::uint64_t frame_fold) const;
 
+  // `extension` is the host of a chrome-extension origin, else empty.
   void DedicatedWorkerCreated(NativeToken128 worker,
-                              bool extension,
+                              std::string_view extension,
                               std::uint32_t creator_tab,
                               NativeToken128 creator_worker);
-  void SharedWorkerCreated(NativeToken128 worker, bool extension);
+  void SharedWorkerCreated(NativeToken128 worker, std::string_view extension);
   // client is the frame's process and routing id; its tab is kept for removal.
   void SharedWorkerClientAdded(NativeToken128 worker, std::uint64_t client, std::uint32_t tab);
   void SharedWorkerClientRemoved(NativeToken128 worker, std::uint64_t client);
   void ServiceWorkerStarted(std::int64_t version,
                             NativeToken128 token,
-                            bool extension,
+                            std::string_view extension,
                             std::string_view scope);
   void ServiceWorkerScope(std::int64_t version, std::string_view scope);
   void ServiceWorkerControlleeAdded(std::int64_t version,
@@ -86,6 +114,8 @@ class NativeTabResolver final {
   [[nodiscard]] NativeTabResolution Resolve(NativeLoaderKind owner_kind,
                                             std::uint64_t owner_fold,
                                             std::uint64_t session_id);
+  // The client tabs of one service-worker version, for a script it fetches.
+  [[nodiscard]] NativeTabResolution ResolveVersion(std::int64_t version, std::uint64_t session_id);
 
  private:
   struct TabSet final {
@@ -97,6 +127,7 @@ class NativeTabResolver final {
     NativeLoaderKind kind = NativeLoaderKind::kNotRecorded;
     NativeToken128 token;
     bool extension = false;
+    std::optional<NativeExtensionId> extension_id;
     bool ambiguous = false;
     // Dedicated: the creator document's tab. Shared: client frame -> tab.
     std::uint32_t tab = 0;
@@ -113,16 +144,18 @@ class NativeTabResolver final {
   };
 
   Worker* FindWorker(std::uint64_t fold);
-  Worker& AddWorker(NativeLoaderKind kind, NativeToken128 token, bool extension);
+  Worker& AddWorker(NativeLoaderKind kind, NativeToken128 token, std::string_view extension);
   Version& VersionOf(std::int64_t version);
   static void Rebuild(TabSet& set, std::vector<std::uint32_t> tabs);
   static std::vector<std::uint32_t> SharedTabs(const Worker& worker);
   static std::vector<std::uint32_t> ControlleeTabs(const Version& version);
   NativeTabResolution Linked(NativeTabLinkKind kind,
                              NativeLoaderKind owner_kind,
+                             std::uint64_t owner_fold,
                              bool last_clients,
                              TabSet& set,
                              std::uint64_t session_id);
+  NativeTabResolution VersionTabs(Version& version, std::uint64_t fold, std::uint64_t session_id);
 
   struct FrameEntry final {
     int child_id = 0;

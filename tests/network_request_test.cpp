@@ -126,6 +126,26 @@ reb::NativeRequestBodySummary Summary(const reb::NativeRequestBodyKind kind,
   return value;
 }
 
+// A body whose file, blob or stream parts the browser read (native-network-v3.md).
+reb::NativeRequestBodySummary Read(const reb::NativeRequestBodyKind kind,
+                                   const reb::NativeRequestBodyState state,
+                                   const std::uint64_t length,
+                                   const std::uint64_t captured = 0) {
+  using S = reb::NativeRequestBodyState;
+  auto value = Summary(kind, state, true, length, captured);
+  value.flags |= reb::kNativeRequestBodyRead;
+  if (state == S::kEmpty || state == S::kCaptured || state == S::kCapturedTruncated) {
+    value.flags &= static_cast<std::uint8_t>(~reb::kNativeRequestBodyLengthPartial);
+  }
+  if (state == S::kEmpty || state == S::kCaptured) {
+    value.flags |= reb::kNativeRequestBodyDigestPresent;
+    value.sha256.fill(0xcd);
+  } else if (state == S::kCapturedTruncated) {
+    value.flags |= reb::kNativeRequestBodyDigestSizeLimit;
+  }
+  return value;
+}
+
 reb::EventRecord Event(const reb::EventType type, const std::array<std::byte, 128>& payload) {
   reb::EventRecord event{};
   event.header.category = reb::EventCategory::kNetwork;
@@ -267,6 +287,22 @@ void CheckBodyStates() {
       {"credential form, metadata", Summary(K::kBytes, S::kNotCapturedCredentialForm, false, 40),
        0},
       {"credential form, content", Summary(K::kBytes, S::kNotCapturedCredentialForm, true, 40), 0},
+      {"file body unavailable before read",
+       Summary(K::kFile, S::kNotCapturedArtifactUnavailable, true, 0), 0},
+      {"stream body past budget before read",
+       Summary(K::kChunkedDataPipe, S::kNotCapturedSessionBudget, true, 0), 0},
+      {"multipart body refused before read",
+       Summary(K::kMixed, S::kNotCapturedTransferRefused, true, 120), 0},
+      {"blob body on unsupported URL", Summary(K::kDataPipe, S::kNotCapturedUrl, true, 0), 0},
+      {"read multipart body with a file", Read(K::kMixed, S::kCaptured, 4096, 4096), 904},
+      {"read stream body", Read(K::kChunkedDataPipe, S::kCaptured, 77, 77), 905},
+      {"read empty blob", Read(K::kDataPipe, S::kEmpty, 0), 0},
+      {"read file past 16 MiB",
+       Read(K::kFile, S::kCapturedTruncated, (16ULL << 20) + 9, 16ULL << 20), 906},
+      {"read stopped by the budget", Read(K::kDataPipe, S::kNotCapturedSessionBudget, 70000), 0},
+      {"read refused by the pool", Read(K::kChunkedDataPipe, S::kNotCapturedTransferRefused, 12),
+       0},
+      {"read incomplete", Read(K::kFile, S::kNotCapturedReadIncomplete, 0), 0},
   };
   for (const Valid& item : valid) {
     golden.emplace_back(item.name, BodyEvent(item.summary, item.artifact_id));
@@ -294,8 +330,40 @@ void CheckBodyStates() {
       {"reserved bytes", captured, 901, payload(28, std::byte{1})},
       {"unknown kind", captured, 901, payload(4, std::byte{7})},
       {"zero state", captured, 901, payload(5, std::byte{0})},
-      {"unknown state", captured, 901, payload(5, std::byte{12})},
-      {"unknown flag", captured, 901, payload(6, std::byte{0x40 | 0x13})},
+      {"unknown state", captured, 901, payload(5, std::byte{13})},
+      {"unknown flag", captured, 901, payload(6, std::byte{0x80 | 0x13})},
+      {"read flag on in-memory bytes", captured, 901, [](auto& s, auto&) { s.flags |= 0x40; }},
+      {"read flag on an unknown element",
+       Read(K::kUnknown, S::kNotCapturedReadIncomplete, 0),
+       0,
+       {}},
+      {"read flag in a metadata session", Read(K::kFile, S::kNotCapturedReadIncomplete, 0), 0,
+       [](auto& s, auto&) { s.flags &= static_cast<std::uint8_t>(~1U); }},
+      {"read incomplete without read flag",
+       Summary(K::kFile, S::kNotCapturedReadIncomplete, true, 0),
+       0,
+       {}},
+      {"read capture without digest", Read(K::kFile, S::kCaptured, 40, 40), 904,
+       [](auto& s, auto&) {
+         s.flags &= static_cast<std::uint8_t>(~2U);
+         s.sha256 = {};
+       }},
+      {"read capture with partial length", Read(K::kFile, S::kCaptured, 40, 40), 904,
+       [](auto& s, auto&) { s.flags |= 8; }},
+      {"read capture past 16 MiB untruncated",
+       Read(K::kFile, S::kCaptured, (16ULL << 20) + 1, (16ULL << 20) + 1),
+       904,
+       {}},
+      {"read truncation with a short prefix",
+       Read(K::kFile, S::kCapturedTruncated, (16ULL << 20) + 9, 1024),
+       906,
+       {}},
+      {"read capture without artifact", Read(K::kDataPipe, S::kCaptured, 40, 40), 0, {}},
+      {"read refusal with exact length", Read(K::kFile, S::kNotCapturedTransferRefused, 40), 0,
+       [](auto& s, auto&) { s.flags &= static_cast<std::uint8_t>(~8U); }},
+      {"read stream of two elements", Read(K::kChunkedDataPipe, S::kCaptured, 40, 40), 905,
+       [](auto& s, auto&) { s.element_count = 2; }},
+      {"read state outside the read set", Read(K::kFile, S::kNotCapturedUrl, 0), 0, {}},
       {"content type dirty tail", captured, 901, payload(100, std::byte{'x'})},
       {"content type upper case", captured, 901, payload(64, std::byte{'A'})},
       {"content type length past field", captured, 901, payload(7, std::byte{65})},

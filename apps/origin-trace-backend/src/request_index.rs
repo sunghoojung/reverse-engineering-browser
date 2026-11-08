@@ -50,7 +50,7 @@ const MAX_IDENTITIES: usize = 16_384;
 const UNIDENTIFIED: &str = "Unidentified network event";
 /// Records that belong to a row without changing its lifecycle; a selected
 /// row reads them back by member (protocol/native-network-v2.md and v3).
-const CHILD_TYPES: [&str; 9] = [
+const CHILD_TYPES: [&str; 10] = [
     "request_target",
     "request_body",
     "response_body",
@@ -60,6 +60,7 @@ const CHILD_TYPES: [&str; 9] = [
     "request_initiator_stack",
     "request_tab_link",
     "navigation_initiator_link",
+    "request_extension_link",
 ];
 
 pub const QUERY_KEYS: [&str; 18] = [
@@ -199,6 +200,8 @@ struct Row {
     /// The newest `request_tab_link`: its set key, kind and tab count.
     tab_set: Option<String>,
     tab_link: (u8, u32),
+    /// The extension a `request_extension_link` names.
+    extension: Option<String>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -294,6 +297,13 @@ pub enum Answer {
     Document(Value, String),
 }
 
+/// A `tab_id` filter: a tab (0 selects rows with no owner) or an extension.
+#[derive(Clone, Debug, PartialEq)]
+enum TabScope {
+    Tab(u64),
+    Extension(String),
+}
+
 pub struct RequestQuery {
     limit: usize,
     offset: usize,
@@ -302,7 +312,7 @@ pub struct RequestQuery {
     sort: &'static str,
     descending: bool,
     needle: String,
-    tab: Option<u64>,
+    tab: Option<TabScope>,
     domain: Option<String>,
     kind: Option<&'static str>,
     named: Vec<(String, u32, String)>,
@@ -432,8 +442,17 @@ impl RequestQuery {
         };
         let tab = match q.one("tab_id")? {
             None => None,
-            Some("unattributed") => Some(0),
-            Some(_) => Some(q.number("tab_id", None, 32, true)?),
+            Some("unattributed") => Some(TabScope::Tab(0)),
+            Some(value) if value.starts_with("extension:") => {
+                let id = &value["extension:".len()..];
+                if id.len() != 32 || !id.bytes().all(|byte| (b'a'..=b'p').contains(&byte)) {
+                    return Err(Error::bad(
+                        "tab_id extension: must name a 32-letter extension id",
+                    ));
+                }
+                Some(TabScope::Extension(id.to_owned()))
+            }
+            Some(_) => Some(TabScope::Tab(q.number("tab_id", None, 32, true)?)),
         };
         let kind = match q.one("type")? {
             None => None,
@@ -723,6 +742,13 @@ fn fold_identity(event: &Value, identities: &mut HashMap<String, String>) {
     }
 }
 
+fn extension_link(event: &Value) -> Option<String> {
+    let bytes = hex::decode(event["payload"].as_str()?).ok()?;
+    let id = bytes.get(8..40)?;
+    (bytes.len() == 40 && id.iter().all(|byte| (b'a'..=b'p').contains(byte)))
+        .then(|| String::from_utf8_lossy(id).into_owned())
+}
+
 fn tab_link(event: &Value) -> Option<(String, (u8, u32))> {
     let bytes = hex::decode(event["payload"].as_str()?).ok()?;
     if bytes.len() != 24 || !(1..=4).contains(&bytes[4]) {
@@ -750,13 +776,17 @@ fn row_tabs(row: &Row, sets: &HashMap<String, (u32, Vec<u64>)>) -> Vec<u64> {
     tabs
 }
 
-/// Tab 0 selects the rows with no tab.
-fn in_tab(row: &Row, sets: &HashMap<String, (u32, Vec<u64>)>, tab: u64) -> bool {
+/// Tab 0 selects the rows with no tab and no extension.
+fn in_tab(row: &Row, sets: &HashMap<String, (u32, Vec<u64>)>, scope: &TabScope) -> bool {
     let linked = row.tab_set.as_ref().and_then(|key| sets.get(key));
-    if tab == 0 {
-        row.tab == 0 && linked.is_none_or(|(_, tabs)| tabs.is_empty())
-    } else {
-        row.tab == tab || linked.is_some_and(|(_, tabs)| tabs.contains(&tab))
+    match scope {
+        TabScope::Extension(id) => row.extension.as_ref() == Some(id),
+        TabScope::Tab(0) => {
+            row.tab == 0
+                && row.extension.is_none()
+                && linked.is_none_or(|(_, tabs)| tabs.is_empty())
+        }
+        TabScope::Tab(tab) => row.tab == *tab || linked.is_some_and(|(_, tabs)| tabs.contains(tab)),
     }
 }
 
@@ -1362,6 +1392,11 @@ impl RequestIndex {
                     {
                         (row.tab_set, row.tab_link) = (Some(set), link);
                     }
+                    if kind == "request_extension_link"
+                        && let Some(id) = extension_link(&event)
+                    {
+                        row.extension = Some(id);
+                    }
                     let parent = (
                         text(&event["session_id"]),
                         number(&event["process_id"]) as u32,
@@ -1434,6 +1469,7 @@ impl RequestIndex {
                     stack_frame: None,
                     tab_set: None,
                     tab_link: (0, 0),
+                    extension: None,
                 });
                 self.views.push(view(state.rows.last().unwrap()));
                 ordinal
@@ -1553,8 +1589,8 @@ impl RequestIndex {
         row.first_offset = row.first_offset.min(start);
         row.end_offset = row.end_offset.max(end);
         row.records += 1;
-        // A link has no request ID of its own; tab_link and tab_ids carry it.
-        if event["type"] == "request_tab_link" {
+        // A link is no request of its own; tab_link, tab_ids and extension_id carry it.
+        if event["type"] == "request_tab_link" || event["type"] == "request_extension_link" {
             return;
         }
         let (session, process, request) = (
@@ -1585,7 +1621,7 @@ impl RequestIndex {
             &self.views[ordinal],
         );
         let sets = &self.state.as_ref().unwrap().tab_sets;
-        let scoped = query.tab.is_none_or(|tab| in_tab(row, sets, tab))
+        let scoped = query.tab.as_ref().is_none_or(|tab| in_tab(row, sets, tab))
             && query
                 .domain
                 .as_ref()
@@ -1812,6 +1848,7 @@ impl RequestIndex {
             "error_code": row.error, "loader_observed": row.loader, "initiator": initiator(row),
             "main_frame": row.main_frame, "browser_internal": view.internal,
         });
+        document["extension_id"] = json!(row.extension);
         // Raw; the get_requests handler replaces it with the frame's resolution.
         document["initiator_frame"] = json!(row.stack_frame.as_ref().map(|(session, process, frame)| {
             let script = u32::from_le_bytes(frame[4..8].try_into().unwrap());
@@ -1824,12 +1861,19 @@ impl RequestIndex {
     fn facets(&self, query: &RequestQuery, through: usize) -> Value {
         let state = self.state.as_ref().unwrap();
         let (rows, sets) = (&state.rows, &state.tab_sets);
-        let mut tabs: BTreeMap<u64, (u64, u64, Vec<String>, bool)> = BTreeMap::new();
+        // Tab ids, `extension:<id>` and `0` for rows with no owner.
+        let mut tabs: BTreeMap<String, (u64, u64, Vec<String>, bool)> = BTreeMap::new();
         let mut domains: BTreeMap<&str, u64> = BTreeMap::new();
         for (row, view) in rows.iter().zip(&self.views).take(through) {
-            let mut own = row_tabs(row, sets);
+            let mut own = row_tabs(row, sets)
+                .iter()
+                .map(u64::to_string)
+                .collect::<Vec<_>>();
+            if let Some(id) = &row.extension {
+                own.push(format!("extension:{id}"));
+            }
             if own.is_empty() {
-                own.push(0);
+                own.push("0".to_owned());
             }
             for id in own {
                 let tab = tabs
@@ -1845,12 +1889,19 @@ impl RequestIndex {
                     }
                 }
             }
-            if query.tab.is_none_or(|tab| in_tab(row, sets, tab)) {
+            if query.tab.as_ref().is_none_or(|tab| in_tab(row, sets, tab)) {
                 *domains.entry(&view.domain).or_default() += 1;
             }
         }
         let mut tabs = tabs.into_iter().collect::<Vec<_>>();
-        tabs.sort_by_key(|(tab, (_, first, _, _))| (*tab == 0, *first, *tab));
+        tabs.sort_by_key(|(tab, (_, first, _, _))| {
+            (
+                tab == "0",
+                *first,
+                tab.parse::<u64>().unwrap_or(u64::MAX),
+                tab.clone(),
+            )
+        });
         let truncated = domains.len() > MAX_DOMAINS;
         let selected = query.domain.as_deref();
         let listed = domains
@@ -1860,7 +1911,7 @@ impl RequestIndex {
             .map(|(_, (domain, count))| json!({"domain": domain, "count": count}))
             .collect::<Vec<_>>();
         json!({
-            "tabs": tabs.iter().map(|(tab, (count, first, domains, more))| json!({"tab_id": tab.to_string(),
+            "tabs": tabs.iter().map(|(tab, (count, first, domains, more))| json!({"tab_id": tab,
                 "count": count, "first_time_ns": first.to_string(), "domains": domains, "domains_truncated": more}))
                 .collect::<Vec<_>>(),
             "domains": listed,
@@ -1920,7 +1971,11 @@ impl RequestIndex {
                 None => json!({"first_time_ns": null, "last_time_ns": null, "buckets": vec![0; TIMELINE_BUCKETS]}),
             },
             "query": {"sort": query.sort, "order": if query.descending { "desc" } else { "asc" }, "q": query.needle,
-                "tab_id": query.tab.map(|tab| if tab == 0 { "unattributed".to_owned() } else { tab.to_string() }),
+                "tab_id": query.tab.as_ref().map(|tab| match tab {
+                    TabScope::Tab(0) => "unattributed".to_owned(),
+                    TabScope::Tab(tab) => tab.to_string(),
+                    TabScope::Extension(id) => format!("extension:{id}"),
+                }),
                 "domain": query.domain, "type": query.kind, "named": query.named.len(),
                 "failed": query.failed, "invert": query.invert, "hide_internal": query.hide_internal,
                 "third_party": query.third_party,
@@ -2324,6 +2379,94 @@ mod tests {
             .collect();
         assert_eq!(internal, [true, false, true]);
         assert_eq!(page(&mut index, "hide_internal=1")["hidden_internal"], 2);
+    }
+
+    #[test]
+    fn frameless_scripts_link_to_clients_and_extensions() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("events.jsonl");
+        let mut store = Store {
+            events: Vec::new(),
+            sequence: 0,
+        };
+        let context = json!({"browser_context_id_high": "3", "browser_context_id_low": "4"});
+        let with = |extra: Value| {
+            let mut fields = context.clone();
+            for (key, value) in extra.as_object().unwrap() {
+                fields[key] = value.clone();
+            }
+            fields
+        };
+        // An update check linked to its version's two client tabs.
+        let update = store.push(2, 900, "request_started", b"GET sw.test", context.clone());
+        let mut set = vec![0u8; 128];
+        set[0..2].copy_from_slice(&1u16.to_le_bytes());
+        set[2..4].copy_from_slice(&128u16.to_le_bytes());
+        set[4] = 19;
+        set[8..16].copy_from_slice(&78u64.to_le_bytes());
+        set[16..20].copy_from_slice(&2u32.to_le_bytes());
+        set[20..22].copy_from_slice(&2u16.to_le_bytes());
+        set[24..28].copy_from_slice(&6u32.to_le_bytes());
+        set[28..32].copy_from_slice(&7u32.to_le_bytes());
+        store.push(2, 0, "tab_set", &set, json!({"tab_id": 6, "frame_id": "0"}));
+        let mut link = vec![0u8; 24];
+        link[0..2].copy_from_slice(&1u16.to_le_bytes());
+        link[2..4].copy_from_slice(&24u16.to_le_bytes());
+        link[4] = 3;
+        link[8..16].copy_from_slice(&78u64.to_le_bytes());
+        link[16..20].copy_from_slice(&2u32.to_le_bytes());
+        store.push(
+            2,
+            900,
+            "request_tab_link",
+            &link,
+            with(json!({"parent_event_id": update})),
+        );
+        // An extension's service-worker script recorded by opt-in.
+        let id = "abcdefghijklmnopabcdefghijklmnop";
+        let script = store.push(2, 901, "request_started", b"GET ext.test", context.clone());
+        let mut extension = vec![1, 0, 40, 0, 6, 0, 0, 0];
+        extension.extend_from_slice(id.as_bytes());
+        store.push(
+            2,
+            901,
+            "request_extension_link",
+            &extension,
+            with(json!({"parent_event_id": script})),
+        );
+        store.push(41, 2, "request_initiated", b"GET lost.test", json!({}));
+        write(&path, &store);
+        let mut index = RequestIndex::new(&path);
+        let document = page(&mut index, "sort=capture&order=asc");
+        let tabs: Vec<_> = document["facets"]["tabs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|tab| {
+                (
+                    tab["tab_id"].as_str().unwrap().to_owned(),
+                    tab["count"].as_u64().unwrap(),
+                )
+            })
+            .collect();
+        let scope = format!("extension:{id}");
+        assert_eq!(
+            tabs,
+            [
+                ("6".into(), 1),
+                ("7".into(), 1),
+                (scope.clone(), 1),
+                ("0".into(), 1)
+            ]
+        );
+        let rows = document["requests"].as_array().unwrap();
+        assert_eq!(rows[0]["tab_ids"], json!(["6", "7"]));
+        assert_eq!(rows[0]["extension_id"], Value::Null);
+        assert_eq!(rows[1]["extension_id"], id);
+        assert_eq!(rows[1]["records"], 2);
+        assert_eq!(page(&mut index, &format!("tab_id={scope}"))["matching"], 1);
+        assert_eq!(page(&mut index, "tab_id=7")["matching"], 1);
+        assert_eq!(page(&mut index, "tab_id=unattributed")["matching"], 1);
     }
 
     #[test]

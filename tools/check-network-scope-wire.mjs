@@ -112,6 +112,10 @@ assert.equal(totals.renderers, 2n);
 assert.deepEqual([...totals.byScheme], [['chrome', 7n], ['devtools', 1n]]);
 assert.equal(scope.captureExclusionNotice(totals), '8 browser-internal requests not recorded · 2 WebUI renderers not admitted');
 assert.equal(scope.captureExclusionNotice(scope.captureExclusionTotals([])), '');
+// Requests a WebUI renderer sends through the proxy are browser-internal requests too.
+const proxied = scope.captureExclusionTotals([webui, golden('webui requests at the proxy'), golden('webui requests with a producer')]);
+assert.deepEqual([proxied.requests, proxied.renderers, [...proxied.byScheme]], [3n, 2n, [['webui', 3n]]]);
+assert.equal(scope.captureExclusionNotice(proxied), '3 browser-internal requests not recorded · 2 WebUI renderers not admitted');
 
 console.log(`PASS network scope wire: ${cases.length} C++ golden records agree with Python and the UI readers; ` +
   'data:, service-worker and opted-in internal rows finish with their own records; the browser-internal view is counted and reversible');

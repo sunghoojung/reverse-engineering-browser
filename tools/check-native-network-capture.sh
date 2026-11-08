@@ -22,7 +22,7 @@ headers=(
   brave/components/reverse_engineering_browser/browser/native_response_body_capture.h
   net/http/http_request_headers.h services/network/public/cpp/data_element.h
   services/network/public/cpp/resource_request_body.h url/gurl.h
-  base/component_export.h base/synchronization/lock.h
+  base/component_export.h base/synchronization/lock.h base/functional/bind.h
   services/network/public/mojom/http_raw_headers.mojom.h
   net/cookies/canonical_cookie.h net/cookies/cookie_access_result.h net/cookies/cookie_constants.h
   net/cookies/cookie_inclusion_status.h net/cookies/cookie_partition_key.h
@@ -41,6 +41,7 @@ readonly sources
   -I"$build/include" -I"$root/include" "$fixture/main.cc" "$sources/browser/native_network_capture_sink.cc" \
   "$sources/common/native_network_headers_hook.cc" "$sources/common/native_navigation_initiator_hook.cc" \
   "$sources/common/native_probe_queue.cc" \
+  "$sources/browser/native_tab_resolver.cc" \
   "$root/src/capture/event.cpp" -o "$build/native-network-capture"
 "$build/native-network-capture"
 

@@ -29,6 +29,8 @@ cases.forEach((item, index) => {
     assert.equal(tabs.decodeTabSet(item.event) !== null, item.valid, `UI tab set: ${item.name}`);
   } else if (item.event.type === 'request_tab_link') {
     assert.equal(tabs.decodeTabLink(item.event) !== null, item.valid, `UI link: ${item.name}`);
+  } else if (item.event.type === 'request_extension_link') {
+    assert.equal(tabs.decodeExtensionLink(item.event) !== null, item.valid, `UI extension link: ${item.name}`);
   } else {
     assert.equal(model.isBrokerEvent(item.event), item.valid, `UI envelope: ${item.name}`);
   }
@@ -94,6 +96,30 @@ assert(rows.length === 1 && tabs.isUnresolved(rows[0]) && rows[0].tabIds.length 
 assert.equal(tabs.unresolvedNotice(1), '1 request without a tab (capture error)');
 assert.equal(tabs.unresolvedNotice(0), '');
 
+// A service-worker update check: the browser record and its browser-record link.
+const update = Object.assign(golden('browser loader kind 6'), {process_id: 7, request_id: '900', sequence_number: '32',
+  browser_context_id_high: '11', browser_context_id_low: '12'});
+const updateSet = withTabs(golden('one-part set'), [4, 9]);
+const updateLink = golden('browser record link to two tabs');
+rows = tabs.attachRequestTabs(model.requestsFromEvents([update], 'live'), [update, updateSet, updateLink]);
+assert.deepEqual(rows[0].tabIds, ['4', '9']);
+assert(!tabs.isUnresolved(rows[0]) && rows[0].tabLinkLabel === 'Service worker · 2 tabs');
+
+// Extension traffic recorded by opt-in sits under its extension, never under no tab.
+const extensionScript = Object.assign(golden('browser loader kind 6'), {process_id: 7, request_id: '900',
+  sequence_number: '32', browser_context_id_high: '11', browser_context_id_low: '12'});
+const extensionLink = golden('extension service-worker script');
+rows = tabs.attachRequestTabs(model.requestsFromEvents([extensionScript], 'live'), [extensionScript, extensionLink]);
+assert.equal(rows[0].extensionId, 'abcdefghijklmnopabcdefghijklmnop');
+assert.deepEqual(tabs.rowTabs(rows[0]), ['extension:abcdefghijklmnopabcdefghijklmnop']);
+assert(!tabs.isUnresolved(rows[0]));
+assert.equal(tabs.scopeLabel('extension:abcdefghijklmnopabcdefghijklmnop'), 'Extension abcdefgh…');
+assert.equal(tabs.scopeLabel('4'), null);
+const workerStart = record({loader_kind: 19, request_id: '17', process_id: 4242, sequence_number: '31'});
+rows = tabs.attachRequestTabs(model.requestsFromEvents([workerStart], 'live'),
+  [workerStart, golden('extension service-worker request')]);
+assert.equal(rows[0].extensionId, 'abcdefghijklmnopabcdefghijklmnop');
+
 // A tab is named by its newest main-frame navigation, not its first request.
 const navigation = (sequence, time, host) => Object.assign(golden('browser loader kind 1'), {process_id: 2,
   request_id: String(sequence), sequence_number: String(sequence), monotonic_time_ns: String(time), tab_id: 4,
@@ -105,4 +131,5 @@ const domain = row => String(row.path).split('/')[0];
 assert.equal(tabs.tabPageLabel(rows, domain), 'example.test');
 
 console.log(`PASS tab link wire: ${cases.length} C++ golden records agree with Python and the UI readers; ` +
-  'worker rows appear in every linked tab once, incomplete sets say so, unlinked rows are errors and tabs are named by their page');
+  'worker rows appear in every linked tab once, incomplete sets say so, browser records and extension traffic link, ' +
+  'unlinked rows are errors and tabs are named by their page');

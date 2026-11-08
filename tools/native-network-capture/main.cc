@@ -5,7 +5,9 @@
 #include <string>
 #include <tuple>
 #include <vector>
+#include "brave/components/reverse_engineering_browser/browser/native_factory_scope.h"
 #include "brave/components/reverse_engineering_browser/browser/native_network_capture_sink.h"
+#include "brave/components/reverse_engineering_browser/browser/native_tab_resolver.h"
 #include "brave/components/reverse_engineering_browser/common/native_artifact_header.h"
 #include "brave/components/reverse_engineering_browser/common/native_navigation_initiator_hook.h"
 #include "brave/components/reverse_engineering_browser/common/native_network_headers.h"
@@ -22,6 +24,7 @@
 #include "reb/network_headers.hpp"
 #include "reb/network_request.hpp"
 #include "reb/network_response_body.hpp"
+#include "reb/tab_link.hpp"
 namespace {
 std::vector<reb::NativeProbeEvent> events;
 reb::NativeProbeQueue queue;
@@ -443,7 +446,8 @@ void RequestContent() {
          body.state == static_cast<std::uint8_t>(State::kCaptured) &&
          body.captured_length == five.size() && artifacts.calls.back().content == five);
 
-  // File, blob, stream, unknown and mixed bodies are named, never read.
+  // File, blob, stream and mixed bodies are read once the hook hands the
+  // request over; the record follows the read. An unknown part is named, not read.
   const auto calls = artifacts.Count(reb::NativeArtifactKind::kRequestBody);
   const auto kind_case = [&](network::DataElement first, Kind kind, bool with_bytes) {
     auto element_body = std::make_shared<network::ResourceRequestBody>();
@@ -453,12 +457,40 @@ void RequestContent() {
     element_body->elements_mutable()->push_back(std::move(first));
     request.request_body = element_body;
     events.clear();
+    artifacts.read_calls.clear();
     start();
-    const auto value = Body(Last(reb::NativeProbeType::kRequestBody));
-    assert(AllValid() && value.kind == static_cast<std::uint8_t>(kind) &&
-           value.state == static_cast<std::uint8_t>(State::kNotCapturedBodyKind) &&
-           (value.flags & reb::kRequestBodyLengthPartial) != 0 &&
-           value.body_length == (with_bytes ? 3U : 0U));
+    if (kind == Kind::kUnknown) {
+      const auto value = Body(Last(reb::NativeProbeType::kRequestBody));
+      assert(AllValid() && value.state == static_cast<std::uint8_t>(State::kNotCapturedBodyKind) &&
+             (value.flags & reb::kRequestBodyLengthPartial) != 0);
+      return;
+    }
+    assert(std::none_of(events.begin(), events.end(), [](const auto& event) {
+      return event.header.type == reb::NativeProbeType::kRequestBody;
+    }));
+    sink.TeeRequestBody(172, request);
+    assert(artifacts.read_calls.size() == 1 && artifacts.read_calls[0].request_id == 172 &&
+           artifacts.read_calls[0].url ==
+               "https://api.hcaptcha.test:8443/checkcaptcha/site/" + key &&
+           artifacts.read_calls[0].mime_type == "text/plain");
+    reb::NativeRequestBodyReadOutcome outcome;
+    outcome.state = reb::NativeRequestBodyState::kCaptured;
+    outcome.artifact_id = 960;
+    outcome.body_length = 4096;
+    outcome.captured_length = 4096;
+    outcome.sha256.fill(0x5a);
+    const auto creator = std::move(artifacts.read_calls[0].record).Run(outcome);
+    const auto& record = Last(reb::NativeProbeType::kRequestBody);
+    const auto value = Body(record);
+    assert(AllValid() && creator == record.header.sequence_number &&
+           record.header.artifact_id == 960 &&
+           record.header.parent_event_id ==
+               Last(reb::NativeProbeType::kRequestStarted).header.sequence_number &&
+           value.kind == static_cast<std::uint8_t>(kind) &&
+           value.state == static_cast<std::uint8_t>(State::kCaptured) &&
+           (value.flags & reb::kRequestBodyRead) != 0 &&
+           (value.flags & reb::kRequestBodyLengthPartial) == 0 &&
+           (value.flags & reb::kRequestBodyDigestPresent) != 0 && value.body_length == 4096);
   };
   kind_case(network::DataElement(network::DataElementFile{}), Kind::kFile, false);
   kind_case(network::DataElement(network::DataElementDataPipe{}), Kind::kDataPipe, false);
@@ -467,6 +499,36 @@ void RequestContent() {
   kind_case(network::DataElement(), Kind::kUnknown, false);
   kind_case(network::DataElement(network::DataElementFile{}), Kind::kMixed, true);
   assert(artifacts.Count(reb::NativeArtifactKind::kRequestBody) == calls);
+  // A read the artifact sink refuses at the hook is recorded at once, unread.
+  request.request_body = std::make_shared<network::ResourceRequestBody>();
+  request.request_body->elements_mutable()->emplace_back(network::DataElementFile{});
+  for (const auto [admission, state] :
+       {std::pair{reb::NativeRequestContentAdmission::kSessionBudget,
+                  State::kNotCapturedSessionBudget},
+        std::pair{reb::NativeRequestContentAdmission::kRefused, State::kNotCapturedTransferRefused},
+        std::pair{reb::NativeRequestContentAdmission::kUnavailable,
+                  State::kNotCapturedArtifactUnavailable}}) {
+    artifacts.read_admission = admission;
+    events.clear();
+    start();
+    sink.TeeRequestBody(172, request);
+    const auto value = Body(Last(reb::NativeProbeType::kRequestBody));
+    assert(AllValid() && value.state == static_cast<std::uint8_t>(state) &&
+           (value.flags & reb::kRequestBodyRead) == 0 &&
+           (value.flags & reb::kRequestBodyLengthPartial) != 0);
+  }
+  artifacts.read_admission = reb::NativeRequestContentAdmission::kQueued;
+  // A read still running at capture end is recorded incomplete; its late result is dropped.
+  events.clear();
+  artifacts.read_calls.clear();
+  start();
+  sink.TeeRequestBody(172, request);
+  sink.SetEmitter(Emit, 22, mask, 200, true);
+  const auto flushed = Body(Last(reb::NativeProbeType::kRequestBody));
+  assert(AllValid() &&
+         flushed.state == static_cast<std::uint8_t>(State::kNotCapturedReadIncomplete) &&
+         (flushed.flags & reb::kRequestBodyRead) != 0);
+  assert(std::move(artifacts.read_calls[0].record).Run({}) == 0);
 
   // Password form posts keep neither bytes nor a digest.
   request.request_body = BytesBody({Bytes("user=a&password=b")});
@@ -882,6 +944,118 @@ void NavigationLinks() {
                "navigation start, never a subresource, configuration reset, Network off\n";
 }
 }  // namespace
+// protocol/native-network-v3.md "Request owners and tabs": what a proxy factory
+// counts, and the links a frameless browser record carries.
+void FactoryOwners() {
+  using Factory = reb::NativeUrlLoaderFactoryKind;
+  const auto decide = [](Factory kind, std::string_view scheme, std::string_view host,
+                         bool internal, reb::NativeFactoryPolicy policy = {}) {
+    return reb::DecideNativeFactoryScope(static_cast<int>(kind), scheme, host, internal, policy);
+  };
+  const std::string extension(32, 'b');
+  assert(decide(Factory::kDevTools, "devtools", "devtools", false).exclusion == 66);
+  assert(decide(Factory::kServiceWorkerScript, "chrome-extension", extension, false).exclusion ==
+         65);
+  const auto recorded =
+      decide(Factory::kServiceWorkerScript, "chrome-extension", extension, false, {false, true});
+  assert(recorded.exclusion == 0 && recorded.owner.extension &&
+         std::string_view(recorded.owner.extension->data(), 32) == extension);
+  const auto renderer_issued = decide(Factory::kServiceWorkerSubResource, "chrome-extension",
+                                      extension, false, {false, true});
+  assert(renderer_issued.exclusion == 0 && !renderer_issued.owner.extension);
+  assert(decide(Factory::kWorkerMainResource, "chrome-extension", "not-an-id", false, {false, true})
+             .exclusion == 65);
+  for (const Factory kind : {Factory::kDocumentSubResource, Factory::kWorkerSubResource,
+                             Factory::kServiceWorkerSubResource, Factory::kWorkerMainResource}) {
+    assert(decide(kind, "chrome", "newtab", true).exclusion == 67);
+    assert(decide(kind, "chrome", "newtab", true, {true, false}).exclusion == 0);
+  }
+  // The new tab page navigating to a site starts the site's own document.
+  assert(decide(Factory::kNavigation, "", "", true).exclusion == 0);
+  assert(decide(Factory::kDocumentSubResource, "https", "a.test", false).exclusion == 0);
+
+  const auto exclusion = [](const reb::NativeFactoryScope& scope, Factory kind,
+                            std::string_view scheme) {
+    const auto value = reb::NativeProxyRequestExclusion(scope, static_cast<int>(kind), scheme);
+    return std::pair{value.exclusion_class, value.counted_here};
+  };
+  const reb::NativeFactoryScope plain;
+  assert(exclusion(plain, Factory::kNavigation, "chrome") == std::pair(std::uint8_t{16}, true));
+  assert(exclusion(plain, Factory::kNavigation, "devtools") == std::pair(std::uint8_t{19}, true));
+  assert(exclusion(plain, Factory::kDocumentSubResource, "chrome-untrusted") ==
+         std::pair(std::uint8_t{17}, false));
+  assert(exclusion(plain, Factory::kNavigation, "https") == std::pair(std::uint8_t{0}, false));
+  reb::NativeFactoryScope opted;
+  opted.record_browser_internal = true;
+  assert(exclusion(opted, Factory::kNavigation, "chrome").first == 0);
+  reb::NativeFactoryScope webui;
+  webui.exclusion = 67;
+  assert(exclusion(webui, Factory::kDocumentSubResource, "https") ==
+         std::pair(std::uint8_t{67}, true));
+  reb::NativeFactoryScope extension_worker;
+  extension_worker.exclusion = 65;
+  assert(exclusion(extension_worker, Factory::kWorkerSubResource, "https").second == false);
+  assert(exclusion(extension_worker, Factory::kServiceWorkerScript, "https").second == true);
+
+  auto& sink = reb::NativeNetworkCaptureSink::Get();
+  auto& resolver = reb::NativeTabResolver::Get();
+  sink.SetEmitter(Emit, 31, reb::NativeProbeCategoryMask(reb::NativeProbeCategory::kNetwork), 200);
+  network::ResourceRequest request;
+  const auto valid = [](const reb::NativeProbeEvent& event) {
+    return reb::IsValidEvent(std::bit_cast<reb::EventRecord>(event));
+  };
+  const auto script = [&](std::uint64_t id, const reb::NativeBrowserRequestOwner& owner) {
+    events.clear();
+    sink.RecordRequestStarted(id, 0, 0, 0, 0, 11, 12, request,
+                              reb::NativeLoaderKind::kServiceWorkerScript, owner);
+    std::erase_if(events, [](const auto& event) {
+      return event.header.type == reb::NativeProbeType::kRequestBody;
+    });
+  };
+  // An update check of a version with two client tabs.
+  resolver.ServiceWorkerControlleeAdded(70, "a", std::vector<std::uint32_t>{8});
+  resolver.ServiceWorkerControlleeAdded(70, "b", std::vector<std::uint32_t>{5});
+  script(300, {.service_worker_version = 70});
+  assert(events.size() == 3 && events[0].header.tab_id == 0 &&
+         events[1].header.type == reb::NativeProbeType::kTabSet && events[1].header.frame_id == 0 &&
+         events[1].header.tab_id == 5);
+  const auto& link = events[2].header;
+  assert(link.type == reb::NativeProbeType::kRequestTabLink && link.request_id == 300 &&
+         link.browser_context_id_high == 11 && link.browser_context_id_low == 12 &&
+         link.initiator_process_id == 0 &&
+         link.parent_event_id == events[0].header.sequence_number &&
+         std::to_integer<int>(events[2].inline_payload[4]) == 3);
+  assert(std::all_of(events.begin(), events.end(), valid));
+  // A version with one client: the record names the tab, and the set is not sent again.
+  resolver.ServiceWorkerControlleeAdded(71, "c", std::vector<std::uint32_t>{9});
+  script(301, {.service_worker_version = 71});
+  assert(events.size() == 3 && events[0].header.tab_id == 9 && events[2].header.tab_id == 9);
+  script(302, {.service_worker_version = 71});
+  assert(events.size() == 2 && events[1].header.type == reb::NativeProbeType::kRequestTabLink &&
+         std::all_of(events.begin(), events.end(), valid));
+  // A version the browser never saw a client of stays for the summary to report.
+  script(303, {.service_worker_version = 72});
+  assert(events.size() == 1 && events[0].header.tab_id == 0);
+  // An extension's service-worker script, recorded by opt-in under its id.
+  reb::NativeExtensionId id;
+  assert(reb::ParseNativeExtensionId(extension, id));
+  script(304, {.extension = id});
+  assert(events.size() == 2 &&
+         events[1].header.type == reb::NativeProbeType::kRequestExtensionLink &&
+         events[1].header.request_id == 304 && events[1].header.tab_id == 0 &&
+         std::to_integer<int>(events[1].inline_payload[4]) == 6 &&
+         std::to_integer<char>(events[1].inline_payload[8]) == 'b' &&
+         std::all_of(events.begin(), events.end(), valid));
+  reb::NativeExtensionId bad;
+  assert(!reb::ParseNativeExtensionId(std::string(32, 'q'), bad) &&
+         !reb::ParseNativeExtensionId(std::string(31, 'a'), bad));
+  sink.SetEmitter(nullptr, 0, 0, 0);
+  events.clear();
+  std::cout
+      << "PASS native factory scope: DevTools, extension, WebUI and internal-scheme loads are "
+         "counted where they are not recorded; frameless scripts link to clients or extensions\n";
+}
+
 int main() {
   auto& sink = reb::NativeNetworkCaptureSink::Get();
   network::ResourceRequest request;
@@ -979,4 +1153,5 @@ int main() {
   HeaderBlocks();
   CookieLists();
   NavigationLinks();
+  FactoryOwners();
 }

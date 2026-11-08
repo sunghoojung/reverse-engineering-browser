@@ -3,14 +3,16 @@ import assert from 'node:assert/strict';
 import {readFile} from 'node:fs/promises';
 import {join} from 'node:path';
 import {fileURLToPath, pathToFileURL} from 'node:url';
-import {runInNewContext} from 'node:vm';
+import {createContext, runInContext, runInNewContext} from 'node:vm';
 
 export async function checkSourceFormatUI(root) {
   const read = path => readFile(join(root, path), 'utf8');
   const fixture = name => read(`tools/fixtures/source-format/${name}`);
   const timers = [];
-  const model = runInNewContext(`${await read('apps/research-ui/source_syntax.js')}\n${await read('apps/research-ui/source_format.js')}
-    ;({createSourceTokenizer, sourceSyntaxTokens, sourceWhitespaceSegments, sourceFormatRawRange, createSourceFormatClient, SOURCE_HIGHLIGHT_TOKEN_LIMIT})`,
+  const syntax = await read('apps/research-ui/source_syntax.js'), format = await read('apps/research-ui/source_format.js');
+  const model = runInNewContext(`${syntax}\n${format}
+    ;({createSourceTokenizer, sourceSyntaxTokens, sourceWhitespaceMap, sourceWhitespaceWalker, sourceWhitespaceRange, sourceLayoutTask, createSourceLayoutWorker,
+      createSourceFormatClient, prettyPrintSource, SOURCE_HIGHLIGHT_TOKEN_LIMIT})`,
   {URL, AbortController, setTimeout: (callback, delay) => {timers.push({callback, delay}); return timers.length;}, clearTimeout() {}});
 
   const kinds = (source, text) => {
@@ -87,22 +89,59 @@ export async function checkSourceFormatUI(root) {
   assert(/--syntax-comment: #908caa; --syntax-keyword: #4fa0c1/.test(contrast), 'Increase Contrast brightens Moon comments and keywords');
   assert(/font: 12px\/18px var\(--code-font\)/.test(block('      .source-code')) && css.includes('--code-font: Menlo, Monaco, "Courier New", monospace;'), 'VS Code macOS editor font');
 
-  // Mapping: whitespace-only, exact by construction, refused otherwise.
+  // Mapping: whitespace-only, exact by construction, refused otherwise. Every
+  // non-whitespace character maps to the same-rank one in the evidence, in
+  // any lookup order and across the 4 Ki-unit sync points.
   const original = (await fixture('minified.js')).trimEnd();
-  const segments = model.sourceWhitespaceSegments(original, formatted);
-  assert(segments?.length > 0);
-  for (const segment of segments) assert.equal(formatted.slice(segment.derived_start, segment.derived_end), original.slice(segment.original_start, segment.original_end));
+  const visible = text => [...text].flatMap((character, at) => /\s/u.test(character) ? [] : [at]);
+  const exact = (input, output, label) => {
+    const map = model.sourceWhitespaceMap(input, output), walk = model.sourceWhitespaceWalker(map, input, output);
+    const from = visible(input), to = visible(output);
+    assert.equal(from.length, to.length);
+    to.forEach((at, rank) => assert.equal(walk(at), from[rank], `${label}: ascending ${at}`));
+    for (let rank = to.length - 1; rank >= 0; rank -= 97) assert.equal(walk(to[rank]), from[rank], `${label}: descending ${to[rank]}`);
+    assert.equal(walk(output.search(/\s/)), null, `${label}: layout whitespace has no original character`);
+    return map;
+  };
+  assert.equal(exact(original, formatted, 'Oxc fixture').anchors.length, 2);
+  const repeated = Array.from({length: 60}, (_, at) => original.replaceAll('list', `list${at}`)).join(';');
+  const layout = model.prettyPrintSource({kind: 'javascript'}, repeated);
+  assert(exact(repeated, layout.text, 'in-page layout').anchors.length > 6, 'The layout crosses several sync points');
   const at = formatted.indexOf('stringify');
-  assert.deepEqual({...model.sourceFormatRawRange(segments, at, at + 9)}, {start: original.indexOf('stringify'), end: original.indexOf('stringify') + 9});
-  assert.equal(model.sourceWhitespaceSegments('a=1', 'a = 2'), null, 'Any non-whitespace difference is refused');
-  assert.equal(model.sourceWhitespaceSegments('a\u0085b', 'ab'), null, 'NEL is not JavaScript whitespace');
-  assert(model.sourceWhitespaceSegments('﻿a=1; b', 'a = 1;\n  b'), 'BOM and line separators are layout whitespace');
+  assert.deepEqual({...model.sourceWhitespaceRange(model.sourceWhitespaceMap(original, formatted), original, formatted, at, at + 9)},
+    {start: original.indexOf('stringify'), end: original.indexOf('stringify') + 9});
+  assert.equal(model.sourceWhitespaceMap('a=1', 'a = 2'), null, 'Any non-whitespace difference is refused');
+  assert.equal(model.sourceWhitespaceMap('a\u0085b', 'ab'), null, 'NEL is not JavaScript whitespace');
+  assert(model.sourceWhitespaceMap('\ufeffa=1; b', 'a = 1;\n  b'), 'BOM and line separators are layout whitespace');
+
+  // Layout runner: a worker reply, a worker that fails to load, and the shipped worker entry.
+  const replies = [];
+  const runner = model.createSourceLayoutWorker({defer: callback => callback(), spawn: () => ({
+    postMessage(message) {queueMicrotask(() => this.onmessage({data: {id: message.id, result: model.sourceLayoutTask(message.task)}}));}, terminate() {}
+  })});
+  assert.equal((await runner.run({op: 'layout', source: {kind: 'javascript'}, value: repeated})).text, layout.text);
+  let broken;
+  const fallback = model.createSourceLayoutWorker({defer: callback => callback(), spawn: () => (broken = {
+    postMessage() {queueMicrotask(() => broken.onerror({preventDefault() {}}));}, terminate() {broken.terminated = true;}
+  })});
+  assert((await fallback.run({op: 'map', original, formatted})).map, 'A failed worker falls back to the page');
+  assert(broken.terminated && (await fallback.run({op: 'map', original, formatted: 'x'})).error);
+  class WorkerGlobalScope {}
+  const scope = new WorkerGlobalScope(), posted = [], imported = [];
+  const worker = createContext({WorkerGlobalScope, self: scope, URL, setTimeout, clearTimeout, AbortController});
+  worker.importScripts = name => {imported.push(name); runInContext(syntax, worker);};
+  scope.postMessage = (message, transfer) => posted.push({message, transfer});
+  runInContext(format, worker);
+  scope.onmessage({data: {id: 7, task: {op: 'layout', source: {kind: 'javascript'}, value: repeated}}});
+  assert.deepEqual(imported, ['source_syntax.js']);
+  assert.equal(posted[0].message.id, 7); assert.equal(posted[0].message.result.text, layout.text);
+  assert.equal(posted[0].transfer[0], posted[0].message.result.map.anchors.buffer, 'The map is transferred, not copied');
 
   // Client: pending, formatted, unavailable and failed layouts.
   const source = {source_type: 'artifact', kind: 'javascript', session_id: '1', artifact_id: '7', sha256: 'f'.repeat(64), byte_size: original.length, content: original};
-  const replies = [];
   const changes = [];
-  const client = model.createSourceFormatClient({request: async url => replies.shift()(url), onChange: changed => changes.push(changed.artifact_id)});
+  const client = model.createSourceFormatClient({request: async url => replies.shift()(url), onChange: changed => changes.push(changed.artifact_id),
+    layouts: model.createSourceLayoutWorker({spawn: null, defer: callback => callback()})});
   const reply = (status, body) => url => ({ok: status === 200, status, json: async () => ({...body, url})});
   const document = (extra, sha256 = source.sha256) => ({schema: 'source-format-v1', mapping: 'whitespace-only', source: {artifact_id: '7', sha256}, ...extra});
   const settle = () => new Promise(resolve => setImmediate(resolve));
@@ -111,6 +150,7 @@ export async function checkSourceFormatUI(root) {
   await settle();
   const view = client.view(source, original);
   assert.equal(view.text, formatted); assert.equal(view.engine, 'oxc'); assert.equal(view.offset_unit, 'utf-16-code-unit'); assert.deepEqual(changes, ['7']);
+  assert.equal(model.sourceWhitespaceWalker(view.map, original, formatted)(formatted.indexOf('POST')), original.indexOf('POST'));
   assert.equal(client.view({...source, contentTruncated: true}, original), null, 'A truncated preview keeps the in-page formatter');
   assert.equal(client.view(source, `${original};`), null, 'Derived text keeps the in-page formatter');
   for (const [index, [body, notice]] of [
@@ -132,7 +172,7 @@ export async function checkSourceFormatUI(root) {
     assert.equal(client.view(other, original).text, formatted);
   }
   assert(timers.every(timer => timer.delay === 180000), 'Each request has a deadline');
-  console.log('PASS source format UI: TextMate-scope token kinds for JavaScript, JSON, CSS and HTML fixtures, Rosé Pine Moon/Dawn values and Increase Contrast in app.css, exact whitespace-only mapping and raw ranges, client pending/formatted/fallback/retry (shipped modules, not rendered QA)');
+  console.log('PASS source format UI: TextMate-scope token kinds for JavaScript, JSON, CSS and HTML fixtures, Rosé Pine Moon/Dawn values and Increase Contrast in app.css, exact whitespace-only map in any lookup order and raw ranges, layout worker reply/fallback/entry, client pending/formatted/fallback/retry (shipped modules, not rendered QA)');
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) await checkSourceFormatUI(fileURLToPath(new URL('..', import.meta.url)));

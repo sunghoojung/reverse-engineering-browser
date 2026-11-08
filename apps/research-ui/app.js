@@ -5964,7 +5964,7 @@ const sourceFormatClient = createSourceFormatClient({
         const preview = state.artifacts.find(value => sourceIdentity(value) === identity);
         if (preview) {
           preview.controller?.abort();
-          for (const field of ['content', 'sourceTextLength', 'contentTruncated', 'loading', 'loadError', 'controller', 'previewUsed', 'contentVerified', 'contentLossy']) delete preview[field];
+          for (const field of ['content', 'sourceTextLength', 'contentTruncated', 'contentLongLine', 'loading', 'loadError', 'controller', 'previewUsed', 'contentVerified', 'contentLossy']) delete preview[field];
         }
         for (const cache of [state.deobfuscationRequests, state.deobfuscationCache, state.sourceFormatCache]) {
           for (const [key, value] of cache ?? []) {
@@ -5984,16 +5984,16 @@ const sourceFormatClient = createSourceFormatClient({
         let characters = entries.reduce((sum, {preview}) => sum + (preview.content?.length ?? 0), 0);
         let documents = entries.length;
         // Metadata/open tabs remain. Reopening an evicted preview reloads it.
-        // Text is at most 16 MiB of UTF-16 units across eight preview owners.
+        // Other previews hold at most 32 Mi UTF-16 units across eight owners.
         for (const {source, preview} of entries) {
-          if (documents <= 8 && characters <= 8 * 1024 * 1024) break;
+          if (documents <= 8 && characters <= 32 * 1024 * 1024) break;
           if (sourceIdentity(source) === protectedIdentity) continue;
           characters -= preview.content?.length ?? 0; documents -= 1;
           releaseSourcePreview(source);
         }
       }
 
-      function boundSourceAnalysis(cache, maximum, characterLimit, segmentLimit) {
+      function boundSourceAnalysis(cache, maximum, characterLimit, segmentLimit, keep = null) {
         let characters = 0, segments = 0, wireBytes = 0;
         for (const value of cache.values()) {
           wireBytes += value.sourceDocumentBytes ?? 0;
@@ -6002,6 +6002,7 @@ const sourceFormatClient = createSourceFormatClient({
         }
         for (const [key, value] of cache) {
           if (cache.size <= maximum && characters <= characterLimit && segments <= segmentLimit && wireBytes <= 32 * 1024 * 1024) break;
+          if (key === keep) continue;
           wireBytes -= value.sourceDocumentBytes ?? 0;
           characters -= (value.original_source?.length ?? value.sourceInput?.length ?? 0) + (value.representation?.text?.length ?? value.text?.length ?? 0);
           segments -= value.representation?.segments?.length ?? value.segments?.length ?? 0;
@@ -6502,7 +6503,12 @@ const sourceFormatClient = createSourceFormatClient({
         const query = elements.sourceSearch.value;
         let editor = state.sourceEditorView;
         const source = selectedSource();
-        const status = message => {if (elements.sourceSearchStatus) elements.sourceSearchStatus.textContent = message;};
+        // The coverage sentence is the Find field's tooltip and description.
+        const status = message => {
+          if (!elements.sourceSearchStatus) return;
+          elements.sourceSearchStatus.textContent = message;
+          elements.sourceSearch.title = `${message} Enter for next, Shift+Enter for previous.`;
+        };
         globalThis.CSS?.highlights?.delete('source-search-match');
         if (!editor || editor.identity !== sourceIdentity(source) || elements.sourceCode.hidden) {
           state.sourceSearchIndex = 0;
@@ -6532,7 +6538,7 @@ const sourceFormatClient = createSourceFormatClient({
           state.sourceSearchIndex = 0; highlightRows();
           elements.sourcePosition.textContent = editor.view.wasmRows ? `0 matches in retained inspection rows; original module bytes were not searched.${incomplete ? ' Inspection coverage is incomplete.' : ''}`
             : incomplete ? '0 matches in the searched display; source coverage is incomplete.' : '0 matches in complete retained text.';
-          status(`${coverage}.${editor.index.complete ? '' : ' Search stopped at the 8 Mi UTF-16-unit bound.'}`);
+          status(`${coverage}.${editor.index.complete ? '' : ' Search stopped at the 64 Mi UTF-16-unit bound.'}`);
           return;
         }
         state.sourceSearchIndex = reset ? 0 : (state.sourceSearchIndex + direction + matches.length) % matches.length;
@@ -6547,8 +6553,8 @@ const sourceFormatClient = createSourceFormatClient({
         const row = elements.sourceCode.querySelector(`[data-local-line="${match.line}"]`);
         const line = match.line;
         const column = match.column;
-        elements.sourcePosition.textContent = `${state.sourceSearchIndex + 1} of ${matches.length}${truncated ? '+' : ''} matches · ${editor.view.wasmRows ? 'Inspection row' : 'Line'} ${line + 1}, Column ${column + 1}`;
-        status(`${coverage}.${truncated ? ' First 1,000 matches; refine Find for later matches.' : ''}${editor.index.complete ? '' : ' Search stopped at the 8 Mi UTF-16-unit bound.'}`);
+        elements.sourcePosition.textContent = `${state.sourceSearchIndex + 1} of ${matches.length}${truncated ? '+' : ''} matches · ${editor.view.wasmRows ? `Inspection row ${line + 1}, Column ${column + 1}` : sourcePositionText(editor, line, column)}`;
+        status(`${coverage}.${truncated ? ' First 1,000 matches; refine Find for later matches.' : ''}${editor.index.complete ? '' : ' Search stopped at the 64 Mi UTF-16-unit bound.'}`);
         if (!row) return;
         const localColumn = match.column - Number(row.dataset.columnStart ?? 0);
         if (localColumn < 0 || localColumn + match.length > row.querySelector('.source-text').textContent.length) return;
@@ -6581,12 +6587,15 @@ const sourceFormatClient = createSourceFormatClient({
 
       function renderSourceWindowControls(editor = state.sourceEditorView) {
         if (!elements.sourceWindow) return;
-        elements.sourceWindow.hidden = !editor;
-        if (!editor) return;
+        elements.sourceGoto.disabled = !editor;
+        elements.sourceWindowPrevious.hidden = !editor || editor.window.start === 0;
+        elements.sourceWindowNext.hidden = !editor || editor.window.end === editor.index.lineCount;
+        if (!editor) {elements.sourceWindow.hidden = true; return;}
         const {window: window, index} = editor;
-        elements.sourceWindowLabel.textContent = `Lines ${window.start + 1}–${window.end} of ${index.lineCount}${index.complete ? '' : '+'}`;
-        elements.sourceWindowPrevious.disabled = window.start === 0;
-        elements.sourceWindowNext.disabled = window.end === index.lineCount;
+        const total = `${index.lineCount}${index.complete ? '' : '+'}`;
+        elements.sourceWindowLabel.textContent = `Lines ${window.start + 1}–${window.end} of ${total}`;
+        elements.sourceWindowPrevious.textContent = window.start ? `↑ Lines ${Math.max(1, window.start - SOURCE_WINDOW_LINES + 1)}–${window.start}` : '';
+        elements.sourceWindowNext.textContent = window.end < index.lineCount ? `↓ Lines ${window.end + 1}–${Math.min(index.lineCount, window.end + SOURCE_WINDOW_LINES)} of ${total}` : '';
         if (document.activeElement !== elements.sourceWindowLine) elements.sourceWindowLine.value = String(window.line + 1);
         if (document.activeElement !== elements.sourceWindowColumn) elements.sourceWindowColumn.value = String(Math.max(0, window.column) + 1);
         elements.sourceWindowLine.max = String(index.lineCount);
@@ -6598,24 +6607,37 @@ const sourceFormatClient = createSourceFormatClient({
             !Number.isSafeInteger(column) || column < 0 || column > (sourceDocumentLine(editor.index, line)?.length ?? 0)) return false;
         renderSourceContent(source, editor.view, {line, column, search: false});
         applySourceSearch(false, 0, {reveal: false});
-        elements.sourcePosition.textContent = `Line ${line + 1}, Column ${column + 1} · Retained display location`;
+        elements.sourcePosition.textContent = sourcePositionText(state.sourceEditorView, line, column);
         const row = elements.sourceCode.querySelector(`[data-local-line="${line}"]`);
         revealSourceColumn(row, column, true);
         return true;
       }
 
+      // A displayed location, with its original one when the view is a layout or derived text.
+      function sourcePositionText(editor, line, column) {
+        const start = sourceDocumentOffset(editor.index, line);
+        const original = start === null ? null : editor.mappingContext?.position(start + column, start + (sourceDocumentLine(editor.index, line)?.length ?? 0));
+        return `Line ${line + 1}, Column ${column + 1}${original ? ` (original ${original.line + 1}:${original.column + 1})` : ''}`;
+      }
+
       function sourceFormattedView(source, value, variant) {
-        // The backend Oxc layout for JavaScript evidence; otherwise the in-page formatter.
+        // The backend Oxc layout for JavaScript evidence; otherwise the in-page layout, off the UI thread.
         const backend = variant === 'original' ? sourceFormatClient.view(source, value) : null;
         if (backend && !backend.fallback) return backend;
-        const key = `${sourceIdentity(source)}|${variant}`;
+        const key = `${sourceIdentity(source)}|${variant}`, notice = backend?.notice ?? null;
         const prior = state.sourceFormatCache.get(key);
-        if (prior?.sourceInput === value && prior.notice === (backend?.notice ?? null)) return prior;
-        const formatted = {...prettyPrintSource(source, value), sourceInput: value, notice: backend?.notice ?? null};
-        state.sourceFormatCache.set(key, formatted);
-        boundSourceAnalysis(state.sourceFormatCache, 2, 6 * 1024 * 1024, 500000);
-        return formatted;
+        if (prior?.sourceInput === value && prior.notice === notice) return prior;
+        const entry = {pending: true, sourceInput: value, notice};
+        state.sourceFormatCache.set(key, entry);
+        sourceFormatClient.layout(source, value).then(result => {
+          if (state.sourceFormatCache.get(key) !== entry) return;
+          Object.assign(entry, result, {pending: false});
+          boundSourceAnalysis(state.sourceFormatCache, 8, 64 * 1024 * 1024, Infinity, key);
+          if (state.sourceFormatted && sourceIdentity(selectedSource()) === sourceIdentity(source)) renderSources();
+        });
+        return entry;
       }
+
 
       function sourceDisplayView(source) {
         if (state.sourceWasm && source.kind === 'wasm' && source.source_type === 'artifact') {
@@ -6733,7 +6755,11 @@ const sourceFormatClient = createSourceFormatClient({
         const window = sameDocument && previous.window.line === clampedLine && previous.window.column === requestedColumn
           ? previous.window : sourceDocumentWindow(index, clampedLine, requestedColumn);
         state.sourceWindow = {identity, representation, line: window.line, column: window.column};
-        const sameWindow = sameDocument && previous.window.line === window.line && previous.window.column === window.column;
+        const highlighter = sameDocument && previous.highlighter ? previous.highlighter
+          : createSourceHighlighter(view.wasmRows ? {kind: 'plain', mime_type: 'text/plain'} : source, index);
+        if (!highlighter.ready(window.rows)) highlighter.advance(SOURCE_COLOR_SYNC_UNITS);
+        const colored = highlighter.ready(window.rows);
+        const sameWindow = sameDocument && previous.window.line === window.line && previous.window.column === window.column && previous.colored === colored;
         if (sameWindow) {
           const coverageChanged = previous.view.searchCoverage !== view.searchCoverage || previous.view.searchIncomplete !== view.searchIncomplete;
           previous.view = view;
@@ -6749,12 +6775,25 @@ const sourceFormatClient = createSourceFormatClient({
         const mappingContext = sameDocument ? previous.mappingContext : view.lineMap ? null : sourceWindowMapping(view.mapOriginal ?? '', view.active ?? '', view.derived, view.formatted);
         const mappedLines = mappingContext?.(window.rows);
         if (!sameDocument) state.sourceSearchIndex = 0;
-        state.sourceEditorView = {identity, representation, content, mapping, formatting, index, window, view, mappingContext,
+        state.sourceEditorView = {identity, representation, content, mapping, formatting, index, window, view, mappingContext, highlighter, colored,
           search: sameDocument ? previous.search : null};
         const lineMap = view.lineMap;
-        // Later/column-clipped windows cannot assume the lexical state of an omitted prefix.
-        const plainWindow = window.start > 0 || window.rows.some(row => row.columnStart > 0 || row.columnEnd < row.fullLength);
-        const tokenizer = createSourceTokenizer(view.wasmRows || plainWindow ? {kind: 'plain', mime_type: 'text/plain'} : source);
+        const colors = colored ? highlighter.rows(window.rows) : null;
+        // Checkpoints extend in small steps between tasks; the window recolors once they reach it.
+        if (!highlighter.done() && !highlighter.pumping) {
+          highlighter.pumping = true;
+          const pump = () => {
+            const editor = state.sourceEditorView;
+            if (editor?.highlighter !== highlighter || editor.identity !== sourceIdentity(selectedSource())) {highlighter.pumping = false; return;}
+            highlighter.advance(SOURCE_COLOR_SLICE_UNITS);
+            if (!editor.colored && highlighter.ready(editor.window.rows)) {
+              renderSourceContent(selectedSource(), editor.view, {line: editor.window.line, column: editor.window.column, search: false});
+              if (elements.sourceSearch.value) applySourceSearch(false, 0, {reveal: false});
+            }
+            if (highlighter.done()) highlighter.pumping = false; else setTimeout(pump, 0);
+          };
+          setTimeout(pump, 0);
+        }
 
         const nodes = window.rows.map((excerpt, rowIndex) => {
           const {text: line, line: index} = excerpt;
@@ -6768,10 +6807,10 @@ const sourceFormatClient = createSourceFormatClient({
           const gutter = document.createElement('button');
           gutter.type = 'button';
           gutter.className = 'source-gutter';
-          gutter.textContent = String((mappedLine ?? index) + 1);
+          gutter.textContent = String(index + 1);
           gutter.disabled = mappedLine === null;
-          gutter.title = mappedLine === null ? 'Retained source line' : `Show original source at line ${mappedLine + 1}`;
-          gutter.setAttribute('aria-label', gutter.title);
+          gutter.setAttribute('aria-label', mappedLine === null ? 'Retained source line' : `Show original source at line ${mappedLine + 1}`);
+          gutter.title = mappedLine === null ? 'Retained source line' : `Original ${mappedLine + 1}:${(mapped?.originalColumn ?? 0) + 1} · show the original source`;
           gutter.addEventListener('click', event => {
             event.stopPropagation();
             if (!view.wasmRows && mappedLine !== null) revealOriginalLine(source, mappedLine, mapped?.originalColumn ?? 0);
@@ -6794,7 +6833,7 @@ const sourceFormatClient = createSourceFormatClient({
           }
           const text = document.createElement('span');
           text.className = 'source-text';
-          appendSourceSyntax(text, line ? sourceSyntaxTokens(line, tokenizer) : []);
+          appendSourceSyntax(text, colors ? colors.rows[rowIndex] : line ? [{type: 'plain', text: line}] : []);
           const displayed = document.createElement('span'); displayed.className = 'source-excerpt';
           if (excerpt.columnStart) displayed.append(textElement('span', 'source-excerpt-notice', `⟪ columns 1–${excerpt.columnStart} omitted ⟫ `));
           displayed.append(text);
@@ -6803,7 +6842,12 @@ const sourceFormatClient = createSourceFormatClient({
           return row;
         });
         elements.sourceCode.replaceChildren(...nodes);
-        elements.sourceLanguage.textContent = view.wasmRows ? 'WASM disassembly · byte offsets' : `${sourceSyntaxLabel(tokenizer.language)}${plainWindow ? ' · bounded excerpt; omitted lexical context' : tokenizer.truncated ? ' · color limit reached' : ''}`;
+        elements.sourceCodeWrap.dataset.gutterDigits = String(Math.max(5, String(index.lineCount).length));
+        const layout = view.formatPending ? ' · formatting…' : view.formatError ? ` · ${view.formatError}`
+          : view.formatted ? ` · ${view.formatted.engine === 'oxc' ? 'Oxc layout' : `whitespace layout${view.formatNotice ? `: ${view.formatNotice}` : ''}`}` : '';
+        elements.sourceLanguage.textContent = view.wasmRows ? 'WASM disassembly · byte offsets'
+          : `${sourceSyntaxLabel(highlighter.language)}${!colors ? ' · coloring…' : colors.truncated ? ' · color limit reached' : ''}${layout}`;
+        elements.sourceLanguage.title = elements.sourceLanguage.textContent;
         elements.sourceCode.hidden = false;
         elements.sourceCodeEmpty.hidden = true;
         renderSourceWindowControls();
@@ -6811,8 +6855,10 @@ const sourceFormatClient = createSourceFormatClient({
           elements.sourceCodeWrap.scrollTop = scroll.top;
           elements.sourceCodeWrap.scrollLeft = scroll.left;
           const row = [...elements.sourceCode.children].find(value => value.dataset.line === focused?.line);
-          const target = focused?.gutter ? row?.querySelector('.source-gutter') : row;
-          if (target) {target.tabIndex = -1; target.focus({preventScroll: true});}
+          const focusTarget = focused?.gutter ? row?.querySelector('.source-gutter') : row;
+          if (focusTarget) {focusTarget.tabIndex = -1; focusTarget.focus({preventScroll: true});}
+          const coverageChanged = previous.view.searchCoverage !== view.searchCoverage || previous.view.searchIncomplete !== view.searchIncomplete;
+          if (coverageChanged && target.search !== false) applySourceSearch(false, 0, {reveal: false});
         } else {
           elements.sourceCodeWrap.scrollTop = 0;
           elements.sourceCodeWrap.scrollLeft = 0;
@@ -6865,8 +6911,11 @@ const sourceFormatClient = createSourceFormatClient({
       }
 
       function syncSourceDisplayControls(source, view) {
-        elements.sourceViewKind.textContent = sourceViewLabel(source, view);
-        elements.sourceViewKind.title = elements.sourceViewKind.textContent;
+        // The status bar names the evidence state; the full provenance is its tooltip.
+        const label = sourceViewLabel(source, view);
+        elements.sourceViewKind.textContent = (state.sourceWasm && source?.kind === 'wasm') || source?.content === undefined ? label
+          : `${state.sourceDeobfuscated && sourceDerivedView(source) ? 'Derived' : 'Original'}${source.contentTruncated ? ' · truncated' : ''}${source.contentLossy ? ' · lossy' : ''}`;
+        elements.sourceViewKind.title = label;
         elements.sourceWasm.hidden = source?.kind !== 'wasm' || source?.source_type !== 'artifact';
         elements.sourceWasm.setAttribute('aria-pressed', String(state.sourceWasm));
         elements.sourceWasm.setAttribute('aria-label', state.sourceWasm ? 'Show original WASM hex' : 'Inspect WebAssembly module');
@@ -6874,8 +6923,11 @@ const sourceFormatClient = createSourceFormatClient({
         elements.sourceCode.classList.toggle('wasm-inspection', Boolean(view?.wasmRows));
         elements.sourcePretty.disabled = !source?.content || !sourcePrettySupported(source);
         elements.sourcePretty.setAttribute('aria-pressed', String(state.sourceFormatted));
-        elements.sourcePretty.setAttribute('aria-label', state.sourceFormatted ? 'Show source without pretty printing' : 'Pretty print source');
-        elements.sourcePretty.title = state.sourceFormatted ? 'Show source without pretty printing' : `Pretty print ${sourceSyntaxLabel(sourceSyntaxLanguage(source))}`;
+        elements.sourcePretty.setAttribute('aria-label', state.sourceFormatted ? 'Show original source' : 'Pretty print source');
+        elements.sourcePretty.textContent = !state.sourceFormatted ? '{ }' : view?.formatPending ? '{ } Formatting…'
+          : view?.formatError ? '{ } Pretty print unavailable' : '{ } Pretty-printed · Show original';
+        elements.sourcePretty.title = !state.sourceFormatted ? `Pretty print ${sourceSyntaxLabel(sourceSyntaxLanguage(source))}`
+          : view?.formatError ?? 'A display layout; the evidence is unchanged. Show the source as captured.';
         elements.sourceDeob.disabled = source?.kind !== 'javascript' || !source.content;
         elements.sourceDeob.setAttribute('aria-pressed', String(state.sourceDeobfuscated));
         elements.sourceDeob.setAttribute('aria-label', state.sourceDeobfuscated ? 'Show original evidence' : 'Run local static cleanup');
@@ -6896,8 +6948,8 @@ const sourceFormatClient = createSourceFormatClient({
         const original = sourceFactsPanel.original(source) !== undefined ? 'Verified original evidence'
           : `Original evidence preview${source?.contentLossy ? ' · lossy UTF-8 display' : ''}${source?.contentTruncated ? ' · truncated' : ''}`;
         if (view?.formatError) return `${original} · ${view.formatError}`;
-        if (view?.formatPending) return `${original} · formatting with Oxc…`;
-        if (view?.formatNotice && !state.sourceDeobfuscated) return `Pretty printed ${original.toLowerCase()} · whitespace formatter · ${view.formatNotice}`;
+        if (view?.formatPending) return `${original} · formatting…`;
+        if (view?.formatNotice && !state.sourceDeobfuscated) return `Pretty printed ${original.toLowerCase()} · whitespace layout · ${view.formatNotice}`;
         if (state.sourceDeobfuscated && sourceDerivedView(source)) {
           const status = state.deobfuscationRequests.get(deobfuscationKey(source))?.status;
           return `${state.sourceFormatted ? 'Pretty printed derived' : 'Derived'} · mapped to original source${status === 'error' ? ' · last successful analysis' : status === 'loading' ? ' · reanalyzing' : status === 'cancelled' ? ' · analysis cancelled' : ''}`;
@@ -7466,6 +7518,9 @@ const sourceFormatClient = createSourceFormatClient({
         if (!sourceIsCurrent(artifact) || artifact.content !== undefined || artifact.loading || (artifact.loadError && !retry)) return;
         const identity = sourceIdentity(artifact);
         const controller = new AbortController();
+        // Text previews read the whole artifact, up to its 16 MiB cap, in 2 MiB pages.
+        const previewBytes = sourceHexArtifact(artifact) || canvasOwner ? 2097152 : SOURCE_PREVIEW_BYTES;
+        const pages = Math.max(1, Math.ceil(Math.min(artifact.byte_size, previewBytes) / 2097152));
         artifact.loading = true; artifact.loadError = null; artifact.controller = controller;
         artifact.previewUsed = state.sourcePreviewSequence = (state.sourcePreviewSequence ?? 0) + 1;
         if (!canvasOwner) boundSourcePreviews(artifact);
@@ -7477,7 +7532,7 @@ const sourceFormatClient = createSourceFormatClient({
           delete artifact.controller; controller.abort();
           if (canvasOwner && canvasGalleryVisible()) renderFingerprintActivity();
           else if (sourceIdentity(selectedSource()) === identity) renderSources();
-        }, 10000);
+        }, 5000 + 5000 * pages);
         if (!canvasOwner) renderSources();
         let responseCancellation = null;
         try {
@@ -7494,12 +7549,32 @@ const sourceFormatClient = createSourceFormatClient({
               return responseCancellation;
             }};
           }}} : response;
-          const buffer = await sourceFactsReadBytes(ownedResponse, 2097152, controller.signal);
+          let buffer = await sourceFactsReadBytes(ownedResponse, 2097152, controller.signal);
           if (!current()) return;
           if (buffer.length !== Math.min(artifact.byte_size, 2097152)) throw new Error('The artifact preview byte size changed.');
           const total = response.headers.get('X-Artifact-Total-Bytes');
           if (total !== null && Number(total) !== artifact.byte_size) throw new Error('The artifact total byte size changed.');
-          if (artifact.byte_size <= 2097152 && globalThis.crypto?.subtle) {
+          if (pages > 1) {
+            const whole = new Uint8Array(Math.min(artifact.byte_size, previewBytes));
+            whole.set(buffer);
+            for (let offset = buffer.length; offset < whole.length; offset += 2097152) {
+              const page = await fetch(`/api/artifacts/${encodeURIComponent(artifact.artifact_id)}/content?offset=${offset}&limit=2097152`, {cache: 'no-store', signal: controller.signal});
+              if (!current() || !page.ok) {
+                responseCancellation = page.body?.cancel().catch(() => {});
+                if (!current()) return;
+                throw new Error(`Artifact store returned ${page.status}`);
+              }
+              const bytes = await sourceFactsReadBytes(page, 2097152, controller.signal);
+              if (!current()) return;
+              const pageTotal = page.headers.get('X-Artifact-Total-Bytes');
+              if (bytes.length !== Math.min(2097152, whole.length - offset) || (pageTotal !== null && Number(pageTotal) !== artifact.byte_size)) {
+                throw new Error('The artifact preview byte size changed.');
+              }
+              whole.set(bytes, offset);
+            }
+            buffer = whole;
+          }
+          if (artifact.byte_size <= previewBytes && globalThis.crypto?.subtle) {
             const hash = Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', buffer)), byte => byte.toString(16).padStart(2, '0')).join('');
             if (!current()) return;
             if (hash !== artifact.sha256) throw new Error('The artifact bytes do not match the selected SHA-256.');
@@ -7524,16 +7599,18 @@ const sourceFormatClient = createSourceFormatClient({
             else canvasOwner.imageInfo = inspection;
           }
           artifact.sourceTextLength = content.length;
+          artifact.contentLongLine = !sourceHexArtifact(artifact) && !canvasOwner && sourceHasLongLine(content);
           artifact.content = content;
           artifact.wasmHexBytes = sourceHexArtifact(artifact) ? hexBytes : undefined;
           artifact.contentTruncated = artifact.byte_size > buffer.length || (sourceHexArtifact(artifact) && buffer.length > hexBytes);
           if (artifact.contentTruncated) artifact.content += sourceHexArtifact(artifact)
             ? `\n\n[Hex preview limited to the first ${hexBytes} bytes; original bytes are unchanged]`
-            : '\n\n[Viewer preview limited to the first 2 MiB; original bytes are unchanged]';
+            : `\n\n[Viewer preview limited to the first ${previewBytes / 1048576} MiB; original bytes are unchanged]`;
           if (!canvasOwner) boundSourcePreviews();
+          if (!canvasOwner && !state.sourceFormatted && sourceIdentity(selectedSource()) === identity) state.sourceFormatted = sourceFormatWanted(artifact);
         } catch (error) {
           if (current()) {
-            if (canvasOwner) for (const field of ['content', 'sourceTextLength', 'contentVerified', 'contentLossy', 'contentTruncated']) delete artifact[field];
+            if (canvasOwner) for (const field of ['content', 'sourceTextLength', 'contentVerified', 'contentLossy', 'contentTruncated', 'contentLongLine']) delete artifact[field];
             artifact.loadError = `Artifact bytes are unavailable: ${String(error.message).slice(0, 1024)}`;
           }
         } finally {
@@ -7589,6 +7666,12 @@ const sourceFormatClient = createSourceFormatClient({
           identity.bytes >= 0 && identity.bytes === source?.byte_size;
       }
 
+      // An explicit { } choice for this artifact wins; otherwise a minified file opens pretty-printed.
+      function sourceFormatWanted(source) {
+        if (!source) return false;
+        return state.sourceFormatChoices?.get(sourceIdentity(source)) ?? Boolean(source.contentLongLine && sourcePrettyByDefault(source));
+      }
+
       function selectArtifact(artifactId, line = null, {identity: expectedIdentity = null, passive = false, column = 0, length = 0} = {}) {
         const matches = state.artifacts.filter(candidate => candidate.artifact_id === artifactId);
         if (matches.length !== 1 || (expectedIdentity && !sourceArtifactIdentityMatches(matches[0], expectedIdentity))) {
@@ -7614,7 +7697,7 @@ const sourceFormatClient = createSourceFormatClient({
         sourceFactsPanel.cancel();
         state.selectedArtifactId = artifactId;
         state.sourceDeobfuscated = false;
-        state.sourceFormatted = false;
+        state.sourceFormatted = sourceFormatWanted(artifact);
         state.sourceWasm = false;
         if (!state.openArtifactIds.includes(artifactId)) state.openArtifactIds.push(artifactId);
         // A requested location is revealed by renderSources once these bytes
@@ -7634,7 +7717,7 @@ const sourceFormatClient = createSourceFormatClient({
           state.selectedArtifactId = state.openArtifactIds[Math.max(0, closedIndex - 1)] ?? null;
         }
         state.sourceDeobfuscated = false;
-        state.sourceFormatted = false;
+        state.sourceFormatted = sourceFormatWanted(selectedSource());
         state.sourceWasm = false;
         renderSources();
         const selected = selectedSource();
@@ -8251,17 +8334,87 @@ const sourceFormatClient = createSourceFormatClient({
       });
       elements.sourceWindowPrevious.addEventListener('click', () => {
         const current = state.sourceEditorView?.window;
-        if (current) moveSourceWindow(Math.max(0, current.start - SOURCE_WINDOW_LINES));
+        if (current?.start) moveSourceWindow(current.start - 1);
       });
       elements.sourceWindowNext.addEventListener('click', () => {
         const current = state.sourceEditorView?.window;
         if (current) moveSourceWindow(current.end);
       });
+      // Go to line opens over the editor; Go or Escape closes it.
+      function openSourceGoto() {
+        if (!state.sourceEditorView) return;
+        elements.sourceMore.open = false;
+        elements.sourceWindow.hidden = false;
+        renderSourceWindowControls();
+        elements.sourceWindowLine.focus();
+        elements.sourceWindowLine.select();
+      }
+      function closeSourceGoto(restoreFocus) {
+        if (elements.sourceWindow.hidden) return;
+        elements.sourceWindow.hidden = true;
+        if (restoreFocus) elements.sourceCodeWrap.focus({preventScroll: true});
+      }
+      elements.sourceGoto.addEventListener('click', openSourceGoto);
       elements.sourceWindow.addEventListener('submit', event => {
         event.preventDefault();
-        if (!moveSourceWindow(Number(elements.sourceWindowLine.value) - 1, Number(elements.sourceWindowColumn.value) - 1)) {
-          elements.sourcePosition.textContent = 'Choose a retained line and column within that line.';
+        if (moveSourceWindow(Number(elements.sourceWindowLine.value) - 1, Number(elements.sourceWindowColumn.value) - 1)) closeSourceGoto(false);
+        else elements.sourcePosition.textContent = 'Choose a retained line and column within that line.';
+      });
+      elements.sourceWindow.addEventListener('keydown', event => {
+        if (event.key === 'Escape') {event.preventDefault(); closeSourceGoto(true);}
+      });
+      // The More menu closes after an action, on Escape and on a click elsewhere.
+      elements.sourceMore.addEventListener('click', event => {
+        const action = event.target.closest?.('.source-more-menu button');
+        if (!action) return;
+        elements.sourceMore.open = false;
+        if (document.activeElement === action || document.activeElement === document.body) elements.sourceMore.querySelector('summary').focus();
+      });
+      document.addEventListener('pointerdown', event => {
+        if (elements.sourceMore.open && !elements.sourceMore.contains(event.target)) elements.sourceMore.open = false;
+        if (!elements.sourceWindow.hidden && !elements.sourceWindow.contains(event.target) && !elements.sourceMore.contains(event.target)) closeSourceGoto(false);
+      });
+      // Cmd/Ctrl+F finds in the open source and Ctrl+G goes to a line, as in VS Code.
+      document.addEventListener('keydown', event => {
+        if (document.querySelector('#screen-sources').hidden || event.altKey || event.shiftKey || event.repeat || document.querySelector('dialog:modal')) return;
+        if (event.key === 'Escape' && elements.sourceMore.open) {
+          event.preventDefault();
+          const inside = elements.sourceMore.contains(document.activeElement);
+          elements.sourceMore.open = false;
+          if (inside) elements.sourceMore.querySelector('summary').focus();
+        } else if (event.code === 'KeyF' && (event.metaKey || event.ctrlKey)) {
+          event.preventDefault();
+          elements.sourceSearch.focus();
+          elements.sourceSearch.select();
+        } else if (event.code === 'KeyG' && event.ctrlKey && !event.metaKey) {
+          event.preventDefault();
+          openSourceGoto();
         }
+      });
+      // The status bar follows the caret and the selection in the mounted source text.
+      function syncSourceSelection() {
+        const editor = state.sourceEditorView, selection = globalThis.getSelection?.();
+        const point = (node, offset) => {
+          const text = (node?.nodeType === 1 ? node : node?.parentElement)?.closest?.('.source-text');
+          if (!editor || !text || !elements.sourceCode.contains(text)) return null;
+          const prefix = document.createRange();
+          prefix.setStart(text, 0);
+          prefix.setEnd(node, offset);
+          const row = text.closest('.source-line'), line = Number(row.dataset.localLine);
+          const column = Number(row.dataset.columnStart ?? 0) + prefix.toString().length, start = sourceDocumentOffset(editor.index, line);
+          return start === null ? null : {line, column, offset: start + column};
+        };
+        const anchor = selection?.rangeCount ? point(selection.anchorNode, selection.anchorOffset) : null;
+        const focus = anchor ? point(selection.focusNode, selection.focusOffset) : null;
+        const length = focus ? Math.abs(focus.offset - anchor.offset) : 0;
+        elements.sourceSelection.hidden = !length;
+        elements.sourceSelection.textContent = length ? `${length} selected` : '';
+        if (focus) elements.sourcePosition.textContent = sourcePositionText(editor, focus.line, focus.column);
+      }
+      let sourceSelectionFrame = 0;
+      document.addEventListener('selectionchange', () => {
+        if (sourceSelectionFrame || document.querySelector('#screen-sources').hidden) return;
+        sourceSelectionFrame = requestAnimationFrame(() => {sourceSelectionFrame = 0; syncSourceSelection();});
       });
       elements.sourceSearch.addEventListener('paste', event => {
         const pasted = event.clipboardData?.getData('text/plain');
@@ -8314,8 +8467,10 @@ const sourceFormatClient = createSourceFormatClient({
       });
       elements.sourcePretty.addEventListener('click', () => {
         sourceFactsPanel.cancel();
+        const source = selectedSource();
         state.sourceFormatted = !state.sourceFormatted;
-        if (state.sourceFormatted) sourceFormatClient.forget(selectedSource());
+        if (source) state.sourceFormatChoices.set(sourceIdentity(source), state.sourceFormatted);
+        if (state.sourceFormatted) sourceFormatClient.forget(source);
         renderSources();
       });
       // A formatted token reports the exact raw range it was printed from.
@@ -8327,14 +8482,17 @@ const sourceFormatClient = createSourceFormatClient({
         let column = Number(row.dataset.columnStart ?? 0);
         for (let node = token.previousSibling; node; node = node.previousSibling) column += node.textContent.length;
         const start = sourceDocumentOffset(editor.index, Number(row.dataset.localLine)) + column;
-        const range = sourceFormatRawRange(sourceSegmentsUTF16(view.active, view.formatted.text, view.formatted.segments, view.formatted.offset_unit), start, start + token.textContent.length);
+        const range = sourceWhitespaceRange(view.formatted.map, view.active, view.formatted.text, start, start + token.textContent.length);
         if (!range) return;
         const original = sourceDocumentIndex(view.active), from = sourceDocumentPosition(original, range.start), to = sourceDocumentPosition(original, range.end);
         if (!from || !to) return;
-        elements.sourcePosition.textContent = `Line ${row.dataset.line}, Column ${column + 1} · raw ${from.line + 1}:${from.column + 1}–${to.line + 1}:${to.column + 1} (offsets ${range.start}–${range.end})`;
+        // After the caret update that the same click schedules.
+        requestAnimationFrame(() => {
+          elements.sourcePosition.textContent = `Line ${row.dataset.line}, Column ${column + 1} · raw ${from.line + 1}:${from.column + 1}–${to.line + 1}:${to.column + 1} (offsets ${range.start}–${range.end})`;
+        });
       });
-      // Search all files. Reads use the artifact content route with the Sources
-      // preview's 2 MiB limit and checks. A loaded preview is reused as is;
+      // Search all files. Reads use the artifact content route with a 2 MiB
+      // limit and the Sources preview's checks. A loaded preview is reused as is;
       // other text stays in a small search-owned cache, so typing does not
       // refetch every file and neither cache grows the other's bound.
       const SOURCE_SEARCH_CACHE_UNITS = 8 * 1024 * 1024;

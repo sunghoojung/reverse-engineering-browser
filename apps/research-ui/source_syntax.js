@@ -20,7 +20,10 @@
 
       // One selected document owns this sparse index. No array is allocated per
       // newline, and excerpts never normalize CRLF, BOMs or UTF-16 positions.
-      const SOURCE_DOCUMENT_LIMIT = 8 * 1024 * 1024;
+      // 64 Mi units hold a 16 MiB artifact laid out at up to four times its size.
+      const SOURCE_DOCUMENT_LIMIT = 64 * 1024 * 1024;
+      // The artifact receiver's default per-artifact cap; larger text shows a limit notice.
+      const SOURCE_PREVIEW_BYTES = 16 * 1024 * 1024;
       const SOURCE_WINDOW_LINES = 1000;
       const SOURCE_WINDOW_COLUMN_LIMIT = 16384;
       const SOURCE_WINDOW_OTHER_COLUMNS = 512;
@@ -41,18 +44,25 @@
         while (current++ < line) offset = index.text.indexOf('\n', offset) + 1;
         return offset;
       }
+      // Ascending lookups continue from the previous line instead of rescanning
+      // from its anchor, which matters inside one very long line.
       function sourceDocumentPosition(index, offset) {
         if (!Number.isSafeInteger(offset) || offset < 0 || offset > index.length) return null;
-        let low = 0, high = index.anchors.length - 1;
-        while (low < high) {
-          const middle = Math.ceil((low + high) / 2);
-          if (index.anchors[middle] <= offset) low = middle; else high = middle - 1;
+        let cursor = index.cursor;
+        if (!cursor || offset < cursor.start) {
+          let low = 0, high = index.anchors.length - 1;
+          while (low < high) {
+            const middle = Math.ceil((low + high) / 2);
+            if (index.anchors[middle] <= offset) low = middle; else high = middle - 1;
+          }
+          const start = index.anchors[low];
+          cursor = index.cursor = {start, line: low * 128, newline: index.text.indexOf('\n', start)};
         }
-        let start = index.anchors[low], line = low * 128;
-        for (let next = index.text.indexOf('\n', start); next >= 0 && next < offset; next = index.text.indexOf('\n', start)) {
-          start = next + 1; line++;
+        while (cursor.newline >= 0 && cursor.newline < offset) {
+          cursor.start = cursor.newline + 1; cursor.line++;
+          cursor.newline = index.text.indexOf('\n', cursor.start);
         }
-        return {line, column: offset - start};
+        return {line: cursor.line, column: offset - cursor.start};
       }
       function sourceDocumentLine(index, line) {
         const start = sourceDocumentOffset(index, line);
@@ -110,12 +120,13 @@
 
       // Map only mounted lines. Normalized segment arrays and sparse source
       // indices belong to the one editor owner, not every refresh or Find step.
+      // A pretty-printed row maps through its first non-whitespace character.
       function sourceWindowMapping(original, active, derived, formatted) {
         if (!derived && !formatted) return null;
         const originalIndex = sourceDocumentIndex(original);
         const activeIndex = sourceDocumentIndex(active);
         const derivedSegments = derived ? sourceSegmentsUTF16(original, active, derived.segments ?? [], derived.offset_unit) : null;
-        const formattedSegments = formatted ? sourceSegmentsUTF16(active, formatted.text, formatted.segments ?? [], formatted.offset_unit) : null;
+        const layout = formatted?.map ? sourceWhitespaceWalker(formatted.map, active, formatted.text) : null;
         const firstMapped = (segments, start, end) => {
           let low = 0, high = segments.length;
           while (low < high) {const middle = (low + high) >> 1; if (segments[middle].derived_end <= start) low = middle + 1; else high = middle;}
@@ -125,13 +136,90 @@
           }
           return null;
         };
-        return rows => rows.map(row => {
-          let offset = formattedSegments ? firstMapped(formattedSegments, row.offset, row.offset + row.fullLength)
-            : firstMapped(derivedSegments, row.offset, row.offset + row.fullLength);
-          if (formattedSegments && derivedSegments && offset !== null) offset = derivedOriginalOffset(derivedSegments, offset);
-          const position = offset === null ? null : sourceDocumentPosition(derived ? originalIndex : activeIndex, offset);
-          return {originalLine: position?.line ?? null, originalColumn: position?.column ?? null};
+        const position = offset => {
+          if (offset !== null && layout && derivedSegments) offset = derivedOriginalOffset(derivedSegments, offset);
+          return offset === null ? null : sourceDocumentPosition(derived ? originalIndex : activeIndex, offset);
+        };
+        const mapping = rows => rows.map(row => {
+          const visible = layout ? sourceFirstNonSpace(formatted.text, row.offset, row.offset + row.fullLength) : null;
+          const at = position(layout ? (visible === null ? null : layout(visible))
+            : formatted ? null : firstMapped(derivedSegments, row.offset, row.offset + row.fullLength));
+          return {originalLine: at?.line ?? null, originalColumn: at?.column ?? null};
         });
+        // The original location of one displayed offset, or of the next visible character on its line.
+        mapping.position = (offset, lineEnd = offset + 1) => {
+          if (!layout) return derivedSegments && !formatted ? position(derivedOriginalOffset(derivedSegments, offset)) : null;
+          const visible = sourceFirstNonSpace(formatted.text, offset, lineEnd);
+          return visible === null ? null : position(layout(visible));
+        };
+        return mapping;
+      }
+
+      function sourceFirstNonSpace(text, start, end) {
+        for (let at = start; at < end && at < text.length; at++) if (!sourceFormatSpace(text.charCodeAt(at))) return at;
+        return null;
+      }
+
+      // ECMAScript WhiteSpace and LineTerminator, the separators a layout may change.
+      function sourceFormatSpace(code) {
+        return code === 32 || (code >= 9 && code <= 13) || code === 0xa0 || code === 0x1680 ||
+          (code >= 0x2000 && code <= 0x200a) || code === 0x2028 || code === 0x2029 ||
+          code === 0x202f || code === 0x205f || code === 0x3000 || code === 0xfeff;
+      }
+
+      // A layout that changes only whitespace maps by walking both texts in step.
+      // Instead of a segment per change, it keeps one sync point per 4 Ki
+      // formatted units; null means a non-whitespace character differs.
+      const SOURCE_LAYOUT_ANCHOR_UNITS = 4096;
+      function sourceWhitespaceMap(original, formatted) {
+        const anchors = [0, 0];
+        const originalLength = original.length, formattedLength = formatted.length;
+        let from = 0, to = 0, next = SOURCE_LAYOUT_ANCHOR_UNITS;
+        for (;;) {
+          while (from < originalLength && to < formattedLength && original.charCodeAt(from) === formatted.charCodeAt(to)) {
+            from++; to++;
+            if (to === next) {anchors.push(to, from); next += SOURCE_LAYOUT_ANCHOR_UNITS;}
+          }
+          if (from === originalLength && to === formattedLength) break;
+          const skippedFrom = from, skippedTo = to;
+          while (from < originalLength && sourceFormatSpace(original.charCodeAt(from))) from++;
+          while (to < formattedLength && sourceFormatSpace(formatted.charCodeAt(to))) to++;
+          if (from === skippedFrom && to === skippedTo) return null;
+          if (to >= next) {anchors.push(to, from); next = (Math.floor(to / SOURCE_LAYOUT_ANCHOR_UNITS) + 1) * SOURCE_LAYOUT_ANCHOR_UNITS;}
+        }
+        return {anchors: Uint32Array.from(anchors), originalLength, formattedLength};
+      }
+
+      // Original offset of a non-whitespace formatted offset. Ascending lookups continue the walk.
+      function sourceWhitespaceWalker(map, original, formatted) {
+        const anchors = map.anchors;
+        let from = 0, to = 0;
+        return target => {
+          if (!Number.isSafeInteger(target) || target < 0 || target >= formatted.length || sourceFormatSpace(formatted.charCodeAt(target))) return null;
+          let low = 0, high = anchors.length / 2 - 1;
+          while (low < high) {const middle = (low + high + 1) >> 1; if (anchors[middle * 2] <= target) low = middle; else high = middle - 1;}
+          if (target < to || anchors[low * 2] > to) {to = anchors[low * 2]; from = anchors[low * 2 + 1];}
+          for (;;) {
+            while (to < target && from < original.length && original.charCodeAt(from) === formatted.charCodeAt(to)) {from++; to++;}
+            if (to === target) break;
+            const skippedFrom = from, skippedTo = to;
+            while (from < original.length && sourceFormatSpace(original.charCodeAt(from))) from++;
+            while (to < target && sourceFormatSpace(formatted.charCodeAt(to))) to++;
+            if (from === skippedFrom && to === skippedTo) {from = 0; to = 0; return null;}
+          }
+          while (from < original.length && original.charCodeAt(from) !== formatted.charCodeAt(to) && sourceFormatSpace(original.charCodeAt(from))) from++;
+          if (original.charCodeAt(from) === formatted.charCodeAt(to)) return from;
+          from = 0; to = 0;
+          return null;
+        };
+      }
+
+      // Original offsets of a formatted range whose ends are not whitespace.
+      function sourceWhitespaceRange(map, original, formatted, start, end) {
+        if (!(end > start)) return null;
+        const walk = sourceWhitespaceWalker(map, original, formatted);
+        const first = walk(start), last = walk(end - 1);
+        return first === null || last === null ? null : {start: first, end: last + 1};
       }
 
       function sourceName(source) {
@@ -156,11 +244,11 @@
         return file || source.url;
       }
 
-      // One hex row is 78 UTF-16 units, including its newline. Stay inside the
-      // editor index so Find and Go to line can reach every formatted byte.
+      // One hex row is 78 UTF-16 units, including its newline. The hex view of
+      // a 2 MiB binary preview stays within 8 Mi units.
       const WASM_HEX_ROW_UNITS = 78;
       function wasmHexByteLimit() {
-        const rows = Math.floor((SOURCE_DOCUMENT_LIMIT - 160) / WASM_HEX_ROW_UNITS);
+        const rows = Math.floor((8 * 1024 * 1024 - 160) / WASM_HEX_ROW_UNITS);
         return rows * 16;
       }
 
@@ -189,10 +277,11 @@
         return rows.join('\n');
       }
 
-      const SOURCE_PRETTY_INPUT_LIMIT = 2 * 1024 * 1024;
-      const SOURCE_PRETTY_OUTPUT_LIMIT = 4 * 1024 * 1024;
+      // The in-page layout streams its tokens and keeps no per-token mapping,
+      // so it accepts the 16 MiB artifact cap; output stays within 3x input.
+      const SOURCE_PRETTY_INPUT_LIMIT = 16 * 1024 * 1024;
+      const SOURCE_PRETTY_OUTPUT_LIMIT = 48 * 1024 * 1024;
       const SOURCE_PRETTY_TOKEN_LIMIT = 250000;
-      const SOURCE_PRETTY_SEGMENT_LIMIT = 500000;
       const SOURCE_PRETTY_LANGUAGES = new Set(['javascript', 'json', 'css', 'markup']);
       const SOURCE_PRETTY_CONTROL_WORDS = new Set(['catch', 'for', 'if', 'switch', 'while', 'with']);
       const SOURCE_PRETTY_REGEX_PREFIXES = new Set([
@@ -207,9 +296,26 @@
         '{', '}', '(', ')', '[', ']', ';', ',', ':', '.', '?', '+', '-', '*',
         '/', '%', '=', '<', '>', '!', '~', '&', '|', '^'
       ];
+      const SOURCE_PRETTY_OPERATOR_PATTERN = new RegExp(SOURCE_PRETTY_OPERATORS.map(value => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|'), 'y');
 
       function sourcePrettySupported(source) {
         return SOURCE_PRETTY_LANGUAGES.has(sourceSyntaxLanguage(source));
+      }
+
+      // Minified JavaScript, CSS and JSON open pretty-printed (#433).
+      const SOURCE_LONG_LINE_UNITS = 16 * 1024;
+      function sourcePrettyByDefault(source) {
+        return ['javascript', 'css', 'json'].includes(sourceSyntaxLanguage(source));
+      }
+
+      function sourceHasLongLine(text, limit = SOURCE_LONG_LINE_UNITS) {
+        for (let start = 0; start < text.length;) {
+          const end = text.indexOf('\n', start);
+          if ((end < 0 ? text.length : end) - start > limit) return true;
+          if (end < 0) break;
+          start = end + 1;
+        }
+        return false;
       }
 
       function sourcePrettyQuotedEnd(value, start, quote) {
@@ -248,130 +354,121 @@
         return previous.kind === 'operator' && ![')', ']', '}', '++', '--'].includes(previous.text);
       }
 
-      function sourcePrettyTokens(value, language) {
-        const tokens = [];
+      // Returns the next token, whitespace included, or null; nothing is retained.
+      function createSourcePrettyLexer(value, language) {
         let index = 0;
         let previous = null;
-        const push = (kind, start, end) => {
-          if (tokens.length >= SOURCE_PRETTY_TOKEN_LIMIT) throw new RangeError('Pretty print token limit reached');
-          const token = {kind, start, end, text: value.slice(start, end)};
-          tokens.push(token);
-          if (kind !== 'whitespace' && kind !== 'comment') previous = token;
+        const token = (kind, start, end) => {
+          const result = {kind, start, end, text: value.slice(start, end)};
+          if (kind !== 'whitespace' && kind !== 'comment') previous = result;
+          return result;
         };
-        while (index < value.length) {
+        return () => {
+          if (index >= value.length) return null;
           const start = index;
           const character = value[index];
           const next = value[index + 1] ?? '';
           if (/\s/.test(character)) {
             while (index < value.length && /\s/.test(value[index])) index += 1;
-            push('whitespace', start, index);
-            continue;
+            return token('whitespace', start, index);
           }
           if ((language === 'javascript' || language === 'css') && character === '/' && next === '*') {
             const close = value.indexOf('*/', index + 2);
             index = close === -1 ? value.length : close + 2;
-            push('comment', start, index);
-            continue;
+            return token('comment', start, index);
           }
           if (language === 'javascript' && character === '/' && next === '/') {
             const close = value.indexOf('\n', index + 2);
             index = close === -1 ? value.length : close;
-            push('line-comment', start, index);
-            continue;
+            return token('line-comment', start, index);
           }
           if (character === '"' || character === "'" || (language === 'javascript' && character === '`')) {
             index = sourcePrettyQuotedEnd(value, index, character);
-            push('literal', start, index);
-            continue;
+            return token('literal', start, index);
           }
           if (language === 'javascript' && character === '/' && next !== '/' && next !== '*' && sourcePrettyMayStartRegex(previous)) {
             const end = sourcePrettyRegexEnd(value, index);
             if (end > index + 1) {
               index = end;
-              push('literal', start, index);
-              continue;
+              return token('literal', start, index);
             }
           }
           if (/[A-Za-z_$]/.test(character)) {
             index += 1;
             while (/[\w$]/.test(value[index] ?? '')) index += 1;
-            push('word', start, index);
-            continue;
+            return token('word', start, index);
           }
           if (/\d/.test(character) || (character === '.' && /\d/.test(next))) {
             SOURCE_PRETTY_NUMBER_PATTERN.lastIndex = index;
             index = SOURCE_PRETTY_NUMBER_PATTERN.exec(value)?.index === start
               ? SOURCE_PRETTY_NUMBER_PATTERN.lastIndex
               : index + 1;
-            push('number', start, index);
-            continue;
+            return token('number', start, index);
           }
-          const operator = SOURCE_PRETTY_OPERATORS.find(candidate => value.startsWith(candidate, index));
-          index += operator?.length ?? 1;
-          push('operator', start, index);
+          SOURCE_PRETTY_OPERATOR_PATTERN.lastIndex = index;
+          index += SOURCE_PRETTY_OPERATOR_PATTERN.exec(value)?.[0].length ?? 1;
+          return token('operator', start, index);
+        };
+      }
+
+      function sourcePrettyTokens(value, language) {
+        const next = createSourcePrettyLexer(value, language);
+        const tokens = [];
+        for (let token = next(); token; token = next()) {
+          if (tokens.length >= SOURCE_PRETTY_TOKEN_LIMIT) throw new RangeError('Pretty print token limit reached');
+          tokens.push(token);
         }
         return tokens;
       }
 
-      function createSourcePrettyWriter(value) {
-        let text = '';
-        const segments = [];
+      function sourcePrettySignificant(next) {
+        return () => {
+          for (let token = next(); token; token = next()) if (token.kind !== 'whitespace') return token;
+          return null;
+        };
+      }
+
+      // The output is the input's tokens in order with synthetic whitespace
+      // between them, so sourceWhitespaceMap can map it back exactly.
+      function createSourcePrettyWriter() {
+        const blocks = [];
+        let parts = [];
+        let length = 0;
+        let last = 0;
+        let syntheticTail = 0;
         let indent = 0;
         let lineStart = true;
-        const append = (kind, chunk, originalStart, originalEnd) => {
+        const append = (chunk, synthetic) => {
           if (!chunk) return;
-          if (text.length + chunk.length > SOURCE_PRETTY_OUTPUT_LIMIT) throw new RangeError('Pretty-print output exceeds 4 MB');
-          const derivedStart = text.length;
-          text += chunk;
-          const segment = {kind, original_start: originalStart, original_end: originalEnd, derived_start: derivedStart, derived_end: text.length};
-          const previous = segments.at(-1);
-          const contiguous = previous && previous.kind === kind && previous.derived_end === segment.derived_start &&
-            (kind === 'synthetic' || previous.original_end === segment.original_start);
-          if (contiguous) {
-            previous.original_end = segment.original_end;
-            previous.derived_end = segment.derived_end;
-          } else {
-            if (segments.length >= SOURCE_PRETTY_SEGMENT_LIMIT) throw new RangeError('Pretty print mapping limit reached');
-            segments.push(segment);
-          }
-          lineStart = chunk.endsWith('\n');
-        };
-        const synthetic = (chunk, anchor) => append('synthetic', chunk, anchor, anchor);
-        const original = token => {
-          if (lineStart) synthetic('  '.repeat(Math.min(indent, 32)), token.start);
-          append('verbatim', token.text, token.start, token.end);
-        };
-        const space = anchor => {
-          if (!lineStart && text && !/\s$/.test(text)) synthetic(' ', anchor);
-        };
-        const newline = anchor => {
-          if (!text || text.endsWith('\n')) return;
-          synthetic('\n', anchor);
-          lineStart = true;
+          if (length + chunk.length > SOURCE_PRETTY_OUTPUT_LIMIT) throw new RangeError('Pretty-print output exceeds three times the input limit');
+          parts.push(chunk);
+          if (parts.length === 8192) { blocks.push(parts.join('')); parts = []; }
+          length += chunk.length;
+          last = chunk.charCodeAt(chunk.length - 1);
+          syntheticTail = synthetic ? syntheticTail + chunk.length : 0;
+          lineStart = last === 10;
         };
         return {
-          original, space, newline,
+          original: token => {
+            if (lineStart) append('  '.repeat(Math.min(indent, 32)), true);
+            append(token.text, false);
+          },
+          space: () => { if (!lineStart && length && !sourceFormatSpace(last)) append(' ', true); },
+          newline: () => { if (length && last !== 10) append('\n', true); },
           indent: () => { indent += 1; },
           outdent: () => { indent = Math.max(0, indent - 1); },
           isLineStart: () => lineStart,
           finish: () => {
-            while (segments.at(-1)?.kind === 'synthetic') {
-              const segment = segments.at(-1);
-              const chunk = text.slice(segment.derived_start, segment.derived_end);
-              const trimmed = chunk.replace(/\s+$/, '');
-              if (trimmed === chunk) break;
-              text = text.slice(0, segment.derived_start) + trimmed;
-              segment.derived_end = text.length;
-              if (segment.derived_start === segment.derived_end) segments.pop();
-            }
-            return {text, segments};
+            blocks.push(parts.join(''));
+            const text = blocks.join('');
+            return syntheticTail ? text.slice(0, text.length - syntheticTail) : text;
           }
         };
       }
 
       function prettyPrintStructuredSource(value, language) {
-        const tokens = sourcePrettyTokens(value, language);
-        const writer = createSourcePrettyWriter(value);
+        const read = sourcePrettySignificant(createSourcePrettyLexer(value, language));
+        const writer = createSourcePrettyWriter();
         let parens = 0;
         let brackets = 0;
         let braces = 0;
@@ -379,44 +476,41 @@
         let forDepth = null;
         let previous = null;
         let pendingFor = false;
-        const significant = tokens.filter(token => token.kind !== 'whitespace');
-        for (let index = 0; index < significant.length; index += 1) {
-          const token = significant[index];
-          const next = significant[index + 1] ?? null;
+        for (let token = read(), next = token && read(); token; token = next, next = token && read()) {
           if (token.kind === 'line-comment') {
-            writer.space(token.start); writer.original(token); writer.newline(token.end); previous = token; continue;
+            writer.space(); writer.original(token); writer.newline(); previous = token; continue;
           }
           if (token.kind === 'comment') {
-            writer.space(token.start); writer.original(token);
-            if (token.text.includes('\n') || next) writer.newline(token.end);
+            writer.space(); writer.original(token);
+            if (token.text.includes('\n') || next) writer.newline();
             previous = token; continue;
           }
           if (token.kind === 'word') {
             if (token.text === 'for') pendingFor = true;
-            if (previous && ['word', 'number', 'literal'].includes(previous.kind)) writer.space(token.start);
-            if (previous?.text === ')' || previous?.text === ']') writer.space(token.start);
+            if (previous && ['word', 'number', 'literal'].includes(previous.kind)) writer.space();
+            if (previous?.text === ')' || previous?.text === ']') writer.space();
             writer.original(token);
             previous = token;
             continue;
           }
           if (token.kind === 'number' || token.kind === 'literal') {
-            if (previous && ['word', 'number', 'literal'].includes(previous.kind)) writer.space(token.start);
+            if (previous && ['word', 'number', 'literal'].includes(previous.kind)) writer.space();
             writer.original(token);
             previous = token;
             continue;
           }
           const operator = token.text;
           if (operator === '{') {
-            writer.space(token.start); writer.original(token); braces += 1;
-            if (next?.text !== '}') { writer.indent(); writer.newline(token.end); }
+            writer.space(); writer.original(token); braces += 1;
+            if (next?.text !== '}') { writer.indent(); writer.newline(); }
           } else if (operator === '}') {
             if (previous?.text !== '{') writer.outdent();
-            if (!writer.isLineStart() && previous?.text !== '{') writer.newline(token.start);
+            if (!writer.isLineStart() && previous?.text !== '{') writer.newline();
             writer.original(token); braces = Math.max(0, braces - 1);
-            if (next && ![';', ',', ')', ']', '.', '?.'].includes(next.text) && !['else', 'catch', 'finally', 'while'].includes(next.text)) writer.newline(token.end);
-            else if (next && ['else', 'catch', 'finally'].includes(next.text)) writer.space(token.end);
+            if (next && ![';', ',', ')', ']', '.', '?.'].includes(next.text) && !['else', 'catch', 'finally', 'while'].includes(next.text)) writer.newline();
+            else if (next && ['else', 'catch', 'finally'].includes(next.text)) writer.space();
           } else if (operator === '(') {
-            if (previous?.kind === 'word' && SOURCE_PRETTY_CONTROL_WORDS.has(previous.text)) writer.space(token.start);
+            if (previous?.kind === 'word' && SOURCE_PRETTY_CONTROL_WORDS.has(previous.text)) writer.space();
             writer.original(token); parens += 1;
             if (pendingFor) { forDepth = parens; pendingFor = false; }
           } else if (operator === ')') {
@@ -428,35 +522,31 @@
             const multiline = language === 'json' || !previous ||
               (previous.kind === 'operator' && ![')', ']'].includes(previous.text));
             multilineBrackets.push(multiline);
-            if (multiline && next?.text !== ']') { writer.indent(); writer.newline(token.end); }
+            if (multiline && next?.text !== ']') { writer.indent(); writer.newline(); }
           } else if (operator === ']') {
             const multiline = multilineBrackets.pop() ?? false;
-            if (multiline && previous?.text !== '[') { writer.outdent(); writer.newline(token.start); }
+            if (multiline && previous?.text !== '[') { writer.outdent(); writer.newline(); }
             writer.original(token); brackets = Math.max(0, brackets - 1);
           } else if (operator === ';') {
             writer.original(token);
-            if (forDepth === null) writer.newline(token.end); else writer.space(token.end);
+            if (forDepth === null) writer.newline(); else writer.space();
           } else if (operator === ',') {
             writer.original(token);
-            if (language === 'json' || (language === 'javascript' && parens === 0 && (braces > 0 || brackets > 0))) writer.newline(token.end);
-            else writer.space(token.end);
+            if (language === 'json' || (language === 'javascript' && parens === 0 && (braces > 0 || brackets > 0))) writer.newline();
+            else writer.space();
           } else if (operator === ':') {
-            writer.original(token); writer.space(token.end);
-          } else if (operator === '.') {
-            writer.original(token);
-          } else if (operator === '?.') {
-            writer.original(token);
-          } else if (['++', '--', '!', '~'].includes(operator)) {
+            writer.original(token); writer.space();
+          } else if (operator === '.' || operator === '?.' || ['++', '--', '!', '~'].includes(operator)) {
             writer.original(token);
           } else if (operator === '?') {
-            writer.space(token.start); writer.original(token); writer.space(token.end);
+            writer.space(); writer.original(token); writer.space();
           } else if ((operator === '-' || operator === '+') && (!previous || (previous.kind === 'operator' && ![')', ']', '}'].includes(previous.text)) ||
               (previous.kind === 'word' && SOURCE_PRETTY_REGEX_PREFIXES.has(previous.text)))) {
             // Unary sign: `-2.5`, `x = -y`, `return +n`.
-            if (previous && previous.text !== '(' && previous.text !== '[') writer.space(token.start);
+            if (previous && previous.text !== '(' && previous.text !== '[') writer.space();
             writer.original(token);
           } else {
-            writer.space(token.start); writer.original(token); writer.space(token.end);
+            writer.space(); writer.original(token); writer.space();
           }
           previous = token;
         }
@@ -464,32 +554,30 @@
       }
 
       function prettyPrintCssSource(value) {
-        const tokens = sourcePrettyTokens(value, 'css').filter(token => token.kind !== 'whitespace');
-        const writer = createSourcePrettyWriter(value);
+        const read = sourcePrettySignificant(createSourcePrettyLexer(value, 'css'));
+        const writer = createSourcePrettyWriter();
         let depth = 0;
-        for (let index = 0; index < tokens.length; index += 1) {
-          const token = tokens[index];
-          const next = tokens[index + 1] ?? null;
+        for (let previous = null, token = read(), next = token && read(); token; previous = token, token = next, next = token && read()) {
           if (token.kind === 'comment') {
-            writer.original(token); writer.newline(token.end); continue;
+            writer.original(token); writer.newline(); continue;
           }
           if (token.kind !== 'operator') {
-            if (index && ![':', '(', '[', '.', '#', '-', '@'].includes(tokens[index - 1]?.text)) writer.space(token.start);
+            if (previous && ![':', '(', '[', '.', '#', '-', '@'].includes(previous.text)) writer.space();
             writer.original(token); continue;
           }
           if (token.text === '{') {
-            writer.space(token.start); writer.original(token); depth += 1;
-            if (next?.text !== '}') { writer.indent(); writer.newline(token.end); }
+            writer.space(); writer.original(token); depth += 1;
+            if (next?.text !== '}') { writer.indent(); writer.newline(); }
           } else if (token.text === '}') {
-            if (tokens[index - 1]?.text !== '{') writer.outdent();
-            writer.newline(token.start); writer.original(token); depth = Math.max(0, depth - 1);
-            if (next) writer.newline(token.end);
+            if (previous?.text !== '{') writer.outdent();
+            writer.newline(); writer.original(token); depth = Math.max(0, depth - 1);
+            if (next) writer.newline();
           } else if (token.text === ';') {
-            writer.original(token); writer.newline(token.end);
+            writer.original(token); writer.newline();
           } else if (token.text === ':') {
-            writer.original(token); writer.space(token.end);
+            writer.original(token); writer.space();
           } else if (token.text === ',' && depth === 0) {
-            writer.original(token); writer.newline(token.end);
+            writer.original(token); writer.newline();
           } else {
             writer.original(token);
           }
@@ -497,89 +585,87 @@
         return writer.finish();
       }
 
-      function sourcePrettyMarkupTokens(value) {
-        const tokens = [];
-        const push = token => {
-          if (tokens.length >= SOURCE_PRETTY_TOKEN_LIMIT) throw new RangeError('Pretty print token limit reached');
-          tokens.push(token);
-        };
+      function createSourcePrettyMarkupLexer(value) {
         let index = 0;
-        while (index < value.length) {
-          if (value[index] !== '<') {
-            const end = value.indexOf('<', index);
-            const boundary = end === -1 ? value.length : end;
-            const leading = value.slice(index, boundary).search(/\S/);
-            if (leading !== -1) {
-              const start = index + leading;
-              const trailing = value.slice(start, boundary).match(/\s*$/)?.[0].length ?? 0;
-              push({kind: 'text', start, end: boundary - trailing, text: value.slice(start, boundary - trailing)});
+        const queue = [];
+        const trimmed = (kind, start, end) => {
+          while (start < end && /\s/.test(value[start])) start += 1;
+          while (end > start && /\s/.test(value[end - 1])) end -= 1;
+          if (start < end) queue.push({kind, start, end, text: value.slice(start, end)});
+        };
+        return () => {
+          while (!queue.length && index < value.length) {
+            if (value[index] !== '<') {
+              const end = value.indexOf('<', index);
+              const boundary = end === -1 ? value.length : end;
+              trimmed('text', index, boundary);
+              index = boundary;
+              continue;
             }
-            index = boundary;
-            continue;
-          }
-          const start = index;
-          if (value.startsWith('<!--', index)) {
-            const close = value.indexOf('-->', index + 4);
-            index = close === -1 ? value.length : close + 3;
-          } else {
-            let quote = '';
-            index += 1;
-            for (; index < value.length; index += 1) {
-              const character = value[index];
-              if (quote) {
-                if (character === '\\') index += 1;
-                else if (character === quote) quote = '';
-              } else if (character === '"' || character === "'") quote = character;
-              else if (character === '>') { index += 1; break; }
-            }
-          }
-          const text = value.slice(start, index);
-          push({kind: 'tag', start, end: index, text});
-          const rawTag = text.match(/^<\s*(script|style)\b/i)?.[1]?.toLowerCase();
-          if (rawTag && !/\/\s*>$/.test(text)) {
-            const close = value.toLowerCase().indexOf(`</${rawTag}`, index);
-            if (close !== -1) {
-              const leading = value.slice(index, close).search(/\S/);
-              if (leading !== -1) {
-                const rawStart = index + leading;
-                const trailing = value.slice(rawStart, close).match(/\s*$/)?.[0].length ?? 0;
-                push({kind: 'raw', start: rawStart, end: close - trailing, text: value.slice(rawStart, close - trailing)});
+            const start = index;
+            if (value.startsWith('<!--', index)) {
+              const close = value.indexOf('-->', index + 4);
+              index = close === -1 ? value.length : close + 3;
+            } else {
+              let quote = '';
+              index += 1;
+              for (; index < value.length; index += 1) {
+                const character = value[index];
+                if (quote) {
+                  if (character === '\\') index += 1;
+                  else if (character === quote) quote = '';
+                } else if (character === '"' || character === "'") quote = character;
+                else if (character === '>') { index += 1; break; }
               }
-              index = close;
+            }
+            const text = value.slice(start, index);
+            queue.push({kind: 'tag', start, end: index, text});
+            const rawTag = text.match(/^<\s*(script|style)\b/i)?.[1]?.toLowerCase();
+            if (rawTag && !/\/\s*>$/.test(text)) {
+              const closing = new RegExp(`</${rawTag}`, 'gi');
+              closing.lastIndex = index;
+              const close = closing.exec(value)?.index;
+              if (close !== undefined) {
+                trimmed('raw', index, close);
+                index = close;
+              }
             }
           }
-        }
-        return tokens;
+          return queue.shift() ?? null;
+        };
       }
 
       function prettyPrintMarkupSource(value) {
-        const tokens = sourcePrettyMarkupTokens(value);
-        const writer = createSourcePrettyWriter(value);
+        const read = createSourcePrettyMarkupLexer(value);
+        const writer = createSourcePrettyWriter();
         const voidTag = /^<\s*(?:area|base|br|col|embed|hr|img|input|link|meta|param|source|track|wbr)\b/i;
-        for (const token of tokens) {
+        for (let token = read(); token; token = read()) {
           if (token.kind !== 'tag') {
-            writer.original(token); writer.newline(token.end); continue;
+            writer.original(token); writer.newline(); continue;
           }
           const closing = /^<\s*\//.test(token.text);
           const declaration = /^<\s*[!?]/.test(token.text);
           const selfClosing = /\/\s*>$/.test(token.text) || voidTag.test(token.text) || declaration;
           if (closing) writer.outdent();
           writer.original(token);
-          writer.newline(token.end);
+          writer.newline();
           if (!closing && !selfClosing) writer.indent();
         }
         return writer.finish();
       }
 
+      // {text, map} where map is the whitespace-only mapping back to `value`.
       function prettyPrintSource(source, value) {
         const language = sourceSyntaxLanguage(source);
         if (!SOURCE_PRETTY_LANGUAGES.has(language)) return {error: `Pretty print does not support ${sourceSyntaxLabel(language)}.`};
-        if (value.length > SOURCE_PRETTY_INPUT_LIMIT) return {error: 'Pretty print is limited to the first 2 MB.'};
+        if (value.length > SOURCE_PRETTY_INPUT_LIMIT) return {error: 'Pretty print is limited to the 16 MiB artifact cap.'};
         try {
-          const formatted = language === 'markup' ? prettyPrintMarkupSource(value)
+          const text = language === 'markup' ? prettyPrintMarkupSource(value)
             : language === 'css' ? prettyPrintCssSource(value)
               : prettyPrintStructuredSource(value, language);
-          return {...formatted, offset_unit: 'utf-16-code-unit', language, changed: formatted.text !== value};
+          const map = sourceWhitespaceMap(value, text);
+          if (!map) return {error: 'Pretty print changed more than whitespace.'};
+          return {text, map, offset_unit: 'utf-16-code-unit', language, changed: text !== value, engine: 'in-page'};
         } catch (error) {
           return {error: error instanceof Error ? error.message : 'Pretty print failed.'};
         }
@@ -704,12 +790,33 @@
           cssBlocks: [],
           cssAtRule: '',
           coloredTokens: 0,
-          truncated: false
+          truncated: false,
+          // Line position of the next token; only tokens inside the clip are emitted.
+          cursor: 0,
+          clipStart: 0,
+          clipEnd: Infinity
         };
+      }
+
+      // Lexer stacks stay bounded so checkpoints copy a fixed amount of state.
+      function pushSourceState(stack, value) {
+        if (stack.length === 64) stack.shift();
+        stack.push(value);
+      }
+
+      function sourceTokenizerSnapshot(tokenizer) {
+        return {...tokenizer, templates: tokenizer.templates.slice(), ternaries: tokenizer.ternaries.slice(),
+          cssBlocks: tokenizer.cssBlocks.slice(), params: tokenizer.params && {...tokenizer.params}};
       }
 
       function pushSourceToken(tokens, tokenizer, type, text) {
         if (!text) return;
+        const start = tokenizer.cursor;
+        tokenizer.cursor += text.length;
+        if (!tokens) return;
+        const from = Math.max(start, tokenizer.clipStart), to = Math.min(tokenizer.cursor, tokenizer.clipEnd);
+        if (to <= from) return;
+        if (from > start || to < tokenizer.cursor) text = text.slice(from - start, to - start);
         let boundedType = type;
         if (type !== 'plain') {
           if (tokenizer.coloredTokens >= SOURCE_HIGHLIGHT_TOKEN_LIMIT) {
@@ -754,6 +861,7 @@
       }
 
       function pushSourceString(tokens, tokenizer, text, type = 'string') {
+        if (!tokens) { tokenizer.cursor += text.length; return; }
         let last = 0;
         SOURCE_ESCAPE_PATTERN.lastIndex = 0;
         for (let match; (match = SOURCE_ESCAPE_PATTERN.exec(text));) {
@@ -839,7 +947,7 @@
           if (character === '$' && line[cursor + 1] === '{') {
             pushSourceString(tokens, tokenizer, line.slice(index, cursor));
             pushSourceBracket(tokens, tokenizer, '${', true);
-            tokenizer.templates.push(tokenizer.depth);
+            pushSourceState(tokenizer.templates, tokenizer.depth);
             tokenizer.state = 'code';
             tokenizer.previous = '${';
             tokenizer.previousKind = 'open';
@@ -851,13 +959,14 @@
         return line.length;
       }
 
-      function tokenizeCodeSourceLine(line, tokenizer) {
-        const tokens = [];
+      // Tokenizes from `from` until a token ends at or after `stop`; tokenizer.cursor is where it stopped.
+      function tokenizeCodeSourceLine(line, tokenizer, from = 0, stop = line.length, tokens = []) {
         const json = tokenizer.language === 'json';
         const push = (type, text) => pushSourceToken(tokens, tokenizer, type, text);
         const significant = (text, kind) => { tokenizer.previous = text; tokenizer.previousKind = kind; };
-        let index = 0;
-        while (index < line.length) {
+        let index = from;
+        tokenizer.cursor = from;
+        while (index < stop) {
           if (tokenizer.coloredTokens >= SOURCE_HIGHLIGHT_TOKEN_LIMIT) {
             tokenizer.truncated = true;
             push('plain', line.slice(index));
@@ -965,7 +1074,7 @@
           }
           const operator = json ? null : sourceMatchAt(SOURCE_OPERATOR_PATTERN, line, index);
           if (operator) {
-            if (operator === '?') tokenizer.ternaries.push(tokenizer.depth);
+            if (operator === '?') pushSourceState(tokenizer.ternaries, tokenizer.depth);
             if (operator === '=' && tokenizer.params?.depth === tokenizer.depth) tokenizer.params.defaults = true;
             if (operator === '.' || operator === '?.') tokenizer.member = tokenizer.previousKind === 'word' ? tokenizer.previous : '';
             else if (operator !== '=>' && tokenizer.declaration === 'extends') tokenizer.declaration = '';
@@ -976,11 +1085,11 @@
         return tokens;
       }
 
-      function tokenizeCssSourceLine(line, tokenizer) {
-        const tokens = [];
+      function tokenizeCssSourceLine(line, tokenizer, from = 0, stop = line.length, tokens = []) {
         const push = (type, text) => pushSourceToken(tokens, tokenizer, type, text);
-        let index = 0;
-        while (index < line.length) {
+        let index = from;
+        tokenizer.cursor = from;
+        while (index < stop) {
           if (tokenizer.coloredTokens >= SOURCE_HIGHLIGHT_TOKEN_LIMIT) {
             tokenizer.truncated = true;
             push('plain', line.slice(index));
@@ -1011,7 +1120,7 @@
           const declarations = tokenizer.cssBlocks.at(-1) === 'declarations' || Boolean(tokenizer.cssAtRule);
           if ('{[('.includes(character)) {
             if (character === '{') {
-              tokenizer.cssBlocks.push(/^(?:media|supports|document|layer|container|scope|starting-style|(?:-\w+-)?keyframes)$/.test(tokenizer.cssAtRule) ? 'rules' : 'declarations');
+              pushSourceState(tokenizer.cssBlocks, /^(?:media|supports|document|layer|container|scope|starting-style|(?:-\w+-)?keyframes)$/.test(tokenizer.cssAtRule) ? 'rules' : 'declarations');
               tokenizer.cssAtRule = ''; tokenizer.cssValue = false;
             }
             pushSourceBracket(tokens, tokenizer, character, true); index += 1; continue;
@@ -1104,11 +1213,11 @@
         }
       }
 
-      function tokenizeMarkupSourceLine(line, tokenizer) {
-        const tokens = [];
+      function tokenizeMarkupSourceLine(line, tokenizer, from = 0, stop = line.length, tokens = []) {
         const push = (type, text) => pushSourceToken(tokens, tokenizer, type, text);
-        let index = 0;
-        while (index < line.length) {
+        let index = from;
+        tokenizer.cursor = from;
+        while (index < stop) {
           if (tokenizer.coloredTokens >= SOURCE_HIGHLIGHT_TOKEN_LIMIT) {
             tokenizer.truncated = true;
             push('plain', line.slice(index));
@@ -1152,10 +1261,10 @@
         pushSourceToken(tokens, tokenizer, 'plain', text.slice(last));
       }
 
-      function tokenizeWasmSourceLine(line, tokenizer) {
-        const tokens = [];
-        let index = 0;
-        while (index < line.length) {
+      function tokenizeWasmSourceLine(line, tokenizer, from = 0, stop = line.length, tokens = []) {
+        let index = from;
+        tokenizer.cursor = from;
+        while (index < stop) {
           if (tokenizer.coloredTokens >= SOURCE_HIGHLIGHT_TOKEN_LIMIT) {
             tokenizer.truncated = true;
             pushSourceToken(tokens, tokenizer, 'plain', line.slice(index));
@@ -1191,23 +1300,90 @@
         return [{type: 'plain', text: line}];
       }
 
-      function sourceLineStarts(text) {
-        const starts = [0];
-        for (let index = 0; index < text.length; index += 1) {
-          if (text[index] === '\n') starts.push(index + 1);
-        }
-        return starts;
+      function sourceLineTokenizer(language) {
+        if (language === 'javascript' || language === 'json') return tokenizeCodeSourceLine;
+        if (language === 'css') return tokenizeCssSourceLine;
+        if (language === 'markup') return tokenizeMarkupSourceLine;
+        if (language === 'wasm' || language === 'bytes') return tokenizeWasmSourceLine;
+        return null;
       }
 
-      function sourceLocationForOffset(starts, offset) {
-        let low = 0;
-        let high = starts.length - 1;
-        while (low < high) {
-          const middle = Math.ceil((low + high) / 2);
-          if (starts[middle] <= offset) low = middle;
-          else high = middle - 1;
-        }
-        return {line: low, column: Math.max(0, offset - starts[low])};
+      // Lexer state saved every 4 Ki units of one document lets a window start
+      // tokenizing near its first row, so later and column-clipped windows keep
+      // their colors. advance() extends the checkpoints in bounded steps.
+      const SOURCE_CHECKPOINT_UNITS = 4096;
+      // About 10 ms of lexing per background step; a render lexes at most 256 Ki ahead.
+      const SOURCE_COLOR_SLICE_UNITS = 64 * 1024;
+      const SOURCE_COLOR_SYNC_UNITS = 256 * 1024;
+      function createSourceHighlighter(source, index) {
+        const language = sourceSyntaxLanguage(source);
+        const tokenize = sourceLineTokenizer(language);
+        const {text, length} = index;
+        const checkpoints = [{offset: 0, lineStart: 0, state: createSourceTokenizer(source)}];
+        const builder = createSourceTokenizer(source);
+        let lineStart = 0, lineText = null, column = 0, frontier = 0, done = !tokenize || length === 0;
+        const lineEnd = start => {const end = text.indexOf('\n', start); return end < 0 || end > length ? length : end;};
+        const checkpointAt = offset => {
+          let low = 0, high = checkpoints.length - 1;
+          while (low < high) {const middle = (low + high + 1) >> 1; if (checkpoints[middle].offset <= offset) low = middle; else high = middle - 1;}
+          return checkpoints[low];
+        };
+        const ready = rows => {
+          const first = rows.find(row => row.fullLength);
+          return done || !first || first.offset + first.columnStart <= frontier;
+        };
+        return {
+          language,
+          done: () => done,
+          ready,
+          // Tokenizes about `units` more of the document; true once it reached the end.
+          advance(units) {
+            let spent = 0;
+            while (!done && spent < units) {
+              lineText ??= text.slice(lineStart, lineEnd(lineStart));
+              const boundary = (Math.floor(frontier / SOURCE_CHECKPOINT_UNITS) + 1) * SOURCE_CHECKPOINT_UNITS;
+              if (column < lineText.length) {
+                tokenize(lineText, builder, column, Math.min(lineText.length, boundary - lineStart), null);
+                spent += builder.cursor - column;
+                column = builder.cursor;
+                frontier = lineStart + column;
+              }
+              if (column >= lineText.length) {
+                if (lineStart + lineText.length >= length) {done = true; frontier = length; break;}
+                lineStart += lineText.length + 1; lineText = null; column = 0; frontier = lineStart; spent += 1;
+              }
+              if (frontier >= boundary) checkpoints.push({offset: frontier, lineStart, state: sourceTokenizerSnapshot(builder)});
+            }
+            return done;
+          },
+          // Tokens for each mounted excerpt, or null while the checkpoints are behind the window.
+          rows(windowRows) {
+            if (!tokenize) return {rows: windowRows.map(row => row.text ? [{type: 'plain', text: row.text}] : []), truncated: false};
+            if (!ready(windowRows)) return null;
+            let current = null, position = 0, lineAt = 0, colored = 0, truncated = false;
+            const rows = windowRows.map(row => {
+              if (!row.text) return [];
+              if (truncated) return [{type: 'plain', text: row.text}];
+              const start = row.offset + row.columnStart;
+              const checkpoint = checkpointAt(start);
+              if (!current || position > start || checkpoint.offset > position) {
+                current = sourceTokenizerSnapshot(checkpoint.state); position = checkpoint.offset; lineAt = checkpoint.lineStart;
+              }
+              while (lineAt < row.offset) {
+                const end = lineEnd(lineAt);
+                if (position < end) tokenize(text.slice(lineAt, end), current, position - lineAt, end - lineAt, null);
+                lineAt = end + 1; position = lineAt;
+              }
+              Object.assign(current, {clipStart: row.columnStart, clipEnd: row.columnEnd, coloredTokens: colored});
+              const tokens = tokenize(text.slice(row.offset, row.offset + row.fullLength), current, position - row.offset, row.columnEnd, []);
+              colored = current.coloredTokens; truncated = current.truncated;
+              position = row.offset + current.cursor;
+              Object.assign(current, {clipStart: 0, clipEnd: Infinity});
+              return tokens;
+            });
+            return {rows, truncated};
+          }
+        };
       }
 
       function derivedSegmentAt(segments, derivedOffset) {
@@ -1258,71 +1434,4 @@
           original_start: originals.get(segment.original_start), original_end: originals.get(segment.original_end),
           derived_start: deriveds.get(segment.derived_start), derived_end: deriveds.get(segment.derived_end)
         }));
-      }
-
-      function derivedLineMap(originalText, derivedText, segments, offsetUnit) {
-        segments = sourceSegmentsUTF16(originalText, derivedText, segments, offsetUnit);
-        const starts = sourceLineStarts(originalText);
-        const lines = derivedText.split('\n');
-        const mapped = [];
-        let offset = 0;
-        let segmentIndex = 0;
-        for (let line = 0; line < lines.length; line += 1) {
-          const lineEnd = offset + lines[line].length;
-          while (segmentIndex < segments.length && segments[segmentIndex].derived_end <= offset) segmentIndex += 1;
-          let mappedOffset = null;
-          let segment = null;
-          for (let candidateIndex = segmentIndex; candidateIndex < segments.length; candidateIndex += 1) {
-            const candidate = segments[candidateIndex];
-            if (candidate.derived_start > lineEnd) break;
-            const candidateOffset = Math.max(offset, candidate.derived_start);
-            const original = derivedOriginalOffset(segments, candidateOffset);
-            if (original !== null) {
-              mappedOffset = original;
-              segment = candidate;
-              break;
-            }
-          }
-          const originalOffset = mappedOffset;
-          const location = originalOffset === null ? null : sourceLocationForOffset(starts, originalOffset);
-          mapped.push({
-            line,
-            synthetic: !segment || segment.kind === 'synthetic',
-            originalOffset,
-            originalLine: location ? location.line : null,
-            originalColumn: location ? location.column : null
-          });
-          offset += lines[line].length + 1;
-        }
-        return mapped;
-      }
-
-      function sourceRepresentationLineMap(originalText, activeText, derived, formatted) {
-        if (!formatted && !derived) return null;
-        const activeMap = formatted
-          ? derivedLineMap(activeText, formatted.text, formatted.segments ?? [], formatted.offset_unit)
-          : null;
-        if (!derived) return activeMap;
-        if (!formatted) {
-          return derivedLineMap(originalText, activeText, derived.segments ?? [], derived.offset_unit);
-        }
-        const derivedSegments = sourceSegmentsUTF16(
-          originalText,
-          activeText,
-          derived.segments ?? [],
-          derived.offset_unit
-        );
-        const originalStarts = sourceLineStarts(originalText);
-        return activeMap.map(entry => {
-          const originalOffset = entry.originalOffset === null
-            ? null
-            : derivedOriginalOffset(derivedSegments, entry.originalOffset);
-          const location = originalOffset === null ? null : sourceLocationForOffset(originalStarts, originalOffset);
-          return {
-            ...entry,
-            originalOffset,
-            originalLine: location ? location.line : null,
-            originalColumn: location ? location.column : null
-          };
-        });
       }

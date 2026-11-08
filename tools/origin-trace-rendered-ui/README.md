@@ -63,9 +63,14 @@ Sources at both window sizes. **Track calls** at the default position must
 refuse top-level code; `o.dup`, typed with native keys and Return, must be
 refused with both definitions listed and their markup-bearing context lines
 inert; `window.hsw` must be saved without matching the decoys in a string and
-a comment; and **Line**, **Column**, **Go** and **Track calls** must save the
+a comment; and **More** > **Go to line** and **Track calls** must save the
 callback around `awb(`. The titlebar chip must read `2 functions saved for the
 next capture` in full, inside the titlebar and over no other label.
+`test18bMinifiedSourceOpensPrettyPrinted` opens a one-line source map over
+16 KiB (artifact 332). It must open pretty-printed with formatted gutter
+numbers and the original location in their tooltips, keep its colors after
+line 1,000, open Find with Cmd+F and Go to line with Ctrl+G (Escape closes it),
+and show the one captured line after **Show original**, without clipping.
 `test19StartDialogListsSavedFunctions` opens **New Live Session…** from the
 app menu with two saved sites. The native dialog must say `Tracking 2
 functions`, name each function and its script, say Content mode records

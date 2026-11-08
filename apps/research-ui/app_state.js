@@ -101,6 +101,8 @@
         wasmRequests: new Map(),
         sourceDeobfuscated: false,
         sourceFormatted: false,
+        // Pretty print on or off per artifact identity, for this session.
+        sourceFormatChoices: new Map(),
         sourceFormatCache: new Map(),
         selectedRequestId: standalonePreview ? '81' : null,
         inspectorTab: 'general',
@@ -395,6 +397,9 @@
         sourceCode: document.querySelector('#source-code'),
         sourceCodeEmpty: document.querySelector('#source-code-empty'),
         sourcePosition: document.querySelector('#source-position'),
+        sourceSelection: document.querySelector('#source-selection'),
+        sourceMore: document.querySelector('#source-more'),
+        sourceGoto: document.querySelector('#source-goto'),
         sourceSize: document.querySelector('#source-size'),
         sourceViewKind: document.querySelector('#source-view-kind'),
         sourceLanguage: document.querySelector('#source-language'),

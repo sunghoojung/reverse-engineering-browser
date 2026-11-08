@@ -331,6 +331,7 @@ struct Expectations: Decodable {
   let requestBodyMarker: String
   let metadataBodyHost: String
   let invocationArtifactId: String
+  let minifiedArtifactId: String
   let invocationSiteStore: String
 
   static func load() throws -> Expectations {
@@ -1318,7 +1319,10 @@ final class OriginTraceRenderedUITests: XCTestCase {
       try await ui.waitUntil("(document.querySelector('#source-code')?.innerText ?? '').includes('Mk().then')", "\(size.name): glue.js did not render")
       try await ui.waitUntil("!document.querySelector('#source-track-calls').disabled", "\(size.name): Track calls stayed disabled on an original JavaScript artifact")
       // The default position is top-level code, which is refused with its reason.
+      // Track calls and Go to line are in the toolbar's More menu.
+      try await ui.click("#source-more > summary")
       try await ui.click("#source-track-calls")
+      try await ui.waitUntil("!document.querySelector('#source-more').open", "\(size.name): the More menu stayed open after an action")
       try await ui.waitUntil("(document.querySelector('#invocation-site-status')?.innerText ?? '').includes('top-level script code')",
         "\(size.name): top-level code was not refused")
       // A name typed and submitted with the keyboard; two definitions are refused.
@@ -1345,6 +1349,9 @@ final class OriginTraceRenderedUITests: XCTestCase {
       let savedStatus = try await ui.value("document.querySelector('#invocation-site-status').innerText") as? String ?? ""
       XCTAssertTrue(savedStatus.contains("not the open page"), "\(size.name): saving says tracking starts with the next capture")
       // Line 2 at the awb( call names the then-callback around it.
+      try await ui.click("#source-more > summary")
+      try await ui.click("#source-goto")
+      try await ui.waitUntil("document.activeElement?.id === 'source-window-line'", "\(size.name): Go to line did not focus its line field")
       _ = try await ui.webView.callAsyncJavaScript(
         """
         const line = document.querySelector('#source-window-line'), column = document.querySelector('#source-window-column');
@@ -1352,6 +1359,8 @@ final class OriginTraceRenderedUITests: XCTestCase {
         return true;
         """, contentWorld: .page)
       try await ui.click("#source-window button[type=submit]")
+      try await ui.waitUntil("document.querySelector('#source-window').hidden", "\(size.name): Go to line stayed open after Go")
+      try await ui.click("#source-more > summary")
       try await ui.click("#source-track-calls")
       try await ui.waitUntil("(document.querySelector('#invocation-site-status')?.innerText ?? '').includes('Saved the function at line 2')",
         "\(size.name): the function at the position was not saved")
@@ -1377,6 +1386,53 @@ final class OriginTraceRenderedUITests: XCTestCase {
       try await assertLayout(ui, "#source-sidebar", "\(size.name) track calls saved")
       try await revealAndAssertFullyVisible(ui, ".invocation-sites-list", "\(size.name) saved list")
       try await ui.screenshot("sources-track-calls-saved-\(size.name)")
+    }
+  }
+
+  // A one-line source map opens pretty-printed: the gutter numbers formatted
+  // lines, a later window keeps its colors, Cmd+F and Ctrl+G reach Find and
+  // Go to line, and the status-bar toggle shows the captured line (#433).
+  @MainActor
+  func test18bMinifiedSourceOpensPrettyPrinted() async throws {
+    let expected = try Expectations.load()
+    for size in windowSizes {
+      let ui = try await prepare(size)
+      try await show(ui, "sources")
+      try await ui.click("#source-tree [role=treeitem]", containing: "artifact \(expected.minifiedArtifactId)")
+      let settled = "!/Formatting|coloring/.test(document.querySelector('#source-pretty').innerText + document.querySelector('#source-language').innerText)"
+      try await ui.waitUntil("document.querySelector('#source-pretty').innerText.includes('Pretty-printed') && \(settled)", timeout: 30,
+        "\(size.name): the one-line source map did not open pretty-printed")
+      let first = try await ui.json(
+        """
+        ({gutters: [...document.querySelectorAll('.source-gutter')].slice(0, 3).map(node => node.textContent),
+          title: document.querySelectorAll('.source-gutter')[1].title, keys: document.querySelectorAll('#source-code .syntax-key').length,
+          pressed: document.querySelector('#source-pretty').getAttribute('aria-pressed')})
+        """)
+      XCTAssertEqual(first["gutters"] as? [String], ["1", "2", "3"], "\(size.name): the gutter numbers formatted lines: \(first)")
+      XCTAssertTrue((first["title"] as? String ?? "").hasPrefix("Original 1:"), "\(size.name): the gutter tooltip names the original location: \(first)")
+      XCTAssertGreaterThan(first["keys"] as? Int ?? 0, 0, "\(size.name): JSON keys are colored: \(first)")
+      XCTAssertEqual(first["pressed"] as? String, "true")
+      try await assertInert(ui, "\(size.name) pretty-printed source map")
+      try await assertLayout(ui, "#screen-sources", "\(size.name) pretty-printed source map")
+      try await ui.screenshot("sources-pretty-printed-\(size.name)")
+      try await ui.click("#source-window-next")
+      try await ui.waitUntil("document.querySelector('.source-line[data-line=\"1001\"]') && \(settled) && document.querySelectorAll('#source-code .syntax-string').length > 0",
+        "\(size.name): the window after line 1,000 lost its colors")
+      try await assertLayout(ui, "#screen-sources", "\(size.name) pretty-printed later window")
+      try await ui.screenshot("sources-pretty-printed-later-\(size.name)")
+      try await ui.key(3, "f", modifiers: [.command])
+      try await ui.waitUntil("document.activeElement?.id === 'source-search'", "\(size.name): Cmd+F did not focus Find")
+      try await ui.key(5, "g", modifiers: [.control])
+      try await ui.waitUntil("!document.querySelector('#source-window').hidden && document.activeElement?.id === 'source-window-line'",
+        "\(size.name): Ctrl+G did not open Go to line")
+      try await ui.screenshot("sources-go-to-line-\(size.name)")
+      try await ui.key(53, "\u{1b}")
+      try await ui.waitUntil("document.querySelector('#source-window').hidden", "\(size.name): Escape did not close Go to line")
+      try await ui.click("#source-pretty")
+      try await ui.waitUntil("document.querySelector('#source-pretty').getAttribute('aria-pressed') === 'false' && document.querySelectorAll('.source-line').length === 1 && \(settled)",
+        "\(size.name): Show original did not show the captured line")
+      try await assertLayout(ui, "#screen-sources", "\(size.name) original one-line source map")
+      try await ui.screenshot("sources-original-line-\(size.name)")
     }
   }
 

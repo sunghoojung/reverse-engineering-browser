@@ -35,6 +35,12 @@ export const INVOCATION_SOURCE = "var s='window.hsw=function(a){}';/* window.hsw
   '(function(){window.hsw=function(aGh,jR,qN){if(0===aGh)return Mk().then(function(){return awb(jR)});return qN}})();\n' +
   "o.dup=function(d){return '<img src=x onerror=\"window.__rebInjected=7\">'};if(z){o.dup=function(e){return e}}\n";
 
+// A one-line source map over 16 KiB, which Sources opens pretty-printed (#433).
+export const MINIFIED_ARTIFACT_ID = '332';
+const MINIFIED_SOURCE_MAP = JSON.stringify({version: 3, file: 'vendor.min.js',
+  sources: Array.from({length: 400}, (_, index) => `src/module-${index}.js`),
+  names: Array.from({length: 6000}, (_, index) => `n${index.toString(36)}`), mappings: 'AAAA,SAASA,CAAC;'.repeat(12000)});
+
 const sha256 = bytes => createHash('sha256').update(bytes).digest('hex');
 const hex = text => Buffer.from(text, 'utf8').toString('hex');
 
@@ -234,6 +240,9 @@ export async function buildEvidence({root, sessions, guestStore, dispatchStore, 
   const glue = await artifact(artifacts, {artifact_id: INVOCATION_ARTIFACT_ID, session_id: '1', navigation_id: '100', frame_id: '200',
     capture_origin: 'network_response', kind: 'javascript', mime_type: 'text/javascript', url: 'https://hcaptcha.test/glue.js'},
   Buffer.from(INVOCATION_SOURCE, 'utf8'));
+  const sourceMap = await artifact(artifacts, {artifact_id: MINIFIED_ARTIFACT_ID, session_id: '1', navigation_id: '100', frame_id: '200',
+    capture_origin: 'network_response', kind: 'source_map', mime_type: 'application/json', url: 'https://cdn.test/vendor.min.js.map'},
+  Buffer.from(MINIFIED_SOURCE_MAP, 'utf8'));
   const guest = await goldenEvidence(artifacts, guestStore);
   const physical = await goldenEvidence(artifacts, dispatchStore);
   assert(guest.events.some(event => event.type === 'wasm_guest_dispatch'), 'guest golden store holds a guest sample');
@@ -242,7 +251,7 @@ export async function buildEvidence({root, sessions, guestStore, dispatchStore, 
   // static arm label, and an inner interpreter linked to its outer handler.
   const observed = await goldenEvidence(artifacts, observedStore);
   assert(observed.events.filter(event => event.type === 'wasm_guest_invocation').length === 2, 'observed store holds outer and inner activations');
-  const manifest = [...demoArtifacts, source, bytecode, parseFailure, glue, withBodies.artifact, ...guest.artifacts, ...physical.artifacts, ...observed.artifacts];
+  const manifest = [...demoArtifacts, source, bytecode, parseFailure, glue, sourceMap, withBodies.artifact, ...guest.artifacts, ...physical.artifacts, ...observed.artifacts];
   const retained = [...demoEvents, ...requests, ...guest.events, ...physical.events, ...observed.events];
   const vm = demoEvents.find(event => event.category === 'vm');
   assert(vm, 'demo store must contain a native vm event');

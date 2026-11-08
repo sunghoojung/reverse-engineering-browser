@@ -1,44 +1,56 @@
-// Client for get_source_format; its whitespace-only layout maps back by walking both texts in step.
+// Client for get_source_format and the in-page layout. Both change only whitespace, so one map walks either back to its input.
 
-const SOURCE_FORMAT_LIMITS = Object.freeze({entries: 4, characters: 24 * 1024 * 1024, segments: 1500000, timeout: 180000, sourceBytes: 16 * 1024 * 1024});
+const SOURCE_FORMAT_LIMITS = Object.freeze({entries: 4, characters: 64 * 1024 * 1024, timeout: 180000, sourceBytes: 16 * 1024 * 1024});
 const SOURCE_FORMAT_REASONS = Object.freeze({
   'parse-failed': 'Oxc could not parse this file', 'output-limit': 'the Oxc layout exceeds its size limit',
   'fidelity-check-failed': 'the Oxc layout failed its token check', 'memory-limit': 'Oxc reached its memory limit',
   'nesting-limit': 'the file nests too deeply for Oxc'
 });
 
-// ECMAScript WhiteSpace and LineTerminator, the separators the layout may change.
-function sourceFormatSpace(code) {
-  return code === 32 || (code >= 9 && code <= 13) || code === 0xa0 || code === 0x1680 ||
-    (code >= 0x2000 && code <= 0x200a) || code === 0x2028 || code === 0x2029 ||
-    code === 0x202f || code === 0x205f || code === 0x3000 || code === 0xfeff;
-}
-
-// Verbatim UTF-16 segments shared by both texts, or null when anything but whitespace differs.
-function sourceWhitespaceSegments(original, formatted, limit = SOURCE_FORMAT_LIMITS.segments) {
-  const segments = [];
-  let from = 0, to = 0;
-  for (;;) {
-    const originalStart = from, derivedStart = to;
-    while (from < original.length && to < formatted.length && original.charCodeAt(from) === formatted.charCodeAt(to)) {from++; to++;}
-    if (from > originalStart) {
-      if (segments.length === limit) return null;
-      segments.push({kind: 'verbatim', original_start: originalStart, original_end: from, derived_start: derivedStart, derived_end: to});
-    }
-    if (from === original.length && to === formatted.length) return segments;
-    const skippedFrom = from, skippedTo = to;
-    while (from < original.length && sourceFormatSpace(original.charCodeAt(from))) from++;
-    while (to < formatted.length && sourceFormatSpace(formatted.charCodeAt(to))) to++;
-    if (from === skippedFrom && to === skippedTo) return null;
+function sourceLayoutTask(task) {
+  try {
+    if (task.op !== 'map') return prettyPrintSource(task.source, task.value);
+    const map = sourceWhitespaceMap(task.original, task.formatted);
+    return map ? {map} : {error: 'Formatter text differs from the evidence beyond whitespace'};
+  } catch (error) {
+    return {error: String(error?.message ?? error).slice(0, 240)};
   }
 }
 
-// Original offsets of a formatted range whose ends are not whitespace.
-function sourceFormatRawRange(segments, start, end) {
-  if (!(end > start)) return null;
-  const first = derivedOriginalOffset(segments, start);
-  const last = derivedOriginalOffset(segments, end - 1);
-  return first === null || last === null ? null : {start: first, end: last + 1};
+// Layouts run in a dedicated worker so a 16 MiB bundle cannot block the UI.
+// Without a worker, or after it fails, they run on the page after one task.
+function createSourceLayoutWorker({spawn = typeof Worker === 'function' ? () => new Worker('source_format.js') : null,
+  defer = callback => setTimeout(callback, 0)} = {}) {
+  let worker = null, failed = !spawn, sequence = 0;
+  const pending = new Map();
+  const local = (task, resolve) => defer(() => resolve(sourceLayoutTask(task)));
+  const fail = () => {
+    failed = true;
+    worker?.terminate();
+    worker = null;
+    for (const [id, {task, resolve}] of pending) {pending.delete(id); local(task, resolve);}
+  };
+  return {
+    run: task => new Promise(resolve => {
+      if (!failed && !worker) {
+        try {
+          worker = spawn();
+          worker.onmessage = ({data}) => {
+            const entry = pending.get(data?.id);
+            if (entry) {pending.delete(data.id); entry.resolve(data.result);}
+          };
+          worker.onerror = event => {event?.preventDefault?.(); fail();};
+          worker.onmessageerror = fail;
+        } catch {
+          fail();
+        }
+      }
+      if (failed) {local(task, resolve); return;}
+      const id = ++sequence;
+      pending.set(id, {task, resolve});
+      worker.postMessage({id, task});
+    })
+  };
 }
 
 function sourceFormatEligible(source) {
@@ -46,16 +58,17 @@ function sourceFormatEligible(source) {
     !source.contentTruncated && !source.contentLossy && Number(source.byte_size) <= SOURCE_FORMAT_LIMITS.sourceBytes;
 }
 
-function createSourceFormatClient({request = (...args) => fetch(...args), onChange = () => {}} = {}) {
+function createSourceFormatClient({request = (...args) => fetch(...args), onChange = () => {}, layouts = createSourceLayoutWorker()} = {}) {
   const entries = new Map();
   const key = source => `${source.session_id}|${source.artifact_id}|${source.sha256}`;
-  const bound = () => {
-    let characters = 0, segments = 0;
-    for (const entry of entries.values()) {characters += entry.view?.text.length ?? 0; segments += entry.view?.segments.length ?? 0;}
+  // The newest layout stays even when it alone exceeds the budget; evicting it would refetch it.
+  const bound = keep => {
+    let characters = 0;
+    for (const entry of entries.values()) characters += entry.view?.text.length ?? 0;
     for (const [name, entry] of entries) {
-      if (entries.size <= SOURCE_FORMAT_LIMITS.entries && characters <= SOURCE_FORMAT_LIMITS.characters && segments <= SOURCE_FORMAT_LIMITS.segments) break;
-      if (entry.status === 'loading') continue;
-      characters -= entry.view?.text.length ?? 0; segments -= entry.view?.segments.length ?? 0;
+      if (entries.size <= SOURCE_FORMAT_LIMITS.entries && characters <= SOURCE_FORMAT_LIMITS.characters) break;
+      if (entry.status === 'loading' || name === keep) continue;
+      characters -= entry.view?.text.length ?? 0;
       entries.delete(name);
     }
   };
@@ -74,9 +87,10 @@ function createSourceFormatClient({request = (...args) => fetch(...args), onChan
         Object.assign(entry, {status: 'unavailable', notice: SOURCE_FORMAT_REASONS[payload.reason] ?? 'the Oxc layout is unavailable'});
         return;
       }
-      const segments = typeof payload.text === 'string' ? sourceWhitespaceSegments(original, payload.text) : null;
-      if (!segments) throw new Error('Formatter text differs from the evidence beyond whitespace');
-      entry.view = {text: payload.text, segments, offset_unit: 'utf-16-code-unit', language: 'javascript', changed: payload.text !== original,
+      if (typeof payload.text !== 'string') throw new Error('Formatter returned no text');
+      const checked = await layouts.run({op: 'map', original, formatted: payload.text});
+      if (!checked.map) throw new Error(checked.error ?? 'Formatter text differs from the evidence beyond whitespace');
+      entry.view = {text: payload.text, map: checked.map, offset_unit: 'utf-16-code-unit', language: 'javascript', changed: payload.text !== original,
         engine: 'oxc', sourceInput: original};
       entry.status = 'ready';
     } catch (error) {
@@ -84,11 +98,11 @@ function createSourceFormatClient({request = (...args) => fetch(...args), onChan
       entry.notice = entry.notice.replace(/\.$/, '');
     } finally {
       clearTimeout(timer);
-      if (entries.get(name) === entry) {bound(); onChange(source);}
+      if (entries.get(name) === entry) {bound(name); onChange(source);}
     }
   }
   return {
-    // null: not eligible. {pending}: wait. {fallback, notice}: use the in-page formatter.
+    // null: not eligible. {pending}: wait. {fallback, notice}: use the in-page layout.
     view(source, original) {
       if (!sourceFormatEligible(source) || original !== source.content) return null;
       const name = key(source);
@@ -107,6 +121,18 @@ function createSourceFormatClient({request = (...args) => fetch(...args), onChan
       if (!source) return;
       const name = key(source);
       if (['error', 'unavailable'].includes(entries.get(name)?.status)) entries.delete(name);
+    },
+    // The in-page whitespace layout of any pretty-printable text.
+    layout(source, value) {
+      return layouts.run({op: 'layout', source: {kind: source.kind, mime_type: source.mime_type, url: source.url}, value});
     }
+  };
+}
+
+if (typeof WorkerGlobalScope !== 'undefined' && self instanceof WorkerGlobalScope) {
+  importScripts('source_syntax.js');
+  self.onmessage = ({data}) => {
+    const result = sourceLayoutTask(data.task);
+    self.postMessage({id: data.id, result}, result.map ? [result.map.anchors.buffer] : []);
   };
 }

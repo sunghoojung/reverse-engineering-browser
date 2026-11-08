@@ -635,6 +635,56 @@ final class OriginTraceRenderedUITests: XCTestCase {
     }
   }
 
+  // Columns fit the table, every cell with text has a tooltip, and Size, the
+  // waterfall and the timing strip follow the fixture's recorded lengths and
+  // timestamps. The strip and the column menu work from the keyboard.
+  @MainActor
+  private func assertTrafficColumns(_ ui: Harness, _ context: String) async throws {
+    let table = try await ui.json("""
+      (() => { const shown = cell => cell.getBoundingClientRect().width > 0;
+        const row = [...document.querySelectorAll('#screen-traffic .request-row')].find(node => node.innerText.includes('item-3.scroll.test'));
+        return {visible: [...document.querySelectorAll('#screen-traffic .request-head [data-column]')].filter(shown).map(cell => cell.dataset.column),
+          untitled: [...document.querySelectorAll('#screen-traffic .request-row [data-column]')].filter(cell => shown(cell) && cell.textContent.trim() && !cell.title).length,
+          footer: document.querySelector('#request-window-status').textContent,
+          bars: document.querySelectorAll('#request-overview .overview-bar').length,
+          size: row?.querySelector('.size-transfer')?.textContent ?? '', sizeTitle: row?.querySelector('.request-size')?.title ?? '',
+          waterfall: row?.querySelector('.waterfall-bar')?.getBoundingClientRect().width ?? -1}; })()
+      """)
+    print("RENDERED_UI_TRAFFIC_COLUMNS \(context) \(table)")
+    let visible = table["visible"] as? [String] ?? []
+    XCTAssertEqual(visible.first, "name", "\(context): Name always shows")
+    XCTAssertTrue(visible.contains("status") && visible.contains("time"), "\(context): narrow tables drop low-priority columns first: \(visible)")
+    XCTAssertFalse(visible.contains("protocol"), "\(context): Protocol is hidden by default")
+    if context == "normal" {
+      XCTAssertEqual(visible, ["name", "status", "type", "method", "initiator", "size", "time", "waterfall"], "\(context): default columns")
+      XCTAssertGreaterThan(table["waterfall"] as? Double ?? 0, 0, "\(context): a completed request has a waterfall bar")
+    }
+    XCTAssertEqual(table["untitled"] as? Int, 0, "\(context): truncated cells have tooltips")
+    let footer = table["footer"] as? String ?? ""
+    XCTAssertTrue(footer.contains(" transferred · ") && footer.contains(" resources"), "\(context): footer totals: \(footer)")
+    XCTAssertEqual(table["bars"] as? Int, 120, "\(context): the timing strip has one bar per bucket")
+    // syntheticTransferSize(3) in evidence-fixture.mjs.
+    if visible.contains("size") {
+      XCTAssertEqual(table["size"] as? String, "1.0 kB", "\(context): Size shows the recorded transfer size")
+    }
+    XCTAssertTrue((table["sizeTitle"] as? String ?? "").contains("Transferred: 1,030 bytes."), "\(context): Size tooltip is exact: \(table)")
+    _ = try await ui.value("document.querySelector('#request-overview .overview-track').focus()")
+    try await ui.key(124, "\u{F703}", modifiers: [.function, .numericPad])
+    try await ui.waitUntil("state.trafficRange !== null", "\(context): Right Arrow on the timing strip did not select a time range")
+    try await assertLayout(ui, "#screen-traffic", "\(context) traffic time range")
+    try await ui.screenshot("traffic-time-range-\(context)")
+    try await ui.key(53, "\u{1B}")
+    try await ui.waitUntil("state.trafficRange === null", "\(context): Escape did not clear the time range")
+    _ = try await ui.value("document.querySelector('#screen-traffic .request-head [data-column=\"name\"]').focus()")
+    try await ui.key(109, "\u{F70D}", modifiers: [.shift, .function])
+    try await ui.waitUntil("document.activeElement?.closest('.column-menu') !== null", "\(context): Shift+F10 did not open the column menu")
+    try await assertLayout(ui, ".column-menu", "\(context) column menu")
+    try await ui.screenshot("traffic-column-menu-\(context)")
+    try await ui.key(53, "\u{1B}")
+    try await ui.waitUntil("document.querySelector('.column-menu') === null && document.activeElement?.dataset.column === 'name'",
+      "\(context): Escape did not close the column menu and return focus")
+  }
+
   @MainActor
   func test1TrafficRequests() async throws {
     let expected = try Expectations.load()
@@ -651,6 +701,7 @@ final class OriginTraceRenderedUITests: XCTestCase {
         """)
       let total = footer["total"] as? String ?? "?"
       XCTAssertTrue((footer["text"] as? String ?? "").hasPrefix("\(total) / \(total) requests"), "\(size.name): footer counts the session: \(footer)")
+      try await assertTrafficColumns(ui, size.name)
       // A stored session is a fixed set; none of its requests is new.
       let latestHidden = try await ui.value("document.querySelector('#request-latest').hidden") as? Bool
       XCTAssertEqual(latestHidden, true, "\(size.name): a stored session must not claim new requests")
@@ -1130,7 +1181,12 @@ final class OriginTraceRenderedUITests: XCTestCase {
       try await ui.click("#screen-traffic .request-row", containing: expected.requestBodyHost)
       try await ui.waitUntil("!document.querySelector('#screen-traffic .detail-pane').hidden", "request detail did not open")
       let rowText = try await ui.value("document.querySelector('#screen-traffic .request-row[aria-selected=\"true\"]')?.innerText ?? ''") as? String ?? ""
-      XCTAssertTrue(rowText.contains(expected.requestBodyTarget), "\(size.name): the row shows the captured path and query: \(rowText)")
+      // The row names the last path segment and the query; the tooltip has the full URL.
+      let path = expected.requestBodyTarget.split(separator: "?", maxSplits: 1).first.map(String.init) ?? ""
+      let shortName = (path.split(separator: "/").last.map(String.init) ?? "") + expected.requestBodyTarget.dropFirst(path.count)
+      XCTAssertTrue(rowText.contains(shortName), "\(size.name): the row shows the captured last segment and query: \(rowText)")
+      let nameTitle = try await ui.value("document.querySelector('#screen-traffic .request-row[aria-selected=\"true\"] .request-name')?.title ?? ''") as? String ?? ""
+      XCTAssertTrue(nameTitle.contains(expected.requestBodyTarget), "\(size.name): the name tooltip has the full URL: \(nameTitle)")
       try await ui.waitUntil("document.querySelector('#exchange-inspector .traffic-body-text') !== null", "retained body did not load")
       let body = try await ui.json("""
         ({text: document.querySelector('#exchange-inspector .traffic-body-text').innerText,

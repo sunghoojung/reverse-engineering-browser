@@ -669,8 +669,8 @@ when the last capture arrived while another workspace was open and the backend
 has no newer events.
 
 Traffic uses a compact network ledger with visible resource-type filters and
-sortable Name, Status, Type, Method, and Time columns. **Capture order** restores
-the evidence order. The selected request opens General, Initiator, Timing,
+sortable columns (see [Traffic columns and filters](#traffic-columns-and-filters)).
+**Capture order** restores the evidence order. The selected request opens General, Initiator, Timing,
 Signals and Evidence beside the ledger above 1100 px, or below it in narrow
 windows. Both panes stay within the available workspace height; the request
 ledger and inspector body scroll independently. Captured-tab and domain filters
@@ -685,7 +685,8 @@ Request signal profiles are owned by the exact selected session, request and roo
 event. Late responses cannot replace a newer selection or refresh. Malformed or
 failed refreshes preserve only the last validated profile for that same identity
 and require a full response on retry; changed or ambiguous owners clear it.
-No cache, recording, throttling, or invented waterfall controls are implied.
+No cache, recording or throttling controls are implied, and the waterfall uses
+recorded timestamps only.
 The layout follows familiar [network inspection conventions](https://developer.chrome.com/docs/devtools/network/reference)
 while keeping Origin Trace's own controls and Rosé Pine Moon palette.
 
@@ -751,10 +752,6 @@ Home/End. Escape closes the inspector and returns focus to the ledger. The close
 button has the same behavior. A dismissed inspector stays closed across
 refreshes; selecting a request reopens it. Full URLs remain available in General
 and Copy URL, and host-only metadata never implies a captured path or query.
-
-Traffic search is a literal, case-insensitive match over the URL or host,
-method and status that native rows carry. Tab, domain, and resource filters
-scope it. Search never enables capture or fetches anything.
 
 Collection uses a saved-request library and a template editor; it never sends
 a request. Headers, Body, and Variables are keyboard-accessible request
@@ -844,6 +841,53 @@ dispatch-mode diagnostics and prompt PNGs are retained in `build/native-close-qa
 and uploaded by CI. The `--contract-only` mode checks wiring, sheet/sudden-exit
 policy and trace assertions; it is not evidence of native lifecycle behavior.
 
+### Traffic columns and filters
+
+The columns are Name, Status, Type, Method, Initiator, Size, Time and Waterfall;
+Protocol is available from the header menu.
+
+- **Name** is the last path segment and the query, with the host as a muted
+  sublabel only when the path was captured. The full URL is the tooltip.
+- **Status** colors 3xx, 4xx and 5xx apart. Failed names its net error,
+  Pending has no terminal record, and No loader means only the renderer
+  recorded the request.
+- **Type** comes from the resource type, then the response MIME type when the
+  resource type says only "other". Its tooltip has the MIME type.
+- **Initiator** is coarse: Renderer, Service worker or Browser. Parser and
+  script starts are not told apart without an initiator stack.
+- **Size** is the terminal record's `encoded_data_length` (transferred) and
+  `decoded_body_length` (resource), or (disk cache) and (service worker) from
+  the response flags. Units are decimal; the tooltip has exact bytes.
+- **Waterfall** draws each request from its first to its last record, lighter
+  until `response_started`, over the matching requests or the selected range.
+
+Drag a column edge, or press Shift+Left or Shift+Right on a header, to resize it.
+Right-click the header, or press Shift+F10 on it, to show or hide columns. The
+layout is saved in local storage. A table too narrow for the chosen columns
+drops Protocol, Initiator, Method, Type, Waterfall, Size, Time and Status in
+that order; Name always stays. Every cell with text has a tooltip.
+
+The timing strip above the table counts request starts in 120 buckets. Drag
+across it to filter to that time range; with it focused, Right or Left Arrow
+selects or moves a bucket, Shift+Arrow grows or shrinks the range, and Escape
+or **Clear range** removes it. The footer reads `N / M requests · X transferred
+· Y resources` for the matching requests of the whole session.
+
+The filter box matches the method, URL or host and status as literal,
+case-insensitive text. `-text` excludes rows that contain it. `domain:` (with
+`*` wildcards), `method:`, `status-code:`, `larger-than:` (transferred bytes; `k`
+and `m` are 1,024 multiples) and `mime-type:` match exactly, and a leading `-`
+negates them. Beside the type chips, **Invert** shows what the filter text does
+not match, **Hide internal** hides rows only a renderer recorded for a
+single-label host (`chrome://resources`, `newtab`) and the footer counts them,
+**3rd-party** keeps requests whose site differs from their tab's latest
+top-level document, and **Failed** keeps failed requests. Sites are the last two
+host labels, or three after a short second level and a two-letter country code;
+there is no public suffix list. Tab and domain filters scope everything. The
+request index applies the same rules to the whole session, and
+`make request-index-check` holds the two to one fixture. Filters never enable
+capture, fetch anything or change a row.
+
 ## Code ownership
 
 | Location | Responsibility |
@@ -855,6 +899,9 @@ policy and trace assertions; it is not evidence of native lifecycle behavior.
 | `pane_layout.js` | Shared pointer and keyboard pane resizing, responsive constraints, and local size preferences |
 | `traffic_view.js` | Native request ledger rows, ordering, the mounted block and URL/method/status/name search, the General coverage view, and the saved-capture export document |
 | `traffic_index.js` | The request index client: the mounted block's rows, totals and facets, and a selected row's records from the event store |
+| `traffic_filter.js` | The filter grammar, Invert, Hide internal, 3rd-party, Failed and the time range over the newest window, mirroring the request index |
+| `traffic_columns.js` | Column widths, hidden columns, the header menu, saved layout and fitting columns to the table width |
+| `traffic_overview.js` | The timing strip and its pointer and keyboard time-range selection |
 | `evidence_names.js` | Researcher names: exact identities, the closed names document, its Analyst-library store, the inline rename editor and the command palette provider |
 | `captured_client.js`, `captured_export_formats.js` | Saved-capture identity, local export dialog, and the client-project/HAR/SDL generators shared with offline commands |
 | `source_search.js` | Search all files: the literal matcher on the Find index, the bounded and cancellable search, partial-result notes and the results panel; `app.js` supplies the artifact reader and the open path |
@@ -873,7 +920,7 @@ Live refresh and DOM updates belong in `app.js`.
 The native scheme handler and packaging script explicitly list shipped assets.
 
 Traffic shows every native request row independently; host, method and time
-never merge or hide rows. Sources reads retained artifact bytes only. A failed
+never merge rows, and only an explicit, reversible filter hides one. Sources reads retained artifact bytes only. A failed
 refresh preserves the last valid catalog, and a detached pending load is
 cancelled and cannot restore obsolete source text. Artifact loads have a
 10-second deadline, including body reads; a timed-out load can be retried
@@ -918,7 +965,9 @@ events, and reads layout only through `probes.js`. At the default 1180×790
 window and the enforced 760×560 minimum it checks:
 
 - Traffic: retained rows, list scrolling to the last row, request selection and
-  the detail pane;
+  the detail pane; default and fitted columns, cell tooltips, Size and the
+  waterfall from recorded lengths and timestamps, the timing strip from the
+  keyboard and the column menu from Shift+F10;
 - Sources: a retained artifact rendered as literal text and scrolled to its end;
 - Investigation navigation: Back appears after a screen change, Alt+Left returns
   to the selected request, and Forward reopens Sources;

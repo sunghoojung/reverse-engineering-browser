@@ -7,7 +7,8 @@ import {runInNewContext} from 'node:vm';
 // Deterministic production-controller/DOM-work checks, not rendered latency.
 // Layout getters below count requests for geometry; they do not simulate a browser.
 const app = await readFile(new URL('../apps/research-ui/app.js', import.meta.url), 'utf8');
-const traffic = await readFile(new URL('../apps/research-ui/traffic_view.js', import.meta.url), 'utf8');
+const traffic = await readFile(new URL('../apps/research-ui/traffic_view.js', import.meta.url), 'utf8') +
+  await readFile(new URL('../apps/research-ui/traffic_filter.js', import.meta.url), 'utf8');
 const part = (source, first, last) => {
   const start = source.indexOf(first), end = source.indexOf(last, start);
   assert(start >= 0 && end > start, `Missing production boundary: ${first}`);

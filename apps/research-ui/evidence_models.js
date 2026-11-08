@@ -48,9 +48,10 @@
       const uint64Max = 18446744073709551615n;
       const int64Min = -9223372036854775808n;
       const int64Max = 9223372036854775807n;
+      // blink::mojom::ResourceType at the pin; 11 is a prefetch, not XHR.
       const resourceTypeFilters = new Map([
         [0, 'doc'], [1, 'doc'], [2, 'css'], [3, 'js'], [4, 'img'], [5, 'font'],
-        [8, 'media'], [11, 'xhr'], [13, 'xhr'], [19, 'doc'], [20, 'doc']
+        [8, 'media'], [9, 'js'], [10, 'js'], [12, 'img'], [13, 'xhr'], [15, 'js'], [19, 'doc'], [20, 'doc']
       ]);
       const lifecycleRanks = new Map([
         ['request_initiated', 1], ['request_started', 2], ['request_redirected', 3],
@@ -1192,12 +1193,44 @@
         return requestKey ? browserRequestKeys.get(requestKey) ?? correlatedId : correlatedId;
       }
 
-      function resourceTypeFilter(event, previous, payload) {
+      // A resource type that says only "other" is classed by its response MIME type.
+      function mimeTypeFilter(mime) {
+        if (mime === 'text/css') return 'css';
+        if (['text/javascript', 'application/javascript', 'application/x-javascript', 'text/ecmascript',
+          'application/ecmascript'].includes(mime)) return 'js';
+        if (mime === 'text/html' || mime === 'application/xhtml+xml') return 'doc';
+        if (mime.startsWith('image/')) return 'img';
+        if (mime.startsWith('font/') || mime.startsWith('application/font-') || mime.startsWith('application/x-font-') ||
+          mime === 'application/vnd.ms-fontobject') return 'font';
+        if (mime.startsWith('audio/') || mime.startsWith('video/')) return 'media';
+        return 'other';
+      }
+
+      function resourceTypeFilter(event, previous, payload, response) {
         if (/^application\/wasm(?:;|$)/i.test(payload)) return 'wasm';
         if (event.protocol_version >= 2 && event.type === 'request_started') {
           return resourceTypeFilters.get(event.resource_type) ?? 'other';
         }
-        return previous?.type ?? 'other';
+        const type = previous?.type ?? 'other';
+        return type === 'other' && response?.mimeType ? mimeTypeFilter(response.mimeType) : type;
+      }
+
+      // response_started carries "mime; protocol=alpn", or "synthetic_shields; mime"
+      // for a Shields-synthesized response (the browser network sink).
+      function responseMetadata(payload) {
+        const synthetic = payload.startsWith('synthetic_shields; ');
+        const text = synthetic ? payload.slice(19) : payload;
+        const at = synthetic ? -1 : text.indexOf('; protocol=');
+        const essence = (at < 0 ? text : text.slice(0, at)).split(';')[0].trim();
+        const protocol = at < 0 ? '' : text.slice(at + 11).trim();
+        return {mimeType: /^[a-z0-9!#$%&'*+.^_`|~-]+\/[a-z0-9!#$%&'*+.^_`|~-]+$/i.test(essence) ? essence.toLowerCase() : null,
+          protocol: /^[\x21-\x7e]{1,32}$/.test(protocol) ? protocol : null};
+      }
+
+      function nonNegativeLength(event, field) {
+        if (!isCanonicalInteger(event[field], int64Min, int64Max, true)) return null;
+        const value = BigInt(event[field]);
+        return value >= 0n ? Number(value) : null;
       }
 
       function networkTargetFromPayload(payload, eventType) {
@@ -1250,13 +1283,21 @@
             : previous?.targetRank ?? 0;
           const updatesTarget = Boolean(target) && targetRank === incomingRank;
           const terminal = rank >= 5;
+          const versioned = event.protocol_version >= 2;
+          const response = versioned && event.type === 'response_started' ? responseMetadata(payload) : null;
+          const ended = versioned && incomingRank === 5;
+          // Initiator inputs: 1 renderer record, 2 service-worker start, 4 versioned record.
+          const initiatorBits = (previous?.initiatorBits ?? 0) |
+            (event.type === 'request_initiated' || (versioned && event.initiator_process_id > 0) ? 1 : 0) |
+            (versioned && event.type === 'request_started' && (event.flags & 4) !== 0 ? 2 : 0) | (versioned ? 4 : 0);
+          const loaderObserved = Boolean(previous?.loaderObserved) || event.type !== 'request_initiated';
           requests.set(id, {
             id,
             path: updatesTarget ? target.value : previous?.path ?? 'Unidentified network event',
             method: updatesTarget && target.method ? target.method : previous?.method ?? 'EVENT',
             status,
             time: terminal ? formatMilliseconds(lastTimestamp - firstTimestamp) : 'pending',
-            type: resourceTypeFilter(event, previous, payload),
+            type: resourceTypeFilter(event, previous, payload, response),
             origin: ['live', 'demo'].includes(origin) ? origin : 'live',
             targetKind: updatesTarget ? target.kind : previous?.targetKind ?? 'unknown',
             hostOnly: (updatesTarget ? target.kind : previous?.targetKind) === 'host',
@@ -1276,7 +1317,19 @@
               ? String(event.tab_id) : previous?.tabId ?? '0',
             operation: incomingRank >= (previous?.rank ?? 0) ? event.type : previous.operation,
             firstTimestamp,
-            lastTimestamp
+            lastTimestamp,
+            transferSize: ended ? nonNegativeLength(event, 'encoded_data_length') : previous?.transferSize ?? null,
+            resourceSize: ended ? nonNegativeLength(event, 'decoded_body_length') : previous?.resourceSize ?? null,
+            fromCache: Boolean(previous?.fromCache) || (response !== null && (event.flags & 2) !== 0),
+            fromServiceWorker: Boolean(previous?.fromServiceWorker) || (response !== null && (event.flags & 4) !== 0),
+            mimeType: response ? response.mimeType : previous?.mimeType ?? null,
+            protocol: response ? response.protocol : previous?.protocol ?? null,
+            responseTimestamp: previous?.responseTimestamp ?? (response ? timestamp : null),
+            errorCode: versioned && event.error_code !== 0 ? event.error_code : previous?.errorCode ?? 0,
+            loaderObserved,
+            initiatorBits,
+            initiator: initiatorBits & 2 ? 'worker' : initiatorBits & 1 ? 'renderer' : initiatorBits & 4 && loaderObserved ? 'browser' : null,
+            mainFrame: Boolean(previous?.mainFrame) || (versioned && event.type === 'request_started' && event.resource_type === 0)
           });
         });
         const rows = [...requests.values()];

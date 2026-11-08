@@ -62,7 +62,7 @@
             <div class="traffic-grid" data-detail-open="false">
               <div class="request-pane">
                 <div class="network-tools">
-                  <label class="filter-box"><input id="request-filter" type="search" maxlength="512" placeholder="Search requests" aria-label="Filter requests" /></label>
+                  <label class="filter-box"><input id="request-filter" type="search" maxlength="512" placeholder="Filter: text, -text, domain:, method:, status-code:, larger-than:, mime-type:" aria-label="Filter requests" title="Text matches method, URL and status. -text excludes it. domain: (with * wildcards), method:, status-code:, larger-than: (k and m are 1,024 multiples) and mime-type: match exactly; a leading - negates them." /></label>
                   <div class="request-filters" id="request-filters">
                   <div class="type-filters" aria-label="Resource type filters">
                     <button class="type-filter" type="button" data-filter="all" aria-pressed="true">All</button>
@@ -76,6 +76,12 @@
                     <button class="type-filter" type="button" data-filter="socket" aria-pressed="false">Socket</button>
                     <button class="type-filter" type="button" data-filter="wasm" aria-pressed="false">Wasm</button>
                     <button class="type-filter" type="button" data-filter="other" aria-pressed="false">Other</button>
+                  </div>
+                  <div class="request-flags" role="group" aria-label="Request filters">
+                    <button class="request-flag" type="button" data-flag="invert" aria-pressed="false" title="Show the requests the filter text does not match">Invert</button>
+                    <button class="request-flag" type="button" data-flag="hideInternal" aria-pressed="false" title="Hide browser-internal requests: rows only a renderer recorded for a single-label host, such as chrome://resources or newtab">Hide internal</button>
+                    <button class="request-flag" type="button" data-flag="thirdParty" aria-pressed="false" title="Only requests whose site differs from their tab's top-level document. Sites are the last two host labels, or three after a short second level and a two-letter country code; there is no public suffix list.">3rd-party</button>
+                    <button class="request-flag" type="button" data-flag="failed" aria-pressed="false" title="Only failed requests">Failed</button>
                   </div>
                   </div>
                 </div>
@@ -91,8 +97,14 @@
                   </label>
                 </div>
 
-                <div class="request-table">
-                  <div class="request-head" role="group" aria-label="Sort requests"><button type="button" data-request-sort="name" aria-pressed="false">Name<span aria-hidden="true"></span></button><button type="button" data-request-sort="status" aria-pressed="false">Status<span aria-hidden="true"></span></button><button type="button" data-request-sort="type" aria-pressed="false">Type<span aria-hidden="true"></span></button><button type="button" data-request-sort="method" aria-pressed="false">Method<span aria-hidden="true"></span></button><button type="button" data-request-sort="time" aria-pressed="false">Time<span aria-hidden="true"></span></button></div>
+                <div id="request-overview" class="request-overview" data-empty="true" data-range="false">
+                  <div class="overview-track" tabindex="0" aria-label="Request starts over time" aria-describedby="request-overview-range"></div>
+                  <span id="request-overview-range" class="overview-range" aria-live="polite">No request timeline yet</span>
+                  <button class="overview-clear" type="button" hidden>Clear range</button>
+                </div>
+
+                <div class="request-table" data-hidden-columns="protocol">
+                  <div class="request-head" role="group" aria-label="Sort requests"><button type="button" data-column="name" data-request-sort="name" aria-pressed="false">Name<span aria-hidden="true"></span></button><button type="button" data-column="status" data-request-sort="status" aria-pressed="false">Status<span aria-hidden="true"></span></button><button type="button" data-column="type" data-request-sort="type" aria-pressed="false">Type<span aria-hidden="true"></span></button><button type="button" data-column="method" data-request-sort="method" aria-pressed="false">Method<span aria-hidden="true"></span></button><button type="button" data-column="protocol" data-request-sort="protocol" aria-pressed="false">Protocol<span aria-hidden="true"></span></button><button type="button" data-column="initiator" data-request-sort="initiator" aria-pressed="false">Initiator<span aria-hidden="true"></span></button><button type="button" data-column="size" data-request-sort="size" aria-pressed="false">Size<span aria-hidden="true"></span></button><button type="button" data-column="time" data-request-sort="time" aria-pressed="false">Time<span aria-hidden="true"></span></button><button type="button" data-column="waterfall" data-request-sort="start" aria-pressed="false">Waterfall<span aria-hidden="true"></span></button></div>
                   <div id="request-rows" class="request-rows" role="listbox" aria-label="Captured requests" tabindex="0"></div>
                   <div class="request-window"><span id="request-window-status">0 requests</span><button id="request-latest" type="button" hidden>New requests</button><button id="request-order" type="button" title="Restore capture order, newest first">Capture order</button><button id="open-captured-export" type="button" data-export-open="capture" aria-haspopup="dialog">Export…</button></div>
                 </div>
@@ -797,6 +809,9 @@
     <script src="source_search.js"></script>
     <script src="traffic_view.js"></script>
     <script src="traffic_index.js"></script>
+    <script src="traffic_filter.js"></script>
+    <script src="traffic_columns.js"></script>
+    <script src="traffic_overview.js"></script>
     <script src="captured_client.js"></script>
     <script src="captured_export_formats.js"></script>
     <script src="vm_debugger.js"></script>

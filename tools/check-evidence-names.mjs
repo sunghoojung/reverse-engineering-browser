@@ -568,7 +568,7 @@ export async function checkNamesApp(root) {
   const [named, plain] = container.children;
   const cell = named.querySelector('.request-name');
   assert.deepEqual(cell.children.map(child => child.className), ['researcher-name', 'request-resource', 'request-host']);
-  assert.deepEqual(cell.children.map(child => child.textContent), [hostile, '/mint', 'collector.example.test']);
+  assert.deepEqual(cell.children.map(child => child.textContent), [hostile, 'mint', 'collector.example.test']);
   assert.match(named.getAttribute('aria-label'), /^<img .*\(researcher name\)\. Demo evidence request: POST https:\/\/collector\.example\.test\/mint/);
   assert.deepEqual(plain.querySelector('.request-name').children.map(child => child.className), ['request-resource', 'request-host']);
   assert(!document.created.some(value => value.tagName === 'IMG'));

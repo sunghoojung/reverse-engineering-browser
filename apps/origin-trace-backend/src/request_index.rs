@@ -22,6 +22,8 @@ use std::{
 
 pub const SIDECAR_SUFFIX: &str = ".requests-v1";
 const FORMAT: &str = "reb-request-index-v1";
+/// Sidecar row layout; a sidecar of another layout is rebuilt from byte 0.
+const LAYOUT: u32 = 2;
 /// Bounds one call; a larger store reports partial coverage and continues next call.
 const SCAN_BYTES: u64 = 64 * 1024 * 1024;
 const RECORD_BYTES: usize = 4096;
@@ -39,13 +41,48 @@ const TAB_DOMAINS: usize = 8;
 const MAX_NAMED: usize = 64;
 const MAX_LOCATE: usize = 4;
 const MAX_TEXT: usize = 512;
+const TIMELINE_BUCKETS: usize = 120;
 const UNIDENTIFIED: &str = "Unidentified network event";
 
-pub const QUERY_KEYS: [&str; 12] = [
-    "limit", "offset", "through", "since", "sort", "order", "q", "tab_id", "domain", "type",
-    "named", "locate",
+pub const QUERY_KEYS: [&str; 18] = [
+    "limit",
+    "offset",
+    "through",
+    "since",
+    "sort",
+    "order",
+    "q",
+    "tab_id",
+    "domain",
+    "type",
+    "named",
+    "locate",
+    "failed",
+    "invert",
+    "hide_internal",
+    "third_party",
+    "from_ns",
+    "to_ns",
 ];
-const SORTS: [&str; 6] = ["capture", "name", "status", "type", "method", "time"];
+const SORTS: [&str; 10] = [
+    "capture",
+    "name",
+    "status",
+    "type",
+    "method",
+    "time",
+    "size",
+    "initiator",
+    "start",
+    "protocol",
+];
+const FILTER_KEYS: [&str; 5] = [
+    "domain",
+    "method",
+    "status-code",
+    "larger-than",
+    "mime-type",
+];
 const TYPES: [(&str, &str); 10] = [
     ("xhr", "Fetch/XHR"),
     ("doc", "Document"),
@@ -119,11 +156,27 @@ struct Row {
     first_offset: u64,
     end_offset: u64,
     records: u64,
+    /// The last terminal record's `encoded_data_length` and `decoded_body_length`.
+    transfer: Option<i64>,
+    decoded: Option<i64>,
+    cache: bool,
+    worker_served: bool,
+    mime: Option<String>,
+    protocol: Option<String>,
+    response_ns: Option<u64>,
+    error: i64,
+    /// Any lifecycle record other than the renderer's `request_initiated`.
+    loader: bool,
+    renderer: bool,
+    worker_started: bool,
+    versioned: bool,
+    main_frame: bool,
 }
 
 #[derive(Serialize, Deserialize)]
 struct State {
     format: String,
+    layout: u32,
     epoch: String,
     identity: String,
     indexed_to: u64,
@@ -145,6 +198,7 @@ impl State {
         );
         Self {
             format: FORMAT.into(),
+            layout: LAYOUT,
             epoch: hex::encode(&Sha256::digest(seed)[..8]),
             identity,
             indexed_to: 0,
@@ -172,6 +226,7 @@ struct View {
     haystack: String,
     name: String,
     method: String,
+    internal: bool,
 }
 
 pub struct RequestIndex {
@@ -186,7 +241,18 @@ pub struct RequestIndex {
     persisted_at: Option<Instant>,
     persist_error: Option<String>,
     store_end: u64,
-    order: Option<(String, u64, Vec<u32>)>,
+    order: Option<(String, u64, Selection)>,
+}
+
+/// One query's rows plus what the footer and timing strip show for it.
+#[derive(Clone)]
+struct Selection {
+    order: Vec<u32>,
+    hidden_internal: usize,
+    transferred: u64,
+    resources: u64,
+    /// First start, last record and per-bucket starts of every row the time range would admit.
+    timeline: Option<(u64, u64, Vec<u32>)>,
 }
 
 pub enum Answer {
@@ -207,7 +273,100 @@ pub struct RequestQuery {
     kind: Option<&'static str>,
     named: Vec<(String, u32, String)>,
     locate: Vec<String>,
+    filter: Filter,
+    failed: bool,
+    invert: bool,
+    hide_internal: bool,
+    third_party: bool,
+    from: u64,
+    to: u64,
     raw: String,
+}
+/// The `q` grammar Traffic search uses; port of `trafficParseFilter`.
+#[derive(Default)]
+struct Filter {
+    text: String,
+    exclude: Vec<String>,
+    tokens: Vec<Token>,
+}
+struct Token {
+    key: &'static str,
+    value: String,
+    negated: bool,
+    bytes: u64,
+}
+impl Filter {
+    fn parse(needle: &str) -> Self {
+        let mut filter = Self::default();
+        let mut free = Vec::new();
+        for word in needle.split(js_space).filter(|word| !word.is_empty()) {
+            let negated = word.len() > 1 && word.starts_with('-');
+            let body = if negated { &word[1..] } else { word };
+            let token = body.split_once(':').and_then(|(key, value)| {
+                let key = FILTER_KEYS.iter().copied().find(|known| *known == key)?;
+                filter_bytes(key, value).map(|bytes| Token {
+                    key,
+                    value: value.into(),
+                    negated,
+                    bytes,
+                })
+            });
+            match token {
+                Some(token) => filter.tokens.push(token),
+                None if negated => filter.exclude.push(body.into()),
+                None => free.push(word),
+            }
+        }
+        filter.text = free.join(" ");
+        filter
+    }
+    fn active(&self) -> bool {
+        !self.text.is_empty() || !self.exclude.is_empty() || !self.tokens.is_empty()
+    }
+}
+/// Validates a token value; `larger-than` yields its byte count.
+fn filter_bytes(key: &str, value: &str) -> Option<u64> {
+    if value.is_empty() {
+        return None;
+    }
+    match key {
+        "status-code" => {
+            (value.len() <= 3 && value.bytes().all(|b| b.is_ascii_digit())).then_some(0)
+        }
+        "larger-than" => {
+            let (digits, unit) = match value.as_bytes()[value.len() - 1] {
+                b'k' => (&value[..value.len() - 1], 1024),
+                b'm' => (&value[..value.len() - 1], 1024 * 1024),
+                _ => (value, 1),
+            };
+            (!digits.is_empty() && digits.len() <= 9 && digits.bytes().all(|b| b.is_ascii_digit()))
+                .then(|| digits.parse::<u64>().unwrap() * unit)
+        }
+        "method" => value.chars().all(token_char).then_some(0),
+        _ => Some(0),
+    }
+}
+fn token_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || "!#$%&'*+.^_`|~-".contains(c)
+}
+/// `*` matches any run of characters; port of `trafficGlob`.
+fn glob(pattern: &str, text: &str) -> bool {
+    let parts = pattern.split('*').collect::<Vec<_>>();
+    if parts.len() == 1 {
+        return pattern == text;
+    }
+    let (first, last) = (parts[0], parts[parts.len() - 1]);
+    if !text.starts_with(first) {
+        return false;
+    }
+    let mut at = first.len();
+    for part in &parts[1..parts.len() - 1] {
+        match text[at..].find(part) {
+            Some(found) => at += found + part.len(),
+            None => return false,
+        }
+    }
+    text.len() >= at + last.len() && text.ends_with(last)
 }
 impl RequestQuery {
     pub fn parse(q: &Query, raw: &str) -> Result<Self> {
@@ -254,6 +413,23 @@ impl RequestQuery {
                     })?,
             ),
         };
+        let flag = |key: &str| -> Result<bool> {
+            match q.one(key)? {
+                None | Some("0") => Ok(false),
+                Some("1") => Ok(true),
+                Some(_) => Err(Error::bad(format!("{key} must be 0 or 1"))),
+            }
+        };
+        let bound = |key: &str| -> Result<Option<u64>> {
+            q.one(key)?
+                .map(|_| q.number(key, None, 64, false))
+                .transpose()
+        };
+        let (from, to) = (bound("from_ns")?, bound("to_ns")?);
+        if from.zip(to).is_some_and(|(from, to)| from > to) {
+            return Err(Error::bad("from_ns must not exceed to_ns"));
+        }
+        let needle = text("q")?.unwrap_or_default().trim().to_lowercase();
         let mut named = Vec::new();
         if let Some(list) = q.one("named")? {
             for item in list.split(',') {
@@ -281,7 +457,14 @@ impl RequestQuery {
             since: count("since")?,
             sort,
             descending,
-            needle: text("q")?.unwrap_or_default().trim().to_lowercase(),
+            filter: Filter::parse(&needle),
+            needle,
+            failed: flag("failed")?,
+            invert: flag("invert")?,
+            hide_internal: flag("hide_internal")?,
+            third_party: flag("third_party")?,
+            from: from.unwrap_or(0),
+            to: to.unwrap_or(u64::MAX),
             tab,
             domain: text("domain")?,
             kind,
@@ -303,8 +486,22 @@ impl RequestQuery {
     }
     fn order_key(&self, through: usize) -> String {
         format!(
-            "{}:{}:{}:{:?}:{:?}:{:?}:{:?}:{through}",
-            self.sort, self.descending, self.needle, self.tab, self.domain, self.kind, self.named
+            "{}:{}:{}:{:?}:{:?}:{:?}:{:?}:{:?}:{through}",
+            self.sort,
+            self.descending,
+            self.needle,
+            self.tab,
+            self.domain,
+            self.kind,
+            self.named,
+            (
+                self.failed,
+                self.invert,
+                self.hide_internal,
+                self.third_party,
+                self.from,
+                self.to
+            )
         )
     }
 }
@@ -362,17 +559,136 @@ fn rank(kind: &str) -> Option<u8> {
         _ => return None,
     })
 }
+/// blink::mojom::ResourceType at the pin; port of `resourceTypeFilters`.
 fn resource(code: i64) -> &'static str {
     match code {
         0 | 1 | 19 | 20 => "doc",
         2 => "css",
-        3 => "js",
-        4 => "img",
+        3 | 9 | 10 | 15 => "js",
+        4 | 12 => "img",
         5 => "font",
         8 => "media",
-        11 | 13 => "xhr",
+        13 => "xhr",
         _ => "other",
     }
+}
+/// A resource type that says only "other" is classed by MIME; port of `mimeTypeFilter`.
+fn mime_class(mime: &str) -> &'static str {
+    match mime {
+        "text/css" => "css",
+        "text/javascript"
+        | "application/javascript"
+        | "application/x-javascript"
+        | "text/ecmascript"
+        | "application/ecmascript" => "js",
+        "text/html" | "application/xhtml+xml" => "doc",
+        "application/vnd.ms-fontobject" => "font",
+        _ if mime.starts_with("image/") => "img",
+        _ if mime.starts_with("font/")
+            || mime.starts_with("application/font-")
+            || mime.starts_with("application/x-font-") =>
+        {
+            "font"
+        }
+        _ if mime.starts_with("audio/") || mime.starts_with("video/") => "media",
+        _ => "other",
+    }
+}
+/// `response_started` payload: `mime; protocol=alpn`, or `synthetic_shields; mime`.
+fn response_metadata(payload: &str) -> (Option<String>, Option<String>) {
+    let (text, synthetic) = match payload.strip_prefix("synthetic_shields; ") {
+        Some(rest) => (rest, true),
+        None => (payload, false),
+    };
+    let at = if synthetic {
+        None
+    } else {
+        text.find("; protocol=")
+    };
+    let essence = at
+        .map_or(text, |at| &text[..at])
+        .split(';')
+        .next()
+        .unwrap_or("")
+        .trim_matches(js_space);
+    let mime = essence
+        .split_once('/')
+        .filter(|(kind, subtype)| {
+            !kind.is_empty()
+                && !subtype.is_empty()
+                && kind.chars().all(token_char)
+                && subtype.chars().all(token_char)
+        })
+        .map(|_| essence.to_ascii_lowercase());
+    let protocol = at
+        .map(|at| text[at + 11..].trim_matches(js_space))
+        .filter(|p| (1..=32).contains(&p.len()) && p.bytes().all(|b| (0x21..=0x7e).contains(&b)))
+        .map(str::to_owned);
+    (mime, protocol)
+}
+fn length(value: &Value) -> Option<i64> {
+    value
+        .as_str()
+        .and_then(|text| text.parse::<i64>().ok())
+        .filter(|length| *length >= 0)
+}
+/// Last path segment plus query; port of `trafficShortName`.
+fn short_name(target: &str) -> String {
+    let (path, query) = target
+        .find('?')
+        .map_or((target, ""), |at| (&target[..at], &target[at..]));
+    let trimmed = path.strip_suffix('/').unwrap_or(path);
+    let segment = if trimmed.is_empty() {
+        ""
+    } else {
+        &path[trimmed.rfind('/').map_or(0, |at| at + 1)..]
+    };
+    format!("{segment}{query}")
+}
+fn initiator(row: &Row) -> Option<&'static str> {
+    if row.worker_started {
+        Some("worker")
+    } else if row.renderer {
+        Some("renderer")
+    } else if row.versioned && row.loader {
+        Some("browser")
+    } else {
+        None
+    }
+}
+fn initiator_label(row: &Row) -> Option<&'static str> {
+    initiator(row).map(|kind| match kind {
+        "worker" => "Service worker",
+        "renderer" => "Renderer",
+        _ => "Browser",
+    })
+}
+fn host_of(domain: &str) -> &str {
+    match domain.rsplit_once(':') {
+        Some((host, port)) if !port.is_empty() && port.bytes().all(|b| b.is_ascii_digit()) => host,
+        _ => domain,
+    }
+}
+/// Approximate site without a public suffix list; port of `trafficSite`.
+fn site(domain: &str) -> Option<String> {
+    let host = host_of(domain).to_lowercase();
+    if host.is_empty() || host == "unknown" {
+        return None;
+    }
+    if host.starts_with('[')
+        || !host.contains('.')
+        || host.bytes().all(|b| b.is_ascii_digit() || b == b'.')
+    {
+        return Some(host);
+    }
+    let labels = host.split('.').collect::<Vec<_>>();
+    let count = labels.len();
+    let keep = if count >= 3 && labels[count - 1].len() == 2 && labels[count - 2].len() <= 3 {
+        3
+    } else {
+        2
+    };
+    Some(labels[count.saturating_sub(keep)..].join("."))
 }
 /// Port of `networkTargetFromPayload`.
 fn network_target(payload: &str, kind: &str) -> Option<(Option<String>, String)> {
@@ -624,6 +940,13 @@ fn view(row: &Row) -> View {
     };
     let trimmed = path.trim_matches(js_space);
     let more = if url_truncated { "…" } else { "" };
+    // The root path names the request by its host.
+    let named = |target: &str, host: &str| match short_name(target) {
+        short if short.is_empty() => {
+            format!("{}{more}", if host.is_empty() { target } else { host })
+        }
+        short => format!("{short}{more}"),
+    };
     let name = if target_kind == "host" {
         if trimmed.is_empty() {
             "Unknown host".into()
@@ -631,22 +954,38 @@ fn view(row: &Row) -> View {
             trimmed.into()
         }
     } else if let Some(target) = &target {
-        format!("{target}{more}")
+        named(target, host.as_deref().unwrap_or(""))
     } else {
         match url::Url::parse(trimmed) {
-            Ok(url) if ["http", "https", "ws", "wss"].contains(&url.scheme()) => format!(
-                "{}{}{more}",
-                url.path(),
-                url.query()
-                    .filter(|q| !q.is_empty())
-                    .map(|q| format!("?{q}"))
-                    .unwrap_or_default()
+            Ok(url) if ["http", "https", "ws", "wss"].contains(&url.scheme()) => named(
+                &format!(
+                    "{}{}",
+                    url.path(),
+                    url.query()
+                        .filter(|q| !q.is_empty())
+                        .map(|q| format!("?{q}"))
+                        .unwrap_or_default()
+                ),
+                &match (url.host_str(), url.port()) {
+                    (Some(host), Some(port)) => format!("{host}:{port}"),
+                    (Some(host), None) => host.into(),
+                    _ => String::new(),
+                },
             ),
             _ if trimmed.is_empty() => "Unidentified request".into(),
             _ => trimmed.into(),
         }
     };
+    // WebUI loads (chrome://resources, newtab) never reach the browser loader proxy.
+    let internal = !row.loader
+        && target_kind == "host"
+        && !trimmed.is_empty()
+        && trimmed
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-')
+        && !trimmed.eq_ignore_ascii_case("localhost");
     View {
+        internal,
         haystack: format!("{} {path} {}", row.method, text(&status)).to_lowercase(),
         domain: domain(&path),
         name,
@@ -727,7 +1066,7 @@ impl RequestIndex {
     fn load_sidecar(&mut self) -> Option<State> {
         let bytes = durable::read_private(&self.sidecar, SIDECAR_BYTES).ok()??;
         let mut state: State = serde_json::from_slice(&bytes).ok()?;
-        if state.format != FORMAT || state.rows.len() > MAX_REQUESTS {
+        if state.format != FORMAT || state.layout != LAYOUT || state.rows.len() > MAX_REQUESTS {
             return None;
         }
         for (ordinal, row) in state.rows.iter().enumerate() {
@@ -915,6 +1254,19 @@ impl RequestIndex {
                     first_offset: start,
                     end_offset: end,
                     records: 0,
+                    transfer: None,
+                    decoded: None,
+                    cache: false,
+                    worker_served: false,
+                    mime: None,
+                    protocol: None,
+                    response_ns: None,
+                    error: 0,
+                    loader: false,
+                    renderer: false,
+                    worker_started: false,
+                    versioned: false,
+                    main_frame: false,
                 });
                 self.views.push(view(state.rows.last().unwrap()));
                 ordinal
@@ -956,14 +1308,44 @@ impl RequestIndex {
                 text(&event["sequence_number"]),
             ));
         }
+        let versioned = version >= 2;
+        let flags = number(&event["flags"]);
+        row.versioned |= versioned;
+        row.loader |= kind != "request_initiated";
+        row.renderer |= kind == "request_initiated"
+            || (versioned && number(&event["initiator_process_id"]) > 0);
+        if versioned && kind == "request_started" {
+            row.worker_started |= flags & 4 != 0;
+            row.main_frame |= number(&event["resource_type"]) == 0;
+        }
+        let response =
+            (versioned && kind == "response_started").then(|| response_metadata(&payload));
+        if let Some((mime, protocol)) = &response {
+            row.cache |= flags & 2 != 0;
+            row.worker_served |= flags & 4 != 0;
+            row.mime = mime.clone();
+            row.protocol = protocol.clone();
+            row.response_ns.get_or_insert(time);
+        }
+        if versioned && incoming == 5 {
+            row.transfer = length(&event["encoded_data_length"]);
+            row.decoded = length(&event["decoded_body_length"]);
+        }
+        if versioned && number(&event["error_code"]) != 0 {
+            row.error = number(&event["error_code"]);
+        }
         let lower = payload.to_ascii_lowercase();
         if lower
             .strip_prefix("application/wasm")
             .is_some_and(|rest| rest.is_empty() || rest.starts_with(';'))
         {
             row.resource = "wasm".into();
-        } else if version >= 2 && kind == "request_started" {
+        } else if versioned && kind == "request_started" {
             row.resource = resource(number(&event["resource_type"])).into();
+        } else if let Some((Some(mime), _)) = &response
+            && row.resource == "other"
+        {
+            row.resource = mime_class(mime).into();
         }
         if incoming >= row.rank {
             row.operation = kind.into();
@@ -1019,45 +1401,141 @@ impl RequestIndex {
         }
     }
 
-    fn matches(&self, query: &RequestQuery, ordinal: usize, search: bool) -> bool {
+    /// Every filter except the time range and the browser-internal switch.
+    fn matches(&self, query: &RequestQuery, ordinal: usize, third_party: &[bool]) -> bool {
         let (row, view) = (
             &self.state.as_ref().unwrap().rows[ordinal],
             &self.views[ordinal],
         );
-        query.tab.is_none_or(|tab| row.tab == tab)
+        let scoped = query.tab.is_none_or(|tab| row.tab == tab)
             && query
                 .domain
                 .as_ref()
                 .is_none_or(|domain| view.domain == *domain)
             && query.kind.is_none_or(|kind| row.resource == kind)
-            && (!search
-                || query.needle.is_empty()
-                || view.haystack.contains(&query.needle)
-                || Self::root(row).is_some_and(|root| {
-                    query.named.iter().any(|(session, process, sequence)| {
-                        root.session == *session
-                            && root.process == *process
-                            && root.sequence == *sequence
-                    })
-                }))
+            && (!query.failed || row.failed)
+            && (!query.third_party || third_party[ordinal]);
+        if !scoped {
+            return false;
+        }
+        let filter = &query.filter;
+        let named = || {
+            Self::root(row).is_some_and(|root| {
+                query.named.iter().any(|(session, process, sequence)| {
+                    root.session == *session
+                        && root.process == *process
+                        && root.sequence == *sequence
+                })
+            })
+        };
+        let token = |token: &Token| match token.key {
+            "domain" => {
+                let domain = view.domain.to_lowercase();
+                glob(&token.value, &domain) || glob(&token.value, host_of(&domain))
+            }
+            "method" => view.method.to_lowercase() == token.value,
+            "status-code" => view.status.as_i64() == token.value.parse().ok(),
+            "larger-than" => row.transfer.is_some_and(|size| size as u64 > token.bytes),
+            _ => row.mime.as_deref() == Some(token.value.as_str()),
+        };
+        let found = (filter.text.is_empty() || view.haystack.contains(&filter.text) || named())
+            && filter
+                .exclude
+                .iter()
+                .all(|text| !view.haystack.contains(text.as_str()))
+            && filter.tokens.iter().all(|t| token(t) != t.negated);
+        found != (query.invert && filter.active())
+    }
+
+    /// Rows whose site differs from their tab's latest top-level document at their start.
+    fn third_party(&self, through: usize) -> Vec<bool> {
+        let rows = &self.state.as_ref().unwrap().rows;
+        let mut documents: HashMap<u64, Vec<(u64, usize)>> = HashMap::new();
+        for (ordinal, row) in rows.iter().enumerate().take(through) {
+            if row.main_frame && row.tab != 0 {
+                documents
+                    .entry(row.tab)
+                    .or_default()
+                    .push((row.first_ns, ordinal));
+            }
+        }
+        for list in documents.values_mut() {
+            list.sort_unstable();
+        }
+        (0..through)
+            .map(|ordinal| {
+                let row = &rows[ordinal];
+                let Some(list) = documents.get(&row.tab) else {
+                    return false;
+                };
+                let at = list.partition_point(|key| *key <= (row.first_ns, ordinal));
+                let (Some(own), Some(&(_, document))) = (
+                    site(&self.views[ordinal].domain),
+                    at.checked_sub(1).map(|at| &list[at]),
+                ) else {
+                    return false;
+                };
+                site(&self.views[document].domain).is_some_and(|first| first != own)
+            })
+            .collect()
     }
 
     fn root(row: &Row) -> Option<&Root> {
         row.roots.iter().flatten().next()
     }
 
-    fn ordered(&mut self, query: &RequestQuery, through: usize) -> &[u32] {
+    fn select(&mut self, query: &RequestQuery, through: usize) -> &Selection {
         let key = query.order_key(through);
         if self
             .order
             .as_ref()
             .is_none_or(|(cached, generation, _)| *cached != key || *generation != self.generation)
         {
-            let mut order: Vec<u32> = (0..through)
-                .filter(|&i| self.matches(query, i, true))
-                .map(|i| i as u32)
-                .collect();
+            let third_party = if query.third_party {
+                self.third_party(through)
+            } else {
+                Vec::new()
+            };
             let rows = &self.state.as_ref().unwrap().rows;
+            let (mut order, mut scope, mut hidden_internal) = (Vec::new(), Vec::new(), 0);
+            for (ordinal, row) in rows.iter().enumerate().take(through) {
+                if !self.matches(query, ordinal, &third_party) {
+                    continue;
+                }
+                let in_range = row.first_ns <= query.to && row.last_ns >= query.from;
+                if query.hide_internal && self.views[ordinal].internal {
+                    hidden_internal += usize::from(in_range);
+                    continue;
+                }
+                scope.push(ordinal as u32);
+                if in_range {
+                    order.push(ordinal as u32);
+                }
+            }
+            let timeline = scope.iter().map(|&i| &rows[i as usize]).fold(
+                None,
+                |bounds: Option<(u64, u64)>, row| {
+                    Some(bounds.map_or((row.first_ns, row.last_ns), |(first, last)| {
+                        (first.min(row.first_ns), last.max(row.last_ns))
+                    }))
+                },
+            );
+            let timeline = timeline.map(|(first, last)| {
+                let mut buckets = vec![0u32; TIMELINE_BUCKETS];
+                let span = u128::from(last - first) + 1;
+                for &i in &scope {
+                    let offset = u128::from(rows[i as usize].first_ns - first);
+                    buckets[(offset * TIMELINE_BUCKETS as u128 / span) as usize] += 1;
+                }
+                (first, last, buckets)
+            });
+            let total = |pick: fn(&Row) -> Option<i64>| {
+                order
+                    .iter()
+                    .map(|&i| pick(&rows[i as usize]).unwrap_or(0) as u64)
+                    .sum::<u64>()
+            };
+            let (transferred, resources) = (total(|row| row.transfer), total(|row| row.decoded));
             let views = &self.views;
             let direction = |ordering: Ordering| {
                 if query.descending {
@@ -1066,41 +1544,53 @@ impl RequestIndex {
                     ordering
                 }
             };
+            let numeric = |order: &mut Vec<u32>, value: &dyn Fn(u32) -> Option<i64>| {
+                order.sort_by(|&a, &b| match (value(a), value(b)) {
+                    (Some(x), Some(y)) => direction(x.cmp(&y)).then(a.cmp(&b)),
+                    (None, None) => a.cmp(&b),
+                    (None, _) => Ordering::Greater,
+                    (_, None) => Ordering::Less,
+                });
+            };
             match query.sort {
                 "capture" if query.descending => order.reverse(),
                 "capture" => {}
-                "time" | "status" => {
-                    let value = |i: u32| {
-                        let row = &rows[i as usize];
-                        // Traffic compares the displayed microseconds.
-                        if query.sort == "time" {
-                            duration(row).map(|d| (d / 1000) as i64)
-                        } else {
-                            views[i as usize].status.as_i64()
+                // Traffic compares the displayed microseconds.
+                "time" => numeric(&mut order, &|i| {
+                    duration(&rows[i as usize]).map(|d| (d / 1000) as i64)
+                }),
+                "status" => numeric(&mut order, &|i| views[i as usize].status.as_i64()),
+                "size" => numeric(&mut order, &|i| rows[i as usize].transfer),
+                "start" => numeric(&mut order, &|i| {
+                    i64::try_from(rows[i as usize].first_ns).ok()
+                }),
+                sort => {
+                    let value = |i: u32| -> Option<&str> {
+                        let (row, view) = (&rows[i as usize], &views[i as usize]);
+                        match sort {
+                            "name" => Some(&view.name),
+                            "type" => Some(type_label(&row.resource)),
+                            "initiator" => initiator_label(row),
+                            "protocol" => row.protocol.as_deref(),
+                            _ => Some(&view.method),
                         }
                     };
                     order.sort_by(|&a, &b| match (value(a), value(b)) {
-                        (Some(x), Some(y)) => direction(x.cmp(&y)).then(a.cmp(&b)),
+                        (Some(x), Some(y)) => direction(compare_text(x, y)).then(a.cmp(&b)),
                         (None, None) => a.cmp(&b),
                         (None, _) => Ordering::Greater,
                         (_, None) => Ordering::Less,
                     });
                 }
-                sort => {
-                    let value = |i: u32| -> &str {
-                        let (row, view) = (&rows[i as usize], &views[i as usize]);
-                        match sort {
-                            "name" => &view.name,
-                            "type" => type_label(&row.resource),
-                            _ => &view.method,
-                        }
-                    };
-                    order.sort_by(|&a, &b| {
-                        direction(compare_text(value(a), value(b))).then(a.cmp(&b))
-                    });
-                }
             }
-            self.order = Some((key, self.generation, order));
+            let selection = Selection {
+                order,
+                hidden_internal,
+                transferred,
+                resources,
+                timeline,
+            };
+            self.order = Some((key, self.generation, selection));
         }
         &self.order.as_ref().unwrap().2
     }
@@ -1131,6 +1621,12 @@ impl RequestIndex {
             "members_limited": row.members_limited,
             "first_offset": row.first_offset.to_string(), "end_offset": row.end_offset.to_string(),
             "records": row.records,
+            "transfer_size": row.transfer, "resource_size": row.decoded,
+            "from_cache": row.cache, "from_service_worker": row.worker_served,
+            "mime_type": row.mime, "protocol": row.protocol,
+            "response_time_ns": row.response_ns.map(|time| time.to_string()),
+            "error_code": row.error, "loader_observed": row.loader, "initiator": initiator(row),
+            "main_frame": row.main_frame, "browser_internal": view.internal,
         })
     }
 
@@ -1203,7 +1699,8 @@ impl RequestIndex {
         });
         let facets = self.facets(query, through);
         let since = query.since;
-        let order = self.ordered(query, through).to_vec();
+        let selection = self.select(query, through).clone();
+        let order = &selection.order;
         let page = order
             .iter()
             .skip(query.offset)
@@ -1217,9 +1714,20 @@ impl RequestIndex {
             "next_offset": (query.offset + page.len() < order.len()).then_some(query.offset + page.len()),
             "previous_offset": (query.offset > 0).then(|| query.offset.saturating_sub(query.limit)),
             "failed": failed, "facets": facets, "index": index,
+            "sizes": {"transferred": selection.transferred, "resources": selection.resources},
+            "hidden_internal": selection.hidden_internal,
+            "timeline": match &selection.timeline {
+                Some((first, last, buckets)) => json!({"first_time_ns": first.to_string(),
+                    "last_time_ns": last.to_string(), "buckets": buckets}),
+                None => json!({"first_time_ns": null, "last_time_ns": null, "buckets": vec![0; TIMELINE_BUCKETS]}),
+            },
             "query": {"sort": query.sort, "order": if query.descending { "desc" } else { "asc" }, "q": query.needle,
                 "tab_id": query.tab.map(|tab| if tab == 0 { "unattributed".to_owned() } else { tab.to_string() }),
-                "domain": query.domain, "type": query.kind, "named": query.named.len()},
+                "domain": query.domain, "type": query.kind, "named": query.named.len(),
+                "failed": query.failed, "invert": query.invert, "hide_internal": query.hide_internal,
+                "third_party": query.third_party,
+                "from_ns": (query.from > 0).then(|| query.from.to_string()),
+                "to_ns": (query.to < u64::MAX).then(|| query.to.to_string())},
             "requests": page,
         });
         if let Some(since) = since {
@@ -1324,7 +1832,7 @@ mod tests {
             900,
             "request_started",
             b"GET api.example.test",
-            merge(joined.clone(), json!({"resource_type": 11})),
+            merge(joined.clone(), json!({"resource_type": 13})),
         );
         store.push(
             7,
@@ -1337,7 +1845,7 @@ mod tests {
             7,
             900,
             "response_started",
-            b"application/json",
+            b"application/json; protocol=h2",
             merge(joined.clone(), json!({"status_code": 200})),
         );
         store.push(
@@ -1345,7 +1853,10 @@ mod tests {
             900,
             "request_completed",
             b"completed",
-            merge(joined, json!({"status_code": 200})),
+            merge(
+                joined,
+                json!({"status_code": 200, "encoded_data_length": "1234", "decoded_body_length": "4567"}),
+            ),
         );
         // A navigation whose redirect replaces the captured target.
         let start = store.push(
@@ -1466,6 +1977,96 @@ mod tests {
             json!({"parent_event_id": start}),
         );
         store.push(42, 11, "request_initiated", b"completed", json!({}));
+        // A WebUI load only the renderer recorded.
+        store.push(43, 12, "request_initiated", b"GET resources", json!({}));
+        // Tab 3 subresources after its navigation: another site from the HTTP
+        // cache, a service-worker start it served, a font by MIME and a prefetch
+        // a Shields synthetic response answered.
+        let tab = |extra: Value| merge(json!({"tab_id": 3}), extra);
+        store.push(
+            7,
+            908,
+            "request_started",
+            b"GET tracker.other.test",
+            tab(json!({"resource_type": 4})),
+        );
+        store.push(
+            7,
+            908,
+            "response_started",
+            b"image/gif; protocol=http/1.1",
+            tab(json!({"status_code": 200, "flags": 2})),
+        );
+        store.push(
+            7,
+            908,
+            "request_completed",
+            b"completed",
+            tab(json!({"encoded_data_length": "0", "decoded_body_length": "43"})),
+        );
+        store.push(
+            7,
+            909,
+            "request_started",
+            b"GET sw.example.test",
+            tab(json!({"resource_type": 13, "flags": 4})),
+        );
+        store.push(
+            7,
+            909,
+            "response_started",
+            b"application/json; protocol=h3",
+            tab(json!({"status_code": 200, "flags": 4})),
+        );
+        store.push(
+            7,
+            909,
+            "request_completed",
+            b"completed",
+            tab(json!({"encoded_data_length": "-1", "decoded_body_length": "12"})),
+        );
+        store.push(
+            7,
+            910,
+            "request_started",
+            b"GET static.example.test",
+            tab(json!({"resource_type": 6})),
+        );
+        store.push(
+            7,
+            910,
+            "response_started",
+            b"Font/WOFF2; protocol=h2",
+            tab(json!({"status_code": 304})),
+        );
+        store.push(
+            7,
+            910,
+            "request_completed",
+            b"completed",
+            tab(json!({"encoded_data_length": "2048", "decoded_body_length": "20480"})),
+        );
+        store.push(
+            7,
+            911,
+            "request_started",
+            b"GET ads.example.test",
+            tab(json!({"resource_type": 11})),
+        );
+        store.push(
+            7,
+            911,
+            "response_started",
+            b"synthetic_shields; text/javascript",
+            tab(json!({"status_code": 200})),
+        );
+        store.push(
+            7,
+            911,
+            "request_failed",
+            b"failed",
+            tab(json!({"error_code": -20, "encoded_data_length": "0", "decoded_body_length": "0"})),
+        );
         store
     }
     fn write(path: &Path, store: &Store) {
@@ -1495,7 +2096,7 @@ mod tests {
         let mut index = RequestIndex::new(&path);
         let document = page(&mut index, "");
         let rows = document["requests"].as_array().unwrap();
-        assert_eq!(document["total"], 10);
+        assert_eq!(document["total"], 15);
         let joined = &rows[0];
         assert_eq!(joined["id"], "S1:R41:10");
         assert_eq!(
@@ -1540,13 +2141,171 @@ mod tests {
             (&json!(true), &json!(400))
         );
         assert_eq!(rows[9]["method"], "EVENT");
-        assert_eq!(document["failed"], 1);
+        assert_eq!(document["failed"], 2);
         let tabs = document["facets"]["tabs"].as_array().unwrap();
         assert_eq!(
             (&tabs[0]["tab_id"], &tabs.last().unwrap()["tab_id"]),
             (&json!("3"), &json!("0"))
         );
         assert_eq!(document["index"]["complete"], true);
+        let fields = |row: &Value, keys: &[&str]| {
+            keys.iter().map(|key| row[*key].clone()).collect::<Vec<_>>()
+        };
+        let measured = [
+            "transfer_size",
+            "resource_size",
+            "mime_type",
+            "protocol",
+            "initiator",
+            "response_time_ns",
+        ];
+        assert_eq!(
+            fields(joined, &measured),
+            [
+                json!(1234),
+                json!(4567),
+                json!("application/json"),
+                json!("h2"),
+                json!("renderer"),
+                json!("4000000")
+            ]
+        );
+        assert_eq!(
+            fields(&rows[1], &["main_frame", "initiator"]),
+            [json!(true), json!("browser")]
+        );
+        assert_eq!(rows[5]["type"], "css", "a missing start is classed by MIME");
+        assert_eq!(
+            fields(
+                &rows[10],
+                &["browser_internal", "loader_observed", "initiator", "status"]
+            ),
+            [
+                json!(true),
+                json!(false),
+                json!("renderer"),
+                json!("pending")
+            ]
+        );
+        assert_eq!(
+            fields(
+                &rows[11],
+                &[
+                    "from_cache",
+                    "type",
+                    "transfer_size",
+                    "resource_size",
+                    "protocol"
+                ]
+            ),
+            [
+                json!(true),
+                json!("img"),
+                json!(0),
+                json!(43),
+                json!("http/1.1")
+            ]
+        );
+        assert_eq!(
+            fields(
+                &rows[12],
+                &[
+                    "initiator",
+                    "from_service_worker",
+                    "transfer_size",
+                    "resource_size"
+                ]
+            ),
+            [json!("worker"), json!(true), Value::Null, json!(12)]
+        );
+        assert_eq!(
+            fields(&rows[13], &["type", "mime_type", "status"]),
+            [json!("font"), json!("font/woff2"), json!(304)]
+        );
+        assert_eq!(
+            fields(
+                &rows[14],
+                &["type", "mime_type", "protocol", "error_code", "status"]
+            ),
+            [
+                json!("js"),
+                json!("text/javascript"),
+                Value::Null,
+                json!(-20),
+                json!("failed")
+            ]
+        );
+        assert_eq!(rows[7]["path"], "files.example.test/upload/1");
+    }
+
+    #[test]
+    fn filter_tokens_flags_time_range_and_totals() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("events.jsonl");
+        write(&path, &fixture());
+        let mut index = RequestIndex::new(&path);
+        let ordinals = |document: &Value| {
+            document["requests"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|row| row["ordinal"].as_u64().unwrap())
+                .collect::<Vec<_>>()
+        };
+        for (raw, expected) in [
+            ("q=domain:*.other.test", vec![11]),
+            ("q=domain:api.example.test", vec![0]),
+            ("q=method:post", vec![2]),
+            ("q=status-code:304", vec![13]),
+            ("q=larger-than:2k", vec![]),
+            ("q=larger-than:1k", vec![0, 13]),
+            ("q=mime-type:application/json", vec![0, 12]),
+            ("q=-example%20-localhost%20-event", vec![10, 11]),
+            (
+                "q=-status-code:200%20-domain:*.test",
+                vec![4, 5, 6, 8, 9, 10],
+            ),
+            ("q=example&invert=1", vec![4, 5, 6, 9, 10, 11]),
+            ("invert=1", (0..15).collect()),
+            ("failed=1", vec![2, 14]),
+            ("third_party=1", vec![11]),
+            ("q=larger-than:big", vec![]),
+            ("from_ns=30000000&to_ns=33000000", vec![12, 13]),
+        ] {
+            assert_eq!(ordinals(&page(&mut index, raw)), expected, "{raw}");
+        }
+        let hidden = page(&mut index, "hide_internal=1");
+        assert_eq!(
+            (hidden["matching"].as_u64(), &hidden["hidden_internal"]),
+            (Some(14), &json!(1))
+        );
+        let totals = page(&mut index, "q=example");
+        assert_eq!(
+            totals["sizes"],
+            json!({"transferred": 1234 + 2048, "resources": 4567 + 12 + 20480})
+        );
+        let timeline = &page(&mut index, "from_ns=30000000")["timeline"];
+        assert_eq!(
+            (&timeline["first_time_ns"], &timeline["last_time_ns"]),
+            (&json!("1000000"), &json!("36000000"))
+        );
+        assert_eq!(
+            timeline["buckets"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|n| n.as_u64().unwrap())
+                .sum::<u64>(),
+            15
+        );
+        for bad in [
+            "failed=yes",
+            "from_ns=9&to_ns=1",
+            "invert=1&invert=0",
+            "to_ns=-1",
+        ] {
+            assert!(RequestQuery::parse(&Query::new(bad), bad).is_err(), "{bad}");
+        }
     }
 
     #[test]
@@ -1560,7 +2319,7 @@ mod tests {
         for request in 1..=2500u64 {
             let host = format!("GET host{}.example.test", request % 7);
             store.push(7, request, "request_started", host.as_bytes(),
-                json!({"resource_type": if request % 2 == 0 { 11 } else { 3 }, "tab_id": 1 + request % 3}));
+                json!({"resource_type": if request % 2 == 0 { 13 } else { 3 }, "tab_id": 1 + request % 3}));
             if request % 5 != 0 {
                 store.push(
                     7,
@@ -1625,7 +2384,7 @@ mod tests {
             7
         );
         for bad in [
-            "sort=size",
+            "sort=bytes",
             "order=up",
             "type=fetch",
             "tab_id=0",
@@ -1669,14 +2428,14 @@ mod tests {
         );
         let line = serde_json::to_vec(store.events.last().unwrap()).unwrap();
         file.write_all(&line[..20]).unwrap();
-        assert_eq!(page(&mut first, "")["total"], 10);
+        assert_eq!(page(&mut first, "")["total"], 15);
         file.write_all(&line[20..]).unwrap();
         file.write_all(b"\n{\"category\":\"network\",broken\n")
             .unwrap();
         let grown = page(&mut first, "");
         assert_eq!(
             (&grown["total"], &grown["index"]["malformed_records"]),
-            (&json!(11), &json!("1"))
+            (&json!(16), &json!("1"))
         );
         assert_eq!(grown["index"]["epoch"], epoch);
         first.persist();
@@ -1684,7 +2443,7 @@ mod tests {
         let document = page(&mut reopened, "");
         assert_eq!(
             (&document["total"], &document["index"]["reopened"]),
-            (&json!(11), &json!(true))
+            (&json!(16), &json!(true))
         );
         assert_eq!(document["index"]["epoch"], epoch);
         // A same-length rewrite rebuilds under a new epoch.
@@ -1695,7 +2454,7 @@ mod tests {
         assert_ne!(rebuilt["index"]["epoch"], epoch);
         assert_eq!(
             (&rebuilt["total"], &rebuilt["index"]["reopened"]),
-            (&json!(11), &json!(false))
+            (&json!(16), &json!(false))
         );
         assert_eq!(rebuilt["index"]["malformed_records"], "2");
         reopened.discard().unwrap();
@@ -1763,7 +2522,18 @@ mod tests {
         write(&path, &store);
         let mut index = RequestIndex::new(&path);
         let mut document = page(&mut index, "limit=500");
-        let orders = ["name", "method", "type", "status", "time"].map(|sort| {
+        let orders = [
+            "name",
+            "method",
+            "type",
+            "status",
+            "time",
+            "size",
+            "initiator",
+            "start",
+            "protocol",
+        ]
+        .map(|sort| {
             (
                 sort.to_owned(),
                 json!({"asc": ids(&page(&mut index, &format!("limit=500&sort={sort}"))),
@@ -1776,9 +2546,34 @@ mod tests {
                 json!(ids(&page(&mut index, &format!("limit=500&q={needle}")))),
             )
         });
+        let filters = [
+            "q=domain:*.example.test",
+            "q=domain:localhost",
+            "q=-example",
+            "q=method:post%20larger-than:1",
+            "q=-status-code:200",
+            "q=larger-than:1k",
+            "q=mime-type:application/json",
+            "q=example&invert=1",
+            "q=get%20-cdn&invert=1&hide_internal=1",
+            "failed=1",
+            "third_party=1",
+            "hide_internal=1",
+            "from_ns=5000000&to_ns=12000000",
+            "q=example&from_ns=20000000&hide_internal=1",
+        ]
+        .map(|raw| {
+            let answer = page(&mut index, &format!("limit=500&{raw}"));
+            (
+                raw.to_owned(),
+                json!({"ids": ids(&answer), "sizes": answer["sizes"], "hidden_internal": answer["hidden_internal"],
+                    "timeline": answer["timeline"]}),
+            )
+        });
         let golden = json!({"events": store.events, "rows": document["requests"].take(),
             "orders": orders.into_iter().collect::<serde_json::Map<_, _>>(),
-            "searches": searches.into_iter().collect::<serde_json::Map<_, _>>()});
+            "searches": searches.into_iter().collect::<serde_json::Map<_, _>>(),
+            "filters": filters.into_iter().collect::<serde_json::Map<_, _>>()});
         fs::write(output, serde_json::to_vec_pretty(&golden).unwrap()).unwrap();
     }
 }

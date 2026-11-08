@@ -1690,7 +1690,7 @@
       "get": {
         "operationId": "get_requests",
         "summary": "Page through every network request of the session",
-        "description": "One row per request of the whole session, from an index the backend folds incrementally from the event store and keeps beside it (protocol/request-index-v1.md), so counts, filters and search cover every request, not the newest event window. A row is a Traffic row: method, path (URL path and query only when the session retained request content, else the host), status, type, time, tab, domain and the root event that get_origin_trace takes. Default order is capture order, oldest first. Page with offset and limit; pass a previous answer's through to keep paging one snapshot, and since to count rows added after it. total and matching are exact for the indexed bytes; index.complete is false while a large store is still being indexed, and index counts unreadable records and requests past the request limit. Read one request's records with get_events: for each member pass its session_id, process_id and request_id with after=first_offset and limit=records. Unknown parameters are rejected. Use a small limit, such as 50, through MCP.",
+        "description": "One row per request of the whole session, from an index the backend folds incrementally from the event store and keeps beside it (protocol/request-index-v1.md), so counts, filters and search cover every request, not the newest event window. A row is a Traffic row: method, path (URL path and query only when the session retained request content, else the host), status, type, time, tab, domain and the root event that get_origin_trace takes. Default order is capture order, oldest first. Page with offset and limit; pass a previous answer's through to keep paging one snapshot, and since to count rows added after it. total and matching are exact for the indexed bytes; index.complete is false while a large store is still being indexed, and index counts unreadable records and requests past the request limit. Read one request's records with get_events: for each member pass its session_id, process_id and request_id with after=first_offset and limit=records. Each row also carries the recorded transfer and resource sizes, MIME type, protocol, initiator class and response time; the answer adds the matching sizes, hidden_internal and a 120-bucket start timeline. Unknown parameters are rejected. Use a small limit, such as 50, through MCP.",
         "tags": [
           "events"
         ],
@@ -1737,7 +1737,7 @@
             "name": "sort",
             "in": "query",
             "required": false,
-            "description": "Sort key. Rows that tie, and rows without a value, keep capture order; rows without a value sort last.",
+            "description": "Sort key. size is the transferred size, start the first record's time, initiator and protocol their labels. Rows that tie, and rows without a value, keep capture order; rows without a value sort last.",
             "schema": {
               "type": "string",
               "enum": [
@@ -1746,7 +1746,11 @@
                 "status",
                 "type",
                 "method",
-                "time"
+                "time",
+                "size",
+                "initiator",
+                "start",
+                "protocol"
               ],
               "default": "capture"
             }
@@ -1769,7 +1773,7 @@
             "name": "q",
             "in": "query",
             "required": false,
-            "description": "Case-insensitive text matched against method, path and status, as Traffic search.",
+            "description": "Traffic filter text, case-insensitive. Words match method, path and status; -word excludes them. domain:host (* is a wildcard), method:, status-code:, larger-than:N (k and m are 1,024 multiples, of the transferred size) and mime-type: match exactly, and a leading - negates them.",
             "schema": {
               "type": "string",
               "maxLength": 512
@@ -1834,6 +1838,80 @@
             "schema": {
               "type": "string",
               "maxLength": 1024
+            }
+          },
+          {
+            "name": "failed",
+            "in": "query",
+            "required": false,
+            "description": "1 keeps only failed requests.",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "0",
+                "1"
+              ],
+              "default": "0"
+            }
+          },
+          {
+            "name": "invert",
+            "in": "query",
+            "required": false,
+            "description": "1 keeps the requests the q filter does not match; without q it has no effect.",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "0",
+                "1"
+              ],
+              "default": "0"
+            }
+          },
+          {
+            "name": "hide_internal",
+            "in": "query",
+            "required": false,
+            "description": "1 hides browser-internal requests (browser_internal) and counts them in hidden_internal.",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "0",
+                "1"
+              ],
+              "default": "0"
+            }
+          },
+          {
+            "name": "third_party",
+            "in": "query",
+            "required": false,
+            "description": "1 keeps requests whose site differs from their tab's latest top-level document at their start. Sites are the last two host labels, or three after a short second level and a two-letter country code; there is no public suffix list.",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "0",
+                "1"
+              ],
+              "default": "0"
+            }
+          },
+          {
+            "name": "from_ns",
+            "in": "query",
+            "required": false,
+            "description": "Keeps requests whose last record is at or after this monotonic time.",
+            "schema": {
+              "$ref": "#/components/schemas/Uint64String"
+            }
+          },
+          {
+            "name": "to_ns",
+            "in": "query",
+            "required": false,
+            "description": "Keeps requests whose first record is at or before this monotonic time.",
+            "schema": {
+              "$ref": "#/components/schemas/Uint64String"
             }
           },
           {
@@ -14029,7 +14107,19 @@
           "members_limited",
           "first_offset",
           "end_offset",
-          "records"
+          "records",
+          "transfer_size",
+          "resource_size",
+          "from_cache",
+          "from_service_worker",
+          "mime_type",
+          "protocol",
+          "response_time_ns",
+          "error_code",
+          "loader_observed",
+          "initiator",
+          "main_frame",
+          "browser_internal"
         ],
         "properties": {
           "id": {
@@ -14231,6 +14321,84 @@
           "records": {
             "type": "integer",
             "minimum": 1
+          },
+          "transfer_size": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0,
+            "description": "The last completion or failure record's encoded_data_length: bytes received over the network, headers included."
+          },
+          "resource_size": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0,
+            "description": "The same record's decoded_body_length."
+          },
+          "from_cache": {
+            "type": "boolean",
+            "description": "A response_started record says the response came from the HTTP cache."
+          },
+          "from_service_worker": {
+            "type": "boolean",
+            "description": "A response_started record says a service worker served the response."
+          },
+          "mime_type": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The response MIME type, lowercase, without parameters."
+          },
+          "protocol": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The negotiated ALPN protocol, such as h2."
+          },
+          "response_time_ns": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/Uint64String"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The first response_started record's time."
+          },
+          "error_code": {
+            "type": "integer",
+            "description": "The last non-zero net error code, else 0."
+          },
+          "loader_observed": {
+            "type": "boolean",
+            "description": "A browser loader record joined the request; false when only the renderer recorded it."
+          },
+          "initiator": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "enum": [
+              "renderer",
+              "worker",
+              "browser",
+              null
+            ],
+            "description": "Who started the request: a renderer, a service worker, or the browser process; null without a versioned record."
+          },
+          "main_frame": {
+            "type": "boolean",
+            "description": "A request_started record names a top-level document."
+          },
+          "browser_internal": {
+            "type": "boolean",
+            "description": "Only the renderer recorded it and it names a single-label host other than localhost, as WebUI loads do."
           }
         }
       },
@@ -14250,6 +14418,9 @@
           "failed",
           "facets",
           "index",
+          "sizes",
+          "hidden_internal",
+          "timeline",
           "query",
           "requests"
         ],
@@ -14315,6 +14486,71 @@
             "type": "integer",
             "minimum": 0,
             "description": "Failed requests in the snapshot, before filters."
+          },
+          "sizes": {
+            "type": "object",
+            "required": [
+              "transferred",
+              "resources"
+            ],
+            "additionalProperties": false,
+            "description": "Sums over the matching requests of transfer_size and resource_size; a request without one adds nothing.",
+            "properties": {
+              "transferred": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "resources": {
+                "type": "integer",
+                "minimum": 0
+              }
+            }
+          },
+          "hidden_internal": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "With hide_internal: browser-internal requests that every other filter admitted."
+          },
+          "timeline": {
+            "type": "object",
+            "required": [
+              "first_time_ns",
+              "last_time_ns",
+              "buckets"
+            ],
+            "additionalProperties": false,
+            "description": "Request starts of every request the filters admit before the time range, in 120 equal buckets from the first start to the last record.",
+            "properties": {
+              "first_time_ns": {
+                "oneOf": [
+                  {
+                    "$ref": "#/components/schemas/Uint64String"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "last_time_ns": {
+                "oneOf": [
+                  {
+                    "$ref": "#/components/schemas/Uint64String"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "buckets": {
+                "type": "array",
+                "minItems": 120,
+                "maxItems": 120,
+                "items": {
+                  "type": "integer",
+                  "minimum": 0
+                }
+              }
+            }
           },
           "facets": {
             "type": "object",

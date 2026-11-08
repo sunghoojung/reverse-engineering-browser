@@ -118,6 +118,10 @@
         trafficWindowStart: 0,
         trafficWindowAnchor: null,
         trafficNewIds: new Set(),
+        trafficFlags: {invert: false, hideInternal: false, thirdParty: false, failed: false},
+        // A selected time range in nanoseconds ({from, to}, BigInt), or null.
+        trafficRange: null,
+        trafficOverview: null,
         trafficIndex: null,
         trafficIndexEpoch: null,
         trafficAppliedAnswer: null,

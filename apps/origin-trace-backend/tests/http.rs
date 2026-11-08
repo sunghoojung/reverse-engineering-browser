@@ -1075,7 +1075,7 @@ async fn openapi_responses_match_live_local_http_and_conditional_reads() {
     }
     for (path, route, status) in [
         ("/api/events?limit=oops", "/api/events", 400),
-        ("/api/requests?sort=size", "/api/requests", 400),
+        ("/api/requests?sort=bytes", "/api/requests", 400),
         ("/api/requests?tab_id=0", "/api/requests", 400),
         ("/api/events?limit=1&limit=2", "/api/events", 400),
         ("/api/artifacts?limit=", "/api/artifacts", 400),

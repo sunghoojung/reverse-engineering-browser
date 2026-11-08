@@ -3,20 +3,33 @@
  * body (protocol/native-network-v2.md); every session records the body's
  * length, type and digest. Headers and response bodies are not part of native
  * capture, so this view never implies or searches them. */
+// The last path segment plus the query, as DevTools names a request.
+function trafficShortName(target) {
+  const at = target.indexOf('?');
+  const path = at < 0 ? target : target.slice(0, at), query = at < 0 ? '' : target.slice(at);
+  const trimmed = path.endsWith('/') ? path.slice(0, -1) : path;
+  return `${trimmed ? path.slice(trimmed.lastIndexOf('/') + 1) : ''}${query}`;
+}
+
+// The host is a sublabel only beside a captured path; a root path is named by its host.
 function trafficTargetParts(request) {
   const target = String(request?.path ?? '').trim();
-  if (request?.hostOnly) return {name: target || 'Unknown host', host: 'Host-only metadata'};
+  if (request?.hostOnly) return {name: target || 'Unknown host', host: ''};
   const more = request?.urlTruncated ? '…' : '';
+  const named = (pathAndQuery, host) => {
+    const name = trafficShortName(pathAndQuery);
+    return name ? {name: `${name}${more}`, host} : {name: `${host || pathAndQuery}${more}`, host: ''};
+  };
   // A native target is shown exactly as captured; reparsing would re-escape it.
-  if (typeof request?.target === 'string') return {name: `${request.target}${more}`, host: request.host ?? ''};
+  if (typeof request?.target === 'string') return named(request.target, request.host ?? '');
   if (request?.targetKind === 'path') {
     const slash = target.indexOf('/');
-    return slash > 0 ? {name: `${target.slice(slash)}${more}`, host: target.slice(0, slash)} : {name: target, host: ''};
+    return slash > 0 ? named(target.slice(slash), target.slice(0, slash)) : {name: target, host: ''};
   }
   try {
     const url = new URL(target);
     if (!['http:', 'https:', 'ws:', 'wss:'].includes(url.protocol)) throw new TypeError('Not a network URL');
-    return {name: `${url.pathname || '/'}${url.search}${more}`, host: url.host};
+    return named(`${url.pathname || '/'}${url.search}`, url.host);
   } catch {
     return {name: target || 'Unidentified request', host: ''};
   }
@@ -128,6 +141,103 @@ function trafficTimeLabel(time) {
   return `${(time / 1000).toFixed(2)} s`;
 }
 
+// DevTools-style decimal units; tooltips keep the exact byte count.
+function trafficBytesLabel(bytes) {
+  if (bytes < 1000) return `${bytes} B`;
+  const [value, unit] = bytes < 1e6 ? [bytes / 1e3, 'kB'] : bytes < 1e9 ? [bytes / 1e6, 'MB'] : [bytes / 1e9, 'GB'];
+  return `${value < 100 ? value.toFixed(1) : Math.round(value)} ${unit}`;
+}
+
+// Transferred is the terminal record's encoded_data_length, resource its decoded_body_length.
+function trafficSizeCell(request) {
+  const exact = value => `${value.toLocaleString('en-US')} ${value === 1 ? 'byte' : 'bytes'}`;
+  const transfer = Number.isSafeInteger(request?.transferSize) ? request.transferSize : null;
+  const resource = Number.isSafeInteger(request?.resourceSize) ? request.resourceSize : null;
+  const served = request?.fromServiceWorker ? '(service worker)' : request?.fromCache ? '(disk cache)' : null;
+  const lines = [served === '(service worker)' ? 'Served by a service worker.' : served ? 'Served from the HTTP cache.' : '',
+    transfer === null ? 'Transferred: no completion record.' : `Transferred: ${exact(transfer)}.`,
+    resource === null ? 'Resource: not recorded.' : `Resource: ${exact(resource)}.`].filter(Boolean);
+  return {transfer: served ?? (transfer === null ? '—' : trafficBytesLabel(transfer)),
+    resource: resource === null ? '' : trafficBytesLabel(resource), title: lines.join('\n')};
+}
+
+const TRAFFIC_INITIATOR_LABELS = Object.freeze({renderer: 'Renderer', worker: 'Service worker', browser: 'Browser'});
+const TRAFFIC_INITIATOR_TITLES = Object.freeze({
+  renderer: 'A renderer started this request. Parser and script starts are not told apart without an initiator stack.',
+  worker: 'A service worker started this request.',
+  browser: 'The browser process started this request, such as a navigation; no renderer record names it.'});
+function trafficInitiatorLabel(request) {
+  return Object.hasOwn(TRAFFIC_INITIATOR_LABELS, request?.initiator ?? '') ? TRAFFIC_INITIATOR_LABELS[request.initiator] : null;
+}
+
+// Verified against net/base/net_error_list.h at the pinned Chromium.
+const TRAFFIC_NET_ERRORS = Object.freeze({'-2': 'FAILED', '-3': 'ABORTED', '-6': 'FILE_NOT_FOUND', '-7': 'TIMED_OUT',
+  '-10': 'ACCESS_DENIED', '-20': 'BLOCKED_BY_CLIENT', '-21': 'NETWORK_CHANGED', '-22': 'BLOCKED_BY_ADMINISTRATOR',
+  '-27': 'BLOCKED_BY_RESPONSE', '-30': 'BLOCKED_BY_CSP', '-32': 'BLOCKED_BY_ORB', '-100': 'CONNECTION_CLOSED',
+  '-101': 'CONNECTION_RESET', '-102': 'CONNECTION_REFUSED', '-103': 'CONNECTION_ABORTED', '-104': 'CONNECTION_FAILED',
+  '-105': 'NAME_NOT_RESOLVED', '-106': 'INTERNET_DISCONNECTED', '-107': 'SSL_PROTOCOL_ERROR', '-109': 'ADDRESS_UNREACHABLE',
+  '-118': 'CONNECTION_TIMED_OUT', '-137': 'NAME_RESOLUTION_FAILED', '-200': 'CERT_COMMON_NAME_INVALID',
+  '-201': 'CERT_DATE_INVALID', '-202': 'CERT_AUTHORITY_INVALID', '-206': 'CERT_REVOKED', '-300': 'INVALID_URL',
+  '-301': 'DISALLOWED_URL_SCHEME', '-302': 'UNKNOWN_URL_SCHEME', '-310': 'TOO_MANY_REDIRECTS', '-311': 'UNSAFE_REDIRECT',
+  '-312': 'UNSAFE_PORT', '-320': 'INVALID_RESPONSE', '-324': 'EMPTY_RESPONSE', '-330': 'CONTENT_DECODING_FAILED',
+  '-337': 'HTTP2_PROTOCOL_ERROR', '-355': 'INCOMPLETE_CHUNKED_ENCODING', '-356': 'QUIC_PROTOCOL_ERROR',
+  '-400': 'CACHE_MISS', '-501': 'INSECURE_RESPONSE'});
+function trafficNetError(code) {
+  const key = String(code);
+  return Object.hasOwn(TRAFFIC_NET_ERRORS, key) ? `net::ERR_${TRAFFIC_NET_ERRORS[key]} (${key})` : `net error ${key}`;
+}
+
+// Pending, Failed and a renderer-only row read differently; 3xx, 4xx and 5xx have their own colors.
+function trafficStatusCell(request) {
+  const code = Number(request.status);
+  if (request.failed) {
+    return {text: 'Failed', className: 'status-error', title: request.errorCode
+      ? `Failed: ${trafficNetError(request.errorCode)}.` : 'Request failed. Inspect the retained response state for details.'};
+  }
+  if (request.interrupted) {
+    return {text: String(request.status), className: 'status-neutral', title: 'Native proxy observation ended; final network outcome is unavailable.'};
+  }
+  if (request.status === 'pending' && request.loaderObserved === false) {
+    return {text: 'No loader', className: 'status-neutral status-unobserved',
+      title: 'Browser loader not observed: only the renderer recorded this request, so its status, size and completion are unknown.'};
+  }
+  if (request.status === 'pending') {
+    return {text: 'Pending', className: 'status-neutral', title: Number.isInteger(request.provisionalStatus)
+      ? `Still pending. Response extra info reported HTTP ${request.provisionalStatus}; that is not a finished response.`
+      : 'No terminal lifecycle event has been captured.'};
+  }
+  const className = !Number.isInteger(code) || code < 100 ? 'status-neutral' : code >= 500 ? 'status-error status-server'
+    : code >= 400 ? 'status-error status-client' : code >= 300 ? 'status-redirect' : code >= 200 ? 'status-ok' : 'status-neutral';
+  return {text: String(request.status), className, title: `HTTP status ${request.status}`};
+}
+
+// Bar geometry in percent of the scale, from recorded timestamps only. A
+// pending request runs to the end of the scale.
+function trafficWaterfall(request, scale) {
+  const first = request?.firstTimestamp, last = request?.lastTimestamp;
+  if (!scale || typeof first !== 'bigint' || typeof last !== 'bigint' || scale.end <= scale.start) return null;
+  const pending = request.time === 'pending';
+  const end = pending && scale.end > last ? scale.end : last;
+  const span = Number(scale.end - scale.start);
+  const at = value => Math.max(0, Math.min(100, Number(value - scale.start) * 100 / span));
+  const response = request.responseTimestamp;
+  const split = typeof response === 'bigint' && response >= first && response <= end ? response : null;
+  const left = at(first), right = at(end);
+  return {left, width: right - left, wait: (split === null ? right : at(split)) - left, pending,
+    outside: last < scale.start || first > scale.end, split};
+}
+
+function trafficWaterfallTitle(request, scale) {
+  const geometry = trafficWaterfall(request, scale);
+  if (!geometry) return 'No timestamps to place on the waterfall.';
+  const ms = nanoseconds => trafficTimeLabel(Number(nanoseconds) / 1e6);
+  const first = request.firstTimestamp, origin = scale.origin ?? scale.start;
+  const parts = [`Started ${first >= origin ? ms(first - origin) : `-${ms(origin - first)}`} after the first request`];
+  if (geometry.split !== null) parts.push(`to response start ${ms(geometry.split - first)}`, `response ${ms(request.lastTimestamp - geometry.split)}`);
+  parts.push(geometry.pending ? 'still pending' : `total ${ms(request.lastTimestamp - first)}`);
+  return `${parts.join(' · ')}${geometry.outside ? ' · outside the selected time range' : ''}`;
+}
+
 // One mounted block of at most 500 rows; spacers stand for the rest.
 const TRAFFIC_ROW_LIMIT = 500;
 const TRAFFIC_ROW_MARGIN = 100;
@@ -141,11 +251,17 @@ function trafficSortedRequests(requests, key = 'capture', direction = 1) {
   const value = request => key === 'name' ? trafficTargetParts(request).name
     : key === 'time' ? trafficTimeValue(request)
       : key === 'status' ? /^\d+$/.test(String(request.status)) ? Number(request.status) : null
-        : key === 'type' ? trafficTypeLabel(request.type) : request.method;
+        : key === 'type' ? trafficTypeLabel(request.type)
+          : key === 'size' ? Number.isSafeInteger(request.transferSize) ? request.transferSize : null
+            : key === 'start' ? typeof request.firstTimestamp === 'bigint' ? request.firstTimestamp : null
+              : key === 'initiator' ? trafficInitiatorLabel(request)
+                : key === 'protocol' ? request.protocol ?? null : request.method;
   // Precompute URL/type keys once; stable ties retain evidence order.
   return requests.map((request, index) => ({request, index, value: value(request)})).sort((a, b) => {
     if (a.value === null || b.value === null) return a.value === b.value ? a.index - b.index : a.value === null ? 1 : -1;
-    const comparison = typeof a.value === 'number' ? a.value - b.value : String(a.value).localeCompare(String(b.value));
+    const comparison = typeof a.value === 'number' ? a.value - b.value
+      : typeof a.value === 'bigint' ? (a.value < b.value ? -1 : a.value > b.value ? 1 : 0)
+        : String(a.value).localeCompare(String(b.value));
     return comparison * direction || a.index - b.index;
   }).map(entry => entry.request);
 }
@@ -180,7 +296,12 @@ function trafficIndexRequest(row, origin) {
     targetKind: row.target_kind, hostOnly: row.target_kind === 'host', failed: row.failed, interrupted: row.interrupted,
     tabId: row.tab_id, operation: row.operation, target: row.target, host: row.host, urlTruncated: row.url_truncated,
     targetLength: row.target_length, targetMalformed: row.target_malformed,
-    firstTimestamp: BigInt(row.first_time_ns), lastTimestamp: BigInt(row.last_time_ns), events: [], details: [], indexRow: row};
+    firstTimestamp: BigInt(row.first_time_ns), lastTimestamp: BigInt(row.last_time_ns),
+    transferSize: row.transfer_size, resourceSize: row.resource_size, fromCache: row.from_cache,
+    fromServiceWorker: row.from_service_worker, mimeType: row.mime_type, protocol: row.protocol,
+    responseTimestamp: row.response_time_ns === null ? null : BigInt(row.response_time_ns), errorCode: row.error_code,
+    loaderObserved: row.loader_observed, initiator: row.initiator, mainFrame: row.main_frame, browserInternal: row.browser_internal,
+    events: [], details: [], indexRow: row};
 }
 
 // Native request failures and the Failed row label are not queue drops.
@@ -216,8 +337,10 @@ function renderTrafficRowSelection(container, selectedId) {
 }
 
 // `requests` is the block from row `start` of `total`; a missing entry is not loaded yet.
-function renderTrafficRows(container, requests, {start = 0, total = requests.length, selectedId, newIds, onSelect, onKey, nameOf = () => null, pending = 'Loading…'}) {
+// `scale` ({start, end, origin} in nanoseconds) places the waterfall bars.
+function renderTrafficRows(container, requests, {start = 0, total = requests.length, selectedId, newIds, onSelect, onKey, nameOf = () => null, pending = 'Loading…', scale = null}) {
   requests = requests.slice(0, TRAFFIC_ROW_LIMIT);
+  const scaleKey = scale ? `${scale.start}:${scale.end}:${scale.origin ?? ''}` : null;
   const previousRows = new Map([...container.querySelectorAll('.request-row')].map(row => [row.dataset.requestId, row]));
   const focused = document.activeElement;
   const focusedId = container.contains(focused) ? focused.dataset.requestId : null;
@@ -246,8 +369,12 @@ function renderTrafficRows(container, requests, {start = 0, total = requests.len
       if (newIds.has(request.id) && (typeof matchMedia !== 'function' || !matchMedia('(prefers-reduced-motion: reduce)').matches)) row.classList.add('is-new');
     }
     const researcherName = nameOf(request);
+    const time = value => typeof value === 'bigint' ? String(value) : null;
     const key = JSON.stringify([request.path, request.method, request.status, request.time,
-      request.type, request.origin, request.hostOnly, request.failed, request.targetKind, request.operation, researcherName]);
+      request.type, request.origin, request.hostOnly, request.failed, request.targetKind, request.operation, researcherName,
+      request.transferSize, request.resourceSize, request.fromCache, request.fromServiceWorker, request.mimeType, request.protocol,
+      request.initiator, request.errorCode, request.loaderObserved, time(request.firstTimestamp), time(request.lastTimestamp),
+      time(request.responseTimestamp), scaleKey]);
     // Reuse the row itself on lifecycle changes, preserving focus and its single
     // arrival animation. Unchanged rows do not rebuild captured text children.
     if (row.dataset.renderKey !== key) {
@@ -256,25 +383,48 @@ function renderTrafficRows(container, requests, {start = 0, total = requests.len
       row.dataset.targetKind = request.targetKind ?? 'unknown';
       row.dataset.pending = String(request.status === 'pending' && !request.failed);
       const target = trafficTargetParts(request);
-      const name = trafficNode('span', 'request-name');
-      name.title = `${trafficOriginLabel(request)} · ${request.method} ${request.path}${request.urlTruncated ? '…' : ''} · network · ${request.operation ?? 'network'} · request ${request.id}${request.hostOnly ? ' · URL path and query not captured' : request.urlTruncated ? ` · path and query truncated from ${request.targetLength} bytes` : ''}`;
+      const cell = (column, className, text, title) => {
+        const node = trafficNode('span', className, text);
+        node.dataset.column = column;
+        if (title) node.title = title;
+        return node;
+      };
+      const url = `${request.path}${request.urlTruncated ? '…' : ''}`;
+      const name = cell('name', 'request-name', undefined, `${url}\n${trafficOriginLabel(request)} · ${request.method} · network · ${request.operation ?? 'network'} · request ${request.id}${request.hostOnly ? ' · URL path and query not captured' : request.urlTruncated ? ` · path and query truncated from ${request.targetLength} bytes` : ''}`);
       // A researcher name leads the cell; the captured path and host stay visible.
       if (researcherName) name.append(trafficNode('span', 'researcher-name', researcherName));
       name.append(trafficNode('span', 'request-resource', target.name),
         trafficNode('span', 'request-host', target.host));
-      const numericStatus = Number(request.status);
-      const status = trafficNode('span', request.failed || numericStatus >= 400 ? 'status-error'
-        : numericStatus >= 200 ? 'status-ok' : 'status-neutral', request.failed ? 'Failed' : request.status === 'pending' ? 'Pending' : String(request.status));
-      status.title = request.failed ? 'Request failed. Inspect the retained response state for details.'
-        : request.interrupted ? 'Native proxy observation ended; final network outcome is unavailable.'
-        : request.status === 'pending' ? (Number.isInteger(request.provisionalStatus)
-          ? `Still pending. Response extra info reported HTTP ${request.provisionalStatus}; that is not a finished response.`
-          : 'No terminal lifecycle event has been captured.') : `HTTP status ${request.status}`;
-      const type = trafficNode('span', 'request-type', trafficTableTypeLabel(request.type));
-      type.title = trafficTypeLabel(request.type);
-      row.replaceChildren(name, status, type,
-        trafficNode('span', 'request-method', request.method), trafficNode('span', 'request-time', trafficTimeLabel(request.time)));
-      row.setAttribute('aria-label', `${researcherName ? `${researcherName} (researcher name). ` : ''}${trafficOriginLabel(request)} ${request.hostOnly ? 'host-only metadata' : 'request'}: ${request.method} ${request.path}, ${status.textContent}, ${trafficTimeLabel(request.time)}, ${request.operation ?? 'network'}, request ${request.id}`);
+      const statusCell = trafficStatusCell(request);
+      const status = cell('status', statusCell.className, statusCell.text, statusCell.title);
+      const type = cell('type', 'request-type', trafficTableTypeLabel(request.type),
+        `${trafficTypeLabel(request.type)}${request.mimeType ? ` · ${request.mimeType}` : ''}`);
+      const protocol = cell('protocol', 'request-protocol', request.protocol ?? '—',
+        request.protocol ? `Negotiated protocol (ALPN): ${request.protocol}` : 'No negotiated protocol recorded.');
+      const initiatorLabel = trafficInitiatorLabel(request);
+      const initiator = cell('initiator', 'request-initiator', initiatorLabel ?? '—',
+        initiatorLabel ? TRAFFIC_INITIATOR_TITLES[request.initiator] : 'No versioned lifecycle record says who started this request.');
+      const sizeCell = trafficSizeCell(request);
+      const size = cell('size', 'request-size', undefined, sizeCell.title);
+      size.append(trafficNode('span', 'size-transfer', sizeCell.transfer));
+      if (sizeCell.resource) size.append(trafficNode('span', 'size-resource', sizeCell.resource));
+      const timeLabel = trafficTimeLabel(request.time);
+      const timeCell = cell('time', 'request-time', timeLabel,
+        request.time === 'pending' ? 'No terminal record yet.' : `${timeLabel} from the first to the last record.`);
+      const waterfall = cell('waterfall', 'request-waterfall', undefined, trafficWaterfallTitle(request, scale));
+      const geometry = trafficWaterfall(request, scale);
+      if (geometry && !geometry.outside) {
+        const bar = trafficNode('span', `waterfall-bar${geometry.pending ? ' is-pending' : ''}`);
+        bar.style.left = `${geometry.left}%`;
+        bar.style.width = `${geometry.width}%`;
+        const wait = trafficNode('span', 'waterfall-wait');
+        wait.style.width = `${geometry.width > 0 ? geometry.wait * 100 / geometry.width : 100}%`;
+        bar.append(wait);
+        waterfall.append(bar);
+      }
+      row.replaceChildren(name, status, type, cell('method', 'request-method', request.method, request.method),
+        protocol, initiator, size, timeCell, waterfall);
+      row.setAttribute('aria-label', `${researcherName ? `${researcherName} (researcher name). ` : ''}${trafficOriginLabel(request)} ${request.hostOnly ? 'host-only metadata' : 'request'}: ${request.method} ${request.path}, ${status.textContent}, ${sizeCell.transfer}, ${timeLabel}, ${request.operation ?? 'network'}, request ${request.id}`);
     }
     row.setAttribute('aria-selected', String(request.id === selectedId));
     // Stripes follow the row's place in the whole list, not in the block.

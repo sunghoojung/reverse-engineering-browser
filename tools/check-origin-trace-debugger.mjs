@@ -1009,9 +1009,15 @@ assert.match(details.textContent, /host only; path and query not captured/);
   assert.match(bodyDetails.textContent, /truncated; the original path and query are 412 bytes/);
   // Spread copies the other realm's object so prototypes compare equal.
   assert.deepEqual({...trafficUI.trafficTargetParts(live(null, {urlTruncated: true}))},
-    {name: "/checksiteconfig?v=1…", host: "api.hcaptcha.test"});
+    {name: "checksiteconfig?v=1…", host: "api.hcaptcha.test"});
   assert.deepEqual({...trafficUI.trafficTargetParts({path: "api.test/opaque", targetKind: "path", hostOnly: false})},
-    {name: "/opaque", host: "api.test"});
+    {name: "opaque", host: "api.test"});
+  // The name is the last segment plus the query; a root path is named by its host.
+  for (const [target, name, host] of [["/a/b/", "b/", "api.test"], ["/", "api.test", ""], ["/?q=1", "?q=1", "api.test"]]) {
+    assert.deepEqual({...trafficUI.trafficTargetParts({path: `https://api.test${target}`, target, host: "api.test", targetKind: "url"})}, {name, host});
+  }
+  assert.deepEqual({...trafficUI.trafficTargetParts({path: "fixture.invalid", hostOnly: true})}, {name: "fixture.invalid", host: ""},
+    "a host-only row has no host sublabel");
 }
 assert.equal(details.querySelector(".exchange-pane"), null, "No request/response panes for native rows");
 selectedTraffic = {...selectedTraffic, status: 404};

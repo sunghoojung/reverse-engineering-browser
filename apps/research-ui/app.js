@@ -2826,23 +2826,36 @@ invocationSitesPanel.refresh();
       }
 
       function trafficRequestFilterKey() {
+        const range = state.trafficRange;
         return JSON.stringify([state.requestTabId, state.requestDomain, state.requestType,
           elements.requestFilter.value.trim().toLowerCase(),
-          state.trafficSort, state.trafficSortDirection]);
+          state.trafficSort, state.trafficSortDirection, state.trafficFlags, range && `${range.from}:${range.to}`]);
       }
 
       // A null visible count is a query the request index has not answered yet.
-      function renderTrafficWindowStatus(visibleCount, totalCount, outside, note = '') {
-        const message = `${visibleCount === null ? '' : `${visibleCount.toLocaleString('en-US')} / `}${totalCount.toLocaleString('en-US')} requests${outside ? ' · Selection outside filter' : ''}${note ? ` · ${note}` : ''}`;
+      // `totals` are the matching requests' recorded sizes and the browser-internal rows hidden.
+      function renderTrafficWindowStatus(visibleCount, totalCount, outside, note = '', totals = null) {
+        const bytes = value => trafficBytesLabel(value).replace(' ', '\u00a0');
+        const sizes = totals ? ` · ${bytes(totals.sizes.transferred)} transferred · ${bytes(totals.sizes.resources)} resources` : '';
+        const hidden = totals?.hiddenInternal ? ` · ${totals.hiddenInternal.toLocaleString('en-US')} browser-internal hidden` : '';
+        const message = `${visibleCount === null ? '' : `${visibleCount.toLocaleString('en-US')} / `}${totalCount.toLocaleString('en-US')} requests${sizes}${hidden}${outside ? ' · Selection outside filter' : ''}${note ? ` · ${note}` : ''}`;
         const status = document.querySelector('#request-window-status');
         if (status.textContent !== message) status.textContent = message;
+      }
+
+      // The waterfall spans the selected time range, else the timeline of every matching start.
+      function trafficScale(timeline) {
+        if (!timeline || timeline.first === null) return null;
+        const range = state.trafficRange;
+        const [start, end] = range ? [range.from, range.to] : [timeline.first, timeline.last];
+        return {start, end: end > start ? end : start + 1n, origin: timeline.first};
       }
 
       function renderTrafficSortButtons() {
         document.querySelectorAll('[data-request-sort]').forEach(button => {
           const active = button.dataset.requestSort === state.trafficSort;
           button.setAttribute('aria-pressed', String(active));
-          button.setAttribute('aria-label', `${button.dataset.requestSort}: ${active ? state.trafficSortDirection === 1 ? 'ascending' : 'descending' : 'not sorted'}. Activate to sort.`);
+          button.setAttribute('aria-label', `${button.dataset.column ?? button.dataset.requestSort}: ${active ? state.trafficSortDirection === 1 ? 'ascending' : 'descending' : 'not sorted'}. Activate to sort.`);
           button.querySelector('span').textContent = active ? state.trafficSortDirection === 1 ? ' ↑' : ' ↓' : '';
         });
       }
@@ -2882,7 +2895,7 @@ invocationSitesPanel.refresh();
             previous.start === state.trafficWindowStart && previous.anchor === state.trafficWindowAnchor &&
             (!previous.mounted || previous.mounted.has(state.selectedRequestId))) {
           renderTrafficRowSelection(elements.requestRows, state.selectedRequestId);
-          renderTrafficWindowStatus(previous.visibleCount, previous.totalCount, previous.outside(state.selectedRequestId), previous.note);
+          renderTrafficWindowStatus(previous.visibleCount, previous.totalCount, previous.outside(state.selectedRequestId), previous.note, previous.totals);
           return;
         }
         state.trafficRenderedView = null;
@@ -2891,7 +2904,7 @@ invocationSitesPanel.refresh();
           return;
         }
         renderRequestScopes();
-        const needle = elements.requestFilter.value.trim().toLowerCase();
+        const filter = trafficParseFilter(elements.requestFilter.value);
         const scoped = state.requests.filter(request =>
           (state.requestTabId === 'all' ||
             (request.tabId && request.tabId !== '0' ? request.tabId : 'unattributed') === state.requestTabId) &&
@@ -2901,9 +2914,12 @@ invocationSitesPanel.refresh();
         // Researcher names are searchable too; captured fields stay as recorded.
         const names = globalThis.RebEvidenceNames?.controller?.() ?? null;
         const nameOf = names?.has('captured-request') ? request => names.nameFor('request', request) : () => null;
-        const search = trafficSearchRequests(scoped, needle, nameOf);
-        state.trafficSearchMatches = search.matches;
-        const visible = trafficSortedRequests(scoped.filter(request => search.matches.has(request.id)), state.trafficSort, state.trafficSortDirection);
+        const search = trafficSearchRequests(scoped, filter.text, nameOf);
+        const filtered = trafficApplyFilter(scoped, search.matches, filter, {flags: state.trafficFlags, range: state.trafficRange, all: state.requests});
+        state.trafficSearchMatches = filtered.matches;
+        const visible = trafficSortedRequests(scoped.filter(request => filtered.matches.has(request.id)), state.trafficSort, state.trafficSortDirection);
+        const totals = {sizes: filtered.sizes, hiddenInternal: filtered.hiddenInternal};
+        state.trafficOverview?.render(filtered.timeline, state.trafficRange);
         const filterKey = trafficRequestFilterKey();
         const filterChanged = filterKey !== state.trafficFilterKey;
         if (filterChanged) {
@@ -2930,9 +2946,9 @@ invocationSitesPanel.refresh();
         state.trafficWindowAnchor = window.rows[0]?.id ?? null;
         const outside = id => id !== null && !state.trafficSearchMatches.has(id);
         const note = state.trafficIndex?.error() ? 'request index unavailable; newest window shown' : 'newest window';
-        renderTrafficWindowStatus(visible.length, state.requests.length, outside(state.selectedRequestId), note);
+        renderTrafficWindowStatus(visible.length, state.requests.length, outside(state.selectedRequestId), note, totals);
         const renderedView = {requests: state.requests, retainedCount: state.requests.length, filterKey, start: window.start, anchor: state.trafficWindowAnchor,
-          answer: undefined, visibleCount: visible.length, totalCount: state.requests.length, outside, note, mounted: null};
+          answer: undefined, visibleCount: visible.length, totalCount: state.requests.length, outside, note, totals, mounted: null};
         renderTrafficSortButtons();
         elements.requestRows.setAttribute('role', 'listbox');
         if (visible.length === 0) {
@@ -2950,7 +2966,8 @@ invocationSitesPanel.refresh();
         }
         renderTrafficRows(elements.requestRows, window.rows, {
           start: window.start, total: visible.length, selectedId: state.selectedRequestId, newIds,
-          onSelect: id => { selectRequest(id); focusRequestRow(id); }, onKey: moveRequestSelection, nameOf
+          onSelect: id => { selectRequest(id); focusRequestRow(id); }, onKey: moveRequestSelection, nameOf,
+          scale: trafficScale(filtered.timeline)
         });
         state.trafficPendingCount = state.trafficNewIds.size;
         renderTrafficLatest();
@@ -3021,9 +3038,10 @@ invocationSitesPanel.refresh();
         }
         state.trafficFilterKey = filterKey;
         const names = globalThis.RebEvidenceNames?.controller?.() ?? null;
-        const needle = elements.requestFilter.value.trim().toLowerCase();
-        const query = trafficIndexParameters({sort: state.trafficSort, direction: state.trafficSortDirection, needle,
-          tabId: state.requestTabId, domain: state.requestDomain, type: state.requestType, named: trafficNamedRoots(names, needle, origin)});
+        const filter = trafficParseFilter(elements.requestFilter.value);
+        const query = trafficIndexParameters({sort: state.trafficSort, direction: state.trafficSortDirection, needle: filter.needle,
+          tabId: state.requestTabId, domain: state.requestDomain, type: state.requestType, named: trafficNamedRoots(names, filter.text, origin),
+          flags: state.trafficFlags, range: state.trafficRange});
         const covering = candidate => candidate?.query === query && candidate.origin === origin ? candidate : null;
         const known = covering(answer)?.document.matching ?? 0;
         const start = trafficBlockStart(container, known, state.trafficWindowStart);
@@ -3056,16 +3074,20 @@ invocationSitesPanel.refresh();
         const located = page.located ?? {};
         const outside = id => id !== null && !mounted.has(id) && Object.hasOwn(located, id) && located[id] === null;
         const note = trafficIndexNote(page, index.error());
-        renderTrafficWindowStatus(matching, page.total, outside(state.selectedRequestId), note);
+        const totals = {sizes: page.sizes, hiddenInternal: page.hidden_internal};
+        const timeline = {first: page.timeline.first_time_ns === null ? null : BigInt(page.timeline.first_time_ns),
+          last: page.timeline.last_time_ns === null ? null : BigInt(page.timeline.last_time_ns), buckets: page.timeline.buckets};
+        state.trafficOverview?.render(timeline, state.trafficRange);
+        renderTrafficWindowStatus(matching, page.total, outside(state.selectedRequestId), note, totals);
         renderTrafficLatest();
         renderRequestCount(matching, page.total, 'session');
         if (matching === 0) renderTrafficEmpty(trafficEmptyText(page.total));
         else renderTrafficRows(container, rows, {start, total: matching, selectedId: state.selectedRequestId, newIds,
           onSelect: selectTrafficRow, onKey: moveRequestSelection, nameOf: trafficNameOf(names),
-          pending: index.error() ? 'Not loaded: the request index is unavailable' : 'Loading…'});
+          pending: index.error() ? 'Not loaded: the request index is unavailable' : 'Loading…', scale: trafficScale(timeline)});
         state.trafficWindowAnchor = rows.find(Boolean)?.id ?? null;
         state.trafficRenderedView = {requests: state.requests, retainedCount: state.requests.length, filterKey, start,
-          anchor: state.trafficWindowAnchor, answer: current, visibleCount: matching, totalCount: page.total, outside, note, mounted};
+          anchor: state.trafficWindowAnchor, answer: current, visibleCount: matching, totalCount: page.total, outside, note, totals, mounted};
         // A loaded selection that gained records is read again, once per count.
         const selected = state.selectedRequestId !== null ? current.rows.find(row => row.id === state.selectedRequestId) : null;
         const loaded = selected && state.trafficLoaded.get(selected.id);
@@ -8347,6 +8369,11 @@ invocationSitesPanel.refresh();
         document.querySelectorAll('.type-filter').forEach(candidate => candidate.setAttribute('aria-pressed', String(candidate === button)));
         renderRequests();
       }));
+      document.querySelectorAll('.request-flag').forEach(button => button.addEventListener('click', () => {
+        state.trafficFlags = {...state.trafficFlags, [button.dataset.flag]: !state.trafficFlags[button.dataset.flag]};
+        button.setAttribute('aria-pressed', String(state.trafficFlags[button.dataset.flag]));
+        renderRequests();
+      }));
       document.querySelectorAll('.field-tab').forEach(button => button.addEventListener('click', () => {
         state.fieldTab = button.dataset.fieldTab;
         state.selectedField = fieldSets[state.fieldTab].find(field => field.traceable) || null;
@@ -8980,8 +9007,9 @@ invocationSitesPanel.refresh();
         let requestItems = {requests: null, items: []};
         const requests = {id: 'requests', group: 'Requests', search: () => {
           if (requestItems.requests !== state.requests) requestItems = {requests: state.requests, items: state.requests.map(request => {
-            const {name, host} = trafficTargetParts(request), id = request.id, identity = investigationRequestIdentity(request);
-            return {title: `${request.method} ${request.hostOnly ? name : `${host}${name}`}`,
+            const id = request.id, identity = investigationRequestIdentity(request);
+            // The host and full captured path, without the scheme.
+            return {title: `${request.method} ${String(request.path ?? '').trim().replace(/^[a-z][a-z0-9+.-]*:\/\//i, '')}${request.urlTruncated ? '…' : ''}`,
               detail: [request.status, trafficTypeLabel(request.type), request.hostOnly ? 'host only' : '',
                 identity ? `request ${identity.request} · session ${identity.session} · process ${identity.process} · sequence ${identity.sequence}` : 'no exact retained identity'].filter(Boolean).join(' · '),
               run: () => openPaletteRequest(id, identity)};
@@ -9194,6 +9222,12 @@ invocationSitesPanel.refresh();
 
       state.trafficIndex = location.protocol === 'file:' || typeof createTrafficIndex !== 'function' ? null
         : createTrafficIndex({onChange: () => { renderRequests(); renderNetworkNotice(); }});
+      if (typeof mountTrafficColumns === 'function') mountTrafficColumns(document.querySelector('#screen-traffic .request-table'));
+      state.trafficOverview = typeof mountTrafficOverview === 'function'
+        ? mountTrafficOverview(document.querySelector('#request-overview'), {onRange: range => {
+          state.trafficRange = range;
+          renderRequests();
+        }}) : null;
       renderRequests();
       renderInspector();
       renderEvidence();

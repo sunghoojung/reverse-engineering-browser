@@ -4,13 +4,20 @@ const TRAFFIC_INDEX_DEADLINE_MS = 10000;
 const TRAFFIC_DETAIL_PAGE = 200;
 const TRAFFIC_DETAIL_PAGES = 16;
 
-function trafficIndexParameters({sort, direction, needle, tabId, domain, type, named}) {
+function trafficIndexParameters({sort, direction, needle, tabId, domain, type, named, flags = {}, range = null}) {
   const parameters = new URLSearchParams({sort, order: direction < 0 ? 'desc' : 'asc'});
   if (needle) parameters.set('q', needle);
   if (tabId !== 'all') parameters.set('tab_id', tabId);
   if (domain !== 'all') parameters.set('domain', domain);
   if (type !== 'all') parameters.set('type', type);
   if (named.length) parameters.set('named', named.join(','));
+  for (const [flag, key] of [['failed', 'failed'], ['invert', 'invert'], ['hideInternal', 'hide_internal'], ['thirdParty', 'third_party']]) {
+    if (flags[flag]) parameters.set(key, '1');
+  }
+  if (range) {
+    parameters.set('from_ns', String(range.from));
+    parameters.set('to_ns', String(range.to));
+  }
   return parameters.toString();
 }
 

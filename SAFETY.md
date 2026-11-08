@@ -85,7 +85,8 @@ it.
   with `REB_CAPTURE_REQUEST_CONTENT=1`, which the packaged app's default content
   mode sets, at most 16 MiB per body and 256 MiB of unique body and full-URL
   bytes per session unless `REB_REQUEST_CONTENT_BUDGET_MIB` sets another
-  budget. See [Native network v2](protocol/native-network-v2.md). The same
+  budget. Those bytes include uploaded files, blobs and stream bodies, which the
+  browser reads for that purpose. See [Native network v2](protocol/native-network-v2.md). The same
   sessions retain response bodies, at most 16 MiB each and 512 MiB of unique
   bytes unless `REB_RESPONSE_BODY_BUDGET_MIB` sets another budget; images,
   audio, video and fonts that page elements load need

@@ -335,6 +335,9 @@ def valid_script_identity(event: dict, payload: bytes) -> bool:
     return 0 < length <= 16 * 1024 * 1024 and any(digest)
 
 
+RESPONSE_CAPTURE_BYTES = 16 * 1024 * 1024
+
+
 def valid_request_body(event: dict, payload: bytes) -> bool:
     """Every state rule of the request_body payload, mirrored from the C++ core."""
     if not valid_request_child(event, payload):
@@ -347,7 +350,7 @@ def valid_request_body(event: dict, payload: bytes) -> bool:
     content, has_digest, size_limit = bool(flags & 1), bool(flags & 2), bool(flags & 4)
     partial, type_present, type_omitted = bool(flags & 8), bool(flags & 16), bool(flags & 32)
     media = content_type[:type_length]
-    if (kind > 6 or not 1 <= state <= 11 or flags & ~0x3F or any(payload[28:32])
+    if (kind > 6 or not 1 <= state <= 12 or flags & ~0x7F or any(payload[28:32])
             or type_length > 64 or (type_present and type_omitted)
             or type_present != (type_length != 0) or any(content_type[type_length:])
             or (type_present and (media.count(b"/") != 1 or media.startswith(b"/")
@@ -356,6 +359,27 @@ def valid_request_body(event: dict, payload: bytes) -> bool:
             or captured > body_length):
         return False
     is_bytes, is_none = kind == 1, kind == 0
+    readable = kind in (2, 3, 4, 5)
+    if flags & 64:
+        # A body whose file, blob or stream parts the browser read (native-network-v3.md).
+        exact, retained = state in (2, 4, 5), state in (4, 5)
+        if (not content or not readable or partial == exact
+                or (event["artifact_id"] != "0") != retained or (not retained and captured)
+                or has_digest != any(digest) or (kind == 5 and elements < 2)
+                or (kind == 4 and elements != 1)):
+            return False
+        return {
+            2: has_digest and not size_limit and body_length == 0,
+            4: has_digest and not size_limit and 0 < body_length <= RESPONSE_CAPTURE_BYTES
+            and captured == body_length,
+            5: not has_digest and size_limit and body_length > RESPONSE_CAPTURE_BYTES
+            and captured == RESPONSE_CAPTURE_BYTES,
+            8: not has_digest and not size_limit,
+            10: not has_digest and not size_limit,
+            12: not has_digest and not size_limit,
+        }.get(state, False)
+    if state == 12:
+        return False
     if ((has_digest and (not is_bytes or size_limit or body_length > REQUEST_DIGEST_LIMIT))
             or (not has_digest and any(digest))
             or (size_limit and (not is_bytes or body_length <= REQUEST_DIGEST_LIMIT))
@@ -375,15 +399,12 @@ def valid_request_body(event: dict, payload: bytes) -> bool:
         4: content and is_bytes and body_length != 0 and captured == body_length,
         5: content and is_bytes and 0 < captured < body_length,
         6: content and not is_none and not is_bytes,
-        7: content and is_bytes and body_length != 0,
-        8: content and is_bytes and body_length != 0,
-        9: content and is_bytes and body_length != 0,
-        10: content and is_bytes and body_length != 0,
+        7: content and ((is_bytes and body_length != 0) or readable),
+        8: content and ((is_bytes and body_length != 0) or readable),
+        9: content and ((is_bytes and body_length != 0) or readable),
+        10: content and ((is_bytes and body_length != 0) or readable),
         11: True,
     }[state]
-
-
-RESPONSE_CAPTURE_BYTES = 16 * 1024 * 1024
 
 
 def valid_response_body(event: dict, payload: bytes) -> bool:

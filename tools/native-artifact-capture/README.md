@@ -66,10 +66,16 @@ above `2^53`, exercising decimal-string identity preservation through JSON and U
 Additional component assertions cover old body and old ACK completion after
 same-session and different-session emitter reconfiguration, disable/re-enable,
 expiry, disabled/category/disconnected admission, an invalid body, unknown MIME,
-declared size and metadata limits, the 32 MiB in-flight pool (40 parallel bodies
-of unknown length, growth without slack, full-pool and growth refusals, shares
-held until the transfer is dropped), tee and enqueue failure, incomplete bodies, generated/runtime input validation,
-real receiver rejection and duplicate/unknown ACKs.
+declared size and metadata limits, the 32 MiB in-flight pool (40 parallel
+streams, one chunk held per open body once its frames are written, declared
+lengths reserving nothing, full-pool refusal, stale abort), tee, open and data
+frame refusal, incomplete bodies, generated/runtime input validation, real
+receiver rejection and duplicate/unknown ACKs.
+
+Bodies stream as version 2 frames. The socket adapter keeps each stream's
+frames, with their pool shares, until a test delivers them, and replays them
+byte for byte to the production receiver; an ended stream also reads as one
+assembled transfer.
 
 `manifest.json` identifies `session_dir` and cases with exact request selection
 objects and `expected_artifact_ids`. `events.bin`, `artifacts.bin`, and `acks.bin`
@@ -92,6 +98,14 @@ a metadata-only session, a receiver started without `--allow-sensitive`, a
 session without the Artifact category, 5,000 bodies within a byte budget, digest
 dedupe, a 16 MiB prefix, the shared pool, changed and refused copies, and every
 target retention state.
+
+Read request bodies (native-network-v3.md, Request body reads): a multipart
+upload with a file and a stream-body `fetch` are read through a scripted
+reader that feeds the real stream, recorded when the read ends and retained by
+the production receiver and broker with exact bytes and digest, created by
+their deferred record. Component cases cover the 16 MiB prefix, the budget
+allowance and refund, a stuck pool, incomplete and empty reads, capture end, a
+missing hook, refusals and receiver refusal.
 
 Response bodies (protocol/native-network-v3.md): the unchanged network sink,
 artifact sink and `native_response_body_capture.cc` in a content session tee
@@ -121,7 +135,9 @@ replay above does not:
 - The production receiver in socket mode, over a raw AF_UNIX client. A valid
   rejected frame larger than the socket buffers is discarded and answered on the
   same connection. An invalid header, a session mismatch and a body past the
-  discard bound close it.
+  discard bound close it. Interleaved version 2 streams publish a checkpoint and
+  an end with exact digests, refused stream frames keep the connection, and a
+  stream open at disconnect is abandoned.
 - The production receiver restarted on a store whose final manifest record was
   interrupted. The record is cut back with a stderr note and capture resumes.
 - `tools/native-artifact-transport`, which compiles the unchanged production
@@ -129,8 +145,9 @@ replay above does not:
   `native_local_ipc_client.cc` against narrow base adapters with real threads,
   locks and task queues. The probe session and capture sinks are recording
   doubles. It drives the artifact writer against the production receiver
-  through sensitive, oversize and duplicate rejections on one connection and
-  then a vanished receiver. It also uses a scripted older receiver that rejects
+  through sensitive, oversize and duplicate rejections on one connection,
+  interleaved streams with a refusal reported once and a silent abort, and then
+  a vanished receiver that loses an open stream. It also uses a scripted older receiver that rejects
   before reading the body or closes after a rejection, and stops the writer
   during a reconnect. It drives the broker writer through a refused session, an
   overflowing mixed queue whose drops must all be counted by browser-sequenced
@@ -143,10 +160,12 @@ Commit rollback and the receiver's failed-store state are covered in
 ## Deliberate limits
 
 Chromium process/thread/time/profile types and the browser sequence allocator
-are minimal adapters. The Mojo adapter feeds the real capture buffer in 64 KiB
+are minimal adapters. The Mojo adapter feeds the real artifact stream in 64 KiB
 chunks and schedules the real sink's body callback but does not test data-pipe
 forwarding, backpressure, watches, or Chromium task execution. The thread-pool
-adapter holds background copies until a test runs them. The artifact socket enqueue adapter allows deterministic delayed,
+adapter holds background copies until a test runs them. The request body
+reader's Mojo and file glue is replaced by a scripted reader; it compiles only
+in a Brave build. The artifact socket enqueue adapter allows deterministic delayed,
 missing, reordered, and rejected transfers; the production socket writer's
 queue, thread and reconnect behavior is covered by the transport stage instead.
 Only the receiver return status creates an ACK in the normal success and

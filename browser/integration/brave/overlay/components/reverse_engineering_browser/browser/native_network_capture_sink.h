@@ -25,6 +25,7 @@
 #include "brave/components/reverse_engineering_browser/common/native_network_cookies.h"
 #include "brave/components/reverse_engineering_browser/common/native_network_headers.h"
 #include "brave/components/reverse_engineering_browser/common/native_network_headers_hook.h"
+#include "brave/components/reverse_engineering_browser/common/native_network_request.h"
 #include "brave/components/reverse_engineering_browser/common/native_probe_event.h"
 #include "brave/components/reverse_engineering_browser/common/native_tab_link.h"
 
@@ -48,6 +49,8 @@ class URLResponseHead;
 }  // namespace network
 
 namespace reb {
+
+struct NativeRequestBodyReadOutcome;
 
 // Browser-process observation boundary for Brave's existing URL loader factory
 // and client proxies. Registering an emitter explicitly enables capture for one
@@ -88,6 +91,11 @@ class NativeNetworkCaptureSink final {
   // DevTools ID gets `reb-<request_id>`, so the network service reports the
   // headers it sends (protocol/native-network-v3.md). No request byte changes.
   void AssignNetworkHeadersId(std::uint64_t request_id, network::ResourceRequest& request) noexcept;
+  // Content sessions only, right after AssignNetworkHeadersId: reads a body
+  // with file, blob or stream parts, whose request_body record then follows
+  // when the read ends (protocol/native-network-v3.md). Only a stream part's
+  // getter changes, to one that forwards every byte unchanged.
+  void TeeRequestBody(std::uint64_t request_id, network::ResourceRequest& request) noexcept;
   void RecordRequestRedirected(std::uint64_t request_id,
                                std::int32_t initiator_request_id,
                                std::uint32_t initiator_process_id,
@@ -135,6 +143,21 @@ class NativeNetworkCaptureSink final {
                        const NativeProbeHeader& parent,
                        const network::ResourceRequest& request,
                        bool capture_content) noexcept;
+
+  // A body record waiting for its read.
+  struct DeferredBody final {
+    NativeProbeHeader parent{};
+    NativeRequestBodySummary summary;
+    std::string url;
+    std::string mime_type;
+  };
+  void EmitDeferredBody(NativeProbeEmitter emitter,
+                        const DeferredBody& body,
+                        NativeRequestBodyState state) noexcept;
+  // The read's recorder: emits the body record and returns its sequence.
+  std::uint64_t RecordBodyRead(std::uint64_t generation,
+                               std::uint64_t read_id,
+                               const NativeRequestBodyReadOutcome& outcome) noexcept;
 
   // One hop of a tracked request: its start record and URL.
   struct HeaderHop final {
@@ -195,6 +218,11 @@ class NativeNetworkCaptureSink final {
   // Hashed DevTools IDs of the newest finished requests, so a late block for one is counted.
   std::array<std::size_t, 256> finished_devtools_ids_{};
   std::size_t finished_devtools_next_ = 0;
+  // UI sequence. The latest start's unread body, until TeeRequestBody takes it,
+  // and the bodies being read.
+  std::optional<DeferredBody> unread_body_;
+  std::map<std::uint64_t, DeferredBody> reading_bodies_;
+  std::uint64_t next_read_id_ = 1;
 };
 
 }  // namespace reb

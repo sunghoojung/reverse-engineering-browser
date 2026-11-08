@@ -441,7 +441,8 @@ void RequestContent() {
          body.state == static_cast<std::uint8_t>(State::kCaptured) &&
          body.captured_length == five.size() && artifacts.calls.back().content == five);
 
-  // File, blob, stream, unknown and mixed bodies are named, never read.
+  // File, blob, stream and mixed bodies are read once the hook hands the
+  // request over; the record follows the read. An unknown part is named, not read.
   const auto calls = artifacts.Count(reb::NativeArtifactKind::kRequestBody);
   const auto kind_case = [&](network::DataElement first, Kind kind, bool with_bytes) {
     auto element_body = std::make_shared<network::ResourceRequestBody>();
@@ -451,12 +452,40 @@ void RequestContent() {
     element_body->elements_mutable()->push_back(std::move(first));
     request.request_body = element_body;
     events.clear();
+    artifacts.read_calls.clear();
     start();
-    const auto value = Body(Last(reb::NativeProbeType::kRequestBody));
-    assert(AllValid() && value.kind == static_cast<std::uint8_t>(kind) &&
-           value.state == static_cast<std::uint8_t>(State::kNotCapturedBodyKind) &&
-           (value.flags & reb::kRequestBodyLengthPartial) != 0 &&
-           value.body_length == (with_bytes ? 3U : 0U));
+    if (kind == Kind::kUnknown) {
+      const auto value = Body(Last(reb::NativeProbeType::kRequestBody));
+      assert(AllValid() && value.state == static_cast<std::uint8_t>(State::kNotCapturedBodyKind) &&
+             (value.flags & reb::kRequestBodyLengthPartial) != 0);
+      return;
+    }
+    assert(std::none_of(events.begin(), events.end(), [](const auto& event) {
+      return event.header.type == reb::NativeProbeType::kRequestBody;
+    }));
+    sink.TeeRequestBody(172, request);
+    assert(artifacts.read_calls.size() == 1 && artifacts.read_calls[0].request_id == 172 &&
+           artifacts.read_calls[0].url ==
+               "https://api.hcaptcha.test:8443/checkcaptcha/site/" + key &&
+           artifacts.read_calls[0].mime_type == "text/plain");
+    reb::NativeRequestBodyReadOutcome outcome;
+    outcome.state = reb::NativeRequestBodyState::kCaptured;
+    outcome.artifact_id = 960;
+    outcome.body_length = 4096;
+    outcome.captured_length = 4096;
+    outcome.sha256.fill(0x5a);
+    const auto creator = std::move(artifacts.read_calls[0].record).Run(outcome);
+    const auto& record = Last(reb::NativeProbeType::kRequestBody);
+    const auto value = Body(record);
+    assert(AllValid() && creator == record.header.sequence_number &&
+           record.header.artifact_id == 960 &&
+           record.header.parent_event_id ==
+               Last(reb::NativeProbeType::kRequestStarted).header.sequence_number &&
+           value.kind == static_cast<std::uint8_t>(kind) &&
+           value.state == static_cast<std::uint8_t>(State::kCaptured) &&
+           (value.flags & reb::kRequestBodyRead) != 0 &&
+           (value.flags & reb::kRequestBodyLengthPartial) == 0 &&
+           (value.flags & reb::kRequestBodyDigestPresent) != 0 && value.body_length == 4096);
   };
   kind_case(network::DataElement(network::DataElementFile{}), Kind::kFile, false);
   kind_case(network::DataElement(network::DataElementDataPipe{}), Kind::kDataPipe, false);
@@ -465,6 +494,36 @@ void RequestContent() {
   kind_case(network::DataElement(), Kind::kUnknown, false);
   kind_case(network::DataElement(network::DataElementFile{}), Kind::kMixed, true);
   assert(artifacts.Count(reb::NativeArtifactKind::kRequestBody) == calls);
+  // A read the artifact sink refuses at the hook is recorded at once, unread.
+  request.request_body = std::make_shared<network::ResourceRequestBody>();
+  request.request_body->elements_mutable()->emplace_back(network::DataElementFile{});
+  for (const auto [admission, state] :
+       {std::pair{reb::NativeRequestContentAdmission::kSessionBudget,
+                  State::kNotCapturedSessionBudget},
+        std::pair{reb::NativeRequestContentAdmission::kRefused, State::kNotCapturedTransferRefused},
+        std::pair{reb::NativeRequestContentAdmission::kUnavailable,
+                  State::kNotCapturedArtifactUnavailable}}) {
+    artifacts.read_admission = admission;
+    events.clear();
+    start();
+    sink.TeeRequestBody(172, request);
+    const auto value = Body(Last(reb::NativeProbeType::kRequestBody));
+    assert(AllValid() && value.state == static_cast<std::uint8_t>(state) &&
+           (value.flags & reb::kRequestBodyRead) == 0 &&
+           (value.flags & reb::kRequestBodyLengthPartial) != 0);
+  }
+  artifacts.read_admission = reb::NativeRequestContentAdmission::kQueued;
+  // A read still running at capture end is recorded incomplete; its late result is dropped.
+  events.clear();
+  artifacts.read_calls.clear();
+  start();
+  sink.TeeRequestBody(172, request);
+  sink.SetEmitter(Emit, 22, mask, 200, true);
+  const auto flushed = Body(Last(reb::NativeProbeType::kRequestBody));
+  assert(AllValid() &&
+         flushed.state == static_cast<std::uint8_t>(State::kNotCapturedReadIncomplete) &&
+         (flushed.flags & reb::kRequestBodyRead) != 0);
+  assert(std::move(artifacts.read_calls[0].record).Run({}) == 0);
 
   // Password form posts keep neither bytes nor a digest.
   request.request_body = BytesBody({Bytes("user=a&password=b")});

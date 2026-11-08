@@ -18,6 +18,8 @@ inline constexpr std::uint16_t kRequestTargetPayloadVersion = 2;
 inline constexpr std::size_t kRequestTargetPrefixBytes = 116;
 inline constexpr std::size_t kRequestContentTypeBytes = 64;
 inline constexpr std::uint64_t kRequestBodyDigestBytes = 4ULL * 1024ULL * 1024ULL;
+// The artifact cap: a read body keeps at most this prefix.
+inline constexpr std::uint64_t kRequestBodyReadBytes = 16ULL * 1024ULL * 1024ULL;
 
 enum class RequestBodyKind : std::uint8_t {
   kNone = 0,
@@ -41,6 +43,7 @@ enum class RequestBodyState : std::uint8_t {
   kNotCapturedUrl = 9,
   kNotCapturedSessionBudget = 10,
   kNotCapturedCredentialForm = 11,
+  kNotCapturedReadIncomplete = 12,
 };
 
 inline constexpr std::uint8_t kRequestBodyContentCapture = 1U << 0U;
@@ -49,7 +52,9 @@ inline constexpr std::uint8_t kRequestBodyDigestSizeLimit = 1U << 2U;
 inline constexpr std::uint8_t kRequestBodyLengthPartial = 1U << 3U;
 inline constexpr std::uint8_t kRequestBodyContentTypePresent = 1U << 4U;
 inline constexpr std::uint8_t kRequestBodyContentTypeOmitted = 1U << 5U;
-inline constexpr std::uint8_t kRequestBodyKnownFlags = 0x3FU;
+// native-network-v3.md: the browser read the file, blob or stream parts.
+inline constexpr std::uint8_t kRequestBodyRead = 1U << 6U;
+inline constexpr std::uint8_t kRequestBodyKnownFlags = 0x7FU;
 
 enum class RequestTargetRetention : std::uint8_t {
   kComplete = 0,
@@ -203,7 +208,7 @@ namespace request_detail {
   if (value.protocol_version != kRequestPayloadVersion || value.payload_size != 128 ||
       value.reserved0 != 0 || value.kind > static_cast<std::uint8_t>(RequestBodyKind::kUnknown) ||
       value.state < static_cast<std::uint8_t>(kNoBody) ||
-      value.state > static_cast<std::uint8_t>(kNotCapturedCredentialForm) ||
+      value.state > static_cast<std::uint8_t>(kNotCapturedReadIncomplete) ||
       (value.flags & ~kRequestBodyKnownFlags) != 0 ||
       value.content_type_length > kRequestContentTypeBytes || (type_present && type_omitted) ||
       type_present != (value.content_type_length != 0) ||
@@ -215,6 +220,40 @@ namespace request_detail {
   }
   const bool bytes = kind == RequestBodyKind::kBytes;
   const bool none = kind == RequestBodyKind::kNone;
+  const bool readable = !none && !bytes && kind != RequestBodyKind::kUnknown;
+  const bool zero_digest =
+      std::all_of(value.sha256.begin(), value.sha256.end(), [](std::uint8_t b) { return b == 0; });
+  if ((value.flags & kRequestBodyRead) != 0) {
+    // A read body: lengths are exact when it ended whole, a lower bound otherwise.
+    const bool exact = state == kEmpty || state == kCaptured || state == kCapturedTruncated;
+    const bool retained = state == kCaptured || state == kCapturedTruncated;
+    if (!content || !readable || partial == exact || has_artifact != retained ||
+        (!retained && value.captured_length != 0) || digest == zero_digest ||
+        (kind == RequestBodyKind::kMixed && value.element_count < 2) ||
+        (kind == RequestBodyKind::kChunkedDataPipe && value.element_count != 1)) {
+      return false;
+    }
+    switch (state) {
+      case kEmpty:
+        return digest && !size_limit && value.body_length == 0;
+      case kCaptured:
+        return digest && !size_limit && value.body_length != 0 &&
+               value.body_length <= kRequestBodyReadBytes &&
+               value.captured_length == value.body_length;
+      case kCapturedTruncated:
+        return !digest && size_limit && value.body_length > kRequestBodyReadBytes &&
+               value.captured_length == kRequestBodyReadBytes;
+      case kNotCapturedTransferRefused:
+      case kNotCapturedSessionBudget:
+      case kNotCapturedReadIncomplete:
+        return !digest && !size_limit;
+      default:
+        return false;
+    }
+  }
+  if (state == kNotCapturedReadIncomplete) {
+    return false;
+  }
   if ((digest && (!bytes || size_limit || value.body_length > kRequestBodyDigestBytes)) ||
       (!digest && !std::all_of(value.sha256.begin(), value.sha256.end(),
                                [](std::uint8_t b) { return b == 0; })) ||
@@ -251,7 +290,10 @@ namespace request_detail {
     case kNotCapturedTransferRefused:
     case kNotCapturedUrl:
     case kNotCapturedSessionBudget:
-      return content && bytes && value.body_length != 0;
+      // A body with file, blob or stream parts is refused before any read.
+      return content && ((bytes && value.body_length != 0) || readable);
+    case kNotCapturedReadIncomplete:
+      return false;
   }
   return false;
 }

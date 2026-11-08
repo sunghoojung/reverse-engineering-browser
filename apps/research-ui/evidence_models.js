@@ -607,7 +607,8 @@
       const requestBodyKinds = ['none', 'bytes', 'file', 'data_pipe', 'chunked_data_pipe', 'mixed', 'unknown'];
       const requestBodyStates = [null, 'no_body', 'empty', 'metadata_only', 'captured', 'captured_truncated',
         'not_captured_body_kind', 'not_captured_artifact_unavailable', 'not_captured_transfer_refused',
-        'not_captured_url', 'not_captured_session_budget', 'not_captured_credential_form'];
+        'not_captured_url', 'not_captured_session_budget', 'not_captured_credential_form',
+        'not_captured_read_incomplete'];
       const requestTokenCharacters = /^[a-z0-9!#$%&'*+.^_`|~-]+\/[a-z0-9!#$%&'*+.^_`|~-]+$/;
 
       // Every rule of the request_body payload, shared with the C++ core and the
@@ -625,14 +626,40 @@
         const typeBytes = bytes.slice(64, 128);
         const contentType = String.fromCharCode(...typeBytes.slice(0, Math.min(typeLength, 64)));
         const has = bit => (flags & bit) !== 0;
-        const [content, hasDigest, sizeLimit, partial, typePresent, typeOmitted] = [1, 2, 4, 8, 16, 32].map(has);
+        const [content, hasDigest, sizeLimit, partial, typePresent, typeOmitted, read] =
+          [1, 2, 4, 8, 16, 32, 64].map(has);
         const digestLimit = 4n * 1024n * 1024n;
+        const readLimit = 16n * 1024n * 1024n;
         if (view.getUint16(0, true) !== 1 || view.getUint16(2, true) !== 128 || view.getUint32(28, true) !== 0 ||
-            kindCode > 6 || stateCode < 1 || stateCode > 11 || (flags & ~0x3f) !== 0 || typeLength > 64 ||
+            kindCode > 6 || stateCode < 1 || stateCode > 12 || (flags & ~0x7f) !== 0 || typeLength > 64 ||
             (typePresent && typeOmitted) || typePresent !== (typeLength !== 0) ||
             typeBytes.slice(typeLength).some(byte => byte !== 0) ||
             (typePresent && !requestTokenCharacters.test(contentType)) || captured > bodyLength) return null;
         const isBytes = kindCode === 1, isNone = kindCode === 0, state = requestBodyStates[stateCode];
+        const readable = kindCode >= 2 && kindCode <= 5;
+        const decoded = () => ({
+          kind: requestBodyKinds[kindCode], state, contentCapture: content, lengthPartial: partial, read,
+          contentType: typePresent ? contentType : null, contentTypeOmitted: typeOmitted,
+          bodyLength: String(bodyLength), capturedLength: String(captured), elementCount: elements,
+          sha256: hasDigest ? Array.from(digest, byte => byte.toString(16).padStart(2, '0')).join('') : null,
+          digestSizeLimit: sizeLimit, artifactId: event.artifact_id,
+          sequenceNumber: event.sequence_number, sessionId: event.session_id, processId: event.process_id
+        });
+        if (read) {
+          // File, blob or stream parts the browser read (native-network-v3.md).
+          const exact = [2, 4, 5].includes(stateCode), kept = stateCode === 4 || stateCode === 5;
+          if (!content || !readable || partial === exact || (event.artifact_id !== '0') !== kept ||
+              (!kept && captured !== 0n) || hasDigest !== digest.some(byte => byte !== 0) ||
+              (kindCode === 5 && elements < 2) || (kindCode === 4 && elements !== 1)) return null;
+          const readValid = {
+            2: hasDigest && !sizeLimit && bodyLength === 0n,
+            4: hasDigest && !sizeLimit && bodyLength !== 0n && bodyLength <= readLimit && captured === bodyLength,
+            5: !hasDigest && sizeLimit && bodyLength > readLimit && captured === readLimit,
+            8: !hasDigest && !sizeLimit, 10: !hasDigest && !sizeLimit, 12: !hasDigest && !sizeLimit
+          }[stateCode];
+          return readValid ? decoded() : null;
+        }
+        if (stateCode === 12) return null;
         if ((hasDigest && (!isBytes || sizeLimit || bodyLength > digestLimit)) ||
             (!hasDigest && digest.some(byte => byte !== 0)) ||
             (sizeLimit && (!isBytes || bodyLength <= digestLimit)) ||
@@ -650,16 +677,9 @@
           captured: content && isBytes && bodyLength !== 0n && captured === bodyLength,
           captured_truncated: content && isBytes && captured !== 0n && captured < bodyLength,
           not_captured_body_kind: content && !isNone && !isBytes
-        }[state] ?? (content && isBytes && bodyLength !== 0n);
+        }[state] ?? (content && ((isBytes && bodyLength !== 0n) || readable));
         if (!stateValid) return null;
-        return {
-          kind: requestBodyKinds[kindCode], state, contentCapture: content, lengthPartial: partial,
-          contentType: typePresent ? contentType : null, contentTypeOmitted: typeOmitted,
-          bodyLength: String(bodyLength), capturedLength: String(captured), elementCount: elements,
-          sha256: hasDigest ? Array.from(digest, byte => byte.toString(16).padStart(2, '0')).join('') : null,
-          digestSizeLimit: sizeLimit, artifactId: event.artifact_id,
-          sequenceNumber: event.sequence_number, sessionId: event.session_id, processId: event.process_id
-        };
+        return decoded();
       }
 
       const responseBodyStates = [null, 'captured', 'captured_truncated', 'partial', 'aborted', 'cancelled', 'empty',

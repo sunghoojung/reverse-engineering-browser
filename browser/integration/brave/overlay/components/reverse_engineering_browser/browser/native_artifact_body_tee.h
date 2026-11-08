@@ -14,7 +14,6 @@
 #include "base/functional/callback.h"
 #include "base/memory/ref_counted.h"
 #include "base/memory/weak_ptr.h"
-#include "brave/components/reverse_engineering_browser/common/native_artifact_capture_buffer.h"
 #include "mojo/public/cpp/system/data_pipe.h"
 #include "mojo/public/cpp/system/data_pipe_producer.h"
 #include "mojo/public/cpp/system/simple_watcher.h"
@@ -32,21 +31,24 @@ enum class NativeArtifactBodyEnd : std::uint8_t {
 
 class NativeArtifactBodyTee final : public base::RefCounted<NativeArtifactBodyTee> {
  public:
-  // The buffer's status names its own refusal.
-  using Completion =
-      base::OnceCallback<void(NativeArtifactBodyEnd end, NativeArtifactCaptureBuffer captured)>;
-  // Receives every chunk instead of `captured`, which is then returned unused.
+  using Completion = base::OnceCallback<void(NativeArtifactBodyEnd end)>;
+  // Receives every forwarded chunk.
   using Observer = base::RepeatingCallback<void(std::span<const std::uint8_t> chunk)>;
 
   // Returns the original source unchanged when a forwarding pipe cannot be
   // created. Otherwise, the returned consumer receives exactly the original
-  // body while `captured` grows within its pool.
+  // body while `observer` sees each chunk.
   [[nodiscard]] static mojo::ScopedDataPipeConsumerHandle Create(
       mojo::ScopedDataPipeConsumerHandle source,
-      NativeArtifactCaptureBuffer captured,
       Completion completion,
-      bool& started,
-      Observer observer = {});
+      Observer observer,
+      bool& started);
+  // Forwards `source` into `target` exactly, reporting each chunk to
+  // `observer`, on the calling sequence. False when an argument is invalid.
+  [[nodiscard]] static bool Forward(mojo::ScopedDataPipeConsumerHandle source,
+                                    mojo::ScopedDataPipeProducerHandle target,
+                                    Completion completion,
+                                    Observer observer);
 
   NativeArtifactBodyTee(const NativeArtifactBodyTee&) = delete;
   NativeArtifactBodyTee& operator=(const NativeArtifactBodyTee&) = delete;
@@ -56,7 +58,6 @@ class NativeArtifactBodyTee final : public base::RefCounted<NativeArtifactBodyTe
 
   NativeArtifactBodyTee(mojo::ScopedDataPipeConsumerHandle source,
                         mojo::ScopedDataPipeProducerHandle target,
-                        NativeArtifactCaptureBuffer captured,
                         Completion completion,
                         Observer observer);
   ~NativeArtifactBodyTee();
@@ -70,7 +71,6 @@ class NativeArtifactBodyTee final : public base::RefCounted<NativeArtifactBodyTe
   mojo::SimpleWatcher source_watcher_;
   std::unique_ptr<mojo::DataPipeProducer> target_;
   std::string write_buffer_;
-  NativeArtifactCaptureBuffer captured_;
   bool write_pending_ = false;
   Completion completion_;
   Observer observer_;

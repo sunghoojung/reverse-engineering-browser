@@ -11,6 +11,7 @@
 #include <cstdint>
 #include <deque>
 #include <memory>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -21,8 +22,8 @@
 #include "base/synchronization/lock.h"
 #include "base/thread_annotations.h"
 #include "base/threading/thread.h"
-#include "brave/components/reverse_engineering_browser/common/native_artifact_capture_buffer.h"
 #include "brave/components/reverse_engineering_browser/common/native_artifact_header.h"
+#include "brave/components/reverse_engineering_browser/common/native_artifact_memory_pool.h"
 
 namespace base {
 class SequencedTaskRunner;
@@ -30,15 +31,28 @@ class SequencedTaskRunner;
 
 namespace reb {
 
+enum class NativeArtifactTransferOp : std::uint8_t {
+  // A version 1 header, metadata and all content in one frame.
+  kWhole,
+  // A version 2 header and metadata; stream frames for its ID follow.
+  kOpen,
+  // One stream frame, with `content` for a data frame.
+  kStream,
+};
+
 struct NativeArtifactTransfer final {
+  NativeArtifactTransferOp op = NativeArtifactTransferOp::kWhole;
   NativeArtifactHeader header;
   std::string url;
   std::string mime_type;
   std::vector<std::uint8_t> content;
+  NativeArtifactStreamFrame frame;
   // Pool share for content, returned when the writer drops the transfer.
   NativeArtifactReservation reservation;
 };
 
+// Exactly once per artifact ID: a whole frame's ACK; a stream's end ACK or its
+// first refusal; a checkpoint's ACK under its snapshot ID. An abort is silent.
 using NativeArtifactCompletion = void (*)(std::uint64_t artifact_id,
                                           NativeArtifactReceiveStatus status) noexcept;
 // Runs once on the starting sequence when the channel is lost for the rest of
@@ -97,6 +111,11 @@ class NativeArtifactSocketClient final {
   void LoseChannel();
   void Run();
   void Report(std::uint64_t artifact_id, NativeArtifactReceiveStatus status);
+  // Sends one transfer and reports it under the exactly-once rule above.
+  [[nodiscard]] bool Send(int descriptor, const NativeArtifactTransfer& transfer);
+  void ReportUnsent(const NativeArtifactTransfer& transfer, NativeArtifactReceiveStatus status);
+  // The receiver abandons open streams with the connection that carried them.
+  void LoseOpenStreams(NativeArtifactReceiveStatus status);
   void DisconnectPending(NativeArtifactReceiveStatus status);
   void JoinWriter();
   void FinishStop();
@@ -105,6 +124,9 @@ class NativeArtifactSocketClient final {
   base::ConditionVariable wakeup_{&lock_};
   std::deque<std::unique_ptr<NativeArtifactTransfer>> queue_ GUARDED_BY(lock_);
   std::size_t queued_bytes_ GUARDED_BY(lock_) = 0;
+  std::size_t queued_stream_frames_ GUARDED_BY(lock_) = 0;
+  // Writer thread only: streams the receiver opened on this connection.
+  std::set<std::uint64_t> open_streams_;
   // The writer replaces it on reconnect and Stop() shuts it down, both under
   // lock_, so Stop() never touches a descriptor the writer already closed.
   int socket_descriptor_ GUARDED_BY(lock_) = -1;

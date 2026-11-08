@@ -56,8 +56,10 @@ HEADERS = (
     "net/cookies/cookie_partition_key.h",
     "brave/components/reverse_engineering_browser/browser/native_artifact_socket_client.h",
     "brave/components/reverse_engineering_browser/browser/native_artifact_body_tee.h",
+    "brave/components/reverse_engineering_browser/browser/native_request_body_reader.h",
     "brave/components/reverse_engineering_browser/browser/native_probe_session.h",
     "brave/components/reverse_engineering_browser/common/native_probe_transport.mojom.h",
+    "base/functional/callback.h",
     "brave/components/reverse_engineering_browser/common/native_wasm_guest_adapter.h",
     "base/memory/raw_ptr.h",
     "base/memory/raw_ref.h",
@@ -149,6 +151,7 @@ def compile_driver(build: Path) -> Path:
         str(sources / "browser/native_network_capture_sink.cc"),
         str(sources / "common/native_network_headers_hook.cc"),
         str(sources / "browser/native_artifact_capture_sink.cc"),
+        str(sources / "browser/native_artifact_stream.cc"),
         str(sources / "browser/native_response_body_capture.cc"),
         str(sources / "browser/native_probe_host.cc"),
         str(sources / "browser/native_tab_resolver.cc"),
@@ -224,17 +227,45 @@ def artifact_frame(
     return header + url + mime + content
 
 
-def read_ack(connection: socket.socket) -> tuple[int, int] | None:
+STREAM_MAGIC = 0x53424552
+OP_DATA, OP_CHECKPOINT, OP_END = 1, 2, 3
+
+
+def open_frame(artifact_id: int) -> bytes:
+    """A version 2 open header: no size or digest; stream frames carry the content."""
+    url = f"https://fixture.test/{artifact_id}.js".encode()
+    mime = b"text/javascript"
+    header = struct.pack(
+        "<IHHHHI7QII32sQHHI",
+        *(ARTIFACT_MAGIC, 2, 128, KIND_JAVASCRIPT, 0, 0),
+        *(7, 0, 0, artifact_id, 0, 0, 0),
+        *(len(url), len(mime), bytes(32), 0, 0, 0, 0),
+    )
+    return header + url + mime
+
+
+def stream_frame(
+    op: int, artifact_id: int, data: bytes = b"", *, value: int = 0, size: int = 0,
+    digest: bytes = bytes(32),
+) -> bytes:
+    # magic, version, frame size, op, reserved, data size; session, artifact,
+    # value and content size; expected digest.
+    return struct.pack(
+        "<IHHHHI4Q32s", STREAM_MAGIC, 2, 80, op, 0, len(data), 7, artifact_id, value, size, digest
+    ) + data
+
+
+def read_ack(connection: socket.socket, version: int = 1) -> tuple[int, int] | None:
     data = b""
     while len(data) < 32:
         chunk = connection.recv(32 - len(data))
         if not chunk:
             return None
         data += chunk
-    magic, version, size, status, reserved0, artifact_id, reserved1 = struct.unpack(
+    magic, acked, size, status, reserved0, artifact_id, reserved1 = struct.unpack(
         "<IHHIIQ8s", data
     )
-    assert (magic, version, size, reserved0, reserved1) == (ACK_MAGIC, 1, 32, 0, bytes(8))
+    assert (magic, acked, size, reserved0, reserved1) == (ACK_MAGIC, version, 32, 0, bytes(8))
     return status, artifact_id
 
 
@@ -302,19 +333,51 @@ def check_receiver_socket(receiver: str) -> None:
             with connect() as connection:
                 connection.sendall(artifact_frame(6, b"six();"))
                 assert read_ack(connection) == (STATUS_ACCEPTED, 6)
+                # Two interleaved streams and a checkpoint, a refused end and an
+                # oversize stream on the same connection, and one left open.
+                head = b"head();" * 9000
+                digest = hashlib.sha256(head).digest()
+                for frame, expected in (
+                    (open_frame(10), (STATUS_ACCEPTED, 10)),
+                    (open_frame(11), (STATUS_ACCEPTED, 11)),
+                    (stream_frame(OP_DATA, 10, head[:40000]), (STATUS_ACCEPTED, 10)),
+                    (stream_frame(OP_DATA, 11, b"eleven();"), (STATUS_ACCEPTED, 11)),
+                    (stream_frame(OP_CHECKPOINT, 10, value=12, size=40000), (STATUS_ACCEPTED, 12)),
+                    (stream_frame(OP_DATA, 10, head[40000:]), (STATUS_ACCEPTED, 10)),
+                    (stream_frame(OP_END, 10, size=len(head), digest=digest), (STATUS_ACCEPTED, 10)),
+                    (stream_frame(OP_END, 11, size=9, digest=bytes([1]) * 32), (STATUS_INVALID, 11)),
+                    (open_frame(13), (STATUS_ACCEPTED, 13)),
+                    (stream_frame(OP_DATA, 13, b"x" * 60000), (STATUS_ACCEPTED, 13)),
+                    (stream_frame(OP_DATA, 13, b"x" * 10000), (STATUS_TOO_LARGE, 13)),
+                    (stream_frame(OP_DATA, 13, b"y"), (STATUS_INVALID, 13)),
+                    (open_frame(14), (STATUS_ACCEPTED, 14)),
+                    (stream_frame(OP_DATA, 14, b"open();"), (STATUS_ACCEPTED, 14)),
+                ):
+                    connection.sendall(frame)
+                    assert read_ack(connection, 2) == expected, frame[:16]
         finally:
             child.send_signal(signal.SIGTERM)
             _, errors = child.communicate(timeout=10)
         assert child.returncode == 0, errors.decode()
         log = errors.decode()
-        assert log.count("rejected; connection kept") == 1, log
+        assert log.count("rejected; connection kept") == 4, log
         assert log.count("closed after an unsynchronized frame") == 3, log
-        assert "accepted=3 " in log and "too_large=2 " in log and "invalid=2 " in log, log
-        manifest = (root / "artifacts/manifest.jsonl").read_text().splitlines()
-        assert [json.loads(line)["artifact_id"] for line in manifest] == ["1", "3", "6"]
+        assert "accepted=5 " in log and "too_large=3 " in log and "invalid=4 " in log, log
+        assert "streams_abandoned=1 " in log, log
+        manifest = [
+            json.loads(line)
+            for line in (root / "artifacts/manifest.jsonl").read_text().splitlines()
+        ]
+        assert [item["artifact_id"] for item in manifest] == ["1", "3", "6", "12", "10"]
+        assert manifest[3]["byte_size"] == 40000 and manifest[4]["byte_size"] == len(head)
+        assert manifest[3]["sha256"] == hashlib.sha256(head[:40000]).hexdigest()
+        assert manifest[4]["sha256"] == digest.hex()
+        assert not list((root / "artifacts").glob("*.part")), "no stream outlives its connection"
     print(
         "PASS artifact receiver socket: a valid rejected frame is discarded and answered on the "
-        "same connection; invalid, mismatched and undiscardable frames close it"
+        "same connection; invalid, mismatched and undiscardable frames close it; interleaved "
+        "version 2 streams publish a checkpoint and an end with exact digests, stream refusals "
+        "keep the connection, and a stream open at disconnect is abandoned"
     )
 
 
@@ -490,7 +553,7 @@ def check_request_bodies(output: Path, artifacts: list[dict], events: list[dict]
         item = next(a for a in artifacts if a["artifact_id"] == body["artifact_id"])
         assert item["kind"] == "request_body" and item["capture_origin"] == "network_request"
         assert item["sensitive"] is True and item["execution_context_id"] == "0"
-        assert item["url"] == body["url"] and item["mime_type"] == "application/json"
+        assert item["url"] == body["url"] and item["mime_type"] == body["mime_type"]
         assert item["creator_event_id"] == body["body_sequence"]
         data = (output / "artifacts" / item["content_path"]).read_bytes()
         assert len(data) == body["captured_length"] == item["byte_size"]

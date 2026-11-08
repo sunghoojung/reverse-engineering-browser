@@ -3,6 +3,7 @@
 
 #include <cerrno>
 #include <cstdlib>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -194,6 +195,164 @@ void CheckManifestRollback() {
   std::filesystem::remove_all(store);
 }
 
+std::string Open(const std::uint64_t artifact_id, const bool request_body = false) {
+  std::string frame = Frame(artifact_id, "");
+  reb::ArtifactHeader header;
+  std::memcpy(&header, frame.data(), sizeof(header));
+  header.protocol_version = reb::kArtifactStreamProtocolVersion;
+  header.content_size = 0;
+  if (request_body) {
+    header.kind = reb::ArtifactKind::kRequestBody;
+    header.capture_origin = reb::ArtifactCaptureOrigin::kNetworkRequest;
+    header.flags = reb::kArtifactFlagSensitive;
+  }
+  std::memcpy(frame.data(), &header, sizeof(header));
+  return frame;
+}
+
+std::string Chunk(const reb::ArtifactStreamOp op,
+                  const std::uint64_t artifact_id,
+                  const std::string& data = "",
+                  const std::uint64_t value = 0,
+                  const std::uint64_t content_size = 0,
+                  const std::uint8_t digest_byte = 0) {
+  reb::ArtifactStreamFrame frame;
+  frame.op = op;
+  frame.data_size = static_cast<std::uint32_t>(data.size());
+  frame.session_id = 7;
+  frame.artifact_id = artifact_id;
+  frame.value = value;
+  frame.content_size = content_size;
+  frame.expected_sha256.fill(digest_byte);
+  return std::string(reinterpret_cast<const char*>(&frame), sizeof(frame)) + data;
+}
+
+std::string ManifestLine(const std::filesystem::path& manifest, const std::uint64_t artifact_id) {
+  std::ifstream input(manifest);
+  const std::string needle = "\"artifact_id\":\"" + std::to_string(artifact_id) + "\"";
+  for (std::string line; std::getline(input, line);) {
+    if (ContainsText(line, needle)) {
+      return line;
+    }
+  }
+  return {};
+}
+
+std::string Field(const std::string& line, const std::string& name) {
+  const std::string key = "\"" + name + "\":";
+  const auto at = line.find(key);
+  if (at == std::string::npos) {
+    return {};
+  }
+  const auto begin = at + key.size() + (line[at + key.size()] == '"' ? 1 : 0);
+  return line.substr(begin, line.find_first_of("\",}", begin) - begin);
+}
+
+void CheckStreams() {
+  const std::filesystem::path store =
+      std::filesystem::temp_directory_path() / ("reb-artifact-streams-" + std::to_string(getpid()));
+  const std::filesystem::path manifest = store / "manifest.jsonl";
+  std::filesystem::remove_all(store);
+  using Op = reb::ArtifactStreamOp;
+  using Status = reb::ArtifactReceiveStatus;
+  const auto part = [&](const std::uint64_t id) {
+    return std::filesystem::exists(store / ("artifact-" + std::to_string(id) + ".part"));
+  };
+  {
+    auto limits = Limits();
+    limits.allow_sensitive = true;
+    reb::ArtifactReceiver receiver(store, limits);
+    // Two interleaved streams, a checkpoint of the first and both ends.
+    std::istringstream stream(Open(10) + Open(11) + Chunk(Op::kData, 10, "ab") +
+                              Chunk(Op::kData, 11, "xy") + Chunk(Op::kData, 10, "c") +
+                              Chunk(Op::kCheckpoint, 10, "", 12, 3) + Chunk(Op::kData, 10, "de") +
+                              Chunk(Op::kEnd, 11, "", 0, 2) + Chunk(Op::kEnd, 10, "", 0, 5));
+    for (std::size_t frame = 0; frame < 9; ++frame) {
+      Expect(receiver.ReceiveOne(stream) == Status::kAccepted &&
+                 receiver.StreamPosition() == reb::ArtifactStreamPosition::kFrameBoundary &&
+                 receiver.ProtocolVersion() == reb::kArtifactStreamProtocolVersion,
+             "interleaved stream frame accepted at a boundary: " + receiver.LastError());
+      Expect(frame != 5 || receiver.LastArtifactId() == 12, "a checkpoint names its snapshot");
+    }
+    Expect(Field(ManifestLine(manifest, 10), "byte_size") == "5" &&
+               Field(ManifestLine(manifest, 11), "byte_size") == "2" &&
+               Field(ManifestLine(manifest, 12), "byte_size") == "3" && receiver.OpenStreams() == 0,
+           "each stream and the snapshot publish their own byte count");
+    Expect(Receive(receiver, Frame(13, "abcde")) == Status::kAccepted &&
+               receiver.ProtocolVersion() == reb::kArtifactProtocolVersion &&
+               Field(ManifestLine(manifest, 13), "sha256") ==
+                   Field(ManifestLine(manifest, 10), "sha256"),
+           "a streamed body digests exactly like the same whole frame");
+    Expect(Receive(receiver, Frame(14, "abc")) == Status::kAccepted &&
+               Field(ManifestLine(manifest, 14), "sha256") ==
+                   Field(ManifestLine(manifest, 12), "sha256"),
+           "a checkpoint digests the bytes it published");
+
+    // A request body's creator record follows in its end frame.
+    std::istringstream deferred(Open(20, true) + Chunk(Op::kData, 20, "{}") +
+                                Chunk(Op::kEnd, 20, "", 0, 2) + Open(21, true) +
+                                Chunk(Op::kData, 21, "{}") + Chunk(Op::kEnd, 21, "", 99, 2));
+    Expect(receiver.ReceiveOne(deferred) == Status::kAccepted &&
+               receiver.ReceiveOne(deferred) == Status::kAccepted &&
+               receiver.ReceiveOne(deferred) == Status::kInvalid && !part(20),
+           "an end without the deferred creator is refused");
+    Expect(receiver.ReceiveOne(deferred) == Status::kAccepted &&
+               receiver.ReceiveOne(deferred) == Status::kAccepted &&
+               receiver.ReceiveOne(deferred) == Status::kAccepted &&
+               Field(ManifestLine(manifest, 21), "creator_event_id") == "99",
+           "the end frame names the request body's creator record");
+
+    // Refusals keep the connection at a frame boundary.
+    std::istringstream refusals(
+        Open(30) + Chunk(Op::kData, 30, std::string(1000, 'a')) +
+        Chunk(Op::kData, 30, std::string(100, 'b')) + Chunk(Op::kData, 30, "c") + Open(31) +
+        Chunk(Op::kData, 31, "d") + Chunk(Op::kEnd, 31, "", 0, 1, 0xab) + Open(32) +
+        Chunk(Op::kData, 32, "e") + Chunk(Op::kAbort, 32) + Chunk(Op::kData, 32, "f") +
+        Chunk(Op::kEnd, 33, "", 0, 0) + Open(10));
+    for (const Status expected :
+         {Status::kAccepted, Status::kAccepted, Status::kTooLarge, Status::kInvalid,
+          Status::kAccepted, Status::kAccepted, Status::kInvalid, Status::kAccepted,
+          Status::kAccepted, Status::kAccepted, Status::kInvalid, Status::kInvalid,
+          Status::kConflict}) {
+      Expect(receiver.ReceiveOne(refusals) == expected &&
+                 receiver.StreamPosition() == reb::ArtifactStreamPosition::kFrameBoundary,
+             "stream refusal keeps the boundary: " + receiver.LastError());
+    }
+    Expect(!part(30) && !part(31) && !part(32) && ManifestLine(manifest, 30).empty() &&
+               ManifestLine(manifest, 31).empty() && ManifestLine(manifest, 32).empty(),
+           "refused, mismatched and aborted streams publish nothing and leave no file");
+
+    // A stream counts against the store before it publishes; a closed
+    // connection abandons it.
+    std::istringstream abandoned(Open(40) + Chunk(Op::kData, 40, std::string(512, 'z')));
+    Expect(receiver.ReceiveOne(abandoned) == Status::kAccepted &&
+               receiver.ReceiveOne(abandoned) == Status::kAccepted && part(40),
+           "an open stream holds its file");
+    receiver.AbandonStreams();
+    Expect(!part(40) && receiver.OpenStreams() == 0 && receiver.Stats().streams_abandoned == 1,
+           "abandoned streams are removed and counted");
+
+    Expect(
+        Receive(receiver, Chunk(Op::kData, 41, std::string(70 * 1024, 'q'))) == Status::kInvalid &&
+            receiver.StreamPosition() == reb::ArtifactStreamPosition::kUnsynchronized,
+        "a chunk past 64 KiB is not read");
+    std::string sized = Open(42);
+    reinterpret_cast<reb::ArtifactHeader*>(sized.data())->content_size = 1;
+    Expect(Receive(receiver, sized) == Status::kInvalid, "an open header declares no size");
+  }
+  {
+    auto limits = Limits();
+    limits.max_artifacts = 2;
+    reb::ArtifactReceiver bounded(store / "bounded", limits);
+    std::istringstream stream(Open(1) + Open(2) + Open(3));
+    Expect(bounded.ReceiveOne(stream) == Status::kAccepted &&
+               bounded.ReceiveOne(stream) == Status::kAccepted &&
+               bounded.ReceiveOne(stream) == Status::kTooLarge,
+           "open streams count against the artifact limit");
+  }
+  std::filesystem::remove_all(store);
+}
+
 }  // namespace
 
 extern "C" int fsync(const int descriptor) {
@@ -210,6 +369,7 @@ extern "C" int fsync(const int descriptor) {
 int main() {
   CheckFraming();
   CheckManifestRollback();
+  CheckStreams();
   if (failures != 0) {
     return 1;
   }

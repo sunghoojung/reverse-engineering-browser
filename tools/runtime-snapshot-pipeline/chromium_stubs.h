@@ -12,10 +12,11 @@
 #include <utility>
 #include <vector>
 
-#include "brave/components/reverse_engineering_browser/common/native_artifact_capture_buffer.h"
 #include "brave/components/reverse_engineering_browser/common/native_artifact_header.h"
+#include "brave/components/reverse_engineering_browser/common/native_artifact_memory_pool.h"
 #include "brave/components/reverse_engineering_browser/common/native_probe_event.h"
 #include "network_request_body_stub.h"
+#include "once_callback_stub.h"
 
 #define COMPONENT_EXPORT(component)
 #define UNSAFE_BUFFERS(...) __VA_ARGS__
@@ -51,9 +52,30 @@ struct TestThreadId {
 struct PlatformThread {
   static TestThreadId CurrentId() { return {}; }
 };
+// Bindings in this pipeline are never run; any callback type accepts one.
+struct NullResult {
+  template <class T>
+  operator T() const {
+    return T{};
+  }
+};
+struct NullBinding {
+  template <class... Args>
+  NullResult operator()(Args&&...) const {
+    return {};
+  }
+};
 template <class... Args>
-int BindOnce(Args&&...) {
-  return 0;
+NullBinding BindOnce(Args&&...) {
+  return {};
+}
+template <class... Args>
+NullBinding BindRepeating(Args&&...) {
+  return {};
+}
+template <class Container>
+std::span<const std::uint8_t> as_byte_span(const Container& container) {
+  return {reinterpret_cast<const std::uint8_t*>(container.data()), container.size()};
 }
 template <class T>
 T* Unretained(T* value) {
@@ -152,6 +174,7 @@ namespace network {
 struct ResourceRequest {
   int resource_type = 0;
   GURL url;
+  std::shared_ptr<ResourceRequestBody> request_body;
 };
 namespace mojom {
 class URLResponseHead {
@@ -177,11 +200,14 @@ class NativeProbeClient {
   virtual void Disable() = 0;
 };
 }  // namespace mojom
+enum class NativeArtifactTransferOp : std::uint8_t { kWhole, kOpen, kStream };
 struct NativeArtifactTransfer final {
+  NativeArtifactTransferOp op = NativeArtifactTransferOp::kWhole;
   NativeArtifactHeader header;
   std::string url;
   std::string mime_type;
   std::vector<std::uint8_t> content;
+  NativeArtifactStreamFrame frame;
   NativeArtifactReservation reservation;
 };
 class NativeArtifactSocketClient {
@@ -221,13 +247,14 @@ class NativeResponseBodyCapture {
     return body;
   }
   void OnTransferCompleted(std::uint64_t, bool) {}
+  bool OnStreamRefused(std::uint64_t) { return false; }
   void Flush() {}
 };
 class NativeArtifactBodyTee {
  public:
   static mojo::ScopedDataPipeConsumerHandle Create(mojo::ScopedDataPipeConsumerHandle body,
-                                                   NativeArtifactCaptureBuffer,
-                                                   int,
+                                                   base::NullBinding,
+                                                   base::NullBinding,
                                                    bool& started) {
     started = false;
     return body;

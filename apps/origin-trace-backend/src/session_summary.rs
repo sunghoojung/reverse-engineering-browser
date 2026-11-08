@@ -221,6 +221,7 @@ fn body_refusal(state: u8) -> Option<&'static str> {
         9 => "not_captured_url",
         10 => "not_captured_session_budget",
         11 => "not_captured_credential_form",
+        12 => "not_captured_read_incomplete",
         _ => return None,
     })
 }
@@ -263,7 +264,10 @@ fn content_meaning(category: &str, reason: &str, count: u64) -> String {
             "arrived after the session's response body byte budget was used. Start a new session, or raise REB_RESPONSE_BODY_BUDGET_MIB"
         }
         "not_captured_body_kind" => {
-            "were files, blobs or streams, which are described but not read"
+            "had a part the browser does not read, so they are described but not read"
+        }
+        "not_captured_read_incomplete" => {
+            "had a file, blob or stream part that changed, failed or was cancelled before it was read whole"
         }
         "not_captured_credential_form" => {
             "were password form posts, which keep neither bytes nor a digest"

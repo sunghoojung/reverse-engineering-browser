@@ -248,10 +248,12 @@ request also gets a `request_body` summary record (length, normalized content
 type, SHA-256, kind and capture state). When `--reb-capture-request-content` is
 explicitly present, the browser also records the raw path and query as
 `request_target` children, retains targets past their 116-byte prefix and at
-most 16 MiB of in-memory body bytes per request through the artifact channel,
-within a per-session byte budget. The change lives entirely in the
-overlay sink; the existing proxy hooks already pass the full `ResourceRequest`.
-See [Native network v2](../../../protocol/native-network-v2.md). Content
+most 16 MiB of body bytes per request through the artifact channel, within a
+per-session byte budget. Patch `0019` hands bodies with file, blob or stream
+parts to the overlay reader, which reads them off the UI sequence; a stream
+part's getter is replaced by one that forwards every byte unchanged. See
+[Native network v2](../../../protocol/native-network-v2.md) and
+[v3](../../../protocol/native-network-v3.md#request-body-reads). Content
 sessions also record request and response header blocks per hop
 ([Native network v3](../../../protocol/native-network-v3.md)): patch `0018`
 names each admitted request for the network service's raw header notifications

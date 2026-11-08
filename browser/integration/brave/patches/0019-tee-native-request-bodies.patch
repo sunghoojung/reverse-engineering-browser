@@ -1,0 +1,12 @@
+diff --git a/browser/net/brave_proxying_url_loader_factory.cc b/browser/net/brave_proxying_url_loader_factory.cc
+index bf3e497..ef22691 100644
+--- a/browser/net/brave_proxying_url_loader_factory.cc
++++ b/browser/net/brave_proxying_url_loader_factory.cc
+@@ -244,6 +244,7 @@ BraveProxyingURLLoaderFactory<T>::InProgressRequest::InProgressRequest(
+                       static_cast<int>(factory_->url_loader_factory_type_)));
+     reb::NativeNetworkCaptureSink::Get().AssignNetworkHeadersId(request_id_,
+                                                                 request_);
++    reb::NativeNetworkCaptureSink::Get().TeeRequestBody(request_id_, request_);
+   } else if (factory.native_exclusion_ != 0 &&
+              // A renderer-issued request is counted once, by the drain.
+              !reb::NativeRendererIssuedRequestId(

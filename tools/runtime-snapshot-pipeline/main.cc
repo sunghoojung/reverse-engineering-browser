@@ -15,6 +15,17 @@
 #include "brave/components/reverse_engineering_browser/common/native_probe_queue.h"
 #include "brave/components/reverse_engineering_browser/renderer/native_probe_sink.h"
 
+// This pipeline reads no request bodies.
+bool reb::NativeRequestBodyReader::CanRead(const network::ResourceRequestBody&) noexcept {
+  return false;
+}
+bool reb::NativeRequestBodyReader::Start(network::ResourceRequestBody&,
+                                         NativeArtifactStream,
+                                         std::size_t,
+                                         Done) {
+  return false;
+}
+
 namespace {
 constexpr std::uint64_t kSession = 42;
 constexpr auto kVmMask = reb::NativeProbeCategoryMask(reb::NativeProbeCategory::kVm);

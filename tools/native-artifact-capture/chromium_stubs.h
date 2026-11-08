@@ -16,16 +16,19 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
-#include "brave/components/reverse_engineering_browser/common/native_artifact_capture_buffer.h"
+#include "brave/components/reverse_engineering_browser/browser/native_artifact_stream.h"
 #include "brave/components/reverse_engineering_browser/common/native_artifact_header.h"
+#include "brave/components/reverse_engineering_browser/common/native_artifact_memory_pool.h"
 #include "brave/components/reverse_engineering_browser/common/native_probe_event.h"
 #include "brave/components/reverse_engineering_browser/common/native_wasm_guest.h"
 #include "brave/components/reverse_engineering_browser/common/native_wasm_sample_budget.h"
 #include "network_headers_stub.h"
 #include "network_request_body_stub.h"
+#include "once_callback_stub.h"
 
 template <class T>
 using scoped_refptr = std::shared_ptr<T>;
@@ -41,6 +44,10 @@ class NoDestructor {
   alignas(T) std::array<std::byte, sizeof(T)> storage_;
 };
 using std::span;
+template <class Container>
+std::span<const std::uint8_t> as_byte_span(const Container& container) {
+  return {reinterpret_cast<const std::uint8_t*>(container.data()), container.size()};
+}
 inline std::int64_t test_now_ns = 100;
 inline unsigned test_clock_reads = 0;
 struct TestDelta {
@@ -77,6 +84,7 @@ template <class T>
 T* Unretained(T* value) {
   return value;
 }
+
 // Bound arguments are moved into the call, so each result runs once.
 template <class Function, class... Bound>
 auto BindOnce(Function function, Bound... bound) {
@@ -265,12 +273,23 @@ class BigBuffer {
 };
 }  // namespace mojo_base
 namespace reb {
+enum class NativeArtifactTransferOp : std::uint8_t { kWhole, kOpen, kStream };
 struct NativeArtifactTransfer final {
+  NativeArtifactTransferOp op = NativeArtifactTransferOp::kWhole;
   NativeArtifactHeader header;
   std::string url;
   std::string mime_type;
   std::vector<std::uint8_t> content;
+  NativeArtifactStreamFrame frame;
   NativeArtifactReservation reservation;
+  // Adapter only. A stream is assembled into one entry that reads like a
+  // whole transfer once ended, and keeps the producer's frames in order, with
+  // their pool shares, until they are delivered.
+  std::vector<std::unique_ptr<NativeArtifactTransfer>> frames;
+  std::size_t delivered = 0;
+  bool ended = false;
+  // A checkpoint's stream.
+  std::uint64_t stream_id = 0;
 };
 class NativeArtifactSocketClient {
  public:
@@ -280,12 +299,67 @@ class NativeArtifactSocketClient {
   }
   bool IsConnected() const { return connected; }
   bool Enqueue(std::unique_ptr<NativeArtifactTransfer> transfer) noexcept {
-    if (!connected || reject_next) {
+    const bool control = transfer->op == NativeArtifactTransferOp::kStream &&
+                         transfer->frame.op != NativeArtifactStreamOp::kData;
+    if (!connected || (reject_next && !control)) {
       reject_next = false;
       return false;
     }
-    const auto id = transfer->header.artifact_id;
-    transfers.emplace(id, std::move(transfer));
+    if (transfer->op == NativeArtifactTransferOp::kWhole) {
+      const auto id = transfer->header.artifact_id;
+      transfers.emplace(id, std::move(transfer));
+      return true;
+    }
+    if (transfer->op == NativeArtifactTransferOp::kOpen) {
+      auto entry = std::make_unique<NativeArtifactTransfer>();
+      entry->op = NativeArtifactTransferOp::kOpen;
+      entry->header = transfer->header;
+      entry->url = transfer->url;
+      entry->mime_type = transfer->mime_type;
+      const auto id = transfer->header.artifact_id;
+      entry->frames.push_back(std::move(transfer));
+      transfers[id] = std::move(entry);
+      return true;
+    }
+    const auto found = transfers.find(transfer->frame.artifact_id);
+    // A writer drops frames of a stream it no longer has.
+    if (found == transfers.end()) {
+      return true;
+    }
+    NativeArtifactTransfer& entry = *found->second;
+    switch (transfer->frame.op) {
+      case NativeArtifactStreamOp::kData:
+        entry.content.insert(entry.content.end(), transfer->content.begin(),
+                             transfer->content.end());
+        break;
+      case NativeArtifactStreamOp::kCheckpoint: {
+        auto snapshot = std::make_unique<NativeArtifactTransfer>();
+        snapshot->header = entry.header;
+        snapshot->header.protocol_version = kNativeArtifactProtocolVersion;
+        snapshot->header.artifact_id = transfer->frame.value;
+        snapshot->header.content_size = transfer->frame.content_size;
+        snapshot->header.expected_sha256 = transfer->frame.expected_sha256;
+        snapshot->url = entry.url;
+        snapshot->mime_type = entry.mime_type;
+        snapshot->content = entry.content;
+        snapshot->stream_id = found->first;
+        transfers[transfer->frame.value] = std::move(snapshot);
+        break;
+      }
+      case NativeArtifactStreamOp::kEnd:
+        entry.ended = true;
+        entry.header.protocol_version = kNativeArtifactProtocolVersion;
+        entry.header.content_size = transfer->frame.content_size;
+        entry.header.expected_sha256 = transfer->frame.expected_sha256;
+        if (transfer->frame.value != 0) {
+          entry.header.creator_event_id = transfer->frame.value;
+        }
+        break;
+      case NativeArtifactStreamOp::kAbort:
+        transfers.erase(found);
+        return true;
+    }
+    entry.frames.push_back(std::move(transfer));
     return true;
   }
   bool connected = true;
@@ -293,29 +367,20 @@ class NativeArtifactSocketClient {
   std::map<std::uint64_t, std::unique_ptr<NativeArtifactTransfer>> transfers;
 };
 enum class NativeArtifactBodyEnd : std::uint8_t { kSourceClosed, kSourceFailed, kTargetClosed };
-// Feeds the real capture buffer, or the observer, in forwarding-pipe-sized
-// chunks, so growth, the size bound and the pool bound run as they do behind
-// the Mojo tee.
+// Feeds the observer in forwarding-pipe-sized chunks, so the stream's
+// coalescing, size bound and pool bound run as they do behind the Mojo tee.
 class NativeArtifactBodyTee {
  public:
-  using Completion = std::packaged_task<void(NativeArtifactBodyEnd, NativeArtifactCaptureBuffer)>;
+  using Completion = base::OnceCallback<void(NativeArtifactBodyEnd)>;
   using Observer = std::function<void(std::span<const std::uint8_t>)>;
-  template <class Callback>
   static mojo::ScopedDataPipeConsumerHandle Create(mojo::ScopedDataPipeConsumerHandle body,
-                                                   NativeArtifactCaptureBuffer captured,
-                                                   Callback callback,
-                                                   bool& started,
-                                                   Observer observer = {}) {
-    if (unavailable) {
-      started = false;
-      return body;
+                                                   Completion completion,
+                                                   Observer observer,
+                                                   bool& started) {
+    started = !unavailable;
+    if (started) {
+      pending.emplace(body.id, Pending{std::move(completion), std::move(observer)});
     }
-    if (captured.status() != NativeArtifactCaptureStatus::kCapturing) {
-      throw std::runtime_error("Tee started without a capturing buffer");
-    }
-    pending.emplace(body.id, Pending{std::move(captured), Completion(std::move(callback)),
-                                     std::move(observer)});
-    started = true;
     return body;
   }
   // Forwards part of a body without ending it.
@@ -323,33 +388,93 @@ class NativeArtifactBodyTee {
     auto& entry = pending.at(id);
     constexpr std::size_t kChunk = 64U * 1024U;
     for (std::size_t offset = 0; offset < content.size(); offset += kChunk) {
-      const auto chunk = content.subspan(offset, std::min(kChunk, content.size() - offset));
-      if (entry.observer) {
-        entry.observer(chunk);
-      } else {
-        entry.captured.Append(chunk);
-      }
+      entry.observer(content.subspan(offset, std::min(kChunk, content.size() - offset)));
     }
   }
   static void End(int id, NativeArtifactBodyEnd end) {
     auto entry = std::move(pending.at(id));
     pending.erase(id);
-    auto result = entry.completion.get_future();
-    entry.completion(end, std::move(entry.captured));
-    result.get();
+    std::move(entry.completion).Run(end);
   }
   static void Complete(int id, bool complete, std::span<const std::uint8_t> content) {
     Deliver(id, content);
     End(id, complete ? NativeArtifactBodyEnd::kSourceClosed : NativeArtifactBodyEnd::kSourceFailed);
   }
-  static std::size_t Reserved(int id) { return pending.at(id).captured.reserved(); }
   struct Pending {
-    NativeArtifactCaptureBuffer captured;
     Completion completion;
     Observer observer;
   };
   static inline bool unavailable = false;
   static inline std::map<int, Pending> pending;
+};
+// Scripted parts stand in for file reads, blob getters and the stream tee; the
+// real stream, budget allowance and sink outcome classification run.
+struct NativeRequestBodyReadResult final {
+  NativeArtifactStream stream;
+  enum class End : std::uint8_t {
+    kComplete,
+    kIncomplete,
+    kBudget,
+    kRefused
+  } end = End::kIncomplete;
+  std::uint64_t body_length = 0;
+};
+using NativeRequestBodyReadEnd = NativeRequestBodyReadResult::End;
+class NativeRequestBodyReader {
+ public:
+  using Done = base::OnceCallback<void(NativeRequestBodyReadResult)>;
+  static bool CanRead(const network::ResourceRequestBody& body) noexcept {
+    bool readable = false;
+    for (const auto& element : *body.elements()) {
+      if (element.TryAs<network::DataElementFile>() ||
+          element.TryAs<network::DataElementDataPipe>() ||
+          element.TryAs<network::DataElementChunkedDataPipe>()) {
+        readable = true;
+      } else if (!element.TryAs<network::DataElementBytes>()) {
+        return false;
+      }
+    }
+    return readable;
+  }
+  static bool Start(network::ResourceRequestBody&,
+                    NativeArtifactStream stream,
+                    std::size_t allowance,
+                    Done done) {
+    if (refuse) {
+      return false;
+    }
+    reads.push_back({std::move(stream), allowance, std::move(done)});
+    return true;
+  }
+  // Feeds `bytes` as the reader would, stopping at the allowance, and ends
+  // the read with `end` and the parts' total length.
+  static void Finish(std::size_t index,
+                     std::span<const std::uint8_t> bytes,
+                     NativeRequestBodyReadEnd end,
+                     std::uint64_t body_length) {
+    Read& read = reads.at(index);
+    constexpr std::size_t kChunk = 64U * 1024U;
+    for (std::size_t offset = 0; offset < bytes.size() && read.stream.is_open(); offset += kChunk) {
+      const auto chunk = bytes.subspan(offset, std::min(kChunk, bytes.size() - offset));
+      const auto keeps = std::min<std::uint64_t>(
+          chunk.size(), kNativeArtifactMaxContentBytes - read.stream.kept());
+      if (read.allowance < kNativeArtifactMaxContentBytes &&
+          read.stream.kept() + keeps > read.allowance) {
+        end = NativeRequestBodyReadEnd::kBudget;
+        break;
+      }
+      read.stream.Append(chunk);
+    }
+    std::move(read.done).Run(NativeRequestBodyReadResult{
+        .stream = std::move(read.stream), .end = end, .body_length = body_length});
+  }
+  struct Read {
+    NativeArtifactStream stream;
+    std::size_t allowance = 0;
+    Done done;
+  };
+  static inline bool refuse = false;
+  static inline std::vector<Read> reads;
 };
 class NativeProbeHost;
 // Session boundary seen by NativeProbeHost; the policy is set by each test.

@@ -594,8 +594,9 @@ captured path and query, and its Payload tab shows them parsed:
   reads on, and the body parses once every byte is read.
 
 Without content capture, Payload still shows the body's length, type and digest
-and says that content capture was off. File, blob and stream bodies are named,
-not read; password form bodies keep neither bytes nor a digest. A body read
+and says that content capture was off. File, blob and stream bodies are read
+in content sessions; one that could not be read whole says why. Password form
+bodies keep neither bytes nor a digest. A body read
 that times out or gets an error status keeps the last read copy and its reason
 and is read again on the next refresh; a size or SHA-256 mismatch shows no bytes
 and is not reread. A path and query past the 116-byte row prefix is loaded from

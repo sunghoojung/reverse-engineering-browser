@@ -14,6 +14,7 @@
 #include <utility>
 #include <vector>
 
+#include "base/functional/bind.h"
 #include "base/process/process_handle.h"
 #include "base/threading/platform_thread.h"
 #include "base/time/time.h"
@@ -424,6 +425,18 @@ void NativeNetworkCaptureSink::SetEmitter(const NativeProbeEmitter emitter,
                                           const std::uint64_t category_mask,
                                           const std::uint64_t expires_at_monotonic_ns,
                                           const bool capture_content) noexcept {
+  // Bodies still waiting or being read are recorded while the ending
+  // configuration can still record them.
+  if (const NativeProbeEmitter ending = emitter_.load(std::memory_order_acquire)) {
+    if (unread_body_) {
+      EmitDeferredBody(ending, *unread_body_, NativeRequestBodyState::kNotCapturedBodyKind);
+    }
+    for (const auto& [read_id, body] : reading_bodies_) {
+      EmitDeferredBody(ending, body, NativeRequestBodyState::kNotCapturedReadIncomplete);
+    }
+  }
+  unread_body_.reset();
+  reading_bodies_.clear();
   emitter_.store(nullptr, std::memory_order_release);
   generation_.fetch_add(1, std::memory_order_acq_rel);
   session_id_.store(emitter ? session_id : 0, std::memory_order_relaxed);
@@ -634,8 +647,7 @@ void NativeNetworkCaptureSink::EmitRequestBody(const NativeProbeEmitter emitter,
             ? kNativeRequestBodyContentTypePresent
             : kNativeRequestBodyContentTypeOmitted;
   }
-  // The body is only described here. File, blob and stream elements are never
-  // read, waited on or moved; the request continues unchanged.
+  // The body is only described here; TeeRequestBody reads it.
   const auto* elements = request.request_body ? request.request_body->elements() : nullptr;
   bool bytes_only = elements && !elements->empty();
   if (elements) {
@@ -652,6 +664,29 @@ void NativeNetworkCaptureSink::EmitRequestBody(const NativeProbeEmitter emitter,
     }
   }
 
+  // File, blob and stream parts are read once TeeRequestBody hands over the
+  // request, and the record follows the read; no sequence is taken until then.
+  std::optional<NativeRequestBodyState> deferred_state;
+  if (capture_content && !bytes_only && summary.kind != NativeRequestBodyKind::kNone &&
+      !request.request_body->contains_sensitive_info() &&
+      NativeRequestBodyReader::CanRead(*request.request_body)) {
+    std::string url = ArtifactUrlOf(request.url, TargetOf(request.url));
+    if (!NativeArtifactCaptureSink::Get().IsEnabled()) {
+      deferred_state = NativeRequestBodyState::kNotCapturedArtifactUnavailable;
+    } else if (url.empty() || url.size() > kNativeArtifactMaxUrlBytes) {
+      deferred_state = NativeRequestBodyState::kNotCapturedUrl;
+    } else {
+      summary.flags |= kNativeRequestBodyLengthPartial;
+      unread_body_ = DeferredBody{
+          .parent = parent,
+          .summary = summary,
+          .url = std::move(url),
+          .mime_type = summary.content_type_length != 0
+                           ? std::string(summary.content_type.data(), summary.content_type_length)
+                           : std::string("application/octet-stream")};
+      return;
+    }
+  }
   NativeProbeEvent event = MakeChildEvent(NativeProbeType::kRequestBody, parent);
   if (summary.kind == NativeRequestBodyKind::kNone) {
     summary.state = NativeRequestBodyState::kNoBody;
@@ -666,6 +701,9 @@ void NativeNetworkCaptureSink::EmitRequestBody(const NativeProbeEmitter emitter,
     summary.flags |= kNativeRequestBodyLengthPartial;
     summary.state = capture_content ? NativeRequestBodyState::kNotCapturedBodyKind
                                     : NativeRequestBodyState::kMetadataOnly;
+    if (deferred_state) {
+      summary.state = *deferred_state;
+    }
   } else {
     if (summary.body_length <= kNativeRequestBodyDigestBytes) {
       crypto::hash::Hasher hasher(crypto::hash::HashKind::kSha256);
@@ -749,6 +787,11 @@ void NativeNetworkCaptureSink::RecordRequestStarted(const std::uint64_t request_
       monotonic_time_ns >= expires_at_monotonic_ns_.load(std::memory_order_relaxed)) {
     return;
   }
+  // A previous start whose body was never handed over is recorded unread.
+  if (unread_body_) {
+    EmitDeferredBody(emitter, *unread_body_, NativeRequestBodyState::kNotCapturedBodyKind);
+    unread_body_.reset();
+  }
 
   NativeProbeEvent event = MakeNetworkEvent(
       NativeProbeType::kRequestStarted, NativeProbeSession::Get().NextBrowserSequence(),
@@ -813,6 +856,91 @@ void NativeNetworkCaptureSink::AssignNetworkHeadersId(const std::uint64_t reques
   } else {
     request.devtools_request_id = HeaderIdOf(request_id);
   }
+}
+
+void NativeNetworkCaptureSink::TeeRequestBody(const std::uint64_t request_id,
+                                              network::ResourceRequest& request) noexcept {
+  const NativeProbeEmitter emitter = emitter_.load(std::memory_order_acquire);
+  if (!emitter || !unread_body_ || unread_body_->parent.request_id != request_id) {
+    return;
+  }
+  DeferredBody body = std::move(*unread_body_);
+  unread_body_.reset();
+  const std::uint64_t read_id = next_read_id_++;
+  switch (NativeArtifactCaptureSink::Get().ReadRequestBody(
+      request, request_id, body.parent.frame_id, body.url, body.mime_type,
+      base::BindOnce(&NativeNetworkCaptureSink::RecordBodyRead, base::Unretained(this),
+                     generation(), read_id))) {
+    case NativeRequestContentAdmission::kQueued:
+      reading_bodies_.emplace(read_id, std::move(body));
+      return;
+    case NativeRequestContentAdmission::kUnavailable:
+      EmitDeferredBody(emitter, body, NativeRequestBodyState::kNotCapturedArtifactUnavailable);
+      return;
+    case NativeRequestContentAdmission::kSessionBudget:
+      EmitDeferredBody(emitter, body, NativeRequestBodyState::kNotCapturedSessionBudget);
+      return;
+    case NativeRequestContentAdmission::kRefused:
+      EmitDeferredBody(emitter, body, NativeRequestBodyState::kNotCapturedTransferRefused);
+      return;
+  }
+}
+
+void NativeNetworkCaptureSink::EmitDeferredBody(const NativeProbeEmitter emitter,
+                                                const DeferredBody& body,
+                                                const NativeRequestBodyState state) noexcept {
+  NativeRequestBodySummary summary = body.summary;
+  summary.state = state;
+  if (state == NativeRequestBodyState::kNotCapturedReadIncomplete) {
+    summary.flags |= kNativeRequestBodyRead;
+  }
+  NativeProbeEvent event = MakeChildEvent(NativeProbeType::kRequestBody, body.parent);
+  event.header.monotonic_time_ns =
+      static_cast<std::uint64_t>(base::TimeTicks::Now().since_origin().InNanoseconds());
+  event.inline_payload = EncodeNativeRequestBodyPayload(summary);
+  emitter(event);
+}
+
+std::uint64_t NativeNetworkCaptureSink::RecordBodyRead(
+    const std::uint64_t generation,
+    const std::uint64_t read_id,
+    const NativeRequestBodyReadOutcome& outcome) noexcept {
+  const NativeProbeEmitter emitter = emitter_.load(std::memory_order_acquire);
+  const auto found = reading_bodies_.find(read_id);
+  if (!emitter || generation != this->generation() || found == reading_bodies_.end()) {
+    return 0;
+  }
+  const DeferredBody body = std::move(found->second);
+  reading_bodies_.erase(found);
+  const std::uint64_t now =
+      static_cast<std::uint64_t>(base::TimeTicks::Now().since_origin().InNanoseconds());
+  if (now >= expires_at_monotonic_ns_.load(std::memory_order_relaxed)) {
+    return 0;
+  }
+  NativeRequestBodySummary summary = body.summary;
+  summary.flags |= kNativeRequestBodyRead;
+  summary.state = outcome.state;
+  summary.body_length = outcome.body_length;
+  summary.captured_length = outcome.captured_length;
+  const bool exact = outcome.state == NativeRequestBodyState::kEmpty ||
+                     outcome.state == NativeRequestBodyState::kCaptured ||
+                     outcome.state == NativeRequestBodyState::kCapturedTruncated;
+  // Read lengths are exact; a read that stopped early counts what it read.
+  if (exact) {
+    summary.flags &= static_cast<std::uint8_t>(~kNativeRequestBodyLengthPartial);
+  }
+  if (outcome.state == NativeRequestBodyState::kCapturedTruncated) {
+    summary.flags |= kNativeRequestBodyDigestSizeLimit;
+  } else if (exact) {
+    summary.flags |= kNativeRequestBodyDigestPresent;
+    summary.sha256 = outcome.sha256;
+  }
+  NativeProbeEvent event = MakeChildEvent(NativeProbeType::kRequestBody, body.parent);
+  event.header.monotonic_time_ns = now;
+  event.header.artifact_id = outcome.artifact_id;
+  event.inline_payload = EncodeNativeRequestBodyPayload(summary);
+  emitter(event);
+  return event.header.sequence_number;
 }
 
 void NativeNetworkCaptureSink::RecordRequestRedirected(

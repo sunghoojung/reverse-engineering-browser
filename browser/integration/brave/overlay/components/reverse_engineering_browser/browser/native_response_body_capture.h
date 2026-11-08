@@ -12,6 +12,7 @@
 #include <cstdint>
 #include <map>
 #include <memory>
+#include <optional>
 #include <span>
 #include <string>
 #include <utility>
@@ -19,7 +20,7 @@
 
 #include "base/no_destructor.h"
 #include "brave/components/reverse_engineering_browser/browser/native_artifact_body_tee.h"
-#include "brave/components/reverse_engineering_browser/common/native_artifact_capture_buffer.h"
+#include "brave/components/reverse_engineering_browser/browser/native_artifact_stream.h"
 #include "brave/components/reverse_engineering_browser/common/native_network_response_body.h"
 #include "brave/components/reverse_engineering_browser/common/native_probe_event.h"
 #include "mojo/public/cpp/system/data_pipe.h"
@@ -34,9 +35,9 @@ class URLResponseHead;
 namespace reb {
 
 // Retains response bodies other than scripts and Wasm through the existing
-// response tee (protocol/native-network-v3.md). It shares the artifact sink's
-// in-flight pool, artifact IDs and ACK path. UI sequence only, except the
-// off-sequence digest.
+// response tee (protocol/native-network-v3.md), streamed to the receiver as
+// they arrive. It shares the artifact sink's in-flight pool, artifact IDs and
+// ACK path. UI sequence only.
 class NativeResponseBodyCapture final {
  public:
   static NativeResponseBodyCapture& Get();
@@ -62,6 +63,9 @@ class NativeResponseBodyCapture final {
   // The loader's completion status; the source pipe closing alone is not.
   void OnCompleted(std::uint64_t request_id, std::uint64_t frame_id, int error_code) noexcept;
   void OnTransferCompleted(std::uint64_t artifact_id, bool accepted) noexcept;
+  // The receiver refused, or the channel lost, a stream whose body is still
+  // open; it becomes not_captured_transfer_refused. False for any other ID.
+  bool OnStreamRefused(std::uint64_t artifact_id) noexcept;
   // Capture end: open bodies become partial records while the session can
   // still record them; finished bodies waiting for completion are retained.
   void Flush() noexcept;
@@ -74,50 +78,30 @@ class NativeResponseBodyCapture final {
   struct Body final {
     std::uint64_t capture_id = 0;
     NativeProbeHeader parent{};
-    std::string url;
-    std::string mime_type;
     NativeResponseBodySummary summary;
-    NativeArtifactCaptureBuffer captured;
+    NativeArtifactStream stream;
     bool streaming = false;
+    // Why the bytes stopped being retained, if they did.
+    std::optional<NativeResponseBodyState> refused;
     std::uint16_t partials = 0;
     std::uint64_t snapshot_ns = 0;
-    std::size_t snapshot_size = 0;
+    std::uint64_t snapshot_size = 0;
     bool tee_done = false;
     bool completion_known = false;
     NativeArtifactBodyEnd end = NativeArtifactBodyEnd::kSourceClosed;
     int error_code = 0;
-  };
-  // One artifact to hash, deduplicate, charge and queue.
-  struct Retention final {
-    Key key{};
-    std::uint64_t capture_id = 0;
-    std::uint64_t generation = 0;
-    NativeProbeHeader parent{};
-    std::string url;
-    std::string mime_type;
-    NativeResponseBodySummary summary;
-    std::vector<std::uint8_t> bytes;
-    NativeArtifactReservation reservation;
-    Digest sha256{};
-    // A snapshot of a body that is still open, superseded by its end record.
-    bool live = false;
   };
 
   NativeResponseBodyCapture();
   ~NativeResponseBodyCapture();
 
   void OnData(Key key, std::uint64_t capture_id, std::span<const std::uint8_t> chunk);
-  void OnEnd(Key key,
-             std::uint64_t capture_id,
-             NativeArtifactBodyEnd end,
-             NativeArtifactCaptureBuffer unused);
+  void OnEnd(Key key, std::uint64_t capture_id, NativeArtifactBodyEnd end);
   void OnCompletionTimeout(Key key, std::uint64_t capture_id);
-  // An open body becomes a partial record; the capture-end flush only.
-  void Finish(std::map<Key, Body>::iterator found, bool synchronous);
+  // Ends the stream and records the body; an open body becomes partial.
+  void Finish(std::map<Key, Body>::iterator found);
   void Snapshot(std::map<Key, Body>::iterator found);
-  void Retain(std::unique_ptr<Retention> retention, bool synchronous);
-  static std::unique_ptr<Retention> Hash(std::unique_ptr<Retention> retention);
-  void OnHashed(std::unique_ptr<Retention> retention);
+  void Refund(std::uint64_t bytes) noexcept;
   // Records why the bytes were not retained, keeping the body's metadata.
   void Refuse(const NativeProbeHeader& parent,
               NativeResponseBodySummary summary,

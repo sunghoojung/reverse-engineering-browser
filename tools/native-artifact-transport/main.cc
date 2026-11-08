@@ -10,6 +10,7 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstdint>
@@ -111,6 +112,39 @@ std::unique_ptr<reb::NativeArtifactTransfer> MakeTransfer(const std::uint64_t ar
   transfer->header.url_size = static_cast<std::uint32_t>(transfer->url.size());
   transfer->header.mime_type_size = static_cast<std::uint32_t>(transfer->mime_type.size());
   return transfer;
+}
+
+std::unique_ptr<reb::NativeArtifactTransfer> OpenStream(const std::uint64_t artifact_id) {
+  auto transfer = MakeTransfer(artifact_id, 0);
+  transfer->op = reb::NativeArtifactTransferOp::kOpen;
+  transfer->header.protocol_version = reb::kNativeArtifactStreamProtocolVersion;
+  transfer->header.content_size = 0;
+  return transfer;
+}
+
+std::unique_ptr<reb::NativeArtifactTransfer> StreamFrame(const reb::NativeArtifactStreamOp op,
+                                                         const std::uint64_t artifact_id,
+                                                         const std::size_t size = 0,
+                                                         const std::uint64_t content_size = 0) {
+  auto transfer = std::make_unique<reb::NativeArtifactTransfer>();
+  transfer->op = reb::NativeArtifactTransferOp::kStream;
+  transfer->frame.op = op;
+  transfer->frame.session_id = kSessionId;
+  transfer->frame.artifact_id = artifact_id;
+  transfer->frame.content_size = content_size;
+  if (size != 0) {
+    transfer->reservation = reb::NativeArtifactReservation::Acquire(g_pool, size);
+    Require(transfer->reservation.is_valid(), "stream frame pool share");
+    transfer->content.assign(size, 's');
+    transfer->frame.data_size = static_cast<std::uint32_t>(size);
+  }
+  return transfer;
+}
+
+bool Reported(const std::uint64_t artifact_id) {
+  return std::ranges::any_of(Completions(), [artifact_id](const reb::TestCompletion& completion) {
+    return completion.artifact_id == artifact_id;
+  });
 }
 
 void WriteToken(const std::string& path) {
@@ -320,14 +354,48 @@ void CheckProductionReceiver(const std::string& receiver, const std::string& roo
   std::cout << "PASS artifact writer: sensitive, oversize and duplicate rejections answered on one "
                "connection with their real status; the next artifact is accepted\n";
 
+  // Streams interleave on the same connection. A refusal mid-stream is
+  // reported once and the stream's later frames are dropped; an abort is
+  // silent; a stream still open when the receiver goes is reported lost.
+  using Op = reb::NativeArtifactStreamOp;
+  Require(
+      Enqueue(OpenStream(20)) && Enqueue(OpenStream(21)) && Enqueue(OpenStream(22)) &&
+          Enqueue(StreamFrame(Op::kData, 20, 1000)) && Enqueue(StreamFrame(Op::kData, 21, 60000)) &&
+          Enqueue(StreamFrame(Op::kData, 22, 10)) && Enqueue(StreamFrame(Op::kData, 20, 2000)) &&
+          Enqueue(StreamFrame(Op::kData, 21, 10000)) && Enqueue(StreamFrame(Op::kData, 21, 5)) &&
+          Enqueue(StreamFrame(Op::kAbort, 22)) && Enqueue(StreamFrame(Op::kEnd, 21, 0, 60005)) &&
+          Enqueue(StreamFrame(Op::kEnd, 20, 0, 3000)),
+      "enqueue interleaved streams");
+  Require(StatusOf(21) == NativeArtifactReceiveStatus::kTooLarge,
+          "a stream refused mid-body reports the receiver's status");
+  Require(StatusOf(20) == NativeArtifactReceiveStatus::kAccepted, "an ended stream is accepted");
+  Require(Enqueue(OpenStream(23)) && Enqueue(StreamFrame(Op::kData, 23, 7)) &&
+              Enqueue(MakeTransfer(24, 4)) &&
+              StatusOf(24) == NativeArtifactReceiveStatus::kAccepted,
+          "a whole artifact follows the open stream");
+  Require(!Reported(21) && !Reported(22) && !Reported(23),
+          "a refused stream is reported once, an abort and an open stream not at all");
+  const std::string streamed = ReadFile(root + "/artifacts/manifest.jsonl");
+  Require(CountOf(streamed, "\"artifact_id\":\"20\"") == 1 &&
+              CountOf(streamed, "\"byte_size\":3000") == 1 &&
+              CountOf(streamed, "\"artifact_id\":\"21\"") == 0 &&
+              CountOf(streamed, "\"artifact_id\":\"22\"") == 0,
+          "only the ended stream is in the manifest");
+  Require(WaitFor([] { return g_pool.used() == 0; }), "stream frames return their pool share");
+  std::cout << "PASS artifact writer: interleaved streams, a refusal reported once with later "
+               "frames dropped, a silent abort\n";
+
   StopReceiver(pid);
   const std::string stats = ReadFile(log_path);
-  Require(CountOf(stats, "accepted=2 ") == 1 && CountOf(stats, "too_large=1 ") == 1 &&
+  Require(CountOf(stats, "accepted=4 ") == 1 && CountOf(stats, "too_large=2 ") == 1 &&
+              CountOf(stats, "streams_abandoned=1 ") == 1 &&
               CountOf(stats, "sensitive_rejected=1 ") == 1 && CountOf(stats, "conflicts=1 ") == 1,
           "receiver counted every rejection");
   const auto lost_started = Clock::now();
   Require(Enqueue(MakeTransfer(5, 8)), "enqueue to a vanished receiver");
   Require(Enqueue(MakeTransfer(6, 8)), "enqueue while the writer reconnects");
+  Require(StatusOf(23) == NativeArtifactReceiveStatus::kIoError,
+          "a stream open on the lost connection is reported");
   Require(StatusOf(5) == NativeArtifactReceiveStatus::kIoError &&
               StatusOf(6) == NativeArtifactReceiveStatus::kIoError,
           "transfers to a vanished receiver are reported");

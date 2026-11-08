@@ -29,6 +29,8 @@ stored v1 or v2 meaning. [SAFETY.md](../SAFETY.md) governs capture and export.
 | Capture origin 12, 13 | `request_stack`, `stack_script` | Request initiator stacks |
 | Brave patch 0017 | `link-requests-to-tab-owners` | Request scope and tabs |
 | Brave patch 0018 | `capture-native-network-headers` | Headers and cookies |
+| Brave patch 0019 | `tee-native-request-bodies` | Request body reads |
+| `request_body` flag bit 6, state 12 | `read`, `not_captured_read_incomplete` | Request body reads |
 | Chromium patch 0025 | `forward-native-network-headers` | Headers and cookies |
 | Chromium patch 0026, 0027 | `finish-renderer-answered-requests`, `record-renderer-fetch-owners` | Request scope and tabs |
 | Chromium patch 0028 | `record-script-cookie-access` | Headers and cookies |
@@ -429,12 +431,14 @@ to `browser/native_response_body_capture.cc`:
   status decides: an error is `aborted`, `net::ERR_ABORTED` or the page closing
   its pipe is `cancelled`. A body whose completion never arrives is kept after
   10 s and flagged.
-- A body without a declared length that is still open after a second is
-  snapshotted as `partial` when it has grown by half since the last snapshot,
-  at most 15 times, so snapshots stay within three times the body. Open bodies
-  at capture end or expiry become one last `partial` record, or
-  `not_captured_artifact_unavailable` when no byte has arrived. The record of the
-  ended body supersedes every snapshot.
+- Bytes stream to the receiver as they arrive
+  ([artifact channel v2](../docs/architecture/artifact-transfer-channel.md#streamed-artifacts-version-2)).
+  A body without a declared length that is still open after a second is
+  published as `partial` by a receiver checkpoint of what arrived when it has
+  grown by half since the last one, at most 15 times, so snapshots stay within
+  three times the body. Open bodies at capture end or expiry end their stream
+  as one last `partial` record, or `not_captured_artifact_unavailable` when no
+  byte has arrived. The record of the ended body supersedes every snapshot.
 
 ### `response_body` (type 33)
 
@@ -518,18 +522,19 @@ launcher passes for content sessions.
 
 - Disabled: unchanged; every sink returns at its emitter load. Metadata-only:
   one relaxed load per response start, completion and untyped body.
-- Each kept body reserves its declared length, or one 64 KiB chunk that grows,
-  in the 32 MiB in-flight pool it shares with scripts and request content, and
-  holds that share until the artifact writer drops it. A full pool is state 11,
-  never a stall. Fifty parallel bodies of unknown length hold 3.2 MiB.
+- Each open body holds at most one pending 64 KiB data frame, plus frames the
+  writer has not yet sent, in the 32 MiB in-flight pool it shares with scripts
+  and request content; a declared length reserves nothing. A full pool or a
+  refused frame is state 11, never a stall.
 - At most 16 MiB per body. Past it the tee keeps the prefix and counts every
   byte.
-- SHA-256 runs off the UI sequence. The capture-end flush hashes on the UI
-  sequence, bounded by the pool.
+- SHA-256 grows by at most one 64 KiB tee read per task, so the record carries
+  the digest when the body ends; the receiver verifies it.
 - Unique bytes per session are budgeted: 512 MiB by default, 1 MiB to 16 GiB
   with `--reb-response-body-budget-bytes` (`REB_RESPONSE_BODY_BUDGET_MIB`).
-  Identical bytes are stored once by SHA-256 and charge nothing; a receiver
-  refusal refunds them. The launcher grows a content session's receiver store
+  A body is charged when it ends, once its digest is known: identical bytes
+  are stored once by SHA-256 and charge nothing (the repeat stream is aborted),
+  each snapshot is charged, and a receiver refusal refunds them. The launcher grows a content session's receiver store
   by both budgets.
 - Every refusal is a named state. The session summary counts states 2 and 9 to
   12 under `request_content_not_retained`, category `response_body`.
@@ -587,6 +592,80 @@ Still required before declaring this browser-ready:
    events, an aborted download, a 304, a redirect and a service-worker-served
    response; load 50 responses in parallel; exhaust a small budget; and watch
    browser memory stay within the pool.
+
+## Request body reads
+
+Defined by #436 and #428. In content sessions a `request_body` (type 22) whose
+parts include a file, blob or stream is read instead of only described, and is
+retained as a `request_body` artifact with exact bytes and digest.
+
+### Read
+
+- Brave patch 0019 calls `NativeNetworkCaptureSink::TeeRequestBody` right after
+  `AssignNetworkHeadersId`. `browser/native_request_body_reader.cc` then reads
+  the parts in order on its own background sequence. In-memory parts are
+  copied; file parts are read only while unchanged since the page attached them
+  (offset, length and expected modification time, as the network service
+  checks); blob parts are read through a clone of their getter, so the request
+  keeps its own.
+- A stream part (`fetch` with a `ReadableStream` body) can be consumed only
+  once, so its getter is replaced by one that forwards the size and every byte
+  unchanged to the network through a tee. That getter is the only change to the
+  request, and the upload is never delayed: a full pool ends the read, not the
+  upload.
+- Bytes stream to the receiver as they are read. Past 16 MiB a part is sized,
+  not read.
+- The record is emitted when the read ends, still the child of
+  `request_started`; its end frame names it as the artifact's creator. A body
+  never handed to the reader (no hook) is recorded as `not_captured_body_kind`
+  at the next request start or capture end.
+
+### Record
+
+Payload version 1. Bit 6 `read` marks a body the browser read; it needs bit 0
+and kind 2 to 5 (a stream has one element). With bit 6:
+
+| State | Rule |
+| ---: | --- |
+| 2 `empty` | Length 0, digest of nothing, bit 3 clear |
+| 4 `captured` | Exact length up to 16 MiB, captured equal, digest present, bit 3 clear, artifact |
+| 5 `captured_truncated` | Exact length over 16 MiB, captured 16 MiB, bit 2, bit 3 clear, artifact |
+| 8 `not_captured_transfer_refused` | The pool or queue refused it while reading; bit 3 set |
+| 10 `not_captured_session_budget` | The read passed its budget allowance; bit 3 set |
+| 12 `not_captured_read_incomplete` | A part changed or failed, the upload was cancelled, or capture ended; bit 3 set |
+
+For states 8, 10 and 12 the length counts what was read; no digest and no
+artifact. Without bit 6, kinds 2 to 5 may also carry states 7 to 10 when the
+read was refused before it started, and state 12 is invalid. Every other v2 rule
+is unchanged.
+
+### Bounds
+
+- Disabled and metadata-only: unchanged; nothing is read.
+- A read charges `min(16 MiB, remaining budget)` of the request-content budget
+  when it starts and settles to its unique bytes when it ends, so parallel reads
+  cannot pass the budget together.
+- Each read holds at most one pending 64 KiB data frame in the in-flight pool.
+  A file or blob read waits for pool space, about 5 s at most, then is state 8.
+
+### Consumers and validation
+
+The C++ core, the Python validator and the Traffic decoder share the rules
+(`make network-request-wire-check`); Traffic names state 12 and read lengths;
+the session summary counts state 12 under `request_content_not_retained`.
+`make native-network-capture-check` covers the deferred record, the hook and
+refusals. `make native-artifact-capture-check` retains a multipart upload with a
+file and a stream-body `fetch` with exact bytes and digest through the
+production receiver and broker, and covers the 16 MiB prefix, the budget
+allowance, a stuck pool, incomplete and empty reads, capture end and a missing
+hook. The reader's Mojo and file glue compiles only in a Brave build.
+
+### Acceptance
+
+Still required: replay all stacks, compile the browser target, and with an
+authorized fixture compare server receipts with retained artifacts for a
+multipart upload with a file, a `Blob` upload, a stream-body `fetch` and a file
+changed after it was attached.
 
 ## Headers and cookies
 

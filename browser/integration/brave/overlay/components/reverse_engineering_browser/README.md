@@ -98,9 +98,17 @@ sink also emit `request_target` children (path and query, 116-byte prefix plus
 original length) for starts and redirects and hand longer targets and at most
 16 MiB of in-memory body bytes to `NativeArtifactCaptureSink::CaptureRequestContent`
 as sensitive `request_target` and `request_body` artifacts, copied and hashed
-off the UI sequence within a per-session byte budget. File, blob and stream elements are never read, and
-password form posts keep neither bytes nor a digest. The wire and limits are in
-[Native network v2](../../../../../../protocol/native-network-v2.md).
+off the UI sequence within a per-session byte budget. Brave patch
+`0019-tee-native-request-bodies` hands bodies with file, blob or stream parts to
+`browser/native_request_body_reader.cc`, which reads them on a background
+sequence (a stream part through a forwarding tee getter) and records them when
+the read ends. Password form posts keep neither bytes nor a digest. The wire
+and limits are in [Native network v2](../../../../../../protocol/native-network-v2.md)
+and [v3](../../../../../../protocol/native-network-v3.md#request-body-reads).
+Every network body streams to the receiver through
+`browser/native_artifact_stream.cc` in data frames of at most 64 KiB, so the
+in-flight pool bounds bytes in flight rather than bodies
+([artifact channel v2](../../../../../../docs/architecture/artifact-transfer-channel.md#streamed-artifacts-version-2)).
 
 Request records carry a scheme class (`common/native_network_scope.h`).
 Renderers count `chrome:`, `devtools:` and other internal-scheme requests in
@@ -144,14 +152,14 @@ aggregated per key.
 Large artifact bytes use the separate 128-byte framed contract and 32-byte
 acknowledgment in `common/native_artifact_header.h`. Only the browser-process
 bridge owns that receiver connection. JavaScript and WASM response bodies are
-copied by an asynchronous Mojo tee with a 16 MiB per-artifact limit. Tees and
+streamed by an asynchronous Mojo tee with a 16 MiB per-artifact limit. Tees and
 request content share the 32 MiB in-flight pool in
-`common/native_artifact_capture_buffer.h`, charged with the bytes each capture
-holds and returned when the writer drops its transfer. Accepted dynamic JavaScript and WASM byte-buffer API
+`common/native_artifact_memory_pool.h`, charged with each queued data frame and
+returned when the writer drops it. Accepted dynamic JavaScript and WASM byte-buffer API
 inputs use a separate one-way Mojo submission with the same per-artifact cap.
 The browser copies renderer-owned shared memory before validation and records
 the stable execution context plus exact capture origin. A dedicated writer
-thread drains a 16-artifact, 32 MiB queue to the authenticated artifact socket.
+thread drains a bounded 32 MiB queue to the authenticated artifact socket.
 Successful evidence is emitted only after receiver acknowledgment; every local
 or remote rejection becomes an `artifact_capture_failed` event. Artifact bytes
 do not enter the renderer event ring. Other response bodies need request

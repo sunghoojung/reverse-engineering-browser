@@ -55,6 +55,8 @@ enum class NativeRequestBodyState : std::uint8_t {
   kNotCapturedUrl = 9,
   kNotCapturedSessionBudget = 10,
   kNotCapturedCredentialForm = 11,
+  // native-network-v3.md: a file, blob or stream part could not be read whole.
+  kNotCapturedReadIncomplete = 12,
 };
 
 inline constexpr std::uint8_t kNativeRequestBodyContentCapture = 1U << 0U;
@@ -63,6 +65,8 @@ inline constexpr std::uint8_t kNativeRequestBodyDigestSizeLimit = 1U << 2U;
 inline constexpr std::uint8_t kNativeRequestBodyLengthPartial = 1U << 3U;
 inline constexpr std::uint8_t kNativeRequestBodyContentTypePresent = 1U << 4U;
 inline constexpr std::uint8_t kNativeRequestBodyContentTypeOmitted = 1U << 5U;
+// The browser read the file, blob or stream parts (native-network-v3.md).
+inline constexpr std::uint8_t kNativeRequestBodyRead = 1U << 6U;
 
 enum class NativeRequestScheme : std::uint8_t {
   kOther = 0,

@@ -117,9 +117,6 @@ class NativeNetworkCaptureSink final {
   std::atomic<std::uint64_t> category_mask_{0};
   std::atomic<std::uint64_t> expires_at_monotonic_ns_{0};
   std::atomic<bool> capture_content_{false};
-  // Request-body artifacts admitted in this configuration (UI sequence).
-  std::atomic<std::size_t> request_body_count_{0};
-  std::atomic<std::size_t> request_body_bytes_{0};
 };
 
 }  // namespace reb

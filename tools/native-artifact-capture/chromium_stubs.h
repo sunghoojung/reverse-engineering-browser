@@ -17,11 +17,15 @@
 #include <utility>
 #include <vector>
 
+#include "brave/components/reverse_engineering_browser/common/native_artifact_capture_buffer.h"
 #include "brave/components/reverse_engineering_browser/common/native_artifact_header.h"
 #include "brave/components/reverse_engineering_browser/common/native_probe_event.h"
 #include "brave/components/reverse_engineering_browser/common/native_wasm_guest.h"
 #include "brave/components/reverse_engineering_browser/common/native_wasm_sample_budget.h"
 #include "network_request_body_stub.h"
+
+template <class T>
+using scoped_refptr = std::shared_ptr<T>;
 
 namespace base {
 template <class T>
@@ -70,11 +74,47 @@ template <class T>
 T* Unretained(T* value) {
   return value;
 }
-template <class Function, class Argument>
-auto BindOnce(Function function, Argument argument) {
-  return [function, argument]() mutable { function(argument); };
+// Bound arguments are moved into the call, so each result runs once.
+template <class Function, class... Bound>
+auto BindOnce(Function function, Bound... bound) {
+  return [function, ... bound = std::move(bound)](auto&&... rest) mutable -> decltype(auto) {
+    return std::invoke(function, std::move(bound)..., std::forward<decltype(rest)>(rest)...);
+  };
 }
 struct Location {};
+enum class TaskPriority { USER_VISIBLE };
+enum class TaskShutdownBehavior { SKIP_ON_SHUTDOWN };
+struct TaskTraits {
+  TaskTraits(TaskPriority, TaskShutdownBehavior) {}
+};
+// Holds background work until a test runs it, so the UI-sequence state between
+// admission and the reply is observable.
+struct ThreadPool {
+  template <class Task, class Reply>
+  static bool PostTaskAndReplyWithResult(const Location&,
+                                         const TaskTraits&,
+                                         Task task,
+                                         Reply reply) {
+    if (refuse) {
+      return false;
+    }
+    pending.emplace_back(
+        [task = std::move(task), reply = std::move(reply)]() mutable { reply(task()); });
+    return true;
+  }
+  static std::size_t RunPending() {
+    std::size_t count = 0;
+    while (!pending.empty()) {
+      auto task = std::move(pending.front());
+      pending.erase(pending.begin());
+      task();
+      ++count;
+    }
+    return count;
+  }
+  static inline bool refuse = false;
+  static inline std::vector<std::packaged_task<void()>> pending;
+};
 struct TimeDelta {
   std::int64_t ns = 0;
 };
@@ -94,13 +134,6 @@ struct SequencedTaskRunner {
   }
   std::vector<std::pair<std::int64_t, std::function<void()>>> tasks;
 };
-template <class Method, class Owner, class Context>
-auto BindOnce(Method method, Owner* owner, Context context) {
-  return [method, owner, context = std::move(context)](bool complete,
-                                                       std::vector<std::uint8_t> bytes) mutable {
-    (owner->*method)(std::move(context), complete, std::move(bytes));
-  };
-}
 }  // namespace base
 #define FROM_HERE ::base::Location()
 
@@ -213,6 +246,7 @@ struct NativeArtifactTransfer final {
   std::string url;
   std::string mime_type;
   std::vector<std::uint8_t> content;
+  NativeArtifactReservation reservation;
 };
 class NativeArtifactSocketClient {
  public:
@@ -234,35 +268,45 @@ class NativeArtifactSocketClient {
   bool reject_next = false;
   std::map<std::uint64_t, std::unique_ptr<NativeArtifactTransfer>> transfers;
 };
+// Feeds the real capture buffer in forwarding-pipe-sized chunks, so growth,
+// the size bound and the pool bound run as they do behind the Mojo tee.
 class NativeArtifactBodyTee {
  public:
-  using Completion = std::packaged_task<void(bool, std::vector<std::uint8_t>)>;
+  using Completion = std::packaged_task<void(bool, NativeArtifactCaptureBuffer)>;
   template <class Callback>
   static mojo::ScopedDataPipeConsumerHandle Create(mojo::ScopedDataPipeConsumerHandle body,
-                                                   std::size_t capture_limit,
-                                                   std::size_t reserve_size,
+                                                   NativeArtifactCaptureBuffer captured,
                                                    Callback callback,
                                                    bool& started) {
     if (unavailable) {
       started = false;
       return body;
     }
-    if (capture_limit != kNativeArtifactMaxContentBytes || reserve_size > capture_limit) {
-      throw std::runtime_error("Invalid tee admission bounds");
+    if (captured.status() != NativeArtifactCaptureStatus::kCapturing) {
+      throw std::runtime_error("Tee started without a capturing buffer");
     }
-    pending.emplace(body.id, Completion(std::move(callback)));
+    pending.emplace(body.id, Pending{std::move(captured), Completion(std::move(callback))});
     started = true;
     return body;
   }
-  static void Complete(int id, bool complete, std::vector<std::uint8_t> content) {
-    auto callback = std::move(pending.at(id));
+  static void Complete(int id, bool complete, std::span<const std::uint8_t> content) {
+    auto entry = std::move(pending.at(id));
     pending.erase(id);
-    auto result = callback.get_future();
-    callback(complete, std::move(content));
+    constexpr std::size_t kChunk = 64U * 1024U;
+    for (std::size_t offset = 0; offset < content.size(); offset += kChunk) {
+      entry.captured.Append(content.subspan(offset, std::min(kChunk, content.size() - offset)));
+    }
+    auto result = entry.completion.get_future();
+    entry.completion(complete, std::move(entry.captured));
     result.get();
   }
+  static std::size_t Reserved(int id) { return pending.at(id).captured.reserved(); }
+  struct Pending {
+    NativeArtifactCaptureBuffer captured;
+    Completion completion;
+  };
   static inline bool unavailable = false;
-  static inline std::map<int, Completion> pending;
+  static inline std::map<int, Pending> pending;
 };
 class NativeProbeHost;
 // Session boundary seen by NativeProbeHost; the policy is set by each test.

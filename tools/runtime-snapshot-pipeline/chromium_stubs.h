@@ -12,11 +12,16 @@
 #include <utility>
 #include <vector>
 
+#include "brave/components/reverse_engineering_browser/common/native_artifact_capture_buffer.h"
 #include "brave/components/reverse_engineering_browser/common/native_artifact_header.h"
 #include "brave/components/reverse_engineering_browser/common/native_probe_event.h"
+#include "network_request_body_stub.h"
 
 #define COMPONENT_EXPORT(component)
 #define UNSAFE_BUFFERS(...) __VA_ARGS__
+
+template <class T>
+using scoped_refptr = std::shared_ptr<T>;
 
 namespace base {
 template <class T>
@@ -69,6 +74,18 @@ class UnsafeSharedMemoryRegion {
 template <class T>
 class ThreadLocalOwnedPointer {};
 struct Location {};
+enum class TaskPriority { USER_VISIBLE };
+enum class TaskShutdownBehavior { SKIP_ON_SHUTDOWN };
+struct TaskTraits {
+  TaskTraits(TaskPriority, TaskShutdownBehavior) {}
+};
+// This pipeline carries no request content.
+struct ThreadPool {
+  template <class Task, class Reply>
+  static bool PostTaskAndReplyWithResult(const Location&, const TaskTraits&, Task&&, Reply&&) {
+    return false;
+  }
+};
 struct TimeDelta {
   std::int64_t ns = 0;
 };
@@ -165,6 +182,7 @@ struct NativeArtifactTransfer final {
   std::string url;
   std::string mime_type;
   std::vector<std::uint8_t> content;
+  NativeArtifactReservation reservation;
 };
 class NativeArtifactSocketClient {
  public:
@@ -188,8 +206,7 @@ class NativeArtifactSocketClient {
 class NativeArtifactBodyTee {
  public:
   static mojo::ScopedDataPipeConsumerHandle Create(mojo::ScopedDataPipeConsumerHandle body,
-                                                   std::size_t,
-                                                   std::size_t,
+                                                   NativeArtifactCaptureBuffer,
                                                    int,
                                                    bool& started) {
     started = false;

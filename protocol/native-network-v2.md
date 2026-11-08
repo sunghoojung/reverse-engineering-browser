@@ -24,7 +24,7 @@ request body, and retains the bytes only where the session allows it.
 | --- | --- | --- | --- |
 | Network category off, or no session | none | none | none |
 | Network on (metadata) | always: kind, state, length, normalized content type, SHA-256 | none | none |
-| Network on with request content | always, as above | start and every redirect | at most 256 KiB per request, as a `request_body` artifact |
+| Network on with request content | always, as above | start and every redirect, with the full target as a `request_target` artifact past 116 bytes | at most 16 MiB per request, as a `request_body` artifact |
 
 Request content is the session's sensitive content gate for requests:
 
@@ -100,12 +100,12 @@ recorded. Other bits are zero.
 | 2 `empty` | In-memory bytes totalling zero; digest of the empty string |
 | 3 `metadata_only` | Content capture off for this session |
 | 4 `captured` | The whole body was queued as the named artifact |
-| 5 `captured_truncated` | The first 256 KiB were queued; the length and digest describe the whole body |
+| 5 `captured_truncated` | The first 16 MiB were queued; the length and digest describe the whole body |
 | 6 `not_captured_body_kind` | A file, blob, stream or unknown part; nothing was read |
 | 7 `not_captured_artifact_unavailable` | Artifact category off, receiver disconnected or session inactive |
-| 8 `not_captured_transfer_refused` | The bounded artifact queue refused it |
-| 9 `not_captured_url` | Not HTTP(S), or the URL is longer than 8 KiB |
-| 10 `not_captured_session_budget` | This session already retained 1,024 bodies or 64 MiB |
+| 8 `not_captured_transfer_refused` | The in-flight pool or the background copy refused it |
+| 9 `not_captured_url` | Not HTTP(S). Captures before payload version 2 targets also used it for URLs over 8 KiB |
+| 10 `not_captured_session_budget` | The session's request-content byte budget was used |
 | 11 `not_captured_credential_form` | Chromium marked a password form post; no bytes and no digest |
 
 Validation rules, shared by the C++ core, the Python evidence validator and the
@@ -136,32 +136,55 @@ after every `request_redirected`, as the child of that record.
 
 | Offset | Size | Field |
 | ---: | ---: | --- |
-| 0 | 2 | payload version, `1` |
+| 0 | 2 | payload version, `2` (`1` in older captures) |
 | 2 | 2 | payload size, `128` |
 | 4 | 4 | target length: bytes of path plus `?query` |
 | 8 | 1 | scheme: 0 other, 1 http, 2 https, 3 ws, 4 wss |
-| 9 | 1 | reserved, zero |
+| 9 | 1 | retention (version 2), zero in version 1 |
 | 10 | 2 | explicit port, or 0 for the scheme default |
 | 12 | 116 | the first `min(length, 116)` target bytes, zero padded |
 
 The target is Chromium's canonical path and query. It never contains
 credentials or a fragment; the host stays in the parent's v1 payload. Target
-bytes are nonzero and every byte after them is zero. A target longer than 116
-bytes is truncated with its original length kept. When a body artifact exists,
-its manifest `url` holds the complete URL (scheme, host, explicit port, path
-and query, at most 8 KiB). An invalid URL reports length 0.
+bytes are nonzero and every byte after them is zero. An invalid URL reports
+length 0.
 
-## Request body artifact
+Retention says where the bytes past the prefix went:
 
-Kind 8 `request_body`, capture origin 10 `network_request`, artifact protocol
-version 1 unchanged. It is always sensitive (flag bit 0), has execution context
-0 and a nonzero creator, and no other kind may use that origin. The MIME type
-is the normalized content type, or `application/octet-stream` when none was
-recorded. Receivers, the backend and the UI reject any other combination.
-The receiver's ACK produces `artifact_captured` or `artifact_capture_failed`
-with this record's sequence as `parent_event_id`, as for response artifacts.
-The Origin Trace Sources workspace does not list request bodies; Traffic shows
-them with their request.
+| Value | Meaning |
+| ---: | --- |
+| 0 `complete` | The target is at most 116 bytes, so the prefix holds all of it |
+| 1 `retained` | The whole target is the `request_target` artifact the envelope's `artifact_id` names |
+| 2 `not_retained_artifact_unavailable` | Artifact category off, receiver disconnected or session inactive |
+| 3 `not_retained_transfer_refused` | The in-flight pool or the background copy refused it |
+| 4 `not_retained_session_budget` | The session's request-content byte budget was used |
+| 5 `not_retained_url` | No HTTP(S) or WebSocket origin, or longer than Chromium's 2 MiB URL limit |
+
+Value 0 if and only if the length is at most 116; value 1 if and only if
+`artifact_id` is nonzero. A version 1 record has byte 9 and `artifact_id` zero
+and a truncated prefix without its rest.
+
+When a body artifact exists, its manifest `url` holds the complete URL
+(scheme, host, explicit port, path and query) when that fits 8 KiB, and the
+origin otherwise.
+
+## Request content artifacts
+
+Kind 8 `request_body` and kind 9 `request_target`, capture origin 10
+`network_request`, artifact protocol version 1 unchanged. Both are always
+sensitive (flag bit 0), have execution context 0 and a nonzero creator: the
+`request_body` or `request_target` record that names them. No other kind may
+use that origin. A body's MIME type is the normalized content type, or
+`application/octet-stream` when none was recorded. A full target's bytes are
+the path and query, its MIME type is `text/plain`, and its manifest `url` is the
+origin (`scheme://host[:port]`). Receivers, the backend and the UI reject any
+other combination. The receiver's ACK produces `artifact_captured` or
+`artifact_capture_failed` with the creator record's sequence as
+`parent_event_id`, as for response artifacts. A body that changed between its
+record and the copy is an `artifact_capture_failed` with reason
+`request_content_changed`; a full queue after the copy is
+`transfer_queue_full_or_disconnected`. The Origin Trace Sources workspace lists
+neither kind; Traffic shows them with their request.
 
 ## Hot path and bounds
 
@@ -169,11 +192,20 @@ them with their request.
 - Every admitted request: one more 320-byte record, a walk over the body
   element list, a non-allocating `Content-Type` lookup and at most 4 MiB of
   SHA-256 on the browser UI sequence. Bodies above 4 MiB are marked, not hashed.
-- Request content: one more record per start or redirect, and for in-memory
-  bodies one copy of at most 256 KiB into the existing artifact queue (288
-  items, 32 MiB). Per session configuration at most 1,024 bodies and 64 MiB are
-  retained, which leaves the receiver's 4,096-artifact, 256 MiB store for
-  JavaScript and WebAssembly. Each refusal is a named state, never silence.
+- Request content: one more record per start or redirect. A body, and a target
+  past 116 bytes, is charged to the session's byte budget and to the 32 MiB
+  in-flight pool it shares with response tees, then copied and hashed on a
+  background sequence while a reference keeps the immutable body alive. The UI
+  sequence copies only the target string. The pool share travels with the
+  transfer until the artifact writer drops it, so the pool bounds bytes held
+  in the browser rather than requests.
+- The budget counts unique bytes: identical content already queued in the
+  session configuration is refunded, because the receiver stores one blob per
+  SHA-256. It defaults to 256 MiB and is set per session with
+  `--reb-request-content-budget-bytes` (1 MiB to 4 GiB), which the launcher
+  takes from `REB_REQUEST_CONTENT_BUDGET_MIB`. There is no body count; the
+  launcher raises a content session's receiver to 65,536 artifacts and
+  256 MiB plus the budget. Each refusal is a named state, never silence.
 - The request is never delayed, consumed or altered. File, blob and stream
   elements are never read, waited on, cloned or moved.
 - Queue loss is reported as in v1. A lost child leaves its request with no
@@ -193,9 +225,12 @@ them with their request.
   size instead of decoding the binary payload as text.
 - Origin Trace joins children to their exact parent. A row with a target shows
   the captured path and query as text, with a marker when truncated. The
-  request detail shows the body capture state, content type, length, digest,
-  kind and, for retained bodies, the bytes decoded as UTF-8 text after a size
-  and SHA-256 check, read at most 256 KiB at a time. A malformed child is shown
+  request detail shows the full URL once its `request_target` artifact is read,
+  or why the rest was not retained, and the body capture state, content type,
+  length, digest, kind and, for retained bodies, the bytes decoded as UTF-8
+  text. Bodies are read by range, 256 KiB at a time on request; the backend
+  checks size and SHA-256 on every read and the view rechecks the digest once
+  every byte is shown. A malformed child is shown
   as malformed in its own request instead of failing the whole refresh.
   Missing records read "no body record". Captured text is never parsed as HTML.
 - A request trace's `invocation_value_flow` join searches a retained body,
@@ -208,15 +243,18 @@ them with their request.
 
 `make native-network-capture-check` drives the actual sink: disabled, expiry,
 metadata-only, content, truncation, the digest bound, each body kind, password
-forms, unavailable, refused and unsupported-URL outcomes, both budgets and
-redirect targets, checking every produced record with the core validator.
+forms, unavailable, refused, budget and unsupported-URL outcomes for bodies and
+full targets, and redirect targets, checking every produced record with the
+core validator.
 `tests/network_request_test.cpp` (in `make native-tests`) checks overlay/core
 layout parity, content-type normalization, every state and many malformed
 records, and the receiver's sensitive policy and manifest round trip.
 `make network-request-wire-check` compares the C++ verdicts with the Python
 validator and the shipped decoders. `make native-artifact-capture-check` runs
-request bodies through the real sinks, the production receiver with and without
-`--allow-sensitive`, and the broker. `make rendered-ui-check` shows a retained
+request bodies and an 8 KB full target through the real sinks, the production
+receiver with and without `--allow-sensitive`, and the broker; it drives 5,000
+bodies to the byte budget, digest dedupe, the shared in-flight pool, the
+background copy and every target retention state. `make rendered-ui-check` shows a retained
 body containing markup and a metadata-only body in the packaged app.
 
 ## Acceptance
@@ -229,7 +267,8 @@ Still required before declaring this browser-ready:
    full `ResourceRequest`.
 2. With an authorized fixture, compare server receipts with native records for
    JSON, form, multipart, `Blob`, `ReadableStream` and file uploads, a password
-   form, a 307 redirect of a POST, and a body above 256 KiB and above 4 MiB.
+   form, a 307 redirect of a POST, a 5 MiB body, a body above 16 MiB, an 8 KB
+   GraphQL GET and a session that exhausts a small byte budget.
 3. On the authorized hCaptcha demo, confirm that each `api.hcaptcha.com` POST
    shows its endpoint path, and that `checksiteconfig`, `getcaptcha` and
    `checkcaptcha` bodies are retained and their digests match.
@@ -237,4 +276,5 @@ Still required before declaring this browser-ready:
    exists while every body record keeps its length, type and digest.
 
 Response bodies are unchanged: native capture still retains only the separately
-authorized JavaScript and WebAssembly response artifacts.
+authorized JavaScript and WebAssembly response artifacts. File, `Blob` and
+stream bodies are still described, not read.

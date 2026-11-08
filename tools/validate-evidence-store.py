@@ -173,11 +173,11 @@ TOKEN_CHARACTERS = frozenset(b"abcdefghijklmnopqrstuvwxyz0123456789!#$%&'*+-.^_`
 REQUEST_DIGEST_LIMIT = 4 * 1024 * 1024
 
 
-def valid_request_child(event: dict, payload: bytes) -> bool:
+def valid_request_child(event: dict, payload: bytes, versions: tuple = (1,)) -> bool:
     """Envelope shared by request_body and request_target (native-network-v2.md)."""
     return (event["protocol_version"] == 3 and event["category"] == "network"
             and event["flags"] == 0 and not event["payload_truncated"] and len(payload) == 128
-            and payload[:4] == bytes((1, 0, 128, 0))
+            and payload[0] in versions and payload[1:4] == bytes((0, 128, 0))
             and all(event[key] != "0" for key in ("session_id", "sequence_number",
                                                   "parent_event_id"))
             and int(event["parent_event_id"]) < int(event["sequence_number"])
@@ -190,8 +190,12 @@ def valid_request_child(event: dict, payload: bytes) -> bool:
 def valid_request_target(event: dict, payload: bytes) -> bool:
     length = int.from_bytes(payload[4:8], "little")
     prefix = min(length, 116)
-    return (valid_request_child(event, payload) and event["artifact_id"] == "0"
-            and payload[8] <= 4 and payload[9] == 0 and 0 not in payload[12:12 + prefix]
+    retention, has_artifact = payload[9], event["artifact_id"] != "0"
+    # Version 2 byte 9 says where bytes past the prefix went; version 1 has none.
+    retention_valid = (retention == 0 and not has_artifact) if payload[0] == 1 else (
+        retention <= 5 and (retention == 0) != (length > 116) and (retention == 1) == has_artifact)
+    return (valid_request_child(event, payload, (1, 2)) and retention_valid
+            and payload[8] <= 4 and 0 not in payload[12:12 + prefix]
             and not any(payload[12 + prefix:]))
 
 

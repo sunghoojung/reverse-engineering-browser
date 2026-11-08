@@ -55,6 +55,11 @@ static_assert(static_cast<std::uint8_t>(reb::RequestBodyKind::kUnknown) ==
 static_assert(reb::kRequestBodyContentTypeOmitted == reb::kNativeRequestBodyContentTypeOmitted);
 static_assert(static_cast<std::uint8_t>(reb::RequestScheme::kWss) ==
               static_cast<std::uint8_t>(reb::NativeRequestScheme::kWss));
+static_assert(reb::kRequestTargetPayloadVersion == reb::kNativeRequestTargetPayloadVersion);
+static_assert(static_cast<std::uint8_t>(reb::RequestTargetRetention::kNotRetainedUrl) ==
+              static_cast<std::uint8_t>(reb::NativeRequestTargetRetention::kNotRetainedUrl));
+static_assert(static_cast<std::uint16_t>(reb::ArtifactKind::kRequestTarget) ==
+              static_cast<std::uint16_t>(reb::NativeArtifactKind::kRequestTarget));
 
 reb::NativeRequestBodySummary Summary(const reb::NativeRequestBodyKind kind,
                                       const reb::NativeRequestBodyState state,
@@ -144,6 +149,7 @@ void CheckParity() {
   reb::NativeRequestTarget target;
   target.target_length = 0x01020304U;
   target.scheme = reb::NativeRequestScheme::kWs;
+  target.retention = reb::NativeRequestTargetRetention::kNotRetainedSessionBudget;
   target.port = 0x0506;
   for (std::size_t i = 0; i < target.prefix.size(); ++i) {
     target.prefix[i] = static_cast<char>('A' + i % 26);
@@ -152,9 +158,9 @@ void CheckParity() {
   Check(reb::DecodeRequestTargetPayload(reb::EncodeNativeRequestTargetPayload(target),
                                         target_decoded),
         "target payload decodes");
-  Check(target_decoded.protocol_version == 1 && target_decoded.payload_size == 128 &&
+  Check(target_decoded.protocol_version == 2 && target_decoded.payload_size == 128 &&
             target_decoded.target_length == target.target_length && target_decoded.scheme == 3 &&
-            target_decoded.reserved0 == 0 && target_decoded.port == 0x0506 &&
+            target_decoded.reserved0 == 4 && target_decoded.port == 0x0506 &&
             std::equal(target_decoded.target_prefix.begin(), target_decoded.target_prefix.end(),
                        target.prefix.begin()),
         "every target field crosses the overlay/core boundary at its documented offset");
@@ -345,40 +351,66 @@ void CheckBodyStates() {
 }
 
 void CheckTargets() {
+  using Retention = reb::NativeRequestTargetRetention;
   reb::NativeRequestTarget target;
   target.scheme = reb::NativeRequestScheme::kHttps;
+  target.retention = Retention::kRetained;
   const std::string path =
       "/checksiteconfig?v=1&host=accounts.example&sitekey=" + std::string(90, 'k');
   target.target_length = static_cast<std::uint32_t>(path.size());
   std::copy_n(path.begin(), target.prefix.size(), target.prefix.begin());
   auto event = Event(reb::EventType::kRequestTarget, reb::EncodeNativeRequestTargetPayload(target));
+  event.header.artifact_id = 31;
   golden.emplace_back("truncated target", event);
-  Check(reb::IsValidEvent(event), "truncated target with original length is valid");
+  Check(reb::IsValidEvent(event), "a long target names its full-target artifact");
   reb::RequestTargetPayload decoded;
   Check(reb::DecodeRequestTargetPayload(event.inline_payload, decoded) &&
             decoded.target_length == path.size() &&
             std::string_view(decoded.target_prefix.data(), decoded.target_prefix.size()) ==
                 std::string_view(path).substr(0, 116),
         "target prefix and original length survive");
+  for (const auto [name, retention] :
+       {std::pair{"target not retained: artifact channel",
+                  Retention::kNotRetainedArtifactUnavailable},
+        std::pair{"target not retained: transfer refused", Retention::kNotRetainedTransferRefused},
+        std::pair{"target not retained: session budget", Retention::kNotRetainedSessionBudget},
+        std::pair{"target not retained: url", Retention::kNotRetainedUrl}}) {
+    auto refused = event;
+    refused.header.artifact_id = 0;
+    refused.inline_payload[9] = static_cast<std::byte>(retention);
+    golden.emplace_back(name, refused);
+    Check(reb::IsValidEvent(refused), std::string("named refusal is valid: ") + name);
+  }
+  auto legacy = event;
+  legacy.header.artifact_id = 0;
+  legacy.inline_payload[0] = std::byte{1};
+  legacy.inline_payload[9] = std::byte{0};
+  golden.emplace_back("version 1 truncated target", legacy);
+  Check(reb::IsValidEvent(legacy), "a stored version 1 target keeps its meaning");
 
   reb::NativeRequestTarget empty;
   Check(reb::IsValidEvent(
             Event(reb::EventType::kRequestTarget, reb::EncodeNativeRequestTargetPayload(empty))),
         "an invalid URL reports an empty target, not a guessed one");
 
-  const auto mutate = [&](const char* name, const std::function<void(reb::EventRecord&)>& change) {
-    auto copy = event;
+  const auto mutate = [&](const char* name, const std::function<void(reb::EventRecord&)>& change,
+                          const reb::EventRecord& base) {
+    auto copy = base;
     change(copy);
     golden.emplace_back(name, copy);
     Check(!reb::IsValidEvent(copy), std::string("malformed target rejected: ") + name);
   };
-  mutate("NUL inside prefix", [](auto& e) { e.inline_payload[20] = std::byte{0}; });
-  mutate("scheme", [](auto& e) { e.inline_payload[8] = std::byte{5}; });
-  mutate("reserved", [](auto& e) { e.inline_payload[9] = std::byte{1}; });
-  mutate("version", [](auto& e) { e.inline_payload[0] = std::byte{2}; });
-  mutate("artifact", [](auto& e) { e.header.artifact_id = 1; });
-  mutate("flags", [](auto& e) { e.header.flags = 1; });
-  mutate("parent", [](auto& e) { e.header.parent_event_id = 0; });
+  mutate("NUL inside prefix", [](auto& e) { e.inline_payload[20] = std::byte{0}; }, event);
+  mutate("scheme", [](auto& e) { e.inline_payload[8] = std::byte{5}; }, event);
+  mutate("retention unknown", [](auto& e) { e.inline_payload[9] = std::byte{6}; }, event);
+  mutate("retained without artifact", [](auto& e) { e.header.artifact_id = 0; }, event);
+  mutate("refused with artifact", [](auto& e) { e.inline_payload[9] = std::byte{4}; }, event);
+  mutate("long target marked complete", [](auto& e) { e.inline_payload[9] = std::byte{0}; }, event);
+  mutate("version", [](auto& e) { e.inline_payload[0] = std::byte{3}; }, event);
+  mutate("version 1 with artifact", [](auto& e) { e.header.artifact_id = 1; }, legacy);
+  mutate("version 1 with retention", [](auto& e) { e.inline_payload[9] = std::byte{4}; }, legacy);
+  mutate("flags", [](auto& e) { e.header.flags = 1; }, event);
+  mutate("parent", [](auto& e) { e.header.parent_event_id = 0; }, event);
   reb::NativeRequestTarget short_target;
   short_target.target_length = 3;
   std::copy_n("/ab", 3, short_target.prefix.begin());
@@ -386,6 +418,7 @@ void CheckTargets() {
       Event(reb::EventType::kRequestTarget, reb::EncodeNativeRequestTargetPayload(short_target));
   golden.emplace_back("short target", dirty);
   Check(reb::IsValidEvent(dirty), "short target valid");
+  mutate("short target not retained", [](auto& e) { e.inline_payload[9] = std::byte{2}; }, dirty);
   dirty.inline_payload[12 + 3] = std::byte{'x'};
   golden.emplace_back("target dirty tail", dirty);
   Check(!reb::IsValidEvent(dirty), "bytes after the recorded target are rejected");
@@ -430,6 +463,14 @@ void CheckArtifacts() {
     h.kind = reb::ArtifactKind::kJavaScript;
     h.flags = 0;
   });
+  auto target_header = header;
+  target_header.kind = reb::ArtifactKind::kRequestTarget;
+  Check(reb::IsValidArtifactHeader(target_header), "request target artifact header is valid");
+  target_header.flags = 0;
+  Check(!reb::IsValidArtifactHeader(target_header), "a request target is always sensitive");
+  target_header.flags = reb::kArtifactFlagSensitive;
+  target_header.capture_origin = reb::ArtifactCaptureOrigin::kNetworkResponse;
+  Check(!reb::IsValidArtifactHeader(target_header), "a request target has the request origin");
 
   const auto root = std::filesystem::temp_directory_path() /
                     ("reb-network-request-test-" + std::to_string(::getpid()));

@@ -63,7 +63,7 @@
       const networkRequestDetailTypes = new Set(['request_target', 'request_body']);
       const artifactKinds = new Set([
         'javascript', 'wasm', 'source_map', 'response_body', 'canvas_data_url',
-        'bytecode_buffer', 'wasm_guest_adapter', 'request_body'
+        'bytecode_buffer', 'wasm_guest_adapter', 'request_body', 'request_target'
       ]);
       const artifactCaptureOrigins = new Set([
         'unknown', 'network_response', 'dynamic_javascript', 'webassembly_compile',
@@ -558,19 +558,31 @@
       }
 
       const requestSchemes = new Map([[0, null], [1, 'http'], [2, 'https'], [3, 'ws'], [4, 'wss']]);
+      const requestTargetRetentions = ['complete', 'retained', 'not_retained_artifact_unavailable',
+        'not_retained_transfer_refused', 'not_retained_session_budget', 'not_retained_url'];
 
       function decodeRequestTargetRecord(event) {
-        if (!isRequestChildEnvelope(event, 'request_target') || event.artifact_id !== '0') return null;
+        if (!isRequestChildEnvelope(event, 'request_target') ||
+            !isCanonicalInteger(event.artifact_id, 0n, uint64Max)) return null;
         const bytes = bytesFromHex(event.payload);
         const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+        const version = view.getUint16(0, true);
         const length = view.getUint32(4, true);
         const prefix = Math.min(length, 116);
-        if (view.getUint16(0, true) !== 1 || view.getUint16(2, true) !== 128 || !requestSchemes.has(bytes[8]) ||
-            bytes[9] !== 0 || bytes.slice(12, 12 + prefix).some(byte => byte === 0) ||
+        const hasArtifact = event.artifact_id !== '0';
+        // Version 2 byte 9 says where bytes past the prefix went; version 1 has none.
+        const retentionValid = version === 1 ? bytes[9] === 0 && !hasArtifact
+          : version === 2 && bytes[9] < requestTargetRetentions.length &&
+            (bytes[9] === 0) !== (length > 116) && (bytes[9] === 1) === hasArtifact;
+        if (!retentionValid || view.getUint16(2, true) !== 128 || !requestSchemes.has(bytes[8]) ||
+            bytes.slice(12, 12 + prefix).some(byte => byte === 0) ||
             bytes.slice(12 + prefix).some(byte => byte !== 0)) return null;
         return {scheme: requestSchemes.get(bytes[8]), port: view.getUint16(10, true), targetLength: length,
           // Decoded as text and only ever assigned to textContent.
-          target: new TextDecoder().decode(bytes.slice(12, 12 + prefix)), truncated: length > prefix};
+          target: new TextDecoder().decode(bytes.slice(12, 12 + prefix)), truncated: length > prefix,
+          retention: version === 1 ? (length > prefix ? 'not_recorded' : 'complete') : requestTargetRetentions[bytes[9]],
+          artifactId: event.artifact_id, sequenceNumber: event.sequence_number, sessionId: event.session_id,
+          processId: event.process_id};
       }
 
       const requestBodyKinds = ['none', 'bytes', 'file', 'data_pipe', 'chunked_data_pipe', 'mixed', 'unknown'];
@@ -658,6 +670,7 @@
           request.target = target.target;
           request.urlTruncated = target.truncated;
           request.targetLength = target.targetLength;
+          request.fullTarget = target.truncated ? target : null;
           request.path = target.scheme
             ? `${target.scheme}://${host}${target.port ? `:${target.port}` : ''}${target.target}`
             : `${host}${target.target}`;
@@ -872,9 +885,10 @@
           return false;
         }
         if (artifact.kind === 'wasm_guest_adapter' && artifact.capture_origin !== 'native_wasm_guest') return false;
-        // A request body is created by its browser request_body record only.
-        if ((artifact.kind === 'request_body') !== (artifact.capture_origin === 'network_request') ||
-          (artifact.kind === 'request_body' && (artifact.execution_context_id !== '0' ||
+        // Request content is created by its browser request_body or request_target record only.
+        const requestContent = ['request_body', 'request_target'].includes(artifact.kind);
+        if (requestContent !== (artifact.capture_origin === 'network_request') ||
+          (requestContent && (artifact.execution_context_id !== '0' ||
             !isCanonicalInteger(artifact.creator_event_id, 1n, uint64Max)))) return false;
         if (artifact.capture_origin === 'native_wasm_guest' && (!['bytecode_buffer','wasm_guest_adapter'].includes(artifact.kind) ||
           !['frame_id','parent_artifact_id','creator_event_id','execution_context_id'].every(k => isCanonicalInteger(artifact[k],1n,uint64Max)))) return false;
@@ -898,7 +912,7 @@
           isSafeIntegerInRange(artifact.byte_size, 0, Number.MAX_SAFE_INTEGER) &&
           typeof artifact.sha256 === 'string' && /^[0-9a-f]{64}$/.test(artifact.sha256) &&
           typeof artifact.sensitive === 'boolean' &&
-          artifact.sensitive === ['response_body', 'canvas_data_url', 'request_body'].includes(artifact.kind);
+          artifact.sensitive === ['response_body', 'canvas_data_url', 'request_body', 'request_target'].includes(artifact.kind);
       }
 
       function isArtifactResponse(body) {

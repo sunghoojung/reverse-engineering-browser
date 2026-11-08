@@ -5,8 +5,8 @@
 
 #include "brave/components/reverse_engineering_browser/browser/native_artifact_body_tee.h"
 
-#include <algorithm>
 #include <cstddef>
+#include <cstdint>
 #include <span>
 #include <string_view>
 #include <utility>
@@ -36,12 +36,12 @@ MojoResult CreateForwardingPipe(mojo::ScopedDataPipeProducerHandle& producer,
 
 mojo::ScopedDataPipeConsumerHandle NativeArtifactBodyTee::Create(
     mojo::ScopedDataPipeConsumerHandle source,
-    const std::size_t capture_limit,
-    const std::size_t reserve_size,
+    NativeArtifactCaptureBuffer captured,
     Completion completion,
     bool& started) {
   started = false;
-  if (!source.is_valid() || capture_limit == 0 || !completion) {
+  if (!source.is_valid() || captured.status() != NativeArtifactCaptureStatus::kCapturing ||
+      !completion) {
     return source;
   }
   mojo::ScopedDataPipeProducerHandle producer;
@@ -49,9 +49,8 @@ mojo::ScopedDataPipeConsumerHandle NativeArtifactBodyTee::Create(
   if (CreateForwardingPipe(producer, consumer) != MOJO_RESULT_OK) {
     return source;
   }
-  auto tee = base::WrapRefCounted(
-      new NativeArtifactBodyTee(std::move(source), std::move(producer), capture_limit,
-                                std::min(reserve_size, capture_limit), std::move(completion)));
+  auto tee = base::WrapRefCounted(new NativeArtifactBodyTee(
+      std::move(source), std::move(producer), std::move(captured), std::move(completion)));
   tee->Start();
   started = true;
   return consumer;
@@ -59,18 +58,15 @@ mojo::ScopedDataPipeConsumerHandle NativeArtifactBodyTee::Create(
 
 NativeArtifactBodyTee::NativeArtifactBodyTee(mojo::ScopedDataPipeConsumerHandle source,
                                              mojo::ScopedDataPipeProducerHandle target,
-                                             const std::size_t capture_limit,
-                                             const std::size_t reserve_size,
+                                             NativeArtifactCaptureBuffer captured,
                                              Completion completion)
     : source_(std::move(source)),
       source_watcher_(FROM_HERE,
                       mojo::SimpleWatcher::ArmingPolicy::MANUAL,
                       base::SequencedTaskRunner::GetCurrentDefault()),
       target_(std::make_unique<mojo::DataPipeProducer>(std::move(target))),
-      capture_limit_(capture_limit),
-      completion_(std::move(completion)) {
-  captured_.reserve(reserve_size);
-}
+      captured_(std::move(captured)),
+      completion_(std::move(completion)) {}
 
 NativeArtifactBodyTee::~NativeArtifactBodyTee() = default;
 
@@ -99,7 +95,7 @@ void NativeArtifactBodyTee::OnReadable(const MojoResult result, const mojo::Hand
     return;
   }
   if (read_result == MOJO_RESULT_FAILED_PRECONDITION) {
-    Finish(!exceeded_limit_);
+    Finish(true);
     return;
   }
   if (read_result != MOJO_RESULT_OK) {
@@ -107,13 +103,7 @@ void NativeArtifactBodyTee::OnReadable(const MojoResult result, const mojo::Hand
     return;
   }
 
-  if (!exceeded_limit_ && data.size() <= capture_limit_ - captured_.size()) {
-    captured_.insert(captured_.end(), data.begin(), data.end());
-  } else {
-    exceeded_limit_ = true;
-    captured_.clear();
-    captured_.shrink_to_fit();
-  }
+  captured_.Append(std::span<const std::uint8_t>(data.data(), data.size()));
   write_buffer_.assign(base::as_string_view(data));
   source_->EndReadData(data.size());
   write_pending_ = true;
@@ -141,8 +131,7 @@ void NativeArtifactBodyTee::Finish(const bool complete) {
   source_watcher_.Cancel();
   source_.reset();
   target_.reset();
-  std::move(completion_)
-      .Run(complete, complete ? std::move(captured_) : std::vector<std::uint8_t>{});
+  std::move(completion_).Run(complete, std::move(captured_));
 }
 
 }  // namespace reb

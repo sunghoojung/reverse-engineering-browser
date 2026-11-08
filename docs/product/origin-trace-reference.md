@@ -76,7 +76,7 @@ low-level startup limits. The mask is decimal or `0x` hexadecimal, from 1 to
 packaged app reads the same grammar when it chooses its content defaults.
 
 `REB_CAPTURE_REQUEST_CONTENT=1 make live` retains request paths, queries and
-request bodies up to 256 KiB for that one session; without it Traffic rows stay
+request bodies up to 16 MiB for that one session; without it Traffic rows stay
 host-only while still recording each body's length, type and SHA-256 (see
 [Native network v2](../../protocol/native-network-v2.md)).
 

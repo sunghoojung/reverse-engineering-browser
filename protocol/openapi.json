@@ -258,7 +258,7 @@
       "get": {
         "operationId": "get_session_summary",
         "summary": "Summarize what this capture recorded",
-        "description": "One call that answers whether a capture worked: capture state, event counts by type, the busiest frames with their event types, session IDs, gap counts and named gap reasons, artifact counts by kind with the newest digests, and checks that name what looks wrong, such as a full sampling budget or Wasm compiled without a stored module. Call it after get_session_context and again after an action. Counts, identifiers and origin labels only: no payloads, source, URLs paths or bodies. Covers the newest 64 MiB of events. Use get_events filters (type, frame_id, request_id) to read the records behind a count.",
+        "description": "One call that answers whether a capture worked: capture state, event counts by type, the busiest frames with their event types, session IDs, gap counts and named gap reasons, artifact counts by kind with the newest digests, and checks that name what looks wrong, such as a full sampling budget, Wasm compiled without a stored module, each artifact capture failure reason, or request bodies and full targets a content session did not retain (budget, pool, channel or kind) with counts. Call it after get_session_context and again after an action. Counts, identifiers and origin labels only: no payloads, source, URLs paths or bodies. Covers the newest 64 MiB of events. Use get_events filters (type, frame_id, request_id) to read the records behind a count.",
         "tags": [
           "health"
         ],
@@ -2020,7 +2020,7 @@
             "name": "kind",
             "in": "query",
             "required": false,
-            "description": "Comma-separated artifact kinds: javascript, wasm, source_map, response_body, request_body, canvas_data_url, bytecode_buffer, wasm_guest_adapter. request_body exists only in sessions that retain request content.",
+            "description": "Comma-separated artifact kinds: javascript, wasm, source_map, response_body, request_body, request_target, canvas_data_url, bytecode_buffer, wasm_guest_adapter. request_body and request_target exist only in sessions that retain request content.",
             "schema": {
               "type": "string",
               "maxLength": 1040
@@ -13782,7 +13782,8 @@
               "canvas_data_url",
               "bytecode_buffer",
               "wasm_guest_adapter",
-              "request_body"
+              "request_body",
+              "request_target"
             ]
           },
           "url": {
@@ -19450,7 +19451,8 @@
               "canvas_data_url",
               "bytecode_buffer",
               "wasm_guest_adapter",
-              "request_body"
+              "request_body",
+              "request_target"
             ]
           },
           "byte_size": {
@@ -25977,6 +25979,7 @@
                     "no_events",
                     "wasm_without_artifacts",
                     "artifact_capture_failed",
+                    "request_content_not_retained",
                     "queue_drops",
                     "sequence_gaps",
                     "named_gap",
@@ -26877,7 +26880,7 @@
           "request_content": {
             "type": "boolean",
             "default": false,
-            "description": "Retain request paths, queries and bodies (at most 256 KiB each, 1,024 bodies or 64 MiB per session) as request_target events and request_body artifacts. Sensitive capture: requires confirm_sensitive_capture and category bits 256 and 1024. Off, Network capture still records each body's length, type and digest."
+            "description": "Retain request paths, queries and bodies (at most 16 MiB each, 256 MiB of unique content per session) as request_target events, request_target artifacts for targets past the 116-byte prefix, and request_body artifacts. Sensitive capture: requires confirm_sensitive_capture and category bits 256 and 1024. Off, Network capture still records each body's length, type and digest."
           },
           "document_start": {
             "type": "boolean",

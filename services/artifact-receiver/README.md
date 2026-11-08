@@ -58,7 +58,8 @@ accepts a later authenticated connection; the browser reconnects within a
 bounded budget and records an `artifact_channel_lost` gap if it cannot. The live
 launcher stops the listener explicitly when the browser session ends.
 
-Response bodies, request bodies and Canvas data URLs are rejected by default.
+Response bodies, request bodies, full request targets and Canvas data URLs are
+rejected by default.
 Add `--allow-sensitive` only under the sensitive-capture rules in
 [`SAFETY.md`](../../SAFETY.md), for a session whose visible authorization scope
 permits that bounded content. The live launcher adds it for

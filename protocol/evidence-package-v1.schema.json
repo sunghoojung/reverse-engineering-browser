@@ -789,7 +789,8 @@
             "canvas_data_url",
             "bytecode_buffer",
             "wasm_guest_adapter",
-            "request_body"
+            "request_body",
+            "request_target"
           ]
         },
         "byte_size": {

@@ -186,6 +186,7 @@ source_set("browser") {
     "browser/native_worker_authority.h",
     "browser/native_worker_transfer_gate.cc",
     "browser/native_worker_transfer_gate.h",
+    "common/native_artifact_capture_buffer.h",
     "common/native_artifact_header.h",
     "common/native_artifact_queue_limits.h",
     "common/native_console_io.cc",

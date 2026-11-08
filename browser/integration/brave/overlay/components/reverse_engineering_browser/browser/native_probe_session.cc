@@ -27,6 +27,15 @@ namespace reb {
 
 namespace {
 
+bool ReadRequestContentBudget(const base::CommandLine& command_line, std::uint64_t& budget) {
+  budget = kNativeRequestContentDefaultBudgetBytes;
+  return !command_line.HasSwitch("reb-request-content-budget-bytes") ||
+         (base::StringToUint64(command_line.GetSwitchValueASCII("reb-request-content-budget-bytes"),
+                               &budget) &&
+          budget >= kNativeRequestContentMinBudgetBytes &&
+          budget <= kNativeRequestContentMaxBudgetBytes);
+}
+
 bool ReadNativeWasmSampleBudget(const base::CommandLine& command_line,
                                 const std::uint64_t category_mask,
                                 NativeWasmSampleBudgetPolicy& policy) {
@@ -180,7 +189,9 @@ bool NativeProbeSession::StartSession(const std::uint64_t session_id,
     js_invocation_digests_ = command_line->HasSwitch("reb-js-invocation-digests");
   }
   NativeWasmSampleBudgetPolicy budget;
-  if (!ReadNativeWasmSampleBudget(*command_line, category_mask, budget)) {
+  std::uint64_t request_content_budget = 0;
+  if (!ReadNativeWasmSampleBudget(*command_line, category_mask, budget) ||
+      !ReadRequestContentBudget(*command_line, request_content_budget)) {
     guest_adapter_json_.clear();
     js_dispatch_sites_.clear();
     js_invocation_sites_.clear();
@@ -204,7 +215,8 @@ bool NativeProbeSession::StartSession(const std::uint64_t session_id,
                                              category_mask, expires_at_monotonic_ns,
                                              capture_request_content_.load());
   NativeArtifactCaptureSink::Get().SetEmitter(&NativeProbeSession::EmitBrowserEvent, session_id,
-                                              category_mask, expires_at_monotonic_ns);
+                                              category_mask, expires_at_monotonic_ns,
+                                              request_content_budget);
   // SetEmitter restores the unrestricted policy. Publish this session's copy.
   NativeArtifactCaptureSink::Get().SetWasmSampleBudgetPolicy(wasm_sample_budget_);
   for (NativeProbeHost* const host : hosts_) {

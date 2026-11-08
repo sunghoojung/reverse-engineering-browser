@@ -31,8 +31,12 @@
 #include "services/network/public/cpp/url_loader_completion_status.h"
 #include "services/network/public/mojom/url_response_head.mojom.h"
 #include "url/gurl.h"
+#include "url/url_constants.h"
 
 namespace reb {
+
+static_assert(kNativeRequestTargetMaxBytes == url::kMaxURLChars);
+static_assert(kNativeRequestBodyCaptureBytes == kNativeArtifactMaxContentBytes);
 
 namespace {
 
@@ -149,22 +153,52 @@ NativeRequestTarget TargetOf(const GURL& url) noexcept {
   return target;
 }
 
-// The URL stored with a body artifact: scheme, host, explicit port, path and
-// query. Empty for schemes whose bodies are not retained.
-std::string ArtifactUrlOf(const GURL& url, const NativeRequestTarget& target) {
-  if (target.scheme != NativeRequestScheme::kHttp && target.scheme != NativeRequestScheme::kHttps) {
+// Scheme, host and explicit port. Empty for schemes without one.
+std::string OriginOf(const GURL& url, const NativeRequestTarget& target) {
+  const char* const prefix = target.scheme == NativeRequestScheme::kHttps  ? "https://"
+                             : target.scheme == NativeRequestScheme::kHttp ? "http://"
+                             : target.scheme == NativeRequestScheme::kWss  ? "wss://"
+                             : target.scheme == NativeRequestScheme::kWs   ? "ws://"
+                                                                           : nullptr;
+  if (!prefix || url.host().empty()) {
     return {};
   }
-  std::string spec(target.scheme == NativeRequestScheme::kHttps ? "https://" : "http://");
+  std::string spec(prefix);
   spec.append(url.host());
   if (target.port != 0) {
     spec.append(":").append(std::to_string(target.port));
   }
-  spec.append(url.path());
-  if (url.has_query()) {
-    spec.append("?").append(url.query());
+  return spec;
+}
+
+// The whole URL when it fits the manifest's 8 KiB, else the origin; empty
+// unless HTTP(S).
+std::string ArtifactUrlOf(const GURL& url, const NativeRequestTarget& target) {
+  if (target.scheme != NativeRequestScheme::kHttp && target.scheme != NativeRequestScheme::kHttps) {
+    return {};
+  }
+  std::string spec = OriginOf(url, target);
+  if (spec.size() + target.target_length <= kNativeArtifactMaxUrlBytes) {
+    spec.append(url.path());
+    if (url.has_query()) {
+      spec.append("?").append(url.query());
+    }
   }
   return spec;
+}
+
+NativeRequestTargetRetention RetentionOf(const NativeRequestContentAdmission admission) {
+  switch (admission) {
+    case NativeRequestContentAdmission::kQueued:
+      return NativeRequestTargetRetention::kRetained;
+    case NativeRequestContentAdmission::kUnavailable:
+      return NativeRequestTargetRetention::kNotRetainedArtifactUnavailable;
+    case NativeRequestContentAdmission::kSessionBudget:
+      return NativeRequestTargetRetention::kNotRetainedSessionBudget;
+    case NativeRequestContentAdmission::kRefused:
+      return NativeRequestTargetRetention::kNotRetainedTransferRefused;
+  }
+  return NativeRequestTargetRetention::kNotRetainedTransferRefused;
 }
 
 NativeRequestBodyKind KindOf(const network::DataElement& element) noexcept {
@@ -220,8 +254,6 @@ void NativeNetworkCaptureSink::SetEmitter(const NativeProbeEmitter emitter,
   category_mask_.store(emitter ? category_mask : 0, std::memory_order_relaxed);
   expires_at_monotonic_ns_.store(emitter ? expires_at_monotonic_ns : 0, std::memory_order_relaxed);
   capture_content_.store(emitter && capture_content, std::memory_order_relaxed);
-  request_body_count_.store(0, std::memory_order_relaxed);
-  request_body_bytes_.store(0, std::memory_order_relaxed);
   emitter_.store(emitter, std::memory_order_release);
 }
 
@@ -229,7 +261,32 @@ void NativeNetworkCaptureSink::EmitRequestTarget(const NativeProbeEmitter emitte
                                                  const NativeProbeHeader& parent,
                                                  const GURL& url) noexcept {
   NativeProbeEvent event = MakeChildEvent(NativeProbeType::kRequestTarget, parent);
-  event.inline_payload = EncodeNativeRequestTargetPayload(TargetOf(url));
+  NativeRequestTarget target = TargetOf(url);
+  if (target.target_length > kNativeRequestTargetPrefixBytes) {
+    std::string origin = OriginOf(url, target);
+    auto& artifacts = NativeArtifactCaptureSink::Get();
+    if (!artifacts.IsEnabled()) {
+      target.retention = NativeRequestTargetRetention::kNotRetainedArtifactUnavailable;
+    } else if (origin.empty() || target.target_length > kNativeRequestTargetMaxBytes) {
+      target.retention = NativeRequestTargetRetention::kNotRetainedUrl;
+    } else {
+      std::string text(url.path());
+      if (url.has_query()) {
+        text.append("?").append(url.query());
+      }
+      target.retention = RetentionOf(
+          artifacts.CaptureRequestContent({.kind = NativeArtifactKind::kRequestTarget,
+                                           .request_id = parent.request_id,
+                                           .frame_id = parent.frame_id,
+                                           .creator_event_id = event.header.sequence_number,
+                                           .url = std::move(origin),
+                                           .mime_type = "text/plain",
+                                           .size = target.target_length,
+                                           .text = std::move(text)},
+                                          event.header.artifact_id));
+    }
+  }
+  event.inline_payload = EncodeNativeRequestTargetPayload(target);
   emitter(event);
 }
 
@@ -306,42 +363,37 @@ void NativeNetworkCaptureSink::EmitRequestBody(const NativeProbeEmitter emitter,
     } else if (std::string url = ArtifactUrlOf(request.url, target);
                url.empty() || url.size() > kNativeArtifactMaxUrlBytes) {
       summary.state = NativeRequestBodyState::kNotCapturedUrl;
-    } else if (request_body_count_.load(std::memory_order_relaxed) >=
-                   kNativeRequestBodySessionCount ||
-               captured > kNativeRequestBodySessionBytes -
-                              std::min(kNativeRequestBodySessionBytes,
-                                       request_body_bytes_.load(std::memory_order_relaxed))) {
-      summary.state = NativeRequestBodyState::kNotCapturedSessionBudget;
     } else {
-      std::vector<std::uint8_t> content;
-      content.reserve(captured);
-      for (const network::DataElement& element : *elements) {
-        const auto& bytes = element.As<network::DataElementBytes>().bytes();
-        const std::size_t size = std::min(bytes.size(), captured - content.size());
-        content.insert(content.end(), bytes.begin(),
-                       bytes.begin() + static_cast<std::ptrdiff_t>(size));
-        if (content.size() == captured) {
-          break;
-        }
-      }
       const std::string_view mime_type =
           summary.content_type_length != 0
               ? std::string_view(summary.content_type.data(), summary.content_type_length)
               : std::string_view("application/octet-stream");
       // The body record is the artifact's creator, so the later ACK result
       // joins this record by sequence rather than by URL.
-      event.header.artifact_id = artifacts.CaptureRequestBody(
-          parent.request_id, parent.frame_id, event.header.sequence_number, std::move(url),
-          std::string(mime_type), std::move(content));
-      if (event.header.artifact_id == 0) {
-        summary.state = NativeRequestBodyState::kNotCapturedTransferRefused;
-      } else {
-        request_body_count_.fetch_add(1, std::memory_order_relaxed);
-        request_body_bytes_.fetch_add(captured, std::memory_order_relaxed);
-        summary.captured_length = captured;
-        summary.state = captured == summary.body_length
-                            ? NativeRequestBodyState::kCaptured
-                            : NativeRequestBodyState::kCapturedTruncated;
+      switch (artifacts.CaptureRequestContent({.kind = NativeArtifactKind::kRequestBody,
+                                               .request_id = parent.request_id,
+                                               .frame_id = parent.frame_id,
+                                               .creator_event_id = event.header.sequence_number,
+                                               .url = std::move(url),
+                                               .mime_type = std::string(mime_type),
+                                               .size = captured,
+                                               .body = request.request_body},
+                                              event.header.artifact_id)) {
+        case NativeRequestContentAdmission::kQueued:
+          summary.captured_length = captured;
+          summary.state = captured == summary.body_length
+                              ? NativeRequestBodyState::kCaptured
+                              : NativeRequestBodyState::kCapturedTruncated;
+          break;
+        case NativeRequestContentAdmission::kUnavailable:
+          summary.state = NativeRequestBodyState::kNotCapturedArtifactUnavailable;
+          break;
+        case NativeRequestContentAdmission::kSessionBudget:
+          summary.state = NativeRequestBodyState::kNotCapturedSessionBudget;
+          break;
+        case NativeRequestContentAdmission::kRefused:
+          summary.state = NativeRequestBodyState::kNotCapturedTransferRefused;
+          break;
       }
     }
   }

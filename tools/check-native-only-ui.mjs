@@ -156,7 +156,7 @@ const shell = (mode, requestContent, canvasImages) => runInContext(`state.sessio
 shell('live', true, true);
 assert.equal(contentLabel.hidden, false);
 assert.equal(contentLabel.textContent, 'Content capture');
-assert.match(contentLabel.getAttribute('title'), /request paths, queries and bodies up to 256 KiB each and Canvas images/);
+assert.match(contentLabel.getAttribute('title'), /request paths, queries and bodies up to 16 MiB each and Canvas images/);
 shell('live', false, true);
 assert.equal(contentLabel.hidden, false);
 assert.match(contentLabel.getAttribute('aria-label'), /^Content capture: Canvas images$/);

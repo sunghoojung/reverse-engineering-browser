@@ -432,7 +432,7 @@ The failure dialog preserves the launcher's explicit browser/helper diagnosis
 when teardown writes later shell messages; the full session log path stays visible.
 **New Live Session…** in the application menu chooses the capture mode and
 Keychain storage. **Content (default)** sets `REB_CAPTURE_REQUEST_CONTENT=1`,
-which retains request paths, queries and request bodies up to 256 KiB each, and
+which retains request paths, queries and request bodies up to 16 MiB each, and
 retains Canvas images. While a live session has either turned on, the titlebar
 shows **Content capture** and its tooltip names which; a browser built before
 that capture ignores the switch, and each Traffic row and body still shows what
@@ -578,13 +578,15 @@ REB_CAPTURE_CANVAS_IMAGES=1 make live
 To retain request paths, queries and bounded request bodies with `make live`,
 run `REB_CAPTURE_REQUEST_CONTENT=1 make live`. Traffic then shows each request's
 captured path and query, and its General view shows the request body: capture
-state, content type, length, SHA-256, kind and the retained bytes as text.
-Without it, the General view still shows the body's length, type and digest and
+state, content type, length, SHA-256, kind and the retained bytes as text, read
+256 KiB at a time with **Show the next 256 KiB**. A path and query past the
+116-byte row prefix is loaded from its retained full target for the Request URL
+and Copy URL, or General says why it was not retained. Without it, the General view still shows the body's length, type and digest and
 says that content capture was off. File, blob and stream bodies are named, not
 read; password form bodies keep neither bytes nor a digest. A body read that
 times out or gets an error status stays shown with its reason and is read again
 on the next refresh; a size or SHA-256 mismatch is kept with its reason and is
-not reread. Sources never lists or opens request bodies.
+not reread. Sources never lists or opens request bodies or full targets.
 
 Canvas image capture is disabled by default because rendered output can contain
 page content. Enabled output stays in the local session artifact store, is

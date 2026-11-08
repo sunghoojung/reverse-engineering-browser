@@ -21,6 +21,7 @@
 #include "base/synchronization/lock.h"
 #include "base/thread_annotations.h"
 #include "base/threading/thread.h"
+#include "brave/components/reverse_engineering_browser/common/native_artifact_capture_buffer.h"
 #include "brave/components/reverse_engineering_browser/common/native_artifact_header.h"
 
 namespace base {
@@ -34,6 +35,8 @@ struct NativeArtifactTransfer final {
   std::string url;
   std::string mime_type;
   std::vector<std::uint8_t> content;
+  // Pool share for content, returned when the writer drops the transfer.
+  NativeArtifactReservation reservation;
 };
 
 using NativeArtifactCompletion = void (*)(std::uint64_t artifact_id,

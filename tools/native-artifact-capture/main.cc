@@ -101,14 +101,14 @@ int Begin(const Request& request,
   Check(returned.id == pipe, "Adapter preserves the original response body handle");
   return pipe;
 }
-std::uint64_t Finish(int pipe, bool complete = true) {
+std::uint64_t Finish(int pipe, bool complete = true, std::span<const std::uint8_t> body = source) {
   auto& transfers = NativeArtifactSocketClient::Get().transfers;
   std::set<std::uint64_t> existing;
   for (const auto& [id, transfer] : transfers) {
     static_cast<void>(transfer);
     existing.insert(id);
   }
-  NativeArtifactBodyTee::Complete(pipe, complete, source);
+  NativeArtifactBodyTee::Complete(pipe, complete, body);
   for (const auto& [id, transfer] : transfers) {
     static_cast<void>(transfer);
     if (!existing.contains(id)) {
@@ -226,9 +226,12 @@ void RequestBodies(reb::ArtifactReceiver& receiver, const std::filesystem::path&
   };
   const std::string json = "{\"v\":\"1\",\"host\":\"accounts.hcaptcha.test\",\"sitekey\":\"" +
                            std::string(740, 's') + "\"}";
+  // The second body is past the 4 MiB record digest; its artifact digest is
+  // computed off the UI sequence and checked by the receiver.
   const Body bodies[] = {
       {401, "https://api.hcaptcha.test/checksiteconfig?v=1&host=accounts.hcaptcha.test", json},
-      {402, "https://api.hcaptcha.test/getcaptcha/site", std::string(300 * 1024, 'm')},
+      {402, "https://api.hcaptcha.test/getcaptcha/site",
+       "{\"data\":\"" + std::string(5U * 1024U * 1024U, 'm') + "\"}"},
   };
   std::ofstream expected(output / "request-bodies.json");
   expected << "[";
@@ -241,9 +244,10 @@ void RequestBodies(reb::ArtifactReceiver& receiver, const std::filesystem::path&
     request.headers.SetHeader("Content-Type", "application/json;charset=UTF-8");
     request.request_body = BodyOf(body.content);
     network.RecordRequestStarted(body.request_id, 0, 0, 1, kFrame, 11, 12, request);
-    const auto& started = LastOf(NativeProbeType::kRequestStarted);
-    const auto& target = LastOf(NativeProbeType::kRequestTarget);
-    const auto& record = LastOf(NativeProbeType::kRequestBody);
+    Check(base::ThreadPool::RunPending() == 1, "The body is copied off the UI sequence");
+    const auto started = LastOf(NativeProbeType::kRequestStarted);
+    const auto target = LastOf(NativeProbeType::kRequestTarget);
+    const auto record = LastOf(NativeProbeType::kRequestBody);
     const auto payload = BodyPayload(record);
     Check(target.header.parent_event_id == started.header.sequence_number &&
               record.header.parent_event_id == started.header.sequence_number &&
@@ -255,13 +259,19 @@ void RequestBodies(reb::ArtifactReceiver& receiver, const std::filesystem::path&
               transfer.header.capture_origin == reb::NativeArtifactCaptureOrigin::kNetworkRequest &&
               (transfer.header.flags & reb::kNativeArtifactFlagSensitive) != 0 &&
               transfer.header.creator_event_id == record.header.sequence_number &&
-              transfer.url == body.url && transfer.mime_type == "application/json",
+              transfer.url == body.url && transfer.mime_type == "application/json" &&
+              std::equal(transfer.content.begin(), transfer.content.end(), body.content.begin(),
+                         body.content.end()),
           "Request body artifact header names its body record, full URL and type");
+    const auto digest = crypto::hash::Sha256(body.content);
+    Check(transfer.header.expected_sha256 == digest, "The artifact carries its exact digest");
     Receive(receiver, artifact_id);
     CheckCapture(artifact_id, record.header.sequence_number, body.request_id);
-    const auto digest = crypto::hash::Sha256(body.content);
-    Check(payload.sha256 == digest && payload.body_length == body.content.size(),
-          "Body record digest and length describe the whole body");
+    const bool hashed = body.content.size() <= reb::kNativeRequestBodyDigestBytes;
+    Check((hashed ? payload.sha256 == digest : payload.sha256 == decltype(digest){}) &&
+              payload.body_length == body.content.size() &&
+              payload.state == static_cast<std::uint8_t>(reb::RequestBodyState::kCaptured),
+          "Body record describes the whole body; past 4 MiB the artifact holds the digest");
     expected << (index ? ",\n" : "\n") << "{\"request_id\":\"" << body.request_id
              << "\",\"start_sequence\":\"" << started.header.sequence_number
              << "\",\"body_sequence\":\"" << record.header.sequence_number
@@ -272,8 +282,206 @@ void RequestBodies(reb::ArtifactReceiver& receiver, const std::filesystem::path&
              << Hex(digest) << "\"}";
   }
   expected << "\n]\n";
+
+  // A GraphQL GET whose target is far past the inline prefix.
+  const std::string query =
+      "operationName=Search&variables=" + std::string(7900, 'v') + "&extensions=%7B%7D";
+  network::ResourceRequest graphql;
+  graphql.url = GURL("https://api.hcaptcha.test/graphql?" + query);
+  network.RecordRequestStarted(403, 0, 0, 1, kFrame, 11, 12, graphql);
+  Check(base::ThreadPool::RunPending() == 1, "The full target is copied off the UI sequence");
+  const auto started = LastOf(NativeProbeType::kRequestStarted);
+  const auto target = LastOf(NativeProbeType::kRequestTarget);
+  reb::RequestTargetPayload decoded;
+  Check(reb::DecodeRequestTargetPayload(target.inline_payload, decoded) &&
+            reb::IsValidEvent(std::bit_cast<reb::EventRecord>(target)) &&
+            decoded.reserved0 ==
+                static_cast<std::uint8_t>(reb::NativeRequestTargetRetention::kRetained) &&
+            target.header.artifact_id != 0,
+        "A long target names its retained full-target artifact");
+  const std::string full = "/graphql?" + query;
+  const auto& transfer = *NativeArtifactSocketClient::Get().transfers.at(target.header.artifact_id);
+  Check(transfer.header.kind == reb::NativeArtifactKind::kRequestTarget &&
+            transfer.header.capture_origin == reb::NativeArtifactCaptureOrigin::kNetworkRequest &&
+            (transfer.header.flags & reb::kNativeArtifactFlagSensitive) != 0 &&
+            transfer.header.creator_event_id == target.header.sequence_number &&
+            transfer.url == "https://api.hcaptcha.test" && transfer.mime_type == "text/plain" &&
+            std::string(transfer.content.begin(), transfer.content.end()) == full &&
+            decoded.target_length == full.size(),
+        "The full target is retained byte for byte under its origin");
+  const auto target_id = target.header.artifact_id;
+  Receive(receiver, target_id);
+  CheckCapture(target_id, target.header.sequence_number, 403);
+  std::ofstream targets(output / "request-targets.json");
+  targets << "[{\"request_id\":\"403\",\"start_sequence\":\"" << started.header.sequence_number
+          << "\",\"target_sequence\":\"" << target.header.sequence_number << "\",\"artifact_id\":\""
+          << target_id << "\",\"origin\":\"https://api.hcaptcha.test\""
+          << ",\"target_length\":" << full.size() << ",\"sha256\":\""
+          << Hex(crypto::hash::Sha256(full)) << "\"}]\n";
   std::cout << "PASS request bodies: content-mode target/body children, sensitive request_body "
-               "artifacts with full URL, receiver ACK joined to the body record\n";
+               "artifacts with full URL and off-thread digest past 4 MiB, an 8 KB target "
+               "retained whole, receiver ACK joined to each creator record\n";
+}
+
+reb::RequestTargetPayload TargetPayload(const NativeProbeEvent& event) {
+  reb::RequestTargetPayload value;
+  Check(reb::DecodeRequestTargetPayload(event.inline_payload, value) &&
+            reb::IsValidEvent(std::bit_cast<reb::EventRecord>(event)),
+        "Produced request_target record passes the core validator");
+  return value;
+}
+
+// Byte budget, digest dedupe, the in-flight pool and the background copy, all
+// through the real network and artifact sinks.
+void RequestContentLimits() {
+  auto& network = reb::NativeNetworkCaptureSink::Get();
+  auto& sink = NativeArtifactCaptureSink::Get();
+  auto& transfers = NativeArtifactSocketClient::Get().transfers;
+  std::uint64_t next_request = 600;
+  const auto configure = [&](std::uint64_t budget) {
+    Configure();
+    sink.SetEmitter(Emit, kSession, kMask, 200, budget);
+    network.SetEmitter(Emit, kSession, kMask, 200, true);
+    transfers.clear();
+  };
+  const auto post = [&](network::ResourceRequest request) {
+    request.method = "POST";
+    request.headers.SetHeader("Content-Type", "application/json");
+    network.RecordRequestStarted(next_request++, 0, 0, 1, kFrame, 11, 12, request);
+    return LastOf(NativeProbeType::kRequestBody);
+  };
+  const auto state_of = [](const NativeProbeEvent& event) {
+    return static_cast<reb::RequestBodyState>(BodyPayload(event).state);
+  };
+  const auto with_body = [](std::string content) {
+    network::ResourceRequest request;
+    request.url = GURL("https://api.fixture.test/collect");
+    request.request_body = BodyOf(content);
+    return request;
+  };
+
+  // 5,000 small distinct bodies all fit a 1 MiB budget; the next one does not.
+  configure(reb::kNativeRequestContentMinBudgetBytes);
+  for (int index = 0; index < 5000; ++index) {
+    std::string content(200, 'b');
+    const std::string number = std::to_string(index);
+    std::copy(number.begin(), number.end(), content.begin());
+    Check(state_of(post(with_body(std::move(content)))) == reb::RequestBodyState::kCaptured,
+          "Every small body is retained until the budget is used");
+  }
+  Check(base::ThreadPool::RunPending() == 5000 && transfers.size() == 5000 &&
+            sink.in_flight_bytes() == 5000U * 200U,
+        "5,000 bodies are queued, each holding exactly its bytes");
+  Check(state_of(post(with_body(std::string(64 * 1024, 'x')))) ==
+                reb::RequestBodyState::kNotCapturedSessionBudget &&
+            base::ThreadPool::pending.empty(),
+        "The body past the budget is named, not copied");
+
+  // Identical bytes are charged once: the receiver keeps one blob per digest.
+  configure(reb::kNativeRequestContentMinBudgetBytes);
+  const std::string repeated(400 * 1024, 'r');
+  Check(state_of(post(with_body(repeated))) == reb::RequestBodyState::kCaptured &&
+            state_of(post(with_body(repeated))) == reb::RequestBodyState::kCaptured,
+        "Both copies are admitted before their digests are known");
+  base::ThreadPool::RunPending();
+  Check(state_of(post(with_body(std::string(400 * 1024, 's')))) == reb::RequestBodyState::kCaptured,
+        "The repeat was refunded, so a distinct body still fits");
+  base::ThreadPool::RunPending();
+  Check(state_of(post(with_body(std::string(400 * 1024, 't')))) ==
+            reb::RequestBodyState::kNotCapturedSessionBudget,
+        "Distinct bytes past the budget are refused");
+  Check(transfers.size() == 3, "The repeat is still transferred and joined to its own record");
+
+  // A large body is copied whole up to 16 MiB; a larger one keeps that prefix.
+  configure(reb::kNativeRequestContentDefaultBudgetBytes);
+  const std::string large(reb::kNativeArtifactMaxContentBytes + 5, 'L');
+  const auto truncated = post(with_body(large));
+  const auto truncated_payload = BodyPayload(truncated);
+  Check(truncated_payload.state ==
+                static_cast<std::uint8_t>(reb::RequestBodyState::kCapturedTruncated) &&
+            truncated_payload.captured_length == reb::kNativeArtifactMaxContentBytes,
+        "A body past 16 MiB keeps its first 16 MiB and its length");
+  Check(transfers.empty() && sink.in_flight_bytes() == reb::kNativeArtifactMaxContentBytes,
+        "Nothing is copied on the UI sequence; the pool holds the pending copy");
+  base::ThreadPool::RunPending();
+  const auto& copy = *transfers.at(truncated.header.artifact_id);
+  Check(copy.content.size() == reb::kNativeArtifactMaxContentBytes &&
+            copy.header.expected_sha256 == crypto::hash::Sha256(std::span(copy.content)),
+        "The prefix and its digest are exact");
+  // The pool is shared with response tees: a full pool refuses the body.
+  network::mojom::URLResponseHead head;
+  head.content_length = static_cast<std::int64_t>(reb::kNativeArtifactMaxContentBytes);
+  const Request response{690, 0, 9};
+  const int tee = Begin(response, true, {}, head);
+  Check(state_of(post(with_body("{}"))) == reb::RequestBodyState::kNotCapturedTransferRefused,
+        "A full in-flight pool refuses the copy visibly");
+  Finish(tee, false);
+  transfers.clear();
+  Check(sink.in_flight_bytes() == 0, "Dropped transfers return their share");
+
+  // The copy reads the body after the record: a body that changed is a failure
+  // joined to its record, never a short artifact.
+  auto changing = with_body("{\"a\":1}");
+  const auto record = post(changing);
+  changing.request_body->elements_mutable()->clear();
+  base::ThreadPool::RunPending();
+  Check(transfers.empty() && events.back().header.type == NativeProbeType::kArtifactCaptureFailed &&
+            Payload(events.back()) == "request_content_changed" &&
+            events.back().header.parent_event_id == record.header.sequence_number &&
+            events.back().header.artifact_id == record.header.artifact_id,
+        "A changed body is a visible failure");
+  base::ThreadPool::refuse = true;
+  Check(state_of(post(with_body("{}"))) == reb::RequestBodyState::kNotCapturedTransferRefused,
+        "A refused background task is named");
+  base::ThreadPool::refuse = false;
+  NativeArtifactSocketClient::Get().reject_next = true;
+  const auto queued = post(with_body("{\"b\":2}"));
+  base::ThreadPool::RunPending();
+  Check(Payload(events.back()) == "transfer_queue_full_or_disconnected" &&
+            events.back().header.parent_event_id == queued.header.sequence_number,
+        "A full queue after the copy is a failure joined to the record");
+
+  // Targets: the inline prefix is the whole target up to 116 bytes; past it the
+  // full target is retained, or the record names why not.
+  const auto get = [&](const std::string& url) {
+    network::ResourceRequest request;
+    request.url = GURL(url);
+    network.RecordRequestStarted(next_request++, 0, 0, 1, kFrame, 11, 12, request);
+    return LastOf(NativeProbeType::kRequestTarget);
+  };
+  const auto retention = [](const reb::RequestTargetPayload& value) {
+    return static_cast<reb::NativeRequestTargetRetention>(value.reserved0);
+  };
+  const std::string exact = "/" + std::string(reb::kNativeRequestTargetPrefixBytes - 1, 'e');
+  const auto inline_target = get("https://api.fixture.test" + exact);
+  Check(retention(TargetPayload(inline_target)) == reb::NativeRequestTargetRetention::kComplete &&
+            inline_target.header.artifact_id == 0 && base::ThreadPool::pending.empty(),
+        "A 116-byte target is complete inline");
+  const auto long_target = get("https://api.fixture.test" + exact + "?q");
+  Check(retention(TargetPayload(long_target)) == reb::NativeRequestTargetRetention::kRetained &&
+            long_target.header.artifact_id != 0 && base::ThreadPool::RunPending() == 1,
+        "A 117-byte target is retained in full");
+  Check(retention(TargetPayload(get("ftp://files.fixture.test" + exact + "?q"))) ==
+            reb::NativeRequestTargetRetention::kNotRetainedUrl,
+        "A scheme without an origin is named");
+  configure(reb::kNativeRequestContentMinBudgetBytes);
+  post(with_body(std::string(reb::kNativeRequestContentMinBudgetBytes - 64, 'f')));
+  Check(retention(TargetPayload(get("https://api.fixture.test" + exact + "?budget"))) ==
+            reb::NativeRequestTargetRetention::kNotRetainedSessionBudget,
+        "A target past the budget is named");
+  base::ThreadPool::RunPending();
+  NativeArtifactSocketClient::Get().connected = false;
+  Check(retention(TargetPayload(get("https://api.fixture.test" + exact + "?off"))) ==
+            reb::NativeRequestTargetRetention::kNotRetainedArtifactUnavailable,
+        "A target without the artifact channel is named");
+  NativeArtifactSocketClient::Get().connected = true;
+  Configure();
+  transfers.clear();
+  Check(sink.in_flight_bytes() == 0 && base::ThreadPool::pending.empty(),
+        "No request content is left in flight");
+  std::cout << "PASS request content: 5,000 bodies within a byte budget, digest dedupe, 16 MiB "
+               "prefix copied off the UI sequence, shared pool, changed and refused copies, "
+               "full targets and every retention state\n";
 }
 
 void RequestBodyPolicy(const std::filesystem::path& output) {
@@ -295,6 +503,7 @@ void RequestBodyPolicy(const std::filesystem::path& output) {
   // A receiver without --allow-sensitive refuses the bytes; the refusal is an event.
   network.SetEmitter(Emit, kSession, kMask, 200, true);
   network.RecordRequestStarted(502, 0, 0, 1, kFrame, 11, 12, request);
+  base::ThreadPool::RunPending();
   const auto& record = LastOf(NativeProbeType::kRequestBody);
   const auto body_sequence = record.header.sequence_number;
   reb::ArtifactReceiver refusing(
@@ -319,6 +528,7 @@ void RequestBodyPolicy(const std::filesystem::path& output) {
   Configure();
   std::cout << "PASS request body policy: metadata-only, receiver sensitive refusal and missing "
                "artifact channel are explicit\n";
+  RequestContentLimits();
 }
 
 void Corpus(reb::ArtifactReceiver& receiver, const std::filesystem::path& output) {
@@ -441,6 +651,85 @@ void Lifecycle(reb::ArtifactReceiver& receiver) {
   Check(events.size() == before_expiry, "Expiry suppresses body and ACK events");
   std::cout << "PASS same/different-session stale bodies and ACKs, disable/re-enable and expiry\n";
 }
+// The pool bounds bytes held, never captures: each body holds what it has
+// (or its declared length) until the writer drops its transfer.
+void InFlightPool(NativeArtifactCaptureSink& sink,
+                  NativeArtifactSocketClient& client,
+                  const std::filesystem::path& output) {
+  constexpr std::size_t kMiB = 1024U * 1024U;
+  const Request request{301, 0, 9};
+  reb::ArtifactReceiver receiver(
+      output / "in-flight-receiver",
+      {.max_artifact_bytes = reb::kNativeArtifactMaxContentBytes, .max_store_bytes = 64U * kMiB});
+  std::vector<int> parallel;
+  for (int index = 0; index < 40; ++index) {
+    parallel.push_back(Begin(request));
+  }
+  Check(NativeArtifactBodyTee::pending.size() == 40 &&
+            sink.in_flight_bytes() == 40 * reb::kNativeArtifactInitialReservation,
+        "40 parallel responses of unknown length each hold one forwarding chunk");
+  std::vector<std::uint64_t> parallel_ids;
+  for (const int pipe : parallel) {
+    parallel_ids.push_back(Finish(pipe));
+  }
+  Check(std::ranges::none_of(parallel_ids, [](std::uint64_t id) { return id == 0; }) &&
+            sink.in_flight_bytes() == 40 * source.size(),
+        "All 40 are queued, each holding exactly its bytes until written");
+  for (const auto id : parallel_ids) {
+    Receive(receiver, id);
+    CheckCapture(id, request.response, request.id);
+  }
+  Check(sink.in_flight_bytes() == 0, "Written transfers return their share");
+
+  std::vector<std::uint8_t> grown(3 * kMiB + 17);
+  for (std::size_t index = 0; index < grown.size(); ++index) {
+    grown[index] = static_cast<std::uint8_t>(index * 31U);
+  }
+  const int growing = Begin(request);
+  Check(NativeArtifactBodyTee::Reserved(growing) == reb::kNativeArtifactInitialReservation,
+        "An unknown length starts at one chunk");
+  const auto grown_id = Finish(growing, true, grown);
+  Check(grown_id != 0 && client.transfers.at(grown_id)->content == grown &&
+            sink.in_flight_bytes() == grown.size(),
+        "A body grows past its first chunk and keeps exactly its bytes, without slack");
+  Receive(receiver, grown_id);
+
+  network::mojom::URLResponseHead head;
+  head.content_length = static_cast<std::int64_t>(reb::kNativeArtifactMaxContentBytes);
+  const int full_a = Begin(request, true, {}, head);
+  const int full_b = Begin(request, true, {}, head);
+  Check(sink.in_flight_bytes() == reb::kNativeArtifactInFlightBytes,
+        "Two declared 16 MiB bodies fill the pool");
+  const auto queued = client.transfers.size();
+  const auto tees = NativeArtifactBodyTee::pending.size();
+  Begin(request);
+  Check(client.transfers.size() == queued && NativeArtifactBodyTee::pending.size() == tees &&
+            Payload(events.back()) == "active_memory_limit",
+        "A full pool refuses admission visibly");
+  Check(Finish(full_a, false) == 0 && sink.in_flight_bytes() == 16 * kMiB,
+        "A failed body returns its whole share");
+  head.content_length = static_cast<std::int64_t>(16 * kMiB - 128 * 1024);
+  const int filler = Begin(request, true, {}, head);
+  const int starved = Begin(request);
+  Check(sink.in_flight_bytes() == reb::kNativeArtifactInFlightBytes - 64 * 1024,
+        "Shares are exact");
+  const std::vector<std::uint8_t> quarter(256 * 1024, 'q');
+  Check(Finish(starved, true, quarter) == 0 && Payload(events.back()) == "active_memory_limit",
+        "A body that cannot grow is refused, not truncated");
+  Check(sink.in_flight_bytes() == reb::kNativeArtifactInFlightBytes - 128 * 1024,
+        "The refused body returns what it had grown to");
+  Configure();
+  Check(Finish(full_b) == 0 && Finish(filler) == 0 && sink.in_flight_bytes() == 0,
+        "Stale bodies return their share after reconfiguration");
+
+  const std::vector<std::uint8_t> oversized(reb::kNativeArtifactMaxContentBytes + 1, 'o');
+  Check(Finish(Begin(request), true, oversized) == 0 &&
+            Payload(events.back()) == "body_too_large" && sink.in_flight_bytes() == 0,
+        "A body past 16 MiB is refused as too large");
+  std::cout << "PASS in-flight pool: 40 parallel bodies, growth without slack, exact shares, "
+               "full-pool and growth refusals, stale release, size bound\n";
+}
+
 void Admission(const std::filesystem::path& output) {
   Configure();
   const Request request{301, 0, 9};
@@ -484,32 +773,14 @@ void Admission(const std::filesystem::path& output) {
   no_admission("Mojo tee creation failure", [&] { Begin(request); });
   Check(Payload(events.back()) == "tee_unavailable", "Tee failure is visible");
   NativeArtifactBodyTee::unavailable = false;
-  Check(Finish(Begin(request), false) == 0 &&
-            Payload(events.back()) == "body_incomplete_or_too_large",
+  Check(Finish(Begin(request), false) == 0 && Payload(events.back()) == "body_incomplete",
         "Incomplete body never enqueues");
   client.reject_next = true;
   Check(Finish(Begin(request)) == 0 &&
             Payload(events.back()) == "transfer_queue_full_or_disconnected",
         "Queue rejection is visible");
-
-  const int first = Begin(request);
-  const int second = Begin(request);
-  no_admission("32 MiB active-body memory bound", [&] { Begin(request); });
-  Check(Payload(events.back()) == "active_memory_limit", "Memory rejection is visible");
-  Check(Finish(first, false) == 0, "Failed body releases reservation");
-  const int replacement = Begin(request);
-  Check(NativeArtifactBodyTee::pending.contains(replacement),
-        "Released reservation admits next body");
-  Configure();
-  Check(Finish(second) == 0 && Finish(replacement) == 0,
-        "Old reservations release on stale callbacks");
-  const int after_stale_a = Begin(request);
-  const int after_stale_b = Begin(request);
-  Check(NativeArtifactBodyTee::pending.size() == 2,
-        "Both reservations reusable after stale retirement");
-  Finish(after_stale_a, false);
-  Finish(after_stale_b, false);
-
+  Check(sink.in_flight_bytes() == 0, "Failed and refused bodies return their pool share");
+  InFlightPool(sink, client, output);
   const std::vector<std::uint8_t> empty;
   Check(sink.CaptureGeneratedArtifact(reb::NativeArtifactKind::kJavaScript,
                                       reb::NativeArtifactCaptureOrigin::kDynamicJavaScript, 9, 1,

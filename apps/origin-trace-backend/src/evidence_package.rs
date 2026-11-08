@@ -470,9 +470,10 @@ fn identities<'a>(
                 if value["sensitive"].as_bool()
                     != Some(matches!(
                         kind,
-                        "response_body" | "canvas_data_url" | "request_body"
+                        "response_body" | "canvas_data_url" | "request_body" | "request_target"
                     ))
-                    || ((kind == "request_body") != (origin == "network_request"))
+                    || (matches!(kind, "request_body" | "request_target")
+                        != (origin == "network_request"))
                     || (value["execution_context_id"].is_null() && origin != "unknown")
                     || (origin == "dynamic_javascript"
                         && (kind != "javascript" || context.is_none_or(|id| id == 0)))

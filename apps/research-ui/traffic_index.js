@@ -103,7 +103,7 @@ function createTrafficIndex({fetcher = (input, init) => fetch(input, init), onCh
         let after = row.first_offset, remaining = member.records;
         for (let page = 0; page < TRAFFIC_DETAIL_PAGES && remaining > 0; page += 1) {
           const parameters = new URLSearchParams({session_id: member.session_id, process_id: String(member.process_id),
-            request_id: member.request_id, after, limit: String(Math.min(remaining, TRAFFIC_DETAIL_PAGE))});
+            request_id: member.request_id, category: 'network', after, limit: String(Math.min(remaining, TRAFFIC_DETAIL_PAGE))});
           const response = await fetcher(`/api/events?${parameters}`, {cache: 'no-store', signal});
           if (!response.ok) throw new Error(`the event store returned HTTP ${response.status}`);
           const body = await response.json();

@@ -511,17 +511,59 @@ fn find_artifact_with_deadline(
     max_bytes: u64,
     deadline: std::time::Instant,
 ) -> Result<Value> {
+    let mut selected = None;
+    scan_manifest(root, max_records, max_bytes, deadline, |value| {
+        if value["artifact_id"] == id {
+            selected = Some(value);
+        }
+    })?;
+    selected.ok_or_else(|| Error::new(404, "Artifact not found"))
+}
+/// The manifest records these events name by artifact ID, and any `also` selects.
+pub fn artifacts_named(
+    root: &Path,
+    events: &[Value],
+    also: impl Fn(&Value) -> bool,
+) -> Result<Vec<Value>> {
+    let named: BTreeSet<&str> = events
+        .iter()
+        .filter_map(|event| event["artifact_id"].as_str())
+        .filter(|id| *id != "0")
+        .collect();
+    select_artifacts(root, |artifact| {
+        artifact["artifact_id"]
+            .as_str()
+            .is_some_and(|id| named.contains(id))
+            || also(artifact)
+    })
+}
+/// Every validated manifest record `keep` selects, oldest first, from one complete scan.
+pub fn select_artifacts(root: &Path, keep: impl Fn(&Value) -> bool) -> Result<Vec<Value>> {
+    let mut selected = Vec::new();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    scan_manifest(root, usize::MAX, u64::MAX, deadline, |value| {
+        if keep(&value) {
+            selected.push(value);
+        }
+    })?;
+    Ok(selected)
+}
+/// Validates every manifest record and visits each; a missing manifest has none.
+fn scan_manifest(
+    root: &Path,
+    max_records: usize,
+    max_bytes: u64,
+    deadline: std::time::Instant,
+    mut visit: impl FnMut(Value),
+) -> Result<()> {
     use std::io::BufRead;
     let path = root.join("manifest.jsonl");
     let file = match regular_file(&path) {
         Ok(file) => file,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            return Err(Error::new(404, "Artifact not found"));
-        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
         Err(e) => return Err(e.into()),
     };
     let mut reader = std::io::BufReader::new(file);
-    let mut selected = None;
     let mut seen = BTreeSet::new();
     let mut scanned = 0u64;
     let mut records = 0usize;
@@ -566,11 +608,9 @@ fn find_artifact_with_deadline(
                 "The artifact manifest contains a duplicate artifact ID",
             ));
         }
-        if value["artifact_id"] == id {
-            selected = Some(value);
-        }
+        visit(value);
     }
-    selected.ok_or_else(|| Error::new(404, "Artifact not found"))
+    Ok(())
 }
 
 /// Strict, cooperative stopped-store reads used only by metadata package export.

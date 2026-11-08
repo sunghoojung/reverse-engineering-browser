@@ -316,12 +316,13 @@ conditional reads. No target/session join is inferred from URL or timing.
 
 `capture_options` labels what this session's launcher passed to Brave, for
 every live session (agent, app or `make live`): `request_content`,
-`canvas_images`, `document_start` (`permitted` or `not_permitted`; whether
+`canvas_images`, `request_stacks`, `document_start` (`permitted` or `not_permitted`; whether
 this Brave honors it is `document_start_supported` in `get_native_console`),
 and `js_invocation` with `state` (`not_armed`, `armed`, `browser_unsupported`
 or `unreadable`), `count` and `digests`. `run-live-session.sh` passes the
-backend `--session-request-content`, `--session-canvas-images` and
-`--session-document-start`; they grant and enable nothing. Idle and demo
+backend `--session-request-content`, `--session-canvas-images`,
+`--session-request-stacks` and `--session-document-start`; they grant and
+enable nothing. Idle and demo
 backends report `source: not_live` with everything off. Site labels and
 source URLs stay in `get_js_invocation_sites`.
 
@@ -416,8 +417,9 @@ do not raise the 16-record cap. Every
 capture switch is off unless named; an inherited capture switch, site file,
 browser profile or embedded-session variable is ignored, so an inherited
 `REB_CAPTURE_REQUEST_CONTENT`, `REB_CONSOLE_DOCUMENT_START`,
-`REB_NATIVE_JS_INVOCATION_SITES` or `REB_NATIVE_JS_INVOCATION_DIGESTS` never
-reaches an agent session.
+`REB_NATIVE_JS_INVOCATION_SITES`, `REB_NATIVE_JS_INVOCATION_DIGESTS` or
+`REB_NATIVE_REQUEST_STACKS` never reaches an agent session, which runs without
+request stacks.
 
 | Option | Launcher switch | Rule |
 | --- | --- | --- |
@@ -1021,11 +1023,12 @@ store and keeps beside it as a private sidecar. `total`, `matching` and the tab
 and domain `facets` are exact for the indexed bytes; filters (`tab_id`,
 `domain`, `type`, `failed`, `invert`, `hide_internal`, `third_party`, `from_ns`,
 `to_ns`), the Traffic filter grammar (`q`) and sort cover every request, and
-`offset` with `through` pages one snapshot. Rows carry recorded sizes, MIME type,
+`offset` with `through` pages the same requests, whose fields stay live. Rows carry recorded sizes, MIME type,
 protocol and initiator class; the answer adds matching sizes and a start
 timeline. Each row names its root event and the
 `session_id`, `process_id` and `request_id` members whose records form it, so
-`get_events` with `after=first_offset` and `limit=records` reads them. The
+`get_events` with `category=network`, `after=first_offset` and the member's
+`records` as `limit` reads them. The
 contract, bounds and invalidation rules are in
 [request-index-v1.md](request-index-v1.md). The `reb://` stored-evidence reader
 does not serve it.

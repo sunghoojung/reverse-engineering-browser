@@ -135,6 +135,7 @@ function trafficPayloadModel(body, view) {
   if (type.startsWith('multipart/')) {
     model.parts = trafficPayloadMultipart(bytes);
     if (!model.parts) model.parsedNote = 'The multipart boundary could not be read from the first line.';
+    else if (view.complete === false) for (const part of model.parts.parts) if (part.cut) part.cut = 'read';
   } else if (model.binary) {
     return model;
   } else if (type === 'application/x-www-form-urlencoded') {
@@ -143,7 +144,8 @@ function trafficPayloadModel(body, view) {
     try {
       model.json = {value: JSON.parse(text)};
     } catch {
-      if (/json$/.test(type)) {
+      // A partly read prefix is not judged; its read note says more follows.
+      if (/json$/.test(type) && view.complete !== false) {
         model.parsedNote = body.state === 'captured_truncated' ? 'The retained prefix ends before the JSON does, so it is shown as sent.'
           : 'This body is not valid JSON, so it is shown as sent.';
       }
@@ -485,7 +487,7 @@ function trafficPayloadPartRow(part, index, marks, current) {
   const head = trafficNode('div', 'traffic-payload-part-head');
   head.append(trafficNode('span', 'traffic-payload-name', part.name ?? '(unnamed part)'));
   const meta = [part.filename === null ? null : `file ${part.filename || '(empty name)'}`, part.type, trafficByteCount(part.size),
-    part.cut ? 'cut at the capture limit' : null].filter(Boolean).join(' · ');
+    part.cut === 'read' ? 'continues past this read' : part.cut ? 'cut at the capture limit' : null].filter(Boolean).join(' · ');
   head.append(trafficNode('span', 'traffic-payload-part-meta', meta));
   row.append(head);
   if (part.value !== null) row.append(trafficNode('div', 'traffic-payload-value', part.value));
@@ -664,7 +666,8 @@ function trafficPayloadBodySection(body, view, shown, panel) {
     const more = trafficNode('button', 'secondary-button traffic-body-more', view.loadingMore ? 'Loading…' : 'Show the next 256 KiB');
     more.type = 'button';
     more.dataset.contentKey = view.key;
-    more.disabled = Boolean(view.loadingMore);
+    // Not `disabled`, so keyboard focus stays on it while the range loads.
+    more.setAttribute('aria-disabled', String(Boolean(view.loadingMore)));
     element.append(more);
   } else if (view?.status === 'ready' && view.verified === false) note('The retained digest could not be rechecked in this view.');
   const parsed = Boolean(model.json || model.pairs || model.parts);

@@ -108,7 +108,7 @@ function trafficBodyContent(body, view) {
       : `The artifact receiver did not retain it (${view.reason || 'unknown reason'}).`};
   }
   if (view.status === 'missing') {
-    return {note: 'The body artifact is not in the current catalog: its acknowledgment is pending, or it is outside the 500 newest artifacts.'};
+    return {note: 'The body artifact is not in the current catalog: its acknowledgment is pending, or it is past the first 50,000 artifacts of the catalog.'};
   }
   if (view.status === 'unavailable') return {note: 'Retained bodies are read from the local backend, which this view does not have.'};
   if (view.status === 'error') {
@@ -491,7 +491,12 @@ function renderTrafficRows(container, requests, {start = 0, total = requests.len
   while (container.children.length > nodes.length) container.lastElementChild.remove();
   const restored = anchor && rows.find(row => row.dataset.requestId === anchor.dataset.requestId);
   container.scrollTop = restored ? restored.offsetTop - anchorOffset : scrollTop;
-  if (focusedId && document.activeElement !== focused) (rows.find(row => row.dataset.requestId === focusedId) ?? rows[0] ?? container).focus({preventScroll: true});
+  if (focusedId && document.activeElement !== focused) {
+    // A row that left the block hands focus to a loaded row in view, else to the list.
+    const top = Math.max(0, Math.floor(container.scrollTop / height) - start);
+    const inView = rows.slice(top, top + Math.ceil((container.clientHeight || 0) / height) + 1).find(row => row.dataset.requestId);
+    (rows.find(row => row.dataset.requestId === focusedId) ?? inView ?? container).focus({preventScroll: true});
+  }
   container.tabIndex = rows.length ? -1 : 0;
 }
 

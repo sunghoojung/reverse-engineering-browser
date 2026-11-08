@@ -263,6 +263,14 @@ std::pair<NativeProbeEvent, NativeProbeEvent> Start(NativeProbeQueue& queue,
   const auto identity = IdentityPayload(Pop(queue));
   assert((identity.flags & reb::kNativeScriptIdentityNotRetained) != 0);
   assert(Drain(queue) == 0 && reb::mojom::NativeProbeHost::artifacts == no_artifacts);
+
+  // Every frame from its own script: counting distinct scripts always ends.
+  Configure(queue, 45);
+  scenario.depth = reb::kNativeRequestStackSyncLimit;
+  scenario.scripts = reb::kNativeRequestStackSyncLimit;
+  assert(StackPayload(Start(queue, 4002).second).scripts == reb::kNativeRequestStackSyncLimit);
+  Drain(queue);
+  scenario.scripts = 3;
   transport.Disable();
   std::cout << "PASS request stacks: disabled, depth bounds, Wasm, await, dedupe, "
                "eviction, budgets and script identity\n";

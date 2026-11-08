@@ -815,6 +815,8 @@ pub async fn launch(options: &StartOptions) -> Result<Started, String> {
         // without invocation capture refuses the start instead of dropping it.
         "REB_NATIVE_JS_INVOCATION_SITES",
         "REB_NATIVE_JS_INVOCATION_IF_SUPPORTED",
+        "REB_NATIVE_REQUEST_STACKS",
+        "REB_NATIVE_REQUEST_STACKS_IF_SUPPORTED",
         "REB_BRAVE_BINARY",
     ] {
         command.env_remove(name);

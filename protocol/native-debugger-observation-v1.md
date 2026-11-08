@@ -34,7 +34,9 @@ cost that load only. Stacks use the [#429 walker](native-network-v3.md) and
 need `--reb-request-stacks`; without it records carry stack state
 `no_script` and a zero digest. The request hook runs in
 `ResourceRequestSender::SendAsync` after the request's own stack record
-(Chromium patch 0029); the other hooks' Blink call sites are not patched yet.
+(Chromium patch 0029) and matches only requests whose `request_initiated`
+frame is the armed document, on its main thread; worker and other-frame
+requests never match. The other hooks' Blink call sites are not patched yet.
 
 ## Common payload
 

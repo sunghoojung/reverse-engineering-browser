@@ -2924,8 +2924,7 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
 
       function renderRequests(selectionOnly = false) {
         const previous = state.trafficRenderedView;
-        // The backend index has no tab links, so rows without a tab are listed locally.
-        const index = trafficIndexActive() && state.requestTabId !== 'unresolved' ? state.trafficIndex : null;
+        const index = trafficIndexActive() ? state.trafficIndex : null;
         // Producers replace the retained request array on refresh. Reuse only
         // this exact rendered snapshot and filter/window; all other entry
         // points (polls, search, sort, scrolling and history) take the full path.
@@ -3011,6 +3010,7 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         renderTrafficLatest();
         renderRequestCount(visible.length, state.requests.length);
         state.trafficRenderedView = renderedView;
+        finishTrafficFocus();
         if (selectionCleared) {
           updateSelectionSummary(null);
           renderInspector();
@@ -3127,6 +3127,7 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         state.trafficWindowAnchor = rows.find(Boolean)?.id ?? null;
         state.trafficRenderedView = {requests: state.requests, retainedCount: state.requests.length, filterKey, start,
           anchor: state.trafficWindowAnchor, answer: current, visibleCount: matching, totalCount: page.total, outside, note, totals, mounted};
+        finishTrafficFocus();
         // A loaded selection that gained records is read again, once per count.
         const selected = state.selectedRequestId !== null ? current.rows.find(row => row.id === state.selectedRequestId) : null;
         const loaded = selected && state.trafficLoaded.get(selected.id);
@@ -3251,6 +3252,8 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
           const events = await state.trafficIndex.events(indexed.indexRow, AbortSignal.any([controller.signal, AbortSignal.timeout(10000)]));
           const request = requestsFromEvents(events, indexed.origin).find(candidate => candidate.id === id);
           if (!request) throw new Error('its stored records no longer form this request');
+          // Tab sets and links have no request ID, so the store read lacks them; the index row has them.
+          Object.assign(request, {tabIds: indexed.tabIds, tabLink: indexed.tabLink, tabLinkLabel: indexed.tabLinkLabel});
           state.trafficLoaded.delete(id);
           state.trafficLoaded.set(id, request);
           for (const key of state.trafficLoaded.keys()) {
@@ -3283,21 +3286,45 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         }
       }
 
+      // Positions span the whole filtered list; the mounted block holds only part of it.
       function moveRequestSelection(event) {
         if (!['ArrowUp', 'ArrowDown', 'Home', 'End'].includes(event.key)) return;
-        const rows = [...elements.requestRows.querySelectorAll('.request-row')].filter(row => row.dataset.requestId);
-        const current = rows.indexOf(event.currentTarget);
-        if (current < 0) return;
+        const container = elements.requestRows, view = state.trafficRenderedView;
+        const slots = [...container.querySelectorAll('.request-row')];
+        const at = slots.indexOf(event.currentTarget);
+        if (!view || (at < 0 && event.currentTarget !== container)) return;
         event.preventDefault();
-        const next = event.key === 'Home'
-          ? 0
-          : event.key === 'End'
-            ? rows.length - 1
-            : Math.max(0, Math.min(rows.length - 1, current + (event.key === 'ArrowDown' ? 1 : -1)));
-        const id = rows[next].dataset.requestId;
-        selectTrafficRow(id);
-        if (document.activeElement !== rows[next]) rows[next].focus({preventScroll: true});
-        rows[next].scrollIntoView({block: 'nearest'});
+        const from = at >= 0 ? view.start + at
+          : state.trafficFocusPosition ?? Math.floor(container.scrollTop / trafficRowHeight(container));
+        const position = event.key === 'Home' ? 0 : event.key === 'End' ? view.visibleCount - 1
+          : from + (event.key === 'ArrowDown' ? 1 : -1);
+        focusTrafficPosition(Math.max(0, Math.min(view.visibleCount - 1, position)));
+      }
+
+      function focusTrafficPosition(position) {
+        const container = elements.requestRows, view = state.trafficRenderedView;
+        const slot = view && container.querySelectorAll('.request-row')[position - view.start];
+        if (slot?.dataset.requestId) {
+          state.trafficFocusPosition = null;
+          selectTrafficRow(slot.dataset.requestId);
+          if (document.activeElement !== slot) slot.focus({preventScroll: true});
+          slot.scrollIntoView({block: 'nearest'});
+          return;
+        }
+        // The list keeps focus while the row's block mounts or loads.
+        state.trafficFocusPosition = position;
+        container.focus({preventScroll: true});
+        if (slot) return;
+        const height = trafficRowHeight(container);
+        container.scrollTop = Math.max(0, (position + 1) * height - (container.clientHeight || 0) / 2);
+        renderRequests();
+      }
+
+      function finishTrafficFocus() {
+        const position = state.trafficFocusPosition, view = state.trafficRenderedView;
+        if (position === null) return;
+        if (!view || document.activeElement !== elements.requestRows || position >= view.visibleCount) state.trafficFocusPosition = null;
+        else if (elements.requestRows.querySelectorAll('.request-row')[position - view.start]?.dataset.requestId) focusTrafficPosition(position);
       }
 
       function focusRequestRow(id) {
@@ -3503,15 +3530,17 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         if (!artifact) return {status: 'missing'};
         const key = `${artifact.session_id}:${artifact.artifact_id}:${artifact.sha256}`;
         const view = requestBodyViews.get(key);
+        // A body cut at the capture limit may end inside a character.
+        const cut = record.state === 'captured_truncated';
         if (view?.retryable && Date.now() - view.failedAt >= REQUEST_BODY_RETRY_MS) {
           // The failed view stays visible until the retry settles.
           requestBodyViews.set(key, {status: 'loading', previous: view});
-          void loadRequestContent(artifact, key, null);
+          void loadRequestContent(artifact, key, null, cut);
           return {...view, url: artifact.url, key};
         }
         if (view) return {...(view.previous ?? view), loadingMore: view.status === 'loading' && Boolean(view.previous?.bytes), url: artifact.url, key};
         requestBodyViews.set(key, {status: 'loading'});
-        void loadRequestContent(artifact, key, null);
+        void loadRequestContent(artifact, key, null, cut);
         return {status: 'loading', url: artifact.url, key};
       }
       function requestBodyView(request) {
@@ -3528,7 +3557,7 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         const view = requestTargetView(request);
         return view?.status === 'ready' && view.complete ? `${view.url}${view.text}` : null;
       }
-      async function loadRequestContent(artifact, key, previous) {
+      async function loadRequestContent(artifact, key, previous, cut = false) {
         const controller = new AbortController();
         const timeout = setTimeout(() => controller.abort(), 10000);
         const mismatch = message => Object.assign(new Error(message), {integrity: true});
@@ -3553,10 +3582,12 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
             if (digest !== artifact.sha256) throw mismatch('its bytes do not match the retained SHA-256');
             verified = true;
           }
+          // A prefix may end inside a character; streaming leaves that tail out instead of failing it.
+          const open = {stream: !complete || cut};
           let lossy = false;
-          try {new TextDecoder('utf-8', {fatal: true}).decode(bytes);} catch {lossy = true;}
-          view = {status: 'ready', artifact, bytes, text: new TextDecoder('utf-8', {fatal: false, ignoreBOM: true}).decode(bytes),
-            lossy, verified, complete, loaded: bytes.length, total: artifact.byte_size};
+          try {new TextDecoder('utf-8', {fatal: true}).decode(bytes, open);} catch {lossy = true;}
+          view = {status: 'ready', artifact, bytes, text: new TextDecoder('utf-8', {fatal: false, ignoreBOM: true}).decode(bytes, open),
+            lossy, verified, complete, cut, loaded: bytes.length, total: artifact.byte_size};
         } catch (error) {
           const message = controller.signal.aborted ? 'timed out after 10 seconds' : String(error?.message ?? error).replace(/\.$/, '');
           // A failed next range keeps the bytes already shown.
@@ -3582,7 +3613,7 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         const view = requestBodyViews.get(key);
         if (view?.status !== 'ready' || view.complete) return;
         requestBodyViews.set(key, {status: 'loading', previous: {...view, moreError: null}});
-        void loadRequestContent(view.artifact, key, view);
+        void loadRequestContent(view.artifact, key, view, view.cut);
         renderInspector();
       }
       function requestBodyViewKey(view) {
@@ -8468,6 +8499,10 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         const key = event.target.closest?.('.traffic-body-more')?.dataset.contentKey;
         if (key) loadMoreRequestBody(key);
       });
+      // The list holds focus while a keyboard target loads; rows handle their own keys.
+      elements.requestRows.addEventListener('keydown', event => {
+        if (event.target === elements.requestRows) moveRequestSelection(event);
+      });
       elements.requestRows.addEventListener('scroll', () => {
         if (state.trafficScrollFrame) return;
         state.trafficScrollFrame = requestAnimationFrame(() => {
@@ -8531,7 +8566,6 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         const current = state.sourceEditorView?.window;
         if (current) moveSourceWindow(current.end);
       });
-      // Go to line opens over the editor; Go or Escape closes it.
       function openSourceGoto() {
         if (!state.sourceEditorView) return;
         elements.sourceMore.open = false;
@@ -8554,7 +8588,6 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
       elements.sourceWindow.addEventListener('keydown', event => {
         if (event.key === 'Escape') {event.preventDefault(); closeSourceGoto(true);}
       });
-      // The More menu closes after an action, on Escape and on a click elsewhere.
       elements.sourceMore.addEventListener('click', event => {
         const action = event.target.closest?.('.source-more-menu button');
         if (!action) return;

@@ -586,7 +586,13 @@
             "capture_exclusion",
             "tab_set",
             "request_tab_link",
-            "script_cookie"
+            "script_cookie",
+            "request_watch_match",
+            "listener_dispatch",
+            "timer_observation",
+            "csp_violation",
+            "exception_observation",
+            "dom_mutation"
           ]
         },
         "status_code": {

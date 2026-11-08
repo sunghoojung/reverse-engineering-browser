@@ -281,6 +281,7 @@ const ranged = request(record({bodyLength: '300000', capturedLength: '300000'}))
 render(ranged, ready(prefix, {verified: false, complete: false, loaded: 262144, total: 300000, key: '7:901:x'}));
 assert.match(text('[data-section="payload"]'), /Showing the first 262,144 bytes of 300,000 bytes retained/);
 assert.equal(panel.querySelector('.traffic-body-more')?.dataset.contentKey, '7:901:x');
+assert.doesNotMatch(text('[data-section="payload"]'), /not valid JSON/, 'a partly read body is not judged invalid');
 render(ranged, ready(json, {complete: true, loaded: json.length, total: json.length}));
 assert.equal(panel.querySelector('.traffic-body-more'), null, 'a complete body has no next-range control');
 assert(tree(), 'the whole body parses once every byte is read');

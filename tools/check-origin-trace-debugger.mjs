@@ -934,7 +934,8 @@ assert.equal(ledger.children[2], selectedRow);
 assert.equal(ledger.scrollTop, 56, "Retained-window eviction preserves the first visible row anchor");
 assert.equal(trafficDocument.activeElement, selectedRow);
 trafficUI.renderTrafficRows(ledger, retainedTraffic.slice(4, 504), rowOptions);
-assert.equal(trafficDocument.activeElement, ledger.children[0]);
+// A focused row that leaves the rendered rows hands focus to the first row in view.
+assert.equal(trafficDocument.activeElement, ledger.children[Math.floor(ledger.scrollTop / 28)]);
 assert.equal(ledger.children.length, 500);
 const details = new TrafficFixtureNode();
 // Native rows carry no headers or response bodies: General shows coverage and

@@ -5,6 +5,7 @@
 
 #include "brave/components/reverse_engineering_browser/browser/native_tab_registry.h"
 
+#include <array>
 #include <string>
 #include <variant>
 #include <vector>
@@ -114,6 +115,15 @@ class NativeTabRegistry::ServiceWorkers final : public content::ServiceWorkerCon
       tabs = NativeTabResolver::Get().WorkerTabs(TokenOf(shared->value()));
     }
     NativeTabResolver::Get().ServiceWorkerControlleeAdded(version_id, client_uuid, tabs);
+  }
+  // A window client gets its frame id only at commit, after OnControlleeAdded.
+  void OnControlleeNavigationCommitted(int64_t version_id,
+                                       const std::string& client_uuid,
+                                       content::GlobalRenderFrameHostId frame_id) override {
+    if (const std::uint32_t tab = NativeTabOf(content::RenderFrameHost::FromID(frame_id))) {
+      const std::array<std::uint32_t, 1> tabs = {tab};
+      NativeTabResolver::Get().ServiceWorkerControlleeAdded(version_id, client_uuid, tabs);
+    }
   }
   void OnControlleeRemoved(int64_t version_id, const std::string& client_uuid) override {
     NativeTabResolver::Get().ServiceWorkerControlleeRemoved(version_id, client_uuid);

@@ -960,18 +960,24 @@ fn decode_target(event: &Value) -> Option<Target> {
         || event["encoded_data_length"] != "0"
         || event["decoded_body_length"] != "0"
         || event["resource_type"] != 0
-        || event["artifact_id"] != "0"
     {
         return None;
     }
+    let artifact = canonical(&event["artifact_id"], false)? != 0;
     let bytes = hex::decode(payload).ok()?;
     let u16_at = |at: usize| u16::from_le_bytes([bytes[at], bytes[at + 1]]);
     let length = u32::from_le_bytes(bytes[4..8].try_into().ok()?);
     let prefix = 12 + (length as usize).min(116);
-    if u16_at(0) != 1
+    // Version 2 byte 9 says where bytes past the prefix went; version 1 has none.
+    let retention = bytes[9];
+    let retention_valid = match u16_at(0) {
+        1 => retention == 0 && !artifact,
+        2 => retention <= 5 && (retention == 0) != (length > 116) && (retention == 1) == artifact,
+        _ => false,
+    };
+    if !retention_valid
         || u16_at(2) != 128
         || bytes[8] > 4
-        || bytes[9] != 0
         || bytes[12..prefix].contains(&0)
         || bytes[prefix..].iter().any(|byte| *byte != 0)
     {
@@ -1542,6 +1548,10 @@ impl RequestIndex {
         row.first_offset = row.first_offset.min(start);
         row.end_offset = row.end_offset.max(end);
         row.records += 1;
+        // A link has no request ID of its own; tab_link and tab_ids carry it.
+        if event["type"] == "request_tab_link" {
+            return;
+        }
         let (session, process, request) = (
             text(&event["session_id"]),
             number(&event["process_id"]) as u32,
@@ -2152,12 +2162,16 @@ mod tests {
             b"GET long.example.test",
             json!({"resource_type": 3}),
         );
+        // Version 2: the whole target is retained as an artifact.
+        let mut long = target(2, 0, &[b'b'; 130], 400);
+        long[0] = 2;
+        long[9] = 1;
         store.push(
             7,
             907,
             "request_target",
-            &target(2, 0, &[b'b'; 130], 400),
-            json!({"parent_event_id": start}),
+            &long,
+            json!({"parent_event_id": start, "artifact_id": "77"}),
         );
         store.push(42, 11, "request_initiated", b"completed", json!({}));
         // A WebUI load only the renderer recorded.
@@ -2369,6 +2383,14 @@ mod tests {
         assert_eq!(
             row["tab_link"],
             json!({"kind": 3, "count": 2, "complete": true})
+        );
+        // The link counts as a record but has no request ID to read it by.
+        assert_eq!(
+            (&row["records"], &row["members"]),
+            (
+                &json!(2),
+                &json!([{"session_id": "1", "process_id": 51, "request_id": "5", "records": 1}])
+            )
         );
         assert_eq!(page(&mut index, "tab_id=5")["matching"], 1);
         assert_eq!(page(&mut index, "tab_id=3")["matching"], 2);

@@ -31,7 +31,9 @@ function mountTrafficOverview(root, {onRange}) {
   };
   const choose = (from, to) => {
     const [low, high] = from <= to ? [from, to] : [to, from];
-    select({from: edge(low), to: edge(high + 1) - 1n});
+    // Under 120 ns of timeline, adjacent edges coincide; a range still holds its start.
+    const start = edge(low), end = edge(high + 1) - 1n;
+    select({from: start, to: end < start ? start : end});
   };
   const ms = value => trafficTimeLabel(Number(value) / 1e6);
 

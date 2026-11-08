@@ -1413,6 +1413,7 @@ dir="$REB_LIVE_SESSION_ROOT/$((4242 + $(ls "$REB_LIVE_SESSION_ROOT" | wc -l)))"
 mkdir -p "$dir/profile" "$dir/artifacts"
 printf '%s\n' "$REB_NATIVE_WASM_DISPATCH $REB_CAPTURE_CATEGORY_MASK $REB_USE_SYSTEM_KEYCHAIN $REB_CONSOLE_DOCUMENT_START $REB_CAPTURE_REQUEST_CONTENT ${{REB_NATIVE_JS_INVOCATION_SITES-unset}} ${{REB_NATIVE_JS_INVOCATION_DIGESTS-unset}}" > "$dir/options"
 printf '%s\n' "${{REB_NATIVE_JS_INVOCATION_IF_SUPPORTED-unset}} ${{REB_JS_INVOCATION_SITE_STORE-unset}}" > "$dir/site-store"
+printf '%s\n' "${{REB_NATIVE_REQUEST_STACKS-unset}} ${{REB_NATIVE_REQUEST_STACKS_IF_SUPPORTED-unset}}" > "$dir/stacks"
 labels=()
 if [[ -n "${{REB_NATIVE_JS_INVOCATION_SITES-}}" ]]; then
   cp "$REB_NATIVE_JS_INVOCATION_SITES" "$dir/sites"
@@ -1495,6 +1496,8 @@ wait "$backend"
             )
             .env("REB_NATIVE_JS_INVOCATION_DIGESTS", "1")
             .env("REB_NATIVE_JS_INVOCATION_IF_SUPPORTED", "1")
+            .env("REB_NATIVE_REQUEST_STACKS", "1")
+            .env("REB_NATIVE_REQUEST_STACKS_IF_SUPPORTED", "1")
             .env(
                 "REB_JS_INVOCATION_SITE_STORE",
                 self.root.path().join("app-sites.json"),
@@ -1600,10 +1603,14 @@ fn an_agent_starts_drives_and_ends_its_own_live_session() {
             .any(|line| line == "https://example.test/page")
     );
     // Inherited switches reach nothing: no request content, document-start
-    // permission, invocation sites or digests.
+    // permission, invocation sites, digests or request stacks.
     assert_eq!(
         std::fs::read_to_string(fixture.session("4242").join("options")).unwrap(),
         "1 4095 0 0 0 unset 0\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(fixture.session("4242").join("stacks")).unwrap(),
+        "unset unset\n"
     );
     // Nor may it read or change the app's saved invocation sites.
     let store = std::fs::read_to_string(fixture.session("4242").join("site-store")).unwrap();
@@ -1626,7 +1633,7 @@ fn an_agent_starts_drives_and_ends_its_own_live_session() {
     assert_eq!(
         context["capture_options"],
         json!({"source":"launcher","request_content":false,"canvas_images":false,
-            "document_start":"not_permitted",
+            "request_stacks":false,"document_start":"not_permitted",
             "js_invocation":{"state":"not_armed","count":0,"digests":false}})
     );
     let summary = mcp.request("tools/call", json!({"name": "get_session_summary"}));
@@ -1831,7 +1838,7 @@ fn agent_session_options_are_named_never_inherited() {
     assert_eq!(
         context["capture_options"],
         json!({"source":"launcher","request_content":true,"canvas_images":false,
-            "document_start":"permitted",
+            "request_stacks":false,"document_start":"permitted",
             "js_invocation":{"state":"armed","count":1,"digests":false}})
     );
 

@@ -20,7 +20,6 @@ const FRAME: usize = 16;
 const MAX_ARTIFACT: usize = HEADER + FRAME * (SYNC_LIMIT + ASYNC_LIMIT) as usize;
 const MAX_SOURCE: usize = 16 * 1024 * 1024;
 const IDENTITY_SCAN: usize = 4096;
-const ARTIFACT_SCAN: usize = 4096;
 const ASYNC_NOT_SHOWN: [&str; 4] = [
     "timers",
     "event listeners",
@@ -616,22 +615,35 @@ impl InitiatorFrames {
     const KEPT: usize = 4096;
     const NEW_PER_ANSWER: usize = 64;
 
-    pub fn resolve(&mut self, document: &mut Value, artifacts_root: &Path) {
-        self.resolve_with(document, artifacts_root, || {
-            evidence::artifacts(artifacts_root, ARTIFACT_SCAN).unwrap_or_default()
-        });
+    /// False when rows were left unresolved for a later answer.
+    pub fn resolve(&mut self, document: &mut Value, artifacts_root: &Path) -> bool {
+        self.resolve_with(document, artifacts_root, |wanted| {
+            evidence::select_artifacts(artifacts_root, |a| {
+                matches!(a["kind"].as_str(), Some("javascript" | "wasm"))
+                    && a["sha256"].as_str().is_some_and(|sha| wanted.contains(sha))
+            })
+            .unwrap_or_default()
+        })
     }
 
     fn resolve_with(
         &mut self,
         document: &mut Value,
         artifacts_root: &Path,
-        manifest: impl FnOnce() -> Vec<Value>,
-    ) {
+        manifest: impl FnOnce(&BTreeSet<String>) -> Vec<Value>,
+    ) -> bool {
         let mut manifest = Some(manifest);
         let Some(rows) = document["requests"].as_array_mut() else {
-            return;
+            return true;
         };
+        let wanted: BTreeSet<String> = rows
+            .iter()
+            .filter_map(|row| {
+                let identity = hex::decode(row["initiator_frame"]["identity"].as_str()?).ok()?;
+                decode_identity(&identity)?.1.sha256
+            })
+            .collect();
+        let mut deferred = false;
         let mut artifacts: Option<Vec<Value>> = None;
         let sources = std::cell::RefCell::new(HashMap::<String, Vec<u8>>::new());
         let read = |artifact: &Value, limit: usize| -> Result<Vec<u8>> {
@@ -664,6 +676,7 @@ impl InitiatorFrames {
                 continue;
             }
             if fresh == Self::NEW_PER_ANSWER {
+                deferred = true;
                 continue;
             }
             fresh += 1;
@@ -673,8 +686,8 @@ impl InitiatorFrames {
                 .and_then(|bytes| decode_identity(&bytes))
                 .into_iter()
                 .collect();
-            let artifacts =
-                artifacts.get_or_insert_with(|| manifest.take().map_or_else(Vec::new, |f| f()));
+            let artifacts = artifacts
+                .get_or_insert_with(|| manifest.take().map_or_else(Vec::new, |f| f(&wanted)));
             let event = json!({"session_id": session, "process_id": raw["process_id"]});
             let mut stack = resolve_call(&event, &frame, None, &identities, artifacts, &read);
             let resolution = stack["frames"][0]["resolution"].take();
@@ -690,6 +703,7 @@ impl InitiatorFrames {
             }
             row["initiator_frame"] = resolution;
         }
+        !deferred
     }
 }
 
@@ -748,11 +762,17 @@ pub fn document(
             }
         }
     }
-    let artifacts = match evidence::artifacts(artifacts_root, ARTIFACT_SCAN) {
-        Ok(artifacts) => artifacts,
-        Err(_) if !artifacts_root.join("manifest.jsonl").exists() => Vec::new(),
-        Err(error) => return Err(error),
-    };
+    let mut wanted: BTreeSet<String> = identities
+        .values()
+        .filter_map(|identity| identity.sha256.clone())
+        .collect();
+    wanted.insert(hex::encode(record.digest));
+    let stack_session = stack["session_id"].as_str();
+    let artifacts = evidence::select_artifacts(artifacts_root, |a| {
+        a["session_id"].as_str() == stack_session
+            && matches!(a["kind"].as_str(), Some("stack" | "javascript" | "wasm"))
+            && a["sha256"].as_str().is_some_and(|sha| wanted.contains(sha))
+    })?;
     let root = artifacts_root.to_path_buf();
     let read = move |artifact: &Value, limit: usize| evidence::content(&root, artifact, limit);
     Ok(resolve(&stack, &record, &identities, &artifacts, &read))
@@ -854,7 +874,7 @@ mod tests {
             {"initiator_frame": Value::Null},
         ]});
         let mut frames = InitiatorFrames::default();
-        frames.resolve_with(&mut document, root.path(), || vec![script.clone()]);
+        assert!(frames.resolve_with(&mut document, root.path(), |_| vec![script.clone()]));
         let resolved = &document["requests"][0]["initiator_frame"];
         assert_eq!(
             (&resolved["status"], &resolved["line"], &resolved["column"]),
@@ -864,11 +884,11 @@ mod tests {
         assert_eq!(document["requests"][1]["initiator_frame"], Value::Null);
         // The kept outcome answers without the manifest; a missing identity is retried.
         let mut again = json!({"requests": [{"initiator_frame": raw(None)}]});
-        frames.resolve_with(&mut again, root.path(), Vec::new);
+        frames.resolve_with(&mut again, root.path(), |_| Vec::new());
         assert_eq!(again["requests"][0]["initiator_frame"], *resolved);
         let mut missing = json!({"requests": [{"initiator_frame": raw(None)}]});
         missing["requests"][0]["initiator_frame"]["frame"] = json!(hex::encode(frame(1, 8, 1, 0)));
-        frames.resolve_with(&mut missing, root.path(), Vec::new);
+        frames.resolve_with(&mut missing, root.path(), |_| Vec::new());
         assert_eq!(
             missing["requests"][0]["initiator_frame"]["reason"],
             "script_identity_missing"

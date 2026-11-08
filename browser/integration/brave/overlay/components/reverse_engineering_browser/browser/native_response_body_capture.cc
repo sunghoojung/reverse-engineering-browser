@@ -298,11 +298,13 @@ void NativeResponseBodyCapture::Finish(const std::map<Key, Body>::iterator found
                         : NativeResponseBodyState::kCaptured;
   }
   if (status == NativeArtifactCaptureStatus::kMemoryLimit || body.captured.size() == 0) {
-    // An open body with nothing received yet has nothing to report.
-    if (!open || status == NativeArtifactCaptureStatus::kMemoryLimit) {
-      summary.partial_index = 0;
-      Emit(body.parent, summary, 0);
+    if (open && status != NativeArtifactCaptureStatus::kMemoryLimit) {
+      // Capture ended before any byte arrived.
+      Refuse(body.parent, summary, NativeResponseBodyState::kNotCapturedArtifactUnavailable);
+      return;
     }
+    summary.partial_index = 0;
+    Emit(body.parent, summary, 0);
     return;
   }
   body.captured.Finish();

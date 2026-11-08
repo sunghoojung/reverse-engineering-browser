@@ -1,5 +1,5 @@
 diff --git a/browser/net/brave_proxying_url_loader_factory.cc b/browser/net/brave_proxying_url_loader_factory.cc
-index dba6df9..454cc92 100644
+index e014d58..bf3e497 100644
 --- a/browser/net/brave_proxying_url_loader_factory.cc
 +++ b/browser/net/brave_proxying_url_loader_factory.cc
 @@ -242,6 +242,8 @@ BraveProxyingURLLoaderFactory<T>::InProgressRequest::InProgressRequest(

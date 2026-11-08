@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <array>
+#include <functional>
 #include <limits>
 #include <string>
 #include <string_view>
@@ -436,6 +437,8 @@ void NativeNetworkCaptureSink::SetEmitter(const NativeProbeEmitter emitter,
     header_bytes_ = 0;
     unattributed_header_blocks_ = 0;
     unattributed_cookie_lists_ = 0;
+    finished_devtools_ids_ = {};
+    finished_devtools_next_ = 0;
   }
   SetNativeNetworkHeadersObserver(emitter && capture_content ? &ForwardNetworkHeaders : nullptr);
   emitter_.store(emitter, std::memory_order_release);
@@ -959,7 +962,13 @@ void NativeNetworkCaptureSink::RecordRequestCompleted(
   }
   if (capture_content_.load(std::memory_order_relaxed)) {
     base::AutoLock lock(header_lock_);
-    tracked_headers_.erase(request_id);
+    if (const auto tracked = tracked_headers_.find(request_id); tracked != tracked_headers_.end()) {
+      if (!tracked->second.devtools_id.empty()) {
+        finished_devtools_ids_[finished_devtools_next_++ % finished_devtools_ids_.size()] =
+            std::hash<std::string_view>{}(tracked->second.devtools_id);
+      }
+      tracked_headers_.erase(tracked);
+    }
   }
   const std::uint64_t monotonic_time_ns =
       static_cast<std::uint64_t>(base::TimeTicks::Now().since_origin().InNanoseconds());
@@ -1002,8 +1011,8 @@ void NativeNetworkCaptureSink::RecordNetworkHeaders(
     return;
   }
   base::AutoLock lock(header_lock_);
-  // A DevTools-owned ID is matched by value; any other unknown ID, such as a
-  // CORS preflight's, is not this sink's request.
+  // A DevTools-owned ID is matched by value; an unknown one that never finished
+  // here, such as a CORS preflight's, is not this sink's request.
   const std::uint64_t own = RequestIdOfHeaderId(devtools_request_id);
   const auto tracked = own != 0
                            ? tracked_headers_.find(own)
@@ -1016,7 +1025,11 @@ void NativeNetworkCaptureSink::RecordNetworkHeaders(
     std::uint32_t& unattributed = kind == NativeNetworkHeadersKind::kRawResponse
                                       ? unattributed_cookie_lists_
                                       : unattributed_header_blocks_;
-    if (own != 0 && unattributed != std::numeric_limits<std::uint32_t>::max()) {
+    const std::size_t hash = std::hash<std::string_view>{}(devtools_request_id);
+    const bool finished = own != 0 || (!devtools_request_id.empty() &&
+                                       std::ranges::find(finished_devtools_ids_, hash) !=
+                                           finished_devtools_ids_.end());
+    if (finished && unattributed != std::numeric_limits<std::uint32_t>::max()) {
       ++unattributed;
     }
     return;

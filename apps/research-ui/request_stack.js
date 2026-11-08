@@ -98,10 +98,13 @@ function requestStackFrameText(frame) {
 const REQUEST_STACK_SEPARATORS = Object.freeze({await: 'await', promise_all: 'Promise.all',
   promise_all_settled: 'Promise.allSettled', promise_any: 'Promise.any'});
 
+const REQUEST_STACK_RETRY_MS = 2000;
+const REQUEST_STACK_CACHE = 32;
+
 function createRequestStackPanel({open, refresh, load = null}) {
   const cache = new Map();
   const fetchStack = load ?? (async parameters => {
-    const response = await fetch(`/api/request-stack?${new URLSearchParams(parameters)}`, {cache: 'no-store'});
+    const response = await fetch(`/api/request-stack?${new URLSearchParams(parameters)}`, {cache: 'no-store', signal: AbortSignal.timeout(10000)});
     if (!response.ok) throw new Error(`Request stack store returned ${response.status}`);
     return response.json();
   });
@@ -185,20 +188,25 @@ function createRequestStackPanel({open, refresh, load = null}) {
     }
     const key = [stackEvent.session_id, stackEvent.process_id, stackEvent.request_id, stackEvent.sequence_number].join(':');
     let entry = cache.get(key);
-    if (!entry && typeof location !== 'undefined' && location.protocol !== 'file:') {
-      entry = {status: 'loading'};
-      cache.set(key, entry);
+    // A transient failure is read again after a pause; a mismatch stays.
+    const retry = entry?.retryable && Date.now() - entry.failedAt >= REQUEST_STACK_RETRY_MS;
+    if ((!entry || retry) && typeof location !== 'undefined' && location.protocol !== 'file:') {
+      const next = {status: 'loading'};
+      cache.delete(key);
+      cache.set(key, next);
+      while (cache.size > REQUEST_STACK_CACHE) cache.delete(cache.keys().next().value);
       fetchStack({process_id: String(stackEvent.process_id), request_id: stackEvent.request_id, session_id: stackEvent.session_id})
         .then(body => {
-          entry.status = body?.status === 'recorded' && body.request?.sequence_number === stackEvent.sequence_number
+          next.status = body?.status === 'recorded' && body.request?.sequence_number === stackEvent.sequence_number
             ? 'ready' : 'error';
-          entry.document = body;
-          entry.error = entry.status === 'error' ? 'The stored stack no longer matches this request record.' : null;
+          next.document = body;
+          next.error = next.status === 'error' ? 'The stored stack no longer matches this request record.' : null;
         }, error => {
-          entry.status = 'error';
-          entry.error = error.message;
+          Object.assign(next, {status: 'error', retryable: true, failedAt: Date.now(),
+            error: error?.name === 'TimeoutError' ? 'The request stack store did not answer within 10 seconds.' : error.message});
         })
         .finally(() => refresh());
+      entry ??= next;
     }
     if (REQUEST_STACK_NOTES[record.state]) nodes.push(note(REQUEST_STACK_NOTES[record.state]));
     if (!entry || entry.status === 'loading') {

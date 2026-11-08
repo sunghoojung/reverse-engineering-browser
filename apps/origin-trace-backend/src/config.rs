@@ -46,6 +46,8 @@ pub struct Options {
     pub session_canvas_images: bool,
     #[arg(long, requires = "socket")]
     pub session_document_start: bool,
+    #[arg(long, requires = "socket")]
+    pub session_request_stacks: bool,
     #[arg(long)]
     pub decoder: Option<PathBuf>,
     #[arg(long)]

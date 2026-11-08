@@ -9320,7 +9320,7 @@ async fn request_index_reaches_every_request_of_a_large_session() {
     let member = &oldest["members"][0];
     let detail: Value = server
         .get(&format!(
-            "/api/events?session_id=1&process_id=7&request_id={}&after={}&limit={}",
+            "/api/events?session_id=1&process_id=7&request_id={}&category=network&after={}&limit={}",
             member["request_id"].as_str().unwrap(),
             oldest["first_offset"].as_str().unwrap(),
             member["records"]

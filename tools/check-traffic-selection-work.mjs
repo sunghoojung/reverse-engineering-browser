@@ -131,12 +131,33 @@ function fixture(appSource = app, trafficSource = traffic, count = 5000) {
   assert.equal(first.getAttribute('aria-selected'), 'false'); assert.equal(first.tabIndex, -1);
   assert.equal(next.getAttribute('aria-selected'), 'true'); assert.equal(next.tabIndex, 0);
   assert.equal(t.rows().filter(row => row.tabIndex === 0).length, 1);
-  for (const key of ['Home', 'End', 'ArrowUp']) {
+  const position = () => t.state.trafficRenderedView.start + t.rows().indexOf(t.document.activeElement);
+  for (const key of ['Home', 'ArrowDown', 'ArrowUp']) {
     const current = t.document.activeElement;
     t.api.moveRequestSelection({key, currentTarget: current, preventDefault() {}});
     assert.equal(t.document.activeElement.dataset.requestId, t.state.selectedRequestId);
   }
+  assert.equal(position(), 0);
   assert.equal(t.stats.searches, 0, 'Repeated navigation does not repeat the filter scan');
+  // End and Home reach the whole list, not the mounted block, which moves once to hold the row.
+  t.api.moveRequestSelection({key: 'End', currentTarget: t.document.activeElement, preventDefault() {}});
+  assert.equal(t.document.activeElement.dataset.requestId, t.state.selectedRequestId);
+  assert.equal(position(), t.state.trafficSearchMatches.size - 1);
+  assert.equal(t.stats.searches, 1);
+  t.api.moveRequestSelection({key: 'ArrowDown', currentTarget: t.document.activeElement, preventDefault() {}});
+  assert.equal(position(), t.state.trafficSearchMatches.size - 1, 'ArrowDown stops at the last request');
+  t.api.moveRequestSelection({key: 'Home', currentTarget: t.document.activeElement, preventDefault() {}});
+  assert.equal(t.document.activeElement.dataset.requestId, t.state.selectedRequestId);
+  assert.equal(position(), 0);
+  // A focused row that leaves the block hands focus to a row in view, not the block's first.
+  t.document.activeElement = t.rows()[20];
+  t.elements.requestRows.scrollTop = 450 * 24;
+  t.api.renderRequests();
+  assert(t.state.trafficRenderedView.start > 20);
+  assert.equal(position(), Math.floor(t.elements.requestRows.scrollTop / 24));
+  assert.notEqual(position(), t.state.trafficRenderedView.start);
+  t.elements.requestRows.scrollTop = 0;
+  t.api.renderRequests();
   const offPage = [...t.state.trafficSearchMatches.keys()].find(id => !t.rows().some(row => row.dataset.requestId === id));
   t.api.selectRequest(offPage);
   assert.doesNotMatch(t.nodes.get('#request-window-status').textContent, /Selection outside filter/,

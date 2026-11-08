@@ -1754,6 +1754,12 @@ mod tests {
             "response_headers",
             "cookie_list",
             "script_cookie",
+            "request_watch_match",
+            "listener_dispatch",
+            "timer_observation",
+            "csp_violation",
+            "exception_observation",
+            "dom_mutation",
         ] {
             let mut event: Value = serde_json::from_slice(first).unwrap();
             event["type"] = json!(kind);

@@ -66,6 +66,8 @@ class COMPONENT_EXPORT(REB_NATIVE_PROBE_SINK) NativeRequestStackWalk final {
   // Called by the loader with RecordRequestInitiated's admitted sequence.
   // Zero, or no provider, returns after at most one atomic load.
   static void Record(std::int32_t request_id, std::uint64_t initiated_sequence) noexcept;
+  // The frame request_initiated names for a request this thread starts now.
+  [[nodiscard]] static std::uint64_t RequestFrameId() noexcept;
   // One debugger observation, protocol/native-debugger-observation-v1.md:
   // the current stack plus a 48-byte tail. Without a provider the record
   // still goes out with stack state no_script. Main thread only.

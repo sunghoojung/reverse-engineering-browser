@@ -104,7 +104,6 @@
         wasmRequests: new Map(),
         sourceDeobfuscated: false,
         sourceFormatted: false,
-        // Pretty print on or off per artifact identity, for this session.
         sourceFormatChoices: new Map(),
         sourceFormatCache: new Map(),
         selectedRequestId: standalonePreview ? '81' : null,
@@ -124,6 +123,8 @@
         trafficSortDirection: -1,
         trafficWindowStart: 0,
         trafficWindowAnchor: null,
+        // A keyboard target outside the mounted rows, selected once its row renders.
+        trafficFocusPosition: null,
         trafficNewIds: new Set(),
         trafficFlags: {invert: false, hideInternal: false, thirdParty: false, failed: false},
         // A selected time range in nanoseconds ({from, to}, BigInt), or null.

@@ -61,7 +61,7 @@ struct NativeWatchRules final {
   std::size_t dom_count = 0;
 };
 
-// Main thread only, except Armed(). Hooks call Armed() first: one relaxed load.
+// Main thread only, except Armed() and Request(). Hooks call Armed() first: one relaxed load.
 class COMPONENT_EXPORT(REB_NATIVE_PROBE_SINK) NativeDebuggerWatch final {
  public:
   [[nodiscard]] static bool Armed(const std::uint32_t kinds) noexcept {
@@ -71,11 +71,12 @@ class COMPONENT_EXPORT(REB_NATIVE_PROBE_SINK) NativeDebuggerWatch final {
   [[nodiscard]] static bool Arm(std::uint64_t frame_id, const NativeWatchRules& rules) noexcept;
   static void Disarm(std::uint64_t frame_id) noexcept;
 
-  // frame_id 0 means the frame of the current script context.
+  // Matches only the armed document's own main-thread requests.
   static void Request(std::int32_t request_id,
                       std::uint64_t initiated_sequence,
                       std::string_view method,
                       std::string_view url) noexcept;
+  // frame_id 0 means the frame of the current script context.
   static void Listener(std::uint64_t frame_id,
                        std::string_view event_type,
                        std::uint8_t target_kind,

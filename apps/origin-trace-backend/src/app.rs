@@ -762,22 +762,26 @@ impl App {
                 return match self
                     .blocking(move || {
                         let mut answer = index.respond(&query, tag.as_deref())?;
+                        let mut settled = true;
                         if let request_index::Answer::Document(document, _) = &mut answer {
-                            frames
+                            settled = frames
                                 .lock()
                                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                                 .resolve(document, &root);
                         }
-                        Ok(answer)
+                        Ok((answer, settled))
                     })
                     .await?
                 {
-                    request_index::Answer::Unchanged(tag) => Ok(not_modified(&tag)),
-                    request_index::Answer::Document(document, tag) => {
+                    (request_index::Answer::Unchanged(tag), _) => Ok(not_modified(&tag)),
+                    (request_index::Answer::Document(document, tag), settled) => {
                         let mut response = axum::Json(document).into_response();
-                        response
-                            .headers_mut()
-                            .insert("etag", HeaderValue::from_str(&tag).unwrap());
+                        // Frames left for a later answer must not be cached behind a 304.
+                        if settled {
+                            response
+                                .headers_mut()
+                                .insert("etag", HeaderValue::from_str(&tag).unwrap());
+                        }
                         Ok(response)
                     }
                 };
@@ -964,7 +968,8 @@ impl App {
                         event_query::EVENT_RECORD_BYTES,
                         event_query::event_visitor(&filter, &mut tally),
                     )?;
-                    let artifacts = evidence::artifacts(&options.artifacts, 10000)?;
+                    let artifacts =
+                        evidence::artifacts_named(&options.artifacts, &page.records, |_| false)?;
                     Ok(request_headers::build(
                         &page.records,
                         &artifacts,
@@ -1004,7 +1009,8 @@ impl App {
                         event_query::EVENT_RECORD_BYTES,
                         event_query::event_visitor(&filter, &mut tally),
                     )?;
-                    let artifacts = evidence::artifacts(&options.artifacts, 10000)?;
+                    let artifacts =
+                        evidence::artifacts_named(&options.artifacts, &page.records, |_| false)?;
                     Ok(request_cookies::build(
                         &page.records,
                         &artifacts,
@@ -1047,7 +1053,15 @@ impl App {
                         event_query::EVENT_RECORD_BYTES,
                         event_query::event_visitor(&filter, &mut tally),
                     )?;
-                    let artifacts = evidence::artifacts(&options.artifacts, 10000)?;
+                    // Script writes resolve through this session's stacks and sources.
+                    let artifacts =
+                        evidence::artifacts_named(&options.artifacts, &page.records, |a| {
+                            a["session_id"].as_str() == Some(session.as_str())
+                                && matches!(
+                                    a["kind"].as_str(),
+                                    Some("stack" | "javascript" | "wasm")
+                                )
+                        })?;
                     Ok(request_cookies::provenance(
                         &page.records,
                         &artifacts,

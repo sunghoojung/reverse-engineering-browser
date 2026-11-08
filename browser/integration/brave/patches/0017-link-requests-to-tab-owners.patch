@@ -1,5 +1,5 @@
 diff --git a/browser/net/brave_proxying_url_loader_factory.cc b/browser/net/brave_proxying_url_loader_factory.cc
-index b83895a..dba6df9 100644
+index b83895a..e014d58 100644
 --- a/browser/net/brave_proxying_url_loader_factory.cc
 +++ b/browser/net/brave_proxying_url_loader_factory.cc
 @@ -26,6 +26,11 @@
@@ -89,25 +89,32 @@ index b83895a..dba6df9 100644
    // The renderer request id lives in the process that calls GenerateRequestId.
    // Document, worker, and service-worker subresource factories are used by
    // that process. Navigations and browser-fetched worker scripts are not, so
-@@ -918,6 +946,16 @@ BraveProxyingURLLoaderFactory<T>::BraveProxyingURLLoaderFactory(
+@@ -910,6 +938,8 @@ BraveProxyingURLLoaderFactory<T>::BraveProxyingURLLoaderFactory(
+       url_loader_factory_type_(url_loader_factory_type),
+       request_initiator_(request_initiator),
+       isolation_info_(isolation_info),
++      native_exclusion_(
++          NativeExclusion(url_loader_factory_type, request_initiator)),
+       request_id_generator_(request_id_generator),
+       disconnect_callback_(std::move(on_disconnect)),
+       navigation_response_task_runner_(
+@@ -918,6 +948,14 @@ BraveProxyingURLLoaderFactory<T>::BraveProxyingURLLoaderFactory(
    DCHECK_CURRENTLY_ON(content::BrowserThread::UI);
    DCHECK(proxy_receivers_.empty());
    DCHECK(!target_factory_.is_bound());
-+  auto& network_capture = reb::NativeNetworkCaptureSink::Get();
-+  if (network_capture.IsEnabled() &&
-+      network_capture.IsOwnedContext(browser_context)) {
++  // The owned profile exists only in a capture launch. Observing it before a
++  // session starts keeps the workers and frames that predate the session.
++  if (reb::NativeNetworkCaptureSink::Get().IsOwnedContext(browser_context)) {
 +    auto& registry = reb::NativeTabRegistry::Get();
 +    registry.ObserveContext(browser_context);
 +    native_tab_id_ = registry.NoteFrame(
 +        content::RenderFrameHost::FromFrameToken(render_frame_token_));
-+    native_exclusion_ =
-+        NativeExclusion(url_loader_factory_type_, request_initiator_);
 +  }
  
    auto [receiver, target_factory] = factory_builder.Append();
  
 diff --git a/browser/net/brave_proxying_url_loader_factory.h b/browser/net/brave_proxying_url_loader_factory.h
-index 28c3621..701632e 100644
+index 28c3621..a3594cd 100644
 --- a/browser/net/brave_proxying_url_loader_factory.h
 +++ b/browser/net/brave_proxying_url_loader_factory.h
 @@ -267,6 +267,10 @@ class BraveProxyingURLLoaderFactory : public network::mojom::URLLoaderFactory {
@@ -117,7 +124,7 @@ index 28c3621..701632e 100644
 +  // Resolved when the factory is created, while its frame is alive; see
 +  // protocol/native-network-v3.md "Request owners and tabs".
 +  uint32_t native_tab_id_ = 0;
-+  uint8_t native_exclusion_ = 0;
++  const uint8_t native_exclusion_;
  
    mojo::ReceiverSet<network::mojom::URLLoaderFactory> proxy_receivers_;
    mojo::Remote<network::mojom::URLLoaderFactory> target_factory_;

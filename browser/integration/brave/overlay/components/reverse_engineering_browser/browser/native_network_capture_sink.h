@@ -192,6 +192,9 @@ class NativeNetworkCaptureSink final {
   std::size_t header_bytes_ = 0;
   std::uint32_t unattributed_header_blocks_ = 0;
   std::uint32_t unattributed_cookie_lists_ = 0;
+  // Hashed DevTools IDs of the newest finished requests, so a late block for one is counted.
+  std::array<std::size_t, 256> finished_devtools_ids_{};
+  std::size_t finished_devtools_next_ = 0;
 };
 
 }  // namespace reb

@@ -36,7 +36,7 @@ Rows also carry what the lifecycle records hold beyond the row model:
 | `error_code` | The last non-zero `error_code` |
 | `loader_observed` | Any lifecycle record other than `request_initiated` |
 | `initiator` | `worker` when `request_started` has flag 4; else, for a `request_initiated` record or a non-zero `initiator_process_id`, `script` when its `request_initiator_stack` walked frames, `parser` when no script was on the stack, else `renderer` ([native network v3](native-network-v3.md#request-initiator-stacks)); else `browser` for a versioned browser record, else null |
-| `initiator_frame` | The innermost frame of that walked stack resolved alone through its `script_identity` and retained source, as `get_request_stack` resolves frames: URL, line, column and function name, or a reason; the index keeps 16,384 identities, the handler resolves at most 64 new frames per answer and keeps settled outcomes, so a later source artifact shows once the index next changes; else null |
+| `initiator_frame` | The innermost frame of that walked stack resolved alone through its `script_identity` and retained source, as `get_request_stack` resolves frames: URL, line, column and function name, or a reason; the index keeps 16,384 identities, the handler resolves at most 64 new frames per answer, from the whole artifact manifest, and keeps settled outcomes, so a later source artifact shows once the index next changes; else null |
 | `tab_ids`, `tab_link` | The row's own `tab_id` plus the tabs of the set its newest `request_tab_link` names, from the `tab_set` parts indexed so far, and that link's kind, tab count and whether every part arrived ([native network v3](native-network-v3.md#request-owners-and-tabs)); at most 4,096 sets of 256 tabs |
 | `main_frame` | `request_started` with resource type 0 |
 | `browser_internal` | The row's scheme class is browser-internal (16 to 20, [native network v3](native-network-v3.md#scheme-class)); without a scheme class, not `loader_observed`, a host-only target and a single-label host other than `localhost`, as WebUI loads are |
@@ -50,9 +50,11 @@ Each row also names its root event (`request_started`, else
 record counts (at most 8), and the byte boundaries of its first record and
 after its last. Record counts include the lifecycle records and their children
 (`request_target`, `request_body`, `response_body`, header blocks, cookie
-lists, `request_initiator_stack` and `request_tab_link`). Reading a row's
-records is `get_events` per member with `after=first_offset` and
-`limit=records`.
+lists, `request_initiator_stack` and `request_tab_link`). A `request_tab_link`
+has no request ID, so it is no member; the row's `tab_link` and `tab_ids` carry
+it. Reading a row's records is `get_events` per member with `category=network`,
+`after=first_offset` and the member's `records` as `limit`: the browser's
+`artifact` acknowledgements share the request ID and are not counted.
 
 Paths and targets are captured text, present only when the session retained
 request content (protocol/native-network-v2.md). Consumers insert them as text.
@@ -95,7 +97,7 @@ Operation `get_requests`, read-only for MCP (`analysis` effect, in memory).
 | Parameter | Meaning |
 | --- | --- |
 | `limit`, `offset` | One page of the filtered, sorted list; `limit` 1 to 500, default 100 |
-| `through` | Only requests indexed before this count; a previous `through` keeps paging one snapshot |
+| `through` | Only requests indexed before this count; a previous `through` keeps paging the same requests. Their fields stay live, so during capture a sort or filter on a changing field can move rows across pages; capture order cannot |
 | `since` | Adds `added`: matching requests indexed at or after this count |
 | `sort`, `order` | `capture`, `name`, `status`, `type`, `method`, `time`, `size` (transferred), `initiator`, `start` (first record) or `protocol`; `asc` (default) or `desc` |
 | `q` | The Traffic filter grammar below |
@@ -138,8 +140,8 @@ matching rows' summed `transfer_size` and `resource_size`), `hidden_internal`
 (rows `hide_internal` removed that every other filter admitted), `timeline`
 (first start, last record and 120 equal buckets of starts over the rows every
 filter but the time range admits), `index` coverage, the `query` echo and
-`requests`. It has an ETag; an unchanged index
-and query answer 304.
+`requests`. It has an ETag unless initiator frames were left for a later
+answer; an unchanged index and query answer 304.
 
 ## Traffic
 

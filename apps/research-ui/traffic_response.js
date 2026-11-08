@@ -30,7 +30,7 @@ function trafficResponseCapture(request, contentSession) {
         : 'The browser network proxy recorded no response for this request. Service-worker and memory-cache answers, and requests that failed first, never reach it.';
     }
     if (['js', 'wasm'].includes(request.type)) {
-      return 'Scripts and Wasm are retained as source artifacts. This one is not in the current catalog: its acknowledgment is pending, it was refused (see artifact_capture_failed in Evidence), or it is outside the 500 newest artifacts.';
+      return 'Scripts and Wasm are retained as source artifacts. This one is not in the current catalog: its acknowledgment is pending, it was refused (see artifact_capture_failed in Evidence), or it is past the first 50,000 artifacts of the catalog.';
     }
     return contentSession
       ? 'No response body record. The body may still be arriving, or its record left the retained window.'
@@ -102,9 +102,10 @@ function trafficImageType(bytes, mime) {
   return found && (type.startsWith('image/') || type === 'application/octet-stream' || type === '') ? found : null;
 }
 
-function trafficResponseText(bytes) {
+// `open`: the bytes may end inside a character, which is left out rather than failed.
+function trafficResponseText(bytes, open = false) {
   try {
-    const text = new TextDecoder('utf-8', {fatal: true}).decode(bytes);
+    const text = new TextDecoder('utf-8', {fatal: true}).decode(bytes, {stream: open});
     return /\u0000/.test(text) ? null : text;
   } catch {
     return null;
@@ -248,7 +249,7 @@ function createTrafficResponse({getArtifacts, getEvents, contentSession, readabl
     }
     if (!artifact) {
       return record && !record.malformed && record.artifactId !== '0'
-        ? 'The body artifact is not in the current catalog: its acknowledgment is pending, or it is outside the 500 newest artifacts.'
+        ? 'The body artifact is not in the current catalog: its acknowledgment is pending, or it is past the first 50,000 artifacts of the catalog.'
         : null;
     }
     if (view.status === 'unavailable') return 'Retained bodies are read from the local backend, which this view does not have.';
@@ -340,7 +341,8 @@ function createTrafficResponse({getArtifacts, getEvents, contentSession, readabl
       if (!matches.length) return;
       const current = matches.findIndex(line => line.classList.contains('current'));
       matches[current]?.classList.remove('current');
-      const next = matches[(current + (event.shiftKey ? matches.length - 1 : 1)) % matches.length];
+      const next = matches[current < 0 ? (event.shiftKey ? matches.length - 1 : 0)
+        : (current + (event.shiftKey ? matches.length - 1 : 1)) % matches.length];
       next.classList.add('current');
       next.scrollIntoView?.({block: 'center'});
     });
@@ -350,7 +352,7 @@ function createTrafficResponse({getArtifacts, getEvents, contentSession, readabl
   function responseBody(container, request, artifact, view) {
     const nodes = [];
     const bytes = view.bytes;
-    const text = trafficResponseText(bytes);
+    const text = trafficResponseText(bytes, !view.complete || request?.responseBody?.state === 'captured_truncated');
     const binary = text === null;
     const source = {kind: 'response_body', mime_type: artifact.mime_type, url: artifact.url};
     const language = binary ? 'bytes' : sourceSyntaxLanguage(source);
@@ -379,14 +381,16 @@ function createTrafficResponse({getArtifacts, getEvents, contentSession, readabl
     if (!view.complete) {
       const button = trafficNodeText('button', 'secondary-button traffic-body-more', view.loadingMore ? 'Loading…' : 'Show the next 2 MiB');
       button.type = 'button';
-      button.disabled = Boolean(view.loadingMore);
+      button.dataset.control = 'more';
+      // Not `disabled`, so keyboard focus stays on it while the range loads.
+      button.setAttribute('aria-disabled', String(Boolean(view.loadingMore)));
       button.addEventListener('click', () => more(view.key));
       nodes.push(button);
     }
     return nodes;
   }
 
-  function preview(artifact, view) {
+  function preview(artifact, view, record) {
     if (!view.complete) return [trafficNodeText('p', 'traffic-body-note', 'Preview needs every retained byte. Show the rest on the Response tab.')];
     const bytes = view.bytes;
     const image = trafficImageType(bytes, artifact.mime_type);
@@ -404,7 +408,7 @@ function createTrafficResponse({getArtifacts, getEvents, contentSession, readabl
       figure.append(img, caption);
       return [figure];
     }
-    const text = trafficResponseText(bytes);
+    const text = trafficResponseText(bytes, record?.state === 'captured_truncated');
     if (text === null) return [trafficNodeText('p', 'traffic-body-note', 'Binary body: no preview. The Response tab shows it as hex.')];
     const language = sourceSyntaxLanguage({kind: 'response_body', mime_type: artifact.mime_type, url: artifact.url});
     if (language === 'json' || /^\s*[[{]/.test(text)) {
@@ -450,11 +454,12 @@ function createTrafficResponse({getArtifacts, getEvents, contentSession, readabl
     }
     const note = contentNote(record, artifact, view ?? {}, refusal);
     if (note) nodes.push(trafficNodeText('p', 'traffic-body-note', note));
-    if (view?.status === 'ready') nodes.push(...(tab === 'preview' ? preview(artifact, view) : responseBody(container, request, artifact, view)));
+    if (view?.status === 'ready') nodes.push(...(tab === 'preview' ? preview(artifact, view, record) : responseBody(container, request, artifact, view)));
     container.replaceChildren(...nodes);
     container.dataset.state = record?.malformed ? 'malformed' : record?.state ?? (artifact ? 'source_artifact' : 'none');
     if (active) {
-      const control = container.querySelector(`[data-control="${active}"]`);
+      const control = container.querySelector(`[data-control="${active}"]`) ??
+        (active === 'more' ? container.querySelector('.traffic-response-code') : null);
       control?.focus?.();
       if (caret !== null && control?.setSelectionRange) control.setSelectionRange(caret, caret);
     }

@@ -6,6 +6,7 @@
 #include "brave/components/reverse_engineering_browser/renderer/native_debugger_observation.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cstring>
 
 #include "base/process/process_handle.h"
@@ -29,6 +30,8 @@ struct ArmedWatch final {
   bool budget_gap = false;
 };
 ArmedWatch g_watch;
+// Arm's thread, the main thread; no other thread reads g_watch.
+std::atomic<decltype(base::PlatformThread::CurrentId().raw())> g_watch_thread{0};
 
 std::array<std::uint8_t, 48> Tail() noexcept {
   return {};
@@ -98,6 +101,7 @@ bool NativeDebuggerWatch::Arm(const std::uint64_t frame_id,
   g_watch.rules = rules;
   g_watch.budget = 0;
   g_watch.budget_gap = false;
+  g_watch_thread.store(base::PlatformThread::CurrentId().raw(), std::memory_order_relaxed);
   std::uint32_t mask = 0;
   mask |= rules.request_count != 0 ? kNativeWatchRequests : 0;
   mask |= rules.event_count != 0 ? kNativeWatchListeners : 0;
@@ -121,7 +125,12 @@ void NativeDebuggerWatch::Request(const std::int32_t request_id,
                                   const std::uint64_t initiated_sequence,
                                   const std::string_view method,
                                   const std::string_view url) noexcept {
-  if (!Armed(kNativeWatchRequests)) {
+  if (!Armed(kNativeWatchRequests) ||
+      base::PlatformThread::CurrentId().raw() != g_watch_thread.load(std::memory_order_relaxed)) {
+    return;
+  }
+  const std::uint64_t frame_id = NativeRequestStackWalk::RequestFrameId();
+  if (frame_id != g_watch.frame_id) {
     return;
   }
   for (std::size_t slot = 0; slot < g_watch.rules.request_count; ++slot) {
@@ -142,7 +151,7 @@ void NativeDebuggerWatch::Request(const std::int32_t request_id,
     tail[0] = static_cast<std::uint8_t>(slot);
     tail[1] = method_match && rule.method_length != 0 ? 1 : 0;
     NativeRequestStackWalk::RecordObservation(NativeProbeType::kRequestWatchMatch, request_id,
-                                              initiated_sequence, 0, tail);
+                                              initiated_sequence, frame_id, tail);
     return;
   }
 }

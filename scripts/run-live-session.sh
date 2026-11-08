@@ -780,6 +780,9 @@ fi
 if [[ "${console_document_start}" == 1 ]]; then
   ui_arguments+=(--session-document-start)
 fi
+if [[ "${request_stacks_state}" == on ]]; then
+  ui_arguments+=(--session-request-stacks)
+fi
 # The session header says which functions this capture tracks, or why not.
 if [[ -n "${js_invocation_session_state}" ]]; then
   ui_arguments+=(--js-invocation-session-sites "${native_js_invocation_sites}"

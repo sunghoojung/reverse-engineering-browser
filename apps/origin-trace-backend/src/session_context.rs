@@ -85,6 +85,7 @@ pub fn capture_options(options: &crate::config::Options, invocation: &Value) -> 
         "source": if live { "launcher" } else { "not_live" },
         "request_content": live && options.session_request_content,
         "canvas_images": live && options.session_canvas_images,
+        "request_stacks": live && options.session_request_stacks,
         "document_start": if live && options.session_document_start {
             "permitted"
         } else {

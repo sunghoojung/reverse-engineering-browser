@@ -185,6 +185,10 @@ await show(largeRequest);
 panel.querySelector('.traffic-body-more').click();
 await until(() => !panel.querySelector('.traffic-body-more'), 'the next range completes the body');
 assert.doesNotMatch(notes(), /Showing the first|could not be rechecked/);
+// A range that ends inside a character is still text.
+await show(request(record(retain('a'.repeat(2 * 1024 * 1024 - 1) + 'é' + 'b'.repeat(100), 'text/plain'))));
+assert.match(notes(), /Showing the first 2,097,152 bytes/);
+assert.equal(panel.querySelector('[data-control="hex"]').disabled, false, 'a split character is not binary');
 
 // Integrity failures stay explicit and are not retried; refusals name their reason.
 const tampered = retain('{"a":1}', 'application/json');

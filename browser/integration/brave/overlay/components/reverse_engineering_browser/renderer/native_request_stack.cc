@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <bit>
 #include <cstring>
 #include <span>
 #include <string_view>
@@ -17,6 +18,7 @@
 #include "base/time/time.h"
 #include "brave/components/reverse_engineering_browser/common/native_artifact_header.h"
 #include "brave/components/reverse_engineering_browser/common/native_probe_event.h"
+#include "brave/components/reverse_engineering_browser/renderer/native_fetch_owner.h"
 #include "brave/components/reverse_engineering_browser/renderer/native_probe_sink.h"
 #include "crypto/hash.h"
 
@@ -37,7 +39,7 @@ struct NativeRequestStackTables final {
   std::array<std::uint8_t, kNativeStackArtifactMaxBytes> artifact{};
   std::array<Digest, kNativeRequestStackDigestTable> digests{};
   std::array<Script, kNativeRequestStackScriptTable> scripts{};
-  std::array<std::uint64_t, 2 * kNativeRequestStackFrameCapacity> distinct{};
+  std::array<std::uint64_t, std::bit_ceil(2 * kNativeRequestStackFrameCapacity)> distinct{};
   std::uint32_t distinct_stamp = 0;
   std::size_t evict = 0;
   std::uint64_t budget_generation = 0;
@@ -180,11 +182,9 @@ void NativeRequestStackWalk::Record(const std::int32_t request_id,
   if ((generation & 1U) != 0) {
     return;
   }
-  const NativeProbeFrameIdProvider frame_ids =
-      sink.frame_id_provider_.load(std::memory_order_relaxed);
   g_walking = true;
   NativeRequestStackWalk walk(g_state, generation, request_id, initiated_sequence,
-                              frame_ids ? frame_ids() : 0);
+                              RequestFrameId());
   const NativeRequestStackWalkResult result = provider(walk);
   g_walking = false;
   if (result == NativeRequestStackWalkResult::kWalked) {
@@ -199,6 +199,16 @@ void NativeRequestStackWalk::Record(const std::int32_t request_id,
                                                 : NativeRequestStackState::kUnsupportedThread);
   payload.flags = kNativeRequestStackTaskCallersNotCaptured;
   walk.Emit(payload);
+}
+
+std::uint64_t NativeRequestStackWalk::RequestFrameId() noexcept {
+  if (const NativeFetchOwner owner = NativeFetchOwnerScope::Current();
+      owner.kind != NativeLoaderKind::kNotRecorded) {
+    return owner.context_id;
+  }
+  const NativeProbeFrameIdProvider frame_ids =
+      NativeProbeSink::Get().frame_id_provider_.load(std::memory_order_relaxed);
+  return frame_ids ? frame_ids() : 0;
 }
 
 void NativeRequestStackWalk::RecordObservation(const NativeProbeType type,

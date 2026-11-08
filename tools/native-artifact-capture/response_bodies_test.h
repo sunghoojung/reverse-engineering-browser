@@ -452,6 +452,17 @@ void ResponseBodyLimits(reb::ArtifactReceiver& receiver, const std::filesystem::
   NativeArtifactBodyTee::End(open.pipe, reb::NativeArtifactBodyEnd::kSourceClosed);
   Check(base::ThreadPool::RunPending() == 0, "The stale tee ends without a record");
   transfers.clear();
+  // One with no byte yet still gets a named state.
+  const auto nothing_yet = Respond(next++, {.mime = "text/event-stream"});
+  ConfigureResponses();
+  const auto unsent = LastOf(NativeProbeType::kResponseBody);
+  Check(unsent.header.parent_event_id == nothing_yet.creator &&
+            StateOf(ResponseRecord(unsent)) ==
+                reb::ResponseBodyState::kNotCapturedArtifactUnavailable &&
+            transfers.empty(),
+        "Capture end names an open body that received nothing");
+  NativeArtifactBodyTee::End(nothing_yet.pipe, reb::NativeArtifactBodyEnd::kSourceClosed);
+  base::ThreadPool::RunPending();
 
   // Images that page elements load are media; asking for media keeps them.
   const std::vector<std::uint8_t> gif{'G', 'I', 'F', '8', '9', 'a', 1, 0, 1, 0};

@@ -2263,6 +2263,7 @@ var(--panel);
         background: var(--panel-2); font: 11px/1.5 var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; }
       .traffic-body-text:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
       .traffic-body-more { margin-top: 8px; }
+      .traffic-body-more[aria-disabled="true"] { cursor: progress; opacity: .45; }
       /* Response and Preview: record facts, then inert retained bytes that
          scroll inside the panel. */
       .traffic-response { padding: 12px; }

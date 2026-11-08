@@ -222,9 +222,14 @@ frame ids.
 | Renderer document record drained late | The browser's frame registry, keyed by process and full frame token, filled at factory creation and from live frames, with tombstones that outlive the frame | `browser/native_tab_resolver.h` |
 | Dedicated and nested workers | The creator document's tab, resolved at `DedicatedWorkerService::Observer::OnWorkerCreated` through the creator chain | `request_tab_link` kind 1 |
 | Shared workers | Every client tab at request start (`SharedWorkerService::Observer::OnClientAdded` / `OnClientRemoved`) | kind 2 |
-| Service workers | The controlled client tabs (`ServiceWorkerContextObserver::OnControlleeAdded` / `OnControlleeRemoved`); with none, the registration's last client tabs | kinds 3 and 4 |
+| Service workers | The controlled client tabs (`ServiceWorkerContextObserver::OnControlleeAdded`, `OnControlleeNavigationCommitted` for window clients, `OnControlleeRemoved`); with none, the registration's last client tabs | kinds 3 and 4 |
 | Page request a service worker answers | The page's document (renderer record) plus the renderer completion above | |
 | Browser record from a worker factory | Joined to its renderer record (same row) through `initiator_process_id` and `initiator_request_id` | |
+
+In a capture launch the proxy observes the owned profile's frames and worker
+services from its first factory, before any session starts, and fixes each
+factory's exclusion class when it is created, so owners and excluded factories
+that predate the session still resolve.
 
 `NativeWorkerAuthority` is not used: it holds one selected document's workers
 for source transfer under a lease, while tab links need every worker of the
@@ -427,7 +432,8 @@ to `browser/native_response_body_capture.cc`:
 - A body without a declared length that is still open after a second is
   snapshotted as `partial` when it has grown by half since the last snapshot,
   at most 15 times, so snapshots stay within three times the body. Open bodies
-  at capture end or expiry become one last `partial` record. The record of the
+  at capture end or expiry become one last `partial` record, or
+  `not_captured_artifact_unavailable` when no byte has arrived. The record of the
   ended body supersedes every snapshot.
 
 ### `response_body` (type 33)
@@ -638,8 +644,9 @@ head with `emitted_extra_info`. A `network` request block joins the oldest
 finished hop whose head says a raw request was emitted and that has none yet,
 or else the open hop. Its parent is that hop's start record (`request_started`
 or `request_redirected`). Early hints join the open hop. A block for a request
-the sink no longer tracks increments the unattributed count carried by every
-later header record.
+the sink no longer tracks, including a DevTools-owned ID among the newest 256
+finished, increments the unattributed count carried by every later header
+record.
 
 ### Records
 

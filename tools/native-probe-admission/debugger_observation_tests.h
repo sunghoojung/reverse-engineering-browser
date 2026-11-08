@@ -4,6 +4,7 @@
 #pragma once
 
 #include "brave/components/reverse_engineering_browser/renderer/native_debugger_observation.h"
+#include "brave/components/reverse_engineering_browser/renderer/native_fetch_owner.h"
 #include "request_stack_tests.h"
 
 namespace {
@@ -83,16 +84,31 @@ NativeRequestStackPayload ObservationPayload(const NativeProbeEvent& event) {
   assert(reb::NativeDebuggerWatch::Arm(9, rules));
   assert(reb::NativeDebuggerWatch::Armed(reb::kNativeWatchRequests | reb::kNativeWatchListeners));
 
-  const auto hit =
-      sink.RecordRequestInitiated(21, "GET", "https", "api.example.test").initiated_sequence;
-  reb::NativeDebuggerWatch::Request(21, hit, "GET", "https://api.example.test/api/x?q=1");
-  assert(Pop(queue).header.sequence_number == hit);
-  assert(Pop(queue).header.type == NativeProbeType::kRequestWatchMatch);
-  // A URL the rule does not name emits nothing.
-  const auto miss =
-      sink.RecordRequestInitiated(22, "GET", "https", "api.example.test").initiated_sequence;
-  reb::NativeDebuggerWatch::Request(22, miss, "GET", "https://api.example.test/other");
-  assert(Pop(queue).header.sequence_number == miss && Drain(queue) == 0);
+  {
+    const reb::NativeFetchOwnerScope armed({reb::NativeLoaderKind::kDocument, 9});
+    const auto hit =
+        sink.RecordRequestInitiated(21, "GET", "https", "api.example.test").initiated_sequence;
+    reb::NativeDebuggerWatch::Request(21, hit, "GET", "https://api.example.test/api/x?q=1");
+    assert(Pop(queue).header.sequence_number == hit);
+    const NativeProbeEvent watched = Pop(queue);
+    assert(watched.header.type == NativeProbeType::kRequestWatchMatch &&
+           watched.header.frame_id == 9);
+    // A URL the rule does not name emits nothing.
+    const auto miss =
+        sink.RecordRequestInitiated(22, "GET", "https", "api.example.test").initiated_sequence;
+    reb::NativeDebuggerWatch::Request(22, miss, "GET", "https://api.example.test/other");
+    assert(Pop(queue).header.sequence_number == miss && Drain(queue) == 0);
+  }
+  // Another frame's or a worker's request never matches the armed document's rule.
+  for (const reb::NativeFetchOwner owner :
+       {reb::NativeFetchOwner{reb::NativeLoaderKind::kDocument, 10},
+        reb::NativeFetchOwner{reb::NativeLoaderKind::kDedicatedWorker, 0x77}}) {
+    const reb::NativeFetchOwnerScope other(owner);
+    const auto sequence =
+        sink.RecordRequestInitiated(24, "GET", "https", "api.example.test").initiated_sequence;
+    reb::NativeDebuggerWatch::Request(24, sequence, "GET", "https://api.example.test/api/x");
+    assert(Pop(queue).header.sequence_number == sequence && Drain(queue) == 0);
+  }
 
   reb::NativeDebuggerWatch::Listener(9, "click", 1, 1,
                                      reb::NativeDebuggerWatch::FunctionFrame(10, 40));

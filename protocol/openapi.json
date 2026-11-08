@@ -2209,7 +2209,7 @@
       "get": {
         "operationId": "get_requests",
         "summary": "Page through every network request of the session",
-        "description": "One row per request of the whole session, from an index the backend folds incrementally from the event store and keeps beside it (protocol/request-index-v1.md), so counts, filters and search cover every request, not the newest event window. A row is a Traffic row: method, path (URL path and query only when the session retained request content, else the host), status, type, time, tab, domain and the root event that get_origin_trace takes. Default order is capture order, oldest first. Page with offset and limit; pass a previous answer's through to keep paging one snapshot, and since to count rows added after it. total and matching are exact for the indexed bytes; index.complete is false while a large store is still being indexed, and index counts unreadable records and requests past the request limit. Read one request's records with get_events: for each member pass its session_id, process_id and request_id with after=first_offset and limit=records. Each row also carries the recorded transfer and resource sizes, MIME type, protocol, initiator class and response time; the answer adds the matching sizes, hidden_internal and a 120-bucket start timeline. Unknown parameters are rejected. Use a small limit, such as 50, through MCP.",
+        "description": "One row per request of the whole session, from an index the backend folds incrementally from the event store and keeps beside it (protocol/request-index-v1.md), so counts, filters and search cover every request, not the newest event window. A row is a Traffic row: method, path (URL path and query only when the session retained request content, else the host), status, type, time, tab, domain and the root event that get_origin_trace takes. Default order is capture order, oldest first. Page with offset and limit; pass a previous answer's through to keep paging the same requests, and since to count rows added after it. total and matching are exact for the indexed bytes; index.complete is false while a large store is still being indexed, and index counts unreadable records and requests past the request limit. Read one request's records with get_events: for each member pass its session_id, process_id and request_id with category=network, after=first_offset and limit set to that member's records. Each row also carries the recorded transfer and resource sizes, MIME type, protocol, initiator class and response time; the answer adds the matching sizes, hidden_internal and a 120-bucket start timeline. Unknown parameters are rejected. Use a small limit, such as 50, through MCP.",
         "tags": [
           "events"
         ],
@@ -2238,7 +2238,7 @@
             "name": "through",
             "in": "query",
             "required": false,
-            "description": "Only requests indexed before this count. A previous answer's through keeps later pages in that snapshot.",
+            "description": "Only requests indexed before this count. A previous answer's through keeps later pages to the same requests; their fields stay live, so while capture runs a sort or filter on a changing field (status, size, type) can move rows across pages. Capture order does not move.",
             "schema": {
               "$ref": "#/components/schemas/Uint64String"
             }
@@ -22338,6 +22338,7 @@
               "source",
               "request_content",
               "canvas_images",
+              "request_stacks",
               "document_start",
               "js_invocation"
             ],
@@ -22356,6 +22357,10 @@
               },
               "canvas_images": {
                 "type": "boolean"
+              },
+              "request_stacks": {
+                "type": "boolean",
+                "description": "Brave walks request initiator stacks and retains their stack and stack_script artifacts (--reb-request-stacks)."
               },
               "document_start": {
                 "type": "string",
@@ -23293,7 +23298,13 @@
               "capture_exclusion",
               "tab_set",
               "request_tab_link",
-              "script_cookie"
+              "script_cookie",
+              "request_watch_match",
+              "listener_dispatch",
+              "timer_observation",
+              "csp_violation",
+              "exception_observation",
+              "dom_mutation"
             ]
           },
           "status_code": {

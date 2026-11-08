@@ -204,7 +204,9 @@ The default receiver rejects all four kinds. The live launcher enables the
 receiver policy only when `REB_CAPTURE_CANVAS_IMAGES=1` or
 `REB_CAPTURE_REQUEST_CONTENT=1` is set. A `request_body` or `request_target`
 artifact must use the `network_request` origin, name its creator record and
-carry no execution context; see [Native network v2](../../protocol/native-network-v2.md). JavaScript,
+carry no execution context; see [Native network v2](../../protocol/native-network-v2.md). A
+`response_body` artifact uses the `network_response` origin and is created by
+its `response_started` record. JavaScript,
 WASM, and source maps cannot be mislabeled as sensitive content. Credentials,
 cookies, and authorization headers are not artifact kinds and remain outside
 this channel.
@@ -227,9 +229,11 @@ inert hex view of their retained bytes.
 A response body becomes a stored JavaScript artifact only when the network tee
 classifies it as a script resource or a JavaScript MIME type. `application/wasm`
 and the compile, module, and instantiate hooks store Wasm, often under a
-synthetic `wasm://` URL, without copying the surrounding loader script. Fetch
-or XHR bodies with another MIME type, and generated source that misses the
-allocating-script hook, are absent from the manifest. `chrome://` script
+synthetic `wasm://` URL, without copying the surrounding loader script. In
+content sessions the same tee stores every other kept response as a sensitive
+`response_body` artifact ([native network v3](../../protocol/native-network-v3.md));
+otherwise those bodies, and generated source that misses the allocating-script
+hook, are absent from the manifest. `chrome://` script
 responses can still be stored; they are browser-UI noise, not a challenge
 loader. VM Lab's session-sources panel lists stored same-session artifacts and,
 only when that session is in the current live evidence window, joins CDP

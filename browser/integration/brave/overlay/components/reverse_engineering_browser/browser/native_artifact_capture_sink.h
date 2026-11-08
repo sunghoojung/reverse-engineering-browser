@@ -24,9 +24,11 @@
 
 #include "base/memory/scoped_refptr.h"
 #include "base/no_destructor.h"
+#include "brave/components/reverse_engineering_browser/browser/native_artifact_body_tee.h"
 #include "brave/components/reverse_engineering_browser/browser/native_artifact_socket_client.h"
 #include "brave/components/reverse_engineering_browser/common/native_artifact_capture_buffer.h"
 #include "brave/components/reverse_engineering_browser/common/native_network_request.h"
+#include "brave/components/reverse_engineering_browser/common/native_network_response_body.h"
 #include "brave/components/reverse_engineering_browser/common/native_probe_event.h"
 #include "mojo/public/cpp/base/big_buffer.h"
 #include "mojo/public/cpp/system/data_pipe.h"
@@ -62,8 +64,9 @@ enum class NativeRequestContentAdmission : std::uint8_t {
 };
 
 // Browser-process capture boundary for immutable JavaScript and WebAssembly
-// response bodies plus renderer-submitted generated source. It is enabled only
-// for an authorized artifact category and keeps every item explicitly bounded.
+// response bodies plus renderer-submitted generated source. Other response
+// bodies go to NativeResponseBodyCapture in content sessions. It is enabled
+// only for an authorized artifact category and keeps every item bounded.
 class NativeArtifactCaptureSink final {
  public:
   static NativeArtifactCaptureSink& Get();
@@ -72,12 +75,12 @@ class NativeArtifactCaptureSink final {
   NativeArtifactCaptureSink& operator=(const NativeArtifactCaptureSink&) = delete;
 
   [[nodiscard]] bool IsEnabled() const noexcept;
-  void SetEmitter(
-      NativeProbeEmitter emitter,
-      std::uint64_t session_id,
-      std::uint64_t category_mask,
-      std::uint64_t expires_at_monotonic_ns,
-      std::uint64_t request_content_budget = kNativeRequestContentDefaultBudgetBytes) noexcept;
+  void SetEmitter(NativeProbeEmitter emitter,
+                  std::uint64_t session_id,
+                  std::uint64_t category_mask,
+                  std::uint64_t expires_at_monotonic_ns,
+                  std::uint64_t request_content_budget = kNativeRequestContentDefaultBudgetBytes,
+                  const NativeResponseBodyPolicy& response_bodies = {}) noexcept;
 
   [[nodiscard]] mojo::ScopedDataPipeConsumerHandle MaybeCaptureResponse(
       std::uint64_t request_id,
@@ -138,6 +141,15 @@ class NativeArtifactCaptureSink final {
   static void TransferCompleted(std::uint64_t artifact_id,
                                 NativeArtifactReceiveStatus status) noexcept;
   [[nodiscard]] std::size_t in_flight_bytes() const noexcept { return memory_pool_.used(); }
+  // Response bodies share the pool, the artifact IDs and the ACK path.
+  [[nodiscard]] NativeArtifactMemoryPool& memory_pool() noexcept { return memory_pool_; }
+  [[nodiscard]] std::uint64_t NextArtifactId() noexcept {
+    return next_artifact_id_.fetch_add(1, std::memory_order_relaxed);
+  }
+  // Its ACK becomes artifact_captured or artifact_capture_failed parented to
+  // the artifact's creator record.
+  [[nodiscard]] bool QueueResponseBody(std::unique_ptr<NativeArtifactTransfer> transfer,
+                                       std::uint64_t request_id) noexcept;
 
  private:
   friend class base::NoDestructor<NativeArtifactCaptureSink>;
@@ -165,6 +177,7 @@ class NativeArtifactCaptureSink final {
     // Only network creators share the browser event's sequence namespace.
     std::uint64_t parent_event_id = 0;
     NativeProbeCategory result_category = NativeProbeCategory::kArtifact;
+    bool response_body = false;
     // Physical dispatch observations that share this module artifact.
     std::vector<std::pair<NativeProbeEvent, std::function<bool()>>> wasm_observations = {};
   };
@@ -227,8 +240,9 @@ class NativeArtifactCaptureSink final {
   // Runs shortly before session expiry, after which the session drops every
   // record: unresolved guest work becomes explicit gaps, held hosts survive.
   void FlushBeforeExpiry(std::uint64_t generation);
-  // Turns every unresolved guest dispatch and held Wasm observation into a
-  // gap in its own slot, publishing held hosts unparented.
+  // Retains open response bodies, then turns every unresolved guest dispatch
+  // and held Wasm observation into a gap in its own slot, publishing held
+  // hosts unparented.
   void FlushPendingWork(std::string_view guest_reason, std::string_view wasm_reason);
   std::vector<GuestGroup> guest_groups_;
   std::map<GuestEventKey, GuestInvocation> guest_invocations_;
@@ -256,7 +270,7 @@ class NativeArtifactCaptureSink final {
                                                  bool native_wasm_runtime);
 
   void OnBodyComplete(std::unique_ptr<CaptureContext> context,
-                      bool complete,
+                      NativeArtifactBodyEnd end,
                       NativeArtifactCaptureBuffer captured);
   static CopiedContent CopyRequestContent(scoped_refptr<network::ResourceRequestBody> body,
                                           std::string text,

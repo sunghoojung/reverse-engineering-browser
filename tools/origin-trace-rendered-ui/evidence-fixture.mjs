@@ -27,6 +27,9 @@ export const REQUEST_BODY_HOST = 'api.body.test';
 export const REQUEST_BODY_TARGET = '/getcaptcha/site-key?s=<svg/onload=window.__rebInjected=5>';
 export const REQUEST_BODY_MARKER = '<img src=x onerror="window.__rebInjected=4">';
 export const METADATA_BODY_HOST = 'api.metadata.test';
+// A content-session response body (native-network-v3.md) whose JSON carries markup.
+export const RESPONSE_BODY_HOST = 'api.response.test';
+export const RESPONSE_BODY_MARKER = '<img src=x onerror="window.__rebInjected=8">';
 // A retained glue script for Track calls: the real window.hsw binder, decoys
 // in a string and a comment that must never match, and two definitions of
 // o.dup that must be refused as ambiguous. Context lines carry markup as text.
@@ -139,6 +142,20 @@ function requestBodyPayload({state, content, bytes, contentType = 'application/j
   return payload.toString('hex');
 }
 
+function responseBodyPayload(bytes, contentType = 'application/json') {
+  const payload = Buffer.alloc(128);
+  payload.writeUInt16LE(1, 0);
+  payload.writeUInt16LE(128, 2);
+  payload[4] = 1;
+  payload[5] = 0x40;
+  payload[6] = contentType.length;
+  payload.writeBigUInt64LE(BigInt(bytes.length), 8);
+  payload.writeBigUInt64LE(BigInt(bytes.length), 16);
+  createHash('sha256').update(bytes).digest().copy(payload, 32);
+  payload.write(contentType, 64, 'ascii');
+  return payload.toString('hex');
+}
+
 function requestTargetPayload(target) {
   const payload = Buffer.alloc(128);
   payload.writeUInt16LE(1, 0);
@@ -187,7 +204,20 @@ async function requestBodyRequests(template, firstSequence, firstTime, artifacts
     frame_id: template.frame_id, creator_event_id: record.sequence_number, execution_context_id: '0',
     capture_origin: 'network_request', kind: 'request_body', mime_type: 'application/json', sensitive: true,
     url: `https://${REQUEST_BODY_HOST}${REQUEST_BODY_TARGET}`}, body);
-  return {events, artifact: bodyArtifact};
+  // The response body artifact is created by response_started, its record's parent.
+  const answer = Buffer.from(JSON.stringify({challenge: 'c1', tasks: [{id: 1, note: RESPONSE_BODY_MARKER}], pass: false}));
+  const responding = {request_id: '3002'};
+  row(responding, 'request_started', hex(`GET ${RESPONSE_BODY_HOST}`), {resource_type: 13});
+  const response = row(responding, 'response_started', hex('application/json'), {status_code: 200});
+  row(responding, 'response_body', responseBodyPayload(answer), {parent_event_id: response.sequence_number, artifact_id: '321'});
+  row(responding, 'request_completed', hex('completed'), {status_code: 200});
+  row({...responding, category: 'artifact'}, 'artifact_captured', hex('accepted'),
+    {artifact_id: '321', parent_event_id: response.sequence_number});
+  const responseArtifact = await artifact(artifactsRoot, {artifact_id: '321', session_id: template.session_id, navigation_id: '0',
+    frame_id: template.frame_id, creator_event_id: response.sequence_number, execution_context_id: '0',
+    capture_origin: 'network_response', kind: 'response_body', mime_type: 'application/json', sensitive: true,
+    url: `https://${RESPONSE_BODY_HOST}/challenge`}, answer);
+  return {events, artifacts: [bodyArtifact, responseArtifact]};
 }
 
 // Like the browser, each gap takes its renderer's own sequence slot, so the
@@ -242,7 +272,7 @@ export async function buildEvidence({root, sessions, guestStore, dispatchStore, 
   // static arm label, and an inner interpreter linked to its outer handler.
   const observed = await goldenEvidence(artifacts, observedStore);
   assert(observed.events.filter(event => event.type === 'wasm_guest_invocation').length === 2, 'observed store holds outer and inner activations');
-  const manifest = [...demoArtifacts, source, bytecode, parseFailure, glue, withBodies.artifact, ...guest.artifacts, ...physical.artifacts, ...observed.artifacts];
+  const manifest = [...demoArtifacts, source, bytecode, parseFailure, glue, ...withBodies.artifacts, ...guest.artifacts, ...physical.artifacts, ...observed.artifacts];
   const retained = [...demoEvents, ...requests, ...guest.events, ...physical.events, ...observed.events];
   const vm = demoEvents.find(event => event.category === 'vm');
   assert(vm, 'demo store must contain a native vm event');

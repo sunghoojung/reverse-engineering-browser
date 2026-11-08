@@ -107,6 +107,7 @@ EVENT_TYPES = {
     "request_redirected",
     "request_started",
     "request_target",
+    "response_body",
     "response_completed",
     "response_started",
     "vm_finding",
@@ -244,6 +245,53 @@ def valid_request_body(event: dict, payload: bytes) -> bool:
         9: content and is_bytes and body_length != 0,
         10: content and is_bytes and body_length != 0,
         11: True,
+    }[state]
+
+
+RESPONSE_CAPTURE_BYTES = 16 * 1024 * 1024
+
+
+def valid_response_body(event: dict, payload: bytes) -> bool:
+    """Every rule of the native-network-v3.md response_body record, mirrored from the C++ core."""
+    if not valid_request_child(event, payload):
+        return False
+    state, flags, type_length, coding_count = payload[4], payload[5], payload[6], payload[7]
+    body_length = int.from_bytes(payload[8:16], "little")
+    captured = int.from_bytes(payload[16:24], "little")
+    codings, partial_index = payload[24:28], int.from_bytes(payload[28:30], "little")
+    digest, content_type = payload[32:64], payload[64:128]
+    media = content_type[:type_length]
+    type_present = bool(flags & 0x40)
+    if (not 1 <= state <= 12 or flags & ~0x7F or any(payload[30:32]) or type_length > 64
+            or type_present != (type_length != 0) or any(content_type[type_length:])
+            or (type_present and (media.count(b"/") != 1 or media.startswith(b"/")
+                                  or media.endswith(b"/")
+                                  or any(b not in TOKEN_CHARACTERS and b != 0x2F for b in media)))
+            or coding_count > 4 or (flags & 0x10 and coding_count != 4)):
+        return False
+    for index, coding in enumerate(codings):
+        if (coding == 0 or (coding > 7 and coding != 15)) if index < coding_count else coding:
+            return False
+    retained = captured != 0
+    whole = min(body_length, RESPONSE_CAPTURE_BYTES)
+    if (captured > body_length or (event["artifact_id"] != "0") != retained
+            or any(digest) != retained or (flags & 1 and not retained)
+            or (partial_index != 0) != (state == 3)
+            or (flags & 0x20 and state not in (1, 2, 6))):
+        return False
+    return {
+        1: body_length != 0 and captured == body_length,
+        2: body_length > RESPONSE_CAPTURE_BYTES and captured == RESPONSE_CAPTURE_BYTES,
+        3: body_length != 0 and captured == whole,
+        4: not retained or captured == whole,
+        5: not retained or captured == whole,
+        6: body_length == 0,
+        7: body_length == 0,
+        8: body_length == 0,
+        9: body_length == 0,
+        10: not retained,
+        11: not retained,
+        12: not retained,
     }[state]
 
 
@@ -574,6 +622,8 @@ def validate_event(event: object, line_number: int) -> None:
         raise ValueError(f"line {line_number}: native request body record is invalid")
     if event["type"] == "request_target" and not valid_request_target(event, payload):
         raise ValueError(f"line {line_number}: native request target record is invalid")
+    if event["type"] == "response_body" and not valid_response_body(event, payload):
+        raise ValueError(f"line {line_number}: native response body record is invalid")
     if event["type"].startswith("js_invocation_") and not valid_js_invocation(event, payload):
         raise ValueError(f"line {line_number}: native JavaScript invocation record is invalid")
     if event["type"] in ("wasm_guest_dispatch", "wasm_guest_invocation"):

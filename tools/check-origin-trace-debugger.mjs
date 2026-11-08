@@ -942,7 +942,7 @@ const details = new TrafficFixtureNode();
 let selectedTraffic = uiRequest("inspect", {status: 200, hostOnly: true, path: "fixture.invalid"});
 trafficUI.renderTrafficDetails(details, selectedTraffic);
 const generalSection = details.querySelector(".traffic-general");
-assert.match(details.textContent, /Request and response headers and response bodies are not captured/);
+assert.match(details.textContent, /Request and response headers are not captured\. Response bodies are on the Response tab\./);
 assert.match(details.textContent, /host only; path and query not captured/);
 {
   // Request body section: every record state reads as its own sentence and the
@@ -1265,7 +1265,7 @@ const summaryState = {selectedRequestId: "current", requests: [uiRequest("curren
   trafficDetailOpen: true, trafficSelectionNotice: null};
 const summaryElements = {};
 for (const name of ["selectedMethod", "selectedStatus", "selectedUrl", "requestCopyUrl", "requestCollectionPivot", "requestInspector", "requestFilter"]) summaryElements[name] = new TrafficFixtureNode();
-const summaryNodes = new Map(["#exchange-inspector", ".traffic-grid", ".detail-pane", "#request-evidence-toggle", "#request-package-entry"].map(key => [key, new TrafficFixtureNode()]));
+const summaryNodes = new Map(["#exchange-inspector", "#response-inspector", ".traffic-grid", ".detail-pane", "#request-evidence-toggle", "#request-package-entry"].map(key => [key, new TrafficFixtureNode()]));
 let renderedSummaryRequest;
 const summaryInspector = runInNewContext(
   appSection("      function updateSelectionSummary(", "      function selectRequest(") +

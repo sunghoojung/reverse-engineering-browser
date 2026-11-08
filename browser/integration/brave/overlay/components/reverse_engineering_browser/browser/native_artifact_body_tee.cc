@@ -38,7 +38,8 @@ mojo::ScopedDataPipeConsumerHandle NativeArtifactBodyTee::Create(
     mojo::ScopedDataPipeConsumerHandle source,
     NativeArtifactCaptureBuffer captured,
     Completion completion,
-    bool& started) {
+    bool& started,
+    Observer observer) {
   started = false;
   if (!source.is_valid() || captured.status() != NativeArtifactCaptureStatus::kCapturing ||
       !completion) {
@@ -49,8 +50,9 @@ mojo::ScopedDataPipeConsumerHandle NativeArtifactBodyTee::Create(
   if (CreateForwardingPipe(producer, consumer) != MOJO_RESULT_OK) {
     return source;
   }
-  auto tee = base::WrapRefCounted(new NativeArtifactBodyTee(
-      std::move(source), std::move(producer), std::move(captured), std::move(completion)));
+  auto tee = base::WrapRefCounted(
+      new NativeArtifactBodyTee(std::move(source), std::move(producer), std::move(captured),
+                                std::move(completion), std::move(observer)));
   tee->Start();
   started = true;
   return consumer;
@@ -59,14 +61,16 @@ mojo::ScopedDataPipeConsumerHandle NativeArtifactBodyTee::Create(
 NativeArtifactBodyTee::NativeArtifactBodyTee(mojo::ScopedDataPipeConsumerHandle source,
                                              mojo::ScopedDataPipeProducerHandle target,
                                              NativeArtifactCaptureBuffer captured,
-                                             Completion completion)
+                                             Completion completion,
+                                             Observer observer)
     : source_(std::move(source)),
       source_watcher_(FROM_HERE,
                       mojo::SimpleWatcher::ArmingPolicy::MANUAL,
                       base::SequencedTaskRunner::GetCurrentDefault()),
       target_(std::make_unique<mojo::DataPipeProducer>(std::move(target))),
       captured_(std::move(captured)),
-      completion_(std::move(completion)) {}
+      completion_(std::move(completion)),
+      observer_(std::move(observer)) {}
 
 NativeArtifactBodyTee::~NativeArtifactBodyTee() = default;
 
@@ -84,7 +88,7 @@ void NativeArtifactBodyTee::OnReadable(const MojoResult result, const mojo::Hand
     return;
   }
   if (result != MOJO_RESULT_OK) {
-    Finish(false);
+    Finish(NativeArtifactBodyEnd::kSourceFailed);
     return;
   }
 
@@ -95,15 +99,20 @@ void NativeArtifactBodyTee::OnReadable(const MojoResult result, const mojo::Hand
     return;
   }
   if (read_result == MOJO_RESULT_FAILED_PRECONDITION) {
-    Finish(true);
+    Finish(NativeArtifactBodyEnd::kSourceClosed);
     return;
   }
   if (read_result != MOJO_RESULT_OK) {
-    Finish(false);
+    Finish(NativeArtifactBodyEnd::kSourceFailed);
     return;
   }
 
-  captured_.Append(std::span<const std::uint8_t>(data.data(), data.size()));
+  const std::span<const std::uint8_t> chunk(data.data(), data.size());
+  if (observer_) {
+    observer_.Run(chunk);
+  } else {
+    captured_.Append(chunk);
+  }
   write_buffer_.assign(base::as_string_view(data));
   source_->EndReadData(data.size());
   write_pending_ = true;
@@ -117,13 +126,13 @@ void NativeArtifactBodyTee::OnDataWritten(const MojoResult result) {
   write_pending_ = false;
   write_buffer_.clear();
   if (result != MOJO_RESULT_OK) {
-    Finish(false);
+    Finish(NativeArtifactBodyEnd::kTargetClosed);
     return;
   }
   source_watcher_.ArmOrNotify();
 }
 
-void NativeArtifactBodyTee::Finish(const bool complete) {
+void NativeArtifactBodyTee::Finish(const NativeArtifactBodyEnd end) {
   if (!completion_) {
     return;
   }
@@ -131,7 +140,8 @@ void NativeArtifactBodyTee::Finish(const bool complete) {
   source_watcher_.Cancel();
   source_.reset();
   target_.reset();
-  std::move(completion_).Run(complete, std::move(captured_));
+  observer_.Reset();
+  std::move(completion_).Run(end, std::move(captured_));
 }
 
 }  // namespace reb

@@ -139,6 +139,7 @@ def compile_driver(build: Path) -> Path:
         str(fixture / "main.cc"),
         str(sources / "browser/native_network_capture_sink.cc"),
         str(sources / "browser/native_artifact_capture_sink.cc"),
+        str(sources / "browser/native_response_body_capture.cc"),
         str(sources / "browser/native_probe_host.cc"),
         str(sources / "common/native_probe_queue.cc"),
         str(ROOT / "src/evidence/artifact.cpp"),
@@ -400,8 +401,49 @@ def check_stores(output: Path, cases: list[dict]) -> None:
             )
             assert capture["parent_event_id"] == item["creator_event_id"] != "0"
     check_request_bodies(output, artifacts, events)
+    check_response_bodies(output, artifacts, events)
     print(
         "PASS production receiver/broker consumed exact native bytes, preserved metadata/hash/uint64 identity"
+    )
+
+
+def check_response_bodies(output: Path, artifacts: list[dict], events: list[dict]) -> None:
+    """Response bodies (native-network-v3.md) survive the production receiver and broker."""
+    expected = json.loads((output / "response-bodies.json").read_text())
+    by_sequence = {item["sequence_number"]: item for item in events}
+    retained = 0
+    for body in expected:
+        record = by_sequence[body["record_sequence"]]
+        assert record["type"] == "response_body" and record["category"] == "network"
+        assert record["parent_event_id"] == body["response_sequence"]
+        assert record["request_id"] == body["request_id"]
+        assert record["artifact_id"] == body["artifact_id"]
+        payload = bytes.fromhex(record["payload"])
+        assert payload[4] == body["state"]
+        assert int.from_bytes(payload[8:16], "little") == body["body_length"]
+        assert int.from_bytes(payload[16:24], "little") == body["captured_length"]
+        assert payload[32:64].hex() == body["sha256"]
+        if body["artifact_id"] == "0":
+            assert body["captured_length"] == 0 and body["sha256"] == "00" * 32
+            continue
+        retained += 1
+        item = next(a for a in artifacts if a["artifact_id"] == body["artifact_id"])
+        assert item["kind"] == "response_body" and item["capture_origin"] == "network_response"
+        assert item["sensitive"] is True and item["execution_context_id"] == "0"
+        assert item["creator_event_id"] == body["response_sequence"]
+        assert item["url"] == body["url"] and item["mime_type"] == body["mime_type"]
+        data = (output / "artifacts" / item["content_path"]).read_bytes()
+        assert len(data) == body["captured_length"] == item["byte_size"]
+        assert hashlib.sha256(data).hexdigest() == body["sha256"] == item["sha256"]
+        captured = next(
+            e
+            for e in events
+            if e["type"] == "artifact_captured" and e["artifact_id"] == body["artifact_id"]
+        )
+        assert captured["parent_event_id"] == body["response_sequence"]
+    assert retained >= 7 and len(expected) > retained
+    print(
+        "PASS production receiver/broker retained response bodies, partial and refused records, exact creator joins"
     )
 
 

@@ -1,8 +1,9 @@
 /* Native Traffic rows carry method, host, status, type and lifecycle timing.
  * Content capture sessions add the URL path and query and a bounded request
  * body (protocol/native-network-v2.md); every session records the body's
- * length, type and digest. Headers and response bodies are not part of native
- * capture, so this view never implies or searches them. */
+ * length, type and digest. Response bodies have their own tabs
+ * (traffic_response.js). Headers are not part of native capture, so this view
+ * never implies or searches them. */
 function trafficTargetParts(request) {
   const target = String(request?.path ?? '').trim();
   if (request?.hostOnly) return {name: target || 'Unknown host', host: 'Host-only metadata'};
@@ -295,8 +296,8 @@ function trafficOriginLabel(request) {
     : request?.origin === 'live' ? 'Live metadata' : 'Local evidence';
 }
 
-// Native capture has no header or response body record to show. Make that
-// coverage explicit instead of rendering request/response panes that stay empty.
+// Native capture has no header record to show. Make that coverage explicit
+// instead of rendering request/response panes that stay empty.
 function renderTrafficDetails(container, request, notice = '', bodyView = null, targetView = null) {
   const key = JSON.stringify([request?.origin, request?.id, notice]);
   if (container.dataset.selection !== key) {
@@ -327,7 +328,7 @@ function renderTrafficDetails(container, request, notice = '', bodyView = null, 
     request.tabId && request.tabId !== '0' ? request.tabId : 'Unattributed',
     `${request.hostOnly
       ? 'Native capture recorded method, host, status and lifecycle timing. URL path, query and body bytes are recorded only in content capture sessions.'
-      : 'Native capture recorded method, URL path and query, status and lifecycle timing.'} Request and response headers and response bodies are not captured.${request.targetMalformed ? ' The URL target record is malformed and was not interpreted.' : ''}${request.urlTruncated && !fullTarget ? ' Request URL truncated.' : ''}${request.documentUrlTruncated ? ' Document URL truncated.' : ''}${request.methodTruncated ? ' Method truncated.' : ''}`];
+      : 'Native capture recorded method, URL path and query, status and lifecycle timing.'} Request and response headers are not captured. Response bodies are on the Response tab.${request.targetMalformed ? ' The URL target record is malformed and was not interpreted.' : ''}${request.urlTruncated && !fullTarget ? ' Request URL truncated.' : ''}${request.documentUrlTruncated ? ' Document URL truncated.' : ''}${request.methodTruncated ? ' Method truncated.' : ''}`];
   // Captured values stay mono; coverage notes read as prose; Source is provenance.
   const kinds = ['value', request.documentUrl ? 'value' : 'prose', 'value', /^\d+$/.test(String(values[3])) ? 'value' : 'prose',
     'provenance', 'value', request.tabId && request.tabId !== '0' ? 'value' : 'prose', 'prose'];

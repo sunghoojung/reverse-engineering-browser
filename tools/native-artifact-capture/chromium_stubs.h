@@ -10,6 +10,7 @@
 #include <map>
 #include <memory>
 #include <new>
+#include <optional>
 #include <span>
 #include <stdexcept>
 #include <string>
@@ -79,6 +80,13 @@ template <class Function, class... Bound>
 auto BindOnce(Function function, Bound... bound) {
   return [function, ... bound = std::move(bound)](auto&&... rest) mutable -> decltype(auto) {
     return std::invoke(function, std::move(bound)..., std::forward<decltype(rest)>(rest)...);
+  };
+}
+template <class Function, class... Bound>
+std::function<void(std::span<const std::uint8_t>)> BindRepeating(Function function,
+                                                                 Bound... bound) {
+  return [function, bound...](std::span<const std::uint8_t> chunk) {
+    std::invoke(function, bound..., chunk);
   };
 }
 struct Location {};
@@ -187,7 +195,12 @@ class GURL {
 };
 namespace net {
 struct HttpResponseHeaders {
-  int response_code() const { return 200; }
+  int code = 200;
+  std::optional<std::string> content_encoding;
+  int response_code() const { return code; }
+  std::optional<std::string> GetNormalizedHeader(std::string_view name) const {
+    return name == "Content-Encoding" ? content_encoding : std::nullopt;
+  }
 };
 struct RedirectInfo {
   std::string new_method = "GET";
@@ -218,6 +231,7 @@ class URLResponseHead {
   bool was_fetched_via_service_worker = false;
   std::string mime_type = "text/javascript";
   std::string alpn_negotiated_protocol = "h2";
+  std::vector<int> client_side_content_decoding_types;
 };
 }  // namespace mojom
 }  // namespace network
@@ -268,16 +282,20 @@ class NativeArtifactSocketClient {
   bool reject_next = false;
   std::map<std::uint64_t, std::unique_ptr<NativeArtifactTransfer>> transfers;
 };
-// Feeds the real capture buffer in forwarding-pipe-sized chunks, so growth,
-// the size bound and the pool bound run as they do behind the Mojo tee.
+enum class NativeArtifactBodyEnd : std::uint8_t { kSourceClosed, kSourceFailed, kTargetClosed };
+// Feeds the real capture buffer, or the observer, in forwarding-pipe-sized
+// chunks, so growth, the size bound and the pool bound run as they do behind
+// the Mojo tee.
 class NativeArtifactBodyTee {
  public:
-  using Completion = std::packaged_task<void(bool, NativeArtifactCaptureBuffer)>;
+  using Completion = std::packaged_task<void(NativeArtifactBodyEnd, NativeArtifactCaptureBuffer)>;
+  using Observer = std::function<void(std::span<const std::uint8_t>)>;
   template <class Callback>
   static mojo::ScopedDataPipeConsumerHandle Create(mojo::ScopedDataPipeConsumerHandle body,
                                                    NativeArtifactCaptureBuffer captured,
                                                    Callback callback,
-                                                   bool& started) {
+                                                   bool& started,
+                                                   Observer observer = {}) {
     if (unavailable) {
       started = false;
       return body;
@@ -285,25 +303,40 @@ class NativeArtifactBodyTee {
     if (captured.status() != NativeArtifactCaptureStatus::kCapturing) {
       throw std::runtime_error("Tee started without a capturing buffer");
     }
-    pending.emplace(body.id, Pending{std::move(captured), Completion(std::move(callback))});
+    pending.emplace(body.id, Pending{std::move(captured), Completion(std::move(callback)),
+                                     std::move(observer)});
     started = true;
     return body;
   }
-  static void Complete(int id, bool complete, std::span<const std::uint8_t> content) {
-    auto entry = std::move(pending.at(id));
-    pending.erase(id);
+  // Forwards part of a body without ending it.
+  static void Deliver(int id, std::span<const std::uint8_t> content) {
+    auto& entry = pending.at(id);
     constexpr std::size_t kChunk = 64U * 1024U;
     for (std::size_t offset = 0; offset < content.size(); offset += kChunk) {
-      entry.captured.Append(content.subspan(offset, std::min(kChunk, content.size() - offset)));
+      const auto chunk = content.subspan(offset, std::min(kChunk, content.size() - offset));
+      if (entry.observer) {
+        entry.observer(chunk);
+      } else {
+        entry.captured.Append(chunk);
+      }
     }
+  }
+  static void End(int id, NativeArtifactBodyEnd end) {
+    auto entry = std::move(pending.at(id));
+    pending.erase(id);
     auto result = entry.completion.get_future();
-    entry.completion(complete, std::move(entry.captured));
+    entry.completion(end, std::move(entry.captured));
     result.get();
+  }
+  static void Complete(int id, bool complete, std::span<const std::uint8_t> content) {
+    Deliver(id, content);
+    End(id, complete ? NativeArtifactBodyEnd::kSourceClosed : NativeArtifactBodyEnd::kSourceFailed);
   }
   static std::size_t Reserved(int id) { return pending.at(id).captured.reserved(); }
   struct Pending {
     NativeArtifactCaptureBuffer captured;
     Completion completion;
+    Observer observer;
   };
   static inline bool unavailable = false;
   static inline std::map<int, Pending> pending;

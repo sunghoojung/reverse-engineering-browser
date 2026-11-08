@@ -104,7 +104,10 @@ types 22 `request_body` (always, with Network: body length, normalized content
 type, SHA-256, kind and capture state) and 23 `request_target` (only with
 request content capture: path and query), both exact children of a lifecycle
 record, plus the sensitive `request_body` artifact kind for at most 256 KiB of
-body bytes. Fragments, credentials, headers and cookies are still not recorded.
+body bytes. [Native network v3](native-network-v3.md) adds type 33
+`response_body` in the same sessions, the child of `response_started` that
+names a sensitive `response_body` artifact or says why none exists. Fragments,
+credentials, headers and cookies are still not recorded.
 
 Renderer-to-browser delivery uses exact 320-byte `EventRecord` objects in a
 bounded shared-memory queue. Mojo carries session lifecycle and coalesced

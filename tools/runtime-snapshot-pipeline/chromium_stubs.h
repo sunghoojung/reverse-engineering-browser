@@ -203,6 +203,26 @@ class NativeArtifactSocketClient {
   bool reject_next = false;
   std::vector<std::unique_ptr<NativeArtifactTransfer>> transfers;
 };
+enum class NativeArtifactBodyEnd : std::uint8_t { kSourceClosed, kSourceFailed, kTargetClosed };
+// This pipeline carries no response bodies.
+class NativeResponseBodyCapture {
+ public:
+  static NativeResponseBodyCapture& Get() {
+    static NativeResponseBodyCapture value;
+    return value;
+  }
+  template <class... Args>
+  void Configure(Args&&...) {}
+  template <class Request, class Head>
+  mojo::ScopedDataPipeConsumerHandle MaybeCapture(std::uint64_t,
+                                                  const Request&,
+                                                  const Head&,
+                                                  mojo::ScopedDataPipeConsumerHandle body) {
+    return body;
+  }
+  void OnTransferCompleted(std::uint64_t, bool) {}
+  void Flush() {}
+};
 class NativeArtifactBodyTee {
  public:
   static mojo::ScopedDataPipeConsumerHandle Create(mojo::ScopedDataPipeConsumerHandle body,

@@ -18,8 +18,10 @@
 #include "base/time/time.h"
 #include "brave/components/reverse_engineering_browser/browser/native_artifact_capture_sink.h"
 #include "brave/components/reverse_engineering_browser/browser/native_probe_session.h"
+#include "brave/components/reverse_engineering_browser/browser/native_response_body_capture.h"
 #include "brave/components/reverse_engineering_browser/common/native_artifact_header.h"
 #include "brave/components/reverse_engineering_browser/common/native_network_request.h"
+#include "brave/components/reverse_engineering_browser/common/native_network_response_body.h"
 #include "content/public/browser/browser_context.h"
 #include "crypto/hash.h"
 #include "net/http/http_request_headers.h"
@@ -199,6 +201,31 @@ NativeRequestTargetRetention RetentionOf(const NativeRequestContentAdmission adm
       return NativeRequestTargetRetention::kNotRetainedTransferRefused;
   }
   return NativeRequestTargetRetention::kNotRetainedTransferRefused;
+}
+
+// A response body this sink can describe without its bytes: a redirect hop,
+// whose body Chromium discards, or a response the artifact channel cannot take.
+void EmitResponseBody(const NativeProbeEmitter emitter,
+                      const NativeProbeHeader& parent,
+                      const network::mojom::URLResponseHead& response_head,
+                      const NativeResponseBodyState state) noexcept {
+  NativeResponseBodySummary summary;
+  summary.state = state;
+  SetNativeResponseContentType(response_head.mime_type, summary);
+  if (response_head.headers) {
+    if (const auto codings = response_head.headers->GetNormalizedHeader("Content-Encoding")) {
+      SetNativeResponseCodings(*codings, summary);
+    }
+  }
+  if (response_head.was_fetched_via_cache) {
+    summary.flags |= kNativeResponseBodyFromCache;
+  }
+  if (response_head.was_fetched_via_service_worker) {
+    summary.flags |= kNativeResponseBodyServiceWorker;
+  }
+  NativeProbeEvent event = MakeChildEvent(NativeProbeType::kResponseBody, parent);
+  event.inline_payload = EncodeNativeResponseBodyPayload(summary);
+  emitter(event);
 }
 
 NativeRequestBodyKind KindOf(const network::DataElement& element) noexcept {
@@ -476,6 +503,7 @@ void NativeNetworkCaptureSink::RecordRequestRedirected(
   emitter(event);
   if (capture_content_.load(std::memory_order_relaxed)) {
     EmitRequestTarget(emitter, event.header, redirect_info.new_url);
+    EmitResponseBody(emitter, event.header, response_head, NativeResponseBodyState::kRedirected);
   }
 }
 
@@ -521,6 +549,16 @@ std::uint64_t NativeNetworkCaptureSink::RecordResponseStarted(
                "; protocol=", response_head.alpn_negotiated_protocol);
   }
   emitter(event);
+  // A synthetic response has no network body to observe.
+  if (!synthetic && capture_content_.load(std::memory_order_relaxed)) {
+    auto& bodies = NativeResponseBodyCapture::Get();
+    if (bodies.IsEnabled() && NativeArtifactCaptureSink::Get().IsEnabled()) {
+      bodies.NoteResponseStarted(event.header);
+    } else {
+      EmitResponseBody(emitter, event.header, response_head,
+                       NativeResponseBodyState::kNotCapturedArtifactUnavailable);
+    }
+  }
   return sequence_number;
 }
 
@@ -557,6 +595,9 @@ void NativeNetworkCaptureSink::RecordRequestCompleted(
   SetPayload(event,
              disposition.empty() ? (status.error_code == 0 ? "completed" : "failed") : disposition);
   emitter(event);
+  if (capture_content_.load(std::memory_order_relaxed)) {
+    NativeResponseBodyCapture::Get().OnCompleted(request_id, frame_id, status.error_code);
+  }
 }
 
 }  // namespace reb

@@ -66,7 +66,7 @@ a workstation build from pinned sources, not a Brave Software release.
 
 | In Origin Trace | You get |
 | --- | --- |
-| **Traffic** | Each request by tab, host, and type. The default session keeps the method, full path and query, and request body, up to 16 MiB. Headers and response bodies stay in the browser. |
+| **Traffic** | Each request by tab, host, and type. The default session keeps the method, full path and query, request body and response body, up to 16 MiB each, with Response and Preview tabs. Headers stay in the browser. |
 | **Fingerprints** | Calls and property reads for Canvas, WebGL, Web Audio, device and layout, Permissions, Storage, WebRTC, and runtime checks. Canvas images are optional. |
 | **Sources** | Hashed copies of the JavaScript and Wasm the page loaded or generated, with search and deobfuscation that keeps the original bytes. |
 | **VM** | Where Wasm and JavaScript dispatched, set next to static analysis, including nested VMs. A row is the dispatch the engine performed. |

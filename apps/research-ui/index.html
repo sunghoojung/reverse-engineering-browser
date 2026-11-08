@@ -112,12 +112,15 @@
                 <div id="request-name-host" class="evidence-name-host"></div>
                 <div class="inspector-tabs" role="tablist" aria-label="Request inspector">
                   <button id="inspector-tab-general" class="inspector-tab" type="button" role="tab" data-inspector-tab="general" aria-controls="exchange-inspector" aria-selected="true">General</button>
+                  <button id="inspector-tab-preview" class="inspector-tab" type="button" role="tab" data-inspector-tab="preview" aria-controls="response-inspector" aria-selected="false" tabindex="-1">Preview</button>
+                  <button id="inspector-tab-response" class="inspector-tab" type="button" role="tab" data-inspector-tab="response" aria-controls="response-inspector" aria-selected="false" tabindex="-1">Response</button>
                   <button id="inspector-tab-initiator" class="inspector-tab" type="button" role="tab" data-inspector-tab="initiator" aria-controls="request-inspector" aria-selected="false" tabindex="-1">Initiator</button>
                   <button id="inspector-tab-timing" class="inspector-tab" type="button" role="tab" data-inspector-tab="timing" aria-controls="request-inspector" aria-selected="false" tabindex="-1">Timing</button>
                   <button id="inspector-tab-signals" class="inspector-tab" type="button" role="tab" data-inspector-tab="signals" aria-controls="request-inspector" aria-selected="false" tabindex="-1">Signals</button>
                   <button id="inspector-tab-evidence" class="inspector-tab" type="button" role="tab" data-inspector-tab="evidence" aria-controls="request-inspector" aria-selected="false" tabindex="-1">Evidence</button>
                 </div>
                 <div id="exchange-inspector" class="exchange-inspector" role="tabpanel" aria-labelledby="inspector-tab-general"></div>
+                <div hidden id="response-inspector" class="exchange-inspector traffic-response" role="tabpanel" aria-labelledby="inspector-tab-response"></div>
                 <div hidden id="request-inspector" class="request-inspector" role="tabpanel" aria-labelledby="inspector-tab-initiator" tabindex="0">
                   <h1 id="request-prompt">Choose a request value and trace where it came from</h1>
                   <div id="request-package-entry" class="package-entry" hidden><button class="secondary-button" type="button" data-screen="evidence">Inspect observations &amp; artifacts</button><span>Recorded links, context correlations and missing evidence</span></div>
@@ -796,6 +799,7 @@
     <script src="source_facts.js"></script>
     <script src="source_search.js"></script>
     <script src="traffic_view.js"></script>
+    <script src="traffic_response.js"></script>
     <script src="captured_client.js"></script>
     <script src="captured_export_formats.js"></script>
     <script src="vm_debugger.js"></script>

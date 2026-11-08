@@ -28,6 +28,7 @@
 #include "base/time/time.h"
 #include "brave/components/reverse_engineering_browser/browser/native_artifact_body_tee.h"
 #include "brave/components/reverse_engineering_browser/browser/native_probe_session.h"
+#include "brave/components/reverse_engineering_browser/browser/native_response_body_capture.h"
 #include "crypto/hash.h"
 #include "services/network/public/cpp/data_element.h"
 #include "services/network/public/cpp/resource_request.h"
@@ -124,11 +125,13 @@ bool NativeArtifactCaptureSink::IsEnabledFor(const NativeProbeCategory category)
   return now < expires_at_monotonic_ns_.load(std::memory_order_relaxed);
 }
 
-void NativeArtifactCaptureSink::SetEmitter(const NativeProbeEmitter emitter,
-                                           const std::uint64_t session_id,
-                                           const std::uint64_t category_mask,
-                                           const std::uint64_t expires_at_monotonic_ns,
-                                           const std::uint64_t request_content_budget) noexcept {
+void NativeArtifactCaptureSink::SetEmitter(
+    const NativeProbeEmitter emitter,
+    const std::uint64_t session_id,
+    const std::uint64_t category_mask,
+    const std::uint64_t expires_at_monotonic_ns,
+    const std::uint64_t request_content_budget,
+    const NativeResponseBodyPolicy& response_bodies) noexcept {
   // The ending configuration's unresolved records become gaps while its
   // session can still record them.
   if (emitter_.load(std::memory_order_acquire))
@@ -165,6 +168,8 @@ void NativeArtifactCaptureSink::SetEmitter(const NativeProbeEmitter emitter,
   request_content_used_ = 0;
   request_content_digests_.clear();
   emitter_.store(emitter, std::memory_order_release);
+  NativeResponseBodyCapture::Get().Configure(emitter, session_id, category_mask,
+                                             expires_at_monotonic_ns, response_bodies);
   const auto now =
       static_cast<std::uint64_t>(base::TimeTicks::Now().since_origin().InNanoseconds());
   if (emitter && expires_at_monotonic_ns > now && base::SequencedTaskRunner::HasCurrentDefault()) {
@@ -188,11 +193,15 @@ mojo::ScopedDataPipeConsumerHandle NativeArtifactCaptureSink::MaybeCaptureRespon
     const network::ResourceRequest& request,
     const network::mojom::URLResponseHead& response_head,
     mojo::ScopedDataPipeConsumerHandle body) {
-  if (!IsEnabled() || !body.is_valid()) {
+  if (!IsEnabled()) {
     return body;
   }
   const NativeArtifactKind kind = Classify(request, response_head);
   if (kind == NativeArtifactKind::kUnknown) {
+    return NativeResponseBodyCapture::Get().MaybeCapture(creator_event_id, request, response_head,
+                                                         std::move(body));
+  }
+  if (!body.is_valid()) {
     return body;
   }
 
@@ -887,6 +896,7 @@ void NativeArtifactCaptureSink::FlushBeforeExpiry(const std::uint64_t generation
 
 void NativeArtifactCaptureSink::FlushPendingWork(const std::string_view guest_reason,
                                                  const std::string_view wasm_reason) {
+  NativeResponseBodyCapture::Get().Flush();
   for (auto& [key, pending] : guest_dispatches_) {
     static_cast<void>(key);
     if (pending.failed || pending.published)
@@ -1356,14 +1366,14 @@ std::uint64_t NativeArtifactCaptureSink::CaptureGeneratedArtifactInternal(
 }
 
 void NativeArtifactCaptureSink::OnBodyComplete(std::unique_ptr<CaptureContext> context,
-                                               const bool complete,
+                                               const NativeArtifactBodyEnd end,
                                                NativeArtifactCaptureBuffer captured) {
   if (!IsCurrentCapture(context->header.session_id, context->generation)) {
     // Do not enqueue old bytes or relabel a failed old body under a new session.
     return;
   }
   const char* failure =
-      !complete                                                        ? "body_incomplete"
+      end != NativeArtifactBodyEnd::kSourceClosed                      ? "body_incomplete"
       : captured.status() == NativeArtifactCaptureStatus::kTooLarge    ? "body_too_large"
       : captured.status() == NativeArtifactCaptureStatus::kMemoryLimit ? "active_memory_limit"
       : !IsEnabled()                                                   ? "session_inactive"
@@ -1396,6 +1406,22 @@ void NativeArtifactCaptureSink::OnBodyComplete(std::unique_ptr<CaptureContext> c
                                   .parent_event_id = context->header.creator_event_id});
 }
 
+bool NativeArtifactCaptureSink::QueueResponseBody(std::unique_ptr<NativeArtifactTransfer> transfer,
+                                                  const std::uint64_t request_id) noexcept {
+  const std::uint64_t artifact_id = transfer->header.artifact_id;
+  const PendingContext context{.request_id = request_id,
+                               .frame_id = transfer->header.frame_id,
+                               .session_id = transfer->header.session_id,
+                               .generation = generation_.load(std::memory_order_acquire),
+                               .parent_event_id = transfer->header.creator_event_id,
+                               .response_body = true};
+  if (!IsEnabled() || !NativeArtifactSocketClient::Get().Enqueue(std::move(transfer))) {
+    return false;
+  }
+  pending_.emplace(artifact_id, context);
+  return true;
+}
+
 void NativeArtifactCaptureSink::TransferCompleted(
     const std::uint64_t artifact_id,
     const NativeArtifactReceiveStatus status) noexcept {
@@ -1413,6 +1439,10 @@ void NativeArtifactCaptureSink::OnTransferCompleted(
   pending_.erase(found);
   if (!IsCurrentCapture(context.session_id, context.generation)) {
     return;
+  }
+  if (context.response_body) {
+    NativeResponseBodyCapture::Get().OnTransferCompleted(
+        artifact_id, status == NativeArtifactReceiveStatus::kAccepted);
   }
   if (auto receipt = guest_receipts_.find(artifact_id); receipt != guest_receipts_.end()) {
     receipt->second = status == NativeArtifactReceiveStatus::kAccepted ? GuestReceipt::kAccepted

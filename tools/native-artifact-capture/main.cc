@@ -25,6 +25,7 @@
 #include "reb/artifact.hpp"
 #include "reb/event.hpp"
 #include "reb/network_request.hpp"
+#include "reb/network_response_body.hpp"
 #include "reb/wasm_dispatch.hpp"
 #include "reb/wasm_guest.hpp"
 
@@ -531,6 +532,8 @@ void RequestBodyPolicy(const std::filesystem::path& output) {
   RequestContentLimits();
 }
 
+#include "response_bodies_test.h"
+
 void Corpus(reb::ArtifactReceiver& receiver, const std::filesystem::path& output) {
   Configure();
   std::vector<Case> cases;
@@ -605,6 +608,7 @@ void Corpus(reb::ArtifactReceiver& receiver, const std::filesystem::path& output
   cases.push_back({"out_of_order_b", second, {second_id}});
   WriteCases(output, cases);
   RequestBodies(receiver, output);
+  ResponseBodies(receiver, output);
   record_corpus = false;
   std::cout << "PASS actual sinks/receiver ACK: exact, missing ACK/creator, generated/runtime, "
                "BrowserContext request reuse, out-of-order body and ACK; uint64 roots > 2^53\n";
@@ -1516,6 +1520,7 @@ int main(int argc, char** argv) {
     NativeProbeHostGuestBoundary(receiver);
     NativeProbeHostJsDispatchForwarding();
     RequestBodyPolicy(output);
+    ResponseBodyLimits(receiver, output);
     event_wire.flush();
     artifact_wire.flush();
     ack_wire.flush();

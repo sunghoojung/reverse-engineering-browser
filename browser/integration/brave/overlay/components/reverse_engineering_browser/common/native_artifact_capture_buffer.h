@@ -116,14 +116,19 @@ enum class NativeArtifactCaptureStatus : std::uint8_t {
   kCapturing,
   kTooLarge,
   kMemoryLimit,
+  // keep_prefix only: the first `limit` bytes are kept.
+  kTruncated,
 };
 
-// Capacity tracks the reservation; after a refusal it holds nothing.
+// Capacity tracks the reservation; after a refusal it holds nothing. observed()
+// counts every appended byte, kept or not.
 class NativeArtifactCaptureBuffer final {
  public:
   NativeArtifactCaptureBuffer() = default;
-  NativeArtifactCaptureBuffer(NativeArtifactReservation reservation, const std::size_t limit)
-      : reservation_(std::move(reservation)), limit_(limit) {
+  NativeArtifactCaptureBuffer(NativeArtifactReservation reservation,
+                              const std::size_t limit,
+                              const bool keep_prefix = false)
+      : reservation_(std::move(reservation)), limit_(limit), keep_prefix_(keep_prefix) {
     if (!reservation_.is_valid()) {
       status_ = NativeArtifactCaptureStatus::kMemoryLimit;
       return;
@@ -136,13 +141,19 @@ class NativeArtifactCaptureBuffer final {
   NativeArtifactCaptureBuffer(NativeArtifactCaptureBuffer&&) noexcept = default;
   NativeArtifactCaptureBuffer& operator=(NativeArtifactCaptureBuffer&&) noexcept = default;
 
-  void Append(const std::span<const std::uint8_t> data) {
+  void Append(std::span<const std::uint8_t> data) {
+    observed_ += data.size();
     if (status_ != NativeArtifactCaptureStatus::kCapturing || data.empty()) {
       return;
     }
+    bool truncated = false;
     if (data.size() > limit_ - bytes_.size()) {
-      Fail(NativeArtifactCaptureStatus::kTooLarge);
-      return;
+      if (!keep_prefix_) {
+        Fail(NativeArtifactCaptureStatus::kTooLarge);
+        return;
+      }
+      data = data.first(limit_ - bytes_.size());
+      truncated = true;
     }
     const std::size_t needed = bytes_.size() + data.size();
     if (needed > reservation_.bytes()) {
@@ -156,10 +167,15 @@ class NativeArtifactCaptureBuffer final {
       bytes_.reserve(reservation_.bytes());
     }
     bytes_.insert(bytes_.end(), data.begin(), data.end());
+    if (truncated) {
+      status_ = NativeArtifactCaptureStatus::kTruncated;
+    }
   }
 
   [[nodiscard]] NativeArtifactCaptureStatus status() const noexcept { return status_; }
   [[nodiscard]] std::size_t size() const noexcept { return bytes_.size(); }
+  [[nodiscard]] std::uint64_t observed() const noexcept { return observed_; }
+  [[nodiscard]] std::span<const std::uint8_t> content() const noexcept { return bytes_; }
   [[nodiscard]] std::size_t reserved() const noexcept { return reservation_.bytes(); }
 
   // Returns the slack of a body shorter than its reservation.
@@ -184,6 +200,8 @@ class NativeArtifactCaptureBuffer final {
   NativeArtifactReservation reservation_;
   std::vector<std::uint8_t> bytes_;
   std::size_t limit_ = 0;
+  std::uint64_t observed_ = 0;
+  bool keep_prefix_ = false;
   NativeArtifactCaptureStatus status_ = NativeArtifactCaptureStatus::kCapturing;
 };
 

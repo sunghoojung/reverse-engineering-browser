@@ -93,6 +93,19 @@ session without the Artifact category, 5,000 bodies within a byte budget, digest
 dedupe, a 16 MiB prefix, the shared pool, changed and refused copies, and every
 target retention state.
 
+Response bodies (protocol/native-network-v3.md): the unchanged network sink,
+artifact sink and `native_response_body_capture.cc` in a content session tee
+JSON, gzip HTML, brotli and service-worker JSON, a fetched PNG, a chunked event
+stream (a partial snapshot, then the ended body), an aborted prefix and
+records for a 304, a redirect, a cancelled body and a skipped font. The
+production receiver retains each as a sensitive `response_body` artifact
+created by its `response_started` record; `response-bodies.json` names the
+expected joins, which the stage checks through the receiver and broker.
+`response_bodies_test.h` also covers dedupe, the byte budget and its
+exhaustion, a receiver refusal refund, 50 parallel bodies, the shared pool,
+16 MiB truncation, a missing completion, coding order, the capture-end
+partial, media opt-in, metadata-only sessions and tee refusal.
+
 ## Socket transport stages
 
 With `--receiver`, the runner also exercises the socket boundary the corpus

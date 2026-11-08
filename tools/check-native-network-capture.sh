@@ -19,6 +19,7 @@ headers=(
   services/network/public/mojom/url_response_head.mojom.h
   brave/components/reverse_engineering_browser/browser/native_probe_session.h
   brave/components/reverse_engineering_browser/browser/native_artifact_capture_sink.h
+  brave/components/reverse_engineering_browser/browser/native_response_body_capture.h
   net/http/http_request_headers.h services/network/public/cpp/data_element.h
   services/network/public/cpp/resource_request_body.h url/gurl.h
 )

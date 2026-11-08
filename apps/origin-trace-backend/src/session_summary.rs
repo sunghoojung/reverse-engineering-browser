@@ -196,6 +196,14 @@ impl Refusals {
                     *self.content.entry(("request_target", reason)).or_default() += 1;
                 }
             }
+            (Some("network"), Some("response_body")) => {
+                if let Some(reason) = payload()
+                    .filter(|b| b.len() == 128 && b[0] == 1)
+                    .and_then(|b| response_refusal(b[4]))
+                {
+                    *self.content.entry(("response_body", reason)).or_default() += 1;
+                }
+            }
             _ => {}
         }
     }
@@ -226,14 +234,32 @@ fn target_refusal(retention: u8) -> Option<&'static str> {
     })
 }
 
+/// response_body states a capture limit or policy caused (native-network-v3.md).
+fn response_refusal(state: u8) -> Option<&'static str> {
+    Some(match state {
+        2 => "captured_truncated",
+        9 => "not_captured_type",
+        10 => "not_captured_artifact_unavailable",
+        11 => "not_captured_transfer_refused",
+        12 => "not_captured_session_budget",
+        _ => return None,
+    })
+}
+
 fn content_meaning(category: &str, reason: &str, count: u64) -> String {
-    let what = if category == "request_body" {
-        "request bodies"
-    } else {
-        "full request targets"
+    let what = match category {
+        "request_body" => "request bodies",
+        "response_body" => "response bodies",
+        _ => "full request targets",
     };
     let why = match reason {
         "captured_truncated" => "were longer than 16 MiB, so only their first 16 MiB is retained",
+        "not_captured_type" => {
+            "were images, audio, video or fonts that page elements load, which are kept only with REB_CAPTURE_RESPONSE_MEDIA=1"
+        }
+        "not_captured_session_budget" if category == "response_body" => {
+            "arrived after the session's response body byte budget was used. Start a new session, or raise REB_RESPONSE_BODY_BUDGET_MIB"
+        }
         "not_captured_body_kind" => {
             "were files, blobs or streams, which are described but not read"
         }

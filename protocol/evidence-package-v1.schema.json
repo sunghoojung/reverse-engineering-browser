@@ -576,7 +576,8 @@
             "js_invocation_request",
             "wasm_execution_outcome",
             "wasm_dispatch_overflow",
-            "wasm_indirect_overflow"
+            "wasm_indirect_overflow",
+            "response_body"
           ]
         },
         "status_code": {

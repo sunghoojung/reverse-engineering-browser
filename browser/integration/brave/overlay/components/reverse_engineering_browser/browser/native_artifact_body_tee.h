@@ -6,7 +6,9 @@
 #ifndef BRAVE_COMPONENTS_REVERSE_ENGINEERING_BROWSER_BROWSER_NATIVE_ARTIFACT_BODY_TEE_H_
 #define BRAVE_COMPONENTS_REVERSE_ENGINEERING_BROWSER_BROWSER_NATIVE_ARTIFACT_BODY_TEE_H_
 
+#include <cstdint>
 #include <memory>
+#include <span>
 #include <string>
 
 #include "base/functional/callback.h"
@@ -19,10 +21,22 @@
 
 namespace reb {
 
+// How the forwarded body ended. The source closing is not proof of a complete
+// body; the loader's completion status says whether the network finished it.
+enum class NativeArtifactBodyEnd : std::uint8_t {
+  kSourceClosed,
+  kSourceFailed,
+  // The consumer stopped reading before the source ended.
+  kTargetClosed,
+};
+
 class NativeArtifactBodyTee final : public base::RefCounted<NativeArtifactBodyTee> {
  public:
-  // complete is false when the source failed; the buffer's status names its own refusal.
-  using Completion = base::OnceCallback<void(bool complete, NativeArtifactCaptureBuffer captured)>;
+  // The buffer's status names its own refusal.
+  using Completion =
+      base::OnceCallback<void(NativeArtifactBodyEnd end, NativeArtifactCaptureBuffer captured)>;
+  // Receives every chunk instead of `captured`, which is then returned unused.
+  using Observer = base::RepeatingCallback<void(std::span<const std::uint8_t> chunk)>;
 
   // Returns the original source unchanged when a forwarding pipe cannot be
   // created. Otherwise, the returned consumer receives exactly the original
@@ -31,7 +45,8 @@ class NativeArtifactBodyTee final : public base::RefCounted<NativeArtifactBodyTe
       mojo::ScopedDataPipeConsumerHandle source,
       NativeArtifactCaptureBuffer captured,
       Completion completion,
-      bool& started);
+      bool& started,
+      Observer observer = {});
 
   NativeArtifactBodyTee(const NativeArtifactBodyTee&) = delete;
   NativeArtifactBodyTee& operator=(const NativeArtifactBodyTee&) = delete;
@@ -42,13 +57,14 @@ class NativeArtifactBodyTee final : public base::RefCounted<NativeArtifactBodyTe
   NativeArtifactBodyTee(mojo::ScopedDataPipeConsumerHandle source,
                         mojo::ScopedDataPipeProducerHandle target,
                         NativeArtifactCaptureBuffer captured,
-                        Completion completion);
+                        Completion completion,
+                        Observer observer);
   ~NativeArtifactBodyTee();
 
   void Start();
   void OnReadable(MojoResult result, const mojo::HandleSignalsState& state);
   void OnDataWritten(MojoResult result);
-  void Finish(bool complete);
+  void Finish(NativeArtifactBodyEnd end);
 
   mojo::ScopedDataPipeConsumerHandle source_;
   mojo::SimpleWatcher source_watcher_;
@@ -57,6 +73,7 @@ class NativeArtifactBodyTee final : public base::RefCounted<NativeArtifactBodyTe
   NativeArtifactCaptureBuffer captured_;
   bool write_pending_ = false;
   Completion completion_;
+  Observer observer_;
   scoped_refptr<NativeArtifactBodyTee> keep_alive_;
   base::WeakPtrFactory<NativeArtifactBodyTee> weak_factory_{this};
 };

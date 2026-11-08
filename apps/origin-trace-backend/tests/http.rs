@@ -1679,6 +1679,9 @@ async fn session_summary_counts_every_capture_refusal_by_reason() {
             p[9] = 4;
         }),
         binary(8, "request_target", &|p| p[9] = 4),
+        binary(9, "response_body", &|p| p[4] = 12),
+        binary(10, "response_body", &|p| p[4] = 12),
+        binary(11, "response_body", &|p| p[4] = 1),
     ];
     server.file("events.jsonl", &jsonl(&events));
     let response = server.get("/api/session/summary").await;
@@ -1721,6 +1724,21 @@ async fn session_summary_counts_every_capture_refusal_by_reason() {
         .as_deref(),
         Some("1")
     );
+    // Response body budget exhaustion is counted under its own category.
+    let response = summary["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|check| check["category"] == "response_body")
+        .unwrap();
+    assert_eq!(response["reason"], "not_captured_session_budget");
+    assert_eq!(response["count"], "2");
+    assert!(
+        response["message"]
+            .as_str()
+            .unwrap()
+            .contains("REB_RESPONSE_BODY_BUDGET_MIB")
+    );
     assert_eq!(
         summary["checks"]
             .as_array()
@@ -1728,7 +1746,7 @@ async fn session_summary_counts_every_capture_refusal_by_reason() {
             .iter()
             .filter(|check| check["code"] == "request_content_not_retained")
             .count(),
-        2
+        3
     );
 }
 

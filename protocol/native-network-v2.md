@@ -275,6 +275,5 @@ Still required before declaring this browser-ready:
 4. Repeat with "Metadata only" and confirm no target record or body artifact
    exists while every body record keeps its length, type and digest.
 
-Response bodies are unchanged: native capture still retains only the separately
-authorized JavaScript and WebAssembly response artifacts. File, `Blob` and
-stream bodies are still described, not read.
+Response bodies are described in [native network v3](native-network-v3.md).
+File, `Blob` and stream request bodies are still described, not read.

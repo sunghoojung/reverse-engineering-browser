@@ -34,7 +34,7 @@
           'vm_dispatch_sample', 'wasm_dispatch_observation', 'wasm_guest_dispatch', 'wasm_guest_invocation',
           'wasm_indirect_observation', 'wasm_execution_outcome', 'js_dispatch_observation', 'js_invocation_start', 'js_invocation_settle',
           'js_invocation_request', 'wasm_dispatch_overflow', 'wasm_indirect_overflow',
-          'artifact_captured', 'artifact_capture_failed', 'request_body', 'request_target'
+          'artifact_captured', 'artifact_capture_failed', 'request_body', 'request_target', 'response_body'
         ])
       };
       const uint64Fields = [
@@ -58,9 +58,9 @@
         ['request_failed', 5]
       ]);
       const networkLifecycleTypes = new Set(lifecycleRanks.keys());
-      // Children of a lifecycle record (protocol/native-network-v2.md). They
-      // describe a request; they never advance its lifecycle rank.
-      const networkRequestDetailTypes = new Set(['request_target', 'request_body']);
+      // Children of a lifecycle record (protocol/native-network-v2.md and v3).
+      // They describe a request; they never advance its lifecycle rank.
+      const networkRequestDetailTypes = new Set(['request_target', 'request_body', 'response_body']);
       const artifactKinds = new Set([
         'javascript', 'wasm', 'source_map', 'response_body', 'canvas_data_url',
         'bytecode_buffer', 'wasm_guest_adapter', 'request_body', 'request_target'
@@ -643,6 +643,60 @@
         };
       }
 
+      const responseBodyStates = [null, 'captured', 'captured_truncated', 'partial', 'aborted', 'cancelled', 'empty',
+        'not_modified', 'redirected', 'not_captured_type', 'not_captured_artifact_unavailable',
+        'not_captured_transfer_refused', 'not_captured_session_budget'];
+      const responseCodings = new Map([[1, 'gzip'], [2, 'deflate'], [3, 'br'], [4, 'zstd'], [5, 'dcb'], [6, 'dcz'],
+        [7, 'compress'], [15, 'other']]);
+      const responseCaptureBytes = 16n * 1024n * 1024n;
+
+      // Every rule of the response_body payload (protocol/native-network-v3.md),
+      // shared with the C++ core and the Python evidence validator through
+      // tools/check-network-request-wire.mjs.
+      function decodeResponseBodyRecord(event) {
+        if (!isRequestChildEnvelope(event, 'response_body') ||
+            !isCanonicalInteger(event.artifact_id, 0n, uint64Max)) return null;
+        const bytes = bytesFromHex(event.payload);
+        const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+        const [stateCode, flags, typeLength, codingCount] = [bytes[4], bytes[5], bytes[6], bytes[7]];
+        const bodyLength = view.getBigUint64(8, true);
+        const captured = view.getBigUint64(16, true);
+        const codings = Array.from(bytes.slice(24, 28));
+        const partialIndex = view.getUint16(28, true);
+        const digest = bytes.slice(32, 64);
+        const typeBytes = bytes.slice(64, 128);
+        const contentType = String.fromCharCode(...typeBytes.slice(0, Math.min(typeLength, 64)));
+        const has = bit => (flags & bit) !== 0;
+        const typePresent = has(0x40);
+        if (view.getUint16(0, true) !== 1 || view.getUint16(2, true) !== 128 || view.getUint16(30, true) !== 0 ||
+            stateCode < 1 || stateCode > 12 || (flags & ~0x7f) !== 0 || typeLength > 64 ||
+            typePresent !== (typeLength !== 0) || typeBytes.slice(typeLength).some(byte => byte !== 0) ||
+            (typePresent && !requestTokenCharacters.test(contentType)) || codingCount > 4 ||
+            (has(0x10) && codingCount !== 4) ||
+            codings.some((coding, index) => index < codingCount ? !responseCodings.has(coding) : coding !== 0)) return null;
+        const retained = captured !== 0n;
+        const whole = bodyLength < responseCaptureBytes ? bodyLength : responseCaptureBytes;
+        if (captured > bodyLength || (event.artifact_id !== '0') !== retained || digest.some(byte => byte !== 0) !== retained ||
+            (has(1) && !retained) || (partialIndex !== 0) !== (stateCode === 3) ||
+            (has(0x20) && ![1, 2, 6].includes(stateCode))) return null;
+        const valid = stateCode === 1 ? bodyLength !== 0n && captured === bodyLength
+          : stateCode === 2 ? bodyLength > responseCaptureBytes && captured === responseCaptureBytes
+            : stateCode === 3 ? bodyLength !== 0n && captured === whole
+              : stateCode <= 5 ? !retained || captured === whole
+                : stateCode <= 9 ? bodyLength === 0n : !retained;
+        if (!valid) return null;
+        return {
+          state: responseBodyStates[stateCode], shared: has(1), fromCache: has(2), serviceWorker: has(4),
+          stillEncoded: has(8), codingsOmitted: has(0x10), completionUnobserved: has(0x20),
+          contentType: typePresent ? contentType : null,
+          codings: codings.slice(0, codingCount).map(coding => responseCodings.get(coding)),
+          bodyLength: String(bodyLength), capturedLength: String(captured), partialIndex,
+          sha256: retained ? Array.from(digest, byte => byte.toString(16).padStart(2, '0')).join('') : null,
+          artifactId: event.artifact_id, sequenceNumber: event.sequence_number, parentEventId: event.parent_event_id,
+          sessionId: event.session_id, processId: event.process_id
+        };
+      }
+
       // A child record joins its exact parent lifecycle record, never by URL.
       function requestChildOf(details, parent, type) {
         return parent ? details.find(event => event.type === type && event.parent_event_id === parent.sequence_number &&
@@ -660,6 +714,17 @@
           const start = request.events.find(event => event.type === 'request_started') ?? null;
           const bodyEvent = requestChildOf(request.details, start, 'request_body');
           request.body = bodyEvent ? decodeRequestBodyRecord(bodyEvent) ?? {malformed: true} : null;
+          // The final response's newest body record: a later end supersedes partial snapshots.
+          const newest = (latest, event) => !latest || BigInt(event.sequence_number) > BigInt(latest.sequence_number) ? event : latest;
+          const response = request.events.filter(event => event.type === 'response_started').reduce(newest, null);
+          request.responseStarted = response ? {sequenceNumber: response.sequence_number, sessionId: response.session_id,
+            processId: response.process_id} : null;
+          const responseBody = response ? request.details.filter(event => event.type === 'response_body' &&
+            event.parent_event_id === response.sequence_number && event.session_id === response.session_id &&
+            event.process_id === response.process_id).reduce(newest, null) : null;
+          request.responseBody = responseBody ? decodeResponseBodyRecord(responseBody) ?? {malformed: true} : null;
+          request.redirectedBody = request.events.some(event => event.type === 'request_redirected' &&
+            requestChildOf(request.details, event, 'response_body'));
           const targetEvent = requestChildOf(request.details, request.targetEvent, 'request_target');
           const target = targetEvent ? decodeRequestTargetRecord(targetEvent) : null;
           request.targetMalformed = Boolean(targetEvent) && !target;

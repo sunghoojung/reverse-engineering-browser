@@ -15,6 +15,7 @@
 #include "crypto/hash.h"
 #include "reb/event.hpp"
 #include "reb/network_request.hpp"
+#include "reb/network_response_body.hpp"
 namespace {
 std::vector<reb::NativeProbeEvent> events;
 reb::NativeProbeQueue queue;
@@ -288,20 +289,62 @@ void RequestContent() {
   network::mojom::URLResponseHead head;
   head.headers = std::make_shared<net::HttpResponseHeaders>();
   head.headers->code = 307;
+  head.headers->content_encoding = "gzip";
+  head.mime_type = "text/html";
   events.clear();
   sink.RecordRequestRedirected(172, 0, 0, 4, 5, 11, 12, redirect, head);
-  assert(events.size() == 2 && AllValid() &&
+  assert(events.size() == 3 && AllValid() &&
          events[1].header.parent_event_id == events[0].header.sequence_number &&
          Target(events[1]).target_length == 18);
+  // Chromium discards a redirect's body, so the hop says so instead of looking empty.
+  reb::ResponseBodyPayload hop;
+  assert(events[2].header.type == reb::NativeProbeType::kResponseBody &&
+         events[2].header.parent_event_id == events[0].header.sequence_number &&
+         events[2].header.artifact_id == 0 &&
+         reb::DecodeResponseBodyPayload(events[2].inline_payload, hop) &&
+         hop.state == static_cast<std::uint8_t>(reb::ResponseBodyState::kRedirected) &&
+         hop.coding_count == 1 && hop.codings[0] == 1 &&
+         std::string_view(hop.content_type.data(), hop.content_type_length) == "text/html");
+
+  // The body record's parent is noted for the tee, or says the channel is down.
+  auto& bodies = reb::NativeResponseBodyCapture::Get();
+  bodies.noted.clear();
+  events.clear();
+  const auto response = sink.RecordResponseStarted(172, 0, 0, 4, 5, 11, 12, head);
+  assert(events.size() == 1 && bodies.noted.size() == 1 &&
+         bodies.noted[0].sequence_number == response && bodies.noted[0].tab_id == 4);
+  artifacts.enabled = false;
+  events.clear();
+  static_cast<void>(sink.RecordResponseStarted(172, 0, 0, 4, 5, 11, 12, head));
+  assert(events.size() == 2 && AllValid() && bodies.noted.size() == 1);
+  reb::ResponseBodyPayload unavailable;
+  assert(reb::DecodeResponseBodyPayload(events[1].inline_payload, unavailable) &&
+         unavailable.state ==
+             static_cast<std::uint8_t>(reb::ResponseBodyState::kNotCapturedArtifactUnavailable) &&
+         events[1].header.parent_event_id == events[0].header.sequence_number);
+  artifacts.enabled = true;
+  events.clear();
+  static_cast<void>(sink.RecordResponseStarted(172, 0, 0, 4, 5, 11, 12, head, true));
+  assert(events.size() == 1 && bodies.noted.size() == 1);
+  network::URLLoaderCompletionStatus aborted;
+  aborted.error_code = -3;
+  sink.RecordRequestCompleted(172, 0, 0, 4, 5, 11, 12, aborted);
+  assert(bodies.completions.size() == 1 && bodies.completions[0].request_id == 172 &&
+         bodies.completions[0].frame_id == 5 && bodies.completions[0].error_code == -3);
 
   // Reconfiguring without content returns to metadata-only.
   sink.SetEmitter(Emit, 22, mask, 200);
   events.clear();
   sink.RecordRequestRedirected(172, 0, 0, 4, 5, 11, 12, redirect, head);
+  static_cast<void>(sink.RecordResponseStarted(172, 0, 0, 4, 5, 11, 12, head));
+  sink.RecordRequestCompleted(172, 0, 0, 4, 5, 11, 12, aborted);
   start();
-  assert(std::none_of(events.begin(), events.end(), [](const auto& event) {
-    return event.header.type == reb::NativeProbeType::kRequestTarget;
-  }));
+  assert(std::none_of(events.begin(), events.end(),
+                      [](const auto& event) {
+                        return event.header.type == reb::NativeProbeType::kRequestTarget ||
+                               event.header.type == reb::NativeProbeType::kResponseBody;
+                      }) &&
+         bodies.noted.size() == 1 && bodies.completions.size() == 1);
   sink.SetEmitter(nullptr, 0, 0, 0, true);
   events.clear();
   start();
@@ -309,7 +352,8 @@ void RequestContent() {
   std::cout << "PASS native request content: metadata-only digest/type/length, content target and "
                "body handoff, truncation, digest bound, file/blob/stream/mixed kinds, credential "
                "form, unavailable/refused/budget/URL outcomes for bodies and full targets, "
-               "redirect target\n";
+               "redirect target, redirected and unavailable response bodies, tee parent and "
+               "completion hand-off\n";
 }
 }  // namespace
 int main() {

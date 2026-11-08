@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <memory>
 #include <new>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
@@ -113,7 +114,11 @@ class GURL {
 namespace net {
 struct HttpResponseHeaders {
   int code = 200;
+  std::optional<std::string> content_encoding;
   int response_code() const { return code; }
+  std::optional<std::string> GetNormalizedHeader(std::string_view name) const {
+    return name == "Content-Encoding" ? content_encoding : std::nullopt;
+  }
 };
 struct RedirectInfo {
   std::string new_method = "GET";
@@ -215,6 +220,27 @@ class NativeArtifactCaptureSink {
   NativeRequestContentAdmission admission = NativeRequestContentAdmission::kQueued;
   std::uint64_t next_artifact_id = 900;
   std::vector<Call> calls;
+};
+// Records the response-body hand-offs; the real capture runs in
+// tools/check-native-artifact-capture.py.
+class NativeResponseBodyCapture {
+ public:
+  static NativeResponseBodyCapture& Get() {
+    static NativeResponseBodyCapture capture;
+    return capture;
+  }
+  bool IsEnabled() const { return enabled; }
+  void NoteResponseStarted(const NativeProbeHeader& header) { noted.push_back(header); }
+  void OnCompleted(std::uint64_t request_id, std::uint64_t frame_id, int error_code) {
+    completions.push_back({request_id, frame_id, error_code});
+  }
+  struct Completion {
+    std::uint64_t request_id = 0, frame_id = 0;
+    int error_code = 0;
+  };
+  bool enabled = true;
+  std::vector<NativeProbeHeader> noted;
+  std::vector<Completion> completions;
 };
 class NativeProbeSession {
  public:

@@ -1284,7 +1284,7 @@ invocationSitesPanel.refresh();
               : 'Deterministic developer evidence is loaded.';
         // Sensitive capture is labeled for the whole session, not only in the
         // rows it fills, because the packaged app turns it on without a dialog.
-        const retained = [state.requestContentCaptureEnabled && 'request paths, queries and bodies up to 16 MiB each',
+        const retained = [state.requestContentCaptureEnabled && 'request paths, queries and bodies, and response bodies, up to 16 MiB each',
           state.canvasImageCaptureEnabled && 'Canvas images'].filter(Boolean);
         elements.sessionContent.hidden = !live || !retained.length;
         // The launch turned these on; a browser built before them ignores the
@@ -3310,6 +3310,10 @@ invocationSitesPanel.refresh();
       // views do not re-render the inspector on every poll.
       function refreshSelectedRequestBody() {
         const selected = state.requests.find(request => request.id === state.selectedRequestId);
+        if (selected && ['response', 'preview'].includes(state.inspectorTab)) {
+          trafficResponse.render(document.querySelector('#response-inspector'), selected, state.inspectorTab);
+          return;
+        }
         if (state.inspectorTab !== 'general' || !selected ||
             (!['captured', 'captured_truncated'].includes(selected.body?.state) && selected.fullTarget?.retention !== 'retained')) return;
         if (requestContentViewKey(selected) !== state.requestBodyViewKey) renderInspector();
@@ -3333,6 +3337,11 @@ invocationSitesPanel.refresh();
           return row;
         }));
       }
+
+      // Response and Preview tabs, protocol/native-network-v3.md.
+      const trafficResponse = createTrafficResponse({getArtifacts: () => state.artifacts, getEvents: () => state.events,
+        contentSession: () => state.requestContentCaptureEnabled, readable: () => location.protocol !== 'file:',
+        onChange: () => renderInspector()});
 
       function renderInspector() {
         evidencePackagePanel.sync();
@@ -3360,6 +3369,15 @@ invocationSitesPanel.refresh();
         elements.requestCollectionPivot.disabled = !request;
         elements.requestInspector.hidden = showingGeneral;
         document.querySelector('.detail-pane').classList.toggle('showing-exchange', showingGeneral);
+        const responseInspector = document.querySelector('#response-inspector');
+        responseInspector.hidden = showingGeneral || !['response', 'preview'].includes(state.inspectorTab);
+        if (!responseInspector.hidden) {
+          responseInspector.setAttribute('aria-labelledby', `inspector-tab-${state.inspectorTab}`);
+          elements.requestInspector.hidden = true;
+          document.querySelector('.detail-pane').classList.add('showing-exchange');
+          trafficResponse.render(responseInspector, request, state.inspectorTab);
+          return;
+        }
         if (showingGeneral) {
           const bodyView = requestBodyView(request);
           const targetView = requestTargetView(request);

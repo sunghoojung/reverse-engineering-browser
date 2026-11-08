@@ -330,6 +330,8 @@ struct Expectations: Decodable {
   let requestBodyTarget: String
   let requestBodyMarker: String
   let metadataBodyHost: String
+  let responseBodyHost: String
+  let responseBodyMarker: String
   let invocationArtifactId: String
   let invocationSiteStore: String
 
@@ -1032,7 +1034,7 @@ final class OriginTraceRenderedUITests: XCTestCase {
     }
     for id in ["websocket-inspector", "runtime-hook-traffic", "request-memory-pivot", "screen-memory", "screen-experiments",
       "open-api-catalog", "api-catalog", "passive-security", "traffic-capture-export", "request-search-scope",
-      "inspector-tab-payload", "inspector-tab-preview", "inspector-tab-response", "inspector-tab-compare", "traffic-comparison",
+      "inspector-tab-payload", "inspector-tab-compare", "traffic-comparison",
       "screen-field-provenance", "decoder-field-origin"] {
       let count = try await ui.value("document.querySelectorAll('#\(id)').length") as? Int ?? -1
       XCTAssertEqual(count, 0, "#\(id) must be removed, not hidden")
@@ -1050,11 +1052,11 @@ final class OriginTraceRenderedUITests: XCTestCase {
       try await ui.click("#screen-traffic .request-row", containing: "item-3.scroll.test")
       try await ui.waitUntil("!document.querySelector('#screen-traffic .detail-pane').hidden", "request detail did not open")
       let tabs = try await ui.value("[...document.querySelectorAll('#screen-traffic .inspector-tab')].map(tab => tab.innerText.trim()).join('|')") as? String ?? ""
-      XCTAssertEqual(tabs, "General|Initiator|Timing|Signals|Evidence", "\(size.name): Traffic offers no body, Compare or header-pane tabs")
+      XCTAssertEqual(tabs, "General|Preview|Response|Initiator|Timing|Signals|Evidence", "\(size.name): Traffic offers native response tabs, no payload, Compare or header-pane tabs")
       let search = try await ui.value("document.querySelectorAll('#request-search-scope, #request-search-status, #traffic-comparison').length") as? Int ?? -1
       XCTAssertEqual(search, 0, "\(size.name): content search and comparison are removed, not hidden")
       let general = try await ui.value("document.querySelector('#exchange-inspector').innerText") as? String ?? ""
-      XCTAssertTrue(general.contains("Request and response headers and response bodies are not captured"), "\(size.name): native coverage is explicit: \(general)")
+      XCTAssertTrue(general.contains("Request and response headers are not captured. Response bodies are on the Response tab."), "\(size.name): native coverage is explicit: \(general)")
       let panes = try await ui.value("document.querySelectorAll('#exchange-inspector .exchange-pane').length") as? Int ?? -1
       XCTAssertEqual(panes, 0, "\(size.name): no permanently empty request/response header panes")
       try await assertLayout(ui, "#screen-traffic .detail-pane", "\(size.name) traffic general")
@@ -1150,6 +1152,55 @@ final class OriginTraceRenderedUITests: XCTestCase {
       XCTAssertEqual(pre, 0, "\(size.name): no body text exists for a metadata-only request")
       try await assertLayout(ui, "#screen-traffic .detail-pane", "\(size.name) metadata-only body")
       try await ui.screenshot("traffic-request-body-metadata-\(size.name)")
+    }
+  }
+
+  // A retained response body reads as inert, colored text on Response and as a
+  // JSON tree on Preview, with the keyboard reaching both tabs.
+  @MainActor
+  func test24ResponseAndPreviewTabs() async throws {
+    let expected = try Expectations.load()
+    for size in windowSizes {
+      let ui = try await prepare(size)
+      try await show(ui, "traffic")
+      try await ui.click("#screen-traffic .request-row", containing: expected.responseBodyHost)
+      try await ui.waitUntil("!document.querySelector('#screen-traffic .detail-pane').hidden", "request detail did not open")
+      try await ui.click("#inspector-tab-response")
+      try await ui.waitUntil("document.querySelector('#response-inspector .traffic-response-code') !== null", "retained response did not load")
+      let response = try await ui.json("""
+        ({text: document.querySelector('#response-inspector .traffic-response-code').innerText,
+          panel: document.querySelector('#response-inspector').innerText,
+          state: document.querySelector('#response-inspector').dataset.state,
+          colored: document.querySelectorAll('#response-inspector .traffic-response-code .syntax-string').length,
+          labelled: document.querySelector('#response-inspector').getAttribute('aria-labelledby')})
+        """)
+      XCTAssertEqual(response["state"] as? String, "captured", "\(size.name): response body record state")
+      XCTAssertEqual(response["labelled"] as? String, "inspector-tab-response")
+      XCTAssertTrue((response["text"] as? String ?? "").contains(expected.responseBodyMarker), "\(size.name): captured markup is literal text")
+      XCTAssertGreaterThan(response["colored"] as? Int ?? 0, 0, "\(size.name): JSON strings are colored")
+      for phrase in ["Retained in full", "application/json", "SHA-256", "Pretty print", "Wrap", "Hex", "Copy"] {
+        XCTAssertTrue((response["panel"] as? String ?? "").contains(phrase), "\(size.name): Response names \(phrase)")
+      }
+      try await assertInert(ui, "\(size.name) response body")
+      try await assertLayout(ui, "#screen-traffic .detail-pane", "\(size.name) response body")
+      try await ui.screenshot("traffic-response-\(size.name)")
+
+      try await ui.click("#response-inspector [data-control='pretty']")
+      try await ui.waitUntil("document.querySelectorAll('#response-inspector .traffic-response-line').length > 3", "pretty print did not split the body")
+      try await assertInert(ui, "\(size.name) pretty response")
+
+      // Left arrow from Response moves to Preview, as on every inspector tab.
+      _ = try await ui.value("(document.querySelector('#inspector-tab-response').focus(), true)")
+      try await ui.key(123, "\u{F702}", modifiers: [.function, .numericPad])
+      try await ui.waitUntil("document.activeElement?.id === 'inspector-tab-preview'", "arrow key did not reach Preview")
+      try await ui.waitUntil("document.querySelector('#response-inspector .traffic-json-tree') !== null", "JSON preview did not render")
+      let preview = try await ui.value("document.querySelector('#response-inspector .traffic-json-tree').innerText") as? String ?? ""
+      XCTAssertTrue(preview.contains("challenge"), "\(size.name): the tree names its keys: \(preview)")
+      XCTAssertTrue(preview.contains(expected.responseBodyMarker), "\(size.name): tree strings are literal text")
+      try await assertInert(ui, "\(size.name) response preview")
+      try await assertLayout(ui, "#screen-traffic .detail-pane", "\(size.name) response preview")
+      try await ui.screenshot("traffic-preview-\(size.name)")
+      try await ui.click("#inspector-tab-general")
     }
   }
 

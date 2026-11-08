@@ -114,8 +114,13 @@ the stable execution context plus exact capture origin. A dedicated writer
 thread drains a 16-artifact, 32 MiB queue to the authenticated artifact socket.
 Successful evidence is emitted only after receiver acknowledgment; every local
 or remote rejection becomes an `artifact_capture_failed` event. Artifact bytes
-do not enter the renderer event ring, and arbitrary response bodies still
-require explicit sensitive-capture authorization under
+do not enter the renderer event ring. Other response bodies need request
+content capture: `browser/native_response_body_capture.cc` takes them from the
+same tee, joins each to its loader completion, retains it as a sensitive
+`response_body` artifact deduplicated by SHA-256 within a per-session byte
+budget, and writes a `response_body` record (type 33) for every outcome, from
+`common/native_network_response_body.h`. See
+[Native network v3](../../../../../../protocol/native-network-v3.md) and
 [`SAFETY.md`](../../../../../../SAFETY.md).
 
 Bounded VM investigation metadata uses `NativeVmFindingPayload` from

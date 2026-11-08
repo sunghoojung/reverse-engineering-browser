@@ -15,7 +15,7 @@ use crate::{
     native_console::NativeConsole,
     origin_trace,
     owned_vm_debugger::OwnedVmDebugger,
-    session_context, session_summary, source_facts, validation, vm, wasm,
+    session_context, session_summary, source_facts, source_format, validation, vm, wasm,
     workspace::{Kind, Store},
 };
 use axum::{
@@ -35,7 +35,7 @@ use std::{
 };
 use tokio::sync::{Mutex, OwnedMutexGuard, OwnedSemaphorePermit, Semaphore, TryAcquireError};
 
-const UI_ASSETS: [&str; 33] = [
+const UI_ASSETS: [&str; 34] = [
     "index.html",
     "app.css",
     "command_palette.js",
@@ -45,6 +45,7 @@ const UI_ASSETS: [&str; 33] = [
     "float32_inspector.js",
     "evidence_comparison.js",
     "source_syntax.js",
+    "source_format.js",
     "source_facts.js",
     "source_search.js",
     "investigation_navigation.js",
@@ -111,6 +112,7 @@ pub struct App {
     decoder: Decoder,
     analyst: Analyst,
     deobfuscator: Deobfuscator,
+    source_format: source_format::SourceFormat,
     /// Process-lifetime identity for `/api/health` and `X-REB-Expected-Instance`.
     instance_id: String,
     native_console: NativeConsole,
@@ -186,6 +188,7 @@ impl App {
                 "OriginTraceDeobfuscator",
                 "apps/deobfuscator-worker/target/debug/reb-deobfuscator-worker",
             )),
+            source_format: source_format::SourceFormat::default(),
             instance_id: format!(
                 "{}:{}",
                 std::process::id(),
@@ -550,6 +553,42 @@ impl App {
                 let mut result = self.deobfuscator.source_facts(&source, region).await?;
                 result["source"] = identity;
                 result
+            }
+            "/api/source-format" => {
+                q.only(
+                    &["session_id", "artifact_id"],
+                    &["start_line", "line_count"],
+                )?;
+                q.number("session_id", None, 64, false)?;
+                q.number("artifact_id", None, 64, false)?;
+                let window = match (q.one("start_line")?, q.one("line_count")?) {
+                    (None, None) => None,
+                    (Some(_), Some(_)) => {
+                        let start_line = q.number("start_line", None, 64, true)?;
+                        let line_count = q.number("line_count", None, 64, true)?;
+                        if line_count > source_format::MAX_WINDOW_LINES {
+                            return Err(Error::bad(
+                                "line_count exceeds the formatted window limit",
+                            ));
+                        }
+                        Some(source_format::Window {
+                            start_line,
+                            line_count,
+                        })
+                    }
+                    _ => {
+                        return Err(Error::bad(
+                            "A formatted window requires start_line and line_count",
+                        ));
+                    }
+                };
+                let session = q.required("session_id")?.to_owned();
+                let id = q.required("artifact_id")?.to_owned();
+                let root = self.options.artifacts.clone();
+                let (source, identity) = self
+                    .blocking(move || source_format::load(&root, &session, &id))
+                    .await?;
+                self.source_format.format(source, identity, window).await?
             }
             "/api/js-invocation-sites" => {
                 if !q.0.is_empty() {

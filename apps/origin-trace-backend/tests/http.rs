@@ -697,7 +697,7 @@ fn openapi_references_and_native_only_operations_are_consistent() {
             assert!(ids.insert(id), "Duplicate operation ID: {id}");
         }
     }
-    assert_eq!(ids.len(), 44, "Review route coverage when the API changes");
+    assert_eq!(ids.len(), 45, "Review route coverage when the API changes");
     assert!(
         ids.contains("get_js_invocation_sites")
             && ids.contains("resolve_js_invocation_site")
@@ -785,7 +785,7 @@ fn execution_metadata_covers_operations_actions_and_dispatch_without_safe_defaul
             operation_count += 1;
         }
     }
-    assert_eq!(operation_count, 44);
+    assert_eq!(operation_count, 45);
     let schemas = &spec["components"]["schemas"];
     let mut action_count = 0;
     for name in [
@@ -5884,6 +5884,66 @@ fn put_source_facts_artifact(server: &Server, bytes: &[u8], kind: &str) -> Value
         format!("{artifact}\n").as_bytes(),
     );
     artifact
+}
+
+#[tokio::test]
+async fn source_format_lays_out_verified_javascript_with_whitespace_only_changes() {
+    let server = Server::start().await;
+    let route = "/api/source-format";
+    let source = "var a=function(e,t){if(!e)return null;return{ok:!0,list:[1,2,3]}};";
+    let artifact = put_source_facts_artifact(&server, source.as_bytes(), "javascript");
+    let path = "/api/source-format?session_id=11&artifact_id=7";
+    let bytes = assert_contract_response(server.get(path).await, "get", route, 200).await;
+    let result: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(result["status"], "formatted");
+    assert_eq!(
+        result["text"],
+        "var a = function (e, t) {\n  if (!e) return null;\n  return { ok: !0, list: [1, 2, 3] }\n};\n"
+    );
+    assert_eq!(result["line_count"], 5);
+    assert_eq!(result["cached"], false);
+    assert_eq!(result["source"]["sha256"], artifact["sha256"]);
+    assert!(result["source"].get("content_path").is_none());
+    let window = format!("{path}&start_line=2&line_count=1");
+    let bytes = assert_contract_response(server.get(&window).await, "get", route, 200).await;
+    let result: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(result["text"], "  if (!e) return null;");
+    assert_eq!(result["window"], json!({"start_line": 2, "line_count": 1}));
+    assert_eq!(result["cached"], true);
+    for query in [
+        "",
+        "?session_id=11",
+        "?session_id=11&artifact_id=7&start_line=1",
+        "?session_id=11&artifact_id=7&start_line=0&line_count=1",
+        "?session_id=11&artifact_id=7&start_line=1&line_count=10001",
+        "?session_id=11&artifact_id=7&start_line=6&line_count=1",
+        "?session_id=11&artifact_id=7&limit=1",
+    ] {
+        assert_contract_response(
+            server.get(&format!("{route}{query}")).await,
+            "get",
+            route,
+            400,
+        )
+        .await;
+    }
+    assert_contract_response(
+        server
+            .get("/api/source-format?session_id=12&artifact_id=7")
+            .await,
+        "get",
+        route,
+        404,
+    )
+    .await;
+    put_source_facts_artifact(&server, b"function(){", "javascript");
+    let bytes = assert_contract_response(server.get(path).await, "get", route, 200).await;
+    let result: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(result["status"], "unavailable");
+    assert_eq!(result["reason"], "parse-failed");
+    assert!(result["text"].is_null());
+    put_source_facts_artifact(&server, b"{}", "source_map");
+    assert_contract_response(server.get(path).await, "get", route, 400).await;
 }
 
 #[cfg(unix)]

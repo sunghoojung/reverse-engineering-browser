@@ -19,6 +19,9 @@ defined the getProperties-only host import map.
 [JavaScript Source Facts v1](javascript-source-facts-v1.md) defines exact-artifact
 lexical binding/effect analysis, original-byte ranges and explicit unknown coverage.
 
+[Source format v1](source-format-v1.md) defines the Prettier-style JavaScript
+layout that changes only whitespace, its fidelity checks and limits.
+
 [Native Console v2](native-console-v2.md) defines the opt-in mutable console,
 its disposable browser ownership, wire layouts, and limits.
 

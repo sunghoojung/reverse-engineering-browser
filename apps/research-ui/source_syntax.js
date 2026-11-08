@@ -450,6 +450,11 @@
             writer.original(token);
           } else if (operator === '?') {
             writer.space(token.start); writer.original(token); writer.space(token.end);
+          } else if ((operator === '-' || operator === '+') && (!previous || (previous.kind === 'operator' && ![')', ']', '}'].includes(previous.text)) ||
+              (previous.kind === 'word' && SOURCE_PRETTY_REGEX_PREFIXES.has(previous.text)))) {
+            // Unary sign: `-2.5`, `x = -y`, `return +n`.
+            if (previous && previous.text !== '(' && previous.text !== '[') writer.space(token.start);
+            writer.original(token);
           } else {
             writer.space(token.start); writer.original(token); writer.space(token.end);
           }
@@ -581,25 +586,71 @@
       }
 
       const SOURCE_HIGHLIGHT_TOKEN_LIMIT = 50000;
-      const SOURCE_CONTROL_WORDS = new Set([
-        'break', 'case', 'catch', 'continue', 'debugger', 'default', 'do', 'else',
-        'finally', 'for', 'if', 'return', 'switch', 'throw', 'try', 'while', 'with',
-        'yield', 'await'
-      ]);
+      // Token kinds are VS Code TextMate scopes, as the Rosé Pine theme colors them (app.css).
       const SOURCE_KEYWORDS = new Set([
-        'as', 'async', 'class', 'const', 'delete', 'enum', 'export', 'extends',
-        'from', 'function', 'get', 'implements', 'import', 'in', 'instanceof',
-        'interface', 'let', 'new', 'of', 'package', 'private', 'protected', 'public',
-        'set', 'static', 'super', 'this', 'typeof', 'var', 'void'
+        'async', 'await', 'break', 'case', 'catch', 'class', 'const', 'continue', 'debugger',
+        'default', 'delete', 'do', 'else', 'enum', 'export', 'extends', 'finally', 'for',
+        'function', 'if', 'implements', 'import', 'in', 'instanceof', 'interface', 'let', 'new',
+        'of', 'package', 'private', 'protected', 'public', 'return', 'static', 'switch', 'this',
+        'throw', 'try', 'typeof', 'var', 'void', 'while', 'with', 'yield'
       ]);
-      const SOURCE_LITERALS = new Set([
-        'false', 'Infinity', 'NaN', 'null', 'true', 'undefined'
+      const SOURCE_REGEX_KEYWORDS = new Set([
+        'await', 'case', 'delete', 'do', 'else', 'in', 'instanceof', 'new', 'of', 'return',
+        'throw', 'typeof', 'void', 'yield'
       ]);
-      const SOURCE_NUMBER_PATTERN = /(?:0[xX][\da-fA-F]+|0[bB][01]+|0[oO][0-7]+|(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?n?)/y;
-      const SOURCE_IDENTIFIER_PATTERN = /[A-Za-z_$][\w$]*/y;
+      const SOURCE_LITERALS = new Set(['false', 'Infinity', 'NaN', 'null', 'true', 'undefined']);
+      const SOURCE_BUILTINS = new Set([
+        'Array', 'ArrayBuffer', 'Atomics', 'BigInt', 'BigInt64Array', 'BigUint64Array', 'Boolean',
+        'DataView', 'Date', 'Error', 'EvalError', 'Float32Array', 'Float64Array', 'Function',
+        'Int8Array', 'Int16Array', 'Int32Array', 'Intl', 'Map', 'Number', 'Object', 'Promise',
+        'Proxy', 'RangeError', 'ReferenceError', 'Reflect', 'RegExp', 'Set', 'SharedArrayBuffer',
+        'String', 'Symbol', 'SyntaxError', 'TextDecoder', 'TextEncoder', 'TypeError', 'Uint8Array',
+        'Uint8ClampedArray', 'Uint16Array', 'Uint32Array', 'URIError', 'URL', 'URLSearchParams',
+        'WeakMap', 'WeakSet', 'WebAssembly', 'console', 'document', 'event', 'navigator',
+        'performance', 'screen', 'window', 'process', 'Buffer', 'module', 'exports', 'global',
+        '__dirname', '__filename'
+      ]);
+      // support.constant, which the theme colors like strings.
+      const SOURCE_BUILTIN_CONSTANTS = new Set(['JSON', 'Math']);
+      const SOURCE_BUILTIN_FUNCTIONS = new Set([
+        'clearInterval', 'clearTimeout', 'decodeURI', 'decodeURIComponent', 'encodeURI',
+        'encodeURIComponent', 'escape', 'eval', 'isFinite', 'isNaN', 'parseFloat', 'parseInt',
+        'require', 'setInterval', 'setTimeout', 'unescape', 'uneval'
+      ]);
+      const SOURCE_MEMBER_FUNCTIONS = {
+        console: new Set(['assert', 'clear', 'count', 'debug', 'dir', 'error', 'group', 'groupCollapsed',
+          'groupEnd', 'info', 'log', 'profile', 'profileEnd', 'table', 'time', 'timeEnd', 'timeStamp', 'trace', 'warn']),
+        JSON: new Set(['parse', 'stringify']),
+        Math: new Set(['abs', 'acos', 'acosh', 'asin', 'asinh', 'atan', 'atan2', 'atanh', 'cbrt', 'ceil',
+          'clz32', 'cos', 'cosh', 'exp', 'expm1', 'floor', 'fround', 'hypot', 'imul', 'log', 'log10',
+          'log1p', 'log2', 'max', 'min', 'pow', 'random', 'round', 'sign', 'sin', 'sinh', 'sqrt', 'tan', 'tanh', 'trunc'])
+      };
+      // support.function.dom: a subset of the grammar's DOM method list.
+      const SOURCE_DOM_FUNCTIONS = new Set([
+        'addEventListener', 'appendChild', 'cancelAnimationFrame', 'cloneNode', 'closest',
+        'createDocumentFragment', 'createElement', 'createTextNode', 'dispatchEvent',
+        'getAttribute', 'getBoundingClientRect', 'getComputedStyle', 'getElementById',
+        'getElementsByClassName', 'getElementsByName', 'getElementsByTagName', 'hasAttribute',
+        'insertBefore', 'preventDefault', 'querySelector', 'querySelectorAll', 'removeAttribute',
+        'removeChild', 'removeEventListener', 'replaceChild', 'requestAnimationFrame',
+        'scrollIntoView', 'setAttribute', 'stopImmediatePropagation', 'stopPropagation'
+      ]);
+      const SOURCE_BUILTIN_PROPERTIES = new Set(['__proto__', 'constructor', 'length', 'prototype']);
+      const SOURCE_NUMBER_PATTERN = /(?:0[xX][\da-fA-F](?:_?[\da-fA-F])*n?|0[bB][01](?:_?[01])*n?|0[oO][0-7](?:_?[0-7])*n?|(?:\d(?:_?\d)*(?:\.(?:\d(?:_?\d)*)?)?|\.\d(?:_?\d)*)(?:[eE][+-]?\d(?:_?\d)*)?n?)/y;
+      const SOURCE_IDENTIFIER_PATTERN = /[\p{ID_Start}$_][\p{ID_Continue}$‌‍]*/uy;
+      const SOURCE_SPACE_PATTERN = /[\s﻿]+/y;
+      const SOURCE_OPERATOR_PATTERN = /(?:>>>=|\.\.\.|===|!==|\*\*=|<<=|>>=|>>>|&&=|\|\|=|\?\?=|=>|==|!=|<=|>=|\+\+|--|&&|\|\||\?\?|\?\.(?!\d)|\*\*|\+=|-=|\*=|\/=|%=|&=|\|=|\^=|<<|>>|[=+\-*/%<>!~&|^?.])/y;
+      const SOURCE_ESCAPE_PATTERN = /\\(?:x[\da-fA-F]{2}|u\{[\da-fA-F]+\}|u[\da-fA-F]{4}|[0-7]{1,3}|[\s\S])/g;
+      const SOURCE_FOLLOWED_CALL = /\s*(?:\?\.\s*)?[(`]/y;
+      const SOURCE_FOLLOWED_ARROW = /\s*=>/y;
+      const SOURCE_FOLLOWED_KEY = /\s*:(?!:)/y;
+      const SOURCE_FUNCTION_VALUE = /\s*(?::|=(?![=>]))\s*(?:async\s*)?(?:function\b|\([^()]*\)\s*=>|[\p{ID_Start}$_][\p{ID_Continue}$]*\s*=>)/uy;
+      const SOURCE_ACCESSOR_NAME = /\s+[#\p{ID_Start}$_][\p{ID_Continue}$]*\s*\(/uy;
+      const SOURCE_FROM_STRING = /\s*['"]/y;
       const SOURCE_CSS_COLOR_PATTERN = /#[\da-fA-F]{3,8}\b/y;
-      const SOURCE_CSS_NUMBER_PATTERN = /(?:\d+\.?\d*|\.\d+)(?:[a-z%]+)?/iy;
-      const SOURCE_CSS_IDENTIFIER_PATTERN = /@?-{0,2}[A-Za-z_][\w-]*/y;
+      const SOURCE_CSS_NUMBER_PATTERN = /[+-]?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?/y;
+      const SOURCE_CSS_UNIT_PATTERN = /%|[a-zA-Z]+/y;
+      const SOURCE_CSS_IDENTIFIER_PATTERN = /-{0,2}[A-Za-z_ -￿][\w -￿-]*/y;
       const SOURCE_MARKUP_IDENTIFIER_PATTERN = /[A-Za-z_:][\w:.-]*/y;
       const SOURCE_WASM_VALUE_PATTERN = /(?:[\da-fA-F]{8}|[\da-fA-F]{2})(?=\s|$)/y;
       const SOURCE_WASM_IDENTIFIER_PATTERN = /\$?[A-Za-z_][\w.$-]*/y;
@@ -609,43 +660,14 @@
         return pattern.exec(value)?.[0] ?? null;
       }
 
+      function sourceFollowedBy(pattern, value, index) {
+        pattern.lastIndex = index;
+        return pattern.test(value);
+      }
+
       function sourceNextSignificant(value, index) {
         while (/\s/.test(value[index] ?? '')) index += 1;
         return value[index] ?? '';
-      }
-
-      function sourcePreviousSignificant(value, index) {
-        for (let previous = index - 1; previous >= 0; previous -= 1) {
-          if (!/\s/.test(value[previous])) return value[previous];
-        }
-        return '';
-      }
-
-      function sourceIdentifierStart(character) {
-        const code = character.charCodeAt(0);
-        return character === '$' || character === '_' ||
-          (code >= 65 && code <= 90) || (code >= 97 && code <= 122);
-      }
-
-      function sourceDigit(character) {
-        const code = character.charCodeAt(0);
-        return code >= 48 && code <= 57;
-      }
-
-      function sourceCodeTokenStart(value, index, json) {
-        const character = value[index] ?? '';
-        const next = value[index + 1] ?? '';
-        return sourceIdentifierStart(character) || sourceDigit(character) ||
-          (character === '.' && sourceDigit(next)) || character === '/' ||
-          character === '"' || character === "'" || (!json && character === '`');
-      }
-
-      function sourceCssTokenStart(value, index) {
-        const character = value[index] ?? '';
-        const next = value[index + 1] ?? '';
-        return sourceIdentifierStart(character) || sourceDigit(character) ||
-          (character === '.' && sourceDigit(next)) ||
-          ['#', '/', '"', "'", '@', '-'].includes(character);
       }
 
       function sourceSyntaxLanguage(source) {
@@ -669,6 +691,18 @@
         return {
           language: sourceSyntaxLanguage(source),
           state: 'code',
+          depth: 0,
+          templates: [],
+          ternaries: [],
+          previous: '',
+          previousKind: '',
+          member: '',
+          declaration: '',
+          pendingParams: false,
+          params: null,
+          cssValue: false,
+          cssBlocks: [],
+          cssAtRule: '',
           coloredTokens: 0,
           truncated: false
         };
@@ -719,191 +753,383 @@
         return start + 1;
       }
 
+      function pushSourceString(tokens, tokenizer, text, type = 'string') {
+        let last = 0;
+        SOURCE_ESCAPE_PATTERN.lastIndex = 0;
+        for (let match; (match = SOURCE_ESCAPE_PATTERN.exec(text));) {
+          pushSourceToken(tokens, tokenizer, type, text.slice(last, match.index));
+          pushSourceToken(tokens, tokenizer, 'escape', match[0]);
+          last = match.index + match[0].length;
+        }
+        pushSourceToken(tokens, tokenizer, type, text.slice(last));
+      }
+
+      function pushSourceBracket(tokens, tokenizer, text, opening) {
+        if (!opening) tokenizer.depth = Math.max(0, tokenizer.depth - 1);
+        pushSourceToken(tokens, tokenizer, `bracket-${tokenizer.depth % 3}`, text);
+        if (opening) tokenizer.depth += 1;
+      }
+
+      // The grammar's same-line lookahead: `(...) =>`, or a method's `(...) {`.
+      function sourceParameterList(line, open, tokenizer) {
+        const before = tokenizer.previous;
+        if (tokenizer.pendingParams) return true;
+        if (['if', 'for', 'while', 'switch', 'with', 'catch'].includes(before)) return false;
+        let depth = 0;
+        const limit = Math.min(line.length, open + 512);
+        for (let index = open; index < limit; index += 1) {
+          const character = line[index];
+          if (character === '"' || character === "'" || character === '`') { index = quotedSourceEnd(line, index, character) - 1; continue; }
+          if (character === '(') depth += 1;
+          else if (character === ')' && --depth === 0) {
+            const rest = line.slice(index + 1, index + 8).trimStart();
+            return rest.startsWith('=>') || (tokenizer.previousKind === 'word' && rest.startsWith('{'));
+          }
+        }
+        return false;
+      }
+
+      function sourceIdentifierType(line, end, name, tokenizer) {
+        const afterDot = tokenizer.previous === '.' || tokenizer.previous === '?.';
+        const key = (tokenizer.previous === '{' || tokenizer.previous === ',') && sourceFollowedBy(SOURCE_FOLLOWED_KEY, line, end);
+        if (!afterDot && !key) {
+          if (SOURCE_LITERALS.has(name)) return 'number';
+          if ((name === 'get' || name === 'set') && sourceFollowedBy(SOURCE_ACCESSOR_NAME, line, end)) return 'keyword';
+          if (name === 'from' && sourceFollowedBy(SOURCE_FROM_STRING, line, end)) return 'keyword';
+          if (SOURCE_KEYWORDS.has(name)) return 'keyword';
+        }
+        if (tokenizer.declaration === 'class') return 'type';
+        if (tokenizer.declaration === 'extends') return 'inherited';
+        if (tokenizer.declaration === 'function') return 'function';
+        if (tokenizer.params && !tokenizer.params.defaults) return 'parameter';
+        const call = sourceFollowedBy(SOURCE_FOLLOWED_CALL, line, end);
+        if (afterDot) {
+          if (call) return SOURCE_MEMBER_FUNCTIONS[tokenizer.member]?.has(name) || SOURCE_DOM_FUNCTIONS.has(name) ? 'builtin-function' : 'function';
+          if (SOURCE_BUILTIN_PROPERTIES.has(name)) return 'builtin';
+          return sourceFollowedBy(SOURCE_FUNCTION_VALUE, line, end) ? 'function' : 'property';
+        }
+        if (sourceFollowedBy(SOURCE_FOLLOWED_ARROW, line, end)) return 'parameter';
+        if (SOURCE_BUILTINS.has(name)) return 'builtin';
+        if (SOURCE_BUILTIN_CONSTANTS.has(name)) return 'constant';
+        if (call) return SOURCE_BUILTIN_FUNCTIONS.has(name) ? 'builtin-function' : 'function';
+        return sourceFollowedBy(SOURCE_FUNCTION_VALUE, line, end) ? 'function' : 'property';
+      }
+
+      function sourceRegexAllowed(tokenizer) {
+        const {previous, previousKind} = tokenizer;
+        if (!previousKind) return true;
+        if (previousKind === 'word') return SOURCE_REGEX_KEYWORDS.has(previous);
+        if (previousKind === 'close' || previousKind === 'value') return false;
+        return !['++', '--'].includes(previous);
+      }
+
+      function tokenizeTemplateText(line, from, tokens, tokenizer, scan = from) {
+        const index = from;
+        let cursor = scan;
+        while (cursor < line.length) {
+          const character = line[cursor];
+          if (character === '\\') { cursor += 2; continue; }
+          if (character === '`') {
+            pushSourceString(tokens, tokenizer, line.slice(index, cursor + 1));
+            tokenizer.state = 'code';
+            tokenizer.previous = '`';
+            tokenizer.previousKind = 'value';
+            return cursor + 1;
+          }
+          if (character === '$' && line[cursor + 1] === '{') {
+            pushSourceString(tokens, tokenizer, line.slice(index, cursor));
+            pushSourceBracket(tokens, tokenizer, '${', true);
+            tokenizer.templates.push(tokenizer.depth);
+            tokenizer.state = 'code';
+            tokenizer.previous = '${';
+            tokenizer.previousKind = 'open';
+            return cursor + 2;
+          }
+          cursor += 1;
+        }
+        pushSourceString(tokens, tokenizer, line.slice(index, Math.min(cursor, line.length)));
+        return line.length;
+      }
+
       function tokenizeCodeSourceLine(line, tokenizer) {
         const tokens = [];
         const json = tokenizer.language === 'json';
+        const push = (type, text) => pushSourceToken(tokens, tokenizer, type, text);
+        const significant = (text, kind) => { tokenizer.previous = text; tokenizer.previousKind = kind; };
         let index = 0;
         while (index < line.length) {
           if (tokenizer.coloredTokens >= SOURCE_HIGHLIGHT_TOKEN_LIMIT) {
             tokenizer.truncated = true;
-            pushSourceToken(tokens, tokenizer, 'plain', line.slice(index));
+            push('plain', line.slice(index));
             break;
           }
           if (tokenizer.state === 'block-comment') {
             const end = line.indexOf('*/', index);
-            if (end === -1) { pushSourceToken(tokens, tokenizer, 'comment', line.slice(index)); break; }
-            pushSourceToken(tokens, tokenizer, 'comment', line.slice(index, end + 2));
+            if (end === -1) { push('comment', line.slice(index)); break; }
+            push('comment', line.slice(index, end)); push('comment-mark', '*/');
             tokenizer.state = 'code'; index = end + 2; continue;
           }
-          if (tokenizer.state === 'template') {
-            const end = quotedSourceEnd(line, index - 1, '`');
-            pushSourceToken(tokens, tokenizer, 'string', line.slice(index, end));
-            if (end < line.length || line[end - 1] === '`') tokenizer.state = 'code';
-            index = end; continue;
-          }
+          if (tokenizer.state === 'template') { index = tokenizeTemplateText(line, index, tokens, tokenizer); continue; }
+          const space = sourceMatchAt(SOURCE_SPACE_PATTERN, line, index);
+          if (space) { push('plain', space); index += space.length; continue; }
           const character = line[index];
           const next = line[index + 1] ?? '';
           if (character === '/' && next === '/') {
-            pushSourceToken(tokens, tokenizer, 'comment', line.slice(index)); break;
+            push('comment-mark', '//'); push('comment', line.slice(index + 2)); break;
           }
           if (character === '/' && next === '*') {
+            push('comment-mark', '/*');
             const end = line.indexOf('*/', index + 2);
-            if (end === -1) {
-              pushSourceToken(tokens, tokenizer, 'comment', line.slice(index));
-              tokenizer.state = 'block-comment'; break;
-            }
-            pushSourceToken(tokens, tokenizer, 'comment', line.slice(index, end + 2));
+            if (end === -1) { push('comment', line.slice(index + 2)); tokenizer.state = 'block-comment'; break; }
+            push('comment', line.slice(index + 2, end)); push('comment-mark', '*/');
             index = end + 2; continue;
           }
-          if (character === '"' || character === "'" || (!json && character === '`')) {
+          if (character === '"' || character === "'") {
             const end = quotedSourceEnd(line, index, character);
-            const nextSignificant = sourceNextSignificant(line, end);
-            const type = json && nextSignificant === ':' ? 'property' : 'string';
-            pushSourceToken(tokens, tokenizer, type, line.slice(index, end));
-            if (character === '`' && line[end - 1] !== '`') tokenizer.state = 'template';
-            index = end; continue;
+            const text = line.slice(index, end);
+            if (json && sourceNextSignificant(line, end) === ':') {
+              const closed = text.length > 1 && text.endsWith(character);
+              push('punctuation', character);
+              pushSourceString(tokens, tokenizer, text.slice(1, closed ? -1 : undefined), 'key');
+              if (closed) push('punctuation', character);
+            } else {
+              pushSourceString(tokens, tokenizer, text);
+            }
+            significant(text, 'value'); index = end; continue;
           }
-          if (!sourceCodeTokenStart(line, index, json)) {
-            const start = index;
-            do { index += 1; } while (index < line.length && !sourceCodeTokenStart(line, index, json));
-            pushSourceToken(tokens, tokenizer, 'plain', line.slice(start, index));
+          if (!json && character === '`') {
+            tokenizer.state = 'template';
+            index = tokenizeTemplateText(line, index, tokens, tokenizer, index + 1);
             continue;
           }
-          const number = sourceMatchAt(SOURCE_NUMBER_PATTERN, line, index);
-          if (number) {
-            pushSourceToken(tokens, tokenizer, 'number', number); index += number.length; continue;
+          const sign = json && character === '-' && /\d/.test(next) ? 1 : 0;
+          const number = sourceMatchAt(SOURCE_NUMBER_PATTERN, line, index + sign);
+          if (number && (sign || /\d/.test(character) || (character === '.' && /\d/.test(next)))) {
+            const text = line.slice(index, index + sign + number.length);
+            push('number', text); significant(text, 'value'); index += text.length; continue;
           }
           const identifier = sourceMatchAt(SOURCE_IDENTIFIER_PATTERN, line, index);
           if (identifier) {
-            const following = sourceNextSignificant(line, index + identifier.length);
-            const type = SOURCE_CONTROL_WORDS.has(identifier) ? 'control'
-              : SOURCE_KEYWORDS.has(identifier) ? 'keyword'
-                : SOURCE_LITERALS.has(identifier) ? 'number'
-                    : following === '(' ? 'function'
-                      : /^[A-Z]/.test(identifier) ? 'type'
-                        : 'property';
-            pushSourceToken(tokens, tokenizer, type, identifier);
-            index += identifier.length; continue;
+            const end = index + identifier.length;
+            const type = json ? (SOURCE_LITERALS.has(identifier) ? 'number' : 'plain') : sourceIdentifierType(line, end, identifier, tokenizer);
+            push(type, identifier);
+            if (type === 'keyword') {
+              if (identifier === 'function') { tokenizer.declaration = 'function'; tokenizer.pendingParams = true; }
+              else if (identifier === 'class') tokenizer.declaration = 'class';
+              else if (identifier === 'extends') tokenizer.declaration = 'extends';
+            } else if (tokenizer.declaration === 'function' || tokenizer.declaration === 'class') {
+              tokenizer.declaration = '';
+            }
+            significant(identifier, type === 'number' || type === 'string' ? 'value' : 'word');
+            index = end; continue;
           }
-          const previous = sourcePreviousSignificant(line, index);
-          if (!json && character === '/' && next && !/[/\s]/.test(next) &&
-              (!previous || /[([{=,:;!&|?+\-*%^~<>]/.test(previous))) {
+          if (!json && character === '/' && sourceRegexAllowed(tokenizer)) {
             const end = regexpSourceEnd(line, index);
             if (end > index + 1) {
-              pushSourceToken(tokens, tokenizer, 'regexp', line.slice(index, end));
-              index = end; continue;
+              push('regexp', line.slice(index, end)); significant('/', 'value'); index = end; continue;
             }
           }
-          pushSourceToken(tokens, tokenizer, 'plain', character);
-          index += 1;
+          if ('([{'.includes(character)) {
+            const params = character === '(' && !json && sourceParameterList(line, index, tokenizer);
+            if (character === '{' && tokenizer.declaration === 'extends') tokenizer.declaration = '';
+            pushSourceBracket(tokens, tokenizer, character, true);
+            if (params) tokenizer.params = {depth: tokenizer.depth, defaults: false};
+            tokenizer.pendingParams = false;
+            if (tokenizer.declaration === 'function') tokenizer.declaration = '';
+            significant(character, 'open'); index += 1; continue;
+          }
+          if (')]}'.includes(character)) {
+            if (character === '}' && tokenizer.templates.at(-1) === tokenizer.depth) {
+              tokenizer.templates.pop();
+              pushSourceBracket(tokens, tokenizer, '}', false);
+              tokenizer.state = 'template';
+              index += 1; continue;
+            }
+            if (tokenizer.params?.depth === tokenizer.depth && character === ')') tokenizer.params = null;
+            pushSourceBracket(tokens, tokenizer, character, false);
+            while (tokenizer.ternaries.length && tokenizer.ternaries.at(-1) > tokenizer.depth) tokenizer.ternaries.pop();
+            significant(character, 'close'); index += 1; continue;
+          }
+          if (character === ',' || character === ';') {
+            if (tokenizer.params?.depth === tokenizer.depth) tokenizer.params.defaults = false;
+            if (tokenizer.declaration !== 'extends') tokenizer.declaration = '';
+            tokenizer.pendingParams = false;
+            push('punctuation', character); significant(character, 'punctuation'); index += 1; continue;
+          }
+          if (character === ':') {
+            const ternary = !json && tokenizer.ternaries.at(-1) === tokenizer.depth;
+            if (ternary) tokenizer.ternaries.pop();
+            tokenizer.declaration = '';
+            tokenizer.pendingParams = false;
+            push(ternary ? 'operator' : 'punctuation', ':'); significant(':', 'punctuation'); index += 1; continue;
+          }
+          const operator = json ? null : sourceMatchAt(SOURCE_OPERATOR_PATTERN, line, index);
+          if (operator) {
+            if (operator === '?') tokenizer.ternaries.push(tokenizer.depth);
+            if (operator === '=' && tokenizer.params?.depth === tokenizer.depth) tokenizer.params.defaults = true;
+            if (operator === '.' || operator === '?.') tokenizer.member = tokenizer.previousKind === 'word' ? tokenizer.previous : '';
+            else if (operator !== '=>' && tokenizer.declaration === 'extends') tokenizer.declaration = '';
+            push('operator', operator); significant(operator, 'operator'); index += operator.length; continue;
+          }
+          push('plain', character); index += 1;
         }
         return tokens;
       }
 
       function tokenizeCssSourceLine(line, tokenizer) {
         const tokens = [];
+        const push = (type, text) => pushSourceToken(tokens, tokenizer, type, text);
         let index = 0;
         while (index < line.length) {
           if (tokenizer.coloredTokens >= SOURCE_HIGHLIGHT_TOKEN_LIMIT) {
             tokenizer.truncated = true;
-            pushSourceToken(tokens, tokenizer, 'plain', line.slice(index));
+            push('plain', line.slice(index));
             break;
           }
           if (tokenizer.state === 'block-comment') {
             const end = line.indexOf('*/', index);
-            if (end === -1) { pushSourceToken(tokens, tokenizer, 'comment', line.slice(index)); break; }
-            pushSourceToken(tokens, tokenizer, 'comment', line.slice(index, end + 2));
+            if (end === -1) { push('comment', line.slice(index)); break; }
+            push('comment', line.slice(index, end)); push('comment-mark', '*/');
             tokenizer.state = 'code'; index = end + 2; continue;
           }
+          const space = sourceMatchAt(SOURCE_SPACE_PATTERN, line, index);
+          if (space) { push('plain', space); index += space.length; continue; }
           if (line.startsWith('/*', index)) {
+            push('comment-mark', '/*');
             const end = line.indexOf('*/', index + 2);
-            if (end === -1) {
-              pushSourceToken(tokens, tokenizer, 'comment', line.slice(index));
-              tokenizer.state = 'block-comment'; break;
-            }
-            pushSourceToken(tokens, tokenizer, 'comment', line.slice(index, end + 2));
+            if (end === -1) { push('comment', line.slice(index + 2)); tokenizer.state = 'block-comment'; break; }
+            push('comment', line.slice(index + 2, end)); push('comment-mark', '*/');
             index = end + 2; continue;
           }
           const character = line[index];
+          const value = tokenizer.cssValue;
           if (character === '"' || character === "'") {
             const end = quotedSourceEnd(line, index, character);
-            pushSourceToken(tokens, tokenizer, 'string', line.slice(index, end));
-            index = end; continue;
+            pushSourceString(tokens, tokenizer, line.slice(index, end)); index = end; continue;
           }
-          if (!sourceCssTokenStart(line, index)) {
-            const start = index;
-            do { index += 1; } while (index < line.length && !sourceCssTokenStart(line, index));
-            pushSourceToken(tokens, tokenizer, 'plain', line.slice(start, index));
-            continue;
+          // @media-like blocks hold rules; style blocks and preludes hold declarations.
+          const declarations = tokenizer.cssBlocks.at(-1) === 'declarations' || Boolean(tokenizer.cssAtRule);
+          if ('{[('.includes(character)) {
+            if (character === '{') {
+              tokenizer.cssBlocks.push(/^(?:media|supports|document|layer|container|scope|starting-style|(?:-\w+-)?keyframes)$/.test(tokenizer.cssAtRule) ? 'rules' : 'declarations');
+              tokenizer.cssAtRule = ''; tokenizer.cssValue = false;
+            }
+            pushSourceBracket(tokens, tokenizer, character, true); index += 1; continue;
           }
-          const color = sourceMatchAt(SOURCE_CSS_COLOR_PATTERN, line, index);
-          const number = sourceMatchAt(SOURCE_CSS_NUMBER_PATTERN, line, index);
-          if (color || number) {
-            const value = color || number;
-            pushSourceToken(tokens, tokenizer, 'number', value); index += value.length; continue;
+          if ('}])'.includes(character)) {
+            if (character === '}') { tokenizer.cssBlocks.pop(); tokenizer.cssValue = false; }
+            if (character === ')' && tokenizer.cssAtRule) tokenizer.cssValue = false;
+            pushSourceBracket(tokens, tokenizer, character, false); index += 1; continue;
+          }
+          if (character === ';' || character === ',') {
+            if (character === ';') { tokenizer.cssValue = false; tokenizer.cssAtRule = ''; }
+            push('punctuation', character); index += 1; continue;
+          }
+          if (character === ':' && declarations && !value) {
+            tokenizer.cssValue = true; push('punctuation', ':'); index += 1; continue;
+          }
+          if (value) {
+            const color = sourceMatchAt(SOURCE_CSS_COLOR_PATTERN, line, index);
+            if (color) { push('keyword', color); index += color.length; continue; }
+            const number = /[\d.+-]/.test(character) ? sourceMatchAt(SOURCE_CSS_NUMBER_PATTERN, line, index) : null;
+            if (number && /\d/.test(number)) {
+              push('number', number); index += number.length;
+              const unit = sourceMatchAt(SOURCE_CSS_UNIT_PATTERN, line, index);
+              if (unit) { push('unit', unit); index += unit.length; }
+              continue;
+            }
+            if (line.startsWith('!important', index)) { push('keyword', '!important'); index += 10; continue; }
+            if ('+-*/'.includes(character)) { push('operator', character); index += 1; continue; }
+          }
+          if (character === '@') {
+            const name = sourceMatchAt(SOURCE_CSS_IDENTIFIER_PATTERN, line, index + 1) ?? '';
+            tokenizer.cssAtRule = name.toLowerCase();
+            push('keyword', `@${name}`); index += name.length + 1; continue;
           }
           const identifier = sourceMatchAt(SOURCE_CSS_IDENTIFIER_PATTERN, line, index);
           if (identifier) {
-            const following = sourceNextSignificant(line, index + identifier.length);
-            pushSourceToken(tokens, tokenizer, identifier.startsWith('@') ? 'keyword' : following === ':' ? 'property' : 'type', identifier);
-            index += identifier.length; continue;
+            const following = line[index + identifier.length] ?? '';
+            const custom = identifier.startsWith('--');
+            const type = following === '(' ? 'builtin-function'
+              : value ? (custom ? 'property' : 'constant')
+                : declarations && sourceNextSignificant(line, index + identifier.length) === ':' ? (custom ? 'variable' : 'key')
+                  : 'tag';
+            push(type, identifier); index += identifier.length; continue;
           }
-          pushSourceToken(tokens, tokenizer, 'plain', character); index += 1;
+          if ((character === '.' || character === '#' || character === ':') && !value) {
+            const colons = line.startsWith('::', index) ? '::' : character;
+            const name = sourceMatchAt(SOURCE_CSS_IDENTIFIER_PATTERN, line, index + colons.length);
+            if (name) { push('attribute', colons + name); index += colons.length + name.length; continue; }
+          }
+          if (character === '*' && !value) { push('tag', '*'); index += 1; continue; }
+          if ('>+~'.includes(character) && !value) { push('operator', character); index += 1; continue; }
+          push('plain', character); index += 1;
         }
         return tokens;
       }
 
       function tokenizeMarkupTag(text, tokenizer, tokens) {
-        let index = 0;
+        const push = (type, value) => pushSourceToken(tokens, tokenizer, type, value);
+        const opener = text.match(/^<[/!?]?/)?.[0] ?? '';
+        push('tag-mark', opener);
+        let index = opener.length;
         let tagSeen = false;
         while (index < text.length) {
           if (tokenizer.coloredTokens >= SOURCE_HIGHLIGHT_TOKEN_LIMIT) {
             tokenizer.truncated = true;
-            pushSourceToken(tokens, tokenizer, 'plain', text.slice(index));
+            push('plain', text.slice(index));
             break;
           }
           const character = text[index];
           if (character === '"' || character === "'") {
             const end = quotedSourceEnd(text, index, character);
-            pushSourceToken(tokens, tokenizer, 'string', text.slice(index, end));
-            index = end; continue;
+            push('string', text.slice(index, end)); index = end; continue;
+          }
+          if (character === '>' || (character === '/' && text[index + 1] === '>')) {
+            const mark = character === '>' ? '>' : '/>';
+            push('tag-mark', mark); index += mark.length; continue;
+          }
+          if (character === '=') {
+            push('punctuation', '=');
+            const unquoted = text.slice(index + 1).match(/^[^\s"'=<>`/]+/)?.[0];
+            if (unquoted) push('string', unquoted);
+            index += 1 + (unquoted?.length ?? 0); continue;
           }
           const identifier = sourceMatchAt(SOURCE_MARKUP_IDENTIFIER_PATTERN, text, index);
           if (identifier) {
-            pushSourceToken(tokens, tokenizer, tagSeen ? 'attribute' : 'tag', identifier);
+            push(tagSeen ? 'attribute' : 'tag', identifier);
             tagSeen = true; index += identifier.length; continue;
           }
-          pushSourceToken(tokens, tokenizer, 'plain', character); index += 1;
+          push('plain', character); index += 1;
         }
       }
 
       function tokenizeMarkupSourceLine(line, tokenizer) {
         const tokens = [];
+        const push = (type, text) => pushSourceToken(tokens, tokenizer, type, text);
         let index = 0;
         while (index < line.length) {
           if (tokenizer.coloredTokens >= SOURCE_HIGHLIGHT_TOKEN_LIMIT) {
             tokenizer.truncated = true;
-            pushSourceToken(tokens, tokenizer, 'plain', line.slice(index));
+            push('plain', line.slice(index));
             break;
           }
           if (tokenizer.state === 'markup-comment') {
             const end = line.indexOf('-->', index);
-            if (end === -1) { pushSourceToken(tokens, tokenizer, 'comment', line.slice(index)); break; }
-            pushSourceToken(tokens, tokenizer, 'comment', line.slice(index, end + 3));
+            if (end === -1) { push('comment', line.slice(index)); break; }
+            push('comment', line.slice(index, end)); push('comment-mark', '-->');
             tokenizer.state = 'code'; index = end + 3; continue;
           }
           const tag = line.indexOf('<', index);
           if (tag === -1) {
-            pushSourceToken(tokens, tokenizer, 'plain', line.slice(index)); break;
+            tokenizeMarkupText(line.slice(index), tokens, tokenizer); break;
           }
-          pushSourceToken(tokens, tokenizer, 'plain', line.slice(index, tag));
+          tokenizeMarkupText(line.slice(index, tag), tokens, tokenizer);
           if (line.startsWith('<!--', tag)) {
+            push('comment-mark', '<!--');
             const end = line.indexOf('-->', tag + 4);
-            if (end === -1) {
-              pushSourceToken(tokens, tokenizer, 'comment', line.slice(tag));
-              tokenizer.state = 'markup-comment'; break;
-            }
-            pushSourceToken(tokens, tokenizer, 'comment', line.slice(tag, end + 3));
+            if (end === -1) { push('comment', line.slice(tag + 4)); tokenizer.state = 'markup-comment'; break; }
+            push('comment', line.slice(tag + 4, end)); push('comment-mark', '-->');
             index = end + 3; continue;
           }
           const end = line.indexOf('>', tag + 1);
@@ -914,6 +1140,16 @@
           index = end + 1;
         }
         return tokens;
+      }
+
+      function tokenizeMarkupText(text, tokens, tokenizer) {
+        let last = 0;
+        for (const match of text.matchAll(/&(?:#\d+|#x[\da-fA-F]+|[A-Za-z][\w]*);/g)) {
+          pushSourceToken(tokens, tokenizer, 'plain', text.slice(last, match.index));
+          pushSourceToken(tokens, tokenizer, 'escape', match[0]);
+          last = match.index + match[0].length;
+        }
+        pushSourceToken(tokens, tokenizer, 'plain', text.slice(last));
       }
 
       function tokenizeWasmSourceLine(line, tokenizer) {

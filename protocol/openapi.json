@@ -4672,6 +4672,196 @@
         }
       }
     },
+    "/api/source-format": {
+      "get": {
+        "operationId": "get_source_format",
+        "summary": "Get a Prettier-style layout of one JavaScript artifact",
+        "description": "Requires exact session_id and artifact_id for an immutable JavaScript artifact of at most 16 MiB that passes size, SHA256 and strict UTF-8 checks. A contained Oxc worker lays the tokens out at 80 columns with 2-space indentation; every token and comment is printed as its original source slice and only whitespace between them changes, so mapping is whitespace-only: removing ECMAScript whitespace from text and from the original yields identical strings. The worker re-lexes its output and the service repeats the whitespace check before returning or caching (by SHA-256) a result. Source that does not parse, layouts over four times the source size, fidelity failures and the memory ceiling are a successful unavailable result with a reason, never a fallback layout. Optional start_line and line_count return one window of formatted lines; line_count always reports the whole layout.",
+        "tags": [
+          "source-format"
+        ],
+        "x-source": "apps/origin-trace-backend/src/app.rs",
+        "parameters": [
+          {
+            "name": "session_id",
+            "in": "query",
+            "required": true,
+            "description": "Exact captured artifact identity; no fallback selection.",
+            "schema": {
+              "$ref": "#/components/schemas/Uint64String"
+            }
+          },
+          {
+            "name": "artifact_id",
+            "in": "query",
+            "required": true,
+            "description": "Exact captured artifact identity; no fallback selection.",
+            "schema": {
+              "$ref": "#/components/schemas/Uint64String"
+            }
+          },
+          {
+            "name": "start_line",
+            "in": "query",
+            "required": false,
+            "description": "Optional first formatted line, counted from 1. Requires line_count and must not exceed the layout's line_count.",
+            "schema": {
+              "$ref": "#/components/schemas/NonzeroUint64String"
+            }
+          },
+          {
+            "name": "line_count",
+            "in": "query",
+            "required": false,
+            "description": "Optional number of formatted lines from start_line, at most 10000. Requires start_line.",
+            "schema": {
+              "$ref": "#/components/schemas/NonzeroUint64String"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SourceFormat"
+                }
+              }
+            },
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Host/Origin/Sec-Fetch-Site rejected.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Requested record not found.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "408": {
+            "description": "Bounded worker timed out.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Local artifact, evidence-store, or worker I/O failure.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "JavaScript formatter worker terminated or returned an invalid response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Required worker unavailable.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "x-reb-execution": {
+          "kind": "operation",
+          "effects": [
+            "analysis",
+            "process-launch"
+          ],
+          "state_dependent_effects": [
+            {
+              "effects": [
+                "process-stop"
+              ],
+              "when": "The contained JavaScript formatter worker process group is cleaned up on completion or failure."
+            }
+          ],
+          "uncertainties": [
+            "The layout follows a subset of Prettier's rules; it never adds, removes or rewrites tokens, so semicolons, quotes and parentheses stay as captured."
+          ],
+          "prerequisites": [
+            {
+              "id": "local-request",
+              "condition": "Host must name the exact loopback listening port; cross-site Sec-Fetch-Site is rejected; an optional Origin must pass App::trusted."
+            },
+            {
+              "id": "exact-source",
+              "condition": "Exact session_id and artifact_id select one verified immutable UTF-8 JavaScript artifact of at most 16 MiB."
+            },
+            {
+              "id": "formatter-worker",
+              "condition": "The backend executable must start its contained formatter worker; one formatter runs at a time and later requests wait for it."
+            }
+          ],
+          "confirmations": [],
+          "notes": "Read-only display layout of retained local evidence. No runtime execution, browser control, model call, network request or artifact mutation. Results are cached in memory by SHA-256.",
+          "sources": [
+            {
+              "path": "apps/origin-trace-backend/src/app.rs",
+              "symbol": "App::get"
+            },
+            {
+              "path": "apps/origin-trace-backend/src/source_format.rs",
+              "symbol": "load"
+            },
+            {
+              "path": "apps/origin-trace-backend/src/source_format.rs",
+              "symbol": "SourceFormat::format"
+            }
+          ]
+        },
+        "x-reb-execution-schema": {
+          "$ref": "#/components/schemas/RebExecutionMetadata"
+        }
+      }
+    },
     "/api/float32/compare": {
       "post": {
         "operationId": "compare_float32",
@@ -21038,6 +21228,150 @@
             }
           }
         ]
+      },
+      "SourceFormat": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "schema",
+          "source",
+          "status",
+          "reason",
+          "detail",
+          "language",
+          "engine",
+          "layout",
+          "mapping",
+          "line_count",
+          "window",
+          "text",
+          "cached",
+          "limits"
+        ],
+        "properties": {
+          "schema": {
+            "const": "source-format-v1"
+          },
+          "source": {
+            "type": "object",
+            "description": "Public identity of the verified artifact, as in Artifact without content_path."
+          },
+          "status": {
+            "enum": [
+              "formatted",
+              "unavailable"
+            ]
+          },
+          "reason": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "enum": [
+                  "parse-failed",
+                  "output-limit",
+                  "fidelity-check-failed",
+                  "memory-limit"
+                ]
+              }
+            ]
+          },
+          "detail": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "language": {
+            "const": "javascript"
+          },
+          "engine": {
+            "type": "string"
+          },
+          "layout": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "print_width",
+              "indent"
+            ],
+            "properties": {
+              "print_width": {
+                "const": 80
+              },
+              "indent": {
+                "const": 2
+              }
+            }
+          },
+          "mapping": {
+            "const": "whitespace-only",
+            "description": "Only ECMAScript WhiteSpace and LineTerminator characters differ from the original source."
+          },
+          "line_count": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 1
+          },
+          "window": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "start_line",
+                  "line_count"
+                ],
+                "properties": {
+                  "start_line": {
+                    "type": "integer",
+                    "minimum": 1
+                  },
+                  "line_count": {
+                    "type": "integer",
+                    "minimum": 0
+                  }
+                }
+              }
+            ]
+          },
+          "text": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The formatted text, or the requested window of it. Null when unavailable."
+          },
+          "cached": {
+            "type": "boolean"
+          },
+          "limits": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "max_source_bytes",
+              "max_output_ratio",
+              "max_window_lines"
+            ],
+            "properties": {
+              "max_source_bytes": {
+                "const": 16777216
+              },
+              "max_output_ratio": {
+                "const": 4
+              },
+              "max_window_lines": {
+                "const": 10000
+              }
+            }
+          }
+        }
       },
       "JavaScriptSourceTarget": {
         "oneOf": [

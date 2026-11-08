@@ -16,6 +16,9 @@ const invocationSitesPanel = createInvocationSitesPanel({
   onShow: showInvocationSites
 });
 invocationSitesPanel.refresh();
+const sourceFormatClient = createSourceFormatClient({
+  onChange: source => { if (state.sourceFormatted && sourceIdentity(selectedSource()) === sourceIdentity(source)) renderSources(); }
+});
       const evidencePackagePanel = createEvidencePackagePanel({getContext: () => ({
         requestId: evidenceRequestKey(state.requests.find(request => request.id === state.selectedRequestId)),
         requestEvents: state.requests.find(request => request.id === state.selectedRequestId)?.events ?? [],
@@ -6458,9 +6461,13 @@ invocationSitesPanel.refresh();
 
       function appendSourceSyntax(container, tokens) {
         const fragment = document.createDocumentFragment();
-        tokens.forEach(token => {
-          if (token.type === 'plain') fragment.append(document.createTextNode(token.text));
-          else {
+        tokens.forEach((token, at) => {
+          if (token.type === 'plain') {
+            // Leading indentation carries the editor's indent guides.
+            const indent = at === 0 ? token.text.match(/^[ \t]+/)?.[0] : null;
+            if (indent) fragment.append(textElement('span', 'source-indent', indent));
+            fragment.append(document.createTextNode(indent ? token.text.slice(indent.length) : token.text));
+          } else {
             const span = document.createElement('span');
             span.className = `syntax-${token.type}`;
             span.textContent = token.text;
@@ -6598,10 +6605,13 @@ invocationSitesPanel.refresh();
       }
 
       function sourceFormattedView(source, value, variant) {
+        // The backend Oxc layout for JavaScript evidence; otherwise the in-page formatter.
+        const backend = variant === 'original' ? sourceFormatClient.view(source, value) : null;
+        if (backend && !backend.fallback) return backend;
         const key = `${sourceIdentity(source)}|${variant}`;
         const prior = state.sourceFormatCache.get(key);
-        if (prior?.sourceInput === value) return prior;
-        const formatted = {...prettyPrintSource(source, value), sourceInput: value};
+        if (prior?.sourceInput === value && prior.notice === (backend?.notice ?? null)) return prior;
+        const formatted = {...prettyPrintSource(source, value), sourceInput: value, notice: backend?.notice ?? null};
         state.sourceFormatCache.set(key, formatted);
         boundSourceAnalysis(state.sourceFormatCache, 2, 6 * 1024 * 1024, 500000);
         return formatted;
@@ -6625,8 +6635,10 @@ invocationSitesPanel.refresh();
         const formatResult = state.sourceFormatted
           ? sourceFormattedView(source, active, derived ? `derived:${deobfuscationKey(source)}` : 'original')
           : null;
-        const formatted = formatResult && !formatResult.error ? formatResult : null;
+        const formatted = formatResult && !formatResult.error && !formatResult.pending ? formatResult : null;
         return {
+          formatPending: Boolean(formatResult?.pending),
+          formatNotice: formatResult?.notice ?? null,
           original,
           derived,
           active,
@@ -6749,7 +6761,7 @@ invocationSitesPanel.refresh();
           const mapped = lineMap ? lineMap[index] ?? null : mappedLines?.[rowIndex] ?? null;
           const mappedLine = mapped?.originalLine ?? null;
           const row = document.createElement('span');
-          row.className = 'source-line';
+          row.className = index === window.line ? 'source-line current-line' : 'source-line';
           row.dataset.line = String(index + 1);
           row.dataset.localLine = String(index);
           row.dataset.columnStart = String(excerpt.columnStart);
@@ -6854,6 +6866,7 @@ invocationSitesPanel.refresh();
 
       function syncSourceDisplayControls(source, view) {
         elements.sourceViewKind.textContent = sourceViewLabel(source, view);
+        elements.sourceViewKind.title = elements.sourceViewKind.textContent;
         elements.sourceWasm.hidden = source?.kind !== 'wasm' || source?.source_type !== 'artifact';
         elements.sourceWasm.setAttribute('aria-pressed', String(state.sourceWasm));
         elements.sourceWasm.setAttribute('aria-label', state.sourceWasm ? 'Show original WASM hex' : 'Inspect WebAssembly module');
@@ -6883,12 +6896,14 @@ invocationSitesPanel.refresh();
         const original = sourceFactsPanel.original(source) !== undefined ? 'Verified original evidence'
           : `Original evidence preview${source?.contentLossy ? ' · lossy UTF-8 display' : ''}${source?.contentTruncated ? ' · truncated' : ''}`;
         if (view?.formatError) return `${original} · ${view.formatError}`;
+        if (view?.formatPending) return `${original} · formatting with Oxc…`;
+        if (view?.formatNotice && !state.sourceDeobfuscated) return `Pretty printed ${original.toLowerCase()} · whitespace formatter · ${view.formatNotice}`;
         if (state.sourceDeobfuscated && sourceDerivedView(source)) {
           const status = state.deobfuscationRequests.get(deobfuscationKey(source))?.status;
           return `${state.sourceFormatted ? 'Pretty printed derived' : 'Derived'} · mapped to original source${status === 'error' ? ' · last successful analysis' : status === 'loading' ? ' · reanalyzing' : status === 'cancelled' ? ' · analysis cancelled' : ''}`;
         }
         if (!state.sourceDeobfuscated || !source) {
-          return state.sourceFormatted && source ? `Pretty printed ${original.toLowerCase()} · mapped to original source` : original;
+          return state.sourceFormatted && source ? `Pretty printed ${original.toLowerCase()} · ${view?.formatted?.engine === 'oxc' ? 'Oxc layout · ' : ''}mapped to original source` : original;
         }
         const request = state.deobfuscationRequests.get(deobfuscationKey(source));
         const prefix = state.sourceFormatted ? `Pretty printed ${original.toLowerCase()}` : original;
@@ -8300,7 +8315,23 @@ invocationSitesPanel.refresh();
       elements.sourcePretty.addEventListener('click', () => {
         sourceFactsPanel.cancel();
         state.sourceFormatted = !state.sourceFormatted;
+        if (state.sourceFormatted) sourceFormatClient.forget(selectedSource());
         renderSources();
+      });
+      // A formatted token reports the exact raw range it was printed from.
+      elements.sourceCode.addEventListener('click', event => {
+        const editor = state.sourceEditorView, view = editor?.view;
+        const token = event.target instanceof Element ? event.target.closest('.source-text > span:not(.source-indent)') : null;
+        const row = token?.closest('.source-line');
+        if (!view?.formatted || view.derived || !token || !row || editor.identity !== sourceIdentity(selectedSource())) return;
+        let column = Number(row.dataset.columnStart ?? 0);
+        for (let node = token.previousSibling; node; node = node.previousSibling) column += node.textContent.length;
+        const start = sourceDocumentOffset(editor.index, Number(row.dataset.localLine)) + column;
+        const range = sourceFormatRawRange(sourceSegmentsUTF16(view.active, view.formatted.text, view.formatted.segments, view.formatted.offset_unit), start, start + token.textContent.length);
+        if (!range) return;
+        const original = sourceDocumentIndex(view.active), from = sourceDocumentPosition(original, range.start), to = sourceDocumentPosition(original, range.end);
+        if (!from || !to) return;
+        elements.sourcePosition.textContent = `Line ${row.dataset.line}, Column ${column + 1} · raw ${from.line + 1}:${from.column + 1}–${to.line + 1}:${to.column + 1} (offsets ${range.start}–${range.end})`;
       });
       // Search all files. Reads use the artifact content route with the Sources
       // preview's 2 MiB limit and checks. A loaded preview is reused as is;

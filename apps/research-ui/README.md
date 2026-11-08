@@ -848,6 +848,7 @@ policy and trace assertions; it is not evidence of native lifecycle behavior.
 | `captured_client.js`, `captured_export_formats.js` | Saved-capture identity, local export dialog, and the client-project/HAR/SDL generators shared with offline commands |
 | `source_search.js` | Search all files: the literal matcher on the Find index, the bounded and cancellable search, partial-result notes and the results panel; `app.js` supplies the artifact reader and the open path |
 | `source_syntax.js` | Source names, display formatting, the inert hex view for Wasm and guest bytecode artifacts, and bounded tokenization without DOM or application state |
+| `source_format.js` | The backend JavaScript layout client and its whitespace-only mapping to the displayed evidence |
 | `native_console.js`, `native_console_completion.js` | Disposable browser console controls and local built-in API completion |
 | `../origin-trace-backend/src/app.rs`, `evidence.rs` | Loopback HTTP routing and bounded evidence reads |
 | `../origin-trace-backend/src/workspace.rs`, `analyst.rs`, `workspace_lease.rs` | Workspace contracts, explicit analyst execution, private durable replacement |
@@ -942,7 +943,12 @@ resource filters stay visible below search and wrap within narrow windows. Selec
 and below it on narrow windows. Session
 counts come from loaded requests, and sample evidence stays visibly labeled.
 Keep labels at least 10 px and reserve stronger color for selection, connection
-state, errors, and evidence confidence.
+state, errors, and evidence confidence. Code is the exception: Sources and the
+Native Console color code like the Rosé Pine Moon VS Code theme (Rosé Pine
+Dawn in light mode), with its token colors, bracket pair colors, editor colors
+and Menlo 12/18 px; the Analyst editor takes the same editor colors and font. With macOS Increase Contrast, comments and
+keywords are brightened. `node tools/check-source-format-ui.mjs` (part of
+`make lint`) pins the token kinds and colors.
 
 Tool workspaces put the next action before implementation details. Decoder
 controls follow input, transformation, and result order; chain editing stays
@@ -1224,7 +1230,15 @@ reached; no safe rewrites is not a claim that source is unobfuscated. This is a
 separate ephemeral derived view, not a persisted replacement capture.
 
 The adjacent **{ }** control pretty prints JavaScript, JSON, CSS, and HTML using
-the detected source type. It can format either the original evidence or the
+the detected source type. A complete JavaScript artifact is laid out by the
+backend's Oxc formatter (`get_source_format`, [Source format v1](../../protocol/source-format-v1.md)):
+Prettier's layout at 80 columns, with every token printed as captured. Its
+text differs from the evidence only in whitespace, so the editor maps every
+character back by walking both texts, and clicking a formatted token shows the
+exact raw range it came from. While it runs the original stays on screen. If
+the source does not parse, the backend is unavailable, or the text is derived,
+truncated or another language, the in-page formatter below is used and the
+status bar says so. It can format either the original evidence or the
 active deobfuscated representation, so an unchanged deobfuscation result does
 not leave a minified bundle on one line. Pretty printing changes only display
 whitespace, keeps source-line mappings back to the captured bytes, and never

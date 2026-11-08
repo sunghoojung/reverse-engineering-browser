@@ -1365,9 +1365,11 @@ Traffic is grouped by browser tab with an All tabs scope and a domain
 selector. Each chip is named by its tab's newest main-frame page. A worker
 request linked to several tabs (`request_tabs.js`, from `tab_set` and
 `request_tab_link`) appears in each with a marker such as "Service worker · 2
-tabs"; All tabs counts it once. The request index joins the same links, so
+tabs"; All tabs counts it once. Extension traffic recorded with
+`REB_CAPTURE_EXTENSION_TRAFFIC=1` (`request_extension_link`) has one
+"Extension <id>" chip per extension. The request index joins the same links, so
 chips, the tab filter and the footer count cover the whole session. There is no
-Unattributed group: a row without a tab is a capture error, counted in the
+Unattributed group: a row without an owner is a capture error, counted in the
 footer, whose button lists those rows.
 See [request owners and tabs](../../protocol/native-network-v3.md#request-owners-and-tabs).
 Evidence retains the original payload and trace actions; General, Initiator and

@@ -92,6 +92,7 @@ bool IsKnownType(const EventType type) noexcept {
     case EventType::kCaptureExclusion:
     case EventType::kTabSet:
     case EventType::kRequestTabLink:
+    case EventType::kRequestExtensionLink:
     case EventType::kRequestInitiatorStack:
     case EventType::kScriptIdentity:
     case EventType::kRequestWatchMatch:
@@ -215,6 +216,9 @@ bool IsValidEvent(const EventRecord& event) noexcept {
   if (event.header.type == EventType::kTabSet && !IsValidTabSetEvent(event))
     return false;
   if (event.header.type == EventType::kRequestTabLink && !IsValidRequestTabLinkEvent(event))
+    return false;
+  if (event.header.type == EventType::kRequestExtensionLink &&
+      !IsValidRequestExtensionLinkEvent(event))
     return false;
   if (!IsKnownSchemeClass(event.header.scheme_class) ||
       (event.header.scheme_class != 0 && !CarriesSchemeClass(event.header)) ||
@@ -425,6 +429,8 @@ std::string_view EventTypeName(const EventType type) noexcept {
       return "tab_set";
     case EventType::kRequestTabLink:
       return "request_tab_link";
+    case EventType::kRequestExtensionLink:
+      return "request_extension_link";
     case EventType::kRequestInitiatorStack:
       return "request_initiator_stack";
     case EventType::kScriptIdentity:

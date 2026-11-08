@@ -43,6 +43,9 @@ inline constexpr std::size_t kTabSetPartTabs = 26;
 inline constexpr std::uint8_t kTabSetLastClients = 1;
 inline constexpr std::uint16_t kRequestTabLinkPayloadVersion = 1;
 inline constexpr std::size_t kRequestTabLinkPayloadSize = 24;
+inline constexpr std::uint16_t kRequestExtensionLinkPayloadVersion = 1;
+inline constexpr std::size_t kRequestExtensionLinkPayloadSize = 40;
+inline constexpr std::size_t kExtensionIdSize = 32;
 
 [[nodiscard]] constexpr bool IsBrowserLoaderKind(const std::uint8_t value) noexcept {
   return value >= 1 && value <= 10;
@@ -78,12 +81,27 @@ inline std::uint64_t At(const std::span<const std::byte> bytes,
   return result;
 }
 
+inline bool QuietLinkFields(const EventHeader& h) noexcept {
+  return h.navigation_id == 0 && h.artifact_id == 0 && h.encoded_data_length == 0 &&
+         h.decoded_body_length == 0 && h.status_code == 0 && h.error_code == 0 &&
+         h.resource_type == 0 && h.flags == 0 && h.scheme_class == 0 && h.loader_kind == 0;
+}
+
 inline bool ZeroRequestFields(const EventHeader& h) noexcept {
-  return h.navigation_id == 0 && h.artifact_id == 0 && h.request_id == 0 &&
-         h.browser_context_id_high == 0 && h.browser_context_id_low == 0 &&
-         h.encoded_data_length == 0 && h.decoded_body_length == 0 && h.status_code == 0 &&
-         h.error_code == 0 && h.resource_type == 0 && h.flags == 0 && h.scheme_class == 0 &&
-         h.loader_kind == 0;
+  return QuietLinkFields(h) && h.request_id == 0 && h.browser_context_id_high == 0 &&
+         h.browser_context_id_low == 0;
+}
+
+// A browser record without a renderer request is named by its request id and context.
+inline bool NamesBrowserRecord(const EventHeader& h) noexcept {
+  return h.initiator_process_id == 0 && h.initiator_request_id == 0 && h.request_id != 0 &&
+         (h.browser_context_id_high != 0 || h.browser_context_id_low != 0);
+}
+
+inline bool NamesLinkedRecord(const EventHeader& h) noexcept {
+  const bool renderer = h.initiator_process_id != 0 && h.request_id == 0 &&
+                        h.browser_context_id_high == 0 && h.browser_context_id_low == 0;
+  return QuietLinkFields(h) && h.parent_event_id != 0 && (renderer || NamesBrowserRecord(h));
 }
 }  // namespace tab_link_detail
 
@@ -134,8 +152,8 @@ struct TabSetPayload final {
   TabSetPayload value;
   return h.category == EventCategory::kNetwork && h.type == EventType::kTabSet &&
          h.payload_size == kTabSetPayloadSize && h.session_id != 0 && h.sequence_number != 0 &&
-         h.process_id != 0 && h.frame_id != 0 && h.initiator_request_id == 0 &&
-         h.initiator_process_id == 0 && tab_link_detail::ZeroRequestFields(h) &&
+         h.process_id != 0 && h.initiator_request_id == 0 && h.initiator_process_id == 0 &&
+         tab_link_detail::ZeroRequestFields(h) &&
          DecodeTabSetPayload(event.inline_payload, value) && h.tab_id == value.tabs[0] &&
          (value.part_index == 0) == (h.parent_event_id == 0);
 }
@@ -160,17 +178,52 @@ struct RequestTabLinkPayload final {
   return value.link_kind >= 1 && value.link_kind <= 4 && value.set_id != 0 && value.tab_count != 0;
 }
 
-// A browser record naming one renderer request_initiated by its producer,
-// request id and sequence; tab_id is the set's only tab, else 0.
+// tab_id is the set's only tab, else 0.
 [[nodiscard]] inline bool IsValidRequestTabLinkEvent(const EventRecord& event) noexcept {
   const auto& h = event.header;
   RequestTabLinkPayload value;
   return h.category == EventCategory::kNetwork && h.type == EventType::kRequestTabLink &&
          h.payload_size == kRequestTabLinkPayloadSize && h.session_id != 0 &&
-         h.sequence_number != 0 && h.process_id != 0 && h.initiator_process_id != 0 &&
-         h.parent_event_id != 0 && tab_link_detail::ZeroRequestFields(h) &&
+         h.sequence_number != 0 && h.process_id != 0 && tab_link_detail::NamesLinkedRecord(h) &&
          DecodeRequestTabLinkPayload(event.inline_payload, value) &&
          (value.tab_count == 1) == (h.tab_id != 0);
+}
+
+struct RequestExtensionLinkPayload final {
+  std::uint8_t loader_kind = 0;
+  std::array<char, kExtensionIdSize> extension_id{};
+};
+
+// Chromium extension ids are 32 letters a to p.
+[[nodiscard]] inline bool DecodeRequestExtensionLinkPayload(
+    const std::span<const std::byte> bytes,
+    RequestExtensionLinkPayload& value) noexcept {
+  using tab_link_detail::At;
+  if (bytes.size() < kRequestExtensionLinkPayloadSize ||
+      At(bytes, 0, 2) != kRequestExtensionLinkPayloadVersion ||
+      At(bytes, 2, 2) != kRequestExtensionLinkPayloadSize || At(bytes, 5, 3) != 0)
+    return false;
+  value.loader_kind = static_cast<std::uint8_t>(At(bytes, 4, 1));
+  for (std::size_t index = 0; index < kExtensionIdSize; ++index) {
+    value.extension_id[index] = static_cast<char>(At(bytes, 8 + index, 1));
+    if (value.extension_id[index] < 'a' || value.extension_id[index] > 'p')
+      return false;
+  }
+  return value.loader_kind == static_cast<std::uint8_t>(LoaderKind::kWorkerMainResource) ||
+         value.loader_kind == static_cast<std::uint8_t>(LoaderKind::kServiceWorkerScript) ||
+         IsWorkerOwnerKind(value.loader_kind);
+}
+
+// A browser record is a worker script the browser fetched (loader kind 4 or 6).
+[[nodiscard]] inline bool IsValidRequestExtensionLinkEvent(const EventRecord& event) noexcept {
+  const auto& h = event.header;
+  RequestExtensionLinkPayload value;
+  return h.category == EventCategory::kNetwork && h.type == EventType::kRequestExtensionLink &&
+         h.payload_size == kRequestExtensionLinkPayloadSize && h.session_id != 0 &&
+         h.sequence_number != 0 && h.process_id != 0 && h.tab_id == 0 &&
+         tab_link_detail::NamesLinkedRecord(h) &&
+         DecodeRequestExtensionLinkPayload(event.inline_payload, value) &&
+         tab_link_detail::NamesBrowserRecord(h) == !IsWorkerOwnerKind(value.loader_kind);
 }
 }  // namespace reb
 #endif

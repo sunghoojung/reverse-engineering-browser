@@ -113,16 +113,28 @@ in-flight pool bounds bytes in flight rather than bodies
 Request records carry a scheme class (`common/native_network_scope.h`).
 Renderers count `chrome:`, `devtools:` and other internal-scheme requests in
 the shared queue instead of recording them, and the session does not admit
-WebUI renderer processes; the browser reports both as `capture_exclusion`
-records unless `--reb-capture-browser-internal` is set. Chromium patch
+WebUI renderer processes: WebUI bindings, or a process lock to an internal
+scheme (`browser/native_capture_scope.h`, Chromium patch
+`0035-expose-process-lock-scheme`). The proxy counts internal-scheme loads it
+sees and the requests WebUI renderers send through it. The browser reports
+all of them as `capture_exclusion` records unless
+`--reb-capture-browser-internal` is set. Chromium patch
 `0026-finish-renderer-answered-requests` keeps a `renderer/native_renderer_request.h`
 value in Blink's loader so `data:`, `blob:` and service-worker answers get a
 renderer completion. See
 [Native network v3](../../../../../../protocol/native-network-v3.md).
 
 Each request names the tab that caused it. Brave patch
-`0017-link-requests-to-tab-owners` records a factory's tab when it is created,
-and counts DevTools and extension-worker factories instead of recording them.
+`0017-link-requests-to-tab-owners` records a factory's tab when it is created;
+Brave patch `0020-scope-native-proxy-factories` moves that decision to
+`browser/native_factory_scope.h`, which counts DevTools, extension-worker and
+WebUI factories instead of recording them, and records extension workers under
+their extension id with `--reb-capture-extension-traffic`. Frameless script
+factories read the owner content scopes around their creation through the
+`factory_owner_hook` component (Chromium patch
+`0036-name-frameless-script-fetch-owners`): a nested worker's ancestor
+document, a service worker's `register()` caller or the clients of the version
+it updates.
 Chromium patch `0027-record-renderer-fetch-owners` scopes the fetch's own
 document or worker (`renderer/native_fetch_owner.h`) around `SendAsync`, so
 `request_initiated` carries a loader kind and that owner. `browser/native_tab_registry.h`

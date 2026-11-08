@@ -66,6 +66,7 @@ readonly capture_request_content="${REB_CAPTURE_REQUEST_CONTENT:-0}"
 # Browser-internal pages (chrome:, devtools: and WebUI renderers) are excluded
 # and counted unless this is 1 (native-network-v3.md).
 readonly capture_browser_internal="${REB_CAPTURE_BROWSER_INTERNAL:-0}"
+readonly capture_extension_traffic="${REB_CAPTURE_EXTENSION_TRAFFIC:-0}"
 # Unique body and full-target bytes one content session retains.
 readonly request_content_budget_mib="${REB_REQUEST_CONTENT_BUDGET_MIB:-256}"
 # Content sessions also retain response bodies (native-network-v3.md): unique
@@ -246,6 +247,9 @@ if [[ "${capture_request_content}" != 0 && "${capture_request_content}" != 1 ]];
 fi
 if [[ "${capture_browser_internal}" != 0 && "${capture_browser_internal}" != 1 ]]; then
   fail_live_session 2 "REB_CAPTURE_BROWSER_INTERNAL must be 0 or 1."
+fi
+if [[ "${capture_extension_traffic}" != 0 && "${capture_extension_traffic}" != 1 ]]; then
+  fail_live_session 2 "REB_CAPTURE_EXTENSION_TRAFFIC must be 0 or 1."
 fi
 if ! [[ "${request_content_budget_mib}" =~ ^[1-9][0-9]{0,3}$ ]] || ((request_content_budget_mib > 4096)); then
   fail_live_session 2 "REB_REQUEST_CONTENT_BUDGET_MIB must be an integer from 1 to 4096."
@@ -898,6 +902,9 @@ fi
 if [[ "${capture_browser_internal}" == 1 ]]; then
   brave_arguments+=(--reb-capture-browser-internal)
 fi
+if [[ "${capture_extension_traffic}" == 1 ]]; then
+  brave_arguments+=(--reb-capture-extension-traffic)
+fi
 if [[ "${use_system_keychain}" == 0 ]]; then
   brave_arguments+=(--use-mock-keychain)
 fi
@@ -983,6 +990,11 @@ if [[ "${capture_browser_internal}" == 1 ]]; then
   echo "Browser-internal capture: enabled; chrome:, devtools: and WebUI renderer evidence is recorded"
 else
   echo "Browser-internal capture: excluded and counted; set REB_CAPTURE_BROWSER_INTERNAL=1 to record it"
+fi
+if [[ "${capture_extension_traffic}" == 1 ]]; then
+  echo "Extension worker traffic: recorded under each extension id"
+else
+  echo "Extension worker traffic: excluded and counted; set REB_CAPTURE_EXTENSION_TRAFFIC=1 to record it"
 fi
 if [[ "${console_document_start}" == 1 && "${native_console_bound}" == 1 ]]; then
   echo "Console document-start scripts: permitted for this capture browser; nothing runs until a live Console connection arms a confirmed rule"

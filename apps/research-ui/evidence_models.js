@@ -36,7 +36,7 @@
           'js_invocation_request', 'wasm_dispatch_overflow', 'wasm_indirect_overflow',
           'artifact_captured', 'artifact_capture_failed', 'request_body', 'request_target', 'response_body',
           'request_headers', 'response_headers', 'cookie_list', 'script_cookie', 'request_initiator_stack',
-          'script_identity', 'capture_exclusion', 'tab_set', 'request_tab_link'
+          'script_identity', 'capture_exclusion', 'tab_set', 'request_tab_link', 'request_extension_link'
         ])
       };
       // Scheme classes of protocol/native-network-v3.md; absent means 0.
@@ -76,7 +76,8 @@
       const networkRequestDetailTypes = new Set(['request_target', 'request_body', 'response_body', 'request_headers',
         'response_headers', 'cookie_list', 'request_initiator_stack']);
       // Session-level network records the backend keeps in its network window.
-      const networkContextTypes = new Set(['capture_exclusion', 'tab_set', 'request_tab_link']);
+      const networkContextTypes = new Set(['capture_exclusion', 'tab_set', 'request_tab_link',
+        'request_extension_link']);
       const networkRequestArtifactKinds = new Set(['request_body', 'request_target', 'request_headers', 'response_headers',
         'cookie_list']);
       const artifactKinds = new Set([

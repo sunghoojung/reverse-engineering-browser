@@ -526,12 +526,28 @@ void NativeProbeHostBrowserInternalScope() {
         "A detached WebUI renderer is never configured again and counts once");
   security.webui.clear();
 
+  // chrome-untrusted: and devtools: renderers have no WebUI bindings; their
+  // process lock names the scheme.
+  security.locks[1] = "chrome-untrusted";
+  RecordingProbeClient untrusted;
+  reb::NativeProbeHost locked(session, 1);
+  locked.BindClient({&untrusted});
+  Check(untrusted.configured == 0 && session.webui_excluded == 2,
+        "A renderer locked to an internal scheme is never configured and counts once");
+  security.locks[1] = "https";
+  RecordingProbeClient web;
+  reb::NativeProbeHost site(session, 1);
+  site.BindClient({&web});
+  Check(web.configured == 1 && session.webui_excluded == 2,
+        "A renderer locked to a web site is admitted");
+  security.locks.clear();
+
   session.browser_internal = true;
   security.webui.insert(1);
   RecordingProbeClient opted;
   reb::NativeProbeHost admitted(session, 1);
   admitted.BindClient({&opted});
-  Check(opted.configured == 1 && opted.browser_internal && session.webui_excluded == 1,
+  Check(opted.configured == 1 && opted.browser_internal && session.webui_excluded == 2,
         "--reb-capture-browser-internal keeps WebUI renderers");
   security.webui.clear();
   session.browser_internal = false;
@@ -600,8 +616,8 @@ void NativeProbeHostWorkerTabLinks() {
         "A document record drained after its frame is gone keeps the frame's tab");
 
   const reb::NativeToken128 worker{0x61, 0x62}, nested{0x63, 0x64};
-  resolver.DedicatedWorkerCreated(worker, false, 7, {});
-  resolver.DedicatedWorkerCreated(nested, false, 0, worker);
+  resolver.DedicatedWorkerCreated(worker, {}, 7, {});
+  resolver.DedicatedWorkerCreated(nested, {}, 0, worker);
   start(reb::NativeLoaderKind::kDedicatedWorker, nested.fold(), 41);
   Check(events.size() == 3 && events[0].header.tab_id == 7 &&
             events[1].header.type == NativeProbeType::kTabSet && events[1].header.tab_id == 7 &&
@@ -616,7 +632,7 @@ void NativeProbeHostWorkerTabLinks() {
         "A set already sent in this session is named, not sent again");
 
   const reb::NativeToken128 shared{0x71, 0x72};
-  resolver.SharedWorkerCreated(shared, false);
+  resolver.SharedWorkerCreated(shared, {});
   resolver.SharedWorkerClientAdded(shared, 1, 9);
   resolver.SharedWorkerClientAdded(shared, 2, 7);
   start(reb::NativeLoaderKind::kSharedWorker, shared.fold(), 43);
@@ -625,7 +641,7 @@ void NativeProbeHostWorkerTabLinks() {
             std::ranges::all_of(events, valid),
         "A shared worker request links to every client tab");
 
-  resolver.ServiceWorkerStarted(5, {0x81, 0x82}, false, "https://a.test/");
+  resolver.ServiceWorkerStarted(5, {0x81, 0x82}, {}, "https://a.test/");
   std::vector<std::uint32_t> many;
   for (std::uint32_t tab = 100; tab < 130; ++tab) {
     many.push_back(tab);
@@ -648,7 +664,9 @@ void NativeProbeHostWorkerTabLinks() {
             std::ranges::all_of(events, valid),
         "After the last client closes, requests link to that last client and say so");
 
-  resolver.ServiceWorkerStarted(6, {0x91, 0x92}, true, "chrome-extension://abc/");
+  const std::string extension_id(32, 'c');
+  resolver.ServiceWorkerStarted(6, {0x91, 0x92}, extension_id,
+                                "chrome-extension://" + extension_id + "/");
   start(reb::NativeLoaderKind::kServiceWorker, reb::NativeToken128{0x91, 0x92}.fold(), 46);
   Check(events.empty() && !session.exclusions.empty() && session.exclusions.back().process == 123 &&
             session.exclusions.back().exclusion_class == 65 && session.exclusions.back().count == 1,
@@ -666,6 +684,31 @@ void NativeProbeHostWorkerTabLinks() {
   host.EventsAvailable();
   Check(events.empty(), "Later records of an excluded request are dropped with it");
 
+  // --reb-capture-extension-traffic records it under the extension id.
+  session.extension_traffic = true;
+  const auto counted = session.exclusions.size();
+  start(reb::NativeLoaderKind::kServiceWorker, reb::NativeToken128{0x91, 0x92}.fold(), 48);
+  Check(events.size() == 2 && events[0].header.tab_id == 0 &&
+            events[1].header.type == NativeProbeType::kRequestExtensionLink &&
+            events[1].header.initiator_process_id == 123 &&
+            events[1].header.initiator_request_id == 48 &&
+            std::to_integer<char>(events[1].inline_payload[8]) == 'c' &&
+            std::to_integer<std::uint8_t>(events[1].inline_payload[4]) == 19 &&
+            session.exclusions.size() == counted && std::ranges::all_of(events, valid),
+        "An opted-in extension worker request is recorded with its extension link");
+  const reb::NativeToken128 extension_child{0x93, 0x94}, extension_parent{0x95, 0x96};
+  resolver.DedicatedWorkerCreated(extension_parent, extension_id, 0, {});
+  resolver.DedicatedWorkerCreated(extension_child, {}, 0, extension_parent);
+  start(reb::NativeLoaderKind::kDedicatedWorker, extension_child.fold(), 49);
+  Check(events.size() == 2 && events[1].header.type == NativeProbeType::kRequestExtensionLink &&
+            std::to_integer<char>(events[1].inline_payload[39]) == 'c',
+        "A nested worker of an extension worker carries its extension id");
+  resolver.SharedWorkerCreated(reb::NativeToken128{0x97, 0x98}, "not-an-extension-id");
+  start(reb::NativeLoaderKind::kSharedWorker, reb::NativeToken128{0x97, 0x98}.fold(), 50);
+  Check(events.empty() && session.exclusions.back().exclusion_class == 65,
+        "An extension origin without a valid id stays counted");
+  session.extension_traffic = false;
+
   start(reb::NativeLoaderKind::kSharedWorker, reb::NativeToken128{0x99, 0x98}.fold(), 47);
   Check(events.size() == 1 && events[0].header.tab_id == 0,
         "A worker the browser never saw stays unresolved for the summary to report");
@@ -675,20 +718,25 @@ void NativeProbeHostWorkerTabLinks() {
   Check(first.fold() == second.fold(), "Fixture tokens share a fold");
   resolver.NoteFrame(3, first, 21);
   resolver.NoteFrame(3, second, 22);
-  resolver.DedicatedWorkerCreated(first, false, 21, {});
-  resolver.DedicatedWorkerCreated(second, false, 22, {});
+  resolver.DedicatedWorkerCreated(first, {}, 21, {});
+  resolver.DedicatedWorkerCreated(second, {}, 22, {});
   Check(resolver.FrameTab(3, first.fold()) == 0 &&
             resolver.Resolve(reb::NativeLoaderKind::kDedicatedWorker, first.fold(), kSession)
                     .status == reb::NativeTabResolution::Status::kUnresolved,
         "A fold two tokens share resolves to no tab");
   const reb::NativeToken128 lone{0xa1, 0xa2};
-  resolver.SharedWorkerCreated(lone, false);
+  resolver.SharedWorkerCreated(lone, {});
   resolver.SharedWorkerClientAdded(lone, 5, 31);
   resolver.SharedWorkerClientRemoved(lone, 5);
   const auto last = resolver.Resolve(reb::NativeLoaderKind::kSharedWorker, lone.fold(), kSession);
   Check(last.status == reb::NativeTabResolution::Status::kLinked && last.last_clients &&
             last.tabs.size() == 1 && last.tabs[0] == 31,
         "A shared worker without clients links to its last client tab, marked as such");
+  const auto version = resolver.ResolveVersion(5, kSession);
+  Check(version.status == reb::NativeTabResolution::Status::kLinked && version.last_clients &&
+            version.owner_fold == reb::NativeToken128{0x81, 0x82}.fold() &&
+            version.kind == reb::NativeTabLinkKind::kServiceWorkerLastClients,
+        "A version's script fetch links to its clients and names the worker that ran");
   for (std::uint64_t index = 0; index <= reb::NativeTabResolver::kFrameCapacity; ++index) {
     resolver.NoteFrame(4, {0xf000 + index, index + 1}, 41);
   }

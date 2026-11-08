@@ -112,7 +112,8 @@ for body bytes up to 16 MiB and full targets. Fragments and URL credentials are 
 byte on request records, type 36 `capture_exclusion` for counted
 browser-internal exclusions, and renderer completions for requests the browser
 proxy never sees. It also adds the `loader_kind` byte, type 37 `tab_set` and
-type 38 `request_tab_link`, which link every request to the tab that caused it.
+type 38 `request_tab_link`, which link every request to the tab that caused it,
+and type 50 `request_extension_link` for extension traffic recorded by opt-in.
 In content sessions it adds type 33 `response_body`, the child of
 `response_started` that names a sensitive `response_body` artifact or says why
 none exists; types 30 `request_headers` and 31 `response_headers` and their
@@ -428,6 +429,7 @@ use the names.
 | 43 | `csp_violation` | `include/reb/debugger_observation.hpp` | [native debugger observation v1](native-debugger-observation-v1.md) |
 | 44 | `exception_observation` | `include/reb/debugger_observation.hpp` | [native debugger observation v1](native-debugger-observation-v1.md) |
 | 45 | `dom_mutation` | `include/reb/debugger_observation.hpp` | [native debugger observation v1](native-debugger-observation-v1.md) |
+| 50 | `request_extension_link` | `include/reb/tab_link.hpp` | [native network v3](native-network-v3.md#request_extension_link-type-50) |
 
 `wasm_indirect_observation` payloads are version 2 and `wasm_guest_invocation`
 version 4: each adds the JavaScript invocation context in previously reserved

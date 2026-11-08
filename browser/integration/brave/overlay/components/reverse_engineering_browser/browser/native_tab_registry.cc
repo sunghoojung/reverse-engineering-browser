@@ -7,12 +7,14 @@
 
 #include <array>
 #include <string>
+#include <string_view>
 #include <variant>
 #include <vector>
 
 #include "base/unguessable_token.h"
 #include "brave/components/reverse_engineering_browser/browser/native_tab_of.h"
 #include "brave/components/reverse_engineering_browser/browser/native_tab_resolver.h"
+#include "brave/components/reverse_engineering_browser/common/native_factory_owner_hook.h"
 #include "content/public/browser/browser_context.h"
 #include "content/public/browser/dedicated_worker_service.h"
 #include "content/public/browser/render_frame_host.h"
@@ -29,6 +31,10 @@ namespace reb {
 namespace {
 
 constexpr char kExtensionScheme[] = "chrome-extension";
+
+std::string_view ExtensionOf(const url::Origin& origin) {
+  return origin.scheme() == kExtensionScheme ? std::string_view(origin.host()) : std::string_view();
+}
 
 NativeToken128 TokenOf(const base::UnguessableToken& token) {
   return {token.GetHighForSerialization(), token.GetLowForSerialization()};
@@ -55,9 +61,8 @@ class NativeTabRegistry::DedicatedWorkers final : public content::DedicatedWorke
     } else if (const auto* parent = std::get_if<blink::DedicatedWorkerToken>(&creator)) {
       creator_worker = TokenOf(parent->value());
     }
-    NativeTabResolver::Get().DedicatedWorkerCreated(TokenOf(worker_token.value()),
-                                                    security_origin.scheme() == kExtensionScheme,
-                                                    creator_tab, creator_worker);
+    NativeTabResolver::Get().DedicatedWorkerCreated(
+        TokenOf(worker_token.value()), ExtensionOf(security_origin), creator_tab, creator_worker);
   }
   void OnBeforeWorkerDestroyed(const blink::DedicatedWorkerToken&,
                                content::DedicatedWorkerCreator) override {}
@@ -71,7 +76,7 @@ class NativeTabRegistry::SharedWorkers final : public content::SharedWorkerServi
                        const url::Origin& security_origin,
                        const base::UnguessableToken&) override {
     NativeTabResolver::Get().SharedWorkerCreated(TokenOf(token.value()),
-                                                 security_origin.scheme() == kExtensionScheme);
+                                                 ExtensionOf(security_origin));
   }
   void OnBeforeWorkerDestroyed(const blink::SharedWorkerToken&) override {}
   void OnClientAdded(const blink::SharedWorkerToken& token,
@@ -90,9 +95,10 @@ class NativeTabRegistry::SharedWorkers final : public content::SharedWorkerServi
 class NativeTabRegistry::ServiceWorkers final : public content::ServiceWorkerContextObserver {
  public:
   void Started(const int64_t version_id, const content::ServiceWorkerRunningInfo& info) {
-    NativeTabResolver::Get().ServiceWorkerStarted(version_id, TokenOf(info.token.value()),
-                                                  info.scope.SchemeIs(kExtensionScheme),
-                                                  info.scope.spec());
+    NativeTabResolver::Get().ServiceWorkerStarted(
+        version_id, TokenOf(info.token.value()),
+        info.scope.SchemeIs(kExtensionScheme) ? info.scope.host() : std::string_view(),
+        info.scope.spec());
   }
   void OnVersionStartedRunning(int64_t version_id,
                                const content::ServiceWorkerRunningInfo& running_info) override {
@@ -156,6 +162,18 @@ std::uint32_t NativeTabRegistry::NoteFrame(content::RenderFrameHost* frame) {
     NativeTabResolver::Get().NoteFrame(token.child_id, TokenOf(token.frame_token.value()), tab);
   }
   return tab;
+}
+
+NativeFactoryOwnerTab NativeTabRegistry::NoteFactory(content::RenderFrameHost* frame) {
+  if (frame) {
+    return {NoteFrame(frame), -1};
+  }
+  const NativeFactoryOwner owner = CurrentNativeFactoryOwner();
+  const std::uint32_t tab = owner.frame_process_id >= 0
+                                ? NoteFrame(content::RenderFrameHost::FromID(
+                                      owner.frame_process_id, owner.frame_routing_id))
+                                : 0;
+  return {tab, tab ? -1 : owner.service_worker_version_id};
 }
 
 void NativeTabRegistry::ObserveContext(content::BrowserContext* context) {

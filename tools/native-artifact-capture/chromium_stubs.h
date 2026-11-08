@@ -497,6 +497,7 @@ class NativeProbeSession {
   bool js_invocation_digests() const { return invocation_digests; }
   bool capture_request_content() const { return request_content; }
   bool capture_browser_internal() const { return browser_internal; }
+  bool capture_extension_traffic() const { return extension_traffic; }
   void NoteWebUiRendererExcluded() { ++webui_excluded; }
   void EmitExclusion(std::uint32_t process, std::uint8_t exclusion_class, std::uint64_t count) {
     exclusions.push_back({process, exclusion_class, count});
@@ -514,7 +515,7 @@ class NativeProbeSession {
   std::vector<std::uint8_t> js_sites;
   std::vector<std::uint8_t> invocation_sites;
   bool invocation_digests = false;
-  bool request_content = false, browser_internal = false;
+  bool request_content = false, browser_internal = false, extension_traffic = false;
   unsigned webui_excluded = 0;
   struct Exclusion {
     std::uint32_t process;
@@ -801,7 +802,12 @@ class ChildProcessSecurityPolicy {
     return &policy;
   }
   bool HasWebUIBindings(int child_id) const { return webui.contains(child_id); }
+  std::string GetProcessLockScheme(int child_id) const {
+    const auto lock = locks.find(child_id);
+    return lock == locks.end() ? std::string() : lock->second;
+  }
   std::set<int> webui;
+  std::map<int, std::string> locks;
 };
 class RenderProcessHost {
  public:

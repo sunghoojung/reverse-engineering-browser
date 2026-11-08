@@ -17,14 +17,13 @@
 #include "base/threading/platform_thread.h"
 #include "base/time/time.h"
 #include "brave/components/reverse_engineering_browser/browser/native_artifact_capture_sink.h"
+#include "brave/components/reverse_engineering_browser/browser/native_capture_scope.h"
 #include "brave/components/reverse_engineering_browser/browser/native_network_capture_sink.h"
 #include "brave/components/reverse_engineering_browser/browser/native_probe_host.h"
 #include "brave/components/reverse_engineering_browser/common/native_js_dispatch_sites.h"
 #include "brave/components/reverse_engineering_browser/common/native_js_invocation_sites.h"
 #include "brave/components/reverse_engineering_browser/common/native_network_scope.h"
-#include "brave/components/reverse_engineering_browser/common/native_tab_link.h"
 #include "brave/components/reverse_engineering_browser/common/native_wasm_guest_adapter.h"
-#include "content/public/browser/child_process_security_policy.h"
 #include "content/public/browser/render_process_host.h"
 #include "mojo/public/cpp/bindings/self_owned_receiver.h"
 
@@ -32,7 +31,6 @@ namespace reb {
 
 namespace {
 
-constexpr char kCaptureBrowserInternalSwitch[] = "reb-capture-browser-internal";
 bool ReadRequestContentBudget(const base::CommandLine& command_line, std::uint64_t& budget) {
   budget = kNativeRequestContentDefaultBudgetBytes;
   return !command_line.HasSwitch("reb-request-content-budget-bytes") ||
@@ -119,9 +117,9 @@ void NativeProbeSession::BindHost(const int renderer_process_id,
   if (!process || !NativeNetworkCaptureSink::Get().IsOwnedContext(process->GetBrowserContext())) {
     return;
   }
-  // WebUI is the browser's own; Native Console targets do not depend on this.
-  if (!base::CommandLine::ForCurrentProcess()->HasSwitch(kCaptureBrowserInternalSwitch) &&
-      content::ChildProcessSecurityPolicy::GetInstance()->HasWebUIBindings(renderer_process_id)) {
+  // Native Console targets do not depend on admission.
+  if (!base::CommandLine::ForCurrentProcess()->HasSwitch(kNativeCaptureBrowserInternalSwitch) &&
+      IsNativeBrowserInternalProcess(renderer_process_id)) {
     NoteWebUiRendererExcluded();
     return;
   }
@@ -233,11 +231,12 @@ bool NativeProbeSession::StartSession(const std::uint64_t session_id,
       capture_request_content &&
           (category_mask & NativeProbeCategoryMask(NativeProbeCategory::kNetwork)) != 0,
       std::memory_order_relaxed);
-  capture_browser_internal_.store(command_line->HasSwitch(kCaptureBrowserInternalSwitch),
+  capture_browser_internal_.store(command_line->HasSwitch(kNativeCaptureBrowserInternalSwitch),
                                   std::memory_order_relaxed);
+  capture_extension_traffic_.store(command_line->HasSwitch(kNativeCaptureExtensionTrafficSwitch),
+                                   std::memory_order_relaxed);
   webui_renderers_excluded_ = 0;
-  extension_requests_excluded_ = 0;
-  devtools_requests_excluded_ = 0;
+  browser_requests_excluded_.clear();
   next_browser_sequence_.store(1, std::memory_order_relaxed);
   downstream_.store(downstream, std::memory_order_release);
   session_id_.store(session_id, std::memory_order_release);
@@ -284,6 +283,7 @@ void NativeProbeSession::StopSession() noexcept {
   capture_canvas_images_.store(false, std::memory_order_release);
   capture_request_content_.store(false, std::memory_order_release);
   capture_browser_internal_.store(false, std::memory_order_release);
+  capture_extension_traffic_.store(false, std::memory_order_release);
   downstream_.store(nullptr, std::memory_order_release);
 }
 
@@ -315,6 +315,10 @@ bool NativeProbeSession::capture_browser_internal() const noexcept {
   return capture_browser_internal_.load(std::memory_order_acquire);
 }
 
+bool NativeProbeSession::capture_extension_traffic() const noexcept {
+  return capture_extension_traffic_.load(std::memory_order_acquire);
+}
+
 void NativeProbeSession::NoteWebUiRendererExcluded() noexcept {
   if (!IsActive()) {
     return;
@@ -326,10 +330,7 @@ void NativeProbeSession::NoteBrowserRequestExcluded(const std::uint8_t exclusion
   if (!IsActive()) {
     return;
   }
-  std::uint64_t& count = exclusion_class == kNativeExtensionWorkerExclusion
-                             ? extension_requests_excluded_
-                             : devtools_requests_excluded_;
-  EmitExclusion(0, exclusion_class, ++count);
+  EmitExclusion(0, exclusion_class, ++browser_requests_excluded_[exclusion_class]);
 }
 
 void NativeProbeSession::EmitExclusion(const std::uint32_t excluded_process_id,

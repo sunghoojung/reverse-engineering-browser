@@ -97,6 +97,8 @@ enum class EventType : std::uint16_t {
   kCspViolation = 43,
   kExceptionObservation = 44,
   kDomMutation = 45,
+  // Extension traffic recorded by opt-in; see protocol/native-network-v3.md.
+  kRequestExtensionLink = 50,
 };
 
 enum class EventFlag : std::uint16_t {

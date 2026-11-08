@@ -1,0 +1,153 @@
+diff --git a/browser/net/brave_proxying_url_loader_factory.cc b/browser/net/brave_proxying_url_loader_factory.cc
+index ef22691..c2cb00f 100644
+--- a/browser/net/brave_proxying_url_loader_factory.cc
++++ b/browser/net/brave_proxying_url_loader_factory.cc
+@@ -28,7 +28,6 @@
+ #include "brave/components/reverse_engineering_browser/common/native_request_namespace.h"
+ #include "brave/components/reverse_engineering_browser/browser/native_probe_session.h"
+ #include "brave/components/reverse_engineering_browser/browser/native_tab_of.h"
+-#include "brave/components/reverse_engineering_browser/browser/native_tab_registry.h"
+ #include "brave/components/reverse_engineering_browser/browser/native_tab_resolver.h"
+ #include "brave/components/reverse_engineering_browser/common/native_tab_link.h"
+ #include "content/public/browser/browser_context.h"
+@@ -127,20 +126,6 @@ std::uint32_t TabId(
+                                                 FrameId(render_frame_token));
+ }
+ 
+-// Traffic no tab caused; see protocol/native-network-v3.md.
+-std::uint8_t NativeExclusion(FactoryType type, const url::Origin& initiator) {
+-  if (type == FactoryType::kDevTools) {
+-    return reb::kNativeDevToolsLoadExclusion;
+-  }
+-  const bool worker = type == FactoryType::kWorkerMainResource ||
+-                      type == FactoryType::kWorkerSubResource ||
+-                      type == FactoryType::kServiceWorkerScript ||
+-                      type == FactoryType::kServiceWorkerSubResource;
+-  return worker && initiator.scheme() == "chrome-extension"
+-             ? reb::kNativeExtensionWorkerExclusion
+-             : 0;
+-}
+-
+ // Helper struct for crafting responses.
+ struct WriteData {
+   base::WeakPtr<network::mojom::URLLoaderClient> client;
+@@ -220,7 +205,11 @@ BraveProxyingURLLoaderFactory<T>::InProgressRequest::InProgressRequest(
+       native_capture_lifecycle_(
+           (reb::NativeNetworkCaptureSink::Get().IsEnabled() ||
+            reb::NativeArtifactCaptureSink::Get().IsEnabled()) &&
+-                  factory.native_exclusion_ == 0 &&
++                  reb::NativeProxyRequestExclusion(
++                      factory.native_scope_,
++                      static_cast<int>(factory.url_loader_factory_type_),
++                      request.url.scheme())
++                          .exclusion_class == 0 &&
+                   reb::NativeNetworkCaptureSink::Get().IsOwnedContext(browser_context)
+               ? reb::NativeNetworkCaptureSink::Get().generation()
+               : 0),
+@@ -240,19 +229,23 @@ BraveProxyingURLLoaderFactory<T>::InProgressRequest::InProgressRequest(
+     reb::NativeNetworkCaptureSink::Get().RecordRequestStarted(
+         request_id_, native_initiator_request_id_, initiator_process_id_,
+         tab_id_, frame_id_, browser_context_id_high_, browser_context_id_low_,
+-        request_, reb::NativeBrowserLoaderKind(
+-                      static_cast<int>(factory_->url_loader_factory_type_)));
++        request_,
++        reb::NativeBrowserLoaderKind(
++            static_cast<int>(factory_->url_loader_factory_type_)),
++        factory_->native_scope_.owner);
+     reb::NativeNetworkCaptureSink::Get().AssignNetworkHeadersId(request_id_,
+                                                                 request_);
+     reb::NativeNetworkCaptureSink::Get().TeeRequestBody(request_id_, request_);
+-  } else if (factory.native_exclusion_ != 0 &&
+-             // A renderer-issued request is counted once, by the drain.
+-             !reb::NativeRendererIssuedRequestId(
+-                 static_cast<int>(factory.url_loader_factory_type_)) &&
++  } else if (const reb::NativeRequestExclusion exclusion =
++                 reb::NativeProxyRequestExclusion(
++                     factory.native_scope_,
++                     static_cast<int>(factory.url_loader_factory_type_),
++                     request.url.scheme());
++             exclusion.counted_here &&
+              reb::NativeNetworkCaptureSink::Get().IsEnabled() &&
+              reb::NativeNetworkCaptureSink::Get().IsOwnedContext(browser_context)) {
+     reb::NativeProbeSession::Get().NoteBrowserRequestExcluded(
+-        factory.native_exclusion_);
++        exclusion.exclusion_class);
+   }
+   // If there is a client error, clean up the request.
+   target_client_.set_disconnect_handler(base::BindOnce(
+@@ -282,8 +275,8 @@ void BraveProxyingURLLoaderFactory<
+   if (native_capture_identity_initialized_) {
+     return;
+   }
+-  tab_id_ = factory_->native_tab_id_ ? factory_->native_tab_id_
+-                                      : TabId(render_frame_token_);
++  tab_id_ = factory_->native_scope_.tab_id ? factory_->native_scope_.tab_id
++                                            : TabId(render_frame_token_);
+   // The renderer request id lives in the process that calls GenerateRequestId.
+   // Document, worker, and service-worker subresource factories are used by
+   // that process. Navigations and browser-fetched worker scripts are not, so
+@@ -946,8 +939,12 @@ BraveProxyingURLLoaderFactory<T>::BraveProxyingURLLoaderFactory(
+       url_loader_factory_type_(url_loader_factory_type),
+       request_initiator_(request_initiator),
+       isolation_info_(isolation_info),
+-      native_exclusion_(
+-          NativeExclusion(url_loader_factory_type, request_initiator)),
++      native_scope_(reb::NativeFactoryScopeOf(
++          browser_context,
++          content::RenderFrameHost::FromFrameToken(render_frame_token),
++          render_process_id,
++          static_cast<int>(url_loader_factory_type),
++          request_initiator)),
+       request_id_generator_(request_id_generator),
+       disconnect_callback_(std::move(on_disconnect)),
+       navigation_response_task_runner_(
+@@ -956,15 +953,6 @@ BraveProxyingURLLoaderFactory<T>::BraveProxyingURLLoaderFactory(
+   DCHECK_CURRENTLY_ON(content::BrowserThread::UI);
+   DCHECK(proxy_receivers_.empty());
+   DCHECK(!target_factory_.is_bound());
+-  // The owned profile exists only in a capture launch. Observing it before a
+-  // session starts keeps the workers and frames that predate the session.
+-  if (reb::NativeNetworkCaptureSink::Get().IsOwnedContext(browser_context)) {
+-    auto& registry = reb::NativeTabRegistry::Get();
+-    registry.ObserveContext(browser_context);
+-    native_tab_id_ = registry.NoteFrame(
+-        content::RenderFrameHost::FromFrameToken(render_frame_token_));
+-  }
+-
+   auto [receiver, target_factory] = factory_builder.Append();
+ 
+   target_factory_.Bind(std::move(target_factory));
+diff --git a/browser/net/brave_proxying_url_loader_factory.h b/browser/net/brave_proxying_url_loader_factory.h
+index a3594cd..7245eb4 100644
+--- a/browser/net/brave_proxying_url_loader_factory.h
++++ b/browser/net/brave_proxying_url_loader_factory.h
+@@ -27,6 +27,7 @@
+ #include "base/timer/elapsed_timer.h"
+ #include "brave/browser/net/resource_context_data.h"
+ #include "brave/browser/net/url_context.h"
++#include "brave/components/reverse_engineering_browser/browser/native_factory_scope.h"
+ #include "brave/components/reverse_engineering_browser/common/native_network_lifecycle.h"
+ #include "mojo/public/cpp/bindings/pending_receiver.h"
+ #include "mojo/public/cpp/bindings/pending_remote.h"
+@@ -269,8 +270,7 @@ class BraveProxyingURLLoaderFactory : public network::mojom::URLLoaderFactory {
+   const net::IsolationInfo isolation_info_;
+   // Resolved when the factory is created, while its frame is alive; see
+   // protocol/native-network-v3.md "Request owners and tabs".
+-  uint32_t native_tab_id_ = 0;
+-  const uint8_t native_exclusion_;
++  const reb::NativeFactoryScope native_scope_;
+ 
+   mojo::ReceiverSet<network::mojom::URLLoaderFactory> proxy_receivers_;
+   mojo::Remote<network::mojom::URLLoaderFactory> target_factory_;
+diff --git a/content/browser/sources.gni b/content/browser/sources.gni
+index 7cc3c1b..8df7509 100644
+--- a/content/browser/sources.gni
++++ b/content/browser/sources.gni
+@@ -18,6 +18,7 @@ brave_content_browser_deps = [
+   "//brave/components/brave_service_keys",
+   "//brave/components/brave_shields/core/common:mojom",
+   "//brave/components/brave_wallet/common/buildflags",
++  "//brave/components/reverse_engineering_browser:factory_owner_hook",
+   "//brave/components/reverse_engineering_browser:network_headers_hook",
+   "//brave/components/speech_to_text",
+ ]

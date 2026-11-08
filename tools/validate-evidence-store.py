@@ -122,6 +122,7 @@ EVENT_TYPES = {
     "response_headers",
     "response_started",
     "request_tab_link",
+    "request_extension_link",
     "tab_set",
     "script_cookie",
     "script_identity",
@@ -138,7 +139,7 @@ EVENT_TYPES = {
 # protocol/native-network-v3.md, shared with include/reb/network_scope.hpp.
 SCHEME_CLASSES = {*range(0, 9), 15, *range(16, 21)}
 SCHEME_CLASS_TYPES = {"request_initiated", "request_started", "request_completed", "request_failed"}
-EXCLUSION_CLASSES = {*range(16, 21), 64, 65, 66}
+EXCLUSION_CLASSES = {*range(16, 21), 64, 65, 66, 67}
 # Loader kinds, shared with include/reb/tab_link.hpp.
 LOADER_KINDS = {"request_started": range(1, 11), "request_initiated": range(16, 22)}
 UINT64_MAX = (1 << 64) - 1
@@ -733,17 +734,31 @@ def valid_capture_exclusion(event: dict, payload: bytes) -> bool:
             and all(event[key] == "0" for key in zero) and event["process_id"] != 0
             and event["tab_id"] == 0 and event["status_code"] == 0 and event["error_code"] == 0
             and event["resource_type"] == 0 and event["initiator_request_id"] == 0
-            and (payload[4] not in (64, 66) or event["initiator_process_id"] == 0))
+            and (payload[4] not in (64, 66, 67) or event["initiator_process_id"] == 0))
 
 
-def quiet_tab_envelope(event: dict) -> bool:
-    zero = ("navigation_id", "artifact_id", "request_id", "browser_context_id_high",
-            "browser_context_id_low", "encoded_data_length", "decoded_body_length")
+def quiet_tab_envelope(event: dict, request_fields: bool = False) -> bool:
+    zero = ("navigation_id", "artifact_id", "encoded_data_length", "decoded_body_length",
+            *(() if request_fields else ("request_id", "browser_context_id_high", "browser_context_id_low")))
     return (event["protocol_version"] == 3 and event["category"] == "network" and event["flags"] == 0
             and "scheme_class" not in event and "loader_kind" not in event
             and all(event[key] != "0" for key in ("session_id", "sequence_number"))
             and all(event[key] == "0" for key in zero) and event["process_id"] != 0
             and event["status_code"] == 0 and event["error_code"] == 0 and event["resource_type"] == 0)
+
+
+def names_browser_record(event: dict) -> bool:
+    return (event["initiator_process_id"] == 0 and event["initiator_request_id"] == 0
+            and event["request_id"] != "0"
+            and (event["browser_context_id_high"] != "0" or event["browser_context_id_low"] != "0"))
+
+
+# protocol/native-network-v3.md request_tab_link.
+def names_linked_record(event: dict) -> bool:
+    renderer = (event["initiator_process_id"] != 0 and event["request_id"] == "0"
+                and event["browser_context_id_high"] == "0" and event["browser_context_id_low"] == "0")
+    return (quiet_tab_envelope(event, True) and event["parent_event_id"] != "0"
+            and (renderer or names_browser_record(event)))
 
 
 def valid_tab_set(event: dict, payload: bytes) -> bool:
@@ -758,19 +773,26 @@ def valid_tab_set(event: dict, payload: bytes) -> bool:
             and any(payload[8:16]) and not any(payload[22:24]) and total > 0
             and part < -(-total // 26) and count == min(26, total - part * 26)
             and all(used) and used == sorted(set(used)) and not any(tabs[count:])
-            and event["tab_id"] == tabs[0] and event["frame_id"] != "0"
+            and event["tab_id"] == tabs[0]
             and event["initiator_process_id"] == 0 and event["initiator_request_id"] == 0
             and (part == 0) == (event["parent_event_id"] == "0"))
 
 
 def valid_request_tab_link(event: dict, payload: bytes) -> bool:
-    if len(payload) != 24 or not quiet_tab_envelope(event):
+    if len(payload) != 24 or not names_linked_record(event):
         return False
     count = int.from_bytes(payload[16:20], "little")
     return (payload[:4] == bytes((1, 0, 24, 0)) and 1 <= payload[4] <= 4 and not any(payload[5:8])
             and any(payload[8:16]) and count > 0 and not any(payload[20:24])
-            and (count == 1) == (event["tab_id"] != 0) and event["initiator_process_id"] != 0
-            and event["parent_event_id"] != "0")
+            and (count == 1) == (event["tab_id"] != 0))
+
+
+def valid_request_extension_link(event: dict, payload: bytes) -> bool:
+    if len(payload) != 40 or not names_linked_record(event):
+        return False
+    return (payload[:4] == bytes((1, 0, 40, 0)) and payload[4] in (4, 6, 17, 18, 19)
+            and not any(payload[5:8]) and all(ord("a") <= byte <= ord("p") for byte in payload[8:40])
+            and event["tab_id"] == 0 and names_browser_record(event) == (payload[4] in (4, 6)))
 
 
 def validate_event(event: object, line_number: int) -> None:
@@ -960,6 +982,8 @@ def validate_event(event: object, line_number: int) -> None:
         raise ValueError(f"line {line_number}: tab set record is invalid")
     if event["type"] == "request_tab_link" and not valid_request_tab_link(event, payload):
         raise ValueError(f"line {line_number}: request tab link record is invalid")
+    if event["type"] == "request_extension_link" and not valid_request_extension_link(event, payload):
+        raise ValueError(f"line {line_number}: request extension link record is invalid")
     if event["type"] == "response_body" and not valid_response_body(event, payload):
         raise ValueError(f"line {line_number}: native response body record is invalid")
     if event["type"] in ("request_headers", "response_headers") and not valid_header_block(

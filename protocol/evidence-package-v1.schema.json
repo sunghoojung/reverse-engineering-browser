@@ -592,7 +592,8 @@
             "timer_observation",
             "csp_violation",
             "exception_observation",
-            "dom_mutation"
+            "dom_mutation",
+            "request_extension_link"
           ]
         },
         "status_code": {

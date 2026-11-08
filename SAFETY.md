@@ -94,6 +94,11 @@ it.
   The backend's request index keeps a private derived copy of those paths
   beside the event store; capture clear removes it
   ([request index v1](protocol/request-index-v1.md)).
+- Browser-internal pages (WebUI, DevTools) and extension background workers are
+  counted, not recorded. `REB_CAPTURE_BROWSER_INTERNAL=1` and
+  `REB_CAPTURE_EXTENSION_TRAFFIC=1` record them, extension traffic under its
+  extension id, with the same content gates; agent-started sessions never set
+  them.
 - Historical captures can include sensitive URLs, headers, bodies and source.
   Removal of CDP does not sanitize previously saved evidence. Only collect and
   disclose data covered by authorization.

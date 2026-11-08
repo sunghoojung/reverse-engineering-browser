@@ -21,6 +21,7 @@
 #include "brave/components/reverse_engineering_browser/browser/native_artifact_capture_sink.h"
 #include "brave/components/reverse_engineering_browser/browser/native_probe_session.h"
 #include "brave/components/reverse_engineering_browser/browser/native_response_body_capture.h"
+#include "brave/components/reverse_engineering_browser/browser/native_tab_resolver.h"
 #include "brave/components/reverse_engineering_browser/common/native_artifact_header.h"
 #include "brave/components/reverse_engineering_browser/common/native_network_headers.h"
 #include "brave/components/reverse_engineering_browser/common/native_network_request.h"
@@ -767,15 +768,17 @@ void NativeNetworkCaptureSink::EmitRequestBody(const NativeProbeEmitter emitter,
   emitter(event);
 }
 
-void NativeNetworkCaptureSink::RecordRequestStarted(const std::uint64_t request_id,
-                                                    const std::int32_t initiator_request_id,
-                                                    const std::uint32_t initiator_process_id,
-                                                    const std::uint32_t tab_id,
-                                                    const std::uint64_t frame_id,
-                                                    const std::uint64_t browser_context_id_high,
-                                                    const std::uint64_t browser_context_id_low,
-                                                    const network::ResourceRequest& request,
-                                                    const NativeLoaderKind loader_kind) noexcept {
+void NativeNetworkCaptureSink::RecordRequestStarted(
+    const std::uint64_t request_id,
+    const std::int32_t initiator_request_id,
+    const std::uint32_t initiator_process_id,
+    const std::uint32_t tab_id,
+    const std::uint64_t frame_id,
+    const std::uint64_t browser_context_id_high,
+    const std::uint64_t browser_context_id_low,
+    const network::ResourceRequest& request,
+    const NativeLoaderKind loader_kind,
+    const NativeBrowserRequestOwner& owner) noexcept {
   const NativeProbeEmitter emitter = emitter_.load(std::memory_order_acquire);
   if (!emitter) [[likely]] {
     return;
@@ -806,7 +809,26 @@ void NativeNetworkCaptureSink::RecordRequestStarted(const std::uint64_t request_
     event.header.flags |= static_cast<std::uint16_t>(NativeProbeFlag::kFromServiceWorker);
   }
   SetPayload(event, request.method, " ", request.url.host());
+  const NativeTabResolution clients =
+      owner.service_worker_version >= 0 && !owner.extension
+          ? NativeTabResolver::Get().ResolveVersion(owner.service_worker_version,
+                                                    event.header.session_id)
+          : NativeTabResolution{};
+  const bool linked = clients.status == NativeTabResolution::Status::kLinked;
+  if (linked && event.header.tab_id == 0 && clients.tabs.size() == 1) {
+    event.header.tab_id = clients.tabs[0];
+  }
   emitter(event);
+  NativeProbeHeader identity = event.header;
+  if (owner.extension) {
+    identity.sequence_number = NativeProbeSession::Get().NextBrowserSequence();
+    emitter(MakeNativeRequestExtensionLink(event.header, identity, loader_kind, *owner.extension,
+                                           true));
+  } else if (linked) {
+    EmitNativeTabLink(
+        clients, event.header, true, identity,
+        [] { return NativeProbeSession::Get().NextBrowserSequence(); }, emitter);
+  }
   // Raw path and query are content; the body summary is metadata. Both follow
   // the start record as children so a dropped start cannot leave them unowned.
   const bool capture_content = capture_content_.load(std::memory_order_relaxed);

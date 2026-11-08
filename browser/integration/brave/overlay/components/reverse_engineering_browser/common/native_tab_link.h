@@ -7,10 +7,13 @@
 #define BRAVE_COMPONENTS_REVERSE_ENGINEERING_BROWSER_COMMON_NATIVE_TAB_LINK_H_
 
 #include <algorithm>
+#include <array>
 #include <bit>
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <span>
+#include <string_view>
 
 #if __has_include("brave/components/reverse_engineering_browser/common/native_probe_event.h")
 #include "brave/components/reverse_engineering_browser/common/native_probe_event.h"
@@ -57,6 +60,31 @@ inline constexpr std::size_t kNativeTabSetPartTabs = 26;
 inline constexpr std::uint8_t kNativeTabSetLastClients = 1;
 inline constexpr std::uint16_t kNativeRequestTabLinkPayloadVersion = 1;
 inline constexpr std::uint32_t kNativeRequestTabLinkPayloadSize = 24;
+inline constexpr std::uint16_t kNativeRequestExtensionLinkPayloadVersion = 1;
+inline constexpr std::uint32_t kNativeRequestExtensionLinkPayloadSize = 40;
+
+// A Chromium extension id: 32 letters a to p.
+using NativeExtensionId = std::array<char, 32>;
+
+[[nodiscard]] constexpr bool ParseNativeExtensionId(const std::string_view host,
+                                                    NativeExtensionId& id) noexcept {
+  if (host.size() != id.size()) {
+    return false;
+  }
+  for (std::size_t index = 0; index < id.size(); ++index) {
+    if (host[index] < 'a' || host[index] > 'p') {
+      return false;
+    }
+    id[index] = host[index];
+  }
+  return true;
+}
+
+// A frameless browser record's link: a service-worker version's clients or an extension.
+struct NativeBrowserRequestOwner final {
+  std::int64_t service_worker_version = -1;
+  std::optional<NativeExtensionId> extension;
+};
 
 // Frame ids and worker context ids share this fold of a 128-bit token.
 [[nodiscard]] constexpr std::uint64_t NativeContextFold(const std::uint64_t high,
@@ -82,6 +110,34 @@ inline void Put(NativeProbeEvent& event,
                 const std::size_t size) noexcept {
   for (std::size_t index = 0; index < size; ++index)
     event.inline_payload[offset + index] = static_cast<std::byte>((value >> (8U * index)) & 0xffU);
+}
+
+// A renderer record by process and request id, a browser record by request id and context.
+[[nodiscard]] inline NativeProbeEvent LinkTo(const NativeProbeHeader& linked,
+                                             const bool browser_record,
+                                             const NativeProbeHeader& identity,
+                                             const NativeProbeType type,
+                                             const std::uint32_t payload_size) noexcept {
+  NativeProbeEvent event;
+  event.header.category = NativeProbeCategory::kNetwork;
+  event.header.type = type;
+  event.header.session_id = identity.session_id;
+  event.header.sequence_number = identity.sequence_number;
+  event.header.monotonic_time_ns = linked.monotonic_time_ns;
+  event.header.process_id = identity.process_id;
+  event.header.thread_id = identity.thread_id;
+  event.header.frame_id = linked.frame_id;
+  event.header.parent_event_id = linked.sequence_number;
+  if (browser_record) {
+    event.header.request_id = linked.request_id;
+    event.header.browser_context_id_high = linked.browser_context_id_high;
+    event.header.browser_context_id_low = linked.browser_context_id_low;
+  } else {
+    event.header.initiator_process_id = linked.process_id;
+    event.header.initiator_request_id = static_cast<std::uint32_t>(linked.request_id);
+  }
+  event.header.payload_size = payload_size;
+  return event;
 }
 }  // namespace native_tab_link_detail
 
@@ -129,33 +185,43 @@ inline void Put(NativeProbeEvent& event,
   return event;
 }
 
-// Names one renderer request_initiated; see protocol/native-network-v3.md.
+// Names one request record; see protocol/native-network-v3.md.
 [[nodiscard]] inline NativeProbeEvent MakeNativeRequestTabLink(
     const NativeProbeHeader& linked,
     const NativeProbeHeader& identity,
     const NativeTabLinkKind kind,
     const std::uint64_t set_id,
-    const std::span<const std::uint32_t> tabs) noexcept {
+    const std::span<const std::uint32_t> tabs,
+    const bool browser_record = false) noexcept {
   using native_tab_link_detail::Put;
-  NativeProbeEvent event;
-  event.header.category = NativeProbeCategory::kNetwork;
-  event.header.type = NativeProbeType::kRequestTabLink;
-  event.header.session_id = identity.session_id;
-  event.header.sequence_number = identity.sequence_number;
-  event.header.monotonic_time_ns = linked.monotonic_time_ns;
-  event.header.process_id = identity.process_id;
-  event.header.thread_id = identity.thread_id;
+  NativeProbeEvent event = native_tab_link_detail::LinkTo(linked, browser_record, identity,
+                                                          NativeProbeType::kRequestTabLink,
+                                                          kNativeRequestTabLinkPayloadSize);
   event.header.tab_id = tabs.size() == 1 ? tabs[0] : 0;
-  event.header.frame_id = linked.frame_id;
-  event.header.parent_event_id = linked.sequence_number;
-  event.header.initiator_process_id = linked.process_id;
-  event.header.initiator_request_id = static_cast<std::uint32_t>(linked.request_id);
-  event.header.payload_size = kNativeRequestTabLinkPayloadSize;
   Put(event, 0, kNativeRequestTabLinkPayloadVersion, 2);
   Put(event, 2, kNativeRequestTabLinkPayloadSize, 2);
   Put(event, 4, static_cast<std::uint8_t>(kind), 1);
   Put(event, 8, set_id, 8);
   Put(event, 16, tabs.size(), 4);
+  return event;
+}
+
+// `loader_kind` is the linked record's: 4 or 6 for a browser record, else 17 to 19.
+[[nodiscard]] inline NativeProbeEvent MakeNativeRequestExtensionLink(
+    const NativeProbeHeader& linked,
+    const NativeProbeHeader& identity,
+    const NativeLoaderKind loader_kind,
+    const NativeExtensionId& extension,
+    const bool browser_record = false) noexcept {
+  using native_tab_link_detail::Put;
+  NativeProbeEvent event = native_tab_link_detail::LinkTo(linked, browser_record, identity,
+                                                          NativeProbeType::kRequestExtensionLink,
+                                                          kNativeRequestExtensionLinkPayloadSize);
+  Put(event, 0, kNativeRequestExtensionLinkPayloadVersion, 2);
+  Put(event, 2, kNativeRequestExtensionLinkPayloadSize, 2);
+  Put(event, 4, static_cast<std::uint8_t>(loader_kind), 1);
+  for (std::size_t index = 0; index < extension.size(); ++index)
+    Put(event, 8 + index, static_cast<std::uint8_t>(extension[index]), 1);
   return event;
 }
 

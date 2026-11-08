@@ -38,6 +38,7 @@ enum class NativeSchemeClass : std::uint8_t {
 };
 
 inline constexpr std::uint8_t kNativeWebUiRendererExclusion = 64;
+inline constexpr std::uint8_t kNativeWebUiRequestExclusion = 67;
 inline constexpr std::uint16_t kNativeCaptureExclusionPayloadVersion = 1;
 inline constexpr std::uint32_t kNativeCaptureExclusionPayloadSize = 16;
 // One counter per browser-internal scheme class, 16 to 20.

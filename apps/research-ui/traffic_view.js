@@ -336,7 +336,7 @@ function trafficBlockStart(container, total, start) {
 function trafficIndexRequest(row, origin) {
   return {id: row.id, path: row.path, method: row.method, status: row.status, time: row.time, type: row.type, origin,
     targetKind: row.target_kind, hostOnly: row.target_kind === 'host', failed: row.failed, interrupted: row.interrupted,
-    tabId: row.tab_id, tabIds: row.tab_ids, operation: row.operation,
+    tabId: row.tab_id, tabIds: row.tab_ids, extensionId: row.extension_id ?? null, operation: row.operation,
     tabLink: row.tab_link ?? null, initiatorFrame: row.initiator_frame ?? null, tabLinkLabel: row.tab_link ? globalThis.RebRequestTabs?.linkLabel(row.tab_link) ?? '' : '', target: row.target, host: row.host, urlTruncated: row.url_truncated,
     targetLength: row.target_length, targetMalformed: row.target_malformed,
     firstTimestamp: BigInt(row.first_time_ns), lastTimestamp: BigInt(row.last_time_ns),
@@ -574,7 +574,8 @@ function trafficTabs(request) {
 function trafficTabText(request) {
   const tabs = trafficTabs(request);
   if (!tabs.length) return request.origin === 'live' ? 'No tab linked. This is a capture error.' : 'Not applicable';
-  return `${tabs.join(', ')}${request.tabLinkLabel ? ` (${request.tabLinkLabel})` : ''}`;
+  const names = tabs.map(tab => tab.startsWith('extension:') ? `Extension ${tab.slice(10)}` : tab);
+  return `${names.join(', ')}${request.tabLinkLabel ? ` (${request.tabLinkLabel})` : ''}`;
 }
 
 // Saved-capture record export for the offline generators. Native Traffic rows

@@ -86,7 +86,8 @@ class NativeNetworkCaptureSink final {
                             std::uint64_t browser_context_id_high,
                             std::uint64_t browser_context_id_low,
                             const network::ResourceRequest& request,
-                            NativeLoaderKind loader_kind = NativeLoaderKind::kNotRecorded) noexcept;
+                            NativeLoaderKind loader_kind = NativeLoaderKind::kNotRecorded,
+                            const NativeBrowserRequestOwner& owner = {}) noexcept;
   // Content sessions only, after RecordRequestStarted: a request without a
   // DevTools ID gets `reb-<request_id>`, so the network service reports the
   // headers it sends (protocol/native-network-v3.md). No request byte changes.

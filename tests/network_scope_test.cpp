@@ -107,7 +107,9 @@ void Exclusions() {
   Case("extension worker requests at the proxy", Exclusion(65, 1, 0), true);
   Case("devtools loads", Exclusion(66, 4, 0), true);
   Case("devtools loads with a producer", Exclusion(66, 1, 4242), false);
-  Case("exclusion class above the table", Exclusion(67, 1, 0), false);
+  Case("webui requests at the proxy", Exclusion(67, 3, 0), true);
+  Case("webui requests with a producer", Exclusion(67, 1, 4242), false);
+  Case("exclusion class above the table", Exclusion(68, 1, 0), false);
   Case("zero count", Exclusion(16, 0, 4242), false);
   Case("unknown class", Exclusion(21, 1, 4242), false);
   Case("http is never excluded", Exclusion(2, 1, 4242), false);

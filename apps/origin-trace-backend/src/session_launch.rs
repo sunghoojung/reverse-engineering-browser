@@ -844,8 +844,9 @@ pub async fn launch(options: &StartOptions) -> Result<Started, String> {
             "REB_CAPTURE_REQUEST_CONTENT",
             switch(options.request_content),
         )
-        // Browser-internal evidence is a debugging opt-in, never inherited.
+        // Browser-internal and extension evidence are debugging opt-ins, never inherited.
         .env("REB_CAPTURE_BROWSER_INTERNAL", "0")
+        .env("REB_CAPTURE_EXTENSION_TRAFFIC", "0")
         // Document-start Console scripts run code in new matching documents.
         // The browser-session permission comes only from document_start, never
         // from an inherited switch, and it arms nothing by itself.

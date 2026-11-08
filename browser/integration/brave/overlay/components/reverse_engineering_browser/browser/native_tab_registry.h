@@ -20,6 +20,12 @@ class StoragePartition;
 
 namespace reb {
 
+// Else the service-worker version whose clients its requests serve, or -1.
+struct NativeFactoryOwnerTab final {
+  std::uint32_t tab = 0;
+  std::int64_t service_worker_version = -1;
+};
+
 // Feeds NativeTabResolver from the Chromium services that know each owner
 // (protocol/native-network-v3.md "Request owners and tabs"). UI thread only.
 class NativeTabRegistry final {
@@ -31,6 +37,8 @@ class NativeTabRegistry final {
 
   // Records the frame for late lookups and returns its NativeTabOf.
   std::uint32_t NoteFrame(content::RenderFrameHost* frame);
+  // `frame`, else the owner content scoped around a frameless factory.
+  NativeFactoryOwnerTab NoteFactory(content::RenderFrameHost* frame);
   // Starts observing the context's default partition once. Workers that
   // already run are enumerated; clients added before this call are not.
   void ObserveContext(content::BrowserContext* context);

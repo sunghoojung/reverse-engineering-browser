@@ -21,6 +21,7 @@ stored v1 or v2 meaning. [SAFETY.md](../SAFETY.md) governs capture and export.
 | Event type 37, 38 | `tab_set`, `request_tab_link` | Request scope and tabs |
 | Event type 39 | `script_cookie` | Headers and cookies |
 | Event type 40 to 45 | debugger observations | [Debugger observation v1](native-debugger-observation-v1.md) |
+| Event type 50 | `request_extension_link` | Request scope and tabs |
 | Envelope byte 140, 141 | `scheme_class`, `loader_kind` | Request scope and tabs |
 | Artifact kind 9 | `request_target` | [Network v2](native-network-v2.md) |
 | Artifact kind 10, 11 | `request_headers`, `response_headers` | Headers and cookies |
@@ -30,11 +31,13 @@ stored v1 or v2 meaning. [SAFETY.md](../SAFETY.md) governs capture and export.
 | Brave patch 0017 | `link-requests-to-tab-owners` | Request scope and tabs |
 | Brave patch 0018 | `capture-native-network-headers` | Headers and cookies |
 | Brave patch 0019 | `tee-native-request-bodies` | Request body reads |
+| Brave patch 0020 | `scope-native-proxy-factories` | Request scope and tabs |
 | `request_body` flag bit 6, state 12 | `read`, `not_captured_read_incomplete` | Request body reads |
 | Chromium patch 0025 | `forward-native-network-headers` | Headers and cookies |
 | Chromium patch 0026, 0027 | `finish-renderer-answered-requests`, `record-renderer-fetch-owners` | Request scope and tabs |
 | Chromium patch 0028 | `record-script-cookie-access` | Headers and cookies |
 | Chromium patch 0029 | `record-request-initiator-stacks` | Request initiator stacks |
+| Chromium patch 0035, 0036 | `expose-process-lock-scheme`, `name-frameless-script-fetch-owners` | Request scope and tabs |
 | V8 patch 0015 | `capture-native-request-stacks` | Request initiator stacks |
 
 Traffic detail tabs, in order: General, Headers, Payload, Preview, Response,
@@ -86,16 +89,31 @@ counted:
 - A renderer counts a request with a class 16 to 20 instead of recording it.
   One counter per class lives in the shared probe queue (queue version 3), like
   the drop counter, and the browser reports it at the next drain.
-- `NativeProbeSession::BindHost` does not admit a renderer process with WebUI
-  bindings (`ChildProcessSecurityPolicy::HasWebUIBindings`). A process granted
-  bindings after it bound is detached at its next drain; the records it queued
-  are discarded with it. Each such process counts once. Its script artifacts,
-  fingerprint events and requests are therefore absent.
+- The browser proxy counts, browser-wide, a request whose URL has a class 16 to
+  20 from a factory the renderer does not issue requests through. WebUI
+  navigations reach it at the pin: `NavigationURLLoaderImpl::Start` creates the
+  WebUI scheme factory through `ContentClientParams`, which calls
+  `WillCreateURLLoaderFactory`.
+- `NativeProbeSession::BindHost` does not admit a WebUI renderer: a process
+  with WebUI bindings (`ChildProcessSecurityPolicy::HasWebUIBindings`) or one
+  whose process lock site URL has a class 16 to 20. `chrome-untrusted:` and
+  `devtools:` renderers have no bindings, so Chromium patch
+  `0035-expose-process-lock-scheme` adds
+  `ChildProcessSecurityPolicy::GetProcessLockScheme`; the lock is set before
+  the renderer starts, and `ProcessLock` is content-internal at the pin. A
+  process granted bindings after it bound is detached at its next drain; the
+  records it queued are discarded with it. Each such process counts once. Its
+  script artifacts, fingerprint events and requests are therefore absent.
+- The proxy counts, browser-wide, every request a WebUI renderer sends through
+  a document, worker or service-worker subresource factory, or a worker main
+  script it creates (class 67). A navigation is never excluded by the frame
+  that starts it, so a site opened from the new tab page keeps its first
+  document.
 - Native Console targets are http(s) frames listed from every render process
   and reach their agents through frame interfaces, so they do not depend on
   probe admission.
 - `REB_CAPTURE_BROWSER_INTERNAL=1` makes the live launcher pass
-  `--reb-capture-browser-internal`, which turns both exclusions off for that
+  `--reb-capture-browser-internal`, which turns these exclusions off for that
   browser. Sessions started by `reb-api session start` or `start_live_session`
   always set it to 0.
 
@@ -119,8 +137,9 @@ request, scheme class and flags are zero. Payload size 16, little endian:
 | 8 | 8 | count, nonzero |
 
 Exclusion classes 16 to 20 count requests of that scheme class. Class 64
-`webui_renderer` counts renderer processes that were not admitted; its
-`initiator_process_id` is 0. Classes 65 `extension_worker` and 66
+`webui_renderer` counts renderer processes that were not admitted, and class 67
+`webui_request` the requests such processes sent through the proxy; both have
+`initiator_process_id` 0. Classes 65 `extension_worker` and 66
 `devtools_load` count requests (see [below](#traffic-no-tab-caused)). The count is cumulative within the session for
 one `(initiator_process_id, class)`, so a later record supersedes an earlier
 one and a lost record loses nothing that a later one reports. Consumers take
@@ -227,11 +246,20 @@ frame ids.
 | Service workers | The controlled client tabs (`ServiceWorkerContextObserver::OnControlleeAdded`, `OnControlleeNavigationCommitted` for window clients, `OnControlleeRemoved`); with none, the registration's last client tabs | kinds 3 and 4 |
 | Page request a service worker answers | The page's document (renderer record) plus the renderer completion above | |
 | Browser record from a worker factory | Joined to its renderer record (same row) through `initiator_process_id` and `initiator_request_id` | |
+| Nested dedicated worker main script | Its factory has no creator frame; `WorkerScriptFetcher::CreateScriptLoader` scopes the ancestor frame, the document at the root of the creator chain, around the factory's creation | Chromium patch `0036-name-frameless-script-fetch-owners` |
+| Service-worker main script and update check | `ServiceWorkerRegisterJob` scopes its `requesting_frame_id_` (the `register()` caller) and the registration's active version around both factory creations. The caller's tab is the factory's tab; without one, each request links to that version's client tabs, which hold the tab whose navigation hinted the update | Patch 0036; `request_tab_link` kinds 3 and 4 naming the browser record |
 
 In a capture launch the proxy observes the owned profile's frames and worker
 services from its first factory, before any session starts, and fixes each
 factory's exclusion class when it is created, so owners and excluded factories
 that predate the session still resolve.
+
+The scoped owner is read by the proxy while `WillCreateURLLoaderFactory` runs
+and only for a factory without a frame. A navigation's update hint
+(`ServiceWorkerClient::HintToUpdateServiceWorker`) reaches
+`ServiceWorkerVersion::ScheduleUpdate`, a coalescing one-second timer that
+keeps no client, so the hinting tab itself is not carried; it is a controllee
+of the active version and so in the linked set.
 
 `NativeWorkerAuthority` is not used: it holds one selected document's workers
 for source transfer under a lease, while tab links need every worker of the
@@ -242,8 +270,9 @@ session.
 Category `network`, browser sequence space. A set is immutable; when a worker's
 client tabs change, the next link names a new set id. A set is emitted before
 the first link that names it in a session. Envelope: `tab_id` the first tab of
-this part, `frame_id` the owner's fold, `parent_event_id` the previous part's
-sequence for a part after the first, else 0. Request, initiator, BrowserContext,
+this part, `frame_id` the owner's fold (0 for a service-worker version that has
+not run in this browser), `parent_event_id` the previous part's sequence for a
+part after the first, else 0. Request, initiator, BrowserContext,
 lengths, status, error, resource type, scheme class, loader kind and flags are
 zero. Payload size 128, little endian:
 
@@ -267,12 +296,15 @@ queue already reported the drop.
 #### `request_tab_link` (type 38)
 
 Category `network`, browser sequence space. One fixed-size record links one
-renderer `request_initiated` to a tab set. Envelope: `initiator_process_id` and
-`initiator_request_id` are the linked record's process and request id,
-`parent_event_id` its sequence (in that process's space), `frame_id` its frame,
-time its time. `tab_id` is the set's tab when the set has one, else 0.
-`request_id`, BrowserContext, lengths, status, error, resource type, scheme
-class, loader kind and flags are zero. Payload size 24:
+request record to a tab set. A renderer `request_initiated` is named by
+`initiator_process_id` and `initiator_request_id` (its process and request id),
+with `request_id` and BrowserContext zero. A browser record that has no
+renderer request (a service-worker script) is named by its `request_id` and
+BrowserContext, with both initiator fields zero. `parent_event_id` is the
+record's sequence (in its producer's space), `frame_id` its frame, time its
+time. `tab_id` is the set's tab when the set has one, else 0. Lengths, status,
+error, resource type, scheme class, loader kind and flags are zero. Payload
+size 24:
 
 | Offset | Size | Field |
 | ---: | ---: | --- |
@@ -291,6 +323,23 @@ class, loader kind and flags are zero. Payload size 24:
 | 3 | `service_worker_clients` | The controlled client tabs |
 | 4 | `service_worker_last_clients` | No current client; the registration's last client tabs, which may be closed |
 
+#### `request_extension_link` (type 50)
+
+Category `network`, browser sequence space, recorded only with the
+[extension opt-in](#traffic-no-tab-caused). One fixed-size record names the
+extension whose context made one request. The envelope names the record as
+`request_tab_link` does; `tab_id` is 0. Payload size 40:
+
+| Offset | Size | Field |
+| ---: | ---: | --- |
+| 0 | 2 | payload version, `1` |
+| 2 | 2 | payload size, `40` |
+| 4 | 1 | the record's loader kind: 4 or 6 for a browser record, 17 to 19 for a renderer one |
+| 5 | 3 | reserved, zero |
+| 8 | 32 | extension id, 32 ASCII letters `a` to `p` |
+
+A row named by such a link has an owner and is not unresolved.
+
 #### Traffic no tab caused
 
 Excluded at capture by default and counted like browser-internal exclusions:
@@ -300,6 +349,14 @@ Excluded at capture by default and counted like browser-internal exclusions:
 | 65 | `extension_worker` | requests | The drain, per renderer, for a renderer record whose owner is an extension worker; the proxy, browser-wide, for a worker main script or service-worker script it fetches for a `chrome-extension` context. The proxy also leaves out the renderer-issued requests of such a context, which the drain counts |
 | 66 | `devtools_load` | requests | The proxy, browser-wide, for the DevTools factory |
 
+`REB_CAPTURE_EXTENSION_TRAFFIC=1` makes the live launcher pass
+`--reb-capture-extension-traffic`; class 65 is then recorded instead of
+counted, each request with one `request_extension_link`: the drain links an
+extension worker's renderer record, the proxy a worker main script or
+service-worker script it fetches. An extension origin whose host is not a valid
+id stays counted. Sessions started by `reb-api session start` or
+`start_live_session` always set it to 0.
+
 Content-script requests use their page's document factory and stay with that
 tab. Extension pages (background page, popup, options) are their own
 `WebContents` and are named by their page like any tab.
@@ -307,16 +364,17 @@ tab. Extension pages (background page, popup, options) are their own
 #### Unresolved requests
 
 A row (records joined as in Traffic) is unresolved when none of its records
-has a nonzero `tab_id` and no `request_tab_link` names it. `get_session_summary`
+has a nonzero `tab_id` and no `request_tab_link` or `request_extension_link`
+names it. `get_session_summary`
 reports `request_tabs` (rows, unresolved rows and up to 16 of them by process
 and request id) and the error check `network_tab_unresolved`. Traffic shows the
 count in its footer; the button lists those rows. They are never hidden.
 
-Not linked yet, so unresolved: the browser's own service-worker main-script
-and update-check fetches (`service_worker_script` with no frame), a nested
-dedicated worker's main script (its factory has no creator frame), a
-browser-initiated prefetch, worklet requests, and a worker whose creator or
-clients were gone before capture started. Early-hints preloads never reach the
+Not linked yet, so unresolved: a service-worker script fetch with neither a
+`register()` caller nor an active version with a client tab this browser saw
+(a browser-initiated registration, or an update while no client was ever
+controlled), a browser-initiated prefetch, worklet requests, and a worker whose
+creator or clients were gone before capture started. Early-hints preloads never reach the
 proxy at the pin (`NavigationRequest` creates their factory without
 `ContentClientParams`), so they are not recorded at all.
 
@@ -338,20 +396,24 @@ proxy at the pin (`NavigationRequest` creates their factory without
   resolver keeps at most 16,384 frames and 4,096 workers, versions and clients
   per worker, evicting the oldest; an evicted owner leaves its later records
   unresolved, which the summary reports.
+- The proxy fixes a factory's scope once, when Chromium creates it: a
+  command-line read and, for a frameless factory, the scoped owner. Each
+  request then costs one classification of its scheme. Admission reads the
+  process lock once per bind and drain.
 
 ### Consumers
 
 - The broker validates both the scheme class and type 36 in `IsValidEvent`,
-  and the loader kind and types 37 and 38.
+  and the loader kind and types 37, 38 and 50.
 - `get_session_summary` lists `exclusions` by class and adds the info checks
-  `browser_internal_excluded` and `no_tab_traffic_excluded`, `request_tabs`,
-  and the error check `network_tab_unresolved`. The backend keeps types 36 to
-  38 in its network window.
+  `browser_internal_excluded` and `no_tab_traffic_excluded`, `request_tabs`
+  (with `extension_rows`), and the error check `network_tab_unresolved`. The
+  backend keeps types 36 to 38 and 50 in its network window.
 - Traffic has no Unattributed group. A row is in every tab its records or link
   name, with a marker such as "Service worker · 2 tabs"; All tabs counts it
-  once. Each chip is named by the tab's newest main-frame navigation. The
-  footer counts rows without a tab as a capture error and its button lists
-  them.
+  once. Each chip is named by the tab's newest main-frame navigation; extension
+  traffic gets one chip per extension id. The footer counts rows without an
+  owner as a capture error and its button lists them.
 - Traffic shows "N browser-internal requests not recorded" in its footer, names
   hostless rows by scheme (`data:`), and joins renderer targets and completions
   to their row. A reversible "Hide browser-internal" filter in Traffic and
@@ -369,16 +431,19 @@ service-worker, opted-in internal and pre-v3 rows.
 `make native-probe-admission-check` drives the real renderer sink and
 transport through exclusion counting, opt-in, renderer completion, stale and
 refused starts and the inactive path. `make native-network-capture-check`
-checks the browser `request_started` scheme class and loader kind.
+checks the browser `request_started` scheme class and loader kind, and the
+factory scope: which proxy loads are counted where, and the links a frameless
+service-worker script carries.
 
 `tests/tab_link_test.cpp` checks loader kinds, tab sets and links for parity
 and malformed records; `make tab-link-wire-check` compares them with the Python
 validator and `request_tabs.js`, then drives Traffic rows through multi-tab,
-incomplete-set, unlinked and page-name cases. `make
+incomplete-set, browser-record, extension, unlinked and page-name cases. `make
 native-artifact-capture-check` drives the real `NativeProbeHost` drain and
 `NativeTabResolver` through tombstoned frames, nested dedicated workers, shared
-worker clients, a service worker with 30 clients, last clients and extension
-workers. `make native-probe-admission-check` covers the renderer fetch owner.
+worker clients, a service worker with 30 clients, last clients, counted and
+opted-in extension workers, and renderers locked to an internal scheme. `make
+native-probe-admission-check` covers the renderer fetch owner.
 
 ### Acceptance
 
@@ -395,11 +460,22 @@ Still required before declaring this browser-ready:
    request content) and status.
 4. Repeat with `REB_CAPTURE_BROWSER_INTERNAL=1` and confirm the internal rows
    return with classes 16 to 20 and no exclusion is reported.
-5. With Brave patch `0017-link-requests-to-tab-owners` and Chromium patch
-   `0027-record-renderer-fetch-owners`, run the #425 fixture site:
+5. With Brave patches `0017-link-requests-to-tab-owners` and
+   `0020-scope-native-proxy-factories` and Chromium patches
+   `0027-record-renderer-fetch-owners` and
+   `0036-name-frameless-script-fetch-owners`, run the #425 fixture site:
    `get_session_summary` reports no `network_tab_unresolved` beyond the
    unlinked cases listed under [Unresolved requests](#unresolved-requests), and
-   each request lands on its tab.
+   each request lands on its tab, including a nested worker's main script and
+   a service worker's registration and update-check fetches.
+6. The new tab page's own https requests count as `webui_request`, and a
+   `chrome-untrusted:` frame and an open DevTools window add `webui_renderer`
+   processes and no scripts to Sources (Chromium patch
+   `0035-expose-process-lock-scheme`).
+7. With `REB_CAPTURE_EXTENSION_TRAFFIC=1` and an installed extension that
+   fetches from its service worker, those requests appear under its extension
+   chip and `extension_rows` counts them; without it they count as
+   `extension_worker`.
 
 ## Response bodies
 

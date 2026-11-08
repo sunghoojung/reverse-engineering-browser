@@ -2782,8 +2782,8 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
           const title = group.title;
           const page = group.page ?? group.domains.find(value => value && value !== 'unknown');
           const fallback = `Tab ${index + 1}`;
-          const label = title ? (title.length > 42 ? `${title.slice(0, 41)}…` : title)
-            : page || fallback;
+          const label = globalThis.RebRequestTabs?.scopeLabel(group.id) ??
+            (title ? (title.length > 42 ? `${title.slice(0, 41)}…` : title) : page || fallback);
           return {
             id: group.id,
             label,
@@ -2806,7 +2806,8 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
           if (button.children[0].textContent !== scope.label) button.children[0].textContent = scope.label;
           if (button.children[1].textContent !== String(scope.count)) button.children[1].textContent = String(scope.count);
           button.title = scope.id === 'all' ? 'Show requests from every captured browser tab, each once'
-            : `${scope.label} · ${scope.domains.join(', ')} · tab id ${scope.id}`;
+            : scope.id.startsWith('extension:') ? `Extension ${scope.id.slice(10)} · ${scope.domains.join(', ')}`
+              : `${scope.label} · ${scope.domains.join(', ')} · tab id ${scope.id}`;
           if (created) button.addEventListener('click', () => {
             state.requestTabId = scope.id;
             state.requestDomain = 'all';
@@ -3253,7 +3254,8 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
           const request = requestsFromEvents(events, indexed.origin).find(candidate => candidate.id === id);
           if (!request) throw new Error('its stored records no longer form this request');
           // Tab sets and links have no request ID, so the store read lacks them; the index row has them.
-          Object.assign(request, {tabIds: indexed.tabIds, tabLink: indexed.tabLink, tabLinkLabel: indexed.tabLinkLabel});
+          Object.assign(request, {tabIds: indexed.tabIds, tabLink: indexed.tabLink, tabLinkLabel: indexed.tabLinkLabel,
+            extensionId: indexed.extensionId});
           state.trafficLoaded.delete(id);
           state.trafficLoaded.set(id, request);
           for (const key of state.trafficLoaded.keys()) {

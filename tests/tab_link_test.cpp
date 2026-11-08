@@ -38,6 +38,10 @@ static_assert(static_cast<std::uint16_t>(reb::EventType::kTabSet) ==
               static_cast<std::uint16_t>(reb::NativeProbeType::kTabSet));
 static_assert(static_cast<std::uint16_t>(reb::EventType::kRequestTabLink) ==
               static_cast<std::uint16_t>(reb::NativeProbeType::kRequestTabLink));
+static_assert(static_cast<std::uint16_t>(reb::EventType::kRequestExtensionLink) ==
+              static_cast<std::uint16_t>(reb::NativeProbeType::kRequestExtensionLink));
+static_assert(reb::kRequestExtensionLinkPayloadSize == reb::kNativeRequestExtensionLinkPayloadSize);
+static_assert(reb::kExtensionIdSize == std::tuple_size_v<reb::NativeExtensionId>);
 static_assert(offsetof(reb::EventHeader, loader_kind) ==
               offsetof(reb::NativeProbeHeader, loader_kind));
 static_assert(reb::kTabSetPartTabs == reb::kNativeTabSetPartTabs);
@@ -81,6 +85,37 @@ reb::EventRecord Link(
   linked.monotonic_time_ns = 999;
   return std::bit_cast<reb::EventRecord>(
       reb::MakeNativeRequestTabLink(linked, Identity(60), kind, 3, tabs));
+}
+
+// A frameless browser record: a service-worker script the browser fetched.
+reb::NativeProbeHeader BrowserRecord() {
+  reb::NativeProbeHeader linked;
+  linked.process_id = 7;
+  linked.sequence_number = 32;
+  linked.request_id = 900;
+  linked.browser_context_id_high = 11;
+  linked.browser_context_id_low = 12;
+  linked.monotonic_time_ns = 999;
+  return linked;
+}
+
+reb::EventRecord BrowserLink(const std::vector<std::uint32_t>& tabs) {
+  return std::bit_cast<reb::EventRecord>(reb::MakeNativeRequestTabLink(
+      BrowserRecord(), Identity(61), reb::NativeTabLinkKind::kServiceWorkerClients, 3, tabs, true));
+}
+
+reb::EventRecord ExtensionLink(const reb::NativeLoaderKind kind, const bool browser_record) {
+  reb::NativeExtensionId id;
+  static_cast<void>(reb::ParseNativeExtensionId("abcdefghijklmnopabcdefghijklmnop", id));
+  reb::NativeProbeHeader linked = browser_record ? BrowserRecord() : reb::NativeProbeHeader{};
+  if (!browser_record) {
+    linked.process_id = 4242;
+    linked.sequence_number = 31;
+    linked.request_id = 17;
+    linked.frame_id = 0xabc;
+  }
+  return std::bit_cast<reb::EventRecord>(
+      reb::MakeNativeRequestExtensionLink(linked, Identity(62), kind, id, browser_record));
 }
 
 reb::EventRecord Request(const reb::EventType type, const std::uint8_t loader_kind) {
@@ -160,7 +195,7 @@ void TabSets() {
   Case("set naming a request", event, false);
   event = Part({4, 9}, 0);
   event.header.frame_id = 0;
-  Case("set without an owner", event, false);
+  Case("set of a version that has not run", event, true);
   event = Part({4, 9}, 0);
   event.header.initiator_process_id = 4242;
   Case("set with an initiator", event, false);
@@ -210,6 +245,18 @@ void Links() {
   event = Link({4});
   event.inline_payload[21] = std::byte{1};
   Case("dirty reserved link", event, false);
+  Case("browser record link to two tabs", BrowserLink({4, 9}), true);
+  Case("browser record link to one tab", BrowserLink({4}), true);
+  event = BrowserLink({4, 9});
+  event.header.browser_context_id_high = 0;
+  event.header.browser_context_id_low = 0;
+  Case("browser record link without its BrowserContext", event, false);
+  event = BrowserLink({4, 9});
+  event.header.initiator_process_id = 4242;
+  Case("link naming both a renderer and a browser record", event, false);
+  event = BrowserLink({4, 9});
+  event.header.request_id = 0;
+  Case("browser record link without its request", event, false);
   const auto valid = Link({4, 9});
   reb::RequestTabLinkPayload value;
   Check(reb::DecodeRequestTabLinkPayload(valid.inline_payload, value) && value.set_id == 3 &&
@@ -218,12 +265,55 @@ void Links() {
         "link round trip");
 }
 
+void ExtensionLinks() {
+  Case("extension service-worker script",
+       ExtensionLink(reb::NativeLoaderKind::kServiceWorkerScript, true), true);
+  Case("extension worker main script",
+       ExtensionLink(reb::NativeLoaderKind::kWorkerMainResource, true), true);
+  Case("extension service-worker request",
+       ExtensionLink(reb::NativeLoaderKind::kServiceWorker, false), true);
+  Case("extension dedicated worker request",
+       ExtensionLink(reb::NativeLoaderKind::kDedicatedWorker, false), true);
+  Case("browser kind on a renderer record",
+       ExtensionLink(reb::NativeLoaderKind::kServiceWorkerScript, false), false);
+  Case("worker kind on a browser record",
+       ExtensionLink(reb::NativeLoaderKind::kServiceWorker, true), false);
+  Case("document kind", ExtensionLink(reb::NativeLoaderKind::kDocument, false), false);
+  auto event = ExtensionLink(reb::NativeLoaderKind::kServiceWorker, false);
+  event.inline_payload[20] = std::byte{'q'};
+  Case("extension id outside a to p", event, false);
+  event = ExtensionLink(reb::NativeLoaderKind::kServiceWorker, false);
+  event.header.tab_id = 4;
+  Case("extension link with a tab", event, false);
+  event = ExtensionLink(reb::NativeLoaderKind::kServiceWorker, false);
+  event.header.parent_event_id = 0;
+  Case("extension link without its record", event, false);
+  event = ExtensionLink(reb::NativeLoaderKind::kServiceWorker, false);
+  event.inline_payload[6] = std::byte{1};
+  Case("dirty reserved extension link", event, false);
+  event = ExtensionLink(reb::NativeLoaderKind::kServiceWorker, false);
+  event.header.payload_size = 39;
+  Case("short extension link", event, false);
+  reb::RequestExtensionLinkPayload value;
+  const auto valid = ExtensionLink(reb::NativeLoaderKind::kServiceWorkerScript, true);
+  Check(reb::DecodeRequestExtensionLinkPayload(valid.inline_payload, value) &&
+            value.loader_kind == 6 && value.extension_id[0] == 'a' &&
+            value.extension_id[31] == 'p' && valid.header.request_id == 900 &&
+            valid.header.parent_event_id == 32,
+        "extension link round trip");
+  reb::NativeExtensionId id;
+  Check(!reb::ParseNativeExtensionId("abcdefghijklmnopabcdefghijklmnoq", id) &&
+            !reb::ParseNativeExtensionId("abc", id),
+        "extension ids are 32 letters a to p");
+}
+
 }  // namespace
 
 int main(const int argc, char** argv) {
   LoaderKinds();
   TabSets();
   Links();
+  ExtensionLinks();
   if (argc == 2 && std::string_view(argv[1]) == "--golden") {
     std::string json;
     std::cout << '[';
@@ -237,8 +327,10 @@ int main(const int argc, char** argv) {
     return failures == 0 ? 0 : 1;
   }
   if (failures == 0) {
-    std::cout << "PASS tab links: " << golden.size()
-              << " loader kind, tab set and request tab link records; overlay and core agree\n";
+    std::cout
+        << "PASS tab links: " << golden.size()
+        << " loader kind, tab set, request tab link and extension link records; overlay and core "
+           "agree\n";
   }
   return failures == 0 ? 0 : 1;
 }

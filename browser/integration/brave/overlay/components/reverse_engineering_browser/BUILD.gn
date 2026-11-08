@@ -150,6 +150,21 @@ component("network_headers_hook") {
   deps = [ "//base" ]
 }
 
+# Linked by content's service-worker and worker script fetchers (Chromium patch
+# 0036) and the browser proxy scope, so both share one owner slot.
+component("factory_owner_hook") {
+  output_name = "reverse_engineering_browser_factory_owner_hook"
+
+  defines = [ "IS_REB_FACTORY_OWNER_HOOK_IMPL" ]
+
+  sources = [
+    "common/native_factory_owner_hook.cc",
+    "common/native_factory_owner_hook.h",
+  ]
+
+  deps = [ "//base" ]
+}
+
 static_library("renderer") {
   sources = [
     "common/native_console_messages.cc",
@@ -203,10 +218,13 @@ source_set("browser") {
     "browser/native_artifact_socket_client.h",
     "browser/native_artifact_stream.cc",
     "browser/native_artifact_stream.h",
+    "browser/native_capture_scope.h",
     "browser/native_console_document_start.cc",
     "browser/native_console_document_start.h",
     "browser/native_console_session.cc",
     "browser/native_console_session.h",
+    "browser/native_factory_scope.cc",
+    "browser/native_factory_scope.h",
     "browser/native_local_ipc_client.cc",
     "browser/native_local_ipc_client.h",
     "browser/native_network_capture_sink.cc",
@@ -260,6 +278,7 @@ source_set("browser") {
 
   deps = [
     ":console_protocol",
+    ":factory_owner_hook",
     ":mojom",
     ":network_headers_hook",
     ":queue",

@@ -72,7 +72,9 @@ it.
   paths, queries and body bytes are sensitive capture: they are retained only
   with `REB_CAPTURE_REQUEST_CONTENT=1`, which the packaged app's default content
   mode sets, at most 256 KiB per body and 1,024 bodies or 64 MiB per session. See
-  [Native network v2](protocol/native-network-v2.md).
+  [Native network v2](protocol/native-network-v2.md). The backend's request
+  index keeps a private derived copy of those paths beside the event store;
+  capture clear removes it ([request index v1](protocol/request-index-v1.md)).
 - Historical captures can include sensitive URLs, headers, bodies and source.
   Removal of CDP does not sanitize previously saved evidence. Only collect and
   disclose data covered by authorization.

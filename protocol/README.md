@@ -105,6 +105,9 @@ type, SHA-256, kind and capture state) and 23 `request_target` (only with
 request content capture: path and query), both exact children of a lifecycle
 record, plus the sensitive `request_body` artifact kind for at most 256 KiB of
 body bytes. Fragments, credentials, headers and cookies are still not recorded.
+[Request index v1](request-index-v1.md) defines the backend's one-row-per-request
+index of a whole session, its private sidecar beside the store and
+`GET /api/requests`, which Traffic pages instead of the newest network window.
 
 Renderer-to-browser delivery uses exact 320-byte `EventRecord` objects in a
 bounded shared-memory queue. Mojo carries session lifecycle and coalesced

@@ -22,6 +22,19 @@ function trafficTargetParts(request) {
   }
 }
 
+// The host a row is grouped and filtered by; the request index applies the same rule.
+function trafficRequestDomain(request) {
+  if (!request) return 'unknown';
+  if (request.origin === 'sample') return 'checkout.acme.test';
+  const target = String(request.path ?? '').trim();
+  if (!target || target === 'Unidentified network event') return 'unknown';
+  try {
+    return new URL(target).host || 'unknown';
+  } catch {
+    return target.replace(/^\/\//, '').split('/')[0] || 'unknown';
+  }
+}
+
 const TRAFFIC_BODY_KIND_LABELS = Object.freeze({none: 'None', bytes: 'In-memory bytes', file: 'File upload',
   data_pipe: 'Blob or data pipe', chunked_data_pipe: 'Streaming upload', mixed: 'Mixed parts',
   unknown: 'Unrecognized part'});
@@ -115,17 +128,16 @@ function trafficTimeLabel(time) {
   return `${(time / 1000).toFixed(2)} s`;
 }
 
-// The broker retains 5,000 events. A separately paged ledger never mounts more
-// than 500 rows; filters and sorting still inspect the whole retained window.
+// One mounted block of at most 500 rows; spacers stand for the rest.
 const TRAFFIC_ROW_LIMIT = 500;
-const TRAFFIC_RETAINED_LIMIT = 5000;
+const TRAFFIC_ROW_MARGIN = 100;
 function trafficTimeValue(request) {
   if (typeof request.time === 'number' && Number.isFinite(request.time)) return request.time;
   const milliseconds = /^(\d+(?:\.\d+)?) ms$/.exec(String(request.time));
   return milliseconds && Number.isFinite(Number(milliseconds[1])) ? Number(milliseconds[1]) : null;
 }
 function trafficSortedRequests(requests, key = 'capture', direction = 1) {
-  if (key === 'capture') return requests;
+  if (key === 'capture') return direction < 0 ? [...requests].reverse() : requests;
   const value = request => key === 'name' ? trafficTargetParts(request).name
     : key === 'time' ? trafficTimeValue(request)
       : key === 'status' ? /^\d+$/.test(String(request.status)) ? Number(request.status) : null
@@ -142,6 +154,33 @@ function trafficWindow(requests, start, anchor = null) {
   const found = anchor === null ? -1 : requests.findIndex(request => request.id === anchor);
   const offset = Math.max(0, Math.min(found < 0 ? start : found, Math.max(0, requests.length - TRAFFIC_ROW_LIMIT)));
   return {start: offset, rows: requests.slice(offset, offset + TRAFFIC_ROW_LIMIT)};
+}
+
+function trafficRowHeight(container) {
+  const height = container.querySelector('.request-row')?.offsetHeight;
+  if (height > 0) container.dataset.rowHeight = String(height);
+  return Number(container.dataset.rowHeight) || 28;
+}
+
+// Moves the mounted block only when the viewport nears one of its edges.
+function trafficBlockStart(container, total, start) {
+  const maximum = Math.max(0, total - TRAFFIC_ROW_LIMIT);
+  const height = trafficRowHeight(container);
+  const first = Math.floor((container.scrollTop || 0) / height);
+  const last = first + Math.ceil((container.clientHeight || 0) / height);
+  start = Math.min(start, maximum);
+  if ((start === 0 || first >= start + TRAFFIC_ROW_MARGIN) &&
+      (start >= maximum || last <= start + TRAFFIC_ROW_LIMIT - TRAFFIC_ROW_MARGIN)) return start;
+  return Math.max(0, Math.min(maximum, first - 2 * TRAFFIC_ROW_MARGIN));
+}
+
+// A request index row (protocol/request-index-v1.md) in the Traffic row shape.
+function trafficIndexRequest(row, origin) {
+  return {id: row.id, path: row.path, method: row.method, status: row.status, time: row.time, type: row.type, origin,
+    targetKind: row.target_kind, hostOnly: row.target_kind === 'host', failed: row.failed, interrupted: row.interrupted,
+    tabId: row.tab_id, operation: row.operation, target: row.target, host: row.host, urlTruncated: row.url_truncated,
+    targetLength: row.target_length, targetMalformed: row.target_malformed,
+    firstTimestamp: BigInt(row.first_time_ns), lastTimestamp: BigInt(row.last_time_ns), events: [], details: [], indexRow: row};
 }
 
 // Native request failures and the Failed row label are not queue drops.
@@ -165,7 +204,7 @@ function trafficFailedRequestNotice(requests) {
 // Selection does not change row content, order or geometry. Keep keyboard
 // movement independent of retained-body search and avoid layout reads/writes.
 function renderTrafficRowSelection(container, selectedId) {
-  const rows = [...container.querySelectorAll('.request-row')];
+  const rows = [...container.querySelectorAll('.request-row')].filter(row => row.dataset.requestId);
   const selectedVisible = rows.some(row => row.dataset.requestId === selectedId);
   rows.forEach((row, index) => {
     const selected = row.dataset.requestId === selectedId;
@@ -176,16 +215,26 @@ function renderTrafficRowSelection(container, selectedId) {
   });
 }
 
-function renderTrafficRows(container, requests, {selectedId, newIds, onSelect, onKey, nameOf = () => null}) {
+// `requests` is the block from row `start` of `total`; a missing entry is not loaded yet.
+function renderTrafficRows(container, requests, {start = 0, total = requests.length, selectedId, newIds, onSelect, onKey, nameOf = () => null, pending = 'Loading…'}) {
   requests = requests.slice(0, TRAFFIC_ROW_LIMIT);
   const previousRows = new Map([...container.querySelectorAll('.request-row')].map(row => [row.dataset.requestId, row]));
   const focused = document.activeElement;
   const focusedId = container.contains(focused) ? focused.dataset.requestId : null;
   const scrollTop = container.scrollTop;
-  const anchor = [...previousRows.values()].find(row => row.offsetTop + row.offsetHeight > scrollTop);
+  const height = trafficRowHeight(container);
+  // At the top, rows that arrive above stay in view instead of pushing it.
+  const anchor = scrollTop > 0 ? [...previousRows.values()].find(row => row.dataset.requestId && row.offsetTop + row.offsetHeight > scrollTop) : null;
   const anchorOffset = anchor ? anchor.offsetTop - scrollTop : 0;
-  const selectedVisible = requests.some(request => request.id === selectedId);
+  const selectedVisible = requests.some(request => request?.id === selectedId);
+  const firstLoaded = requests.findIndex(Boolean);
   const rows = requests.map((request, index) => {
+    if (!request) {
+      const placeholder = trafficNode('div', 'request-row request-placeholder', pending);
+      placeholder.setAttribute('aria-hidden', 'true');
+      placeholder.classList.toggle('is-striped', (start + index) % 2 === 1);
+      return placeholder;
+    }
     let row = previousRows.get(String(request.id));
     if (!row) {
       row = trafficNode('button', 'request-row'); row.type = 'button';
@@ -228,14 +277,25 @@ function renderTrafficRows(container, requests, {selectedId, newIds, onSelect, o
       row.setAttribute('aria-label', `${researcherName ? `${researcherName} (researcher name). ` : ''}${trafficOriginLabel(request)} ${request.hostOnly ? 'host-only metadata' : 'request'}: ${request.method} ${request.path}, ${status.textContent}, ${trafficTimeLabel(request.time)}, ${request.operation ?? 'network'}, request ${request.id}`);
     }
     row.setAttribute('aria-selected', String(request.id === selectedId));
-    row.tabIndex = request.id === selectedId || !selectedVisible && index === 0 ? 0 : -1;
+    // Stripes follow the row's place in the whole list, not in the block.
+    row.classList.toggle('is-striped', (start + index) % 2 === 1);
+    row.tabIndex = request.id === selectedId || !selectedVisible && index === firstLoaded ? 0 : -1;
     return row;
   });
-  rows.forEach((row, index) => {
-    const current = container.children[index];
-    if (current !== row) container.insertBefore(row, current ?? null);
+  const spacers = container.trafficSpacers ??= [0, 1].map(() => {
+    const spacer = trafficNode('div', 'request-spacer');
+    spacer.setAttribute('aria-hidden', 'true');
+    return spacer;
   });
-  while (container.children.length > rows.length) container.lastElementChild.remove();
+  const below = Math.max(0, total - start - rows.length);
+  spacers[0].style.height = `${start * height}px`;
+  spacers[1].style.height = `${below * height}px`;
+  const nodes = [...(start > 0 ? [spacers[0]] : []), ...rows, ...(below > 0 ? [spacers[1]] : [])];
+  nodes.forEach((node, index) => {
+    const current = container.children[index];
+    if (current !== node) container.insertBefore(node, current ?? null);
+  });
+  while (container.children.length > nodes.length) container.lastElementChild.remove();
   const restored = anchor && rows.find(row => row.dataset.requestId === anchor.dataset.requestId);
   container.scrollTop = restored ? restored.offsetTop - anchorOffset : scrollTop;
   if (focusedId && document.activeElement !== focused) (rows.find(row => row.dataset.requestId === focusedId) ?? rows[0] ?? container).focus({preventScroll: true});

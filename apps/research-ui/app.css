@@ -384,7 +384,7 @@
         text-align: left;
         font: 12px var(--mono);
       }
-      .request-row:nth-child(even) { background: var(--stripe); }
+      .request-row.is-striped { background: var(--stripe); }
       .request-row:hover { background: var(--panel-3); }
       .request-row > span { border-right-color: transparent; }
       .request-row[aria-selected="true"] {
@@ -2029,7 +2029,7 @@ var(--panel);
       .request-head { background: var(--panel); border-color: var(--line-soft); }
       .request-head > span { border-right: 0; }
       .request-row { height: 40px; font-size: 11px; }
-      .request-row:nth-child(even) { background: transparent; }
+      .request-row.is-striped { background: transparent; }
       .request-row:hover { background: var(--panel-2); }
       .request-row[aria-selected="true"] { background: var(--accent-soft); box-shadow: inset 2px 0 var(--accent); }
       .request-row[aria-selected="true"] > span { color: var(--text); }
@@ -2081,7 +2081,7 @@ var(--panel);
       .request-row { height: 28px; font-size: 11px; }
       .request-row > span { padding: 0 8px; }
       .request-head > :nth-child(5), .request-row > :nth-child(5) { display: block; }
-      .request-row:nth-child(even) { background: var(--stripe); }
+      .request-row.is-striped { background: var(--stripe); }
       .request-row:hover { background: var(--panel-3); }
       .request-row[aria-selected="true"] { background: var(--accent-soft); box-shadow: inset 2px 0 var(--accent); }
       .request-row:focus-visible { outline: 1px solid var(--accent); outline-offset: -2px; }
@@ -2102,6 +2102,10 @@ var(--panel);
       .request-window button:hover { color: var(--text); background: var(--panel-3); }
       .request-window button:disabled { opacity: .45; cursor: default; }
       .request-window #request-latest { color: var(--accent); }
+      .request-row.request-placeholder { align-items: center; padding: 0 8px; color: var(--muted); }
+      .request-spacer { pointer-events: none; }
+      #request-rows { overflow-anchor: none; }
+      .request-row[aria-busy="true"] { cursor: progress; opacity: .7; }
       /* Keep the phone footer to a full-width count row and one action row.
          Mixing shrinking counts with buttons steals height from the ledger. */
       @media (max-width: 480px) { .request-window > span { flex-basis: 100%; } }

@@ -643,6 +643,14 @@ final class OriginTraceRenderedUITests: XCTestCase {
       try await show(ui, "traffic")
       let rows = try await ui.value("__rebUiProbe.count('#screen-traffic .request-row') > 0 && document.querySelectorAll('#screen-traffic .request-row').length") as? Int ?? 0
       XCTAssertGreaterThanOrEqual(rows, expected.requestCount, "\(size.name): retained native requests are listed")
+      // Rows and the footer come from the session request index, not the newest window.
+      let indexed = try await ui.value("state.trafficIndex?.answer()?.document.total ?? -1") as? Int ?? -1
+      XCTAssertGreaterThanOrEqual(indexed, expected.requestCount, "\(size.name): the request index lists the session")
+      let footer = try await ui.json("""
+        ({text: document.querySelector('#request-window-status').textContent, total: (\(indexed)).toLocaleString('en-US')})
+        """)
+      let total = footer["total"] as? String ?? "?"
+      XCTAssertTrue((footer["text"] as? String ?? "").hasPrefix("\(total) / \(total) requests"), "\(size.name): footer counts the session: \(footer)")
       // A stored session is a fixed set; none of its requests is new.
       let latestHidden = try await ui.value("document.querySelector('#request-latest').hidden") as? Bool
       XCTAssertEqual(latestHidden, true, "\(size.name): a stored session must not claim new requests")

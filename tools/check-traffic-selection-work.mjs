@@ -22,7 +22,7 @@ function fixture(appSource = app, trafficSource = traffic, count = 5000) {
   clearStats();
   class Node {
     constructor(tag = 'div') {
-      this.tagName = tag; this.children = []; this.dataset = {}; this.attributes = new Map();
+      this.tagName = tag; this.children = []; this.dataset = {}; this.attributes = new Map(); this.style = {};
       this.listeners = new Map(); this.className = ''; this.textContent = ''; this.tabIndex = -1;
       this._scrollTop = 0; this.scrollLeft = 0; this.value = ''; this.hidden = false;
       this.classList = {

@@ -999,6 +999,20 @@ checks the store length every 200 ms and holds no reader between checks. At
 most eight waits run at once; a ninth returns 503 `resource_limit`. Waiting
 changes nothing in the browser or the stores.
 
+### Session request index
+
+`GET /api/requests` (`get_requests`) pages one row per network request of the
+whole session, from an index the backend folds incrementally from the event
+store and keeps beside it as a private sidecar. `total`, `matching` and the tab
+and domain `facets` are exact for the indexed bytes; filters (`tab_id`,
+`domain`, `type`), search (`q`) and sort cover every request, and `offset` with
+`through` pages one snapshot. Each row names its root event and the
+`session_id`, `process_id` and `request_id` members whose records form it, so
+`get_events` with `after=first_offset` and `limit=records` reads them. The
+contract, bounds and invalidation rules are in
+[request-index-v1.md](request-index-v1.md). The `reb://` stored-evidence reader
+does not serve it.
+
 ## Exact native Traffic to VM selection
 
 `GET /api/analysis/vm` without selectors remains session analysis. A request

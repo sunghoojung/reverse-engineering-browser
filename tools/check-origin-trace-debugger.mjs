@@ -641,7 +641,7 @@ console.log("PASS WASM inspection identity, coordinate and resource bounds");
 // pixels. `make rendered-ui-check` is the separate rendered interaction path.
 class TrafficFixtureNode {
   constructor(tag = "div") {
-    this.tagName = tag.toUpperCase(); this.children = []; this.dataset = {}; this.attributes = new Map();
+    this.tagName = tag.toUpperCase(); this.children = []; this.dataset = {}; this.attributes = new Map(); this.style = {};
     this.listeners = new Map(); this.className = ""; this._text = ""; this.value = ""; this.scrollTop = 0; this.parentNode = null;
     this.classList = {add: name => {if (!this.className.split(" ").includes(name)) this.className += ` ${name}`;},
       remove: name => {this.className = this.className.split(" ").filter(value => value !== name).join(" ");},

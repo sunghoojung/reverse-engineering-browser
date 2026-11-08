@@ -697,7 +697,7 @@ fn openapi_references_and_native_only_operations_are_consistent() {
             assert!(ids.insert(id), "Duplicate operation ID: {id}");
         }
     }
-    assert_eq!(ids.len(), 44, "Review route coverage when the API changes");
+    assert_eq!(ids.len(), 45, "Review route coverage when the API changes");
     assert!(
         ids.contains("get_js_invocation_sites")
             && ids.contains("resolve_js_invocation_site")
@@ -785,7 +785,7 @@ fn execution_metadata_covers_operations_actions_and_dispatch_without_safe_defaul
             operation_count += 1;
         }
     }
-    assert_eq!(operation_count, 44);
+    assert_eq!(operation_count, 45);
     let schemas = &spec["components"]["schemas"];
     let mut action_count = 0;
     for name in [
@@ -1054,6 +1054,7 @@ async fn openapi_responses_match_live_local_http_and_conditional_reads() {
         "/api/native-console",
         "/api/live-wasm",
         "/api/events",
+        "/api/requests",
         "/api/artifacts",
         "/api/analysis/vm",
         "/api/analysis/vm/opcodes",
@@ -1074,6 +1075,8 @@ async fn openapi_responses_match_live_local_http_and_conditional_reads() {
     }
     for (path, route, status) in [
         ("/api/events?limit=oops", "/api/events", 400),
+        ("/api/requests?sort=size", "/api/requests", 400),
+        ("/api/requests?tab_id=0", "/api/requests", 400),
         ("/api/events?limit=1&limit=2", "/api/events", 400),
         ("/api/artifacts?limit=", "/api/artifacts", 400),
         (
@@ -8988,5 +8991,132 @@ async fn js_invocation_sites_real_worker_resolves_names_and_positions() {
     assert_eq!(
         std::fs::read_to_string(&store).unwrap(),
         format!(r#"{{"sites":[{}],"version":1}}"#, named["site"])
+    );
+}
+
+/// Twenty thousand requests outnumber the 5,000-event network window four to
+/// one. The request index still counts, filters, pages and locates each one,
+/// and get_events reads any row's records from its first offset.
+#[tokio::test]
+async fn request_index_reaches_every_request_of_a_large_session() {
+    let server = Server::start().await;
+    let mut lines = String::new();
+    let mut sequence = 0u64;
+    let mut push = |request: u64, kind: &str, payload: &str, extra: Value| {
+        sequence += 1;
+        let mut event = json!({"protocol_version":3,"session_id":"1","sequence_number":sequence.to_string(),
+            "monotonic_time_ns":(1000 * sequence).to_string(),"navigation_id":"0","frame_id":"9","artifact_id":"0",
+            "parent_event_id":"0","request_id":request.to_string(),"process_id":7,"thread_id":1,"tab_id":1 + request % 4,
+            "category":"network","type":kind,"flags":0,"status_code":0,"error_code":0,"encoded_data_length":"0",
+            "decoded_body_length":"0","resource_type":11,"initiator_process_id":0,"initiator_request_id":0,
+            "payload_encoding":"hex","payload":hex::encode(payload),"payload_size":payload.len(),"payload_truncated":false});
+        for (key, value) in extra.as_object().unwrap() {
+            event[key] = value.clone();
+        }
+        lines.push_str(&event.to_string());
+        lines.push('\n');
+    };
+    for request in 1..=20_000u64 {
+        push(
+            request,
+            "request_started",
+            &format!("GET host{}.example.test", request % 10),
+            json!({}),
+        );
+        push(
+            request,
+            "request_completed",
+            "completed",
+            json!({"status_code": if request % 100 == 0 { 500 } else { 200 }}),
+        );
+    }
+    server.file("events.jsonl", lines.as_bytes());
+    let window: Value = server
+        .get("/api/events?limit=5000")
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        window["network_events"].as_array().unwrap().len(),
+        5000,
+        "the polling window still holds 2,500 requests"
+    );
+    let first = server.get("/api/requests?limit=500").await;
+    let etag = first.headers().get("etag").unwrap().clone();
+    let first: Value = first.json().await.unwrap();
+    assert_eq!(
+        (first["total"].as_u64(), first["matching"].as_u64()),
+        (Some(20_000), Some(20_000))
+    );
+    assert_eq!(first["index"]["complete"], true);
+    assert_eq!(first["facets"]["tabs"].as_array().unwrap().len(), 4);
+    assert!(
+        !server.root.path().join("events.jsonl.requests-v1").exists(),
+        "a read writes no file"
+    );
+    let unchanged = server
+        .client
+        .get(format!("{}/api/requests?limit=500", server.url))
+        .header("if-none-match", etag)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(unchanged.status(), 304);
+    let last: Value = server
+        .get("/api/requests?limit=500&offset=19500")
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        (last["returned"].as_u64(), &last["next_offset"]),
+        (Some(500), &Value::Null)
+    );
+    assert_eq!(last["requests"][499]["ordinal"], 19_999);
+    let oldest = &first["requests"][0];
+    let id = url::form_urlencoded::byte_serialize(oldest["id"].as_str().unwrap().as_bytes())
+        .collect::<String>();
+    let located: Value = server
+        .get(&format!("/api/requests?order=desc&limit=1&locate={id}"))
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(located["located"][oldest["id"].as_str().unwrap()], 19_999);
+    let failed: Value = server
+        .get("/api/requests?q=500&tab_id=1&limit=1")
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        failed["matching"],
+        (1..=20_000u64)
+            .filter(|r| r % 100 == 0 && r % 4 == 0)
+            .count()
+    );
+    let member = &oldest["members"][0];
+    let detail: Value = server
+        .get(&format!(
+            "/api/events?session_id=1&process_id=7&request_id={}&after={}&limit={}",
+            member["request_id"].as_str().unwrap(),
+            oldest["first_offset"].as_str().unwrap(),
+            member["records"]
+        ))
+        .await
+        .json()
+        .await
+        .unwrap();
+    let types = detail["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|event| event["type"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        types,
+        ["request_started", "request_completed"],
+        "the oldest request is read from its own offset"
     );
 }

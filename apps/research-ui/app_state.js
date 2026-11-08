@@ -113,10 +113,20 @@
         trafficPendingCount: 0,
         trafficFilterKey: null,
         trafficSort: 'capture',
-        trafficSortDirection: 1,
+        // Newest first: new requests arrive at the top.
+        trafficSortDirection: -1,
         trafficWindowStart: 0,
         trafficWindowAnchor: null,
         trafficNewIds: new Set(),
+        trafficIndex: null,
+        trafficIndexEpoch: null,
+        trafficAppliedAnswer: null,
+        trafficSeenThrough: null,
+        trafficLoaded: new Map(),
+        trafficLoadController: null,
+        trafficLoadingId: null,
+        trafficReloaded: null,
+        trafficScrollFrame: 0,
         trafficDetailOpen: false,
         // Written only by setEventConnection(); broker and eventFailureKind
         // are its projections for existing readers.

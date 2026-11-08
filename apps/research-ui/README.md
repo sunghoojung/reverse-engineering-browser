@@ -78,10 +78,9 @@ lifecycle status only; the inspector states that headers and bodies were not
 captured instead of showing empty panes.
 
 Traffic selection updates only the mounted rows and selection summary when the
-retained snapshot, filters, ordering and page are unchanged. Keyboard navigation
+snapshot, filters, ordering and mounted block are unchanged. Keyboard navigation
 does not repeat search or sorting and does not rebuild rows or reset ledger
-scrolling. A changed snapshot, filter, page or explicit refresh still recomputes
-the whole bounded retained window. `node tools/check-traffic-selection-work.mjs` checks production
+scrolling. A changed snapshot, filter, block or explicit refresh renders again. `node tools/check-traffic-selection-work.mjs` checks production
 controller work and selection invariants. Add `--baseline-ref=<commit>` for a
 reproducible authored 5,000-record/500-row before-and-after Node benchmark. Those
 timings are not rendered browser or native-app latency; the Requests browser
@@ -690,11 +689,22 @@ No cache, recording, throttling, or invented waterfall controls are implied.
 The layout follows familiar [network inspection conventions](https://developer.chrome.com/docs/devtools/network/reference)
 while keeping Origin Trace's own controls and Rosé Pine Moon palette.
 
-The ledger mounts at most 500 fixed-height rows. Previous/Next page through the
-retained window without changing the evidence: the Rust native-event API returns separate newest general and network lifecycle
+Traffic lists every request of the session from the backend request index
+(`get_requests`, [request index v1](../../protocol/request-index-v1.md)). The
+ledger mounts one block of at most 500 fixed-height rows inside padding for the
+rest and moves it as you scroll, so every request is reachable. Counts, the
+`N / M requests` footer, tab chips, domain options, filters and search cover the
+whole session. Newest requests come first; rows that arrive above a scrolled
+viewport do not move it or the selection. Selecting a row whose records are not
+all in the newest event window reads them with `get_events` from the row's first
+byte offset before the inspector opens. While the index is still indexing a large
+store, or counts unreadable or over-limit records, the footer says so. Until it
+first answers, and in the bundled `reb://` workspace, Traffic uses the newest
+network window and labels its counts that way; a later failed read keeps the
+last rows. The Rust native-event API returns separate newest general and network lifecycle
 windows of up to 5,000 events each from at most the newest 64 MiB. Canvas/WebGL activity does not consume
-network slots within that byte budget. Traffic uses the network window, including
-redirect, failed, and response-completed outcomes. Notices distinguish a capped
+network slots within that byte budget. That network window, including
+redirect, failed, and response-completed outcomes, also supplies the inspector. Notices distinguish a capped
 window from the bounded tail and label summary counts by their actual scan scope.
 Sequence-gap counts are arrival-order high-water jumps, not a deduplicated count
 of still-missing IDs after late arrivals, and queue drops may overlap them.
@@ -727,12 +737,12 @@ The Swift stored-evidence reader uses the same newest-general and
 newest-network windows, 64 MiB tail, and summary scope as the Rust endpoint.
 A response that omits those fields is still labeled visible-window-only, and
 no whole-capture count is inferred for it. Filtering
-and sorting cover the whole retained window. Rows and capture-tab controls are
+and sorting cover the whole session through the index. Rows and capture-tab controls are
 reused across refreshes. New arrivals briefly accent the row edge once; pending
 requests use a steady label. Reduced-motion disables animation and transitions.
-Refresh preserves the reading anchor and keyboard focus and never follows the
-bottom automatically. **N new requests** explicitly jumps to the newest capture
-window. Selection survives filters and sorting; its absence from the filter is
+Refresh preserves the reading anchor and keyboard focus. **N new requests**
+counts rows that arrived while the table was scrolled away from the newest, and
+returns to them. Selection survives filters and sorting; its absence from the filter is
 labeled. An actually evicted selection reports that it left the retained window
 instead of silently selecting another request.
 
@@ -843,7 +853,8 @@ policy and trace assertions; it is not evidence of native lifecycle behavior.
 | `invocation_sites.js` | Track calls: the saved invocation site pane, byte offsets of Sources positions and the titlebar tracking chip |
 | `command_palette.js` | The ⌘ / Ctrl + K palette: provider registry, matching, ranking and caps, and its dialog controller; `app.js` supplies the built-in providers |
 | `pane_layout.js` | Shared pointer and keyboard pane resizing, responsive constraints, and local size preferences |
-| `traffic_view.js` | Native request ledger rows, ordering, paging and URL/method/status/name search, the General coverage view, and the saved-capture export document |
+| `traffic_view.js` | Native request ledger rows, ordering, the mounted block and URL/method/status/name search, the General coverage view, and the saved-capture export document |
+| `traffic_index.js` | The request index client: the mounted block's rows, totals and facets, and a selected row's records from the event store |
 | `evidence_names.js` | Researcher names: exact identities, the closed names document, its Analyst-library store, the inline rename editor and the command palette provider |
 | `captured_client.js`, `captured_export_formats.js` | Saved-capture identity, local export dialog, and the client-project/HAR/SDL generators shared with offline commands |
 | `source_search.js` | Search all files: the literal matcher on the Find index, the bounded and cancellable search, partial-result notes and the results panel; `app.js` supplies the artifact reader and the open path |

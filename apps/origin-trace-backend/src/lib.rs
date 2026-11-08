@@ -24,6 +24,7 @@ mod native_console;
 mod native_guest_binding;
 mod origin_trace;
 mod owned_vm_debugger;
+mod request_index;
 mod session_context;
 #[cfg(unix)]
 pub mod session_launch;

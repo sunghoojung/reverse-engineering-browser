@@ -219,14 +219,17 @@ invocationSitesPanel.refresh();
             ? 'The local evidence broker did not answer within 10 seconds.'
             : 'The local evidence broker is disconnected.');
         }
-        if (state.eventsLimited) {
+        // The request index lists the whole session, so window caps do not limit Traffic rows.
+        const indexed = state.trafficIndex?.answer?.() ?? null;
+        if (state.eventsLimited && !indexed) {
           if (kind === 'empty') kind = 'gap';
           messages.push('Showing the last 5,000 evidence events; older events remain recorded on disk.');
         }
-        if (state.networkEventsLimited) messages.push('The network event window is capped; older request lifecycle evidence may be incomplete.');
+        if (state.networkEventsLimited && !indexed) messages.push('The network event window is capped; older request lifecycle evidence may be incomplete.');
         if (state.eventCountScope === 'bounded_tail') {
           if (kind === 'empty') kind = 'gap';
-          messages.push('Only the newest 64 MiB of stored evidence is scanned; counts and both windows exclude the older prefix.');
+          messages.push(indexed ? 'Gap and drop counts cover only the newest 64 MiB of stored evidence; the request list covers the whole session.'
+            : 'Only the newest 64 MiB of stored evidence is scanned; counts and both windows exclude the older prefix.');
         }
         if (gapCount > 0n) {
           if (kind === 'empty') kind = 'gap';
@@ -242,7 +245,8 @@ invocationSitesPanel.refresh();
           messages.push(networkLimits);
         }
 
-        const failedNotice = trafficFailedRequestNotice(state.requests);
+        const failedNotice = indexed ? indexed.document.failed > 0 ? `Failed requests: ${indexed.document.failed}.` : ''
+          : trafficFailedRequestNotice(state.requests);
         if (failedNotice) messages.push(failedNotice);
         if (messages.length) setNetworkNotice(kind, messages.join(' '));
         else {
@@ -1256,7 +1260,19 @@ invocationSitesPanel.refresh();
       function rebuildTrafficRequests() {
         // Hidden Traffic must not keep the previous request snapshot alive.
         state.trafficRenderedView = null;
-        state.requests = state.nativeRequests;
+        const loaded = state.trafficLoaded;
+        if (!loaded?.size) {
+          state.requests = state.nativeRequests;
+          return;
+        }
+        // Rows read on selection stay selectable and replace a window copy with fewer records.
+        const merged = state.nativeRequests.map(request => {
+          const read = loaded.get(request.id);
+          return read && trafficRecordCount(read) > trafficRecordCount(request) ? read : request;
+        });
+        const windowIds = new Set(state.nativeRequests.map(request => request.id));
+        for (const [id, request] of loaded) if (!windowIds.has(id)) merged.push(request);
+        state.requests = merged;
       }
 
       function renderShellStatus() {
@@ -1341,8 +1357,13 @@ invocationSitesPanel.refresh();
         evidencePackagePanel.sync();
       }
 
-      function renderRequestCount(visibleCount, loadedCount) {
-        elements.requestCount.textContent = String(visibleCount);
+      function renderRequestCount(visibleCount, loadedCount, scope = 'loaded') {
+        elements.requestCount.textContent = visibleCount.toLocaleString('en-US');
+        if (scope === 'session') {
+          elements.requestCountLabel.textContent = visibleCount === loadedCount ? loadedCount === 1 ? 'request' : 'requests'
+            : `of ${loadedCount.toLocaleString('en-US')} ${loadedCount === 1 ? 'request' : 'requests'}`;
+          return;
+        }
         const loadedLabel = loadedCount === 1 ? 'request loaded' : 'requests loaded';
         const suffix = state.eventsLimited ? ' · event window capped' : '';
         elements.requestCountLabel.textContent = visibleCount === loadedCount
@@ -2691,17 +2712,7 @@ invocationSitesPanel.refresh();
         renderedVmWorkspace = workspaceKey;
       }
 
-      function requestDomain(request) {
-        if (!request) return 'unknown';
-        if (request.origin === 'sample') return 'checkout.acme.test';
-        const target = String(request.path ?? '').trim();
-        if (!target || target === 'Unidentified network event') return 'unknown';
-        try {
-          return new URL(target).host || 'unknown';
-        } catch {
-          return target.replace(/^\/\//, '').split('/')[0] || 'unknown';
-        }
-      }
+      function requestDomain(request) { return trafficRequestDomain(request); }
 
       function requestTabGroups() {
         const groups = new Map();
@@ -2719,16 +2730,34 @@ invocationSitesPanel.refresh();
         });
       }
 
-      function renderRequestScopes() {
-        const groups = requestTabGroups();
+      function trafficLocalScopes() {
+        const groups = requestTabGroups().map(group => ({id: group.id, count: group.requests.length,
+          domains: [...new Set(group.requests.map(requestDomain))],
+          title: group.requests.map(request => String(request.tabTitle ?? '').trim()).find(Boolean)}));
+        const scoped = state.requestTabId === 'all' ? state.requests
+          : state.requests.filter(request => (request.tabId && request.tabId !== '0' ? request.tabId : 'unattributed') === state.requestTabId);
+        const domainCounts = new Map();
+        for (const request of scoped) { const domain = requestDomain(request); domainCounts.set(domain, (domainCounts.get(domain) ?? 0) + 1); }
+        return {total: state.requests.length, groups, scopedCount: scoped.length,
+          domains: [...domainCounts.keys()].sort((left, right) => left.localeCompare(right)).map(domain => [domain, domainCounts.get(domain)])};
+      }
+
+      function trafficIndexScopes(answer) {
+        const groups = answer.facets.tabs.map(tab => ({id: tab.tab_id === '0' ? 'unattributed' : tab.tab_id,
+          count: tab.count, domains: tab.domains, title: null}));
+        return {total: answer.through, groups, domains: answer.facets.domains.map(entry => [entry.domain, entry.count]),
+          scopedCount: state.requestTabId === 'all' ? answer.through : groups.find(group => group.id === state.requestTabId)?.count ?? 0};
+      }
+
+      function renderRequestScopes(scopes = trafficLocalScopes()) {
+        const groups = scopes.groups;
         const availableTabs = new Set(groups.map(group => group.id));
         if (state.requestTabId !== 'all' && !availableTabs.has(state.requestTabId)) state.requestTabId = 'all';
         const oldScopes = new Map([...elements.requestTabScopes.children].map(button => [button.dataset.scopeId, button]));
         const focusedScope = elements.requestTabScopes.contains(document.activeElement) ? document.activeElement : null;
-        const buttons = [{id: 'all', label: 'All tabs', count: state.requests.length}, ...groups.map((group, index) => {
-          const domains = [...new Set(group.requests.map(requestDomain))];
-          const title = group.requests.map(request => String(request.tabTitle ?? '').trim()).find(Boolean);
-          const domain = domains.find(value => value && value !== 'unknown');
+        const buttons = [{id: 'all', label: 'All tabs', count: scopes.total}, ...groups.map((group, index) => {
+          const title = group.title;
+          const domain = group.domains.find(value => value && value !== 'unknown');
           const fallback = `Tab ${index + 1}`;
           const label = group.id === 'unattributed' ? 'Unattributed'
             : title ? (title.length > 42 ? `${title.slice(0, 41)}…` : title)
@@ -2736,8 +2765,8 @@ invocationSitesPanel.refresh();
           return {
             id: group.id,
             label,
-            count: group.requests.length,
-            domains
+            count: group.count,
+            domains: group.domains
           };
         })].map(scope => {
           let button = oldScopes.get(scope.id);
@@ -2780,14 +2809,10 @@ invocationSitesPanel.refresh();
         while (elements.requestTabScopes.children.length > buttons.length) elements.requestTabScopes.lastElementChild.remove();
         if (focusedScope && document.activeElement !== focusedScope) (buttons.includes(focusedScope) ? focusedScope : buttons[0])?.focus({preventScroll: true});
 
-        const scoped = state.requestTabId === 'all' ? state.requests
-          : state.requests.filter(request => (request.tabId && request.tabId !== '0' ? request.tabId : 'unattributed') === state.requestTabId);
-        const domainCounts = new Map();
-        for (const request of scoped) { const domain = requestDomain(request); domainCounts.set(domain, (domainCounts.get(domain) ?? 0) + 1); }
-        const domains = [...domainCounts.keys()].sort((left, right) => left.localeCompare(right));
+        const domains = scopes.domains.map(([domain]) => domain);
         if (state.requestDomain !== 'all' && !domains.includes(state.requestDomain)) state.requestDomain = 'all';
         const oldOptions = new Map([...elements.requestDomain.children].map(option => [option.value, option]));
-        const options = [['all', `All domains (${scoped.length})`], ...domains.map(domain => [domain, `${domain} (${domainCounts.get(domain)})`])]
+        const options = [['all', `All domains (${scopes.scopedCount})`], ...scopes.domains.map(([domain, count]) => [domain, `${domain} (${count})`])]
           .map(([value, label]) => {
             const option = oldOptions.get(value) ?? document.createElement('option'); option.value = value;
             if (option.textContent !== label) option.textContent = label;
@@ -2806,26 +2831,65 @@ invocationSitesPanel.refresh();
           state.trafficSort, state.trafficSortDirection]);
       }
 
-      function renderTrafficWindowStatus(start, rowCount, visibleCount) {
-        const selectedFiltered = state.selectedRequestId !== null && !state.trafficSearchMatches.has(state.selectedRequestId);
-        const message = `${visibleCount ? start + 1 : 0}–${start + rowCount} of ${visibleCount} matching · ${state.requests.length} retained${selectedFiltered ? ' · Selection outside filter' : ''}`;
+      // A null visible count is a query the request index has not answered yet.
+      function renderTrafficWindowStatus(visibleCount, totalCount, outside, note = '') {
+        const message = `${visibleCount === null ? '' : `${visibleCount.toLocaleString('en-US')} / `}${totalCount.toLocaleString('en-US')} requests${outside ? ' · Selection outside filter' : ''}${note ? ` · ${note}` : ''}`;
         const status = document.querySelector('#request-window-status');
         if (status.textContent !== message) status.textContent = message;
       }
 
+      function renderTrafficSortButtons() {
+        document.querySelectorAll('[data-request-sort]').forEach(button => {
+          const active = button.dataset.requestSort === state.trafficSort;
+          button.setAttribute('aria-pressed', String(active));
+          button.setAttribute('aria-label', `${button.dataset.requestSort}: ${active ? state.trafficSortDirection === 1 ? 'ascending' : 'descending' : 'not sorted'}. Activate to sort.`);
+          button.querySelector('span').textContent = active ? state.trafficSortDirection === 1 ? ' ↑' : ' ↓' : '';
+        });
+      }
+
+      function renderTrafficEmpty(text) {
+        const empty = document.createElement('div');
+        empty.className = 'request-empty';
+        empty.setAttribute('role', 'status');
+        empty.textContent = text;
+        const hadFocus = elements.requestRows.contains(document.activeElement);
+        elements.requestRows.replaceChildren(empty);
+        elements.requestRows.tabIndex = 0;
+        if (hadFocus) elements.requestRows.focus({preventScroll: true});
+      }
+
+      function trafficEmptyText(total) {
+        return total === 0
+          ? state.sessionMode === 'live' ? 'No live requests yet. Start a capture in the attached browser.'
+            : state.sessionMode === 'demo' ? 'No developer evidence is available.' : 'No capture session is running.'
+          : 'No requests match the current filters. Clear the filter or choose another type.';
+      }
+
+      // Until the index first answers, or without a backend, the newest window serves Traffic.
+      function trafficIndexActive() {
+        const index = state.trafficIndex;
+        return Boolean(index) && state.sessionMode !== 'preview' && !(index.error() && !index.answer());
+      }
+
       function renderRequests(selectionOnly = false) {
         const previous = state.trafficRenderedView;
+        const index = trafficIndexActive() ? state.trafficIndex : null;
         // Producers replace the retained request array on refresh. Reuse only
         // this exact rendered snapshot and filter/window; all other entry
-        // points (polls, search, sort, paging and history) take the full path.
+        // points (polls, search, sort, scrolling and history) take the full path.
         if (selectionOnly === true && previous?.requests === state.requests && previous.retainedCount === state.requests.length &&
-            previous.filterKey === trafficRequestFilterKey() &&
-            previous.start === state.trafficWindowStart && previous.anchor === state.trafficWindowAnchor) {
+            previous.filterKey === trafficRequestFilterKey() && previous.answer === index?.answer() &&
+            previous.start === state.trafficWindowStart && previous.anchor === state.trafficWindowAnchor &&
+            (!previous.mounted || previous.mounted.has(state.selectedRequestId))) {
           renderTrafficRowSelection(elements.requestRows, state.selectedRequestId);
-          renderTrafficWindowStatus(previous.start, previous.rowCount, previous.visibleCount);
+          renderTrafficWindowStatus(previous.visibleCount, previous.totalCount, previous.outside(state.selectedRequestId), previous.note);
           return;
         }
         state.trafficRenderedView = null;
+        if (index) {
+          renderIndexedRequests(index);
+          return;
+        }
         renderRequestScopes();
         const needle = elements.requestFilter.value.trim().toLowerCase();
         const scoped = state.requests.filter(request =>
@@ -2842,7 +2906,10 @@ invocationSitesPanel.refresh();
         const visible = trafficSortedRequests(scoped.filter(request => search.matches.has(request.id)), state.trafficSort, state.trafficSortDirection);
         const filterKey = trafficRequestFilterKey();
         const filterChanged = filterKey !== state.trafficFilterKey;
-        if (filterChanged) { state.trafficNewIds.clear(); state.trafficWindowStart = 0; state.trafficWindowAnchor = null; }
+        if (filterChanged) {
+          state.trafficNewIds.clear(); state.trafficWindowStart = 0; state.trafficWindowAnchor = null;
+          if (state.trafficFilterKey !== null) elements.requestRows.scrollTop = 0;
+        }
         state.trafficFilterKey = filterKey;
         const selectedIsVisible = visible.some(request => request.id === state.selectedRequestId);
         const selectionCleared = state.selectedRequestId !== null && !state.requests.some(request => request.id === state.selectedRequestId);
@@ -2852,36 +2919,24 @@ invocationSitesPanel.refresh();
         const knownIds = state.trafficKnownIds, live = state.sessionMode === 'live';
         const newIds = new Set(live && knownIds ? visible.filter(request => !knownIds.has(request.id)).map(request => request.id) : []);
         state.trafficKnownIds = new Set(state.requests.map(request => request.id));
-        if (!live) state.trafficNewIds.clear();
-        if (!filterChanged) newIds.forEach(id => state.trafficNewIds.add(id));
+        if (!live || trafficAtNewest()) state.trafficNewIds.clear();
+        else if (!filterChanged) newIds.forEach(id => state.trafficNewIds.add(id));
         for (const id of state.trafficNewIds) if (!state.trafficKnownIds.has(id)) state.trafficNewIds.delete(id);
-        const window = trafficWindow(visible, state.trafficWindowStart, state.trafficWindowAnchor);
+        // The block follows its first row when rows arrive above it, unless scrolled to the top.
+        const start = trafficBlockStart(elements.requestRows, visible.length, state.trafficWindowStart);
+        const anchor = start === state.trafficWindowStart && elements.requestRows.scrollTop > 0 ? state.trafficWindowAnchor : null;
+        const window = trafficWindow(visible, start, anchor);
         state.trafficWindowStart = window.start;
         state.trafficWindowAnchor = window.rows[0]?.id ?? null;
-        renderTrafficWindowStatus(window.start, window.rows.length, visible.length);
+        const outside = id => id !== null && !state.trafficSearchMatches.has(id);
+        const note = state.trafficIndex?.error() ? 'request index unavailable; newest window shown' : 'newest window';
+        renderTrafficWindowStatus(visible.length, state.requests.length, outside(state.selectedRequestId), note);
         const renderedView = {requests: state.requests, retainedCount: state.requests.length, filterKey, start: window.start, anchor: state.trafficWindowAnchor,
-          rowCount: window.rows.length, visibleCount: visible.length};
-        document.querySelector('#request-window-prev').disabled = window.start === 0;
-        document.querySelector('#request-window-next').disabled = window.start + TRAFFIC_ROW_LIMIT >= visible.length;
-        document.querySelectorAll('[data-request-sort]').forEach(button => {
-          const active = button.dataset.requestSort === state.trafficSort;
-          button.setAttribute('aria-pressed', String(active));
-          button.setAttribute('aria-label', `${button.dataset.requestSort}: ${active ? state.trafficSortDirection === 1 ? 'ascending' : 'descending' : 'not sorted'}. Activate to sort.`);
-          button.querySelector('span').textContent = active ? state.trafficSortDirection === 1 ? ' ↑' : ' ↓' : '';
-        });
+          answer: undefined, visibleCount: visible.length, totalCount: state.requests.length, outside, note, mounted: null};
+        renderTrafficSortButtons();
         elements.requestRows.setAttribute('role', 'listbox');
         if (visible.length === 0) {
-          const empty = document.createElement('div');
-          empty.className = 'request-empty';
-          empty.setAttribute('role', 'status');
-          empty.textContent = state.requests.length === 0
-            ? state.sessionMode === 'live' ? 'No live requests yet. Start a capture in the attached browser.'
-              : state.sessionMode === 'demo' ? 'No developer evidence is available.' : 'No capture session is running.'
-            : 'No requests match the current filters. Clear the filter or choose another type.';
-          const hadFocus = elements.requestRows.contains(document.activeElement);
-          elements.requestRows.replaceChildren(empty);
-          elements.requestRows.tabIndex = 0;
-          if (hadFocus) elements.requestRows.focus({preventScroll: true});
+          renderTrafficEmpty(trafficEmptyText(state.requests.length));
           state.trafficPendingCount = 0;
           elements.requestLatest.hidden = true;
           renderRequestCount(0, state.requests.length);
@@ -2894,12 +2949,11 @@ invocationSitesPanel.refresh();
           return;
         }
         renderTrafficRows(elements.requestRows, window.rows, {
-          selectedId: state.selectedRequestId, newIds,
+          start: window.start, total: visible.length, selectedId: state.selectedRequestId, newIds,
           onSelect: id => { selectRequest(id); focusRequestRow(id); }, onKey: moveRequestSelection, nameOf
         });
         state.trafficPendingCount = state.trafficNewIds.size;
-        elements.requestLatest.hidden = state.trafficPendingCount === 0;
-        elements.requestLatest.textContent = `${state.trafficPendingCount} new ${state.trafficPendingCount === 1 ? 'request' : 'requests'}`;
+        renderTrafficLatest();
         renderRequestCount(visible.length, state.requests.length);
         state.trafficRenderedView = renderedView;
         if (selectionCleared) {
@@ -2907,6 +2961,119 @@ invocationSitesPanel.refresh();
           renderInspector();
           renderEvidence();
         } else if (filterChanged && selectedIsVisible) renderInspector();
+      }
+
+      function trafficAtNewest() {
+        return elements.requestRows.scrollTop === 0 && state.trafficSort === 'capture' && state.trafficSortDirection < 0;
+      }
+
+      function renderTrafficLatest() {
+        elements.requestLatest.hidden = state.trafficPendingCount === 0;
+        elements.requestLatest.textContent = `${state.trafficPendingCount.toLocaleString('en-US')} new ${state.trafficPendingCount === 1 ? 'request' : 'requests'}`;
+      }
+
+      // Researcher names live in the UI, so the index gets the named root events to match.
+      function trafficNamedRoots(names, needle, origin) {
+        if (!needle || !names) return [];
+        return (names.model?.document?.requests ?? []).filter(entry => entry.origin === origin && entry.name.toLowerCase().includes(needle))
+          .slice(0, 64).map(entry => `${entry.session}:${entry.process}:${entry.sequence}`);
+      }
+
+      function trafficNameOf(names) {
+        if (!names?.has('captured-request')) return () => null;
+        return request => {
+          if (!request.indexRow) return names.nameFor('request', request);
+          const identity = request.indexRow.root && RebEvidenceNames.requestIdentity(request, request.indexRow.root);
+          return identity ? names.nameOf(identity) : null;
+        };
+      }
+
+      function trafficIndexNote(answer, error) {
+        if (error) return `request index unavailable (${error}); last rows kept`;
+        const coverage = answer.index;
+        const notes = [];
+        if (!coverage.complete) {
+          const end = Number(coverage.store_end);
+          notes.push(`indexing ${end ? Math.floor(Number(coverage.indexed_end) * 100 / end) : 0}%`);
+        }
+        if (coverage.unindexed_records !== '0') notes.push(`${coverage.unindexed_records} records past the ${coverage.request_limit.toLocaleString('en-US')}-request limit`);
+        if (coverage.malformed_records !== '0') notes.push(`${coverage.malformed_records} unreadable records`);
+        return notes.join(' · ');
+      }
+
+      function renderIndexedRequests(index) {
+        const container = elements.requestRows;
+        const origin = state.sessionMode === 'demo' ? 'demo' : 'live', live = state.sessionMode === 'live';
+        let answer = index.answer();
+        if (answer && answer.document.index.epoch !== state.trafficIndexEpoch) {
+          // A cleared or replaced store: rows read before it are not this session's.
+          if (state.trafficIndexEpoch !== null) { state.trafficLoaded.clear(); rebuildTrafficRequests(); }
+          state.trafficIndexEpoch = answer.document.index.epoch;
+        }
+        // Scopes first: a tab or domain the session no longer has resets its filter.
+        if (answer) renderRequestScopes(trafficIndexScopes(answer.document));
+        const filterKey = trafficRequestFilterKey();
+        const filterChanged = filterKey !== state.trafficFilterKey;
+        if (filterChanged) {
+          state.trafficNewIds.clear(); state.trafficPendingCount = 0; state.trafficSeenThrough = null;
+          state.trafficWindowStart = 0; state.trafficWindowAnchor = null;
+          if (state.trafficFilterKey !== null) container.scrollTop = 0;
+        }
+        state.trafficFilterKey = filterKey;
+        const names = globalThis.RebEvidenceNames?.controller?.() ?? null;
+        const needle = elements.requestFilter.value.trim().toLowerCase();
+        const query = trafficIndexParameters({sort: state.trafficSort, direction: state.trafficSortDirection, needle,
+          tabId: state.requestTabId, domain: state.requestDomain, type: state.requestType, named: trafficNamedRoots(names, needle, origin)});
+        const covering = candidate => candidate?.query === query && candidate.origin === origin ? candidate : null;
+        const known = covering(answer)?.document.matching ?? 0;
+        const start = trafficBlockStart(container, known, state.trafficWindowStart);
+        state.trafficWindowStart = start;
+        answer = index.want({query, start, origin, locate: [state.selectedRequestId]});
+        const current = covering(answer);
+        renderTrafficSortButtons();
+        container.setAttribute('role', 'listbox');
+        if (!current) {
+          // Another query's rows stay until this one answers; they are never relabeled.
+          if (!answer) renderTrafficEmpty('Reading the request index…');
+          renderTrafficWindowStatus(null, answer?.document.total ?? 0, false, 'reading the request index');
+          return;
+        }
+        const page = current.document, matching = page.matching;
+        if (current !== state.trafficAppliedAnswer) {
+          if (live && state.trafficAppliedAnswer?.query === query && current.added > 0 && !trafficAtNewest()) state.trafficPendingCount += current.added;
+          state.trafficAppliedAnswer = current;
+        }
+        if (!live || trafficAtNewest()) state.trafficPendingCount = 0;
+        const length = Math.max(0, Math.min(TRAFFIC_ROW_LIMIT, matching - start));
+        const rows = Array.from({length}, (_, offset) => {
+          const at = start + offset - current.start;
+          return at >= 0 && at < current.rows.length ? current.rows[at] : null;
+        });
+        const seen = state.trafficSeenThrough;
+        const newIds = new Set(live && seen !== null ? rows.filter(row => row && row.indexRow.ordinal >= seen).map(row => row.id) : []);
+        state.trafficSeenThrough = page.through;
+        const mounted = new Set(rows.filter(Boolean).map(row => row.id));
+        const located = page.located ?? {};
+        const outside = id => id !== null && !mounted.has(id) && Object.hasOwn(located, id) && located[id] === null;
+        const note = trafficIndexNote(page, index.error());
+        renderTrafficWindowStatus(matching, page.total, outside(state.selectedRequestId), note);
+        renderTrafficLatest();
+        renderRequestCount(matching, page.total, 'session');
+        if (matching === 0) renderTrafficEmpty(trafficEmptyText(page.total));
+        else renderTrafficRows(container, rows, {start, total: matching, selectedId: state.selectedRequestId, newIds,
+          onSelect: selectTrafficRow, onKey: moveRequestSelection, nameOf: trafficNameOf(names),
+          pending: index.error() ? 'Not loaded: the request index is unavailable' : 'Loading…'});
+        state.trafficWindowAnchor = rows.find(Boolean)?.id ?? null;
+        state.trafficRenderedView = {requests: state.requests, retainedCount: state.requests.length, filterKey, start,
+          anchor: state.trafficWindowAnchor, answer: current, visibleCount: matching, totalCount: page.total, outside, note, mounted};
+        // A loaded selection that gained records is read again, once per count.
+        const selected = state.selectedRequestId !== null ? current.rows.find(row => row.id === state.selectedRequestId) : null;
+        const loaded = selected && state.trafficLoaded.get(selected.id);
+        const attempt = selected && `${selected.id}:${selected.indexRow.records}`;
+        if (loaded && trafficRecordCount(loaded) < selected.indexRow.records && state.trafficLoadingId === null && state.trafficReloaded !== attempt) {
+          state.trafficReloaded = attempt;
+          loadTrafficRequest(selected, false);
+        }
       }
 
       function updateSelectionSummary(request) {
@@ -2996,9 +3163,67 @@ invocationSitesPanel.refresh();
         refreshRequestSignalProfile();
       }
 
+      function trafficRecordCount(request) {
+        return (request?.events?.length ?? 0) + (request?.details?.length ?? 0);
+      }
+
+      // A row the newest window does not hold whole is read from the store first.
+      function selectTrafficRow(id) {
+        const indexed = state.trafficIndex?.row(id) ?? null;
+        const retained = state.requests.find(request => request.id === id);
+        if (retained && (!indexed || trafficRecordCount(retained) >= indexed.indexRow.records)) {
+          selectRequest(id);
+          focusRequestRow(id);
+        } else if (indexed) loadTrafficRequest(indexed, true);
+      }
+
+      async function loadTrafficRequest(indexed, select) {
+        const id = indexed.id;
+        state.trafficLoadController?.abort();
+        const controller = new AbortController();
+        state.trafficLoadController = controller;
+        state.trafficLoadingId = id;
+        const row = [...elements.requestRows.querySelectorAll('.request-row')].find(node => node.dataset.requestId === id);
+        row?.setAttribute('aria-busy', 'true');
+        try {
+          const events = await state.trafficIndex.events(indexed.indexRow, AbortSignal.any([controller.signal, AbortSignal.timeout(10000)]));
+          const request = requestsFromEvents(events, indexed.origin).find(candidate => candidate.id === id);
+          if (!request) throw new Error('its stored records no longer form this request');
+          state.trafficLoaded.delete(id);
+          state.trafficLoaded.set(id, request);
+          for (const key of state.trafficLoaded.keys()) {
+            if (state.trafficLoaded.size <= 32) break;
+            if (key !== state.selectedRequestId && key !== id) state.trafficLoaded.delete(key);
+          }
+          rebuildTrafficRequests();
+          if (select) {
+            selectRequest(id);
+            focusRequestRow(id);
+            // Selecting opens the inspector, which can cover the row.
+            [...elements.requestRows.querySelectorAll('.request-row')].find(node => node.dataset.requestId === id)?.scrollIntoView({block: 'nearest'});
+          } else if (state.selectedRequestId === id) {
+            renderInspector();
+          }
+        } catch (error) {
+          if (controller.signal.aborted) return;
+          if (select) {
+            state.trafficSelectionNotice = `The records of this request could not be read: ${error?.name === 'TimeoutError' ? 'the backend did not answer within 10 seconds' : error.message}.`;
+            if (state.selectedRequestId === null) updateSelectionSummary(null);
+            else investigationNotice(state.trafficSelectionNotice, 'unavailable');
+          }
+        } finally {
+          row?.removeAttribute('aria-busy');
+          if (state.trafficLoadController === controller) {
+            state.trafficLoadController = null;
+            state.trafficLoadingId = null;
+          }
+          renderRequests();
+        }
+      }
+
       function moveRequestSelection(event) {
         if (!['ArrowUp', 'ArrowDown', 'Home', 'End'].includes(event.key)) return;
-        const rows = [...elements.requestRows.querySelectorAll('.request-row')];
+        const rows = [...elements.requestRows.querySelectorAll('.request-row')].filter(row => row.dataset.requestId);
         const current = rows.indexOf(event.currentTarget);
         if (current < 0) return;
         event.preventDefault();
@@ -3008,8 +3233,8 @@ invocationSitesPanel.refresh();
             ? rows.length - 1
             : Math.max(0, Math.min(rows.length - 1, current + (event.key === 'ArrowDown' ? 1 : -1)));
         const id = rows[next].dataset.requestId;
-        selectRequest(id);
-        focusRequestRow(id);
+        selectTrafficRow(id);
+        if (document.activeElement !== rows[next]) rows[next].focus({preventScroll: true});
         rows[next].scrollIntoView({block: 'nearest'});
       }
 
@@ -7866,6 +8091,7 @@ invocationSitesPanel.refresh();
           const eventOrigin = state.sessionMode === 'demo' ? 'demo' : 'live';
           state.nativeRequests = requestsFromEvents(body.network_events ?? state.events, eventOrigin);
           rebuildTrafficRequests();
+          state.trafficIndex?.invalidate();
           let selectedRequest = state.requests.find(request => request.id === state.selectedRequestId);
           if (!selectedRequest && state.selectedRequestId !== null) resetRequestSelection();
           updateSelectionSummary(selectedRequest);
@@ -8180,22 +8406,26 @@ invocationSitesPanel.refresh();
         renderRequests();
       }));
       document.querySelector('#request-order').addEventListener('click', () => {
-        state.trafficSort = 'capture'; state.trafficSortDirection = 1; renderRequests();
+        state.trafficSort = 'capture'; state.trafficSortDirection = -1; renderRequests();
       });
-      for (const [id, direction] of [['request-window-prev', -1], ['request-window-next', 1]]) {
-        document.getElementById(id).addEventListener('click', () => {
-          state.trafficWindowAnchor = null;
-          state.trafficWindowStart += TRAFFIC_ROW_LIMIT * direction;
-          renderRequests(); elements.requestRows.scrollTop = 0;
-        });
-      }
       elements.requestLatest.addEventListener('click', () => {
-        state.trafficSort = 'capture'; state.trafficSortDirection = 1;
+        state.trafficSort = 'capture'; state.trafficSortDirection = -1;
+        state.trafficNewIds.clear(); state.trafficPendingCount = 0;
+        state.trafficWindowStart = 0; state.trafficWindowAnchor = null;
+        elements.requestRows.scrollTop = 0;
         renderRequests();
-        state.trafficWindowAnchor = null; state.trafficWindowStart = TRAFFIC_RETAINED_LIMIT;
-        state.trafficNewIds.clear(); renderRequests();
-        elements.requestRows.scrollTop = elements.requestRows.scrollHeight;
       });
+      elements.requestRows.addEventListener('scroll', () => {
+        if (state.trafficScrollFrame) return;
+        state.trafficScrollFrame = requestAnimationFrame(() => {
+          state.trafficScrollFrame = 0;
+          const total = state.trafficRenderedView?.visibleCount ?? 0;
+          if (state.trafficPendingCount && trafficAtNewest()) {
+            state.trafficPendingCount = 0; state.trafficNewIds.clear(); renderTrafficLatest();
+          }
+          if (trafficBlockStart(elements.requestRows, total, state.trafficWindowStart) !== state.trafficWindowStart) renderRequests();
+        });
+      }, {passive: true});
       elements.requestCopyUrl.addEventListener('click', async () => {
         const selected = state.requests.find(request => request.id === state.selectedRequestId);
         if (!selected || selected.hostOnly || selected.urlTruncated || selected.targetKind === 'path') return;
@@ -8962,6 +9192,8 @@ invocationSitesPanel.refresh();
         return true;
       }
 
+      state.trafficIndex = location.protocol === 'file:' || typeof createTrafficIndex !== 'function' ? null
+        : createTrafficIndex({onChange: () => { renderRequests(); renderNetworkNotice(); }});
       renderRequests();
       renderInspector();
       renderEvidence();

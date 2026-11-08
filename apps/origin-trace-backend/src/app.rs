@@ -15,6 +15,7 @@ use crate::{
     native_console::NativeConsole,
     origin_trace,
     owned_vm_debugger::OwnedVmDebugger,
+    request_index::{self, RequestIndex},
     session_context, session_summary, source_facts, validation, vm, wasm,
     workspace::{Kind, Store},
 };
@@ -35,7 +36,7 @@ use std::{
 };
 use tokio::sync::{Mutex, OwnedMutexGuard, OwnedSemaphorePermit, Semaphore, TryAcquireError};
 
-const UI_ASSETS: [&str; 33] = [
+const UI_ASSETS: [&str; 34] = [
     "index.html",
     "app.css",
     "command_palette.js",
@@ -52,6 +53,7 @@ const UI_ASSETS: [&str; 33] = [
     "evidence_names.js",
     "invocation_sites.js",
     "traffic_view.js",
+    "traffic_index.js",
     "captured_client.js",
     "captured_export_formats.js",
     "vm_semantics.js",
@@ -124,6 +126,7 @@ pub struct App {
     package_io: Arc<Semaphore>,
     analysis: Mutex<Option<VmDocumentsCache>>,
     events: Arc<Mutex<event_window::EventWindowCache>>,
+    requests: Arc<Mutex<RequestIndex>>,
     artifact_lookup: Arc<Mutex<ArtifactLookupCache>>,
     /// Bounds concurrent `/api/events/wait` callers; a full pool refuses.
     event_waiters: Arc<Semaphore>,
@@ -152,6 +155,8 @@ fn cached_artifact_lookup(
 
 impl App {
     pub async fn stop(&self) {
+        let mut index = self.requests.clone().lock_owned().await;
+        let _ = tokio::task::spawn_blocking(move || index.maintain()).await;
         self.analyst.stop();
         self.native_console.stop().await;
         if self.owned_vm_debugger.stop().await.is_err() {
@@ -211,6 +216,7 @@ impl App {
             ),
             live_browser: LiveBrowser::new(&options),
             lifecycle: Capture::new(&options),
+            requests: Arc::new(Mutex::new(RequestIndex::new(&options.store))),
             invocation_sites,
             invocation_session,
             text_digests: Arc::new(std::sync::Mutex::new(BTreeMap::new())),
@@ -224,6 +230,15 @@ impl App {
             event_waiters: Arc::new(Semaphore::new(event_query::MAX_WAITERS)),
         });
         app.native_console.arm_live_bridge().await;
+        let index = app.requests.clone();
+        tokio::spawn(async move {
+            let mut ticks = tokio::time::interval(request_index::PERSIST_INTERVAL);
+            loop {
+                ticks.tick().await;
+                let mut index = index.clone().lock_owned().await;
+                let _ = tokio::task::spawn_blocking(move || index.maintain()).await;
+            }
+        });
         app
     }
     pub fn router(self: &Arc<Self>) -> Router {
@@ -656,6 +671,27 @@ impl App {
                             .expect("Demo canvas capture");
                 }
                 result
+            }
+            "/api/requests" => {
+                let query = request_index::RequestQuery::parse(&q, raw_query)?;
+                let tag = headers
+                    .get("if-none-match")
+                    .and_then(|value| value.to_str().ok())
+                    .map(str::to_owned);
+                let mut index = self.requests.clone().lock_owned().await;
+                return match self
+                    .blocking(move || index.respond(&query, tag.as_deref()))
+                    .await?
+                {
+                    request_index::Answer::Unchanged(tag) => Ok(not_modified(&tag)),
+                    request_index::Answer::Document(document, tag) => {
+                        let mut response = axum::Json(document).into_response();
+                        response
+                            .headers_mut()
+                            .insert("etag", HeaderValue::from_str(&tag).unwrap());
+                        Ok(response)
+                    }
+                };
             }
             "/api/artifacts" => {
                 q.only(&artifact_query::ARTIFACT_QUERY_KEYS, &["limit"])?;
@@ -1389,8 +1425,12 @@ impl App {
                 self.options.trace_store.clone(),
                 self.options.signal_store.clone(),
             ];
-            self.blocking(move || evidence::clear_stores(&paths))
-                .await?;
+            let mut index = self.requests.clone().lock_owned().await;
+            self.blocking(move || {
+                index.discard()?;
+                evidence::clear_stores(&paths)
+            })
+            .await?;
         } else {
             return Err(Error::bad("Capture action is invalid"));
         }
@@ -1700,7 +1740,7 @@ impl Query {
         )
     }
     /// Rejects any key outside the listed ones.
-    fn only(&self, keys: &[&str], extra: &[&str]) -> Result<()> {
+    pub(crate) fn only(&self, keys: &[&str], extra: &[&str]) -> Result<()> {
         match self
             .0
             .keys()
@@ -1720,7 +1760,7 @@ impl Query {
     fn any(&self, keys: &[&str]) -> bool {
         keys.iter().any(|key| self.0.contains_key(*key))
     }
-    fn limit(&self, default: usize, max: usize) -> Result<usize> {
+    pub(crate) fn limit(&self, default: usize, max: usize) -> Result<usize> {
         self.one("limit")?.map_or(Ok(default), |s| {
             s.parse::<i64>()
                 .map(|n| n.clamp(1, max as i64) as usize)

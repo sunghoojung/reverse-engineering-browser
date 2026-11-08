@@ -93,6 +93,7 @@ class GURL {
         has_query_(has_query || !query_.empty()) {}
   bool is_valid() const { return valid_; }
   bool SchemeIs(std::string_view scheme) const { return scheme_ == scheme; }
+  std::string_view scheme() const { return scheme_; }
   std::string_view host() const { return host_; }
   std::string_view path() const { return path_; }
   bool has_query() const { return has_query_; }

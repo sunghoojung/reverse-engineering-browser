@@ -30,9 +30,11 @@ PAGE_GUEST_SAMPLER_TEST := $(BUILD_DIR)/tests/page-guest-sampler-test
 NATIVE_GUEST_TEST := $(BUILD_DIR)/tests/native-wasm-guest-test
 JS_DISPATCH_TEST := $(BUILD_DIR)/tests/js-dispatch-test
 NETWORK_REQUEST_TEST := $(BUILD_DIR)/tests/network-request-test
+NETWORK_SCOPE_TEST := $(BUILD_DIR)/tests/network-scope-test
+TAB_LINK_TEST := $(BUILD_DIR)/tests/tab-link-test
 JS_INVOCATION_TEST := $(BUILD_DIR)/tests/js-invocation-test
 ARTIFACT_TEST_BINARY := $(BUILD_DIR)/tests/artifact-test
-NATIVE_TEST_BINARIES := $(ARTIFACT_TEST_BINARY) $(EVENT_TEST_BINARY) $(EVENT_BROKER_TEST_BINARY) $(VM_DISPATCH_TEST_BINARY) $(OWNED_REGISTER_SAMPLER_TEST) $(PAGE_GUEST_SAMPLER_TEST) $(NATIVE_GUEST_TEST) $(JS_DISPATCH_TEST) $(NETWORK_REQUEST_TEST) $(JS_INVOCATION_TEST) $(NATIVE_CONSOLE_DOCUMENT_START_TEST)
+NATIVE_TEST_BINARIES := $(ARTIFACT_TEST_BINARY) $(EVENT_TEST_BINARY) $(EVENT_BROKER_TEST_BINARY) $(VM_DISPATCH_TEST_BINARY) $(OWNED_REGISTER_SAMPLER_TEST) $(PAGE_GUEST_SAMPLER_TEST) $(NATIVE_GUEST_TEST) $(JS_DISPATCH_TEST) $(NETWORK_REQUEST_TEST) $(NETWORK_SCOPE_TEST) $(TAB_LINK_TEST) $(JS_INVOCATION_TEST) $(NATIVE_CONSOLE_DOCUMENT_START_TEST)
 ORIGIN_TRACE_BACKEND := apps/origin-trace-backend/target/debug/origin-trace-backend
 VM_ANALYZER := apps/origin-trace-backend/target/debug/origin-trace-vm
 
@@ -175,6 +177,10 @@ $(JS_INVOCATION_TEST): $(BUILD_DIR)/tests/js_invocation_test.o $(BUILD_DIR)/src/
 $(BUILD_DIR)/tests/network_request_test.o: CPPFLAGS += -Ibrowser/integration/brave/overlay
 $(NETWORK_REQUEST_TEST): $(BUILD_DIR)/tests/network_request_test.o $(BUILD_DIR)/src/capture/event.o \
 	$(BUILD_DIR)/src/evidence/artifact.o
+$(BUILD_DIR)/tests/network_scope_test.o: CPPFLAGS += -Ibrowser/integration/brave/overlay
+$(NETWORK_SCOPE_TEST): $(BUILD_DIR)/tests/network_scope_test.o $(BUILD_DIR)/src/capture/event.o
+$(BUILD_DIR)/tests/tab_link_test.o: CPPFLAGS += -Ibrowser/integration/brave/overlay
+$(TAB_LINK_TEST): $(BUILD_DIR)/tests/tab_link_test.o $(BUILD_DIR)/src/capture/event.o
 NATIVE_JS_DISPATCH_GOLDEN := $(BUILD_DIR)/reb-native-js-dispatch-golden
 .PHONY: native-js-dispatch-golden
 native-js-dispatch-golden: $(NATIVE_JS_DISPATCH_GOLDEN)

@@ -98,6 +98,10 @@ queue drop prevents the terminal observation, completeness remains unknown.
 | Headers and arbitrary response bodies | Not retained by native metadata; existing separately authorized artifact paths only |
 | URL path and query, request bodies | [Native network v2](native-network-v2.md): body summary always; path, query and body bytes only with request content capture |
 
+[Native network v3](native-network-v3.md) adds a scheme class byte to
+`request_initiated` and `request_started`, and stops recording browser-internal
+pages, counting them instead.
+
 Request payloads remain bounded method + host; response payloads remain bounded
 MIME/protocol or synthetic provenance. Version 1 adds no query, fragment,
 credentials, headers or request body. [Native network v2](native-network-v2.md)

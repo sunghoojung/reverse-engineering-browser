@@ -576,7 +576,10 @@
             "js_invocation_request",
             "wasm_execution_outcome",
             "wasm_dispatch_overflow",
-            "wasm_indirect_overflow"
+            "wasm_indirect_overflow",
+            "capture_exclusion",
+            "tab_set",
+            "request_tab_link"
           ]
         },
         "status_code": {

@@ -61,6 +61,9 @@ readonly capture_canvas_images="${REB_CAPTURE_CANVAS_IMAGES:-0}"
 # Raw request paths, queries and bounded request bodies (native-network-v2.md).
 # Body length, type and digest are recorded whenever Network capture is on.
 readonly capture_request_content="${REB_CAPTURE_REQUEST_CONTENT:-0}"
+# Browser-internal pages (chrome:, devtools: and WebUI renderers) are excluded
+# and counted unless this is 1 (native-network-v3.md).
+readonly capture_browser_internal="${REB_CAPTURE_BROWSER_INTERNAL:-0}"
 readonly use_system_keychain="${REB_USE_SYSTEM_KEYCHAIN:-1}"
 readonly localhost_only="${REB_LOCALHOST_ONLY:-0}"
 readonly embedded_session="${REB_EMBEDDED_SESSION:-0}"
@@ -225,6 +228,9 @@ if [[ "${capture_canvas_images}" != 0 && "${capture_canvas_images}" != 1 ]]; the
 fi
 if [[ "${capture_request_content}" != 0 && "${capture_request_content}" != 1 ]]; then
   fail_live_session 2 "REB_CAPTURE_REQUEST_CONTENT must be 0 or 1."
+fi
+if [[ "${capture_browser_internal}" != 0 && "${capture_browser_internal}" != 1 ]]; then
+  fail_live_session 2 "REB_CAPTURE_BROWSER_INTERNAL must be 0 or 1."
 fi
 if [[ "${use_system_keychain}" != 0 && "${use_system_keychain}" != 1 ]]; then
   fail_live_session 2 "REB_USE_SYSTEM_KEYCHAIN must be 0 or 1."
@@ -825,6 +831,9 @@ fi
 if [[ "${capture_request_content}" == 1 ]]; then
   brave_arguments+=(--reb-capture-request-content)
 fi
+if [[ "${capture_browser_internal}" == 1 ]]; then
+  brave_arguments+=(--reb-capture-browser-internal)
+fi
 if [[ "${use_system_keychain}" == 0 ]]; then
   brave_arguments+=(--use-mock-keychain)
 fi
@@ -904,6 +913,11 @@ if [[ "${capture_request_content}" == 1 ]]; then
   echo "Request content capture: enabled for this session; request paths, queries and bodies are retained locally"
 else
   echo "Request content capture: disabled; hosts and body length, type and digest only. Set REB_CAPTURE_REQUEST_CONTENT=1 to retain paths and bodies"
+fi
+if [[ "${capture_browser_internal}" == 1 ]]; then
+  echo "Browser-internal capture: enabled; chrome:, devtools: and WebUI renderer evidence is recorded"
+else
+  echo "Browser-internal capture: excluded and counted; set REB_CAPTURE_BROWSER_INTERNAL=1 to record it"
 fi
 if [[ "${console_document_start}" == 1 && "${native_console_bound}" == 1 ]]; then
   echo "Console document-start scripts: permitted for this capture browser; nothing runs until a live Console connection arms a confirmed rule"

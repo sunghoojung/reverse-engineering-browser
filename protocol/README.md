@@ -105,6 +105,11 @@ type, SHA-256, kind and capture state) and 23 `request_target` (only with
 request content capture: path and query), both exact children of a lifecycle
 record, plus the sensitive `request_body` artifact kind for at most 256 KiB of
 body bytes. Fragments, credentials, headers and cookies are still not recorded.
+[Native network v3](native-network-v3.md) adds the envelope's `scheme_class`
+byte on request records, type 36 `capture_exclusion` for counted
+browser-internal exclusions, and renderer completions for requests the browser
+proxy never sees. It also adds the `loader_kind` byte, type 37 `tab_set` and
+type 38 `request_tab_link`, which link every request to the tab that caused it.
 
 Renderer-to-browser delivery uses exact 320-byte `EventRecord` objects in a
 bounded shared-memory queue. Mojo carries session lifecycle and coalesced

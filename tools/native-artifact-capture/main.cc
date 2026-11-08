@@ -16,6 +16,7 @@
 #include "brave/components/reverse_engineering_browser/browser/native_artifact_capture_sink.h"
 #include "brave/components/reverse_engineering_browser/browser/native_network_capture_sink.h"
 #include "brave/components/reverse_engineering_browser/browser/native_probe_host.h"
+#include "brave/components/reverse_engineering_browser/browser/native_tab_resolver.h"
 #include "brave/components/reverse_engineering_browser/common/native_js_dispatch.h"
 #include "brave/components/reverse_engineering_browser/common/native_js_invocation.h"
 #include "brave/components/reverse_engineering_browser/common/native_network_request.h"
@@ -1244,6 +1245,8 @@ int main(int argc, char** argv) {
     NativeGuestDependencies(receiver);
     NativeProbeHostGuestBoundary(receiver);
     NativeProbeHostJsDispatchForwarding();
+    NativeProbeHostBrowserInternalScope();
+    NativeProbeHostWorkerTabLinks();
     RequestBodyPolicy(output);
     event_wire.flush();
     artifact_wire.flush();

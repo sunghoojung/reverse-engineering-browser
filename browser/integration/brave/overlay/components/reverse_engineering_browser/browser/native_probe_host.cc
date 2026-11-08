@@ -22,8 +22,11 @@
 
 #include "brave/components/reverse_engineering_browser/browser/native_artifact_capture_sink.h"
 #include "brave/components/reverse_engineering_browser/browser/native_probe_session.h"
+#include "brave/components/reverse_engineering_browser/browser/native_tab_of.h"
+#include "brave/components/reverse_engineering_browser/browser/native_tab_resolver.h"
 #include "brave/components/reverse_engineering_browser/common/native_probe_queue.h"
 #include "brave/components/reverse_engineering_browser/common/native_wasm_guest_adapter.h"
+#include "content/public/browser/child_process_security_policy.h"
 #include "content/public/browser/render_frame_host.h"
 #include "content/public/browser/render_process_host.h"
 #include "content/public/browser/web_contents.h"
@@ -39,6 +42,7 @@ NativeProbeEvent EventFromRecord(std::span<const std::uint8_t> record) {
   return std::bit_cast<NativeProbeEvent>(bytes);
 }
 
+// Live frames of the process, also kept by the resolver for later drains.
 std::unordered_map<std::uint64_t, std::uint32_t> CurrentFrameTabs(const int renderer_process_id) {
   std::unordered_map<std::uint64_t, std::uint32_t> tabs;
   content::RenderProcessHost* const process =
@@ -46,21 +50,17 @@ std::unordered_map<std::uint64_t, std::uint32_t> CurrentFrameTabs(const int rend
   if (!process) {
     return tabs;
   }
-  process->ForEachRenderFrameHost([&tabs](content::RenderFrameHost* frame) {
-    content::WebContents* const contents = content::WebContents::FromRenderFrameHost(frame);
-    content::RenderFrameHost* const main_frame =
-        contents ? contents->GetPrimaryMainFrame() : nullptr;
-    if (!main_frame) {
+  process->ForEachRenderFrameHost([&tabs, renderer_process_id](content::RenderFrameHost* frame) {
+    const std::uint32_t tab_id = NativeTabOf(frame);
+    if (tab_id == 0) {
       return;
     }
     const base::UnguessableToken& token = frame->GetFrameToken().value();
-    const std::uint64_t frame_id =
-        std::rotl(token.GetHighForSerialization(), 17) ^ token.GetLowForSerialization();
-    const content::FrameTreeNodeId tab_id = main_frame->GetFrameTreeNodeId();
-    if (frame_id != 0 && tab_id) {
-      const auto [entry, inserted] =
-          tabs.emplace(frame_id, static_cast<std::uint32_t>(tab_id.value()));
-      if (!inserted && entry->second != static_cast<std::uint32_t>(tab_id.value())) {
+    const NativeToken128 full{token.GetHighForSerialization(), token.GetLowForSerialization()};
+    NativeTabResolver::Get().NoteFrame(renderer_process_id, full, tab_id);
+    if (full.fold() != 0) {
+      const auto [entry, inserted] = tabs.emplace(full.fold(), tab_id);
+      if (!inserted && entry->second != tab_id) {
         entry->second = 0;
       }
     }
@@ -665,11 +665,7 @@ void NativeProbeHost::CaptureNativeGuestHost(const std::uint64_t capture_epoch,
     }
     return;
   }
-  const auto frame_tabs = CurrentFrameTabs(renderer_process_id_);
-  if (const auto tab = frame_tabs.find(event.header.frame_id);
-      tab != frame_tabs.end() && tab->second != 0) {
-    event.header.tab_id = tab->second;
-  }
+  event.header.tab_id = FrameTab(CurrentFrameTabs(renderer_process_id_), event.header.frame_id);
   NativeArtifactCaptureSink::Get().CaptureNativeGuestHost(event, capture_epoch);
 }
 
@@ -705,9 +701,14 @@ void NativeProbeHost::Configure(const std::uint64_t session_id,
                                 const bool capture_canvas_images) {
   Disable();
   if (!client_.is_bound() || session_id == 0 ||
-      wasm_capture_epoch_ == std::numeric_limits<std::uint64_t>::max()) {
+      wasm_capture_epoch_ == std::numeric_limits<std::uint64_t>::max() || IsBrowserInternal()) {
     return;
   }
+  auto* const process = content::RenderProcessHost::FromID(renderer_process_id_);
+  renderer_os_pid_ = process && process->GetProcess().IsValid()
+                         ? static_cast<std::uint32_t>(process->GetProcess().Pid())
+                         : 0;
+  reported_exclusions_ = {};
 
   queue_region_ = base::UnsafeSharedMemoryRegion::Create(sizeof(NativeProbeQueue));
   if (!queue_region_.IsValid()) {
@@ -732,13 +733,16 @@ void NativeProbeHost::Configure(const std::uint64_t session_id,
   client_->Configure(session_id, category_mask, expires_at_monotonic_ns, capture_canvas_images,
                      std::move(renderer_region), wasm_capture_epoch_,
                      session_->guest_adapter_json(), session_->js_dispatch_sites(),
-                     session_->js_invocation_sites(), session_->js_invocation_digests());
+                     session_->js_invocation_sites(), session_->js_invocation_digests(),
+                     session_->capture_request_content(), session_->capture_browser_internal());
 }
 
 void NativeProbeHost::Disable() {
   // Records the renderer already queued, and drops it has not reported, are
   // this configuration's evidence: publish them before the mapping goes.
+  disabling_ = true;
   Drain();
+  disabling_ = false;
   wasm_epoch_lifetime_.reset();
   if (wasm_capture_epoch_ != std::numeric_limits<std::uint64_t>::max())
     ++wasm_capture_epoch_;
@@ -769,8 +773,101 @@ void NativeProbeHost::ResetWasmSampleBudgets() {
     client_->ResetWasmSampleBudgets();
 }
 
+bool NativeProbeHost::IsBrowserInternal() {
+  if (!browser_internal_ && !session_->capture_browser_internal() &&
+      content::ChildProcessSecurityPolicy::GetInstance()->HasWebUIBindings(renderer_process_id_)) {
+    browser_internal_ = true;
+    session_->NoteWebUiRendererExcluded();
+  }
+  return browser_internal_;
+}
+
+void NativeProbeHost::ReportExclusions() {
+  for (std::size_t slot = 0; slot < reported_exclusions_.size(); ++slot) {
+    const std::uint64_t count = queue_->ExclusionCount(slot);
+    if (count > reported_exclusions_[slot]) {
+      reported_exclusions_[slot] = count;
+      session_->EmitExclusion(renderer_os_pid_, static_cast<std::uint8_t>(16 + slot), count);
+    }
+  }
+}
+
+std::uint32_t NativeProbeHost::FrameTab(
+    const std::unordered_map<std::uint64_t, std::uint32_t>& live,
+    const std::uint64_t frame_id) const {
+  if (frame_id == 0) {
+    return 0;
+  }
+  if (const auto tab = live.find(frame_id); tab != live.end()) {
+    return tab->second;
+  }
+  return NativeTabResolver::Get().FrameTab(renderer_process_id_, frame_id);
+}
+
+bool NativeProbeHost::IsWorkerRequestStart(const NativeProbeEvent& event) {
+  return event.header.category == NativeProbeCategory::kNetwork &&
+         event.header.type == NativeProbeType::kRequestInitiated &&
+         IsNativeWorkerOwner(static_cast<NativeLoaderKind>(event.header.loader_kind));
+}
+
+bool NativeProbeHost::IsExcludedRequestRecord(const NativeProbeEvent& event) const {
+  return event.header.category == NativeProbeCategory::kNetwork && event.header.request_id != 0 &&
+         std::ranges::find(excluded_requests_, event.header.request_id) != excluded_requests_.end();
+}
+
+// protocol/native-network-v3.md: the record, its tab set the first time this
+// session names it, then the link.
+void NativeProbeHost::EmitWorkerRequest(NativeProbeEvent& event) {
+  const NativeTabResolution resolution =
+      NativeTabResolver::Get().Resolve(static_cast<NativeLoaderKind>(event.header.loader_kind),
+                                       event.header.frame_id, event.header.session_id);
+  if (resolution.status == NativeTabResolution::Status::kExtension) {
+    excluded_requests_[excluded_next_++ % excluded_requests_.size()] = event.header.request_id;
+    session_->EmitExclusion(renderer_os_pid_, kNativeExtensionWorkerExclusion,
+                            ++extension_requests_excluded_);
+    return;
+  }
+  if (resolution.status != NativeTabResolution::Status::kLinked) {
+    session_->Emit(event);
+    return;
+  }
+  if (resolution.tabs.size() == 1) {
+    event.header.tab_id = resolution.tabs[0];
+  }
+  session_->Emit(event);
+  NativeProbeHeader identity;
+  identity.session_id = event.header.session_id;
+  identity.monotonic_time_ns = event.header.monotonic_time_ns;
+  identity.process_id = static_cast<std::uint32_t>(base::GetCurrentProcId());
+  identity.thread_id = static_cast<std::uint32_t>(base::PlatformThread::CurrentId().raw());
+  if (resolution.emit_set) {
+    std::uint64_t previous = 0;
+    for (std::size_t part = 0; part < NativeTabSetParts(resolution.tabs.size()); ++part) {
+      identity.sequence_number = session_->NextBrowserSequence();
+      session_->Emit(MakeNativeTabSetPart(identity, resolution.owner_kind, event.header.frame_id,
+                                          resolution.last_clients, resolution.set_id,
+                                          resolution.tabs, part, previous));
+      previous = identity.sequence_number;
+    }
+  }
+  identity.sequence_number = session_->NextBrowserSequence();
+  session_->Emit(MakeNativeRequestTabLink(event.header, identity, resolution.kind,
+                                          resolution.set_id, resolution.tabs));
+}
+
 void NativeProbeHost::Drain() {
   if (!queue_) {
+    return;
+  }
+  // The renderer is counted once as excluded; what it queued leaves with it.
+  if (browser_internal_ || IsBrowserInternal()) {
+    NativeProbeEvent discarded;
+    while (queue_->TryPop(discarded)) {
+    }
+    queue_->ClearNotificationPending();
+    if (!disabling_) {
+      Disable();
+    }
     return;
   }
 
@@ -780,13 +877,19 @@ void NativeProbeHost::Drain() {
     NativeProbeEvent last_event;
     bool drained_event = false;
     while (queue_->TryPop(event)) {
-      if (const auto tab = frame_tabs.find(event.header.frame_id);
-          tab != frame_tabs.end() && tab->second != 0) {
-        event.header.tab_id = tab->second;
-      }
-      session_->Emit(event);
       last_event = event;
       drained_event = true;
+      if (IsWorkerRequestStart(event)) {
+        EmitWorkerRequest(event);
+        continue;
+      }
+      if (IsExcludedRequestRecord(event)) {
+        continue;
+      }
+      if (const std::uint32_t tab = FrameTab(frame_tabs, event.header.frame_id)) {
+        event.header.tab_id = tab;
+      }
+      session_->Emit(event);
     }
 
     const std::uint64_t dropped = queue_->DroppedCount();
@@ -796,6 +899,8 @@ void NativeProbeHost::Drain() {
     }
 
     queue_->ClearNotificationPending();
+    // After the clear, so a later count either is read here or wakes again.
+    ReportExclusions();
     if (queue_->Empty() || !queue_->MarkNotificationPending()) {
       return;
     }

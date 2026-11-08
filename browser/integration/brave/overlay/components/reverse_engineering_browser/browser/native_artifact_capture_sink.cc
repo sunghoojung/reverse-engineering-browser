@@ -343,7 +343,7 @@ bool GuestEnvelope(const NativeProbeEvent& event, std::uint64_t payload_version)
   const auto& h = event.header;
   return h.protocol_version == kNativeProbeProtocolVersion && h.header_size == sizeof(h) &&
          h.category == NativeProbeCategory::kVm && h.payload_size == 128 && h.flags == 0 &&
-         h.reserved1 == 0 && h.session_id && h.process_id && h.thread_id && h.frame_id &&
+         h.loader_kind == 0 && h.session_id && h.process_id && h.thread_id && h.frame_id &&
          h.sequence_number && h.monotonic_time_ns && h.artifact_id == 0 && h.navigation_id == 0 &&
          GuestField(event, 0, 2) == payload_version && GuestField(event, 2, 2) == 128 &&
          std::all_of(event.reserved.begin(), event.reserved.end(),
@@ -616,7 +616,7 @@ void NativeArtifactCaptureSink::CaptureNativeGuestHost(const NativeProbeEvent& e
     return;
   const auto& h = event.header;
   if (h.protocol_version != kNativeProbeProtocolVersion ||
-      h.header_size != sizeof(NativeProbeHeader) || h.flags || h.reserved1 || h.artifact_id ||
+      h.header_size != sizeof(NativeProbeHeader) || h.flags || h.loader_kind || h.artifact_id ||
       !h.parent_event_id || !h.sequence_number || !h.monotonic_time_ns ||
       h.payload_size > kNativeProbeInlinePayloadSize ||
       !std::all_of(event.reserved.begin(), event.reserved.end(),

@@ -53,6 +53,10 @@ checks:
   budget filled and later occurrences were not sampled. Recipe 6.
 - `queue_drops` or `sequence_gaps`: records were lost. Counts are within the
   scanned range only.
+- `browser_internal_excluded`: `chrome:`, `devtools:` and WebUI pages were
+  counted, not recorded. Not a loss; see `exclusions`.
+- `network_tab_unresolved` (error): requests without a tab. Read one with
+  `get_events` and the `process_id` and `request_id` from `request_tabs`.
 
 ## 3. Find a session's Wasm modules
 

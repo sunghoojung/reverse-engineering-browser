@@ -10,6 +10,7 @@
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include "brave/components/reverse_engineering_browser/common/native_wasm_sample_budget.h"
@@ -19,6 +20,7 @@
 #include "base/memory/shared_memory_mapping.h"
 #include "base/memory/unsafe_shared_memory_region.h"
 #include "base/memory/weak_ptr.h"
+#include "brave/components/reverse_engineering_browser/common/native_network_scope.h"
 #include "brave/components/reverse_engineering_browser/common/native_probe_transport.mojom.h"
 #include "mojo/public/cpp/base/big_buffer.h"
 #include "mojo/public/cpp/bindings/remote.h"
@@ -139,6 +141,14 @@ class NativeProbeHost final : public mojom::NativeProbeHost {
 
  private:
   void Drain();
+  // WebUI bindings can be granted after the renderer bound.
+  [[nodiscard]] bool IsBrowserInternal();
+  void ReportExclusions();
+  [[nodiscard]] std::uint32_t FrameTab(const std::unordered_map<std::uint64_t, std::uint32_t>& live,
+                                       std::uint64_t frame_id) const;
+  [[nodiscard]] static bool IsWorkerRequestStart(const NativeProbeEvent& event);
+  [[nodiscard]] bool IsExcludedRequestRecord(const NativeProbeEvent& event) const;
+  void EmitWorkerRequest(NativeProbeEvent& event);
   // Reports the browser verdict for module bytes sent with the guest dispatch
   // whose sequence number is module_token, if that configuration is current.
   void SendNativeGuestModuleStatus(std::uint64_t capture_epoch,
@@ -152,6 +162,14 @@ class NativeProbeHost final : public mojom::NativeProbeHost {
   base::WritableSharedMemoryMapping queue_mapping_;
   raw_ptr<NativeProbeQueue> queue_ = nullptr;
   std::uint64_t reported_dropped_events_ = 0;
+  std::array<std::uint64_t, kNativeSchemeExclusionSlots> reported_exclusions_{};
+  std::uint32_t renderer_os_pid_ = 0;
+  // Requests of extension workers; their later renderer records are dropped too.
+  std::array<std::uint64_t, 64> excluded_requests_{};
+  std::size_t excluded_next_ = 0;
+  std::uint64_t extension_requests_excluded_ = 0;
+  bool browser_internal_ = false;
+  bool disabling_ = false;
   std::uint64_t wasm_capture_epoch_ = 0;
   std::uint32_t wasm_capture_count_ = 0;
   std::uint32_t wasm_indirect_capture_count_ = 0;

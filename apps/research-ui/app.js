@@ -1022,9 +1022,7 @@ invocationSitesPanel.refresh();
         }
         const ids = [...counts.keys()].sort((left, right) =>
           left === 'unattributed' ? 1 : right === 'unattributed' ? -1 : Number(left) - Number(right));
-        const requestTabLabels = new Map(requestTabGroups()
-          .filter(group => group.id !== 'unattributed')
-          .map((group, index) => [group.id, `Tab ${index + 1}`]));
+        const requestTabLabels = new Map(requestTabGroups().map((group, index) => [group.id, `Tab ${index + 1}`]));
         const scopes = [['all', 'All tabs', allEvents.length], ...ids.map(id =>
           [id, id === 'unattributed' ? 'Unattributed' : requestTabLabels.get(id) ?? `Tab ${id}`, counts.get(id)])];
         const buttons = scopes.map(([id, label, count]) => {
@@ -2705,34 +2703,31 @@ invocationSitesPanel.refresh();
 
       function requestTabGroups() {
         const groups = new Map();
-        state.requests.forEach(request => {
-          const id = request.tabId && request.tabId !== '0' ? request.tabId : 'unattributed';
+        state.requests.forEach(request => requestTabsOf(request).forEach(id => {
           const group = groups.get(id) ?? {id, requests: [], firstTimestamp: request.firstTimestamp};
           group.requests.push(request);
           if (request.firstTimestamp < group.firstTimestamp) group.firstTimestamp = request.firstTimestamp;
           groups.set(id, group);
-        });
-        return [...groups.values()].sort((left, right) => {
-          if (left.id === 'unattributed') return 1;
-          if (right.id === 'unattributed') return -1;
-          return left.firstTimestamp < right.firstTimestamp ? -1 : left.firstTimestamp > right.firstTimestamp ? 1 : 0;
-        });
+        }));
+        return [...groups.values()].sort((left, right) =>
+          left.firstTimestamp < right.firstTimestamp ? -1 : left.firstTimestamp > right.firstTimestamp ? 1 : 0);
       }
 
       function renderRequestScopes() {
         const groups = requestTabGroups();
         const availableTabs = new Set(groups.map(group => group.id));
-        if (state.requestTabId !== 'all' && !availableTabs.has(state.requestTabId)) state.requestTabId = 'all';
+        if (state.requestTabId !== 'all' && !availableTabs.has(state.requestTabId) &&
+            !(state.requestTabId === 'unresolved' && state.requests.some(request => !requestTabsOf(request).length))) state.requestTabId = 'all';
         const oldScopes = new Map([...elements.requestTabScopes.children].map(button => [button.dataset.scopeId, button]));
         const focusedScope = elements.requestTabScopes.contains(document.activeElement) ? document.activeElement : null;
         const buttons = [{id: 'all', label: 'All tabs', count: state.requests.length}, ...groups.map((group, index) => {
           const domains = [...new Set(group.requests.map(requestDomain))];
           const title = group.requests.map(request => String(request.tabTitle ?? '').trim()).find(Boolean);
-          const domain = domains.find(value => value && value !== 'unknown');
+          const page = globalThis.RebRequestTabs?.tabPageLabel(group.requests, requestDomain) ??
+            domains.find(value => value && value !== 'unknown');
           const fallback = `Tab ${index + 1}`;
-          const label = group.id === 'unattributed' ? 'Unattributed'
-            : title ? (title.length > 42 ? `${title.slice(0, 41)}…` : title)
-            : domain || fallback;
+          const label = title ? (title.length > 42 ? `${title.slice(0, 41)}…` : title)
+            : page || fallback;
           return {
             id: group.id,
             label,
@@ -2754,9 +2749,8 @@ invocationSitesPanel.refresh();
           button.tabIndex = state.requestTabId === scope.id ? 0 : -1;
           if (button.children[0].textContent !== scope.label) button.children[0].textContent = scope.label;
           if (button.children[1].textContent !== String(scope.count)) button.children[1].textContent = String(scope.count);
-          button.title = scope.id === 'all' ? 'Show requests from every captured browser tab'
-            : scope.id === 'unattributed' ? 'Events without a browser tab identifier'
-              : `${scope.label} · ${scope.domains.join(', ')} · tab id ${scope.id}`;
+          button.title = scope.id === 'all' ? 'Show requests from every captured browser tab, each once'
+            : `${scope.label} · ${scope.domains.join(', ')} · tab id ${scope.id}`;
           if (created) button.addEventListener('click', () => {
             state.requestTabId = scope.id;
             state.requestDomain = 'all';
@@ -2780,8 +2774,7 @@ invocationSitesPanel.refresh();
         while (elements.requestTabScopes.children.length > buttons.length) elements.requestTabScopes.lastElementChild.remove();
         if (focusedScope && document.activeElement !== focusedScope) (buttons.includes(focusedScope) ? focusedScope : buttons[0])?.focus({preventScroll: true});
 
-        const scoped = state.requestTabId === 'all' ? state.requests
-          : state.requests.filter(request => (request.tabId && request.tabId !== '0' ? request.tabId : 'unattributed') === state.requestTabId);
+        const scoped = state.requests.filter(requestInScope);
         const domainCounts = new Map();
         for (const request of scoped) { const domain = requestDomain(request); domainCounts.set(domain, (domainCounts.get(domain) ?? 0) + 1); }
         const domains = [...domainCounts.keys()].sort((left, right) => left.localeCompare(right));
@@ -2800,17 +2793,34 @@ invocationSitesPanel.refresh();
         elements.requestDomain.value = state.requestDomain;
       }
 
+      // A row linked to several tabs is in each of them; no tab is a capture error.
+      function requestTabsOf(request) {
+        return globalThis.RebRequestTabs?.rowTabs(request) ?? (request.tabId && request.tabId !== '0' ? [request.tabId] : []);
+      }
+
+      function requestInScope(request) {
+        if (state.requestTabId === 'all') return true;
+        const tabs = requestTabsOf(request);
+        return state.requestTabId === 'unresolved' ? tabs.length === 0 : tabs.includes(state.requestTabId);
+      }
+
       function trafficRequestFilterKey() {
-        return JSON.stringify([state.requestTabId, state.requestDomain, state.requestType,
+        return JSON.stringify([state.requestTabId, state.requestDomain, state.requestType, state.hideBrowserInternal,
           elements.requestFilter.value.trim().toLowerCase(),
           state.trafficSort, state.trafficSortDirection]);
       }
 
       function renderTrafficWindowStatus(start, rowCount, visibleCount) {
         const selectedFiltered = state.selectedRequestId !== null && !state.trafficSearchMatches.has(state.selectedRequestId);
-        const message = `${visibleCount ? start + 1 : 0}–${start + rowCount} of ${visibleCount} matching · ${state.requests.length} retained${selectedFiltered ? ' · Selection outside filter' : ''}`;
+        const excluded = globalThis.RebNetworkScope?.captureExclusionNotice(state.captureExclusions) ?? '';
+        const message = `${visibleCount ? start + 1 : 0}–${start + rowCount} of ${visibleCount} matching · ${state.requests.length} retained${excluded ? ` · ${excluded}` : ''}${selectedFiltered ? ' · Selection outside filter' : ''}`;
         const status = document.querySelector('#request-window-status');
         if (status.textContent !== message) status.textContent = message;
+        const unresolved = state.requests.filter(request => globalThis.RebRequestTabs?.isUnresolved(request)).length;
+        const errors = document.querySelector('#request-unresolved');
+        errors.hidden = unresolved === 0;
+        errors.textContent = globalThis.RebRequestTabs?.unresolvedNotice(unresolved) ?? '';
+        errors.setAttribute('aria-pressed', String(state.requestTabId === 'unresolved'));
       }
 
       function renderRequests(selectionOnly = false) {
@@ -2828,9 +2838,12 @@ invocationSitesPanel.refresh();
         state.trafficRenderedView = null;
         renderRequestScopes();
         const needle = elements.requestFilter.value.trim().toLowerCase();
-        const scoped = state.requests.filter(request =>
-          (state.requestTabId === 'all' ||
-            (request.tabId && request.tabId !== '0' ? request.tabId : 'unattributed') === state.requestTabId) &&
+        const scope = globalThis.RebNetworkScope;
+        const internal = scope?.browserInternalView(state.requests, scope.isBrowserInternalRequest, state.hideBrowserInternal)
+          ?? {visible: state.requests, internal: 0};
+        scope?.renderBrowserInternalToggle(document.querySelector('#request-hide-internal'), internal.internal, state.hideBrowserInternal);
+        const scoped = internal.visible.filter(request =>
+          requestInScope(request) &&
           (state.requestDomain === 'all' || requestDomain(request) === state.requestDomain) &&
           (state.requestType === 'all' || request.type === state.requestType)
         );
@@ -6059,7 +6072,8 @@ invocationSitesPanel.refresh();
         const rootKey = JSON.stringify([collection, 'root']);
         const root = {key: rootKey, kind: 'root', label: 'top', depth: 0, parent: null, children: [], count: 0};
         nodes.set(rootKey, root);
-        const limits = {catalog: Math.max(0, catalog.length - SOURCE_TREE_LIMITS.catalog), omitted: 0, deep: 0, ambiguous: 0};
+        const limits = {catalog: Math.max(0, catalog.length - SOURCE_TREE_LIMITS.catalog), omitted: 0, deep: 0, ambiguous: 0, internal: 0};
+        const internalUrl = globalThis.RebNetworkScope?.isBrowserInternalSourceUrl ?? (() => false);
         const files = new Map();
         const branch = (key, label, kind, parent) => {
           if (!nodes.has(key)) {
@@ -6071,6 +6085,10 @@ invocationSitesPanel.refresh();
         for (let index = 0; index < Math.min(catalog.length, SOURCE_TREE_LIMITS.catalog); index++) {
           const raw = catalog[index];
           if (!isSourceArtifact(raw)) continue;
+          if (internalUrl(raw.url)) {
+            limits.internal++;
+            if (state.hideBrowserInternal) continue;
+          }
           // Refuse an overlong path before URL parsing or identity serialization.
           if (typeof raw.url !== 'string' || raw.url.length > SOURCE_TREE_LIMITS.url) {limits.omitted++; continue;}
           const source = {...sourceReference(raw), source_type: 'artifact'};
@@ -6227,10 +6245,19 @@ invocationSitesPanel.refresh();
         return {row, icon, name, raw, researcher, detail, group};
       }
 
+      function sourceInternalToggle() {
+        const toggle = document.createElement('button');
+        toggle.type = 'button'; toggle.className = 'source-internal-toggle';
+        toggle.title = 'Hide chrome:, devtools: and other browser-internal sources; nothing is deleted';
+        toggle.addEventListener('click', () => { state.hideBrowserInternal = !state.hideBrowserInternal; renderRequests(); renderSourceTree(); });
+        return toggle;
+      }
+
       function renderSourceTree(refresh = true) {
         const nav = sourceTreeState(), tree = elements.sourceTree, previous = nav.model;
         const activeKey = document.activeElement?.dataset?.sourceTreeKey;
         const hadFocus = tree.contains(document.activeElement);
+        const toggleFocused = Boolean(nav.internalToggle) && document.activeElement === nav.internalToggle;
         const previousScope = previous && sourceTreeScope(nav, previous.collection);
         let anchor = null;
         if (refresh && previous?.collection === state.sourceCollection && tree.scrollTop > 0 && tree.clientHeight > 0) {
@@ -6299,10 +6326,16 @@ invocationSitesPanel.refresh();
         if (model.limits.omitted) notices.push(`${model.limits.omitted} sources exceed the navigator path, identity or node limit and are not listed.`);
         if (model.limits.ambiguous) notices.push(`${model.limits.ambiguous} duplicate source identities are not shown twice; ambiguous sources cannot be opened.`);
         if (model.limits.deep) notices.push(`${model.limits.deep} paths are shortened after ${SOURCE_TREE_LIMITS.depth} folders; file tooltips retain their full URLs.`);
+        if (model.limits.internal && state.hideBrowserInternal) notices.push(`${model.limits.internal} browser-internal ${model.limits.internal === 1 ? 'source is' : 'sources are'} hidden.`);
+        const internalToggle = model.limits.internal && globalThis.RebNetworkScope ? nav.internalToggle ??= sourceInternalToggle() : null;
         if (limited) notices.push(`Showing the first ${SOURCE_TREE_LIMITS.visible.toLocaleString()} expanded rows. Collapse branches to see later rows, or use Open file.`);
-        if (!visible.length || notices.length) {
+        if (!visible.length || notices.length || internalToggle) {
           nav.notice ??= document.createElement('div'); nav.notice.className = 'source-tree-empty'; nav.notice.setAttribute('role', 'status');
-          nav.notice.textContent = notices.join(' ') || 'No source artifacts captured. Canvas images are shown in Fingerprinting.';
+          nav.notice.textContent = notices.join(' ') || (visible.length ? '' : 'No source artifacts captured. Canvas images are shown in Fingerprinting.');
+          if (internalToggle) {
+            globalThis.RebNetworkScope.renderBrowserInternalToggle(internalToggle, model.limits.internal, state.hideBrowserInternal);
+            nav.notice.append(internalToggle);
+          }
           // Keep limit disclosures above the rows, including when the navigator
           // itself is empty after filtering or rejecting over-limit paths.
           containers.get(tree).unshift(nav.notice);
@@ -6320,7 +6353,8 @@ invocationSitesPanel.refresh();
           const bounds = nav.rows.get(anchor.key).row.getBoundingClientRect();
           tree.scrollTop += bounds.top - tree.getBoundingClientRect().top - anchor.offset;
         }
-        if (hadFocus) {
+        if (toggleFocused && nav.internalToggle.parentElement) nav.internalToggle.focus({preventScroll: true});
+        else if (hadFocus) {
           if (scope.focus) sourceTreeFocus(scope.focus, Boolean(activeKey && activeKey !== scope.focus));
           else tree.focus({preventScroll: true});
         }
@@ -7865,6 +7899,8 @@ invocationSitesPanel.refresh();
           state.malformedVmFindings = vmModel.malformedCount;
           const eventOrigin = state.sessionMode === 'demo' ? 'demo' : 'live';
           state.nativeRequests = requestsFromEvents(body.network_events ?? state.events, eventOrigin);
+          globalThis.RebRequestTabs?.attachRequestTabs(state.nativeRequests, body.network_events ?? state.events);
+          state.captureExclusions = globalThis.RebNetworkScope?.captureExclusionTotals(body.network_events ?? state.events) ?? null;
           rebuildTrafficRequests();
           let selectedRequest = state.requests.find(request => request.id === state.selectedRequestId);
           if (!selectedRequest && state.selectedRequestId !== null) resetRequestSelection();
@@ -8207,6 +8243,17 @@ invocationSitesPanel.refresh();
           elements.requestCopyUrl.textContent = 'Copy unavailable';
         }
         setTimeout(() => { elements.requestCopyUrl.textContent = 'Copy URL'; }, 1800);
+      });
+      document.querySelector('#request-unresolved').addEventListener('click', () => {
+        state.requestTabId = state.requestTabId === 'unresolved' ? 'all' : 'unresolved';
+        state.requestDomain = 'all';
+        renderRequests();
+      });
+      // One reversible view filter for Traffic and Sources; evidence is unchanged.
+      document.querySelector('#request-hide-internal').addEventListener('click', () => {
+        state.hideBrowserInternal = !state.hideBrowserInternal;
+        renderRequests();
+        renderSourceTree();
       });
       elements.requestDomain.addEventListener('change', () => {
         state.requestDomain = elements.requestDomain.value;
